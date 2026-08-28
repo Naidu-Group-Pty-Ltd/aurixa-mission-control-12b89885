@@ -2825,6 +2825,7 @@ export type Database = {
           default_branch: string
           deploy_url: string | null
           drift_suggestions: Json
+          contract_excluded_module_slugs: string[]
           entitled_module_slugs: string[]
           entitled_plan_slug: string | null
           entitlement_keys: string[]
@@ -2868,6 +2869,7 @@ export type Database = {
           default_branch?: string
           deploy_url?: string | null
           drift_suggestions?: Json
+          contract_excluded_module_slugs?: string[]
           entitled_module_slugs?: string[]
           entitled_plan_slug?: string | null
           entitlement_keys?: string[]
@@ -2911,6 +2913,7 @@ export type Database = {
           default_branch?: string
           deploy_url?: string | null
           drift_suggestions?: Json
+          contract_excluded_module_slugs?: string[]
           entitled_module_slugs?: string[]
           entitled_plan_slug?: string | null
           entitlement_keys?: string[]

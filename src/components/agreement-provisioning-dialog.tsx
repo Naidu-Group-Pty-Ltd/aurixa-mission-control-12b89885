@@ -1,7 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -15,13 +14,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { TierModulePicker, type TierSelection } from "@/components/tier-module-picker";
 import {
   configureAgreementProvisioning,
   getProvisioningCatalog,
@@ -30,9 +23,14 @@ import {
 
 /**
  * The commercial selection that a signature will provision: tier plan,
- * modules in, add-ons on top, modules negotiated OUT — and the arm switch
- * that makes the signature act on it. Locked once provisioning has started:
- * what a signature provisions must be what the signature saw.
+ * modules, add-ons, and the modules negotiated OUT — plus the arm switch
+ * that makes the signature act on it.
+ *
+ * The tier/module surface is `TierModulePicker`, the SAME component the
+ * clone wizard uses, resolving through the same pricing→module mapping
+ * (`previewTierModules`), so what an agreement offers and what the wizard
+ * offers cannot drift. Locked once provisioning has started: what a
+ * signature provisions must be what the signature saw.
  */
 export function AgreementProvisioningDialog({
   agreement,
@@ -50,44 +48,59 @@ export function AgreementProvisioningDialog({
     enabled: open,
   });
 
-  const [planSlug, setPlanSlug] = useState("");
-  const [moduleIds, setModuleIds] = useState<string[]>([]);
+  const modules = useMemo(
+    () => (catalogQ.data?.modules ?? []) as Array<{ id: string; slug: string; name: string; description?: string | null }>,
+    [catalogQ.data],
+  );
+  const byId = useMemo(() => new Map(modules.map((m) => [m.id, m])), [modules]);
+  const bySlug = useMemo(() => new Map(modules.map((m) => [m.slug, m])), [modules]);
+
+  const [selection, setSelection] = useState<TierSelection>({ planSlug: null, addonSlugs: [] });
+  const [picked, setPicked] = useState<Set<string>>(new Set());
   const [excludedIds, setExcludedIds] = useState<string[]>([]);
-  const [addonSlugs, setAddonSlugs] = useState<string[]>([]);
   const [adminEmail, setAdminEmail] = useState("");
   const [armed, setArmed] = useState(true);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (!agreement) return;
-    setPlanSlug(agreement.plan_slug ?? "");
-    setModuleIds(agreement.module_ids ?? []);
+    setSelection({ planSlug: agreement.plan_slug ?? null, addonSlugs: agreement.addon_slugs ?? [] });
     setExcludedIds(agreement.excluded_module_ids ?? []);
-    setAddonSlugs(agreement.addon_slugs ?? []);
     setAdminEmail(agreement.admin_email ?? agreement.client_email);
     setArmed(agreement.provision_on_signature ?? true);
   }, [agreement]);
 
+  // The stored module ids become the picker's slug set once the catalog is
+  // loaded (and only then — mapping through an empty catalog would wipe a
+  // saved selection).
+  useEffect(() => {
+    if (!agreement || modules.length === 0) return;
+    const slugs = (agreement.module_ids ?? [])
+      .map((id) => byId.get(id)?.slug)
+      .filter((s): s is string => Boolean(s));
+    setPicked(new Set(slugs));
+  }, [agreement, modules, byId]);
+
   const locked =
     agreement?.provision_status === "provisioning" || agreement?.provision_status === "provisioned";
 
-  const toggle = (list: string[], set: (v: string[]) => void, id: string) =>
-    set(list.includes(id) ? list.filter((x) => x !== id) : [...list, id]);
-
   const save = async () => {
     if (!agreement) return;
-    if (!planSlug) {
+    if (!selection.planSlug) {
       toast.error("Pick a tier plan — provisioning without one has nothing to entitle.");
       return;
     }
     setSaving(true);
     try {
+      const moduleIds = [...picked]
+        .map((slug) => bySlug.get(slug)?.id)
+        .filter((id): id is string => Boolean(id));
       const res = await configureAgreementProvisioning({
         data: {
           id: agreement.id,
-          planSlug,
+          planSlug: selection.planSlug,
           moduleIds,
-          addonSlugs,
+          addonSlugs: selection.addonSlugs,
           excludedModuleIds: excludedIds,
           adminEmail: adminEmail.trim() || undefined,
           armed,
@@ -107,13 +120,9 @@ export function AgreementProvisioningDialog({
     }
   };
 
-  const modules = catalogQ.data?.modules ?? [];
-  const addons = catalogQ.data?.addons ?? [];
-  const plans = catalogQ.data?.plans ?? [];
-
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
+      <DialogContent className="max-h-[85vh] max-w-3xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Provisioning on signature</DialogTitle>
           <DialogDescription>
@@ -131,88 +140,35 @@ export function AgreementProvisioningDialog({
           </div>
         )}
 
-        <div className="space-y-5">
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <div className="space-y-2">
-              <Label>Tier plan</Label>
-              <Select value={planSlug} onValueChange={setPlanSlug} disabled={locked}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Select the plan the client signed up to" />
-                </SelectTrigger>
-                <SelectContent>
-                  {plans.map((p) => (
-                    <SelectItem key={p.slug} value={p.slug}>
-                      {p.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="prov-admin-email">Clone admin email</Label>
-              <Input
-                id="prov-admin-email"
-                type="email"
-                value={adminEmail}
-                onChange={(e) => setAdminEmail(e.target.value)}
-                disabled={locked}
-              />
-              <p className="text-xs text-muted-foreground">
-                Seed administrator of the new workspace. They set their password via the platform's
-                own reset flow.
-              </p>
-            </div>
-          </div>
+        <div className={locked ? "pointer-events-none space-y-5 opacity-60" : "space-y-5"}>
+          <TierModulePicker
+            modules={modules}
+            picked={picked}
+            onPickedChange={setPicked}
+            selection={selection}
+            onSelectionChange={setSelection}
+          />
 
           <div className="space-y-2">
-            <Label>Modules included</Label>
-            <div className="grid max-h-44 grid-cols-1 gap-1 overflow-y-auto rounded-md border border-border/60 p-2 sm:grid-cols-2">
-              {modules.map((m) => (
-                <label
-                  key={m.id}
-                  className="flex items-start gap-2 rounded p-1 text-sm hover:bg-muted/40"
-                >
-                  <Checkbox
-                    checked={moduleIds.includes(m.id)}
-                    disabled={locked}
-                    onCheckedChange={() => toggle(moduleIds, setModuleIds, m.id)}
-                  />
-                  <span className="leading-tight">{m.name}</span>
-                </label>
-              ))}
-              {modules.length === 0 && (
-                <p className="p-2 text-xs text-muted-foreground">No modules in the catalog yet.</p>
-              )}
-            </div>
-          </div>
-
-          <div className="space-y-2">
-            <Label>Add-ons</Label>
-            <div className="flex flex-wrap gap-2">
-              {addons.map((a) => (
-                <button
-                  key={a.slug}
-                  type="button"
-                  disabled={locked}
-                  onClick={() => toggle(addonSlugs, setAddonSlugs, a.slug)}
-                  className="focus-visible:ring-2 focus-visible:ring-primary rounded-full focus-visible:outline-none"
-                >
-                  <Badge variant={addonSlugs.includes(a.slug) ? "default" : "outline"}>
-                    {a.name}
-                  </Badge>
-                </button>
-              ))}
-              {addons.length === 0 && (
-                <p className="text-xs text-muted-foreground">No add-ons in the catalog.</p>
-              )}
-            </div>
+            <Label htmlFor="prov-admin-email">Clone admin email</Label>
+            <Input
+              id="prov-admin-email"
+              type="email"
+              value={adminEmail}
+              onChange={(e) => setAdminEmail(e.target.value)}
+              disabled={locked}
+            />
+            <p className="text-xs text-muted-foreground">
+              Seed administrator of the new workspace. They set their password via the platform's
+              own reset flow.
+            </p>
           </div>
 
           <div className="space-y-2">
             <Label>Modules excluded (negotiated out)</Label>
             <p className="text-xs text-muted-foreground">
-              Recorded so a later reconciliation never "helpfully" re-adds what the client bargained
-              away. An exclusion always wins over the include list.
+              Contractual exclusions travel onto the clone and hold across every later plan
+              change — a tier upgrade can never re-install what the client bargained away.
             </p>
             <div className="grid max-h-32 grid-cols-1 gap-1 overflow-y-auto rounded-md border border-border/60 p-2 sm:grid-cols-2">
               {modules.map((m) => (
@@ -223,7 +179,11 @@ export function AgreementProvisioningDialog({
                   <Checkbox
                     checked={excludedIds.includes(m.id)}
                     disabled={locked}
-                    onCheckedChange={() => toggle(excludedIds, setExcludedIds, m.id)}
+                    onCheckedChange={() =>
+                      setExcludedIds((prev) =>
+                        prev.includes(m.id) ? prev.filter((x) => x !== m.id) : [...prev, m.id],
+                      )
+                    }
                   />
                   <span className="leading-tight">{m.name}</span>
                 </label>

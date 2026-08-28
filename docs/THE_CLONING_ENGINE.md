@@ -160,17 +160,22 @@ on everything near it.
 
 ## Still open
 
-- **Provider credentials.** `VERCEL_API_TOKEN`, `VERCEL_TEAM_ID`,
-  `VERCEL_WEBHOOK_SECRET`, `CLOUDFLARE_API_TOKEN` and `CREDENTIALS_ENC_KEY` are
-  deployment environment variables. Without them `deployment-drain` cannot
-  reach a provider, and `provisionClone` records the deployment as
-  `pending_platform` rather than queuing it — which is the correct refusal, not
-  a failure.
-- **Nothing has run end to end.** `clones`, `clone_backends`,
-  `clone_deployments`, `cascade_events` and `edge_provisioning_jobs` are all
-  **empty**. Every statement above about behaviour is read from code and from
-  the two backends that were built by hand, not from a completed pipeline run.
-  The first real clone is still the first real test.
+*(updated 28 Aug 2026)*
+
+- **Provider credentials — Vercel is live now.** `VERCEL_API_TOKEN`,
+  `VERCEL_TEAM_ID` and `VERCEL_WEBHOOK_SECRET` are configured and proven: the
+  hand-made clone's deployment ran the full pipeline to `live` on
+  2026-08-28 (`npc.aurixasystems.com.au`). `CLOUDFLARE_API_TOKEN` remains
+  unset — subdomain DNS and the email-identity auto-DNS path stay dormant,
+  which is the correct refusal, not a failure.
+- **No ENGINE-provisioned clone has run end to end.** The one clone in the
+  fleet was built by hand; its backend and deployment exercised the drains,
+  but `provisionClone → backend-provisioning-drain → deployment-drain` has
+  never produced a clone from scratch. The first template-provisioned clone
+  is still the first real test. The signed-agreement path
+  ([`MODULES_TO_CLONES.md`](./MODULES_TO_CLONES.md)) now runs
+  `assessProvisioningPreflight` before spending anything, precisely so that
+  first run cannot start into a half-configured engine.
 - **17 codex scans have been stalled for weeks** (10 `running` since 31 Jul–6
   Aug, 7 `queued` since 27 Jul) because `codex-sweep` is the worker that clears
   them. On its first run it marks the hung ones failed and may re-dispatch up

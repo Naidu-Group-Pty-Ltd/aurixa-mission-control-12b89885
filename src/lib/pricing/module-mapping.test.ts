@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  applyContractExclusions,
   slugify,
   suggestModules,
   mapPricedModule,
@@ -285,5 +286,33 @@ describe("buildFullMapping", () => {
 
   it("gives every row a reason an operator can act on", () => {
     for (const r of rows) expect(r.reason.length).toBeGreaterThan(10);
+  });
+});
+
+describe("applyContractExclusions", () => {
+  const base = {
+    planSlug: "growth",
+    moduleSlugs: ["platform-core", "market-updates", "call-logs"],
+    entitlementKeys: ["k1"],
+    includedModules: ["market-updates"],
+    addonModules: [],
+    unmapped: [],
+  };
+
+  it("subtracts excluded modules and names what it removed", () => {
+    const r = applyContractExclusions(base, ["market-updates"]);
+    expect(r.moduleSlugs).toEqual(["platform-core", "call-logs"]);
+    expect(r.contractExcluded).toEqual(["market-updates"]);
+  });
+
+  it("an exclusion outside the resolution is inert", () => {
+    const r = applyContractExclusions(base, ["not-in-plan"]);
+    expect(r.moduleSlugs).toEqual(base.moduleSlugs);
+    expect(r.contractExcluded).toEqual([]);
+  });
+
+  it("leaves entitlement keys alone — the module gate wins anyway", () => {
+    const r = applyContractExclusions(base, ["market-updates"]);
+    expect(r.entitlementKeys).toEqual(["k1"]);
   });
 });

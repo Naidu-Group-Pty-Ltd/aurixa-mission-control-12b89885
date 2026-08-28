@@ -215,7 +215,7 @@ export const getProvisioningCatalog = createServerFn({ method: "POST" })
         .order("sort_order", { ascending: true }),
       context.supabase
         .from("modules")
-        .select("id, name, description")
+        .select("id, slug, name, description")
         .order("name", { ascending: true }),
     ]);
     return {
