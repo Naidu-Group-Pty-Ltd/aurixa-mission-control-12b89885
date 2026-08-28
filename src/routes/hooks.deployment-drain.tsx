@@ -215,11 +215,46 @@ async function step(row: DeploymentRow): Promise<StepOutcome> {
     }
 
     case "linking_repo": {
-      // Vercel links the repository at project creation. Verifying it here is
-      // cheap and turns a confusing 400 five steps later ("no git link") into a
-      // named failure at the step that owns it.
+      // This step's whole job is to turn a confusing 400 five steps later
+      // ("no git link" at deploy) into a named failure at the step that owns
+      // it — and until it asked the provider anything, it did not do that job.
+      // It checked only that a project id had been recorded, so an ADOPTED
+      // project with no git link sailed through: adoption never links a
+      // repository, only creation does (`gitRepository` is a create-time
+      // parameter), and the one production case was exactly that — a
+      // hand-made project adopted by name, whose link then broke when the
+      // repository transferred to another GitHub org, because Vercel's App
+      // installation does not follow a repo across orgs.
       if (!row.project_id) return { kind: "error", error: "no project_id", retryable: false };
-      return { kind: "advance" };
+      if (!provider.describeProject) return { kind: "advance" };
+
+      const described = await provider.describeProject(row.project_id, row.team_id);
+      if (!described.found) {
+        return {
+          kind: "error",
+          error:
+            `Vercel project ${row.project_name ?? row.project_id} is not visible to this ` +
+            `token — moved into a team, renamed, or deleted. Fix the project (or clear ` +
+            `project_id so provisioning re-creates it) and retry.`,
+          retryable: false,
+        };
+      }
+      if (!described.linkedRepo) {
+        return {
+          kind: "error",
+          error:
+            `Vercel project ${described.name ?? row.project_id} has no linked GitHub ` +
+            `repository, so nothing can be built from a ref. Link ` +
+            `${clone.github_owner}/${clone.github_repo} in that project's Settings → Git, ` +
+            `then retry. (Adoption never links: only project CREATION passes a repository.)`,
+          retryable: false,
+        };
+      }
+      // A link that names a different repo is not failed here: a repository
+      // transferred between orgs legitimately diverges from the owner this
+      // clone recorded, and Vercel builds from what IT holds. It is surfaced
+      // instead, so the event log says what the build will actually use.
+      return { kind: "advance", result: { linked_repo: described.linkedRepo } };
     }
 
     // ── Environment ──────────────────────────────────────────────────────

@@ -30,7 +30,9 @@ describe("scopeCorpusToPrime", () => {
   });
 
   it("withholds and never drops — every corpus entry lands in exactly one bucket", () => {
-    const corpus = Array.from({ length: 50 }, (_, i) => meta(`2025010100${String(i).padStart(4, "0")}`));
+    const corpus = Array.from({ length: 50 }, (_, i) =>
+      meta(`2025010100${String(i).padStart(4, "0")}`),
+    );
     const applied = new Set(corpus.slice(0, 17).map((m) => m.id));
     const { runnable, withheld } = scopeCorpusToPrime(corpus, applied);
     expect(runnable.length + withheld.length).toBe(corpus.length);
@@ -86,7 +88,11 @@ describe("scopeCorpusToPrime", () => {
 describe("assertPrimeLedgerUsable", () => {
   it("permits a run when the prime reports applied migrations", () => {
     expect(
-      assertPrimeLedgerUsable({ failed: false, appliedCount: 864, primeRef: "dduzbchuswwbefdunfct" }),
+      assertPrimeLedgerUsable({
+        failed: false,
+        appliedCount: 864,
+        primeRef: "dduzbchuswwbefdunfct",
+      }),
     ).toBeNull();
   });
 
@@ -136,9 +142,7 @@ describe("assertPrimeLedgerUsable", () => {
 
 describe("migrationEpochSeconds", () => {
   it("parses a 14-digit version as UTC", () => {
-    expect(migrationEpochSeconds("20250831091525")).toBe(
-      Date.UTC(2025, 7, 31, 9, 15, 25) / 1000,
-    );
+    expect(migrationEpochSeconds("20250831091525")).toBe(Date.UTC(2025, 7, 31, 9, 15, 25) / 1000);
   });
 
   it("measures the real skew observed on this prime", () => {
@@ -261,5 +265,44 @@ describe("the withheld breakdown", () => {
     );
     expect(breakdown).toEqual({ neverApplied: 1, skewSuspected: 0 });
     expect(withheld[0].reason).toBe("never_applied");
+  });
+});
+
+/**
+ * The rule has to hold at every caller, and it had two callers with one
+ * implementation: the scheduled fleet sync scoped, and the per-clone
+ * "Sync migrations" button passed the raw repo corpus to
+ * `applyPrimeMigrations`. One click replayed the repo's January-2025 tail at a
+ * tenant backend and marked it `failed`, taking it out of the fleet sync and
+ * blocking its deployment. These read the source because the defect was a
+ * missing call, which no behavioural test of the pure function can see.
+ */
+describe("every replay path goes through the scoped corpus", () => {
+  const read = async (f: string) => {
+    const { readFileSync } = await import("node:fs");
+    return readFileSync(new URL(`./${f}`, import.meta.url), "utf8");
+  };
+
+  it("the per-clone sync button scopes, and never passes the raw corpus", async () => {
+    const src = await read("migration-sync.functions.ts");
+    expect(src).toContain("openScopedPrimeCorpus");
+    expect(src).not.toMatch(/applyPrimeMigrations\(\s*[^)]*corpus\.metas/s);
+  });
+
+  it("the pending count on the clone card is measured against the scoped set", async () => {
+    const src = await read("migration-sync.functions.ts");
+    const status = src.slice(
+      src.indexOf("getCloneMigrationStatus"),
+      src.indexOf("syncCloneMigrations"),
+    );
+    expect(status).toContain("openScopedPrimeCorpus");
+    expect(status).toContain("scoped.runnable");
+  });
+
+  it("the scheduled fleet sync uses the same implementation", async () => {
+    const src = await read("fleet-migration.server.ts");
+    expect(src).toContain("export async function openScopedPrimeCorpus");
+    // Exactly one site constructs the scope; everything else calls the helper.
+    expect(src.match(/scopeCorpusToPrime\(/g)?.length).toBe(1);
   });
 });

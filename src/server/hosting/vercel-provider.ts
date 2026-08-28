@@ -125,17 +125,47 @@ export const vercelProvider: HostingProvider = {
     return { written: vars.length, removed: 0 };
   },
 
+  async describeProject(projectId, teamId) {
+    const project = await vercelApi.getProjectByName(projectId, teamId ?? defaultTeamId());
+    if (!project) return { found: false, name: null, linkedRepo: null };
+    const org = project.link?.org;
+    const repo = project.link?.repo;
+    return {
+      found: true,
+      name: project.name ?? null,
+      linkedRepo: org && repo ? `${org}/${repo}` : null,
+    };
+  },
+
   async deploy(projectId, opts): Promise<DeployResult> {
     const team = opts.teamId ?? defaultTeamId();
     const project = await vercelApi.getProjectByName(projectId, team);
-    const org = project?.link?.org;
-    const repo = project?.link?.repo;
+    // Two different failures used to share one message here, and they send an
+    // operator to different screens: a project this token cannot SEE (moved
+    // into a team, renamed, deleted) and a project with no git link both read
+    // as `project?.link?.org == null`. The night that mattered, the operator
+    // had re-linked a repository in Vercel and the pipeline kept saying "no
+    // linked GitHub repository" — with no way to tell whether the link had
+    // gone to a different project or the project itself had left this token's
+    // sight.
+    if (!project) {
+      throw new VercelError(
+        `Vercel project ${projectId} is not visible to this token — it may have been ` +
+          `moved into a team, renamed, or deleted. Check which project the token's ` +
+          `account actually holds.`,
+        404,
+        "project_not_found",
+      );
+    }
+    const org = project.link?.org;
+    const repo = project.link?.repo;
     if (!org || !repo) {
       // A project with no git link cannot be deployed from a ref, and asking
       // Vercel to do it anyway answers 400 five times over five attempts. Fail
       // loudly with the reason instead.
       throw new VercelError(
-        `Vercel project ${projectId} has no linked GitHub repository`,
+        `Vercel project ${project.name ?? projectId} exists but has no linked GitHub ` +
+          `repository. Link it in that project's Settings → Git.`,
         400,
         "no_git_link",
       );
