@@ -1686,6 +1686,78 @@ export type Database = {
           },
         ]
       }
+      clone_email_identities: {
+        Row: {
+          clone_id: string
+          created_at: string
+          created_by: string | null
+          default_from_address: string | null
+          dns_installed_via: string | null
+          dns_records: Json
+          domain_status: string
+          id: string
+          key_last4: string | null
+          key_written_at: string | null
+          last_error: string | null
+          region: string
+          resend_domain_id: string | null
+          resend_key_id: string | null
+          sending_domain: string
+          updated_at: string
+        }
+        Insert: {
+          clone_id: string
+          created_at?: string
+          created_by?: string | null
+          default_from_address?: string | null
+          dns_installed_via?: string | null
+          dns_records?: Json
+          domain_status?: string
+          id?: string
+          key_last4?: string | null
+          key_written_at?: string | null
+          last_error?: string | null
+          region?: string
+          resend_domain_id?: string | null
+          resend_key_id?: string | null
+          sending_domain: string
+          updated_at?: string
+        }
+        Update: {
+          clone_id?: string
+          created_at?: string
+          created_by?: string | null
+          default_from_address?: string | null
+          dns_installed_via?: string | null
+          dns_records?: Json
+          domain_status?: string
+          id?: string
+          key_last4?: string | null
+          key_written_at?: string | null
+          last_error?: string | null
+          region?: string
+          resend_domain_id?: string | null
+          resend_key_id?: string | null
+          sending_domain?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clone_email_identities_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: true
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "clone_email_identities_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: true
+            referencedRelation: "clones_missing_isolated_backend"
+            referencedColumns: ["clone_id"]
+          },
+        ]
+      }
       clone_deployments: {
         Row: {
           attempts: number

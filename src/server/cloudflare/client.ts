@@ -115,12 +115,14 @@ export const cloudflareApi = {
   createDnsRecord: (
     zoneId: string,
     body: {
-      type: "A" | "AAAA" | "CNAME" | "TXT";
+      type: "A" | "AAAA" | "CNAME" | "TXT" | "MX";
       name: string;
       content: string;
       proxied?: boolean;
       ttl?: number;
       comment?: string;
+      /** MX only — Cloudflare requires it on MX and rejects it elsewhere. */
+      priority?: number;
     },
   ) => {
     // `proxied` is not a property a TXT record can have, and Cloudflare rejects
@@ -129,7 +131,8 @@ export const cloudflareApi = {
     // ever asked to write would have failed with a validation error that names
     // the field rather than the record type — and a domain-ownership challenge
     // that never lands looks exactly like DNS that has not propagated yet.
-    const proxyable = body.type !== "TXT";
+    // MX is in the same class: only A/AAAA/CNAME can sit behind the proxy.
+    const proxyable = body.type !== "TXT" && body.type !== "MX";
     const payload = proxyable
       ? { ttl: 1, proxied: true, ...body }
       : { ttl: 1, ...body, proxied: undefined };

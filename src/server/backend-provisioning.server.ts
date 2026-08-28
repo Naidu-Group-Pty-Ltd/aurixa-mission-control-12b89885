@@ -1928,11 +1928,20 @@ export function planCloneSecrets(
   inheritedValues: Record<string, string>,
   generate: () => string,
   origins?: CloneOrigins | null,
+  dedicatedNames?: ReadonlySet<string>,
 ): { toWrite: { name: string; value: string }[]; results: Map<string, SecretShellResult> } {
   const toWrite: { name: string; value: string }[] = [];
   const results = new Map<string, SecretShellResult>();
 
   for (const name of names) {
+    // A name the clone holds a dedicated credential for is never inherited —
+    // see `dedicatedSecretNames` on the provisioning input. `missing` is
+    // honest for a fresh backend: the dedicated token cannot be read back, so
+    // the operator re-mints it (key rotation on the email identity panel).
+    if (dedicatedNames?.has(name)) {
+      results.set(name, { name, status: "missing", success: true });
+      continue;
+    }
     const kind = classifySecret(name);
 
     if (kind === "platform") {
@@ -1974,6 +1983,7 @@ export async function syncCloneSecrets(
   names: string[],
   inheritedValues: Record<string, string>,
   origins?: CloneOrigins | null,
+  dedicatedNames?: ReadonlySet<string>,
 ): Promise<SecretShellResult[]> {
   if (names.length === 0) return [];
 
@@ -1982,6 +1992,7 @@ export async function syncCloneSecrets(
     inheritedValues,
     () => crypto.randomBytes(32).toString("hex"),
     origins ?? null,
+    dedicatedNames,
   );
 
   if (toWrite.length > 0) {
@@ -2390,6 +2401,17 @@ export type ProvisionBackendInput = {
    */
   inheritedSecrets?: Record<string, string>;
   /**
+   * Secret names this clone holds a DEDICATED credential for (today: a
+   * per-clone Resend key from `clone_email_identities`). Never inherited from
+   * the prime, whatever `prime_secret_forwards` says — a re-provision that
+   * silently swapped a clone's own key back to the prime's shared one is a
+   * regression to the model this exists to replace. Recorded as `missing`
+   * (the ledger's own word) because a fresh backend genuinely does not hold
+   * the value yet: the dedicated token cannot be read back and is re-minted by
+   * a key rotation on the clone's email identity panel.
+   */
+  dedicatedSecretNames?: string[];
+  /**
    * The clone's own frontend origins. Used to rewrite the prime's
    * [auth] `site_url` + `uri_allow_list` so the new backend accepts
    * sign-ins from the clone's own hosts, not the prime's (G8).
@@ -2755,6 +2777,7 @@ export async function provisionCloneBackend(
     // The same origins `applyAuthConfig` was given at step 5c. Passing them
     // here is what makes ALLOWED_ORIGINS this clone's own rather than unset.
     input.cloneOrigins ?? null,
+    new Set(input.dedicatedSecretNames ?? []),
   );
 
   // Step 7: Seed admin

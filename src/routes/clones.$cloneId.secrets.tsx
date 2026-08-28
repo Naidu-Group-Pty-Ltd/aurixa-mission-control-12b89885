@@ -8,6 +8,7 @@ import {
   setCloneBackendSecret,
 } from "@/lib/backend-provisioning.functions";
 import { AppShell } from "@/components/app-shell";
+import { CloneEmailIdentityCard } from "@/components/clone-email-identity-card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -110,6 +111,15 @@ function CloneSecretsPage() {
             </Button>
           </div>
         </div>
+
+        {/*
+          The dedicated email identity sits above the raw secret list because
+          it is the intended way RESEND_API_KEY gets a value here — a
+          domain-scoped key of the clone's own, not a pasted copy of the
+          prime's. The list below still accepts a manual value for it, which
+          stays correct as the escape hatch.
+        */}
+        <CloneEmailIdentityCard cloneId={cloneId} />
 
         {isLoading && <div className="text-sm text-muted-foreground">Loading…</div>}
 
