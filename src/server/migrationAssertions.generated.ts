@@ -66,4 +66,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "cron", jobname: "agreements-refresh" },
     ],
   },
+  {
+    migration: "20260828080000_contract_module_exclusions.sql",
+    version: "20260828080000",
+    assertions: [{ kind: "column", table: "clones", column: "contract_excluded_module_slugs" }],
+  },
 ];

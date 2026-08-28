@@ -475,3 +475,31 @@ export function diffModules(installed: readonly string[], entitled: readonly str
     unchanged: [...want].filter((s) => have.has(s)).sort(),
   };
 }
+
+// ─── Contractual exclusions ──────────────────────────────────────────
+
+/**
+ * Subtract the modules a signed agreement contractually excluded.
+ *
+ * Applied to every resolution — initial provisioning, upgrades, downgrades,
+ * manual reconciles — because the failure mode this prevents is the quiet
+ * one: a plan change re-resolving the tier's full set and re-installing
+ * exactly what the client bargained away. An exclusion naming a module the
+ * plan does not include anyway is inert (it documents the negotiation).
+ *
+ * Entitlement KEYS are left alone on purpose: a key gates a sub-feature
+ * inside a module, and the module gate itself already wins — an excluded
+ * module's tabs cannot render whatever its keys say.
+ */
+export function applyContractExclusions(
+  resolution: EntitlementResolution,
+  excludedSlugs: readonly string[],
+): EntitlementResolution & { contractExcluded: string[] } {
+  const excluded = new Set(excludedSlugs);
+  const contractExcluded = resolution.moduleSlugs.filter((s) => excluded.has(s)).sort();
+  return {
+    ...resolution,
+    moduleSlugs: resolution.moduleSlugs.filter((s) => !excluded.has(s)),
+    contractExcluded,
+  };
+}

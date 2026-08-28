@@ -24,6 +24,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import {
   resolveEntitledModules,
+  applyContractExclusions,
   diffModules,
   buildFullMapping,
   type EntitlementResolution,
@@ -203,7 +204,7 @@ export async function reconcileCloneEntitlements(args: {
   // ── Current state ──
   const { data: clone } = await supabase
     .from("clones")
-    .select("id, entitled_plan_slug, revoked_module_slugs")
+    .select("id, entitled_plan_slug, revoked_module_slugs, contract_excluded_module_slugs")
     .eq("id", cloneId)
     .maybeSingle();
   if (!clone) return { ...base, error: "Clone not found" };
@@ -222,12 +223,18 @@ export async function reconcileCloneEntitlements(args: {
     return { ...base, error: "Module catalogue is empty — run detection before reconciling" };
   }
 
-  const resolution = resolveEntitledModules({
-    planSlug,
-    purchasedAddons: addons,
-    knownModules: new Set(catalogue.keys()),
-    overrides,
-  });
+  // Contractual exclusions hold across every reconcile — initial, plan
+  // changes, manual — or the first upgrade quietly re-installs what the
+  // signed agreement excluded.
+  const resolution = applyContractExclusions(
+    resolveEntitledModules({
+      planSlug,
+      purchasedAddons: addons,
+      knownModules: new Set(catalogue.keys()),
+      overrides,
+    }),
+    (clone.contract_excluded_module_slugs as string[] | null) ?? [],
+  );
 
   const { data: installedRows } = await supabase
     .from("clone_modules")

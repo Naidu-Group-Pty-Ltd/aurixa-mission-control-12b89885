@@ -135,12 +135,85 @@ export async function provisionCloneFromAgreement(
   }
 }
 
+/**
+ * Everything the pipeline is about to spend against, checked BEFORE anything
+ * is created. An autonomous signature event must refuse with a named reason
+ * rather than burn a GitHub repository or a Supabase project slot into a
+ * half-configured engine — the failure this prevents was live this morning:
+ * module cascades failing for ninety minutes on a wrong GitHub App
+ * installation id, visible only after the spend.
+ *
+ * Presence checks are presence, not validity (`readiness.pure.ts` owns that
+ * rule); the one LIVE probe is reading the prime's branch through the GitHub
+ * App, because that single call proves the App id, the private key, the
+ * installation and the prime's coordinates together — and it is the exact
+ * call the first pipeline step would otherwise fail on.
+ */
+export async function assessProvisioningPreflight(): Promise<
+  { ok: true } | { ok: false; reasons: string[] }
+> {
+  const reasons: string[] = [];
+
+  for (const name of [
+    "GITHUB_APP_ID",
+    "GITHUB_APP_PRIVATE_KEY",
+    "GITHUB_APP_INSTALLATION_ID",
+    "SB_MGMT_API_TOKEN",
+    "SB_ORG_ID",
+    "CREDENTIALS_ENC_KEY",
+  ]) {
+    if (!process.env[name]?.trim()) reasons.push(`${name} is not configured`);
+  }
+
+  const { data: prime, error: primeErr } = await supabaseAdmin
+    .from("prime_config")
+    .select("github_owner, github_repo, default_branch, supabase_project_ref")
+    .limit(1)
+    .maybeSingle();
+  if (primeErr) reasons.push(`prime_config unreadable: ${primeErr.message}`);
+  else if (!prime?.github_owner || !prime?.github_repo) {
+    reasons.push("prime repository is not configured (Settings)");
+  } else if (!prime.supabase_project_ref) {
+    reasons.push("prime backend ref is not configured (Settings)");
+  }
+
+  const { count, error: modErr } = await supabaseAdmin
+    .from("modules")
+    .select("id", { count: "exact", head: true });
+  if (modErr) reasons.push(`module catalogue unreadable: ${modErr.message}`);
+  else if (!count) reasons.push("module catalogue is empty — run detection first");
+
+  // The one live probe, only once everything cheap has passed.
+  if (reasons.length === 0 && prime?.github_owner && prime.github_repo) {
+    try {
+      const { getAppOctokit } = await import("./github-app.server");
+      await getAppOctokit().repos.getBranch({
+        owner: prime.github_owner,
+        repo: prime.github_repo,
+        branch: prime.default_branch || "main",
+      });
+    } catch (e) {
+      reasons.push(
+        `GitHub App cannot read the prime (${prime.github_owner}/${prime.github_repo}): ` +
+          (e instanceof Error ? e.message : String(e)),
+      );
+    }
+  }
+
+  return reasons.length === 0 ? { ok: true } : { ok: false, reasons };
+}
+
 async function runProvisioning(
   agreement: AgreementProvisionFacts,
   operatorUserId: string | null,
 ): Promise<string> {
   const identity = deriveCloneIdentity(agreement);
   if (!identity) throw new Error("No usable client/organisation name to derive the clone from");
+
+  const preflight = await assessProvisioningPreflight();
+  if (!preflight.ok) {
+    throw new Error(`Preflight refused (nothing was created): ${preflight.reasons.join("; ")}`);
+  }
 
   // Attribution: the operator pressing the button, else whoever raised the
   // agreement. decideProvisionOnSignature already refused a null creator.
@@ -190,7 +263,53 @@ async function runProvisioning(
   });
   if (!created.ok) throw new Error(created.error);
 
-  // Queue the dedicated backend. The seed admin is the client's own address
+  // ── Contractual exclusions, then the initial entitlement reconcile ──
+  // The reconcile is what turns "modules installed" into "features on":
+  // it stamps entitled_plan_slug / entitled_module_slugs / entitlement_keys
+  // from the tier + purchased add-ons (through the curated pricing→module
+  // mapping), and installs any tier-entitled module the operator did not
+  // hand-pick. The exclusions land FIRST so the resolution honours them —
+  // and they persist on the clone, so a later plan change can never
+  // re-install what this agreement bargained away. Fatal on failure on
+  // purpose: a clone with modules but no entitlements renders every gated
+  // feature off, which is exactly the "installed but unfunctional" state
+  // this pipeline exists to prevent. The operator's retry re-enters here
+  // idempotently.
+  if ((agreement.excluded_module_ids ?? []).length > 0) {
+    const { data: excludedRows, error: exErr } = await supabaseAdmin
+      .from("modules")
+      .select("slug")
+      .in("id", agreement.excluded_module_ids);
+    if (exErr) throw new Error(`Could not resolve excluded module slugs: ${exErr.message}`);
+    const { error: writeErr } = await supabaseAdmin
+      .from("clones")
+      .update({
+        contract_excluded_module_slugs: (excludedRows ?? []).map((r) => r.slug).sort(),
+      })
+      .eq("id", created.cloneId);
+    if (writeErr) throw new Error(`Could not record contractual exclusions: ${writeErr.message}`);
+  }
+
+  const { reconcileCloneEntitlements } = await import("./entitlement-modules.server");
+  const recon = await reconcileCloneEntitlements({
+    supabase: supabaseAdmin,
+    options: {
+      cloneId: created.cloneId,
+      planSlug: agreement.plan_slug!,
+      fromPlanSlug: null,
+      direction: "initial",
+      userId,
+    },
+  });
+  if (!recon.ok) {
+    throw new Error(
+      `Clone ${created.cloneId} created, but the initial entitlement reconcile failed: ${recon.error}`,
+    );
+  }
+
+  // Queue the dedicated backend AFTER the reconcile, so `clone_modules` —
+  // which the enqueue reads as the authoritative module set — already holds
+  // the full entitled selection. The seed admin is the client's own address
   // (or the override recorded at arm time); the password is generated and
   // reaches the row only encrypted, for the drain worker. Nobody is ever
   // shown it — the platform's own password-reset flow is the front door.
