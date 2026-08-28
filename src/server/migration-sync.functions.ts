@@ -4,11 +4,11 @@ import { requireAdmin } from "@/integrations/supabase/role-middleware";
 import { getAppOctokit } from "./github-app.server";
 import {
   fetchPrimeMigrationList,
-  openPrimeMigrationCorpus,
   resolvePrimeBackendRef,
   resolvePrimeSource,
 } from "./prime-backend.server";
 import { applyPrimeMigrations } from "./backend-provisioning.server";
+import { openScopedPrimeCorpus } from "./fleet-migration.server";
 
 /**
  * Migration sync — prime-repo driven.
@@ -91,15 +91,22 @@ export const getCloneMigrationStatus = createServerFn({ method: "POST" })
     try {
       const source = await resolvePrimeSource(supabase);
       if (source) {
-        const { migrations } = await fetchPrimeMigrationList(getAppOctokit(), source);
-        latestVersion = migrations[migrations.length - 1]?.id ?? "none";
-        pending = migrations
-          .filter((m) => !currentVersion || m.id > currentVersion)
-          .map((m) => ({ id: m.id, description: m.name }));
+        // The SCOPED list, for the same reason the sync applies the scoped
+        // list: a repo version the prime's database never ran is not pending
+        // work, it is a file the prime deliberately never took. Counting the
+        // raw repo here is what showed hundreds "pending" and invited the
+        // click that replayed the repo's 2025 tail at a tenant backend.
+        const scoped = await openScopedPrimeCorpus(supabase, source);
+        if (scoped.ok) {
+          latestVersion = scoped.runnable[scoped.runnable.length - 1]?.id ?? "none";
+          pending = scoped.runnable
+            .filter((m) => !currentVersion || m.id > currentVersion)
+            .map((m) => ({ id: m.id, description: m.name }));
+        }
       }
     } catch {
-      // Prime repo unreadable (GitHub App down/unconfigured) — show no pending
-      // rather than failing the whole clone page.
+      // Prime unreadable (GitHub App down/unconfigured, ledger unreachable) —
+      // show no pending rather than failing the whole clone page.
     }
 
     return {
@@ -163,15 +170,39 @@ export const syncCloneMigrations = createServerFn({ method: "POST" })
         .eq("clone_id", data.cloneId);
 
       try {
-        // Metadata only; bodies are fetched inside the replay, for the versions
-        // this clone turns out to be missing. Materialising the whole corpus
-        // here is what made the fleet job time out at 60 s without claiming a
-        // single clone — this button ran the same code and never once finished.
-        const corpus = await openPrimeMigrationCorpus(getAppOctokit(), source);
-        const sourceSha = corpus.sourceSha;
+        // The SCOPED corpus — the same one the scheduled fleet sync replays —
+        // and never the raw repo. This button used to pass `corpus.metas`
+        // directly: 962 files, including two rollback scripts and 52
+        // future-dated versions the prime never ran. One click replayed the
+        // repo's January-2025 tail at this tenant's backend — the versions the
+        // earlier incident had stamped were skipped by the ledger, and
+        // `20250124140000`, a version absent from the prime's own ledger,
+        // failed against the introspected schema and marked the backend
+        // `failed`, which took it out of the fleet sync and blocked its
+        // deployment. The rule is #71's: a clone never runs a migration the
+        // prime itself has not run — and it holds for a button exactly as it
+        // holds for a schedule, because the database cannot tell who asked.
+        //
+        // Bodies still arrive on demand inside the replay, for the versions
+        // this clone turns out to be missing; materialising the whole corpus
+        // here is what made this button time out at 60 s without finishing.
+        const scoped = await openScopedPrimeCorpus(supabase, source);
+        if (!scoped.ok) {
+          await supabase
+            .from("clone_backends")
+            .update({
+              status: "ready" as const,
+              status_detail: `Migration sync refused: ${scoped.error}`,
+              error_message: scoped.error,
+            })
+            .eq("clone_id", data.cloneId);
+          return { ok: false, error: scoped.error };
+        }
+        const { corpus, runnable } = scoped;
+        const sourceSha = scoped.sourceSha;
         const { results, latestApplied } = await applyPrimeMigrations(
           backend.supabase_project_ref,
-          corpus.metas,
+          runnable,
           undefined,
           (m) => corpus.loadSql(m.id),
         );

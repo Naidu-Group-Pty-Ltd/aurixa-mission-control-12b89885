@@ -155,6 +155,102 @@ async function reclaimStale(supabase: Db): Promise<void> {
 }
 
 /**
+ * The prime corpus, ALREADY narrowed to what the prime's database has applied.
+ *
+ * Extracted so there is exactly one implementation of the #71 rule — "a clone
+ * never runs a migration the prime itself has not run" — for every caller that
+ * replays prime migrations onto a clone.
+ *
+ * It had two callers and one implementation. The scheduled fleet sync scoped;
+ * the per-clone "Sync migrations" button passed `corpus.metas` — the raw repo,
+ * 962 files including two rollback scripts and 52 future-dated versions —
+ * straight to `applyPrimeMigrations`. One click on 2026-08-28 replayed the
+ * repo's January-2025 tail at a tenant backend: the four versions the earlier
+ * incident had already stamped were skipped by the ledger, and the fifth
+ * (`20250124140000`, absent from the prime's own ledger, so a version the
+ * clone should never have been sent) failed on the introspected schema and
+ * marked the backend `failed` — which took it out of the fleet sync AND
+ * blocked its deployment, whose env step waits on a ready backend.
+ *
+ * Fails closed exactly as the scheduled path always has: an unreadable or
+ * empty prime ledger is a refusal, never a fall-back to the whole repo.
+ */
+export async function openScopedPrimeCorpus(
+  supabase: Db,
+  source: NonNullable<Awaited<ReturnType<typeof resolvePrimeSource>>>,
+): Promise<
+  | {
+      ok: true;
+      corpus: Awaited<ReturnType<typeof openPrimeMigrationCorpus>>;
+      runnable: ReturnType<typeof scopeCorpusToPrime<CorpusMetaOf>>["runnable"];
+      withheld: number;
+      breakdown: ReturnType<typeof scopeCorpusToPrime<CorpusMetaOf>>["breakdown"];
+      sourceSha: string;
+      primeAppliedCount: number;
+      withheldEntries: ReturnType<typeof scopeCorpusToPrime<CorpusMetaOf>>["withheld"];
+      primeRef: string;
+    }
+  | { ok: false; error: string }
+> {
+  let corpus: Awaited<ReturnType<typeof openPrimeMigrationCorpus>>;
+  try {
+    corpus = await openPrimeMigrationCorpus(getAppOctokit(), source);
+  } catch (e) {
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : "Failed to read prime repo migrations",
+    };
+  }
+
+  let primeApplied: Set<string>;
+  let primeRef: string;
+  try {
+    primeRef = await resolvePrimeBackendRef(supabase);
+    const rows = (await runSqlOnProject(
+      primeRef,
+      `select version from supabase_migrations.schema_migrations`,
+    )) as Array<{ version?: unknown }>;
+    primeApplied = new Set(
+      (Array.isArray(rows) ? rows : [])
+        .map((r) => r?.version)
+        .filter((v): v is string => typeof v === "string"),
+    );
+  } catch (e) {
+    return {
+      ok: false,
+      error:
+        assertPrimeLedgerUsable({
+          failed: true,
+          errorMessage: e instanceof Error ? e.message : String(e),
+          appliedCount: 0,
+          primeRef: "unresolved",
+        }) ?? "Could not read the prime backend's migration ledger",
+    };
+  }
+  const unusable = assertPrimeLedgerUsable({
+    failed: false,
+    appliedCount: primeApplied.size,
+    primeRef,
+  });
+  if (unusable) return { ok: false, error: unusable };
+
+  const { runnable, withheld, breakdown } = scopeCorpusToPrime(corpus.metas, primeApplied);
+  return {
+    ok: true,
+    corpus,
+    runnable,
+    withheld: withheld.length,
+    withheldEntries: withheld,
+    breakdown,
+    sourceSha: corpus.sourceSha,
+    primeAppliedCount: primeApplied.size,
+    primeRef,
+  };
+}
+
+type CorpusMetaOf = Awaited<ReturnType<typeof openPrimeMigrationCorpus>>["metas"][number];
+
+/**
  * Apply the prime's migrations to a bounded slice of the fleet.
  *
  * `actorUserId` is the operator when a person pressed the button and null when
@@ -198,7 +294,11 @@ export async function runFleetMigrationSync(
   // "0 clones, nothing to do" would make a database fault look like a fleet
   // already in step, on the one job whose purpose is noticing that it is not.
   if (pickErr) {
-    return { ...EMPTY, excluded: excludedCount ?? 0, error: `Could not read clone backends: ${pickErr.message}` };
+    return {
+      ...EMPTY,
+      excluded: excludedCount ?? 0,
+      error: `Could not read clone backends: ${pickErr.message}`,
+    };
   }
 
   const out: FleetMigrationResult = { ...EMPTY, failed: [], excluded: excludedCount ?? 0 };
@@ -218,62 +318,13 @@ export async function runFleetMigrationSync(
   // migration share one fetch through the corpus's own memo. Listing is two
   // API calls; a body costs a round trip only when some clone is actually
   // missing that version.
-  let corpus: Awaited<ReturnType<typeof openPrimeMigrationCorpus>>;
-  try {
-    corpus = await openPrimeMigrationCorpus(getAppOctokit(), source);
-  } catch (e) {
-    return {
-      ...out,
-      error: e instanceof Error ? e.message : "Failed to read prime repo migrations",
-    };
-  }
-  const sourceSha = corpus.sourceSha;
-
-  // Narrow the repo corpus to what the prime's DATABASE has actually applied.
-  //
-  // See `fleetCorpusScope.pure.ts`. Briefly: the repo holds 906 versions and
-  // the prime's ledger 864, and sending a clone the difference does not bring
-  // it level with the prime — it takes the clone PAST the prime. The run that
-  // proved it applied two `rollback_*` scripts to a tenant database and put 23
-  // permissive `USING (true)` policies on its client and financial tables.
-  let primeApplied: Set<string>;
-  let primeRef: string;
-  try {
-    primeRef = await resolvePrimeBackendRef(supabase);
-    const rows = (await runSqlOnProject(
-      primeRef,
-      `select version from supabase_migrations.schema_migrations`,
-    )) as Array<{ version?: unknown }>;
-    primeApplied = new Set(
-      (Array.isArray(rows) ? rows : [])
-        .map((r) => r?.version)
-        .filter((v): v is string => typeof v === "string"),
-    );
-  } catch (e) {
-    // Fails closed. A ledger that could not be read is not a prime that has
-    // applied nothing, and degrading to "use the whole repo" is the behaviour
-    // this scoping exists to prevent.
-    return {
-      ...out,
-      error:
-        assertPrimeLedgerUsable({
-          failed: true,
-          errorMessage: e instanceof Error ? e.message : String(e),
-          appliedCount: 0,
-          primeRef: "unresolved",
-        }) ?? "Could not read the prime backend's migration ledger",
-    };
-  }
-  const unusable = assertPrimeLedgerUsable({
-    failed: false,
-    appliedCount: primeApplied.size,
-    primeRef,
-  });
-  if (unusable) return { ...out, error: unusable };
-
-  const { runnable, withheld, breakdown } = scopeCorpusToPrime(corpus.metas, primeApplied);
-  out.withheld = withheld.length;
-  out.withheldBreakdown = breakdown;
+  // One implementation of the corpus-plus-scoping sequence, shared with the
+  // per-clone sync button. See openScopedPrimeCorpus for what having two cost.
+  const scoped = await openScopedPrimeCorpus(supabase, source);
+  if (!scoped.ok) return { ...out, error: scoped.error };
+  const { corpus, runnable, sourceSha } = scoped;
+  out.withheld = scoped.withheld;
+  out.withheldBreakdown = scoped.breakdown;
 
   const ids = backends.map((b) => b.clone_id);
   const { data: clones } = await supabase.from("clones").select("id, name").in("id", ids);
@@ -401,17 +452,17 @@ export async function runFleetMigrationSync(
       failed: out.failed.length,
       excluded: out.excluded,
       withheld: out.withheld,
-      withheld_never_applied: breakdown.neverApplied,
-      withheld_skew_suspected: breakdown.skewSuspected,
+      withheld_never_applied: scoped.breakdown.neverApplied,
+      withheld_skew_suspected: scoped.breakdown.skewSuspected,
       // The names, capped. A count tells an operator how big the problem is;
       // the names tell them which migration to go and look at, and that is the
       // half a dashboard number always loses.
-      withheld_never_applied_sample: withheld
+      withheld_never_applied_sample: scoped.withheldEntries
         .filter((w) => w.reason === "never_applied")
         .slice(0, 20)
         .map((w) => w.meta.name),
-      prime_backend_ref: primeRef,
-      prime_applied: primeApplied.size,
+      prime_backend_ref: scoped.primeRef,
+      prime_applied: scoped.primeAppliedCount,
     },
   });
 

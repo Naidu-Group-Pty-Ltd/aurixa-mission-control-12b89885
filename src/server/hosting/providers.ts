@@ -87,6 +87,25 @@ export interface HostingProvider {
   attachDomain(projectId: string, domain: string, teamId?: string | null): Promise<DomainResult>;
   getDomain(projectId: string, domain: string, teamId?: string | null): Promise<DomainResult>;
   removeProject(projectId: string, teamId?: string | null): Promise<void>;
+
+  /**
+   * What the provider currently knows about a project: whether this
+   * credential can see it at all, and which repository it is linked to.
+   *
+   * Optional because the manual provider has nothing to ask. It exists so
+   * `linking_repo` can be a real verification: the step used to check only
+   * that a project id had been recorded, so a project adopted WITHOUT a git
+   * link — adoption never links; only creation passes `gitRepository` — sailed
+   * through and failed five steps later as a bare "no linked GitHub
+   * repository" at deploy. Worse, that message conflated two states: a
+   * project with no link, and a project this token cannot SEE (moved into a
+   * team, renamed, deleted) both read as `project?.link?.org == null`. The
+   * remedies live in different screens, so the difference is the diagnosis.
+   */
+  describeProject?(
+    projectId: string,
+    teamId?: string | null,
+  ): Promise<{ found: boolean; name: string | null; linkedRepo: string | null }>;
 }
 
 const registry = new Map<HostingProviderSlug, HostingProvider>();

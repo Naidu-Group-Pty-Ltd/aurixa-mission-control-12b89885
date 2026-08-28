@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { openPrimeMigrationCorpus, MAX_MIGRATION_BYTES } from "./prime-backend.server";
 
-const REF = { owner: "lavan96", repo: "npc-property-dashbord", branch: "main" };
+const REF = { owner: "Naidu-Group-Pty-Ltd", repo: "npc-property-dashbord", branch: "main" };
 
 /**
  * A fake Octokit that counts blob fetches.
