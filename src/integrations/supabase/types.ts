@@ -924,6 +924,16 @@ export type Database = {
       }
       client_agreements: {
         Row: {
+          addon_slugs: string[]
+          admin_email: string | null
+          excluded_module_ids: string[]
+          module_ids: string[]
+          plan_slug: string | null
+          provision_error: string | null
+          provision_on_signature: boolean
+          provision_region: string
+          provision_status: string
+          provisioned_clone_id: string | null
           account_id: string | null
           client_email: string
           client_name: string
@@ -946,6 +956,16 @@ export type Database = {
           void_reason: string | null
         }
         Insert: {
+          addon_slugs?: string[]
+          admin_email?: string | null
+          excluded_module_ids?: string[]
+          module_ids?: string[]
+          plan_slug?: string | null
+          provision_error?: string | null
+          provision_on_signature?: boolean
+          provision_region?: string
+          provision_status?: string
+          provisioned_clone_id?: string | null
           account_id?: string | null
           client_email: string
           client_name: string
@@ -968,6 +988,16 @@ export type Database = {
           void_reason?: string | null
         }
         Update: {
+          addon_slugs?: string[]
+          admin_email?: string | null
+          excluded_module_ids?: string[]
+          module_ids?: string[]
+          plan_slug?: string | null
+          provision_error?: string | null
+          provision_on_signature?: boolean
+          provision_region?: string
+          provision_status?: string
+          provisioned_clone_id?: string | null
           account_id?: string | null
           client_email?: string
           client_name?: string
@@ -5070,6 +5100,53 @@ export type Database = {
             isOneToOne: false
             referencedRelation: "clones_missing_isolated_backend"
             referencedColumns: ["clone_id"]
+          },
+        ]
+      }
+      docusign_connect_events: {
+        Row: {
+          agreement_id: string | null
+          created_at: string
+          decision: string
+          docusign_status: string | null
+          envelope_id: string
+          error: string | null
+          event_type: string
+          hmac_valid: boolean
+          id: string
+          payload_summary: Json
+        }
+        Insert: {
+          agreement_id?: string | null
+          created_at?: string
+          decision?: string
+          docusign_status?: string | null
+          envelope_id: string
+          error?: string | null
+          event_type: string
+          hmac_valid?: boolean
+          id?: string
+          payload_summary?: Json
+        }
+        Update: {
+          agreement_id?: string | null
+          created_at?: string
+          decision?: string
+          docusign_status?: string | null
+          envelope_id?: string
+          error?: string | null
+          event_type?: string
+          hmac_valid?: boolean
+          id?: string
+          payload_summary?: Json
+        }
+        Relationships: [
+          {
+            foreignKeyName: "docusign_connect_events_agreement_id_fkey"
+            columns: ["agreement_id"]
+            isOneToOne: false
+            referencedRelation: "client_agreements"
+            referencedColumns: ["id"]
           },
         ]
       }
@@ -11768,6 +11845,7 @@ export type Database = {
         | "voice_outbound_failed"
         | "voice_blacklist_hit"
         | "phone_missed_call"
+        | "agreement_provisioned"
         | "agreement_signed"
         | "agreement_declined"
         | "migration_drift"
@@ -12254,6 +12332,7 @@ export const Constants = {
         "voice_outbound_failed",
         "voice_blacklist_hit",
         "phone_missed_call",
+        "agreement_provisioned",
         "agreement_signed",
         "agreement_declined",
         "migration_drift",

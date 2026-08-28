@@ -42,7 +42,11 @@ const REQUIRED_ENV = [
 ] as const;
 
 export function docusignRestBaseUrl(raw?: string): string {
-  const configured = (raw ?? process.env.DOCUSIGN_BASE_URL ?? "https://demo.docusign.net/restapi").trim();
+  const configured = (
+    raw ??
+    process.env.DOCUSIGN_BASE_URL ??
+    "https://demo.docusign.net/restapi"
+  ).trim();
   const normalized = configured.replace(/\/+$/, "");
   return normalized.toLowerCase().endsWith("/restapi") ? normalized : `${normalized}/restapi`;
 }
@@ -193,7 +197,9 @@ export async function getDocusignAccessToken(config: DocusignConfig): Promise<st
         `https://${config.oauthHost}/oauth/auth?response_type=code&scope=signature%20impersonation&client_id=${config.integrationKey}&redirect_uri=https://www.docusign.com`,
       );
     }
-    throw new Error(`DocuSign token exchange failed: ${data.error_description || data.error || res.status}`);
+    throw new Error(
+      `DocuSign token exchange failed: ${data.error_description || data.error || res.status}`,
+    );
   }
   return data.access_token;
 }
@@ -220,7 +226,11 @@ export const ANCHORS = {
 
 type AnchorTab = Record<string, string>;
 
-function anchoredTab(anchor: string, yOffset: string, extra: Record<string, string> = {}): AnchorTab {
+function anchoredTab(
+  anchor: string,
+  yOffset: string,
+  extra: Record<string, string> = {},
+): AnchorTab {
   return {
     anchorString: anchor,
     anchorUnits: "pixels",
@@ -339,7 +349,9 @@ export function mapEnvelopeStatus(docusignStatus: string): string | null {
 /* --------------------------------- actions --------------------------------- */
 
 const TEMPLATE_PATH = "/agreements/aurixa-sla-template.pdf";
-const PUBLIC_ORIGIN = (process.env.PUBLIC_APP_URL ?? "https://mission-control.aurixasystems.com.au").replace(/\/+$/, "");
+const PUBLIC_ORIGIN = (
+  process.env.PUBLIC_APP_URL ?? "https://mission-control.aurixasystems.com.au"
+).replace(/\/+$/, "");
 
 async function loadTemplateBase64(): Promise<string> {
   const res = await fetch(PUBLIC_ORIGIN + TEMPLATE_PATH);
@@ -372,11 +384,14 @@ export async function sendAgreementEnvelope(agreementId: string): Promise<{
   status: string;
 }> {
   const config = docusignConfig();
-  if (!config.ready) throw new Error(`DocuSign not configured; missing: ${config.missing.join(", ")}`);
+  if (!config.ready)
+    throw new Error(`DocuSign not configured; missing: ${config.missing.join(", ")}`);
 
   const { data: agreement, error } = await supabaseAdmin
     .from("client_agreements")
-    .select("id, client_name, client_email, client_org, service_tier, commencement_date, status, docusign_envelope_id, metadata")
+    .select(
+      "id, client_name, client_email, client_org, service_tier, commencement_date, status, docusign_envelope_id, metadata",
+    )
     .eq("id", agreementId)
     .maybeSingle();
   if (error) throw error;
@@ -436,7 +451,8 @@ export async function refreshEnvelopeStatus(agreementId: string): Promise<{
   docusignStatus: string;
 }> {
   const config = docusignConfig();
-  if (!config.ready) throw new Error(`DocuSign not configured; missing: ${config.missing.join(", ")}`);
+  if (!config.ready)
+    throw new Error(`DocuSign not configured; missing: ${config.missing.join(", ")}`);
 
   const { data: agreement, error } = await supabaseAdmin
     .from("client_agreements")
@@ -459,15 +475,49 @@ export async function refreshEnvelopeStatus(agreementId: string): Promise<{
   };
   if (!res.ok || !data.status) throw new Error(`DocuSign: ${data.message || res.status}`);
 
-  const mapped = mapEnvelopeStatus(data.status);
+  const applied = await applyDocusignStatus(agreementId, data.status, {
+    completedDateTime: data.completedDateTime ?? null,
+    voidedDateTime: data.voidedDateTime ?? null,
+  });
+  return { status: applied.status, docusignStatus: data.status };
+}
+
+/**
+ * Fold a DocuSign envelope status into the agreement — the ONE place the
+ * lifecycle moves, whichever way the status arrived (the operator's refresh
+ * poll, the agreements-refresh cron, or the Connect webhook). Raises the
+ * signed/declined notifications on a transition, and on the transition to
+ * `signed` hands the agreement to the provisioning flow, which decides for
+ * itself (by named refusal) whether a clone should be created.
+ *
+ * A provisioning failure never fails the status application: the signature
+ * is a recorded fact either way, and the failure lands on the agreement row
+ * as `provision_status = failed` where the operator can see and retrigger it.
+ */
+export async function applyDocusignStatus(
+  agreementId: string,
+  docusignStatus: string,
+  times: { completedDateTime?: string | null; voidedDateTime?: string | null } = {},
+): Promise<{ status: string; transitioned: boolean }> {
+  const { data: agreement, error } = await supabaseAdmin
+    .from("client_agreements")
+    .select("id, status, client_name")
+    .eq("id", agreementId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!agreement) throw new Error("agreement_not_found");
+
+  const mapped = mapEnvelopeStatus(docusignStatus);
   const updates: Database["public"]["Tables"]["client_agreements"]["Update"] = {
-    docusign_status: data.status,
+    docusign_status: docusignStatus,
   };
   if (mapped) updates.status = mapped;
-  if (mapped === "signed") updates.docusign_signed_at = data.completedDateTime || new Date().toISOString();
-  if (mapped === "voided") updates.docusign_voided_at = data.voidedDateTime || new Date().toISOString();
+  if (mapped === "signed")
+    updates.docusign_signed_at = times.completedDateTime || new Date().toISOString();
+  if (mapped === "voided")
+    updates.docusign_voided_at = times.voidedDateTime || new Date().toISOString();
 
-  const transitioned = mapped && mapped !== agreement.status;
+  const transitioned = Boolean(mapped && mapped !== agreement.status);
   const { error: updateError } = await supabaseAdmin
     .from("client_agreements")
     .update(updates)
@@ -485,7 +535,19 @@ export async function refreshEnvelopeStatus(agreementId: string): Promise<{
     }).catch((err) => console.error("[agreements] notify failed:", (err as Error).message));
   }
 
-  return { status: mapped ?? agreement.status, docusignStatus: data.status };
+  if (mapped === "signed") {
+    try {
+      const { provisionCloneFromAgreement } = await import("./agreement-provisioning.server");
+      await provisionCloneFromAgreement(agreementId, { trigger: "signature" });
+    } catch (err) {
+      console.error(
+        "[agreements] provision-on-signature failed:",
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  }
+
+  return { status: mapped ?? agreement.status, transitioned };
 }
 
 export async function downloadSignedPdf(agreementId: string): Promise<{
@@ -493,7 +555,8 @@ export async function downloadSignedPdf(agreementId: string): Promise<{
   filename: string;
 }> {
   const config = docusignConfig();
-  if (!config.ready) throw new Error(`DocuSign not configured; missing: ${config.missing.join(", ")}`);
+  if (!config.ready)
+    throw new Error(`DocuSign not configured; missing: ${config.missing.join(", ")}`);
 
   const { data: agreement, error } = await supabaseAdmin
     .from("client_agreements")
@@ -543,7 +606,10 @@ export async function voidEnvelope(agreementId: string, reason: string): Promise
           {
             method: "PUT",
             headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-            body: JSON.stringify({ status: "voided", voidedReason: reason || "Voided by operator" }),
+            body: JSON.stringify({
+              status: "voided",
+              voidedReason: reason || "Voided by operator",
+            }),
           },
         );
       } catch (err) {
