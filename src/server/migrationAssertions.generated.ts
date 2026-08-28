@@ -52,4 +52,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260828050000",
     assertions: [{ kind: "column", table: "clone_deployments", column: "status_since" }],
   },
+  {
+    migration: "20260828060000_clone_email_identities.sql",
+    version: "20260828060000",
+    assertions: [{ kind: "table", table: "clone_email_identities" }],
+  },
 ];

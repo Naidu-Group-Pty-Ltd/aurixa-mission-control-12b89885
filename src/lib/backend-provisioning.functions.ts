@@ -137,6 +137,18 @@ async function runBackendProvisioning(
       if (typeof val === "string" && val.length > 0) inheritedSecrets[row.name] = val;
     }
 
+    // A clone with its own email identity holds a DEDICATED Resend key — that
+    // name must never fall back to the prime's shared value, even on a
+    // re-provision. The token itself cannot be read back; the operator
+    // re-mints it from the clone's email identity panel afterwards.
+    const dedicatedSecretNames: string[] = [];
+    const { data: emailIdentity } = await supabase
+      .from("clone_email_identities")
+      .select("resend_key_id")
+      .eq("clone_id", input.cloneId)
+      .maybeSingle();
+    if (emailIdentity?.resend_key_id) dedicatedSecretNames.push("RESEND_API_KEY");
+
     const result = await provisionCloneBackend(
       {
         cloneName: input.cloneName,
@@ -146,6 +158,7 @@ async function runBackendProvisioning(
         snapshot,
         existingProjectRef: existingRow?.supabase_project_ref ?? null,
         inheritedSecrets,
+        dedicatedSecretNames,
         cloneOrigins,
         schemaStrategy: input.schemaStrategy ?? "introspection",
         primeBackendRef,
@@ -257,17 +270,37 @@ async function runBackendProvisioning(
       .eq("clone_id", input.cloneId);
 
     // Persist per-name secret status so operators can drive the fill-in UI.
+    //
+    // Mapped through `ledgerStatusForShell` because the column's CHECK
+    // constraint speaks `missing|set|failed|inherited` while the planner also
+    // says `generated`/`derived`/`skipped_*`. Writing the planner's words
+    // straight in made ONE `generated` row invalidate the whole upsert;
+    // Postgres refused the statement, the error was discarded, and every
+    // clone's secret ledger stayed empty while the secrets page read "none".
     if (result.secretShells.length > 0) {
-      await supabase.from("clone_backend_secrets").upsert(
-        result.secretShells.map((s) => ({
-          clone_id: input.cloneId,
-          name: s.name,
-          status: s.status,
-          last_set_at: s.status === "inherited" ? new Date().toISOString() : null,
-          last_error: s.error ?? null,
-        })),
-        { onConflict: "clone_id,name" },
+      const { ledgerStatusForShell } = await import(
+        /* @vite-ignore */ "@/lib/_server-shims/cloneEmailIdentity.pure"
       );
+      const ledgerRows = result.secretShells.flatMap((s) => {
+        const status = ledgerStatusForShell(s.status);
+        if (status === null) return []; // skipped_* — not operator-facing
+        return [
+          {
+            clone_id: input.cloneId,
+            name: s.name,
+            status,
+            last_set_at:
+              status === "inherited" || status === "set" ? new Date().toISOString() : null,
+            last_error: s.error ?? null,
+          },
+        ];
+      });
+      const { error: ledgerErr } = await supabase
+        .from("clone_backend_secrets")
+        .upsert(ledgerRows, { onConflict: "clone_id,name" });
+      if (ledgerErr) {
+        console.error("[backend-provisioning] secret ledger upsert failed:", ledgerErr.message);
+      }
     }
 
     // ── Per-module migrations for selected modules ──
@@ -710,9 +743,7 @@ export const backfillCloneAllowedOrigins = createServerFn({ method: "POST" })
     }
 
     const applied = results.filter((r) => r.ok).length;
-    const { writeAuditLog } = await import(
-      /* @vite-ignore */ "@/lib/_server-shims/audit.server"
-    );
+    const { writeAuditLog } = await import(/* @vite-ignore */ "@/lib/_server-shims/audit.server");
     await writeAuditLog({
       action: "clone_backend.allowed_origins_backfill",
       entityType: "clone",
