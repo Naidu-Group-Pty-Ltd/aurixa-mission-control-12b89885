@@ -95,6 +95,7 @@ import { Route as HooksBackendProvisioningDrainRouteImport } from './routes/hook
 import { Route as HooksApiUsageSettleRouteImport } from './routes/hooks.api-usage-settle'
 import { Route as HooksAllowedOriginsReconcileRouteImport } from './routes/hooks.allowed-origins-reconcile'
 import { Route as HooksAirtableSyncRouteImport } from './routes/hooks.airtable-sync'
+import { Route as HooksAgreementsRefreshRouteImport } from './routes/hooks.agreements-refresh'
 import { Route as HandoffsNewRouteImport } from './routes/handoffs.new'
 import { Route as HandoffsHandoffIdRouteImport } from './routes/handoffs.$handoffId'
 import { Route as FleetEdgeRouteImport } from './routes/fleet.edge'
@@ -153,6 +154,7 @@ import { Route as ApiPublicSeatsEntitlementRouteImport } from './routes/api.publ
 import { Route as ApiPublicSeatsCommitRouteImport } from './routes/api.public.seats.commit'
 import { Route as ApiPublicPricingCatalogRouteImport } from './routes/api.public.pricing.catalog'
 import { Route as ApiPublicLeadsCaptureRouteImport } from './routes/api.public.leads.capture'
+import { Route as ApiPublicHooksDocusignRouteImport } from './routes/api.public.hooks.docusign'
 import { Route as ApiPublicHooksCodexSecurityRouteImport } from './routes/api.public.hooks.codex-security'
 import { Route as ApiPublicHooksCodexRemediationRouteImport } from './routes/api.public.hooks.codex-remediation'
 import { Route as ApiPublicHandoffsConsentRouteImport } from './routes/api.public.handoffs.consent'
@@ -609,6 +611,11 @@ const HooksAirtableSyncRoute = HooksAirtableSyncRouteImport.update({
   path: '/hooks/airtable-sync',
   getParentRoute: () => rootRouteImport,
 } as any)
+const HooksAgreementsRefreshRoute = HooksAgreementsRefreshRouteImport.update({
+  id: '/hooks/agreements-refresh',
+  path: '/hooks/agreements-refresh',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const HandoffsNewRoute = HandoffsNewRouteImport.update({
   id: '/new',
   path: '/new',
@@ -915,6 +922,11 @@ const ApiPublicLeadsCaptureRoute = ApiPublicLeadsCaptureRouteImport.update({
   path: '/api/public/leads/capture',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiPublicHooksDocusignRoute = ApiPublicHooksDocusignRouteImport.update({
+  id: '/api/public/hooks/docusign',
+  path: '/api/public/hooks/docusign',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiPublicHooksCodexSecurityRoute =
   ApiPublicHooksCodexSecurityRouteImport.update({
     id: '/api/public/hooks/codex-security',
@@ -1058,6 +1070,7 @@ export interface FileRoutesByFullPath {
   '/fleet/edge': typeof FleetEdgeRoute
   '/handoffs/$handoffId': typeof HandoffsHandoffIdRoute
   '/handoffs/new': typeof HandoffsNewRoute
+  '/hooks/agreements-refresh': typeof HooksAgreementsRefreshRoute
   '/hooks/airtable-sync': typeof HooksAirtableSyncRoute
   '/hooks/allowed-origins-reconcile': typeof HooksAllowedOriginsReconcileRoute
   '/hooks/api-usage-settle': typeof HooksApiUsageSettleRoute
@@ -1132,6 +1145,7 @@ export interface FileRoutesByFullPath {
   '/api/public/handoffs/consent': typeof ApiPublicHandoffsConsentRoute
   '/api/public/hooks/codex-remediation': typeof ApiPublicHooksCodexRemediationRoute
   '/api/public/hooks/codex-security': typeof ApiPublicHooksCodexSecurityRoute
+  '/api/public/hooks/docusign': typeof ApiPublicHooksDocusignRoute
   '/api/public/leads/capture': typeof ApiPublicLeadsCaptureRoute
   '/api/public/pricing/catalog': typeof ApiPublicPricingCatalogRoute
   '/api/public/seats/commit': typeof ApiPublicSeatsCommitRoute
@@ -1219,6 +1233,7 @@ export interface FileRoutesByTo {
   '/fleet/edge': typeof FleetEdgeRoute
   '/handoffs/$handoffId': typeof HandoffsHandoffIdRoute
   '/handoffs/new': typeof HandoffsNewRoute
+  '/hooks/agreements-refresh': typeof HooksAgreementsRefreshRoute
   '/hooks/airtable-sync': typeof HooksAirtableSyncRoute
   '/hooks/allowed-origins-reconcile': typeof HooksAllowedOriginsReconcileRoute
   '/hooks/api-usage-settle': typeof HooksApiUsageSettleRoute
@@ -1293,6 +1308,7 @@ export interface FileRoutesByTo {
   '/api/public/handoffs/consent': typeof ApiPublicHandoffsConsentRoute
   '/api/public/hooks/codex-remediation': typeof ApiPublicHooksCodexRemediationRoute
   '/api/public/hooks/codex-security': typeof ApiPublicHooksCodexSecurityRoute
+  '/api/public/hooks/docusign': typeof ApiPublicHooksDocusignRoute
   '/api/public/leads/capture': typeof ApiPublicLeadsCaptureRoute
   '/api/public/pricing/catalog': typeof ApiPublicPricingCatalogRoute
   '/api/public/seats/commit': typeof ApiPublicSeatsCommitRoute
@@ -1382,6 +1398,7 @@ export interface FileRoutesById {
   '/fleet/edge': typeof FleetEdgeRoute
   '/handoffs/$handoffId': typeof HandoffsHandoffIdRoute
   '/handoffs/new': typeof HandoffsNewRoute
+  '/hooks/agreements-refresh': typeof HooksAgreementsRefreshRoute
   '/hooks/airtable-sync': typeof HooksAirtableSyncRoute
   '/hooks/allowed-origins-reconcile': typeof HooksAllowedOriginsReconcileRoute
   '/hooks/api-usage-settle': typeof HooksApiUsageSettleRoute
@@ -1456,6 +1473,7 @@ export interface FileRoutesById {
   '/api/public/handoffs/consent': typeof ApiPublicHandoffsConsentRoute
   '/api/public/hooks/codex-remediation': typeof ApiPublicHooksCodexRemediationRoute
   '/api/public/hooks/codex-security': typeof ApiPublicHooksCodexSecurityRoute
+  '/api/public/hooks/docusign': typeof ApiPublicHooksDocusignRoute
   '/api/public/leads/capture': typeof ApiPublicLeadsCaptureRoute
   '/api/public/pricing/catalog': typeof ApiPublicPricingCatalogRoute
   '/api/public/seats/commit': typeof ApiPublicSeatsCommitRoute
@@ -1546,6 +1564,7 @@ export interface FileRouteTypes {
     | '/fleet/edge'
     | '/handoffs/$handoffId'
     | '/handoffs/new'
+    | '/hooks/agreements-refresh'
     | '/hooks/airtable-sync'
     | '/hooks/allowed-origins-reconcile'
     | '/hooks/api-usage-settle'
@@ -1620,6 +1639,7 @@ export interface FileRouteTypes {
     | '/api/public/handoffs/consent'
     | '/api/public/hooks/codex-remediation'
     | '/api/public/hooks/codex-security'
+    | '/api/public/hooks/docusign'
     | '/api/public/leads/capture'
     | '/api/public/pricing/catalog'
     | '/api/public/seats/commit'
@@ -1707,6 +1727,7 @@ export interface FileRouteTypes {
     | '/fleet/edge'
     | '/handoffs/$handoffId'
     | '/handoffs/new'
+    | '/hooks/agreements-refresh'
     | '/hooks/airtable-sync'
     | '/hooks/allowed-origins-reconcile'
     | '/hooks/api-usage-settle'
@@ -1781,6 +1802,7 @@ export interface FileRouteTypes {
     | '/api/public/handoffs/consent'
     | '/api/public/hooks/codex-remediation'
     | '/api/public/hooks/codex-security'
+    | '/api/public/hooks/docusign'
     | '/api/public/leads/capture'
     | '/api/public/pricing/catalog'
     | '/api/public/seats/commit'
@@ -1869,6 +1891,7 @@ export interface FileRouteTypes {
     | '/fleet/edge'
     | '/handoffs/$handoffId'
     | '/handoffs/new'
+    | '/hooks/agreements-refresh'
     | '/hooks/airtable-sync'
     | '/hooks/allowed-origins-reconcile'
     | '/hooks/api-usage-settle'
@@ -1943,6 +1966,7 @@ export interface FileRouteTypes {
     | '/api/public/handoffs/consent'
     | '/api/public/hooks/codex-remediation'
     | '/api/public/hooks/codex-security'
+    | '/api/public/hooks/docusign'
     | '/api/public/leads/capture'
     | '/api/public/pricing/catalog'
     | '/api/public/seats/commit'
@@ -2029,6 +2053,7 @@ export interface RootRouteChildren {
   CrmTicketsRoute: typeof CrmTicketsRoute
   FleetDeploymentsRoute: typeof FleetDeploymentsRoute
   FleetEdgeRoute: typeof FleetEdgeRoute
+  HooksAgreementsRefreshRoute: typeof HooksAgreementsRefreshRoute
   HooksAirtableSyncRoute: typeof HooksAirtableSyncRoute
   HooksAllowedOriginsReconcileRoute: typeof HooksAllowedOriginsReconcileRoute
   HooksApiUsageSettleRoute: typeof HooksApiUsageSettleRoute
@@ -2085,6 +2110,7 @@ export interface RootRouteChildren {
   ApiPublicHandoffsConsentRoute: typeof ApiPublicHandoffsConsentRoute
   ApiPublicHooksCodexRemediationRoute: typeof ApiPublicHooksCodexRemediationRoute
   ApiPublicHooksCodexSecurityRoute: typeof ApiPublicHooksCodexSecurityRoute
+  ApiPublicHooksDocusignRoute: typeof ApiPublicHooksDocusignRoute
   ApiPublicLeadsCaptureRoute: typeof ApiPublicLeadsCaptureRoute
   ApiPublicPricingCatalogRoute: typeof ApiPublicPricingCatalogRoute
   ApiPublicSeatsCommitRoute: typeof ApiPublicSeatsCommitRoute
@@ -2728,6 +2754,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof HooksAirtableSyncRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/hooks/agreements-refresh': {
+      id: '/hooks/agreements-refresh'
+      path: '/hooks/agreements-refresh'
+      fullPath: '/hooks/agreements-refresh'
+      preLoaderRoute: typeof HooksAgreementsRefreshRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/handoffs/new': {
       id: '/handoffs/new'
       path: '/new'
@@ -3134,6 +3167,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicLeadsCaptureRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/hooks/docusign': {
+      id: '/api/public/hooks/docusign'
+      path: '/api/public/hooks/docusign'
+      fullPath: '/api/public/hooks/docusign'
+      preLoaderRoute: typeof ApiPublicHooksDocusignRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/hooks/codex-security': {
       id: '/api/public/hooks/codex-security'
       path: '/api/public/hooks/codex-security'
@@ -3400,6 +3440,7 @@ const rootRouteChildren: RootRouteChildren = {
   CrmTicketsRoute: CrmTicketsRoute,
   FleetDeploymentsRoute: FleetDeploymentsRoute,
   FleetEdgeRoute: FleetEdgeRoute,
+  HooksAgreementsRefreshRoute: HooksAgreementsRefreshRoute,
   HooksAirtableSyncRoute: HooksAirtableSyncRoute,
   HooksAllowedOriginsReconcileRoute: HooksAllowedOriginsReconcileRoute,
   HooksApiUsageSettleRoute: HooksApiUsageSettleRoute,
@@ -3456,6 +3497,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPublicHandoffsConsentRoute: ApiPublicHandoffsConsentRoute,
   ApiPublicHooksCodexRemediationRoute: ApiPublicHooksCodexRemediationRoute,
   ApiPublicHooksCodexSecurityRoute: ApiPublicHooksCodexSecurityRoute,
+  ApiPublicHooksDocusignRoute: ApiPublicHooksDocusignRoute,
   ApiPublicLeadsCaptureRoute: ApiPublicLeadsCaptureRoute,
   ApiPublicPricingCatalogRoute: ApiPublicPricingCatalogRoute,
   ApiPublicSeatsCommitRoute: ApiPublicSeatsCommitRoute,

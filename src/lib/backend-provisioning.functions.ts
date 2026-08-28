@@ -453,77 +453,10 @@ export const provisionBackend = createServerFn({ method: "POST" })
       context,
     }): Promise<{ ok: true; queued: true } | { ok: false; error: string }> => {
       const { supabase, userId } = context;
-      const { encryptSecret } = await import(
-        /* @vite-ignore */ "@/lib/_server-shims/crypto.server"
+      const { enqueueCloneBackendProvisioning } = await import(
+        /* @vite-ignore */ "@/lib/_server-shims/backend-provisioning.server"
       );
-
-      const { data: clone } = await supabase
-        .from("clones")
-        .select("id, name")
-        .eq("id", data.cloneId)
-        .single();
-
-      if (!clone) return { ok: false, error: "Clone not found" };
-
-      const { data: existing } = await supabase
-        .from("clone_backends")
-        .select("id, status")
-        .eq("clone_id", data.cloneId)
-        .maybeSingle();
-
-      if (existing && existing.status === "ready") {
-        return { ok: false, error: "This clone already has a provisioned backend" };
-      }
-
-      // ─── Issue #12: single source of truth for moduleIds ──────────────
-      // The wizard used to pass `moduleIds` to both provisionClone AND
-      // provisionBackend independently. If the picker state drifted between
-      // the two calls (network retry, edited selection, race), the freshly-
-      // created backend seeded a different module set than what was actually
-      // installed on the clone. `clone_modules` is written by provisionClone
-      // and is the authoritative record; always resolve from there and treat
-      // `data.moduleIds` as a fallback for the (rare) case where the clone
-      // has no installed modules yet.
-      const { data: installed } = await supabase
-        .from("clone_modules")
-        .select("module_id")
-        .eq("clone_id", data.cloneId);
-      const dbModuleIds = (installed ?? []).map((r) => r.module_id).filter(Boolean);
-      const resolvedModuleIds = dbModuleIds.length > 0 ? dbModuleIds : (data.moduleIds ?? []);
-      if (data.moduleIds && data.moduleIds.length > 0 && dbModuleIds.length > 0) {
-        const a = new Set(data.moduleIds);
-        const b = new Set(dbModuleIds);
-        const drift = a.size !== b.size || [...a].some((x) => !b.has(x));
-        if (drift) {
-          console.warn(
-            "[provisionBackend] moduleIds drift between client input and clone_modules; using clone_modules",
-            { cloneId: data.cloneId, input: [...a], installed: [...b] },
-          );
-        }
-      }
-
-      const { error: upsertErr } = await supabase.from("clone_backends").upsert(
-        {
-          clone_id: data.cloneId,
-          status: "pending" as const,
-          region: data.region || "us-east-1",
-          admin_email: data.adminEmail,
-          queued_admin_password_enc: encryptSecret(data.adminPassword),
-          queued_module_ids: resolvedModuleIds,
-          queued_at: new Date().toISOString(),
-          worker_started_at: null,
-          worker_finished_at: null,
-          attempts: 0,
-          enqueued_by: userId,
-          error_message: null,
-          status_detail: "Queued — background worker will start within ~60 seconds",
-        },
-        { onConflict: "clone_id" },
-      );
-
-      if (upsertErr) return { ok: false, error: upsertErr.message };
-
-      return { ok: true, queued: true };
+      return enqueueCloneBackendProvisioning(supabase, userId, data);
     },
   );
 

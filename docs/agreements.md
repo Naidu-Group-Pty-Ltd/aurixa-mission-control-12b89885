@@ -123,3 +123,86 @@ client, so what was reviewed is what is signed.
 - **The template is fetched from the deployed origin** and checked to be a
   PDF before it is sent anywhere — a missing asset fails loudly, not with an
   empty envelope.
+
+## Provisioning on signature
+
+The agreement now carries the COMMERCIAL SELECTION — tier plan
+(`billing_plans`), modules in (`modules`), add-ons (`addon_modules`), and the
+modules the negotiation explicitly took OUT — and, when **armed**, the moment
+DocuSign reports the envelope signed, Mission Control provisions the clone
+from exactly those parameters. Same pipeline as the operator wizard
+(`provisionCloneCore` → repo, clone row, entitlements, module install,
+API key, secrets, subdomain, deployment enqueue; then
+`enqueueCloneBackendProvisioning` → dedicated backend for the drain worker).
+No second implementation.
+
+Operate it from `/agreements`: the ⚙ button on a pre-signature row opens the
+selection (plan, modules, add-ons, exclusions, clone admin email, the arm
+switch); a signed row offers **Provision now** (also the retry after a
+failure, and the manual path for an agreement that was never armed); a
+provisioned row links to the clone.
+
+### How the signature arrives — two paths, one handler
+
+Both funnel through `applyDocusignStatus` (the ONE place the lifecycle
+moves), which on the `signed` transition hands the agreement to
+`provisionCloneFromAgreement`:
+
+1. **The agreements-refresh cron** (`/hooks/agreements-refresh`, every 10
+   minutes) polls every sent/delivered envelope with the same JWT
+   credentials the send path uses. Works the moment the five DocuSign
+   secrets exist — **no extra configuration** — so signature-driven
+   provisioning is at most ~10 minutes behind the pen.
+2. **DocuSign Connect webhook** (`/api/public/hooks/docusign`) makes it
+   instant. One extra secret (below). Fails closed: unconfigured → 503,
+   bad HMAC → 401.
+
+### Safety model
+
+- Every skip is a **named refusal** (`decideProvisionOnSignature`): not
+  armed, not signed, already done, in flight, previous attempt failed,
+  no plan, no attributable creator.
+- The agreement is **claimed by compare-and-set** on `provision_status`
+  (`armed → provisioning`), so the webhook, the cron and the button land on
+  one clone however they race — and under the claim, the clone insert
+  carries idempotency key `agreement:<id>`.
+- A **failed attempt never auto-retries** — external resources (a Supabase
+  project, a GitHub repo) are not retried into on a timer. The failure is a
+  notification plus a red badge, and the operator's *Retry provision* is the
+  deliberate second attempt.
+- The webhook **ledger** (`docusign_connect_events`) stores a summary, never
+  the raw Connect body (recipient PII; with `includeDocuments` on, whole
+  signed PDFs). Envelopes this platform did not send are acknowledged and
+  recorded as `not_ours` — the same DocuSign account also carries NPC's
+  client paperwork.
+- The clone's seed admin password is generated, encrypted for the drain
+  worker, and shown to nobody — the platform's own password-reset flow is
+  the front door.
+
+### DocuSign Connect setup (one time, ~5 minutes)
+
+1. DocuSign admin → **Settings → Connect → Add Configuration → Custom**.
+2. URL to publish: `https://mission-control.aurixasystems.com.au/api/public/hooks/docusign`
+3. Format: **REST v2.1 (JSON)**. Trigger events: envelope **Sent,
+   Delivered, Completed, Declined, Voided**. Do NOT include documents.
+4. Enable **HMAC signature**, generate a key, and store the same value as
+   the `DOCUSIGN_CONNECT_HMAC_KEY` secret in Mission Control's environment.
+5. Save. Send a test agreement; the delivery ledger is
+   `docusign_connect_events`.
+
+### Account facts (traced 2026-08-28)
+
+The DocuSign account behind admin@npcservices.com.au is **production AU** —
+not a demo sandbox:
+
+| Fact | Value |
+| --- | --- |
+| API Account ID | `1e4503ea-6211-4ff4-84d4-521034fe47a8` |
+| REST base | `https://au.docusign.net/restapi` (`DOCUSIGN_BASE_URL`) |
+| OAuth host | `account.docusign.com` (production consent, not `account-d`) |
+| Impersonated user id | `5f978ac8-d03e-4644-8a2c-92b969c734d2` (`DOCUSIGN_USER_ID`) |
+
+The integration key + RSA private key cannot be traced from outside — create
+them in Settings → Apps & Keys per the runbook above, grant one-time consent
+on the **production** host, and note that production envelopes are billable
+(demo watermarking only exists on `demo.docusign.net` accounts).

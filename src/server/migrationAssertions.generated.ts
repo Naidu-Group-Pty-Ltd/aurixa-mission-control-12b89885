@@ -57,4 +57,13 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260828060000",
     assertions: [{ kind: "table", table: "clone_email_identities" }],
   },
+  {
+    migration: "20260828070000_agreement_provisioning.sql",
+    version: "20260828070000",
+    assertions: [
+      { kind: "column", table: "client_agreements", column: "provision_status" },
+      { kind: "table", table: "docusign_connect_events" },
+      { kind: "cron", jobname: "agreements-refresh" },
+    ],
+  },
 ];

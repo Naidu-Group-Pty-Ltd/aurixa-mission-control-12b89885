@@ -2811,10 +2811,99 @@ export async function provisionCloneBackend(
   };
 }
 
-function generateSecurePassword(): string {
+export function generateSecurePassword(): string {
   const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*";
   const length = 32;
   const bytes = new Uint8Array(length);
   crypto.getRandomValues(bytes);
   return Array.from(bytes, (b) => chars[b % chars.length]).join("");
+}
+
+/**
+ * Queue a clone's backend for the pg_cron drain worker.
+ *
+ * One implementation with two callers — the operator wizard's
+ * `provisionBackend` server function and the signed-agreement flow — because
+ * this upsert IS the contract with `/hooks/backend-provisioning-drain`, and
+ * two writers of that row shape is how the queue and the worker drift.
+ *
+ * Issue #12 lives here now: `clone_modules` (written by provisionClone) is
+ * the authoritative module set; the caller's `moduleIds` are only a fallback
+ * for a clone with nothing installed yet.
+ */
+export async function enqueueCloneBackendProvisioning(
+  // Narrow structural type: both the request-scoped client and the
+  // service-role client satisfy it.
+  supabase: {
+    from: (table: string) => any;
+  },
+  userId: string,
+  input: {
+    cloneId: string;
+    cloneName: string;
+    region?: string;
+    adminEmail: string;
+    adminPassword: string;
+    moduleIds?: string[];
+  },
+): Promise<{ ok: true; queued: true } | { ok: false; error: string }> {
+  const { encryptSecret } = await import("./crypto.server");
+
+  const { data: clone } = await supabase
+    .from("clones")
+    .select("id, name")
+    .eq("id", input.cloneId)
+    .single();
+  if (!clone) return { ok: false, error: "Clone not found" };
+
+  const { data: existing } = await supabase
+    .from("clone_backends")
+    .select("id, status")
+    .eq("clone_id", input.cloneId)
+    .maybeSingle();
+  if (existing && existing.status === "ready") {
+    return { ok: false, error: "This clone already has a provisioned backend" };
+  }
+
+  const { data: installed } = await supabase
+    .from("clone_modules")
+    .select("module_id")
+    .eq("clone_id", input.cloneId);
+  const dbModuleIds = (installed ?? [])
+    .map((r: { module_id: string | null }) => r.module_id)
+    .filter(Boolean) as string[];
+  const resolvedModuleIds = dbModuleIds.length > 0 ? dbModuleIds : (input.moduleIds ?? []);
+  if (input.moduleIds && input.moduleIds.length > 0 && dbModuleIds.length > 0) {
+    const a = new Set(input.moduleIds);
+    const b = new Set(dbModuleIds);
+    const drift = a.size !== b.size || [...a].some((x) => !b.has(x));
+    if (drift) {
+      console.warn(
+        "[provisionBackend] moduleIds drift between caller input and clone_modules; using clone_modules",
+        { cloneId: input.cloneId, input: [...a], installed: [...b] },
+      );
+    }
+  }
+
+  const { error: upsertErr } = await supabase.from("clone_backends").upsert(
+    {
+      clone_id: input.cloneId,
+      status: "pending" as const,
+      region: input.region || "us-east-1",
+      admin_email: input.adminEmail,
+      queued_admin_password_enc: encryptSecret(input.adminPassword),
+      queued_module_ids: resolvedModuleIds,
+      queued_at: new Date().toISOString(),
+      worker_started_at: null,
+      worker_finished_at: null,
+      attempts: 0,
+      enqueued_by: userId,
+      error_message: null,
+      status_detail: "Queued — background worker will start within ~60 seconds",
+    },
+    { onConflict: "clone_id" },
+  );
+  if (upsertErr) return { ok: false, error: upsertErr.message };
+
+  return { ok: true, queued: true };
 }

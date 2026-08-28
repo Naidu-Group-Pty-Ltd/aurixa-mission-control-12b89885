@@ -42,13 +42,26 @@ import {
   downloadSignedAgreement,
   getAgreementsConfig,
   listAgreements,
+  provisionAgreementNow,
   refreshAgreementStatus,
   searchAgreementClients,
   sendAgreement,
   voidAgreement,
   type AgreementRow,
 } from "@/lib/agreements.functions";
-import { Download, FileSignature, Plus, RefreshCw, Send, Trash2, XCircle } from "lucide-react";
+import { AgreementProvisioningDialog } from "@/components/agreement-provisioning-dialog";
+import {
+  Download,
+  FileSignature,
+  Plus,
+  RefreshCw,
+  Rocket,
+  Send,
+  Settings2,
+  Trash2,
+  XCircle,
+} from "lucide-react";
+import { Link } from "@tanstack/react-router";
 
 export const Route = createFileRoute("/agreements")({
   component: () => (
@@ -96,6 +109,7 @@ function AgreementsPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [voidTarget, setVoidTarget] = useState<AgreementRow | null>(null);
   const [voidReason, setVoidReason] = useState("");
+  const [provisionTarget, setProvisionTarget] = useState<AgreementRow | null>(null);
 
   const configQ = useQuery({
     queryKey: ["agreements", "config"],
@@ -161,6 +175,20 @@ function AgreementsPage() {
     },
     onError: (err: Error) => toast.error(err.message),
   });
+  const provisionM = useMutation({
+    mutationFn: (id: string) => provisionAgreementNow({ data: { id } }),
+    onSuccess: (res) => {
+      if (res && "cloneId" in res && res.cloneId) {
+        toast.success("Clone provisioned — backend is queued for the worker");
+      } else if (res && "skipped" in res && res.skipped) {
+        toast.info(`Not provisioned: ${res.detail}`);
+      } else if (res && "error" in res) {
+        toast.error(res.error);
+      }
+      invalidate();
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
 
   const agreements = listQ.data?.agreements ?? [];
   const counts = useMemo(() => {
@@ -210,8 +238,8 @@ function AgreementsPage() {
           </p>
           <p className="mt-1 text-sm text-muted-foreground">
             Add these Worker secrets and sending comes alive without a code change:{" "}
-            <span className="font-mono text-xs">{configQ.data.missing.join(", ")}</span>. The
-            setup runbook (integration key, RSA keypair, one-time consent) is in{" "}
+            <span className="font-mono text-xs">{configQ.data.missing.join(", ")}</span>. The setup
+            runbook (integration key, RSA keypair, one-time consent) is in{" "}
             <span className="font-mono text-xs">docs/agreements.md</span>.
           </p>
         </div>
@@ -273,6 +301,26 @@ function AgreementsPage() {
                       </Badge>
                     )}
                     {a.service_tier && <Badge variant="secondary">{a.service_tier}</Badge>}
+                    {a.plan_slug && <Badge variant="outline">plan: {a.plan_slug}</Badge>}
+                    {a.provision_status === "armed" && (
+                      <Badge
+                        variant="secondary"
+                        title="Signature will provision the clone automatically"
+                      >
+                        <Rocket className="mr-1 h-3 w-3" /> armed
+                      </Badge>
+                    )}
+                    {a.provision_status === "provisioning" && (
+                      <Badge variant="secondary">provisioning…</Badge>
+                    )}
+                    {a.provision_status === "provisioned" && (
+                      <Badge variant="default">provisioned</Badge>
+                    )}
+                    {a.provision_status === "failed" && (
+                      <Badge variant="destructive" title={a.provision_error ?? undefined}>
+                        provisioning failed
+                      </Badge>
+                    )}
                   </div>
                   <p className="mt-0.5 truncate font-mono text-xs text-muted-foreground">
                     {a.client_email}
@@ -291,6 +339,17 @@ function AgreementsPage() {
                           : `created ${formatDistanceToNow(new Date(a.created_at), { addSuffix: true })}`}
                     </p>
                   </div>
+                  {(a.status === "draft" || a.status === "sent" || a.status === "delivered") && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      aria-label="Configure provisioning"
+                      title="What a signature provisions: plan, modules, add-ons"
+                      onClick={() => setProvisionTarget(a)}
+                    >
+                      <Settings2 className="h-3.5 w-3.5" />
+                    </Button>
+                  )}
                   {a.status === "draft" && (
                     <>
                       <Button
@@ -334,14 +393,37 @@ function AgreementsPage() {
                     </>
                   )}
                   {a.status === "signed" && (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={!configured || downloadM.isPending}
-                      onClick={() => downloadM.mutate(a.id)}
-                    >
-                      <Download className="mr-1.5 h-3.5 w-3.5" /> Signed PDF
-                    </Button>
+                    <>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={!configured || downloadM.isPending}
+                        onClick={() => downloadM.mutate(a.id)}
+                      >
+                        <Download className="mr-1.5 h-3.5 w-3.5" /> Signed PDF
+                      </Button>
+                      {a.provision_status === "provisioned" && a.provisioned_clone_id ? (
+                        <Button size="sm" variant="outline" asChild>
+                          <Link to="/clones/$cloneId" params={{ cloneId: a.provisioned_clone_id }}>
+                            <Rocket className="mr-1.5 h-3.5 w-3.5" /> View clone
+                          </Link>
+                        </Button>
+                      ) : a.provision_status !== "provisioning" ? (
+                        <Button
+                          size="sm"
+                          disabled={provisionM.isPending}
+                          title={
+                            a.provision_status === "failed"
+                              ? `Retry — last attempt failed: ${a.provision_error ?? "unknown"}`
+                              : "Provision the clone from this agreement's selection"
+                          }
+                          onClick={() => provisionM.mutate(a.id)}
+                        >
+                          <Rocket className="mr-1.5 h-3.5 w-3.5" />
+                          {a.provision_status === "failed" ? "Retry provision" : "Provision now"}
+                        </Button>
+                      ) : null}
+                    </>
                   )}
                 </div>
               </RecordRow>
@@ -356,13 +438,19 @@ function AgreementsPage() {
         onCreated={invalidate}
       />
 
+      <AgreementProvisioningDialog
+        agreement={provisionTarget}
+        onOpenChange={(o) => !o && setProvisionTarget(null)}
+        onSaved={invalidate}
+      />
+
       <Dialog open={Boolean(voidTarget)} onOpenChange={(o) => !o && setVoidTarget(null)}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Void this envelope?</DialogTitle>
             <DialogDescription>
-              {voidTarget?.client_name}'s agreement will be withdrawn in DocuSign and can no
-              longer be signed. The record stays here as voided.
+              {voidTarget?.client_name}'s agreement will be withdrawn in DocuSign and can no longer
+              be signed. The record stays here as voided.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2">
@@ -381,9 +469,7 @@ function AgreementsPage() {
             <Button
               variant="destructive"
               disabled={voidM.isPending}
-              onClick={() =>
-                voidTarget && voidM.mutate({ id: voidTarget.id, reason: voidReason })
-              }
+              onClick={() => voidTarget && voidM.mutate({ id: voidTarget.id, reason: voidReason })}
             >
               Void envelope
             </Button>
@@ -457,8 +543,8 @@ function CreateAgreementDialog({
         <DialogHeader>
           <DialogTitle>New Service Level Agreement</DialogTitle>
           <DialogDescription>
-            Pick a CRM contact (or enter the signer directly). Their details are stamped into
-            the Execution Schedule when the agreement is sent.
+            Pick a CRM contact (or enter the signer directly). Their details are stamped into the
+            Execution Schedule when the agreement is sent.
           </DialogDescription>
         </DialogHeader>
 
