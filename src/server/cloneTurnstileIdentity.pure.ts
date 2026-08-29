@@ -30,6 +30,8 @@ export type TurnstileIdentityRow = {
   fail_closed_at: string | null;
   site_key_published_at: string | null;
   last_error: string | null;
+  /** Present on the stored row; the sweep's cooling-off window reads it. */
+  updated_at?: string | null;
 };
 
 /** The clone facts the derivations read. */
@@ -195,4 +197,107 @@ export function canRotateSecret(row: TurnstileIdentityRow | null): {
     return { ok: false, reason: "This clone's widget was revoked — provision a new one instead" };
   }
   return { ok: true };
+}
+
+/* ── The repair sweep ────────────────────────────────────────────────────── */
+
+/**
+ * What a clone's Turnstile identity needs, decided from stored facts alone.
+ *
+ * The deployment drain mints a widget in `syncing_env`, which covers every
+ * clone provisioned from now on and no clone provisioned before — including
+ * the one clone in the fleet, which was built by hand and went live months
+ * earlier. A feature that only reaches future tenants is the shape
+ * `allowed-origins-reconcile` already exists to fix, and this is the same
+ * answer: a sweep that repairs what the pipeline missed.
+ *
+ * Pure so every state can be asserted by name rather than the two that happen
+ * to occur in a dev fleet.
+ */
+export type TurnstileSweepFacts = {
+  /** A hosting project must exist — the site key is published into its env. */
+  hasProject: boolean;
+  /** The clone's own Supabase project must exist — the secret is written to it. */
+  backendReady: boolean;
+  identity: TurnstileIdentityRow | null;
+  /** What the clone's hostnames say the widget should cover, right now. */
+  wantedDomains: string[];
+  /** For the cooling-off window; pass the run's own clock. */
+  now: number;
+};
+
+export type TurnstileSweepAction = "provision" | "rotate" | "refresh";
+
+export type TurnstileSweepSkip =
+  | "no_hosting_project"
+  | "backend_not_ready"
+  | "revoked"
+  | "cooling_off"
+  | "complete";
+
+export type TurnstileSweepVerdict =
+  | { act: true; action: TurnstileSweepAction; why: string }
+  | { act: false; reason: TurnstileSweepSkip };
+
+/**
+ * How long to leave a failed identity alone. A sweep that retries a permanent
+ * refusal every minute turns one misconfiguration into 1,440 Cloudflare calls a
+ * day and buries the real errors in the log.
+ */
+export const TURNSTILE_SWEEP_COOLDOWN_MS = 30 * 60 * 1000;
+
+export function decideTurnstileSweep(facts: TurnstileSweepFacts): TurnstileSweepVerdict {
+  const id = facts.identity;
+
+  // An operator deliberately took this widget away. A sweep must never read
+  // that as a gap and hand it back — the same reason `decideRedeploy` refuses
+  // to rebuild a `detached` deployment.
+  if (id?.status === "revoked") return { act: false, reason: "revoked" };
+
+  // Both halves need somewhere to land. Refusing here is not a failure: a
+  // clone with no hosting project or no backend yet is mid-pipeline, and the
+  // drain will mint its widget when it reaches `syncing_env`.
+  if (!facts.hasProject) return { act: false, reason: "no_hosting_project" };
+  if (!facts.backendReady) return { act: false, reason: "backend_not_ready" };
+
+  if (id?.last_error && id.updated_at) {
+    const since = facts.now - Date.parse(id.updated_at);
+    if (Number.isFinite(since) && since >= 0 && since < TURNSTILE_SWEEP_COOLDOWN_MS) {
+      return { act: false, reason: "cooling_off" };
+    }
+  }
+
+  if (!id?.site_key) {
+    return { act: true, action: "provision", why: "no widget yet" };
+  }
+
+  // A widget whose secret was never delivered cannot be repaired by provision:
+  // Cloudflare returns a secret on CREATE and on ROTATE and never on a read, so
+  // adopting an existing widget yields nothing to write. Rotation is the only
+  // operation that produces one. It is safe here and nowhere else — nothing is
+  // verifying against the old secret precisely because it was never delivered.
+  if (!id.secret_written_at) {
+    return {
+      act: true,
+      action: "rotate",
+      why: "widget exists but no secret ever reached the clone",
+    };
+  }
+
+  if (!id.site_key_published_at) {
+    return { act: true, action: "provision", why: "site key not published to the deployment" };
+  }
+
+  // Domain drift is compared LOCALLY — stored list against derived list — so
+  // the common case costs no Cloudflare call at all. It matters because a
+  // custom domain attached after provisioning is a hostname the widget does
+  // not cover, and a widget that does not cover the login page issues no
+  // token there: the sign-in button never enables.
+  const have = [...(id.domains ?? [])].sort().join(",");
+  const want = [...facts.wantedDomains].sort().join(",");
+  if (facts.wantedDomains.length > 0 && have !== want) {
+    return { act: true, action: "refresh", why: "the clone's hostnames changed" };
+  }
+
+  return { act: false, reason: "complete" };
 }

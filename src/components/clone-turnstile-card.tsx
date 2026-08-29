@@ -9,6 +9,7 @@ import { CheckCircle2, Circle, CircleDot, KeyRound, RefreshCw, ShieldCheck } fro
 import { toast } from "sonner";
 import {
   getCloneTurnstileIdentity,
+  probeCloneTurnstileAccess,
   provisionCloneTurnstile,
   refreshCloneTurnstile,
   revokeCloneTurnstile,
@@ -53,11 +54,29 @@ export function CloneTurnstileCard({ cloneId }: { cloneId: string }) {
     queryFn: async () => loadFn({ data: { cloneId } }),
   });
 
+  // The identity state reports whether the token EXISTS. That is the wrong
+  // question, and answering it is how a configured token still read "not
+  // configured" — and how a token scoped for DNS would have read "Connected"
+  // right up until the button failed. This probe asks Cloudflare whether this
+  // deployment can actually list Turnstile widgets, which is the capability
+  // minting one needs.
+  const probeFn = useServerFn(probeCloneTurnstileAccess);
+  const tokenQ = useQuery({
+    queryKey: ["turnstile-access-probe"],
+    queryFn: async () => probeFn(),
+    staleTime: 60_000,
+  });
+
   const state = data?.ok ? data : null;
   const row = state?.row ?? null;
   const steps: Step[] = state?.readiness.steps ?? [];
   const live = state?.readiness.live ?? false;
-  const cloudflareReady = Boolean(state?.cloudflareConfigured && state?.accountConfigured);
+  const tokenPresent = tokenQ.data?.tokenPresent ?? state?.cloudflareConfigured ?? false;
+  const tokenError = tokenQ.data?.error ?? null;
+  const accountConfigured = tokenQ.data?.accountConfigured ?? state?.accountConfigured ?? false;
+  // Usable, not merely present. A token Cloudflare refuses mints nothing, and
+  // enabling the buttons for it produces an opaque vendor error on click.
+  const cloudflareReady = Boolean(tokenQ.data?.canMint);
 
   const run = async (label: string, fn: () => Promise<{ ok: boolean; error?: string }>) => {
     setBusy(true);
@@ -102,13 +121,61 @@ export function CloneTurnstileCard({ cloneId }: { cloneId: string }) {
           <p className="text-sm text-destructive">{data?.error ?? "Could not load the identity"}</p>
         ) : (
           <>
-            {!cloudflareReady && (
+            {/*
+              The Cloudflare reading, always shown rather than only on failure.
+              "Nothing about Cloudflare on the clone's page" is what made a
+              configured token look unconfigured: absence of a statement reads
+              as a negative one.
+            */}
+            <div className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2 text-sm">
+              <span className="text-muted-foreground">Cloudflare account</span>
+              {tokenQ.isLoading ? (
+                <span className="text-muted-foreground">Checking…</span>
+              ) : cloudflareReady ? (
+                <Badge variant="default">Connected</Badge>
+              ) : tokenPresent && !accountConfigured ? (
+                <Badge variant="secondary">No account id</Badge>
+              ) : tokenPresent ? (
+                <Badge variant="destructive">Token cannot mint</Badge>
+              ) : (
+                <Badge variant="outline">No token</Badge>
+              )}
+            </div>
+
+            {!cloudflareReady && !tokenQ.isLoading && (
               <div className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
-                <p className="font-medium">Cloudflare is not configured yet</p>
-                <p className="text-muted-foreground">
-                  Widget creation needs <code>CLOUDFLARE_API_TOKEN</code> in Mission Control's
-                  environment and <code>cloudflare_account_id</code> in the hosting configuration.
-                  Until both exist this clone keeps whatever secret it already has.
+                {!tokenPresent ? (
+                  <>
+                    <p className="font-medium">Mission Control has no Cloudflare token</p>
+                    <p className="text-muted-foreground">
+                      Set <code>CLOUDFLARE_API_TOKEN</code> in this deployment's own environment —
+                      not the clone's. The name is read exactly; a secret stored under any other
+                      name reads here as no token at all.
+                    </p>
+                  </>
+                ) : accountConfigured ? (
+                  <>
+                    <p className="font-medium">The token cannot reach Turnstile</p>
+                    <p className="text-muted-foreground">
+                      Cloudflare has the token and will not serve Turnstile with it
+                      {tokenError ? `: ${tokenError}` : "."} Minting a widget needs{" "}
+                      <strong>Account · Turnstile: Edit</strong>. The scopes this deployment was set
+                      up with — Zone Read, Zone Settings Edit, Analytics Read — verify as an active
+                      token and refuse this, which is why the check is the capability rather than
+                      the token.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <p className="font-medium">No Cloudflare account id</p>
+                    <p className="text-muted-foreground">
+                      A Turnstile widget is created against an account, so
+                      <code> cloudflare_account_id</code> must be set in the hosting configuration.
+                    </p>
+                  </>
+                )}
+                <p className="mt-1 text-muted-foreground">
+                  Until then this clone keeps whatever secret it already has.
                 </p>
               </div>
             )}

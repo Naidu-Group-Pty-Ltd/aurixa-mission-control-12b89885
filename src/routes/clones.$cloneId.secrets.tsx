@@ -9,7 +9,6 @@ import {
 } from "@/lib/backend-provisioning.functions";
 import { AppShell } from "@/components/app-shell";
 import { CloneEmailIdentityCard } from "@/components/clone-email-identity-card";
-import { CloneTurnstileCard } from "@/components/clone-turnstile-card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -123,11 +122,25 @@ function CloneSecretsPage() {
         <CloneEmailIdentityCard cloneId={cloneId} />
 
         {/*
-          Beside the email identity for the same reason it exists: both are
-          per-tenant vendor credentials that a clone must hold its OWN copy of,
-          never the prime's.
+          TURNSTILE_SECRET_KEY is listed below and is deliberately NOT operated
+          from here. It is one half of a (site key, secret) pair, and pasting a
+          secret whose site key no build renders produces a login page that
+          refuses every attempt — which is the exact fault this pointer exists
+          to stop somebody re-creating. The panel that mints both halves lives
+          on the clone page.
         */}
-        <CloneTurnstileCard cloneId={cloneId} />
+        <div className="border p-4 text-sm">
+          <p className="font-medium">Sign-in CAPTCHA</p>
+          <p className="text-muted-foreground">
+            <code className="font-mono">TURNSTILE_SECRET_KEY</code> is half of this clone's own
+            Turnstile widget; its public site key has to reach the clone's build in the same act.
+            Mint and rotate it from{" "}
+            <Link to="/clones/$cloneId" params={{ cloneId }} className="underline">
+              the clone's page
+            </Link>
+            .
+          </p>
+        </div>
 
         {isLoading && <div className="text-sm text-muted-foreground">Loading…</div>}
 

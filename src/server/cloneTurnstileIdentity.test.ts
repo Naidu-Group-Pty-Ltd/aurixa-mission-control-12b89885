@@ -1,11 +1,13 @@
 import { describe, it, expect } from "vitest";
 import {
   canRotateSecret,
+  decideTurnstileSweep,
   deriveWidgetDomains,
   deriveWidgetName,
   isPrimeSiteKey,
   secretLast4,
   turnstileReadiness,
+  TURNSTILE_SWEEP_COOLDOWN_MS,
   type TurnstileIdentityRow,
 } from "./cloneTurnstileIdentity.pure";
 
@@ -156,5 +158,116 @@ describe("canRotateSecret", () => {
 
   it("permits rotation for a live widget", () => {
     expect(canRotateSecret(row({ site_key: "0xK", status: "provisioned" })).ok).toBe(true);
+  });
+});
+
+describe("decideTurnstileSweep", () => {
+  const NOW = Date.parse("2026-08-29T12:00:00Z");
+  const facts = (over: Partial<Parameters<typeof decideTurnstileSweep>[0]> = {}) => ({
+    hasProject: true,
+    backendReady: true,
+    identity: null,
+    wantedDomains: ["npc.aurixasystems.com.au"],
+    now: NOW,
+    ...over,
+  });
+
+  const complete = (over: Partial<TurnstileIdentityRow> = {}) =>
+    row({
+      site_key: "0xK",
+      status: "provisioned",
+      secret_written_at: "2026-08-29T10:00:00Z",
+      site_key_published_at: "2026-08-29T10:00:00Z",
+      domains: ["npc.aurixasystems.com.au"],
+      ...over,
+    });
+
+  it("provisions a clone that has no widget", () => {
+    const v = decideTurnstileSweep(facts());
+    expect(v).toMatchObject({ act: true, action: "provision" });
+  });
+
+  it("leaves a revoked identity alone — that was an operator decision", () => {
+    const v = decideTurnstileSweep(facts({ identity: row({ status: "revoked" }) }));
+    expect(v).toEqual({ act: false, reason: "revoked" });
+  });
+
+  it("waits for somewhere to put each half", () => {
+    expect(decideTurnstileSweep(facts({ hasProject: false }))).toEqual({
+      act: false,
+      reason: "no_hosting_project",
+    });
+    expect(decideTurnstileSweep(facts({ backendReady: false }))).toEqual({
+      act: false,
+      reason: "backend_not_ready",
+    });
+  });
+
+  it("ROTATES a widget whose secret never reached the clone", () => {
+    // Cloudflare returns a secret on create and rotate only, so adopting an
+    // existing widget yields nothing to deliver. Provisioning again would
+    // report success and leave the clone exactly as broken.
+    const v = decideTurnstileSweep(
+      facts({ identity: row({ site_key: "0xK", status: "provisioned" }) }),
+    );
+    expect(v).toMatchObject({ act: true, action: "rotate" });
+  });
+
+  it("never rotates a secret that WAS delivered", () => {
+    const v = decideTurnstileSweep(facts({ identity: complete() }));
+    expect(v).toEqual({ act: false, reason: "complete" });
+  });
+
+  it("publishes a site key that was minted but never published", () => {
+    const v = decideTurnstileSweep(facts({ identity: complete({ site_key_published_at: null }) }));
+    expect(v).toMatchObject({ act: true, action: "provision" });
+  });
+
+  it("refreshes when the clone's hostnames have changed", () => {
+    const v = decideTurnstileSweep(
+      facts({
+        identity: complete({ domains: ["old.aurixasystems.com.au"] }),
+        wantedDomains: ["npc.aurixasystems.com.au", "npc.example.com"],
+      }),
+    );
+    expect(v).toMatchObject({ act: true, action: "refresh" });
+  });
+
+  it("does not call it drift when the lists differ only in order", () => {
+    const v = decideTurnstileSweep(
+      facts({
+        identity: complete({ domains: ["b.example.com", "a.example.com"] }),
+        wantedDomains: ["a.example.com", "b.example.com"],
+      }),
+    );
+    expect(v).toEqual({ act: false, reason: "complete" });
+  });
+
+  it("holds off on a recent failure instead of retrying every pass", () => {
+    const v = decideTurnstileSweep(
+      facts({
+        identity: row({ last_error: "boom", updated_at: "2026-08-29T11:50:00Z" }),
+      }),
+    );
+    expect(v).toEqual({ act: false, reason: "cooling_off" });
+  });
+
+  it("retries once the cooling-off window has passed", () => {
+    const v = decideTurnstileSweep(
+      facts({
+        identity: row({
+          last_error: "boom",
+          updated_at: new Date(NOW - TURNSTILE_SWEEP_COOLDOWN_MS - 1000).toISOString(),
+        }),
+      }),
+    );
+    expect(v).toMatchObject({ act: true, action: "provision" });
+  });
+
+  it("a clone with no resolvable hostname is complete rather than churning", () => {
+    // deriveWidgetDomains returns [] and provisioning would refuse; treating
+    // that as drift would retry it every ten minutes for ever.
+    const v = decideTurnstileSweep(facts({ identity: complete(), wantedDomains: [] }));
+    expect(v).toEqual({ act: false, reason: "complete" });
   });
 });

@@ -32,6 +32,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import {
   canRotateSecret,
+  decideTurnstileSweep,
   deriveWidgetDomains,
   deriveWidgetName,
   secretLast4,
@@ -447,5 +448,220 @@ export async function revokeTurnstileIdentity(
     return { ok: true };
   } catch (e) {
     return fail(msg(e));
+  }
+}
+
+/* ── The repair sweep ────────────────────────────────────────────────────── */
+
+export type TurnstileSweepOutcome = {
+  cloneId: string;
+  slug: string | null;
+  /** What was decided, and what came of it. Both, because they differ. */
+  decision: string;
+  ok: boolean;
+  advanced?: string[];
+  redeploy?: string;
+  error?: string;
+};
+
+export type TurnstileSweepReport = {
+  cloudflareConfigured: boolean;
+  accountConfigured: boolean;
+  /** Named refusal when the sweep could not run at all. */
+  skipped?: string;
+  considered: number;
+  acted: TurnstileSweepOutcome[];
+  skippedByReason: Record<string, number>;
+};
+
+/** Cloudflare is rate-limited and this runs on a schedule; act on a few. */
+const SWEEP_MAX_PER_RUN = 3;
+
+/**
+ * Give every eligible clone the Turnstile widget the pipeline did not.
+ *
+ * The deployment drain mints one in `syncing_env`, which reaches every clone
+ * provisioned from now on and none provisioned before it existed. This is the
+ * other half — and it is the same shape as `reconcileAllowedOrigins`, for the
+ * same reason: a per-tenant credential that only new tenants get is a feature
+ * the existing fleet does not have.
+ *
+ * It runs inside Mission Control, so it is also the honest test of whether
+ * `CLOUDFLARE_API_TOKEN` is actually visible to this deployment — the report
+ * says so either way rather than silently doing nothing.
+ */
+export async function reconcileTurnstileIdentities(
+  supabase: Db,
+  opts: { limit?: number; cloneId?: string } = {},
+): Promise<TurnstileSweepReport> {
+  const cloudflareConfigured = isCloudflareConfigured();
+  const accountId = await readAccountId(supabase).catch(() => null);
+  const base = {
+    cloudflareConfigured,
+    accountConfigured: Boolean(accountId),
+    considered: 0,
+    acted: [] as TurnstileSweepOutcome[],
+    skippedByReason: {} as Record<string, number>,
+  };
+
+  // Both refusals are named rather than shrugged at. "Nothing happened" is the
+  // reading an operator gets from a missing credential AND from a healthy
+  // fleet, and those want different actions.
+  if (!cloudflareConfigured) {
+    return { ...base, skipped: "CLOUDFLARE_API_TOKEN is not configured on Mission Control" };
+  }
+  if (!accountId) {
+    return {
+      ...base,
+      skipped:
+        "platform_hosting_config.cloudflare_account_id is empty — a Turnstile widget is created " +
+        "against an account, so there is nothing to create one under",
+    };
+  }
+
+  const cloneQuery = supabase.from("clones").select("id, slug, subdomain_fqdn, deploy_url");
+  const { data: clones, error: cloneErr } = opts.cloneId
+    ? await cloneQuery.eq("id", opts.cloneId)
+    : await cloneQuery;
+  if (cloneErr) throw new Error(`Could not list clones: ${cloneErr.message}`);
+
+  const ids = (clones ?? []).map((c) => c.id);
+  if (ids.length === 0) return base;
+
+  const [deployments, backends, identities] = await Promise.all([
+    supabase.from("clone_deployments").select("clone_id, project_id, status").in("clone_id", ids),
+    supabase
+      .from("clone_backends")
+      .select("clone_id, status, supabase_project_ref")
+      .in("clone_id", ids),
+    supabase.from("clone_turnstile_identities").select("*").in("clone_id", ids),
+  ]);
+  // A read that FAILED is not a fleet that is EMPTY. Treating an unreadable
+  // table as "no deployments" would make every clone look ineligible and the
+  // run report a clean pass over a fleet it never saw.
+  for (const [name, res] of [
+    ["clone_deployments", deployments],
+    ["clone_backends", backends],
+    ["clone_turnstile_identities", identities],
+  ] as const) {
+    if (res.error) throw new Error(`Could not read ${name}: ${res.error.message}`);
+  }
+
+  const byDeployment = new Map((deployments.data ?? []).map((d) => [d.clone_id, d]));
+  const byBackend = new Map((backends.data ?? []).map((b) => [b.clone_id, b]));
+  const byIdentity = new Map(
+    (identities.data ?? []).map((i) => [
+      (i as { clone_id: string }).clone_id,
+      rowFrom(i as Record<string, unknown>)!,
+    ]),
+  );
+
+  const now = Date.now();
+  const limit = opts.limit ?? SWEEP_MAX_PER_RUN;
+  const report: TurnstileSweepReport = { ...base, considered: ids.length };
+
+  for (const clone of clones ?? []) {
+    if (report.acted.length >= limit) break;
+
+    const deployment = byDeployment.get(clone.id);
+    const backend = byBackend.get(clone.id);
+    const verdict = decideTurnstileSweep({
+      hasProject: Boolean(deployment?.project_id),
+      backendReady: Boolean(backend?.supabase_project_ref) && backend?.status === "ready",
+      identity: byIdentity.get(clone.id) ?? null,
+      wantedDomains: deriveWidgetDomains(clone),
+      now,
+    });
+
+    if (!verdict.act) {
+      report.skippedByReason[verdict.reason] = (report.skippedByReason[verdict.reason] ?? 0) + 1;
+      continue;
+    }
+
+    const outcome: TurnstileSweepOutcome = {
+      cloneId: clone.id,
+      slug: clone.slug,
+      decision: `${verdict.action}: ${verdict.why}`,
+      ok: false,
+    };
+
+    try {
+      if (verdict.action === "rotate") {
+        const rotated = await rotateTurnstileSecret(supabase, clone.id, null);
+        outcome.ok = rotated.ok;
+        if (!rotated.ok) outcome.error = rotated.error;
+        else outcome.advanced = ["secret_rotated"];
+      } else {
+        const provisioned = await provisionTurnstileIdentity(supabase, clone.id, {
+          mode: verdict.action === "refresh" ? "refresh" : "provision",
+        });
+        outcome.ok = provisioned.ok;
+        if (!provisioned.ok) outcome.error = provisioned.error;
+        else outcome.advanced = provisioned.advanced;
+      }
+
+      // A published site key does not reach a browser until the clone is BUILT
+      // again — Vite inlines `VITE_*` at build time. Publishing without asking
+      // for a rebuild leaves the clone in the state this whole change exists to
+      // end: a login page that cannot answer its own CAPTCHA. Only on the pass
+      // that actually published, so this cannot loop.
+      if (outcome.ok && outcome.advanced?.includes("site_key_published")) {
+        const { requestRedeployAfterPush } = await import("./hosting/redeploy.server");
+        const asked = await requestRedeployAfterPush({
+          cloneId: clone.id,
+          reason: "Turnstile site key published",
+        });
+        outcome.redeploy = asked.queued ? `queued from ${asked.from}` : `skipped: ${asked.reason}`;
+      }
+    } catch (e) {
+      outcome.error = msg(e);
+    }
+
+    report.acted.push(outcome);
+  }
+
+  return report;
+}
+
+/**
+ * Can this Mission Control actually mint a widget?
+ *
+ * `verifyToken` answers "is this token real", which is not the question. A
+ * Cloudflare token is a set of scoped permissions, and the one this deployment
+ * was set up with is documented as Zone Read / Zone Settings Edit / Analytics
+ * Read — none of which includes Turnstile. Such a token verifies as **active**
+ * and then refuses widget creation, so a panel that trusts `verifyToken` says
+ * "Connected" and the button fails with a vendor error code.
+ *
+ * So the probe is the capability itself: listing widgets is the cheapest call
+ * that requires Turnstile permission on the account. It reads and creates
+ * nothing.
+ */
+export type TurnstileAccessProbe = {
+  tokenPresent: boolean;
+  accountConfigured: boolean;
+  /** True only when Cloudflare actually served a Turnstile read. */
+  canMint: boolean;
+  widgetCount?: number;
+  error?: string;
+};
+
+export async function probeTurnstileAccess(supabase: Db): Promise<TurnstileAccessProbe> {
+  const tokenPresent = isCloudflareConfigured();
+  const accountId = await readAccountId(supabase).catch(() => null);
+  if (!tokenPresent || !accountId) {
+    return { tokenPresent, accountConfigured: Boolean(accountId), canMint: false };
+  }
+  try {
+    const { cloudflareApi } = await import("./cloudflare/client");
+    const widgets = await cloudflareApi.listTurnstileWidgets(accountId);
+    return {
+      tokenPresent: true,
+      accountConfigured: true,
+      canMint: true,
+      widgetCount: widgets?.length ?? 0,
+    };
+  } catch (e) {
+    return { tokenPresent: true, accountConfigured: true, canMint: false, error: msg(e) };
   }
 }

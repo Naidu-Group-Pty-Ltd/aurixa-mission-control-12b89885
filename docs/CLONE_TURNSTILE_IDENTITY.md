@@ -72,6 +72,68 @@ Without `CLOUDFLARE_API_TOKEN` the whole feature is dormant and says so.
 
 ---
 
+## The repair sweep
+
+The drain covers every clone provisioned **from now on** and none provisioned
+before that step existed — which was the whole fleet. A per-tenant security
+credential only new tenants receive is not a credential the fleet has, so
+`/hooks/turnstile-reconcile` (pg_cron, every 10 minutes) gives it to the rest.
+
+`decideTurnstileSweep` is pure and decides from stored facts alone:
+
+| State | Action |
+| --- | --- |
+| No widget | `provision` |
+| Widget, but no secret ever delivered | **`rotate`** |
+| Widget + secret, site key unpublished | `provision` (publishes) |
+| Stored domains ≠ the clone's hostnames | `refresh` |
+| `revoked` | never touched — an operator's decision, not a gap |
+| `last_error` set within 30 min | `cooling_off` |
+| Otherwise | `complete` |
+
+Two of those rows are the ones worth knowing.
+
+**A widget with no delivered secret is repaired by ROTATING, not by
+provisioning.** Cloudflare returns a secret on create and on `rotate_secret`
+and never on a read, so adopting an existing widget yields nothing to write —
+provisioning again reports success and leaves the clone exactly as broken.
+Rotation is safe there and nowhere else, precisely because nothing is verifying
+against the old secret.
+
+**Domain drift is compared locally** — stored list against derived list — so a
+healthy fleet costs no Cloudflare call at all. It matters because a custom
+domain attached after provisioning is a hostname the widget does not cover, and
+a widget that does not cover the login page issues no token there.
+
+The sweep also asks for a **rebuild** on the pass that publishes a site key, via
+`requestRedeployAfterPush`. Publishing without it leaves the clone in the state
+this whole change exists to end: a login page that cannot answer its own CAPTCHA
+because the bundle predates the key. Only on the publishing pass, so it cannot
+loop.
+
+Its response is the run's own diagnosis — it names whether Mission Control can
+see `CLOUDFLARE_API_TOKEN` and the account id, because "nothing happened" reads
+identically for a missing credential and a healthy fleet. Every run is recorded
+in `audit_log` as `turnstile_reconcile_cron`.
+
+---
+
+## Validity is not scope
+
+`verifyToken` answers "is this token real". That is the wrong question here.
+
+A Cloudflare token is a set of scoped permissions, and the scopes this
+deployment was set up with — Zone Read, Zone Settings Edit, Analytics Read —
+verify as an **active** token and then refuse widget creation. A panel built on
+token validity says "Connected" right up until the button fails with a vendor
+error code.
+
+So `probeTurnstileAccess` asks for the capability instead: listing widgets is
+the cheapest call that requires `Account · Turnstile: Edit`. It reads and
+creates nothing, and it is what the clone's panel renders. The three readings it
+separates — no token, no account id, token cannot mint — each send an operator
+somewhere different.
+
 ## Rules that bite
 
 **The secret exists in memory for one flow.** Cloudflare returns it on create

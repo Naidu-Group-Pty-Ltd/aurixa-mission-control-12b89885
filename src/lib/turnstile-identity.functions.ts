@@ -101,3 +101,18 @@ export const revokeCloneTurnstile = createServerFn({ method: "POST" })
     });
     return res;
   });
+
+/**
+ * Whether this Mission Control can mint widgets at all — the capability, not
+ * the token's existence. See `probeTurnstileAccess`: a token scoped for DNS
+ * verifies as active and refuses Turnstile, and a panel that cannot tell those
+ * apart sends an operator to the wrong remedy.
+ */
+export const probeCloneTurnstileAccess = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
+  .handler(async ({ context }) => {
+    const { probeTurnstileAccess } = await import(
+      /* @vite-ignore */ "@/lib/_server-shims/turnstile-identity.server"
+    );
+    return probeTurnstileAccess(context.supabase);
+  });

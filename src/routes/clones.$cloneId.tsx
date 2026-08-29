@@ -28,6 +28,7 @@ import { CloneDriftPolicyCard } from "@/components/clone-drift-policy-card";
 import { CloneDriftSuggestionsCard } from "@/components/clone-drift-suggestions-card";
 import { CloneEditDialog } from "@/components/clone-edit-dialog";
 import { CloneDeploymentCard } from "@/components/clone-deployment-card";
+import { CloneTurnstileCard } from "@/components/clone-turnstile-card";
 import { CloneEdgeCard } from "@/components/clone-edge-card";
 import { CloneHealthCard } from "@/components/clone-health-card";
 import { CloneLibraryPinsCard } from "@/components/clone-library-pins";
@@ -344,6 +345,15 @@ function CloneDetail() {
 
       <CloneBackendCard cloneId={cloneId} />
       <CloneDeploymentCard cloneId={cloneId} />
+      {/*
+        Beside the deployment because that is what it belongs to: the site key
+        is published into the hosting environment and only reaches a browser
+        when the clone is built again. It sits on THIS page, not only on the
+        secrets sub-page, because "Mission Control shows nothing about
+        Cloudflare for this clone" is indistinguishable from "Cloudflare is not
+        configured" — and one of those was true while the other was not.
+      */}
+      <CloneTurnstileCard cloneId={cloneId} />
       <ClonePurchasesCard cloneId={cloneId} />
       <GitHubSecretSyncCard target="clone" cloneId={cloneId} />
       <CloneSecurityAssessmentsCard cloneId={cloneId} />
