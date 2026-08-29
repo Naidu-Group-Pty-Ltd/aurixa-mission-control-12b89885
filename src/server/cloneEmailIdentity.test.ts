@@ -8,6 +8,8 @@ import {
   keyLast4,
   ledgerStatusForShell,
   mayAlignSenderAddress,
+  decideEmailIdentitySweep,
+  EMAIL_SWEEP_COOLDOWN_MS,
   planDnsInstallation,
   resolveEmailDnsZone,
   type EmailIdentityRow,
@@ -274,6 +276,85 @@ describe("identityReadiness", () => {
     );
     expect(r.live).toBe(true);
     expect(r.next).toBeNull();
+  });
+});
+
+describe("decideEmailIdentitySweep", () => {
+  const NOW = Date.parse("2026-08-29T10:00:00Z");
+  const base = {
+    resend_domain_id: "d_1",
+    domain_status: "pending_dns" as const,
+    key_written_at: null,
+    last_error: null,
+    updated_at: "2026-08-29T09:00:00Z",
+  };
+
+  it("never starts an identity that has no domain registered", () => {
+    // The invariant the drain's safety rests on: `advanceEmailIdentity`
+    // creates a domain only when `resend_domain_id` is null, so refusing here
+    // is what makes it safe to hand the drain `provision` mode.
+    expect(decideEmailIdentitySweep({ identity: null, now: NOW })).toEqual({
+      act: false,
+      reason: "not_started",
+    });
+    expect(
+      decideEmailIdentitySweep({ identity: { ...base, resend_domain_id: null }, now: NOW }),
+    ).toEqual({ act: false, reason: "not_started" });
+  });
+
+  it("stops once the key has reached the clone", () => {
+    expect(
+      decideEmailIdentitySweep({
+        identity: { ...base, key_written_at: "2026-08-29T09:30:00Z" },
+        now: NOW,
+      }),
+    ).toEqual({ act: false, reason: "complete" });
+  });
+
+  it("polls verification while the domain is pending", () => {
+    const v = decideEmailIdentitySweep({ identity: base, now: NOW });
+    expect(v.act).toBe(true);
+  });
+
+  it("mints once the domain is verified and no key exists yet", () => {
+    const v = decideEmailIdentitySweep({
+      identity: { ...base, domain_status: "verified" },
+      now: NOW,
+    });
+    expect(v).toEqual({ act: true, why: "domain verified, key not yet minted" });
+  });
+
+  it("leaves a failed identity alone for the cooling-off window", () => {
+    const justFailed = {
+      ...base,
+      last_error: "Cloudflare unreachable",
+      updated_at: new Date(NOW - 60_000).toISOString(),
+    };
+    expect(decideEmailIdentitySweep({ identity: justFailed, now: NOW })).toEqual({
+      act: false,
+      reason: "cooling_off",
+    });
+  });
+
+  it("retries a failed identity once the window has passed", () => {
+    const stale = {
+      ...base,
+      last_error: "Cloudflare unreachable",
+      updated_at: new Date(NOW - EMAIL_SWEEP_COOLDOWN_MS - 1000).toISOString(),
+    };
+    expect(decideEmailIdentitySweep({ identity: stale, now: NOW }).act).toBe(true);
+  });
+
+  it("does not cool off an identity that has no error", () => {
+    // A healthy identity mid-propagation was updated seconds ago; the window
+    // is for FAILURES, and applying it here would stall every normal run.
+    const fresh = { ...base, updated_at: new Date(NOW - 1000).toISOString() };
+    expect(decideEmailIdentitySweep({ identity: fresh, now: NOW }).act).toBe(true);
+  });
+
+  it("acts rather than stalls when the timestamp is unusable", () => {
+    const bad = { ...base, last_error: "boom", updated_at: "not-a-date" };
+    expect(decideEmailIdentitySweep({ identity: bad, now: NOW }).act).toBe(true);
   });
 });
 

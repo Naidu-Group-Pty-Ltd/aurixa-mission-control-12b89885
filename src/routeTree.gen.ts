@@ -83,6 +83,7 @@ import { Route as HooksFleetDriftRouteImport } from './routes/hooks.fleet-drift'
 import { Route as HooksFeedbackForwardRetryRouteImport } from './routes/hooks.feedback-forward-retry'
 import { Route as HooksExpireReservationsRouteImport } from './routes/hooks.expire-reservations'
 import { Route as HooksEntitlementDrainRouteImport } from './routes/hooks.entitlement-drain'
+import { Route as HooksEmailIdentityDrainRouteImport } from './routes/hooks.email-identity-drain'
 import { Route as HooksEdgeDriftRouteImport } from './routes/hooks.edge-drift'
 import { Route as HooksEdgeDrainRouteImport } from './routes/hooks.edge-drain'
 import { Route as HooksDriftRefreshRouteImport } from './routes/hooks.drift-refresh'
@@ -548,6 +549,11 @@ const HooksExpireReservationsRoute = HooksExpireReservationsRouteImport.update({
 const HooksEntitlementDrainRoute = HooksEntitlementDrainRouteImport.update({
   id: '/hooks/entitlement-drain',
   path: '/hooks/entitlement-drain',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksEmailIdentityDrainRoute = HooksEmailIdentityDrainRouteImport.update({
+  id: '/hooks/email-identity-drain',
+  path: '/hooks/email-identity-drain',
   getParentRoute: () => rootRouteImport,
 } as any)
 const HooksEdgeDriftRoute = HooksEdgeDriftRouteImport.update({
@@ -1090,6 +1096,7 @@ export interface FileRoutesByFullPath {
   '/hooks/drift-refresh': typeof HooksDriftRefreshRoute
   '/hooks/edge-drain': typeof HooksEdgeDrainRoute
   '/hooks/edge-drift': typeof HooksEdgeDriftRoute
+  '/hooks/email-identity-drain': typeof HooksEmailIdentityDrainRoute
   '/hooks/entitlement-drain': typeof HooksEntitlementDrainRoute
   '/hooks/expire-reservations': typeof HooksExpireReservationsRoute
   '/hooks/feedback-forward-retry': typeof HooksFeedbackForwardRetryRoute
@@ -1254,6 +1261,7 @@ export interface FileRoutesByTo {
   '/hooks/drift-refresh': typeof HooksDriftRefreshRoute
   '/hooks/edge-drain': typeof HooksEdgeDrainRoute
   '/hooks/edge-drift': typeof HooksEdgeDriftRoute
+  '/hooks/email-identity-drain': typeof HooksEmailIdentityDrainRoute
   '/hooks/entitlement-drain': typeof HooksEntitlementDrainRoute
   '/hooks/expire-reservations': typeof HooksExpireReservationsRoute
   '/hooks/feedback-forward-retry': typeof HooksFeedbackForwardRetryRoute
@@ -1420,6 +1428,7 @@ export interface FileRoutesById {
   '/hooks/drift-refresh': typeof HooksDriftRefreshRoute
   '/hooks/edge-drain': typeof HooksEdgeDrainRoute
   '/hooks/edge-drift': typeof HooksEdgeDriftRoute
+  '/hooks/email-identity-drain': typeof HooksEmailIdentityDrainRoute
   '/hooks/entitlement-drain': typeof HooksEntitlementDrainRoute
   '/hooks/expire-reservations': typeof HooksExpireReservationsRoute
   '/hooks/feedback-forward-retry': typeof HooksFeedbackForwardRetryRoute
@@ -1587,6 +1596,7 @@ export interface FileRouteTypes {
     | '/hooks/drift-refresh'
     | '/hooks/edge-drain'
     | '/hooks/edge-drift'
+    | '/hooks/email-identity-drain'
     | '/hooks/entitlement-drain'
     | '/hooks/expire-reservations'
     | '/hooks/feedback-forward-retry'
@@ -1751,6 +1761,7 @@ export interface FileRouteTypes {
     | '/hooks/drift-refresh'
     | '/hooks/edge-drain'
     | '/hooks/edge-drift'
+    | '/hooks/email-identity-drain'
     | '/hooks/entitlement-drain'
     | '/hooks/expire-reservations'
     | '/hooks/feedback-forward-retry'
@@ -1916,6 +1927,7 @@ export interface FileRouteTypes {
     | '/hooks/drift-refresh'
     | '/hooks/edge-drain'
     | '/hooks/edge-drift'
+    | '/hooks/email-identity-drain'
     | '/hooks/entitlement-drain'
     | '/hooks/expire-reservations'
     | '/hooks/feedback-forward-retry'
@@ -2079,6 +2091,7 @@ export interface RootRouteChildren {
   HooksDriftRefreshRoute: typeof HooksDriftRefreshRoute
   HooksEdgeDrainRoute: typeof HooksEdgeDrainRoute
   HooksEdgeDriftRoute: typeof HooksEdgeDriftRoute
+  HooksEmailIdentityDrainRoute: typeof HooksEmailIdentityDrainRoute
   HooksEntitlementDrainRoute: typeof HooksEntitlementDrainRoute
   HooksExpireReservationsRoute: typeof HooksExpireReservationsRoute
   HooksFeedbackForwardRetryRoute: typeof HooksFeedbackForwardRetryRoute
@@ -2681,6 +2694,13 @@ declare module '@tanstack/react-router' {
       path: '/hooks/entitlement-drain'
       fullPath: '/hooks/entitlement-drain'
       preLoaderRoute: typeof HooksEntitlementDrainRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/email-identity-drain': {
+      id: '/hooks/email-identity-drain'
+      path: '/hooks/email-identity-drain'
+      fullPath: '/hooks/email-identity-drain'
+      preLoaderRoute: typeof HooksEmailIdentityDrainRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/hooks/edge-drift': {
@@ -3474,6 +3494,7 @@ const rootRouteChildren: RootRouteChildren = {
   HooksDriftRefreshRoute: HooksDriftRefreshRoute,
   HooksEdgeDrainRoute: HooksEdgeDrainRoute,
   HooksEdgeDriftRoute: HooksEdgeDriftRoute,
+  HooksEmailIdentityDrainRoute: HooksEmailIdentityDrainRoute,
   HooksEntitlementDrainRoute: HooksEntitlementDrainRoute,
   HooksExpireReservationsRoute: HooksExpireReservationsRoute,
   HooksFeedbackForwardRetryRoute: HooksFeedbackForwardRetryRoute,

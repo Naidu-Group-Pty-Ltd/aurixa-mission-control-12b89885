@@ -96,6 +96,22 @@ per-clone buttons; and the prime rotating its own key affects nobody.
   open when it is not (Cloudflare unreachable, or a partial write). Settling on
   a transient error would permanently downgrade a clone to manual DNS because
   Cloudflare happened to be down for one click.
+- **The drain advances; it never starts.** Every other provisioning pipeline
+  here has a scheduled drain and this one did not, so an identity waiting on
+  DNS propagation sat still until a person reopened the page and pressed
+  *Advance* — which is how a clone ends up registered, with its records
+  installed and its domain verified, and still holding no key, one click short
+  of the outage being over. `email-identity-drain` (every 5 minutes) carries
+  started identities forward. It acts only on a row that already has a
+  `resend_domain_id`, because registering a sending domain chooses a hostname
+  and a region and creates a resource at Resend — an operator's decision, not
+  a sweep's. That refusal is also what makes it safe for the drain to use the
+  same `provision` mode the button uses: `advanceEmailIdentity` creates a
+  domain only when `resend_domain_id` is null, and `refresh` deliberately
+  mints nothing, so a drain restricted to `refresh` would poll verification
+  forever and never close the gap. A failed identity is left alone for thirty
+  minutes; a healthy one mid-propagation is not, because the window is for
+  failures and applying it to everything would stall every normal run.
 - **Sender alignment repairs a default, never a choice.** The clone's
   from-headers all derive from `global_report_settings.contact_details.email`
   (see the prime's `_shared/brand-config.ts`); while that still carries the

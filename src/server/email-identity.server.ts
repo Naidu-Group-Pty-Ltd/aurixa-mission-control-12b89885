@@ -48,10 +48,12 @@ import {
   isValidSendingDomain,
   keyLast4,
   mayAlignSenderAddress,
+  decideEmailIdentitySweep,
   planDnsInstallation,
   resolveEmailDnsZone,
   type EmailIdentityReadiness,
   type EmailIdentityRow,
+  type EmailSweepFacts,
 } from "./cloneEmailIdentity.pure";
 import { resolveCloneSecretTarget, CloneSecretTargetError } from "./cloneAllowedOrigins.server";
 
@@ -125,10 +127,12 @@ async function readCloneHostFacts(supabase: Db, cloneId: string) {
  * fall back to, which is a manual-DNS flow rather than a failure.
  *
  * This reads through the CALLER's client, and `platform_hosting_config` grants
- * SELECT to admins only (`is_admin(auth.uid())`). Every entry point here is
- * behind `requireAdmin`, so the row is visible. Move this behind a
- * non-admin caller and RLS would FILTER rather than error — null row, null
- * error, and auto-DNS would silently stop happening with nothing to see.
+ * SELECT to admins only (`is_admin(auth.uid())`). Both callers can see the
+ * row: the operator's paths are behind `requireAdmin`, and the scheduled drain
+ * passes the service-role client, which RLS does not apply to. Hand this a
+ * user-scoped client for anyone else and RLS would FILTER rather than error —
+ * null row, null error, and auto-DNS would silently stop happening with
+ * nothing anywhere to see.
  */
 async function readFleetZone(
   supabase: Db,
@@ -449,6 +453,93 @@ export async function advanceEmailIdentity(
       .eq("clone_id", cloneId);
     return fail(error);
   }
+}
+
+export type EmailSweepReport = {
+  resendConfigured: boolean;
+  considered: number;
+  advanced: number;
+  failed: number;
+  skipped: Record<string, number>;
+  detail: Array<{ cloneId: string; outcome: string; note?: string }>;
+};
+
+/**
+ * Carry every started email identity forward, on a schedule.
+ *
+ * Every other provisioning pipeline here has a drain; this one did not, so an
+ * identity waiting on DNS propagation sat still until a person reopened the
+ * page and pressed a button. That is how a clone ends up registered, with its
+ * records installed and its domain verified, and still no key — the outage
+ * this whole feature exists to end, one click short of fixed.
+ *
+ * It advances and never starts: see `decideEmailIdentitySweep`. The batch is
+ * small because each advance is several Resend calls and possibly a Cloudflare
+ * write, and a drain is a background repair rather than a backfill.
+ */
+export async function sweepEmailIdentities(
+  supabase: Db,
+  opts: { limit?: number; now?: number } = {},
+): Promise<EmailSweepReport> {
+  const report: EmailSweepReport = {
+    resendConfigured: isResendConfigured(),
+    considered: 0,
+    advanced: 0,
+    failed: 0,
+    skipped: {},
+    detail: [],
+  };
+  // Dormant, not broken. Without the master key every advance would refuse by
+  // name anyway; refusing once here keeps the log readable and says why.
+  if (!report.resendConfigured) return report;
+
+  const now = opts.now ?? Date.now();
+  const { data, error } = await supabase
+    .from("clone_email_identities")
+    .select("clone_id, resend_domain_id, domain_status, key_written_at, last_error, updated_at")
+    // Finished identities are the overwhelming majority once a fleet settles;
+    // excluding them here keeps the sweep's cost proportional to the work.
+    .is("key_written_at", null)
+    .order("updated_at", { ascending: true })
+    .limit(opts.limit ?? 10);
+  if (error) throw new Error(`Could not list email identities: ${error.message}`);
+
+  const bump = (reason: string) => {
+    report.skipped[reason] = (report.skipped[reason] ?? 0) + 1;
+  };
+
+  for (const raw of data ?? []) {
+    const rowFacts = raw as unknown as EmailSweepFacts["identity"] & { clone_id: string };
+    report.considered += 1;
+    const verdict = decideEmailIdentitySweep({ identity: rowFacts, now });
+    if (!verdict.act) {
+      bump(verdict.reason);
+      report.detail.push({ cloneId: rowFacts.clone_id, outcome: verdict.reason });
+      continue;
+    }
+    try {
+      // `provision` is the mode that mints; it cannot register a domain here
+      // because this row already has one. The decision above is what holds
+      // that invariant.
+      const res = await advanceEmailIdentity(supabase, rowFacts.clone_id, { mode: "provision" });
+      if (res.ok) {
+        report.advanced += 1;
+        report.detail.push({
+          cloneId: rowFacts.clone_id,
+          outcome: "advanced",
+          note: res.advanced.join(",") || verdict.why,
+        });
+      } else {
+        report.failed += 1;
+        report.detail.push({ cloneId: rowFacts.clone_id, outcome: "failed", note: res.error });
+      }
+    } catch (e) {
+      // One stuck identity must not stop the sweep for the others.
+      report.failed += 1;
+      report.detail.push({ cloneId: rowFacts.clone_id, outcome: "failed", note: msg(e) });
+    }
+  }
+  return report;
 }
 
 /**
