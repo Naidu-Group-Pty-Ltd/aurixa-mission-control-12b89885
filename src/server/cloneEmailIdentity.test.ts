@@ -10,6 +10,7 @@ import {
   mayAlignSenderAddress,
   absoluteRecordName,
   decideEmailIdentitySweep,
+  expectedDnsProbes,
   EMAIL_SWEEP_COOLDOWN_MS,
   planDnsInstallation,
   resolveEmailDnsZone,
@@ -347,6 +348,54 @@ describe("identityReadiness", () => {
     );
     expect(r.live).toBe(true);
     expect(r.next).toBeNull();
+  });
+});
+
+describe("expectedDnsProbes", () => {
+  // Resend's real answer for this domain: two records share one name.
+  const RECORDS: ResendDnsRecord[] = [
+    {
+      record: "DKIM",
+      name: "resend._domainkey.send.npc.aurixasystems.com.au",
+      type: "TXT",
+      value: "p=...",
+    },
+    {
+      record: "SPF",
+      name: "send.send.npc.aurixasystems.com.au",
+      type: "MX",
+      value: "feedback",
+      priority: 10,
+    },
+    { record: "SPF", name: "send.send.npc.aurixasystems.com.au", type: "TXT", value: "v=spf1" },
+  ];
+
+  it("asks one question per distinct name and type", () => {
+    // Three records, three lookups — the shared name differs by type.
+    expect(expectedDnsProbes(RECORDS)).toEqual([
+      { name: "resend._domainkey.send.npc.aurixasystems.com.au", type: "TXT" },
+      { name: "send.send.npc.aurixasystems.com.au", type: "MX" },
+      { name: "send.send.npc.aurixasystems.com.au", type: "TXT" },
+    ]);
+  });
+
+  it("collapses a genuine duplicate", () => {
+    const doubled = [...RECORDS, RECORDS[1]];
+    expect(expectedDnsProbes(doubled)).toHaveLength(3);
+  });
+
+  it("normalises case and whitespace so the same name is asked once", () => {
+    const mixed: ResendDnsRecord[] = [
+      { record: "SPF", name: "  Send.Send.NPC.aurixasystems.com.au ", type: "mx", value: "v" },
+      { record: "SPF", name: "send.send.npc.aurixasystems.com.au", type: "MX", value: "v" },
+    ];
+    expect(expectedDnsProbes(mixed)).toEqual([
+      { name: "send.send.npc.aurixasystems.com.au", type: "MX" },
+    ]);
+  });
+
+  it("has nothing to ask when no records are published", () => {
+    expect(expectedDnsProbes([])).toEqual([]);
   });
 });
 
