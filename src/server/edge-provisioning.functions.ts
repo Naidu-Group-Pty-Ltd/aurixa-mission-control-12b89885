@@ -116,7 +116,54 @@ export const getCloneEdgeStatus = createServerFn({ method: "GET" })
       .eq("clone_id", data.cloneId)
       .order("created_at", { ascending: false })
       .limit(10);
-    return { configs: configs ?? [], jobs: jobs ?? [] };
+
+    // Cloudflare does TWO jobs for a clone and the card only ever reported
+    // one. `clone_edge_config` is the OPTIONAL WAF/CDN wrapper; the clone's
+    // subdomain DNS is a separate, non-optional thing that Cloudflare has been
+    // carrying all along. Reporting only the first is how a page came to read
+    // "No edge provider attached" directly above a failed Cloudflare job, for
+    // a hostname Cloudflare was resolving at that moment.
+    const [{ data: clone }, { data: hosting }, { data: dnsRecord }] = await Promise.all([
+      (supabase as any)
+        .from("clones")
+        .select("subdomain, subdomain_fqdn, subdomain_status")
+        .eq("id", data.cloneId)
+        .maybeSingle(),
+      (supabase as any)
+        .from("platform_hosting_config")
+        .select("cloudflare_zone_id, cloudflare_zone_name, target_type, target_value, proxied")
+        .eq("singleton", true)
+        .maybeSingle(),
+      (supabase as any)
+        .from("edge_dns_records")
+        .select("external_record_id, record_type, record_name, record_content, proxied, updated_at")
+        .eq("clone_id", data.cloneId)
+        .eq("purpose", "clone_subdomain")
+        .maybeSingle(),
+    ]);
+
+    const dns = clone?.subdomain_fqdn
+      ? {
+          fqdn: clone.subdomain_fqdn as string,
+          status: (clone.subdomain_status as string | null) ?? null,
+          zoneId: (hosting?.cloudflare_zone_id as string | null) ?? null,
+          zoneName: (hosting?.cloudflare_zone_name as string | null) ?? null,
+          // What the record SHOULD say, from the hosting configuration.
+          desiredType: (hosting?.target_type as string | null)?.toUpperCase() ?? null,
+          desiredContent: (hosting?.target_value as string | null) ?? null,
+          desiredProxied: (hosting?.proxied as boolean | null) ?? null,
+          // What Mission Control has actually recorded. Null here with a live
+          // hostname is the real state this card has to be able to show: the
+          // record exists at Cloudflare and we are not tracking it.
+          trackedRecordId: (dnsRecord?.external_record_id as string | null) ?? null,
+          trackedType: (dnsRecord?.record_type as string | null) ?? null,
+          trackedContent: (dnsRecord?.record_content as string | null) ?? null,
+          trackedProxied: (dnsRecord?.proxied as boolean | null) ?? null,
+          trackedAt: (dnsRecord?.updated_at as string | null) ?? null,
+        }
+      : null;
+
+    return { configs: configs ?? [], jobs: jobs ?? [], dns };
   });
 
 export const listEdgePresets = createServerFn({ method: "GET" })

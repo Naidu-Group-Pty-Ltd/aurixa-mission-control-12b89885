@@ -25,6 +25,10 @@ import {
   listEdgeProviders,
 } from "@/server/edge-provisioning.functions";
 import { formatDistanceToNow } from "@/lib/format";
+import {
+  readCloudflareDns,
+  type CloudflareDnsFacts,
+} from "@/lib/hosting/cloudflareDnsReading.pure";
 
 type Provider = {
   slug: string;
@@ -70,6 +74,7 @@ export function CloneEdgeCard({ cloneId }: { cloneId: string }) {
   const [providers, setProviders] = useState<Provider[]>([]);
   const [presets, setPresets] = useState<Preset[]>([]);
   const [configs, setConfigs] = useState<Config[]>([]);
+  const [dns, setDns] = useState<CloudflareDnsFacts | null>(null);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
@@ -88,6 +93,7 @@ export function CloneEdgeCard({ cloneId }: { cloneId: string }) {
         listProviders(),
       ]);
       setConfigs((s.configs as Config[]) ?? []);
+      setDns((s.dns as CloudflareDnsFacts | null) ?? null);
       setJobs((s.jobs as Job[]) ?? []);
       setPresets((p.presets as Preset[]) ?? []);
       setProviders((pr.providers as Provider[]) ?? []);
@@ -206,7 +212,8 @@ export function CloneEdgeCard({ cloneId }: { cloneId: string }) {
           <Shield className="h-4 w-4 text-info" /> Edge security
         </CardTitle>
         <CardDescription>
-          Optional edge/CDN wrapper for WAF, bot protection, and DDoS mitigation.
+          What Cloudflare does for this clone: the subdomain it resolves, and an optional edge/CDN
+          wrapper for WAF, bot protection and DDoS mitigation.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -214,9 +221,55 @@ export function CloneEdgeCard({ cloneId }: { cloneId: string }) {
           <div className="font-mono text-xs text-muted-foreground">loading…</div>
         ) : (
           <>
+            {/*
+              DNS first, and unconditionally. Cloudflare does two jobs for a
+              clone and this card used to report only the optional one — so it
+              said "No edge provider attached" for a hostname Cloudflare was
+              resolving at that moment, three lines above a failed Cloudflare
+              job. The wrapper's empty state is now scoped to the wrapper.
+            */}
+            {(() => {
+              const reading = readCloudflareDns(dns);
+              const tone =
+                reading.tone === "live"
+                  ? "default"
+                  : reading.tone === "unconfigured"
+                    ? "outline"
+                    : reading.tone === "drifted"
+                      ? "destructive"
+                      : "secondary";
+              const label =
+                reading.tone === "live"
+                  ? "Live"
+                  : reading.tone === "untracked"
+                    ? "Untracked"
+                    : reading.tone === "drifted"
+                      ? "Drifted"
+                      : reading.tone === "pending"
+                        ? "Pending"
+                        : "Not configured";
+              return (
+                <div className="border p-4">
+                  <div className="mb-2 flex items-start justify-between gap-3">
+                    <div className="flex items-center gap-2 text-sm font-medium">
+                      <Globe className="h-4 w-4" aria-hidden /> DNS · {reading.headline}
+                    </div>
+                    <Badge variant={tone}>{label}</Badge>
+                  </div>
+                  <p className="text-xs text-muted-foreground">{reading.detail}</p>
+                  {reading.record && <p className="mt-2 font-mono text-xs">{reading.record}</p>}
+                </div>
+              );
+            })()}
+
+            <div className="pt-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              Edge wrapper · optional
+            </div>
+
             {configs.length === 0 && (
               <div className="border border-dashed p-4 text-center text-xs text-muted-foreground">
-                No edge provider attached.
+                No WAF / CDN wrapper attached. This is separate from the DNS above, which Cloudflare
+                serves either way.
               </div>
             )}
 
