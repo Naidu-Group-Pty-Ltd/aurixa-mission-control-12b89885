@@ -1,6 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
-import { asJson } from "@/lib/json-cast";
 import { writeAuditLog } from "@/server/audit.server";
 import { verifyCronAuth } from "@/server/cron-auth.server";
 
@@ -39,7 +38,7 @@ export const Route = createFileRoute("/hooks/turnstile-reconcile")({
           await writeAuditLog({
             action: "turnstile_reconcile_cron",
             entityType: "cron",
-            metadata: asJson(report),
+            metadata: report as unknown as Record<string, unknown>,
           });
 
           // 200 with the refusals in the body, not 500: an unconfigured
@@ -54,7 +53,7 @@ export const Route = createFileRoute("/hooks/turnstile-reconcile")({
           await writeAuditLog({
             action: "turnstile_reconcile_cron",
             entityType: "cron",
-            metadata: asJson({ error: msg }),
+            metadata: { error: msg },
           });
           return new Response(JSON.stringify({ success: false, error: msg }), {
             status: 500,

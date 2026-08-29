@@ -467,6 +467,8 @@ export type TurnstileSweepOutcome = {
 export type TurnstileSweepReport = {
   cloudflareConfigured: boolean;
   accountConfigured: boolean;
+  /** Whether this deployment can mint at all, and why not when it cannot. */
+  probe?: TurnstileAccessProbe;
   /** Named refusal when the sweep could not run at all. */
   skipped?: string;
   considered: number;
@@ -496,27 +498,24 @@ export async function reconcileTurnstileIdentities(
 ): Promise<TurnstileSweepReport> {
   const cloudflareConfigured = isCloudflareConfigured();
   const accountId = await readAccountId(supabase).catch(() => null);
+  const probe = await probeTurnstileAccess(supabase);
   const base = {
     cloudflareConfigured,
     accountConfigured: Boolean(accountId),
+    probe,
     considered: 0,
     acted: [] as TurnstileSweepOutcome[],
     skippedByReason: {} as Record<string, number>,
   };
 
-  // Both refusals are named rather than shrugged at. "Nothing happened" is the
-  // reading an operator gets from a missing credential AND from a healthy
-  // fleet, and those want different actions.
-  if (!cloudflareConfigured) {
-    return { ...base, skipped: "CLOUDFLARE_API_TOKEN is not configured on Mission Control" };
-  }
-  if (!accountId) {
-    return {
-      ...base,
-      skipped:
-        "platform_hosting_config.cloudflare_account_id is empty — a Turnstile widget is created " +
-        "against an account, so there is nothing to create one under",
-    };
+  // Ask once whether this deployment can mint at all, and stop here when it
+  // cannot. Attempting anyway spends one Cloudflare call per clone to collect
+  // the same refusal N times, and records it as N clone-specific failures —
+  // which reads as a fleet problem rather than the one credential problem it
+  // is. "Nothing happened" is also the reading a healthy fleet gives, so the
+  // refusal is always NAMED.
+  if (!probe.canMint) {
+    return { ...base, skipped: probe.diagnosis };
   }
 
   const cloneQuery = supabase.from("clones").select("id, slug, subdomain_fqdn, deploy_url");
@@ -640,28 +639,80 @@ export async function reconcileTurnstileIdentities(
 export type TurnstileAccessProbe = {
   tokenPresent: boolean;
   accountConfigured: boolean;
+  /** Whether Cloudflare accepts the token at all, independently of scope. */
+  tokenValid: boolean;
   /** True only when Cloudflare actually served a Turnstile read. */
   canMint: boolean;
   widgetCount?: number;
   error?: string;
+  /** The remedy, in one line, for whichever of the four states this is. */
+  diagnosis: string;
 };
 
 export async function probeTurnstileAccess(supabase: Db): Promise<TurnstileAccessProbe> {
   const tokenPresent = isCloudflareConfigured();
   const accountId = await readAccountId(supabase).catch(() => null);
-  if (!tokenPresent || !accountId) {
-    return { tokenPresent, accountConfigured: Boolean(accountId), canMint: false };
+  if (!tokenPresent) {
+    return {
+      tokenPresent: false,
+      accountConfigured: Boolean(accountId),
+      tokenValid: false,
+      canMint: false,
+      diagnosis:
+        "CLOUDFLARE_API_TOKEN is not set on Mission Control. The name is read exactly; a secret " +
+        "stored under any other name reads as no token at all.",
+    };
   }
+  if (!accountId) {
+    return {
+      tokenPresent: true,
+      accountConfigured: false,
+      tokenValid: false,
+      canMint: false,
+      diagnosis:
+        "platform_hosting_config.cloudflare_account_id is empty. A Turnstile widget is created " +
+        "against an account, so there is nothing to create one under.",
+    };
+  }
+
+  const { cloudflareApi } = await import("./cloudflare/client");
+
+  // Validity and scope are separate questions and they are asked separately,
+  // because the two failures have different remedies and Cloudflare reports
+  // BOTH as "Authentication error" on the Turnstile endpoint. A token that
+  // verifies and cannot list widgets is a scope problem; one that does not
+  // verify is the wrong token.
+  let tokenValid = false;
   try {
-    const { cloudflareApi } = await import("./cloudflare/client");
+    const verified = await cloudflareApi.verifyToken();
+    tokenValid = verified?.status === "active";
+  } catch {
+    tokenValid = false;
+  }
+
+  try {
     const widgets = await cloudflareApi.listTurnstileWidgets(accountId);
     return {
       tokenPresent: true,
       accountConfigured: true,
+      tokenValid,
       canMint: true,
       widgetCount: widgets?.length ?? 0,
+      diagnosis: "Cloudflare is serving Turnstile for this account.",
     };
   } catch (e) {
-    return { tokenPresent: true, accountConfigured: true, canMint: false, error: msg(e) };
+    const error = msg(e);
+    return {
+      tokenPresent: true,
+      accountConfigured: true,
+      tokenValid,
+      canMint: false,
+      error,
+      diagnosis: tokenValid
+        ? "Cloudflare accepts this token and will not serve Turnstile with it, which is a SCOPE " +
+          "problem, not a bad token: add Account · Turnstile · Edit to the token (and check it is " +
+          `scoped to account ${accountId}). Cloudflare said: ${error}`
+        : `Cloudflare does not accept this token at all. Cloudflare said: ${error}`,
+    };
   }
 }

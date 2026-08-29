@@ -130,9 +130,20 @@ error code.
 
 So `probeTurnstileAccess` asks for the capability instead: listing widgets is
 the cheapest call that requires `Account · Turnstile: Edit`. It reads and
-creates nothing, and it is what the clone's panel renders. The three readings it
-separates — no token, no account id, token cannot mint — each send an operator
-somewhere different.
+creates nothing, and it is what the clone's panel renders. The four readings it
+separates — no token, no account id, token not accepted, token cannot mint —
+each send an operator somewhere different, and the panel renders the server's
+own `diagnosis` string rather than restating it, so what an operator is told and
+what the sweep writes to `audit_log` cannot become two accounts of one fault.
+
+**This was measured, not anticipated.** The first production run of
+`/hooks/turnstile-reconcile` (2026-08-29) reported `cloudflareConfigured: true`,
+`accountConfigured: true`, and refused widget creation with Cloudflare's
+`Authentication error` — a token that is present, reaches Cloudflare, and lacks
+the Turnstile scope. Note also what the sweep does with that: it stops after the
+probe rather than attempting every clone, because spending one Cloudflare call
+per clone to collect the same refusal N times records one credential problem as
+N clone-specific failures.
 
 ## Rules that bite
 
