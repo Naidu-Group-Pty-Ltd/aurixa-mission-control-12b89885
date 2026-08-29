@@ -258,6 +258,70 @@ export function identityReadiness(
   return { steps, next, live: next === null };
 }
 
+export type EmailSweepFacts = {
+  identity:
+    | (Pick<
+        EmailIdentityRow,
+        "resend_domain_id" | "domain_status" | "key_written_at" | "last_error"
+      > & {
+        /** Not on `EmailIdentityRow` — the flow does not read it; the sweep does. */
+        updated_at: string | null;
+      })
+    | null;
+  /** For the cooling-off window; pass the run's own clock. */
+  now: number;
+};
+
+export type EmailSweepSkip = "not_started" | "complete" | "cooling_off";
+
+export type EmailSweepVerdict = { act: true; why: string } | { act: false; reason: EmailSweepSkip };
+
+/**
+ * How long to leave a failed identity alone. A sweep that retries a permanent
+ * refusal every run turns one misconfiguration into hundreds of Resend and
+ * Cloudflare calls a day and buries the real errors.
+ */
+export const EMAIL_SWEEP_COOLDOWN_MS = 30 * 60 * 1000;
+
+/**
+ * Whether the scheduled drain should carry this identity forward.
+ *
+ * **The drain ADVANCES an identity; it never STARTS one.** Registering a
+ * sending domain picks a hostname and a region and creates a resource at
+ * Resend — an operator's decision, not a sweep's. A sweep that started them
+ * would register a domain for every clone that lacks one, at the moment the
+ * feature was switched on.
+ *
+ * That rule is enforced structurally rather than by care: the drain acts only
+ * on a row that ALREADY has `resend_domain_id`, and `advanceEmailIdentity`
+ * creates a domain only when that field is null. So the skip below is what
+ * makes it safe to hand the drain the same `provision` mode the operator's
+ * button uses — which it needs, because `refresh` deliberately mints nothing,
+ * and a drain that polls verification forever without ever minting the key is
+ * exactly the gap this exists to close.
+ */
+export function decideEmailIdentitySweep(facts: EmailSweepFacts): EmailSweepVerdict {
+  const id = facts.identity;
+
+  // Nothing has been registered for this clone. See above: not ours to start.
+  if (!id?.resend_domain_id) return { act: false, reason: "not_started" };
+
+  // The key reached the clone. Finished — rotation is a separate, deliberate act.
+  if (id.key_written_at) return { act: false, reason: "complete" };
+
+  if (id.last_error && id.updated_at) {
+    const since = facts.now - Date.parse(id.updated_at);
+    if (Number.isFinite(since) && since >= 0 && since < EMAIL_SWEEP_COOLDOWN_MS) {
+      return { act: false, reason: "cooling_off" };
+    }
+  }
+
+  if (id.domain_status === "verified") {
+    return { act: true, why: "domain verified, key not yet minted" };
+  }
+  return { act: true, why: `domain ${id.domain_status}, polling verification` };
+}
+
 /**
  * A key may be minted only for a VERIFIED domain. Resend would happily mint
  * one earlier, and every send would then 403 — refusing here converts a
