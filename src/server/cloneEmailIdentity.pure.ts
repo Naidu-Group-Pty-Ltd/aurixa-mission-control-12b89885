@@ -155,6 +155,69 @@ export function resolveEmailDnsZone(input: {
 }
 
 /**
+ * Resend's record names are RELATIVE to the registrable domain, not FQDNs.
+ *
+ * For the sending domain `send.npc.aurixasystems.com.au` the API answers with
+ *
+ *     resend._domainkey.send.npc
+ *     send.send.npc            (SPF TXT and the MX, on Resend's own `send.`)
+ *
+ * — the same names with `.aurixasystems.com.au` cut off. Every consumer here
+ * assumed a fully-qualified name: `planDnsInstallation` asks whether a name
+ * ends with the zone, which is false for all three, so a domain sitting
+ * squarely inside a zone Mission Control manages was handed to an operator
+ * anyway. Measured on the first live provisioning run.
+ *
+ * The root is reconstructed from the SENDING DOMAIN rather than from a public
+ * suffix list: `.com.au` is a multi-label suffix, and guessing where a name
+ * ends is exactly the class of mistake that would silently write a record into
+ * the wrong place. The relative name's trailing labels overlap the sending
+ * domain's leading labels — `send.send.npc` ends with `send.npc`, which is
+ * where `send.npc.aurixasystems.com.au` begins — so the missing labels are the
+ * remainder, and nothing is inferred that the two names do not already agree
+ * on.
+ *
+ * Returns null when no overlap exists. A name that cannot be resolved
+ * confidently is one nobody should write: the caller treats it as the
+ * operator's to install.
+ */
+export function absoluteRecordName(raw: string, sendingDomain: string): string | null {
+  const n = raw.trim().toLowerCase().replace(/\.$/, "");
+  const s = sendingDomain.trim().toLowerCase().replace(/\.$/, "");
+  if (!n || !s) return null;
+  // Already fully qualified.
+  if (n === s || n.endsWith(`.${s}`)) return n;
+
+  const nl = n.split(".");
+  const sl = s.split(".");
+  // Longest overlap first: a shorter one can match by coincidence (a single
+  // `send` label would, and would append the wrong tail).
+  for (let k = Math.min(nl.length, sl.length); k >= 1; k--) {
+    if (nl.slice(nl.length - k).join(".") === sl.slice(0, k).join(".")) {
+      return [...nl, ...sl.slice(k)].join(".");
+    }
+  }
+  return null;
+}
+
+/**
+ * Re-express a set of Resend records with fully-qualified names.
+ *
+ * Applied where the records are STORED, so the planner, the Cloudflare writer
+ * and the table an operator copies from all read the same absolute names —
+ * rather than each re-deriving them and one of them getting it wrong.
+ */
+export function withAbsoluteRecordNames(
+  records: ResendDnsRecord[],
+  sendingDomain: string,
+): ResendDnsRecord[] {
+  return records.map((r) => {
+    const absolute = absoluteRecordName(r.name, sendingDomain);
+    return absolute ? { ...r, name: absolute } : r;
+  });
+}
+
+/**
  * Which of Resend's required records Mission Control may write itself.
  *
  * A record is auto-installable only when the clone has a Cloudflare zone AND

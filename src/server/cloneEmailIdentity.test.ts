@@ -8,10 +8,12 @@ import {
   keyLast4,
   ledgerStatusForShell,
   mayAlignSenderAddress,
+  absoluteRecordName,
   decideEmailIdentitySweep,
   EMAIL_SWEEP_COOLDOWN_MS,
   planDnsInstallation,
   resolveEmailDnsZone,
+  withAbsoluteRecordNames,
   type EmailIdentityRow,
 } from "./cloneEmailIdentity.pure";
 import type { ResendDnsRecord } from "./resend-client";
@@ -83,6 +85,75 @@ describe("sending domain and address shapes", () => {
 
   it("keeps only the last four characters of a token", () => {
     expect(keyLast4("re_abc123XYZ9")).toBe("XYZ9");
+  });
+});
+
+describe("absoluteRecordName", () => {
+  // Verbatim from the first live provisioning run: Resend answered with these
+  // three names for sending domain send.npc.aurixasystems.com.au, and all
+  // three were handed to the operator because none ends with the zone.
+  const S = "send.npc.aurixasystems.com.au";
+
+  it("restores the registrable domain Resend strips", () => {
+    expect(absoluteRecordName("resend._domainkey.send.npc", S)).toBe(
+      "resend._domainkey.send.npc.aurixasystems.com.au",
+    );
+    expect(absoluteRecordName("send.send.npc", S)).toBe("send.send.npc.aurixasystems.com.au");
+  });
+
+  it("leaves an already fully-qualified name alone", () => {
+    expect(absoluteRecordName(S, S)).toBe(S);
+    expect(absoluteRecordName(`resend._domainkey.${S}`, S)).toBe(`resend._domainkey.${S}`);
+  });
+
+  it("resolves a bare relative apex to the sending domain itself", () => {
+    expect(absoluteRecordName("send.npc", S)).toBe(S);
+  });
+
+  it("takes the LONGEST overlap, not the first plausible one", () => {
+    // A single trailing `send` label also matches the sending domain's first
+    // label; appending from there would produce
+    // send.send.npc.npc.aurixasystems.com.au — a real record in the wrong place.
+    expect(absoluteRecordName("send.send.npc", S)).toBe("send.send.npc.aurixasystems.com.au");
+  });
+
+  it("tolerates a trailing dot and mixed case", () => {
+    expect(absoluteRecordName("Send.Send.NPC.", S)).toBe("send.send.npc.aurixasystems.com.au");
+  });
+
+  it("refuses a name that shares nothing with the sending domain", () => {
+    // Fail closed: an unresolvable name is the operator's to install, never
+    // something to write into a zone on a guess.
+    expect(absoluteRecordName("mail.example.org", S)).toBeNull();
+    expect(absoluteRecordName("", S)).toBeNull();
+  });
+
+  it("makes the records land inside the zone, which is the whole point", () => {
+    const raw: ResendDnsRecord[] = [
+      { record: "DKIM", name: "resend._domainkey.send.npc", type: "TXT", value: "p=..." },
+      { record: "SPF", name: "send.send.npc", type: "MX", value: "feedback", priority: 10 },
+      { record: "SPF", name: "send.send.npc", type: "TXT", value: "v=spf1" },
+    ];
+    const plan = planDnsInstallation(withAbsoluteRecordNames(raw, S), "aurixasystems.com.au");
+    expect(plan.auto).toHaveLength(3);
+    expect(plan.manual).toHaveLength(0);
+  });
+
+  it("without the rewrite every record is handed over — the measured defect", () => {
+    const raw: ResendDnsRecord[] = [
+      { record: "DKIM", name: "resend._domainkey.send.npc", type: "TXT", value: "p=..." },
+      { record: "SPF", name: "send.send.npc", type: "MX", value: "feedback", priority: 10 },
+    ];
+    const plan = planDnsInstallation(raw, "aurixasystems.com.au");
+    expect(plan.auto).toHaveLength(0);
+    expect(plan.manual).toHaveLength(2);
+  });
+
+  it("leaves an unresolvable name untouched rather than dropping it", () => {
+    const raw: ResendDnsRecord[] = [
+      { record: "X", name: "mail.example.org", type: "TXT", value: "v" },
+    ];
+    expect(withAbsoluteRecordNames(raw, S)[0].name).toBe("mail.example.org");
   });
 });
 

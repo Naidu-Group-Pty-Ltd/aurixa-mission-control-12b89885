@@ -41,6 +41,7 @@ import {
   type ResendDomain,
 } from "./resend-client";
 import {
+  withAbsoluteRecordNames,
   canMintKey,
   deriveFromAddress,
   deriveSendingDomain,
@@ -324,7 +325,13 @@ export async function advanceEmailIdentity(
         sending_domain: row.sending_domain,
         resend_domain_id: domain.id,
         domain_status: status,
-        dns_records: (domain.records ?? []) as unknown as Json,
+        // Resend answers with names relative to the registrable domain;
+        // everything downstream — the planner, the Cloudflare writer, the
+        // table an operator copies from — expects FQDNs.
+        dns_records: withAbsoluteRecordNames(
+          domain.records ?? [],
+          row.sending_domain,
+        ) as unknown as Json,
         last_error: null,
       });
       if (!row.resend_domain_id) advanced.push("domain_registered");
@@ -332,7 +339,7 @@ export async function advanceEmailIdentity(
         ...row,
         resend_domain_id: domain.id,
         domain_status: status,
-        dns_records: domain.records ?? [],
+        dns_records: withAbsoluteRecordNames(domain.records ?? [], row.sending_domain),
       };
     }
 
@@ -411,9 +418,16 @@ export async function advanceEmailIdentity(
         await persistIdentity(supabase, cloneId, {
           sending_domain: row.sending_domain,
           domain_status: status,
-          dns_records: (fresh.records ?? []) as unknown as Json,
+          dns_records: withAbsoluteRecordNames(
+            fresh.records ?? [],
+            row.sending_domain,
+          ) as unknown as Json,
         });
-        row = { ...row, domain_status: status, dns_records: fresh.records ?? [] };
+        row = {
+          ...row,
+          domain_status: status,
+          dns_records: withAbsoluteRecordNames(fresh.records ?? [], row.sending_domain),
+        };
         advanced.push(`verification_${status}`);
       }
     }

@@ -70,6 +70,25 @@ per-clone buttons; and the prime rotating its own key affects nobody.
   `RESEND_API_KEY` as `missing` on a re-provision (the token cannot be read
   back) instead of silently swapping back to the prime's shared key. The
   identity panel's *Rotate key* is the re-mint.
+- **Resend's record names are relative; every consumer here wanted FQDNs.**
+  For `send.npc.aurixasystems.com.au` the API answers `send.send.npc` and
+  `resend._domainkey.send.npc` — the registrable domain cut off.
+  `planDnsInstallation` asks whether a name ends with the zone, which is false
+  for all of them, so the first live provisioning run registered the domain
+  correctly and then handed all three records to an operator anyway, for a
+  domain sitting squarely inside a zone this platform manages. The zone fix
+  below was right and was defeated one line later. `absoluteRecordName`
+  restores the root from the SENDING DOMAIN rather than a public suffix list
+  (`.com.au` is multi-label, and guessing where a name ends is how a record
+  gets written in the wrong place): the relative name's trailing labels
+  overlap the sending domain's leading labels, so the missing labels are the
+  remainder and nothing is inferred the two names do not already agree on.
+  Longest overlap wins — a single `send` label also matches, and appending
+  from there yields a real record in the wrong place. A name that resolves to
+  nothing is left alone and stays the operator's, because a name that cannot
+  be placed confidently is not one to write on a guess. Applied where records
+  are STORED, so the planner, the Cloudflare writer and the table an operator
+  copies from all read the same names instead of each re-deriving them.
 - **The DNS zone is resolved from where DNS actually lives.** This gate used
   to be `clone.cloudflare_enabled ? clone.cloudflare_zone_id : null`, which
   asks the wrong question: those two columns are set by ATTACHING AN EDGE
