@@ -182,7 +182,9 @@ function CloudflarePage() {
         {!tokenQ.data?.configured && (
           <CardContent className="text-sm text-muted-foreground">
             Add the <code>CLOUDFLARE_API_TOKEN</code> secret in Lovable Cloud settings. Required
-            scopes: Zone — Read, Zone Settings — Edit, Analytics — Read.
+            scopes: Zone — Read, Zone Settings — Edit, Analytics — Read, and{" "}
+            <strong>Account — Turnstile: Edit</strong> for per-clone sign-in widgets. A token
+            missing the last one still reports <em>Active</em> here: validity is not scope.
           </CardContent>
         )}
       </Card>

@@ -204,13 +204,17 @@ export const CAPABILITIES: readonly CapabilitySpec[] = [
   },
   {
     key: "dns",
-    title: "DNS — Cloudflare",
+    title: "DNS & CAPTCHA — Cloudflare",
     consequence:
-      "A clone builds and serves, but its subdomain never resolves. The deploy URL 404s at DNS.",
+      "A clone builds and serves, but its subdomain never resolves and it gets no Turnstile " +
+      "widget of its own — so its login page cannot answer its own security check.",
     credentials: [
       {
         name: "CLOUDFLARE_API_TOKEN",
-        purpose: "Writes the clone's CNAME. Needs Zone:DNS:Edit and Zone:Zone:Read.",
+        purpose:
+          "Writes the clone's CNAME and mints its own Turnstile widget. Needs Zone:DNS:Edit, " +
+          "Zone:Zone:Read AND Account:Turnstile:Edit — the first two verify as an active token " +
+          "and refuse widget creation, so scope is not something token validity reports.",
         required: true,
       },
     ],

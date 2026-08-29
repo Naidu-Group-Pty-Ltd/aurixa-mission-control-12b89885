@@ -68,6 +68,7 @@ import { Route as HooksWarmHealthRouteImport } from './routes/hooks.warm-health'
 import { Route as HooksVoiceOutboundDispatchRouteImport } from './routes/hooks.voice-outbound-dispatch'
 import { Route as HooksVoiceCallDrainRouteImport } from './routes/hooks.voice-call-drain'
 import { Route as HooksVercelRouteImport } from './routes/hooks.vercel'
+import { Route as HooksTurnstileReconcileRouteImport } from './routes/hooks.turnstile-reconcile'
 import { Route as HooksTokenAlertsRouteImport } from './routes/hooks.token-alerts'
 import { Route as HooksSupportRemediationDrainRouteImport } from './routes/hooks.support-remediation-drain'
 import { Route as HooksRunSchedulesRouteImport } from './routes/hooks.run-schedules'
@@ -468,6 +469,11 @@ const HooksVoiceCallDrainRoute = HooksVoiceCallDrainRouteImport.update({
 const HooksVercelRoute = HooksVercelRouteImport.update({
   id: '/hooks/vercel',
   path: '/hooks/vercel',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksTurnstileReconcileRoute = HooksTurnstileReconcileRouteImport.update({
+  id: '/hooks/turnstile-reconcile',
+  path: '/hooks/turnstile-reconcile',
   getParentRoute: () => rootRouteImport,
 } as any)
 const HooksTokenAlertsRoute = HooksTokenAlertsRouteImport.update({
@@ -1098,6 +1104,7 @@ export interface FileRoutesByFullPath {
   '/hooks/run-schedules': typeof HooksRunSchedulesRoute
   '/hooks/support-remediation-drain': typeof HooksSupportRemediationDrainRoute
   '/hooks/token-alerts': typeof HooksTokenAlertsRoute
+  '/hooks/turnstile-reconcile': typeof HooksTurnstileReconcileRoute
   '/hooks/vercel': typeof HooksVercelRoute
   '/hooks/voice-call-drain': typeof HooksVoiceCallDrainRoute
   '/hooks/voice-outbound-dispatch': typeof HooksVoiceOutboundDispatchRoute
@@ -1261,6 +1268,7 @@ export interface FileRoutesByTo {
   '/hooks/run-schedules': typeof HooksRunSchedulesRoute
   '/hooks/support-remediation-drain': typeof HooksSupportRemediationDrainRoute
   '/hooks/token-alerts': typeof HooksTokenAlertsRoute
+  '/hooks/turnstile-reconcile': typeof HooksTurnstileReconcileRoute
   '/hooks/vercel': typeof HooksVercelRoute
   '/hooks/voice-call-drain': typeof HooksVoiceCallDrainRoute
   '/hooks/voice-outbound-dispatch': typeof HooksVoiceOutboundDispatchRoute
@@ -1426,6 +1434,7 @@ export interface FileRoutesById {
   '/hooks/run-schedules': typeof HooksRunSchedulesRoute
   '/hooks/support-remediation-drain': typeof HooksSupportRemediationDrainRoute
   '/hooks/token-alerts': typeof HooksTokenAlertsRoute
+  '/hooks/turnstile-reconcile': typeof HooksTurnstileReconcileRoute
   '/hooks/vercel': typeof HooksVercelRoute
   '/hooks/voice-call-drain': typeof HooksVoiceCallDrainRoute
   '/hooks/voice-outbound-dispatch': typeof HooksVoiceOutboundDispatchRoute
@@ -1592,6 +1601,7 @@ export interface FileRouteTypes {
     | '/hooks/run-schedules'
     | '/hooks/support-remediation-drain'
     | '/hooks/token-alerts'
+    | '/hooks/turnstile-reconcile'
     | '/hooks/vercel'
     | '/hooks/voice-call-drain'
     | '/hooks/voice-outbound-dispatch'
@@ -1755,6 +1765,7 @@ export interface FileRouteTypes {
     | '/hooks/run-schedules'
     | '/hooks/support-remediation-drain'
     | '/hooks/token-alerts'
+    | '/hooks/turnstile-reconcile'
     | '/hooks/vercel'
     | '/hooks/voice-call-drain'
     | '/hooks/voice-outbound-dispatch'
@@ -1919,6 +1930,7 @@ export interface FileRouteTypes {
     | '/hooks/run-schedules'
     | '/hooks/support-remediation-drain'
     | '/hooks/token-alerts'
+    | '/hooks/turnstile-reconcile'
     | '/hooks/vercel'
     | '/hooks/voice-call-drain'
     | '/hooks/voice-outbound-dispatch'
@@ -2081,6 +2093,7 @@ export interface RootRouteChildren {
   HooksRunSchedulesRoute: typeof HooksRunSchedulesRoute
   HooksSupportRemediationDrainRoute: typeof HooksSupportRemediationDrainRoute
   HooksTokenAlertsRoute: typeof HooksTokenAlertsRoute
+  HooksTurnstileReconcileRoute: typeof HooksTurnstileReconcileRoute
   HooksVercelRoute: typeof HooksVercelRoute
   HooksVoiceCallDrainRoute: typeof HooksVoiceCallDrainRoute
   HooksVoiceOutboundDispatchRoute: typeof HooksVoiceOutboundDispatchRoute
@@ -2563,6 +2576,13 @@ declare module '@tanstack/react-router' {
       path: '/hooks/vercel'
       fullPath: '/hooks/vercel'
       preLoaderRoute: typeof HooksVercelRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/turnstile-reconcile': {
+      id: '/hooks/turnstile-reconcile'
+      path: '/hooks/turnstile-reconcile'
+      fullPath: '/hooks/turnstile-reconcile'
+      preLoaderRoute: typeof HooksTurnstileReconcileRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/hooks/token-alerts': {
@@ -3468,6 +3488,7 @@ const rootRouteChildren: RootRouteChildren = {
   HooksRunSchedulesRoute: HooksRunSchedulesRoute,
   HooksSupportRemediationDrainRoute: HooksSupportRemediationDrainRoute,
   HooksTokenAlertsRoute: HooksTokenAlertsRoute,
+  HooksTurnstileReconcileRoute: HooksTurnstileReconcileRoute,
   HooksVercelRoute: HooksVercelRoute,
   HooksVoiceCallDrainRoute: HooksVoiceCallDrainRoute,
   HooksVoiceOutboundDispatchRoute: HooksVoiceOutboundDispatchRoute,

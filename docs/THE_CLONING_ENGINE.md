@@ -31,12 +31,21 @@ behind a `/hooks/*` route driven by `pg_cron`:
 | ------------------- | ----------------------------------- | ------------ | -------------------------------------------------------------------------------- |
 | `cascade_events`    | `/hooks/cascade-drain`              | every minute | the module files, merged into the clone's repo                                   |
 | `clone_backends`    | `/hooks/backend-provisioning-drain` | every minute | the clone's own Supabase project — schema, edge functions, secrets, seeded admin |
-| `clone_deployments` | `/hooks/deployment-drain`           | every minute | the Vercel project, its environment, the build, the domain                       |
+| `clone_deployments` | `/hooks/deployment-drain`           | every minute | the Vercel project, its environment (including this clone's OWN Turnstile site key), the build, the domain |
 
 That is the whole engine. There is no orchestrator above these three; they are
 coupled only through data, and only in one place — `deployment-drain` will not
 sync a clone's environment until `clone_backends` has published a URL and an
 anon key.
+
+One thing rides on `syncing_env` rather than having a queue of its own, and the
+placement is not interchangeable: the clone's **Turnstile widget** is minted
+there ([`CLONE_TURNSTILE_IDENTITY.md`](./CLONE_TURNSTILE_IDENTITY.md)). Vite
+inlines `VITE_*` at BUILD time, so a site key that arrives after `deploying` is
+a site key the bundle does not have. It is best-effort by design — a clone that
+cannot get a widget reaches production saying its security check is
+unconfigured, rather than failing to deploy — and the refusal is recorded on the
+identity row instead of being swallowed.
 
 ---
 
@@ -166,8 +175,13 @@ on everything near it.
   `VERCEL_TEAM_ID` and `VERCEL_WEBHOOK_SECRET` are configured and proven: the
   hand-made clone's deployment ran the full pipeline to `live` on
   2026-08-28 (`npc.aurixasystems.com.au`). `CLOUDFLARE_API_TOKEN` remains
-  unset — subdomain DNS and the email-identity auto-DNS path stay dormant,
-  which is the correct refusal, not a failure.
+  unset — subdomain DNS, the email-identity auto-DNS path and now the
+  per-clone **Turnstile** widget all stay dormant, which is the correct
+  refusal, not a failure. The Cloudflare *account id* is configured
+  (`platform_hosting_config.cloudflare_account_id`), so the token is the only
+  thing missing. Until it is set, a clone deploys with no site key and its
+  login page says the security check is not configured; the prime's widget is
+  never substituted.
 - **No ENGINE-provisioned clone has run end to end.** The one clone in the
   fleet was built by hand; its backend and deployment exercised the drains,
   but `provisionClone → backend-provisioning-drain → deployment-drain` has

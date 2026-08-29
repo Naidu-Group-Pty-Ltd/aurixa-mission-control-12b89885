@@ -68,6 +68,19 @@ export type CFZone = {
   plan?: { name: string };
 };
 
+export type TurnstileMode = "managed" | "non-interactive" | "invisible";
+
+export type TurnstileWidget = {
+  sitekey: string;
+  /** Present only on create and rotate_secret — Cloudflare never reads it back. */
+  secret?: string;
+  name: string;
+  domains: string[];
+  mode: string;
+  created_on?: string;
+  modified_on?: string;
+};
+
 export const cloudflareApi = {
   verifyToken: () => cf<{ id: string; status: string }>("/user/tokens/verify"),
   listZones: (accountId?: string) =>
@@ -152,4 +165,47 @@ export const cloudflareApi = {
     ),
   deleteDnsRecord: (zoneId: string, recordId: string) =>
     cf<{ id: string }>(`/zones/${zoneId}/dns_records/${recordId}`, { method: "DELETE" }),
+
+  // ── Turnstile widgets (per-clone CAPTCHA identity) ─────────────────────
+  //
+  // A widget IS the (site key, secret) pair. `sitekey` is public — it is
+  // rendered in the login page — and the `secret` is returned ONLY by create
+  // and rotate_secret, never by a read. Callers must deliver it in the same
+  // flow that obtained it.
+  createTurnstileWidget: (
+    accountId: string,
+    body: { name: string; domains: string[]; mode?: TurnstileMode },
+  ) =>
+    cf<TurnstileWidget>(`/accounts/${accountId}/challenges/widgets`, {
+      method: "POST",
+      body: JSON.stringify({ mode: "managed", ...body }),
+    }),
+
+  getTurnstileWidget: (accountId: string, sitekey: string) =>
+    cf<TurnstileWidget>(`/accounts/${accountId}/challenges/widgets/${sitekey}`),
+
+  listTurnstileWidgets: (accountId: string) =>
+    cf<TurnstileWidget[]>(`/accounts/${accountId}/challenges/widgets?per_page=50`),
+
+  updateTurnstileWidget: (
+    accountId: string,
+    sitekey: string,
+    body: { name?: string; domains?: string[]; mode?: TurnstileMode },
+  ) =>
+    cf<TurnstileWidget>(`/accounts/${accountId}/challenges/widgets/${sitekey}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+
+  /** Returns the widget with a FRESH `secret`; the previous one stops verifying. */
+  rotateTurnstileSecret: (accountId: string, sitekey: string) =>
+    cf<TurnstileWidget>(`/accounts/${accountId}/challenges/widgets/${sitekey}/rotate_secret`, {
+      method: "POST",
+      body: JSON.stringify({ invalidate_immediately: true }),
+    }),
+
+  deleteTurnstileWidget: (accountId: string, sitekey: string) =>
+    cf<TurnstileWidget>(`/accounts/${accountId}/challenges/widgets/${sitekey}`, {
+      method: "DELETE",
+    }),
 };

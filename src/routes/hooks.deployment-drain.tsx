@@ -354,11 +354,47 @@ async function step(row: DeploymentRow): Promise<StepOutcome> {
       } catch {
         primeProjectRef = null;
       }
+      // This clone's OWN Turnstile widget, minted here because Vite inlines
+      // `VITE_*` at BUILD time: a site key that arrives after `deploying` is a
+      // site key the bundle does not have. Best-effort for the same reason the
+      // prime ref above is — a clone that cannot get a widget should reach
+      // production saying its security check is unconfigured, not fail to
+      // deploy at all. The refusal is recorded on the identity row and shown in
+      // the clone's Turnstile panel, so it is visible rather than swallowed.
+      //
+      // Never the prime's key. `buildCloneEnv` has no parameter for one, and
+      // the only value that can reach the bundle is the one Cloudflare minted
+      // for this clone.
+      let turnstileSiteKey: string | null = null;
+      let turnstileNote = "not attempted";
+      try {
+        const { provisionTurnstileIdentity, isCloudflareConfigured } =
+          await import("@/server/turnstile-identity.server");
+        if (!isCloudflareConfigured()) {
+          turnstileNote = "CLOUDFLARE_API_TOKEN not configured — no widget minted for this clone";
+        } else {
+          const minted = await provisionTurnstileIdentity(admin, row.clone_id, {
+            mode: "provision",
+          });
+          if (minted.ok) {
+            turnstileSiteKey = minted.row?.site_key ?? null;
+            turnstileNote = minted.advanced.length
+              ? minted.advanced.join("; ")
+              : "already provisioned";
+          } else {
+            turnstileNote = minted.error;
+          }
+        }
+      } catch (e) {
+        turnstileNote = e instanceof Error ? e.message : String(e);
+      }
+
       const vars = buildCloneEnv({
         supabaseUrl: backend.supabase_url,
         supabaseProjectRef: backend.supabase_project_ref,
         supabaseAnonKey: backend.anon_key,
         primeProjectRef,
+        extra: { VITE_TURNSTILE_SITE_KEY: turnstileSiteKey },
       });
       const digest = envDigest(vars);
       if (digest === row.env_digest) {
@@ -368,7 +404,7 @@ async function step(row: DeploymentRow): Promise<StepOutcome> {
       return {
         kind: "advance",
         patch: { env_digest: digest, env_synced_at: new Date().toISOString() },
-        result: synced,
+        result: { ...(synced as Record<string, unknown>), turnstile: turnstileNote },
       };
     }
 
