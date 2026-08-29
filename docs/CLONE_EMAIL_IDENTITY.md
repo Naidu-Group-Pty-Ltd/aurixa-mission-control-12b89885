@@ -70,6 +70,22 @@ per-clone buttons; and the prime rotating its own key affects nobody.
   `RESEND_API_KEY` as `missing` on a re-provision (the token cannot be read
   back) instead of silently swapping back to the prime's shared key. The
   identity panel's *Rotate key* is the re-mint.
+- **Never ask Resend to verify a record that is not there yet.** Its verifier
+  resolves through a caching resolver, and a MISS is cached for the zone's SOA
+  negative TTL — 1800s on `aurixasystems.com.au`. Measured on the first clone:
+  the domain was registered at 11:15 and its records installed at 12:32, while
+  the drain asked for verification every five minutes throughout, so roughly
+  seventeen lookups returned NXDOMAIN and the last of them held "this does not
+  exist" until half an hour after the records were already correct and
+  resolving publicly. The delay was entirely self-inflicted, and it is the kind
+  that reads as a vendor being slow. The poll is now gated on the records
+  actually resolving (one DoH lookup per distinct name — `expectedDnsProbes`),
+  and "not visible yet" is reported rather than being indistinguishable from
+  "Resend says no". Values are not compared: Resend is the authority on its own
+  DKIM key, and re-implementing TXT chunk joining here is a way to be subtly
+  wrong. The probe fails OPEN — an unreachable resolver reports present — since
+  a wasted verify call costs nothing and a false "missing" would stop us asking
+  at all.
 - **Resend's record names are relative; every consumer here wanted FQDNs.**
   For `send.npc.aurixasystems.com.au` the API answers `send.send.npc` and
   `resend._domainkey.send.npc` — the registrable domain cut off.

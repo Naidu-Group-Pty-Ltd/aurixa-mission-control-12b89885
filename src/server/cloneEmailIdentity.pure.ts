@@ -321,6 +321,34 @@ export function identityReadiness(
   return { steps, next, live: next === null };
 }
 
+export type DnsProbe = { name: string; type: string };
+
+/**
+ * The distinct (name, type) lookups that decide whether Resend's records are
+ * visible in DNS yet.
+ *
+ * Resend answers with two records on the same name — an MX and a TXT for SPF —
+ * so a naive walk asks the same question twice. Values are deliberately NOT
+ * compared: Resend is the authority on whether its own DKIM key matches, and
+ * re-implementing that here would mean re-implementing TXT chunk joining and
+ * getting it subtly wrong. All this needs to know is whether the name exists,
+ * because that is what a negative cache poisons.
+ */
+export function expectedDnsProbes(records: ResendDnsRecord[]): DnsProbe[] {
+  const seen = new Set<string>();
+  const probes: DnsProbe[] = [];
+  for (const r of records) {
+    const name = r.name.trim().toLowerCase();
+    const type = r.type.trim().toUpperCase();
+    if (!name || !type) continue;
+    const key = `${type} ${name}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    probes.push({ name, type });
+  }
+  return probes;
+}
+
 export type EmailSweepFacts = {
   identity:
     | (Pick<

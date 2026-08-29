@@ -50,6 +50,7 @@ import {
   keyLast4,
   mayAlignSenderAddress,
   decideEmailIdentitySweep,
+  expectedDnsProbes,
   planDnsInstallation,
   resolveEmailDnsZone,
   type EmailIdentityReadiness,
@@ -410,25 +411,43 @@ export async function advanceEmailIdentity(
     }
 
     // ── Verification poll ────────────────────────────────────────────
+    //
+    // Never ask Resend to verify a record that is not there yet. Its verifier
+    // resolves through a caching resolver, and a miss is cached for the zone's
+    // SOA negative TTL — 1800s on ours. Measured on the first clone: the
+    // domain was registered at 11:15 and the records were installed at 12:32,
+    // and the drain asked for verification every five minutes throughout, so
+    // roughly seventeen lookups returned NXDOMAIN and the last of them held
+    // "this does not exist" until half an hour after the records were already
+    // correct. The delay was entirely self-inflicted.
+    //
+    // One DoH lookup per distinct name is far cheaper than a wrong answer
+    // cached for thirty minutes, and "not visible yet" is reported rather than
+    // being indistinguishable from "Resend says no".
     if (row.resend_domain_id && row.domain_status !== "verified") {
-      await resendApi.verifyDomain(row.resend_domain_id);
-      const fresh = await resendApi.getDomain(row.resend_domain_id);
-      const status = mapDomainStatus(fresh.status);
-      if (status !== row.domain_status) {
-        await persistIdentity(supabase, cloneId, {
-          sending_domain: row.sending_domain,
-          domain_status: status,
-          dns_records: withAbsoluteRecordNames(
-            fresh.records ?? [],
-            row.sending_domain,
-          ) as unknown as Json,
-        });
-        row = {
-          ...row,
-          domain_status: status,
-          dns_records: withAbsoluteRecordNames(fresh.records ?? [], row.sending_domain),
-        };
-        advanced.push(`verification_${status}`);
+      const visibility = await dnsRecordsVisible(row.dns_records);
+      if (!visibility.allPresent) {
+        advanced.push(`verification_deferred_dns_missing:${visibility.missing.join(",")}`);
+      } else {
+        await resendApi.verifyDomain(row.resend_domain_id);
+        const fresh = await resendApi.getDomain(row.resend_domain_id);
+        const status = mapDomainStatus(fresh.status);
+        if (status !== row.domain_status) {
+          await persistIdentity(supabase, cloneId, {
+            sending_domain: row.sending_domain,
+            domain_status: status,
+            dns_records: withAbsoluteRecordNames(
+              fresh.records ?? [],
+              row.sending_domain,
+            ) as unknown as Json,
+          });
+          row = {
+            ...row,
+            domain_status: status,
+            dns_records: withAbsoluteRecordNames(fresh.records ?? [], row.sending_domain),
+          };
+          advanced.push(`verification_${status}`);
+        }
       }
     }
 
@@ -554,6 +573,45 @@ export async function sweepEmailIdentities(
     }
   }
   return report;
+}
+
+/**
+ * Are Resend's records visible in public DNS yet?
+ *
+ * Resolved over DNS-over-HTTPS because the runtime is a Worker with no
+ * resolver of its own. Presence only — see `expectedDnsProbes` for why values
+ * are Resend's business rather than ours.
+ *
+ * Fails OPEN: a probe that errors or times out reports the record as present,
+ * so a hiccup reaching the resolver delays nothing. The cost of a false
+ * "present" is one wasted verify call; the cost of a false "missing" is a
+ * domain that never verifies because we stopped asking.
+ */
+async function dnsRecordsVisible(
+  records: ResendDnsRecord[],
+): Promise<{ allPresent: boolean; missing: string[] }> {
+  const probes = expectedDnsProbes(records);
+  if (probes.length === 0) return { allPresent: false, missing: ["no records published yet"] };
+
+  const missing: string[] = [];
+  await Promise.all(
+    probes.map(async (probe) => {
+      try {
+        const res = await fetch(
+          `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(probe.name)}&type=${encodeURIComponent(probe.type)}`,
+          { headers: { accept: "application/dns-json" } },
+        );
+        if (!res.ok) return; // fail open
+        const body = (await res.json()) as { Answer?: unknown[] };
+        if (!Array.isArray(body.Answer) || body.Answer.length === 0) {
+          missing.push(`${probe.type} ${probe.name}`);
+        }
+      } catch {
+        // fail open
+      }
+    }),
+  );
+  return { allPresent: missing.length === 0, missing };
 }
 
 /**
