@@ -652,6 +652,17 @@ export type TurnstileAccessProbe = {
   accountConfigured: boolean;
   /** Whether Cloudflare accepts the token at all, independently of scope. */
   tokenValid: boolean;
+  /**
+   * Cloudflare's id for the token this deployment is holding — an identifier,
+   * not a credential, and the last few characters of the id are the ones the
+   * dashboard URL shows. It is here because "the permission was added to a
+   * different token" and "the permission was not saved" are indistinguishable
+   * from the error, and this tells them apart in one glance.
+   */
+  tokenId?: string;
+  /** Accounts the token can actually see, and whether ours is among them. */
+  visibleAccounts?: Array<{ id: string; name: string }>;
+  accountInScope?: boolean;
   /** True only when Cloudflare actually served a Turnstile read. */
   canMint: boolean;
   widgetCount?: number;
@@ -694,9 +705,11 @@ export async function probeTurnstileAccess(supabase: Db): Promise<TurnstileAcces
   // verifies and cannot list widgets is a scope problem; one that does not
   // verify is the wrong token.
   let tokenValid = false;
+  let tokenId: string | undefined;
   try {
     const verified = await cloudflareApi.verifyToken();
     tokenValid = verified?.status === "active";
+    tokenId = verified?.id;
   } catch {
     tokenValid = false;
   }
@@ -707,23 +720,62 @@ export async function probeTurnstileAccess(supabase: Db): Promise<TurnstileAcces
       tokenPresent: true,
       accountConfigured: true,
       tokenValid,
+      tokenId,
       canMint: true,
       widgetCount: widgets?.length ?? 0,
       diagnosis: "Cloudflare is serving Turnstile for this account.",
     };
   } catch (e) {
     const error = msg(e);
+
+    // Which accounts DOES it reach? A token whose Account Resources do not
+    // include ours fails here identically to one that simply lacks the
+    // Turnstile permission, and identically again to the permission having
+    // been added to some OTHER token. Naming the accounts separates all three,
+    // and none of it is secret.
+    let visibleAccounts: Array<{ id: string; name: string }> | undefined;
+    try {
+      const accounts = await cloudflareApi.listAccounts();
+      visibleAccounts = (accounts ?? []).map((a) => ({ id: a.id, name: a.name }));
+    } catch {
+      visibleAccounts = undefined;
+    }
+    const accountInScope = visibleAccounts?.some((a) => a.id === accountId);
+
+    let diagnosis: string;
+    if (!tokenValid) {
+      diagnosis = `Cloudflare does not accept this token at all. Cloudflare said: ${error}`;
+    } else if (visibleAccounts && visibleAccounts.length === 0) {
+      diagnosis =
+        `Token ${tokenId ?? "(id unknown)"} is valid and can see NO accounts, so it holds no ` +
+        "account-level permission at all. Turnstile is account-scoped. Either the change was not " +
+        `saved, or it was made on a different token. Cloudflare said: ${error}`;
+    } else if (visibleAccounts && !accountInScope) {
+      diagnosis =
+        `Token ${tokenId ?? "(id unknown)"} reaches ${visibleAccounts
+          .map((a) => `${a.name} (${a.id})`)
+          .join(", ")} — but NOT ${accountId}, which is the account this deployment provisions ` +
+        `into. Point the token's Account Resources at that account, or correct ` +
+        `platform_hosting_config.cloudflare_account_id. Cloudflare said: ${error}`;
+    } else {
+      diagnosis =
+        `Token ${tokenId ?? "(id unknown)"} is valid and reaches account ${accountId}, and ` +
+        "Cloudflare still refuses Turnstile — so the Turnstile permission itself is missing from " +
+        "THIS token. Cloudflare applies permission edits immediately, so a change that is not " +
+        "visible here was not saved, or was saved on a different token: compare the id above with " +
+        `the one in the dashboard URL. Cloudflare said: ${error}`;
+    }
+
     return {
       tokenPresent: true,
       accountConfigured: true,
       tokenValid,
+      tokenId,
+      visibleAccounts,
+      accountInScope,
       canMint: false,
       error,
-      diagnosis: tokenValid
-        ? "Cloudflare accepts this token and will not serve Turnstile with it, which is a SCOPE " +
-          "problem, not a bad token: add Account · Turnstile · Edit to the token (and check it is " +
-          `scoped to account ${accountId}). Cloudflare said: ${error}`
-        : `Cloudflare does not accept this token at all. Cloudflare said: ${error}`,
+      diagnosis,
     };
   }
 }

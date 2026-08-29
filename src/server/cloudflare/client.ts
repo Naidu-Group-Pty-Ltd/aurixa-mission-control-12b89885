@@ -83,6 +83,13 @@ export type TurnstileWidget = {
 
 export const cloudflareApi = {
   verifyToken: () => cf<{ id: string; status: string }>("/user/tokens/verify"),
+  /**
+   * Accounts this token can see. Not a secret, and the only way to tell
+   * "the permission is on a DIFFERENT token" apart from "the permission did
+   * not save" — both of which Cloudflare reports as `Authentication error`
+   * on the Turnstile endpoint.
+   */
+  listAccounts: () => cf<Array<{ id: string; name: string }>>("/accounts?per_page=50"),
   listZones: (accountId?: string) =>
     cf<CFZone[]>(`/zones?per_page=50${accountId ? `&account.id=${accountId}` : ""}`),
   getZone: (zoneId: string) => cf<CFZone>(`/zones/${zoneId}`),
