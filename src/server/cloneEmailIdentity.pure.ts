@@ -96,6 +96,64 @@ export type DnsInstallationPlan = {
   manual: ResendDnsRecord[];
 };
 
+export type EmailDnsZone = {
+  zoneId: string;
+  /**
+   * Known without a vendor call for the fleet zone, whose name is stored
+   * beside its id. Null for a clone's own zone — the name is read from
+   * Cloudflare, because nothing local records it.
+   */
+  zoneName: string | null;
+  source: "clone" | "fleet";
+};
+
+/**
+ * Which Cloudflare zone to try to write this clone's email DNS into.
+ *
+ * This used to be `clone.cloudflare_enabled ? clone.cloudflare_zone_id : null`
+ * and nothing else, which asks the wrong question. Those two columns are set
+ * by ATTACHING AN EDGE PROVIDER to a clone — the WAF/CDN wrapper written to
+ * `cloudflare_clone_config` — and that table is empty on this deployment,
+ * which is exactly what the Edge card means by "No edge provider attached".
+ * Meanwhile every clone subdomain already lives in the FLEET zone recorded in
+ * `platform_hosting_config`, and Mission Control writes records there
+ * routinely (it is where `provision_subdomain` puts a clone's CNAME).
+ *
+ * So the default sending domain — `send.<clone-fqdn>`, whose SPF, DKIM and MX
+ * records all fall inside that same fleet zone — was being handed to an
+ * operator to install by hand, into a zone this platform manages and had
+ * written to minutes earlier. Same DNS-versus-wrapper conflation the Edge
+ * card carried; a second consumer of it.
+ *
+ * The clone's own zone still wins when one is genuinely attached: a tenant
+ * that brought its own domain has its records in that zone, not the fleet's.
+ *
+ * Returning a zone is a candidacy, never a licence to write. `planDnsInstallation`
+ * still decides record by record whether a name falls inside the resolved
+ * zone, and anything outside it stays the operator's to install. That
+ * containment check is what makes falling back to the fleet zone safe: a
+ * tenant-owned sending domain resolves to the fleet zone here and then
+ * installs nothing, because none of its records are inside it.
+ */
+export function resolveEmailDnsZone(input: {
+  cloneCloudflareEnabled: boolean;
+  cloneZoneId: string | null;
+  fleetZoneId: string | null;
+  fleetZoneName: string | null;
+}): EmailDnsZone | null {
+  if (input.cloneCloudflareEnabled && input.cloneZoneId) {
+    return { zoneId: input.cloneZoneId, zoneName: null, source: "clone" };
+  }
+  if (input.fleetZoneId) {
+    return {
+      zoneId: input.fleetZoneId,
+      zoneName: input.fleetZoneName?.trim().toLowerCase() || null,
+      source: "fleet",
+    };
+  }
+  return null;
+}
+
 /**
  * Which of Resend's required records Mission Control may write itself.
  *
@@ -171,7 +229,10 @@ export function identityReadiness(
     "dns",
     Boolean(row?.dns_installed_via),
     row?.dns_installed_via === "cloudflare"
-      ? "DNS records written to the clone's Cloudflare zone"
+      ? // Not necessarily the CLONE's zone — the default sending domain lands in
+        // the fleet zone. `dns_installed_via` carries cloudflare-vs-manual and
+        // nothing finer, so the wording must not claim which zone it was.
+        "DNS records written to Cloudflare"
       : row?.dns_installed_via === "manual"
         ? "DNS records handed to the operator to install"
         : "Install the SPF, DKIM and MX records Resend requires",

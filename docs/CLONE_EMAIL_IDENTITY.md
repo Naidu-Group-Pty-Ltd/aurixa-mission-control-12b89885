@@ -70,6 +70,32 @@ per-clone buttons; and the prime rotating its own key affects nobody.
   `RESEND_API_KEY` as `missing` on a re-provision (the token cannot be read
   back) instead of silently swapping back to the prime's shared key. The
   identity panel's *Rotate key* is the re-mint.
+- **The DNS zone is resolved from where DNS actually lives.** This gate used
+  to be `clone.cloudflare_enabled ? clone.cloudflare_zone_id : null`, which
+  asks the wrong question: those two columns are set by ATTACHING AN EDGE
+  PROVIDER (the WAF/CDN wrapper in `cloudflare_clone_config`), a table that is
+  empty across the fleet — the same thing the Edge card means by "No edge
+  provider attached". Every clone subdomain meanwhile lives in the fleet zone
+  recorded in `platform_hosting_config`, which Mission Control writes to
+  routinely. So `send.<clone-fqdn>` — whose SPF, DKIM and MX records all fall
+  inside that fleet zone — was handed to an operator to install by hand, into
+  a zone this platform had written to minutes earlier. `resolveEmailDnsZone`
+  now takes the clone's own zone when one is genuinely attached (a tenant that
+  brought its own domain) and the fleet zone otherwise. **Resolving a zone is
+  candidacy, never licence**: `planDnsInstallation` still decides record by
+  record whether a name falls inside it, which is exactly what makes the
+  fallback safe — a tenant-owned sending domain resolves to the fleet zone and
+  then installs nothing.
+- **Handing the records over is an outcome; a transient failure is not.** The
+  step used to settle only on `via === "cloudflare" || !zoneId`, so a zone that
+  existed but could not carry every record left `dns_installed_via` null — the
+  path reported DNS as the open step forever and every advance re-ran the whole
+  attempt. It now settles when the outcome is DETERMINED (no zone at all, or
+  records that fall outside the resolved one — Resend's required records for a
+  domain do not move, so retrying cannot change either) and deliberately stays
+  open when it is not (Cloudflare unreachable, or a partial write). Settling on
+  a transient error would permanently downgrade a clone to manual DNS because
+  Cloudflare happened to be down for one click.
 - **Sender alignment repairs a default, never a choice.** The clone's
   from-headers all derive from `global_report_settings.contact_details.email`
   (see the prime's `_shared/brand-config.ts`); while that still carries the

@@ -9,6 +9,7 @@ import {
   ledgerStatusForShell,
   mayAlignSenderAddress,
   planDnsInstallation,
+  resolveEmailDnsZone,
   type EmailIdentityRow,
 } from "./cloneEmailIdentity.pure";
 import type { ResendDnsRecord } from "./resend-client";
@@ -121,6 +122,109 @@ describe("planDnsInstallation", () => {
     );
     expect(plan.auto).toHaveLength(0);
     expect(plan.manual).toHaveLength(1);
+  });
+});
+
+describe("resolveEmailDnsZone", () => {
+  const FLEET = {
+    fleetZoneId: "34f9a6100c3f7074e4feda43975a9c10",
+    fleetZoneName: "aurixasystems.com.au",
+  };
+
+  it("falls back to the fleet zone when no edge provider is attached to the clone", () => {
+    // The regression this exists for: `cloudflare_enabled` is the WAF/CDN
+    // wrapper attachment, which is false on every clone in the fleet, so the
+    // default sending domain's records were handed to an operator to install
+    // by hand into a zone Mission Control writes to routinely.
+    const zone = resolveEmailDnsZone({
+      cloneCloudflareEnabled: false,
+      cloneZoneId: null,
+      ...FLEET,
+    });
+    expect(zone).toEqual({
+      zoneId: FLEET.fleetZoneId,
+      zoneName: "aurixasystems.com.au",
+      source: "fleet",
+    });
+  });
+
+  it("prefers the clone's own zone when one is genuinely attached", () => {
+    const zone = resolveEmailDnsZone({
+      cloneCloudflareEnabled: true,
+      cloneZoneId: "clone-zone",
+      ...FLEET,
+    });
+    expect(zone).toEqual({ zoneId: "clone-zone", zoneName: null, source: "clone" });
+  });
+
+  it("ignores a stale zone id when the attachment flag is off", () => {
+    const zone = resolveEmailDnsZone({
+      cloneCloudflareEnabled: false,
+      cloneZoneId: "stale-zone",
+      ...FLEET,
+    });
+    expect(zone?.source).toBe("fleet");
+  });
+
+  it("resolves to nothing when neither a clone zone nor a fleet zone exists", () => {
+    expect(
+      resolveEmailDnsZone({
+        cloneCloudflareEnabled: false,
+        cloneZoneId: null,
+        fleetZoneId: null,
+        fleetZoneName: null,
+      }),
+    ).toBeNull();
+  });
+
+  it("treats a blank fleet zone name as unknown rather than as an empty zone", () => {
+    // An empty string would match nothing in planDnsInstallation's suffix
+    // test, which is right, but null says "ask Cloudflare" and is honest.
+    const zone = resolveEmailDnsZone({
+      cloneCloudflareEnabled: false,
+      cloneZoneId: null,
+      fleetZoneId: "z",
+      fleetZoneName: "   ",
+    });
+    expect(zone).toEqual({ zoneId: "z", zoneName: null, source: "fleet" });
+  });
+
+  it("resolving a zone is candidacy, not licence — containment still decides", () => {
+    // A tenant-owned sending domain resolves to the fleet zone and then
+    // installs nothing, because none of its records sit inside it. This is
+    // the property that makes the fleet fallback safe.
+    const zone = resolveEmailDnsZone({
+      cloneCloudflareEnabled: false,
+      cloneZoneId: null,
+      ...FLEET,
+    });
+    const tenantRecords: ResendDnsRecord[] = [
+      { record: "DKIM", name: "resend._domainkey.send.tenant.example", type: "TXT", value: "v" },
+      { record: "SPF", name: "send.tenant.example", type: "TXT", value: "v" },
+    ];
+    const plan = planDnsInstallation(tenantRecords, zone!.zoneName);
+    expect(plan.auto).toHaveLength(0);
+    expect(plan.manual).toHaveLength(2);
+  });
+
+  it("writes the default sending domain's records, which are inside the fleet zone", () => {
+    const zone = resolveEmailDnsZone({
+      cloneCloudflareEnabled: false,
+      cloneZoneId: null,
+      ...FLEET,
+    });
+    const records: ResendDnsRecord[] = [
+      {
+        record: "DKIM",
+        name: "resend._domainkey.send.npc.aurixasystems.com.au",
+        type: "TXT",
+        value: "v",
+      },
+      { record: "SPF", name: "send.npc.aurixasystems.com.au", type: "MX", value: "feedback" },
+    ];
+    const plan = planDnsInstallation(records, zone!.zoneName);
+    expect(plan.auto).toHaveLength(2);
+    expect(plan.manual).toHaveLength(0);
   });
 });
 

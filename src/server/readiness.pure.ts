@@ -220,6 +220,25 @@ export const CAPABILITIES: readonly CapabilitySpec[] = [
     ],
   },
   {
+    key: "email",
+    title: "Outbound email — Resend",
+    consequence:
+      "A clone cannot be given a sending identity of its own, so its outbound mail either " +
+      "rides the prime's shared key or does not send at all — password resets, portal " +
+      "invites and notifications included.",
+    credentials: [
+      {
+        name: "RESEND_MASTER_API_KEY",
+        purpose:
+          "Full-access key on the platform's own Resend team. Used for exactly two things: " +
+          "registering each clone's sending domain, and minting that clone's key. It is " +
+          "NEVER written to a clone — what a clone receives is a sending_access key scoped " +
+          "by domain_id, which cannot list domains, mint keys, or send as anybody else.",
+        required: true,
+      },
+    ],
+  },
+  {
     key: "agreements",
     title: "Agreements — DocuSign",
     consequence:
