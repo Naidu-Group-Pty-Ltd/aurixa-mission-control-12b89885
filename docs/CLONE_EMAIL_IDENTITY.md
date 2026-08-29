@@ -96,6 +96,21 @@ per-clone buttons; and the prime rotating its own key affects nobody.
   open when it is not (Cloudflare unreachable, or a partial write). Settling on
   a transient error would permanently downgrade a clone to manual DNS because
   Cloudflare happened to be down for one click.
+- **Provisioning starts it, and the panel is where operators look.** The
+  identity panel lived only on `/clones/$cloneId/secrets`, a route nothing in
+  the product linked to — grep for it found its own definition and nothing
+  else — so it was reachable only by typing a URL. It now sits on the clone's
+  page beside the Turnstile panel, because both are per-clone credentials
+  Mission Control mints; the secrets page carries a pointer in the same style
+  as the one `TURNSTILE_SECRET_KEY` already had, and the clone page finally
+  links to it. And the deployment drain STARTS an identity during
+  `syncing_env`, beside the widget mint: `subdomain_fqdn` is reserved at
+  enrolment so the sending domain is derivable by then, the records go in
+  while the build runs, and the drain mints the key once Resend verifies.
+  Both are best-effort — a clone that cannot get one still reaches production
+  and says so on its own panel. `cloneCredentialArming.contract.test.ts`
+  asserts the call stays there, because deleting it fails silently: clones
+  would deploy perfectly and simply never be able to send.
 - **The drain advances; it never starts.** Every other provisioning pipeline
   here has a scheduled drain and this one did not, so an identity waiting on
   DNS propagation sat still until a person reopened the page and pressed
