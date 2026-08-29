@@ -9,6 +9,7 @@ import {
 } from "@/lib/backend-provisioning.functions";
 import { AppShell } from "@/components/app-shell";
 import { CloneEmailIdentityCard } from "@/components/clone-email-identity-card";
+import { CloneTurnstileCard } from "@/components/clone-turnstile-card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -120,6 +121,13 @@ function CloneSecretsPage() {
           stays correct as the escape hatch.
         */}
         <CloneEmailIdentityCard cloneId={cloneId} />
+
+        {/*
+          Beside the email identity for the same reason it exists: both are
+          per-tenant vendor credentials that a clone must hold its OWN copy of,
+          never the prime's.
+        */}
+        <CloneTurnstileCard cloneId={cloneId} />
 
         {isLoading && <div className="text-sm text-muted-foreground">Loading…</div>}
 

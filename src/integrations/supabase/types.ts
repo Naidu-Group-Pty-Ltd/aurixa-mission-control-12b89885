@@ -1716,6 +1716,68 @@ export type Database = {
           },
         ]
       }
+      clone_turnstile_identities: {
+        Row: {
+          clone_id: string
+          created_at: string
+          created_by: string | null
+          domains: string[]
+          fail_closed_at: string | null
+          id: string
+          last_error: string | null
+          mode: string
+          secret_last4: string | null
+          secret_written_at: string | null
+          site_key: string | null
+          site_key_published_at: string | null
+          status: string
+          updated_at: string
+          widget_name: string | null
+        }
+        Insert: {
+          clone_id: string
+          created_at?: string
+          created_by?: string | null
+          domains?: string[]
+          fail_closed_at?: string | null
+          id?: string
+          last_error?: string | null
+          mode?: string
+          secret_last4?: string | null
+          secret_written_at?: string | null
+          site_key?: string | null
+          site_key_published_at?: string | null
+          status?: string
+          updated_at?: string
+          widget_name?: string | null
+        }
+        Update: {
+          clone_id?: string
+          created_at?: string
+          created_by?: string | null
+          domains?: string[]
+          fail_closed_at?: string | null
+          id?: string
+          last_error?: string | null
+          mode?: string
+          secret_last4?: string | null
+          secret_written_at?: string | null
+          site_key?: string | null
+          site_key_published_at?: string | null
+          status?: string
+          updated_at?: string
+          widget_name?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clone_turnstile_identities_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: true
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       clone_email_identities: {
         Row: {
           clone_id: string

@@ -1878,7 +1878,13 @@ export type SecretShellStatus =
   /** Names the prime's own domain; the clone supplies its own. */
   | "skipped_deployment_config"
   /** Deployment config Mission Control can compute for THIS clone. */
-  | "derived";
+  | "derived"
+  /**
+   * A per-tenant vendor credential that must be MINTED for this clone, never
+   * copied from the prime (see TENANT_SCOPED_SECRETS). Left unset here; the
+   * clone's own identity flow writes it.
+   */
+  | "tenant_scoped_pending";
 
 export type SecretShellResult = {
   name: string;
@@ -1951,6 +1957,19 @@ export function planCloneSecrets(
     if (kind === "identity") {
       toWrite.push({ name, value: generate() });
       results.set(name, { name, status: "generated", success: true });
+      continue;
+    }
+    if (kind === "tenant_scoped") {
+      // Never inherited, whatever `prime_secret_forwards` says: sharing the
+      // prime's value is the cross-tenant defect this class exists to stop.
+      results.set(name, {
+        name,
+        status: "tenant_scoped_pending",
+        success: true,
+        error:
+          `${name} is per-tenant and is never copied from the prime. ` +
+          "Mint this clone's own credential from its identity panel before handover.",
+      });
       continue;
     }
     if (kind === "deployment_config") {

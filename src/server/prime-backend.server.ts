@@ -265,7 +265,32 @@ export const DEPLOYMENT_CONFIG_SECRETS = new Set([
   "APP_BASE_URL",
 ]);
 
-export type SecretClass = "platform" | "identity" | "deployment_config" | "vendor";
+/**
+ * Vendor credentials that are nonetheless PER-TENANT, and must therefore be
+ * minted for each clone rather than copied from the prime.
+ *
+ * `TURNSTILE_SECRET_KEY` is the whole reason this class exists. A Turnstile
+ * token is bound to a (site key, secret) PAIR, and `siteverify` reports the
+ * hostname it was issued for without any caller here checking it. One widget
+ * shared across the fleet therefore means a token farmed from ANY tenant's
+ * login page — or from the prime's, which is public — verifies on every other
+ * tenant, so the CAPTCHA stops being a per-deployment control at all. Sharing
+ * it also gives every tenant the same rotation blast radius that
+ * `RESEND_API_KEY` already demonstrated here, and forces the prime's widget to
+ * carry every customer's hostname on its allow-list.
+ *
+ * These names are recorded `missing` on a clone no matter what
+ * `prime_secret_forwards` says. Adding a forwarding row must not be able to
+ * re-share them, which is why this is a classification and not a default.
+ */
+export const TENANT_SCOPED_SECRETS = new Set(["TURNSTILE_SECRET_KEY"]);
+
+export type SecretClass =
+  | "platform"
+  | "identity"
+  | "deployment_config"
+  | "tenant_scoped"
+  | "vendor";
 
 /**
  * How a shelled secret should reach a clone. The three non-vendor classes are
@@ -275,6 +300,7 @@ export function classifySecret(name: string): SecretClass {
   if (AUTO_INJECTED_SECRETS.has(name) || name.startsWith("SUPABASE_")) return "platform";
   if (IDENTITY_SECRETS.has(name)) return "identity";
   if (DEPLOYMENT_CONFIG_SECRETS.has(name)) return "deployment_config";
+  if (TENANT_SCOPED_SECRETS.has(name)) return "tenant_scoped";
   return "vendor";
 }
 

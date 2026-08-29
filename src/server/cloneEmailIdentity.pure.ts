@@ -244,6 +244,11 @@ export function ledgerStatusForShell(
     case "skipped_platform":
     case "skipped_deployment_config":
       return null;
+    // Operator-facing on purpose: a clone whose CAPTCHA secret has not been
+    // minted yet must SHOW as missing, because until it is the login either
+    // has no CAPTCHA at all or refuses everyone.
+    case "tenant_scoped_pending":
+      return "missing";
   }
 }
 
