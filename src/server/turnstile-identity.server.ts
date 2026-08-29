@@ -616,8 +616,8 @@ export async function reconcileTurnstileIdentities(
       // end: a login page that cannot answer its own CAPTCHA. Only on the pass
       // that actually published, so this cannot loop.
       if (outcome.ok && outcome.advanced?.includes("site_key_published")) {
-        const { requestRedeployAfterPush } = await import("./hosting/redeploy.server");
-        const asked = await requestRedeployAfterPush({
+        const { requestEnvResync } = await import("./hosting/redeploy.server");
+        const asked = await requestEnvResync({
           cloneId: clone.id,
           reason: "Turnstile site key published",
         });
