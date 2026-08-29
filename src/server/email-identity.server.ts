@@ -49,6 +49,7 @@ import {
   keyLast4,
   mayAlignSenderAddress,
   planDnsInstallation,
+  resolveEmailDnsZone,
   type EmailIdentityReadiness,
   type EmailIdentityRow,
 } from "./cloneEmailIdentity.pure";
@@ -115,6 +116,32 @@ async function readCloneHostFacts(supabase: Db, cloneId: string) {
   if (error) throw new Error(`Could not read clone ${cloneId}: ${error.message}`);
   if (!data) throw new Error(`Clone ${cloneId} not found`);
   return data;
+}
+
+/**
+ * The fleet's own Cloudflare zone — the one every clone subdomain lives in,
+ * and therefore the one that carries `send.<clone-fqdn>`'s records. Read as a
+ * best effort: a deployment with no hosting config simply has no fleet zone to
+ * fall back to, which is a manual-DNS flow rather than a failure.
+ *
+ * This reads through the CALLER's client, and `platform_hosting_config` grants
+ * SELECT to admins only (`is_admin(auth.uid())`). Every entry point here is
+ * behind `requireAdmin`, so the row is visible. Move this behind a
+ * non-admin caller and RLS would FILTER rather than error — null row, null
+ * error, and auto-DNS would silently stop happening with nothing to see.
+ */
+async function readFleetZone(
+  supabase: Db,
+): Promise<{ cloudflare_zone_id: string | null; cloudflare_zone_name: string | null } | null> {
+  const { data, error } = await supabase
+    .from("platform_hosting_config")
+    .select("cloudflare_zone_id, cloudflare_zone_name")
+    .eq("singleton", true)
+    .maybeSingle();
+  if (error) return null;
+  return (
+    (data as { cloudflare_zone_id: string | null; cloudflare_zone_name: string | null }) ?? null
+  );
 }
 
 /** Current state for the operator UI — reads only, no vendor calls. */
@@ -242,7 +269,10 @@ export async function advanceEmailIdentity(
 
   const advanced: string[] = [];
   try {
-    const clone = await readCloneHostFacts(supabase, cloneId);
+    const [clone, fleet] = await Promise.all([
+      readCloneHostFacts(supabase, cloneId),
+      readFleetZone(supabase),
+    ]);
     let row = await readIdentity(supabase, cloneId);
 
     // ── Domain choice ────────────────────────────────────────────────
@@ -304,32 +334,61 @@ export async function advanceEmailIdentity(
 
     // ── DNS installation ─────────────────────────────────────────────
     if (domain && !row.dns_installed_via && row.dns_records.length > 0) {
-      const zoneId = clone.cloudflare_enabled ? clone.cloudflare_zone_id : null;
-      let via: "cloudflare" | "manual" = "manual";
-      if (zoneId) {
+      const zone = resolveEmailDnsZone({
+        cloneCloudflareEnabled: clone.cloudflare_enabled,
+        cloneZoneId: clone.cloudflare_zone_id,
+        fleetZoneId: fleet?.cloudflare_zone_id ?? null,
+        fleetZoneName: fleet?.cloudflare_zone_name ?? null,
+      });
+      // null = UNDETERMINED: this attempt neither installed nor established
+      // that it never can, so the step stays open and the next advance retries.
+      // Anything else is an outcome and settles.
+      let via: "cloudflare" | "manual" | null = null;
+      if (!zone) {
+        // No zone at all to write into — determined, and the operator's to do.
+        via = "manual";
+      } else {
         try {
-          const { cloudflareApi } = await import("./cloudflare/client");
-          const zone = await cloudflareApi.getZone(zoneId);
-          const plan = planDnsInstallation(row.dns_records, zone.name);
-          if (plan.manual.length === 0) {
-            const res = await installDnsViaCloudflare(zoneId, plan.auto);
+          // The fleet zone's name is stored beside its id, so the common case
+          // costs no vendor call. A clone's own zone has no local name.
+          let zoneName = zone.zoneName;
+          if (!zoneName) {
+            const { cloudflareApi } = await import("./cloudflare/client");
+            zoneName = (await cloudflareApi.getZone(zone.zoneId)).name;
+          }
+          const plan = planDnsInstallation(row.dns_records, zoneName);
+          if (plan.manual.length > 0) {
+            // Records outside the resolved zone — a tenant-owned sending
+            // domain. Retrying cannot change this: Resend's required records
+            // for a given domain do not move. Determined.
+            via = "manual";
+          } else {
+            const res = await installDnsViaCloudflare(zone.zoneId, plan.auto);
             if (res.installed) via = "cloudflare";
             else
+              // A PARTIAL write is worth retrying — leave it undetermined.
               await persistIdentity(supabase, cloneId, {
                 sending_domain: row.sending_domain,
                 last_error: `DNS partially installed: ${res.detail}`,
               });
           }
         } catch (e) {
-          // Cloudflare being unreachable must not strand the flow — the
-          // records are still shown for manual installation.
+          // Cloudflare being unreachable must not strand the flow, and must
+          // not permanently downgrade this clone to manual DNS either: it is
+          // transient, so the step stays open and the next advance tries again.
+          // The records are shown meanwhile.
           await persistIdentity(supabase, cloneId, {
             sending_domain: row.sending_domain,
             last_error: `Cloudflare DNS installation failed: ${msg(e)}`,
           });
         }
       }
-      if (via === "cloudflare" || !zoneId) {
+      // Settling used to require `via === "cloudflare" || !zoneId`, which left
+      // the step UNRECORDED whenever a zone existed but could not carry every
+      // record. `dns_installed_via` stayed null, the path reported DNS as the
+      // open step forever, and each advance re-ran the whole attempt. Handing
+      // the records over IS an outcome; a transient failure is not.
+      if (via) {
         await persistIdentity(supabase, cloneId, {
           sending_domain: row.sending_domain,
           dns_installed_via: via,
