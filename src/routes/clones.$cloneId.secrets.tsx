@@ -8,7 +8,6 @@ import {
   setCloneBackendSecret,
 } from "@/lib/backend-provisioning.functions";
 import { AppShell } from "@/components/app-shell";
-import { CloneEmailIdentityCard } from "@/components/clone-email-identity-card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -113,13 +112,30 @@ function CloneSecretsPage() {
         </div>
 
         {/*
-          The dedicated email identity sits above the raw secret list because
-          it is the intended way RESEND_API_KEY gets a value here — a
-          domain-scoped key of the clone's own, not a pasted copy of the
-          prime's. The list below still accepts a manual value for it, which
-          stays correct as the escape hatch.
+          RESEND_API_KEY is listed below and is deliberately NOT operated from
+          here, for the same reason as TURNSTILE_SECRET_KEY: it is one half of
+          a (sending domain, domain-scoped key) pair, and a key pasted here
+          without a verified domain behind it answers 403 on every send. The
+          panel that registers the domain, installs its DNS and mints the key
+          lives on the clone's page — beside the Turnstile panel, because both
+          are credentials Mission Control mints for one clone.
+
+          It used to live HERE and only here, on a route nothing in the product
+          linked to. The list below still accepts a manual value as the escape
+          hatch.
         */}
-        <CloneEmailIdentityCard cloneId={cloneId} />
+        <div className="border p-4 text-sm">
+          <p className="font-medium">Outbound email</p>
+          <p className="text-muted-foreground">
+            <code className="font-mono">RESEND_API_KEY</code> is this clone's own domain-scoped
+            sending key; the sending domain has to be registered and verified in the same act.
+            Provision and rotate it from{" "}
+            <Link to="/clones/$cloneId" params={{ cloneId }} className="underline">
+              the clone's page
+            </Link>
+            .
+          </p>
+        </div>
 
         {/*
           TURNSTILE_SECRET_KEY is listed below and is deliberately NOT operated

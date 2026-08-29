@@ -389,6 +389,41 @@ async function step(row: DeploymentRow): Promise<StepOutcome> {
         turnstileNote = e instanceof Error ? e.message : String(e);
       }
 
+      // This clone's OWN Resend sending domain — STARTED here, not finished.
+      //
+      // Unlike the site key above, `RESEND_API_KEY` is a BACKEND secret rather
+      // than a `VITE_*`, so it does not need to be in the bundle. What it does
+      // need is DNS, and a domain cannot verify until those records propagate
+      // — minutes, not milliseconds. Registering the domain and writing its
+      // records now means both are in place while the build runs, and
+      // `email-identity-drain` mints the key the moment Resend verifies.
+      //
+      // Without this the drain would never act at all: it deliberately
+      // ADVANCES identities and never STARTS one, because choosing a sending
+      // domain is an operator's decision. Provisioning a clone IS that
+      // decision, and the domain is derived from the hostname the clone was
+      // already given — `subdomain_fqdn` is reserved at enrolment, before this
+      // state machine runs, so it is known by the time we get here.
+      //
+      // Best-effort for the same reason as the widget: a clone that cannot get
+      // a sending domain should reach production saying so on its own panel,
+      // not fail to deploy.
+      let emailNote = "not attempted";
+      try {
+        const { isResendConfigured } = await import("@/server/resend-client");
+        if (!isResendConfigured()) {
+          emailNote = "RESEND_MASTER_API_KEY not configured — no sending domain for this clone";
+        } else {
+          const { advanceEmailIdentity } = await import("@/server/email-identity.server");
+          const started = await advanceEmailIdentity(admin, row.clone_id, { mode: "provision" });
+          emailNote = started.ok
+            ? started.advanced.join("; ") || "already provisioned"
+            : started.error;
+        }
+      } catch (e) {
+        emailNote = e instanceof Error ? e.message : String(e);
+      }
+
       const vars = buildCloneEnv({
         supabaseUrl: backend.supabase_url,
         supabaseProjectRef: backend.supabase_project_ref,
@@ -404,7 +439,11 @@ async function step(row: DeploymentRow): Promise<StepOutcome> {
       return {
         kind: "advance",
         patch: { env_digest: digest, env_synced_at: new Date().toISOString() },
-        result: { ...(synced as Record<string, unknown>), turnstile: turnstileNote },
+        result: {
+          ...(synced as Record<string, unknown>),
+          turnstile: turnstileNote,
+          email: emailNote,
+        },
       };
     }
 

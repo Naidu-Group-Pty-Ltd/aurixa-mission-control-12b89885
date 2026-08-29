@@ -7,6 +7,7 @@ import {
   ArrowLeft,
   ExternalLink,
   Github,
+  KeyRound,
   Pencil,
   Plus,
   RefreshCw,
@@ -28,6 +29,7 @@ import { CloneDriftPolicyCard } from "@/components/clone-drift-policy-card";
 import { CloneDriftSuggestionsCard } from "@/components/clone-drift-suggestions-card";
 import { CloneEditDialog } from "@/components/clone-edit-dialog";
 import { CloneDeploymentCard } from "@/components/clone-deployment-card";
+import { CloneEmailIdentityCard } from "@/components/clone-email-identity-card";
 import { CloneTurnstileCard } from "@/components/clone-turnstile-card";
 import { CloneEdgeCard } from "@/components/clone-edge-card";
 import { CloneHealthCard } from "@/components/clone-health-card";
@@ -288,6 +290,17 @@ function CloneDetail() {
           </div>
         </div>
         <div className="flex gap-2">
+          {/*
+            The secrets sub-page had no link anywhere in the product — grep for
+            its route found only its own definition — so the raw secret list
+            and `Derive ALLOWED_ORIGINS` were reachable only by typing a URL.
+          */}
+          <Button
+            variant="outline"
+            onClick={() => navigate({ to: "/clones/$cloneId/secrets", params: { cloneId } })}
+          >
+            <KeyRound className="mr-1.5 h-4 w-4" /> Secrets
+          </Button>
           <Button variant="outline" onClick={() => setEditOpen(true)}>
             <Pencil className="mr-1.5 h-4 w-4" /> Edit
           </Button>
@@ -354,6 +367,16 @@ function CloneDetail() {
         configured" — and one of those was true while the other was not.
       */}
       <CloneTurnstileCard cloneId={cloneId} />
+      {/*
+        The clone's own sending identity, beside the widget for the same
+        reason. Both are per-clone credentials Mission Control mints, and this
+        one lived ONLY on the secrets sub-page — a route nothing in the product
+        linked to, reachable only by typing the URL. A panel an operator cannot
+        navigate to is a panel that does not exist, which is how the one clone
+        in the fleet sat with `RESEND_API_KEY` missing and no visible way to
+        fix it.
+      */}
+      <CloneEmailIdentityCard cloneId={cloneId} />
       <ClonePurchasesCard cloneId={cloneId} />
       <GitHubSecretSyncCard target="clone" cloneId={cloneId} />
       <CloneSecurityAssessmentsCard cloneId={cloneId} />
