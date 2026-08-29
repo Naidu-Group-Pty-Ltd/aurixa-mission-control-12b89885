@@ -129,12 +129,54 @@ for (const f of rawFindings) {
   if (effectiveFiles.has(f.file)) findings.push(f);
 }
 
+// The one vault entry that holds the cron credential. Every scheduled job on
+// this deployment reads this name; `verifyCronAuth` accepts the ENV names
+// CRON_SECRET and DRIFT_REFRESH_TOKEN, which are a different namespace and are
+// not vault entries. `agreements-refresh` shipped reading `DRIFT_REFRESH_TOKEN`
+// FROM THE VAULT, where no such row exists, so the subselect returned NULL and
+// `'Bearer ' || NULL` is NULL — the same "missing credential degrades into a
+// valid-looking wrong one" this file exists to catch, one level deeper than
+// COALESCE(..., '').
+const CRON_VAULT_SECRET = "cron_secret";
+
+// Posting to the lovable.app origin cannot authenticate, however good the
+// token is: it 307s to the custom domain and libcurl drops `Authorization` on
+// a cross-host hop. Measured — the identical body and a correct `cron_secret`
+// answers 401 there and 200 on the custom domain.
+const REDIRECTING_ORIGIN = "aurixa-mission-control.lovable.app";
+
 for (const [jobname, { file, body }] of lastSchedule) {
   // Every /hooks/ endpoint is behind verifyCronAuth, so a job that posts to one
   // needs a credential whether or not the word appears in the command text.
   // Asking about the PATH rather than the header is what catches a header
   // hidden behind format(%L).
   if (!/\/hooks\//.test(body)) continue;
+
+  if (body.includes(REDIRECTING_ORIGIN)) {
+    findings.push({
+      file,
+      why:
+        `'${jobname}' posts to ${REDIRECTING_ORIGIN}, which 307s to the custom domain — ` +
+        `libcurl drops Authorization across hosts, so the request always arrives ` +
+        `unauthenticated`,
+      snippet: body.replace(/\s+/g, " ").slice(0, 120),
+    });
+  }
+
+  // A vault name the deployment does not hold reads as NULL, not as an error.
+  for (const m of body.matchAll(/decrypted_secrets\s+WHERE\s+name\s*=\s*'([^']+)'/gi)) {
+    if (m[1] !== CRON_VAULT_SECRET) {
+      findings.push({
+        file,
+        why:
+          `'${jobname}' reads vault entry '${m[1]}' for its credential; the cron secret ` +
+          `is '${CRON_VAULT_SECRET}'. A name the vault does not hold yields NULL, and ` +
+          `'Bearer ' || NULL is a null header rather than a failure`,
+        snippet: m[0],
+      });
+    }
+  }
+
   if (/vault\.decrypted_secrets/i.test(body)) continue;
   const interpolated = /%L/.test(body);
   findings.push({

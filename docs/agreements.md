@@ -157,6 +157,35 @@ moves), which on the `signed` transition hands the agreement to
    instant. One extra secret (below). Fails closed: unconfigured → 503,
    bad HMAC → 401.
 
+**The poll was dead from the day it was installed, and said nothing.**
+Measured 29 Aug 2026: 37 × HTTP 401 across the ~6 hours pg_net retains a
+response, while `cron.job_run_details` reported all 36 runs `succeeded` —
+because what pg_cron reports on is the SQL that QUEUES the call, never the
+call. Two independent faults, each sufficient on its own:
+
+- The credential read vault entry `DRIFT_REFRESH_TOKEN`, which does not
+  exist. `verifyCronAuth` accepts `CRON_SECRET` **or** `DRIFT_REFRESH_TOKEN`
+  as *environment* names, and that is a different namespace from the vault —
+  the vault holds `cron_secret`. A subselect on a missing name returns NULL,
+  and `'Bearer ' || NULL` is NULL, so `jsonb_build_object` stored a null
+  header rather than raising.
+- The URL was the `aurixa-mission-control.lovable.app` origin, which 307s to
+  the custom domain. pg_net follows it, but libcurl drops `Authorization`
+  across hosts, so the request arrives unauthenticated however good the
+  token is. Verified directly: identical body and a correct `cron_secret`
+  answers **401** on the lovable.app origin and **200** on the custom domain.
+
+Repaired in `20260829100000_fix_agreements_refresh_cron.sql`, which also
+reschedules `airtable-waitlist-sync` and `crm-sweep-hourly` — both were fixed
+directly on the deployment and never in a migration, so the corpus still
+installed the broken form. `check-cron-auth.mjs` now fails on either fault:
+a vault name that is not `cron_secret`, and a `/hooks/` post to the
+redirecting origin.
+
+The lesson is the one this codebase keeps relearning: **a green cron run is
+not a delivered request.** Read `net._http_response`, not
+`cron.job_run_details`.
+
 ### Safety model
 
 - Every skip is a **named refusal** (`decideProvisionOnSignature`): not
