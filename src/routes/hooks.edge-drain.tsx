@@ -15,6 +15,7 @@ import { verifyCronAuth } from "@/server/cron-auth.server";
 import { getEdgeProvider } from "@/server/edge";
 import "@/server/edge/index"; // ensure providers register
 import { cloudflareApi } from "@/server/cloudflare/client";
+import { decideDnsRecordAction } from "@/server/hosting/dnsAdoption.pure";
 import type { EdgePosture, EdgeProviderSlug } from "@/server/edge";
 
 const admin = supabaseAdmin;
@@ -206,8 +207,56 @@ async function runJob(job: JobRow): Promise<{ ok: boolean; result?: unknown; err
         .eq("purpose", "clone_subdomain")
         .eq("zone_id", zoneId)
         .maybeSingle();
+      // Create, or ADOPT what is already there. `existing` above is our own
+      // bookkeeping; the zone is the authority on what actually exists, and
+      // the two disagree the moment a record is made by hand or a write to
+      // `edge_dns_records` does not land. See `dnsAdoption.pure.ts` — this is
+      // the fault that failed one clone's resync seven times against a
+      // hostname that was serving the whole time.
+      const zoneRecords = existing?.external_record_id
+        ? []
+        : await cloudflareApi.listDnsRecords(zoneId, { name: fqdn }).catch(() => []);
+      const plan = decideDnsRecordAction({
+        trackedRecordId: existing?.external_record_id ?? null,
+        zoneRecords,
+        desired: {
+          type: recordType as "A" | "AAAA" | "CNAME",
+          name: fqdn,
+          content: recordContent,
+          proxied: proxied ?? true,
+        },
+      });
+      if (plan.kind === "refuse") throw new Error(plan.reason);
+
       let recordId: string;
-      if (existing?.external_record_id) {
+      if (plan.kind === "adopt") {
+        recordId = plan.recordId;
+        // Only write when it does not already say what we want: a resync that
+        // finds the record correct should cost no rate-limited call at all.
+        if (plan.needsWrite) {
+          await cloudflareApi.updateDnsRecord(zoneId, recordId, {
+            type: recordType,
+            name: fqdn,
+            content: recordContent,
+            proxied: proxied ?? true,
+          });
+        }
+        const { error: adoptErr } = await admin.from("edge_dns_records").insert({
+          clone_id: job.clone_id,
+          provider_slug: "cloudflare",
+          zone_id: zoneId,
+          external_record_id: recordId,
+          record_type: recordType,
+          record_name: fqdn,
+          record_content: recordContent,
+          proxied: proxied ?? true,
+          managed: true,
+          purpose: "clone_subdomain",
+        });
+        // A read that FAILED is not a row that is ABSENT, and here it is a row
+        // we must not lose: without it the next run adopts all over again.
+        if (adoptErr) throw new Error(`adopted ${recordId} but could not record it: ${adoptErr.message}`);
+      } else if (existing?.external_record_id) {
         const r = await cloudflareApi.updateDnsRecord(zoneId, existing.external_record_id, {
           type: recordType,
           name: fqdn,
