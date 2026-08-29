@@ -220,6 +220,54 @@ export const CAPABILITIES: readonly CapabilitySpec[] = [
     ],
   },
   {
+    key: "agreements",
+    title: "Agreements — DocuSign",
+    consequence:
+      "A signed agreement cannot provision a clone. Drafts can still be prepared and the " +
+      "operator wizard still works; only the signature-driven path is dormant.",
+    credentials: [
+      {
+        name: "DOCUSIGN_INTEGRATION_KEY",
+        purpose: "The app's integration key (GUID) — Settings → Apps & Keys",
+        required: true,
+      },
+      {
+        name: "DOCUSIGN_USER_ID",
+        purpose: "API User ID of the impersonated user; JWT grant acts as them",
+        required: true,
+      },
+      {
+        name: "DOCUSIGN_RSA_PRIVATE_KEY",
+        purpose:
+          "Private half of the integration key's RSA pair. PKCS#1 is converted and escaped " +
+          "newlines are normalised, so paste it as the console gives it.",
+        required: true,
+      },
+      { name: "DOCUSIGN_ACCOUNT_ID", purpose: "API Account ID (GUID)", required: true },
+      {
+        name: "DOCUSIGN_CONNECT_HMAC_KEY",
+        purpose:
+          "Signs Connect deliveries. Unset, the webhook answers 503 to EVERY delivery — it " +
+          "refuses to act on an unauthenticated one — so signature-driven provisioning waits " +
+          "for the 10-minute poll instead of being instant.",
+        required: true,
+      },
+      {
+        name: "DOCUSIGN_BASE_URL",
+        purpose:
+          "REST base. Defaults to demo; a production account must set its own (this one is " +
+          "https://au.docusign.net/restapi). Wrong here and the OAuth host is wrong too, " +
+          "because it is derived from this.",
+        required: false,
+      },
+      {
+        name: "DOCUSIGN_COUNTERSIGNER_EMAIL",
+        purpose: "An Aurixa signatory routed SECOND. Omit and the envelope is client-only.",
+        required: false,
+      },
+    ],
+  },
+  {
     key: "billing",
     title: "Billing — Stripe",
     consequence: "Plans, seats and add-ons cannot be charged or reconciled.",
