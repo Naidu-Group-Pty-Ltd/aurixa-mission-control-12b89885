@@ -356,10 +356,21 @@ export async function provisionTurnstileIdentity(
     return { ...state, advanced };
   } catch (e) {
     const error = msg(e);
-    await supabase
-      .from("clone_turnstile_identities")
-      .update({ last_error: error })
-      .eq("clone_id", cloneId);
+    // UPSERT, not update. A clone that has never been provisioned has no row,
+    // so an `.eq(clone_id)` update matched nothing and the failure was written
+    // nowhere: the panel showed no error, and the sweep's cooling-off window —
+    // which reads `last_error` off the row — never engaged, so a permanent
+    // refusal was retried on every pass for ever.
+    //
+    // `status` moves to `failed` only when there is nothing working to
+    // contradict: a widget that exists and merely failed a domain re-sync is
+    // not a failed identity, and saying so would send an operator to re-mint
+    // something that is fine.
+    const existing = await readIdentity(supabase, cloneId).catch(() => null);
+    await persist(supabase, cloneId, {
+      last_error: error,
+      ...(existing?.site_key ? {} : { status: "failed" }),
+    }).catch(() => {});
     return fail(error);
   }
 }
