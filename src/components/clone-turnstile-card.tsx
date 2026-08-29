@@ -73,6 +73,7 @@ export function CloneTurnstileCard({ cloneId }: { cloneId: string }) {
   const live = state?.readiness.live ?? false;
   const tokenPresent = tokenQ.data?.tokenPresent ?? state?.cloudflareConfigured ?? false;
   const tokenError = tokenQ.data?.error ?? null;
+  const tokenValid = tokenQ.data?.tokenValid ?? false;
   const accountConfigured = tokenQ.data?.accountConfigured ?? state?.accountConfigured ?? false;
   // Usable, not merely present. A token Cloudflare refuses mints nothing, and
   // enabling the buttons for it produces an opaque vendor error on click.
@@ -144,36 +145,22 @@ export function CloneTurnstileCard({ cloneId }: { cloneId: string }) {
 
             {!cloudflareReady && !tokenQ.isLoading && (
               <div className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
-                {!tokenPresent ? (
-                  <>
-                    <p className="font-medium">Mission Control has no Cloudflare token</p>
-                    <p className="text-muted-foreground">
-                      Set <code>CLOUDFLARE_API_TOKEN</code> in this deployment's own environment —
-                      not the clone's. The name is read exactly; a secret stored under any other
-                      name reads here as no token at all.
-                    </p>
-                  </>
-                ) : accountConfigured ? (
-                  <>
-                    <p className="font-medium">The token cannot reach Turnstile</p>
-                    <p className="text-muted-foreground">
-                      Cloudflare has the token and will not serve Turnstile with it
-                      {tokenError ? `: ${tokenError}` : "."} Minting a widget needs{" "}
-                      <strong>Account · Turnstile: Edit</strong>. The scopes this deployment was set
-                      up with — Zone Read, Zone Settings Edit, Analytics Read — verify as an active
-                      token and refuse this, which is why the check is the capability rather than
-                      the token.
-                    </p>
-                  </>
-                ) : (
-                  <>
-                    <p className="font-medium">No Cloudflare account id</p>
-                    <p className="text-muted-foreground">
-                      A Turnstile widget is created against an account, so
-                      <code> cloudflare_account_id</code> must be set in the hosting configuration.
-                    </p>
-                  </>
-                )}
+                <p className="font-medium">
+                  {!tokenPresent
+                    ? "Mission Control has no Cloudflare token"
+                    : !accountConfigured
+                      ? "No Cloudflare account id"
+                      : tokenValid
+                        ? "The token cannot reach Turnstile"
+                        : "Cloudflare does not accept this token"}
+                </p>
+                {/*
+                  The remedy is rendered from the server's own diagnosis rather
+                  than restated here, so what an operator is told and what the
+                  sweep records in `audit_log` cannot become two accounts of the
+                  same fault.
+                */}
+                <p className="text-muted-foreground">{tokenQ.data?.diagnosis ?? tokenError}</p>
                 <p className="mt-1 text-muted-foreground">
                   Until then this clone keeps whatever secret it already has.
                 </p>
