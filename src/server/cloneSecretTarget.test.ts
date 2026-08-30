@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { decideCloneSecretTarget } from "./cloneSecretTarget.pure";
 
@@ -119,7 +119,10 @@ describe("the sweep cannot enumerate its way to the prime either", () => {
   // Asserted against the schema rather than against the query, because the
   // query is the thing that could change.
   const migration = readFileSync(
-    join(process.cwd(), "supabase/migrations/20260422235720_3fe15343-81a9-45a4-8e82-80c547a38d7b.sql"),
+    join(
+      process.cwd(),
+      "supabase/migrations/20260422235720_3fe15343-81a9-45a4-8e82-80c547a38d7b.sql",
+    ),
     "utf8",
   );
 
@@ -146,7 +149,9 @@ describe("the writer never takes a project ref from its caller", () => {
   const src = readFileSync(join(process.cwd(), "src/server/cloneAllowedOrigins.server.ts"), "utf8");
 
   it("applyCloneAllowedOrigins is addressed by clone id", () => {
-    expect(src).toMatch(/export async function applyCloneAllowedOrigins\(\s*supabase: Db,\s*cloneId: string,/);
+    expect(src).toMatch(
+      /export async function applyCloneAllowedOrigins\(\s*supabase: Db,\s*cloneId: string,/,
+    );
     expect(src).not.toMatch(/applyCloneAllowedOrigins\([^)]*projectRef/);
   });
 
@@ -158,6 +163,46 @@ describe("the writer never takes a project ref from its caller", () => {
 
   it("writes exactly one secret name", () => {
     expect(src).toMatch(/ALLOWED_ORIGINS_SECRET = "ALLOWED_ORIGINS"/);
+  });
+});
+
+describe("NO caller anywhere hands setCloneSecretValue a ref of its own", () => {
+  // The rule this module states is repo-wide — "the ONE way to obtain a project
+  // ref for a clone-scoped secret write" — so asserting it on one module leaves
+  // it advisory everywhere else. It WAS advisory: `setCloneBackendSecret` read
+  // `clone_backends.supabase_project_ref` itself and wrote to whatever it found,
+  // so a ref mistyped or pasted from the prime's settings page was an ordinary
+  // row it wrote a tenant's secret onto.
+  //
+  // Scanned rather than listed, because a list of known-good callers is exactly
+  // what a new caller does not appear in.
+  const roots = ["src/server", "src/lib", "src/routes"];
+
+  const walk = (dir: string): string[] =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+      const full = join(dir, e.name);
+      if (e.isDirectory()) return walk(full);
+      return /\.tsx?$/.test(e.name) && !/\.test\.tsx?$/.test(e.name) ? [full] : [];
+    });
+
+  const callers = roots
+    .flatMap((r) => walk(join(process.cwd(), r)))
+    .map((f) => ({ file: f, body: readFileSync(f, "utf8") }))
+    // The definition itself is not a call site.
+    .filter((f) => !f.file.endsWith("backend-provisioning.server.ts"))
+    .filter((f) => f.body.includes("setCloneSecretValue("));
+
+  it("finds the call sites at all — a scan that matches nothing proves nothing", () => {
+    expect(callers.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it.each(callers.map((c) => c.file))("%s resolves its ref through the guard", (file) => {
+    const body = callers.find((c) => c.file === file)!.body;
+    expect(body).toContain("resolveCloneSecretTarget");
+    for (const call of body.match(/setCloneSecretValue\(\s*[^,]+,/g) ?? []) {
+      // Either the guard's return value directly, or a const bound from it.
+      expect(call).toMatch(/setCloneSecretValue\(\s*(target\.projectRef|projectRef)\s*,/);
+    }
   });
 });
 
