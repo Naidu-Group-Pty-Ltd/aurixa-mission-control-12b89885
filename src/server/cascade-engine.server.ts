@@ -5,6 +5,11 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import { decideCascadeMerge } from "./cascade/autoMergeGate.pure";
 import {
+  describeStaleHeldReferences,
+  findStaleHeldReferences,
+  type StaleHeldReference,
+} from "./cascade/heldFileStaleness.pure";
+import {
   getAppOctokit,
   listFilesMatchingGlobs,
   listTreeEntries,
@@ -613,7 +618,20 @@ async function processClone(args: {
   // than for maximum speed: the work is IO, not CPU, and the same 144 calls
   // finish inside the budget with room to spare.
   type Prepared =
-    | { kind: "blob"; path: string; mode: "100644"; type: "blob"; sha: string }
+    | {
+        kind: "blob";
+        path: string;
+        mode: "100644";
+        type: "blob";
+        sha: string;
+        /**
+         * The text this cascade delivers, kept only for source modules so
+         * `findStaleHeldReferences` can read the exports it is about to
+         * remove. Held to the same paths the check can act on, so a cascade of
+         * images or lockfiles carries nothing extra.
+         */
+        content: string | null;
+      }
     | { kind: "held"; held: HeldPath };
 
   const prepared = await mapWithConcurrency<string, Prepared | null>(
@@ -671,9 +689,11 @@ async function processClone(args: {
         mode: "100644" as const,
         type: "blob" as const,
         sha: blob.sha,
+        content: /\.[cm]?tsx?$/.test(path) ? primeFile.content : null,
       };
     },
   );
+  const deliveredSource: Record<string, string> = {};
   for (const entry of prepared) {
     if (!entry) continue;
     if (entry.kind === "held") {
@@ -685,6 +705,7 @@ async function processClone(args: {
       continue;
     }
     treeEntries.push({ path: entry.path, mode: entry.mode, type: entry.type, sha: entry.sha });
+    if (entry.content !== null) deliveredSource[entry.path] = entry.content;
   }
 
   if (treeEntries.length === 0) {
@@ -711,6 +732,46 @@ async function processClone(args: {
     };
   }
 
+  // Does this cascade break a file it is not allowed to touch?
+  //
+  // A `manual_reconcile` path is held because the clone's copy must win. That
+  // hold cannot notice that a file the cascade DID deliver removed a symbol the
+  // held file still imports — which is exactly how prime@909417c put
+  // `src/App.tsx` on this clone's `main` importing an `AmlIntakeQueue` that
+  // `AmlShellPages.tsx` had stopped exporting, failing every Vercel deployment
+  // while the cascade reported the same "1 awaiting manual reconcile" it
+  // reports on every healthy run.
+  //
+  // Only the clone's copy of the reportable held paths is read, and only when
+  // this cascade actually delivers TypeScript — a handful of files on the runs
+  // that can break this way, and no request at all on the ones that cannot.
+  let staleHeld: StaleHeldReference[] = [];
+  const heldSourcePaths = needsReconcile
+    .map((h) => h.path)
+    .filter((path) => /\.[cm]?tsx?$/.test(path));
+  if (heldSourcePaths.length > 0 && Object.keys(deliveredSource).length > 0) {
+    const heldFiles: Record<string, string> = {};
+    await Promise.all(
+      heldSourcePaths.map(async (path) => {
+        // A read that fails is not a file with no imports. Skipping it loses a
+        // warning; inventing an empty one would claim the cascade is safe.
+        try {
+          const f = await getFileContent(octokit, cloneRef, path);
+          if (f) heldFiles[path] = f.content;
+        } catch {
+          /* leave it out — see above */
+        }
+      }),
+    );
+    staleHeld = findStaleHeldReferences({ heldFiles, cascadedFiles: deliveredSource });
+  }
+  const staleSuffix =
+    staleHeld.length > 0
+      ? ` · BREAKS ${staleHeld.length} held file(s): ${staleHeld
+          .map((r) => `${r.heldPath} needs ${r.missing.join("/")}`)
+          .join("; ")}`
+      : "";
+
   // Build the "diff_summary" — first 5 file paths + count of remainder.
   // If any library pins were honored, surface that in the summary too.
   const summaryFiles = treeEntries.slice(0, 5).map((t) => t.path);
@@ -718,7 +779,7 @@ async function processClone(args: {
   const pinSuffix = pinSummary ? ` · ${pinSummary}` : "";
   const heldSuffix = partition.held.length > 0 ? ` · ${partition.held.length} withheld` : "";
   const reconcileSuffix = reconcileSuffixFor(needsReconcile.length);
-  const fileSummary = `${summaryFiles.join(", ")}${summarySuffix}${pinSuffix}${heldSuffix}${reconcileSuffix}`;
+  const fileSummary = `${summaryFiles.join(", ")}${summarySuffix}${pinSuffix}${heldSuffix}${reconcileSuffix}${staleSuffix}`;
 
   const { data: cloneCommit } = await octokit.git.getCommit({
     owner: cloneRef.owner,
@@ -744,6 +805,16 @@ async function processClone(args: {
     `\n\nScope: **${scopeLabel}**.\n\n` +
     `Files synchronized:\n\n` +
     treeEntries.map((t) => `- \`${t.path}\``).join("\n") +
+    (staleHeld.length > 0
+      ? `\n\n### ⚠ This cascade breaks a held file\n\n` +
+        `A file this cascade delivers no longer exports something a withheld file still imports. ` +
+        `Merging this as-is puts the clone's default branch in a state that cannot build — ` +
+        `the bundler fails with "is not exported by", not a test.\n\n` +
+        describeStaleHeldReferences(staleHeld)
+          .map((l) => `- ${l}`)
+          .join("\n") +
+        `\n\nRepair the held file in the same merge, or carry the removal across by hand.`
+      : "") +
     (needsReconcile.length > 0
       ? `\n\n### Needs a human — ${needsReconcile.length} file(s) changed upstream and were held back\n\n` +
         `These carry deliberate divergence on this clone, so the cascade will never overwrite them. ` +
