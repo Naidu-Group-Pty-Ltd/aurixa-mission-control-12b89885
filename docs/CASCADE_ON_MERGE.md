@@ -550,41 +550,70 @@ clone, for every commit of this shape.
 
 ### The rule
 
-> A deletion is delivered only where **the clone's copy is byte-identical to the
-> version prime deleted.**
+> A deletion is delivered only where the clone's copy is byte-identical to
+> **some version prime itself held at that path.**
 
-That one test settles all three cases, and the third is the one worth saying out
-loud:
-
-| prime's history says | the bytes say | outcome |
+| prime's history says | the clone's blob is | outcome |
 | --- | --- | --- |
 | never had this path | — | keep — the clone owns it |
-| deleted it | identical | **delete** |
-| deleted it | different | keep — somebody edited it here |
+| deleted it | a version prime held | **delete** |
+| deleted it | a blob prime never held here | keep — somebody edited it |
 
-The first run against real data is the argument for the third row. Four paths on
-the mirror had been deleted upstream; three matched byte-for-byte and were
-removed, and `PassportRecipientsPanel.tsx` did not — the clone's copy is not the
-one prime deleted. Deleting it would have destroyed that difference with no
-warning and no recovery through any surface this product offers.
+The question the rule is really asking is *did anybody here do work that would
+be lost*. Unmodified prime content at an older point is not work. A blob prime
+never had at that path is.
+
+#### Why "some version" and not "the version prime deleted"
+
+This shipped first as a comparison against the single version prime deleted, and
+the first real run showed that was too narrow.
+`PassportRecipientsPanel.tsx` does not match the blob prime deleted — it matches
+`a7c1fce`, the version prime held **two commits earlier**. The clone is not
+edited. It is stale: prime revised the file twice more and then removed it, and
+the clone had only ever received the first of those revisions.
+
+Being a few revisions behind on a file prime then deletes is the ordinary
+condition of a clone, not an exception. Under the narrow rule every one of those
+became a permanent leftover needing a person — which is the problem this whole
+area exists to remove.
+
+The walk back through prime's history is bounded at ten versions and stops at
+the first match, so a clone that is current pays one extra call. **Whether the
+walk reached the end of the history travels with the answer**: a version list
+that ran out cannot tell "edited here" from "staler than we looked", so it
+reports `unsettled` and keeps the file rather than picking one.
 
 Blob SHAs are compared, never contents, for the reason the section above this
 one records: a blob SHA is a hash of the bytes and settles binaries exactly as
 it settles text.
 
+### Both scopes, and where each one's section of prime stops
+
+A mirror's section of prime is the whole tree. A module-scoped clone's is the
+globs of what it installed — so a file it holds **inside** those globs that
+prime no longer has is a deletion, and a file outside them is none of the
+cascade's business and never becomes a candidate at all.
+
+That took one extra tree read on the module path, which previously only ever
+learned what prime *has*. The globs are re-validated before any of them decides
+a deletion: `listFilesMatchingGlobs` validates its own copy, and a pattern that
+escaped the module scope would do so here in the one direction that destroys
+something. A truncated tree read refuses the deletion pass outright, because it
+looks exactly like a clone holding fewer files than it does.
+
 ### A tree comparison is not evidence
 
 The tree read produces *candidates* — thirteen on the mirror, of which nine are
 the clone's own isolation machinery. Evidence has to come from prime's own
-history, so each candidate is asked one question (`listCommits` for the path)
-and, only when the answer is "prime removed it", a second (the blob at the
-removing commit's parent). Every failure path answers `unsettled`, which keeps
-the file: a read that FAILED is not a fact that is ABSENT.
+history: one `listCommits` for the path returns every commit that touched it,
+newest first, so the first is the removal and the rest are the revisions prime
+held. Every failure path answers `unsettled`, which keeps the file: a read that
+FAILED is not a fact that is ABSENT.
 
-The removing commit's own `files[]` carries a pre-image SHA and would make this
-one call rather than two. It is deliberately not used — on a merge commit that
-list is computed against the first parent and a 300-file cap truncates it
-silently, and being wrong here does not fail loudly, it deletes the wrong file.
+The removing commit's own `files[]` carries a pre-image SHA and would save one
+call. It is deliberately not used — on a merge commit that list is computed
+against the first parent and a 300-file cap truncates it silently, and being
+wrong here does not fail loudly, it deletes the wrong file.
 
 ### Three refusals
 
@@ -603,10 +632,12 @@ stop — not to act on the first twenty-five of it. The largest real retirement 
 this codebase (the partner-agreement removal: three Edge Functions and eleven
 shared modules) is fourteen.
 
-**Mirror scope only.** A module-scoped clone never reads its own tree — it asks
-prime for the globs of what it installed — so it cannot know what it holds, and
-a deletion set it cannot compute is one it must not guess at. That is a real
-limit, recorded here rather than left to be discovered.
+**Never spend the probe budget on the wrong candidates.** Ordering is a
+heuristic about which candidates to *ask about* first and never about what the
+answer is: a clone-only file in a directory prime does not have at all is almost
+certainly the clone's own, and one sitting in a directory prime *does* have is
+where a deletion hides. That is what keeps a clone with a large tree of its own
+from crowding a real removal out past the probe cap.
 
 ### The comment stripper underneath it
 

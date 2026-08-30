@@ -7,6 +7,7 @@ import {
   moduleSpecifiersOf,
   planDeletions,
   withholdReferencedDeletions,
+  orderDeletionCandidates,
   MAX_DELETIONS_PER_CASCADE,
   type DeletionCandidate,
   type DeletionVerdict,
@@ -27,7 +28,12 @@ const PRE_IMAGE = "2994304c44de840fdd09ab1ade144d719001c235";
 const candidate = (over: Partial<DeletionCandidate> = {}): DeletionCandidate => ({
   path: QUEUES_TEST,
   cloneSha: PRE_IMAGE,
-  evidence: { kind: "removed", deletedIn: DELETED_IN, preImageSha: PRE_IMAGE },
+  evidence: {
+    kind: "removed",
+    deletedIn: DELETED_IN,
+    versions: [PRE_IMAGE],
+    versionsExhaustive: true,
+  },
   ...over,
 });
 
@@ -56,16 +62,67 @@ describe("the bytes decide", () => {
     expect((v as { why: string }).why).toMatch(/edited here/);
   });
 
+  it("deletes a file the clone is merely STALE on, not just the last version", () => {
+    /* Verbatim from the first real run. Prime revised
+       PassportRecipientsPanel.tsx twice more and then removed it; the clone
+       had only ever received the first of those revisions. Comparing against
+       the deleted version alone called that "edited here" and would have left
+       a permanent leftover on every clone in that position — which is the
+       problem this whole area exists to remove. */
+    const v = decideDeletion(
+      candidate({
+        path: "src/components/aml/PassportRecipientsPanel.tsx",
+        cloneSha: "a7c1fced779d0000000000000000000000000000",
+        evidence: {
+          kind: "removed",
+          deletedIn: "c7ca6eeedf05000000000000000000000000000",
+          versions: [
+            "d5f489fa4ebf000000000000000000000000000",
+            "ac41c13ab1b4000000000000000000000000000",
+            "a7c1fced779d0000000000000000000000000000",
+          ],
+          versionsExhaustive: true,
+        },
+      }),
+    );
+    expect(v.act).toBe("delete");
+  });
+
+  it("will not call it edited when the walk did not reach the beginning", () => {
+    /* "Edited here" and "staler than we looked" are indistinguishable once the
+       version list runs out, and only one of them is safe. */
+    const v = decideDeletion(
+      candidate({
+        cloneSha: "0".repeat(40),
+        evidence: {
+          kind: "removed",
+          deletedIn: DELETED_IN,
+          versions: [PRE_IMAGE],
+          versionsExhaustive: false,
+        },
+      }),
+    );
+    expect(v).toMatchObject({ act: "keep", reason: "unsettled" });
+    expect((v as { why: string }).why).toMatch(/did not reach the beginning/);
+  });
+
   it("keeps it when prime's history could not be read", () => {
     const v = decideDeletion(candidate({ evidence: { kind: "unsettled", why: "HTTP 502" } }));
     expect(v).toMatchObject({ act: "keep", reason: "unsettled" });
   });
 
-  it("keeps it when the deleted version itself could not be recovered", () => {
+  it("keeps it when no version of it could be recovered", () => {
     /* Knowing prime removed something is not knowing WHAT it removed, and
        there is nothing to compare the clone's copy against. */
     const v = decideDeletion(
-      candidate({ evidence: { kind: "removed", deletedIn: DELETED_IN, preImageSha: null } }),
+      candidate({
+        evidence: {
+          kind: "removed",
+          deletedIn: DELETED_IN,
+          versions: [],
+          versionsExhaustive: true,
+        },
+      }),
     );
     expect(v).toMatchObject({ act: "keep", reason: "unsettled" });
   });
@@ -143,6 +200,45 @@ describe("what still imports it", () => {
     expect(
       withholdReferencedDeletions(deletes, { "src/a.ts": `import x from "react";` })[0].act,
     ).toBe("delete");
+  });
+});
+
+describe("which candidates get asked about first", () => {
+  const primeDirs = new Set(["src/components/aml", "src/pages/aml/__tests__"]);
+  const candidates = [
+    { path: "scripts/clone-backend/01-transfer-schema.py" },
+    { path: "src/components/aml/AmlShellPage.tsx" },
+    { path: "docs/BACKEND_ISOLATION.md" },
+    { path: "src/pages/aml/__tests__/amlComplianceHomeQueues.test.tsx" },
+  ];
+
+  it("puts candidates in directories prime has ahead of the clone's own trees", () => {
+    /* A clone-only file in a directory prime does not have at all is almost
+       certainly the clone's own; one sitting in a directory prime DOES have is
+       where a deletion hides. Spending the probe budget that way means a large
+       clone-owned tree never crowds a real removal out past the cap. */
+    expect(orderDeletionCandidates(candidates, primeDirs).map((c) => c.path)).toEqual([
+      "src/components/aml/AmlShellPage.tsx",
+      "src/pages/aml/__tests__/amlComplianceHomeQueues.test.tsx",
+      "docs/BACKEND_ISOLATION.md",
+      "scripts/clone-backend/01-transfer-schema.py",
+    ]);
+  });
+
+  it("is an order and never a verdict — the same set, whatever prime's tree looks like", () => {
+    const withDirs = orderDeletionCandidates(candidates, primeDirs)
+      .map((c) => c.path)
+      .sort();
+    const withNone = orderDeletionCandidates(candidates, new Set<string>())
+      .map((c) => c.path)
+      .sort();
+    expect(withDirs).toEqual(withNone);
+  });
+
+  it("asks the same questions twice — ties break on the path", () => {
+    expect(orderDeletionCandidates(candidates, primeDirs)).toEqual(
+      orderDeletionCandidates([...candidates].reverse(), primeDirs),
+    );
   });
 });
 
@@ -228,6 +324,29 @@ describe("the rules the engine has to keep", () => {
 
   it("no longer promises the reader that a cascade never removes files", () => {
     expect(engine).not.toContain("a cascade never removes files");
+  });
+
+  it("finds deletions in a module-scoped clone too, bounded by its globs", () => {
+    /* A module-scoped clone's section of prime is the globs of what it
+       installed. Before this it only ever learned what prime HAS, so a file
+       prime removed from an installed module stayed for ever. */
+    expect(code).toContain("listTreeEntries(octokit, cloneRef)");
+    expect(code).toContain("matchers.some((rx) => rx.test(path))");
+  });
+
+  it("re-validates the globs before letting one decide a deletion", () => {
+    /* A deletion decided by an unvalidated pattern could reach outside the
+       module in the one direction that destroys something. */
+    const validateAt = code.indexOf("validateModuleGlobs(installedGlobs)");
+    const pushAt = code.indexOf("deletionCandidates.push({ path, cloneSha: sha })", validateAt);
+    expect(validateAt).toBeGreaterThan(-1);
+    expect(pushAt).toBeGreaterThan(validateAt);
+  });
+
+  it("refuses the deletion pass on a truncated clone tree", () => {
+    /* A truncated read looks exactly like a clone holding fewer files than it
+       does, which here means silently missing every deletion past the cut. */
+    expect(code).toContain("if (!cloneTree.truncated)");
   });
 
   it("keeps the commit subject the repair path recognises", () => {

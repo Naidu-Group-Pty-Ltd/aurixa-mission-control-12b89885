@@ -58,6 +58,12 @@ function shortSha(sha: string) {
   return sha.slice(0, 7);
 }
 
+/** The directory part of a repo path, or "" at the root. */
+function directoryOf(path: string): string {
+  const i = path.lastIndexOf("/");
+  return i === -1 ? "" : path.slice(0, i);
+}
+
 function branchName(sourceSha: string) {
   return `aurixa/cascade-${shortSha(sourceSha)}-${Date.now().toString(36)}`;
 }
@@ -632,14 +638,17 @@ async function processClone(args: {
   // is which (`cascadeDeletions.server.ts`), and the clone's copy has to be
   // byte-identical to the version prime deleted before anything is removed.
   //
-  // Mirror scope only, and that is a real limit rather than an oversight: a
-  // module-scoped clone never reads its own tree — it asks prime for the globs
-  // of what it installed — so it cannot know what it holds, and a deletion set
-  // it cannot compute is one it must not guess at.
+  // BOTH scopes, and the difference is where "the clone's section of prime"
+  // stops. A mirror's section is the whole tree. A module-scoped clone's is the
+  // globs of what it installed — so a file it holds INSIDE those globs that
+  // prime no longer has is a deletion, and a file outside them is none of the
+  // cascade's business and is never even a candidate.
   let candidatePaths: string[];
   let scopeLabel: string;
   let onlyInClone = 0;
   const deletionCandidates: Array<{ path: string; cloneSha: string }> = [];
+  /** Directories prime's tree contains. Probe ORDER only — never a verdict. */
+  const primeDirectories = new Set<string>();
   if (isMirror) {
     const [primeTree, cloneTree] = await Promise.all([
       listTreeEntries(octokit, primeRef),
@@ -663,10 +672,48 @@ async function processClone(args: {
         deletionCandidates.push({ path, cloneSha: sha });
       }
     }
+    for (const path of primeTree.entries.keys()) primeDirectories.add(directoryOf(path));
     scopeLabel = "mirror";
   } else {
     candidatePaths = await listFilesMatchingGlobs(octokit, primeRef, installedGlobs);
     scopeLabel = "installed modules";
+
+    // The clone's own tree, read for one reason: a module-scoped cascade
+    // otherwise only ever learns what prime HAS, so a file prime removed from
+    // an installed module stays on the clone for ever. One tree read answers
+    // it, against a scope that is a handful of globs rather than the whole
+    // repository.
+    //
+    // The glob set is re-validated here rather than trusted. `listFilesMatching
+    // Globs` validates its own copy before building matchers, and a deletion
+    // decided by an unvalidated pattern could reach outside the module in the
+    // one direction that destroys something.
+    const { validateModuleGlobs, globToRegex } = await import("@/lib/module-globs");
+    const { valid } = validateModuleGlobs(installedGlobs);
+    if (valid.length > 0) {
+      const matchers = valid.map(globToRegex);
+      const inScope = new Set(candidatePaths);
+      let cloneTree: Awaited<ReturnType<typeof listTreeEntries>>;
+      try {
+        cloneTree = await listTreeEntries(octokit, cloneRef);
+      } catch (e) {
+        throw new Error(
+          `Cannot read clone tree for ${cloneRef.owner}/${cloneRef.repo}: ${e instanceof Error ? e.message : "unknown"}`,
+        );
+      }
+      // A truncated tree read looks exactly like a clone holding fewer files
+      // than it does, which here means silently missing every deletion past the
+      // cut. Refusing the deletion pass is the safe half of that.
+      if (!cloneTree.truncated) {
+        for (const [path, sha] of cloneTree.entries) {
+          if (inScope.has(path)) continue;
+          if (!matchers.some((rx) => rx.test(path))) continue;
+          onlyInClone++;
+          deletionCandidates.push({ path, cloneSha: sha });
+        }
+      }
+      for (const path of inScope) primeDirectories.add(directoryOf(path));
+    }
   }
 
   // The guard rail. Applied in BOTH scopes: a module glob that grows to cover
@@ -725,6 +772,7 @@ async function processClone(args: {
       octokit,
       primeRef,
       candidates: deletionCandidates.filter((c) => probeable.has(c.path)),
+      primeDirectories,
     });
     deletionVerdicts = probe.candidates.map(decideDeletion);
     unprobedDeletions = probe.unprobed;

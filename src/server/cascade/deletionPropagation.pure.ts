@@ -32,19 +32,37 @@
  *
  * ## The rule
  *
- * A deletion is delivered only where **the clone's copy is byte-identical to
- * the version prime deleted**.
+ * A deletion is delivered only where the clone's copy is byte-identical to
+ * **some version prime itself held at that path**.
  *
- * That single test settles all three cases:
+ *   - prime never had the path             → the clone owns it        → keep
+ *   - the clone holds a version prime had  → unmodified prime content → delete
+ *   - the clone holds a blob prime never
+ *     had at that path                     → somebody edited it       → keep
  *
- *   - prime never had the path        → the clone owns it        → keep
- *   - prime deleted it, bytes match   → unmodified prime content → delete
- *   - prime deleted it, bytes differ  → somebody edited it       → keep
+ * ### Why "some version" and not "the last one"
  *
- * The third is the one worth stating out loud: a clone that edited a file prime
- * later deleted has done work, and deleting it destroys that work with no
- * warning and no recovery through any surface this product offers. Bytes match
- * or the file stays.
+ * This began as a comparison against the single version prime deleted, and that
+ * was too narrow in a way the first real run exposed.
+ * `PassportRecipientsPanel.tsx` on the client-facing mirror does not match the
+ * blob prime deleted — but it matches `a7c1fce`, the version prime held two
+ * commits earlier. The clone is not edited. It is STALE: prime revised the file
+ * twice more and then removed it, and the clone had only ever received the
+ * first of those revisions.
+ *
+ * Under the narrow rule every such file becomes a permanent leftover needing a
+ * person — which is the problem this whole area exists to remove, since being a
+ * few revisions behind on a file prime then deletes is the ordinary condition
+ * of a clone rather than an exception.
+ *
+ * What the rule is really asking is "did anybody here do work that would be
+ * lost", and unmodified prime content at an older point is not work. A blob
+ * prime never had at that path is.
+ *
+ * The walk back through prime's history is bounded, and the bound is part of
+ * the answer: a version list that ran out before it was exhausted cannot
+ * distinguish "edited here" from "staler than we looked", so it reports
+ * `unsettled` and keeps the file rather than picking one.
  *
  * Blob SHAs are compared, never contents. A blob SHA IS a hash of the bytes, so
  * it settles binaries as exactly as it settles text — and the cascade has
@@ -99,16 +117,59 @@ export const MAX_DELETIONS_PER_CASCADE = 25;
  */
 export const MAX_DELETION_PROBES = 100;
 
+/**
+ * How far back through a path's history one probe will walk.
+ *
+ * Each step is one API call and stops early on a match, so the cost is paid
+ * only by files that are genuinely stale. Ten is well past the point where a
+ * clone that far behind on one file has a bigger problem than this deletion.
+ */
+export const MAX_VERSION_WALK = 10;
+
+/**
+ * Probe order — a heuristic about which candidates to ASK about first, never
+ * about what the answer is.
+ *
+ * A clone-only file living in a directory prime does not have at all is almost
+ * certainly the clone's own (`scripts/clone-backend/`, `docs/BACKEND_*.md`).
+ * One sitting in a directory prime DOES have is where a deletion hides
+ * (`src/components/aml/`). Ordering that way means the probe budget is spent on
+ * the candidates that can produce a deletion, so a clone that has grown a large
+ * tree of its own never crowds a real removal out past the cap.
+ *
+ * Ties break on the path so the same run twice asks the same questions.
+ */
+export function orderDeletionCandidates<T extends { path: string }>(
+  candidates: readonly T[],
+  primeDirectories: ReadonlySet<string>,
+): T[] {
+  const rank = (path: string) => (primeDirectories.has(dirOf(path)) ? 0 : 1);
+  return [...candidates].sort(
+    (a, b) => rank(a.path) - rank(b.path) || a.path.localeCompare(b.path),
+  );
+}
+
+function dirOf(path: string): string {
+  const i = path.lastIndexOf("/");
+  return i === -1 ? "" : path.slice(0, i);
+}
+
 /** What prime's history says about a path the clone has and prime does not. */
 export type DeletionEvidence =
   /** No commit in prime has ever touched this path: the clone owns it. */
   | { kind: "never_primes" }
   /**
-   * Prime removed it. `preImageSha` is the blob prime held immediately before
-   * — `null` when the probe could not recover it, which is unsettled rather
-   * than a licence to delete.
+   * Prime removed it. `versions` are the blobs prime held at this path, newest
+   * first, as far back as the probe walked. `versionsExhaustive` says whether
+   * that walk reached the end of the path's history — without it, a blob that
+   * is not in the list might still be one prime had.
    */
-  | { kind: "removed"; deletedIn: string; preImageSha: string | null }
+  | {
+      kind: "removed";
+      deletedIn: string;
+      versions: readonly string[];
+      versionsExhaustive: boolean;
+    }
   /** The probe could not answer. Never an argument for deleting. */
   | { kind: "unsettled"; why: string };
 
@@ -162,29 +223,45 @@ export function decideDeletion(candidate: DeletionCandidate): DeletionVerdict {
     };
   }
 
-  if (!evidence.preImageSha) {
+  if (evidence.versions.length === 0) {
     return {
       act: "keep",
       path,
       reason: "unsettled",
       why:
-        `Prime removed this in ${shortish(evidence.deletedIn)}, but the version it removed could ` +
-        `not be recovered, so there is nothing to compare this clone's copy against.`,
+        `Prime removed this in ${shortish(evidence.deletedIn)}, but no version of it could be ` +
+        `recovered, so there is nothing to compare this clone's copy against.`,
     };
   }
 
-  if (evidence.preImageSha !== cloneSha) {
+  if (evidence.versions.includes(cloneSha)) {
+    return { act: "delete", path, deletedIn: evidence.deletedIn };
+  }
+
+  if (!evidence.versionsExhaustive) {
+    // The walk ran out before the history did. "Edited here" and "staler than
+    // we looked" are indistinguishable from here, and only one of them is safe.
     return {
       act: "keep",
       path,
-      reason: "clone_edited",
+      reason: "unsettled",
       why:
-        `Prime removed this in ${shortish(evidence.deletedIn)}, but this clone's copy is not the ` +
-        `one prime removed — it has been edited here. Deleting it would destroy that work.`,
+        `Prime removed this in ${shortish(evidence.deletedIn)}. This clone's copy does not match ` +
+        `any of the ${evidence.versions.length} version(s) walked back through prime's history, ` +
+        `but the walk did not reach the beginning — so it cannot be told apart from a copy that ` +
+        `is simply older than that.`,
     };
   }
 
-  return { act: "delete", path, deletedIn: evidence.deletedIn };
+  return {
+    act: "keep",
+    path,
+    reason: "clone_edited",
+    why:
+      `Prime removed this in ${shortish(evidence.deletedIn)}, and this clone's copy is not any ` +
+      `version prime ever held at this path — it has been edited here. Deleting it would ` +
+      `destroy that work.`,
+  };
 }
 
 /**
