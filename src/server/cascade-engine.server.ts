@@ -737,7 +737,11 @@ async function processClone(args: {
       if (!isMirror) {
         cloneFile = await getFileContent(octokit, cloneRef, path);
         cloneFileRead = true;
-        if (cloneFile && cloneFile.content === primeFile.content) return null;
+        // Compared by blob SHA, which IS a hash of the bytes, rather than by
+        // the UTF-8 reading. Two different binaries decode to the same string
+        // of replacement characters, so comparing the readings would report a
+        // changed image as unchanged and never deliver it.
+        if (cloneFile && cloneFile.sha === primeFile.sha) return null;
       }
 
       // The content rule. Path exclusions protect what somebody remembered to
@@ -748,7 +752,12 @@ async function processClone(args: {
       // ships -- one file out of 71 on the first mirror run -- so the extra
       // read costs nothing on the paths that are not about identity, which is
       // nearly all of them.
+      // Text only. `primeFile.content` is a lossy reading of a binary file, so
+      // scanning it for a project reference asks a question of characters that
+      // were never there — and a backend identity cannot be spelled in bytes
+      // that are not text.
       if (
+        !primeFile.binary &&
         isShippedPath(path) &&
         backendRefsIn(primeFile.content).some((r) => r !== ownProjectRef)
       ) {
@@ -765,10 +774,19 @@ async function processClone(args: {
         if (hold) return { kind: "held", held: hold };
       }
 
+      // Prime's bytes, passed through untouched.
+      //
+      // This used to be `Buffer.from(primeFile.content, "utf8")` — the UTF-8
+      // READING re-encoded — which is a faithful round trip for text and
+      // destruction for anything else. `aurixa-emblem-240.png` arrived on the
+      // clone as 142,140 bytes of replacement characters where prime holds
+      // 78,450 bytes of PNG, and was re-corrupted by every cascade that
+      // carried it. 144 binary files were exposed, including 86 `.docx`
+      // partner agreement templates that both portals hand to partners.
       const { data: blob } = await octokit.git.createBlob({
         owner: cloneRef.owner,
         repo: cloneRef.repo,
-        content: Buffer.from(primeFile.content, "utf8").toString("base64"),
+        content: primeFile.base64,
         encoding: "base64",
       });
       return {
@@ -777,7 +795,7 @@ async function processClone(args: {
         mode: "100644" as const,
         type: "blob" as const,
         sha: blob.sha,
-        content: /\.[cm]?tsx?$/.test(path) ? primeFile.content : null,
+        content: !primeFile.binary && /\.[cm]?tsx?$/.test(path) ? primeFile.content : null,
       };
     },
   );

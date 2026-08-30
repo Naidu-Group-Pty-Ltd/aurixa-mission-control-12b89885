@@ -262,11 +262,25 @@ describe("the engine actually runs this check", () => {
     expect(staleAt).toBeLessThan(reconcileAt);
   });
 
-  it("only keeps delivered content for TypeScript sources", () => {
-    // A cascade of images and lockfiles must not carry their bytes around.
-    expect(src).toMatch(
-      /content:\s*\/\\\.\[cm\]\?tsx\?\$\/\.test\(path\)\s*\?\s*primeFile\.content\s*:\s*null/,
-    );
+  it("only keeps delivered content for TypeScript sources, and never for binary", () => {
+    // A cascade of images and lockfiles must not carry their bytes around —
+    // and `primeFile.content` is a LOSSY reading of a binary file, so keeping
+    // it would hand the held-file guards a string of replacement characters
+    // and invite them to reason about it.
+    //
+    // Asserted as two properties rather than as one exact expression: the
+    // previous version pinned the literal source text and broke the moment the
+    // condition was correctly narrowed, which is a test that fails on
+    // improvement.
+    // Anchored on the object LITERAL (`kind: "blob",`) rather than on the type
+    // declaration above it (`kind: "blob";`), which is what the first version
+    // of this slice caught.
+    const at = src.indexOf('kind: "blob",');
+    expect(at).toBeGreaterThan(-1);
+    const clause = src.slice(at, at + 400);
+    expect(clause).toContain("primeFile.binary");
+    expect(clause).toMatch(/\[cm\]\?tsx\?\$/);
+    expect(clause).toMatch(/:\s*null/);
   });
 });
 

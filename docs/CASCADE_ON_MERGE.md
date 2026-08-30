@@ -468,3 +468,57 @@ The **clone's own commits** are not ours and never will be: a Dependabot bump, a
 hand fix, a Lovable edit. Any of them touching a file an open proposal carries
 conflicts it. That is the case regeneration exists for, and it is why the repair
 is a standing mechanism rather than a one-off fix.
+
+## A cascade delivers BYTES, not a reading of them
+
+`getFileContent` returned the UTF-8 decoding of a blob and nothing else, and the
+engine wrote it back with `Buffer.from(primeFile.content, "utf8")`. For text
+that is a faithful round trip. For anything else it is destruction: every byte
+sequence that is not valid UTF-8 becomes U+FFFD, three bytes where there was
+one.
+
+Measured on 30 August 2026, comparing both trees blob by blob:
+
+| | |
+| --- | --- |
+| binary files in prime | **144** |
+| byte-identical on the clone | 143 |
+| **corrupted** | **1** — `public/brand/aurixa-emblem-240.png` |
+| | prime 78,450 bytes → clone 142,140 (**1.81×**) |
+
+The proof is not the size. It is that the clone's copy **decodes cleanly as
+UTF-8**, which no PNG does — it is no longer an image at all. And it had been
+re-delivered and re-corrupted by every cascade that carried it: the path appears
+in the payload of #67, #68, #70 and #71.
+
+Only one file is damaged today because a clone starts as a FORK, so all 144
+arrive intact through git and only the ones prime later changes go through the
+cascade. That is not a mitigation, it is a countdown: the exposed set is 86
+`.docx` partner agreement templates — the instruments both portals hand to
+partners as byte-identical files — plus 11 print fonts, 7 PDFs and 25 images.
+
+Three rules now hold it.
+
+**The bytes and the reading are separate fields, and only one may be written.**
+`RepoFile` carries `content` (the UTF-8 reading, lossy, safe to read) and
+`base64` (what was actually there, the only thing that may go back into a
+repository). `createBlob` takes `primeFile.base64` untouched.
+
+**Binary is decided by round-tripping, not by extension.** A file is binary
+precisely when decoding and re-encoding it does not give back what was there.
+That is the property that matters, it cannot go stale the way a list of
+extensions does, and it needs no maintenance.
+
+**Sameness is a blob SHA, never a decoded string.** Two different binaries
+decode to the same run of replacement characters, so comparing readings reports
+a changed image as unchanged and never delivers it. The blob SHA IS the content
+hash and is already fetched.
+
+### The 1 MB ceiling underneath it
+
+The same read had a second fault. `repos.getContent` only inlines files up to
+1 MB; past that it answers with an empty body and `encoding: "none"`, which the
+old code read as an empty file. A large file would therefore have been delivered
+to the clone as **zero bytes** rather than as a corrupted one. Prime carries two
+past that line — a 3.4 MB font archive and a 1.6 MB PDF. Over the ceiling the
+blob is refetched through the blobs API, which has none.
