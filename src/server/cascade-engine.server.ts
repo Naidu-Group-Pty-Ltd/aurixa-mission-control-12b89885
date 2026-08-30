@@ -25,6 +25,15 @@ import {
 } from "./github-app.server";
 import { cascadeEventStatus, summariseCascade } from "./cascade/prReconcile.pure";
 import {
+  decideDeletion,
+  deletionSuffixFor,
+  describeDeletionPlan,
+  planDeletions,
+  withholdReferencedDeletions,
+  type DeletionVerdict,
+} from "./cascade/deletionPropagation.pure";
+import { probeDeletions } from "./cascadeDeletions.server";
+import {
   assertMirrorPolicy,
   backendIdentityHold,
   backendRefsIn,
@@ -615,14 +624,22 @@ async function processClone(args: {
   // fetched only for those, which is what makes a whole-tree cascade affordable
   // (see `listTreeEntries`).
   //
-  // Neither scope ever DELETES. A path present in the clone and absent from
-  // prime is left alone: the clone legitimately carries files of its own -- its
-  // isolation spec, its transfer scripts -- and a mirror that pruned them would
-  // remove the very things that make it a clone rather than a copy. Prime-side
-  // deletions are counted and named, never acted on.
+  // A path present in the clone and absent from prime is a CANDIDATE for
+  // deletion and never on its own a reason to delete: the clone legitimately
+  // carries files of its own -- its isolation spec, its transfer scripts -- and
+  // a mirror that pruned "everything prime lacks" would remove the very things
+  // that make it a clone rather than a copy. Prime's own history settles which
+  // is which (`cascadeDeletions.server.ts`), and the clone's copy has to be
+  // byte-identical to the version prime deleted before anything is removed.
+  //
+  // Mirror scope only, and that is a real limit rather than an oversight: a
+  // module-scoped clone never reads its own tree — it asks prime for the globs
+  // of what it installed — so it cannot know what it holds, and a deletion set
+  // it cannot compute is one it must not guess at.
   let candidatePaths: string[];
   let scopeLabel: string;
   let onlyInClone = 0;
+  const deletionCandidates: Array<{ path: string; cloneSha: string }> = [];
   if (isMirror) {
     const [primeTree, cloneTree] = await Promise.all([
       listTreeEntries(octokit, primeRef),
@@ -640,8 +657,11 @@ async function processClone(args: {
     for (const [path, sha] of primeTree.entries) {
       if (cloneTree.entries.get(path) !== sha) candidatePaths.push(path);
     }
-    for (const path of cloneTree.entries.keys()) {
-      if (!primeTree.entries.has(path)) onlyInClone++;
+    for (const [path, sha] of cloneTree.entries) {
+      if (!primeTree.entries.has(path)) {
+        onlyInClone++;
+        deletionCandidates.push({ path, cloneSha: sha });
+      }
     }
     scopeLabel = "mirror";
   } else {
@@ -682,6 +702,34 @@ async function processClone(args: {
       completed_at: new Date().toISOString(),
     };
   }
+
+  // ── What prime deleted ────────────────────────────────────────────────────
+  //
+  // Candidates come from the tree comparison and mean nothing on their own.
+  // Prime's history is asked about each one, and the clone's copy has to be
+  // byte-identical to the version prime deleted before it is removed. The
+  // exclusion policy is applied FIRST and for the ordinary reason: a
+  // `protected` path is protected whatever the evidence says.
+  //
+  // Provisional here. A deletion still has to survive the reference check
+  // below, which cannot run until the held files have been read.
+  const deletionPartition = partitionCascadePaths(
+    deletionCandidates.map((c) => c.path),
+    exclusions,
+  );
+  const probeable = new Set(deletionPartition.write);
+  let deletionVerdicts: DeletionVerdict[] = [];
+  let unprobedDeletions = 0;
+  if (probeable.size > 0) {
+    const probe = await probeDeletions({
+      octokit,
+      primeRef,
+      candidates: deletionCandidates.filter((c) => probeable.has(c.path)),
+    });
+    deletionVerdicts = probe.candidates.map(decideDeletion);
+    unprobedDeletions = probe.unprobed;
+  }
+  const pendingDeletes = deletionVerdicts.filter((v) => v.act === "delete").map((v) => v.path);
 
   const treeEntries: Array<{
     path: string;
@@ -814,7 +862,10 @@ async function processClone(args: {
     if (entry.content !== null) deliveredSource[entry.path] = entry.content;
   }
 
-  if (treeEntries.length === 0) {
+  // A cascade whose only work is a removal is still work. Keying this on
+  // `treeEntries` alone would report "already in sync" while the clone still
+  // held a file prime deleted — which is the whole defect this is here for.
+  if (treeEntries.length === 0 && pendingDeletes.length === 0) {
     // "Nothing to write" and "nothing differed" are different states, and the
     // second one is the one an operator can safely ignore. A mirror whose only
     // differences were all withheld must not report as in sync.
@@ -856,8 +907,15 @@ async function processClone(args: {
   const heldSourcePaths = needsReconcile
     .map((h) => h.path)
     .filter((path) => /\.[cm]?tsx?$/.test(path));
-  if (heldSourcePaths.length > 0 && Object.keys(deliveredSource).length > 0) {
-    const heldFiles: Record<string, string> = {};
+  // The clone's copies of its held files, kept beyond this block because the
+  // deletion reference check needs exactly the same sources: a held file is
+  // precisely a file the cascade cannot fix, so a held file importing a module
+  // this run wants to delete is the one way a deletion can break the build.
+  const heldFiles: Record<string, string> = {};
+  if (
+    heldSourcePaths.length > 0 &&
+    (Object.keys(deliveredSource).length > 0 || pendingDeletes.length > 0)
+  ) {
     const heldFilesPrime: Record<string, string> = {};
     await Promise.all(
       heldSourcePaths.flatMap((path) => [
@@ -905,6 +963,56 @@ async function processClone(args: {
           .join("; ")}`
       : "";
 
+  // ── Is anything still importing what this run wants to delete? ────────────
+  //
+  // Two kinds of file can be, and only two. A HELD file, because the cascade
+  // cannot change it — `src/App.tsx` is `manual_reconcile` on the client-facing
+  // mirror and imports from the AML shell. And a CLONE-ONLY file, because prime
+  // has never seen it. Everything else is either delivered by this run (prime's
+  // own content, which cannot import a path prime deleted) or byte-identical to
+  // prime's copy, which cannot either.
+  //
+  // Only read when there is a deletion to protect, so a run that deletes
+  // nothing spends nothing.
+  if (pendingDeletes.length > 0) {
+    const deleting = new Set(pendingDeletes);
+    const cloneOnlySources = deletionCandidates
+      .map((c) => c.path)
+      .filter((p) => !deleting.has(p) && /\.[cm]?tsx?$/.test(p))
+      .sort()
+      .slice(0, 60);
+    const surviving: Record<string, string> = { ...heldFiles };
+    await Promise.all(
+      cloneOnlySources.map(async (path) => {
+        try {
+          const f = await getFileContent(octokit, cloneRef, path);
+          if (f && !f.binary) surviving[path] = f.content;
+        } catch {
+          /* A read that failed is not a file with no imports — but it is also
+             not evidence against a deletion. The bytes rule already stands. */
+        }
+      }),
+    );
+    deletionVerdicts = withholdReferencedDeletions(deletionVerdicts, surviving);
+  }
+
+  const deletionPlan = planDeletions(deletionVerdicts);
+  for (const path of deletionPlan.deletes) {
+    // `sha: null` is how a tree entry removes a path from `base_tree`.
+    treeEntries.push({ path, mode: "100644" as const, type: "blob" as const, sha: null });
+  }
+  if (treeEntries.length === 0) {
+    // Every deletion this run found was withheld — by a reference, by an edit,
+    // or by the bulk refusal — and nothing else differed. Saying "in sync"
+    // here would be the original defect wearing a new hat.
+    return {
+      status: "skipped",
+      diff_summary: `Nothing to cascade: ${deletionPlan.kept.length} prime deletion(s) withheld${deletionSuffixFor(deletionPlan)}`,
+      files_changed: 0,
+      completed_at: new Date().toISOString(),
+    };
+  }
+
   // Build the "diff_summary" — first 5 file paths + count of remainder.
   // If any library pins were honored, surface that in the summary too.
   const summaryFiles = treeEntries.slice(0, 5).map((t) => t.path);
@@ -912,7 +1020,8 @@ async function processClone(args: {
   const pinSuffix = pinSummary ? ` · ${pinSummary}` : "";
   const heldSuffix = partition.held.length > 0 ? ` · ${partition.held.length} withheld` : "";
   const reconcileSuffix = reconcileSuffixFor(needsReconcile.length);
-  const fileSummary = `${summaryFiles.join(", ")}${summarySuffix}${pinSuffix}${heldSuffix}${reconcileSuffix}${staleSuffix}${missingSuffix}`;
+  const deleteSuffix = deletionSuffixFor(deletionPlan);
+  const fileSummary = `${summaryFiles.join(", ")}${summarySuffix}${pinSuffix}${heldSuffix}${reconcileSuffix}${deleteSuffix}${staleSuffix}${missingSuffix}`;
 
   // Re-read the clone's head HERE, rather than trusting the one captured at the
   // top of this function.
@@ -956,9 +1065,13 @@ async function processClone(args: {
     tree: treeEntries,
   });
 
+  // A removal is marked in the commit body. The subject line's shape is
+  // unchanged and deliberately so: `isEngineOnlyBranch` recognises an
+  // unmodified proposal by this exact prefix, and a proposal the repair path
+  // stops recognising is one that can never be rebuilt.
   const message =
     `chore(aurixa): cascade ${treeEntries.length} file(s) from prime@${shortSha(sourceSha)}\n\n` +
-    treeEntries.map((t) => `- ${t.path}`).join("\n");
+    treeEntries.map((t) => `- ${t.sha === null ? "DELETE " : ""}${t.path}`).join("\n");
 
   // What the pull request has to say beyond the file list. `manual_reconcile`
   // paths are the reason this section exists: withholding them silently is how
@@ -967,7 +1080,9 @@ async function processClone(args: {
     lead +
     `\n\nScope: **${scopeLabel}**.\n\n` +
     `Files synchronized:\n\n` +
-    treeEntries.map((t) => `- \`${t.path}\``).join("\n") +
+    treeEntries
+      .map((t) => `- \`${t.path}\`${t.sha === null ? " — **removed**, prime deleted it" : ""}`)
+      .join("\n") +
     (staleHeld.length > 0
       ? `\n\n### ⚠ This cascade breaks a held file\n\n` +
         `A file this cascade delivers no longer exports something a withheld file still imports. ` +
@@ -997,8 +1112,15 @@ async function processClone(args: {
     (partition.held.length - needsReconcile.length > 0
       ? `\n\n_${partition.held.length - needsReconcile.length} further path(s) are owned by this clone and were withheld without comment._`
       : "") +
+    (describeDeletionPlan(deletionPlan)
+      ? `\n\n### What prime deleted\n\n${describeDeletionPlan(deletionPlan)}`
+      : "") +
+    (unprobedDeletions > 0
+      ? `\n\n_${unprobedDeletions} further clone-only path(s) were not checked against prime's history this run._`
+      : "") +
     (onlyInClone > 0
-      ? `\n\n_${onlyInClone} path(s) exist only in this clone. Nothing was deleted — a cascade never removes files._`
+      ? `\n\n_${onlyInClone} path(s) exist only in this clone. A path is removed only where prime's ` +
+        `own history shows it deleted AND this clone's copy is byte-identical to the version prime deleted._`
       : "");
 
   const { data: newCommit } = await octokit.git.createCommit({
@@ -1045,7 +1167,8 @@ async function processClone(args: {
   const title = `Aurixa cascade · prime@${shortSha(sourceSha)} → ${treeEntries.length} file(s)`;
 
   const existing = await findOpenCascadePr(octokit, cloneRef);
-  let proposal: { number: number; url: string; nodeId: string | null; headSha: string } | null = null;
+  let proposal: { number: number; url: string; nodeId: string | null; headSha: string } | null =
+    null;
 
   if (existing) {
     let existingTreeSha: string | null = null;
