@@ -92,6 +92,7 @@ import { Route as HooksCrmSweepRouteImport } from './routes/hooks.crm-sweep'
 import { Route as HooksCodexSweepRouteImport } from './routes/hooks.codex-sweep'
 import { Route as HooksCodexNightlyRouteImport } from './routes/hooks.codex-nightly'
 import { Route as HooksCloneJwtSecretReconcileRouteImport } from './routes/hooks.clone-jwt-secret-reconcile'
+import { Route as HooksCascadeMergeDrainRouteImport } from './routes/hooks.cascade-merge-drain'
 import { Route as HooksCascadeDrainRouteImport } from './routes/hooks.cascade-drain'
 import { Route as HooksBrandDriftRouteImport } from './routes/hooks.brand-drift'
 import { Route as HooksBackendProvisioningDrainRouteImport } from './routes/hooks.backend-provisioning-drain'
@@ -598,6 +599,11 @@ const HooksCloneJwtSecretReconcileRoute =
     path: '/hooks/clone-jwt-secret-reconcile',
     getParentRoute: () => rootRouteImport,
   } as any)
+const HooksCascadeMergeDrainRoute = HooksCascadeMergeDrainRouteImport.update({
+  id: '/hooks/cascade-merge-drain',
+  path: '/hooks/cascade-merge-drain',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const HooksCascadeDrainRoute = HooksCascadeDrainRouteImport.update({
   id: '/hooks/cascade-drain',
   path: '/hooks/cascade-drain',
@@ -1096,6 +1102,7 @@ export interface FileRoutesByFullPath {
   '/hooks/backend-provisioning-drain': typeof HooksBackendProvisioningDrainRoute
   '/hooks/brand-drift': typeof HooksBrandDriftRoute
   '/hooks/cascade-drain': typeof HooksCascadeDrainRoute
+  '/hooks/cascade-merge-drain': typeof HooksCascadeMergeDrainRoute
   '/hooks/clone-jwt-secret-reconcile': typeof HooksCloneJwtSecretReconcileRoute
   '/hooks/codex-nightly': typeof HooksCodexNightlyRoute
   '/hooks/codex-sweep': typeof HooksCodexSweepRoute
@@ -1262,6 +1269,7 @@ export interface FileRoutesByTo {
   '/hooks/backend-provisioning-drain': typeof HooksBackendProvisioningDrainRoute
   '/hooks/brand-drift': typeof HooksBrandDriftRoute
   '/hooks/cascade-drain': typeof HooksCascadeDrainRoute
+  '/hooks/cascade-merge-drain': typeof HooksCascadeMergeDrainRoute
   '/hooks/clone-jwt-secret-reconcile': typeof HooksCloneJwtSecretReconcileRoute
   '/hooks/codex-nightly': typeof HooksCodexNightlyRoute
   '/hooks/codex-sweep': typeof HooksCodexSweepRoute
@@ -1430,6 +1438,7 @@ export interface FileRoutesById {
   '/hooks/backend-provisioning-drain': typeof HooksBackendProvisioningDrainRoute
   '/hooks/brand-drift': typeof HooksBrandDriftRoute
   '/hooks/cascade-drain': typeof HooksCascadeDrainRoute
+  '/hooks/cascade-merge-drain': typeof HooksCascadeMergeDrainRoute
   '/hooks/clone-jwt-secret-reconcile': typeof HooksCloneJwtSecretReconcileRoute
   '/hooks/codex-nightly': typeof HooksCodexNightlyRoute
   '/hooks/codex-sweep': typeof HooksCodexSweepRoute
@@ -1599,6 +1608,7 @@ export interface FileRouteTypes {
     | '/hooks/backend-provisioning-drain'
     | '/hooks/brand-drift'
     | '/hooks/cascade-drain'
+    | '/hooks/cascade-merge-drain'
     | '/hooks/clone-jwt-secret-reconcile'
     | '/hooks/codex-nightly'
     | '/hooks/codex-sweep'
@@ -1765,6 +1775,7 @@ export interface FileRouteTypes {
     | '/hooks/backend-provisioning-drain'
     | '/hooks/brand-drift'
     | '/hooks/cascade-drain'
+    | '/hooks/cascade-merge-drain'
     | '/hooks/clone-jwt-secret-reconcile'
     | '/hooks/codex-nightly'
     | '/hooks/codex-sweep'
@@ -1932,6 +1943,7 @@ export interface FileRouteTypes {
     | '/hooks/backend-provisioning-drain'
     | '/hooks/brand-drift'
     | '/hooks/cascade-drain'
+    | '/hooks/cascade-merge-drain'
     | '/hooks/clone-jwt-secret-reconcile'
     | '/hooks/codex-nightly'
     | '/hooks/codex-sweep'
@@ -2097,6 +2109,7 @@ export interface RootRouteChildren {
   HooksBackendProvisioningDrainRoute: typeof HooksBackendProvisioningDrainRoute
   HooksBrandDriftRoute: typeof HooksBrandDriftRoute
   HooksCascadeDrainRoute: typeof HooksCascadeDrainRoute
+  HooksCascadeMergeDrainRoute: typeof HooksCascadeMergeDrainRoute
   HooksCloneJwtSecretReconcileRoute: typeof HooksCloneJwtSecretReconcileRoute
   HooksCodexNightlyRoute: typeof HooksCodexNightlyRoute
   HooksCodexSweepRoute: typeof HooksCodexSweepRoute
@@ -2771,6 +2784,13 @@ declare module '@tanstack/react-router' {
       path: '/hooks/clone-jwt-secret-reconcile'
       fullPath: '/hooks/clone-jwt-secret-reconcile'
       preLoaderRoute: typeof HooksCloneJwtSecretReconcileRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/cascade-merge-drain': {
+      id: '/hooks/cascade-merge-drain'
+      path: '/hooks/cascade-merge-drain'
+      fullPath: '/hooks/cascade-merge-drain'
+      preLoaderRoute: typeof HooksCascadeMergeDrainRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/hooks/cascade-drain': {
@@ -3508,6 +3528,7 @@ const rootRouteChildren: RootRouteChildren = {
   HooksBackendProvisioningDrainRoute: HooksBackendProvisioningDrainRoute,
   HooksBrandDriftRoute: HooksBrandDriftRoute,
   HooksCascadeDrainRoute: HooksCascadeDrainRoute,
+  HooksCascadeMergeDrainRoute: HooksCascadeMergeDrainRoute,
   HooksCloneJwtSecretReconcileRoute: HooksCloneJwtSecretReconcileRoute,
   HooksCodexNightlyRoute: HooksCodexNightlyRoute,
   HooksCodexSweepRoute: HooksCodexSweepRoute,

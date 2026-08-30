@@ -1,9 +1,11 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { decideCascadeMerge, type CheckRun } from "./autoMergeGate.pure";
+import { decideCascadeMerge, REQUIRED_CHECKS, type CheckRun } from "./autoMergeGate.pure";
 
 const ok = (name: string): CheckRun => ({ name, status: "completed", conclusion: "success" });
+/** The required jobs, all green — the baseline every case below starts from. */
+const required = () => REQUIRED_CHECKS.map((n) => ok(n));
 const red = (name: string, c = "failure"): CheckRun => ({
   name,
   status: "completed",
@@ -47,13 +49,13 @@ describe("decideCascadeMerge", () => {
   });
 
   it("names the failing checks so the reason is actionable", () => {
-    const v = decideCascadeMerge([red("security")]);
+    const v = decideCascadeMerge([ok("verify"), red("security")]);
     expect(v.why).toContain("security");
   });
 
   it("treats neutral, skipped and stale as not blocking", () => {
     const v = decideCascadeMerge([
-      ok("verify"),
+      ...required(),
       red("a", "neutral"),
       red("b", "skipped"),
       red("c", "stale"),
@@ -66,7 +68,7 @@ describe("decideCascadeMerge", () => {
     (conclusion) => {
       // None of these is evidence the tree is good, and treating an
       // unfamiliar conclusion as passing is how a gate stops being one.
-      expect(decideCascadeMerge([ok("verify"), red("x", conclusion)])).toMatchObject({
+      expect(decideCascadeMerge([...required(), red("x", conclusion)])).toMatchObject({
         merge: false,
         reason: "failing",
       });
@@ -75,7 +77,7 @@ describe("decideCascadeMerge", () => {
 
   it("treats a null conclusion on a completed run as blocking", () => {
     expect(
-      decideCascadeMerge([{ name: "x", status: "completed", conclusion: null }]),
+      decideCascadeMerge([...required(), { name: "x", status: "completed", conclusion: null }]),
     ).toMatchObject({ merge: false, reason: "failing" });
   });
 });
@@ -120,10 +122,89 @@ describe("an auto_merge cascade cannot reach a default branch except through a P
     expect(autoMergeBlock.match(/pulls\.merge\(/g) ?? []).toHaveLength(1);
   });
 
-  it("merges with MERGE, never SQUASH", () => {
+  it("never squashes", () => {
     // A squash rewrites the cascade commit naming the prime SHA it came from,
-    // which is the one durable record of what a clone has received.
+    // which is the one durable record of what a clone has received. The merge
+    // itself now happens in the drain — see its own tests — because the engine
+    // cannot wait seventeen minutes for `verify` inside one request.
     expect(autoMergeBlock).not.toContain("SQUASH");
-    expect(autoMergeBlock).toContain('merge_method: "merge"');
+  });
+});
+
+describe("the asynchronous-check race", () => {
+  // The hole this closes. Check runs appear over time: `Vercel Preview
+  // Comments` completes in the same second the pull request opens, and
+  // `verify` — install, typecheck, build, ~19,000 tests — takes about
+  // seventeen minutes to report at all. A gate that asked "has every check I
+  // can SEE passed?" answered yes to a single fast check and merged before the
+  // job that matters had started.
+
+  it("refuses when only the instant check has reported", () => {
+    const v = decideCascadeMerge([ok("Vercel Preview Comments")]);
+    expect(v).toMatchObject({ merge: false, reason: "awaiting_required" });
+  });
+
+  it("names what it is waiting for", () => {
+    const v = decideCascadeMerge([ok("Vercel Preview Comments")]);
+    expect(v.why).toContain("verify");
+  });
+
+  it("refuses while a required check is merely absent, not pending", () => {
+    // `security` green, `verify` not created yet — nothing is "pending",
+    // which is exactly why counting could not see the problem.
+    expect(decideCascadeMerge([ok("security"), ok("supply-chain")])).toMatchObject({
+      merge: false,
+      reason: "awaiting_required",
+    });
+  });
+
+  it("merges once every required check has reported green", () => {
+    expect(decideCascadeMerge([...required(), ok("supply-chain")]).merge).toBe(true);
+  });
+
+  it("still refuses a required check that reported and FAILED", () => {
+    const checks = [ok("security"), red("verify")];
+    expect(decideCascadeMerge(checks)).toMatchObject({ merge: false, reason: "failing" });
+  });
+
+  it("still refuses a required check that is running", () => {
+    expect(decideCascadeMerge([ok("security"), running("verify")])).toMatchObject({
+      merge: false,
+      reason: "pending",
+    });
+  });
+
+  it("requires verify — the job that builds and tests", () => {
+    // Pinned by name rather than by count, because the whole defect was that
+    // a count cannot tell which check it counted.
+    expect(REQUIRED_CHECKS).toContain("verify");
+  });
+});
+
+describe("the merge drain", () => {
+  const src = readFileSync(join(process.cwd(), "src/server/cascadeMergeDrain.server.ts"), "utf8");
+
+  it("touches only branches this engine names", () => {
+    expect(src).toContain('CASCADE_BRANCH_PREFIX = "aurixa/cascade-"');
+    expect(src).toContain("p.head.ref.startsWith(CASCADE_BRANCH_PREFIX)");
+  });
+
+  it("decides with the SAME rule the engine uses", () => {
+    // Two definitions of "green" is one definition of green and one bug.
+    expect(src).toContain("decideCascadeMerge(");
+    expect(src).toContain("REQUIRED_CHECKS");
+  });
+
+  it("reads checks on the pull request's current head", () => {
+    expect(src).toContain("ref: pr.head.sha");
+  });
+
+  it("merges with MERGE, never SQUASH", () => {
+    expect(src).toContain('merge_method: "merge"');
+    expect(src).not.toContain('merge_method: "squash"');
+  });
+
+  it("throws rather than reporting an empty fleet when the clone list fails", () => {
+    expect(src).toMatch(/Could not list clones/);
   });
 });

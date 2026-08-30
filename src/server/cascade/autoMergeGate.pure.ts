@@ -48,7 +48,27 @@ export type CheckRun = {
 
 export type MergeVerdict =
   | { merge: true; why: string }
-  | { merge: false; reason: "pending" | "failing" | "no_checks"; why: string };
+  | {
+      merge: false;
+      reason: "pending" | "failing" | "no_checks" | "awaiting_required";
+      why: string;
+    };
+
+/**
+ * Checks that must have REPORTED before any merge, named rather than counted.
+ *
+ * Counting is not enough and the reason is a race the first version lost.
+ * Check runs appear asynchronously: `Vercel Preview Comments` completes in the
+ * same second the pull request opens, while `verify` — the job that installs,
+ * type-checks, builds and runs ~19,000 tests — takes about seventeen minutes to
+ * even start reporting. A gate that reads "every check I can see has passed"
+ * therefore sees exactly one passing check and merges, seventeen minutes before
+ * the one that matters has an opinion.
+ *
+ * So the substantive jobs are named. A cascade merges when THESE have passed,
+ * not when the fast ones have.
+ */
+export const REQUIRED_CHECKS = ["verify", "security"] as const;
 
 /**
  * Conclusions that do not stand in the way of merging.
@@ -63,7 +83,10 @@ export type MergeVerdict =
  */
 const PASSING = new Set(["success", "neutral", "skipped", "stale"]);
 
-export function decideCascadeMerge(checks: readonly CheckRun[]): MergeVerdict {
+export function decideCascadeMerge(
+  checks: readonly CheckRun[],
+  required: readonly string[] = REQUIRED_CHECKS,
+): MergeVerdict {
   // No checks at all is NOT "all checks passed". It means nothing has built
   // this tree, which is the precise condition that put a clone's `main` in a
   // state that could not install. A cascade is unattended by definition, so
@@ -73,6 +96,19 @@ export function decideCascadeMerge(checks: readonly CheckRun[]): MergeVerdict {
       merge: false,
       reason: "no_checks",
       why: "No check has reported on this pull request — nothing has built this tree.",
+    };
+  }
+
+  // A required check that has not reported at all is not a passing one. This
+  // is the asynchronous case above: the fast checks are green and `verify` has
+  // not been created yet, so it is absent rather than pending.
+  const reported = new Set(checks.map((c) => c.name));
+  const absent = required.filter((name) => !reported.has(name));
+  if (absent.length > 0) {
+    return {
+      merge: false,
+      reason: "awaiting_required",
+      why: `Not merging — ${absent.join(", ")} ${absent.length === 1 ? "has" : "have"} not reported yet.`,
     };
   }
 
