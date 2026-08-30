@@ -32,7 +32,12 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import { getAppOctokit } from "./github-app.server";
-import { decideCascadeMerge, REQUIRED_CHECKS } from "./cascade/autoMergeGate.pure";
+import {
+  CHECKS_PERMISSION_REMEDY,
+  checksUnreadable,
+  decideCascadeMerge,
+  REQUIRED_CHECKS,
+} from "./cascade/autoMergeGate.pure";
 
 type Db = SupabaseClient<Database>;
 
@@ -154,6 +159,20 @@ export async function drainCascadeMerges(
           sha: merged.sha?.slice(0, 7) ?? null,
         });
       } catch (e) {
+        // "I cannot see CI" is not "the cascade failed" — it is a missing
+        // read-only permission, and the correct response to an unreadable
+        // signal is to leave the pull request alone and say so.
+        if (checksUnreadable(e)) {
+          report.held.checks_unreadable = (report.held.checks_unreadable ?? 0) + 1;
+          report.detail.push({
+            clone: label,
+            pr: pr.number,
+            outcome: "held",
+            reason: "checks_unreadable",
+            why: CHECKS_PERMISSION_REMEDY,
+          });
+          continue;
+        }
         report.failed += 1;
         report.detail.push({ clone: label, pr: pr.number, outcome: "failed", error: msg(e) });
       }
