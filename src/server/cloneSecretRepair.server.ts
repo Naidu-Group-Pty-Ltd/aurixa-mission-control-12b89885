@@ -42,7 +42,11 @@ import {
   type CloneSecretTarget,
 } from "./cloneAllowedOrigins.server";
 import type { CloneSecretRefusal } from "./cloneSecretTarget.pure";
-import { decideJwtSecretRepair, type JwtRepairFacts, type JwtRepairSkip } from "./cloneSecretRepair.pure";
+import {
+  decideJwtSecretRepair,
+  type JwtRepairFacts,
+  type JwtRepairSkip,
+} from "./cloneSecretRepair.pure";
 
 type Db = SupabaseClient<Database>;
 
@@ -53,10 +57,7 @@ type Db = SupabaseClient<Database>;
  */
 export const JWT_SECRET_NAME = "JWT_SECRET";
 
-export type JwtRepairFailure =
-  | CloneSecretRefusal
-  | "not_readable"
-  | "write_failed";
+export type JwtRepairFailure = CloneSecretRefusal | "not_readable" | "write_failed";
 
 export type JwtRepairResult =
   | { ok: true; cloneId: string; projectRef: string; changed: true }
@@ -84,12 +85,29 @@ async function readLedger(
     .eq("name", JWT_SECRET_NAME)
     .maybeSingle();
   if (error) throw new Error(`Could not read the ${JWT_SECRET_NAME} ledger row: ${error.message}`);
-  const row = data as { status?: string | null; last_error?: string | null; updated_at?: string | null } | null;
+  const row = data as {
+    status?: string | null;
+    last_error?: string | null;
+    updated_at?: string | null;
+  } | null;
   if (!row) return { ledgerStatus: null, lastError: null, updatedAt: null };
+  return normaliseLedgerRow(row);
+}
+
+/**
+ * One reading of a ledger row, shared by the single read and the bulk one so
+ * the sweep's prediction and the repair's own decision cannot disagree about
+ * what a row says.
+ */
+function normaliseLedgerRow(row: {
+  status?: string | null;
+  last_error?: string | null;
+  updated_at?: string | null;
+}): Pick<JwtRepairFacts, "ledgerStatus" | "lastError" | "updatedAt"> {
   const status = row.status ?? null;
   return {
-    // The column is CHECK-constrained to exactly these four; anything else is
-    // a schema that moved under us, and `null` (repairable) is the safe read.
+    // The column is CHECK-constrained to exactly these four; anything else is a
+    // schema that moved under us, and `null` (repairable) is the safe read.
     ledgerStatus:
       status === "missing" || status === "set" || status === "failed" || status === "inherited"
         ? status
@@ -137,14 +155,20 @@ export async function repairCloneJwtSecret(
     if (!verdict.act) return { ok: true, cloneId, changed: false, skipped: verdict.reason };
   }
 
-  const { getProjectJwtSecret, setCloneSecretValue } = await import("./backend-provisioning.server");
+  const { getProjectJwtSecret, setCloneSecretValue } =
+    await import("./backend-provisioning.server");
 
   let secret: string | null;
   try {
     secret = await getProjectJwtSecret(projectRef);
   } catch (e) {
     secret = null;
-    await recordFailure(supabase, cloneId, `Could not read the project's signing key: ${msg(e)}`, opts?.actorUserId);
+    await recordFailure(
+      supabase,
+      cloneId,
+      `Could not read the project's signing key: ${msg(e)}`,
+      opts?.actorUserId,
+    );
     return { ok: false, cloneId, reason: "not_readable", error: msg(e) };
   }
   if (!secret) {
@@ -209,7 +233,10 @@ async function recordFailure(
     { onConflict: "clone_id,name" },
   );
   if (trackErr) {
-    console.error("[jwt_secret] could not record the failed attempt", { cloneId, error: trackErr.message });
+    console.error("[jwt_secret] could not record the failed attempt", {
+      cloneId,
+      error: trackErr.message,
+    });
   }
   await recordEvent(supabase, cloneId, false, error, actorUserId);
 }
@@ -235,7 +262,10 @@ async function recordEvent(
   if (error) {
     // The write already happened or already failed; losing the timeline row
     // must not change what is reported, and must not be silent either.
-    console.error("[jwt_secret] could not record deployment_event", { cloneId, error: error.message });
+    console.error("[jwt_secret] could not record deployment_event", {
+      cloneId,
+      error: error.message,
+    });
   }
 }
 
@@ -249,18 +279,29 @@ export type JwtReconcileResult = {
 /**
  * Carry every clone that is missing its own signing key forward.
  *
- * Candidacy is a backend with a project ref; the decision is
- * `decideJwtSecretRepair`, and the ref that is actually written still comes
- * from `resolveCloneSecretTarget` inside the repair. The ref read here is a
- * filter and never a target.
+ * Two queries per pass, and only then any per-clone work: the candidate list
+ * and the ledger are both read in bulk, and `decideJwtSecretRepair` runs
+ * against those facts before anything else happens. That is what makes a
+ * settled fleet free — once every clone holds its key, a pass is those two
+ * reads and nothing else. Resolving a write target is three more queries and
+ * `getProjectJwtSecret` is a Management API call; neither is worth paying for a
+ * clone the ledger already says is done.
+ *
+ * The ref read here is a FILTER and never a target. What is actually written to
+ * still comes from `resolveCloneSecretTarget` inside the repair, which re-runs
+ * the same decision — the duplicated read costs one query on exactly the clones
+ * that are about to do real work, and it means no future caller can reach the
+ * write by skipping the rules.
  */
 export async function reconcileCloneJwtSecrets(
   supabase: Db,
   opts: { now?: number } = {},
 ): Promise<JwtReconcileResult> {
+  const now = opts.now ?? Date.now();
+
   const { data, error } = await supabase
     .from("clone_backends")
-    .select("clone_id")
+    .select("clone_id, supabase_project_ref")
     .not("supabase_project_ref", "is", null);
   // A candidate list that could not be READ is not an empty one. Reporting
   // "0 clones, nothing to do" would make a database fault look like a fleet
@@ -268,25 +309,67 @@ export async function reconcileCloneJwtSecrets(
   // it is not.
   if (error) throw new Error(`Could not list clone backends: ${error.message}`);
 
-  const cloneIds = (data ?? [])
-    .map((r) => (r as { clone_id: string | null }).clone_id)
-    .filter((id): id is string => typeof id === "string" && id.length > 0);
+  const candidates = (data ?? [])
+    .map((r) => r as { clone_id: string | null; supabase_project_ref: string | null })
+    .filter(
+      (r): r is { clone_id: string; supabase_project_ref: string | null } =>
+        typeof r.clone_id === "string" && r.clone_id.length > 0,
+    );
 
   const out: JwtReconcileResult = {
-    considered: cloneIds.length,
+    considered: candidates.length,
     repaired: 0,
     skipped: {},
     refused: [],
   };
+  if (candidates.length === 0) return out;
 
-  for (const cloneId of cloneIds) {
+  // Same reasoning as the candidate list: a ledger that could not be read is
+  // not a fleet with no ledger rows, and treating it as one would send every
+  // clone to the Management API on every pass during a database fault.
+  const ledgerRes = await supabase
+    .from("clone_backend_secrets")
+    .select("clone_id, status, last_error, updated_at")
+    .eq("name", JWT_SECRET_NAME)
+    .in(
+      "clone_id",
+      candidates.map((c) => c.clone_id),
+    );
+  if (ledgerRes.error) {
+    throw new Error(`Could not read the ${JWT_SECRET_NAME} ledger: ${ledgerRes.error.message}`);
+  }
+
+  const ledger = new Map<
+    string,
+    Pick<JwtRepairFacts, "ledgerStatus" | "lastError" | "updatedAt">
+  >();
+  for (const raw of ledgerRes.data ?? []) {
+    const row = raw as {
+      clone_id: string;
+      status?: string | null;
+      last_error?: string | null;
+      updated_at?: string | null;
+    };
+    ledger.set(row.clone_id, normaliseLedgerRow(row));
+  }
+
+  for (const { clone_id: cloneId, supabase_project_ref: projectRef } of candidates) {
+    const facts = ledger.get(cloneId) ?? { ledgerStatus: null, lastError: null, updatedAt: null };
+    const verdict = decideJwtSecretRepair({ projectRef, ...facts, now });
+    if (!verdict.act) {
+      out.skipped[verdict.reason] = (out.skipped[verdict.reason] ?? 0) + 1;
+      continue;
+    }
+
     try {
-      const res = await repairCloneJwtSecret(supabase, cloneId, { now: opts.now });
+      const res = await repairCloneJwtSecret(supabase, cloneId, { now });
       if (!res.ok) {
         out.refused.push({ cloneId: res.cloneId, reason: res.reason });
       } else if (res.changed) {
         out.repaired += 1;
       } else {
+        // The repair re-decided and disagreed — a row that changed between the
+        // bulk read and now. Counted where it landed, not where we predicted.
         out.skipped[res.skipped] = (out.skipped[res.skipped] ?? 0) + 1;
       }
     } catch (e) {

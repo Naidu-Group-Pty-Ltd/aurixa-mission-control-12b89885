@@ -30,9 +30,7 @@ export type JwtRepairFacts = {
 
 export type JwtRepairSkip = "no_backend" | "already_set" | "cooling_off";
 
-export type JwtRepairVerdict =
-  | { act: true; why: string }
-  | { act: false; reason: JwtRepairSkip };
+export type JwtRepairVerdict = { act: true; why: string } | { act: false; reason: JwtRepairSkip };
 
 /**
  * How long to leave a failed repair alone. A project whose config the

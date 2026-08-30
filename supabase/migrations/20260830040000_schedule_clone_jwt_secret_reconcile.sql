@@ -17,10 +17,12 @@
 -- pasting a signing key into a box — for a value Mission Control can read for
 -- itself from the project's own PostgREST config. This job reads it.
 --
--- Thirty minutes, not five. This settles: once a clone holds its key the pass
--- is a single indexed ledger read and no Management API call at all, and
--- `decideJwtSecretRepair` holds a failed repair for thirty minutes before
--- retrying — so a project whose config the Management API refuses costs two
+-- Thirty minutes, not five. This settles: the sweep reads the candidate list
+-- and the ledger in bulk and decides from those, so once every clone holds its
+-- key a pass is two queries and no Management API call at all — resolving a
+-- write target and reading a key are paid for only by clones that need work.
+-- And `decideJwtSecretRepair` holds a failed repair for thirty minutes before
+-- retrying, so a project whose config the Management API refuses costs two
 -- calls an hour rather than sixty.
 --
 -- The write can only ever reach a clone: the ref comes from

@@ -253,9 +253,12 @@ was a person opening the clone's Supabase settings and pasting a signing key
 into a box — for a value Mission Control can read for itself.
 
 `clone-jwt-secret-reconcile` reads it (`cloneSecretRepair.server.ts`, decided
-by `cloneSecretRepair.pure.ts`). It runs every 30 minutes, and it settles:
-once a clone holds its key the pass is one indexed ledger read and no
-Management API call at all.
+by `cloneSecretRepair.pure.ts`). It runs every 30 minutes, and it settles: the
+sweep reads the candidate list and the ledger in bulk and decides from those,
+so once every clone holds its key a pass is two queries and no Management API
+call at all. Resolving a write target is three more queries and reading the key
+is a Management API call; neither is paid for a clone the ledger already says
+is done. A source test pins the ordering, because that is the whole claim.
 
 Four rules carry it.
 

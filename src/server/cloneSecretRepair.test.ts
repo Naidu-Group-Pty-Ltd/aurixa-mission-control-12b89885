@@ -85,7 +85,9 @@ describe("decideJwtSecretRepair", () => {
     // `missing` with a stale `updated_at` and no error is the ordinary state of
     // a clone nobody has repaired yet, not a recent failure.
     expect(
-      decideJwtSecretRepair(facts({ lastError: null, updatedAt: new Date(NOW - 1000).toISOString() })),
+      decideJwtSecretRepair(
+        facts({ lastError: null, updatedAt: new Date(NOW - 1000).toISOString() }),
+      ),
     ).toEqual({ act: true, why: "ledger says missing" });
   });
 
@@ -93,7 +95,9 @@ describe("decideJwtSecretRepair", () => {
     // A cooling-off window computed from a date nobody can read would hold the
     // repair forever. Acting is the recoverable side.
     expect(
-      decideJwtSecretRepair(facts({ ledgerStatus: "failed", lastError: "boom", updatedAt: "not a date" })),
+      decideJwtSecretRepair(
+        facts({ ledgerStatus: "failed", lastError: "boom", updatedAt: "not a date" }),
+      ),
     ).toEqual({ act: true, why: "ledger says failed" });
   });
 
@@ -169,6 +173,30 @@ describe("the JWT repair's write target", () => {
     expect(code).not.toMatch(/result:\s*\{[^}]*\bsecret\s*[,}]/);
     expect(code).not.toMatch(/\bsecret\.slice\(/);
     expect(code).not.toMatch(/\breturn\b[^;]*\bsecret\b[^;]*;/);
+  });
+
+  it("decides from a BULK ledger read before doing any per-clone work", () => {
+    // The schedule's comment claims a settled fleet costs two reads a pass and
+    // no Management API call at all. That is only true if the sweep decides
+    // from facts it already has: resolving a write target is three more
+    // queries and reading the key is a Management API call, and neither is
+    // worth paying for a clone the ledger already says is done.
+    const sweep = code.slice(code.indexOf("export async function reconcileCloneJwtSecrets"));
+    expect(sweep).toMatch(/\.in\(\s*"clone_id"/);
+    const decidedAt = sweep.indexOf("decideJwtSecretRepair(");
+    const repairedAt = sweep.indexOf("repairCloneJwtSecret(");
+    expect(decidedAt).toBeGreaterThan(-1);
+    expect(repairedAt).toBeGreaterThan(-1);
+    expect(decidedAt).toBeLessThan(repairedAt);
+  });
+
+  it("throws rather than reporting an empty fleet when a read fails", () => {
+    // A candidate list or a ledger that could not be READ is not a fleet that
+    // is already correct — on the job whose whole purpose is noticing that it
+    // is not.
+    const sweep = code.slice(code.indexOf("export async function reconcileCloneJwtSecrets"));
+    expect(sweep).toContain("Could not list clone backends");
+    expect(sweep).toMatch(/ledgerRes\.error[\s\S]{0,200}throw new Error/);
   });
 
   it("records a failed read as `failed`, never leaving it `missing`", () => {
