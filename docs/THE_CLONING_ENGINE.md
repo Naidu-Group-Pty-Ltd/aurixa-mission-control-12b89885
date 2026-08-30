@@ -199,3 +199,38 @@ on everything near it.
   Aug, 7 `queued` since 27 Jul) because `codex-sweep` is the worker that clears
   them. On its first run it marks the hung ones failed and may re-dispatch up
   to seven month-old scans; that is bounded and is what the sweeper is for.
+
+## A clone's token-signing key is its own, and provisioning captures it
+
+The clone's custom auth mints Supabase access tokens itself
+(`_shared/jwt.ts`, read as `SUPABASE_JWT_SECRET ?? JWT_SECRET`) and its own
+project validates them. Two things were wrong.
+
+**It was classified `vendor` — the class that COPIES the prime's value.**
+`JWT_SECRET` is in no other list, so `classifySecret` fell through to
+`vendor`, and a `prime_secret_forwards` row with `inherit=true` would have
+handed every clone the prime's signing key. That does not merely break the
+clone (its own project would reject those tokens); it lets the clone MINT
+tokens the PRIME's database accepts, for any `sub` and any role. No
+forwarding row exists, so nothing was ever shared — but the whole point of
+`TENANT_SCOPED_SECRETS` is that adding one later must be impossible, and it
+is now in that set.
+
+**The ledger asked for a name that cannot be set.** `SUPABASE_` is reserved
+by Supabase's secrets API; `extractSecretNames` and `classifySecret` both
+already excluded the prefix, so `SUPABASE_JWT_SECRET` could only ever read
+`missing` no matter what an operator did. `JWT_SECRET` is the settable
+spelling and the one the clone's code already falls back to.
+
+Two rules carry it. **Never inherited is not never written** — a value that
+belongs to THIS clone is exactly what should land, so `planCloneSecrets`
+takes `selfValues` and provisioning supplies the project's own `jwt_secret`,
+captured from the `POST /v1/projects` response. Supabase returns it there and
+nowhere else: there is no endpoint that reads it back, and it cannot be
+derived from the anon or service-role keys because those are signed WITH it.
+So a project Mission Control CREATES is automatic, and one adopted after the
+fact legitimately has none to capture and says so. And **a signing key is
+never generated** — the `identity` class mints a fresh random value, which is
+right for `INTERNAL_EDGE_SECRET` and actively worse here: PostgREST validates
+against the project's own key, so a random one produces tokens rejected by
+the very database they are for.

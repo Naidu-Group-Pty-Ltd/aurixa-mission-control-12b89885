@@ -9,7 +9,7 @@
 
 import crypto from "node:crypto";
 
-import { classifySecret } from "./prime-backend.server";
+import { classifySecret, TENANT_SCOPED_REMEDY } from "./prime-backend.server";
 import { assessLedgerState, ledgerRepairHint } from "./cloneLedgerState.pure";
 import type { PrimeBackendSnapshot } from "./prime-backend.server";
 import type { StageName, StageResult } from "./schema-introspection.server";
@@ -55,6 +55,14 @@ export type SupabaseProject = {
     host: string;
     version: string;
   };
+  /**
+   * The project's token-signing key. Supabase returns this on CREATE and
+   * nowhere else — there is no endpoint that reads it back afterwards, and no
+   * way to derive it from the anon or service-role keys (they are signed WITH
+   * it). So it is captured here or not at all, and a project adopted rather
+   * than created by Mission Control legitimately has none to capture.
+   */
+  jwt_secret?: string;
 };
 
 export type ApiKey = {
@@ -1935,6 +1943,12 @@ export function planCloneSecrets(
   generate: () => string,
   origins?: CloneOrigins | null,
   dedicatedNames?: ReadonlySet<string>,
+  /**
+   * Values that belong to THIS clone — never the prime's. The only source for
+   * a tenant-scoped name that Mission Control can supply itself: today the
+   * project's own `jwt_secret`, captured from the create response.
+   */
+  selfValues?: Record<string, string>,
 ): { toWrite: { name: string; value: string }[]; results: Map<string, SecretShellResult> } {
   const toWrite: { name: string; value: string }[] = [];
   const results = new Map<string, SecretShellResult>();
@@ -1960,15 +1974,23 @@ export function planCloneSecrets(
       continue;
     }
     if (kind === "tenant_scoped") {
-      // Never inherited, whatever `prime_secret_forwards` says: sharing the
+      // Never INHERITED, whatever `prime_secret_forwards` says: sharing the
       // prime's value is the cross-tenant defect this class exists to stop.
+      // A value of the clone's OWN is a different thing entirely, and is
+      // exactly what should be written.
+      const own = selfValues?.[name];
+      if (typeof own === "string" && own.length > 0) {
+        toWrite.push({ name, value: own });
+        results.set(name, { name, status: "derived", success: true });
+        continue;
+      }
       results.set(name, {
         name,
         status: "tenant_scoped_pending",
         success: true,
         error:
           `${name} is per-tenant and is never copied from the prime. ` +
-          "Mint this clone's own credential from its identity panel before handover.",
+          (TENANT_SCOPED_REMEDY[name] ?? "Set this clone's own value before handover."),
       });
       continue;
     }
@@ -2003,6 +2025,7 @@ export async function syncCloneSecrets(
   inheritedValues: Record<string, string>,
   origins?: CloneOrigins | null,
   dedicatedNames?: ReadonlySet<string>,
+  selfValues?: Record<string, string>,
 ): Promise<SecretShellResult[]> {
   if (names.length === 0) return [];
 
@@ -2012,6 +2035,7 @@ export async function syncCloneSecrets(
     () => crypto.randomBytes(32).toString("hex"),
     origins ?? null,
     dedicatedNames,
+    selfValues,
   );
 
   if (toWrite.length > 0) {
@@ -2495,6 +2519,8 @@ export async function provisionCloneBackend(
   // Step 1: Create the project (or resume onto a surviving one)
   let projectRef = input.existingProjectRef ?? null;
   let dbPass: string | null = null;
+  // The clone's own signing key, readable exactly once — see SupabaseProject.
+  let createdJwtSecret: string | null = null;
   if (projectRef) {
     await onStatusUpdate?.("provisioning", `Resuming on existing project ${projectRef}...`);
   } else {
@@ -2521,6 +2547,10 @@ export async function provisionCloneBackend(
       dbPass,
     });
     projectRef = project.id;
+    // Only ever from a project WE created. An adopted ref has no create
+    // response to read, and guessing is not available: the key cannot be
+    // fetched back or derived.
+    createdJwtSecret = project.jwt_secret ?? null;
   }
 
   // Step 2: Wait for it to be ready
@@ -2797,6 +2827,11 @@ export async function provisionCloneBackend(
     // here is what makes ALLOWED_ORIGINS this clone's own rather than unset.
     input.cloneOrigins ?? null,
     new Set(input.dedicatedSecretNames ?? []),
+    // Values that belong to THIS clone rather than being copied from the
+    // prime. `JWT_SECRET` is tenant-scoped precisely so it can never be
+    // inherited, which would otherwise leave every clone unable to sign its
+    // own access tokens — so provisioning supplies the project's own.
+    createdJwtSecret ? { JWT_SECRET: createdJwtSecret } : undefined,
   );
 
   // Step 7: Seed admin

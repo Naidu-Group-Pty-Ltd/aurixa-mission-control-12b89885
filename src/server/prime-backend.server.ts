@@ -282,8 +282,34 @@ export const DEPLOYMENT_CONFIG_SECRETS = new Set([
  * These names are recorded `missing` on a clone no matter what
  * `prime_secret_forwards` says. Adding a forwarding row must not be able to
  * re-share them, which is why this is a classification and not a default.
+ *
+ * `JWT_SECRET` is the sharpest case in the set and was classified `vendor` —
+ * the class that COPIES the prime's value whenever a forwarding row exists.
+ * It is a Supabase project's token-signing key: the clone's custom auth signs
+ * access tokens with it (`_shared/jwt.ts`) and the project validates against
+ * it. Handing a clone the prime's key would not merely break the clone (its
+ * own project would reject those tokens) — it would let that clone MINT
+ * tokens the PRIME's database accepts, for any `sub` and any role. No
+ * forwarding row exists today, so nothing has been shared; the classification
+ * is what makes it impossible for one to be added later, which is the whole
+ * point of this list.
  */
-export const TENANT_SCOPED_SECRETS = new Set(["TURNSTILE_SECRET_KEY"]);
+export const TENANT_SCOPED_SECRETS = new Set(["TURNSTILE_SECRET_KEY", "JWT_SECRET"]);
+
+/**
+ * What an operator should DO about a tenant-scoped secret that is still
+ * pending. The generic "mint it from the identity panel" is right for the
+ * CAPTCHA and wrong for a project's signing key, which is not minted by
+ * anything here — it is issued by Supabase when the project is created.
+ */
+export const TENANT_SCOPED_REMEDY: Record<string, string> = {
+  TURNSTILE_SECRET_KEY:
+    "Mint this clone's own Turnstile widget from its identity panel before handover.",
+  JWT_SECRET:
+    "This is the clone's OWN Supabase project signing key (Settings → API → JWT Settings on " +
+    "that project). Provisioning captures it automatically for projects Mission Control " +
+    "creates; a project adopted after the fact needs it set once from the clone's Secrets page.",
+};
 
 export type SecretClass =
   | "platform"
@@ -633,7 +659,9 @@ export async function openPrimeMigrationCorpus(
     if (hit) return hit;
     const meta = byId.get(id);
     if (!meta) {
-      return Promise.reject(new Error(`Migration ${id} is not in the prime corpus at ${commitSha}`));
+      return Promise.reject(
+        new Error(`Migration ${id} is not in the prime corpus at ${commitSha}`),
+      );
     }
     const pending = (async () => {
       // Refuse before the round trip when the tree already told us the size.
