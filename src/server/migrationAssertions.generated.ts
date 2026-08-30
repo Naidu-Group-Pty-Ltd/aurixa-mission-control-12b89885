@@ -100,4 +100,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260830040000",
     assertions: [{ kind: "cron", jobname: "clone-jwt-secret-reconcile" }],
   },
+  {
+    migration: "20260830070000_schedule_cascade_merge_drain.sql",
+    version: "20260830070000",
+    assertions: [{ kind: "cron", jobname: "cascade-merge-drain" }],
+  },
 ];
