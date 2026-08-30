@@ -244,3 +244,73 @@ after the duplicate storm there were eight.
 Failing to LIST is not failing to find: if the lookup errors the engine falls
 through to opening a new pull request. A duplicate is a tidiness problem; a
 cascade that silently proposed nothing is not.
+
+## What a held file never learns on its own
+
+`manual_reconcile` holds a file back and names it in the pull request, because
+the clone's copy has to win. That hold is correct and it is also a hole: the
+cascade delivers a module and declines to deliver the file that wires it up, so
+the two halves of one change land a commit apart, or never.
+
+Two guards close it, and they fail in opposite ways.
+
+**A removal is loud.** `findStaleHeldReferences` reads the clone's copy of each
+held source file and asks whether it imports anything the cascade's own payload
+has stopped exporting. That is how `src/App.tsx` came to sit on the clone's
+`main` importing an `AmlIntakeQueue` that `AmlShellPages.tsx` no longer had —
+every Vercel deployment failing, while the cascade reported the same
+"1 awaiting manual reconcile" it reports on a healthy run.
+
+**An addition is silent.** `findMissingHeldReferences` reads BOTH copies — the
+clone's and the one the cascade declined to write — and asks what prime's copy
+takes from a module this cascade delivers that the clone's copy takes from
+nowhere. An import that is simply absent compiles perfectly. The clone does not
+have the feature and nothing anywhere goes red. The AUSTRAC drafting routes were
+caught only because a source test happened to assert them, which is luck rather
+than a mechanism.
+
+Comparing two held files in general is meaningless — they differ on purpose,
+which is what "held" means. Comparing them on **one axis** is not, and the
+restrictions are what keep it quiet: only modules this run delivers, only
+symbols that module actually exports, and matched on the RESOLVED target so
+`@/pages/x` and `./pages/x` are one module rather than an absence.
+
+### And on a clock, because a cascade only sees its own payload
+
+Both guards run inside a cascade, over the files that cascade touches. Drift on
+a module no cascade has touched since is invisible to both: the guard never
+runs, nothing goes red, and nobody is told.
+
+`hooks/held-file-drift` is the part that comes back and looks anyway — hourly,
+per clone, with no cascade running. It reads the clone's tree once, takes the
+`manual_reconcile` source paths out of the same `partitionCascadePaths` the
+engine uses, fetches both copies of each, and puts the result through
+`findMissingHeldReferences` — the same function, so the sweep and the cascade
+cannot reach two different conclusions.
+
+Four rules carry it.
+
+**It reports; it never repairs.** A held file is held precisely because this
+platform is forbidden to write it. A sweep that pushed the missing import would
+be the cascade overwriting a clone's own work by another route.
+
+**The clone's own tree decides what exists.** A module prime's held file imports
+from that the clone does not have at all is not a finding — that is ordinary
+cascade lag, and the cascade's own guard will speak when the module lands.
+Without that rule every open cascade becomes an operator notification.
+
+**The plan decides what to FETCH, never what to REPORT.** `planHeldFileDrift`
+is a pre-filter so a held file importing from forty modules costs one blob read
+rather than forty. Two implementations of "what is missing" is how they come to
+disagree.
+
+**A standing finding is not news.** The gap persists until a person edits a file
+this platform may not touch, so `decideDriftReport` compares an
+order-independent fingerprint of the whole finding set against what was last
+**observed** — not what was last announced. A clearance is recorded and not
+announced, which is what makes a gap that came back audible again.
+
+Measured on the live fleet: 7,910 paths, five held source files, eleven GitHub
+calls, no findings. Against the clone as it stood the day before the routes were
+reconciled by hand: one module read, one finding, named as
+`AmlAustracReportDraft` from `src/pages/aml/AmlShellPages.tsx`.

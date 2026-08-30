@@ -75,6 +75,7 @@ import { Route as HooksRunSchedulesRouteImport } from './routes/hooks.run-schedu
 import { Route as HooksReferenceDataSyncRouteImport } from './routes/hooks.reference-data-sync'
 import { Route as HooksMigrationEnqueueRouteImport } from './routes/hooks.migration-enqueue'
 import { Route as HooksMigrationDriftRouteImport } from './routes/hooks.migration-drift'
+import { Route as HooksHeldFileDriftRouteImport } from './routes/hooks.held-file-drift'
 import { Route as HooksHandoffParityRefreshRouteImport } from './routes/hooks.handoff-parity-refresh'
 import { Route as HooksHandoffObservabilityPollRouteImport } from './routes/hooks.handoff-observability-poll'
 import { Route as HooksGithubRouteImport } from './routes/hooks.github'
@@ -508,6 +509,11 @@ const HooksMigrationEnqueueRoute = HooksMigrationEnqueueRouteImport.update({
 const HooksMigrationDriftRoute = HooksMigrationDriftRouteImport.update({
   id: '/hooks/migration-drift',
   path: '/hooks/migration-drift',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksHeldFileDriftRoute = HooksHeldFileDriftRouteImport.update({
+  id: '/hooks/held-file-drift',
+  path: '/hooks/held-file-drift',
   getParentRoute: () => rootRouteImport,
 } as any)
 const HooksHandoffParityRefreshRoute =
@@ -1120,6 +1126,7 @@ export interface FileRoutesByFullPath {
   '/hooks/github': typeof HooksGithubRoute
   '/hooks/handoff-observability-poll': typeof HooksHandoffObservabilityPollRoute
   '/hooks/handoff-parity-refresh': typeof HooksHandoffParityRefreshRoute
+  '/hooks/held-file-drift': typeof HooksHeldFileDriftRoute
   '/hooks/migration-drift': typeof HooksMigrationDriftRoute
   '/hooks/migration-enqueue': typeof HooksMigrationEnqueueRoute
   '/hooks/reference-data-sync': typeof HooksReferenceDataSyncRoute
@@ -1287,6 +1294,7 @@ export interface FileRoutesByTo {
   '/hooks/github': typeof HooksGithubRoute
   '/hooks/handoff-observability-poll': typeof HooksHandoffObservabilityPollRoute
   '/hooks/handoff-parity-refresh': typeof HooksHandoffParityRefreshRoute
+  '/hooks/held-file-drift': typeof HooksHeldFileDriftRoute
   '/hooks/migration-drift': typeof HooksMigrationDriftRoute
   '/hooks/migration-enqueue': typeof HooksMigrationEnqueueRoute
   '/hooks/reference-data-sync': typeof HooksReferenceDataSyncRoute
@@ -1456,6 +1464,7 @@ export interface FileRoutesById {
   '/hooks/github': typeof HooksGithubRoute
   '/hooks/handoff-observability-poll': typeof HooksHandoffObservabilityPollRoute
   '/hooks/handoff-parity-refresh': typeof HooksHandoffParityRefreshRoute
+  '/hooks/held-file-drift': typeof HooksHeldFileDriftRoute
   '/hooks/migration-drift': typeof HooksMigrationDriftRoute
   '/hooks/migration-enqueue': typeof HooksMigrationEnqueueRoute
   '/hooks/reference-data-sync': typeof HooksReferenceDataSyncRoute
@@ -1626,6 +1635,7 @@ export interface FileRouteTypes {
     | '/hooks/github'
     | '/hooks/handoff-observability-poll'
     | '/hooks/handoff-parity-refresh'
+    | '/hooks/held-file-drift'
     | '/hooks/migration-drift'
     | '/hooks/migration-enqueue'
     | '/hooks/reference-data-sync'
@@ -1793,6 +1803,7 @@ export interface FileRouteTypes {
     | '/hooks/github'
     | '/hooks/handoff-observability-poll'
     | '/hooks/handoff-parity-refresh'
+    | '/hooks/held-file-drift'
     | '/hooks/migration-drift'
     | '/hooks/migration-enqueue'
     | '/hooks/reference-data-sync'
@@ -1961,6 +1972,7 @@ export interface FileRouteTypes {
     | '/hooks/github'
     | '/hooks/handoff-observability-poll'
     | '/hooks/handoff-parity-refresh'
+    | '/hooks/held-file-drift'
     | '/hooks/migration-drift'
     | '/hooks/migration-enqueue'
     | '/hooks/reference-data-sync'
@@ -2127,6 +2139,7 @@ export interface RootRouteChildren {
   HooksGithubRoute: typeof HooksGithubRoute
   HooksHandoffObservabilityPollRoute: typeof HooksHandoffObservabilityPollRoute
   HooksHandoffParityRefreshRoute: typeof HooksHandoffParityRefreshRoute
+  HooksHeldFileDriftRoute: typeof HooksHeldFileDriftRoute
   HooksMigrationDriftRoute: typeof HooksMigrationDriftRoute
   HooksMigrationEnqueueRoute: typeof HooksMigrationEnqueueRoute
   HooksReferenceDataSyncRoute: typeof HooksReferenceDataSyncRoute
@@ -2665,6 +2678,13 @@ declare module '@tanstack/react-router' {
       path: '/hooks/migration-drift'
       fullPath: '/hooks/migration-drift'
       preLoaderRoute: typeof HooksMigrationDriftRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/held-file-drift': {
+      id: '/hooks/held-file-drift'
+      path: '/hooks/held-file-drift'
+      fullPath: '/hooks/held-file-drift'
+      preLoaderRoute: typeof HooksHeldFileDriftRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/hooks/handoff-parity-refresh': {
@@ -3546,6 +3566,7 @@ const rootRouteChildren: RootRouteChildren = {
   HooksGithubRoute: HooksGithubRoute,
   HooksHandoffObservabilityPollRoute: HooksHandoffObservabilityPollRoute,
   HooksHandoffParityRefreshRoute: HooksHandoffParityRefreshRoute,
+  HooksHeldFileDriftRoute: HooksHeldFileDriftRoute,
   HooksMigrationDriftRoute: HooksMigrationDriftRoute,
   HooksMigrationEnqueueRoute: HooksMigrationEnqueueRoute,
   HooksReferenceDataSyncRoute: HooksReferenceDataSyncRoute,
