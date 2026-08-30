@@ -1,7 +1,8 @@
 /**
- * Merge the cascade pull requests whose checks have gone green.
+ * Merge the cascade pull requests that have gone green — and make Mission
+ * Control's record of every cascade agree with what GitHub actually did.
  *
- * ## Why this has to exist
+ * ## Why the merging half has to exist
  *
  * `auto_merge` cannot merge at the moment it opens a pull request, and should
  * not try. Check runs appear asynchronously: `Vercel Preview Comments`
@@ -11,23 +12,47 @@
  * `decideCascadeMerge` therefore refuses, correctly, and the engine leaves the
  * pull request open with the reason on it.
  *
- * Which would be the end of it. GitHub's own auto-merge is the mechanism
- * designed for exactly this wait, and it CANNOT BE ARMED on a repository with
- * no required status checks — which is every clone here, all with unprotected
- * default branches. So without this drain the honest gate turns into the old
- * symptom by another route: pull requests opened, nothing merged, and a
- * cascade summary reading `0 merged` for ever.
+ * GitHub's own auto-merge is the mechanism designed for that wait, and it
+ * CANNOT BE ARMED on a repository with no required status checks — which is
+ * every clone here, all with unprotected default branches. So without this the
+ * honest gate turns into the old symptom by another route: pull requests
+ * opened, nothing merged, `0 merged` for ever.
  *
- * This is the part that comes back and looks again.
+ * ## Why the reconciling half has to exist
+ *
+ * A cascade result reached `pr_opened` and stopped there permanently. Nothing
+ * ever looked at the pull request again. This drain merged it on GitHub and
+ * wrote an audit row; a person merging one by hand wrote nothing at all.
+ * Neither reached `cascade_results`, `cascade_events.summary` or `clones`.
+ *
+ * Measured on 30 Aug 2026: #66 and #67 were merged at 07:55 and 08:35. Both
+ * rows still read `pr_opened`, both parent events still read `0 merged · 1
+ * PRs`, and the clone still read `140 commits behind` with `last_synced_sha`
+ * frozen on a commit from before either landed — which is not cosmetic, because
+ * `runDriftRefresh` measures drift FROM that pointer, so an unadvanced pointer
+ * makes a clone that is up to date report as permanently behind.
+ *
+ * So Mission Control said one thing and GitHub said another, in both
+ * directions, with no mechanism anywhere that could have reconciled them.
+ *
+ * ## The rule
+ *
+ * **The pull request's own state is the truth, and it is READ rather than
+ * remembered.** Not "what this drain did" — that misses every merge a person
+ * performed, every merge that landed while this control plane was down, and
+ * every proposal an operator closed. One `pulls.get` answers all of them.
+ *
+ * That is also why the work list is Mission Control's UNRECONCILED ROWS rather
+ * than GitHub's open pull requests: a merged pull request is not open any more,
+ * so a drain that only enumerates open ones can never discover it. GitHub's
+ * open list is still read, on top, so a pull request this engine opened but
+ * failed to record is still merged when it goes green.
  *
  * ## What it will and will not merge
  *
  * Only branches this engine names — `aurixa/cascade-…` — and only through
  * `decideCascadeMerge`, the same rule the engine uses, so there is one
- * definition of "green" rather than two that can drift. A pull request that is
- * failing, still running, or missing a required check is left exactly where it
- * is, with nothing written and nothing announced: a drain that reports on every
- * pull request it declined to merge every few minutes is one nobody reads.
+ * definition of "green" rather than two that can drift.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
@@ -38,6 +63,15 @@ import {
   decideCascadeMerge,
   REQUIRED_CHECKS,
 } from "./cascade/autoMergeGate.pure";
+import {
+  cascadeEventStatus,
+  countResults,
+  parsePrNumber,
+  reconcileResultToPr,
+  summariseCascade,
+  type PullRequestFacts,
+} from "./cascade/prReconcile.pure";
+import { summaryOwesReconcile } from "./cascade/syncExclusions.pure";
 
 type Db = SupabaseClient<Database>;
 
@@ -47,17 +81,41 @@ export const CASCADE_BRANCH_PREFIX = "aurixa/cascade-";
 export type MergeDrainOutcome =
   | { clone: string; pr: number; outcome: "merged"; sha: string | null }
   | { clone: string; pr: number; outcome: "held"; reason: string; why: string }
-  | { clone: string; pr: number; outcome: "failed"; error: string };
+  | { clone: string; pr: number; outcome: "failed"; error: string }
+  /** The record was behind and has been brought forward. */
+  | { clone: string; pr: number; outcome: "reconciled"; to: string; why: string };
 
 export type MergeDrainReport = {
   considered: number;
   merged: number;
+  /** Rows whose recorded state was wrong and has been corrected. */
+  reconciled: number;
+  /** Cascade events whose summary was recounted. */
+  recounted: number;
+  /** Clones whose commit pointer was moved forward. */
+  advanced: number;
   held: Record<string, number>;
   failed: number;
   detail: MergeDrainOutcome[];
 };
 
 const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
+type CloneRow = {
+  id: string;
+  name: string | null;
+  github_owner: string;
+  github_repo: string;
+  default_branch: string | null;
+};
+
+type ResultRow = {
+  id: string;
+  clone_id: string;
+  cascade_event_id: string;
+  pr_url: string | null;
+  diff_summary: string | null;
+};
 
 export async function drainCascadeMerges(
   supabase: Db,
@@ -66,6 +124,9 @@ export async function drainCascadeMerges(
   const report: MergeDrainReport = {
     considered: 0,
     merged: 0,
+    reconciled: 0,
+    recounted: 0,
+    advanced: 0,
     held: {},
     failed: 0,
     detail: [],
@@ -81,103 +142,357 @@ export async function drainCascadeMerges(
   // healthy.
   if (error) throw new Error(`Could not list clones: ${error.message}`);
 
+  // Every row Mission Control still believes is an open proposal. This is the
+  // work list, because a merged pull request is no longer open and a drain that
+  // enumerated only open ones could never find it.
+  const unreconciled = await supabase
+    .from("cascade_results")
+    .select("id, clone_id, cascade_event_id, pr_url, diff_summary")
+    .eq("status", "pr_opened")
+    .not("pr_url", "is", null);
+  if (unreconciled.error) {
+    throw new Error(`Could not read cascade results: ${unreconciled.error.message}`);
+  }
+  const rowsByClone = new Map<string, ResultRow[]>();
+  for (const row of (unreconciled.data ?? []) as ResultRow[]) {
+    const list = rowsByClone.get(row.clone_id);
+    if (list) list.push(row);
+    else rowsByClone.set(row.clone_id, [row]);
+  }
+
   const octokit = getAppOctokit();
+  /** Events whose counts may have moved, recounted once at the end. */
+  const touchedEvents = new Set<string>();
+  /** Clones where something merged, so their pointer is re-derived. */
+  const advancedClones = new Set<string>();
 
   for (const raw of data ?? []) {
-    const clone = raw as {
-      name: string | null;
-      github_owner: string | null;
-      github_repo: string | null;
-      default_branch: string | null;
-    };
+    const clone = raw as CloneRow & { github_owner: string | null; github_repo: string | null };
     if (!clone.github_owner || !clone.github_repo) continue;
     const label = clone.name ?? `${clone.github_owner}/${clone.github_repo}`;
+    const owner = clone.github_owner;
+    const repo = clone.github_repo;
 
-    let open: Array<{ number: number; head: { ref: string; sha: string } }>;
+    const rows = rowsByClone.get(clone.id) ?? [];
+    /** Pull request number → the row that records it, when there is one. */
+    const rowByPr = new Map<number, ResultRow>();
+    for (const row of rows) {
+      const n = parsePrNumber(row.pr_url);
+      if (n !== null) rowByPr.set(n, row);
+    }
+
+    // GitHub's open cascade pull requests, on top of the rows above: one this
+    // engine opened but failed to record still deserves to be merged.
+    let openNumbers: number[] = [];
     try {
       const { data: prs } = await octokit.pulls.list({
-        owner: clone.github_owner,
-        repo: clone.github_repo,
+        owner,
+        repo,
         state: "open",
         base: clone.default_branch || "main",
         per_page: opts.limitPerClone ?? 20,
       });
-      open = prs as typeof open;
+      openNumbers = (prs as Array<{ number: number; head: { ref: string } }>)
+        .filter((p) => p.head.ref.startsWith(CASCADE_BRANCH_PREFIX))
+        .map((p) => p.number);
     } catch (e) {
-      // One unreachable repository must not stop the others.
+      // One unreachable repository must not stop the others, and must not stop
+      // this clone's own recorded rows from being reconciled either.
       report.failed += 1;
       report.detail.push({ clone: label, pr: 0, outcome: "failed", error: msg(e) });
-      continue;
     }
 
-    for (const pr of open.filter((p) => p.head.ref.startsWith(CASCADE_BRANCH_PREFIX))) {
+    // Oldest first. Two proposals open at once carry overlapping trees, and
+    // landing the newer one first would put the older one's content on top.
+    const numbers = [...new Set([...rowByPr.keys(), ...openNumbers])].sort((a, b) => a - b);
+
+    for (const number of numbers) {
       report.considered += 1;
+      const row = rowByPr.get(number) ?? null;
       try {
-        // Checks are read on the pull request's CURRENT head, so a push that
-        // lands between the read and the merge invalidates nothing silently —
-        // the merge below is by pull number and GitHub refuses a stale one.
-        const { data: checkData } = await octokit.checks.listForRef({
-          owner: clone.github_owner,
-          repo: clone.github_repo,
-          ref: pr.head.sha,
+        const outcome = await handleOne({
+          supabase,
+          octokit,
+          owner,
+          repo,
+          number,
+          row,
+          label,
         });
-        const verdict = decideCascadeMerge(
-          (checkData.check_runs ?? []).map((c) => ({
-            name: c.name,
-            status: c.status,
-            conclusion: c.conclusion,
-          })),
-          REQUIRED_CHECKS,
-        );
-
-        if (!verdict.merge) {
-          report.held[verdict.reason] = (report.held[verdict.reason] ?? 0) + 1;
-          report.detail.push({
-            clone: label,
-            pr: pr.number,
-            outcome: "held",
-            reason: verdict.reason,
-            why: verdict.why,
-          });
-          continue;
+        report.detail.push(outcome);
+        if (outcome.outcome === "merged") {
+          report.merged += 1;
+          advancedClones.add(clone.id);
+        } else if (outcome.outcome === "held") {
+          report.held[outcome.reason] = (report.held[outcome.reason] ?? 0) + 1;
+        } else if (outcome.outcome === "reconciled") {
+          report.reconciled += 1;
+          if (outcome.to === "succeeded") advancedClones.add(clone.id);
         }
-
-        // MERGE, never SQUASH — a squash rewrites the cascade commit naming the
-        // prime SHA it came from, which is the one durable record of what a
-        // clone has received.
-        const { data: merged } = await octokit.pulls.merge({
-          owner: clone.github_owner,
-          repo: clone.github_repo,
-          pull_number: pr.number,
-          merge_method: "merge",
-        });
-        report.merged += 1;
-        report.detail.push({
-          clone: label,
-          pr: pr.number,
-          outcome: "merged",
-          sha: merged.sha?.slice(0, 7) ?? null,
-        });
+        if (row) touchedEvents.add(row.cascade_event_id);
       } catch (e) {
-        // "I cannot see CI" is not "the cascade failed" — it is a missing
-        // read-only permission, and the correct response to an unreadable
-        // signal is to leave the pull request alone and say so.
-        if (checksUnreadable(e)) {
-          report.held.checks_unreadable = (report.held.checks_unreadable ?? 0) + 1;
-          report.detail.push({
-            clone: label,
-            pr: pr.number,
-            outcome: "held",
-            reason: "checks_unreadable",
-            why: CHECKS_PERMISSION_REMEDY,
-          });
-          continue;
-        }
         report.failed += 1;
-        report.detail.push({ clone: label, pr: pr.number, outcome: "failed", error: msg(e) });
+        report.detail.push({ clone: label, pr: number, outcome: "failed", error: msg(e) });
       }
     }
   }
 
+  // Recount the events whose results moved, and move the pointers of the clones
+  // where something landed. Both are DERIVED from the reconciled rows rather
+  // than incremented as we go, so neither can drift and neither can regress —
+  // and both repair a record that was already wrong before this ran.
+  for (const eventId of touchedEvents) {
+    if (await recountEvent(supabase, eventId)) report.recounted += 1;
+  }
+  for (const cloneId of advancedClones) {
+    if (await advanceClone(supabase, cloneId)) report.advanced += 1;
+  }
+
   return report;
+}
+
+/**
+ * Read one pull request, merge it if it is green, and bring its Mission Control
+ * row into line with whatever is true afterwards.
+ */
+async function handleOne(args: {
+  supabase: Db;
+  octokit: ReturnType<typeof getAppOctokit>;
+  owner: string;
+  repo: string;
+  number: number;
+  row: ResultRow | null;
+  label: string;
+}): Promise<MergeDrainOutcome> {
+  const { supabase, octokit, owner, repo, number, row, label } = args;
+
+  const { data: pr } = await octokit.pulls.get({ owner, repo, pull_number: number });
+  let facts: PullRequestFacts = {
+    state: pr.state === "closed" ? "closed" : "open",
+    merged: Boolean(pr.merged),
+    mergeCommitSha: pr.merge_commit_sha ?? null,
+  };
+  let mergedNow = false;
+  let reason = "";
+
+  if (facts.state === "open") {
+    let verdict: ReturnType<typeof decideCascadeMerge> | null = null;
+    try {
+      // Checks are read on the pull request's CURRENT head, so a push landing
+      // between the read and the merge invalidates nothing silently — the merge
+      // below is by pull number and GitHub refuses a stale one.
+      const { data: checkData } = await octokit.checks.listForRef({
+        owner,
+        repo,
+        ref: pr.head.sha,
+      });
+      verdict = decideCascadeMerge(
+        (checkData.check_runs ?? []).map((c) => ({
+          name: c.name,
+          status: c.status,
+          conclusion: c.conclusion,
+        })),
+        REQUIRED_CHECKS,
+      );
+    } catch (e) {
+      // "I cannot see CI" is not "the cascade failed" — it is a missing
+      // read-only permission, and the correct response to an unreadable signal
+      // is to leave the pull request alone and say so.
+      if (!checksUnreadable(e)) throw e;
+      reason = CHECKS_PERMISSION_REMEDY;
+      await writeReconciliation(supabase, row, facts, reason);
+      return { clone: label, pr: number, outcome: "held", reason: "checks_unreadable", why: reason };
+    }
+
+    if (!verdict.merge) {
+      await writeReconciliation(supabase, row, facts, verdict.why);
+      return { clone: label, pr: number, outcome: "held", reason: verdict.reason, why: verdict.why };
+    }
+
+    // MERGE, never SQUASH — a squash rewrites the cascade commit naming the
+    // prime SHA it came from, which is the one durable record of what a clone
+    // has received.
+    const { data: merged } = await octokit.pulls.merge({
+      owner,
+      repo,
+      pull_number: number,
+      merge_method: "merge",
+    });
+    facts = { state: "closed", merged: true, mergeCommitSha: merged.sha ?? null };
+    mergedNow = true;
+  }
+
+  const applied = await writeReconciliation(supabase, row, facts, reason);
+
+  if (mergedNow) {
+    return { clone: label, pr: number, outcome: "merged", sha: facts.mergeCommitSha?.slice(0, 7) ?? null };
+  }
+  if (applied) {
+    // The record was behind — a merge somebody else performed, or a proposal
+    // somebody closed — and has been brought forward.
+    return {
+      clone: label,
+      pr: number,
+      outcome: "reconciled",
+      to: applied.status,
+      why: applied.why,
+    };
+  }
+  return {
+    clone: label,
+    pr: number,
+    outcome: "held",
+    reason: "already_recorded",
+    why: "Mission Control's record already matches this pull request.",
+  };
+}
+
+/**
+ * Write one row's reconciliation, if there is a row and if anything changed.
+ *
+ * Returns what was applied, or null when nothing needed writing — which is the
+ * ordinary case for a pull request that is open, unchanged, and being looked at
+ * every five minutes.
+ */
+async function writeReconciliation(
+  supabase: Db,
+  row: ResultRow | null,
+  facts: PullRequestFacts,
+  openReason: string,
+): Promise<{ status: string; why: string } | null> {
+  if (!row) return null;
+  const decision = reconcileResultToPr({
+    pr: facts,
+    currentSummary: row.diff_summary,
+    openReason,
+  });
+  if (!decision.changed) return null;
+
+  const { error } = await supabase
+    .from("cascade_results")
+    .update({
+      status: decision.status,
+      diff_summary: decision.diffSummary,
+      ...(decision.commitSha ? { commit_sha: decision.commitSha } : {}),
+      ...(decision.status === "succeeded" ? { completed_at: new Date().toISOString() } : {}),
+    })
+    .eq("id", row.id);
+  // A reconciliation that silently failed to write leaves exactly the stale
+  // record this exists to remove, so it is raised rather than swallowed.
+  if (error) throw new Error(`Could not reconcile result ${row.id}: ${error.message}`);
+  return { status: decision.status, why: decision.diffSummary };
+}
+
+/**
+ * Recompose a cascade event's summary and status from its results as they now
+ * stand.
+ *
+ * Derived, never incremented: `0 merged · 1 PRs` was frozen at the moment the
+ * run finished and had no way to learn that the pull request later landed.
+ */
+async function recountEvent(supabase: Db, eventId: string): Promise<boolean> {
+  const { data, error } = await supabase
+    .from("cascade_results")
+    .select("status, diff_summary")
+    .eq("cascade_event_id", eventId);
+  if (error) throw new Error(`Could not recount event ${eventId}: ${error.message}`);
+
+  const counts = countResults(
+    (data ?? []) as Array<{ status: string | null; diff_summary: string | null }>,
+    summaryOwesReconcile,
+  );
+  const summary = summariseCascade(counts);
+  const status = cascadeEventStatus(counts);
+
+  const current = await supabase
+    .from("cascade_events")
+    .select("summary, status")
+    .eq("id", eventId)
+    .maybeSingle();
+  if (current.error) throw new Error(`Could not read event ${eventId}: ${current.error.message}`);
+  if (current.data?.summary === summary && current.data?.status === status) return false;
+
+  const { error: writeErr } = await supabase
+    .from("cascade_events")
+    .update({ summary, status })
+    .eq("id", eventId);
+  if (writeErr) throw new Error(`Could not update event ${eventId}: ${writeErr.message}`);
+  return true;
+}
+
+/**
+ * Move a clone's commit pointer to the newest prime SHA it has actually
+ * received, and ask its deployment to rebuild.
+ *
+ * `last_synced_sha` is not a cosmetic field. `runDriftRefresh` measures
+ * `commits_behind` FROM it, so a pointer that never advances makes a clone that
+ * is up to date report as permanently behind — 140 commits, on a clone that had
+ * merged two cascades in the preceding hour.
+ *
+ * It is DERIVED from the clone's own reconciled history rather than set from
+ * whatever merged in this pass, so two pull requests landing out of order
+ * cannot walk the pointer backwards.
+ */
+async function advanceClone(supabase: Db, cloneId: string): Promise<boolean> {
+  // Ordered by this table's OWN column and re-sorted below by the event's.
+  // Ordering on a referenced table is a PostgREST syntax that varies by client
+  // version, and a query that errors here would take the whole drain down for
+  // a tidiness gain — the JS sort is what actually decides.
+  const { data, error } = await supabase
+    .from("cascade_results")
+    .select("cascade_event_id, cascade_events!inner(source_sha, created_at)")
+    .eq("clone_id", cloneId)
+    .eq("status", "succeeded")
+    .order("completed_at", { ascending: false, nullsFirst: false })
+    .limit(50);
+  if (error) throw new Error(`Could not read clone history ${cloneId}: ${error.message}`);
+
+  type Joined = { cascade_events: { source_sha: string | null; created_at: string } | null };
+  const newest = ((data ?? []) as unknown as Joined[])
+    .map((r) => r.cascade_events)
+    .filter((e): e is { source_sha: string | null; created_at: string } => Boolean(e?.source_sha))
+    .sort((a, b) => (a.created_at < b.created_at ? 1 : -1))[0];
+  if (!newest?.source_sha) return false;
+
+  const clone = await supabase
+    .from("clones")
+    .select("last_synced_sha")
+    .eq("id", cloneId)
+    .maybeSingle();
+  if (clone.error) throw new Error(`Could not read clone ${cloneId}: ${clone.error.message}`);
+  if (clone.data?.last_synced_sha === newest.source_sha) return false;
+
+  const { error: writeErr } = await supabase
+    .from("clones")
+    .update({
+      last_synced_sha: newest.source_sha,
+      sync_status: "in_sync",
+      commits_behind: 0,
+      last_cascade_at: new Date().toISOString(),
+    })
+    .eq("id", cloneId);
+  if (writeErr) throw new Error(`Could not advance clone ${cloneId}: ${writeErr.message}`);
+
+  // Code reached the clone's default branch, so what serves it is now stale.
+  //
+  // The engine already does this on its own `succeeded` path, and its comment
+  // explains why nothing else will: Vercel rebuilds on push only where its
+  // GitHub App is installed, Mission Control forks clones through its own App
+  // and never installs Vercel's, so on this fleet nothing else asks. A merge
+  // performed HERE reached `main` exactly as a direct push would, and until now
+  // nothing rebuilt after one.
+  //
+  // Never throws — a pointer that moved correctly must not report as failed
+  // because a hosting row could not be updated.
+  try {
+    const { requestRedeployAfterPush } = await import("@/server/hosting/redeploy.server");
+    await requestRedeployAfterPush({
+      cloneId,
+      reason: "cascade merge drain",
+      sha: newest.source_sha,
+    });
+  } catch (e) {
+    console.error("[cascade-merge-drain] redeploy request failed:", e);
+  }
+  return true;
 }

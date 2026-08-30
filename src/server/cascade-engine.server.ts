@@ -23,6 +23,7 @@ import {
   getFileContent,
   type RepoRef,
 } from "./github-app.server";
+import { cascadeEventStatus, summariseCascade } from "./cascade/prReconcile.pure";
 import {
   assertMirrorPolicy,
   backendIdentityHold,
@@ -283,21 +284,26 @@ export async function executeCascade(
   }
 
   const totalQueued = (queuedRes.data ?? []).length;
-  const finalStatus =
-    failed > 0 && succeeded + opened === 0
-      ? ("failed" as const)
-      : failed > 0
-        ? ("partial" as const)
-        : ("completed" as const);
+  const finalStatus = cascadeEventStatus({ succeeded, opened, failed });
   // A cascade can do everything asked of it and still leave a clone unable to
   // go green, because a `manual_reconcile` path moved upstream and was held
   // back by design. That is not a failure of the cascade and it is not a
   // success either: it is work owed to a person, and reporting it as
   // `completed · success` is what left a clone red for twelve hours with the
   // explanation sitting unread in a pull request body.
-  const summary =
-    `${succeeded} merged · ${opened} PRs · ${failed} failed · ${skipped} skipped (of ${totalQueued})` +
-    (owedReconcile > 0 ? ` · ${owedReconcile} awaiting manual reconcile` : "");
+  //
+  // Composed by `summariseCascade` rather than here, because the engine is no
+  // longer the only writer: a pull request that lands later is reconciled by
+  // `cascadeMergeDrain`, which recounts this line. Two copies of the format is
+  // how "0 merged" and "1 merged" come to be rendered in two different shapes.
+  const summary = summariseCascade({
+    succeeded,
+    opened,
+    failed,
+    skipped,
+    total: totalQueued,
+    owedReconcile,
+  });
 
   await supabase
     .from("cascade_events")
@@ -880,6 +886,142 @@ async function processClone(args: {
     parents: [cloneBranchSha],
   });
 
+  // === One open cascade proposal per clone, in EVERY mode ===
+  //
+  // Opening a fresh pull request every time is what the first live run
+  // actually did: prime merged eight pull requests in the minutes it took a
+  // fix to deploy, eight cascades queued, and every one of them opened its own
+  // pull request carrying THE SAME 57 files — #27 through #34 on the clone.
+  //
+  // That was fixed for `pr` mode and NOT for `auto_merge`, on the reasoning
+  // that under auto-merge "the first will win and the rest will skip". It does
+  // not, because auto-merge does not merge on the spot — it waits for checks
+  // that take about seventeen minutes, and prime moves faster than that. On
+  // 30 Aug 2026 three prime commits inside thirty-one minutes produced #67,
+  // #68 and #69, all open together, all carrying overlapping trees cut from a
+  // common ancestor. #67 merged; the other two were left proposing changes to
+  // the same files, so at least one of them could only ever land as a conflict.
+  //
+  // So the rule is the one Dependabot has, and it belongs to both modes:
+  //
+  //   same tree  -> nothing new to say; report the pull request that already
+  //                 says it, and open nothing.
+  //   new tree   -> move that pull request's branch to the new commit. The
+  //                 commit's parent is the clone's current default branch, so
+  //                 the diff stays honest.
+  //   none open  -> open one.
+  //
+  // Failing to LIST is not failing to find: if the lookup errors we fall
+  // through to opening a new pull request, because a duplicate is a tidiness
+  // problem and a cascade that silently did not propose anything is not.
+  const intro =
+    mode === "auto_merge"
+      ? "Auto-merge: this lands on green and waits otherwise."
+      : `Automated cascade from **${primeRef.owner}/${primeRef.repo}@${shortSha(sourceSha)}**.`;
+  const title = `Aurixa cascade · prime@${shortSha(sourceSha)} → ${treeEntries.length} file(s)`;
+
+  const existing = await findOpenCascadePr(octokit, cloneRef);
+  let proposal: { number: number; url: string; nodeId: string | null; headSha: string } | null = null;
+
+  if (existing) {
+    let existingTreeSha: string | null = null;
+    try {
+      const { data: headCommit } = await octokit.git.getCommit({
+        owner: cloneRef.owner,
+        repo: cloneRef.repo,
+        commit_sha: existing.headSha,
+      });
+      existingTreeSha = headCommit.tree.sha;
+    } catch {
+      existingTreeSha = null;
+    }
+
+    if (existingTreeSha && existingTreeSha === newTree.sha) {
+      // Nothing new to propose. The open pull request already carries this
+      // exact tree, and the merge drain is what lands it once checks pass.
+      return {
+        status: "skipped",
+        pr_url: existing.url,
+        diff_summary: `Already proposed — PR #${existing.number} carries this exact tree (${treeEntries.length} file(s))`,
+        files_changed: treeEntries.length,
+        completed_at: new Date().toISOString(),
+      };
+    }
+
+    try {
+      await octokit.git.updateRef({
+        owner: cloneRef.owner,
+        repo: cloneRef.repo,
+        ref: `heads/${existing.branch}`,
+        sha: newCommit.sha,
+        // Its only writer is this engine, and the new commit sits on the
+        // clone's current default branch rather than on the old proposal.
+        force: true,
+      });
+      const { data: updated } = await octokit.pulls.update({
+        owner: cloneRef.owner,
+        repo: cloneRef.repo,
+        pull_number: existing.number,
+        title,
+        body: cascadeBody(
+          `${intro}\n\n` +
+            `_This pull request was updated in place rather than replaced, so one proposal tracks prime._`,
+        ),
+      });
+      proposal = {
+        number: existing.number,
+        url: existing.url,
+        nodeId: updated.node_id ?? null,
+        headSha: newCommit.sha,
+      };
+    } catch {
+      // Branch deleted under an open pull request, or a race. Fall through and
+      // open a fresh one.
+      proposal = null;
+    }
+  }
+
+  if (!proposal) {
+    const branch = branchName(sourceSha);
+    try {
+      await octokit.git.createRef({
+        owner: cloneRef.owner,
+        repo: cloneRef.repo,
+        ref: `refs/heads/${branch}`,
+        sha: newCommit.sha,
+      });
+      const { data: pr } = await octokit.pulls.create({
+        owner: cloneRef.owner,
+        repo: cloneRef.repo,
+        title,
+        head: branch,
+        base: cloneRef.branch,
+        body: cascadeBody(intro),
+      });
+      proposal = {
+        number: pr.number,
+        url: pr.html_url,
+        nodeId: pr.node_id ?? null,
+        headSha: newCommit.sha,
+      };
+    } catch (prErr) {
+      return {
+        status: "failed",
+        diff_summary: `Could not open a cascade pull request: ${fileSummary}`,
+        files_changed: treeEntries.length,
+        error_message: prErr instanceof Error ? prErr.message : "unknown",
+        completed_at: new Date().toISOString(),
+      };
+    }
+  }
+
+  // The summary a result carries is written ONCE and read for as long as the
+  // row exists, so it holds only what stays true: which pull request, and what
+  // it carries. Why it has not merged yet is a fact about this minute, and
+  // `cascadeMergeDrain` owns it — writing it here is what left rows reading
+  // "No check has reported on this pull request" long after every check had.
+  const durableSummary = `PR #${proposal.number} ${existing ? "updated" : "opened"}: ${fileSummary}`;
+
   // === auto_merge: always through a pull request, never past its checks ===
   //
   // This used to try `git.updateRef` first — a direct fast-forward push to the
@@ -900,30 +1042,14 @@ async function processClone(args: {
   // Both are gone. `decideCascadeMerge` reads the pull request's own check runs
   // and an unattended cascade merges only on green.
   if (mode === "auto_merge") {
-    const branch = branchName(sourceSha);
-    try {
-      await octokit.git.createRef({
-        owner: cloneRef.owner,
-        repo: cloneRef.repo,
-        ref: `refs/heads/${branch}`,
-        sha: newCommit.sha,
-      });
-      const { data: pr } = await octokit.pulls.create({
-        owner: cloneRef.owner,
-        repo: cloneRef.repo,
-        title: `Aurixa cascade · prime@${shortSha(sourceSha)} → ${treeEntries.length} file(s)`,
-        head: branch,
-        base: cloneRef.branch,
-        body: cascadeBody("Auto-merge: this lands on green and waits otherwise."),
-      });
-
-      // Preferred: let GitHub hold it and merge the moment checks pass. That is
-      // race-free in a way polling cannot be — it cannot merge a head that a
-      // later push has replaced.
-      //
-      // `MERGE`, never `SQUASH`. A squash rewrites the cascade commit that
-      // names the prime SHA it came from, which is the one durable record of
-      // what a clone has received.
+    // Preferred: let GitHub hold it and merge the moment checks pass. That is
+    // race-free in a way polling cannot be — it cannot merge a head that a
+    // later push has replaced.
+    //
+    // `MERGE`, never `SQUASH`. A squash rewrites the cascade commit that names
+    // the prime SHA it came from, which is the one durable record of what a
+    // clone has received.
+    if (proposal.nodeId) {
       try {
         await octokit.graphql(
           `mutation($id: ID!) {
@@ -931,12 +1057,13 @@ async function processClone(args: {
                pullRequest { autoMergeRequest { enabledAt } }
              }
            }`,
-          { id: pr.node_id },
+          { id: proposal.nodeId },
         );
         return {
           status: "pr_opened",
-          pr_url: pr.html_url,
-          diff_summary: `Queued for auto-merge once checks pass: ${fileSummary}`,
+          pr_url: proposal.url,
+          commit_sha: newCommit.sha.slice(0, 7),
+          diff_summary: durableSummary,
           files_changed: treeEntries.length,
           completed_at: new Date().toISOString(),
         };
@@ -945,183 +1072,73 @@ async function processClone(args: {
         // pull request with nothing to wait for. Falling through does NOT mean
         // merging blind — it means reading the checks ourselves.
       }
+    }
 
-      let checkData: {
-        check_runs?: Array<{ name: string; status: string; conclusion: string | null }>;
-      };
-      try {
-        ({ data: checkData } = await octokit.checks.listForRef({
-          owner: cloneRef.owner,
-          repo: cloneRef.repo,
-          ref: newCommit.sha,
-        }));
-      } catch (e) {
-        // A missing `checks: read` permission is not a broken cascade. The
-        // pull request is open and correct; what is missing is the signal that
-        // would let it merge unattended.
-        if (checksUnreadable(e)) {
-          return {
-            status: "pr_opened",
-            pr_url: pr.html_url,
-            diff_summary: `${CHECKS_PERMISSION_REMEDY} ${fileSummary}`,
-            files_changed: treeEntries.length,
-            completed_at: new Date().toISOString(),
-          };
-        }
-        throw e;
-      }
-      const verdict = decideCascadeMerge(
-        (checkData.check_runs ?? []).map((c) => ({
-          name: c.name,
-          status: c.status,
-          conclusion: c.conclusion,
-        })),
-      );
-
-      if (!verdict.merge) {
-        // Left open on purpose, with the reason on the record. A cascade that
-        // cannot land is a fact an operator needs; one that lands anyway is the
-        // defect this block exists to remove.
+    let checkData: {
+      check_runs?: Array<{ name: string; status: string; conclusion: string | null }>;
+    };
+    try {
+      ({ data: checkData } = await octokit.checks.listForRef({
+        owner: cloneRef.owner,
+        repo: cloneRef.repo,
+        ref: proposal.headSha,
+      }));
+    } catch (e) {
+      // A missing `checks: read` permission is not a broken cascade. The pull
+      // request is open and correct; what is missing is the signal that would
+      // let it merge unattended, and the drain will say so on its next pass.
+      if (checksUnreadable(e)) {
         return {
           status: "pr_opened",
-          pr_url: pr.html_url,
-          diff_summary: `${verdict.why} ${fileSummary}`,
+          pr_url: proposal.url,
+          commit_sha: newCommit.sha.slice(0, 7),
+          diff_summary: durableSummary,
           files_changed: treeEntries.length,
           completed_at: new Date().toISOString(),
         };
       }
-
-      const { data: merged } = await octokit.pulls.merge({
-        owner: cloneRef.owner,
-        repo: cloneRef.repo,
-        pull_number: pr.number,
-        merge_method: "merge",
-        commit_title: `Aurixa cascade prime@${shortSha(sourceSha)} (#${pr.number})`,
-      });
-      return {
-        status: "succeeded",
-        commit_sha: merged.sha?.slice(0, 7) ?? null,
-        pr_url: pr.html_url,
-        diff_summary: `Merged on green (${verdict.why}): ${fileSummary}`,
-        files_changed: treeEntries.length,
-        completed_at: new Date().toISOString(),
-      };
-    } catch (prErr) {
-      return {
-        status: "failed",
-        diff_summary: `Auto-merge failed: ${fileSummary}`,
-        files_changed: treeEntries.length,
-        error_message: prErr instanceof Error ? prErr.message : "unknown",
-        completed_at: new Date().toISOString(),
-      };
+      throw e;
     }
+    const verdict = decideCascadeMerge(
+      (checkData.check_runs ?? []).map((c) => ({
+        name: c.name,
+        status: c.status,
+        conclusion: c.conclusion,
+      })),
+    );
+
+    if (verdict.merge) {
+      try {
+        const { data: merged } = await octokit.pulls.merge({
+          owner: cloneRef.owner,
+          repo: cloneRef.repo,
+          pull_number: proposal.number,
+          merge_method: "merge",
+          commit_title: `Aurixa cascade prime@${shortSha(sourceSha)} (#${proposal.number})`,
+        });
+        return {
+          status: "succeeded",
+          commit_sha: merged.sha?.slice(0, 7) ?? null,
+          pr_url: proposal.url,
+          diff_summary: `Merged as ${merged.sha?.slice(0, 7) ?? "?"}. ${durableSummary}`,
+          files_changed: treeEntries.length,
+          completed_at: new Date().toISOString(),
+        };
+      } catch (mergeErr) {
+        // Green and unmergeable is a real state — a conflict, or a head that
+        // moved under us. The proposal stands and the drain will try again.
+        console.error("[cascade] merge on green failed:", mergeErr);
+      }
+    }
+    // Left open on purpose. A cascade that cannot land is a fact an operator
+    // needs; one that lands anyway is the defect this block exists to remove.
   }
-
-  // === pr mode: one open cascade pull request per clone, kept current ===
-  //
-  // Opening a fresh pull request every time is what the first live run
-  // actually did: prime merged eight pull requests in the minutes it took a
-  // fix to deploy, eight cascades queued, and every one of them opened its own
-  // pull request carrying THE SAME 57 files. They could not see each other,
-  // because in `pr` mode nothing merges -- each one diffs prime against a clone
-  // `main` that no earlier cascade had changed, so each one found identical
-  // work and proposed it again. #27 through #34.
-  //
-  // "The first will win and the rest will skip" is only true of `auto_merge`.
-  // Under `pr` the correct behaviour is the one Dependabot has: keep ONE
-  // proposal and move it forward.
-  //
-  //   same tree  -> nothing new to say; report the pull request that already
-  //                 says it, and open nothing.
-  //   new tree   -> move that pull request's branch to the new commit. The
-  //                 commit's parent is the clone's current default branch, so
-  //                 the diff stays honest.
-  //   none open  -> open one.
-  //
-  // Failing to LIST is not failing to find: if the lookup errors we fall
-  // through to opening a new pull request, because a duplicate is a tidiness
-  // problem and a cascade that silently did not propose anything is not.
-  const existing = await findOpenCascadePr(octokit, cloneRef);
-
-  if (existing) {
-    let existingTreeSha: string | null = null;
-    try {
-      const { data: headCommit } = await octokit.git.getCommit({
-        owner: cloneRef.owner,
-        repo: cloneRef.repo,
-        commit_sha: existing.headSha,
-      });
-      existingTreeSha = headCommit.tree.sha;
-    } catch {
-      existingTreeSha = null;
-    }
-
-    if (existingTreeSha && existingTreeSha === newTree.sha) {
-      return {
-        status: "skipped",
-        pr_url: existing.url,
-        diff_summary: `Already proposed — PR #${existing.number} carries this exact tree (${treeEntries.length} file(s))`,
-        files_changed: treeEntries.length,
-        completed_at: new Date().toISOString(),
-      };
-    }
-
-    try {
-      await octokit.git.updateRef({
-        owner: cloneRef.owner,
-        repo: cloneRef.repo,
-        ref: `heads/${existing.branch}`,
-        sha: newCommit.sha,
-        // Its only writer is this engine, and the new commit sits on the
-        // clone's current default branch rather than on the old proposal.
-        force: true,
-      });
-      await octokit.pulls.update({
-        owner: cloneRef.owner,
-        repo: cloneRef.repo,
-        pull_number: existing.number,
-        title: `Aurixa cascade · prime@${shortSha(sourceSha)} → ${treeEntries.length} file(s)`,
-        body: cascadeBody(
-          `Automated cascade from **${primeRef.owner}/${primeRef.repo}@${shortSha(sourceSha)}**.\n\n` +
-            `_This pull request was updated in place rather than replaced, so one proposal tracks prime._`,
-        ),
-      });
-      return {
-        status: "pr_opened",
-        pr_url: existing.url,
-        commit_sha: newCommit.sha.slice(0, 7),
-        diff_summary: `PR #${existing.number} updated: ${fileSummary}`,
-        files_changed: treeEntries.length,
-        completed_at: new Date().toISOString(),
-      };
-    } catch {
-      // Branch deleted under an open pull request, or a race. Fall through.
-    }
-  }
-
-  const branch = branchName(sourceSha);
-  await octokit.git.createRef({
-    owner: cloneRef.owner,
-    repo: cloneRef.repo,
-    ref: `refs/heads/${branch}`,
-    sha: newCommit.sha,
-  });
-  const { data: pr } = await octokit.pulls.create({
-    owner: cloneRef.owner,
-    repo: cloneRef.repo,
-    title: `Aurixa cascade · prime@${shortSha(sourceSha)} → ${treeEntries.length} file(s)`,
-    head: branch,
-    base: cloneRef.branch,
-    body: cascadeBody(
-      `Automated cascade from **${primeRef.owner}/${primeRef.repo}@${shortSha(sourceSha)}**.`,
-    ),
-  });
 
   return {
     status: "pr_opened",
-    pr_url: pr.html_url,
+    pr_url: proposal.url,
     commit_sha: newCommit.sha.slice(0, 7),
-    diff_summary: `PR #${pr.number} opened: ${fileSummary}`,
+    diff_summary: durableSummary,
     files_changed: treeEntries.length,
     completed_at: new Date().toISOString(),
   };
