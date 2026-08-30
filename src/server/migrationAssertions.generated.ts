@@ -71,4 +71,33 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260828080000",
     assertions: [{ kind: "column", table: "clones", column: "contract_excluded_module_slugs" }],
   },
+  {
+    migration: "20260829030000_clone_turnstile_identities.sql",
+    version: "20260829030000",
+    assertions: [{ kind: "table", table: "clone_turnstile_identities" }],
+  },
+  {
+    migration: "20260829040000_schedule_turnstile_reconcile.sql",
+    version: "20260829040000",
+    assertions: [{ kind: "cron", jobname: "turnstile-reconcile-10min" }],
+  },
+  {
+    migration: "20260829100000_fix_agreements_refresh_cron.sql",
+    version: "20260829100000",
+    assertions: [
+      { kind: "cron", jobname: "agreements-refresh" },
+      { kind: "cron", jobname: "airtable-waitlist-sync" },
+      { kind: "cron", jobname: "crm-sweep-hourly" },
+    ],
+  },
+  {
+    migration: "20260829110000_schedule_email_identity_drain.sql",
+    version: "20260829110000",
+    assertions: [{ kind: "cron", jobname: "email-identity-drain" }],
+  },
+  {
+    migration: "20260830040000_schedule_clone_jwt_secret_reconcile.sql",
+    version: "20260830040000",
+    assertions: [{ kind: "cron", jobname: "clone-jwt-secret-reconcile" }],
+  },
 ];

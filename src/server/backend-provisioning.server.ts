@@ -55,14 +55,6 @@ export type SupabaseProject = {
     host: string;
     version: string;
   };
-  /**
-   * The project's token-signing key. Supabase returns this on CREATE and
-   * nowhere else — there is no endpoint that reads it back afterwards, and no
-   * way to derive it from the anon or service-role keys (they are signed WITH
-   * it). So it is captured here or not at all, and a project adopted rather
-   * than created by Mission Control legitimately has none to capture.
-   */
-  jwt_secret?: string;
 };
 
 export type ApiKey = {
@@ -263,6 +255,34 @@ export async function getProjectApiKeys(projectRef: string): Promise<ApiKey[]> {
     throw new Error(`Failed to get API keys: ${res.status} — ${body}`);
   }
   return res.json();
+}
+
+/**
+ * The project's token-signing key.
+ *
+ * `GET /v1/projects/{ref}/postgrest` is the one endpoint that returns it
+ * (`PostgrestConfigWithJWTSecretResponse.jwt_secret`) — it is PostgREST's
+ * config, and the signing key is part of it because PostgREST is what
+ * validates the tokens. It is NOT on the create-project response
+ * (`V1ProjectResponse` carries id, ref, organization_id, organization_slug,
+ * name, region, created_at and status, and nothing else) and it cannot be
+ * derived from the anon or service-role keys, which are signed WITH it.
+ *
+ * Being readable at any time rather than only at creation is what makes this
+ * work for a project Mission Control ADOPTED as well as one it created.
+ *
+ * `jwt_secret` is not in the schema's `required` list, so a project that does
+ * not report one yields null and the caller records the secret as pending
+ * rather than writing an empty value.
+ */
+export async function getProjectJwtSecret(projectRef: string): Promise<string | null> {
+  const res = await fetch(`${MGMT_API}/projects/${projectRef}/postgrest`, {
+    headers: headers(),
+  });
+  if (!res.ok) return null;
+  const body = (await res.json()) as { jwt_secret?: string };
+  const secret = body.jwt_secret?.trim();
+  return secret && secret.length > 0 ? secret : null;
 }
 
 /**
@@ -2519,8 +2539,7 @@ export async function provisionCloneBackend(
   // Step 1: Create the project (or resume onto a surviving one)
   let projectRef = input.existingProjectRef ?? null;
   let dbPass: string | null = null;
-  // The clone's own signing key, readable exactly once — see SupabaseProject.
-  let createdJwtSecret: string | null = null;
+
   if (projectRef) {
     await onStatusUpdate?.("provisioning", `Resuming on existing project ${projectRef}...`);
   } else {
@@ -2547,10 +2566,6 @@ export async function provisionCloneBackend(
       dbPass,
     });
     projectRef = project.id;
-    // Only ever from a project WE created. An adopted ref has no create
-    // response to read, and guessing is not available: the key cannot be
-    // fetched back or derived.
-    createdJwtSecret = project.jwt_secret ?? null;
   }
 
   // Step 2: Wait for it to be ready
@@ -2563,6 +2578,11 @@ export async function provisionCloneBackend(
   if (!anonKey || !serviceRoleKey) {
     throw new Error("Could not retrieve client/privileged API keys from new project");
   }
+  // The clone's own token-signing key, read from its PostgREST config. Best
+  // effort: a project that will not report one records JWT_SECRET as pending
+  // with a remedy, which is the honest state — never a generated value, which
+  // would sign tokens this project's own PostgREST rejects.
+  const ownJwtSecret = await getProjectJwtSecret(projectRef).catch(() => null);
 
   const projectUrl = getProjectUrl(projectRef);
 
@@ -2831,7 +2851,7 @@ export async function provisionCloneBackend(
     // prime. `JWT_SECRET` is tenant-scoped precisely so it can never be
     // inherited, which would otherwise leave every clone unable to sign its
     // own access tokens — so provisioning supplies the project's own.
-    createdJwtSecret ? { JWT_SECRET: createdJwtSecret } : undefined,
+    ownJwtSecret ? { JWT_SECRET: ownJwtSecret } : undefined,
   );
 
   // Step 7: Seed admin

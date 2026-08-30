@@ -307,8 +307,9 @@ export const TENANT_SCOPED_REMEDY: Record<string, string> = {
     "Mint this clone's own Turnstile widget from its identity panel before handover.",
   JWT_SECRET:
     "This is the clone's OWN Supabase project signing key (Settings → API → JWT Settings on " +
-    "that project). Provisioning captures it automatically for projects Mission Control " +
-    "creates; a project adopted after the fact needs it set once from the clone's Secrets page.",
+    "that project). Provisioning writes it, and the clone-jwt-secret-reconcile job repairs any " +
+    "clone that is still without it — so this should settle on its own within half an hour. " +
+    "Set it by hand from the clone's Secrets page only if it does not.",
 };
 
 export type SecretClass =

@@ -562,6 +562,19 @@ export const listCloneBackendSecrets = createServerFn({ method: "POST" })
 /**
  * Push a real value for a named secret onto the clone's Supabase project
  * and update the tracking row. Admin-only.
+ *
+ * The ref comes from `resolveCloneSecretTarget` rather than from this
+ * function's own read of `clone_backends`. `cloneSecretTarget.pure.ts` says
+ * it is "the ONE way to obtain a project ref for a clone-scoped secret write",
+ * and this was the caller that made that untrue: it took whatever
+ * `supabase_project_ref` the row held, so a ref mistyped or pasted from the
+ * prime's settings page was a perfectly ordinary row this wrote to. Admin-only
+ * is not the guard — the damage is writing a tenant's value onto the prime's
+ * project, and the admin doing it is the one who cannot tell.
+ *
+ * It also fixes a discarded error on the same read: `const { data: backend }`
+ * threw the error away, so a database fault reported as "backend not
+ * provisioned yet" about a clone that has one.
  */
 export const setCloneBackendSecret = createServerFn({ method: "POST" })
   .middleware([requireAdmin])
@@ -578,18 +591,21 @@ export const setCloneBackendSecret = createServerFn({ method: "POST" })
   })
   .handler(async ({ data, context }) => {
     const { supabase, userId } = context;
-    const { data: backend } = await supabase
-      .from("clone_backends")
-      .select("supabase_project_ref, status")
-      .eq("clone_id", data.cloneId)
-      .maybeSingle();
-    if (!backend?.supabase_project_ref) {
-      return { ok: false as const, error: "Clone backend not provisioned yet" };
+    const { resolveCloneSecretTarget } = await import(
+      /* @vite-ignore */ "@/lib/_server-shims/cloneAllowedOrigins.server"
+    );
+    let projectRef: string;
+    try {
+      ({ projectRef } = await resolveCloneSecretTarget(supabase, data.cloneId));
+    } catch (e) {
+      // Every refusal carries its own message naming what it refused and why —
+      // "backend not provisioned", "target is the prime", "could not tell".
+      return { ok: false as const, error: e instanceof Error ? e.message : String(e) };
     }
     const { setCloneSecretValue } = await import(
       /* @vite-ignore */ "@/lib/_server-shims/backend-provisioning.server"
     );
-    const res = await setCloneSecretValue(backend.supabase_project_ref, data.name, data.value);
+    const res = await setCloneSecretValue(projectRef, data.name, data.value);
     const now = new Date().toISOString();
     await supabase.from("clone_backend_secrets").upsert(
       {
