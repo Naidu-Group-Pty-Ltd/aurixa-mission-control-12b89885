@@ -391,3 +391,80 @@ them could only ever land as a conflict.
 Both modes now keep one proposal and move it forward. The drain merges oldest
 first for the same reason: two proposals open together carry overlapping trees,
 and landing the newer one first would put the older one's content on top of it.
+
+## A conflicted proposal is rebuilt, never resolved
+
+At one clone a merge conflict on a cascade pull request is an afternoon's
+annoyance. At a hundred it is a standing job nobody can do: every conflict is a
+judgement about which side wins, made by somebody who wrote neither side, in a
+repository they do not otherwise work in. That does not scale, and it does not
+have to.
+
+**There is nothing in a cascade branch worth merging.** It holds exactly one
+commit, authored by nobody:
+
+```
+447b508  aurixa-mission-control[bot]
+         chore(aurixa): cascade 17 file(s) from prime@fc01e33
+```
+
+The engine builds it by taking the clone's tree and overwriting whole files with
+prime's blobs. No history, nothing hand-written, no second line of development.
+It is a **statement** — "these files should hold prime's content" — and a
+statement is restated rather than merged.
+
+So a conflict is repaired by building the statement again against the branch as
+it now stands. Rebuilt that way the conflict cannot exist, by construction
+rather than by luck:
+
+```
+base_tree = the clone's CURRENT tree
+parent    = the clone's CURRENT head
+⇒ the proposal's merge base IS the head, so it fast-forwards.
+```
+
+There is never a side to pick, so there is never a wrong side to pick. That is
+the property that makes it safe to run unattended across a fleet, and it is why
+this is regeneration rather than resolution.
+
+### Four rules
+
+**It never touches a branch a person has committed to.** This is the rule the
+whole design turns on. The pull request body asks operators to fix a held file
+*in the same merge* — that is the one thing a cascade cannot deliver and a human
+must — and regeneration force-overwrites the branch. The test is exact rather
+than heuristic: the engine writes ONE commit with a message shape it controls,
+so one such commit and nothing else means the branch is still entirely the
+engine's. Anything else is hands off, said once, with the reason.
+
+**It re-bases and never re-scopes.** The rebuild delivers the prime SHA the
+proposal already promised, not prime's latest. Upgrading the payload would save
+a CI run and would make `cascade_events.source_sha` describe something that
+event never carried.
+
+**It never loops.** Past `MAX_REPAIRS` it stops and asks for a person. A clone
+whose default branch is written faster than a cascade can complete cannot be
+settled by rebuilding harder, and a repair loop burns CI on every clone at once.
+The attempt is recorded BEFORE the rebuild, so a rebuild that crashes still
+counts — counting only successes is how a failing repair runs for ever.
+
+**`null` is not `false`.** GitHub computes mergeability asynchronously and
+answers null until it has. Reading unknown as conflicted would rebuild healthy
+proposals on every tick, resetting their CI, on every clone at once.
+
+### Where the conflicts come from
+
+Two sources, and only the first is now closed.
+
+The **stale parent** was ours: the engine read the clone's head at the top of
+`processClone` and used it as the commit's parent hundreds of API calls later,
+with two tree listings and a blob fetch per file in between, while the drain
+merged every five minutes. PR #71 was cut from `6eaaf5a` while #70 merged at
+10:00:07. The head is re-read immediately before the tree is built now, and the
+base tree and parent come from the same read — a fresh parent on a stale base
+tree would silently revert whatever landed in between.
+
+The **clone's own commits** are not ours and never will be: a Dependabot bump, a
+hand fix, a Lovable edit. Any of them touching a file an open proposal carries
+conflicts it. That is the case regeneration exists for, and it is why the repair
+is a standing mechanism rather than a one-off fix.
