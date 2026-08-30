@@ -91,6 +91,71 @@ describe("a queue claim never reports a fault as an empty queue", () => {
   }
 });
 
+describe("a reclaim returns rows to the shape its own claim reads", () => {
+  // The backend drain's reclaim wrote "Worker stalled — requeued" while
+  // leaving `status` at 'provisioning' — words claimOne's
+  // `.eq("status","pending")` never takes. The first engine-provisioned
+  // clone (30 Aug 2026 dry run) froze exactly there: reclaimed mid
+  // "Snapshotting backend architecture", then untouched for an hour by a
+  // drain that runs every minute. A requeue that the claim cannot see is
+  // not a requeue; each worker below is pinned to whichever shape ITS
+  // claim actually reads.
+  it("backend drain: reclaim resets status to pending, not just the timestamp", () => {
+    const body = bodyOf(read("hooks.backend-provisioning-drain.tsx"), "reclaimStalled");
+    expect(body).toMatch(/status:\s*"pending"/);
+    expect(body).toMatch(/worker_started_at:\s*null/);
+  });
+
+  it("backend drain: sweeps rows the cutoff filter cannot see (null timestamp, in-flight status)", () => {
+    // The pre-fix reclaim nulled `worker_started_at` and left the status
+    // standing, and NULL is never `.lt(cutoff)` — so the repair has to
+    // recognise those rows by shape, or every row it ever damaged stays
+    // frozen after the fix ships.
+    const source = read("hooks.backend-provisioning-drain.tsx");
+    const body = bodyOf(source, "reclaimStalled");
+    expect(body).toMatch(/\.is\("worker_started_at", null\)/);
+    expect(body).toMatch(/\.in\("status", IN_FLIGHT_STATUSES\)/);
+    expect(source).toMatch(
+      /IN_FLIGHT_STATUSES = \["provisioning", "migrating", "seeding_admin"\]/,
+    );
+  });
+
+  it("backend drain: a stall on the final attempt terminates instead of queueing", () => {
+    // claimOne filters `attempts < MAX_ATTEMPTS`, so requeueing an
+    // exhausted row parks it at 'pending' for ever — the same lie one
+    // step later. The failure path already terminates exhaustion; the
+    // stall path must too.
+    const body = bodyOf(read("hooks.backend-provisioning-drain.tsx"), "reclaimStalled");
+    expect(body).toMatch(/\.gte\("attempts", MAX_ATTEMPTS\)/);
+    expect(body).toMatch(/status:\s*"failed"/);
+  });
+
+  it("backend drain: reclaim checks every update and throws", () => {
+    // A statement-position `await admin` discards PostgREST's error, and a
+    // reclaim that half-happened is invisible exactly when it matters.
+    const body = bodyOf(read("hooks.backend-provisioning-drain.tsx"), "reclaimStalled");
+    expect(body).not.toMatch(/^\s*await admin/m);
+    expect(body).toMatch(/throw new Error\(/);
+  });
+
+  it("cascade drain: reclaim keeps resetting both fields", () => {
+    const body = bodyOf(read("hooks.cascade-drain.tsx"), "reclaimStalled");
+    expect(body).toMatch(/status:\s*"pending"/);
+    expect(body).toMatch(/worker_started_at:\s*null/);
+  });
+
+  it("deployment drain: claim reads every CLAIMABLE status, which is why its reclaim may reset the timestamp alone", () => {
+    // The deployment queue is a per-status state machine: claim() takes any
+    // CLAIMABLE status, so nulling `worker_started_at` IS a complete
+    // requeue there. If that claim ever narrows to one status, this pin
+    // fails and the reclaim must move status too.
+    const claim = bodyOf(read("hooks.deployment-drain.tsx"), "claim");
+    expect(claim).toMatch(/\.in\("status", CLAIMABLE\)/);
+    const reclaim = bodyOf(read("hooks.deployment-drain.tsx"), "reclaimStalled");
+    expect(reclaim).toMatch(/worker_started_at:\s*null/);
+  });
+});
+
 describe("the deployment worker's other queue reads say when they could not read", () => {
   // These two do NOT throw: the claim work above them has already succeeded and
   // is worth keeping. They name the failure in the response instead — which is
