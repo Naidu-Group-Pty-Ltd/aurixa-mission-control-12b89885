@@ -105,4 +105,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260830070000",
     assertions: [{ kind: "cron", jobname: "cascade-merge-drain" }],
   },
+  {
+    migration: "20260830090000_schedule_held_file_drift_sweep.sql",
+    version: "20260830090000",
+    assertions: [{ kind: "cron", jobname: "held-file-drift" }],
+  },
 ];
