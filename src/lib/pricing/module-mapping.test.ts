@@ -53,6 +53,9 @@ const KNOWN = new Set([
   "lenders",
   "agent",
   "integrations",
+  // A real approved module in production. Its absence here is what let the
+  // `intelligence-hub` alias look unresolved while the test still passed.
+  "report-qa",
 ]);
 
 const priced = (slug: string) => MODULES.find((m) => m.slug === slug)!;
@@ -111,9 +114,49 @@ describe("mapPricedModule", () => {
   });
 
   it("surfaces candidates for an unmapped item instead of guessing", () => {
-    const m = mapPricedModule(priced("intelligence-hub"), KNOWN);
+    // Deliberately a slug nobody sells. This assertion used to be made with
+    // `intelligence-hub`, which was a REAL unmapped item — so the test that
+    // was supposed to describe the unmapped path was instead pinning a live
+    // defect in place, and fixing the defect would have "broken" the test.
+    const m = mapPricedModule(
+      {
+        slug: "model-hubb",
+        name: "Model Hubb",
+        category: "Reports & Analysis",
+        monthlyInclGstCents: 0,
+        includedIn: [],
+      },
+      KNOWN,
+    );
     expect(m.kind).toBe("unmapped");
     expect(m.reason).toMatch(/model-hub/);
+  });
+
+  it("maps the Intelligence Hub onto Report Q&A", () => {
+    // The prime's own registries settle this: `entitlements/registry.ts`
+    // declares `module.intelligence_hub` with `addonSlugs: ["intelligence-hub"]`
+    // and `navigation/registry.ts` renders "Aurixa Intelligence Hub" at
+    // `/report-qa`. Detection names the module `report-qa`, so the pricing
+    // sheet and the repo never met.
+    const m = mapPricedModule(priced("intelligence-hub"), KNOWN);
+    expect(m.kind).toBe("installs");
+    expect(m.moduleSlugs).toEqual(["report-qa"]);
+  });
+
+  // The guard for the class, not the instance.
+  //
+  // `intelligence-hub` was active, carried a live Stripe price, was included in
+  // no plan (so purchase-only) and resolved to NOTHING: a customer could pay
+  // $79/month for an addon that installed nothing and gated nothing. Nobody had
+  // bought it, so there was no symptom anywhere — the only signal was a mapping
+  // nobody read.
+  //
+  // A priced item is a promise. This asserts every one of them is kept.
+  it("every priced item in the catalogue resolves to something", () => {
+    const unresolved = MODULES.filter((m) => mapPricedModule(m, KNOWN).kind === "unmapped").map(
+      (m) => `${m.slug} (${m.name})`,
+    );
+    expect(unresolved).toEqual([]);
   });
 });
 
@@ -237,15 +280,37 @@ describe("resolveEntitledModules", () => {
   });
 
   it("reports unmapped items rather than dropping them", () => {
-    const r = resolveEntitledModules({ planSlug: "scale", knownModules: KNOWN });
+    // Exercised by REMOVING the target module rather than by naming an item
+    // that is genuinely unmapped in production. This test used to buy
+    // `intelligence-hub` against the full catalogue and assert it came back
+    // unmapped — which it did, because it was a live defect. A test that
+    // reaches for a real gap to demonstrate a mechanism makes fixing the gap
+    // look like a regression.
+    //
+    // This is also the documented behaviour of a STALE alias: a mapping is
+    // only claimed when the target actually exists, so it degrades to
+    // `unmapped` (visible) rather than to a silent no-op install.
+    const withoutReportQa = new Set([...KNOWN].filter((s) => s !== "report-qa"));
+
+    const r = resolveEntitledModules({ planSlug: "scale", knownModules: withoutReportQa });
     // Intelligence Hub is addon-only so it is not in a tier; force it in.
+    const withAddon = resolveEntitledModules({
+      planSlug: "scale",
+      purchasedAddons: ["intelligence-hub"],
+      knownModules: withoutReportQa,
+    });
+    expect(withAddon.unmapped.length).toBeGreaterThan(r.unmapped.length);
+    expect(withAddon.unmapped.some((u) => u.sourceSlug === "intelligence-hub")).toBe(true);
+  });
+
+  it("installs Report Q&A when the Intelligence Hub is purchased", () => {
     const withAddon = resolveEntitledModules({
       planSlug: "scale",
       purchasedAddons: ["intelligence-hub"],
       knownModules: KNOWN,
     });
-    expect(withAddon.unmapped.length).toBeGreaterThan(r.unmapped.length);
-    expect(withAddon.unmapped.some((u) => u.sourceSlug === "intelligence-hub")).toBe(true);
+    expect(withAddon.moduleSlugs).toContain("report-qa");
+    expect(withAddon.unmapped.some((u) => u.sourceSlug === "intelligence-hub")).toBe(false);
   });
 
   it("degrades safely for an unrecognised plan", () => {

@@ -63,6 +63,14 @@ export const PRICED_MODULE_ALIASES: Readonly<Record<string, readonly string[]>> 
   "email-copilot": ["email"],
   "opportunity-marketplace": ["listings"],
   "aurixa-agent": ["agent"],
+  // The pricing sheet's "Aurixa Intelligence Hub" IS Report Q&A. The prime's
+  // own registries say so and are the authority here: `entitlements/registry.ts`
+  // declares `module.intelligence_hub` with `addonSlugs: ["intelligence-hub"]`,
+  // and `navigation/registry.ts` renders "Aurixa Intelligence Hub" at
+  // `/report-qa` under `moduleKey: 'report_qa'`. Detection names the module
+  // `report-qa`, so the two never met and the addon resolved `unmapped` —
+  // sellable at $79/month with a live Stripe price and nothing behind it.
+  "intelligence-hub": ["report-qa"],
 };
 
 /**
