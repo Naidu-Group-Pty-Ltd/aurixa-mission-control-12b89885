@@ -205,11 +205,70 @@ export async function listTreeEntries(
   return { entries, truncated: Boolean(tree.truncated) };
 }
 
+/**
+ * A file read out of a repository.
+ *
+ * `content` is the UTF-8 reading and `base64` is what was actually there. They
+ * are not interchangeable, and the difference destroyed a file in production:
+ * see `binary` below.
+ */
+export type RepoFile = {
+  sha: string;
+  /**
+   * The bytes decoded as UTF-8. LOSSY when `binary` is true — every byte
+   * sequence that is not valid UTF-8 has become U+FFFD and cannot be recovered.
+   * Safe to read, never safe to write back.
+   */
+  content: string;
+  /**
+   * The bytes exactly as GitHub returned them. The only thing that may be
+   * written back into a repository.
+   */
+  base64: string;
+  /**
+   * True when the bytes do not survive a UTF-8 round trip.
+   *
+   * Decided by performing the round trip rather than by a list of extensions:
+   * a file is binary precisely when decoding and re-encoding it does not give
+   * back what was there, which is the actual property that matters and cannot
+   * go stale the way an extension list does.
+   */
+  binary: boolean;
+  bytes: number;
+};
+
+/**
+ * Read one file, keeping the bytes as well as the text.
+ *
+ * ## Why this returns both
+ *
+ * It used to return the UTF-8 decoding alone, and the cascade engine wrote that
+ * back with `Buffer.from(content, "utf8").toString("base64")`. For text that is
+ * a faithful round trip. For anything else it is destruction: every byte
+ * sequence that is not valid UTF-8 becomes U+FFFD, three bytes where there was
+ * one.
+ *
+ * Measured on 30 Aug 2026. `public/brand/aurixa-emblem-240.png` is 78,450 bytes
+ * of valid PNG in prime and 142,140 bytes on the clone — 1.81x, and no longer a
+ * PNG at all. The proof is that the clone's copy decodes cleanly as UTF-8,
+ * which no PNG does. It had been re-delivered and re-corrupted by every cascade
+ * that carried it. 144 binary files are exposed to this: 86 `.docx` partner
+ * agreement templates, 11 print fonts, 7 PDFs, 25 images.
+ *
+ * ## The 1 MB ceiling
+ *
+ * `repos.getContent` only inlines files up to 1 MB. Past that it answers with
+ * an empty `content` and `encoding: "none"`, which the old code read as an
+ * empty file — so a large file would have been delivered as ZERO bytes rather
+ * than as a corrupted one. Prime carries two: a 3.4 MB font archive and a
+ * 1.6 MB PDF. The blobs API has no such limit, so that case is refetched
+ * through it rather than silently truncated.
+ */
 export async function getFileContent(
   octokit: Octokit,
   ref: RepoRef,
   path: string,
-): Promise<{ sha: string; content: string } | null> {
+): Promise<RepoFile | null> {
   try {
     const res = await octokit.repos.getContent({
       owner: ref.owner,
@@ -217,10 +276,37 @@ export async function getFileContent(
       path,
       ref: ref.branch,
     });
-    const data = res.data as { type?: string; sha?: string; content?: string };
+    const data = res.data as {
+      type?: string;
+      sha?: string;
+      content?: string;
+      encoding?: string;
+      size?: number;
+    };
     if (data.type !== "file" || !data.sha) return null;
-    const content = data.content ? Buffer.from(data.content, "base64").toString("utf8") : "";
-    return { sha: data.sha, content };
+
+    let base64 = data.encoding === "base64" ? (data.content ?? "") : "";
+    if (data.encoding !== "base64") {
+      // Over the contents API's 1 MB inline ceiling. The blobs API has none,
+      // and an empty string here would have been written into the clone as an
+      // empty file.
+      const { data: blob } = await octokit.git.getBlob({
+        owner: ref.owner,
+        repo: ref.repo,
+        file_sha: data.sha,
+      });
+      base64 = blob.encoding === "base64" ? blob.content : "";
+    }
+
+    const raw = Buffer.from(base64, "base64");
+    const content = raw.toString("utf8");
+    return {
+      sha: data.sha,
+      content,
+      base64,
+      binary: !Buffer.from(content, "utf8").equals(raw),
+      bytes: raw.length,
+    };
   } catch (e: unknown) {
     if ((e as { status?: number })?.status === 404) return null;
     throw e;
