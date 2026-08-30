@@ -522,3 +522,129 @@ old code read as an empty file. A large file would therefore have been delivered
 to the clone as **zero bytes** rather than as a corrupted one. Prime carries two
 past that line — a 3.4 MB font archive and a 1.6 MB PDF. Over the ceiling the
 blob is refetched through the blobs API, which has none.
+
+## A cascade removes what prime removed
+
+Until 30 Aug 2026 a cascade delivered modifications and additions and silently
+dropped every deletion. The engine said so out loud — *"Neither scope ever
+DELETES … Prime-side deletions are counted and named, never acted on"* — and the
+reasoning behind that comment was sound: a clone legitimately carries files
+prime has never had. On the client-facing mirror there are nine of them, and
+they are the difference between a clone and a copy.
+
+What the comment missed is that prime deletes files as part of ordinary work,
+usually in the same commit that rewrites what replaced them.
+
+### What it cost
+
+Prime's `9f9abe594` did seven things at once. It rewrote `AmlOverview.tsx`,
+added `amlComplianceHomeShape.test.tsx`, and **deleted**
+`amlComplianceHomeQueues.test.tsx`, the test the rewrite obsoleted.
+
+The cascade carried six of the seven. The clone was then running a test prime
+had deleted against a page prime had rewritten, so `verify` went red on the
+cascade's own pull request — a pull request that **could never go green**,
+because nothing in the engine could remove the file that was failing. The clone
+stalls there until a person notices and deletes the file by hand, on every
+clone, for every commit of this shape.
+
+### The rule
+
+> A deletion is delivered only where the clone's copy is byte-identical to
+> **some version prime itself held at that path.**
+
+| prime's history says | the clone's blob is | outcome |
+| --- | --- | --- |
+| never had this path | — | keep — the clone owns it |
+| deleted it | a version prime held | **delete** |
+| deleted it | a blob prime never held here | keep — somebody edited it |
+
+The question the rule is really asking is *did anybody here do work that would
+be lost*. Unmodified prime content at an older point is not work. A blob prime
+never had at that path is.
+
+#### Why "some version" and not "the version prime deleted"
+
+This shipped first as a comparison against the single version prime deleted, and
+the first real run showed that was too narrow.
+`PassportRecipientsPanel.tsx` does not match the blob prime deleted — it matches
+`a7c1fce`, the version prime held **two commits earlier**. The clone is not
+edited. It is stale: prime revised the file twice more and then removed it, and
+the clone had only ever received the first of those revisions.
+
+Being a few revisions behind on a file prime then deletes is the ordinary
+condition of a clone, not an exception. Under the narrow rule every one of those
+became a permanent leftover needing a person — which is the problem this whole
+area exists to remove.
+
+The walk back through prime's history is bounded at ten versions and stops at
+the first match, so a clone that is current pays one extra call. **Whether the
+walk reached the end of the history travels with the answer**: a version list
+that ran out cannot tell "edited here" from "staler than we looked", so it
+reports `unsettled` and keeps the file rather than picking one.
+
+Blob SHAs are compared, never contents, for the reason the section above this
+one records: a blob SHA is a hash of the bytes and settles binaries exactly as
+it settles text.
+
+### Both scopes, and where each one's section of prime stops
+
+A mirror's section of prime is the whole tree. A module-scoped clone's is the
+globs of what it installed — so a file it holds **inside** those globs that
+prime no longer has is a deletion, and a file outside them is none of the
+cascade's business and never becomes a candidate at all.
+
+That took one extra tree read on the module path, which previously only ever
+learned what prime *has*. The globs are re-validated before any of them decides
+a deletion: `listFilesMatchingGlobs` validates its own copy, and a pattern that
+escaped the module scope would do so here in the one direction that destroys
+something. A truncated tree read refuses the deletion pass outright, because it
+looks exactly like a clone holding fewer files than it does.
+
+### A tree comparison is not evidence
+
+The tree read produces *candidates* — thirteen on the mirror, of which nine are
+the clone's own isolation machinery. Evidence has to come from prime's own
+history: one `listCommits` for the path returns every commit that touched it,
+newest first, so the first is the removal and the rest are the revisions prime
+held. Every failure path answers `unsettled`, which keeps the file: a read that
+FAILED is not a fact that is ABSENT.
+
+The removing commit's own `files[]` carries a pre-image SHA and would save one
+call. It is deliberately not used — on a merge commit that list is computed
+against the first parent and a 300-file cap truncates it silently, and being
+wrong here does not fail loudly, it deletes the wrong file.
+
+### Three refusals
+
+**Never delete something still imported.** A file prime deleted can still be
+referenced by a file the cascade cannot deliver — a `manual_reconcile` path like
+`src/App.tsx`, or a file only the clone has. Every surviving source the engine
+can see is scanned first. Files that are byte-identical in prime and clone are
+deliberately *not* scanned, and that is sound rather than a shortcut: prime
+compiles without the deleted path, so prime's copy cannot import it, so an
+identical copy cannot either.
+
+**Never delete in bulk.** Past 25 the whole set is refused rather than trimmed.
+A cascade that suddenly wants to remove a hundred files is more likely to be
+evidence gone wrong than a retirement, and the answer to suspect evidence is to
+stop — not to act on the first twenty-five of it. The largest real retirement in
+this codebase (the partner-agreement removal: three Edge Functions and eleven
+shared modules) is fourteen.
+
+**Never spend the probe budget on the wrong candidates.** Ordering is a
+heuristic about which candidates to *ask about* first and never about what the
+answer is: a clone-only file in a directory prime does not have at all is almost
+certainly the clone's own, and one sitting in a directory prime *does* have is
+where a deletion hides. That is what keeps a clone with a large tree of its own
+from crowding a real removal out past the probe cap.
+
+### The comment stripper underneath it
+
+Finding out what still imports a path meant stripping comments, and the shared
+`stripNonCode` could not do it: `/\*[\s\S]*?\*\/` treats the `/*` inside
+`"supabase/functions/**"` as a comment opening and closes it at the next `*/`
+anywhere in the file. The engine's own source carries eleven such globs, and
+scanning it that way loses two thirds of the file. It steps over quoted strings
+now. On the import guard that fault only ever cost a *warning*; on a deletion it
+would have cost the file.

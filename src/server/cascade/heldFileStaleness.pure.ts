@@ -66,12 +66,68 @@ const EXTENSIONS = [".ts", ".tsx", ".d.ts", "/index.ts", "/index.tsx"];
  * Deliberately crude and deliberately LOSSY in the safe direction: anything it
  * mangles produces fewer matches, and fewer matches means fewer claims.
  */
-function stripNonCode(source: string): string {
-  return source
-    .replace(/\/\*[\s\S]*?\*\//g, " ")
-    .split("\n")
-    .map((l) => (l.trimStart().startsWith("//") ? "" : l))
-    .join("\n");
+/**
+ * Comments removed, so a path named in prose never counts as a reference.
+ *
+ * Quoted strings are stepped over rather than scanned, and that is not a
+ * nicety. `"supabase/functions/**"` contains `/*`, so a regex that treats the
+ * first `/*` it sees as a comment opens one inside a glob and closes it at the
+ * next `*` + `/` anywhere in the file — swallowing every import in between.
+ * The engine's own source has eleven such globs; scanning it that way loses
+ * two thirds of the file.
+ */
+export function stripNonCode(source: string): string {
+  let out = "";
+  let i = 0;
+  while (i < source.length) {
+    const c = source[i];
+    const next = source[i + 1];
+
+    // A string or template literal is copied through verbatim. Anything that
+    // looks like a comment inside it is text.
+    if (c === '"' || c === "'" || c === "`") {
+      const quote = c;
+      out += c;
+      i++;
+      while (i < source.length) {
+        if (source[i] === "\\") {
+          out += source.slice(i, i + 2);
+          i += 2;
+          continue;
+        }
+        out += source[i];
+        if (source[i] === quote) {
+          i++;
+          break;
+        }
+        i++;
+      }
+      continue;
+    }
+
+    if (c === "/" && next === "*") {
+      const end = source.indexOf("*/", i + 2);
+      // An unterminated block comment runs to the end of the file, which is
+      // what a compiler would do with it too.
+      const stop = end === -1 ? source.length : end + 2;
+      // Newlines are kept so line-based readers downstream stay aligned.
+      out += source.slice(i, stop).replace(/[^\n]/g, " ");
+      i = stop;
+      continue;
+    }
+
+    if (c === "/" && next === "/") {
+      const end = source.indexOf("\n", i);
+      const stop = end === -1 ? source.length : end;
+      out += " ".repeat(stop - i);
+      i = stop;
+      continue;
+    }
+
+    out += c;
+    i++;
+  }
+  return out;
 }
 
 /** One `import { … } from "…"` in a module, flattened to the local names. */
