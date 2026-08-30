@@ -48,12 +48,18 @@ export const Route = createFileRoute("/hooks/cascade-merge-drain")({
           // not merges alone — a pull request somebody merged by hand, or a
           // proposal somebody closed, corrects a record that was wrong, which
           // is exactly as worth filing as a merge this drain performed itself.
+          //
+          // `foreignRepo` deliberately does NOT trigger a write. It is a
+          // CONSTANT — 48 historical rows naming the personal fork this clone
+          // was moved off, unreconcilable from here for ever — so filing it
+          // would put an identical row in the audit log every five minutes
+          // until the end of time. It is in the response body, where somebody
+          // asking gets an answer and nobody else is told twice.
           if (
             report.merged > 0 ||
             report.reconciled > 0 ||
             report.recounted > 0 ||
             report.advanced > 0 ||
-            report.foreignRepo > 0 ||
             report.failed > 0
           ) {
             await writeAuditLog({
