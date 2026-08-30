@@ -821,10 +821,40 @@ async function processClone(args: {
   const reconcileSuffix = reconcileSuffixFor(needsReconcile.length);
   const fileSummary = `${summaryFiles.join(", ")}${summarySuffix}${pinSuffix}${heldSuffix}${reconcileSuffix}${staleSuffix}${missingSuffix}`;
 
+  // Re-read the clone's head HERE, rather than trusting the one captured at the
+  // top of this function.
+  //
+  // Everything between the two reads is slow: two recursive tree listings, a
+  // blob fetch per changed file, and both held-file guards. The merge drain
+  // runs every five minutes and merges an earlier proposal in exactly that
+  // window — and then this proposal is built on a parent that no longer
+  // exists on the branch, so GitHub reports it `dirty` and it can never merge.
+  //
+  // That is not hypothetical: pull request #71 was cut from `6eaaf5a` while
+  // the drain merged #70 at 10:00:07, and arrived conflicted against a `main`
+  // it had been current with seconds earlier.
+  //
+  // The base tree and the parent MUST come from the same read. A fresh parent
+  // with a stale base tree is worse than the race it fixes: it would silently
+  // revert whatever landed in between.
+  let parentSha = cloneBranchSha;
+  try {
+    const { data: fresh } = await octokit.repos.getBranch({
+      owner: cloneRef.owner,
+      repo: cloneRef.repo,
+      branch: cloneRef.branch,
+    });
+    parentSha = fresh.commit.sha;
+  } catch {
+    // A failed re-read is not a moved branch. Keeping the earlier value is the
+    // old behaviour, which is wrong only in the window this closes — refusing
+    // the whole cascade over it would be worse.
+  }
+
   const { data: cloneCommit } = await octokit.git.getCommit({
     owner: cloneRef.owner,
     repo: cloneRef.repo,
-    commit_sha: cloneBranchSha,
+    commit_sha: parentSha,
   });
   const { data: newTree } = await octokit.git.createTree({
     owner: cloneRef.owner,
@@ -883,7 +913,8 @@ async function processClone(args: {
     repo: cloneRef.repo,
     message,
     tree: newTree.sha,
-    parents: [cloneBranchSha],
+    // Same read as the base tree above. See the comment there.
+    parents: [parentSha],
   });
 
   // === One open cascade proposal per clone, in EVERY mode ===

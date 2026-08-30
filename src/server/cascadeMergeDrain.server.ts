@@ -389,6 +389,30 @@ async function handleOne(args: {
   let mergedNow = false;
   let reason = "";
 
+  // A proposal that cannot merge is held, not attempted.
+  //
+  // `pulls.merge` on a conflicted head answers 405, which lands in the catch
+  // above as `failed` — and the drain comes back five minutes later and does
+  // it again, for ever, filing an audit row each time and colouring the fleet
+  // red over something no retry can fix.
+  //
+  // This reads `mergeable` ONLY to refuse. It is never permission: `clean` is
+  // also what a pull request with no checks at all reports, so believing it
+  // would reopen the `no_checks` hole exactly where nobody is watching. Every
+  // merge below still goes through `decideCascadeMerge`.
+  //
+  // `null` is not `false`. GitHub computes mergeability asynchronously and
+  // answers null until it has, so an unknown state has to fall through to the
+  // ordinary path rather than being read as a conflict.
+  if (facts.state === "open" && pr.mergeable === false) {
+    const why =
+      "This proposal conflicts with the clone's default branch and cannot be merged as it " +
+      "stands. The next cascade rebuilds it on the current branch; nothing here can resolve " +
+      "a conflict on its own.";
+    await writeReconciliation(supabase, rows, facts, why);
+    return { clone: label, pr: number, outcome: "held", reason: "conflicted", why };
+  }
+
   if (facts.state === "open") {
     let verdict: ReturnType<typeof decideCascadeMerge> | null = null;
     try {
