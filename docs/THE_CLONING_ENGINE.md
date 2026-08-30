@@ -224,13 +224,22 @@ spelling and the one the clone's code already falls back to.
 
 Two rules carry it. **Never inherited is not never written** — a value that
 belongs to THIS clone is exactly what should land, so `planCloneSecrets`
-takes `selfValues` and provisioning supplies the project's own `jwt_secret`,
-captured from the `POST /v1/projects` response. Supabase returns it there and
-nowhere else: there is no endpoint that reads it back, and it cannot be
-derived from the anon or service-role keys because those are signed WITH it.
-So a project Mission Control CREATES is automatic, and one adopted after the
-fact legitimately has none to capture and says so. And **a signing key is
-never generated** — the `identity` class mints a fresh random value, which is
-right for `INTERNAL_EDGE_SECRET` and actively worse here: PostgREST validates
-against the project's own key, so a random one produces tokens rejected by
-the very database they are for.
+takes `selfValues` and provisioning supplies the project's own key.
+
+It is read from **`GET /v1/projects/{ref}/postgrest`**, whose
+`PostgrestConfigWithJWTSecretResponse` carries `jwt_secret`: it is PostgREST's
+configuration, and the signing key belongs to it because PostgREST is what
+validates the tokens. It is deliberately NOT taken from the create-project
+response — `V1ProjectResponse` carries `id`, `ref`, `organization_id`,
+`organization_slug`, `name`, `region`, `created_at` and `status`, and nothing
+else. That was the first implementation here and it would have captured
+`undefined` on every clone while looking correct, because the field is
+optional and absence degrades silently to "pending". Reading the config
+instead also means the key is available at ANY time rather than once, so a
+project Mission Control ADOPTED is covered exactly like one it created, and an
+existing clone can be repaired without an operator ever seeing the value.
+
+And **a signing key is never generated** — the `identity` class mints a fresh
+random value, which is right for `INTERNAL_EDGE_SECRET` and actively worse
+here: PostgREST validates against the project's own key, so a random one
+produces tokens rejected by the very database they are for.
