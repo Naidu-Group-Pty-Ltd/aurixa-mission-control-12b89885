@@ -9,6 +9,8 @@ import {
   summariseCascade,
 } from "./prReconcile.pure";
 import { RECONCILE_MARKER, summaryOwesReconcile } from "./syncExclusions.pure";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 // The real row, verbatim, as the engine wrote it for pull request #67 —
 // merged by the drain at 08:35 and still reading `pr_opened` an hour later.
@@ -253,5 +255,77 @@ describe("the event summary, recounted", () => {
     // A run that opened a pull request and failed elsewhere is partial, not
     // failed: something is live and waiting.
     expect(cascadeEventStatus({ succeeded: 0, opened: 1, failed: 1 })).toBe("partial");
+  });
+});
+
+describe("a row whose pull request lives somewhere else", () => {
+  // Both real. This clone was re-pointed from a personal fork to the
+  // organisation's own repository, and 48 historical cascade results still
+  // carry the old URL.
+  const OLD = "https://github.com/lavan96/npc-client-dashboard/pull/42";
+  const NEW = "https://github.com/Naidu-Group-Pty-Ltd/npc-client-dashboard/pull/42";
+
+  it("has the same number in both repositories", () => {
+    // Which is the whole danger: `pull/42` in the new repository is a real,
+    // unrelated pull request — a Dependabot one — and reconciling a cascade
+    // from it would stamp a stranger's outcome onto this record.
+    expect(parsePrNumber(OLD)).toBe(parsePrNumber(NEW));
+  });
+
+  it("is told apart by the repository the URL names", () => {
+    expect(parsePrRepo(OLD)).toEqual({ owner: "lavan96", repo: "npc-client-dashboard" });
+    expect(parsePrRepo(NEW)?.owner).toBe("Naidu-Group-Pty-Ltd");
+  });
+
+  it("is checked by the drain BEFORE it reads a pull request", () => {
+    // Asserted against the source: exercising it would need a token that can
+    // read production repositories, which is what a test must not hold.
+    const drain = readFileSync(
+      join(process.cwd(), "src/server/cascadeMergeDrain.server.ts"),
+      "utf8",
+    );
+    const guardAt = drain.indexOf("parsePrRepo(");
+    const readAt = drain.indexOf("octokit.pulls.get(");
+    expect(guardAt).toBeGreaterThan(-1);
+    expect(readAt).toBeGreaterThan(guardAt);
+    // And the guard has to compare BOTH halves; owner alone would let a
+    // different repository under the same owner through.
+    const guard = drain.slice(guardAt, guardAt + 400);
+    expect(guard).toContain("at.owner !== owner");
+    expect(guard).toContain("at.repo !== repo");
+  });
+});
+
+describe("several rows sharing one pull request", () => {
+  it("is the ordinary case, not an edge case", () => {
+    // `pr` mode moves ONE proposal forward across many prime commits, so one
+    // pull request accumulates a cascade result per commit — #55 carries
+    // eleven and #62 eight. All of them landed when it merged.
+    const drain = readFileSync(
+      join(process.cwd(), "src/server/cascadeMergeDrain.server.ts"),
+      "utf8",
+    );
+    // The map is number -> LIST, and the writer loops.
+    expect(drain).toContain("rowsByPr = new Map<number, ResultRow[]>()");
+    const writer = drain.slice(drain.indexOf("async function writeReconciliation"));
+    expect(writer.slice(0, 1200)).toContain("for (const row of rows)");
+  });
+
+  it("reconciles each row against its own summary", () => {
+    // They share a pull request and not a history: each carries the file list
+    // of the cascade that wrote it, and a shared outcome must not flatten them
+    // into one sentence.
+    const a = reconcileResultToPr({
+      pr: { state: "closed", merged: true, mergeCommitSha: "abc1234" },
+      currentSummary: "PR #55 opened: alpha.ts",
+    });
+    const b = reconcileResultToPr({
+      pr: { state: "closed", merged: true, mergeCommitSha: "abc1234" },
+      currentSummary: "PR #55 updated: beta.ts",
+    });
+    expect(a.diffSummary).toContain("alpha.ts");
+    expect(b.diffSummary).toContain("beta.ts");
+    expect(a.status).toBe("succeeded");
+    expect(b.status).toBe("succeeded");
   });
 });

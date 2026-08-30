@@ -67,6 +67,7 @@ import {
   cascadeEventStatus,
   countResults,
   parsePrNumber,
+  parsePrRepo,
   reconcileResultToPr,
   summariseCascade,
   type PullRequestFacts,
@@ -78,15 +79,31 @@ type Db = SupabaseClient<Database>;
 /** Branches the cascade engine creates. Nothing else is ever touched. */
 export const CASCADE_BRANCH_PREFIX = "aurixa/cascade-";
 
+/**
+ * Distinct pull requests read per clone per run.
+ *
+ * The backlog this was built to clear is not small: on 30 Aug 2026 the fleet
+ * carried 86 rows still reading `pr_opened`, every cascade this platform had
+ * ever run. Reading them all in one pass would be one long request against a
+ * 60-second cron timeout, so it drains over several runs instead — newest
+ * first, because the rows an operator is looking at are the recent ones.
+ */
+const MAX_PRS_PER_RUN = 25;
+
 export type MergeDrainOutcome =
   | { clone: string; pr: number; outcome: "merged"; sha: string | null }
   | { clone: string; pr: number; outcome: "held"; reason: string; why: string }
   | { clone: string; pr: number; outcome: "failed"; error: string }
   /** The record was behind and has been brought forward. */
-  | { clone: string; pr: number; outcome: "reconciled"; to: string; why: string };
+  | { clone: string; pr: number; outcome: "reconciled"; to: string; rows: number; why: string };
 
 export type MergeDrainReport = {
   considered: number;
+  /**
+   * Rows whose pull request lives in a repository this clone no longer is.
+   * Skipped without an API call — see `rowsForThisRepo`.
+   */
+  foreignRepo: number;
   merged: number;
   /** Rows whose recorded state was wrong and has been corrected. */
   reconciled: number;
@@ -123,6 +140,7 @@ export async function drainCascadeMerges(
 ): Promise<MergeDrainReport> {
   const report: MergeDrainReport = {
     considered: 0,
+    foreignRepo: 0,
     merged: 0,
     reconciled: 0,
     recounted: 0,
@@ -149,7 +167,8 @@ export async function drainCascadeMerges(
     .from("cascade_results")
     .select("id, clone_id, cascade_event_id, pr_url, diff_summary")
     .eq("status", "pr_opened")
-    .not("pr_url", "is", null);
+    .not("pr_url", "is", null)
+    .order("created_at", { ascending: false });
   if (unreconciled.error) {
     throw new Error(`Could not read cascade results: ${unreconciled.error.message}`);
   }
@@ -174,11 +193,32 @@ export async function drainCascadeMerges(
     const repo = clone.github_repo;
 
     const rows = rowsByClone.get(clone.id) ?? [];
-    /** Pull request number → the row that records it, when there is one. */
-    const rowByPr = new Map<number, ResultRow>();
+    // Pull request number → EVERY row that records it.
+    //
+    // Several rows share one pull request whenever `pr` mode moved a single
+    // proposal forward across several prime commits — #55 carries eleven of
+    // them, #62 eight — and all of them landed when it merged. So the pull
+    // request is read ONCE and the answer applied to each, rather than eleven
+    // identical requests for one fact.
+    const rowsByPr = new Map<number, ResultRow[]>();
     for (const row of rows) {
       const n = parsePrNumber(row.pr_url);
-      if (n !== null) rowByPr.set(n, row);
+      if (n === null) continue;
+      // A row whose URL names a DIFFERENT repository cannot be reconciled from
+      // this one, and must never be looked up by number here: this clone was
+      // re-pointed from `lavan96/npc-client-dashboard` to the organisation's
+      // own repo, and 48 historical rows still carry the old URL. Reading
+      // `pull/42` in the new repository answers about a real, unrelated pull
+      // request — a Dependabot one — and would stamp its outcome onto a cascade
+      // that has nothing to do with it.
+      const at = parsePrRepo(row.pr_url);
+      if (!at || at.owner !== owner || at.repo !== repo) {
+        report.foreignRepo += 1;
+        continue;
+      }
+      const list = rowsByPr.get(n);
+      if (list) list.push(row);
+      else rowsByPr.set(n, [row]);
     }
 
     // GitHub's open cascade pull requests, on top of the rows above: one this
@@ -204,11 +244,18 @@ export async function drainCascadeMerges(
 
     // Oldest first. Two proposals open at once carry overlapping trees, and
     // landing the newer one first would put the older one's content on top.
-    const numbers = [...new Set([...rowByPr.keys(), ...openNumbers])].sort((a, b) => a - b);
+    // The cap is applied to the NEWEST, then the survivors sorted back into
+    // merge order — so a backlog drains from the end an operator is looking at
+    // while merges still happen in the safe order.
+    const all = [...new Set([...rowsByPr.keys(), ...openNumbers])];
+    const numbers = all
+      .sort((a, b) => b - a)
+      .slice(0, MAX_PRS_PER_RUN)
+      .sort((a, b) => a - b);
 
     for (const number of numbers) {
       report.considered += 1;
-      const row = rowByPr.get(number) ?? null;
+      const rowsForPr = rowsByPr.get(number) ?? [];
       try {
         const outcome = await handleOne({
           supabase,
@@ -216,7 +263,7 @@ export async function drainCascadeMerges(
           owner,
           repo,
           number,
-          row,
+          rows: rowsForPr,
           label,
         });
         report.detail.push(outcome);
@@ -226,10 +273,10 @@ export async function drainCascadeMerges(
         } else if (outcome.outcome === "held") {
           report.held[outcome.reason] = (report.held[outcome.reason] ?? 0) + 1;
         } else if (outcome.outcome === "reconciled") {
-          report.reconciled += 1;
+          report.reconciled += outcome.rows;
           if (outcome.to === "succeeded") advancedClones.add(clone.id);
         }
-        if (row) touchedEvents.add(row.cascade_event_id);
+        for (const row of rowsForPr) touchedEvents.add(row.cascade_event_id);
       } catch (e) {
         report.failed += 1;
         report.detail.push({ clone: label, pr: number, outcome: "failed", error: msg(e) });
@@ -261,10 +308,11 @@ async function handleOne(args: {
   owner: string;
   repo: string;
   number: number;
-  row: ResultRow | null;
+  /** Every cascade result recording this pull request. Often more than one. */
+  rows: ResultRow[];
   label: string;
 }): Promise<MergeDrainOutcome> {
-  const { supabase, octokit, owner, repo, number, row, label } = args;
+  const { supabase, octokit, owner, repo, number, rows, label } = args;
 
   const { data: pr } = await octokit.pulls.get({ owner, repo, pull_number: number });
   let facts: PullRequestFacts = {
@@ -300,12 +348,12 @@ async function handleOne(args: {
       // is to leave the pull request alone and say so.
       if (!checksUnreadable(e)) throw e;
       reason = CHECKS_PERMISSION_REMEDY;
-      await writeReconciliation(supabase, row, facts, reason);
+      await writeReconciliation(supabase, rows, facts, reason);
       return { clone: label, pr: number, outcome: "held", reason: "checks_unreadable", why: reason };
     }
 
     if (!verdict.merge) {
-      await writeReconciliation(supabase, row, facts, verdict.why);
+      await writeReconciliation(supabase, rows, facts, verdict.why);
       return { clone: label, pr: number, outcome: "held", reason: verdict.reason, why: verdict.why };
     }
 
@@ -322,7 +370,7 @@ async function handleOne(args: {
     mergedNow = true;
   }
 
-  const applied = await writeReconciliation(supabase, row, facts, reason);
+  const applied = await writeReconciliation(supabase, rows, facts, reason);
 
   if (mergedNow) {
     return { clone: label, pr: number, outcome: "merged", sha: facts.mergeCommitSha?.slice(0, 7) ?? null };
@@ -335,6 +383,7 @@ async function handleOne(args: {
       pr: number,
       outcome: "reconciled",
       to: applied.status,
+      rows: applied.rows,
       why: applied.why,
     };
   }
@@ -356,31 +405,42 @@ async function handleOne(args: {
  */
 async function writeReconciliation(
   supabase: Db,
-  row: ResultRow | null,
+  rows: ResultRow[],
   facts: PullRequestFacts,
   openReason: string,
-): Promise<{ status: string; why: string } | null> {
-  if (!row) return null;
-  const decision = reconcileResultToPr({
-    pr: facts,
-    currentSummary: row.diff_summary,
-    openReason,
-  });
-  if (!decision.changed) return null;
+): Promise<{ status: string; rows: number; why: string } | null> {
+  let applied: { status: string; why: string } | null = null;
+  let written = 0;
 
-  const { error } = await supabase
-    .from("cascade_results")
-    .update({
-      status: decision.status,
-      diff_summary: decision.diffSummary,
-      ...(decision.commitSha ? { commit_sha: decision.commitSha } : {}),
-      ...(decision.status === "succeeded" ? { completed_at: new Date().toISOString() } : {}),
-    })
-    .eq("id", row.id);
-  // A reconciliation that silently failed to write leaves exactly the stale
-  // record this exists to remove, so it is raised rather than swallowed.
-  if (error) throw new Error(`Could not reconcile result ${row.id}: ${error.message}`);
-  return { status: decision.status, why: decision.diffSummary };
+  // Every row that recorded this pull request, not just one. When `pr` mode
+  // moved a single proposal forward across several prime commits, ALL of those
+  // cascades landed the moment it merged — leaving the rest at `pr_opened`
+  // would replace one stale record with ten.
+  for (const row of rows) {
+    const decision = reconcileResultToPr({
+      pr: facts,
+      currentSummary: row.diff_summary,
+      openReason,
+    });
+    if (!decision.changed) continue;
+
+    const { error } = await supabase
+      .from("cascade_results")
+      .update({
+        status: decision.status,
+        diff_summary: decision.diffSummary,
+        ...(decision.commitSha ? { commit_sha: decision.commitSha } : {}),
+        ...(decision.status === "succeeded" ? { completed_at: new Date().toISOString() } : {}),
+      })
+      .eq("id", row.id);
+    // A reconciliation that silently failed to write leaves exactly the stale
+    // record this exists to remove, so it is raised rather than swallowed.
+    if (error) throw new Error(`Could not reconcile result ${row.id}: ${error.message}`);
+    written += 1;
+    applied = { status: decision.status, why: decision.diffSummary };
+  }
+
+  return applied ? { ...applied, rows: written } : null;
 }
 
 /**
@@ -443,8 +503,11 @@ async function advanceClone(supabase: Db, cloneId: string): Promise<boolean> {
     .select("cascade_event_id, cascade_events!inner(source_sha, created_at)")
     .eq("clone_id", cloneId)
     .eq("status", "succeeded")
-    .order("completed_at", { ascending: false, nullsFirst: false })
-    .limit(50);
+    // The row's own creation, not `completed_at`: a bulk reconciliation stamps
+    // every row it repairs with the same `completed_at`, which would make that
+    // ordering meaningless exactly when it matters most.
+    .order("created_at", { ascending: false })
+    .limit(200);
   if (error) throw new Error(`Could not read clone history ${cloneId}: ${error.message}`);
 
   type Joined = { cascade_events: { source_sha: string | null; created_at: string } | null };

@@ -53,6 +53,7 @@ export const Route = createFileRoute("/hooks/cascade-merge-drain")({
             report.reconciled > 0 ||
             report.recounted > 0 ||
             report.advanced > 0 ||
+            report.foreignRepo > 0 ||
             report.failed > 0
           ) {
             await writeAuditLog({
