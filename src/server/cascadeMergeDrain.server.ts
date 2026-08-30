@@ -101,7 +101,17 @@ export type MergeDrainReport = {
   considered: number;
   /**
    * Rows whose pull request lives in a repository this clone no longer is.
-   * Skipped without an API call — see `rowsForThisRepo`.
+   *
+   * Skipped without an API call, and deliberately NOT a reason to file an
+   * audit row: it is a constant, not an event. This clone was moved off a
+   * personal fork and 48 rows still name it, so a drain that reported the
+   * number every five minutes would say the same thing for ever.
+   *
+   * Their status is left ALONE rather than rewritten. Marking them `skipped`
+   * would claim a person declined them; marking them `succeeded` would claim a
+   * merge nobody can see. What is true is that the outcome is unknowable from
+   * here, and inventing one to tidy a count is how a record stops being a
+   * record.
    */
   foreignRepo: number;
   merged: number;
