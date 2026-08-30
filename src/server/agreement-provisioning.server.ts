@@ -183,15 +183,52 @@ export async function assessProvisioningPreflight(): Promise<
   if (modErr) reasons.push(`module catalogue unreadable: ${modErr.message}`);
   else if (!count) reasons.push("module catalogue is empty — run detection first");
 
-  // The one live probe, only once everything cheap has passed.
+  // The live probes, only once everything cheap has passed.
   if (reasons.length === 0 && prime?.github_owner && prime.github_repo) {
     try {
       const { getAppOctokit } = await import("./github-app.server");
-      await getAppOctokit().repos.getBranch({
+      const octokit = getAppOctokit();
+      await octokit.repos.getBranch({
         owner: prime.github_owner,
         repo: prime.github_repo,
         branch: prime.default_branch || "main",
       });
+
+      // The agreement path creates the clone with `method: "template"`, and
+      // `createUsingTemplate` requires the source repository to carry the
+      // template FLAG — a Settings checkbox, not a property of its contents.
+      // The first autonomous run proved this is the one requirement nothing
+      // checked: every credential verified, the branch probe passed, and the
+      // engine's first spend answered 404 ("Not Found" is how GitHub reports
+      // a non-template source to this endpoint, not 403).
+      //
+      // The flag is metadata the App can usually set for itself (it holds
+      // admin on the prime), so a missing flag is repaired here rather than
+      // reported — ONE PATCH, idempotent, visible in the repo's settings.
+      // Only when that write is refused does preflight refuse, and the
+      // refusal names the one-checkbox manual remedy. The fork method is not
+      // a fallback: GitHub will not fork a repository into the organisation
+      // that owns it, so for same-org provisioning the template path is the
+      // only path.
+      const { data: repo } = await octokit.repos.get({
+        owner: prime.github_owner,
+        repo: prime.github_repo,
+      });
+      if (!repo.is_template) {
+        try {
+          await octokit.repos.update({
+            owner: prime.github_owner,
+            repo: prime.github_repo,
+            is_template: true,
+          });
+        } catch (e) {
+          reasons.push(
+            `prime repository is not marked as a template and the GitHub App could not set it ` +
+              `(${e instanceof Error ? e.message : String(e)}). Fix by hand: ` +
+              `${prime.github_owner}/${prime.github_repo} → Settings → tick "Template repository".`,
+          );
+        }
+      }
     } catch (e) {
       reasons.push(
         `GitHub App cannot read the prime (${prime.github_owner}/${prime.github_repo}): ` +
