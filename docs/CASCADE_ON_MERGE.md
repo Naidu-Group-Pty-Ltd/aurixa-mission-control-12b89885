@@ -314,3 +314,80 @@ Measured on the live fleet: 7,910 paths, five held source files, eleven GitHub
 calls, no findings. Against the clone as it stood the day before the routes were
 reconciled by hand: one module read, one finding, named as
 `AmlAustracReportDraft` from `src/pages/aml/AmlShellPages.tsx`.
+
+## Mission Control's record of a cascade, and GitHub's
+
+A cascade result reached `pr_opened` and stopped there permanently. Nothing ever
+looked at the pull request again. The merge drain merged it on GitHub and wrote
+an audit row; a person merging one by hand wrote nothing at all. Neither reached
+`cascade_results`, `cascade_events.summary` or `clones`.
+
+Measured on 30 August 2026, an hour after the fact:
+
+| | GitHub | Mission Control |
+| --- | --- | --- |
+| PR #66 | merged 07:55 | `pr_opened` |
+| PR #67 | merged 08:35 | `pr_opened` |
+| both events | — | `0 merged · 1 PRs` |
+| the clone | two cascades landed | `behind`, **140 commits**, pointer frozen |
+
+The clone's card drew a green tick and the word `PR_OPENED` beside a badge
+reading `AUTO MERGE` — three signals that together say "merged" about a pull
+request nobody had merged.
+
+`commits_behind` is the part that is not cosmetic. `runDriftRefresh` measures
+drift **from `last_synced_sha`**, and only a `succeeded` result ever moved that
+pointer, so a clone kept up to date entirely by the drain reports as
+permanently behind and its drift number grows for ever.
+
+### The rule
+
+**The pull request's own state is the truth, and it is READ rather than
+remembered.**
+
+Not "what the drain did". That misses every merge a person performed, every
+merge that landed while this control plane was down, and every proposal an
+operator closed. One `pulls.get` answers all of them, which is also what lets a
+record that fell behind *before any of this existed* be brought forward.
+
+It is why the work list is Mission Control's **unreconciled rows** rather than
+GitHub's open pull requests: a merged pull request is not open any more, so a
+drain enumerating only open ones can never discover it. GitHub's open list is
+read on top, so a pull request this engine opened but failed to record is still
+merged when it goes green.
+
+Three rules carry it. A summary has a **durable half and a perishable half** —
+the engine writes which pull request and what it carries, which stays true
+whatever becomes of it, and the drain owns the leading outcome sentence and
+rewrites it every pass; blending them is what left rows reading "No check has
+reported on this pull request" long after every check had. Everything derived
+is **recomputed, never incremented** — the event's counts are tallied from its
+results and the clone's pointer is taken from its newest merged cascade, so two
+pull requests landing out of order cannot walk it backwards and a wrong record
+repairs itself. And **a closed-unmerged proposal is `skipped`, never `failed`**:
+nothing failed, and colouring the fleet red over a decision an operator made on
+purpose is worse than useless.
+
+### A drained merge rebuilds the clone
+
+The engine requests a redeploy on its own `succeeded` path and its comment
+explains why nothing else will: Vercel rebuilds on push only where its GitHub
+App is installed, Mission Control forks clones through its own App and never
+installs Vercel's, so on this fleet nothing else asks. A merge performed by the
+drain reaches `main` exactly as a direct push does, and until now nothing
+rebuilt after one.
+
+### `auto_merge` gets the one-proposal rule too
+
+`pr` mode learned this after eight cascades opened eight pull requests carrying
+the same 57 files. `auto_merge` did not, on the reasoning that "the first will
+win and the rest will skip". It does not: auto-merge does not merge on the spot,
+it waits about seventeen minutes for `verify`, and prime moves faster than that.
+Three prime commits inside thirty-one minutes gave the clone #67, #68 and #69 at
+once, all carrying overlapping trees cut from a common ancestor — #67 merged and
+the other two were left proposing changes to the same files, so at least one of
+them could only ever land as a conflict.
+
+Both modes now keep one proposal and move it forward. The drain merges oldest
+first for the same reason: two proposals open together carry overlapping trees,
+and landing the newer one first would put the older one's content on top of it.

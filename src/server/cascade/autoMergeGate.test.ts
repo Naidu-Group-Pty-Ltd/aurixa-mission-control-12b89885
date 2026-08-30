@@ -92,13 +92,19 @@ describe("an auto_merge cascade cannot reach a default branch except through a P
   // to production repositories, which is what a test must not hold.
   const src = readFileSync(join(process.cwd(), "src/server/cascade-engine.server.ts"), "utf8");
 
-  // Sliced from the ORIGINAL source between the two mode markers, then stripped
-  // of line comments inside that slice only. A whole-file block-comment regex
-  // over-consumes here — this module's prose contains sequences that open a
-  // comment the pattern never closes — and an empty slice makes every
-  // `not.toContain` below pass vacuously, which is worse than no test.
-  const blockStart = src.indexOf('if (mode === "auto_merge")');
-  const blockEnd = src.indexOf("=== pr mode:", blockStart);
+  // Sliced from the ORIGINAL source, then stripped of line comments inside that
+  // slice only. A whole-file block-comment regex over-consumes here — this
+  // module's prose contains sequences that open a comment the pattern never
+  // closes — and an empty slice makes every `not.toContain` below pass
+  // vacuously, which is worse than no test.
+  //
+  // The slice is the whole tail that writes to the clone: proposal first, then
+  // the auto_merge merge attempt. It used to stop at the `pr mode` marker,
+  // which stopped existing when the two modes were given ONE proposal rule
+  // between them — and the assertions below are about what this region may do
+  // to a default branch, which is the same question either way.
+  const blockStart = src.indexOf("// === One open cascade proposal per clone");
+  const blockEnd = src.indexOf("async function findOpenCascadePr", blockStart);
   const autoMergeBlock = src
     .slice(blockStart, blockEnd)
     .split("\n")
@@ -109,6 +115,29 @@ describe("an auto_merge cascade cannot reach a default branch except through a P
     expect(blockStart).toBeGreaterThan(-1);
     expect(blockEnd).toBeGreaterThan(blockStart);
     expect(autoMergeBlock).toContain("pulls.create(");
+  });
+
+  it("opens ONE proposal per clone, in auto_merge as well as pr", () => {
+    // `pr` mode learned this after eight cascades opened eight pull requests
+    // carrying the same 57 files. `auto_merge` did not, on the reasoning that
+    // the first would win and the rest would skip — which is false, because
+    // auto-merge waits about seventeen minutes for checks and prime moves
+    // faster than that. Three prime commits in thirty-one minutes gave the
+    // clone #67, #68 and #69 at once, overlapping, cut from a common ancestor.
+    expect(autoMergeBlock.match(/pulls\.create\(/g) ?? []).toHaveLength(1);
+    const findAt = autoMergeBlock.indexOf("findOpenCascadePr(");
+    const createAt = autoMergeBlock.indexOf("pulls.create(");
+    expect(findAt).toBeGreaterThan(-1);
+    expect(createAt).toBeGreaterThan(findAt);
+  });
+
+  it("writes no reason into a summary the drain will have to correct", () => {
+    // `diff_summary` is written once and read for as long as the row exists,
+    // so it holds what stays true. Why a pull request has not merged YET is a
+    // fact about this minute, and putting it here is what left rows reading
+    // "No check has reported on this pull request" long after every check had.
+    expect(autoMergeBlock).not.toContain("verdict.why");
+    expect(autoMergeBlock).not.toContain("CHECKS_PERMISSION_REMEDY}");
   });
 
   it("never pushes straight to the clone's default branch", () => {
@@ -243,9 +272,16 @@ describe("when the App cannot read check runs", () => {
       join(process.cwd(), "src/server/cascadeMergeDrain.server.ts"),
       "utf8",
     );
-    const held = drain.slice(drain.indexOf("if (checksUnreadable(e))"));
-    expect(held.slice(0, 400)).toContain('outcome: "held"');
-    expect(held.slice(0, 400)).not.toContain("pulls.merge");
+    // From the point the unreadable-checks case is RECOGNISED to the end of
+    // the statement that answers it. Sliced structurally rather than by a
+    // character count, so reordering the handler cannot quietly widen it.
+    const at = drain.indexOf("checksUnreadable(e)");
+    expect(at).toBeGreaterThan(-1);
+    const returnAt = drain.indexOf("return {", at);
+    expect(returnAt).toBeGreaterThan(at);
+    const handler = drain.slice(at, drain.indexOf(";", returnAt) + 1);
+    expect(handler).toContain('outcome: "held"');
+    expect(handler).not.toContain("pulls.merge");
   });
 
   it("does NOT fall back to mergeable_state", () => {

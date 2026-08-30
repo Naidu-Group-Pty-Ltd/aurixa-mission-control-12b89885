@@ -18,6 +18,7 @@ import {
   XCircle,
   Loader2,
   AlertTriangle,
+  GitPullRequest,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { formatDistanceToNow } from "@/lib/format";
@@ -91,14 +92,21 @@ export function CloneSyncStatusCard({ clone }: { clone: Clone }) {
   };
 
   const isInFlight = latest?.status === "pushing" || latest?.status === "queued";
+  // `pr_opened` is NOT `succeeded`, and drawing them with the same green tick
+  // is what made this card say a cascade had landed while the pull request was
+  // still sitting open on GitHub. A proposal is a proposal until it merges —
+  // the cascade detail page has always drawn it as one, and this is the
+  // per-clone surface an operator actually looks at.
   const StatusIcon =
-    latest?.status === "succeeded" || latest?.status === "pr_opened"
+    latest?.status === "succeeded"
       ? CheckCircle2
-      : latest?.status === "failed"
-        ? XCircle
-        : isInFlight
-          ? Loader2
-          : AlertTriangle;
+      : latest?.status === "pr_opened"
+        ? GitPullRequest
+        : latest?.status === "failed"
+          ? XCircle
+          : isInFlight
+            ? Loader2
+            : AlertTriangle;
 
   return (
     <Card>
@@ -190,7 +198,7 @@ export function CloneSyncStatusCard({ clone }: { clone: Clone }) {
                       variant="outline"
                       className={cn("font-mono text-[10px] uppercase", statusBorder(latest.status))}
                     >
-                      {latest.status}
+                      {statusLabel(latest.status)}
                     </Badge>
                     {latest.event?.mode && (
                       <Badge variant="outline" className="font-mono text-[10px] uppercase">
@@ -253,11 +261,32 @@ function Tile({ label, children }: { label: string; children: React.ReactNode })
   );
 }
 
+/**
+ * What a status is called on screen.
+ *
+ * The raw enum used to be rendered, so this card read `PR_OPENED` beside a mode
+ * badge reading `AUTO MERGE` under a green tick — three signals that together
+ * say "merged" about a pull request nobody had merged.
+ */
+function statusLabel(s: CascadeResult["status"]): string {
+  switch (s) {
+    case "pr_opened":
+      return "PR open";
+    case "succeeded":
+      return "merged";
+    case "pushing":
+      return "running";
+    default:
+      return s;
+  }
+}
+
 function statusTone(s: CascadeResult["status"]) {
   switch (s) {
     case "succeeded":
-    case "pr_opened":
       return "text-success";
+    case "pr_opened":
+      return "text-accent";
     case "failed":
       return "text-destructive";
     case "skipped":
@@ -270,8 +299,9 @@ function statusTone(s: CascadeResult["status"]) {
 function statusBorder(s: CascadeResult["status"]) {
   switch (s) {
     case "succeeded":
-    case "pr_opened":
       return "border-success/40 text-success";
+    case "pr_opened":
+      return "border-accent/40 text-accent";
     case "failed":
       return "border-destructive/40 text-destructive";
     case "skipped":

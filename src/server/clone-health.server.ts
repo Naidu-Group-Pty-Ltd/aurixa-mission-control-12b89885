@@ -140,9 +140,12 @@ export async function getCloneHealth(
     uptime = await pingDeploy(deployUrl);
   }
 
-  const succeeded = (results ?? []).filter(
-    (r) => r.status === "succeeded" || r.status === "pr_opened",
-  );
+  // `succeeded` alone. A `pr_opened` result is a PROPOSAL — the change has not
+  // reached the clone's default branch and nothing it carries is deployed — so
+  // counting one as the last successful cascade dated this clone's health from
+  // a pull request that might still be open. `cascadeMergeDrain` reconciles a
+  // landed proposal to `succeeded`, so this reads true rather than optimistic.
+  const succeeded = (results ?? []).filter((r) => r.status === "succeeded");
   const failed = (results ?? []).filter((r) => r.status === "failed");
   const lastSuccessfulCascadeAt = succeeded[0]?.completed_at ?? null;
   const lastFailedCascadeAt = failed[0]?.completed_at ?? null;
