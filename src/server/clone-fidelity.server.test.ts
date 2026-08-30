@@ -85,10 +85,65 @@ describe("classifySecret", () => {
     expect(classifySecret("ANTHROPIC_API_KEY")).toBe("vendor");
     expect(classifySecret("AIRTABLE_TOKEN")).toBe("vendor");
   });
+
+  it("treats a project signing key as tenant-scoped, never vendor", () => {
+    expect(classifySecret("JWT_SECRET")).toBe("tenant_scoped");
+    // The SUPABASE_-prefixed spelling stays `platform`: the secrets API
+    // reserves that prefix, so it cannot be written at all and must not be
+    // presented to an operator as something they can set.
+    expect(classifySecret("SUPABASE_JWT_SECRET")).toBe("platform");
+  });
 });
 
 describe("planCloneSecrets", () => {
   const gen = () => "GENERATED";
+
+  it("NEVER hands a clone the prime's token-signing key", () => {
+    // The sharpest case in the tenant-scoped set. JWT_SECRET was classified
+    // `vendor` — the class that copies the prime's value whenever a
+    // forwarding row exists. A clone holding it could mint access tokens the
+    // PRIME's database accepts, for any subject and any role.
+    const { toWrite, results } = planCloneSecrets(
+      ["JWT_SECRET"],
+      { JWT_SECRET: "the-primes-signing-key" },
+      gen,
+    );
+    expect(toWrite).toHaveLength(0);
+    expect(results.get("JWT_SECRET")?.status).toBe("tenant_scoped_pending");
+    expect(results.get("JWT_SECRET")?.error).not.toContain("the-primes-signing-key");
+  });
+
+  it("writes the clone's OWN signing key when provisioning captured one", () => {
+    // Never inherited is not the same as never written: a value belonging to
+    // this clone is exactly what should land.
+    const { toWrite, results } = planCloneSecrets(
+      ["JWT_SECRET"],
+      { JWT_SECRET: "the-primes-signing-key" },
+      gen,
+      null,
+      undefined,
+      { JWT_SECRET: "this-clones-own-key" },
+    );
+    expect(toWrite).toEqual([{ name: "JWT_SECRET", value: "this-clones-own-key" }]);
+    expect(results.get("JWT_SECRET")?.status).toBe("derived");
+  });
+
+  it("never generates a signing key, because a random one signs nothing valid", () => {
+    // `identity` secrets get a fresh random value and that is right for them.
+    // It would be actively worse here: PostgREST validates against the
+    // project's own key, so a generated one produces tokens rejected by the
+    // very database they are for.
+    const { toWrite } = planCloneSecrets(["JWT_SECRET"], {}, gen);
+    expect(toWrite).toHaveLength(0);
+  });
+
+  it("names a remedy an operator can actually act on", () => {
+    const { results } = planCloneSecrets(["JWT_SECRET"], {}, gen);
+    const err = results.get("JWT_SECRET")?.error ?? "";
+    // Not the CAPTCHA's "mint it from the identity panel" — nothing mints this.
+    expect(err).toContain("JWT Settings");
+    expect(err).not.toContain("identity panel");
+  });
 
   it("NEVER copies an identity secret, even when a value is available", () => {
     const { toWrite, results } = planCloneSecrets(
@@ -187,7 +242,12 @@ describe("planCloneSecrets", () => {
       { siteUrl: "https://clone.example" },
       { siteUrl: null, additionalRedirectUrls: [] },
     ]) {
-      const { toWrite } = planCloneSecrets(["ALLOWED_ORIGINS"], { ALLOWED_ORIGINS: primeValue }, gen, origins);
+      const { toWrite } = planCloneSecrets(
+        ["ALLOWED_ORIGINS"],
+        { ALLOWED_ORIGINS: primeValue },
+        gen,
+        origins,
+      );
       expect(toWrite.some((s) => s.value.includes(primeValue))).toBe(false);
     }
   });
