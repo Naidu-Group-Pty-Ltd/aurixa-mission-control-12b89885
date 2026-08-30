@@ -684,7 +684,7 @@ export async function processClone(args: {
   // a mirror that pruned "everything prime lacks" would remove the very things
   // that make it a clone rather than a copy. Prime's own history settles which
   // is which (`cascadeDeletions.server.ts`), and the clone's copy has to be
-  // byte-identical to the version prime deleted before anything is removed.
+  // byte-identical to some version prime itself held before anything is removed.
   //
   // BOTH scopes, and the difference is where "the clone's section of prime"
   // stops. A mirror's section is the whole tree. A module-scoped clone's is the
@@ -802,7 +802,7 @@ export async function processClone(args: {
   //
   // Candidates come from the tree comparison and mean nothing on their own.
   // Prime's history is asked about each one, and the clone's copy has to be
-  // byte-identical to the version prime deleted before it is removed. The
+  // byte-identical to some version prime itself held before it is removed. The
   // exclusion policy is applied FIRST and for the ordinary reason: a
   // `protected` path is protected whatever the evidence says.
   //
@@ -1251,7 +1251,7 @@ export async function processClone(args: {
       : "") +
     (onlyInClone > 0
       ? `\n\n_${onlyInClone} path(s) exist only in this clone. A path is removed only where prime's ` +
-        `own history shows it deleted AND this clone's copy is byte-identical to the version prime deleted._`
+        `own history shows it deleted AND this clone's copy is byte-identical to a version prime itself held._`
       : "");
 
   const { data: newCommit } = await octokit.git.createCommit({
