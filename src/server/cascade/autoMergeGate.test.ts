@@ -1,7 +1,12 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { decideCascadeMerge, REQUIRED_CHECKS, type CheckRun } from "./autoMergeGate.pure";
+import {
+  checksUnreadable,
+  decideCascadeMerge,
+  REQUIRED_CHECKS,
+  type CheckRun,
+} from "./autoMergeGate.pure";
 
 const ok = (name: string): CheckRun => ({ name, status: "completed", conclusion: "success" });
 /** The required jobs, all green — the baseline every case below starts from. */
@@ -206,5 +211,51 @@ describe("the merge drain", () => {
 
   it("throws rather than reporting an empty fleet when the clone list fails", () => {
     expect(src).toMatch(/Could not list clones/);
+  });
+});
+
+describe("when the App cannot read check runs", () => {
+  // `checks: read` is a separate GitHub App permission from `pull_requests`.
+  // Without it the check-runs endpoint answers "Resource not accessible by
+  // integration" — which is not a red check and not a green one, but no
+  // signal at all. Measured on the live fleet the first time the drain ran.
+
+  it("recognises the permission refusal", () => {
+    expect(
+      checksUnreadable(
+        new Error(
+          "Resource not accessible by integration - https://docs.github.com/rest/checks/runs#list-check-runs-for-a-git-reference",
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it("does not mistake an ordinary failure for it", () => {
+    expect(checksUnreadable(new Error("Bad credentials"))).toBe(false);
+    expect(checksUnreadable(new Error("Not Found"))).toBe(false);
+  });
+
+  it("is never treated as permission to merge", () => {
+    // The whole risk of this state is that an unreadable signal reads as a
+    // clear one. There is no code path from `checksUnreadable` to a merge:
+    // both callers hold, and the gate itself never sees the error.
+    const drain = readFileSync(
+      join(process.cwd(), "src/server/cascadeMergeDrain.server.ts"),
+      "utf8",
+    );
+    const held = drain.slice(drain.indexOf("if (checksUnreadable(e))"));
+    expect(held.slice(0, 400)).toContain('outcome: "held"');
+    expect(held.slice(0, 400)).not.toContain("pulls.merge");
+  });
+
+  it("does NOT fall back to mergeable_state", () => {
+    // `clean` is what a pull request with NO checks reports, so falling back
+    // would reintroduce the `no_checks` hole precisely on the deployments
+    // where the permission is missing — the ones nobody is watching.
+    const drain = readFileSync(
+      join(process.cwd(), "src/server/cascadeMergeDrain.server.ts"),
+      "utf8",
+    );
+    expect(drain).not.toContain("mergeable_state");
   });
 });

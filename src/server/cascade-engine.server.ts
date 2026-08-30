@@ -3,7 +3,11 @@
 // webhook receiver invokes it directly with the admin client.
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
-import { decideCascadeMerge } from "./cascade/autoMergeGate.pure";
+import {
+  CHECKS_PERMISSION_REMEDY,
+  checksUnreadable,
+  decideCascadeMerge,
+} from "./cascade/autoMergeGate.pure";
 import {
   describeStaleHeldReferences,
   findStaleHeldReferences,
@@ -902,11 +906,30 @@ async function processClone(args: {
         // merging blind — it means reading the checks ourselves.
       }
 
-      const { data: checkData } = await octokit.checks.listForRef({
-        owner: cloneRef.owner,
-        repo: cloneRef.repo,
-        ref: newCommit.sha,
-      });
+      let checkData: {
+        check_runs?: Array<{ name: string; status: string; conclusion: string | null }>;
+      };
+      try {
+        ({ data: checkData } = await octokit.checks.listForRef({
+          owner: cloneRef.owner,
+          repo: cloneRef.repo,
+          ref: newCommit.sha,
+        }));
+      } catch (e) {
+        // A missing `checks: read` permission is not a broken cascade. The
+        // pull request is open and correct; what is missing is the signal that
+        // would let it merge unattended.
+        if (checksUnreadable(e)) {
+          return {
+            status: "pr_opened",
+            pr_url: pr.html_url,
+            diff_summary: `${CHECKS_PERMISSION_REMEDY} ${fileSummary}`,
+            files_changed: treeEntries.length,
+            completed_at: new Date().toISOString(),
+          };
+        }
+        throw e;
+      }
       const verdict = decideCascadeMerge(
         (checkData.check_runs ?? []).map((c) => ({
           name: c.name,

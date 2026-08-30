@@ -50,7 +50,7 @@ export type MergeVerdict =
   | { merge: true; why: string }
   | {
       merge: false;
-      reason: "pending" | "failing" | "no_checks" | "awaiting_required";
+      reason: "pending" | "failing" | "no_checks" | "awaiting_required" | "checks_unreadable";
       why: string;
     };
 
@@ -136,3 +136,35 @@ export function decideCascadeMerge(
 
   return { merge: true, why: `All ${checks.length} check(s) passed.` };
 }
+
+/**
+ * The App cannot read this repository's check runs.
+ *
+ * `checks: read` is a separate GitHub App permission from `pull_requests`, and
+ * without it `GET /repos/{o}/{r}/commits/{ref}/check-runs` answers
+ * "Resource not accessible by integration". That is not a red check and not a
+ * green one — it is no signal at all.
+ *
+ * There IS a weaker signal available without the permission: a pull request's
+ * `mergeable_state` reads `clean` when checks pass and `unstable` when they do
+ * not. It is deliberately NOT used as a fallback, because `clean` is also what
+ * a pull request with NO checks reports — so falling back would quietly
+ * reintroduce the exact hole `no_checks` exists to close, and would do it on
+ * the deployments where the permission is missing, which are the ones nobody
+ * is watching.
+ *
+ * So this fails closed and names the remedy. It is a HOLD rather than a
+ * failure: nothing is broken, a permission is missing, and the cascade's pull
+ * request is sitting there correctly waiting.
+ */
+export function checksUnreadable(error: unknown): boolean {
+  const m = error instanceof Error ? error.message : String(error ?? "");
+  return /Resource not accessible by integration|check-runs|checks\/runs/i.test(m);
+}
+
+export const CHECKS_PERMISSION_REMEDY =
+  "The GitHub App cannot read check runs on this repository. Grant it the " +
+  "read-only `Checks` permission (App settings → Permissions → Repository → " +
+  "Checks: Read-only) and accept the permission request on the installation. " +
+  "Until then a cascade pull request is opened and left for a human, never " +
+  "merged unseen.";
