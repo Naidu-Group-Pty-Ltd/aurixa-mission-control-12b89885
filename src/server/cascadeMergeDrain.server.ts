@@ -74,6 +74,7 @@ import {
   type PullRequestFacts,
 } from "./cascade/prReconcile.pure";
 import { summaryOwesReconcile } from "./cascade/syncExclusions.pure";
+import { repairConflictedProposal } from "./cascadeProposalRepair.server";
 
 type Db = SupabaseClient<Database>;
 
@@ -95,6 +96,8 @@ export type MergeDrainOutcome =
   | { clone: string; pr: number; outcome: "merged"; sha: string | null }
   | { clone: string; pr: number; outcome: "held"; reason: string; why: string }
   | { clone: string; pr: number; outcome: "failed"; error: string }
+  /** The proposal had gone stale and was rebuilt on the clone's current head. */
+  | { clone: string; pr: number; outcome: "repaired"; why: string }
   /** The record was behind and has been brought forward. */
   | { clone: string; pr: number; outcome: "reconciled"; to: string; rows: number; why: string };
 
@@ -124,6 +127,8 @@ export type MergeDrainReport = {
   advanced: number;
   /** Already-landed rows whose summary still contradicted itself. */
   tidied: number;
+  /** Conflicted proposals rebuilt on the clone's current head. */
+  repaired: number;
   held: Record<string, number>;
   failed: number;
   detail: MergeDrainOutcome[];
@@ -159,6 +164,7 @@ export async function drainCascadeMerges(
     recounted: 0,
     advanced: 0,
     tidied: 0,
+    repaired: 0,
     held: {},
     failed: 0,
     detail: [],
@@ -279,6 +285,7 @@ export async function drainCascadeMerges(
           number,
           rows: rowsForPr,
           label,
+          cloneId: clone.id,
         });
         report.detail.push(outcome);
         if (outcome.outcome === "merged") {
@@ -286,6 +293,8 @@ export async function drainCascadeMerges(
           advancedClones.add(clone.id);
         } else if (outcome.outcome === "held") {
           report.held[outcome.reason] = (report.held[outcome.reason] ?? 0) + 1;
+        } else if (outcome.outcome === "repaired") {
+          report.repaired += 1;
         } else if (outcome.outcome === "reconciled") {
           report.reconciled += outcome.rows;
           if (outcome.to === "succeeded") advancedClones.add(clone.id);
@@ -377,8 +386,9 @@ async function handleOne(args: {
   /** Every cascade result recording this pull request. Often more than one. */
   rows: ResultRow[];
   label: string;
+  cloneId: string;
 }): Promise<MergeDrainOutcome> {
-  const { supabase, octokit, owner, repo, number, rows, label } = args;
+  const { supabase, octokit, owner, repo, number, rows, label, cloneId } = args;
 
   const { data: pr } = await octokit.pulls.get({ owner, repo, pull_number: number });
   let facts: PullRequestFacts = {
@@ -389,26 +399,63 @@ async function handleOne(args: {
   let mergedNow = false;
   let reason = "";
 
-  // A proposal that cannot merge is held, not attempted.
+  // A proposal that cannot merge is REBUILT, not resolved and never retried.
   //
   // `pulls.merge` on a conflicted head answers 405, which lands in the catch
-  // above as `failed` — and the drain comes back five minutes later and does
-  // it again, for ever, filing an audit row each time and colouring the fleet
-  // red over something no retry can fix.
+  // above as `failed` — and the drain comes back five minutes later and does it
+  // again, for ever, filing an audit row each time and colouring the fleet red
+  // over something no retry can fix.
   //
-  // This reads `mergeable` ONLY to refuse. It is never permission: `clean` is
-  // also what a pull request with no checks at all reports, so believing it
-  // would reopen the `no_checks` hole exactly where nobody is watching. Every
-  // merge below still goes through `decideCascadeMerge`.
+  // So a conflict hands off to `repairConflictedProposal`, which rebuilds the
+  // proposal on the clone's current head through the engine's own construction.
+  // That removes the conflict by construction rather than resolving it — see
+  // `cascade/proposalRepair.pure.ts` for why a cascade branch has nothing in it
+  // worth merging, and for the three things the repair refuses to do.
+  //
+  // This reads `mergeable` ONLY to refuse and to repair. It is never
+  // permission: `clean` is also what a pull request with no checks at all
+  // reports, so believing it would reopen the `no_checks` hole exactly where
+  // nobody is watching. Every merge below still goes through
+  // `decideCascadeMerge`.
   //
   // `null` is not `false`. GitHub computes mergeability asynchronously and
-  // answers null until it has, so an unknown state has to fall through to the
+  // answers null until it has, so an unknown state falls through to the
   // ordinary path rather than being read as a conflict.
   if (facts.state === "open" && pr.mergeable === false) {
+    const eventId = rows[0]?.cascade_event_id ?? null;
+    if (eventId) {
+      const repair = await repairConflictedProposal({
+        supabase,
+        octokit,
+        clone: { id: cloneId, label, owner, repo },
+        prNumber: number,
+        mergeable: pr.mergeable,
+        eventId,
+      });
+      if (repair?.act === "regenerate") {
+        return {
+          clone: label,
+          pr: number,
+          outcome: "repaired",
+          why: repair.why,
+        };
+      }
+      if (repair?.act === "hold") {
+        return {
+          clone: label,
+          pr: number,
+          outcome: "held",
+          reason: repair.reason ?? "unrepairable",
+          why: repair.why,
+        };
+      }
+    }
+    // No event to rebuild from — the proposal exists on GitHub and Mission
+    // Control has no record of which cascade opened it, so there is nothing to
+    // rebuild it from. Say so rather than retrying a merge that cannot succeed.
     const why =
-      "This proposal conflicts with the clone's default branch and cannot be merged as it " +
-      "stands. The next cascade rebuilds it on the current branch; nothing here can resolve " +
-      "a conflict on its own.";
+      "This proposal conflicts with the clone's default branch, and Mission Control has no " +
+      "cascade record for it to rebuild from. It has to be closed or resolved by hand.";
     await writeReconciliation(supabase, rows, facts, why);
     return { clone: label, pr: number, outcome: "held", reason: "conflicted", why };
   }

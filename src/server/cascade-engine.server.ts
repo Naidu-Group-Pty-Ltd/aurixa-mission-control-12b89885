@@ -379,6 +379,81 @@ export async function executeCascade(
   };
 }
 
+/**
+ * Rebuild one clone's open cascade proposal on the branch as it now stands.
+ *
+ * This is the repair path for a conflicted proposal, and it is deliberately
+ * not a new mechanism: it runs the SAME `processClone` an ordinary cascade
+ * runs, which reads the clone's current head, re-partitions against the
+ * clone's exclusions, re-runs both held-file guards, finds the open proposal
+ * and force-updates it. A conflict cannot survive that, because the rebuilt
+ * commit's parent IS the branch head — see `cascade/proposalRepair.pure.ts`.
+ *
+ * It re-bases and never RE-SCOPES. `sourceSha` is the prime commit the
+ * proposal already promised, so the rebuilt proposal delivers exactly what its
+ * cascade event says it delivers. Quietly upgrading the payload to prime's
+ * latest would be one CI run cheaper and would make `cascade_events.source_sha`
+ * describe something that event never carried.
+ *
+ * The caller owns the safety check. `processClone` force-updates the proposal
+ * branch, so calling this on a branch somebody has committed to destroys their
+ * work — `decideProposalRepair` is what stands in front of it.
+ */
+export async function regenerateCloneProposal(args: {
+  supabase: SupabaseLike;
+  octokit: ReturnType<typeof getAppOctokit>;
+  cloneId: string;
+  /** The prime SHA this proposal already promised. Never prime's latest. */
+  sourceSha: string;
+  mode: Database["public"]["Enums"]["cascade_mode"];
+}): Promise<CascadeResultUpdate> {
+  const { supabase, octokit, cloneId, sourceSha, mode } = args;
+
+  const [primeRes, cloneRes] = await Promise.all([
+    supabase.from("prime_config").select("*").limit(1).maybeSingle(),
+    supabase
+      .from("clones")
+      .select("id, name, github_owner, github_repo, default_branch, sync_scope")
+      .eq("id", cloneId)
+      .maybeSingle(),
+  ]);
+  if (primeRes.error) throw new Error(`Could not read prime config: ${primeRes.error.message}`);
+  if (cloneRes.error) throw new Error(`Could not read clone ${cloneId}: ${cloneRes.error.message}`);
+
+  const prime = primeRes.data;
+  if (!prime?.github_owner || !prime?.github_repo) {
+    throw new Error("Prime not configured — nothing to rebuild a proposal from");
+  }
+  const clone = cloneRes.data;
+  if (!clone?.github_owner || !clone?.github_repo) {
+    throw new Error(`Clone ${cloneId} has no repository`);
+  }
+
+  return processClone({
+    octokit,
+    primeRef: {
+      owner: prime.github_owner,
+      repo: prime.github_repo,
+      branch: prime.default_branch || "main",
+    },
+    sourceSha,
+    mode,
+    clone: {
+      id: clone.id,
+      name: clone.name ?? clone.github_repo,
+      github_owner: clone.github_owner,
+      github_repo: clone.github_repo,
+      default_branch: clone.default_branch || "main",
+      sync_scope: clone.sync_scope,
+    },
+    supabase,
+    // A repair carries no scope filter of its own: the clone's own installed
+    // modules and exclusions decide what it receives, exactly as on the run
+    // that opened the proposal.
+    scopeFilter: null,
+  });
+}
+
 async function processClone(args: {
   octokit: ReturnType<typeof getAppOctokit>;
   primeRef: RepoRef;

@@ -312,13 +312,21 @@ describe("when the App cannot read check runs", () => {
     expect(gateAt).toBeGreaterThan(-1);
     expect(mergeAt).toBeGreaterThan(gateAt);
 
-    // And the refusal it does make is a hold, never a failure: a conflict is a
-    // state a retry cannot change, so reporting it as failed would colour the
-    // fleet red every five minutes over something no retry can fix.
+    // And what it does on a conflict never ends in a merge. The whole handler
+    // is checked rather than its first return: a conflicted proposal now has
+    // more than one lawful exit — rebuilt on the clone's current head, or held
+    // for a person — and neither may reach `pulls.merge`, because a retry
+    // cannot change a conflict and 405 every five minutes is not a strategy.
     const at = drain.indexOf("pr.mergeable === false");
     expect(at).toBeGreaterThan(-1);
-    const handler = drain.slice(at, drain.indexOf(";", drain.indexOf("return {", at)) + 1);
-    expect(handler).toContain('outcome: "held"');
+    const ordinaryPathAt = drain.indexOf('if (facts.state === "open") {', at);
+    expect(ordinaryPathAt).toBeGreaterThan(at);
+    const handler = drain.slice(at, ordinaryPathAt);
     expect(handler).not.toContain("pulls.merge");
+    expect(handler).toContain('outcome: "held"');
+    // Every exit from it is a hold or a rebuild — never a success, never a
+    // failure, because a conflict is neither.
+    expect(handler).not.toContain('outcome: "merged"');
+    expect(handler).not.toContain('outcome: "failed"');
   });
 });
