@@ -1,0 +1,6 @@
+import {
+  AmlVerification, AmlScreening, AmlRisk, AmlCounterparty,
+  AmlFinance, AmlTransactions,
+  AmlMonitoring, AmlInvestigations, AmlAustracReporting, AmlAustracReportDraft,
+  AmlRecords, AmlGovernance, AmlConfiguration,
+} from "./pages/aml/AmlShellPages";

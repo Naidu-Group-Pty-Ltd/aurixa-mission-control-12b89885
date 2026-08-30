@@ -9,8 +9,11 @@ import {
   decideCascadeMerge,
 } from "./cascade/autoMergeGate.pure";
 import {
+  describeMissingHeldReferences,
   describeStaleHeldReferences,
+  findMissingHeldReferences,
   findStaleHeldReferences,
+  type MissingHeldReference,
   type StaleHeldReference,
 } from "./cascade/heldFileStaleness.pure";
 import {
@@ -750,25 +753,52 @@ async function processClone(args: {
   // this cascade actually delivers TypeScript — a handful of files on the runs
   // that can break this way, and no request at all on the ones that cannot.
   let staleHeld: StaleHeldReference[] = [];
+  let missingHeld: MissingHeldReference[] = [];
   const heldSourcePaths = needsReconcile
     .map((h) => h.path)
     .filter((path) => /\.[cm]?tsx?$/.test(path));
   if (heldSourcePaths.length > 0 && Object.keys(deliveredSource).length > 0) {
     const heldFiles: Record<string, string> = {};
+    const heldFilesPrime: Record<string, string> = {};
     await Promise.all(
-      heldSourcePaths.map(async (path) => {
+      heldSourcePaths.flatMap((path) => [
         // A read that fails is not a file with no imports. Skipping it loses a
         // warning; inventing an empty one would claim the cascade is safe.
-        try {
-          const f = await getFileContent(octokit, cloneRef, path);
-          if (f) heldFiles[path] = f.content;
-        } catch {
-          /* leave it out — see above */
-        }
-      }),
+        (async () => {
+          try {
+            const f = await getFileContent(octokit, cloneRef, path);
+            if (f) heldFiles[path] = f.content;
+          } catch {
+            /* leave it out — see above */
+          }
+        })(),
+        // The prime's copy of the same path: the one the cascade DECLINED to
+        // write. Comparing the two in general is meaningless — they differ on
+        // purpose, which is what "held" means — but comparing what each imports
+        // from a module this run is delivering is not.
+        (async () => {
+          try {
+            const f = await getFileContent(octokit, primeRef, path);
+            if (f) heldFilesPrime[path] = f.content;
+          } catch {
+            /* leave it out — see above */
+          }
+        })(),
+      ]),
     );
     staleHeld = findStaleHeldReferences({ heldFiles, cascadedFiles: deliveredSource });
+    missingHeld = findMissingHeldReferences({
+      heldFilesClone: heldFiles,
+      heldFilesPrime,
+      cascadedFiles: deliveredSource,
+    });
   }
+  const missingSuffix =
+    missingHeld.length > 0
+      ? ` · ${missingHeld.length} held file(s) MISSING new wiring: ${missingHeld
+          .map((r) => `${r.heldPath} needs ${r.missing.join("/")}`)
+          .join("; ")}`
+      : "";
   const staleSuffix =
     staleHeld.length > 0
       ? ` · BREAKS ${staleHeld.length} held file(s): ${staleHeld
@@ -783,7 +813,7 @@ async function processClone(args: {
   const pinSuffix = pinSummary ? ` · ${pinSummary}` : "";
   const heldSuffix = partition.held.length > 0 ? ` · ${partition.held.length} withheld` : "";
   const reconcileSuffix = reconcileSuffixFor(needsReconcile.length);
-  const fileSummary = `${summaryFiles.join(", ")}${summarySuffix}${pinSuffix}${heldSuffix}${reconcileSuffix}${staleSuffix}`;
+  const fileSummary = `${summaryFiles.join(", ")}${summarySuffix}${pinSuffix}${heldSuffix}${reconcileSuffix}${staleSuffix}${missingSuffix}`;
 
   const { data: cloneCommit } = await octokit.git.getCommit({
     owner: cloneRef.owner,
@@ -818,6 +848,16 @@ async function processClone(args: {
           .map((l) => `- ${l}`)
           .join("\n") +
         `\n\nRepair the held file in the same merge, or carry the removal across by hand.`
+      : "") +
+    (missingHeld.length > 0
+      ? `\n\n### ⚠ A held file is missing wiring this cascade delivered\n\n` +
+        `Upstream uses something from a file this cascade DID deliver, and this clone's ` +
+        `held copy does not. Nothing fails the build — the routes or components are simply ` +
+        `absent here, and stay absent until somebody brings them across.\n\n` +
+        describeMissingHeldReferences(missingHeld)
+          .map((l) => `- ${l}`)
+          .join("\n") +
+        `\n\nAdd the import and its use to the held file in the same merge.`
       : "") +
     (needsReconcile.length > 0
       ? `\n\n### Needs a human — ${needsReconcile.length} file(s) changed upstream and were held back\n\n` +
