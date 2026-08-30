@@ -2,7 +2,9 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  describeMissingHeldReferences,
   describeStaleHeldReferences,
+  findMissingHeldReferences,
   exportedNamesOf,
   findStaleHeldReferences,
   namedImportsOf,
@@ -215,16 +217,38 @@ describe("the engine actually runs this check", () => {
   // of defect is "the machinery existed and never ran".
   const src = readFileSync(join(process.cwd(), "src/server/cascade-engine.server.ts"), "utf8");
 
+  it("runs the ADDITIONS guard too, with the prime's copy of the held file", () => {
+    // It needs both copies: the clone's (what it has) and the prime's (what it
+    // was not given). Reading only one side can never find an absence.
+    expect(src).toContain("findMissingHeldReferences({");
+    expect(src).toContain("heldFilesPrime,");
+    expect(src).toContain("getFileContent(octokit, primeRef, path)");
+  });
+
+  it("puts the missing wiring in the summary and the pull request body", () => {
+    expect(src).toContain("${missingSuffix}");
+    expect(src).toContain("missing wiring this cascade delivered");
+  });
+
   it("calls it with the delivered source and the clone's held files", () => {
     expect(src).toContain("findStaleHeldReferences({ heldFiles, cascadedFiles: deliveredSource })");
   });
 
-  it("reads the HELD file from the clone, never from prime", () => {
-    // Prime's copy is the one that agrees with the cascade by construction, so
-    // checking it would find nothing, always.
-    const block = src.slice(src.indexOf("let staleHeld"), src.indexOf("const staleSuffix"));
-    expect(block).toContain("getFileContent(octokit, cloneRef, path)");
-    expect(block).not.toContain("primeRef");
+  it("checks staleness against the CLONE's copy, never the prime's", () => {
+    // Prime's copy agrees with the cascade by construction, so a removal check
+    // run against it would find nothing, always. The block now reads BOTH
+    // copies — the prime's is what the additions guard needs — so the rule is
+    // asserted on the call rather than on the absence of the word.
+    expect(src).toContain("findStaleHeldReferences({ heldFiles, cascadedFiles: deliveredSource })");
+    expect(src).toContain("getFileContent(octokit, cloneRef, path)");
+  });
+
+  it("keeps the two copies in separate maps", () => {
+    // One map for each side. Merging them would make "what the clone has" and
+    // "what upstream has" the same object, and both checks meaningless.
+    const block = src.slice(src.indexOf("let staleHeld"), src.indexOf("const missingSuffix"));
+    expect(block).toContain("const heldFiles: Record<string, string> = {}");
+    expect(block).toContain("const heldFilesPrime: Record<string, string> = {}");
   });
 
   it("puts the breakage in the summary and at the TOP of the pull request body", () => {
@@ -243,5 +267,111 @@ describe("the engine actually runs this check", () => {
     expect(src).toMatch(
       /content:\s*\/\\\.\[cm\]\?tsx\?\$\/\.test\(path\)\s*\?\s*primeFile\.content\s*:\s*null/,
     );
+  });
+});
+
+describe("the additions gap, from the real files", () => {
+  // Verbatim: npc-property-dashbord's App.tsx import block (which names
+  // AmlAustracReportDraft), npc-client-dashboard's App.tsx at 69b2c2a (which
+  // does not), and the AmlShellPages.tsx the cascade delivered.
+  const primeApp = fixture("App.prime.txt");
+  const cloneApp = fixture("App.clone-before.txt");
+  const shell = fixture("AmlShellPages.withDraft.txt");
+
+  const run = (clone: string) =>
+    findMissingHeldReferences({
+      heldFilesClone: { "src/App.tsx": clone },
+      heldFilesPrime: { "src/App.tsx": primeApp },
+      cascadedFiles: { "src/pages/aml/AmlShellPages.tsx": shell },
+    });
+
+  it("names AmlAustracReportDraft — the wiring that never arrived", () => {
+    expect(run(cloneApp)).toEqual([
+      {
+        heldPath: "src/App.tsx",
+        cascadedPath: "src/pages/aml/AmlShellPages.tsx",
+        missing: ["AmlAustracReportDraft"],
+      },
+    ]);
+  });
+
+  it("does not flag the twelve symbols the clone already imports", () => {
+    expect(run(cloneApp)[0].missing).toHaveLength(1);
+    for (const shared of ["AmlVerification", "AmlScreening", "AmlConfiguration"]) {
+      expect(run(cloneApp)[0].missing).not.toContain(shared);
+    }
+  });
+
+  it("says nothing once the clone has been reconciled", () => {
+    // The repair that was actually made: the import name added by hand.
+    const repaired = cloneApp.replace(
+      "AmlAustracReporting, AmlRecords",
+      "AmlAustracReporting, AmlAustracReportDraft, AmlRecords",
+    );
+    expect(run(repaired)).toEqual([]);
+  });
+
+  it("never reports AmlIntakeQueue — a removal is the other check's business", () => {
+    // The clone's copy imports it and the prime's does not, which is the
+    // REMOVAL case. Reporting it here would double-count one defect and send
+    // an operator to add back a component that was deleted on purpose.
+    expect(run(cloneApp)[0].missing).not.toContain("AmlIntakeQueue");
+  });
+
+  it("says which file needs the wiring and where it comes from", () => {
+    const [line] = describeMissingHeldReferences(run(cloneApp));
+    expect(line).toContain("src/App.tsx");
+    expect(line).toContain("AmlAustracReportDraft");
+    expect(line).toContain("src/pages/aml/AmlShellPages.tsx");
+  });
+});
+
+describe("what the additions guard refuses to claim", () => {
+  const base = {
+    heldFilesPrime: { "src/App.tsx": 'import { A, B } from "./m";' },
+    cascadedFiles: { "src/m.ts": "export const A = 1;\nexport const B = 2;" },
+  };
+
+  it("says nothing about a module this cascade is not delivering", () => {
+    expect(
+      findMissingHeldReferences({
+        ...base,
+        heldFilesClone: { "src/App.tsx": "" },
+        cascadedFiles: { "src/other.ts": "export const A = 1;" },
+      }),
+    ).toEqual([]);
+  });
+
+  it("says nothing when the clone imports it by a different specifier", () => {
+    // `@/m` and `./m` resolve to the same module; an alias is not an absence.
+    expect(
+      findMissingHeldReferences({
+        heldFilesPrime: { "src/App.tsx": 'import { A } from "./m";' },
+        heldFilesClone: { "src/App.tsx": 'import { A } from "@/m";' },
+        cascadedFiles: { "src/m.ts": "export const A = 1;" },
+      }),
+    ).toEqual([]);
+  });
+
+  it("says nothing about a symbol the delivered module does not export", () => {
+    // Prime imports it, the cascade did not bring it: that is the REMOVAL
+    // check's finding, and reporting it here would double-count.
+    expect(
+      findMissingHeldReferences({
+        heldFilesPrime: { "src/App.tsx": 'import { Gone } from "./m";' },
+        heldFilesClone: { "src/App.tsx": "" },
+        cascadedFiles: { "src/m.ts": "export const Kept = 1;" },
+      }),
+    ).toEqual([]);
+  });
+
+  it("says nothing about a held path the clone does not have", () => {
+    expect(findMissingHeldReferences({ ...base, heldFilesClone: {} })).toEqual([]);
+  });
+
+  it("reports both symbols when both are missing", () => {
+    expect(findMissingHeldReferences({ ...base, heldFilesClone: { "src/App.tsx": "" } })).toEqual([
+      { heldPath: "src/App.tsx", cascadedPath: "src/m.ts", missing: ["A", "B"] },
+    ]);
   });
 });

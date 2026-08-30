@@ -218,3 +218,109 @@ export function describeStaleHeldReferences(refs: readonly StaleHeldReference[])
       `\`${r.cascadedPath}\`, which this cascade no longer exports.`,
   );
 }
+
+// ─── The other direction: what the held file never received ──────────────────
+
+export type MissingHeldReference = {
+  /** The held file that is behind — e.g. `src/App.tsx`. */
+  heldPath: string;
+  /** The cascaded module the prime's copy pulls these from. */
+  cascadedPath: string;
+  /** Symbols the PRIME's copy imports and this clone's copy does not. */
+  missing: string[];
+};
+
+/**
+ * Everything the prime's held file uses from this cascade that the clone's
+ * copy has not been given.
+ *
+ * `findStaleHeldReferences` catches a REMOVAL: a held file importing a symbol
+ * that a cascaded file stopped exporting. That fails the build, loudly, which
+ * is why it was findable at all.
+ *
+ * An ADDITION fails nothing. On 30 Aug 2026 the prime added
+ * `AmlAustracReportDraft` and two routes for it; the cascade delivered the
+ * page, the shell re-export and a source test asserting the routes, and could
+ * not deliver `src/App.tsx`, which is held. The clone was left without the
+ * routes. That was caught only because a test happened to assert them — a route
+ * with no test would simply have been missing, on a clone nobody was comparing.
+ *
+ * `syncExclusions.pure.ts` records the same shape from the first time it
+ * happened, with `/passport/:token`, and twelve hours of red CI.
+ *
+ * ## What makes this decidable
+ *
+ * The prime's copy of the held file is available — it is the copy the cascade
+ * DECLINED to write, so it has already been read. Comparing the two copies in
+ * general is useless (they differ on purpose; that is what "held" means), but
+ * comparing them on ONE axis is not: a symbol the prime imports from a module
+ * this cascade is delivering, which the clone imports from nowhere, is wiring
+ * the clone was never handed.
+ *
+ * Restricted three ways so it stays quiet:
+ *   - only modules THIS cascade delivers, so unrelated divergence is invisible;
+ *   - only symbols the delivered module actually exports, so a prime-side
+ *     import of something that never arrived is not double-reported (the
+ *     removal check owns that);
+ *   - matched on the RESOLVED target, so `@/pages/x` and `./pages/x` are the
+ *     same module and an alias is never mistaken for an absence.
+ */
+export function findMissingHeldReferences(input: {
+  /** Held files as the CLONE keeps them. */
+  heldFilesClone: Readonly<Record<string, string>>;
+  /** The same paths as the PRIME has them — the copy the cascade withheld. */
+  heldFilesPrime: Readonly<Record<string, string>>;
+  /** Files this cascade delivers, with the content it delivers. */
+  cascadedFiles: Readonly<Record<string, string>>;
+}): MissingHeldReference[] {
+  const out: MissingHeldReference[] = [];
+
+  for (const [heldPath, primeSource] of Object.entries(input.heldFilesPrime)) {
+    const cloneSource = input.heldFilesClone[heldPath];
+    // A held path the clone does not have at all is a different question, and
+    // not this one's to answer.
+    if (typeof cloneSource !== "string") continue;
+
+    // What the clone already imports, keyed by resolved module plus symbol.
+    const cloneHas = new Set<string>();
+    for (const imp of namedImportsOf(cloneSource)) {
+      for (const target of resolveSpecifier(heldPath, imp.specifier)) {
+        for (const name of imp.names) cloneHas.add(`${target} ${name}`);
+      }
+    }
+
+    for (const imp of namedImportsOf(primeSource)) {
+      const candidates = resolveSpecifier(heldPath, imp.specifier);
+      const target = candidates.find((c) => c in input.cascadedFiles);
+      if (!target) continue;
+
+      const exports = exportedNamesOf(input.cascadedFiles[target]);
+      const missing = imp.names.filter(
+        (n) =>
+          // The delivered module really provides it ...
+          (exports.exhaustive ? exports.names.has(n) : true) &&
+          // ... and the clone's copy asks for it from nowhere.
+          !cloneHas.has(`${target} ${n}`),
+      );
+      if (missing.length === 0) continue;
+
+      const already = out.find((r) => r.heldPath === heldPath && r.cascadedPath === target);
+      if (already) {
+        for (const n of missing) if (!already.missing.includes(n)) already.missing.push(n);
+      } else {
+        out.push({ heldPath, cascadedPath: target, missing: [...missing] });
+      }
+    }
+  }
+
+  return out;
+}
+
+/** One line per gap, for a pull request body and a cascade summary. */
+export function describeMissingHeldReferences(refs: readonly MissingHeldReference[]): string[] {
+  return refs.map(
+    (r) =>
+      `\`${r.heldPath}\` upstream uses ${r.missing.map((m) => `\`${m}\``).join(", ")} from ` +
+      `\`${r.cascadedPath}\`; this clone's copy does not, so the wiring never arrived.`,
+  );
+}
