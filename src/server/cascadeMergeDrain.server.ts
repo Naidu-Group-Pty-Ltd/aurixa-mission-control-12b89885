@@ -66,6 +66,7 @@ import {
 import {
   cascadeEventStatus,
   countResults,
+  durableSummary,
   parsePrNumber,
   parsePrRepo,
   reconcileResultToPr,
@@ -121,6 +122,8 @@ export type MergeDrainReport = {
   recounted: number;
   /** Clones whose commit pointer was moved forward. */
   advanced: number;
+  /** Already-landed rows whose summary still contradicted itself. */
+  tidied: number;
   held: Record<string, number>;
   failed: number;
   detail: MergeDrainOutcome[];
@@ -155,6 +158,7 @@ export async function drainCascadeMerges(
     reconciled: 0,
     recounted: 0,
     advanced: 0,
+    tidied: 0,
     held: {},
     failed: 0,
     detail: [],
@@ -304,8 +308,60 @@ export async function drainCascadeMerges(
   for (const cloneId of advancedClones) {
     if (await advanceClone(supabase, cloneId)) report.advanced += 1;
   }
+  report.tidied = await tidyLandedSummaries(supabase);
 
   return report;
+}
+
+/**
+ * Rewrite a landed row whose summary still contradicts itself.
+ *
+ * The first reconciliation ran before the engine's own legacy reasons were
+ * recognised, so 38 rows came out reading `Merged as 6eaaf5a. No check has
+ * reported on this pull request — nothing has built this tree. …` — merged, and
+ * quoting a stale check verdict as though it were live. They are `succeeded`
+ * now, so they have left the work list above and nothing would ever look at
+ * them again.
+ *
+ * No API call: a landed row already carries its merge SHA, and the only thing
+ * wrong with it is text. It goes through `durableSummary` — the SAME rule, not
+ * a second one written in SQL — and stops matching once it is clean, so this
+ * costs one query on a settled fleet and writes nothing.
+ */
+async function tidyLandedSummaries(supabase: Db): Promise<number> {
+  const { data, error } = await supabase
+    .from("cascade_results")
+    .select("id, commit_sha, diff_summary")
+    .eq("status", "succeeded")
+    .not("diff_summary", "is", null)
+    .order("created_at", { ascending: false })
+    .limit(200);
+  // Cosmetic work must never take the drain down with it.
+  if (error) {
+    console.error("[cascade-merge-drain] could not read landed summaries:", error.message);
+    return 0;
+  }
+
+  let tidied = 0;
+  for (const row of (data ?? []) as Array<{
+    id: string;
+    commit_sha: string | null;
+    diff_summary: string | null;
+  }>) {
+    const detail = durableSummary(row.diff_summary);
+    const wanted = `Merged${row.commit_sha ? ` as ${row.commit_sha}` : ""}.${detail ? ` ${detail}` : ""}`;
+    if (wanted === (row.diff_summary ?? "").trim()) continue;
+    const { error: writeErr } = await supabase
+      .from("cascade_results")
+      .update({ diff_summary: wanted })
+      .eq("id", row.id);
+    if (writeErr) {
+      console.error(`[cascade-merge-drain] could not tidy result ${row.id}:`, writeErr.message);
+      continue;
+    }
+    tidied += 1;
+  }
+  return tidied;
 }
 
 /**

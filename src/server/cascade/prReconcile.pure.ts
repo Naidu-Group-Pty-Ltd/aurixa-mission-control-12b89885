@@ -109,14 +109,60 @@ export function parsePrRepo(url: string | null | undefined): { owner: string; re
 const OUTCOME_PREFIX =
   /^(?:Merged(?: as [0-9a-f]{7,40})?\.|Closed without merging — this proposal was declined\.|Open · [^.]*\.)\s+/;
 
-/** A summary with any previous outcome sentence removed. Idempotent. */
+/**
+ * The reasons the ENGINE used to bake into a summary, before the durable and
+ * perishable halves were separated.
+ *
+ * Not a guess at arbitrary prose. Every one is a string this codebase wrote,
+ * from `decideCascadeMerge`'s closed vocabulary or one exported constant, so
+ * recognising them is recognising our own output rather than parsing English.
+ * That distinction is the whole reason this is a SECOND pattern instead of a
+ * looser first one: a summary this could not identify is a summary it would
+ * have deleted, and the file list is the only record of what a cascade carried.
+ *
+ * It matters because 38 rows reconciled on 30 Aug 2026 came out reading
+ * `Merged as 6eaaf5a. No check has reported on this pull request — nothing has
+ * built this tree.` A record that contradicts itself is the class of defect
+ * this whole module exists to remove, so leaving it in place would have been
+ * fixing the mechanism and shipping the symptom.
+ */
+const LEGACY_REASON_PREFIX = new RegExp(
+  "^(?:" +
+    [
+      // `decideCascadeMerge`'s verdicts, in the shapes it composes them.
+      "No check has reported on this pull request — nothing has built this tree\\.",
+      "Not merging — .*? ha(?:s|ve) not reported yet\\.",
+      "Not merging — \\d+ check\\(s\\) failing: .*?\\.",
+      "Not merging yet — \\d+ check\\(s\\) still running: .*?\\.",
+      "All \\d+ check\\(s\\) passed\\.",
+      // The colon forms the engine used on its own returns.
+      "Queued for auto-merge once checks pass:",
+      // Lazy to the first `):`, NOT `[^)]*` — the verdict it wraps is itself
+      // `All 4 check(s) passed.`, so a negated-paren class stops inside its
+      // own argument and matches nothing.
+      "Merged on green \\(.*?\\):",
+      // The one exported constant, matched on its opening clause so a later
+      // rewording of its tail cannot leave half a sentence behind.
+      "The GitHub App cannot read check runs on this repository\\..*?merged unseen\\.",
+    ].join("|") +
+    ")\\s+",
+);
+
+/**
+ * A summary with any previous outcome sentence removed. Idempotent.
+ *
+ * Both patterns are applied, this module's own first: a row reconciled once
+ * already carries `Merged as … .` in front of the engine's legacy reason, and
+ * stripping only the outer one would leave the contradiction it was written to
+ * remove.
+ */
 export function durableSummary(summary: string | null | undefined): string {
   if (typeof summary !== "string") return "";
   let s = summary.trim();
   // A loop, not a single strip: a row written by an earlier version of this
   // could carry two, and leaving one behind would contradict the one in front.
-  for (let i = 0; i < 4; i++) {
-    const next = s.replace(OUTCOME_PREFIX, "");
+  for (let i = 0; i < 6; i++) {
+    const next = s.replace(OUTCOME_PREFIX, "").replace(LEGACY_REASON_PREFIX, "");
     if (next === s) break;
     s = next.trim();
   }

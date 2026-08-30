@@ -185,10 +185,50 @@ describe("the durable half of a summary", () => {
     expect(durableSummary(REAL_SUMMARY)).toBe(REAL_SUMMARY);
   });
 
-  it("leaves the engine's own volatile-looking prose alone", () => {
-    const legacy =
-      "No check has reported on this pull request — nothing has built this tree. CLAUDE.md · 19 withheld";
-    expect(durableSummary(legacy)).toBe(legacy);
+  it("strips the reasons the ENGINE used to bake in", () => {
+    // Verbatim from production. Reconciling these rows first time round
+    // produced `Merged as 6eaaf5a. No check has reported on this pull
+    // request — nothing has built this tree.`, which contradicts itself in
+    // one sentence — the exact class of defect this module exists to remove.
+    const real =
+      "Merged as 6eaaf5a. No check has reported on this pull request — nothing has " +
+      "built this tree. .github/workflows/ci.yml, CLAUDE.md · 19 withheld · 6 need reconciling";
+    expect(durableSummary(real)).toBe(
+      ".github/workflows/ci.yml, CLAUDE.md · 19 withheld · 6 need reconciling",
+    );
+  });
+
+  it("strips a legacy reason under one of this module's own", () => {
+    const real =
+      "Open · Not merging yet — 1 check(s) still running: verify. " +
+      "No check has reported on this pull request — nothing has built this tree. CLAUDE.md";
+    expect(durableSummary(real)).toBe("CLAUDE.md");
+  });
+
+  it("strips every shape `decideCascadeMerge` composes", () => {
+    // A closed vocabulary this codebase writes — recognising it is recognising
+    // our own output, not parsing English.
+    const cases = [
+      "Not merging — verify, security have not reported yet.",
+      "Not merging — 2 check(s) failing: verify (failure), security (failure).",
+      "Not merging yet — 1 check(s) still running: verify.",
+      "All 4 check(s) passed.",
+      "Queued for auto-merge once checks pass:",
+      "Merged on green (All 4 check(s) passed.):",
+    ];
+    for (const reason of cases) {
+      expect(durableSummary(`${reason} CLAUDE.md · 19 withheld`)).toBe("CLAUDE.md · 19 withheld");
+    }
+  });
+
+  it("still refuses to touch prose it cannot identify", () => {
+    // The rule that has not changed and must not: a summary this could not
+    // identify is a summary it would DELETE, and the file list is the only
+    // record of what a cascade carried. Only our own vocabulary is removed.
+    const foreign = "Something nobody here ever wrote. CLAUDE.md · 19 withheld";
+    expect(durableSummary(foreign)).toBe(foreign);
+    const operator = "Skipped by operator";
+    expect(durableSummary(operator)).toBe(operator);
   });
 
   it("is idempotent", () => {
