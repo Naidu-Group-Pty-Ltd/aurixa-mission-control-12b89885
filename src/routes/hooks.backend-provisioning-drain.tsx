@@ -8,9 +8,10 @@
 //
 // Concurrency safety:
 //  - Atomic claim: UPDATE ... WHERE status='pending' AND worker_started_at IS NULL
-//  - Stall reclaim: rows where worker_started_at is older than STALL_MINUTES
-//    and still not finished are reset back to pending so a fresh worker
-//    picks them up (previous Cloudflare Worker invocation likely timed out).
+//  - Stall reclaim: unfinished rows whose worker_started_at is older than
+//    STALL_MINUTES are reset to pending — STATUS and timestamp both, because
+//    the claim reads status (previous Worker invocation likely timed out).
+//    A stall on the final attempt is terminated as failed instead of queued.
 //  - Serial per invocation (CONCURRENCY=1): provisioning is heavy, we'd
 //    rather burn wall clock than saturate the Supabase Management API.
 import { createFileRoute } from "@tanstack/react-router";
@@ -24,14 +25,86 @@ const STALL_MINUTES = 15;
 const MAX_JOBS_PER_RUN = 2;
 const MAX_ATTEMPTS = 3;
 
+const IN_FLIGHT_STATUSES = ["provisioning", "migrating", "seeding_admin"] as const;
+
 async function reclaimStalled() {
   const cutoff = new Date(Date.now() - STALL_MINUTES * 60 * 1000).toISOString();
-  await admin
+  const requeue = {
+    status: "pending" as const,
+    worker_started_at: null,
+    status_detail: "Worker stalled — requeued",
+  };
+
+  // A requeue is a STATUS, not a sentence. Until 30 Aug 2026 this update
+  // reset `worker_started_at` alone and wrote "requeued" while leaving
+  // `status` wherever the dead worker had moved it — and claimOne() takes
+  // only `status = 'pending'`, so a run that died at 'provisioning',
+  // 'migrating' or 'seeding_admin' was requeued in words and frozen in
+  // state: the first engine-provisioned clone stalled mid "Snapshotting
+  // backend architecture" and sat untouched for an hour against a
+  // one-minute drain. The cascade drain's reclaim already resets both
+  // fields, for this exact reason. Re-entry from pending is safe by
+  // design: drainOne's retry branch already does it, and the pipeline
+  // resumes onto an existing `supabase_project_ref` rather than creating
+  // a second project.
+  //
+  // Each update is checked and THROWS, for the same reason the claim
+  // does: a reclaim that half-happened is invisible exactly when it
+  // matters, and the route's catch turns a throw into a non-200 that
+  // `cron_delivery_health()` can see.
+  const { error: stalledErr } = await admin
     .from("clone_backends")
-    .update({ worker_started_at: null, status_detail: "Worker stalled — requeued" })
+    .update(requeue)
     .lt("worker_started_at", cutoff)
     .is("worker_finished_at", null)
-    .in("status", ["pending", "provisioning", "migrating", "seeding_admin"]);
+    .in("status", ["pending", ...IN_FLIGHT_STATUSES]);
+  if (stalledErr) {
+    throw new Error(`backend-provisioning reclaim: stalled claims: ${stalledErr.message}`);
+  }
+
+  // Rows the pre-fix reclaim already touched are out of reach of the
+  // update above — it nulled `worker_started_at`, and NULL is never
+  // `.lt()` anything — so they are recognised by shape instead: an
+  // in-flight status with no claim timestamp belongs to no live worker
+  // (claimOne stamps `worker_started_at` before any status moves, and
+  // only a requeue nulls it). Idempotent noise once the damaged rows
+  // are gone.
+  const { error: orphanErr } = await admin
+    .from("clone_backends")
+    .update(requeue)
+    .is("worker_started_at", null)
+    .is("worker_finished_at", null)
+    .in("status", IN_FLIGHT_STATUSES);
+  if (orphanErr) {
+    throw new Error(`backend-provisioning reclaim: orphaned rows: ${orphanErr.message}`);
+  }
+
+  // A stall on the final attempt TERMINATES rather than queues: claimOne's
+  // `attempts < MAX_ATTEMPTS` filter would skip the row for ever, which is
+  // the same lie — "requeued" on a row nothing will take — one step later.
+  // The failure path already terminates exhaustion (drainOne stamps
+  // worker_finished_at, the pipeline's catch writes 'failed'); this is the
+  // stall path's copy of that rule, clearing the queued password exactly
+  // as drainOne's terminal branch does. Enqueueing again from the clone
+  // page resets attempts to 0, so the remedy in the message is real.
+  const { error: exhaustedErr } = await admin
+    .from("clone_backends")
+    .update({
+      status: "failed",
+      worker_finished_at: new Date().toISOString(),
+      queued_admin_password_enc: null,
+      error_message:
+        `Provisioning worker stalled ${MAX_ATTEMPTS} times — each run died before finishing. ` +
+        `Check the drain's delivery health, then retry from the clone page (retrying re-queues with fresh attempts).`,
+      status_detail: "Worker stalled — attempts exhausted",
+    })
+    .eq("status", "pending")
+    .is("worker_started_at", null)
+    .is("worker_finished_at", null)
+    .gte("attempts", MAX_ATTEMPTS);
+  if (exhaustedErr) {
+    throw new Error(`backend-provisioning reclaim: exhausted rows: ${exhaustedErr.message}`);
+  }
 }
 
 /**
