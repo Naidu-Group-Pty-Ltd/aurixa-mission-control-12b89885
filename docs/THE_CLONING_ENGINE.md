@@ -243,3 +243,45 @@ And **a signing key is never generated** — the `identity` class mints a fresh
 random value, which is right for `INTERNAL_EDGE_SECRET` and actively worse
 here: PostgREST validates against the project's own key, so a random one
 produces tokens rejected by the very database they are for.
+
+### Repairing the clones that were provisioned before any of that
+
+Provisioning covers clones provisioned *after* the capture existed and nothing
+else. Every clone already in the fleet has `JWT_SECRET` missing, and so does
+any project adopted rather than created here. The documented remedy for those
+was a person opening the clone's Supabase settings and pasting a signing key
+into a box — for a value Mission Control can read for itself.
+
+`clone-jwt-secret-reconcile` reads it (`cloneSecretRepair.server.ts`, decided
+by `cloneSecretRepair.pure.ts`). It runs every 30 minutes, and it settles:
+once a clone holds its key the pass is one indexed ledger read and no
+Management API call at all.
+
+Four rules carry it.
+
+**The ref that reads is the ref that writes.** `getProjectJwtSecret` returns
+one project's signing key and `setCloneSecretValue` writes an environment
+variable onto one project. If those two refs could ever differ this hands one
+tenant another tenant's signing key — the exact defect `tenant_scoped` exists
+to prevent, arrived at from the other direction. So there is one `projectRef`
+const and both calls take it, it comes from `resolveCloneSecretTarget` (which
+refuses the prime's project, refuses Mission Control's own, and refuses when it
+cannot tell), and a source-contract test asserts both — the damage needs a live
+Management API token, which is exactly what a test must not hold.
+
+**A missing ledger row is as repairable as one that says `missing`.** The
+fleet's rows were written under `SUPABASE_JWT_SECRET`, a name the secrets API
+refuses outright, so clones predating the fix have no row under the settable
+spelling at all. Only `set` stops the repair — `inherited` deliberately does
+not, because for a tenant-scoped name it cannot legitimately happen and reading
+it as "already done" would leave that row standing and silent.
+
+**A failed read is recorded as `failed`, never left as `missing`.** They are
+different states and the 30-minute cooling-off window is keyed off the second
+one, so a project whose config the Management API refuses costs two calls an
+hour rather than sixty.
+
+**The value never appears anywhere.** Not in a log line, not in the
+`deployment_events` row, not in a return value, not as a prefix. A signing key
+is authority, and an event row is read by more people than can read the project
+it came from.
