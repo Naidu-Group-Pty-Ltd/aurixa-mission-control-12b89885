@@ -284,14 +284,41 @@ describe("when the App cannot read check runs", () => {
     expect(handler).not.toContain("pulls.merge");
   });
 
-  it("does NOT fall back to mergeable_state", () => {
-    // `clean` is what a pull request with NO checks reports, so falling back
-    // would reintroduce the `no_checks` hole precisely on the deployments
-    // where the permission is missing — the ones nobody is watching.
+  it("reads mergeability only to REFUSE, never as permission", () => {
+    // The drain does now look at `mergeable`, to hold a conflicted proposal
+    // rather than retry a 405 every five minutes for ever. That direction is
+    // safe — it can only ever decline.
+    //
+    // The other direction is the hole this rule was written for: `clean` is
+    // also what a pull request with NO checks reports, so treating mergeability
+    // as permission would merge an unbuilt tree precisely on the deployments
+    // where the checks permission is missing — the ones nobody is watching.
+    // So the assertion is about the RULE, not about one identifier: no
+    // mergeability value may be a merge condition, and the gate stays the only
+    // thing that authorises one.
     const drain = readFileSync(
       join(process.cwd(), "src/server/cascadeMergeDrain.server.ts"),
       "utf8",
     );
     expect(drain).not.toContain("mergeable_state");
+    expect(drain).not.toMatch(/mergeable\s*===\s*true/);
+    expect(drain).not.toContain('"clean"');
+    expect(drain).not.toContain("'clean'");
+
+    // Exactly one merge, and the gate is consulted before it.
+    expect(drain.match(/pulls\.merge\(/g) ?? []).toHaveLength(1);
+    const gateAt = drain.indexOf("decideCascadeMerge(");
+    const mergeAt = drain.indexOf("pulls.merge(");
+    expect(gateAt).toBeGreaterThan(-1);
+    expect(mergeAt).toBeGreaterThan(gateAt);
+
+    // And the refusal it does make is a hold, never a failure: a conflict is a
+    // state a retry cannot change, so reporting it as failed would colour the
+    // fleet red every five minutes over something no retry can fix.
+    const at = drain.indexOf("pr.mergeable === false");
+    expect(at).toBeGreaterThan(-1);
+    const handler = drain.slice(at, drain.indexOf(";", drain.indexOf("return {", at)) + 1);
+    expect(handler).toContain('outcome: "held"');
+    expect(handler).not.toContain("pulls.merge");
   });
 });
