@@ -3,6 +3,12 @@
 // webhook receiver invokes it directly with the admin client.
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
+import { decideCascadeMerge } from "./cascade/autoMergeGate.pure";
+import {
+  describeStaleHeldReferences,
+  findStaleHeldReferences,
+  type StaleHeldReference,
+} from "./cascade/heldFileStaleness.pure";
 import {
   getAppOctokit,
   listFilesMatchingGlobs,
@@ -612,7 +618,20 @@ async function processClone(args: {
   // than for maximum speed: the work is IO, not CPU, and the same 144 calls
   // finish inside the budget with room to spare.
   type Prepared =
-    | { kind: "blob"; path: string; mode: "100644"; type: "blob"; sha: string }
+    | {
+        kind: "blob";
+        path: string;
+        mode: "100644";
+        type: "blob";
+        sha: string;
+        /**
+         * The text this cascade delivers, kept only for source modules so
+         * `findStaleHeldReferences` can read the exports it is about to
+         * remove. Held to the same paths the check can act on, so a cascade of
+         * images or lockfiles carries nothing extra.
+         */
+        content: string | null;
+      }
     | { kind: "held"; held: HeldPath };
 
   const prepared = await mapWithConcurrency<string, Prepared | null>(
@@ -670,9 +689,11 @@ async function processClone(args: {
         mode: "100644" as const,
         type: "blob" as const,
         sha: blob.sha,
+        content: /\.[cm]?tsx?$/.test(path) ? primeFile.content : null,
       };
     },
   );
+  const deliveredSource: Record<string, string> = {};
   for (const entry of prepared) {
     if (!entry) continue;
     if (entry.kind === "held") {
@@ -684,6 +705,7 @@ async function processClone(args: {
       continue;
     }
     treeEntries.push({ path: entry.path, mode: entry.mode, type: entry.type, sha: entry.sha });
+    if (entry.content !== null) deliveredSource[entry.path] = entry.content;
   }
 
   if (treeEntries.length === 0) {
@@ -710,6 +732,46 @@ async function processClone(args: {
     };
   }
 
+  // Does this cascade break a file it is not allowed to touch?
+  //
+  // A `manual_reconcile` path is held because the clone's copy must win. That
+  // hold cannot notice that a file the cascade DID deliver removed a symbol the
+  // held file still imports — which is exactly how prime@909417c put
+  // `src/App.tsx` on this clone's `main` importing an `AmlIntakeQueue` that
+  // `AmlShellPages.tsx` had stopped exporting, failing every Vercel deployment
+  // while the cascade reported the same "1 awaiting manual reconcile" it
+  // reports on every healthy run.
+  //
+  // Only the clone's copy of the reportable held paths is read, and only when
+  // this cascade actually delivers TypeScript — a handful of files on the runs
+  // that can break this way, and no request at all on the ones that cannot.
+  let staleHeld: StaleHeldReference[] = [];
+  const heldSourcePaths = needsReconcile
+    .map((h) => h.path)
+    .filter((path) => /\.[cm]?tsx?$/.test(path));
+  if (heldSourcePaths.length > 0 && Object.keys(deliveredSource).length > 0) {
+    const heldFiles: Record<string, string> = {};
+    await Promise.all(
+      heldSourcePaths.map(async (path) => {
+        // A read that fails is not a file with no imports. Skipping it loses a
+        // warning; inventing an empty one would claim the cascade is safe.
+        try {
+          const f = await getFileContent(octokit, cloneRef, path);
+          if (f) heldFiles[path] = f.content;
+        } catch {
+          /* leave it out — see above */
+        }
+      }),
+    );
+    staleHeld = findStaleHeldReferences({ heldFiles, cascadedFiles: deliveredSource });
+  }
+  const staleSuffix =
+    staleHeld.length > 0
+      ? ` · BREAKS ${staleHeld.length} held file(s): ${staleHeld
+          .map((r) => `${r.heldPath} needs ${r.missing.join("/")}`)
+          .join("; ")}`
+      : "";
+
   // Build the "diff_summary" — first 5 file paths + count of remainder.
   // If any library pins were honored, surface that in the summary too.
   const summaryFiles = treeEntries.slice(0, 5).map((t) => t.path);
@@ -717,7 +779,7 @@ async function processClone(args: {
   const pinSuffix = pinSummary ? ` · ${pinSummary}` : "";
   const heldSuffix = partition.held.length > 0 ? ` · ${partition.held.length} withheld` : "";
   const reconcileSuffix = reconcileSuffixFor(needsReconcile.length);
-  const fileSummary = `${summaryFiles.join(", ")}${summarySuffix}${pinSuffix}${heldSuffix}${reconcileSuffix}`;
+  const fileSummary = `${summaryFiles.join(", ")}${summarySuffix}${pinSuffix}${heldSuffix}${reconcileSuffix}${staleSuffix}`;
 
   const { data: cloneCommit } = await octokit.git.getCommit({
     owner: cloneRef.owner,
@@ -743,6 +805,16 @@ async function processClone(args: {
     `\n\nScope: **${scopeLabel}**.\n\n` +
     `Files synchronized:\n\n` +
     treeEntries.map((t) => `- \`${t.path}\``).join("\n") +
+    (staleHeld.length > 0
+      ? `\n\n### ⚠ This cascade breaks a held file\n\n` +
+        `A file this cascade delivers no longer exports something a withheld file still imports. ` +
+        `Merging this as-is puts the clone's default branch in a state that cannot build — ` +
+        `the bundler fails with "is not exported by", not a test.\n\n` +
+        describeStaleHeldReferences(staleHeld)
+          .map((l) => `- ${l}`)
+          .join("\n") +
+        `\n\nRepair the held file in the same merge, or carry the removal across by hand.`
+      : "") +
     (needsReconcile.length > 0
       ? `\n\n### Needs a human — ${needsReconcile.length} file(s) changed upstream and were held back\n\n` +
         `These carry deliberate divergence on this clone, so the cascade will never overwrite them. ` +
@@ -764,114 +836,121 @@ async function processClone(args: {
     parents: [cloneBranchSha],
   });
 
-  // === auto_merge: try direct fast-forward push to default branch first ===
+  // === auto_merge: always through a pull request, never past its checks ===
+  //
+  // This used to try `git.updateRef` first — a direct fast-forward push to the
+  // clone's default branch, with no pull request and no checks — and only fell
+  // back to a pull request when branch protection REFUSED the push. Every clone
+  // in this fleet has an unprotected `main`, so that push always succeeded and
+  // CI was never consulted at all.
+  //
+  // The comment that used to live here already said what that meant: protection
+  // was doing the work this function thought it was doing itself, and where
+  // protection is absent it merged a tree nothing had built. It named the day
+  // it bit, 26 Aug 2026 — a cascade carrying a package.json/package-lock.json
+  // pair that fails `npm ci`, six of eight checks red, a clone's `main` unable
+  // to install or deploy. Then it went on to call `pulls.merge` immediately
+  // whenever GitHub auto-merge could not be armed, which is the same hole one
+  // level down.
+  //
+  // Both are gone. `decideCascadeMerge` reads the pull request's own check runs
+  // and an unattended cascade merges only on green.
   if (mode === "auto_merge") {
+    const branch = branchName(sourceSha);
     try {
-      await octokit.git.updateRef({
+      await octokit.git.createRef({
         owner: cloneRef.owner,
         repo: cloneRef.repo,
-        ref: `heads/${cloneRef.branch}`,
+        ref: `refs/heads/${branch}`,
         sha: newCommit.sha,
-        force: false,
       });
-      return {
-        status: "succeeded",
-        commit_sha: newCommit.sha.slice(0, 7),
-        diff_summary: `Pushed ${treeEntries.length} files directly to ${cloneRef.branch}: ${fileSummary}`,
-        files_changed: treeEntries.length,
-        completed_at: new Date().toISOString(),
-      };
-    } catch (directPushErr) {
-      // Fall back to branch + PR + merge (handles protected branches)
-      const branch = branchName(sourceSha);
+      const { data: pr } = await octokit.pulls.create({
+        owner: cloneRef.owner,
+        repo: cloneRef.repo,
+        title: `Aurixa cascade · prime@${shortSha(sourceSha)} → ${treeEntries.length} file(s)`,
+        head: branch,
+        base: cloneRef.branch,
+        body: cascadeBody("Auto-merge: this lands on green and waits otherwise."),
+      });
+
+      // Preferred: let GitHub hold it and merge the moment checks pass. That is
+      // race-free in a way polling cannot be — it cannot merge a head that a
+      // later push has replaced.
+      //
+      // `MERGE`, never `SQUASH`. A squash rewrites the cascade commit that
+      // names the prime SHA it came from, which is the one durable record of
+      // what a clone has received.
       try {
-        await octokit.git.createRef({
-          owner: cloneRef.owner,
-          repo: cloneRef.repo,
-          ref: `refs/heads/${branch}`,
-          sha: newCommit.sha,
-        });
-        const { data: pr } = await octokit.pulls.create({
-          owner: cloneRef.owner,
-          repo: cloneRef.repo,
-          title: `Aurixa cascade · prime@${shortSha(sourceSha)} → ${treeEntries.length} file(s)`,
-          head: branch,
-          base: cloneRef.branch,
-          body: cascadeBody(
-            `Direct push to \`${cloneRef.branch}\` was blocked — falling back to PR + merge.`,
-          ),
-        });
-        // Ask GitHub to merge it WHEN THE CHECKS PASS, rather than now.
-        //
-        // This used to call `pulls.merge` immediately. On a clone with branch
-        // protection that is refused, which is the only reason it never landed
-        // a broken tree — protection was doing the work the cascade thought it
-        // was doing itself. Where protection is absent it merged a tree nothing
-        // had built.
-        //
-        // That is not hypothetical. On 26 Aug 2026 a mirror cascade carried
-        // prime's `package.json` and `package-lock.json` at a commit where the
-        // pair fails `npm ci` (27 missing `esbuild@0.28.2` entries — the prime
-        // reverted it a few commits later). Six of eight checks went red and
-        // the clone's `main` could not install or deploy. That one was merged
-        // by a person; on `auto_merge` it would have been merged by this
-        // function, on every clone, every time prime merges.
-        //
-        // `MERGE`, never `SQUASH`. A squash rewrites the cascade commit that
-        // names the prime SHA it came from, which is the one durable record of
-        // what a clone has received.
-        let autoMergeArmed = false;
-        try {
-          await octokit.graphql(
-            `mutation($id: ID!) {
-               enablePullRequestAutoMerge(input: { pullRequestId: $id, mergeMethod: MERGE }) {
-                 pullRequest { autoMergeRequest { enabledAt } }
-               }
-             }`,
-            { id: pr.node_id },
-          );
-          autoMergeArmed = true;
-        } catch {
-          // Auto-merge is a repository setting and can be off, and GitHub
-          // refuses to arm it on a pull request with nothing to wait for.
-          // Fall through: with no required checks there is nothing this would
-          // have protected anyway.
-        }
-
-        if (autoMergeArmed) {
-          return {
-            status: "pr_opened",
-            pr_url: pr.html_url,
-            diff_summary: `Queued for auto-merge once checks pass (direct push blocked): ${fileSummary}`,
-            files_changed: treeEntries.length,
-            completed_at: new Date().toISOString(),
-          };
-        }
-
-        const { data: merged } = await octokit.pulls.merge({
-          owner: cloneRef.owner,
-          repo: cloneRef.repo,
-          pull_number: pr.number,
-          merge_method: "merge",
-          commit_title: `Aurixa cascade prime@${shortSha(sourceSha)} (#${pr.number})`,
-        });
+        await octokit.graphql(
+          `mutation($id: ID!) {
+             enablePullRequestAutoMerge(input: { pullRequestId: $id, mergeMethod: MERGE }) {
+               pullRequest { autoMergeRequest { enabledAt } }
+             }
+           }`,
+          { id: pr.node_id },
+        );
         return {
-          status: "succeeded",
-          commit_sha: merged.sha?.slice(0, 7) ?? null,
+          status: "pr_opened",
           pr_url: pr.html_url,
-          diff_summary: `Auto-merged via PR (direct push blocked, auto-merge unavailable): ${fileSummary}`,
+          diff_summary: `Queued for auto-merge once checks pass: ${fileSummary}`,
           files_changed: treeEntries.length,
           completed_at: new Date().toISOString(),
         };
-      } catch (prErr) {
+      } catch {
+        // Auto-merge is a repository setting and GitHub refuses to arm it on a
+        // pull request with nothing to wait for. Falling through does NOT mean
+        // merging blind — it means reading the checks ourselves.
+      }
+
+      const { data: checkData } = await octokit.checks.listForRef({
+        owner: cloneRef.owner,
+        repo: cloneRef.repo,
+        ref: newCommit.sha,
+      });
+      const verdict = decideCascadeMerge(
+        (checkData.check_runs ?? []).map((c) => ({
+          name: c.name,
+          status: c.status,
+          conclusion: c.conclusion,
+        })),
+      );
+
+      if (!verdict.merge) {
+        // Left open on purpose, with the reason on the record. A cascade that
+        // cannot land is a fact an operator needs; one that lands anyway is the
+        // defect this block exists to remove.
         return {
-          status: "failed",
-          diff_summary: `Auto-merge failed: ${fileSummary}`,
+          status: "pr_opened",
+          pr_url: pr.html_url,
+          diff_summary: `${verdict.why} ${fileSummary}`,
           files_changed: treeEntries.length,
-          error_message: `Direct push: ${directPushErr instanceof Error ? directPushErr.message : "unknown"}; PR fallback: ${prErr instanceof Error ? prErr.message : "unknown"}`,
           completed_at: new Date().toISOString(),
         };
       }
+
+      const { data: merged } = await octokit.pulls.merge({
+        owner: cloneRef.owner,
+        repo: cloneRef.repo,
+        pull_number: pr.number,
+        merge_method: "merge",
+        commit_title: `Aurixa cascade prime@${shortSha(sourceSha)} (#${pr.number})`,
+      });
+      return {
+        status: "succeeded",
+        commit_sha: merged.sha?.slice(0, 7) ?? null,
+        pr_url: pr.html_url,
+        diff_summary: `Merged on green (${verdict.why}): ${fileSummary}`,
+        files_changed: treeEntries.length,
+        completed_at: new Date().toISOString(),
+      };
+    } catch (prErr) {
+      return {
+        status: "failed",
+        diff_summary: `Auto-merge failed: ${fileSummary}`,
+        files_changed: treeEntries.length,
+        error_message: prErr instanceof Error ? prErr.message : "unknown",
+        completed_at: new Date().toISOString(),
+      };
     }
   }
 
