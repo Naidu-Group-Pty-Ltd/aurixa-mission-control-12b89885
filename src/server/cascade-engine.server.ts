@@ -52,6 +52,37 @@ import { validateModuleGlobs } from "@/lib/module-globs";
 import { mapWithConcurrency } from "@/lib/concurrency";
 
 type CascadeResultUpdate = Database["public"]["Tables"]["cascade_results"]["Update"];
+
+/**
+ * Everything one cascade decided, before it wrote anything.
+ *
+ * This exists so a dry run can be the ENGINE rather than a second walk that
+ * agrees with it on a good day. The one it replaced compared decoded strings
+ * (so a binary read as unchanged), probed the first 30 files of a module and
+ * called that the blast radius, applied no exclusion policy, had no concept of
+ * a mirror, and could not see a deletion at all — every one of which made it
+ * describe a cascade that would not happen.
+ */
+export type ClonePlan = {
+  cloneId: string;
+  scope: string;
+  /** Paths this cascade would write. */
+  writes: string[];
+  /** Paths it would remove, having proved prime deleted them. */
+  deletes: string[];
+  /** Paths withheld by the exclusion policy or a content hold. */
+  heldTotal: number;
+  /** The subset a person is expected to reconcile by hand. */
+  needsReconcile: string[];
+  /** Prime deletions NOT delivered, with the reason. */
+  deletionKept: Array<{ path: string; reason: string; why: string }>;
+  deletionRefusal: string | null;
+  staleHeld: StaleHeldReference[];
+  missingHeld: MissingHeldReference[];
+  onlyInClone: number;
+  unprobedDeletions: number;
+  summary: string;
+};
 type SupabaseLike = SupabaseClient<Database>;
 
 function shortSha(sha: string) {
@@ -469,7 +500,14 @@ export async function regenerateCloneProposal(args: {
   });
 }
 
-async function processClone(args: {
+/**
+ * One clone's cascade, decided and then written.
+ *
+ * Exported for the dry run, which calls it with `dryRun: true` so a rehearsal
+ * and the real thing are one implementation rather than two that agree on a
+ * good day.
+ */
+export async function processClone(args: {
   octokit: ReturnType<typeof getAppOctokit>;
   primeRef: RepoRef;
   sourceSha: string;
@@ -484,8 +522,18 @@ async function processClone(args: {
   };
   supabase: SupabaseLike;
   scopeFilter: Record<string, unknown> | null;
+  /**
+   * Decide everything and write nothing. No blob, no tree, no commit, no
+   * branch, no pull request, no issue — and `processClone` never writes to the
+   * database on any path, so a dry run leaves GitHub and Mission Control
+   * exactly as it found them.
+   */
+  dryRun?: boolean;
+  /** Called with the decision, on the real path and the dry one alike. */
+  onPlan?: (plan: ClonePlan) => void;
 }): Promise<CascadeResultUpdate> {
   const { octokit, primeRef, sourceSha, mode, clone, supabase, scopeFilter } = args;
+  const dryRun = args.dryRun === true;
 
   const isMirror = clone.sync_scope === "mirror";
 
@@ -723,7 +771,7 @@ async function processClone(args: {
   const primeFiles = partition.write;
   const needsReconcile = reportableHeld(partition.held);
 
-  if (mode === "notify") {
+  if (mode === "notify" && !dryRun) {
     const body =
       `### Aurixa cascade — drift notice\n\n` +
       `Prime \`${primeRef.owner}/${primeRef.repo}@${shortSha(sourceSha)}\` ` +
@@ -879,18 +927,25 @@ async function processClone(args: {
       // 78,450 bytes of PNG, and was re-corrupted by every cascade that
       // carried it. 144 binary files were exposed, including 86 `.docx`
       // partner agreement templates that both portals hand to partners.
-      const { data: blob } = await octokit.git.createBlob({
-        owner: cloneRef.owner,
-        repo: cloneRef.repo,
-        content: primeFile.base64,
-        encoding: "base64",
-      });
+      // A dry run needs to know WHICH paths would be written, not to upload
+      // their bytes. Prime's blob SHA stands in: it is never used for anything
+      // on this path, because the write boundary is never reached.
+      const blobSha = dryRun
+        ? primeFile.sha
+        : (
+            await octokit.git.createBlob({
+              owner: cloneRef.owner,
+              repo: cloneRef.repo,
+              content: primeFile.base64,
+              encoding: "base64",
+            })
+          ).data.sha;
       return {
         kind: "blob",
         path,
         mode: "100644" as const,
         type: "blob" as const,
-        sha: blob.sha,
+        sha: blobSha,
         content: !primeFile.binary && /\.[cm]?tsx?$/.test(path) ? primeFile.content : null,
       };
     },
@@ -1070,6 +1125,34 @@ async function processClone(args: {
   const reconcileSuffix = reconcileSuffixFor(needsReconcile.length);
   const deleteSuffix = deletionSuffixFor(deletionPlan);
   const fileSummary = `${summaryFiles.join(", ")}${summarySuffix}${pinSuffix}${heldSuffix}${reconcileSuffix}${deleteSuffix}${staleSuffix}${missingSuffix}`;
+
+  // The decision, complete, and the last point before anything is written.
+  // Emitted on BOTH paths deliberately: a dry run that took a different route
+  // to its answer would be a second implementation again.
+  args.onPlan?.({
+    cloneId: clone.id,
+    scope: scopeLabel,
+    writes: treeEntries.filter((t) => t.sha !== null).map((t) => t.path),
+    deletes: deletionPlan.deletes,
+    heldTotal: partition.held.length,
+    needsReconcile: needsReconcile.map((h) => h.path),
+    deletionKept: deletionPlan.kept,
+    deletionRefusal: deletionPlan.refusal,
+    staleHeld,
+    missingHeld,
+    onlyInClone,
+    unprobedDeletions,
+    summary: fileSummary,
+  });
+
+  if (dryRun) {
+    return {
+      status: "skipped",
+      diff_summary: `[dry run] ${fileSummary}`,
+      files_changed: treeEntries.length,
+      completed_at: new Date().toISOString(),
+    };
+  }
 
   // Re-read the clone's head HERE, rather than trusting the one captured at the
   // top of this function.
