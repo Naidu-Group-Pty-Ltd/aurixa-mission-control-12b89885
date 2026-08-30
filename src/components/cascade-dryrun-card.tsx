@@ -137,10 +137,37 @@ function ImpactRow({ impact }: { impact: CloneImpact }) {
             {impact.installedModules} mod
           </Badge>
         </div>
-        <div className="truncate text-xs text-muted-foreground">{impact.reason}</div>
+        <div className="text-xs text-muted-foreground">{impact.reason}</div>
+        {/* A rehearsal that hides the two things worth rehearsing for is not
+            one. A breakage puts the clone's default branch in a state that
+            cannot build, and a removal is irreversible from this screen — so
+            both are named here rather than folded into a count. */}
+        {impact.breaks.length > 0 && (
+          <ul className="mt-1 space-y-0.5 text-xs text-destructive">
+            {impact.breaks.map((b) => (
+              <li key={b} className="truncate">
+                {b}
+              </li>
+            ))}
+          </ul>
+        )}
+        {impact.filesDeleted > 0 && (
+          <div className="mt-1 truncate font-mono text-[11px] text-warning">
+            would remove {impact.filesDeleted} file(s) prime deleted
+          </div>
+        )}
+        {impact.deletionsWithheld.length > 0 && (
+          <div className="mt-1 truncate text-xs text-muted-foreground">
+            {impact.deletionsWithheld.length} prime deletion(s) withheld —{" "}
+            {impact.deletionsWithheld[0].why}
+          </div>
+        )}
       </div>
       <div className="shrink-0 text-right font-mono text-[11px] text-muted-foreground">
-        {impact.filesChanged}/{impact.filesInScope}
+        <div>
+          {impact.filesChanged}/{impact.filesInScope}
+        </div>
+        {impact.filesDeleted > 0 && <div className="text-warning">−{impact.filesDeleted}</div>}
       </div>
     </div>
   );

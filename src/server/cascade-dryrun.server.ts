@@ -1,15 +1,33 @@
-// Pre-cascade dry-run: for the chosen mode/scope, walk each clone's installed
-// modules, list which prime files differ, and return a green/yellow/red impact
-// matrix. AI summary is generated from the aggregate file list so callers can
-// preview the blast before firing.
+// Pre-cascade dry-run: what would this cascade actually do?
+//
+// This runs the ENGINE with `dryRun: true` — the same tree reads, the same
+// exclusion policy, the same content holds, the same deletion evidence, the
+// same held-file guards — and stops at the write boundary. Nothing is
+// uploaded, no branch moves, no pull request opens, and `processClone` writes
+// to the database on no path at all.
+//
+// It used to be a second walk of its own, and it disagreed with the cascade on
+// nearly every point that matters:
+//
+//   - it compared DECODED STRINGS (`cf.content !== pf.content`), so two
+//     different binaries both decoding to replacement characters read as
+//     unchanged — the exact comparison the binary-fidelity work removed from
+//     the engine;
+//   - it probed the first 30 files per clone and reported that as the blast
+//     radius;
+//   - it applied no exclusion policy, so protected and manual_reconcile paths
+//     counted as "will be pushed";
+//   - it had no concept of a mirror, asking `clone_modules` for globs whatever
+//     the clone's sync scope was;
+//   - and it could not see a deletion at all.
+//
+// A rehearsal that does not rehearse the real thing is worse than none: it is
+// a green light nobody checked. So there is one implementation now, and the
+// dry run is a parameter on it.
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
-import {
-  getAppOctokit,
-  listFilesMatchingGlobs,
-  getFileContent,
-  type RepoRef,
-} from "./github-app.server";
+import { getAppOctokit, type RepoRef } from "./github-app.server";
+import { processClone, type ClonePlan } from "./cascade-engine.server";
 
 type SupabaseLike = SupabaseClient<Database>;
 
@@ -19,9 +37,21 @@ export type CloneImpact = {
   cloneId: string;
   name: string;
   level: ImpactLevel;
+  /** Files the cascade would write. */
   filesChanged: number;
+  /** Files it would REMOVE, having proved prime deleted them. */
+  filesDeleted: number;
+  /** Paths in scope for this clone — its whole tree, or its module globs. */
   filesInScope: number;
   installedModules: number;
+  /** Withheld by the exclusion policy or a content hold. */
+  filesHeld: number;
+  /** Held paths a person is expected to reconcile by hand. */
+  needsReconcile: string[];
+  /** Held files this cascade would BREAK, and wiring they would be missing. */
+  breaks: string[];
+  /** Prime deletions this cascade would not deliver, and why. */
+  deletionsWithheld: Array<{ path: string; why: string }>;
   reason: string;
 };
 
@@ -36,13 +66,26 @@ export type DryRunResult =
   | { ok: false; error: string };
 
 const MAX_CLONES_TO_DRYRUN = 25;
-const MAX_FILES_TO_PROBE_PER_CLONE = 30;
 
-function classify(filesChanged: number, installedModules: number): ImpactLevel {
-  if (filesChanged === 0) return "green";
-  if (installedModules === 0) return "green";
-  if (filesChanged > 15) return "red";
-  if (filesChanged > 4) return "yellow";
+/**
+ * How much attention this clone's cascade needs.
+ *
+ * A breakage is RED whatever the file count: a cascade that leaves a held file
+ * importing something no longer exported puts the clone's default branch in a
+ * state that cannot build, and one file is enough to do it. Removals count
+ * towards the size because a removal is a change — under the old scoring a
+ * cascade that deleted nine files and wrote none read as "no changes".
+ */
+function classify(input: {
+  filesChanged: number;
+  filesDeleted: number;
+  breaks: number;
+  needsReconcile: number;
+}): ImpactLevel {
+  if (input.breaks > 0) return "red";
+  const total = input.filesChanged + input.filesDeleted;
+  if (total === 0) return input.needsReconcile > 0 ? "yellow" : "green";
+  if (total > 15) return "red";
   return "yellow";
 }
 
@@ -62,7 +105,7 @@ export async function runCascadeDryRun(
 
   let clonesQuery = supabase
     .from("clones")
-    .select("id, name, github_owner, github_repo, default_branch");
+    .select("id, name, github_owner, github_repo, default_branch, sync_scope");
   if (opts.cloneIds && opts.cloneIds.length > 0) {
     clonesQuery = clonesQuery.in("id", opts.cloneIds);
   }
@@ -89,116 +132,134 @@ export async function runCascadeDryRun(
     return { ok: false, error: `Cannot read prime: ${e instanceof Error ? e.message : "unknown"}` };
   }
 
-  // Pull installed modules for each clone in one shot.
+  // Installed-module counts, for the operator's reading only. Which files are
+  // in scope is the ENGINE's decision now, not a second reading of these rows:
+  // a mirror's scope is its whole tree whatever `clone_modules` says, and that
+  // disagreement is how this page came to describe a cascade nobody would run.
   const { data: cmRows } = await supabase
     .from("clone_modules")
-    .select("clone_id, modules(file_globs)")
+    .select("clone_id")
     .in(
       "clone_id",
       limited.map((c) => c.id),
     );
-
-  const cloneToGlobs = new Map<string, string[]>();
   const cloneToModuleCount = new Map<string, number>();
   for (const row of cmRows ?? []) {
-    const cmRow = row as { clone_id: string; modules: { file_globs: string[] | null } | null };
-    const globs = cmRow.modules?.file_globs ?? [];
-    if (!cloneToGlobs.has(cmRow.clone_id)) cloneToGlobs.set(cmRow.clone_id, []);
-    cloneToGlobs.get(cmRow.clone_id)!.push(...globs);
-    cloneToModuleCount.set(cmRow.clone_id, (cloneToModuleCount.get(cmRow.clone_id) ?? 0) + 1);
+    const id = (row as { clone_id: string }).clone_id;
+    cloneToModuleCount.set(id, (cloneToModuleCount.get(id) ?? 0) + 1);
   }
 
   const impacts: CloneImpact[] = [];
   for (const clone of limited) {
-    const globs = cloneToGlobs.get(clone.id) ?? [];
     const modCount = cloneToModuleCount.get(clone.id) ?? 0;
-    if (globs.length === 0) {
-      impacts.push({
-        cloneId: clone.id,
-        name: clone.name,
-        level: "green",
-        filesChanged: 0,
-        filesInScope: 0,
-        installedModules: 0,
-        reason: "No modules installed — cascade would skip",
-      });
-      continue;
-    }
+    let plan: ClonePlan | null = null;
+    let patchSummary = "";
 
-    const cloneRef: RepoRef = {
-      owner: clone.github_owner,
-      repo: clone.github_repo,
-      branch: clone.default_branch || "main",
-    };
-
-    let primeFiles: string[] = [];
     try {
-      primeFiles = await listFilesMatchingGlobs(octokit, primeRef, globs);
-    } catch {
+      const patch = await processClone({
+        octokit,
+        primeRef,
+        sourceSha,
+        // `pr` rather than the event's mode on purpose: a dry run must never
+        // take the notify branch, and mode changes nothing about WHAT the
+        // cascade decides — only what it would then do with it.
+        mode: "pr",
+        clone,
+        supabase,
+        scopeFilter: null,
+        dryRun: true,
+        onPlan: (p) => {
+          plan = p;
+        },
+      });
+      patchSummary = patch.diff_summary ?? "";
+    } catch (e) {
+      // A refusal is a RESULT, not a missing row. `requireExclusions` and
+      // `assertMirrorPolicy` both throw, and both are exactly what an operator
+      // needs to see before firing rather than during.
       impacts.push({
         cloneId: clone.id,
         name: clone.name,
         level: "red",
         filesChanged: 0,
+        filesDeleted: 0,
         filesInScope: 0,
         installedModules: modCount,
-        reason: "Could not enumerate prime files",
+        filesHeld: 0,
+        needsReconcile: [],
+        breaks: [],
+        deletionsWithheld: [],
+        reason: `Cascade would refuse: ${e instanceof Error ? e.message : "unknown error"}`,
       });
       continue;
     }
 
-    if (primeFiles.length === 0) {
+    if (!plan) {
+      // The engine returned before it decided anything — already in sync, or
+      // nothing it may write. Its own words are better than a number.
       impacts.push({
         cloneId: clone.id,
         name: clone.name,
         level: "green",
         filesChanged: 0,
+        filesDeleted: 0,
         filesInScope: 0,
         installedModules: modCount,
-        reason: "No files match installed module globs",
+        filesHeld: 0,
+        needsReconcile: [],
+        breaks: [],
+        deletionsWithheld: [],
+        reason: patchSummary || "Nothing to cascade",
       });
       continue;
     }
 
-    const probeFiles = primeFiles.slice(0, MAX_FILES_TO_PROBE_PER_CLONE);
-    let changed = 0;
-    try {
-      for (const path of probeFiles) {
-        const [pf, cf] = await Promise.all([
-          getFileContent(octokit, primeRef, path),
-          getFileContent(octokit, cloneRef, path),
-        ]);
-        if (!pf) continue;
-        if (!cf || cf.content !== pf.content) changed++;
-      }
-    } catch {
-      impacts.push({
-        cloneId: clone.id,
-        name: clone.name,
-        level: "red",
-        filesChanged: changed,
-        filesInScope: primeFiles.length,
-        installedModules: modCount,
-        reason: "Clone unreachable on GitHub",
-      });
-      continue;
-    }
+    const settled: ClonePlan = plan;
+    const breaks = [
+      ...settled.staleHeld.map(
+        (r) =>
+          `${r.heldPath} imports ${r.missing.join("/")} from ${r.cascadedPath}, which this cascade no longer exports`,
+      ),
+      ...settled.missingHeld.map(
+        (r) =>
+          `${r.heldPath} is missing ${r.missing.join("/")} that upstream takes from ${r.cascadedPath}`,
+      ),
+    ];
+    const level = classify({
+      filesChanged: settled.writes.length,
+      filesDeleted: settled.deletes.length,
+      breaks: settled.staleHeld.length,
+      needsReconcile: settled.needsReconcile.length,
+    });
 
-    const level = classify(changed, modCount);
-    const reason =
-      changed === 0
-        ? "Clone matches prime — no changes will be pushed"
-        : level === "red"
-          ? `${changed} files differ — large blast radius`
-          : `${changed} files differ across ${modCount} module${modCount === 1 ? "" : "s"}`;
+    const parts: string[] = [];
+    if (settled.writes.length > 0) parts.push(`${settled.writes.length} file(s) would be written`);
+    if (settled.deletes.length > 0) parts.push(`${settled.deletes.length} removed`);
+    if (settled.needsReconcile.length > 0) {
+      parts.push(`${settled.needsReconcile.length} awaiting hand-reconcile`);
+    }
+    if (settled.staleHeld.length > 0)
+      parts.push(`${settled.staleHeld.length} held file(s) WOULD BREAK`);
+    if (settled.deletionRefusal) parts.push("deletions refused");
+
     impacts.push({
       cloneId: clone.id,
       name: clone.name,
       level,
-      filesChanged: changed,
-      filesInScope: primeFiles.length,
+      filesChanged: settled.writes.length,
+      filesDeleted: settled.deletes.length,
+      filesInScope: settled.writes.length + settled.heldTotal,
       installedModules: modCount,
-      reason,
+      filesHeld: settled.heldTotal,
+      needsReconcile: settled.needsReconcile,
+      breaks,
+      deletionsWithheld: settled.deletionKept
+        .filter((k) => k.reason !== "clone_owns")
+        .map((k) => ({ path: k.path, why: k.why })),
+      reason:
+        parts.length > 0
+          ? `${parts.join(" · ")} (${settled.scope})`
+          : `Clone matches prime — nothing would be pushed (${settled.scope})`,
     });
   }
 

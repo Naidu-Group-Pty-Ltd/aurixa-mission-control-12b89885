@@ -648,3 +648,53 @@ anywhere in the file. The engine's own source carries eleven such globs, and
 scanning it that way loses two thirds of the file. It steps over quoted strings
 now. On the import guard that fault only ever cost a *warning*; on a deletion it
 would have cost the file.
+
+## The rehearsal is the engine
+
+`runCascadeDryRun` answers one question — *what would this cascade actually do?*
+— and until now it answered it with a walk of its own. That walk disagreed with
+the cascade on nearly every point that matters:
+
+- it compared **decoded strings** (`cf.content !== pf.content`), so two
+  different binaries both decoding to replacement characters read as unchanged
+  — the exact comparison the binary-fidelity work removed from the engine;
+- it probed the **first 30 files** of each clone and reported that as the blast
+  radius;
+- it applied **no exclusion policy**, so `protected` and `manual_reconcile`
+  paths counted as "will be pushed";
+- it had **no concept of a mirror**, asking `clone_modules` for globs whatever
+  the clone's sync scope was — and the client-facing mirror's scope is its whole
+  tree;
+- and it could not see a **deletion** at all.
+
+A rehearsal that does not rehearse the real thing is worse than none: it is a
+green light nobody checked. So there is one implementation now and the dry run
+is a parameter on it — `processClone({ dryRun: true })` takes the same tree
+reads, the same exclusion policy, the same content holds, the same deletion
+evidence and the same held-file guards, and stops at the write boundary.
+
+Three things hold that boundary, and `dryRunBoundary.test.ts` pins each:
+
+**Every write sits after the return.** `createTree`, `createCommit`,
+`createRef`, `updateRef`, `pulls.create`, `pulls.update` and `pulls.merge` are
+all below `if (dryRun)`, asserted by source position rather than by reading the
+code and trusting it.
+
+**`createBlob` is guarded at the call**, because it is the one write that
+happens *before* the boundary — inside the prepare loop a dry run still needs
+for the content holds and the held-file guards. Prime's own blob SHA stands in.
+
+**`processClone` writes to the database on no path at all**, which is what makes
+one flag sufficient. A test asserts that too: if it ever gained a write, a
+rehearsal would start mutating Mission Control's record of a cascade that never
+happened.
+
+The flag defaults to *writing*. A safety flag that defaulted the other way would
+turn a real cascade into a silent no-op, which is the more expensive mistake
+here — nothing would fail, and the fleet would simply stop receiving anything.
+
+What the operator now sees per clone: files that would be written, files that
+would be **removed**, paths withheld, paths awaiting a hand-reconcile, prime
+deletions withheld and why, and any held file the cascade **would break** — the
+last of which is red regardless of file count, because one is enough to leave
+the clone's default branch unable to build.
