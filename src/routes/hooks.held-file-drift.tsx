@@ -38,7 +38,7 @@ export const Route = createFileRoute("/hooks/held-file-drift")({
           // filing only when something went wrong across the fleet — a sweep
           // that files an identical "0 drifted" row every hour is how an audit
           // log stops being read.
-          if (report.failed > 0 || report.skipped > 0) {
+          if (report.failed > 0 || report.skipped > 0 || report.capped > 0) {
             await writeAuditLog({
               action: "held_file_drift_sweep_run",
               entityType: "cron",

@@ -68,6 +68,7 @@ import {
   type MissingHeldReference,
 } from "./cascade/heldFileStaleness.pure";
 import {
+  assertMirrorPolicy,
   partitionCascadePaths,
   reportableHeld,
   requireExclusions,
@@ -90,7 +91,7 @@ const MAX_HELD_PATHS = 24;
 const MAX_TARGETS = 12;
 
 export type CloneDriftOutcome =
-  | { clone: string; outcome: "clean" }
+  | { clone: string; outcome: "clean"; capped?: boolean }
   | {
       clone: string;
       outcome: "drifted";
@@ -108,6 +109,8 @@ export type HeldFileDriftReport = {
   drifted: number;
   cleared: number;
   announced: number;
+  /** Clones whose sweep hit a ceiling, so this run looked at less than all. */
+  capped: number;
   skipped: number;
   failed: number;
   detail: CloneDriftOutcome[];
@@ -124,6 +127,7 @@ export async function sweepHeldFileDrift(supabase: Db): Promise<HeldFileDriftRep
     drifted: 0,
     cleared: 0,
     announced: 0,
+    capped: 0,
     skipped: 0,
     failed: 0,
     detail: [],
@@ -145,7 +149,7 @@ export async function sweepHeldFileDrift(supabase: Db): Promise<HeldFileDriftRep
 
   const { data, error } = await supabase
     .from("clones")
-    .select("id, name, github_owner, github_repo, default_branch")
+    .select("id, name, github_owner, github_repo, default_branch, sync_scope")
     .not("github_owner", "is", null)
     .not("github_repo", "is", null);
   // A candidate list that could not be READ is not an empty one.
@@ -160,6 +164,7 @@ export async function sweepHeldFileDrift(supabase: Db): Promise<HeldFileDriftRep
       github_owner: string | null;
       github_repo: string | null;
       default_branch: string | null;
+      sync_scope: string | null;
     };
     if (!clone.github_owner || !clone.github_repo) continue;
     const label = clone.name ?? `${clone.github_owner}/${clone.github_repo}`;
@@ -176,16 +181,23 @@ export async function sweepHeldFileDrift(supabase: Db): Promise<HeldFileDriftRep
           github_owner: clone.github_owner,
           github_repo: clone.github_repo,
           default_branch: clone.default_branch,
+          sync_scope: clone.sync_scope,
         },
       });
       report.detail.push(outcome);
       if (outcome.outcome === "drifted") {
         report.drifted += 1;
         if (outcome.announced) report.announced += 1;
+        // A ceiling reached is a sweep that looked at less than all of it, and
+        // a truncated sweep that reports as complete is the exact shape of
+        // failure this module exists to stop.
+        if (outcome.capped) report.capped += 1;
       } else if (outcome.outcome === "cleared") {
         report.cleared += 1;
       } else if (outcome.outcome === "skipped") {
         report.skipped += 1;
+      } else if (outcome.outcome === "clean" && outcome.capped) {
+        report.capped += 1;
       }
     } catch (e) {
       // One unreachable repository, or one unreadable exclusion policy, must
@@ -203,7 +215,13 @@ async function sweepOneClone(args: {
   supabase: Db;
   octokit: ReturnType<typeof getAppOctokit>;
   primeRef: RepoRef;
-  clone: { id: string; github_owner: string; github_repo: string; default_branch: string | null };
+  clone: {
+    id: string;
+    github_owner: string;
+    github_repo: string;
+    default_branch: string | null;
+    sync_scope: string | null;
+  };
   label: string;
 }): Promise<CloneDriftOutcome> {
   const { supabase, octokit, primeRef, clone, label } = args;
@@ -228,6 +246,12 @@ async function sweepOneClone(args: {
     exclusionRes.data as SyncExclusion[] | null,
     exclusionRes.error,
   );
+  // A mirror with no policy holds nothing back, so every held file this sweep
+  // exists to check would be invisible to it and the clone would report as
+  // CLEAN. That is the same lie in the other direction from the one the engine
+  // refuses, and it is worth refusing here for the same reason: silence about a
+  // question you could not ask is indistinguishable from a good answer.
+  if (clone.sync_scope === "mirror") assertMirrorPolicy(clone.id, exclusions);
 
   const tree = await listTreeEntries(octokit, cloneRef);
   // A partial tree read as complete is indistinguishable from a clone that is
@@ -241,7 +265,10 @@ async function sweepOneClone(args: {
 
   const held = reportableHeld(partitionCascadePaths([...clonePaths], exclusions).held)
     .map((h) => h.path)
-    .filter(isSource);
+    .filter(isSource)
+    // Sorted so the ceiling below takes the same paths every run. An unsorted
+    // cap whose membership drifted would read as a changed finding.
+    .sort();
   if (held.length === 0) {
     // Not "clean" in the interesting sense and not a failure either: this clone
     // holds no source file back, so there is no held file to be behind.
@@ -327,10 +354,14 @@ async function sweepOneClone(args: {
           announced: false,
           capped,
         }
-      : { clone: label, outcome: "clean" };
+      : { clone: label, outcome: "clean", capped };
   }
 
   const lines = describeMissingHeldReferences(findings);
+  // `writeAuditLog` logs a failed insert and does not throw, so a lost record
+  // means the next run sees no previous fingerprint and announces this gap
+  // again. That is the safe direction: a repeated notification is noise, a
+  // finding that quietly stops being reported is the thing this exists to stop.
   await writeAuditLog({
     action: HELD_DRIFT_ACTION,
     entityType: "clone",
@@ -353,7 +384,9 @@ async function sweepOneClone(args: {
   await notifyOperators({
     kind: "drift_medium",
     severity: "warning",
-    title: `${label}: ${symbols.length} piece(s) of wiring never reached a held file`,
+    title:
+      `${label}: ${symbols.length} piece${symbols.length === 1 ? "" : "s"} of wiring ` +
+      `never reached a held file`,
     // Named in full, because the whole point is that nothing else says it. A
     // notification reading "drift detected" would send an operator to open
     // three repositories to work out which symbol, in which file, from which
