@@ -183,7 +183,7 @@ export type DeletionCandidate = {
 export type DeletionKeepReason =
   /** Prime never had it — it is the clone's own file. */
   | "clone_owns"
-  /** Prime deleted it, but this clone's copy is not the one prime deleted. */
+  /** Prime deleted it, and this copy is not any version prime held at that path. */
   | "clone_edited"
   /** Prime's history could not be read. */
   | "unsettled"
@@ -401,7 +401,7 @@ export function describeDeletionPlan(plan: DeletionPlan): string {
   } else if (plan.deletes.length > 0) {
     parts.push(
       `**Removed (${plan.deletes.length}).** Prime deleted these and this clone's copies were ` +
-        `byte-identical to the versions prime deleted:\n` +
+        `byte-identical to a version prime itself held at that path:\n` +
         plan.deletes.map((p) => `- \`${p}\``).join("\n"),
     );
   }
