@@ -25,6 +25,21 @@ const STALL_MINUTES = 15;
 const MAX_JOBS_PER_RUN = 2;
 const MAX_ATTEMPTS = 3;
 
+// How long ONE invocation of this route may work before the pipeline pauses
+// at a stage boundary. pg_net stops waiting at 60s and the hosting runtime
+// reclaims the worker soon after, so an unbudgeted run dies mid-write with no
+// record — which is exactly how the first engine-provisioned clone burned all
+// three attempts on one step. A pause is requeued as forward progress
+// (attempts reset to 0); only a hard death costs an attempt.
+const INVOCATION_BUDGET_MS = 40_000;
+
+// The global bound the attempt-neutral recycling answers to: a backend that
+// has been in flight this long is not "still going", whatever each individual
+// invocation reports. Judged on PARKED rows only (worker_started_at null) so
+// a live invocation is never failed under its own feet — the next tick
+// catches it parked. clone_deployments has the same idea as STUCK_HOURS.
+const CEILING_HOURS = 3;
+
 const IN_FLIGHT_STATUSES = ["provisioning", "migrating", "seeding_admin"] as const;
 
 async function reclaimStalled() {
@@ -105,6 +120,29 @@ async function reclaimStalled() {
   if (exhaustedErr) {
     throw new Error(`backend-provisioning reclaim: exhausted rows: ${exhaustedErr.message}`);
   }
+
+  // The ceiling. Budget pauses recycle attempt-neutrally on purpose, so
+  // `attempts` no longer bounds a job that keeps proving liveness without
+  // finishing — wall clock does. Parked rows only (see CEILING_HOURS).
+  const ceilingCutoff = new Date(Date.now() - CEILING_HOURS * 3600 * 1000).toISOString();
+  const { error: ceilingErr } = await admin
+    .from("clone_backends")
+    .update({
+      status: "failed",
+      worker_finished_at: new Date().toISOString(),
+      queued_admin_password_enc: null,
+      error_message:
+        `Provisioning has been in flight for over ${CEILING_HOURS} hours without finishing. ` +
+        `Check the drain's delivery health and the clone's status history, then retry from the clone page.`,
+      status_detail: "Provisioning ceiling exceeded",
+    })
+    .lt("queued_at", ceilingCutoff)
+    .is("worker_started_at", null)
+    .is("worker_finished_at", null)
+    .in("status", ["pending", ...IN_FLIGHT_STATUSES]);
+  if (ceilingErr) {
+    throw new Error(`backend-provisioning reclaim: ceiling: ${ceilingErr.message}`);
+  }
 }
 
 /**
@@ -170,7 +208,9 @@ async function claimOne(): Promise<null | {
   return claimed ?? null;
 }
 
-async function drainOne(): Promise<{ processed: boolean; ok?: boolean; error?: string }> {
+async function drainOne(
+  deadlineAt: number,
+): Promise<{ processed: boolean; ok?: boolean; error?: string; budgetPaused?: boolean }> {
   const claimed = await claimOne();
   if (!claimed) return { processed: false };
 
@@ -216,10 +256,18 @@ async function drainOne(): Promise<{ processed: boolean; ok?: boolean; error?: s
     adminPassword,
     moduleIds: claimed.queued_module_ids ?? [],
     actorUserId: claimed.enqueued_by ?? null,
+    deadlineAt,
   });
 
+  // A budget pause is forward progress, not a failed attempt: the pipeline
+  // exited cleanly at a stage boundary and everything done so far survives a
+  // resume. Requeue with attempts RESET, so only consecutive hard deaths —
+  // runs that never reach a boundary — accumulate towards MAX_ATTEMPTS. The
+  // wall-clock ceiling in reclaimStalled() bounds the recycling.
+  const budgetPaused = !result.ok && result.retryable === true && result.progressed === true;
+
   // Clear the queued password whether we succeeded or exhausted retries.
-  const isTerminal = result.ok || claimed.attempts >= MAX_ATTEMPTS;
+  const isTerminal = result.ok || (!budgetPaused && claimed.attempts >= MAX_ATTEMPTS);
   await admin
     .from("clone_backends")
     .update({
@@ -228,10 +276,16 @@ async function drainOne(): Promise<{ processed: boolean; ok?: boolean; error?: s
       // If we failed but still have retries left, allow another worker to claim.
       worker_started_at: !result.ok && !isTerminal ? null : undefined,
       status: !result.ok && !isTerminal ? "pending" : undefined,
+      ...(budgetPaused ? { attempts: 0 } : {}),
     })
     .eq("clone_id", claimed.clone_id);
 
-  return { processed: true, ok: result.ok, error: result.ok ? undefined : result.error };
+  return {
+    processed: true,
+    ok: result.ok,
+    budgetPaused,
+    error: result.ok ? undefined : result.error,
+  };
 }
 
 export const Route = createFileRoute("/hooks/backend-provisioning-drain")({
@@ -242,11 +296,17 @@ export const Route = createFileRoute("/hooks/backend-provisioning-drain")({
         if (!auth.ok) return auth.response;
         try {
           await reclaimStalled();
-          const results: Array<{ ok?: boolean; error?: string }> = [];
+          // One deadline for the whole invocation: job 2 gets whatever job 1
+          // left, and a budget pause ends the invocation — starting another
+          // job past the deadline would just die mid-claim.
+          const deadlineAt = Date.now() + INVOCATION_BUDGET_MS;
+          const results: Array<{ ok?: boolean; error?: string; budgetPaused?: boolean }> = [];
           for (let i = 0; i < MAX_JOBS_PER_RUN; i++) {
-            const r = await drainOne();
+            if (Date.now() >= deadlineAt) break;
+            const r = await drainOne(deadlineAt);
             if (!r.processed) break;
-            results.push({ ok: r.ok, error: r.error });
+            results.push({ ok: r.ok, error: r.error, budgetPaused: r.budgetPaused });
+            if (r.budgetPaused) break;
           }
           return new Response(
             JSON.stringify({ success: true, processed: results.length, results }),

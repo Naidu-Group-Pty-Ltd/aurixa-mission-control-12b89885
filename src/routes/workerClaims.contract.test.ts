@@ -115,9 +115,7 @@ describe("a reclaim returns rows to the shape its own claim reads", () => {
     const body = bodyOf(source, "reclaimStalled");
     expect(body).toMatch(/\.is\("worker_started_at", null\)/);
     expect(body).toMatch(/\.in\("status", IN_FLIGHT_STATUSES\)/);
-    expect(source).toMatch(
-      /IN_FLIGHT_STATUSES = \["provisioning", "migrating", "seeding_admin"\]/,
-    );
+    expect(source).toMatch(/IN_FLIGHT_STATUSES = \["provisioning", "migrating", "seeding_admin"\]/);
   });
 
   it("backend drain: a stall on the final attempt terminates instead of queueing", () => {
@@ -142,6 +140,34 @@ describe("a reclaim returns rows to the shape its own claim reads", () => {
     const body = bodyOf(read("hooks.cascade-drain.tsx"), "reclaimStalled");
     expect(body).toMatch(/status:\s*"pending"/);
     expect(body).toMatch(/worker_started_at:\s*null/);
+  });
+
+  it("backend drain: a budget pause requeues with attempts reset, and the invocation carries one deadline", () => {
+    // The pipeline pauses at stage boundaries when the invocation budget is
+    // due (see provisioningBudget.ts). A pause is forward progress: requeue
+    // with attempts RESET, so MAX_ATTEMPTS counts only consecutive hard
+    // deaths. Without the reset, a three-slice pipeline exhausts on slices.
+    const src = read("hooks.backend-provisioning-drain.tsx");
+    const drain = bodyOf(src, "drainOne");
+    expect(drain).toMatch(/budgetPaused[\s\S]{0,120}progressed === true/);
+    expect(drain).toMatch(/budgetPaused \? \{ attempts: 0 \}/);
+    // One absolute deadline per invocation, handed to every job it runs.
+    expect(src).toContain("INVOCATION_BUDGET_MS");
+    expect(src).toMatch(/drainOne\(deadlineAt\)/);
+    expect(src).toMatch(/if \(r\.budgetPaused\) break;/);
+  });
+
+  it("backend drain: wall clock bounds the recycling that attempts no longer do", () => {
+    // Attempt-neutral requeues need their own terminal condition, or a job
+    // that keeps proving liveness without finishing recycles forever. Parked
+    // rows only — a live invocation is never failed under its own feet.
+    const body = bodyOf(read("hooks.backend-provisioning-drain.tsx"), "reclaimStalled");
+    expect(body).toMatch(/CEILING_HOURS/);
+    expect(body).toMatch(/\.lt\("queued_at", ceilingCutoff\)/);
+    expect(body).toMatch(/Provisioning ceiling exceeded/);
+    expect(body).toMatch(
+      /\.is\("worker_started_at", null\)[\s\S]{0,80}\.is\("worker_finished_at", null\)/,
+    );
   });
 
   it("deployment drain: claim reads every CLAIMABLE status, which is why its reclaim may reset the timestamp alone", () => {

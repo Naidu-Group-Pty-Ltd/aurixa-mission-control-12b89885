@@ -115,11 +115,46 @@ export async function runFleetDriftScan(
   const { data: clones } = await supabase.from("clones").select("*");
   if (!clones || clones.length === 0) return { scanned: 0, updated: 0 };
 
+  // A clone that is still being PROVISIONED is not drifting — drift compares
+  // two live things, and one of them does not exist yet. The 30 Aug dry run
+  // measured what scanning one anyway does: a clone created at 15:34 drew a
+  // "High drift" warning every 15 minutes for hours (each one a PAID model
+  // call in analyzeClone), because a null last_cascade_at scored as 99,999
+  // minutes behind. Backend or deployment still in flight → record the check
+  // ran and nothing else.
+  const inFlightBackends = new Set<string>();
+  const { data: backendRows } = await supabase.from("clone_backends").select("clone_id, status");
+  for (const b of backendRows ?? []) {
+    if (["pending", "provisioning", "migrating", "seeding_admin"].includes(b.status)) {
+      inFlightBackends.add(b.clone_id);
+    }
+  }
+  const { data: deploymentRows } = await supabase
+    .from("clone_deployments")
+    .select("clone_id, status");
+  for (const d of deploymentRows ?? []) {
+    if (d.status !== "live" && d.status !== "failed") inFlightBackends.add(d.clone_id);
+  }
+
   let updated = 0;
   for (const c of clones) {
-    // Pseudo "git diff" — in real wiring, compare last_synced_sha vs prime HEAD
-    const minutesSinceCascade = c.last_cascade_at
-      ? (Date.now() - new Date(c.last_cascade_at).getTime()) / 60000
+    if (inFlightBackends.has(c.id)) {
+      await supabase
+        .from("clones")
+        .update({ last_drift_check_at: new Date().toISOString() })
+        .eq("id", c.id);
+      updated++;
+      continue;
+    }
+
+    // Pseudo "git diff" — in real wiring, compare last_synced_sha vs prime HEAD.
+    // A clone with no cascade yet is NOT 99,999 minutes behind: a template
+    // copy is born AT prime HEAD, so its clock starts at creation. Inventing
+    // a number here is the "fabricated zero" rule in reverse — and it was a
+    // fabricated forty.
+    const clockBase = c.last_cascade_at ?? c.created_at;
+    const minutesSinceCascade = clockBase
+      ? (Date.now() - new Date(clockBase).getTime()) / 60000
       : 99999;
     const drift = Math.min(40, Math.max(0, Math.floor(minutesSinceCascade / 30)));
     const newCommitsBehind = c.sync_status === "in_sync" && drift < 2 ? 0 : drift;
@@ -165,10 +200,16 @@ export async function runFleetDriftScan(
       .eq("id", c.id);
     updated++;
 
-    // Emit notifications for genuinely new high-severity suggestions
-    const newHigh = suggestions.filter(
-      (s) => s.severity === "high" && !previousHighTitles.has(s.title),
-    );
+    // Emit notifications when the clone ENTERS a behind state, not on every
+    // scan while it stays there. The old title-set dedupe never held: the
+    // titles are model-authored and vary per run, so "genuinely new" was true
+    // every 15 minutes — the dry-run clone drew ten identical warnings in one
+    // afternoon, two of them in the same insert at the same microsecond. A
+    // transition is a fact the model cannot rephrase.
+    const wasAlreadyBehind = c.sync_status === "behind" || c.sync_status === "failed";
+    const newHigh = wasAlreadyBehind
+      ? []
+      : suggestions.filter((s) => s.severity === "high" && !previousHighTitles.has(s.title));
     if (newHigh.length > 0) {
       await supabase.from("notifications").insert(
         newHigh.map((s) => ({

@@ -96,6 +96,7 @@ import { Route as HooksCloneJwtSecretReconcileRouteImport } from './routes/hooks
 import { Route as HooksCascadeMergeDrainRouteImport } from './routes/hooks.cascade-merge-drain'
 import { Route as HooksCascadeDrainRouteImport } from './routes/hooks.cascade-drain'
 import { Route as HooksBrandDriftRouteImport } from './routes/hooks.brand-drift'
+import { Route as HooksBackendProvisioningRetryRouteImport } from './routes/hooks.backend-provisioning-retry'
 import { Route as HooksBackendProvisioningDrainRouteImport } from './routes/hooks.backend-provisioning-drain'
 import { Route as HooksApiUsageSettleRouteImport } from './routes/hooks.api-usage-settle'
 import { Route as HooksAllowedOriginsReconcileRouteImport } from './routes/hooks.allowed-origins-reconcile'
@@ -620,6 +621,12 @@ const HooksBrandDriftRoute = HooksBrandDriftRouteImport.update({
   path: '/hooks/brand-drift',
   getParentRoute: () => rootRouteImport,
 } as any)
+const HooksBackendProvisioningRetryRoute =
+  HooksBackendProvisioningRetryRouteImport.update({
+    id: '/hooks/backend-provisioning-retry',
+    path: '/hooks/backend-provisioning-retry',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const HooksBackendProvisioningDrainRoute =
   HooksBackendProvisioningDrainRouteImport.update({
     id: '/hooks/backend-provisioning-drain',
@@ -1106,6 +1113,7 @@ export interface FileRoutesByFullPath {
   '/hooks/allowed-origins-reconcile': typeof HooksAllowedOriginsReconcileRoute
   '/hooks/api-usage-settle': typeof HooksApiUsageSettleRoute
   '/hooks/backend-provisioning-drain': typeof HooksBackendProvisioningDrainRoute
+  '/hooks/backend-provisioning-retry': typeof HooksBackendProvisioningRetryRoute
   '/hooks/brand-drift': typeof HooksBrandDriftRoute
   '/hooks/cascade-drain': typeof HooksCascadeDrainRoute
   '/hooks/cascade-merge-drain': typeof HooksCascadeMergeDrainRoute
@@ -1274,6 +1282,7 @@ export interface FileRoutesByTo {
   '/hooks/allowed-origins-reconcile': typeof HooksAllowedOriginsReconcileRoute
   '/hooks/api-usage-settle': typeof HooksApiUsageSettleRoute
   '/hooks/backend-provisioning-drain': typeof HooksBackendProvisioningDrainRoute
+  '/hooks/backend-provisioning-retry': typeof HooksBackendProvisioningRetryRoute
   '/hooks/brand-drift': typeof HooksBrandDriftRoute
   '/hooks/cascade-drain': typeof HooksCascadeDrainRoute
   '/hooks/cascade-merge-drain': typeof HooksCascadeMergeDrainRoute
@@ -1444,6 +1453,7 @@ export interface FileRoutesById {
   '/hooks/allowed-origins-reconcile': typeof HooksAllowedOriginsReconcileRoute
   '/hooks/api-usage-settle': typeof HooksApiUsageSettleRoute
   '/hooks/backend-provisioning-drain': typeof HooksBackendProvisioningDrainRoute
+  '/hooks/backend-provisioning-retry': typeof HooksBackendProvisioningRetryRoute
   '/hooks/brand-drift': typeof HooksBrandDriftRoute
   '/hooks/cascade-drain': typeof HooksCascadeDrainRoute
   '/hooks/cascade-merge-drain': typeof HooksCascadeMergeDrainRoute
@@ -1615,6 +1625,7 @@ export interface FileRouteTypes {
     | '/hooks/allowed-origins-reconcile'
     | '/hooks/api-usage-settle'
     | '/hooks/backend-provisioning-drain'
+    | '/hooks/backend-provisioning-retry'
     | '/hooks/brand-drift'
     | '/hooks/cascade-drain'
     | '/hooks/cascade-merge-drain'
@@ -1783,6 +1794,7 @@ export interface FileRouteTypes {
     | '/hooks/allowed-origins-reconcile'
     | '/hooks/api-usage-settle'
     | '/hooks/backend-provisioning-drain'
+    | '/hooks/backend-provisioning-retry'
     | '/hooks/brand-drift'
     | '/hooks/cascade-drain'
     | '/hooks/cascade-merge-drain'
@@ -1952,6 +1964,7 @@ export interface FileRouteTypes {
     | '/hooks/allowed-origins-reconcile'
     | '/hooks/api-usage-settle'
     | '/hooks/backend-provisioning-drain'
+    | '/hooks/backend-provisioning-retry'
     | '/hooks/brand-drift'
     | '/hooks/cascade-drain'
     | '/hooks/cascade-merge-drain'
@@ -2119,6 +2132,7 @@ export interface RootRouteChildren {
   HooksAllowedOriginsReconcileRoute: typeof HooksAllowedOriginsReconcileRoute
   HooksApiUsageSettleRoute: typeof HooksApiUsageSettleRoute
   HooksBackendProvisioningDrainRoute: typeof HooksBackendProvisioningDrainRoute
+  HooksBackendProvisioningRetryRoute: typeof HooksBackendProvisioningRetryRoute
   HooksBrandDriftRoute: typeof HooksBrandDriftRoute
   HooksCascadeDrainRoute: typeof HooksCascadeDrainRoute
   HooksCascadeMergeDrainRoute: typeof HooksCascadeMergeDrainRoute
@@ -2825,6 +2839,13 @@ declare module '@tanstack/react-router' {
       path: '/hooks/brand-drift'
       fullPath: '/hooks/brand-drift'
       preLoaderRoute: typeof HooksBrandDriftRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/backend-provisioning-retry': {
+      id: '/hooks/backend-provisioning-retry'
+      path: '/hooks/backend-provisioning-retry'
+      fullPath: '/hooks/backend-provisioning-retry'
+      preLoaderRoute: typeof HooksBackendProvisioningRetryRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/hooks/backend-provisioning-drain': {
@@ -3546,6 +3567,7 @@ const rootRouteChildren: RootRouteChildren = {
   HooksAllowedOriginsReconcileRoute: HooksAllowedOriginsReconcileRoute,
   HooksApiUsageSettleRoute: HooksApiUsageSettleRoute,
   HooksBackendProvisioningDrainRoute: HooksBackendProvisioningDrainRoute,
+  HooksBackendProvisioningRetryRoute: HooksBackendProvisioningRetryRoute,
   HooksBrandDriftRoute: HooksBrandDriftRoute,
   HooksCascadeDrainRoute: HooksCascadeDrainRoute,
   HooksCascadeMergeDrainRoute: HooksCascadeMergeDrainRoute,

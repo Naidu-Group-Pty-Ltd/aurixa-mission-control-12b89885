@@ -445,6 +445,45 @@ async function fetchBlobBase64(octokit: Octokit, ref: RepoRef, sha: string): Pro
 }
 
 /**
+ * How many blob fetches run at once. One round trip per blob is the unit of
+ * cost here, and the snapshot needs THOUSANDS of them — every migration and
+ * every edge-function file is its own `git.getBlob` call. Fetched serially
+ * that is tens of minutes, which is longer than the drain worker invocation
+ * that runs it lives: the first engine-provisioned clone died mid-snapshot on
+ * three consecutive attempts and never got past this step. Pooled at this
+ * width the same walk is tens of seconds. The width is deliberately modest —
+ * GitHub's secondary rate limits punish bursts from a single installation
+ * token, and a snapshot that gets the App rate-limited breaks the cascade and
+ * every other GitHub caller sharing the token.
+ */
+const BLOB_FETCH_CONCURRENCY = 12;
+
+/**
+ * Bounded-concurrency map that preserves input order in its results.
+ * Rejects with the first failure, like `Promise.all`.
+ */
+export async function mapPool<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from(
+    { length: Math.max(1, Math.min(concurrency, items.length)) },
+    async () => {
+      for (;;) {
+        const i = next++;
+        if (i >= items.length) return;
+        out[i] = await fn(items[i], i);
+      }
+    },
+  );
+  await Promise.all(workers);
+  return out;
+}
+
+/**
  * Minimal shape of the Supabase query builder chain the prime resolvers need.
  *
  * `error` is part of the shape deliberately. PostgREST always returns both
@@ -710,11 +749,17 @@ export async function fetchPrimeBackendSnapshot(
   const { blobs, commitSha } = await listSupabaseBlobs(octokit, ref);
 
   // ── Migrations ──
-  const migrations: PrimeMigration[] = [];
-  for (const meta of migrationMetasFromBlobs(blobs)) {
-    const sql = decodeBase64Utf8(await fetchBlobBase64(octokit, ref, meta.sha));
-    migrations.push({ id: meta.id, name: meta.name, path: meta.path, sql });
-  }
+  // Pooled, not serial — see BLOB_FETCH_CONCURRENCY for why serial was fatal.
+  const migrationMetas = migrationMetasFromBlobs(blobs);
+  const migrationSqls = await mapPool(migrationMetas, BLOB_FETCH_CONCURRENCY, async (meta) =>
+    decodeBase64Utf8(await fetchBlobBase64(octokit, ref, meta.sha)),
+  );
+  const migrations: PrimeMigration[] = migrationMetas.map((meta, i) => ({
+    id: meta.id,
+    name: meta.name,
+    path: meta.path,
+    sql: migrationSqls[i],
+  }));
 
   // ── Edge functions ──
   const functionBlobs = blobs.filter((b) => b.path.startsWith(FUNCTIONS_PREFIX));
@@ -730,37 +775,51 @@ export async function fetchPrimeBackendSnapshot(
     : null;
   const fnConfig = parseFunctionConfig(configToml);
 
-  // Fetch each needed blob once, keyed by relative path.
-  const contentCache = new Map<string, string>();
-  const getContent = async (rel: string): Promise<string> => {
-    const hit = contentCache.get(rel);
-    if (hit !== undefined) return hit;
-    const sha = shaByRel.get(rel);
-    if (!sha) throw new Error(`Blob not found for ${rel}`);
-    const b64 = await fetchBlobBase64(octokit, ref, sha);
-    contentCache.set(rel, b64);
-    return b64;
-  };
-
-  const functions: PrimeEdgeFunction[] = [];
+  // Decide which bundles are deployable FIRST, so the fetch pool below pulls
+  // exactly the set of blobs the bundles need — each once, whole set pooled.
+  const deployable: Array<{ slug: string; bundlePaths: string[]; entrypointPath: string }> = [];
   for (const [slug, ownPaths] of Array.from(slugs.entries()).sort((a, b) =>
     a[0].localeCompare(b[0]),
   )) {
     const bundlePaths = [...ownPaths, ...sharedFiles];
     const entrypointPath = pickEntrypoint(slug, bundlePaths);
     if (!entrypointPath) continue; // no runnable entrypoint — not a deployable function
-    const files: PrimeFunctionFile[] = [];
-    for (const rel of bundlePaths) {
-      files.push({ path: rel, contentBase64: await getContent(rel) });
+    deployable.push({ slug, bundlePaths, entrypointPath });
+  }
+
+  // Fetch each needed blob once, keyed by relative path — pooled, not serial.
+  // This loop is the bulk of the snapshot's round trips (hundreds of
+  // functions, each bundling the shared tree), and the serial version of it is
+  // what no drain invocation ever survived.
+  const neededRels: string[] = [];
+  const seenRel = new Set<string>();
+  for (const bundle of deployable) {
+    for (const rel of bundle.bundlePaths) {
+      if (seenRel.has(rel)) continue;
+      seenRel.add(rel);
+      neededRels.push(rel);
     }
-    functions.push({
+  }
+  const contentCache = new Map<string, string>();
+  await mapPool(neededRels, BLOB_FETCH_CONCURRENCY, async (rel) => {
+    const sha = shaByRel.get(rel);
+    if (!sha) throw new Error(`Blob not found for ${rel}`);
+    contentCache.set(rel, await fetchBlobBase64(octokit, ref, sha));
+  });
+
+  const functions: PrimeEdgeFunction[] = deployable.map(
+    ({ slug, bundlePaths, entrypointPath }) => ({
       slug,
-      files,
+      files: bundlePaths.map((rel): PrimeFunctionFile => {
+        const contentBase64 = contentCache.get(rel);
+        if (contentBase64 === undefined) throw new Error(`Blob not found for ${rel}`);
+        return { path: rel, contentBase64 };
+      }),
       entrypointPath,
       importMapPath,
       verifyJwt: fnConfig.get(slug)?.verifyJwt ?? true,
-    });
-  }
+    }),
+  );
 
   // ── Secret shells ──
   const textSources: string[] = [];
