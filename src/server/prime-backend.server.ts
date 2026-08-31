@@ -878,14 +878,22 @@ export async function fetchPrimeBackendSnapshot(
   });
   const contentCache = await fetchBlobTextsBatched(octokit, ref, neededEntries);
 
+  // ONE file object per distinct path, shared BY REFERENCE across every bundle
+  // that carries it. Every bundle includes the whole `_shared` tree by
+  // convention, so building a fresh object per bundle entry meant ~217,000
+  // objects for 1,033 distinct files (423 bundles × 516 files) — tens of
+  // megabytes of pure allocation overhead before a single byte of payload.
+  const fileByPath = new Map<string, PrimeFunctionFile>();
+  for (const rel of neededRels) {
+    const contentBase64 = contentCache.get(rel);
+    if (contentBase64 === undefined) throw new Error(`Blob not found for ${rel}`);
+    fileByPath.set(rel, { path: rel, contentBase64 });
+  }
+
   const functions: PrimeEdgeFunction[] = deployable.map(
     ({ slug, bundlePaths, entrypointPath }) => ({
       slug,
-      files: bundlePaths.map((rel): PrimeFunctionFile => {
-        const contentBase64 = contentCache.get(rel);
-        if (contentBase64 === undefined) throw new Error(`Blob not found for ${rel}`);
-        return { path: rel, contentBase64 };
-      }),
+      files: bundlePaths.map((rel) => fileByPath.get(rel)!),
       entrypointPath,
       importMapPath,
       verifyJwt: fnConfig.get(slug)?.verifyJwt ?? true,
@@ -893,11 +901,18 @@ export async function fetchPrimeBackendSnapshot(
   );
 
   // ── Secret shells ──
+  //
+  // Scanned over the DISTINCT files, never over the bundles. Walking
+  // `functions` here decoded each shared file once per bundle and pushed every
+  // copy into one array: 423 bundles × a 6.3 MB shared tree is roughly 2.7 GB
+  // of decoded strings, which is why the worker died the moment the fetch got
+  // fast enough to reach this loop (31 Aug 2026, 04:05 — a hard 502 rather
+  // than the timeouts every earlier build produced). The answer is the same
+  // set of secret names: a name found in a file is found whichever bundles
+  // that file happens to travel in.
   const textSources: string[] = [];
-  for (const fn of functions) {
-    for (const f of fn.files) {
-      if (isTextFile(f.path)) textSources.push(decodeBase64Utf8(f.contentBase64));
-    }
+  for (const [rel, f] of fileByPath) {
+    if (isTextFile(rel)) textSources.push(decodeBase64Utf8(f.contentBase64));
   }
   const secretNames = extractSecretNames(textSources);
 

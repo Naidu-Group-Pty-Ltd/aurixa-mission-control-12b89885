@@ -219,3 +219,31 @@ describe("the retry hook is the operator's button, engine-callable", () => {
     expect(src).not.toContain('from("clone_backends").upsert');
   });
 });
+
+describe("the snapshot materialises once per file, never once per bundle", () => {
+  /* Every bundle carries the whole `_shared` tree by convention, so anything
+     that walks bundles multiplies the shared tree by the function count. The
+     prime has 423 bundles and a 6.3 MB shared tree: walking bundles to collect
+     secret names decoded roughly 2.7 GB of strings into one array. It killed
+     the worker outright (502) the moment the fetch got fast enough to reach
+     it — every earlier build had died fetching, which is why a defect present
+     from the start only surfaced last. */
+  it("builds one file object per distinct path and shares it by reference", () => {
+    const fn = primeBackend().slice(
+      primeBackend().indexOf("export async function fetchPrimeBackendSnapshot"),
+    );
+    expect(fn).toMatch(/const fileByPath = new Map<string, PrimeFunctionFile>\(\)/);
+    expect(fn).toMatch(/files: bundlePaths\.map\(\(rel\) => fileByPath\.get\(rel\)!\)/);
+  });
+
+  it("scans distinct files for secret names, never the bundles", () => {
+    const fn = primeBackend().slice(
+      primeBackend().indexOf("export async function fetchPrimeBackendSnapshot"),
+    );
+    expect(fn).toMatch(/for \(const \[rel, f\] of fileByPath\)/);
+    /* The shape that cost 2.7 GB. It must not come back. */
+    expect(fn).not.toMatch(
+      /for \(const fn of functions\)[\s\S]{0,120}for \(const f of fn\.files\)/,
+    );
+  });
+});
