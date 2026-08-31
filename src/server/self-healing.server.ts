@@ -598,7 +598,11 @@ async function executeEdgeFunctionDeploy(run: any): Promise<{ status: string }> 
   const source = await resolvePrimeSource(admin);
   if (!source) return parkRun(run, ["prime source repo is not configured"]);
 
-  const snapshot = await fetchPrimeBackendSnapshot(getAppOctokit(), source);
+  // This lane redeploys FUNCTION bundles; migration SQL bodies are half the
+  // snapshot's round trips and nothing here reads them.
+  const snapshot = await fetchPrimeBackendSnapshot(getAppOctokit(), source, {
+    includeMigrationSql: false,
+  });
   const wanted: string[] | null = run.plan?.slugs ?? null;
   const bundles = (snapshot.functions ?? []).filter(
     (fn: any) => !wanted || wanted.includes(fn.slug),

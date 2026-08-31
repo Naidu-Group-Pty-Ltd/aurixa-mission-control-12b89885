@@ -85,7 +85,12 @@ async function runBackendProvisioning(
       `Snapshotting backend architecture from ${source.owner}/${source.repo}@${source.branch}...`,
     );
     const octokit = getAppOctokit();
-    const snapshot = await fetchPrimeBackendSnapshot(octokit, source);
+    // Migration SQL bodies are ~half the snapshot's round trips and only the
+    // replay strategy reads them; the default introspection path needs the
+    // file LIST alone. See fetchPrimeBackendSnapshot's opts doc.
+    const snapshot = await fetchPrimeBackendSnapshot(octokit, source, {
+      includeMigrationSql: (input.schemaStrategy ?? "introspection") === "migration-replay",
+    });
     if (snapshot.migrations.length === 0) {
       throw new Error(
         `No migrations found under supabase/migrations in ${source.owner}/${source.repo}@${source.branch} — nothing to replicate`,
