@@ -16,6 +16,7 @@
 -- the default and what a completed pass writes back — a pass that began
 -- partway through never claims the run is finished, it asks for one more full
 -- pass to verify the stages it skipped.
+-- @asserts column:clone_backends.resume_stage
 alter table public.clone_backends
   add column if not exists resume_stage text;
 
