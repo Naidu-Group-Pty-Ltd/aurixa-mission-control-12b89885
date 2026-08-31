@@ -247,3 +247,31 @@ describe("the snapshot materialises once per file, never once per bundle", () =>
     );
   });
 });
+
+describe("every stage can be interrupted at batch granularity", () => {
+  /* A stage that cannot pause gets KILLED instead, and a kill costs a
+     15-minute stall reclaim where a pause costs 60 seconds. The `functions`
+     stage settled it: 624 definitions in batches of 15 over up to five
+     convergence passes is not work any single invocation finishes. Batches
+     commit individually, so between them is the finest honest interruption
+     point — below it is one server-side transaction. */
+  it("applyStatements checks the budget between batches, never before the first", () => {
+    const src = introspection();
+    const fn = src.slice(src.indexOf("export async function applyStatements"));
+    expect(fn).toMatch(/pauseIfDue\?:\s*\(about: string\) => void/);
+    expect(fn).toMatch(/if \(i > 0\) pauseIfDue\?\./);
+  });
+
+  it("the repeating loops pass the hook down", () => {
+    const src = introspection();
+    /* The two stages that re-apply a whole statement set until it converges. */
+    expect(src).toMatch(/applyStatements\(cloneRef, "functions", fnStmts, 15, pauseIfDue\)/);
+    expect(src).toMatch(/applyStatements\(cloneRef, "views", viewStmts, 30, pauseIfDue\)/);
+  });
+
+  it("a finished stage is skipped by asking the clone, not by keeping notes", () => {
+    const src = introspection();
+    expect(src).toMatch(/async function alreadyReconciled\(/);
+    expect(src).toMatch(/already reconciled — skipped on resume/);
+  });
+});
