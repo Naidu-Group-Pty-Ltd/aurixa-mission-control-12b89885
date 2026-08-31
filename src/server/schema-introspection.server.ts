@@ -867,12 +867,39 @@ export async function replicateSchemaByIntrospection(
   if (enterStage("functions")) {
     await say("Replicating functions...");
     const fnRows = await query(primeRef, Q.functions);
-    const fnStmts = fnRows.map((r) => str(r.def)).filter(Boolean);
+    const allFnStmts = fnRows.map((r) => str(r.def)).filter(Boolean);
     const history: number[] = [];
     let lastApply: BatchApplyResult = { applied: 0, failed: 0, errors: [] };
     let totalApplied = 0;
+    let lastOutstanding = allFnStmts.length;
     while (shouldRunAnotherFunctionPass(history)) {
-      await say(`Functions pass ${history.length + 1}...`);
+      // ASK THE TARGET WHAT IT ALREADY HOLDS, exactly as the stage gate and
+      // the edge-function deploy do. This stage applies 739 definitions in
+      // batches of 15, and it restarts at batch zero on every invocation —
+      // so without this, a budgeted pass spends nearly all of its slice
+      // re-issuing CREATE OR REPLACE for functions the clone already has and
+      // never reaches the tail. Measured on 31 Aug 2026: the count sat at
+      // 594 across a dozen consecutive passes, all of them reporting
+      // "Functions pass 1" and all of them doing real work that changed
+      // nothing.
+      //
+      // The comparison is on the definition TEXT, both sides rendered by the
+      // same pg_get_functiondef. Identical text is the same function, so
+      // skipping it is exactly what CREATE OR REPLACE would have done; any
+      // difference at all re-applies. The bias is deliberate — an unnecessary
+      // re-apply costs a batch, a wrongly skipped one costs correctness.
+      const held = new Set(
+        (await query(cloneRef, Q.functions)).map((r) => str(r.def)).filter(Boolean),
+      );
+      const fnStmts = allFnStmts.filter((stmt) => !held.has(stmt));
+      lastOutstanding = fnStmts.length;
+      if (fnStmts.length === 0) {
+        history.push(0);
+        break;
+      }
+      await say(
+        `Functions pass ${history.length + 1} — ${fnStmts.length} of ${allFnStmts.length} outstanding...`,
+      );
       lastApply = await applyStatements(cloneRef, "functions", fnStmts, 15, pauseIfDue);
       totalApplied += lastApply.applied;
       history.push(lastApply.failed);
@@ -889,7 +916,10 @@ export async function replicateSchemaByIntrospection(
       failed: history[history.length - 1] ?? 0,
       reconciled: reconcile(fnPrime, fnClone),
       ...(lastApply.errors.length ? { errors: lastApply.errors } : {}),
-      notes: [`convergence: ${history.join(" → ")}`],
+      notes: [
+        `convergence: ${history.join(" → ")}`,
+        `outstanding at last pass: ${lastOutstanding}`,
+      ],
     });
   }
 

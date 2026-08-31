@@ -479,3 +479,42 @@ describe("a resumed pass does not buy what it cannot use", () => {
     expect(branch).toMatch(/"",/);
   });
 });
+
+describe("the functions stage asks the clone what it already holds", () => {
+  it("applies only the outstanding definitions, not all of them", () => {
+    const src = introspection();
+    /* The diff must be computed INSIDE the convergence loop: each pass lands
+       more functions, so the work has to shrink pass by pass. */
+    const stageAt = src.indexOf('if (enterStage("functions"))');
+    const loopAt = src.indexOf("while (shouldRunAnotherFunctionPass(history))", stageAt);
+    const applyAt = src.indexOf('applyStatements(cloneRef, "functions"', loopAt);
+    const heldAt = src.indexOf("const held = new Set(", loopAt);
+    expect(heldAt).toBeGreaterThan(loopAt);
+    expect(heldAt).toBeLessThan(applyAt);
+    /* Read from the CLONE, with the same query the prime is read with — two
+       spellings of "what is a function here" is how a diff lies. */
+    const branch = src.slice(loopAt, applyAt);
+    expect(branch).toMatch(/query\(cloneRef, Q\.functions\)/);
+    expect(branch).toMatch(/allFnStmts\.filter\(\(stmt\) => !held\.has\(stmt\)\)/);
+  });
+
+  it("nothing outstanding ends the stage rather than applying an empty batch", () => {
+    const src = introspection();
+    const loopAt = src.indexOf("while (shouldRunAnotherFunctionPass(history))");
+    const branch = src.slice(loopAt, loopAt + 1800);
+    expect(branch).toMatch(/if \(fnStmts\.length === 0\)[\s\S]{0,80}break;/);
+  });
+
+  it("reconciliation still counts the catalogue, never the diff", () => {
+    /* The stage's verdict must come from counting both databases. A diff that
+       skipped everything would otherwise report a reconciled stage on a clone
+       holding nothing. */
+    const src = introspection();
+    const stageAt = src.indexOf('if (enterStage("functions"))');
+    const pushAt = src.indexOf('stage: "functions",', stageAt);
+    const tail = src.slice(stageAt, pushAt + 400);
+    expect(tail).toMatch(/countOn\(primeRef, "functions"\)/);
+    expect(tail).toMatch(/countOn\(cloneRef, "functions"\)/);
+    expect(tail).toMatch(/reconciled: reconcile\(fnPrime, fnClone\)/);
+  });
+});
