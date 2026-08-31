@@ -36,6 +36,7 @@ import {
   PhoneOutgoing,
   Route,
   Receipt,
+  ShieldAlert as GateIcon,
   ReceiptText,
   ScrollText,
   Settings,
@@ -317,6 +318,13 @@ export const NAV_SECTIONS: NavSection[] = [
         keywords: "api keys metering piggyback byok openai resend vendor spend recharge",
       },
       { to: "/billing/topup", label: "Top-up", icon: Coins, keywords: "tokens credits" },
+      {
+        to: "/billing/gates",
+        label: "Payment Gates",
+        icon: GateIcon,
+        keywords:
+          "activation gate lock unlock clone access grace period trial countdown 72 hours paid unpaid stripe",
+      },
     ],
   },
   {

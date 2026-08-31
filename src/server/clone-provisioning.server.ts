@@ -9,6 +9,7 @@ import { getAppOctokit } from "./github-app.server";
 import { generateApiKey } from "./clone-api-keys.server";
 import { cascadeApiKeyToRepo } from "./clone-credentials.server";
 import { fireTokenWebhook } from "./token-webhooks.server";
+import { armGate } from "./payment-gate.server";
 import type { Database } from "@/integrations/supabase/types";
 import type { ProvisionCloneInput, ProvisionCloneResult } from "./clone-provisioning.functions";
 
@@ -162,6 +163,39 @@ export async function provisionCloneCore(
         notes: "Selected during clone provisioning",
       })),
     );
+  }
+
+  // ─── Arm the activation gate ──────────────────────────────────────────
+  // A clone provisioned onto a PAID plan boots on a clock and is locked when
+  // it runs out, until Stripe captures the activation payment.
+  //
+  // It sits in the PIPELINE rather than in the wizard's server function
+  // precisely because this function has two callers — the operator wizard and
+  // the signed-agreement flow — and a gate armed in only one of them would
+  // mean a clone created by an agreement is never gated at all. One pipeline,
+  // one gate, exactly as the header above says.
+  //
+  // This is also the only place a gate is ever created: nothing backfills, so
+  // the prime and every clone that already exists are untouched by
+  // construction rather than by a flag somebody has to remember to set.
+  //
+  // Deliberately non-fatal. The repo is already forked and the clone row is
+  // already written; failing here would leave a half-provisioned clone behind
+  // a gate that is also the thing that failed. A clone that does not arm is a
+  // clone with no gate — the fleet's existing behaviour — and the Payment
+  // Gates console lists paid clones with no gate for exactly this reason.
+  const gate = await armGate({
+    cloneId: inserted.id,
+    cloneName: data.name,
+    planSlug: data.planSlug,
+    graceHours: data.gateGraceHours,
+    actorId: userId,
+  });
+  if (!gate.armed && gate.reason === "write_failed") {
+    console.error("[provisionCloneCore] activation gate not armed", {
+      cloneId: inserted.id,
+      detail: gate.detail,
+    });
   }
 
   // Install picked modules

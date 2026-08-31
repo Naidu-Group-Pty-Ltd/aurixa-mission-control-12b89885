@@ -2532,6 +2532,158 @@ export type Database = {
           },
         ]
       }
+      clone_payment_gate_events: {
+        Row: {
+          actor: string
+          actor_id: string | null
+          clone_id: string
+          created_at: string
+          gate_id: string
+          id: string
+          kind: string
+          metadata: Json
+          reason: string | null
+          status_after: string | null
+          status_before: string | null
+        }
+        Insert: {
+          actor?: string
+          actor_id?: string | null
+          clone_id: string
+          created_at?: string
+          gate_id: string
+          id?: string
+          kind: string
+          metadata?: Json
+          reason?: string | null
+          status_after?: string | null
+          status_before?: string | null
+        }
+        Update: {
+          actor?: string
+          actor_id?: string | null
+          clone_id?: string
+          created_at?: string
+          gate_id?: string
+          id?: string
+          kind?: string
+          metadata?: Json
+          reason?: string | null
+          status_after?: string | null
+          status_before?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clone_payment_gate_events_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "clone_payment_gate_events_gate_id_fkey"
+            columns: ["gate_id"]
+            isOneToOne: false
+            referencedRelation: "clone_payment_gates"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      clone_payment_gates: {
+        Row: {
+          amount_due_cents: number | null
+          amount_paid_cents: number | null
+          armed_at: string
+          check_count: number
+          clone_id: string
+          created_at: string
+          currency: string
+          first_locked_seen_at: string | null
+          grace_hours: number | null
+          id: string
+          last_checked_at: string | null
+          locks_at: string | null
+          manual_override: string | null
+          manual_override_at: string | null
+          manual_override_by: string | null
+          manual_override_reason: string | null
+          notes: string | null
+          paid_at: string | null
+          payment_source: string | null
+          plan_name: string | null
+          plan_slug: string | null
+          stripe_checkout_session_id: string | null
+          stripe_customer_id: string | null
+          stripe_payment_intent_id: string | null
+          stripe_subscription_id: string | null
+          updated_at: string
+        }
+        Insert: {
+          amount_due_cents?: number | null
+          amount_paid_cents?: number | null
+          armed_at?: string
+          check_count?: number
+          clone_id: string
+          created_at?: string
+          currency?: string
+          first_locked_seen_at?: string | null
+          grace_hours?: number | null
+          id?: string
+          last_checked_at?: string | null
+          locks_at?: string | null
+          manual_override?: string | null
+          manual_override_at?: string | null
+          manual_override_by?: string | null
+          manual_override_reason?: string | null
+          notes?: string | null
+          paid_at?: string | null
+          payment_source?: string | null
+          plan_name?: string | null
+          plan_slug?: string | null
+          stripe_checkout_session_id?: string | null
+          stripe_customer_id?: string | null
+          stripe_payment_intent_id?: string | null
+          stripe_subscription_id?: string | null
+          updated_at?: string
+        }
+        Update: {
+          amount_due_cents?: number | null
+          amount_paid_cents?: number | null
+          armed_at?: string
+          check_count?: number
+          clone_id?: string
+          created_at?: string
+          currency?: string
+          first_locked_seen_at?: string | null
+          grace_hours?: number | null
+          id?: string
+          last_checked_at?: string | null
+          locks_at?: string | null
+          manual_override?: string | null
+          manual_override_at?: string | null
+          manual_override_by?: string | null
+          manual_override_reason?: string | null
+          notes?: string | null
+          paid_at?: string | null
+          payment_source?: string | null
+          plan_name?: string | null
+          plan_slug?: string | null
+          stripe_checkout_session_id?: string | null
+          stripe_customer_id?: string | null
+          stripe_payment_intent_id?: string | null
+          stripe_subscription_id?: string | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clone_payment_gates_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: true
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       clone_reference_syncs: {
         Row: {
           clone_id: string
@@ -7841,6 +7993,8 @@ export type Database = {
           codex_nightly_enabled: boolean
           codex_post_merge_revalidate: boolean
           codex_pr_scan_enabled: boolean
+          clone_gate_default_hours: number
+          clone_gate_enabled: boolean
           codex_scan_dedup_hours: number
           created_at: string
           default_branch: string
@@ -7859,6 +8013,8 @@ export type Database = {
           codex_nightly_enabled?: boolean
           codex_post_merge_revalidate?: boolean
           codex_pr_scan_enabled?: boolean
+          clone_gate_default_hours?: number
+          clone_gate_enabled?: boolean
           codex_scan_dedup_hours?: number
           created_at?: string
           default_branch?: string
@@ -7877,6 +8033,8 @@ export type Database = {
           codex_nightly_enabled?: boolean
           codex_post_merge_revalidate?: boolean
           codex_pr_scan_enabled?: boolean
+          clone_gate_default_hours?: number
+          clone_gate_enabled?: boolean
           codex_scan_dedup_hours?: number
           created_at?: string
           default_branch?: string
@@ -11856,6 +12014,10 @@ export type Database = {
       ledger_source: "subscription" | "topup" | "manual" | "system" | "report"
       module_status: "proposed" | "approved" | "archived" | "rejected"
       notification_kind:
+        | "clone_gate_armed"
+        | "clone_gate_expiring"
+        | "clone_gate_locked"
+        | "clone_gate_unlocked"
         | "cascade_completed"
         | "cascade_failed"
         | "cascade_partial"
@@ -12343,6 +12505,10 @@ export const Constants = {
       ledger_source: ["subscription", "topup", "manual", "system", "report"],
       module_status: ["proposed", "approved", "archived", "rejected"],
       notification_kind: [
+        "clone_gate_armed",
+        "clone_gate_expiring",
+        "clone_gate_locked",
+        "clone_gate_unlocked",
         "cascade_completed",
         "cascade_failed",
         "cascade_partial",

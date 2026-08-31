@@ -4,6 +4,7 @@ import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { ensureTenant, jsonResponse, resolveCloneApiKey } from "@/server/clone-api-keys.server";
 import { checkRateLimit } from "@/server/token-rate-limit.server";
 import { fireTokenWebhook, balanceSnapshot } from "@/server/token-webhooks.server";
+import { assertGateOpen, gateLockedBody } from "@/server/payment-gate.server";
 
 const Schema = z.object({
   tenant_ref: z.string().min(1).max(200),
@@ -81,6 +82,17 @@ export const Route = createFileRoute("/api/public/tokens/reserve")({
           );
         }
         const data = parsed.data;
+
+        // The activation gate, enforced where it matters most. A workspace
+        // provisioned by Mission Control runs on the PRIME'S forwarded vendor
+        // keys, so an unpaid clone generating reports spends Aurixa's own
+        // OpenAI and property-data budget — and a browser lock screen does not
+        // stop a scripted caller. A clone with no gate (the prime, and every
+        // clone that pre-dates this) is waved straight through.
+        const gate = await assertGateOpen(key.clone_id);
+        if (!gate.open) {
+          return jsonResponse(gateLockedBody(gate), 402);
+        }
 
         const tenant = await ensureTenant(
           key.clone_id,

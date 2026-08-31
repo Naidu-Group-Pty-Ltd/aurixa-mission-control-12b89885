@@ -288,3 +288,28 @@ hour rather than sixty.
 `deployment_events` row, not in a return value, not as a prefix. A signing key
 is authority, and an event row is read by more people than can read the project
 it came from.
+
+---
+
+## What a new clone now boots with, that it did not before
+
+A clone provisioned onto a **paid plan** now carries an activation gate: it
+works normally for a window (72 hours by default) and is then locked behind a
+payment screen until Stripe captures its activation payment. See
+[`CLONE_PAYMENT_GATES.md`](./CLONE_PAYMENT_GATES.md).
+
+It is armed inside `provisionCloneCore` rather than in the wizard's server
+function, because that pipeline has **two** callers — the operator wizard and
+the signed-agreement flow — and a gate armed in only one would leave every
+agreement-provisioned clone ungated.
+
+It is deliberately **not** a fifth queue. The reason is the failure this
+document opens with: a gate whose CLOSING depended on a worker would fail OPEN
+under exactly the fault recorded above — six jobs that were never scheduled,
+silently, with every check green — and nothing would report it. So the gate's
+state is derived on every read from stored facts, and no worker exists to be
+missing.
+
+The prime and every clone that already exists are unaffected, by construction:
+a `clone_payment_gates` row IS the gate, this is the only code path that writes
+one, and a test asserts no migration backfills the table.

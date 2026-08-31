@@ -26,6 +26,13 @@ import {
   planChangeRef,
   tenantForSubscription,
 } from "@/server/plan-allowance.server";
+import {
+  cloneIdForStripe,
+  logGateEvent,
+  readGate,
+  settleGatePayment,
+} from "@/server/payment-gate.server";
+import { notifyOperators } from "@/server/audit.server";
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -125,6 +132,53 @@ async function notifyPurchaseCompleted(session: Stripe.Checkout.Session) {
   }
 }
 
+/**
+ * Open the clone's activation gate, if it has one.
+ *
+ * Which payments count is a commercial decision and it is made here, once:
+ * `seat_plan` (the tier subscription) and `setup_package` (the onboarding fee)
+ * are what activate a workspace. A `topup` deliberately does not — a $50 credit
+ * pack would otherwise open a $2,015/month plan, and the CTA the customer is
+ * shown leads to their plan, not to credits.
+ *
+ * Never throws and never fails its caller. The money is already taken by the
+ * time this runs; a 5xx here would have Stripe retry a delivery whose only
+ * outstanding work is a stamp that `settleGatePayment` makes idempotently on
+ * the next attempt anyway. A gate that stays shut on a paid workspace is an
+ * operator unlock away and is visible in the Payment Gates console — a
+ * re-fulfilled purchase is not.
+ */
+const GATE_OPENING_MODES = new Set(["seat_plan", "setup_package"]);
+
+async function openGateForPayment(input: {
+  cloneId: string | null;
+  source: "stripe_checkout" | "stripe_subscription" | "stripe_invoice";
+  amountPaidCents?: number | null;
+  currency?: string | null;
+  checkoutSessionId?: string | null;
+  paymentIntentId?: string | null;
+  subscriptionId?: string | null;
+  customerId?: string | null;
+}) {
+  if (!input.cloneId) return;
+  try {
+    const result = await settleGatePayment({ ...input, cloneId: input.cloneId });
+    if (!result.ok) {
+      console.error("[webhook] activation gate not settled", {
+        clone_id: input.cloneId,
+        error: result.error,
+      });
+    } else if (result.settled) {
+      console.log("[webhook] activation gate unlocked", {
+        clone_id: input.cloneId,
+        source: input.source,
+      });
+    }
+  } catch (err) {
+    console.error("[webhook] activation gate settle threw", err);
+  }
+}
+
 // ---------- Event handlers ----------
 
 // Setup-mode sessions vault a card (wallet flow) — no money moves and no
@@ -200,6 +254,32 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
     } catch (err) {
       console.error("recordTenantTaxIdFromSession failed", err);
     }
+  }
+
+  // The activation gate. This is the ONE place a Stripe Checkout payment opens
+  // one, placed after `isPaidSession` and after the purchase is finalised —
+  // i.e. exactly where the platform has already concluded the money landed.
+  // Two call sites (one per fulfilment branch) is how one of them comes to
+  // settle on a payment status the other rejects.
+  const gateMode = (session.metadata ?? {}).mode ?? "";
+  if (GATE_OPENING_MODES.has(gateMode)) {
+    await openGateForPayment({
+      cloneId: (session.metadata ?? {}).clone_id || null,
+      source: "stripe_checkout",
+      amountPaidCents: session.amount_total ?? null,
+      currency: session.currency ?? null,
+      checkoutSessionId: session.id,
+      paymentIntentId:
+        typeof session.payment_intent === "string"
+          ? session.payment_intent
+          : (session.payment_intent?.id ?? null),
+      subscriptionId:
+        typeof session.subscription === "string"
+          ? session.subscription
+          : (session.subscription?.id ?? null),
+      customerId:
+        typeof session.customer === "string" ? session.customer : (session.customer?.id ?? null),
+    });
   }
 
   await notifyPurchaseCompleted(session);
@@ -399,6 +479,23 @@ async function handleSubscriptionUpdated(sub: Stripe.Subscription) {
       .eq("clone_id", cloneId);
   }
 
+  // A live subscription IS an activation payment, whether or not it came
+  // through our Checkout: one created in Stripe's own dashboard never sees
+  // `checkout.session.completed`, and its clone would stay locked with money
+  // in the bank. `settleGatePayment` is idempotent, so a subscription that
+  // already settled from its session updates nothing here.
+  if (status === "active") {
+    await openGateForPayment({
+      cloneId: await cloneIdForStripe({
+        metadataCloneId: cloneId,
+        subscriptionId: sub.id,
+      }),
+      source: "stripe_subscription",
+      subscriptionId: sub.id,
+      customerId: typeof sub.customer === "string" ? sub.customer : (sub.customer?.id ?? null),
+    });
+  }
+
   // Two things follow from a subscription changing, and only an active one
   // earns either: a cancelled or past-due plan must not keep granting credits.
   if (status !== "active" || !seatPlanId) return;
@@ -492,6 +589,23 @@ async function handleInvoicePaid(invoice: Stripe.Invoice) {
       updated_at: new Date().toISOString(),
     })
     .eq("stripe_subscription_id", subId);
+
+  // The third and last route to an activation payment. A renewal invoice that
+  // Stripe mints on its own cycle carries no session and, for a subscription
+  // created outside our Checkout, may carry no clone metadata either — which
+  // is why `cloneIdForStripe` also resolves through the subscription id.
+  await openGateForPayment({
+    cloneId: await cloneIdForStripe({
+      metadataCloneId: (invoice.metadata ?? {}).clone_id ?? null,
+      subscriptionId: subId,
+    }),
+    source: "stripe_invoice",
+    amountPaidCents: invoice.amount_paid ?? null,
+    currency: invoice.currency ?? null,
+    subscriptionId: subId,
+    customerId:
+      typeof invoice.customer === "string" ? invoice.customer : (invoice.customer?.id ?? null),
+  });
 }
 
 async function handleInvoiceFailed(invoice: Stripe.Invoice) {
@@ -520,6 +634,68 @@ async function handleInvoiceFailed(invoice: Stripe.Invoice) {
   });
 }
 
+/**
+ * A refunded activation payment is recorded on the gate and announced — and
+ * deliberately does NOT re-lock the workspace.
+ *
+ * `charge.refunded` fires for a partial refund too, so auto-locking would take
+ * a live workspace down over a goodwill credit. The failure of not locking is
+ * revenue an operator can recover with one click from the notification; the
+ * failure of locking is an outage for a customer who did nothing wrong. The
+ * operator's manual lock is the deliberate act this leaves to a person.
+ */
+async function noteGateRefund(charge: Stripe.Charge) {
+  try {
+    const paymentIntentId =
+      typeof charge.payment_intent === "string"
+        ? charge.payment_intent
+        : (charge.payment_intent?.id ?? null);
+    if (!paymentIntentId) return;
+
+    const { data: gate } = await adminAny
+      .from("clone_payment_gates")
+      .select("id, clone_id, plan_name, plan_slug")
+      .eq("stripe_payment_intent_id", paymentIntentId)
+      .maybeSingle();
+    if (!gate) return;
+
+    const read = await readGate(gate.clone_id);
+    const status = read.ok && read.row ? (read.row.paid_at ? "open" : "unknown") : "unknown";
+    await logGateEvent({
+      gateId: gate.id,
+      cloneId: gate.clone_id,
+      kind: "payment_reversed",
+      statusBefore: status,
+      statusAfter: status,
+      reason: charge.refunded
+        ? "Activation payment fully refunded at Stripe"
+        : "Activation payment partially refunded at Stripe",
+      actor: "stripe",
+      metadata: {
+        charge_id: charge.id,
+        payment_intent_id: paymentIntentId,
+        amount_refunded: charge.amount_refunded ?? 0,
+        fully_refunded: charge.refunded === true,
+      },
+    });
+
+    // Through `notifyOperators` rather than a bare insert: this notification IS
+    // the record that a refund happened and nothing re-locked, so a write that
+    // fails silently is the whole failure.
+    await notifyOperators({
+      kind: "clone_gate_locked",
+      severity: "warning",
+      title: `Activation payment refunded — gate left OPEN: ${gate.plan_name ?? gate.plan_slug ?? "plan"}`,
+      body: `${charge.refunded ? "Fully" : "Partially"} refunded ${((charge.amount_refunded ?? 0) / 100).toFixed(2)} ${(charge.currency ?? "aud").toUpperCase()}. The workspace is still unlocked — lock it by hand if that is what this refund means.`,
+      cloneId: gate.clone_id,
+      url: "/billing/gates",
+      metadata: { charge_id: charge.id, payment_intent_id: paymentIntentId },
+    });
+  } catch (err) {
+    console.error("[webhook] gate refund note failed", err);
+  }
+}
+
 async function handleChargeRefunded(charge: Stripe.Charge) {
   // Update the matching setup_purchase if any.
   const refunded = charge.amount_refunded ?? 0;
@@ -543,6 +719,8 @@ async function handleChargeRefunded(charge: Stripe.Charge) {
     refunded,
     !!charge.refunded,
   );
+
+  await noteGateRefund(charge);
 
   await adminAny.from("notifications").insert({
     kind: "tokens_alert",
