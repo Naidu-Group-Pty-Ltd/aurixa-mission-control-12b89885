@@ -210,7 +210,13 @@ async function claimOne(): Promise<null | {
 
 async function drainOne(
   deadlineAt: number,
-): Promise<{ processed: boolean; ok?: boolean; error?: string; budgetPaused?: boolean }> {
+): Promise<{
+  processed: boolean;
+  ok?: boolean;
+  error?: string;
+  budgetPaused?: boolean;
+  upstreamLimited?: boolean;
+}> {
   const claimed = await claimOne();
   if (!claimed) return { processed: false };
 
@@ -266,8 +272,16 @@ async function drainOne(
   // wall-clock ceiling in reclaimStalled() bounds the recycling.
   const budgetPaused = !result.ok && result.retryable === true && result.progressed === true;
 
+  // An upstream quota refused the run. Nothing was carried forward, so it is
+  // not a pause — but it is not this job failing either, so it must not spend
+  // the attempt claimOne already took. Hand that one back rather than
+  // resetting to zero: a genuine failure earlier in this job's life still
+  // counts. Recycling is bounded by the wall-clock ceiling, not by attempts.
+  const upstreamLimited = !result.ok && result.upstreamLimited === true;
+
   // Clear the queued password whether we succeeded or exhausted retries.
-  const isTerminal = result.ok || (!budgetPaused && claimed.attempts >= MAX_ATTEMPTS);
+  const isTerminal =
+    result.ok || (!budgetPaused && !upstreamLimited && claimed.attempts >= MAX_ATTEMPTS);
   await admin
     .from("clone_backends")
     .update({
@@ -277,6 +291,7 @@ async function drainOne(
       worker_started_at: !result.ok && !isTerminal ? null : undefined,
       status: !result.ok && !isTerminal ? "pending" : undefined,
       ...(budgetPaused ? { attempts: 0 } : {}),
+      ...(upstreamLimited ? { attempts: Math.max(0, (claimed.attempts ?? 0) - 1) } : {}),
     })
     .eq("clone_id", claimed.clone_id);
 
@@ -284,6 +299,7 @@ async function drainOne(
     processed: true,
     ok: result.ok,
     budgetPaused,
+    upstreamLimited,
     error: result.ok ? undefined : result.error,
   };
 }
@@ -300,13 +316,26 @@ export const Route = createFileRoute("/hooks/backend-provisioning-drain")({
           // left, and a budget pause ends the invocation — starting another
           // job past the deadline would just die mid-claim.
           const deadlineAt = Date.now() + INVOCATION_BUDGET_MS;
-          const results: Array<{ ok?: boolean; error?: string; budgetPaused?: boolean }> = [];
+          const results: Array<{
+            ok?: boolean;
+            error?: string;
+            budgetPaused?: boolean;
+            upstreamLimited?: boolean;
+          }> = [];
           for (let i = 0; i < MAX_JOBS_PER_RUN; i++) {
             if (Date.now() >= deadlineAt) break;
             const r = await drainOne(deadlineAt);
             if (!r.processed) break;
-            results.push({ ok: r.ok, error: r.error, budgetPaused: r.budgetPaused });
-            if (r.budgetPaused) break;
+            results.push({
+              ok: r.ok,
+              error: r.error,
+              budgetPaused: r.budgetPaused,
+              upstreamLimited: r.upstreamLimited,
+            });
+            // A quota refusal is about the installation, not the job: the
+            // second job would meet the same wall, so end the invocation
+            // rather than spend another claim proving it.
+            if (r.budgetPaused || r.upstreamLimited) break;
           }
           return new Response(
             JSON.stringify({ success: true, processed: results.length, results }),
