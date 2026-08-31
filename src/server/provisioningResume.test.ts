@@ -518,3 +518,53 @@ describe("the functions stage asks the clone what it already holds", () => {
     expect(tail).toMatch(/reconciled: reconcile\(fnPrime, fnClone\)/);
   });
 });
+
+describe("every stage asks whether it is already done", () => {
+  /* `alreadyReconciled` was written for exactly this and wired into TWO of the
+     twelve stages. The other ten re-applied their whole statement list on
+     every pass — grants is ~10,385 statements, which is why that stage ran for
+     three hours across a dozen invocations without ever completing, and why
+     the pipeline could never reach the edge-function step behind it. */
+  const STAGES_THAT_MUST_ASK = [
+    "constraints",
+    "indexes",
+    "views",
+    "matviews",
+    "triggers",
+    "rls",
+    "policies",
+    "grants",
+  ];
+
+  it("no stage re-applies a statement list the clone has already caught up on", () => {
+    const src = introspection();
+    for (const stage of STAGES_THAT_MUST_ASK) {
+      const asks =
+        src.includes(`stageOrSkip(\n        "${stage}"`) ||
+        src.includes(`alreadyReconciled("${stage}"`);
+      expect(asks, `${stage} applies unconditionally — it must ask first`).toBe(true);
+    }
+  });
+
+  it("tables is the one deliberate exception, and says why", () => {
+    /* Equal counts do NOT mean equal tables: `create table if not exists`
+       skips an existing table, so column drift survives with counts matching.
+       Skipping on the count would skip diffMissingColumns with it. */
+    const src = introspection();
+    expect(src).toMatch(/never asks `alreadyReconciled` first, and deliberately/);
+    expect(src).toMatch(/COLUMN DRIFT survives with the/);
+    /* And it is the only remaining direct application. */
+    expect(src.split("await runStage(").length - 1).toBe(1);
+  });
+
+  it("a skipped stage costs two COUNTs and no prime read", () => {
+    /* The statements are a thunk, so a skipped stage never even queries the
+       prime's catalogue for DDL it is not going to apply. */
+    const src = introspection();
+    const helper = src.slice(src.indexOf("const stageOrSkip ="), src.indexOf("await ensureApplyHelper"));
+    expect(helper).toMatch(/statements: \(\) => Promise<readonly string\[\]> \| readonly string\[\]/);
+    expect(helper).toMatch(/const done = await alreadyReconciled\(stage, primeRef, cloneRef\)/);
+    expect(helper).toMatch(/if \(done\) return done;/);
+    expect(helper).toMatch(/await statements\(\)/);
+  });
+});

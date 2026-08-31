@@ -765,7 +765,14 @@ export async function replicateSchemaByIntrospection(
     );
   }
 
-  // 3. tables (columns only — constraints and indexes come later)
+  // 3. tables
+  //
+  // The ONE stage that never asks `alreadyReconciled` first, and deliberately.
+  // Every other stage's work is fully described by its object count, so equal
+  // counts mean equal schemas. Tables are not: `create table if not exists`
+  // skips a table that already exists, so COLUMN DRIFT survives with the
+  // counts matching exactly — which is the fault diffMissingColumns exists to
+  // repair. Skipping on the count would skip the repair with it. (columns only — constraints and indexes come later)
   //
   // `tableStmts` and `tableStage` outlive this block: step 4b re-applies the
   // table DDL once functions exist. A pass that skipped this stage has
@@ -941,15 +948,20 @@ export async function replicateSchemaByIntrospection(
   // 5. constraints, ordered p → u → c → f
   if (enterStage("constraints")) {
     await say("Replicating constraints...");
-    const conRows = await query(primeRef, Q.constraints);
-    const conStmts = conRows.map(
-      (r) =>
-        `alter table ${quoteIdent(str(r.schema))}.${quoteIdent(str(r.table_name))} add constraint ${quoteIdent(
-          str(r.name),
-        )} ${str(r.def)}`,
-    );
     stages.push(
-      await runStage("constraints", primeRef, cloneRef, conStmts, 60, undefined, pauseIfDue),
+      await stageOrSkip(
+        "constraints",
+        async () => {
+          const conRows = await query(primeRef, Q.constraints);
+          return conRows.map(
+            (r) =>
+              `alter table ${quoteIdent(str(r.schema))}.${quoteIdent(str(r.table_name))} add constraint ${quoteIdent(
+                str(r.name),
+              )} ${str(r.def)}`,
+          );
+        },
+        60,
+      ),
     );
   }
 
@@ -961,22 +973,34 @@ export async function replicateSchemaByIntrospection(
   let idxStmts: string[] | null = null;
   if (enterStage("indexes")) {
     await say("Replicating indexes...");
-    const idxRows = await query(primeRef, Q.indexes);
-    const conIdxNames = new Set(
-      (await query(primeRef, Q.constraintIndexNames)).map((r) => str(r.indexname)),
+    stages.push(
+      await stageOrSkip(
+        "indexes",
+        async () => {
+          const idxRows = await query(primeRef, Q.indexes);
+          const conIdxNames = new Set(
+            (await query(primeRef, Q.constraintIndexNames)).map((r) => str(r.indexname)),
+          );
+          // Captured for step 8b. A pass that SKIPPED this stage leaves it
+          // null, and 8b is guarded on that.
+          idxStmts = filterCreatableIndexes(
+            idxRows.map((r) => ({ indexname: str(r.indexname), indexdef: str(r.indexdef) })),
+            conIdxNames,
+          ).map((def) =>
+            def.replace(/^create (unique )?index /i, (m) => `${m.trimEnd()} if not exists `),
+          );
+          return idxStmts;
+        },
+        60,
+      ),
     );
-    idxStmts = filterCreatableIndexes(
-      idxRows.map((r) => ({ indexname: str(r.indexname), indexdef: str(r.indexdef) })),
-      conIdxNames,
-    ).map((def) =>
-      def.replace(/^create (unique )?index /i, (m) => `${m.trimEnd()} if not exists `),
-    );
-    stages.push(await runStage("indexes", primeRef, cloneRef, idxStmts, 60, undefined, pauseIfDue));
   }
 
   // 7. views — a view on a view fails when the callee is not in place yet, and
   // catalog order is not dependency order, so converge the same way functions do.
-  if (enterStage("views")) {
+  const viewsDone = enterStage("views") ? await alreadyReconciled("views", primeRef, cloneRef) : null;
+  if (viewsDone) stages.push(viewsDone);
+  else if (STAGE_SEQUENCE.indexOf("views") >= startIndex) {
     await say("Replicating views...");
     const viewRows = await query(primeRef, Q.views);
     const viewStmts = viewRows.map(
@@ -1011,21 +1035,17 @@ export async function replicateSchemaByIntrospection(
   //    an index belongs to one, so skipping this breaks the index stage)
   if (enterStage("matviews")) {
     await say("Replicating materialized views...");
-    const mvRows = await query(primeRef, Q.matviews);
     stages.push(
-      await runStage(
+      await stageOrSkip(
         "matviews",
-        primeRef,
-        cloneRef,
-        mvRows.map(
-          (r) =>
-            `create materialized view if not exists ${quoteIdent(str(r.schema))}.${quoteIdent(
-              str(r.name),
-            )} as ${str(r.def)}`,
-        ),
+        async () =>
+          (await query(primeRef, Q.matviews)).map(
+            (r) =>
+              `create materialized view if not exists ${quoteIdent(str(r.schema))}.${quoteIdent(
+                str(r.name),
+              )} as ${str(r.def)}`,
+          ),
         15,
-        undefined,
-        pauseIfDue,
       ),
     );
   }
@@ -1045,16 +1065,12 @@ export async function replicateSchemaByIntrospection(
   // 9. triggers
   if (enterStage("triggers")) {
     await say("Replicating triggers...");
-    const trgRows = await query(primeRef, Q.triggers);
     stages.push(
-      await runStage(
+      await stageOrSkip(
         "triggers",
-        primeRef,
-        cloneRef,
-        trgRows.map((r) => str(r.def)).filter(Boolean),
+        async () =>
+          (await query(primeRef, Q.triggers)).map((r) => str(r.def)).filter(Boolean),
         60,
-        undefined,
-        pauseIfDue,
       ),
     );
   }
@@ -1062,19 +1078,15 @@ export async function replicateSchemaByIntrospection(
   // 10. RLS enable
   if (enterStage("rls")) {
     await say("Enabling row level security...");
-    const rlsRows = await query(primeRef, Q.rlsTables);
     stages.push(
-      await runStage(
+      await stageOrSkip(
         "rls",
-        primeRef,
-        cloneRef,
-        rlsRows.map(
-          (r) =>
-            `alter table ${quoteIdent(str(r.schema))}.${quoteIdent(str(r.name))} enable row level security`,
-        ),
+        async () =>
+          (await query(primeRef, Q.rlsTables)).map(
+            (r) =>
+              `alter table ${quoteIdent(str(r.schema))}.${quoteIdent(str(r.name))} enable row level security`,
+          ),
         60,
-        undefined,
-        pauseIfDue,
       ),
     );
   }
@@ -1082,27 +1094,23 @@ export async function replicateSchemaByIntrospection(
   // 11. policies
   if (enterStage("policies")) {
     await say("Replicating RLS policies...");
-    const polRows = await query(primeRef, Q.policies);
     stages.push(
-      await runStage(
+      await stageOrSkip(
         "policies",
-        primeRef,
-        cloneRef,
-        polRows.map((r) =>
-          buildPolicyDdl({
-            schemaname: str(r.schemaname),
-            tablename: str(r.tablename),
-            policyname: str(r.policyname),
-            permissive: str(r.permissive),
-            roles: str(r.roles),
-            cmd: str(r.cmd),
-            qual: r.qual == null ? null : str(r.qual),
-            with_check: r.with_check == null ? null : str(r.with_check),
-          }),
-        ),
+        async () =>
+          (await query(primeRef, Q.policies)).map((r) =>
+            buildPolicyDdl({
+              schemaname: str(r.schemaname),
+              tablename: str(r.tablename),
+              policyname: str(r.policyname),
+              permissive: str(r.permissive),
+              roles: str(r.roles),
+              cmd: str(r.cmd),
+              qual: r.qual == null ? null : str(r.qual),
+              with_check: r.with_check == null ? null : str(r.with_check),
+            }),
+          ),
         60,
-        undefined,
-        pauseIfDue,
       ),
     );
   }
@@ -1111,12 +1119,17 @@ export async function replicateSchemaByIntrospection(
   // privileges PostgREST cannot reach a single table on the clone.
   if (enterStage("grants")) {
     await say("Replicating Data API grants...");
-    const grantRows = await query(primeRef, Q.grants);
-    const grantStmts = grantRows.map((r) =>
-      buildGrantDdl(str(r.schema), str(r.table_name), str(r.grantee), str(r.privilege_type)),
-    );
     stages.push(
-      await runStage("grants", primeRef, cloneRef, grantStmts, 60, undefined, pauseIfDue),
+      await stageOrSkip(
+        "grants",
+        async () => {
+          const grantRows = await query(primeRef, Q.grants);
+          return grantRows.map((r) =>
+            buildGrantDdl(str(r.schema), str(r.table_name), str(r.grantee), str(r.privilege_type)),
+          );
+        },
+        60,
+      ),
     );
   }
 
