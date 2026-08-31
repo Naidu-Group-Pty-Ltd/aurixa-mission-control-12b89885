@@ -70,6 +70,13 @@ export type PrimeBackendSnapshot = {
   /** Auth policy replicated from the prime's supabase/config.toml [auth] block.
    *  Values-only, never secrets — providers/keys are configured per-clone. */
   authConfig: PrimeAuthConfig | null;
+  /**
+   * True when the edge-function SOURCE was deliberately not fetched, so
+   * `functions` and `secretNames` are empty because nobody asked for them —
+   * not because the prime has none. Callers that deploy must check it; see
+   * `includeFunctionSource`.
+   */
+  functionSourceOmitted: boolean;
 };
 
 // ─── Pure helpers (unit-tested) ──────────────────────────────────────
@@ -810,6 +817,26 @@ export async function fetchPrimeBackendSnapshot(
      * lifetime. Defaults true so callers that do not say are unchanged.
      */
     includeMigrationSql?: boolean;
+    /**
+     * Fetch the edge-function bundle SOURCE. This is the expensive half of
+     * the snapshot — ~1,033 files across 423 bundles — and it is the half
+     * that exhausts the GitHub App installation's hourly quota when a long
+     * schema build resumes every minute. Measured on 31 Aug 2026: the run
+     * hit "API rate limit exceeded for installation ID …" twice, and lost
+     * a 45-minute window to it while the schema build was making progress.
+     *
+     * A pass that RESUMES the schema build provably never reaches the
+     * edge-function stage: a resumed pass reports `partial` and the pipeline
+     * pauses on it to verify from the first stage next tick. So on those
+     * passes this source is fetched, decoded, scanned and thrown away — and
+     * skipping it is not an optimisation with a risk attached, it is
+     * declining to buy something the pass cannot use.
+     *
+     * Defaults true so callers that do not say are unchanged, and the
+     * snapshot records `functionSourceOmitted` rather than leaving an empty
+     * list to be mistaken for a prime with no functions.
+     */
+    includeFunctionSource?: boolean;
   },
 ): Promise<PrimeBackendSnapshot> {
   const { blobs, commitSha } = await listSupabaseBlobs(octokit, ref);
@@ -833,6 +860,25 @@ export async function fetchPrimeBackendSnapshot(
   }));
 
   // ── Edge functions ──
+  const includeFunctionSource = opts?.includeFunctionSource !== false;
+  if (!includeFunctionSource) {
+    // Everything above this point is cheap (one tree walk); everything below
+    // is the ~1,033-file fetch. Stop here and say so.
+    const configBlobEarly = blobs.find((b) => b.path === CONFIG_TOML_PATH);
+    const configTomlEarly = configBlobEarly
+      ? decodeBase64Utf8(await fetchBlobBase64(octokit, ref, configBlobEarly.sha))
+      : null;
+    return {
+      sourceRepo: `${ref.owner}/${ref.repo}`,
+      sourceRef: ref.branch,
+      sourceSha: commitSha,
+      migrations,
+      functions: [],
+      secretNames: [],
+      authConfig: parseAuthConfig(configTomlEarly),
+      functionSourceOmitted: true,
+    };
+  }
   const functionBlobs = blobs.filter((b) => b.path.startsWith(FUNCTIONS_PREFIX));
   const relPaths = functionBlobs.map((b) => b.path.slice(FUNCTIONS_PREFIX.length));
   const shaByRel = new Map(
@@ -924,5 +970,6 @@ export async function fetchPrimeBackendSnapshot(
     functions,
     secretNames,
     authConfig: parseAuthConfig(configToml),
+    functionSourceOmitted: false,
   };
 }

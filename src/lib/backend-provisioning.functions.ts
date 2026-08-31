@@ -98,6 +98,21 @@ async function runBackendProvisioning(
     if (!source) {
       throw new Error("Prime not configured — set the prime repo in Settings first");
     }
+    // Read the row BEFORE the snapshot: whether this pass is RESUMING a
+    // schema build decides how much of the prime repository is worth reading.
+    // (It used to be read after, so every pass paid for the whole thing.)
+    const { data: existingRow, error: existingRowErr } = await supabase
+      .from("clone_backends")
+      .select("supabase_project_ref, resume_stage")
+      .eq("clone_id", input.cloneId)
+      .maybeSingle();
+    if (existingRowErr) {
+      throw new Error(
+        `Could not read the clone's backend row before snapshotting: ${existingRowErr.message}`,
+      );
+    }
+    const resumingSchema = Boolean(existingRow?.resume_stage);
+
     await updateStatus(
       "provisioning",
       `Snapshotting backend architecture from ${source.owner}/${source.repo}@${source.branch}...`,
@@ -108,6 +123,12 @@ async function runBackendProvisioning(
     // file LIST alone. See fetchPrimeBackendSnapshot's opts doc.
     const snapshot = await fetchPrimeBackendSnapshot(octokit, source, {
       includeMigrationSql: (input.schemaStrategy ?? "introspection") === "migration-replay",
+      // A resumed schema pass cannot reach the edge-function stage — it
+      // reports `partial` and the pipeline pauses to verify from the first
+      // stage next tick — so its bundle source would be fetched, decoded,
+      // scanned and discarded. That fetch is what exhausts the GitHub App
+      // installation's hourly quota when a long build resumes every minute.
+      includeFunctionSource: !resumingSchema,
     });
     if (snapshot.migrations.length === 0) {
       throw new Error(
@@ -115,13 +136,9 @@ async function runBackendProvisioning(
       );
     }
 
-    // Resume onto a project left behind by a failed run rather than orphaning
-    // it, and pick the schema build up where the last budget pause left it.
-    const { data: existingRow } = await supabase
-      .from("clone_backends")
-      .select("supabase_project_ref, resume_stage")
-      .eq("clone_id", input.cloneId)
-      .maybeSingle();
+    // `existingRow` was read above the snapshot — it carries both the project
+    // left behind by an earlier pass (resume onto it rather than orphaning it)
+    // and the stage that pass paused at.
 
     // G8: Collect the clone's own frontend origins so applyAuthConfig can
     // whitelist them on the new backend instead of copying prime's URLs.
