@@ -119,4 +119,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "column", table: "prime_config", column: "clone_gate_default_hours" },
     ],
   },
+  {
+    migration: "20260831080000_clone_backend_resume_stage.sql",
+    version: "20260831080000",
+    assertions: [{ kind: "column", table: "clone_backends", column: "resume_stage" }],
+  },
 ];
