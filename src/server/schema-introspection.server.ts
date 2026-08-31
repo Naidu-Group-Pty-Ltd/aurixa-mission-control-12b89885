@@ -522,6 +522,38 @@ export function reconcile(primeCount: number, cloneCount: number): boolean {
 
 type Notify = (status: string, detail: string) => Promise<void>;
 
+/**
+ * Has the clone already caught up on this stage?
+ *
+ * Two cheap COUNT queries, one per side. Every stage's work is idempotent, so
+ * re-running a finished stage is harmless — but it is not FREE, and that is
+ * what stalled the first real clone: each invocation redid the completed
+ * stages, ran out of wall clock inside the heavy `tables` stage, and was
+ * killed before reaching anything new. Skipping what is already reconciled
+ * hands the whole budget to the stage that still has work, which is the same
+ * "ask the target what it already holds" rule the edge-function resume uses.
+ */
+async function alreadyReconciled(
+  stage: StageName,
+  primeRef: string,
+  cloneRef: string,
+): Promise<StageResult | null> {
+  const [primeCount, cloneCount] = await Promise.all([
+    countOn(primeRef, stage),
+    countOn(cloneRef, stage),
+  ]);
+  if (!reconcile(primeCount, cloneCount)) return null;
+  return {
+    stage,
+    primeCount,
+    cloneCount,
+    applied: 0,
+    failed: 0,
+    reconciled: true,
+    notes: ["already reconciled — skipped on resume"],
+  };
+}
+
 async function runStage(
   stage: StageName,
   primeRef: string,
@@ -588,6 +620,17 @@ export async function replicateSchemaByIntrospection(
     );
   }
 
+  /** Run a stage, unless the clone has already caught up on it. */
+  const stageOrSkip = async (
+    stage: StageName,
+    statements: () => Promise<readonly string[]> | readonly string[],
+    batchSize: number,
+  ): Promise<StageResult> => {
+    const done = await alreadyReconciled(stage, primeRef, cloneRef);
+    if (done) return done;
+    return runStage(stage, primeRef, cloneRef, await statements(), batchSize);
+  };
+
   await ensureApplyHelper(cloneRef);
   await runSqlOnProject(
     cloneRef,
@@ -596,13 +639,15 @@ export async function replicateSchemaByIntrospection(
 
   // 1. enum types
   await say("Introspecting prime: enum types...");
-  const enumRows = await query(primeRef, Q.enums);
   stages.push(
-    await runStage(
+    await stageOrSkip(
       "enums",
-      primeRef,
-      cloneRef,
-      enumRows.map((r) => buildEnumDdl(str(r.schema), str(r.name), parsePgArray(r.labels))),
+      async () => {
+        const enumRows = await query(primeRef, Q.enums);
+        return enumRows.map((r) =>
+          buildEnumDdl(str(r.schema), str(r.name), parsePgArray(r.labels)),
+        );
+      },
       60,
     ),
   );
@@ -610,16 +655,16 @@ export async function replicateSchemaByIntrospection(
   // 2. sequences
   pauseIfDue("introspection: sequences onward resume next tick");
   await say("Replicating sequences...");
-  const seqRows = await query(primeRef, Q.sequences);
   stages.push(
-    await runStage(
+    await stageOrSkip(
       "sequences",
-      primeRef,
-      cloneRef,
-      seqRows.map(
-        (r) =>
-          `create sequence if not exists ${quoteIdent(str(r.schema))}.${quoteIdent(str(r.name))}`,
-      ),
+      async () => {
+        const seqRows = await query(primeRef, Q.sequences);
+        return seqRows.map(
+          (r) =>
+            `create sequence if not exists ${quoteIdent(str(r.schema))}.${quoteIdent(str(r.name))}`,
+        );
+      },
       60,
     ),
   );
@@ -654,6 +699,13 @@ export async function replicateSchemaByIntrospection(
   );
   const tableStage = await runStage("tables", primeRef, cloneRef, tableStmts, 60);
 
+  // The single heaviest stage in the pipeline, and the one that has to be
+  // interruptible from the inside: three catalog reads of ~10,000 rows plus
+  // ~15 batched DDL round trips do not fit one invocation on a prime this
+  // size. Without a pause here the worker is KILLED rather than exiting, and
+  // a kill costs a 15-minute stall reclaim where a pause costs 60 seconds.
+  pauseIfDue("introspection: column drift repair resumes next tick");
+
   // 3b. Column drift: `create table if not exists` never repairs an existing
   // table, so counts can match while columns do not.
   const cloneCols = await query(cloneRef, Q.columns);
@@ -679,11 +731,17 @@ export async function replicateSchemaByIntrospection(
       ...(tableStage.notes ?? []),
       `column drift: ${missing.length} missing, ${repair.applied} repaired`,
     ];
-    const afterCols = toInfo(await query(cloneRef, Q.columns));
-    const stillDrifted = driftedTables(columnSignature(primeInfo), columnSignature(afterCols));
-    if (stillDrifted.length) {
-      tableStage.reconciled = false;
-      tableStage.notes.push(`still drifted: ${stillDrifted.slice(0, 10).join(", ")}`);
+    // Re-read only when the repair itself reported a failure. A clean repair
+    // already knows what it added, and this verification is another ~10,000
+    // row read — the difference between finishing the stage inside the
+    // invocation and being killed one step from the end.
+    if (repair.failed > 0) {
+      const afterCols = toInfo(await query(cloneRef, Q.columns));
+      const stillDrifted = driftedTables(columnSignature(primeInfo), columnSignature(afterCols));
+      if (stillDrifted.length) {
+        tableStage.reconciled = false;
+        tableStage.notes.push(`still drifted: ${stillDrifted.slice(0, 10).join(", ")}`);
+      }
     }
   }
   stages.push(tableStage);

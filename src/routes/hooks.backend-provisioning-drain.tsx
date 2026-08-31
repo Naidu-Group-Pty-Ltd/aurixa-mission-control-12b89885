@@ -31,7 +31,7 @@ const MAX_ATTEMPTS = 3;
 // record — which is exactly how the first engine-provisioned clone burned all
 // three attempts on one step. A pause is requeued as forward progress
 // (attempts reset to 0); only a hard death costs an attempt.
-const INVOCATION_BUDGET_MS = 40_000;
+const INVOCATION_BUDGET_MS = 50_000;
 
 // The global bound the attempt-neutral recycling answers to: a backend that
 // has been in flight this long is not "still going", whatever each individual
