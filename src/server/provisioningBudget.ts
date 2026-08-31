@@ -25,10 +25,22 @@ export class BudgetPause extends Error {
   /** What the pipeline was about to do when the budget ran out. */
   readonly detail: string;
 
-  constructor(detail: string) {
+  /**
+   * Where to pick the schema build up next time, when the pause happened
+   * inside introspection. Carried on the pause rather than parsed back out of
+   * `detail`, because prose is for the operator and control state is not.
+   *
+   * Undefined when the pause happened somewhere with no stage to name (the
+   * health wait, the edge-function deploys); the caller then leaves the stored
+   * marker alone rather than guessing.
+   */
+  readonly resumeStage?: string;
+
+  constructor(detail: string, resumeStage?: string) {
     super(`Provisioning paused at the invocation budget — ${detail}`);
     this.name = "BudgetPause";
     this.detail = detail;
+    this.resumeStage = resumeStage;
   }
 }
 

@@ -35,6 +35,28 @@ const API_ROLE_LIST = API_ROLES.map((r) => `'${r}'`).join(", ");
 /** Max passes for the function-convergence loop, so a genuine error cannot loop forever. */
 export const MAX_FUNCTION_PASSES = 5;
 
+/**
+ * The order the stages run in, and the vocabulary of the resume marker.
+ *
+ * Declared once and exported because three places have to agree about it: the
+ * pipeline that walks it, the row that stores where it paused, and the test
+ * that pins the two together. An index into this list IS the marker.
+ */
+export const STAGE_SEQUENCE: readonly StageName[] = [
+  "enums",
+  "sequences",
+  "tables",
+  "functions",
+  "constraints",
+  "indexes",
+  "views",
+  "matviews",
+  "triggers",
+  "rls",
+  "policies",
+  "grants",
+] as const;
+
 export type StageName =
   | "enums"
   | "sequences"
@@ -69,6 +91,13 @@ export type IntrospectionResult = {
   stages: StageResult[];
   /** Stages whose clone count came up short. */
   shortStages: StageName[];
+  /**
+   * True when this pass began partway through the sequence, so it says
+   * nothing about the stages it skipped. Such a pass never reports `ok`: it
+   * asks for one more full pass, which is cheap because every finished stage
+   * now answers `alreadyReconciled` immediately.
+   */
+  partial: boolean;
 };
 
 // ─── Read-only guard ─────────────────────────────────────────────────
@@ -602,7 +631,18 @@ async function runStage(
 
 export async function replicateSchemaByIntrospection(
   cloneRef: string,
-  options: { primeRef: string; onStatusUpdate?: Notify; deadlineAt?: number | null },
+  options: {
+    primeRef: string;
+    onStatusUpdate?: Notify;
+    deadlineAt?: number | null;
+    /**
+     * Stage this invocation should pick up at, from a previous pause. Stages
+     * before it were carried by an earlier invocation and are skipped without
+     * paying for their catalogue reads. Unset (or unrecognised) starts at the
+     * beginning.
+     */
+    resumeFrom?: string | null;
+  },
 ): Promise<IntrospectionResult> {
   const primeRef = options.primeRef;
   const notify = options?.onStatusUpdate;
@@ -610,15 +650,41 @@ export async function replicateSchemaByIntrospection(
   const say = async (detail: string) => {
     await notify?.("migrating", detail);
   };
-  // Every stage is idempotent (`if not exists` / `create or replace` / the
-  // reconcile counts), so a run that pauses between stages re-enters from the
-  // top on the next invocation and the completed stages no-op through. The
-  // pause sits BETWEEN stages, never inside one — a stage is the transaction
-  // of meaning here, and pausing mid-batch is exactly the half-applied state
-  // the batches exist to avoid. Stage 1 never pauses: an invocation that has
-  // claimed the job must move it, or the recycle makes no forward progress.
+  // ── Where this invocation starts, and where it says it stopped ──
+  //
+  // Every stage is idempotent, so replaying one is harmless — but it is not
+  // free, and on a prime this size the `tables` stage alone costs a whole
+  // invocation. Replaying the prefix every time meant the run reached the
+  // same pause point on every pass and the stages after it were never given
+  // any budget: 155 of 624 functions, unchanged across three consecutive
+  // passes, pausing correctly and progressing not at all.
+  //
+  // The marker is the stage to resume AT, so an interrupted stage re-runs
+  // from its own start while carried stages are skipped.
+  const startIndex = Math.max(
+    0,
+    options.resumeFrom ? STAGE_SEQUENCE.indexOf(options.resumeFrom as StageName) : 0,
+  );
+  let reachedStage: StageName = STAGE_SEQUENCE[startIndex] ?? "enums";
+  let ranAStageThisPass = false;
+
   const pauseIfDue = (about: string) => {
-    if (pastDeadline(options.deadlineAt)) throw new BudgetPause(about);
+    if (pastDeadline(options.deadlineAt)) throw new BudgetPause(about, reachedStage);
+  };
+
+  /**
+   * Enter a stage, or report that an earlier invocation already carried it.
+   *
+   * The first stage this invocation actually runs never pauses: a worker that
+   * has claimed the job must move it, or the recycling makes no forward
+   * progress at all.
+   */
+  const enterStage = (stage: StageName): boolean => {
+    if (STAGE_SEQUENCE.indexOf(stage) < startIndex) return false;
+    reachedStage = stage;
+    if (ranAStageThisPass) pauseIfDue(`introspection: ${stage} onward resumes next tick`);
+    ranAStageThisPass = true;
+    return true;
   };
 
   if (primeRef === cloneRef) throw new Error("Refusing to introspect the prime onto itself");
@@ -665,148 +731,172 @@ export async function replicateSchemaByIntrospection(
   );
 
   // 1. enum types
-  await say("Introspecting prime: enum types...");
-  stages.push(
-    await stageOrSkip(
-      "enums",
-      async () => {
-        const enumRows = await query(primeRef, Q.enums);
-        return enumRows.map((r) =>
-          buildEnumDdl(str(r.schema), str(r.name), parsePgArray(r.labels)),
-        );
-      },
-      60,
-    ),
-  );
+  if (enterStage("enums")) {
+    await say("Introspecting prime: enum types...");
+    stages.push(
+      await stageOrSkip(
+        "enums",
+        async () => {
+          const enumRows = await query(primeRef, Q.enums);
+          return enumRows.map((r) =>
+            buildEnumDdl(str(r.schema), str(r.name), parsePgArray(r.labels)),
+          );
+        },
+        60,
+      ),
+    );
+  }
 
   // 2. sequences
-  pauseIfDue("introspection: sequences onward resume next tick");
-  await say("Replicating sequences...");
-  stages.push(
-    await stageOrSkip(
-      "sequences",
-      async () => {
-        const seqRows = await query(primeRef, Q.sequences);
-        return seqRows.map(
-          (r) =>
-            `create sequence if not exists ${quoteIdent(str(r.schema))}.${quoteIdent(str(r.name))}`,
-        );
-      },
-      60,
-    ),
-  );
+  if (enterStage("sequences")) {
+    await say("Replicating sequences...");
+    stages.push(
+      await stageOrSkip(
+        "sequences",
+        async () => {
+          const seqRows = await query(primeRef, Q.sequences);
+          return seqRows.map(
+            (r) =>
+              `create sequence if not exists ${quoteIdent(str(r.schema))}.${quoteIdent(str(r.name))}`,
+          );
+        },
+        60,
+      ),
+    );
+  }
 
   // 3. tables (columns only — constraints and indexes come later)
-  pauseIfDue("introspection: tables onward resume next tick");
-  await say("Replicating tables...");
-  const primeCols = await query(primeRef, Q.columns);
-  const grouped = new Map<
-    string,
-    {
-      schema: string;
-      table: string;
-      cols: ColumnDef[];
+  //
+  // `tableStmts` and `tableStage` outlive this block: step 4b re-applies the
+  // table DDL once functions exist. A pass that skipped this stage has
+  // neither, and 4b is guarded on that rather than rebuilding them — the next
+  // full pass carries it, and rebuilding means another ~10,000-row read.
+  let tableStmts: string[] | null = null;
+  let tableStage: StageResult | null = null;
+  if (enterStage("tables")) {
+    await say("Replicating tables...");
+    const primeCols = await query(primeRef, Q.columns);
+    const grouped = new Map<
+      string,
+      {
+        schema: string;
+        table: string;
+        cols: ColumnDef[];
+      }
+    >();
+    for (const r of primeCols) {
+      const key = `${str(r.schema)}.${str(r.table_name)}`;
+      const entry = grouped.get(key) ?? {
+        schema: str(r.schema),
+        table: str(r.table_name),
+        cols: [],
+      };
+      entry.cols.push({
+        name: str(r.column_name),
+        type: str(r.data_type),
+        notNull: r.not_null === true || r.not_null === "true",
+        default: r.column_default == null ? null : str(r.column_default),
+        identity: r.identity == null ? null : str(r.identity),
+      });
+      grouped.set(key, entry);
     }
-  >();
-  for (const r of primeCols) {
-    const key = `${str(r.schema)}.${str(r.table_name)}`;
-    const entry = grouped.get(key) ?? { schema: str(r.schema), table: str(r.table_name), cols: [] };
-    entry.cols.push({
-      name: str(r.column_name),
-      type: str(r.data_type),
-      notNull: r.not_null === true || r.not_null === "true",
-      default: r.column_default == null ? null : str(r.column_default),
-      identity: r.identity == null ? null : str(r.identity),
-    });
-    grouped.set(key, entry);
-  }
 
-  const tableStmts = Array.from(grouped.values()).map((t) =>
-    buildCreateTableDdl(t.schema, t.table, t.cols),
-  );
-  const tableStage = await runStage("tables", primeRef, cloneRef, tableStmts, 60);
-
-  // The single heaviest stage in the pipeline, and the one that has to be
-  // interruptible from the inside: three catalog reads of ~10,000 rows plus
-  // ~15 batched DDL round trips do not fit one invocation on a prime this
-  // size. Without a pause here the worker is KILLED rather than exiting, and
-  // a kill costs a 15-minute stall reclaim where a pause costs 60 seconds.
-  pauseIfDue("introspection: column drift repair resumes next tick");
-
-  // 3b. Column drift: `create table if not exists` never repairs an existing
-  // table, so counts can match while columns do not.
-  const cloneCols = await query(cloneRef, Q.columns);
-  const toInfo = (rows: Array<Record<string, unknown>>): ColumnInfo[] =>
-    rows.map((r) => ({
-      table: `${quoteIdent(str(r.schema))}.${quoteIdent(str(r.table_name))}`,
-      column: quoteIdent(str(r.column_name)),
-      type: str(r.data_type),
-    }));
-  const primeInfo = toInfo(primeCols);
-  const missing = diffMissingColumns(primeInfo, toInfo(cloneCols));
-  if (missing.length) {
-    await say(`Repairing ${missing.length} drifted column(s)...`);
-    const repair = await applyStatements(
+    tableStmts = Array.from(grouped.values()).map((t) =>
+      buildCreateTableDdl(t.schema, t.table, t.cols),
+    );
+    tableStage = await runStage(
+      "tables",
+      primeRef,
       cloneRef,
-      "tables:columns",
-      buildAddColumnStatements(missing),
+      tableStmts,
       60,
+      undefined,
       pauseIfDue,
     );
-    tableStage.applied += repair.applied;
-    tableStage.failed += repair.failed;
-    tableStage.notes = [
-      ...(tableStage.notes ?? []),
-      `column drift: ${missing.length} missing, ${repair.applied} repaired`,
-    ];
-    // Re-read only when the repair itself reported a failure. A clean repair
-    // already knows what it added, and this verification is another ~10,000
-    // row read — the difference between finishing the stage inside the
-    // invocation and being killed one step from the end.
-    if (repair.failed > 0) {
-      const afterCols = toInfo(await query(cloneRef, Q.columns));
-      const stillDrifted = driftedTables(columnSignature(primeInfo), columnSignature(afterCols));
-      if (stillDrifted.length) {
-        tableStage.reconciled = false;
-        tableStage.notes.push(`still drifted: ${stillDrifted.slice(0, 10).join(", ")}`);
+
+    // The single heaviest stage in the pipeline, and the one that has to be
+    // interruptible from the inside: three catalog reads of ~10,000 rows plus
+    // ~15 batched DDL round trips do not fit one invocation on a prime this
+    // size. Without a pause here the worker is KILLED rather than exiting, and
+    // a kill costs a 15-minute stall reclaim where a pause costs 60 seconds.
+    pauseIfDue("introspection: column drift repair resumes next tick");
+
+    // 3b. Column drift: `create table if not exists` never repairs an existing
+    // table, so counts can match while columns do not.
+    const cloneCols = await query(cloneRef, Q.columns);
+    const toInfo = (rows: Array<Record<string, unknown>>): ColumnInfo[] =>
+      rows.map((r) => ({
+        table: `${quoteIdent(str(r.schema))}.${quoteIdent(str(r.table_name))}`,
+        column: quoteIdent(str(r.column_name)),
+        type: str(r.data_type),
+      }));
+    const primeInfo = toInfo(primeCols);
+    const missing = diffMissingColumns(primeInfo, toInfo(cloneCols));
+    if (missing.length) {
+      await say(`Repairing ${missing.length} drifted column(s)...`);
+      const repair = await applyStatements(
+        cloneRef,
+        "tables:columns",
+        buildAddColumnStatements(missing),
+        60,
+        pauseIfDue,
+      );
+      tableStage.applied += repair.applied;
+      tableStage.failed += repair.failed;
+      tableStage.notes = [
+        ...(tableStage.notes ?? []),
+        `column drift: ${missing.length} missing, ${repair.applied} repaired`,
+      ];
+      // Re-read only when the repair itself reported a failure. A clean repair
+      // already knows what it added, and this verification is another ~10,000
+      // row read — the difference between finishing the stage inside the
+      // invocation and being killed one step from the end.
+      if (repair.failed > 0) {
+        const afterCols = toInfo(await query(cloneRef, Q.columns));
+        const stillDrifted = driftedTables(columnSignature(primeInfo), columnSignature(afterCols));
+        if (stillDrifted.length) {
+          tableStage.reconciled = false;
+          tableStage.notes.push(`still drifted: ${stillDrifted.slice(0, 10).join(", ")}`);
+        }
       }
     }
+    stages.push(tableStage);
   }
-  stages.push(tableStage);
 
   // 4. functions — repeat until the failure count stops falling
-  pauseIfDue("introspection: functions onward resume next tick");
-  await say("Replicating functions...");
-  const fnRows = await query(primeRef, Q.functions);
-  const fnStmts = fnRows.map((r) => str(r.def)).filter(Boolean);
-  const history: number[] = [];
-  let lastApply: BatchApplyResult = { applied: 0, failed: 0, errors: [] };
-  let totalApplied = 0;
-  while (shouldRunAnotherFunctionPass(history)) {
-    await say(`Functions pass ${history.length + 1}...`);
-    lastApply = await applyStatements(cloneRef, "functions", fnStmts, 15, pauseIfDue);
-    totalApplied += lastApply.applied;
-    history.push(lastApply.failed);
+  if (enterStage("functions")) {
+    await say("Replicating functions...");
+    const fnRows = await query(primeRef, Q.functions);
+    const fnStmts = fnRows.map((r) => str(r.def)).filter(Boolean);
+    const history: number[] = [];
+    let lastApply: BatchApplyResult = { applied: 0, failed: 0, errors: [] };
+    let totalApplied = 0;
+    while (shouldRunAnotherFunctionPass(history)) {
+      await say(`Functions pass ${history.length + 1}...`);
+      lastApply = await applyStatements(cloneRef, "functions", fnStmts, 15, pauseIfDue);
+      totalApplied += lastApply.applied;
+      history.push(lastApply.failed);
+    }
+    const [fnPrime, fnClone] = await Promise.all([
+      countOn(primeRef, "functions"),
+      countOn(cloneRef, "functions"),
+    ]);
+    stages.push({
+      stage: "functions",
+      primeCount: fnPrime,
+      cloneCount: fnClone,
+      applied: totalApplied,
+      failed: history[history.length - 1] ?? 0,
+      reconciled: reconcile(fnPrime, fnClone),
+      ...(lastApply.errors.length ? { errors: lastApply.errors } : {}),
+      notes: [`convergence: ${history.join(" → ")}`],
+    });
   }
-  const [fnPrime, fnClone] = await Promise.all([
-    countOn(primeRef, "functions"),
-    countOn(cloneRef, "functions"),
-  ]);
-  stages.push({
-    stage: "functions",
-    primeCount: fnPrime,
-    cloneCount: fnClone,
-    applied: totalApplied,
-    failed: history[history.length - 1] ?? 0,
-    reconciled: reconcile(fnPrime, fnClone),
-    ...(lastApply.errors.length ? { errors: lastApply.errors } : {}),
-    notes: [`convergence: ${history.join(" → ")}`],
-  });
 
   // 4b. A column default that calls a user function could not be created
   // before stage 4 existed. Re-apply the table DDL once the functions are in
   // place and re-reconcile, so that ordering cannot silently lose a table.
-  if (!tableStage.reconciled || tableStage.failed > 0) {
+  if (tableStmts && tableStage && (!tableStage.reconciled || tableStage.failed > 0)) {
     await say("Re-applying tables now that functions exist...");
     const retry = await applyStatements(cloneRef, "tables:retry", tableStmts, 60);
     tableStage.applied += retry.applied;
@@ -819,88 +909,103 @@ export async function replicateSchemaByIntrospection(
   }
 
   // 5. constraints, ordered p → u → c → f
-  pauseIfDue("introspection: constraints onward resume next tick");
-  await say("Replicating constraints...");
-  const conRows = await query(primeRef, Q.constraints);
-  const conStmts = conRows.map(
-    (r) =>
-      `alter table ${quoteIdent(str(r.schema))}.${quoteIdent(str(r.table_name))} add constraint ${quoteIdent(
-        str(r.name),
-      )} ${str(r.def)}`,
-  );
-  stages.push(
-    await runStage("constraints", primeRef, cloneRef, conStmts, 60, undefined, pauseIfDue),
-  );
+  if (enterStage("constraints")) {
+    await say("Replicating constraints...");
+    const conRows = await query(primeRef, Q.constraints);
+    const conStmts = conRows.map(
+      (r) =>
+        `alter table ${quoteIdent(str(r.schema))}.${quoteIdent(str(r.table_name))} add constraint ${quoteIdent(
+          str(r.name),
+        )} ${str(r.def)}`,
+    );
+    stages.push(
+      await runStage("constraints", primeRef, cloneRef, conStmts, 60, undefined, pauseIfDue),
+    );
+  }
 
   // 6. indexes — skipping the constraint-backed ones stage 5 already made
-  pauseIfDue("introspection: indexes onward resume next tick");
-  await say("Replicating indexes...");
-  const idxRows = await query(primeRef, Q.indexes);
-  const conIdxNames = new Set(
-    (await query(primeRef, Q.constraintIndexNames)).map((r) => str(r.indexname)),
-  );
-  const idxStmts = filterCreatableIndexes(
-    idxRows.map((r) => ({ indexname: str(r.indexname), indexdef: str(r.indexdef) })),
-    conIdxNames,
-  ).map((def) => def.replace(/^create (unique )?index /i, (m) => `${m.trimEnd()} if not exists `));
-  stages.push(await runStage("indexes", primeRef, cloneRef, idxStmts, 60, undefined, pauseIfDue));
+  //
+  // `idxStmts` outlives this block: step 8b re-applies it once materialized
+  // views exist, since an index can belong to one. A pass that skipped this
+  // stage has none, and 8b is guarded on that.
+  let idxStmts: string[] | null = null;
+  if (enterStage("indexes")) {
+    await say("Replicating indexes...");
+    const idxRows = await query(primeRef, Q.indexes);
+    const conIdxNames = new Set(
+      (await query(primeRef, Q.constraintIndexNames)).map((r) => str(r.indexname)),
+    );
+    idxStmts = filterCreatableIndexes(
+      idxRows.map((r) => ({ indexname: str(r.indexname), indexdef: str(r.indexdef) })),
+      conIdxNames,
+    ).map((def) =>
+      def.replace(/^create (unique )?index /i, (m) => `${m.trimEnd()} if not exists `),
+    );
+    stages.push(await runStage("indexes", primeRef, cloneRef, idxStmts, 60, undefined, pauseIfDue));
+  }
 
   // 7. views — a view on a view fails when the callee is not in place yet, and
   // catalog order is not dependency order, so converge the same way functions do.
-  pauseIfDue("introspection: views onward resume next tick");
-  await say("Replicating views...");
-  const viewRows = await query(primeRef, Q.views);
-  const viewStmts = viewRows.map(
-    (r) =>
-      `create or replace view ${quoteIdent(str(r.schema))}.${quoteIdent(str(r.name))} as ${str(r.def)}`,
-  );
-  const viewHistory: number[] = [];
-  let viewApply: BatchApplyResult = { applied: 0, failed: 0, errors: [] };
-  let viewApplied = 0;
-  while (shouldRunAnotherFunctionPass(viewHistory, 3)) {
-    viewApply = await applyStatements(cloneRef, "views", viewStmts, 30, pauseIfDue);
-    viewApplied += viewApply.applied;
-    viewHistory.push(viewApply.failed);
+  if (enterStage("views")) {
+    await say("Replicating views...");
+    const viewRows = await query(primeRef, Q.views);
+    const viewStmts = viewRows.map(
+      (r) =>
+        `create or replace view ${quoteIdent(str(r.schema))}.${quoteIdent(str(r.name))} as ${str(r.def)}`,
+    );
+    const viewHistory: number[] = [];
+    let viewApply: BatchApplyResult = { applied: 0, failed: 0, errors: [] };
+    let viewApplied = 0;
+    while (shouldRunAnotherFunctionPass(viewHistory, 3)) {
+      viewApply = await applyStatements(cloneRef, "views", viewStmts, 30, pauseIfDue);
+      viewApplied += viewApply.applied;
+      viewHistory.push(viewApply.failed);
+    }
+    const [viewPrime, viewClone] = await Promise.all([
+      countOn(primeRef, "views"),
+      countOn(cloneRef, "views"),
+    ]);
+    stages.push({
+      stage: "views",
+      primeCount: viewPrime,
+      cloneCount: viewClone,
+      applied: viewApplied,
+      failed: viewHistory[viewHistory.length - 1] ?? 0,
+      reconciled: reconcile(viewPrime, viewClone),
+      ...(viewApply.errors.length ? { errors: viewApply.errors } : {}),
+      notes: [`convergence: ${viewHistory.join(" → ")}`],
+    });
   }
-  const [viewPrime, viewClone] = await Promise.all([
-    countOn(primeRef, "views"),
-    countOn(cloneRef, "views"),
-  ]);
-  stages.push({
-    stage: "views",
-    primeCount: viewPrime,
-    cloneCount: viewClone,
-    applied: viewApplied,
-    failed: viewHistory[viewHistory.length - 1] ?? 0,
-    reconciled: reconcile(viewPrime, viewClone),
-    ...(viewApply.errors.length ? { errors: viewApply.errors } : {}),
-    notes: [`convergence: ${viewHistory.join(" → ")}`],
-  });
 
   // 8. materialized views (relkind 'm' — every table query misses these, and
   //    an index belongs to one, so skipping this breaks the index stage)
-  pauseIfDue("introspection: materialized views onward resume next tick");
-  await say("Replicating materialized views...");
-  const mvRows = await query(primeRef, Q.matviews);
-  stages.push(
-    await runStage(
-      "matviews",
-      primeRef,
-      cloneRef,
-      mvRows.map(
-        (r) =>
-          `create materialized view if not exists ${quoteIdent(str(r.schema))}.${quoteIdent(
-            str(r.name),
-          )} as ${str(r.def)}`,
+  if (enterStage("matviews")) {
+    await say("Replicating materialized views...");
+    const mvRows = await query(primeRef, Q.matviews);
+    stages.push(
+      await runStage(
+        "matviews",
+        primeRef,
+        cloneRef,
+        mvRows.map(
+          (r) =>
+            `create materialized view if not exists ${quoteIdent(str(r.schema))}.${quoteIdent(
+              str(r.name),
+            )} as ${str(r.def)}`,
+        ),
+        15,
+        undefined,
+        pauseIfDue,
       ),
-      15,
-    ),
-  );
+    );
+  }
 
   // 8b. Indexes that belong to matviews could not exist before stage 8.
-  const idxAfterMv = await applyStatements(cloneRef, "indexes:matview", idxStmts, 60);
+  // Only when this pass built the index statements; otherwise the next full
+  // pass carries it rather than paying for the catalogue read again.
   const idxStage = stages.find((s) => s.stage === "indexes");
-  if (idxStage) {
+  if (idxStmts && idxStage) {
+    const idxAfterMv = await applyStatements(cloneRef, "indexes:matview", idxStmts, 60, pauseIfDue);
     idxStage.applied += idxAfterMv.applied;
     idxStage.cloneCount = await countOn(cloneRef, "indexes");
     idxStage.failed = idxAfterMv.failed;
@@ -908,73 +1013,100 @@ export async function replicateSchemaByIntrospection(
   }
 
   // 9. triggers
-  pauseIfDue("introspection: triggers onward resume next tick");
-  await say("Replicating triggers...");
-  const trgRows = await query(primeRef, Q.triggers);
-  stages.push(
-    await runStage(
-      "triggers",
-      primeRef,
-      cloneRef,
-      trgRows.map((r) => str(r.def)).filter(Boolean),
-      60,
-    ),
-  );
+  if (enterStage("triggers")) {
+    await say("Replicating triggers...");
+    const trgRows = await query(primeRef, Q.triggers);
+    stages.push(
+      await runStage(
+        "triggers",
+        primeRef,
+        cloneRef,
+        trgRows.map((r) => str(r.def)).filter(Boolean),
+        60,
+        undefined,
+        pauseIfDue,
+      ),
+    );
+  }
 
   // 10. RLS enable
-  pauseIfDue("introspection: RLS onward resumes next tick");
-  await say("Enabling row level security...");
-  const rlsRows = await query(primeRef, Q.rlsTables);
-  stages.push(
-    await runStage(
-      "rls",
-      primeRef,
-      cloneRef,
-      rlsRows.map(
-        (r) =>
-          `alter table ${quoteIdent(str(r.schema))}.${quoteIdent(str(r.name))} enable row level security`,
+  if (enterStage("rls")) {
+    await say("Enabling row level security...");
+    const rlsRows = await query(primeRef, Q.rlsTables);
+    stages.push(
+      await runStage(
+        "rls",
+        primeRef,
+        cloneRef,
+        rlsRows.map(
+          (r) =>
+            `alter table ${quoteIdent(str(r.schema))}.${quoteIdent(str(r.name))} enable row level security`,
+        ),
+        60,
+        undefined,
+        pauseIfDue,
       ),
-      60,
-    ),
-  );
+    );
+  }
 
   // 11. policies
-  pauseIfDue("introspection: policies onward resume next tick");
-  await say("Replicating RLS policies...");
-  const polRows = await query(primeRef, Q.policies);
-  stages.push(
-    await runStage(
-      "policies",
-      primeRef,
-      cloneRef,
-      polRows.map((r) =>
-        buildPolicyDdl({
-          schemaname: str(r.schemaname),
-          tablename: str(r.tablename),
-          policyname: str(r.policyname),
-          permissive: str(r.permissive),
-          roles: str(r.roles),
-          cmd: str(r.cmd),
-          qual: r.qual == null ? null : str(r.qual),
-          with_check: r.with_check == null ? null : str(r.with_check),
-        }),
+  if (enterStage("policies")) {
+    await say("Replicating RLS policies...");
+    const polRows = await query(primeRef, Q.policies);
+    stages.push(
+      await runStage(
+        "policies",
+        primeRef,
+        cloneRef,
+        polRows.map((r) =>
+          buildPolicyDdl({
+            schemaname: str(r.schemaname),
+            tablename: str(r.tablename),
+            policyname: str(r.policyname),
+            permissive: str(r.permissive),
+            roles: str(r.roles),
+            cmd: str(r.cmd),
+            qual: r.qual == null ? null : str(r.qual),
+            with_check: r.with_check == null ? null : str(r.with_check),
+          }),
+        ),
+        60,
+        undefined,
+        pauseIfDue,
       ),
-      60,
-    ),
-  );
+    );
+  }
 
   // 12. Data API grants. RLS alone is not access: without the prime's table
   // privileges PostgREST cannot reach a single table on the clone.
-  pauseIfDue("introspection: grants resume next tick");
-  await say("Replicating Data API grants...");
-  const grantRows = await query(primeRef, Q.grants);
-  const grantStmts = grantRows.map((r) =>
-    buildGrantDdl(str(r.schema), str(r.table_name), str(r.grantee), str(r.privilege_type)),
-  );
-  stages.push(await runStage("grants", primeRef, cloneRef, grantStmts, 60, undefined, pauseIfDue));
+  if (enterStage("grants")) {
+    await say("Replicating Data API grants...");
+    const grantRows = await query(primeRef, Q.grants);
+    const grantStmts = grantRows.map((r) =>
+      buildGrantDdl(str(r.schema), str(r.table_name), str(r.grantee), str(r.privilege_type)),
+    );
+    stages.push(
+      await runStage("grants", primeRef, cloneRef, grantStmts, 60, undefined, pauseIfDue),
+    );
+  }
 
+  // A pass that began partway through says nothing about the stages it
+  // skipped, so it never pronounces the schema complete: it reports `partial`,
+  // the caller clears the marker, and one more pass runs from the top to
+  // verify the lot. That pass is cheap — every finished stage answers
+  // `alreadyReconciled` with two COUNTs — and it is what closes the loop,
+  // because a stage that could not finish early (tables needs types the
+  // functions stage creates) succeeds once the rest of the schema exists.
+  const partial = startIndex > 0;
   const shortStages = stages.filter((s) => !s.reconciled).map((s) => s.stage);
-  return { ok: shortStages.length === 0, primeRef, cloneRef, stages, shortStages };
+  return {
+    ok: !partial && shortStages.length === 0,
+    primeRef,
+    cloneRef,
+    stages,
+    shortStages,
+    partial,
+  };
 }
 
 // ─── Emptiness verification ──────────────────────────────────────────

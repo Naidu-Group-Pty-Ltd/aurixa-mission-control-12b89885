@@ -151,18 +151,16 @@ describe("the pipeline is budgeted and resumable", () => {
     expect(body).toMatch(/skipped: true/);
   });
 
-  it("introspection pauses between stages, and stage 1 never pauses", () => {
+  it("introspection pauses between stages, and the first stage run never pauses", () => {
+    /* Every stage now goes through one gate rather than carrying its own
+       pause call — the rule is unchanged, its enforcement moved. Each stage
+       in the sequence must be entered through it, or a stage becomes
+       unpausable and unskippable at once. */
     const src = introspection();
     const body = src.slice(src.indexOf("export async function replicateSchemaByIntrospection"));
-    const pauses = body.match(/pauseIfDue\(/g) ?? [];
-    /* One definition plus one call per stage from sequences onward. */
-    expect(pauses.length).toBeGreaterThanOrEqual(11);
-    /* The first stage must run unconditionally, or a recycled invocation can
-       spin without ever moving the job. */
-    const enums = body.indexOf('await say("Introspecting prime: enum types...")');
-    const firstPauseCall = body.indexOf("pauseIfDue(", body.indexOf("};") + 1);
-    expect(enums).toBeGreaterThan(-1);
-    expect(firstPauseCall).toBeGreaterThan(enums);
+    const gated = body.match(/enterStage\("/g) ?? [];
+    expect(gated.length).toBe(12);
+    expect(body).toMatch(/if \(ranAStageThisPass\) pauseIfDue\(/);
   });
 
   it("the runner reports a pause as progressed and never writes failed for it", () => {
@@ -273,5 +271,89 @@ describe("every stage can be interrupted at batch granularity", () => {
     const src = introspection();
     expect(src).toMatch(/async function alreadyReconciled\(/);
     expect(src).toMatch(/already reconciled — skipped on resume/);
+  });
+});
+
+describe("the schema build remembers where it paused", () => {
+  /* Batch-level pausing (above) made overruns cheap, but every invocation
+     still replayed the sequence from stage 1 — and on this prime the `tables`
+     stage alone costs a whole slice. The run reached the same pause point on
+     every pass and the stages after it were never given any budget: 155 of
+     624 functions, unchanged across three consecutive passes, pausing
+     correctly and progressing not at all. The marker is what turns a pause
+     into progress. */
+  const migration = () => read("supabase/migrations/20260831080000_clone_backend_resume_stage.sql");
+
+  it("the stage order is declared once and shared", () => {
+    const src = introspection();
+    expect(src).toMatch(/export const STAGE_SEQUENCE: readonly StageName\[\]/);
+    /* The marker is an index into this list, so a stage missing from it can
+       never be resumed at. */
+    for (const stage of [
+      "enums",
+      "sequences",
+      "tables",
+      "functions",
+      "constraints",
+      "indexes",
+      "views",
+      "matviews",
+      "triggers",
+      "rls",
+      "policies",
+      "grants",
+    ]) {
+      expect(src.slice(src.indexOf("STAGE_SEQUENCE"))).toContain(`"${stage}"`);
+    }
+  });
+
+  it("a carried stage is skipped, and the first stage run never pauses", () => {
+    const src = introspection();
+    const gate = src.slice(src.indexOf("const enterStage ="));
+    expect(gate).toMatch(/STAGE_SEQUENCE\.indexOf\(stage\) < startIndex\) return false/);
+    /* Without this an invocation could pause before doing anything and
+       recycle for ever without moving the job. */
+    expect(gate).toMatch(/if \(ranAStageThisPass\) pauseIfDue\(/);
+  });
+
+  it("the pause carries the stage rather than the caller parsing the prose", () => {
+    expect(read("src/server/provisioningBudget.ts")).toMatch(/readonly resumeStage\?: string/);
+    expect(introspection()).toMatch(/throw new BudgetPause\(about, reachedStage\)/);
+  });
+
+  it("a resumed pass never claims the schema is complete", () => {
+    /* It skipped stages, so it cannot pronounce on them. It reports `partial`,
+       the marker is cleared, and one full pass verifies the lot — cheap now,
+       because every finished stage answers alreadyReconciled with two COUNTs.
+       This is also what closes the loop: `tables` cannot finish before the
+       functions stage exists, and succeeds on the pass after it does. */
+    const src = introspection();
+    expect(src).toMatch(/const partial = startIndex > 0/);
+    expect(src).toMatch(/ok: !partial && shortStages\.length === 0/);
+    expect(pipeline()).toMatch(/if \(result\.partial\)[\s\S]{0,400}throw new BudgetPause\(/);
+  });
+
+  it("the runner stores the marker on a pause and clears it when done", () => {
+    const src = runner();
+    expect(src).toMatch(/select\("supabase_project_ref, resume_stage"\)/);
+    expect(src).toMatch(/introspectionResumeStage: existingRow\?\.resume_stage/);
+    /* Undefined means the pause had no stage to name (the health wait, the
+       edge deploys) — leave the stored marker alone rather than guessing. */
+    expect(src).toMatch(
+      /e\.resumeStage === undefined \? \{\} : \{ resume_stage: e\.resumeStage \|\| null \}/,
+    );
+    /* Cleared on both terminal outcomes: a finished schema and a broken run
+       both start from the first stage next time. */
+    expect(src).toMatch(/status: "ready" as const,[\s\S]{0,160}resume_stage: null/);
+    expect(src).toMatch(/status: "failed" as const,[\s\S]{0,240}resume_stage: null/);
+  });
+
+  it("the column exists in a migration, defaulting to start-from-the-top", () => {
+    const sql = migration();
+    expect(sql).toMatch(/alter table public\.clone_backends/);
+    expect(sql).toMatch(/add column if not exists resume_stage text/);
+    /* Nullable with no default: NULL is "start from the beginning", which is
+       what every existing row already means. */
+    expect(sql).not.toMatch(/not null/i);
   });
 });

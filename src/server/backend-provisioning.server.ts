@@ -2519,6 +2519,13 @@ export type ProvisionBackendInput = {
    */
   deadlineAt?: number | null;
   /**
+   * Introspection stage to resume at, from a previous invocation's budget
+   * pause. Stages before it were carried already and are skipped without
+   * paying for their catalogue reads — the difference between a run that
+   * progresses and one that replays the same prefix for ever.
+   */
+  introspectionResumeStage?: string | null;
+  /**
    * Called the MOMENT a project is created, before anything else is spent on
    * it. The caller persists the ref so a death anywhere after creation can
    * never orphan a paid project: the resume path reads the persisted ref and
@@ -2668,6 +2675,7 @@ export async function provisionCloneBackend(
       primeRef,
       onStatusUpdate,
       deadlineAt: input.deadlineAt,
+      resumeFrom: input.introspectionResumeStage ?? null,
     });
     const emptiness = await verifyCloneIsEmpty(projectRef, { allowRows: 0 }).catch(() => null);
     introspection = {
@@ -2677,6 +2685,16 @@ export async function provisionCloneBackend(
       rowsOnClone: emptiness?.totalRows ?? null,
       nonEmptyTables: emptiness?.nonEmpty.map((t) => t.table).slice(0, 20) ?? [],
     };
+    if (result.partial) {
+      // Not a failure and not a success: this pass resumed partway through
+      // and reached the end of the sequence, so the stages it skipped are
+      // unverified. Pause out, clearing the marker, and let one full pass
+      // confirm the schema from the top.
+      throw new BudgetPause(
+        "schema build reached the end of a resumed pass — verifying from the first stage next tick",
+        "",
+      );
+    }
     if (!result.ok) {
       const short = result.stages
         .filter((s) => !s.reconciled)

@@ -97,10 +97,11 @@ async function runBackendProvisioning(
       );
     }
 
-    // Resume onto a project left behind by a failed run rather than orphaning it
+    // Resume onto a project left behind by a failed run rather than orphaning
+    // it, and pick the schema build up where the last budget pause left it.
     const { data: existingRow } = await supabase
       .from("clone_backends")
-      .select("supabase_project_ref")
+      .select("supabase_project_ref, resume_stage")
       .eq("clone_id", input.cloneId)
       .maybeSingle();
 
@@ -176,6 +177,7 @@ async function runBackendProvisioning(
         schemaStrategy: input.schemaStrategy ?? "introspection",
         primeBackendRef,
         deadlineAt: input.deadlineAt ?? null,
+        introspectionResumeStage: existingRow?.resume_stage ?? null,
         // Persist the ref the moment the project exists — a death after
         // creation must resume onto it, never orphan it (see the input doc).
         onProjectRef: async (ref: string) => {
@@ -264,6 +266,8 @@ async function runBackendProvisioning(
         // On resume the original db password is kept — don't null it out
         ...(result.dbPass ? { db_pass: encryptSecret(result.dbPass) } : {}),
         status: "ready" as const,
+        // The schema build is done; a later re-provision starts from the top.
+        resume_stage: null,
         parity_report: parity ?? null,
         parity_checked_at: parity ? new Date().toISOString() : null,
         repo_retarget: repoRetarget ?? null,
@@ -420,11 +424,19 @@ async function runBackendProvisioning(
       /* @vite-ignore */ "@/lib/_server-shims/provisioningBudget"
     );
     if (e instanceof BudgetPause) {
+      // `resumeStage` is undefined when the pause happened somewhere with no
+      // stage to name (the health wait, the edge-function deploys) — leave the
+      // stored marker alone rather than guessing. An empty string is the
+      // deliberate "start from the top again" signal a completed partial pass
+      // sends, and is stored as NULL.
+      const markerUpdate =
+        e.resumeStage === undefined ? {} : { resume_stage: e.resumeStage || null };
       const { error: pauseWriteErr } = await supabase
         .from("clone_backends")
         .update({
           status_detail: `Paused at the invocation budget — ${e.detail}`,
           error_message: null,
+          ...markerUpdate,
         })
         .eq("clone_id", input.cloneId);
       if (pauseWriteErr) {
@@ -445,6 +457,9 @@ async function runBackendProvisioning(
         status: "failed" as const,
         error_message: msg,
         status_detail: "Provisioning failed",
+        // A retry re-verifies from the first stage: the marker records where a
+        // PAUSE left off, and this run did not pause, it broke.
+        resume_stage: null,
       })
       .eq("clone_id", input.cloneId);
 
