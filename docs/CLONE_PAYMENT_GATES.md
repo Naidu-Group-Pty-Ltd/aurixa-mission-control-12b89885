@@ -194,6 +194,37 @@ why a workspace is locked without being able to change it.
   that is never asked about is indistinguishable from one that is working, and
   this platform has shipped that particular silence before.
 
+## The one part of the migration nothing verifies
+
+`20260831000000_clone_payment_gates.sql` carries three `-- @asserts` claims —
+both tables and `prime_config.clone_gate_default_hours` — and
+`/hooks/migration-drift` resolves them against the live schema every hour.
+
+It also adds four `notification_kind` enum values, and **an `enum` claim is
+unassertable on this deployment**: `pg_type` is outside the schemas PostgREST
+exposes, so the drift checker reports it rather than answering it
+(`migration-drift.server.ts`). Nothing checks that those four values are really
+there.
+
+That matters because it is a failure this platform has already had.
+`20260820120000_notification_kinds_never_declared.sql` records three kinds that
+were being inserted and had never been added to the enum: Postgres refused every
+write, the discarded error meant nobody found out, and the notification that a
+client had handed over their Supabase PAT had never once arrived.
+
+The exposure here is bounded and the symptom is specific. Arming, locking,
+payment settlement and the derived status do not touch the enum, so the gate
+works either way; what is lost is the four operator notifications. Because these
+go through `notifyOperators`, a refused write is LOGGED rather than silent —
+which is the difference that one cost us. **So if a gate arms and no
+notification arrives, check the enum values before anything else**:
+
+```sql
+SELECT enumlabel FROM pg_enum
+ WHERE enumtypid = 'public.notification_kind'::regtype
+   AND enumlabel LIKE 'clone_gate_%';   -- expect 4 rows
+```
+
 ## Files
 
 | File | What it is |
