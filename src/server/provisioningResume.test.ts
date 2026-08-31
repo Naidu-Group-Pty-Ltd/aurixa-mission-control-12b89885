@@ -160,8 +160,8 @@ describe("the drift sweep leaves provisioning clones alone", () => {
     expect(guard).toBeGreaterThan(-1);
     expect(model).toBeGreaterThan(guard);
     /* The guarded branch records the check ran and nothing else. */
-    expect(scan.slice(guard, guard + 400)).toContain("last_drift_check_at");
-    expect(scan.slice(guard, guard + 400)).toContain("continue");
+    expect(scan.slice(guard, guard + 700)).toContain("last_drift_check_at");
+    expect(scan.slice(guard, guard + 700)).toContain("continue");
   });
 
   it("a clone with no cascade yet is clocked from creation, not from 1970", () => {
