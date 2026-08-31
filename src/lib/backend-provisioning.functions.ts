@@ -174,10 +174,19 @@ async function runBackendProvisioning(
         // Persist the ref the moment the project exists — a death after
         // creation must resume onto it, never orphan it (see the input doc).
         onProjectRef: async (ref: string) => {
-          await supabase
+          const { error } = await supabase
             .from("clone_backends")
             .update({ supabase_project_ref: ref })
             .eq("clone_id", input.cloneId);
+          if (error) {
+            // The one write whose failure can cost a paid project: without
+            // the persisted ref, a later death makes the resume create a
+            // second one. The run continues — the final update writes the
+            // ref again if it completes — but this must not be silent.
+            console.error(
+              `[backend-provisioning] could not persist project ref ${ref} for clone ${input.cloneId}: ${error.message}`,
+            );
+          }
         },
       },
       updateStatus,
@@ -406,13 +415,20 @@ async function runBackendProvisioning(
       /* @vite-ignore */ "@/lib/_server-shims/provisioningBudget"
     );
     if (e instanceof BudgetPause) {
-      await supabase
+      const { error: pauseWriteErr } = await supabase
         .from("clone_backends")
         .update({
           status_detail: `Paused at the invocation budget — ${e.detail}`,
           error_message: null,
         })
         .eq("clone_id", input.cloneId);
+      if (pauseWriteErr) {
+        // The pause itself stands either way — a stale detail sentence is the
+        // only cost — but a database refusing writes is not a thing to hide.
+        console.error(
+          `[backend-provisioning] could not record budget pause for clone ${input.cloneId}: ${pauseWriteErr.message}`,
+        );
+      }
       return { ok: false, error: e.detail, retryable: true, progressed: true };
     }
 

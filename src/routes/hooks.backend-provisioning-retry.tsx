@@ -26,6 +26,7 @@ import {
   enqueueCloneBackendProvisioning,
   generateSecurePassword,
 } from "@/server/backend-provisioning.server";
+import { writeAuditLog } from "@/server/audit.server";
 
 const admin = supabaseAdmin;
 
@@ -95,10 +96,10 @@ export const Route = createFileRoute("/hooks/backend-provisioning-retry")({
           });
           if (!enq.ok) return json({ success: false, error: enq.error }, 409);
 
-          await admin.from("audit_log").insert({
+          await writeAuditLog({
             action: "clone_backend.retry_enqueued",
-            entity_type: "clone",
-            entity_id: cloneId,
+            entityType: "clone",
+            entityId: cloneId,
             metadata: { via: "hooks/backend-provisioning-retry" },
           });
 

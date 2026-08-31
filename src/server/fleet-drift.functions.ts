@@ -139,10 +139,15 @@ export async function runFleetDriftScan(
   let updated = 0;
   for (const c of clones) {
     if (inFlightBackends.has(c.id)) {
-      await supabase
+      const { error: checkStampErr } = await supabase
         .from("clones")
         .update({ last_drift_check_at: new Date().toISOString() })
         .eq("id", c.id);
+      if (checkStampErr) {
+        console.error(
+          `[fleet-drift] could not stamp drift check for provisioning clone ${c.id}: ${checkStampErr.message}`,
+        );
+      }
       updated++;
       continue;
     }
