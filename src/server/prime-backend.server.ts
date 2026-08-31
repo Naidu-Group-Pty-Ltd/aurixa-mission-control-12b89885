@@ -445,24 +445,72 @@ async function fetchBlobBase64(octokit: Octokit, ref: RepoRef, sha: string): Pro
 }
 
 /**
- * How many blob fetches run at once. One round trip per blob is the unit of
- * cost here, and the snapshot needs THOUSANDS of them — every migration and
- * every edge-function file is its own `git.getBlob` call. Fetched serially
- * that is tens of minutes, which is longer than the drain worker invocation
- * that runs it lives: the first engine-provisioned clone died mid-snapshot on
- * three consecutive attempts and never got past this step.
- *
- * The width is measured, not guessed. The prime holds 2,037 blobs under
- * `supabase/` (~985 migrations, ~1,033 function files), the invocation dies
- * at roughly sixty seconds, and the first pooled attempt — 12-wide, still
- * fetching migration SQL nobody reads under the introspection strategy — was
- * killed mid-pool anyway (31 Aug 2026, 02:07). At 24-wide over the ~1,000
- * blobs a default run actually needs, the walk fits with margin. Higher is
- * not free: GitHub's secondary rate limits punish bursts from a single
- * installation token, and a snapshot that gets the App rate-limited breaks
- * the cascade and every other GitHub caller sharing the token.
+ * How many REST blob fetches run at once, for the paths that still need REST:
+ * migration SQL bodies under the replay strategy, and the GraphQL fallback
+ * (binary or truncated blobs). The PRIMARY function-file path is GraphQL
+ * batches — see fetchBlobTextsBatched — because per-request cost from this
+ * runtime is the binding constraint, not width: the drain invocation died
+ * mid-pool at 12-wide over ~2,000 blobs (31 Aug 02:07), and again at 24-wide
+ * over ~1,050 (31 Aug 02:56, pg_net timeout on the tick that claimed).
+ * Whatever each round trip costs here, a thousand of them do not fit inside
+ * the invocation; ~fourteen do.
  */
 const BLOB_FETCH_CONCURRENCY = 24;
+
+/** Blobs per GraphQL query. ~80 aliased Blob objects ≈ a ~1MB response. */
+const GRAPHQL_BLOB_BATCH = 80;
+
+/**
+ * Fetch many blobs' contents in a handful of GraphQL queries instead of one
+ * REST round trip each.
+ *
+ * Returns base64 per path, matching what `git.getBlob` yields, so callers do
+ * not care which road a blob travelled. GraphQL serves `text` — UTF-8 only,
+ * truncated past ~512KB (the prime's largest function file is 453KB), null
+ * for binary — so any blob GraphQL cannot carry faithfully is fetched by
+ * REST afterwards, pooled. Fidelity beats speed: a mis-decoded byte in a
+ * deployed function is worse than a slow snapshot, which is why the fallback
+ * is keyed on GitHub's OWN isBinary/isTruncated verdicts, never on filename.
+ */
+async function fetchBlobTextsBatched(
+  octokit: Octokit,
+  ref: RepoRef,
+  entries: Array<{ rel: string; sha: string }>,
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const restFallback: Array<{ rel: string; sha: string }> = [];
+
+  for (let i = 0; i < entries.length; i += GRAPHQL_BLOB_BATCH) {
+    const group = entries.slice(i, i + GRAPHQL_BLOB_BATCH);
+    // Object oids are 40-char hex straight from the tree listing — inert in
+    // a query string. Everything user-shaped travels as variables.
+    const fields = group
+      .map((e, j) => `b${j}: object(oid: "${e.sha}") { ... on Blob { text isBinary isTruncated } }`)
+      .join("\n");
+    const query = `query($owner: String!, $repo: String!) { repository(owner: $owner, name: $repo) { ${fields} } }`;
+    const resp = (await octokit.graphql(query, { owner: ref.owner, repo: ref.repo })) as {
+      repository: Record<
+        string,
+        { text: string | null; isBinary: boolean | null; isTruncated: boolean } | null
+      >;
+    };
+    group.forEach((e, j) => {
+      const blob = resp.repository[`b${j}`];
+      if (blob && blob.text !== null && blob.isBinary === false && blob.isTruncated === false) {
+        out.set(e.rel, Buffer.from(blob.text, "utf8").toString("base64"));
+      } else {
+        restFallback.push(e);
+      }
+    });
+  }
+
+  if (restFallback.length > 0) {
+    await mapPool(restFallback, BLOB_FETCH_CONCURRENCY, async (e) => {
+      out.set(e.rel, await fetchBlobBase64(octokit, ref, e.sha));
+    });
+  }
+  return out;
+}
 
 /**
  * Bounded-concurrency map that preserves input order in its results.
@@ -810,10 +858,10 @@ export async function fetchPrimeBackendSnapshot(
     deployable.push({ slug, bundlePaths, entrypointPath });
   }
 
-  // Fetch each needed blob once, keyed by relative path — pooled, not serial.
-  // This loop is the bulk of the snapshot's round trips (hundreds of
-  // functions, each bundling the shared tree), and the serial version of it is
-  // what no drain invocation ever survived.
+  // Fetch each needed blob once, keyed by relative path — GraphQL batches,
+  // not per-blob round trips. ~1,033 function files (15.6 MB) become about
+  // fourteen requests; see fetchBlobTextsBatched for why per-blob REST could
+  // never finish inside the drain invocation, at any pool width.
   const neededRels: string[] = [];
   const seenRel = new Set<string>();
   for (const bundle of deployable) {
@@ -823,12 +871,12 @@ export async function fetchPrimeBackendSnapshot(
       neededRels.push(rel);
     }
   }
-  const contentCache = new Map<string, string>();
-  await mapPool(neededRels, BLOB_FETCH_CONCURRENCY, async (rel) => {
+  const neededEntries = neededRels.map((rel) => {
     const sha = shaByRel.get(rel);
     if (!sha) throw new Error(`Blob not found for ${rel}`);
-    contentCache.set(rel, await fetchBlobBase64(octokit, ref, sha));
+    return { rel, sha };
   });
+  const contentCache = await fetchBlobTextsBatched(octokit, ref, neededEntries);
 
   const functions: PrimeEdgeFunction[] = deployable.map(
     ({ slug, bundlePaths, entrypointPath }) => ({
