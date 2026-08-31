@@ -55,7 +55,7 @@ export const Route = createFileRoute("/hooks/backend-provisioning-retry")({
         try {
           const { data: row, error: rowErr } = await admin
             .from("clone_backends")
-            .select("clone_id, status, region, admin_email, queued_module_ids")
+            .select("clone_id, status, region, admin_email, queued_module_ids, enqueued_by")
             .eq("clone_id", cloneId)
             .maybeSingle();
           if (rowErr) {
@@ -77,6 +77,20 @@ export const Route = createFileRoute("/hooks/backend-provisioning-retry")({
               409,
             );
           }
+          // `enqueued_by` is a uuid column and the enqueue writes its actor
+          // verbatim, so a retry is attributed to the ORIGINAL enqueuer — the
+          // honest reading of "do that enqueue again". The hook's first live
+          // call proved a literal "system" is refused by the column itself.
+          if (!row.enqueued_by) {
+            return json(
+              {
+                success: false,
+                error:
+                  "backend row records no original enqueuer to attribute the retry to — re-provision from the clone page instead",
+              },
+              409,
+            );
+          }
 
           const { data: clone, error: cloneErr } = await admin
             .from("clones")
@@ -86,7 +100,7 @@ export const Route = createFileRoute("/hooks/backend-provisioning-retry")({
           if (cloneErr) throw new Error(`could not read clones: ${cloneErr.message}`);
           if (!clone) return json({ success: false, error: "clone not found" }, 404);
 
-          const enq = await enqueueCloneBackendProvisioning(admin, "system", {
+          const enq = await enqueueCloneBackendProvisioning(admin, row.enqueued_by, {
             cloneId,
             cloneName: clone.name,
             region: row.region ?? undefined,
