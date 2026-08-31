@@ -435,3 +435,47 @@ describe("a vendor's quota is not this job failing", () => {
     expect(src).toMatch(/\.in\("status", \["pending", \.\.\.IN_FLIGHT_STATUSES\]\)/);
   });
 });
+
+describe("a resumed pass does not buy what it cannot use", () => {
+  it("the snapshot can decline the expensive half, and says it did", () => {
+    const src = primeBackend();
+    expect(src).toMatch(/includeFunctionSource\?: boolean/);
+    /* The early return must sit BEFORE the bundle fetch, or declining costs
+       exactly as much as not declining. */
+    const guardAt = src.indexOf("if (!includeFunctionSource)");
+    const fetchAt = src.indexOf("fetchBlobTextsBatched(octokit, ref, neededEntries)");
+    expect(guardAt).toBeGreaterThan(-1);
+    expect(fetchAt).toBeGreaterThan(-1);
+    expect(guardAt).toBeLessThan(fetchAt);
+    /* An empty list must never be mistaken for a prime with no functions. */
+    expect(src).toMatch(/functionSourceOmitted: true/);
+    expect(src).toMatch(/functionSourceOmitted: false/);
+  });
+
+  it("the runner decides from the marker, and reads it before snapshotting", () => {
+    const src = runner();
+    const readAt = src.indexOf('.select("supabase_project_ref, resume_stage")');
+    const snapAt = src.indexOf("await fetchPrimeBackendSnapshot(");
+    expect(readAt).toBeGreaterThan(-1);
+    expect(readAt).toBeLessThan(snapAt);
+    expect(src).toMatch(/includeFunctionSource: !resumingSchema/);
+    /* Read once. Two reads is how the second one drifts from the first. */
+    expect(src.split('.select("supabase_project_ref, resume_stage")').length - 1).toBe(1);
+    /* A failed read is not an absent row — it must not resolve to "not resuming",
+       which would silently restore the expensive fetch on every pass. */
+    expect(src).toMatch(/existingRowErr[\s\S]{0,220}throw new Error\(/);
+  });
+
+  it("deploying can never proceed on a snapshot that omitted the source", () => {
+    const src = pipeline();
+    const guardAt = src.indexOf("snapshot.functionSourceOmitted");
+    const deployAt = src.indexOf("const deployedNow = await deployEdgeFunctions(");
+    expect(guardAt).toBeGreaterThan(-1);
+    expect(guardAt).toBeLessThan(deployAt);
+    /* It pauses with an EMPTY resume stage: the marker clears, so the pass
+       after it takes a full snapshot rather than declining again for ever. */
+    const branch = src.slice(guardAt, guardAt + 500);
+    expect(branch).toMatch(/throw new BudgetPause\(/);
+    expect(branch).toMatch(/"",/);
+  });
+});

@@ -2765,6 +2765,17 @@ export async function provisionCloneBackend(
 
   // Step 5: Deploy the prime's edge functions (non-fatal per function)
   pauseIfDue("deploying edge functions");
+  // An empty function list must never be mistaken for a prime with no
+  // functions. A resumed schema pass declines to fetch the bundle source
+  // because it cannot reach this point — so if it somehow does, stop and
+  // fetch it, rather than "successfully" deploying nothing. The empty
+  // resumeStage clears the marker, so the next pass takes a full snapshot.
+  if (snapshot.functionSourceOmitted) {
+    throw new BudgetPause(
+      "the edge functions need the prime's source, which this pass did not fetch — taking a full snapshot next tick",
+      "",
+    );
+  }
   // On a resume, ask the PROJECT which functions it already holds and deploy
   // only the rest — the target is the authority, never a diary of past runs.
   // This is what turns repeated budgeted invocations into compound progress
