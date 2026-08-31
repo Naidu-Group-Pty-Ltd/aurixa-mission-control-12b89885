@@ -374,9 +374,27 @@ export async function applyStatements(
   stage: string,
   statements: readonly string[],
   batchSize = 60,
+  /**
+   * Checked BETWEEN batches, never inside one. Every batch commits on its own,
+   * so stopping between them leaves the clone in a state the next invocation
+   * simply continues from — while being KILLED mid-stage costs a 15-minute
+   * stall reclaim and repeats the whole stage. The `functions` stage is the
+   * proof: 624 definitions in batches of 15, up to five convergence passes,
+   * which no single invocation was ever going to finish.
+   *
+   * Batch granularity is the finest interruption this pipeline can honestly
+   * offer: below it lies a single `apply_ddl_batch` call, which is one
+   * server-side transaction and not ours to divide.
+   */
+  pauseIfDue?: (about: string) => void,
 ): Promise<BatchApplyResult> {
   const result: BatchApplyResult = { applied: 0, failed: 0, errors: [] };
-  for (const batch of chunk(statements, batchSize)) {
+  const batches = chunk(statements, batchSize);
+  for (let i = 0; i < batches.length; i++) {
+    const batch = batches[i];
+    // Never before the first batch: an invocation that has claimed the job
+    // must move it, or recycling makes no forward progress at all.
+    if (i > 0) pauseIfDue?.(`${stage}: ${i}/${batches.length} batches applied this pass`);
     const payload = sqlLiteral(JSON.stringify(batch));
     const raw = await runSqlOnProject(
       cloneRef,
@@ -561,8 +579,9 @@ async function runStage(
   statements: readonly string[],
   batchSize: number,
   notes?: string[],
+  pauseIfDue?: (about: string) => void,
 ): Promise<StageResult> {
-  const applyResult = await applyStatements(cloneRef, stage, statements, batchSize);
+  const applyResult = await applyStatements(cloneRef, stage, statements, batchSize, pauseIfDue);
   const [primeCount, cloneCount] = await Promise.all([
     countOn(primeRef, stage),
     countOn(cloneRef, stage),
@@ -628,7 +647,15 @@ export async function replicateSchemaByIntrospection(
   ): Promise<StageResult> => {
     const done = await alreadyReconciled(stage, primeRef, cloneRef);
     if (done) return done;
-    return runStage(stage, primeRef, cloneRef, await statements(), batchSize);
+    return runStage(
+      stage,
+      primeRef,
+      cloneRef,
+      await statements(),
+      batchSize,
+      undefined,
+      pauseIfDue,
+    );
   };
 
   await ensureApplyHelper(cloneRef);
@@ -724,6 +751,7 @@ export async function replicateSchemaByIntrospection(
       "tables:columns",
       buildAddColumnStatements(missing),
       60,
+      pauseIfDue,
     );
     tableStage.applied += repair.applied;
     tableStage.failed += repair.failed;
@@ -756,7 +784,7 @@ export async function replicateSchemaByIntrospection(
   let totalApplied = 0;
   while (shouldRunAnotherFunctionPass(history)) {
     await say(`Functions pass ${history.length + 1}...`);
-    lastApply = await applyStatements(cloneRef, "functions", fnStmts, 15);
+    lastApply = await applyStatements(cloneRef, "functions", fnStmts, 15, pauseIfDue);
     totalApplied += lastApply.applied;
     history.push(lastApply.failed);
   }
@@ -800,7 +828,9 @@ export async function replicateSchemaByIntrospection(
         str(r.name),
       )} ${str(r.def)}`,
   );
-  stages.push(await runStage("constraints", primeRef, cloneRef, conStmts, 60));
+  stages.push(
+    await runStage("constraints", primeRef, cloneRef, conStmts, 60, undefined, pauseIfDue),
+  );
 
   // 6. indexes — skipping the constraint-backed ones stage 5 already made
   pauseIfDue("introspection: indexes onward resume next tick");
@@ -813,7 +843,7 @@ export async function replicateSchemaByIntrospection(
     idxRows.map((r) => ({ indexname: str(r.indexname), indexdef: str(r.indexdef) })),
     conIdxNames,
   ).map((def) => def.replace(/^create (unique )?index /i, (m) => `${m.trimEnd()} if not exists `));
-  stages.push(await runStage("indexes", primeRef, cloneRef, idxStmts, 60));
+  stages.push(await runStage("indexes", primeRef, cloneRef, idxStmts, 60, undefined, pauseIfDue));
 
   // 7. views — a view on a view fails when the callee is not in place yet, and
   // catalog order is not dependency order, so converge the same way functions do.
@@ -828,7 +858,7 @@ export async function replicateSchemaByIntrospection(
   let viewApply: BatchApplyResult = { applied: 0, failed: 0, errors: [] };
   let viewApplied = 0;
   while (shouldRunAnotherFunctionPass(viewHistory, 3)) {
-    viewApply = await applyStatements(cloneRef, "views", viewStmts, 30);
+    viewApply = await applyStatements(cloneRef, "views", viewStmts, 30, pauseIfDue);
     viewApplied += viewApply.applied;
     viewHistory.push(viewApply.failed);
   }
@@ -941,7 +971,7 @@ export async function replicateSchemaByIntrospection(
   const grantStmts = grantRows.map((r) =>
     buildGrantDdl(str(r.schema), str(r.table_name), str(r.grantee), str(r.privilege_type)),
   );
-  stages.push(await runStage("grants", primeRef, cloneRef, grantStmts, 60));
+  stages.push(await runStage("grants", primeRef, cloneRef, grantStmts, 60, undefined, pauseIfDue));
 
   const shortStages = stages.filter((s) => !s.reconciled).map((s) => s.stage);
   return { ok: shortStages.length === 0, primeRef, cloneRef, stages, shortStages };
