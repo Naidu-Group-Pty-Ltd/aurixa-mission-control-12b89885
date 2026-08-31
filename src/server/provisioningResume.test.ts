@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { mapPool } from "./prime-backend.server";
-import { BudgetPause, pastDeadline } from "./provisioningBudget";
+import { BudgetPause, isUpstreamRateLimit, pastDeadline } from "./provisioningBudget";
 
 /**
  * Provisioning must survive the invocation it runs in.
@@ -355,5 +355,83 @@ describe("the schema build remembers where it paused", () => {
     /* Nullable with no default: NULL is "start from the beginning", which is
        what every existing row already means. */
     expect(sql).not.toMatch(/not null/i);
+  });
+});
+
+describe("a vendor's quota is not this job failing", () => {
+  const drain = () => read("src/routes/hooks.backend-provisioning-drain.tsx");
+
+  it("recognises the refusal that terminated the 31 Aug dry run", () => {
+    /* Verbatim from clone_backends.error_message on the row that exhausted. */
+    expect(
+      isUpstreamRateLimit(
+        new Error(
+          "API rate limit exceeded for installation ID 157200201. If you reach out to " +
+            "GitHub Support for help, please include the request ID 6C94:CFC00 and " +
+            "timestamp 2026-08-31 07:42:01 UTC.",
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it("recognises a secondary limit and a bare 429", () => {
+    expect(
+      isUpstreamRateLimit(
+        new Error("You have exceeded a secondary rate limit. Please wait a few minutes."),
+      ),
+    ).toBe(true);
+    expect(isUpstreamRateLimit(Object.assign(new Error("Too Many Requests"), { status: 429 }))).toBe(
+      true,
+    );
+  });
+
+  it("does NOT swallow a permission denial, which is also a 403", () => {
+    /* Requeuing this for three hours would hide a real access fault behind a
+       quota message. The message has to name the limit. */
+    expect(
+      isUpstreamRateLimit(
+        Object.assign(new Error("Resource not accessible by integration"), { status: 403 }),
+      ),
+    ).toBe(false);
+    expect(isUpstreamRateLimit(new Error("Not Found"))).toBe(false);
+    expect(isUpstreamRateLimit(null)).toBe(false);
+    expect(isUpstreamRateLimit("rate limit exceeded")).toBe(false);
+  });
+
+  it("the runner reports it instead of writing `failed`", () => {
+    const src = runner();
+    /* Classified BEFORE the failure write, or the row is already terminal. */
+    const limitAt = src.indexOf("isUpstreamRateLimit(e)");
+    const failAt = src.indexOf('status: "failed" as const');
+    expect(limitAt).toBeGreaterThan(-1);
+    expect(limitAt).toBeLessThan(failAt);
+    expect(src).toMatch(/upstreamLimited: true/);
+    /* The marker is untouched: the next invocation resumes where this one was
+       refused rather than starting over. */
+    const branch = src.slice(limitAt, failAt);
+    expect(branch).not.toMatch(/resume_stage/);
+    expect(branch).not.toMatch(/status: "failed"/);
+  });
+
+  it("the drain hands the attempt back rather than resetting it", () => {
+    const src = drain();
+    /* Not zero — a genuine failure earlier in this job's life still counts. */
+    expect(src).toMatch(
+      /upstreamLimited \? \{ attempts: Math\.max\(0, \(claimed\.attempts \?\? 0\) - 1\) \} : \{\}/,
+    );
+    /* And it can never be the thing that terminates the row. */
+    expect(src).toMatch(/!budgetPaused && !upstreamLimited && claimed\.attempts >= MAX_ATTEMPTS/);
+  });
+
+  it("the invocation stops rather than proving the same wall twice", () => {
+    expect(drain()).toMatch(/if \(r\.budgetPaused \|\| r\.upstreamLimited\) break;/);
+  });
+
+  it("the ceiling still bounds a job the quota never lets through", () => {
+    /* Attempts no longer bound this, so the wall clock must — parked rows
+       included, which is the branch that catches a permanently limited job. */
+    const src = drain();
+    expect(src).toMatch(/ceilingCutoff/);
+    expect(src).toMatch(/\.in\("status", \["pending", \.\.\.IN_FLIGHT_STATUSES\]\)/);
   });
 });

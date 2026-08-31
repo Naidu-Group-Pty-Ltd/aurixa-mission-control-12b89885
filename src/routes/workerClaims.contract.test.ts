@@ -154,7 +154,9 @@ describe("a reclaim returns rows to the shape its own claim reads", () => {
     // One absolute deadline per invocation, handed to every job it runs.
     expect(src).toContain("INVOCATION_BUDGET_MS");
     expect(src).toMatch(/drainOne\(deadlineAt\)/);
-    expect(src).toMatch(/if \(r\.budgetPaused\) break;/);
+    // A pause ends the invocation; so does an upstream quota refusal, for a
+    // different reason (see provisioningBudget.isUpstreamRateLimit).
+    expect(src).toMatch(/if \(r\.budgetPaused \|\| r\.upstreamLimited\) break;/);
   });
 
   it("backend drain: wall clock bounds the recycling that attempts no longer do", () => {
