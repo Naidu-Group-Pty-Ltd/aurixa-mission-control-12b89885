@@ -69,16 +69,31 @@ describe("mapPool", () => {
   });
 });
 
-describe("the snapshot fetches blobs pooled, never serially", () => {
-  it("migrations and function bundles both go through mapPool", () => {
+describe("the snapshot fetches blobs batched, never one round trip each", () => {
+  it("function bundles travel by GraphQL batch; replay migrations stay pooled", () => {
+    /* Per-request cost from this runtime is the binding constraint, not
+       width: the invocation died mid-pool at 12-wide over ~2,000 blobs and
+       again at 24-wide over ~1,050. ~Fourteen GraphQL queries fit; a
+       thousand REST calls never did. */
     const src = primeBackend();
     const fn = src.slice(src.indexOf("export async function fetchPrimeBackendSnapshot"));
+    expect(fn).toMatch(/await fetchBlobTextsBatched\(octokit, ref, neededEntries\)/);
     expect(fn).toMatch(/await mapPool\(migrationMetas/);
-    expect(fn).toMatch(/await mapPool\(neededRels/);
     /* The defect's exact shape: one awaited round trip per iteration of a
        bare for-loop. Neither loop may come back. */
     expect(fn).not.toMatch(/for \(const meta of migrationMetasFromBlobs/);
     expect(fn).not.toMatch(/files\.push\(\{ path: rel, contentBase64: await getContent/);
+  });
+
+  it("the batch fetch falls back to REST on GitHub's own fidelity verdicts", () => {
+    /* GraphQL text is UTF-8 only and truncates past ~512KB; a mis-decoded
+       byte in a deployed function is worse than a slow snapshot. The
+       fallback keys on isBinary/isTruncated — never on filename. */
+    const src = primeBackend();
+    const fn = src.slice(src.indexOf("async function fetchBlobTextsBatched"));
+    expect(fn).toMatch(/isBinary === false && blob\.isTruncated === false/);
+    expect(fn).toMatch(/restFallback/);
+    expect(fn).toMatch(/fetchBlobBase64\(octokit, ref, e\.sha\)/);
   });
 
   it("migration SQL bodies are fetched only for the strategy that reads them", () => {
