@@ -110,4 +110,13 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260830090000",
     assertions: [{ kind: "cron", jobname: "held-file-drift" }],
   },
+  {
+    migration: "20260831000000_clone_payment_gates.sql",
+    version: "20260831000000",
+    assertions: [
+      { kind: "table", table: "clone_payment_gates" },
+      { kind: "table", table: "clone_payment_gate_events" },
+      { kind: "column", table: "prime_config", column: "clone_gate_default_hours" },
+    ],
+  },
 ];

@@ -14,7 +14,8 @@ export type CloneApiScope = {
     | "webhooks"
     | "edge"
     | "health"
-    | "usage";
+    | "usage"
+    | "gate";
   label: string;
   description: string;
   default?: boolean;
@@ -97,6 +98,14 @@ export const CLONE_API_SCOPES: CloneApiScope[] = [
     description:
       "Read this clone's own API usage totals and current-period charge, so a workspace can show its operators what it is spending.",
     default: false,
+  },
+  {
+    value: "gate:read",
+    group: "gate",
+    label: "Activation gate — read",
+    description:
+      "Read this clone's own activation-gate status and start the activation checkout. On by default: a gated clone that cannot read its gate has no way to tell a customer why it is locked, or how to pay.",
+    default: true,
   },
   {
     value: "health:beacon",

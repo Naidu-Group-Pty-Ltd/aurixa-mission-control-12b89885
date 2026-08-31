@@ -4,6 +4,7 @@ import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { jsonResponse, resolveCloneApiKey } from "@/server/clone-api-keys.server";
 import { checkRateLimit } from "@/server/token-rate-limit.server";
 import { checkSeatThresholds, fireSeatWebhook } from "@/server/seats.server";
+import { assertGateOpen, gateLockedBody } from "@/server/payment-gate.server";
 
 const Schema = z.object({
   external_user_id: z.string().min(1).max(200),
@@ -39,6 +40,16 @@ export const Route = createFileRoute("/api/public/seats/reserve")({
             },
           );
         }
+        // A locked workspace may not take on new users. Blocking the seat is
+        // the honest place: reserving one commits Aurixa to a seat nobody has
+        // paid for, and it is the only seats endpoint that grows the account —
+        // `release` and `commit` stay open so a locked workspace can still be
+        // tidied up and an in-flight signup can finish or unwind.
+        const gate = await assertGateOpen(key.clone_id);
+        if (!gate.open) {
+          return jsonResponse(gateLockedBody(gate), 402);
+        }
+
         let body: unknown;
         try {
           body = await request.json();

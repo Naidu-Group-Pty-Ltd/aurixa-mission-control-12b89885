@@ -118,6 +118,7 @@ import { Route as BillingSuccessRouteImport } from './routes/billing.success'
 import { Route as BillingSeatsRouteImport } from './routes/billing.seats'
 import { Route as BillingPurchasesRouteImport } from './routes/billing.purchases'
 import { Route as BillingInvoicesRouteImport } from './routes/billing.invoices'
+import { Route as BillingGatesRouteImport } from './routes/billing.gates'
 import { Route as BillingCatalogRouteImport } from './routes/billing.catalog'
 import { Route as BillingCancelRouteImport } from './routes/billing.cancel'
 import { Route as BillingApiUsageRouteImport } from './routes/billing.api-usage'
@@ -168,6 +169,7 @@ import { Route as ApiPublicHandoffBeaconRouteImport } from './routes/api.public.
 import { Route as ApiPublicHandoffAuditIngestRouteImport } from './routes/api.public.handoff.audit-ingest'
 import { Route as ApiPublicEdgeStatusRouteImport } from './routes/api.public.edge.status'
 import { Route as ApiPublicClonesRotateKeyRouteImport } from './routes/api.public.clones.rotate-key'
+import { Route as ApiPublicClonesGateRouteImport } from './routes/api.public.clones.gate'
 import { Route as ApiPublicBillingPaymentMethodsRouteImport } from './routes/api.public.billing.payment-methods'
 import { Route as ApiPublicBillingInvoicesRouteImport } from './routes/api.public.billing.invoices'
 import { Route as ApiPublicBillingInvoicePdfRouteImport } from './routes/api.public.billing.invoice-pdf'
@@ -177,6 +179,7 @@ import { Route as ApiPublicSeatsDevicesReleaseRouteImport } from './routes/api.p
 import { Route as ApiPublicSeatsDevicesRegisterRouteImport } from './routes/api.public.seats.devices.register'
 import { Route as ApiPublicSeatsDevicesListRouteImport } from './routes/api.public.seats.devices.list'
 import { Route as ApiPublicSeatsDevicesHeartbeatRouteImport } from './routes/api.public.seats.devices.heartbeat'
+import { Route as ApiPublicClonesGateCheckoutRouteImport } from './routes/api.public.clones.gate.checkout'
 
 const YggdrasilRoute = YggdrasilRouteImport.update({
   id: '/yggdrasil',
@@ -734,6 +737,11 @@ const BillingInvoicesRoute = BillingInvoicesRouteImport.update({
   path: '/billing/invoices',
   getParentRoute: () => rootRouteImport,
 } as any)
+const BillingGatesRoute = BillingGatesRouteImport.update({
+  id: '/billing/gates',
+  path: '/billing/gates',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const BillingCatalogRoute = BillingCatalogRouteImport.update({
   id: '/billing/catalog',
   path: '/billing/catalog',
@@ -1005,6 +1013,11 @@ const ApiPublicClonesRotateKeyRoute =
     path: '/api/public/clones/rotate-key',
     getParentRoute: () => rootRouteImport,
   } as any)
+const ApiPublicClonesGateRoute = ApiPublicClonesGateRouteImport.update({
+  id: '/api/public/clones/gate',
+  path: '/api/public/clones/gate',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiPublicBillingPaymentMethodsRoute =
   ApiPublicBillingPaymentMethodsRouteImport.update({
     id: '/api/public/billing/payment-methods',
@@ -1058,6 +1071,12 @@ const ApiPublicSeatsDevicesHeartbeatRoute =
     path: '/api/public/seats/devices/heartbeat',
     getParentRoute: () => rootRouteImport,
   } as any)
+const ApiPublicClonesGateCheckoutRoute =
+  ApiPublicClonesGateCheckoutRouteImport.update({
+    id: '/checkout',
+    path: '/checkout',
+    getParentRoute: () => ApiPublicClonesGateRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -1092,6 +1111,7 @@ export interface FileRoutesByFullPath {
   '/billing/api-usage': typeof BillingApiUsageRoute
   '/billing/cancel': typeof BillingCancelRoute
   '/billing/catalog': typeof BillingCatalogRoute
+  '/billing/gates': typeof BillingGatesRoute
   '/billing/invoices': typeof BillingInvoicesRoute
   '/billing/purchases': typeof BillingPurchasesRoute
   '/billing/seats': typeof BillingSeatsRoute
@@ -1182,6 +1202,7 @@ export interface FileRoutesByFullPath {
   '/api/public/billing/invoice-pdf': typeof ApiPublicBillingInvoicePdfRoute
   '/api/public/billing/invoices': typeof ApiPublicBillingInvoicesRoute
   '/api/public/billing/payment-methods': typeof ApiPublicBillingPaymentMethodsRoute
+  '/api/public/clones/gate': typeof ApiPublicClonesGateRouteWithChildren
   '/api/public/clones/rotate-key': typeof ApiPublicClonesRotateKeyRoute
   '/api/public/edge/status': typeof ApiPublicEdgeStatusRoute
   '/api/public/handoff/audit-ingest': typeof ApiPublicHandoffAuditIngestRoute
@@ -1223,6 +1244,7 @@ export interface FileRoutesByFullPath {
   '/api/public/tokens/reserve': typeof ApiPublicTokensReserveRoute
   '/api/public/usage/report': typeof ApiPublicUsageReportRoute
   '/api/public/voice/webhook': typeof ApiPublicVoiceWebhookRoute
+  '/api/public/clones/gate/checkout': typeof ApiPublicClonesGateCheckoutRoute
   '/api/public/seats/devices/heartbeat': typeof ApiPublicSeatsDevicesHeartbeatRoute
   '/api/public/seats/devices/list': typeof ApiPublicSeatsDevicesListRoute
   '/api/public/seats/devices/register': typeof ApiPublicSeatsDevicesRegisterRoute
@@ -1261,6 +1283,7 @@ export interface FileRoutesByTo {
   '/billing/api-usage': typeof BillingApiUsageRoute
   '/billing/cancel': typeof BillingCancelRoute
   '/billing/catalog': typeof BillingCatalogRoute
+  '/billing/gates': typeof BillingGatesRoute
   '/billing/invoices': typeof BillingInvoicesRoute
   '/billing/purchases': typeof BillingPurchasesRoute
   '/billing/seats': typeof BillingSeatsRoute
@@ -1351,6 +1374,7 @@ export interface FileRoutesByTo {
   '/api/public/billing/invoice-pdf': typeof ApiPublicBillingInvoicePdfRoute
   '/api/public/billing/invoices': typeof ApiPublicBillingInvoicesRoute
   '/api/public/billing/payment-methods': typeof ApiPublicBillingPaymentMethodsRoute
+  '/api/public/clones/gate': typeof ApiPublicClonesGateRouteWithChildren
   '/api/public/clones/rotate-key': typeof ApiPublicClonesRotateKeyRoute
   '/api/public/edge/status': typeof ApiPublicEdgeStatusRoute
   '/api/public/handoff/audit-ingest': typeof ApiPublicHandoffAuditIngestRoute
@@ -1392,6 +1416,7 @@ export interface FileRoutesByTo {
   '/api/public/tokens/reserve': typeof ApiPublicTokensReserveRoute
   '/api/public/usage/report': typeof ApiPublicUsageReportRoute
   '/api/public/voice/webhook': typeof ApiPublicVoiceWebhookRoute
+  '/api/public/clones/gate/checkout': typeof ApiPublicClonesGateCheckoutRoute
   '/api/public/seats/devices/heartbeat': typeof ApiPublicSeatsDevicesHeartbeatRoute
   '/api/public/seats/devices/list': typeof ApiPublicSeatsDevicesListRoute
   '/api/public/seats/devices/register': typeof ApiPublicSeatsDevicesRegisterRoute
@@ -1432,6 +1457,7 @@ export interface FileRoutesById {
   '/billing/api-usage': typeof BillingApiUsageRoute
   '/billing/cancel': typeof BillingCancelRoute
   '/billing/catalog': typeof BillingCatalogRoute
+  '/billing/gates': typeof BillingGatesRoute
   '/billing/invoices': typeof BillingInvoicesRoute
   '/billing/purchases': typeof BillingPurchasesRoute
   '/billing/seats': typeof BillingSeatsRoute
@@ -1522,6 +1548,7 @@ export interface FileRoutesById {
   '/api/public/billing/invoice-pdf': typeof ApiPublicBillingInvoicePdfRoute
   '/api/public/billing/invoices': typeof ApiPublicBillingInvoicesRoute
   '/api/public/billing/payment-methods': typeof ApiPublicBillingPaymentMethodsRoute
+  '/api/public/clones/gate': typeof ApiPublicClonesGateRouteWithChildren
   '/api/public/clones/rotate-key': typeof ApiPublicClonesRotateKeyRoute
   '/api/public/edge/status': typeof ApiPublicEdgeStatusRoute
   '/api/public/handoff/audit-ingest': typeof ApiPublicHandoffAuditIngestRoute
@@ -1563,6 +1590,7 @@ export interface FileRoutesById {
   '/api/public/tokens/reserve': typeof ApiPublicTokensReserveRoute
   '/api/public/usage/report': typeof ApiPublicUsageReportRoute
   '/api/public/voice/webhook': typeof ApiPublicVoiceWebhookRoute
+  '/api/public/clones/gate/checkout': typeof ApiPublicClonesGateCheckoutRoute
   '/api/public/seats/devices/heartbeat': typeof ApiPublicSeatsDevicesHeartbeatRoute
   '/api/public/seats/devices/list': typeof ApiPublicSeatsDevicesListRoute
   '/api/public/seats/devices/register': typeof ApiPublicSeatsDevicesRegisterRoute
@@ -1604,6 +1632,7 @@ export interface FileRouteTypes {
     | '/billing/api-usage'
     | '/billing/cancel'
     | '/billing/catalog'
+    | '/billing/gates'
     | '/billing/invoices'
     | '/billing/purchases'
     | '/billing/seats'
@@ -1694,6 +1723,7 @@ export interface FileRouteTypes {
     | '/api/public/billing/invoice-pdf'
     | '/api/public/billing/invoices'
     | '/api/public/billing/payment-methods'
+    | '/api/public/clones/gate'
     | '/api/public/clones/rotate-key'
     | '/api/public/edge/status'
     | '/api/public/handoff/audit-ingest'
@@ -1735,6 +1765,7 @@ export interface FileRouteTypes {
     | '/api/public/tokens/reserve'
     | '/api/public/usage/report'
     | '/api/public/voice/webhook'
+    | '/api/public/clones/gate/checkout'
     | '/api/public/seats/devices/heartbeat'
     | '/api/public/seats/devices/list'
     | '/api/public/seats/devices/register'
@@ -1773,6 +1804,7 @@ export interface FileRouteTypes {
     | '/billing/api-usage'
     | '/billing/cancel'
     | '/billing/catalog'
+    | '/billing/gates'
     | '/billing/invoices'
     | '/billing/purchases'
     | '/billing/seats'
@@ -1863,6 +1895,7 @@ export interface FileRouteTypes {
     | '/api/public/billing/invoice-pdf'
     | '/api/public/billing/invoices'
     | '/api/public/billing/payment-methods'
+    | '/api/public/clones/gate'
     | '/api/public/clones/rotate-key'
     | '/api/public/edge/status'
     | '/api/public/handoff/audit-ingest'
@@ -1904,6 +1937,7 @@ export interface FileRouteTypes {
     | '/api/public/tokens/reserve'
     | '/api/public/usage/report'
     | '/api/public/voice/webhook'
+    | '/api/public/clones/gate/checkout'
     | '/api/public/seats/devices/heartbeat'
     | '/api/public/seats/devices/list'
     | '/api/public/seats/devices/register'
@@ -1943,6 +1977,7 @@ export interface FileRouteTypes {
     | '/billing/api-usage'
     | '/billing/cancel'
     | '/billing/catalog'
+    | '/billing/gates'
     | '/billing/invoices'
     | '/billing/purchases'
     | '/billing/seats'
@@ -2033,6 +2068,7 @@ export interface FileRouteTypes {
     | '/api/public/billing/invoice-pdf'
     | '/api/public/billing/invoices'
     | '/api/public/billing/payment-methods'
+    | '/api/public/clones/gate'
     | '/api/public/clones/rotate-key'
     | '/api/public/edge/status'
     | '/api/public/handoff/audit-ingest'
@@ -2074,6 +2110,7 @@ export interface FileRouteTypes {
     | '/api/public/tokens/reserve'
     | '/api/public/usage/report'
     | '/api/public/voice/webhook'
+    | '/api/public/clones/gate/checkout'
     | '/api/public/seats/devices/heartbeat'
     | '/api/public/seats/devices/list'
     | '/api/public/seats/devices/register'
@@ -2114,6 +2151,7 @@ export interface RootRouteChildren {
   BillingApiUsageRoute: typeof BillingApiUsageRoute
   BillingCancelRoute: typeof BillingCancelRoute
   BillingCatalogRoute: typeof BillingCatalogRoute
+  BillingGatesRoute: typeof BillingGatesRoute
   BillingInvoicesRoute: typeof BillingInvoicesRoute
   BillingPurchasesRoute: typeof BillingPurchasesRoute
   BillingSeatsRoute: typeof BillingSeatsRoute
@@ -2183,6 +2221,7 @@ export interface RootRouteChildren {
   ApiPublicBillingInvoicePdfRoute: typeof ApiPublicBillingInvoicePdfRoute
   ApiPublicBillingInvoicesRoute: typeof ApiPublicBillingInvoicesRoute
   ApiPublicBillingPaymentMethodsRoute: typeof ApiPublicBillingPaymentMethodsRoute
+  ApiPublicClonesGateRoute: typeof ApiPublicClonesGateRouteWithChildren
   ApiPublicClonesRotateKeyRoute: typeof ApiPublicClonesRotateKeyRoute
   ApiPublicEdgeStatusRoute: typeof ApiPublicEdgeStatusRoute
   ApiPublicHandoffAuditIngestRoute: typeof ApiPublicHandoffAuditIngestRoute
@@ -2995,6 +3034,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof BillingInvoicesRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/billing/gates': {
+      id: '/billing/gates'
+      path: '/billing/gates'
+      fullPath: '/billing/gates'
+      preLoaderRoute: typeof BillingGatesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/billing/catalog': {
       id: '/billing/catalog'
       path: '/billing/catalog'
@@ -3345,6 +3391,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicClonesRotateKeyRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/clones/gate': {
+      id: '/api/public/clones/gate'
+      path: '/api/public/clones/gate'
+      fullPath: '/api/public/clones/gate'
+      preLoaderRoute: typeof ApiPublicClonesGateRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/billing/payment-methods': {
       id: '/api/public/billing/payment-methods'
       path: '/api/public/billing/payment-methods'
@@ -3407,6 +3460,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/api/public/seats/devices/heartbeat'
       preLoaderRoute: typeof ApiPublicSeatsDevicesHeartbeatRouteImport
       parentRoute: typeof rootRouteImport
+    }
+    '/api/public/clones/gate/checkout': {
+      id: '/api/public/clones/gate/checkout'
+      path: '/checkout'
+      fullPath: '/api/public/clones/gate/checkout'
+      preLoaderRoute: typeof ApiPublicClonesGateCheckoutRouteImport
+      parentRoute: typeof ApiPublicClonesGateRoute
     }
   }
 }
@@ -3502,6 +3562,17 @@ const ClonesCloneIdRouteWithChildren = ClonesCloneIdRoute._addFileChildren(
   ClonesCloneIdRouteChildren,
 )
 
+interface ApiPublicClonesGateRouteChildren {
+  ApiPublicClonesGateCheckoutRoute: typeof ApiPublicClonesGateCheckoutRoute
+}
+
+const ApiPublicClonesGateRouteChildren: ApiPublicClonesGateRouteChildren = {
+  ApiPublicClonesGateCheckoutRoute: ApiPublicClonesGateCheckoutRoute,
+}
+
+const ApiPublicClonesGateRouteWithChildren =
+  ApiPublicClonesGateRoute._addFileChildren(ApiPublicClonesGateRouteChildren)
+
 interface ApiPublicStripeWebhookRouteChildren {
   ApiPublicStripeWebhookCloneIdRoute: typeof ApiPublicStripeWebhookCloneIdRoute
 }
@@ -3549,6 +3620,7 @@ const rootRouteChildren: RootRouteChildren = {
   BillingApiUsageRoute: BillingApiUsageRoute,
   BillingCancelRoute: BillingCancelRoute,
   BillingCatalogRoute: BillingCatalogRoute,
+  BillingGatesRoute: BillingGatesRoute,
   BillingInvoicesRoute: BillingInvoicesRoute,
   BillingPurchasesRoute: BillingPurchasesRoute,
   BillingSeatsRoute: BillingSeatsRoute,
@@ -3618,6 +3690,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPublicBillingInvoicePdfRoute: ApiPublicBillingInvoicePdfRoute,
   ApiPublicBillingInvoicesRoute: ApiPublicBillingInvoicesRoute,
   ApiPublicBillingPaymentMethodsRoute: ApiPublicBillingPaymentMethodsRoute,
+  ApiPublicClonesGateRoute: ApiPublicClonesGateRouteWithChildren,
   ApiPublicClonesRotateKeyRoute: ApiPublicClonesRotateKeyRoute,
   ApiPublicEdgeStatusRoute: ApiPublicEdgeStatusRoute,
   ApiPublicHandoffAuditIngestRoute: ApiPublicHandoffAuditIngestRoute,
