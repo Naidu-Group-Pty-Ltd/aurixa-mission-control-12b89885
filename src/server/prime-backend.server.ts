@@ -450,13 +450,19 @@ async function fetchBlobBase64(octokit: Octokit, ref: RepoRef, sha: string): Pro
  * every edge-function file is its own `git.getBlob` call. Fetched serially
  * that is tens of minutes, which is longer than the drain worker invocation
  * that runs it lives: the first engine-provisioned clone died mid-snapshot on
- * three consecutive attempts and never got past this step. Pooled at this
- * width the same walk is tens of seconds. The width is deliberately modest —
- * GitHub's secondary rate limits punish bursts from a single installation
- * token, and a snapshot that gets the App rate-limited breaks the cascade and
- * every other GitHub caller sharing the token.
+ * three consecutive attempts and never got past this step.
+ *
+ * The width is measured, not guessed. The prime holds 2,037 blobs under
+ * `supabase/` (~985 migrations, ~1,033 function files), the invocation dies
+ * at roughly sixty seconds, and the first pooled attempt — 12-wide, still
+ * fetching migration SQL nobody reads under the introspection strategy — was
+ * killed mid-pool anyway (31 Aug 2026, 02:07). At 24-wide over the ~1,000
+ * blobs a default run actually needs, the walk fits with margin. Higher is
+ * not free: GitHub's secondary rate limits punish bursts from a single
+ * installation token, and a snapshot that gets the App rate-limited breaks
+ * the cascade and every other GitHub caller sharing the token.
  */
-const BLOB_FETCH_CONCURRENCY = 12;
+const BLOB_FETCH_CONCURRENCY = 24;
 
 /**
  * Bounded-concurrency map that preserves input order in its results.
@@ -745,20 +751,37 @@ function oversized(name: string, bytes: number, maxBytes: number): Error {
 export async function fetchPrimeBackendSnapshot(
   octokit: Octokit,
   ref: RepoRef,
+  opts?: {
+    /**
+     * Fetch the migration SQL BODIES, not just the file list. Only the
+     * `migration-replay` schema strategy ever reads them; the default
+     * introspection path uses the metas alone (the presence guard, the
+     * latest-migration name, and the ledger stamp, which reads the PRIME's
+     * ledger). Fetching ~985 bodies nobody reads was half the snapshot's
+     * round trips — the half that kept the walk over the invocation's
+     * lifetime. Defaults true so callers that do not say are unchanged.
+     */
+    includeMigrationSql?: boolean;
+  },
 ): Promise<PrimeBackendSnapshot> {
   const { blobs, commitSha } = await listSupabaseBlobs(octokit, ref);
 
   // ── Migrations ──
   // Pooled, not serial — see BLOB_FETCH_CONCURRENCY for why serial was fatal.
   const migrationMetas = migrationMetasFromBlobs(blobs);
-  const migrationSqls = await mapPool(migrationMetas, BLOB_FETCH_CONCURRENCY, async (meta) =>
-    decodeBase64Utf8(await fetchBlobBase64(octokit, ref, meta.sha)),
-  );
+  const includeMigrationSql = opts?.includeMigrationSql !== false;
+  const migrationSqls = includeMigrationSql
+    ? await mapPool(migrationMetas, BLOB_FETCH_CONCURRENCY, async (meta) =>
+        decodeBase64Utf8(await fetchBlobBase64(octokit, ref, meta.sha)),
+      )
+    : null;
   const migrations: PrimeMigration[] = migrationMetas.map((meta, i) => ({
     id: meta.id,
     name: meta.name,
     path: meta.path,
-    sql: migrationSqls[i],
+    // Empty when bodies were not requested — a sentinel the replay path can
+    // never see, because the caller that replays is the caller that asks.
+    sql: migrationSqls ? migrationSqls[i] : "",
   }));
 
   // ── Edge functions ──

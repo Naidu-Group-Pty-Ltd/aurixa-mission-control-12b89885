@@ -80,6 +80,17 @@ describe("the snapshot fetches blobs pooled, never serially", () => {
     expect(fn).not.toMatch(/for \(const meta of migrationMetasFromBlobs/);
     expect(fn).not.toMatch(/files\.push\(\{ path: rel, contentBase64: await getContent/);
   });
+
+  it("migration SQL bodies are fetched only for the strategy that reads them", () => {
+    /* ~985 of the snapshot's ~2,000 round trips were SQL bodies the default
+       introspection path never reads — the half that kept the walk over the
+       invocation's lifetime even pooled. The runner asks for them exactly
+       when the replay strategy will replay them. */
+    expect(primeBackend()).toMatch(/includeMigrationSql\?:/);
+    expect(runner()).toMatch(
+      /includeMigrationSql:\s*\(input\.schemaStrategy \?\? "introspection"\) === "migration-replay"/,
+    );
+  });
 });
 
 describe("the pipeline is budgeted and resumable", () => {
