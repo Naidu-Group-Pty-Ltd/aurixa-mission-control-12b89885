@@ -38,6 +38,14 @@ const NOT_SCHEDULED = new Map([
       "directly rather than an endpoint. A timer here would enqueue nothing, " +
       "because there is nothing to enqueue until a merge happens.",
   ],
+  [
+    "backend-provisioning-retry",
+    "Invoked on demand (cron-secret bearer) to re-queue a FAILED clone backend " +
+      "— an operator's decision or a deliberate automation, never a schedule: " +
+      "an automatic retry loop on a failed provisioning is how a systemic " +
+      "fault burns Supabase project slots unattended. What IS scheduled is " +
+      "/hooks/backend-provisioning-drain, which works whatever this re-queues.",
+  ],
 ]);
 
 const hooks = readdirSync(ROUTES)

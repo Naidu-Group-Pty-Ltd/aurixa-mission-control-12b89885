@@ -21,6 +21,7 @@
 
 import { runSqlOnProject, sqlLiteral } from "./backend-provisioning.server";
 import { ownProjectRef } from "./prime-backend.server";
+import { BudgetPause, pastDeadline } from "./provisioningBudget";
 
 /** Schemas replicated onto a clone. `aml` is not optional — the prime keeps 106 tables there. */
 export const REPLICATED_SCHEMAS = ["public", "aml"] as const;
@@ -550,13 +551,23 @@ async function runStage(
 
 export async function replicateSchemaByIntrospection(
   cloneRef: string,
-  options: { primeRef: string; onStatusUpdate?: Notify },
+  options: { primeRef: string; onStatusUpdate?: Notify; deadlineAt?: number | null },
 ): Promise<IntrospectionResult> {
   const primeRef = options.primeRef;
   const notify = options?.onStatusUpdate;
   const stages: StageResult[] = [];
   const say = async (detail: string) => {
     await notify?.("migrating", detail);
+  };
+  // Every stage is idempotent (`if not exists` / `create or replace` / the
+  // reconcile counts), so a run that pauses between stages re-enters from the
+  // top on the next invocation and the completed stages no-op through. The
+  // pause sits BETWEEN stages, never inside one — a stage is the transaction
+  // of meaning here, and pausing mid-batch is exactly the half-applied state
+  // the batches exist to avoid. Stage 1 never pauses: an invocation that has
+  // claimed the job must move it, or the recycle makes no forward progress.
+  const pauseIfDue = (about: string) => {
+    if (pastDeadline(options.deadlineAt)) throw new BudgetPause(about);
   };
 
   if (primeRef === cloneRef) throw new Error("Refusing to introspect the prime onto itself");
@@ -597,6 +608,7 @@ export async function replicateSchemaByIntrospection(
   );
 
   // 2. sequences
+  pauseIfDue("introspection: sequences onward resume next tick");
   await say("Replicating sequences...");
   const seqRows = await query(primeRef, Q.sequences);
   stages.push(
@@ -613,6 +625,7 @@ export async function replicateSchemaByIntrospection(
   );
 
   // 3. tables (columns only — constraints and indexes come later)
+  pauseIfDue("introspection: tables onward resume next tick");
   await say("Replicating tables...");
   const primeCols = await query(primeRef, Q.columns);
   const grouped = new Map<
@@ -676,6 +689,7 @@ export async function replicateSchemaByIntrospection(
   stages.push(tableStage);
 
   // 4. functions — repeat until the failure count stops falling
+  pauseIfDue("introspection: functions onward resume next tick");
   await say("Replicating functions...");
   const fnRows = await query(primeRef, Q.functions);
   const fnStmts = fnRows.map((r) => str(r.def)).filter(Boolean);
@@ -719,6 +733,7 @@ export async function replicateSchemaByIntrospection(
   }
 
   // 5. constraints, ordered p → u → c → f
+  pauseIfDue("introspection: constraints onward resume next tick");
   await say("Replicating constraints...");
   const conRows = await query(primeRef, Q.constraints);
   const conStmts = conRows.map(
@@ -730,6 +745,7 @@ export async function replicateSchemaByIntrospection(
   stages.push(await runStage("constraints", primeRef, cloneRef, conStmts, 60));
 
   // 6. indexes — skipping the constraint-backed ones stage 5 already made
+  pauseIfDue("introspection: indexes onward resume next tick");
   await say("Replicating indexes...");
   const idxRows = await query(primeRef, Q.indexes);
   const conIdxNames = new Set(
@@ -743,6 +759,7 @@ export async function replicateSchemaByIntrospection(
 
   // 7. views — a view on a view fails when the callee is not in place yet, and
   // catalog order is not dependency order, so converge the same way functions do.
+  pauseIfDue("introspection: views onward resume next tick");
   await say("Replicating views...");
   const viewRows = await query(primeRef, Q.views);
   const viewStmts = viewRows.map(
@@ -774,6 +791,7 @@ export async function replicateSchemaByIntrospection(
 
   // 8. materialized views (relkind 'm' — every table query misses these, and
   //    an index belongs to one, so skipping this breaks the index stage)
+  pauseIfDue("introspection: materialized views onward resume next tick");
   await say("Replicating materialized views...");
   const mvRows = await query(primeRef, Q.matviews);
   stages.push(
@@ -802,6 +820,7 @@ export async function replicateSchemaByIntrospection(
   }
 
   // 9. triggers
+  pauseIfDue("introspection: triggers onward resume next tick");
   await say("Replicating triggers...");
   const trgRows = await query(primeRef, Q.triggers);
   stages.push(
@@ -815,6 +834,7 @@ export async function replicateSchemaByIntrospection(
   );
 
   // 10. RLS enable
+  pauseIfDue("introspection: RLS onward resumes next tick");
   await say("Enabling row level security...");
   const rlsRows = await query(primeRef, Q.rlsTables);
   stages.push(
@@ -831,6 +851,7 @@ export async function replicateSchemaByIntrospection(
   );
 
   // 11. policies
+  pauseIfDue("introspection: policies onward resume next tick");
   await say("Replicating RLS policies...");
   const polRows = await query(primeRef, Q.policies);
   stages.push(
@@ -856,6 +877,7 @@ export async function replicateSchemaByIntrospection(
 
   // 12. Data API grants. RLS alone is not access: without the prime's table
   // privileges PostgREST cannot reach a single table on the clone.
+  pauseIfDue("introspection: grants resume next tick");
   await say("Replicating Data API grants...");
   const grantRows = await query(primeRef, Q.grants);
   const grantStmts = grantRows.map((r) =>

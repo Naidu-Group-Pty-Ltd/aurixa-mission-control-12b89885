@@ -11,6 +11,7 @@ import crypto from "node:crypto";
 
 import { classifySecret, TENANT_SCOPED_REMEDY } from "./prime-backend.server";
 import { assessLedgerState, ledgerRepairHint } from "./cloneLedgerState.pure";
+import { BudgetPause, pastDeadline } from "./provisioningBudget";
 import type { PrimeBackendSnapshot } from "./prime-backend.server";
 import type { StageName, StageResult } from "./schema-introspection.server";
 
@@ -1779,6 +1780,10 @@ export type EdgeFunctionDeployResult = {
   /** Non-null when the deployed flag was auto-corrected away from the prime's;
    *  explains why so operators can audit the decision. */
   verifyJwtOverrideReason?: string;
+  /** True when a RESUMED run found the function already on the project and
+   *  did not redeploy it. The live project is the authority on what it holds
+   *  (asked, never diaried), so the parity check still measures the truth. */
+  skipped?: boolean;
 };
 
 /**
@@ -1866,9 +1871,20 @@ export async function deployEdgeFunctions(
   projectRef: string,
   functions: Array<Parameters<typeof deployEdgeFunction>[1]>,
   onStatusUpdate?: (status: string, detail: string) => Promise<void>,
+  deadlineAt?: number | null,
 ): Promise<EdgeFunctionDeployResult[]> {
   const results: EdgeFunctionDeployResult[] = [];
   for (let i = 0; i < functions.length; i++) {
+    // Hundreds of functions × one Management API call each is the longest
+    // stage in the pipeline, so the invocation budget is checked between
+    // deploys. Pausing throws away this pass's partial `results` on purpose:
+    // the resumed run asks the project which slugs it already holds and skips
+    // them, so the record is recovered from the target rather than a diary.
+    if (i > 0 && pastDeadline(deadlineAt)) {
+      throw new BudgetPause(
+        `deployed ${i}/${functions.length} edge functions this pass — the rest resume next tick`,
+      );
+    }
     const fn = functions[i];
     await onStatusUpdate?.(
       "migrating",
@@ -2492,6 +2508,24 @@ export type ProvisionBackendInput = {
    * Control's own project. Resolve it with `resolvePrimeBackendRef()`.
    */
   primeBackendRef: string;
+  /**
+   * Absolute wall-clock deadline for THIS invocation — not for the pipeline.
+   * The drain worker that runs this lives ~60 seconds (pg_net's wait, plus
+   * whatever grace the hosting runtime gives); the pipeline takes minutes.
+   * When the deadline passes, the next stage boundary throws `BudgetPause`
+   * instead of letting the runtime kill the worker mid-write, and the drain
+   * requeues the job as forward progress rather than as a failed attempt.
+   * Omitted = no budget (the operator wizard's direct path).
+   */
+  deadlineAt?: number | null;
+  /**
+   * Called the MOMENT a project is created, before anything else is spent on
+   * it. The caller persists the ref so a death anywhere after creation can
+   * never orphan a paid project: the resume path reads the persisted ref and
+   * continues onto it. Without this the ref reached the row only in the final
+   * update, which is after every step that can die.
+   */
+  onProjectRef?: (projectRef: string) => Promise<void>;
 };
 
 export type SchemaStrategy = "introspection" | "migration-replay";
@@ -2536,6 +2570,12 @@ export async function provisionCloneBackend(
 ): Promise<ProvisionBackendResult> {
   const { snapshot } = input;
 
+  // Budget check between stages. Throws BudgetPause, which the drain treats
+  // as forward progress — never a burned attempt. See provisioningBudget.ts.
+  const pauseIfDue = (about: string) => {
+    if (pastDeadline(input.deadlineAt)) throw new BudgetPause(about);
+  };
+
   // Step 1: Create the project (or resume onto a surviving one)
   let projectRef = input.existingProjectRef ?? null;
   let dbPass: string | null = null;
@@ -2566,11 +2606,30 @@ export async function provisionCloneBackend(
       dbPass,
     });
     projectRef = project.id;
+    // Persist the ref the MOMENT it exists — a death anywhere after this
+    // point must resume onto this project, never create (and pay for) a
+    // second one. The final row update writing it again is idempotent.
+    await input.onProjectRef?.(projectRef);
   }
 
-  // Step 2: Wait for it to be ready
+  // Step 2: Wait for it to be ready. A fresh project can take minutes to
+  // report healthy, which is longer than the invocation lives — so the wait
+  // is clamped to the budget and its expiry converts to a pause: the ref is
+  // persisted, so the next tick resumes the same wait at no cost.
   await onStatusUpdate?.("provisioning", "Waiting for project to become healthy...");
-  await waitForProjectReady(projectRef);
+  const remainingForWait =
+    typeof input.deadlineAt === "number" ? input.deadlineAt - Date.now() : null;
+  try {
+    await waitForProjectReady(
+      projectRef,
+      remainingForWait === null ? undefined : Math.max(15_000, Math.min(120_000, remainingForWait)),
+    );
+  } catch (err) {
+    if (remainingForWait !== null && pastDeadline(input.deadlineAt)) {
+      throw new BudgetPause("waiting for the new project to report healthy");
+    }
+    throw err;
+  }
 
   // Step 3: Get API keys
   await onStatusUpdate?.("provisioning", "Retrieving API keys...");
@@ -2600,6 +2659,7 @@ export async function provisionCloneBackend(
   let introspection: IntrospectionSummary | null = null;
 
   if (strategy === "introspection") {
+    pauseIfDue("building the schema by introspection");
     await onStatusUpdate?.("migrating", "Introspecting the prime's live catalog...");
     const { replicateSchemaByIntrospection, stampMigrationLedgerFromPrime, verifyCloneIsEmpty } =
       await import("./schema-introspection.server");
@@ -2607,6 +2667,7 @@ export async function provisionCloneBackend(
     const result = await replicateSchemaByIntrospection(projectRef, {
       primeRef,
       onStatusUpdate,
+      deadlineAt: input.deadlineAt,
     });
     const emptiness = await verifyCloneIsEmpty(projectRef, { allowRows: 0 }).catch(() => null);
     introspection = {
@@ -2685,13 +2746,44 @@ export async function provisionCloneBackend(
   }
 
   // Step 5: Deploy the prime's edge functions (non-fatal per function)
-  const edgeFunctions = await deployEdgeFunctions(projectRef, snapshot.functions, onStatusUpdate);
+  pauseIfDue("deploying edge functions");
+  // On a resume, ask the PROJECT which functions it already holds and deploy
+  // only the rest — the target is the authority, never a diary of past runs.
+  // This is what turns repeated budgeted invocations into compound progress
+  // over the longest stage in the pipeline.
+  let functionsToDeploy = snapshot.functions;
+  let alreadyDeployed: EdgeFunctionDeployResult[] = [];
+  if (input.existingProjectRef) {
+    const liveSlugs = new Set(
+      await listProjectEdgeFunctionSlugs(projectRef).catch(() => [] as string[]),
+    );
+    if (liveSlugs.size > 0) {
+      alreadyDeployed = snapshot.functions
+        .filter((f) => liveSlugs.has(f.slug))
+        .map((f) => ({ slug: f.slug, success: true, skipped: true }));
+      functionsToDeploy = snapshot.functions.filter((f) => !liveSlugs.has(f.slug));
+      if (alreadyDeployed.length > 0) {
+        await onStatusUpdate?.(
+          "migrating",
+          `Resume: ${alreadyDeployed.length}/${snapshot.functions.length} edge functions already on the project — deploying the remaining ${functionsToDeploy.length}`,
+        );
+      }
+    }
+  }
+  const deployedNow = await deployEdgeFunctions(
+    projectRef,
+    functionsToDeploy,
+    onStatusUpdate,
+    input.deadlineAt,
+  );
+  const edgeFunctions = [...alreadyDeployed, ...deployedNow];
 
   // Step 5b: Replicate storage bucket configuration from the prime. Migrations
   // already replayed the row-level policies on `storage.objects`, but those
   // policies only match if the buckets themselves exist — otherwise every
   // signed-URL / upload path silently 404s on the clone. Non-fatal: we
   // surface per-bucket errors so operators can retry from the clone page.
+  pauseIfDue("replicating storage buckets");
   let storageBuckets: BucketReplicationResult[] = [];
   try {
     const primeRef = input.primeBackendRef;
@@ -2725,6 +2817,7 @@ export async function provisionCloneBackend(
   // Step 5c: Replicate the prime's [auth] policy (site URL, redirect allow-list,
   // JWT expiry, signup + password rules). Non-fatal — surface the result so
   // operators can retry from the clone page if the Management API rejects it.
+  pauseIfDue("replicating auth policy");
   let authConfigResult: AuthConfigResult = { status: "skipped", reason: "not attempted" };
   try {
     await onStatusUpdate?.("migrating", "Replicating auth policy from prime config.toml...");
@@ -2755,6 +2848,7 @@ export async function provisionCloneBackend(
   // BEFORE any job is scheduled. Cron commands were already rewritten; these
   // two are the places that rewrite does not reach, and both fire on a fresh
   // clone precisely because it is fresh. Non-fatal — surfaced for retry.
+  pauseIfDue("seeding vault URL and re-pointing prime references");
   let vaultSeed: { ok: boolean; error?: string } = { ok: false };
   let functionRepoints: FunctionRepointResult[] = [];
   try {
@@ -2783,6 +2877,7 @@ export async function provisionCloneBackend(
     );
   }
 
+  pauseIfDue("replicating the pg_cron schedule");
   let cronJobs: CronJobReplicationResult[] = [];
   try {
     const primeRef = input.primeBackendRef;
@@ -2810,6 +2905,7 @@ export async function provisionCloneBackend(
   // Step 5e (G4): mirror the prime's realtime publication membership so
   // channels subscribing to the same tables continue to receive INSERT /
   // UPDATE / DELETE payloads on the clone. Non-fatal per table.
+  pauseIfDue("replicating the realtime publication");
   let realtimePublication: RealtimeReplicationResult = {
     status: "skipped",
     added: [],
@@ -2835,6 +2931,7 @@ export async function provisionCloneBackend(
     };
   }
 
+  pauseIfDue("syncing secrets");
   await onStatusUpdate?.(
     "migrating",
     `Syncing ${snapshot.secretNames.length} secret(s) — inheriting whitelisted values...`,
@@ -2855,6 +2952,7 @@ export async function provisionCloneBackend(
   );
 
   // Step 7: Seed admin
+  pauseIfDue("seeding the admin user");
   await onStatusUpdate?.("seeding_admin", "Creating admin user...");
   const { userId: adminUserId } = await seedAdminUser(
     projectRef,

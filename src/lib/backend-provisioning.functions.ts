@@ -31,8 +31,16 @@ async function runBackendProvisioning(
     moduleIds?: string[];
     /** Force the legacy migration replay instead of catalog introspection. */
     schemaStrategy?: "introspection" | "migration-replay";
+    /**
+     * Absolute wall-clock deadline for THIS invocation (the drain worker's
+     * lifetime, not the pipeline's). Past it, the pipeline pauses at the next
+     * stage boundary instead of dying mid-write; the pause returns
+     * `{ ok:false, retryable:true, progressed:true }` and the drain requeues
+     * without burning an attempt. See src/server/provisioningBudget.ts.
+     */
+    deadlineAt?: number | null;
   },
-): Promise<{ ok: true } | { ok: false; error: string }> {
+): Promise<{ ok: true } | { ok: false; error: string; retryable?: boolean; progressed?: boolean }> {
   const updateStatus = async (status: string, detail: string) => {
     await supabase
       .from("clone_backends")
@@ -162,6 +170,24 @@ async function runBackendProvisioning(
         cloneOrigins,
         schemaStrategy: input.schemaStrategy ?? "introspection",
         primeBackendRef,
+        deadlineAt: input.deadlineAt ?? null,
+        // Persist the ref the moment the project exists — a death after
+        // creation must resume onto it, never orphan it (see the input doc).
+        onProjectRef: async (ref: string) => {
+          const { error } = await supabase
+            .from("clone_backends")
+            .update({ supabase_project_ref: ref })
+            .eq("clone_id", input.cloneId);
+          if (error) {
+            // The one write whose failure can cost a paid project: without
+            // the persisted ref, a later death makes the resume create a
+            // second one. The run continues — the final update writes the
+            // ref again if it completes — but this must not be silent.
+            console.error(
+              `[backend-provisioning] could not persist project ref ${ref} for clone ${input.cloneId}: ${error.message}`,
+            );
+          }
+        },
       },
       updateStatus,
     );
@@ -379,6 +405,33 @@ async function runBackendProvisioning(
 
     return { ok: true as const };
   } catch (e) {
+    // A budget pause is FORWARD PROGRESS, not a failure: the invocation ran
+    // out of wall clock, exited at a stage boundary, and everything done so
+    // far survives (project ref persisted, applied DDL idempotent, deployed
+    // functions skipped on resume). Recorded on the row so the operator sees
+    // a live pipeline, and returned as retryable+progressed so the drain
+    // requeues without burning an attempt.
+    const { BudgetPause } = await import(
+      /* @vite-ignore */ "@/lib/_server-shims/provisioningBudget"
+    );
+    if (e instanceof BudgetPause) {
+      const { error: pauseWriteErr } = await supabase
+        .from("clone_backends")
+        .update({
+          status_detail: `Paused at the invocation budget — ${e.detail}`,
+          error_message: null,
+        })
+        .eq("clone_id", input.cloneId);
+      if (pauseWriteErr) {
+        // The pause itself stands either way — a stale detail sentence is the
+        // only cost — but a database refusing writes is not a thing to hide.
+        console.error(
+          `[backend-provisioning] could not record budget pause for clone ${input.cloneId}: ${pauseWriteErr.message}`,
+        );
+      }
+      return { ok: false, error: e.detail, retryable: true, progressed: true };
+    }
+
     const msg = e instanceof Error ? e.message : "Backend provisioning failed";
 
     await supabase
@@ -408,7 +461,12 @@ export async function runQueuedBackendProvisioning(input: {
   adminPassword: string;
   moduleIds?: string[];
   actorUserId: string | null;
-}): Promise<{ ok: true; error?: undefined } | { ok: false; error: string }> {
+  /** The drain invocation's wall-clock deadline — see runBackendProvisioning. */
+  deadlineAt?: number | null;
+}): Promise<
+  | { ok: true; error?: undefined; retryable?: undefined; progressed?: undefined }
+  | { ok: false; error: string; retryable?: boolean; progressed?: boolean }
+> {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
   return runBackendProvisioning(supabaseAdmin, input.actorUserId ?? "system", {
     cloneId: input.cloneId,
@@ -417,6 +475,7 @@ export async function runQueuedBackendProvisioning(input: {
     adminEmail: input.adminEmail,
     adminPassword: input.adminPassword,
     moduleIds: input.moduleIds,
+    deadlineAt: input.deadlineAt ?? null,
   });
 }
 
