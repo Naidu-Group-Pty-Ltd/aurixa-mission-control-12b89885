@@ -25,6 +25,10 @@ import { join } from "node:path";
 const ROUTES = join(__dirname);
 const read = (f: string) => readFileSync(join(ROUTES, f), "utf8");
 
+/** Source with comments removed — a comment quoting code is not code. */
+const stripComments = (src: string): string =>
+  src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
+
 /**
  * The body of a named `async function`, by brace counting.
  *
@@ -170,6 +174,85 @@ describe("a reclaim returns rows to the shape its own claim reads", () => {
     expect(body).toMatch(
       /\.is\("worker_started_at", null\)[\s\S]{0,80}\.is\("worker_finished_at", null\)/,
     );
+  });
+
+  it("backend drain: a parked row is how a HEALTHY job looks, so stranded is a CONDITION not an age", () => {
+    // The shape that made the old single ceiling wrong. Every tick claims the
+    // job, works ~50s, pauses at a stage boundary and requeues to
+    // `status='pending'` with `worker_started_at` NULL — so for most of its
+    // life a perfectly healthy provision is indistinguishable, BY THE PARKED
+    // FILTERS ALONE, from one nothing is working on. Elapsed time cannot tell
+    // them apart; only what makes a row unclaimable can.
+    //
+    // `claimOne` skips a row for exactly two reasons: its queued credential is
+    // gone, or its attempts are spent (the exhaustion branch). So the first is
+    // asked directly. `updated_at` rides along as a grace period only.
+    const body = bodyOf(read("hooks.backend-provisioning-drain.tsx"), "reclaimStalled");
+    expect(body).toMatch(/\.is\("queued_admin_password_enc", null\)/);
+    expect(body).toMatch(/\.lt\("updated_at", stallCutoff\)/);
+    expect(body).toMatch(/PARKED_STALL_MINUTES/);
+    expect(body).toMatch(/Provisioning stranded — nothing could claim it/);
+    // Parked rows only, exactly as the ceiling is: a live invocation is never
+    // failed under its own feet.
+    expect(body).toMatch(
+      /\.is\("queued_admin_password_enc", null\)[\s\S]{0,200}\.is\("worker_started_at", null\)[\s\S]{0,80}\.is\("worker_finished_at", null\)/,
+    );
+  });
+
+  it("backend drain: a job WAITING behind a longer one is not stranded", () => {
+    // claimOne takes the OLDEST pending row, so a younger job waits behind a
+    // long one and nothing writes to it meanwhile — it looks abandoned by
+    // every staleness measure and is not. It still HOLDS its queued
+    // credential, which is why the stranded rule asks for that credential's
+    // ABSENCE rather than for silence: a busy queue must never fail the jobs
+    // queued behind it.
+    const src = read("hooks.backend-provisioning-drain.tsx");
+    const body = stripComments(bodyOf(src, "reclaimStalled"));
+    // The stranded update must be conditioned on the missing credential.
+    const strandedStart = body.indexOf("Provisioning stranded");
+    expect(strandedStart).toBeGreaterThan(-1);
+    const stranded = body.slice(strandedStart, body.indexOf("strandedErr", strandedStart));
+    expect(stranded).toMatch(/\.is\("queued_admin_password_enc", null\)/);
+    // And a non-terminal requeue really does keep the credential, so a waiting
+    // row cannot drift into the stranded shape on its own.
+    expect(stripComments(bodyOf(src, "drainOne"))).toMatch(
+      /queued_admin_password_enc: isTerminal \? null : claimed\.queued_admin_password_enc/,
+    );
+  });
+
+  it("backend drain: the progress signal is not resume_stage, which the longest stage nulls", () => {
+    // The obvious progress rule — "did the resume marker move" — is blind in
+    // the one stage that needed it. The edge-function stage pauses with an
+    // EMPTY marker on purpose (`functionSourceTruncated`), which is stored as
+    // NULL so the next tick re-snapshots and carries the next batch. That is
+    // where the 1 Sep 2026 run was killed, having already replicated the
+    // prime's schema exactly.
+    const drain = read("hooks.backend-provisioning-drain.tsx");
+    expect(stripComments(bodyOf(drain, "reclaimStalled"))).not.toMatch(/resume_stage/);
+    // And the pause path really does store an empty marker as NULL.
+    const fns = read("../lib/backend-provisioning.functions.ts");
+    expect(fns).toMatch(/resume_stage: e\.resumeStage \|\| null/);
+  });
+
+  it("backend drain: the two bounds answer different questions, and the backstop is not reachable by a healthy job", () => {
+    // A bound a working provision can reach is not a backstop, it is a
+    // deadline — which is exactly the defect. The stranded check is the fast,
+    // precise one; the ceiling only bounds a pipeline that keeps pausing
+    // without converging, so it must sit far above a real provision (the
+    // schema alone took ~3 hours against this prime, and the edge functions
+    // are carried a batch a tick after it).
+    const src = read("hooks.backend-provisioning-drain.tsx");
+    const stall = Number(/const PARKED_STALL_MINUTES = (\d+);/.exec(src)?.[1]);
+    const ceiling = Number(/const CEILING_HOURS = (\d+);/.exec(src)?.[1]);
+    expect(stall).toBeGreaterThan(0);
+    // Comfortably clear of the starvation window: claimOne takes the oldest
+    // pending row and an invocation ends at the first pause, so a row still
+    // advances every few minutes with several provisions in flight.
+    expect(stall).toBeGreaterThanOrEqual(30);
+    // The schema pass alone measured ~3 hours. Anything near that is a
+    // deadline on every job.
+    expect(ceiling).toBeGreaterThanOrEqual(12);
+    expect(ceiling * 60).toBeGreaterThan(stall * 4);
   });
 
   it("deployment drain: claim reads every CLAIMABLE status, which is why its reclaim may reset the timestamp alone", () => {
