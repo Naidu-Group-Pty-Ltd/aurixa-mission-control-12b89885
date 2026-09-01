@@ -37,6 +37,18 @@
  * write goes through the same path provisioning uses, which reads the stored
  * hash back before reporting success — because a password handed to a client
  * that does not work is worse than telling them it could not be set.
+ *
+ * ## Why this sits in `lib/` and not beside its server module
+ *
+ * The build denies any client import matching `**\/server\/**`, by PATH and
+ * not by content, so a pure module there is unimportable from a component
+ * however free of server dependencies it is. Every other `@/server/*.pure`
+ * import in this repository is from an `api.*` or `hooks.*` route, which never
+ * enters the client bundle — this is the first one a rendered panel needed, and
+ * it failed the build rather than the typecheck, after 4,032 modules had
+ * transformed. `clonePaymentGate.pure.ts` is the precedent: a rule both a card
+ * and a server handler read lives in `lib/`, and the `.server.ts` beside it
+ * imports it from there.
  */
 
 /** What Mission Control knows about a clone before anything is issued. */

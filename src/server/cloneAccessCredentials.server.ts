@@ -9,7 +9,7 @@
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { writeAuditLog } from "./audit.server";
 import { generateSecurePassword, seedProductAdminIdentity } from "./backend-provisioning.server";
-import { readCloneAccessState, type CloneAccessState } from "./cloneAccessCredentials.pure";
+import { readCloneAccessState, type CloneAccessState } from "@/lib/cloneAccessCredentials.pure";
 import { describeSeed, seedIsUsable } from "./cloneAdminIdentity.pure";
 
 /** The audit action both the writer and the reader name. A literal at each end is how two ends drift. */

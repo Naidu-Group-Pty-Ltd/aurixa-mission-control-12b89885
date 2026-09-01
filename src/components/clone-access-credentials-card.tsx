@@ -8,7 +8,7 @@ import { CopyButton } from "@/components/copy-button";
 import { AlertTriangle, ExternalLink, KeyRound, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 import { getCloneAccess, issueCloneAccess } from "@/lib/clone-access.functions";
-import { issueConfirmation, type CloneAccessState } from "@/server/cloneAccessCredentials.pure";
+import { issueConfirmation, type CloneAccessState } from "@/lib/cloneAccessCredentials.pure";
 
 type Issued = { password: string; email: string; signInUrl: string | null; detail: string };
 
