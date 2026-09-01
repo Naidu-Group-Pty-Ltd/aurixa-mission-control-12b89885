@@ -74,6 +74,25 @@ describe("isBenignDdlError", () => {
     expect(isBenignDdlError("duplicate object")).toBe(true);
     expect(isBenignDdlError('column "x" of relation "y" does not exist')).toBe(false);
   });
+
+  it("treats a re-added primary key as success, because that is what it is", () => {
+    /* The tables stage creates a table with its key inline, so the constraints
+       stage re-adds one Postgres already has — and says so with this wording
+       rather than "already exists". 200 of the dry run's recorded constraint
+       failures came from five tables this way, and the operator's sample is
+       capped at twenty, so noise does not dilute the signal, it evicts it. */
+    expect(
+      isBenignDdlError('multiple primary keys for table "report_versions" are not allowed'),
+    ).toBe(true);
+  });
+
+  it("still reports a genuinely missing dependency", () => {
+    /* The failure that mattered on the dry run — one absent extension behind
+       6 tables, 337 columns and 28 functions — must never be filtered away. */
+    expect(isBenignDdlError('type "vector" does not exist')).toBe(false);
+    expect(isBenignDdlError('relation "public.market_updates" does not exist')).toBe(false);
+    expect(isBenignDdlError("cannot use column reference in DEFAULT expression")).toBe(false);
+  });
 });
 
 describe("function convergence stop condition", () => {
