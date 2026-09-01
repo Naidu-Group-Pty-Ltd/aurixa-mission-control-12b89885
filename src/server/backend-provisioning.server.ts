@@ -12,6 +12,8 @@ import crypto from "node:crypto";
 import { classifySecret, TENANT_SCOPED_REMEDY } from "./prime-backend.server";
 import { assessLedgerState, ledgerRepairHint } from "./cloneLedgerState.pure";
 import { BudgetPause, pastDeadline } from "./provisioningBudget";
+import { chooseRoleLabel, describeSeed, sqlCredentialLiteral } from "./cloneAdminIdentity.pure";
+import type { AdminSeedReport } from "./cloneAdminIdentity.pure";
 import type { PrimeBackendSnapshot } from "./prime-backend.server";
 import type { StageName, StageResult } from "./schema-introspection.server";
 
@@ -2502,7 +2504,7 @@ export async function seedAdminUser(
   projectUrl: string,
   adminEmail: string,
   adminPassword: string,
-): Promise<{ userId: string | null }> {
+): Promise<{ userId: string | null; report: AdminSeedReport }> {
   // Create user via Supabase Auth Admin API (using service role key)
   const createRes = await fetch(`${projectUrl}/auth/v1/admin/users`, {
     method: "POST",
@@ -2551,26 +2553,146 @@ export async function seedAdminUser(
 
   // Reached on BOTH paths now — freshly created and already-existing alike.
   //
-  // Best-effort super_admin grant: the clone's schema is whatever the prime
-  // repo defines, so only insert if a user_roles table actually exists, and
-  // never let a role-model mismatch fail the whole provisioning run.
-  await runSqlOnProject(
+  // AND AN AUTH USER IS NOT, ON ITS OWN, AN ADMIN ANYBODY CAN SIGN IN AS.
+  //
+  // What this used to do — grant `super_admin` in `public.user_roles` against
+  // the auth id — could not work against the prime this platform clones, for
+  // three independent reasons, and reported success for all of them because
+  // the block swallowed every error into a warning:
+  //
+  //   * the product's login path reads `public.custom_users` and compares a
+  //     bcrypt `password_hash` (`_shared/password.ts`); it never consults
+  //     `auth.users`;
+  //   * `public.user_roles.user_id` is a foreign key to `public.custom_users`,
+  //     so an auth id is refused with 23503;
+  //   * `public.app_role` spells the top role `superadmin`, so `super_admin`
+  //     is refused with 22P02 even where the key would have been accepted.
+  //
+  // Measured on the first clone on 1 Sep 2026: `auth.users` held ZERO rows
+  // after a run that had reported this step done.
+  //
+  // So the seed writes into the store the product actually reads, chooses a
+  // role label the column actually admits, and REPORTS what it managed —
+  // because a seeded admin who cannot sign in is worse than no admin, the
+  // clone having been made to look finished.
+  const report = await seedProductAdminIdentity(projectRef, adminEmail, adminPassword, userId);
+
+  return { userId, report };
+}
+
+/**
+ * Seed the identity the prime's own login path reads, and verify it.
+ *
+ * Everything here is conditional on the prime actually defining these tables:
+ * a prime that authenticates through Supabase Auth has no `custom_users`, and
+ * must not be failed for its absence. What is NOT conditional is honesty about
+ * the outcome — the caller decides what to do with a clone nobody can enter.
+ */
+export async function seedProductAdminIdentity(
+  projectRef: string,
+  adminEmail: string,
+  adminPassword: string,
+  authUserId: string | null,
+): Promise<AdminSeedReport> {
+  const emailLit = sqlCredentialLiteral(adminEmail.trim().toLowerCase());
+  const pwLit = sqlCredentialLiteral(adminPassword);
+
+  // The role label is chosen BY THE COLUMN, not by us: `app_role` is an enum
+  // on one table and free text on another, and the two spell it differently.
+  const roleRows = (await runSqlOnProject(
+    projectRef,
+    `select e.enumlabel::text as label
+       from pg_enum e
+       join pg_type t on t.oid = e.enumtypid
+       join pg_namespace n on n.oid = t.typnamespace
+      where n.nspname = 'public' and t.typname = 'app_role'
+      order by e.enumsortorder`,
+  )) as Array<{ label?: unknown }>;
+  const enumLabels = (Array.isArray(roleRows) ? roleRows : [])
+    .map((r) => (typeof r?.label === "string" ? r.label : null))
+    .filter((v): v is string => Boolean(v));
+  const enumRole = chooseRoleLabel(enumLabels);
+  const enumRoleLit = enumRole ? sqlCredentialLiteral(enumRole) : "null";
+
+  const rows = (await runSqlOnProject(
     projectRef,
     `
-DO $$ BEGIN
-  IF to_regclass('public.user_roles') IS NOT NULL THEN
-    EXECUTE format(
-      'INSERT INTO public.user_roles (user_id, role) VALUES (%L, %L) ON CONFLICT DO NOTHING',
-      '${userId}'::uuid, 'super_admin'
-    );
-  END IF;
-EXCEPTION WHEN others THEN
-  RAISE WARNING 'aurixa: admin role seed skipped: %', SQLERRM;
-END $$;
-    `.trim(),
-  );
+do $seed$
+declare
+  v_id uuid;
+  v_role text;
+begin
+  if to_regclass('public.custom_users') is null then
+    return;
+  end if;
 
-  return { userId };
+  select id into v_id from public.custom_users
+   where lower(email) = ${emailLit} or lower(username) = ${emailLit}
+   order by created_at limit 1;
+
+  -- The role TEXT column takes the product's own spelling; the enum column is
+  -- handled separately below because the two disagree by design.
+  v_role := coalesce(${enumRoleLit}, 'admin');
+
+  if v_id is null then
+    v_id := gen_random_uuid();
+    insert into public.custom_users (id, username, email, password_hash, role, is_active)
+    values (v_id, 'admin', ${emailLit},
+            extensions.crypt(${pwLit}, extensions.gen_salt('bf', 10)),
+            v_role, true);
+  else
+    update public.custom_users
+       set password_hash = extensions.crypt(${pwLit}, extensions.gen_salt('bf', 10)),
+           is_active = true,
+           deleted_at = null,
+           failed_login_attempts = 0,
+           locked_until = null,
+           updated_at = now()
+     where id = v_id;
+  end if;
+
+  -- The role row is best-effort and never fails the seed: a prime may model
+  -- authority entirely inside custom_users.role.
+  begin
+    if to_regclass('public.user_roles') is not null and ${enumRole ? "true" : "false"} then
+      execute format(
+        'insert into public.user_roles (user_id, role) values (%L, %L::public.app_role) on conflict do nothing',
+        v_id, ${enumRoleLit});
+    end if;
+  exception when others then
+    raise warning 'aurixa: admin role row skipped: %', sqlerrm;
+  end;
+end
+$seed$;
+
+select
+  (to_regclass('public.custom_users') is not null
+     and exists (select 1 from public.custom_users
+                  where lower(email) = ${emailLit})) as product_identity,
+  coalesce((select password_hash = extensions.crypt(${pwLit}, password_hash)
+              from public.custom_users where lower(email) = ${emailLit} limit 1), false)
+    as password_verifies,
+  (select r.role::text from public.user_roles r
+     join public.custom_users u on u.id = r.user_id
+    where lower(u.email) = ${emailLit} limit 1) as role_label,
+  ${authUserId ? "true" : "false"} as auth_user
+    `.trim(),
+  )) as Array<Record<string, unknown>>;
+
+  const row = Array.isArray(rows) ? (rows[0] ?? {}) : {};
+  const notes: string[] = [];
+  if (!enumRole && enumLabels.length > 0) {
+    notes.push(
+      `public.app_role admits ${enumLabels.join(", ")}, none of which names an administrator — no role row written`,
+    );
+  }
+  return {
+    product_identity: row.product_identity === true,
+    password_verifies: row.password_verifies === true,
+    role_label: typeof row.role_label === "string" ? row.role_label : null,
+    auth_user: Boolean(authUserId),
+    notes,
+  };
 }
 
 // ─── Full Provisioning Pipeline ──────────────────────────────────────
@@ -3136,12 +3258,22 @@ export async function provisionCloneBackend(
   // Step 7: Seed admin
   pauseIfDue("seeding the admin user");
   await onStatusUpdate?.("seeding_admin", "Creating admin user...");
-  const { userId: adminUserId } = await seedAdminUser(
+  const { userId: adminUserId, report: adminSeed } = await seedAdminUser(
     projectRef,
     serviceRoleKey,
     projectUrl,
     input.adminEmail,
     input.adminPassword,
+  );
+  // SAID, NOT SWALLOWED. The previous version reported this step done whether
+  // or not anybody could sign in, which is how a clone came to look finished
+  // with zero rows in every identity table it has. The run is not failed over
+  // it — the schema, functions and secrets are all real and worth keeping, and
+  // a prime that authenticates some third way is not a fault — but the
+  // operator is told, in the status line they are already watching.
+  await onStatusUpdate?.(
+    "seeding_admin",
+    [describeSeed(adminSeed, input.adminEmail), ...adminSeed.notes].join(" "),
   );
 
   return {
