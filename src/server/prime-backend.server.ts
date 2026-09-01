@@ -77,6 +77,14 @@ export type PrimeBackendSnapshot = {
    * `includeFunctionSource`.
    */
   functionSourceOmitted: boolean;
+  /**
+   * True when the function list was CAPPED and more bundles remain unfetched.
+   *
+   * A pass that carries only some of the functions may not pronounce the
+   * deployment complete, exactly as a resumed schema pass may not pronounce
+   * the schema complete. The caller pauses on it instead.
+   */
+  functionSourceTruncated: boolean;
 };
 
 // ─── Pure helpers (unit-tested) ──────────────────────────────────────
@@ -837,6 +845,28 @@ export async function fetchPrimeBackendSnapshot(
      * list to be mistaken for a prime with no functions.
      */
     includeFunctionSource?: boolean;
+    /**
+     * Slugs the target already holds. Their bundles are not fetched at all.
+     *
+     * The deploy step already lists the project's live functions and skips
+     * them — but it did so AFTER the snapshot had fetched every bundle, so
+     * the work was paid for and thrown away on every pass.
+     */
+    skipFunctionSlugs?: readonly string[];
+    /**
+     * Fetch at most this many function bundles.
+     *
+     * 423 bundles over ~1,033 files does not fit one invocation's share of the
+     * GitHub App installation's hourly quota. Measured 1 Sep 2026: the pass
+     * that needed the whole set was refused with "API rate limit exceeded" on
+     * every attempt, so the pipeline could reach the edge-function stage and
+     * never get through it — the schema completed, the marker cleared, the
+     * full pass was refused, and the cycle repeated.
+     *
+     * Capping makes the fetch affordable and the progress monotonic: what is
+     * deployed is skipped next time, so the remaining set only shrinks.
+     */
+    functionLimit?: number;
   },
 ): Promise<PrimeBackendSnapshot> {
   const { blobs, commitSha } = await listSupabaseBlobs(octokit, ref);
@@ -877,6 +907,7 @@ export async function fetchPrimeBackendSnapshot(
       secretNames: [],
       authConfig: parseAuthConfig(configTomlEarly),
       functionSourceOmitted: true,
+      functionSourceTruncated: false,
     };
   }
   const functionBlobs = blobs.filter((b) => b.path.startsWith(FUNCTIONS_PREFIX));
@@ -894,15 +925,23 @@ export async function fetchPrimeBackendSnapshot(
 
   // Decide which bundles are deployable FIRST, so the fetch pool below pulls
   // exactly the set of blobs the bundles need — each once, whole set pooled.
+  const skip = new Set(opts?.skipFunctionSlugs ?? []);
   const deployable: Array<{ slug: string; bundlePaths: string[]; entrypointPath: string }> = [];
   for (const [slug, ownPaths] of Array.from(slugs.entries()).sort((a, b) =>
     a[0].localeCompare(b[0]),
   )) {
+    if (skip.has(slug)) continue; // the target already holds it — do not pay for it
     const bundlePaths = [...ownPaths, ...sharedFiles];
     const entrypointPath = pickEntrypoint(slug, bundlePaths);
     if (!entrypointPath) continue; // no runnable entrypoint — not a deployable function
     deployable.push({ slug, bundlePaths, entrypointPath });
   }
+  // Sorted above, so the cap takes a STABLE prefix: the same functions are
+  // deployed first on every pass, and a pass never re-fetches what the last
+  // one landed.
+  const limit = opts?.functionLimit;
+  const functionSourceTruncated = typeof limit === "number" && deployable.length > limit;
+  const selected = functionSourceTruncated ? deployable.slice(0, limit) : deployable;
 
   // Fetch each needed blob once, keyed by relative path — GraphQL batches,
   // not per-blob round trips. ~1,033 function files (15.6 MB) become about
@@ -910,7 +949,7 @@ export async function fetchPrimeBackendSnapshot(
   // never finish inside the drain invocation, at any pool width.
   const neededRels: string[] = [];
   const seenRel = new Set<string>();
-  for (const bundle of deployable) {
+  for (const bundle of selected) {
     for (const rel of bundle.bundlePaths) {
       if (seenRel.has(rel)) continue;
       seenRel.add(rel);
@@ -936,7 +975,7 @@ export async function fetchPrimeBackendSnapshot(
     fileByPath.set(rel, { path: rel, contentBase64 });
   }
 
-  const functions: PrimeEdgeFunction[] = deployable.map(
+  const functions: PrimeEdgeFunction[] = selected.map(
     ({ slug, bundlePaths, entrypointPath }) => ({
       slug,
       files: bundlePaths.map((rel) => fileByPath.get(rel)!),
@@ -971,5 +1010,6 @@ export async function fetchPrimeBackendSnapshot(
     secretNames,
     authConfig: parseAuthConfig(configToml),
     functionSourceOmitted: false,
+    functionSourceTruncated,
   };
 }

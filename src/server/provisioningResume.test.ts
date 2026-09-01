@@ -689,3 +689,55 @@ describe("no bulk apply runs without a budget check", () => {
     expect(src).toMatch(/pauseInTableRetry,\s*\n\s*takeResumeBatch\("tables"\)/);
   });
 });
+
+describe("the edge-function fetch is budgeted like everything else", () => {
+  /* 423 bundles over ~1,033 files does not fit one invocation's share of the
+     installation's hourly quota. Measured 1 Sep 2026: every pass that needed
+     the whole set was refused with "API rate limit exceeded", so the pipeline
+     could REACH the edge-function stage and never get through it — the schema
+     completed, the marker cleared, the full pass was refused, and the cycle
+     repeated. `ready` was unreachable. */
+  it("the snapshot skips slugs the target already holds", () => {
+    const src = primeBackend();
+    expect(src).toMatch(/skipFunctionSlugs\?: readonly string\[\]/);
+    /* Skipped BEFORE the bundle paths are collected, or it costs the same. */
+    const skipAt = src.indexOf("if (skip.has(slug)) continue;");
+    const fetchAt = src.indexOf("fetchBlobTextsBatched(octokit, ref, neededEntries)");
+    expect(skipAt).toBeGreaterThan(-1);
+    expect(skipAt).toBeLessThan(fetchAt);
+  });
+
+  it("the cap takes a stable prefix and only the selected bundles are fetched", () => {
+    const src = primeBackend();
+    /* Sorted, so the same functions lead every pass and none is re-fetched. */
+    expect(src).toMatch(/const selected = functionSourceTruncated \? deployable\.slice\(0, limit\)/);
+    expect(src).toMatch(/for \(const bundle of selected\)/);
+    /* The blob walk must never iterate the unfiltered list again. */
+    expect(src).not.toMatch(/for \(const bundle of deployable\)/);
+  });
+
+  it("the runner asks the target, then caps what remains", () => {
+    const src = runner();
+    const askAt = src.indexOf("listProjectEdgeFunctionSlugs(existingRow.supabase_project_ref)");
+    const snapAt = src.indexOf("await fetchPrimeBackendSnapshot(");
+    expect(askAt).toBeGreaterThan(-1);
+    expect(askAt).toBeLessThan(snapAt);
+    expect(src).toMatch(/skipFunctionSlugs: liveFunctionSlugs/);
+    expect(src).toMatch(/functionLimit: EDGE_FUNCTION_FETCH_LIMIT/);
+    /* A failed listing must not be read as "the clone holds everything" — it
+       resolves to an empty skip list, which fetches more, never less. */
+    expect(src).toMatch(/\.catch\(\(\) => \[\]\)/);
+  });
+
+  it("a truncated pass can never mark the clone ready", () => {
+    /* Otherwise the pipeline runs to the end holding 60 of 423 functions: a
+       workspace that looks finished and is missing most of its backend. */
+    const src = pipeline();
+    const guardAt = src.indexOf("snapshot.functionSourceTruncated");
+    expect(guardAt).toBeGreaterThan(-1);
+    const branch = src.slice(guardAt, guardAt + 420);
+    expect(branch).toMatch(/throw new BudgetPause\(/);
+    /* Empty marker: the next pass is a full one that re-asks the project. */
+    expect(branch).toMatch(/"",/);
+  });
+});
