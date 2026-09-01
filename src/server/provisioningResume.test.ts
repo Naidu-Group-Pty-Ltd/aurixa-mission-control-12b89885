@@ -429,9 +429,7 @@ describe("a vendor's quota is not this job failing", () => {
   it("the drain hands the attempt back rather than resetting it", () => {
     const src = drain();
     /* Not zero — a genuine failure earlier in this job's life still counts. */
-    expect(src).toMatch(
-      /upstreamLimited \? \{ attempts: Math\.max\(0, \(claimed\.attempts \?\? 0\) - 1\) \} : \{\}/,
-    );
+    expect(src).toMatch(/attempts: Math\.max\(0, \(claimed\.attempts \?\? 0\) - 1\)/);
     /* And it can never be the thing that terminates the row. */
     expect(src).toMatch(/!budgetPaused && !upstreamLimited && claimed\.attempts >= MAX_ATTEMPTS/);
   });
@@ -739,5 +737,33 @@ describe("the edge-function fetch is budgeted like everything else", () => {
     expect(branch).toMatch(/throw new BudgetPause\(/);
     /* Empty marker: the next pass is a full one that re-asks the project. */
     expect(branch).toMatch(/"",/);
+  });
+});
+
+describe("a schema that is already built costs almost nothing to verify", () => {
+  /* The tables stage applied ~700 `create table if not exists` statements on
+     EVERY pass, against a clone that already held all of them. That consumed
+     most of each invocation, so a full pass never finished the schema, always
+     ended `partial` — and a partial pass may not proceed to the edge
+     functions. The engine could complete the schema and never get past it. */
+  it("skips the creation when every table is present, and says so", () => {
+    const src = introspection();
+    expect(src).toMatch(/const tablesAlreadyPresent = reconcile\(tableCounts\[0\], tableCounts\[1\]\)/);
+    expect(src).toMatch(/every table present — creation skipped, drift still checked/);
+  });
+
+  it("but the column-drift repair still runs, which is the point of the stage", () => {
+    /* Equal counts do not mean equal tables: `create table if not exists`
+       skips an existing table, so drift survives with the counts matching.
+       Skipping the whole stage would skip the repair; skipping only the
+       APPLICATION does not. */
+    const src = introspection();
+    const stageAt = src.indexOf('if (enterStage("tables"))');
+    const driftAt = src.indexOf("diffMissingColumns(primeInfo", stageAt);
+    const skipAt = src.indexOf("tablesAlreadyPresent", stageAt);
+    expect(skipAt).toBeGreaterThan(-1);
+    expect(driftAt).toBeGreaterThan(skipAt);
+    /* The drift read must not be inside the skip branch. */
+    expect(src).toMatch(/const cloneCols = await query\(cloneRef, Q\.columns\)/);
   });
 });

@@ -163,6 +163,31 @@ describe("a reclaim returns rows to the shape its own claim reads", () => {
     expect(src).toMatch(/if \(r\.budgetPaused \|\| r\.upstreamLimited\) break;/);
   });
 
+  it("backend drain: a job refused on a vendor quota waits before asking again", () => {
+    /* The drain claims a pending row every minute. When the installation's
+       hourly quota is exhausted each claim spends a request that is refused
+       and parks the row again — sixty refused calls an hour, which is what
+       keeps the quota exhausted. The engine was competing with its own retry
+       frequency for the quota it was waiting on. */
+    const src = read("hooks.backend-provisioning-drain.tsx");
+    expect(src).toContain("UPSTREAM_LIMIT_BACKOFF_MS");
+    expect(bodyOf(src, "drainOne")).toMatch(/retry_after: new Date\(Date\.now\(\) \+ UPSTREAM_LIMIT_BACKOFF_MS\)/);
+    const claim = bodyOf(src, "claimOne");
+    /* Filtered in JS, never as a composed PostgREST `.or()` string — one of
+       those never parsed and the claim it guarded had never once succeeded. */
+    expect(claim).toMatch(/new Date\(c\.retry_after\)\.getTime\(\) <= Date\.now\(\)/);
+    /* Comments may NAME the forbidden call; code may not contain it. */
+    const claimCode = claim
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("//") && !l.trim().startsWith("*"))
+      .join("\n");
+    expect(claimCode).not.toMatch(/\.or\(/);
+    /* The wait is spent on claim, so a stale stamp cannot hold a job twice. */
+    expect(claim).toMatch(/retry_after: null/);
+    /* And a single backed-off row must not hide the queue behind it. */
+    expect(claim).toMatch(/\.limit\(5\)/);
+  });
+
   it("backend drain: wall clock bounds the recycling that attempts no longer do", () => {
     // Attempt-neutral requeues need their own terminal condition, or a job
     // that keeps proving liveness without finishing recycles forever. Parked

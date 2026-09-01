@@ -1356,6 +1356,8 @@ export type Database = {
           queued_at: string | null
           queued_module_ids: string[] | null
           reference_sync_started_at: string | null
+          resume_stage: string | null
+          retry_after: string | null
           region: string
           repo_retarget: Json | null
           secret_shells: Json
@@ -1390,6 +1392,8 @@ export type Database = {
           queued_at?: string | null
           queued_module_ids?: string[] | null
           reference_sync_started_at?: string | null
+          resume_stage?: string | null
+          retry_after?: string | null
           region?: string
           repo_retarget?: Json | null
           secret_shells?: Json
@@ -1424,6 +1428,8 @@ export type Database = {
           queued_at?: string | null
           queued_module_ids?: string[] | null
           reference_sync_started_at?: string | null
+          resume_stage?: string | null
+          retry_after?: string | null
           region?: string
           repo_retarget?: Json | null
           secret_shells?: Json

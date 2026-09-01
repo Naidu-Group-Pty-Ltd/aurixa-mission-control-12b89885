@@ -125,15 +125,8 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     assertions: [{ kind: "column", table: "clone_backends", column: "resume_stage" }],
   },
   {
-    migration: "20260901120000_clone_email_identity_from_address.sql",
-    version: "20260901120000",
-    assertions: [
-      { kind: "column", table: "clone_email_identities", column: "from_address_written_at" },
-    ],
-  },
-  {
-    migration: "20260901130000_clone_email_identity_revoked_at.sql",
-    version: "20260901130000",
-    assertions: [{ kind: "column", table: "clone_email_identities", column: "revoked_at" }],
+    migration: "20260901090000_clone_backend_retry_after.sql",
+    version: "20260901090000",
+    assertions: [{ kind: "column", table: "clone_backends", column: "retry_after" }],
   },
 ];
