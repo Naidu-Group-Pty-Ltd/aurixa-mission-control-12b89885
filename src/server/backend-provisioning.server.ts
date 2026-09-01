@@ -2850,6 +2850,22 @@ export async function provisionCloneBackend(
   );
   const edgeFunctions = [...alreadyDeployed, ...deployedNow];
 
+  // A pass that carried only SOME of the functions may not pronounce the
+  // deployment complete, exactly as a resumed schema pass may not pronounce
+  // the schema complete. Without this the pipeline would run to the end and
+  // mark the clone `ready` holding 60 of 423 functions — a workspace that
+  // looks finished and is missing most of its backend, which is the worst
+  // outcome available here.
+  //
+  // The empty resume stage clears the marker, so the next pass takes a fresh
+  // snapshot, asks the project what it now holds, and fetches the next slice.
+  if (snapshot.functionSourceTruncated) {
+    throw new BudgetPause(
+      `${edgeFunctions.length} edge functions carried this pass — fetching the next batch next tick`,
+      "",
+    );
+  }
+
   // Step 5b: Replicate storage bucket configuration from the prime. Migrations
   // already replayed the row-level policies on `storage.objects`, but those
   // policies only match if the buckets themselves exist — otherwise every

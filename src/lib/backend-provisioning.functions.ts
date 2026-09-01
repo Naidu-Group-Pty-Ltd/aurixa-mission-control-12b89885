@@ -19,6 +19,22 @@ import type { ApplyAllowedOriginsResult } from "@/server/cloneAllowedOrigins.ser
  * Snapshots the prime repo's supabase/ directory, provisions the project,
  * and persists the full replication report on clone_backends.
  */
+/**
+ * How many edge-function bundles one invocation may FETCH.
+ *
+ * The prime has 423 deployable functions over ~1,033 files. Fetching them all
+ * does not fit one invocation's share of the GitHub App installation's hourly
+ * quota: measured 1 Sep 2026, every pass that needed the whole set was refused
+ * with "API rate limit exceeded", so the pipeline could reach the
+ * edge-function stage and never get through it — the schema completed, the
+ * marker cleared, the full pass was refused, and the cycle repeated.
+ *
+ * Sixty is comfortably inside the budget for both the fetch and the deploys it
+ * feeds, and progress is monotonic: what a pass deploys is skipped by the next
+ * one, so the remaining set only shrinks.
+ */
+const EDGE_FUNCTION_FETCH_LIMIT = 60;
+
 async function runBackendProvisioning(
   supabase,
   userId: string,
@@ -76,7 +92,7 @@ async function runBackendProvisioning(
     const { getAppOctokit } = await import(
       /* @vite-ignore */ "@/lib/_server-shims/github-app.server"
     );
-    const { provisionCloneBackend } = await import(
+    const { provisionCloneBackend, listProjectEdgeFunctionSlugs } = await import(
       /* @vite-ignore */ "@/lib/_server-shims/backend-provisioning.server"
     );
     const { encryptSecret } = await import(/* @vite-ignore */ "@/lib/_server-shims/crypto.server");
@@ -113,6 +129,14 @@ async function runBackendProvisioning(
     }
     const resumingSchema = Boolean(existingRow?.resume_stage);
 
+    // What the clone already has. Asked of the TARGET, never of a diary — the
+    // same rule the schema stages follow. Cheap (one Supabase call) and it is
+    // what makes each pass's GitHub fetch smaller than the last.
+    const liveFunctionSlugs =
+      !resumingSchema && existingRow?.supabase_project_ref
+        ? await listProjectEdgeFunctionSlugs(existingRow.supabase_project_ref).catch(() => [])
+        : [];
+
     await updateStatus(
       "provisioning",
       `Snapshotting backend architecture from ${source.owner}/${source.repo}@${source.branch}...`,
@@ -129,6 +153,16 @@ async function runBackendProvisioning(
       // scanned and discarded. That fetch is what exhausts the GitHub App
       // installation's hourly quota when a long build resumes every minute.
       includeFunctionSource: !resumingSchema,
+      // Do not pay for bundles the target already holds. The deploy step has
+      // always skipped live functions — but only AFTER the snapshot had
+      // fetched every one of them, so the work was bought and discarded on
+      // every pass.
+      skipFunctionSlugs: liveFunctionSlugs,
+      // And cap what remains. 423 bundles over ~1,033 files does not fit one
+      // invocation's share of the installation's hourly quota: the pass that
+      // needed the whole set was refused on every attempt, so the pipeline
+      // could reach the edge-function stage and never get through it.
+      functionLimit: EDGE_FUNCTION_FETCH_LIMIT,
     });
     if (snapshot.migrations.length === 0) {
       throw new Error(
