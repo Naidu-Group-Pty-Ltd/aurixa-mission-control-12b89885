@@ -33,12 +33,54 @@ const MAX_ATTEMPTS = 3;
 // (attempts reset to 0); only a hard death costs an attempt.
 const INVOCATION_BUDGET_MS = 50_000;
 
-// The global bound the attempt-neutral recycling answers to: a backend that
-// has been in flight this long is not "still going", whatever each individual
-// invocation reports. Judged on PARKED rows only (worker_started_at null) so
-// a live invocation is never failed under its own feet — the next tick
-// catches it parked. clone_deployments has the same idea as STUCK_HOURS.
-const CEILING_HOURS = 3;
+// The two bounds the attempt-neutral recycling answers to. They ask DIFFERENT
+// QUESTIONS, which is why one of them cannot do both jobs.
+//
+// This used to be a single wall-clock bound of 3 hours measured from
+// `queued_at`, on the reasoning that "a backend that has been in flight this
+// long is not still going, whatever each individual invocation reports". That
+// reasoning was written before `resume_stage` existed, when there was no way
+// to tell a working pipeline from a spinning one — and it is wrong now, for a
+// reason the shape of this queue makes unavoidable: a HEALTHY job spends
+// almost its whole life parked. Each tick claims it, works ~50s, pauses at a
+// stage boundary and requeues to `status='pending'` with `worker_started_at`
+// NULL. That is precisely the row the ceiling matched, so the bound was not a
+// backstop for a wedged job — it was a hard deadline on every job, and it
+// fired whether or not the pipeline was making progress.
+//
+// It cost a complete provision on 1 Sep 2026. The Preflight clone replicated
+// the prime's schema EXACTLY — 536/536 public tables, 113/113 aml, 2,602
+// constraints, 624 functions, 2,166 indexes, 1,154 policies, 474 triggers, 13
+// views, 1 matview — and was into the edge-function stage, the longest one,
+// when the ceiling failed it, cleared the queued password so it could not
+// resume, and told the operator to "check the drain's delivery health". The
+// drain was healthy: 888 delivered invocations, every one HTTP 200.
+//
+// So:
+//
+//   PARKED_STALL_MINUTES asks "can anything ever claim this?" — the question
+//   the old bound was reaching for, answered by the CONDITION rather than by
+//   elapsed time. A parked row whose queued admin credential is gone is one
+//   `claimOne` will never take, so it would sit at 'pending' for ever showing
+//   a live queue. This is a grace period on that fact, not a deadline on the
+//   work: a healthy job is written to several times a minute (claimOne stamps
+//   `status_detail`, every stage stamps it again, the pause writes it once
+//   more, and a BEFORE UPDATE trigger maintains `updated_at`), and it always
+//   holds its credential between ticks — `drainOne` clears it only on a
+//   terminal outcome — so it cannot match however long it runs.
+//
+//   CEILING_HOURS asks "has this been recycling for ever?" — the pathological
+//   case a pause-reset attempt counter cannot bound. It is a backstop and
+//   nothing else, so it is set far above what a real provision needs: the
+//   schema alone took ~3 hours against this prime, and the edge functions are
+//   carried a batch a tick after it. A bound that a healthy job can reach is
+//   not a backstop, it is the bug above.
+//
+// Both judge PARKED rows only (worker_started_at null) so a live invocation is
+// never failed under its own feet — the next tick catches it parked.
+const PARKED_STALL_MINUTES = 45;
+const CEILING_HOURS = 24;
+
 /**
  * How long a job waits after a vendor quota refuses it.
  *
