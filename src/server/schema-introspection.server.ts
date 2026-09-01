@@ -161,7 +161,23 @@ export function chunk<T>(items: readonly T[], size: number): T[][] {
   return out;
 }
 
-/** `already exists` / `duplicate …` are success on a re-run, not failures. */
+/**
+ * `already exists` / `duplicate …` are success on a re-run, not failures.
+ *
+ * `multiple primary keys … are not allowed` belongs with them, and did not use
+ * to. A table created by the tables stage carries its primary key inline, so
+ * the constraints stage re-adds one Postgres already has — and it says so with
+ * that wording rather than "already exists". Reconciliation was never affected
+ * (it counts objects, not errors), but the ledger was: 17,008 recorded
+ * constraint failures on the 31 Aug 2026 dry run, of which five tables
+ * contributed 200 by themselves, every one of them a key that was already
+ * correctly in place.
+ *
+ * That matters because the ledger is where a real failure is found. A log full
+ * of non-failures is how a genuine one goes unread — and the sample an
+ * operator sees is capped at twenty, so noise does not merely dilute the
+ * signal, it evicts it.
+ */
 export function isBenignDdlError(message: string): boolean {
   const m = message.toLowerCase();
   return (
@@ -169,7 +185,8 @@ export function isBenignDdlError(message: string): boolean {
     m.includes("duplicate key") ||
     m.includes("duplicate object") ||
     m.includes("duplicate table") ||
-    m.includes("duplicate column")
+    m.includes("duplicate column") ||
+    m.includes("multiple primary keys")
   );
 }
 
