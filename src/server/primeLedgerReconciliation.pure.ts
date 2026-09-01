@@ -54,7 +54,15 @@
  * the whole design.
  */
 
-export type CreatedObjectKind = "table" | "function" | "type" | "view" | "index" | "sequence";
+export type CreatedObjectKind =
+  | "table"
+  | "function"
+  | "type"
+  | "view"
+  | "index"
+  | "sequence"
+  | "column"
+  | "trigger";
 
 export type CreatedObject = {
   kind: CreatedObjectKind;
@@ -95,9 +103,15 @@ const PATTERNS: ReadonlyArray<{ kind: CreatedObjectKind; re: RegExp }> = [
     kind: "view",
     re: /\bcreate\s+(?:or\s+replace\s+)?(?:materialized\s+)?view\s+(?:if\s+not\s+exists\s+)?([a-z0-9_."]+)/gi,
   },
+  // An index's own name is written UNQUALIFIED, but Postgres puts it in the
+  // schema of the table it is ON — `CREATE INDEX i ON aml.t (...)` creates
+  // `aml.i`, not `public.i`. Assuming `public` reported 14 real indexes on
+  // `aml` tables as absent on the first live run, which would have withheld
+  // migrations the prime demonstrably has. The ON target is captured so the
+  // schema can be taken from it.
   {
     kind: "index",
-    re: /\bcreate\s+(?:unique\s+)?index\s+(?:concurrently\s+)?(?:if\s+not\s+exists\s+)?([a-z0-9_."]+)\s+on\b/gi,
+    re: /\bcreate\s+(?:unique\s+)?index\s+(?:concurrently\s+)?(?:if\s+not\s+exists\s+)?([a-z0-9_."]+)\s+on\s+(?:only\s+)?([a-z0-9_."]+)/gi,
   },
   { kind: "sequence", re: /\bcreate\s+sequence\s+(?:if\s+not\s+exists\s+)?([a-z0-9_."]+)/gi },
 ];
@@ -112,6 +126,50 @@ export function qualify(raw: string, kind: CreatedObjectKind): string {
   return kind === "index" ? `public.${bare}` : `public.${bare}`;
 }
 
+/** The schema part of a possibly-qualified name, or null when it has none. */
+function schemaOf(raw: string): string | null {
+  const parts = raw.replace(/"/g, "").trim().toLowerCase().split(".");
+  return parts.length >= 2 ? parts[parts.length - 2] : null;
+}
+
+/**
+ * `ALTER TABLE … ADD COLUMN` and `CREATE TRIGGER`.
+ *
+ * Added because CREATE alone left 34 of 74 candidates `indeterminate`, and the
+ * FIRST of them in corpus order is a hole — so the dependency guard stopped
+ * there and stamping the other 40 would have unblocked nothing. A column and a
+ * trigger are both verifiable against the catalog, so they are evidence of the
+ * same quality as a table.
+ *
+ * Policies are still deliberately NOT evidence. The two `rollback_*` scripts
+ * in this corpus are policy rewrites, and they must stay `indeterminate` for
+ * ever — which they do, because a policy rewrite creates no column, trigger or
+ * relation.
+ */
+function extractAlterAndTrigger(text: string): CreatedObject[] {
+  const out: CreatedObject[] = [];
+  for (const stmt of text.split(";")) {
+    const alter = /\balter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?([a-z0-9_."]+)/i.exec(stmt);
+    if (alter) {
+      const table = qualify(alter[1] ?? "", "table");
+      for (const c of stmt.matchAll(/\badd\s+column\s+(?:if\s+not\s+exists\s+)?([a-z0-9_"]+)/gi)) {
+        const col = (c[1] ?? "").replace(/"/g, "").toLowerCase();
+        if (table && col) out.push({ kind: "column", qualified: `${table}.${col}` });
+      }
+    }
+    const trig =
+      /\bcreate\s+(?:or\s+replace\s+)?(?:constraint\s+)?trigger\s+([a-z0-9_"]+)[\s\S]*?\son\s+(?:only\s+)?([a-z0-9_."]+)/i.exec(
+        stmt,
+      );
+    if (trig) {
+      const name = (trig[1] ?? "").replace(/"/g, "").toLowerCase();
+      const table = qualify(trig[2] ?? "", "table");
+      if (name && table) out.push({ kind: "trigger", qualified: `${table}.${name}` });
+    }
+  }
+  return out;
+}
+
 export function extractCreatedObjects(sql: string): CreatedObject[] {
   const text = stripSqlNoise(sql);
   const seen = new Set<string>();
@@ -119,13 +177,24 @@ export function extractCreatedObjects(sql: string): CreatedObject[] {
   for (const { kind, re } of PATTERNS) {
     re.lastIndex = 0;
     for (const m of text.matchAll(re)) {
-      const qualified = qualify(m[1] ?? "", kind);
+      let qualified = qualify(m[1] ?? "", kind);
+      // An unqualified index takes its table's schema.
+      if (kind === "index" && qualified.startsWith("public.") && !(m[1] ?? "").includes(".")) {
+        const onSchema = schemaOf(m[2] ?? "");
+        if (onSchema) qualified = `${onSchema}.${qualified.slice("public.".length)}`;
+      }
       if (!qualified || qualified.endsWith(".")) continue;
       const key = `${kind}:${qualified}`;
       if (seen.has(key)) continue;
       seen.add(key);
       out.push({ kind, qualified });
     }
+  }
+  for (const extra of extractAlterAndTrigger(text)) {
+    const key = `${extra.kind}:${extra.qualified}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(extra);
   }
   return out;
 }
