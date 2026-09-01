@@ -998,7 +998,29 @@ export async function replicateSchemaByIntrospection(
   // place and re-reconcile, so that ordering cannot silently lose a table.
   if (tableStmts && tableStage && (!tableStage.reconciled || tableStage.failed > 0)) {
     await say("Re-applying tables now that functions exist...");
-    const retry = await applyStatements(cloneRef, "tables:retry", tableStmts, 60);
+    // This re-apply had NO budget check, and it is ~700 statements. An
+    // invocation that ran out of clock here was KILLED rather than pausing,
+    // which costs a hard attempt every time instead of a free requeue: the
+    // 1 Sep 2026 run went from attempts 1 to 3 in this block, one short of
+    // terminating a job whose schema was otherwise nearly complete.
+    //
+    // It pauses against the TABLES stage rather than the stage the cursor
+    // happens to sit on, because that is the work being redone — resuming at
+    // `functions` would skip the tables stage, leave `tableStmts` null, and
+    // guard this block off entirely, so the repair would never run again.
+    const pauseInTableRetry = (about: string, batchIndex?: number) => {
+      if (pastDeadline(options.deadlineAt)) {
+        throw new BudgetPause(about, formatResumeMarker("tables", batchIndex));
+      }
+    };
+    const retry = await applyStatements(
+      cloneRef,
+      "tables:retry",
+      tableStmts,
+      60,
+      pauseInTableRetry,
+      takeResumeBatch("tables"),
+    );
     tableStage.applied += retry.applied;
     tableStage.failed = retry.failed;
     tableStage.cloneCount = await countOn(cloneRef, "tables");
