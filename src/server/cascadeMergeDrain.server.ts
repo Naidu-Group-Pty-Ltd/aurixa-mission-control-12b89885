@@ -486,12 +486,24 @@ async function handleOne(args: {
       if (!checksUnreadable(e)) throw e;
       reason = CHECKS_PERMISSION_REMEDY;
       await writeReconciliation(supabase, rows, facts, reason);
-      return { clone: label, pr: number, outcome: "held", reason: "checks_unreadable", why: reason };
+      return {
+        clone: label,
+        pr: number,
+        outcome: "held",
+        reason: "checks_unreadable",
+        why: reason,
+      };
     }
 
     if (!verdict.merge) {
       await writeReconciliation(supabase, rows, facts, verdict.why);
-      return { clone: label, pr: number, outcome: "held", reason: verdict.reason, why: verdict.why };
+      return {
+        clone: label,
+        pr: number,
+        outcome: "held",
+        reason: verdict.reason,
+        why: verdict.why,
+      };
     }
 
     // MERGE, never SQUASH — a squash rewrites the cascade commit naming the
@@ -510,7 +522,12 @@ async function handleOne(args: {
   const applied = await writeReconciliation(supabase, rows, facts, reason);
 
   if (mergedNow) {
-    return { clone: label, pr: number, outcome: "merged", sha: facts.mergeCommitSha?.slice(0, 7) ?? null };
+    return {
+      clone: label,
+      pr: number,
+      outcome: "merged",
+      sha: facts.mergeCommitSha?.slice(0, 7) ?? null,
+    };
   }
   if (applied) {
     // The record was behind — a merge somebody else performed, or a proposal
@@ -661,6 +678,8 @@ async function advanceClone(supabase: Db, cloneId: string): Promise<boolean> {
     .maybeSingle();
   if (clone.error) throw new Error(`Could not read clone ${cloneId}: ${clone.error.message}`);
   if (clone.data?.last_synced_sha === newest.source_sha) return false;
+  // What the clone held before this merge, kept before the update moves it.
+  const previousSha = clone.data?.last_synced_sha ?? null;
 
   const { error: writeErr } = await supabase
     .from("clones")
@@ -693,6 +712,25 @@ async function advanceClone(supabase: Db, cloneId: string): Promise<boolean> {
     });
   } catch (e) {
     console.error("[cascade-merge-drain] redeploy request failed:", e);
+  }
+
+  // And the backend half, for the same reason and on the same terms as the
+  // engine's own succeeded path. A pull request merged HERE reached `main`
+  // exactly as a direct push would, so the edge functions and migrations it
+  // carried are live in the repository and absent from the project.
+  //
+  // Never throws: a pointer that moved correctly must not report as failed
+  // because a repair row could not be written.
+  try {
+    const { requestBackendSyncAfterCascade } = await import("@/server/backendSync.server");
+    await requestBackendSyncAfterCascade({
+      cloneId,
+      reason: "cascade merge drain",
+      fromSha: previousSha,
+      toSha: newest.source_sha,
+    });
+  } catch (e) {
+    console.error("[cascade-merge-drain] backend sync request failed:", e);
   }
   return true;
 }

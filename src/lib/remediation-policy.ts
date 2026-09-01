@@ -38,6 +38,22 @@ export type RemediationPolicyInput = {
   linesChanged?: number | null;
   /** sql_migration: destructiveness assessment of every pending statement. */
   sqlAssessment?: SqlRiskAssessment | null;
+  /**
+   * sql_migration: the caller is planning a run the lane will gate itself.
+   *
+   * `executeSqlMigration` loads every PENDING migration's body immediately
+   * before applying it, assesses each one, and parks the whole batch on the
+   * first destructive statement or the first body it cannot read. That check
+   * is strictly stronger than one taken at plan time — it reads the SQL that
+   * is about to run rather than the SQL that was pending when somebody
+   * queued the work, and those differ whenever the prime moves in between.
+   *
+   * So this is a statement about WHERE the assessment happens, never about
+   * whether it happens. It exists as a flag rather than as the default
+   * because turning the default around would widen auto-execution for the
+   * ticket path too, which asks for this decision in a different context.
+   */
+  sqlAssessedByLane?: boolean;
 };
 
 export type RemediationPolicyDecision = {
@@ -93,7 +109,16 @@ export function decideRemediation(input: RemediationPolicyInput): RemediationPol
   }
 
   if (input.actionType === "sql_migration") {
+    // A supplied assessment is read FIRST and can still refuse. Reading the
+    // deferral first would let a caller that has already been told the SQL is
+    // destructive hand the batch to the lane anyway.
     if (!input.sqlAssessment) {
+      if (input.sqlAssessedByLane) {
+        return auto([
+          "every pending statement is assessed by the lane immediately before it applies; " +
+            "a destructive one parks the batch",
+        ]);
+      }
       return human(["pending SQL was not assessed for destructiveness"]);
     }
     if (input.sqlAssessment.destructive) {
