@@ -908,16 +908,42 @@ export async function replicateSchemaByIntrospection(
     tableStmts = Array.from(grouped.values()).map((t) =>
       buildCreateTableDdl(t.schema, t.table, t.cols),
     );
-    tableStage = await runStage(
-      "tables",
-      primeRef,
-      cloneRef,
-      tableStmts,
-      60,
-      undefined,
-      pauseIfDue,
-      takeResumeBatch("tables"),
-    );
+    // Applying ~700 `create table if not exists` statements against a clone
+    // that already holds every one of them is pure cost, and it is the cost
+    // that deadlocked this pipeline: the tables stage consumed most of each
+    // invocation, so a full pass never finished the schema, always ended
+    // `partial`, and a partial pass may not proceed to the edge functions.
+    // The engine could complete the schema and never get past it.
+    //
+    // So skip the APPLICATION when the count already reconciles — and only
+    // the application. The column-drift repair below still runs, which is the
+    // whole reason this stage does not use `alreadyReconciled`: equal counts
+    // do not mean equal tables.
+    const tableCounts = await Promise.all([
+      countOn(primeRef, "tables"),
+      countOn(cloneRef, "tables"),
+    ]);
+    const tablesAlreadyPresent = reconcile(tableCounts[0], tableCounts[1]);
+    tableStage = tablesAlreadyPresent
+      ? {
+          stage: "tables",
+          primeCount: tableCounts[0],
+          cloneCount: tableCounts[1],
+          applied: 0,
+          failed: 0,
+          reconciled: true,
+          notes: ["every table present — creation skipped, drift still checked"],
+        }
+      : await runStage(
+          "tables",
+          primeRef,
+          cloneRef,
+          tableStmts,
+          60,
+          undefined,
+          pauseIfDue,
+          takeResumeBatch("tables"),
+        );
 
     // The single heaviest stage in the pipeline, and the one that has to be
     // interruptible from the inside: three catalog reads of ~10,000 rows plus
