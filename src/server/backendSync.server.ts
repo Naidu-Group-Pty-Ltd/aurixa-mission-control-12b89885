@@ -139,7 +139,41 @@ export async function requestBackendSyncAfterCascade(input: {
     });
   }
 
+  // Now that Mission Control is demonstrably deploying this clone's backend,
+  // say so on the repository — this is the moment the statement becomes true.
+  //
+  // Here rather than only at provisioning, because provisioning is the one
+  // moment the clones that need it most have already passed. Every clone that
+  // existed before this change would otherwise keep failing its deploy check
+  // on every push until somebody opened repository settings, which is asking
+  // an operator to correct this product's own bookkeeping by hand.
+  //
+  // Idempotent (create, then update on 409) and only on a cascade that
+  // actually queued backend work, so it is neither a per-push cost nor a
+  // claim made before it is warranted.
+  await declareDeployer(input.cloneId);
+
   return { requested: true, work, runs };
+}
+
+/** Best-effort, and never the reason a queued catch-up reports as failed. */
+async function declareDeployer(cloneId: string): Promise<void> {
+  try {
+    const { data: clone } = await admin
+      .from("clones")
+      .select("github_owner, github_repo")
+      .eq("id", cloneId)
+      .maybeSingle();
+    if (!clone?.github_owner || !clone?.github_repo) return;
+    const { declareMissionControlDeploysBackend } =
+      await import("@/server/github-variables.server");
+    await declareMissionControlDeploysBackend({
+      owner: clone.github_owner,
+      repo: clone.github_repo,
+    });
+  } catch (e) {
+    console.error("[backend-sync] could not declare the deployer:", e);
+  }
 }
 
 /** The prime's backend diff between two of its own revisions. */
