@@ -68,6 +68,23 @@ describe("extractCreatedObjects", () => {
     ]);
   });
 
+  it("gives an unqualified index the schema of the table it is ON", () => {
+    // Postgres puts `CREATE INDEX i ON aml.t (...)` in `aml`, not `public`.
+    // Assuming public reported 14 real indexes on aml tables as absent when
+    // this was first run against the live prime — which would have withheld
+    // migrations the prime demonstrably has.
+    const sql = `
+      CREATE INDEX idx_aml_pvl_case ON aml.party_verification_links (case_id);
+      CREATE UNIQUE INDEX idx_pub ON public.thing (id);
+      CREATE INDEX other.explicit_idx ON aml.t (id);
+    `;
+    expect(
+      extractCreatedObjects(sql)
+        .map((o) => o.qualified)
+        .sort(),
+    ).toEqual(["aml.idx_aml_pvl_case", "other.explicit_idx", "public.idx_pub"]);
+  });
+
   it("assumes public for an unqualified name and normalises quoting", () => {
     expect(qualify('"Public"."Thing"', "table")).toBe("public.thing");
     expect(qualify("thing", "table")).toBe("public.thing");
@@ -75,6 +92,35 @@ describe("extractCreatedObjects", () => {
 
   it("strips dollar-quoted bodies whatever the tag", () => {
     expect(stripSqlNoise("a $job$ CREATE TABLE x $job$ b")).not.toContain("CREATE TABLE");
+  });
+});
+
+describe("columns and triggers are evidence; policies are not", () => {
+  it("reads ADD COLUMN, including several in one statement", () => {
+    const sql = `ALTER TABLE ONLY aml.cases ADD COLUMN IF NOT EXISTS a int, ADD COLUMN b text;`;
+    expect(extractCreatedObjects(sql).map((o) => `${o.kind}:${o.qualified}`)).toEqual([
+      "column:aml.cases.a",
+      "column:aml.cases.b",
+    ]);
+  });
+
+  it("reads CREATE TRIGGER against its table", () => {
+    const sql = `CREATE TRIGGER touch_updated BEFORE UPDATE ON public.thing
+                 FOR EACH ROW EXECUTE FUNCTION public.f();`;
+    expect(extractCreatedObjects(sql).map((o) => `${o.kind}:${o.qualified}`)).toEqual([
+      "trigger:public.thing.touch_updated",
+    ]);
+  });
+
+  it("still finds nothing in a policy rewrite", () => {
+    // The two rollback_* scripts in this corpus are policy rewrites. They must
+    // stay indeterminate for ever, whatever else this module learns to read.
+    const rollback = `
+      DROP POLICY IF EXISTS "read" ON public.client_files;
+      CREATE POLICY "read" ON public.client_files FOR SELECT USING (true) WITH CHECK (true);
+      GRANT SELECT ON public.client_files TO public;
+    `;
+    expect(extractCreatedObjects(rollback)).toEqual([]);
   });
 });
 
@@ -98,7 +144,13 @@ describe("reconcileMigration — evidence, never permission", () => {
     // The rule that keeps this honest. A pure-ALTER migration and a rollback
     // script look identical to this test, and one of those must never be
     // stamped. "Found nothing to check" is not "checked and found everything".
-    const r = reconcileMigration(meta, "ALTER TABLE public.a ADD COLUMN b int;", new Set());
+    // A migration that only seeds rows or moves grants around leaves nothing
+    // the catalog can be asked about.
+    const r = reconcileMigration(
+      meta,
+      "INSERT INTO public.feature_flags (key, enabled) VALUES ('x', true) ON CONFLICT DO NOTHING; GRANT SELECT ON public.a TO authenticated;",
+      new Set(),
+    );
     expect(r.verdict).toBe("indeterminate");
     expect(r.creates).toEqual([]);
 
@@ -130,11 +182,7 @@ describe("summarise", () => {
         new Set(["table:public.a"]),
       ),
       reconcileMigration({ id: "2", name: "b" }, "CREATE TABLE public.b (id int);", new Set()),
-      reconcileMigration(
-        { id: "3", name: "c" },
-        "ALTER TABLE public.a ADD COLUMN z int;",
-        new Set(),
-      ),
+      reconcileMigration({ id: "3", name: "c" }, "GRANT SELECT ON public.a TO anon;", new Set()),
     ];
     expect(summarise(rows)).toEqual({ satisfied: 1, unsatisfied: 1, indeterminate: 1 });
   });
