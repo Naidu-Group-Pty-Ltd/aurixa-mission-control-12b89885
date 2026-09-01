@@ -352,6 +352,14 @@ async function runBackendProvisioning(
                 : missingSecrets.length > 0
                   ? `Backend ready — ${missingSecrets.length} secret(s) awaiting operator input at /clones/${input.cloneId}/secrets`
                   : "Backend is ready — verified against the prime",
+        // Recorded on the ROW, not only in the audit metadata.
+        //
+        // Only the queued path wrote this column, so a clone provisioned
+        // synchronously carried `admin_email: null` — which is the state
+        // `npc-client-dashboard` is in. It matters on the retry: a resume has
+        // to know which account to seed and grant, and a null here leaves the
+        // one question provisioning cannot answer for itself unanswerable.
+        admin_email: input.adminEmail,
         migration_version: result.latestMigration,
         source_repo: snapshot.sourceRepo,
         source_ref: snapshot.sourceRef,

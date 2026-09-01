@@ -205,6 +205,9 @@ export const syncCloneMigrations = createServerFn({ method: "POST" })
           runnable,
           undefined,
           (m) => corpus.loadSql(m.id),
+          // Same rule as the fleet sync: this button is the other scoped
+          // caller, so it gets the same refusal to step over a hole.
+          { corpus: corpus.metas, runnableIds: new Set(runnable.map((m) => m.id)) },
         );
 
         const successes = results.filter((r) => r.success && !r.skipped);

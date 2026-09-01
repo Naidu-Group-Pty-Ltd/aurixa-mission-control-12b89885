@@ -1456,6 +1456,13 @@ export type PrimeMigrationResult = {
   success: boolean;
   skipped?: boolean;
   error?: string;
+  /**
+   * Set when this version was runnable but sits behind a corpus version the
+   * clone does not have and this run will not send. It is NOT applied. Names
+   * the first few holes so an operator sees what to reconcile rather than a
+   * bare "skipped". See `partitionByDependency`.
+   */
+  blockedBy?: string[];
 };
 
 /**
@@ -1477,6 +1484,25 @@ export async function applyPrimeMigrations(
    * item and never reach this.
    */
   loadSql?: (m: { id: string; name: string }) => Promise<string>,
+  /**
+   * Supplied by the SCOPED callers (the fleet sync and the per-clone sync
+   * button), which hand `migrations` already narrowed to what the prime's
+   * ledger records. Narrowing produces a SET, and a set cannot say whether a
+   * cleared version sits behind a withheld one — which is how a clone came to
+   * run `builder_stock_ladder_generation` without the migration that defines
+   * the function it calls. With this present the replay additionally refuses
+   * to step over a hole.
+   *
+   * Provisioning's own replay passes nothing: it is unscoped by construction
+   * (it replays the snapshot it just downloaded), so every predecessor is
+   * present and there is no hole to step over.
+   */
+  scope?: {
+    /** The whole corpus, in corpus order — including what was withheld. */
+    corpus: ReadonlyArray<{ id: string; name: string }>;
+    /** Ids the scope cleared. */
+    runnableIds: ReadonlySet<string>;
+  },
 ): Promise<{ results: PrimeMigrationResult[]; latestApplied: string | null }> {
   await runSqlOnProject(projectRef, TRACKING_TABLE_SQL);
 
@@ -1517,7 +1543,28 @@ export async function applyPrimeMigrations(
   const results: PrimeMigrationResult[] = [];
   let latestApplied: string | null = null;
 
-  const ordered = [...migrations].sort((a, b) => a.name.localeCompare(b.name));
+  // A scoped caller's list is a SET of cleared versions; the corpus is a
+  // SEQUENCE. Refuse to send anything sitting behind a version this clone does
+  // not have and this run will not send — and SKIP it rather than halting,
+  // because halting here is what left a 546-table clone with no admin user.
+  let sendable: ReadonlyArray<{ id: string; name: string; sql?: string }> = migrations;
+  if (scope) {
+    const { partitionByDependency } = await import("./fleetCorpusScope.pure");
+    const part = partitionByDependency(scope.corpus, scope.runnableIds, applied);
+    const sendableIds = new Set(part.send.map((m) => m.id));
+    sendable = migrations.filter((m) => sendableIds.has(m.id));
+    for (const o of part.orphaned) {
+      results.push({
+        id: o.meta.id,
+        name: o.meta.name,
+        success: true,
+        skipped: true,
+        blockedBy: o.blockedBy,
+      });
+    }
+  }
+
+  const ordered = [...sendable].sort((a, b) => a.name.localeCompare(b.name));
   for (let i = 0; i < ordered.length; i++) {
     const m = ordered[i];
     if (applied.has(m.id)) {
@@ -2419,6 +2466,33 @@ END $$;
 }
 
 /**
+ * Find an existing auth user's id by email, via the Auth Admin API.
+ *
+ * Only used on the resume path of {@link seedAdminUser}. Returns null when the
+ * project genuinely has no such user, so the caller can say so rather than
+ * granting a role to `undefined`.
+ */
+async function findUserIdByEmail(
+  projectUrl: string,
+  serviceRoleKey: string,
+  email: string,
+): Promise<string | null> {
+  const res = await fetch(
+    `${projectUrl}/auth/v1/admin/users?page=1&per_page=200&filter=${encodeURIComponent(email)}`,
+    {
+      headers: { Authorization: `Bearer ${serviceRoleKey}`, apikey: serviceRoleKey },
+    },
+  );
+  if (!res.ok) return null;
+  const body = (await res.json()) as { users?: Array<{ id?: string; email?: string }> };
+  const wanted = email.trim().toLowerCase();
+  // The filter is a server-side CONTAINS, so it can answer with neighbours —
+  // `admin@x` matches `superadmin@x`. Compare exactly rather than taking [0].
+  const hit = (body.users ?? []).find((u) => (u.email ?? "").trim().toLowerCase() === wanted);
+  return hit?.id ?? null;
+}
+
+/**
  * Seed an admin user into the clone's backend using the Management API.
  * Creates the user via the Auth Admin API and inserts their admin role.
  */
@@ -2445,18 +2519,38 @@ export async function seedAdminUser(
     }),
   });
 
+  let userId: string | null = null;
+
   if (!createRes.ok) {
     const body = await createRes.text();
-    // Resume path: the admin may already exist from a previous attempt
     if (createRes.status === 422 || /already.*(registered|exists)/i.test(body)) {
-      return { userId: null };
+      // Resume path: the admin already exists from an earlier attempt.
+      //
+      // This used to `return { userId: null }` here — BEFORE the role grant
+      // below. So the one run that mattered, the retry after a half-finished
+      // provisioning, created nobody and granted nothing: the account existed,
+      // could sign in, and held no `super_admin`. That is worse than no admin
+      // at all, because it looks like a seeded clone. Every retry reproduced
+      // it, because every retry took this branch.
+      //
+      // The user is looked up instead, and falls through to the same grant.
+      userId = await findUserIdByEmail(projectUrl, serviceRoleKey, adminEmail);
+      if (!userId) {
+        throw new Error(
+          `The admin user ${adminEmail} already exists on ${projectRef} but could not be ` +
+            "read back, so its role could not be granted. Check the project's Auth users.",
+        );
+      }
+    } else {
+      throw new Error(`Failed to create admin user: ${createRes.status} — ${body}`);
     }
-    throw new Error(`Failed to create admin user: ${createRes.status} — ${body}`);
+  } else {
+    const user = await createRes.json();
+    userId = user.id;
   }
 
-  const user = await createRes.json();
-  const userId = user.id;
-
+  // Reached on BOTH paths now — freshly created and already-existing alike.
+  //
   // Best-effort super_admin grant: the clone's schema is whatever the prime
   // repo defines, so only insert if a user_roles table actually exists, and
   // never let a role-model mismatch fail the whole provisioning run.

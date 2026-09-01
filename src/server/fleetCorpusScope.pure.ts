@@ -230,6 +230,111 @@ export function scopeCorpusToPrime<T extends CorpusMeta>(
 }
 
 /**
+ * Which runnable migrations may actually be SENT to one clone, given what that
+ * clone already has and what the scope withheld.
+ *
+ * ## The hole this closes
+ *
+ * `scopeCorpusToPrime` decides `runnable` by exact membership of the prime's
+ * ledger AND NOTHING ELSE — deliberately, and that part is right. But the
+ * result is a SET, and migrations are a SEQUENCE. A version the prime's ledger
+ * happens to record can therefore be handed to a clone while the version it
+ * depends on — sitting earlier in the corpus, absent from that ledger — is
+ * withheld from the same run.
+ *
+ * That is not hypothetical. Measured on `npc-client-dashboard`:
+ * `20261012000000_builder_stock_auto_source_drain.sql` DEFINES
+ * `ensure_builder_stock_settlement_scheduled()` and is absent from the prime's
+ * ledger, so it was withheld. `20261027010000_builder_stock_ladder_generation.sql`
+ * CALLS that function and IS in the ledger, so it was sent. The clone answered
+ * `42883: function public.ensure_builder_stock_settlement_scheduled() does not
+ * exist`, `applyPrimeMigrations` halted, and provisioning stopped at step 5 of
+ * 7 — four steps short of `seedAdminUser`. The clone has 546 tables, no admin
+ * user, and has been unusable since 2026-08-27. Three of the six versions the
+ * prime's ledger records above that clone's frontier call that same withheld
+ * function, so every provisioning attempt died the same way.
+ *
+ * ## Skip, do not halt
+ *
+ * The obvious repair is to stop the replay at the first hole. That is wrong
+ * here for a specific reason: halting is what starved the admin seed. A clone
+ * whose schema is 546 tables deep does not become more correct by refusing to
+ * give it an owner — it becomes unreachable. So an orphan is SKIPPED and
+ * named, the replay continues past it, and the pipeline reaches step 7.
+ *
+ * Skipping is also strictly safer than what happens today: today the orphan
+ * RUNS, against a database missing what it needs, and whatever it managed to
+ * do before the error is left behind. Not running it leaves the clone exactly
+ * where it was.
+ *
+ * ## Why the barrier is every withheld version, not just the suspicious ones
+ *
+ * It is tempting to let `skew_suspected` entries pass — the prime almost
+ * certainly ran those, under a differently-stamped id. But the skew is not
+ * bounded by {@link SKEW_WINDOW_SECONDS} in practice: this prime's repo holds
+ * `20250912170521` where its ledger holds `20250912050519`, twelve hours
+ * apart and therefore classified `never_applied` by that window. A barrier
+ * that trusted the classification would be trusting a test we can measure to
+ * be wrong. So ANY corpus version this clone does not have and this run will
+ * not send is a hole, and nothing after it is sent.
+ *
+ * The consequence is deliberate and must not be papered over: while the
+ * prime's ledger under-reports its own schema, a clone advances very little
+ * and this function says so, loudly, in `blockedBy`. That is the honest
+ * reading of the fleet's real state — and it is the argument for reconciling
+ * the ledger, not a reason to keep stepping over holes.
+ */
+export type OrphanedEntry<T> = {
+  meta: T;
+  /** Corpus versions before it that this clone has not got and will not be sent. */
+  blockedBy: string[];
+};
+
+export type DependencyPartition<T> = {
+  /** Runnable, in corpus order, with every predecessor accounted for. */
+  send: T[];
+  /** Runnable, but sitting behind at least one hole. Never sent. */
+  orphaned: OrphanedEntry<T>[];
+};
+
+/**
+ * @param metas        The whole corpus, in corpus order.
+ * @param runnableIds  Ids `scopeCorpusToPrime` cleared — the prime has run these.
+ * @param cloneApplied This clone's own ledger. A version it already holds is
+ *                     not a hole, whatever the prime's ledger says about it.
+ * @param maxBlockedBy Cap on the blockers recorded per orphan; the number of
+ *                     holes can run to hundreds and this is read by a person.
+ *                     The FIRST ones are kept — those are what an operator
+ *                     would investigate.
+ */
+export function partitionByDependency<T extends CorpusMeta>(
+  metas: readonly T[],
+  runnableIds: ReadonlySet<string>,
+  cloneApplied: ReadonlySet<string>,
+  maxBlockedBy = 5,
+): DependencyPartition<T> {
+  const send: T[] = [];
+  const orphaned: OrphanedEntry<T>[] = [];
+  const holes: string[] = [];
+
+  for (const m of metas) {
+    // Already on this clone. Not a hole, and not ours to send again.
+    if (cloneApplied.has(m.id)) continue;
+
+    if (runnableIds.has(m.id)) {
+      if (holes.length === 0) send.push(m);
+      else orphaned.push({ meta: m, blockedBy: holes.slice(0, maxBlockedBy) });
+      continue;
+    }
+
+    // Withheld by the scope and absent from this clone: a hole.
+    holes.push(m.id);
+  }
+
+  return { send, orphaned };
+}
+
+/**
  * Is the prime's ledger usable as an authority at all?
  *
  * Returns the operator-facing refusal, or null when the run may proceed.

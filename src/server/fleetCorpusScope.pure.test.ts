@@ -4,6 +4,7 @@ import {
   assertPrimeLedgerUsable,
   migrationEpochSeconds,
   SKEW_WINDOW_SECONDS,
+  partitionByDependency,
 } from "./fleetCorpusScope.pure";
 
 const meta = (id: string, name = `${id}_m.sql`) => ({ id, name });
@@ -304,5 +305,82 @@ describe("every replay path goes through the scoped corpus", () => {
     expect(src).toContain("export async function openScopedPrimeCorpus");
     // Exactly one site constructs the scope; everything else calls the helper.
     expect(src.match(/scopeCorpusToPrime\(/g)?.length).toBe(1);
+  });
+});
+
+describe("partitionByDependency — never step over a hole", () => {
+  const meta = (id: string) => ({ id, name: `${id}_m.sql` });
+  // The real shape, from npc-client-dashboard.
+  const FRONTIER = "20260920000000";
+  const DEFINER = "20261012000000"; // defines ensure_builder_stock_settlement_scheduled()
+  const CALLER = "20261027010000"; // calls it
+  const corpus = [meta(FRONTIER), meta(DEFINER), meta(CALLER)];
+
+  it("refuses to send a migration whose predecessor was withheld", () => {
+    // Exactly what happened: the prime's ledger records the CALLER and not the
+    // DEFINER, so the scope cleared the caller alone and the clone answered
+    // 42883. The clone already holds the frontier.
+    const part = partitionByDependency(
+      corpus,
+      new Set([FRONTIER, CALLER]), // runnable per the prime's ledger
+      new Set([FRONTIER]), // the clone's own ledger
+    );
+    expect(part.send).toEqual([]);
+    expect(part.orphaned.map((o) => o.meta.id)).toEqual([CALLER]);
+    expect(part.orphaned[0].blockedBy).toEqual([DEFINER]);
+  });
+
+  it("sends it once the hole is filled", () => {
+    const part = partitionByDependency(
+      corpus,
+      new Set([FRONTIER, DEFINER, CALLER]),
+      new Set([FRONTIER]),
+    );
+    expect(part.send.map((m) => m.id)).toEqual([DEFINER, CALLER]);
+    expect(part.orphaned).toEqual([]);
+  });
+
+  it("a version the CLONE already holds is not a hole, whatever the prime's ledger says", () => {
+    // The prime's ledger is polluted with a second id namespace — this prime's
+    // repo holds 20250912170521 where its ledger holds 20250912050519. A clone
+    // that already has the version must not be blocked by the prime's failure
+    // to record it, or every clone freezes at its thirteenth migration.
+    const part = partitionByDependency(
+      corpus,
+      new Set([CALLER]), // prime's ledger records only the caller
+      new Set([FRONTIER, DEFINER]), // but the clone HAS the definer
+    );
+    expect(part.send.map((m) => m.id)).toEqual([CALLER]);
+    expect(part.orphaned).toEqual([]);
+  });
+
+  it("skips rather than halts, so everything after a hole is still considered", () => {
+    // Halting is what starved seedAdminUser: the replay stopped at step 5 of 7
+    // and the clone never got an owner. A later runnable version is reported as
+    // orphaned in its own right, not silently swallowed by an early exit.
+    const later = meta("20261029000000");
+    const part = partitionByDependency(
+      [...corpus, later],
+      new Set([FRONTIER, CALLER, later.id]),
+      new Set([FRONTIER]),
+    );
+    expect(part.send).toEqual([]);
+    expect(part.orphaned.map((o) => o.meta.id)).toEqual([CALLER, later.id]);
+  });
+
+  it("caps the recorded blockers, keeping the first", () => {
+    const holes = Array.from({ length: 40 }, (_, i) =>
+      meta(`2026100${String(i).padStart(7, "0")}`),
+    );
+    const tail = meta("20261099000000");
+    const part = partitionByDependency([...holes, tail], new Set([tail.id]), new Set(), 3);
+    expect(part.orphaned).toHaveLength(1);
+    expect(part.orphaned[0].blockedBy).toEqual(holes.slice(0, 3).map((m) => m.id));
+  });
+
+  it("is a no-op when nothing was withheld", () => {
+    const part = partitionByDependency(corpus, new Set(corpus.map((m) => m.id)), new Set());
+    expect(part.send).toHaveLength(3);
+    expect(part.orphaned).toEqual([]);
   });
 });

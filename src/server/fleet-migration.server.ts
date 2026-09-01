@@ -360,9 +360,15 @@ export async function runFleetMigrationSync(
         runnable,
         undefined,
         (m) => corpus.loadSql(m.id),
+        // `runnable` alone cannot say whether a cleared version sits behind a
+        // withheld one. The whole corpus can.
+        { corpus: corpus.metas, runnableIds: new Set(runnable.map((m) => m.id)) },
       );
       const successes = results.filter((r) => r.success && !r.skipped);
       const failures = results.filter((r) => !r.success);
+      // Runnable, but sitting behind a version this clone has not got. Skipped
+      // rather than run — see `partitionByDependency`.
+      const blocked = results.filter((r) => r.blockedBy && r.blockedBy.length > 0);
 
       out.processed++;
       if (successes.length === 0 && failures.length === 0) {
@@ -383,7 +389,15 @@ export async function runFleetMigrationSync(
           status_detail:
             failures.length > 0
               ? `Migration failed at ${failures[0].name}`
-              : `Synced to ${latestApplied}`,
+              : blocked.length > 0
+                ? // `ready` and NOT level. Saying only "Synced to X" here would
+                  // report a clone that is holding dozens of migrations back as
+                  // healthy — the exact shape of report this module exists to
+                  // stop. The first hole is named because it is the one to
+                  // reconcile first.
+                  `Synced to ${latestApplied} — ${blocked.length} migration(s) held back behind ` +
+                  `${blocked[0].blockedBy?.[0] ?? "a withheld version"}, which the prime's ledger does not record`
+                : `Synced to ${latestApplied}`,
           error_message: failures.length > 0 ? failures[0].error : null,
           // Released here, not in a finally: on the failure path the row is
           // deliberately left `failed`, and a `failed` row is outside this
