@@ -215,7 +215,16 @@ export function shouldRunAnotherFunctionPass(
 
 // ─── Column drift ────────────────────────────────────────────────────
 
-export type ColumnInfo = { table: string; column: string; type: string; notNull?: boolean };
+export type ColumnInfo = {
+  table: string;
+  column: string;
+  type: string;
+  notNull?: boolean;
+  /** The column's default expression, or a generated column's own expression. */
+  default?: string | null;
+  /** pg_attribute.attgenerated: 's' = STORED generated column. */
+  generated?: string | null;
+};
 
 /**
  * `create table if not exists` does not repair an existing table: on a re-run,
@@ -232,9 +241,15 @@ export function diffMissingColumns(
 }
 
 export function buildAddColumnStatements(missing: readonly ColumnInfo[]): string[] {
-  return missing.map(
-    (c) => `alter table ${c.table} add column if not exists ${c.column} ${c.type}`,
-  );
+  return missing.map((c) => {
+    const head = `alter table ${c.table} add column if not exists ${c.column} ${c.type}`;
+    // A generated column added as a plain one does not fail — it succeeds, and
+    // reconciles, and is wrong for ever after: the count matches while the
+    // value never populates. Carry the expression or do not carry the column.
+    return c.generated === "s" && c.default
+      ? `${head} generated always as (${c.default}) stored`
+      : head;
+  });
 }
 
 /** Per-table signature of `attname + format_type` pairs, for a cheap drift check. */
@@ -305,6 +320,21 @@ export type ColumnDef = {
   default: string | null;
   /** pg_attribute.attidentity: 'a' = always, 'd' = by default, '' = none. */
   identity?: string | null;
+  /**
+   * pg_attribute.attgenerated: 's' = STORED generated column, '' = none.
+   *
+   * A generated column's expression lives in `pg_attrdef` exactly like a
+   * default, so reading the column list without this flag produces
+   * `default (released_at IS NULL)` — which Postgres refuses with "cannot use
+   * column reference in DEFAULT expression", because a default may not see
+   * other columns.
+   *
+   * The whole CREATE TABLE fails on it, so this is never one lost column: on
+   * the 1 Sep 2026 dry run seven tables could not be created at all, and
+   * behind them 272 columns and 38 constraints failed with "relation does not
+   * exist" — a cascade that reads as five unrelated faults and is one.
+   */
+  generated?: string | null;
 };
 
 export function buildCreateTableDdl(
@@ -317,6 +347,9 @@ export function buildCreateTableDdl(
     // Identity columns carry no pg_attrdef default — they must be declared.
     if (c.identity === "a" || c.identity === "d") {
       s += ` generated ${c.identity === "a" ? "always" : "by default"} as identity`;
+    } else if (c.generated === "s" && c.default) {
+      // Its expression is stored as a default but is NOT one — see ColumnDef.
+      s += ` generated always as (${c.default}) stored`;
     } else if (c.default) {
       s += ` default ${c.default}`;
     }
@@ -502,6 +535,7 @@ const Q = {
               a.attnotnull as not_null,
               pg_get_expr(d.adbin, d.adrelid) as column_default,
               a.attidentity::text as identity,
+              a.attgenerated::text as generated,
               a.attnum as ord
             from pg_attribute a
             join pg_class c on c.oid = a.attrelid
@@ -866,6 +900,7 @@ export async function replicateSchemaByIntrospection(
         notNull: r.not_null === true || r.not_null === "true",
         default: r.column_default == null ? null : str(r.column_default),
         identity: r.identity == null ? null : str(r.identity),
+        generated: r.generated == null ? null : str(r.generated),
       });
       grouped.set(key, entry);
     }
@@ -899,6 +934,8 @@ export async function replicateSchemaByIntrospection(
         table: `${quoteIdent(str(r.schema))}.${quoteIdent(str(r.table_name))}`,
         column: quoteIdent(str(r.column_name)),
         type: str(r.data_type),
+        default: r.column_default == null ? null : str(r.column_default),
+        generated: r.generated == null ? null : str(r.generated),
       }));
     const primeInfo = toInfo(primeCols);
     const missing = diffMissingColumns(primeInfo, toInfo(cloneCols));
