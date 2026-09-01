@@ -33,12 +33,53 @@ const MAX_ATTEMPTS = 3;
 // (attempts reset to 0); only a hard death costs an attempt.
 const INVOCATION_BUDGET_MS = 50_000;
 
-// The global bound the attempt-neutral recycling answers to: a backend that
-// has been in flight this long is not "still going", whatever each individual
-// invocation reports. Judged on PARKED rows only (worker_started_at null) so
-// a live invocation is never failed under its own feet — the next tick
-// catches it parked. clone_deployments has the same idea as STUCK_HOURS.
-const CEILING_HOURS = 3;
+// The two bounds the attempt-neutral recycling answers to. They ask DIFFERENT
+// QUESTIONS, which is why one of them cannot do both jobs.
+//
+// This used to be a single wall-clock bound of 3 hours measured from
+// `queued_at`, on the reasoning that "a backend that has been in flight this
+// long is not still going, whatever each individual invocation reports". That
+// reasoning was written before `resume_stage` existed, when there was no way
+// to tell a working pipeline from a spinning one — and it is wrong now, for a
+// reason the shape of this queue makes unavoidable: a HEALTHY job spends
+// almost its whole life parked. Each tick claims it, works ~50s, pauses at a
+// stage boundary and requeues to `status='pending'` with `worker_started_at`
+// NULL. That is precisely the row the ceiling matched, so the bound was not a
+// backstop for a wedged job — it was a hard deadline on every job, and it
+// fired whether or not the pipeline was making progress.
+//
+// It cost a complete provision on 1 Sep 2026. The Preflight clone replicated
+// the prime's schema EXACTLY — 536/536 public tables, 113/113 aml, 2,602
+// constraints, 624 functions, 2,166 indexes, 1,154 policies, 474 triggers, 13
+// views, 1 matview — and was into the edge-function stage, the longest one,
+// when the ceiling failed it, cleared the queued password so it could not
+// resume, and told the operator to "check the drain's delivery health". The
+// drain was healthy: 888 delivered invocations, every one HTTP 200.
+//
+// So:
+//
+//   PARKED_STALL_MINUTES asks "can anything ever claim this?" — the question
+//   the old bound was reaching for, answered by the CONDITION rather than by
+//   elapsed time. A parked row whose queued admin credential is gone is one
+//   `claimOne` will never take, so it would sit at 'pending' for ever showing
+//   a live queue. This is a grace period on that fact, not a deadline on the
+//   work: a healthy job is written to several times a minute (claimOne stamps
+//   `status_detail`, every stage stamps it again, the pause writes it once
+//   more, and a BEFORE UPDATE trigger maintains `updated_at`), and it always
+//   holds its credential between ticks — `drainOne` clears it only on a
+//   terminal outcome — so it cannot match however long it runs.
+//
+//   CEILING_HOURS asks "has this been recycling for ever?" — the pathological
+//   case a pause-reset attempt counter cannot bound. It is a backstop and
+//   nothing else, so it is set far above what a real provision needs: the
+//   schema alone took ~3 hours against this prime, and the edge functions are
+//   carried a batch a tick after it. A bound that a healthy job can reach is
+//   not a backstop, it is the bug above.
+//
+// Both judge PARKED rows only (worker_started_at null) so a live invocation is
+// never failed under its own feet — the next tick catches it parked.
+const PARKED_STALL_MINUTES = 45;
+const CEILING_HOURS = 24;
 
 const IN_FLIGHT_STATUSES = ["provisioning", "migrating", "seeding_admin"] as const;
 
@@ -121,9 +162,54 @@ async function reclaimStalled() {
     throw new Error(`backend-provisioning reclaim: exhausted rows: ${exhaustedErr.message}`);
   }
 
+  // Unclaimable: a parked row `claimOne` can never take, because its queued
+  // admin password is gone. (The other reason it skips a row — attempts spent
+  // — is the exhaustion branch above.) Without this the row sits at 'pending'
+  // for ever showing the operator a live queue, which is the same lie the
+  // stall and exhaustion branches exist to prevent.
+  //
+  // Stated as the CONDITION rather than inferred from staleness, which is what
+  // keeps it clear of the one row that also looks abandoned and is not:
+  // `claimOne` takes the OLDEST pending row, so a younger job waits behind a
+  // long one and is not written to meanwhile. That row still HOLDS its
+  // password, so it can never match here — it is waiting, not stranded, and
+  // failing it would punish it for the queue being busy.
+  //
+  // `updated_at` is kept as a grace period, not as the test: it is the only
+  // signal that survives every stage, because `resume_stage` is deliberately
+  // NULLED by the edge-function stage (`functionSourceTruncated` pauses with
+  // an empty marker so the next tick re-snapshots and carries the next batch)
+  // — the longest stage, and exactly where the 1 Sep 2026 run was killed. A
+  // rule keyed on the marker would have been blind in the one place it was
+  // needed. A BEFORE UPDATE trigger maintains `updated_at`, so the claim,
+  // every stage and the pause each bump it and no new stage can forget to.
+  const stallCutoff = new Date(Date.now() - PARKED_STALL_MINUTES * 60 * 1000).toISOString();
+  const { error: strandedErr } = await admin
+    .from("clone_backends")
+    .update({
+      status: "failed",
+      worker_finished_at: new Date().toISOString(),
+      error_message:
+        `Provisioning has sat unclaimable for over ${PARKED_STALL_MINUTES} minutes — ` +
+        `the queued admin credential is gone, so no worker can take this row. ` +
+        `Retry from the clone page (retrying re-queues with a fresh credential and fresh attempts).`,
+      status_detail: "Provisioning stranded — nothing could claim it",
+    })
+    .is("queued_admin_password_enc", null)
+    .lt("updated_at", stallCutoff)
+    .is("worker_started_at", null)
+    .is("worker_finished_at", null)
+    .in("status", ["pending", ...IN_FLIGHT_STATUSES]);
+  if (strandedErr) {
+    throw new Error(`backend-provisioning reclaim: stranded rows: ${strandedErr.message}`);
+  }
+
   // The ceiling. Budget pauses recycle attempt-neutrally on purpose, so
   // `attempts` no longer bounds a job that keeps proving liveness without
-  // finishing — wall clock does. Parked rows only (see CEILING_HOURS).
+  // finishing — wall clock does. This is the backstop for THAT case alone and
+  // is set far above what a real provision needs; the stranded check above is
+  // what catches a job nothing is working on. Parked rows only (see
+  // CEILING_HOURS).
   const ceilingCutoff = new Date(Date.now() - CEILING_HOURS * 3600 * 1000).toISOString();
   const { error: ceilingErr } = await admin
     .from("clone_backends")
@@ -133,7 +219,8 @@ async function reclaimStalled() {
       queued_admin_password_enc: null,
       error_message:
         `Provisioning has been in flight for over ${CEILING_HOURS} hours without finishing. ` +
-        `Check the drain's delivery health and the clone's status history, then retry from the clone page.`,
+        `It was still moving, so this is a pipeline that is not converging rather than a stalled queue — ` +
+        `read the clone's status history for the stage it keeps returning to before retrying.`,
       status_detail: "Provisioning ceiling exceeded",
     })
     .lt("queued_at", ceilingCutoff)
