@@ -84,6 +84,51 @@ export async function putRepoVariable(input: PutRepoVariableInput): Promise<void
   });
 }
 
+/**
+ * Every Actions variable on a repository, as a name → value map.
+ *
+ * Returns `null` when GitHub could not be asked. A caller must not read that
+ * as "the repository has none" — which is why it is a distinct value rather
+ * than an empty map.
+ */
+export async function listRepoVariables(input: {
+  owner: string;
+  repo: string;
+  installationId?: string | null;
+}): Promise<Record<string, string> | null> {
+  try {
+    const octokit = getAppOctokit(input.installationId ?? undefined);
+    const { data } = await octokit.request("GET /repos/{owner}/{repo}/actions/variables", {
+      owner: input.owner,
+      repo: input.repo,
+      per_page: 100,
+    });
+    return Object.fromEntries((data.variables ?? []).map((v) => [v.name, v.value]));
+  } catch (e) {
+    console.error("[github-variables] could not list variables:", e);
+    return null;
+  }
+}
+
+/** Remove a repository variable. A variable that is already gone is a success. */
+export async function deleteRepoVariable(input: {
+  owner: string;
+  repo: string;
+  name: string;
+  installationId?: string | null;
+}): Promise<void> {
+  const octokit = getAppOctokit(input.installationId ?? undefined);
+  try {
+    await octokit.request("DELETE /repos/{owner}/{repo}/actions/variables/{name}", {
+      owner: input.owner,
+      repo: input.repo,
+      name: input.name,
+    });
+  } catch (e) {
+    if ((e as { status?: number }).status !== 404) throw e;
+  }
+}
+
 /** The variable a clone's deploy workflow reads, and the one value it accepts. */
 export const BACKEND_DEPLOYER_VARIABLE = "BACKEND_DEPLOYED_BY";
 export const BACKEND_DEPLOYER_MISSION_CONTROL = "mission-control";

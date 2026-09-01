@@ -143,6 +143,52 @@ export async function putRepoSecret(input: PutRepoSecretInput): Promise<void> {
   });
 }
 
+/**
+ * The NAMES of a repository's Actions secrets. GitHub never returns a value,
+ * which is exactly what makes this safe to call for a status card.
+ *
+ * `null` where GitHub could not be asked — a failed read is not an empty
+ * repository, and a caller that conflates them would report "nothing deploys
+ * this" every time the API hiccuped.
+ */
+export async function listRepoSecretNames(input: {
+  owner: string;
+  repo: string;
+  installationId?: string | null;
+}): Promise<string[] | null> {
+  try {
+    const octokit = getAppOctokit(input.installationId ?? undefined);
+    const { data } = await octokit.request("GET /repos/{owner}/{repo}/actions/secrets", {
+      owner: input.owner,
+      repo: input.repo,
+      per_page: 100,
+    });
+    return (data.secrets ?? []).map((s) => s.name);
+  } catch (e) {
+    console.error("[github-secrets] could not list secret names:", e);
+    return null;
+  }
+}
+
+/** Remove a repository secret. One that is already gone is a success. */
+export async function deleteRepoSecret(input: {
+  owner: string;
+  repo: string;
+  name: string;
+  installationId?: string | null;
+}): Promise<void> {
+  const octokit = getAppOctokit(input.installationId ?? undefined);
+  try {
+    await octokit.request("DELETE /repos/{owner}/{repo}/actions/secrets/{secret_name}", {
+      owner: input.owner,
+      repo: input.repo,
+      secret_name: input.name,
+    });
+  } catch (e) {
+    if ((e as { status?: number }).status !== 404) throw e;
+  }
+}
+
 export type SyncSecretsInput = {
   owner: string;
   repo: string;
