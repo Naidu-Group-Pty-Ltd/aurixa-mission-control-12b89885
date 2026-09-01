@@ -359,11 +359,15 @@ export async function attachCloneDeployToken(input: {
     };
   }
 
-  await admin.from("audit_log").insert({
+  // Through the shared helper, which logs a failed insert rather than
+  // discarding it. An access decision that happened and was not recorded is
+  // exactly the thing an audit trail exists to make impossible to miss.
+  const { writeAuditLog } = await import("@/server/audit.server");
+  await writeAuditLog({
     action: TOKEN_ATTACHED_ACTION,
-    entity_type: "clone",
-    entity_id: input.cloneId,
-    actor_user_id: input.actorUserId,
+    entityType: "clone",
+    entityId: input.cloneId,
+    actorUserId: input.actorUserId,
     // The class and the checks, never the token. This row is a record that an
     // access decision was taken, not a copy of the credential it was about.
     metadata: {
@@ -420,11 +424,12 @@ export async function detachCloneDeployToken(input: {
   // `SUPABASE_PROJECT_REF` is deliberately LEFT. It is not a credential, it is
   // a fact about which project this repository belongs to, and removing it
   // would only mean typing it again next time.
-  await admin.from("audit_log").insert({
+  const { writeAuditLog } = await import("@/server/audit.server");
+  await writeAuditLog({
     action: TOKEN_REMOVED_ACTION,
-    entity_type: "clone",
-    entity_id: input.cloneId,
-    actor_user_id: input.actorUserId,
+    entityType: "clone",
+    entityId: input.cloneId,
+    actorUserId: input.actorUserId,
     metadata: { repo: `${clone.github_owner}/${clone.github_repo}` },
   });
 
