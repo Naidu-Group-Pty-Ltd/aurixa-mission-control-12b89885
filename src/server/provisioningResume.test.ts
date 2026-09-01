@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { mapPool } from "./prime-backend.server";
-import { BudgetPause, isUpstreamRateLimit, pastDeadline } from "./provisioningBudget";
+import {
+  BudgetPause,
+  formatResumeMarker,
+  isUpstreamRateLimit,
+  parseResumeMarker,
+  pastDeadline,
+} from "./provisioningBudget";
 
 /**
  * Provisioning must survive the invocation it runs in.
@@ -256,8 +262,10 @@ describe("every stage can be interrupted at batch granularity", () => {
   it("applyStatements checks the budget between batches, never before the first", () => {
     const src = introspection();
     const fn = src.slice(src.indexOf("export async function applyStatements"));
-    expect(fn).toMatch(/pauseIfDue\?:\s*\(about: string\) => void/);
-    expect(fn).toMatch(/if \(i > 0\) pauseIfDue\?\./);
+    expect(fn).toMatch(/pauseIfDue\?:\s*\(about: string, batchIndex\?: number\) => void/);
+    /* Never before the first batch THIS invocation runs — which is `from` on a
+       resumed stage, not a hard zero. */
+    expect(fn).toMatch(/if \(i > from\) pauseIfDue\?\./);
   });
 
   it("the repeating loops pass the hook down", () => {
@@ -265,6 +273,7 @@ describe("every stage can be interrupted at batch granularity", () => {
     /* The two stages that re-apply a whole statement set until it converges. */
     expect(src).toMatch(/applyStatements\(cloneRef, "functions", fnStmts, 15, pauseIfDue\)/);
     expect(src).toMatch(/applyStatements\(cloneRef, "views", viewStmts, 30, pauseIfDue\)/);
+
   });
 
   it("a finished stage is skipped by asking the clone, not by keeping notes", () => {
@@ -318,7 +327,11 @@ describe("the schema build remembers where it paused", () => {
 
   it("the pause carries the stage rather than the caller parsing the prose", () => {
     expect(read("src/server/provisioningBudget.ts")).toMatch(/readonly resumeStage\?: string/);
-    expect(introspection()).toMatch(/throw new BudgetPause\(about, reachedStage\)/);
+    /* The pause carries WHERE the build stopped — stage and, when it stopped
+       inside one, the batch. One value, because they are one fact. */
+    expect(introspection()).toMatch(
+      /throw new BudgetPause\(about, formatResumeMarker\(reachedStage, batchIndex\)\)/,
+    );
   });
 
   it("a resumed pass never claims the schema is complete", () => {
@@ -598,5 +611,57 @@ describe("the schema's own dependencies exist before the schema is built", () =>
        that is a silence this platform has already paid for. */
     const src = pipeline();
     expect(src).toMatch(/extension\(s\) failed to install/);
+  });
+});
+
+describe("a stage larger than one budget can still finish", () => {
+  /* A stage that is genuinely short cannot be skipped, so one whose statement
+     list exceeds a single budget could never complete: it restarted at batch
+     zero every pass and applied the same prefix for ever. Grants showed it
+     first — 46 of 149 batches, a dozen passes, three hours — and constraints
+     showed it again the moment grants became skippable. */
+  it("the marker carries the batch as well as the stage, in one value", () => {
+    expect(formatResumeMarker("constraints", 26)).toBe("constraints#26");
+    expect(parseResumeMarker("constraints#26")).toEqual({ stage: "constraints", batch: 26 });
+    /* A bare stage still means "start this stage from the beginning". */
+    expect(formatResumeMarker("grants")).toBe("grants");
+    expect(parseResumeMarker("grants")).toEqual({ stage: "grants", batch: 0 });
+    expect(parseResumeMarker(null)).toEqual({ stage: null, batch: 0 });
+  });
+
+  it("batch zero is never encoded, so the marker stays comparable", () => {
+    expect(formatResumeMarker("tables", 0)).toBe("tables");
+    expect(formatResumeMarker("", 5)).toBe("");
+  });
+
+  it("an unreadable batch starts the stage over rather than guessing", () => {
+    /* Re-applying a prefix is merely slow. Skipping one that was never applied
+       is wrong, so every unparseable form resolves to 0. */
+    expect(parseResumeMarker("constraints#").batch).toBe(0);
+    expect(parseResumeMarker("constraints#abc").batch).toBe(0);
+    expect(parseResumeMarker("constraints#-4").batch).toBe(0);
+    expect(parseResumeMarker("#7").stage).toBe(null);
+  });
+
+  it("applyStatements resumes at the offset and clamps it to the list", () => {
+    const fn = introspection();
+    const body = fn.slice(fn.indexOf("export async function applyStatements"));
+    expect(body).toMatch(/const from = Math\.min\(Math\.max\(0, startBatch\), batches\.length\)/);
+    expect(body).toMatch(/for \(let i = from; i < batches\.length; i\+\+\)/);
+  });
+
+  it("the offset belongs to ONE stage and is spent when the pass moves on", () => {
+    /* A batch index means nothing outside the statement list it was counted
+       in, so carrying it into the next stage would skip real work. */
+    const src = introspection();
+    expect(src).toMatch(/stage === resumeMarker\.stage \? resumeBatch : 0/);
+    expect(src).toMatch(/if \(stage !== resumeMarker\.stage\) resumeBatch = 0;/);
+  });
+
+  it("the stages that need it are handed it", () => {
+    const src = introspection();
+    /* stageOrSkip covers eight of them; tables calls runStage directly. */
+    expect(src).toMatch(/takeResumeBatch\(stage\)/);
+    expect(src).toMatch(/takeResumeBatch\("tables"\)/);
   });
 });

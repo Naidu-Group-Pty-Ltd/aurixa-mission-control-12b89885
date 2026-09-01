@@ -44,6 +44,44 @@ export class BudgetPause extends Error {
   }
 }
 
+/**
+ * The resume marker is `stage` or `stage#batch`.
+ *
+ * A stage that is genuinely short cannot be skipped, so one whose statement
+ * list is larger than a single invocation's budget could never finish: it
+ * restarted at batch zero every pass, applied the same prefix, and paused in
+ * the same place. Grants showed it first — 46 of 149 batches, a dozen passes,
+ * three hours, no completion — and constraints showed it again the moment
+ * grants became skippable.
+ *
+ * So the marker records the batch as well as the stage. The two are encoded in
+ * one column because they are one fact: WHERE the build stopped. A batch with
+ * no stage is meaningless, and storing them apart is how the pair drifts.
+ */
+export function formatResumeMarker(stage: string, batchIndex?: number): string {
+  if (!stage) return "";
+  return typeof batchIndex === "number" && batchIndex > 0 ? `${stage}#${batchIndex}` : stage;
+}
+
+/**
+ * Split a stored marker back into its stage and batch.
+ *
+ * An unparseable batch resolves to 0 — start the stage from its beginning —
+ * rather than being guessed at or throwing. Re-applying a prefix is merely
+ * slow; skipping one that was never applied is wrong.
+ */
+export function parseResumeMarker(marker: string | null | undefined): {
+  stage: string | null;
+  batch: number;
+} {
+  if (!marker) return { stage: null, batch: 0 };
+  const hash = marker.indexOf("#");
+  if (hash < 0) return { stage: marker, batch: 0 };
+  const stage = marker.slice(0, hash);
+  const n = Number.parseInt(marker.slice(hash + 1), 10);
+  return { stage: stage || null, batch: Number.isFinite(n) && n > 0 ? n : 0 };
+}
+
 /** True when `deadlineAt` is set and the clock has passed it. */
 export function pastDeadline(deadlineAt: number | null | undefined): boolean {
   return typeof deadlineAt === "number" && Date.now() >= deadlineAt;
