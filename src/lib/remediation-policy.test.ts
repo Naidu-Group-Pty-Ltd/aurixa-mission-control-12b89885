@@ -119,6 +119,41 @@ describe("decideRemediation", () => {
     expect(d.autoExecute).toBe(false);
   });
 
+  it("lets the lane hold the assessment when the caller says so", () => {
+    // The lane loads every pending body immediately before applying it, which
+    // is a stronger check than one taken at plan time: the prime moves between
+    // planning and executing, and the SQL that runs is the SQL that matters.
+    const d = decideRemediation({
+      actionType: "sql_migration",
+      priority: "P3",
+      sqlAssessedByLane: true,
+    });
+    expect(d.autoExecute).toBe(true);
+    expect(d.reasons.join(" ")).toMatch(/before it applies/);
+  });
+
+  it("still refuses destructive SQL that was already assessed, deferral or not", () => {
+    // Order matters. Reading the deferral first would let a caller that has
+    // ALREADY been told the batch is destructive hand it to the lane anyway.
+    const d = decideRemediation({
+      actionType: "sql_migration",
+      priority: "P2",
+      sqlAssessedByLane: true,
+      sqlAssessment: assessSqlDestructiveness("DROP TABLE public.t;"),
+    });
+    expect(d.autoExecute).toBe(false);
+    expect(d.reasons.join(" ")).toMatch(/drops a table/);
+  });
+
+  it("never lets the deferral outrank the priority line", () => {
+    const d = decideRemediation({
+      actionType: "sql_migration",
+      priority: "P0",
+      sqlAssessedByLane: true,
+    });
+    expect(d.autoExecute).toBe(false);
+  });
+
   it("treats monitoring and rescans as always safe, even at P0", () => {
     expect(decideRemediation({ actionType: "monitor_recovery", priority: "P0" }).autoExecute).toBe(
       true,

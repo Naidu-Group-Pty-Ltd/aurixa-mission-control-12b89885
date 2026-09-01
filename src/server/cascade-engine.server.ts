@@ -216,6 +216,13 @@ export async function executeCascade(
       github_repo: string;
       default_branch: string;
       sync_scope: string | null;
+      /**
+       * What the clone held BEFORE this cascade. Read from the joined row,
+       * which was fetched before the loop, so it is still the previous value
+       * when the update below has already moved it — that is the whole point:
+       * the backend catch-up needs the two revisions to diff between.
+       */
+      last_synced_sha: string | null;
     } | null;
 
     if (!clone) {
@@ -276,6 +283,8 @@ export async function executeCascade(
       else if (patch.status === "skipped") skipped++;
 
       if (patch.status === "succeeded" || patch.status === "pr_opened") {
+        // Read before the update below overwrites it.
+        const previousSha = clone.last_synced_sha ?? null;
         await supabase
           .from("clones")
           .update({
@@ -310,6 +319,29 @@ export async function executeCascade(
             });
           } catch (e) {
             console.error("[cascade] redeploy request failed:", e);
+          }
+
+          // The same sentence, about the other half of the deployment.
+          //
+          // Edge functions and migrations rode in on this very push and
+          // nothing deploys them: the clone's own workflow needs a
+          // repository secret it does not have, and Mission Control — which
+          // holds the credential and already has both lanes — was never asked.
+          // A rebuilt frontend over a stale backend is worse than neither,
+          // because the two halves are then from different revisions.
+          //
+          // Plans work; it does not do it. The self-healing lanes execute,
+          // under the destructiveness gate they already enforce.
+          try {
+            const { requestBackendSyncAfterCascade } = await import("@/server/backendSync.server");
+            await requestBackendSyncAfterCascade({
+              cloneId: clone.id,
+              reason: `cascade ${event.id}`,
+              fromSha: previousSha,
+              toSha: sourceSha,
+            });
+          } catch (e) {
+            console.error("[cascade] backend sync request failed:", e);
           }
         }
       } else if (patch.status === "failed") {

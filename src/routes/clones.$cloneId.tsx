@@ -33,6 +33,7 @@ import { CloneDeploymentCard } from "@/components/clone-deployment-card";
 import { CloneEmailIdentityCard } from "@/components/clone-email-identity-card";
 import { CloneAccessCredentialsCard } from "@/components/clone-access-credentials-card";
 import { CloneTurnstileCard } from "@/components/clone-turnstile-card";
+import { CloneBackendDeployCard } from "@/components/clone-backend-deploy-card";
 import { CloneEdgeCard } from "@/components/clone-edge-card";
 import { CloneHealthCard } from "@/components/clone-health-card";
 import { CloneLibraryPinsCard } from "@/components/clone-library-pins";
@@ -402,6 +403,7 @@ function CloneDetail() {
         remove={remove}
         resync={resync}
       />
+      <CloneBackendDeployCard cloneId={cloneId} />
       <CloneEdgeCard cloneId={cloneId} />
       <CloneDriftSuggestionsCard
         cloneId={cloneId}

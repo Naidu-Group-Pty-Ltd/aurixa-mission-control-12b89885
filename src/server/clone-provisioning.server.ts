@@ -313,6 +313,33 @@ export async function provisionCloneCore(
     console.error("[provisionClone] api key auto-issue failed:", e);
   }
 
+  // ─── Tell the clone's CI who deploys its Supabase project ─────────
+  //
+  // Not gated on the provisioning method, unlike the secret sync below: a
+  // forked clone and a created one are both deployed by Mission Control, and
+  // this variable is what lets each one's `deploy-supabase-functions.yml`
+  // stand down instead of failing on every push for want of a token it is
+  // deliberately not given.
+  //
+  // A plain variable, never a secret — it is a name, not a key. The token it
+  // replaces would have carried every permission on every project the account
+  // can reach, in every clone repository at once.
+  //
+  // Non-fatal by construction: if this cannot be written the clone's deploy
+  // check goes red, which is the loud recoverable state rather than a silent
+  // one.
+  if (githubUrl && githubOwner && githubRepo) {
+    const { declareMissionControlDeploysBackend } =
+      await import("@/server/github-variables.server");
+    const declared = await declareMissionControlDeploysBackend({
+      owner: githubOwner,
+      repo: githubRepo,
+    });
+    if (!declared.ok) {
+      console.error("[provisionClone] backend-deployer variable not written:", declared.error);
+    }
+  }
+
   // ─── Auto-sync Codex Actions secrets to the new repo ──────────────
   // The scan and remediation workflows need the model API key to run.
   // Push the secrets immediately so the clone is ready for autonomous
