@@ -665,3 +665,27 @@ describe("a stage larger than one budget can still finish", () => {
     expect(src).toMatch(/takeResumeBatch\("tables"\)/);
   });
 });
+
+describe("no bulk apply runs without a budget check", () => {
+  /* An apply with no pause hook cannot stop: the invocation is KILLED rather
+     than pausing, which costs a hard attempt instead of a free requeue. The
+     1 Sep 2026 run went from attempts 1 to 3 inside the table re-apply, one
+     short of terminating a job whose schema was otherwise nearly complete. */
+  it("every applyStatements call site passes a pause hook", () => {
+    const src = introspection();
+    const calls = [...src.matchAll(/applyStatements\(([\s\S]{0,220}?)\);/g)].map((m) => m[1]);
+    /* The definition itself is not a call site. */
+    const callSites = calls.filter((c) => !c.includes("cloneRef: string"));
+    expect(callSites.length).toBeGreaterThan(0);
+    const unguarded = callSites.filter((c) => !/pause/i.test(c));
+    expect(unguarded, `applies with no budget check: ${unguarded.join(" | ")}`).toEqual([]);
+  });
+
+  it("the table re-apply pauses against the TABLES stage, not the cursor", () => {
+    /* Resuming at `functions` would skip the tables stage, leave tableStmts
+       null, and guard the repair off entirely — so it would never run again. */
+    const src = introspection();
+    expect(src).toMatch(/formatResumeMarker\("tables", batchIndex\)/);
+    expect(src).toMatch(/pauseInTableRetry,\s*\n\s*takeResumeBatch\("tables"\)/);
+  });
+});
