@@ -2652,6 +2652,50 @@ export async function provisionCloneBackend(
 
   const projectUrl = getProjectUrl(projectRef);
 
+  // Step 3b: extensions, BEFORE the schema is built.
+  //
+  // This ran after the schema build and that was a deadlock. The prime's
+  // schema DEPENDS on its extensions: `vector` supplies the type that
+  // `agent_semantic_memories`, `document_chunks`, `pdf_import_chunks`,
+  // `market_updates` and five more tables declare a column of. Without it
+  // those tables cannot be created; without those tables every column added
+  // to them fails "relation does not exist", and so does every function that
+  // reads them.
+  //
+  // Measured on the 31 Aug 2026 dry run, once the schema build was finally
+  // able to run to the end of its stages: 6 table failures on
+  // `type "vector" does not exist`, 337 column failures and 28 function
+  // failures behind them, all from that one absence — while the step that
+  // installs it sat on the far side of the build that could not finish.
+  //
+  // The ordering was survivable only while the build ran to completion in a
+  // single invocation. It stopped being survivable the moment the build
+  // learned to pause and resume, because a build that never finishes never
+  // reaches what comes after it.
+  //
+  // Non-fatal per extension, and reported: a clone missing `pg_cron` or
+  // `pg_net` has no working background layer at all, which is precisely the
+  // silent failure this platform has had before.
+  let requiredExtensions: RequiredExtensionResult[] = [];
+  try {
+    await onStatusUpdate?.("migrating", "Enforcing required Postgres extensions...");
+    // Mirror the prime's extensions, not a hard-coded guess. See
+    // resolveRequiredExtensions for what that list used to miss.
+    requiredExtensions = await enforceRequiredExtensions(projectRef, input.primeBackendRef);
+    const failedExt = requiredExtensions.filter((r) => r.status === "failed");
+    if (failedExt.length > 0) {
+      await onStatusUpdate?.(
+        "migrating",
+        `${failedExt.length}/${requiredExtensions.length} extension(s) failed to install — ${failedExt.map((e) => e.name).join(", ")}`,
+      );
+    }
+  } catch (err) {
+    await onStatusUpdate?.(
+      "migrating",
+      `Required-extension enforcement skipped: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
   // Step 4: Build the clone's schema.
   //
   // Default path is catalog introspection: read the prime's live pg_catalog
@@ -2738,29 +2782,6 @@ export async function provisionCloneBackend(
           `(project ${projectRef} kept — retry resumes from the failed migration)`,
       );
     }
-  }
-
-  // Step 4b (G4): guarantee required extensions are enabled before anything
-  // downstream (edge fns, cron, webhook fanout, vault-backed cron auth) tries
-  // to use them. Non-fatal per extension — surfaced in the parity report.
-  let requiredExtensions: RequiredExtensionResult[] = [];
-  try {
-    await onStatusUpdate?.("migrating", "Enforcing required Postgres extensions...");
-    // Mirror the prime's extensions, not a hard-coded guess. See
-    // resolveRequiredExtensions for what that list used to miss.
-    requiredExtensions = await enforceRequiredExtensions(projectRef, input.primeBackendRef);
-    const failedExt = requiredExtensions.filter((r) => r.status === "failed");
-    if (failedExt.length > 0) {
-      await onStatusUpdate?.(
-        "migrating",
-        `${failedExt.length}/${requiredExtensions.length} extension(s) failed to install — ${failedExt.map((e) => e.name).join(", ")}`,
-      );
-    }
-  } catch (err) {
-    await onStatusUpdate?.(
-      "migrating",
-      `Required-extension enforcement skipped: ${err instanceof Error ? err.message : String(err)}`,
-    );
   }
 
   // Step 5: Deploy the prime's edge functions (non-fatal per function)

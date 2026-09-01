@@ -568,3 +568,35 @@ describe("every stage asks whether it is already done", () => {
     expect(helper).toMatch(/await statements\(\)/);
   });
 });
+
+describe("the schema's own dependencies exist before the schema is built", () => {
+  it("extensions are installed BEFORE the introspection build, not after", () => {
+    /* The prime's schema depends on its extensions: `vector` supplies the type
+       eight tables declare a column of. Installing them after the build is a
+       deadlock the moment the build can pause — a build that never finishes
+       never reaches what comes after it. Measured: 6 table failures on
+       `type "vector" does not exist`, 337 column and 28 function failures
+       behind them. */
+    const src = pipeline();
+    const extAt = src.indexOf("enforceRequiredExtensions(projectRef, input.primeBackendRef)");
+    const buildAt = src.indexOf("replicateSchemaByIntrospection(projectRef, {");
+    expect(extAt).toBeGreaterThan(-1);
+    expect(buildAt).toBeGreaterThan(-1);
+    expect(extAt, "extensions must be enforced before the schema build").toBeLessThan(buildAt);
+  });
+
+  it("it is enforced exactly once, and mirrors the prime rather than a fixed list", () => {
+    const src = pipeline();
+    expect(src.split("await enforceRequiredExtensions(").length - 1).toBe(1);
+    /* The prime ref is passed, or only the floor installs — and the floor has
+       never been the list. */
+    expect(src).toMatch(/enforceRequiredExtensions\(projectRef, input\.primeBackendRef\)/);
+  });
+
+  it("a failed extension is reported, never swallowed", () => {
+    /* A clone missing pg_cron or pg_net has no background layer at all, and
+       that is a silence this platform has already paid for. */
+    const src = pipeline();
+    expect(src).toMatch(/extension\(s\) failed to install/);
+  });
+});
