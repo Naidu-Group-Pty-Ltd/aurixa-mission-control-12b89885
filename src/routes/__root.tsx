@@ -36,6 +36,16 @@ function NotFoundComponent() {
   );
 }
 
+/**
+ * The Aurixa Systems mark, and the ONE place Mission Control names it.
+ *
+ * Kept beside the head config rather than in a shared module because this app
+ * has exactly one consumer of it; the clones have their own copy of the same
+ * rule in `src/branding/platformBrand.ts`, for the same reason — one name per
+ * deployment, so the artwork is swapped in one file.
+ */
+const AURIXA_FAVICON = "/brand/aurixa-favicon-192.png";
+
 export const Route = createRootRoute({
   head: () => ({
     meta: [
@@ -70,6 +80,19 @@ export const Route = createRootRoute({
       { property: "og:type", content: "website" },
     ],
     links: [
+      /*
+        Mission Control declared no icon of any kind, so every operator tab
+        showed the browser's blank-page glyph and the whole fleet console was
+        indistinguishable from an untitled tab beside the clones it operates.
+        Declared explicitly rather than left to a root /favicon.ico, which this
+        app does not serve either.
+
+        `AURIXA_FAVICON` is the one place the platform mark is named — the same
+        rule the clones follow, so replacing the artwork is one file rather
+        than a search across three repositories.
+      */
+      { rel: "icon", type: "image/png", sizes: "192x192", href: AURIXA_FAVICON },
+      { rel: "apple-touch-icon", sizes: "180x180", href: AURIXA_FAVICON },
       { rel: "stylesheet", href: appCss },
       { rel: "preconnect", href: "https://fonts.googleapis.com" },
       { rel: "preconnect", href: "https://fonts.gstatic.com", crossOrigin: "anonymous" },
