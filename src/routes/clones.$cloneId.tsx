@@ -31,6 +31,7 @@ import { CloneDriftSuggestionsCard } from "@/components/clone-drift-suggestions-
 import { CloneEditDialog } from "@/components/clone-edit-dialog";
 import { CloneDeploymentCard } from "@/components/clone-deployment-card";
 import { CloneEmailIdentityCard } from "@/components/clone-email-identity-card";
+import { CloneAccessCredentialsCard } from "@/components/clone-access-credentials-card";
 import { CloneTurnstileCard } from "@/components/clone-turnstile-card";
 import { CloneEdgeCard } from "@/components/clone-edge-card";
 import { CloneHealthCard } from "@/components/clone-health-card";
@@ -379,6 +380,16 @@ function CloneDetail() {
         fix it.
       */}
       <CloneEmailIdentityCard cloneId={cloneId} />
+      {/*
+        Beside the other two per-clone credentials, because it is the third:
+        an operator login for the clone itself. It exists because two people
+        needed one and neither could get it — the team auditing a clone before
+        it ships, and the client it is handed to — while the only place a
+        clone's admin password is ever written down is cleared on every
+        terminal outcome, deliberately. So this ISSUES rather than reveals, and
+        says so.
+      */}
+      <CloneAccessCredentialsCard cloneId={cloneId} />
       <ClonePurchasesCard cloneId={cloneId} />
       <GitHubSecretSyncCard target="clone" cloneId={cloneId} />
       <CloneSecurityAssessmentsCard cloneId={cloneId} />

@@ -1791,6 +1791,7 @@ export type Database = {
           created_by: string | null
           default_from_address: string | null
           dns_installed_via: string | null
+          from_address_written_at: string | null
           dns_records: Json
           domain_status: string
           id: string
@@ -1798,6 +1799,7 @@ export type Database = {
           key_written_at: string | null
           last_error: string | null
           region: string
+          revoked_at: string | null
           resend_domain_id: string | null
           resend_key_id: string | null
           sending_domain: string
@@ -1809,6 +1811,7 @@ export type Database = {
           created_by?: string | null
           default_from_address?: string | null
           dns_installed_via?: string | null
+          from_address_written_at?: string | null
           dns_records?: Json
           domain_status?: string
           id?: string
@@ -1816,6 +1819,7 @@ export type Database = {
           key_written_at?: string | null
           last_error?: string | null
           region?: string
+          revoked_at?: string | null
           resend_domain_id?: string | null
           resend_key_id?: string | null
           sending_domain: string
@@ -1827,6 +1831,7 @@ export type Database = {
           created_by?: string | null
           default_from_address?: string | null
           dns_installed_via?: string | null
+          from_address_written_at?: string | null
           dns_records?: Json
           domain_status?: string
           id?: string
@@ -1834,6 +1839,7 @@ export type Database = {
           key_written_at?: string | null
           last_error?: string | null
           region?: string
+          revoked_at?: string | null
           resend_domain_id?: string | null
           resend_key_id?: string | null
           sending_domain?: string

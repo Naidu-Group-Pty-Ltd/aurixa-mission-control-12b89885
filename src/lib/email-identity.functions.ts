@@ -58,6 +58,41 @@ export const provisionCloneEmailIdentity = createServerFn({ method: "POST" })
     return res;
   });
 
+/**
+ * Undo a revocation and mint again.
+ *
+ * A separate action rather than a flag on Provision, because a revoked
+ * identity coming back has to be somebody's decision. Both drains call
+ * `advanceEmailIdentity` in `provision` mode, and before `revoked_at` existed
+ * they re-minted a key for a clone an operator had deliberately stopped —
+ * within five minutes, with nothing recording that it had happened.
+ */
+export const resumeCloneEmailIdentity = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
+  .inputValidator(requireCloneId)
+  .handler(async ({ data, context }) => {
+    const { advanceEmailIdentity } = await import(
+      /* @vite-ignore */ "@/lib/_server-shims/email-identity.server"
+    );
+    const res = await advanceEmailIdentity(context.supabase, data.cloneId, {
+      mode: "provision",
+      resume: true,
+      actorUserId: context.userId,
+    });
+    await context.supabase.from("audit_log").insert({
+      action: "clone_email_identity.resume",
+      entity_type: "clone",
+      entity_id: data.cloneId,
+      actor_user_id: context.userId,
+      metadata: {
+        ok: res.ok,
+        advanced: res.ok ? res.advanced : null,
+        error: res.ok ? null : res.error,
+      },
+    });
+    return res;
+  });
+
 /** Re-poll Resend (records + verification). Creates nothing, mints nothing. */
 export const checkCloneEmailIdentity = createServerFn({ method: "POST" })
   .middleware([requireAdmin])

@@ -131,9 +131,54 @@ async function reclaimStalled() {
     throw new Error(`backend-provisioning reclaim: exhausted rows: ${exhaustedErr.message}`);
   }
 
+  // Unclaimable: a parked row `claimOne` can never take, because its queued
+  // admin password is gone. (The other reason it skips a row — attempts spent
+  // — is the exhaustion branch above.) Without this the row sits at 'pending'
+  // for ever showing the operator a live queue, which is the same lie the
+  // stall and exhaustion branches exist to prevent.
+  //
+  // Stated as the CONDITION rather than inferred from staleness, which is what
+  // keeps it clear of the one row that also looks abandoned and is not:
+  // `claimOne` takes the OLDEST pending row, so a younger job waits behind a
+  // long one and is not written to meanwhile. That row still HOLDS its
+  // password, so it can never match here — it is waiting, not stranded, and
+  // failing it would punish it for the queue being busy.
+  //
+  // `updated_at` is kept as a grace period, not as the test: it is the only
+  // signal that survives every stage, because `resume_stage` is deliberately
+  // NULLED by the edge-function stage (`functionSourceTruncated` pauses with
+  // an empty marker so the next tick re-snapshots and carries the next batch)
+  // — the longest stage, and exactly where the 1 Sep 2026 run was killed. A
+  // rule keyed on the marker would have been blind in the one place it was
+  // needed. A BEFORE UPDATE trigger maintains `updated_at`, so the claim,
+  // every stage and the pause each bump it and no new stage can forget to.
+  const stallCutoff = new Date(Date.now() - PARKED_STALL_MINUTES * 60 * 1000).toISOString();
+  const { error: strandedErr } = await admin
+    .from("clone_backends")
+    .update({
+      status: "failed",
+      worker_finished_at: new Date().toISOString(),
+      error_message:
+        `Provisioning has sat unclaimable for over ${PARKED_STALL_MINUTES} minutes — ` +
+        `the queued admin credential is gone, so no worker can take this row. ` +
+        `Retry from the clone page (retrying re-queues with a fresh credential and fresh attempts).`,
+      status_detail: "Provisioning stranded — nothing could claim it",
+    })
+    .is("queued_admin_password_enc", null)
+    .lt("updated_at", stallCutoff)
+    .is("worker_started_at", null)
+    .is("worker_finished_at", null)
+    .in("status", ["pending", ...IN_FLIGHT_STATUSES]);
+  if (strandedErr) {
+    throw new Error(`backend-provisioning reclaim: stranded rows: ${strandedErr.message}`);
+  }
+
   // The ceiling. Budget pauses recycle attempt-neutrally on purpose, so
   // `attempts` no longer bounds a job that keeps proving liveness without
-  // finishing — wall clock does. Parked rows only (see CEILING_HOURS).
+  // finishing — wall clock does. This is the backstop for THAT case alone and
+  // is set far above what a real provision needs; the stranded check above is
+  // what catches a job nothing is working on. Parked rows only (see
+  // CEILING_HOURS).
   const ceilingCutoff = new Date(Date.now() - CEILING_HOURS * 3600 * 1000).toISOString();
   const { error: ceilingErr } = await admin
     .from("clone_backends")
@@ -143,7 +188,8 @@ async function reclaimStalled() {
       queued_admin_password_enc: null,
       error_message:
         `Provisioning has been in flight for over ${CEILING_HOURS} hours without finishing. ` +
-        `Check the drain's delivery health and the clone's status history, then retry from the clone page.`,
+        `It was still moving, so this is a pipeline that is not converging rather than a stalled queue — ` +
+        `read the clone's status history for the stage it keeps returning to before retrying.`,
       status_detail: "Provisioning ceiling exceeded",
     })
     .lt("queued_at", ceilingCutoff)

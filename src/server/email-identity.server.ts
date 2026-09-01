@@ -63,6 +63,23 @@ type Db = SupabaseClient<Database>;
 
 export const CLONE_RESEND_SECRET = "RESEND_API_KEY";
 
+/**
+ * The address the clone may send from, written beside the key.
+ *
+ * A `sending_access` key scoped to a domain can send from THAT DOMAIN AND
+ * NOTHING ELSE. The clone's edge functions build every from-header from
+ * `global_report_settings.contact_details.email`, which is empty on a fresh
+ * clone — so `getBrandConfig` fell to its hard-coded `noreply@npcservices.com.au`,
+ * an address belonging to the prime's separate Resend account and verified in
+ * the platform account not at all. Every send answered 403.
+ *
+ * So the key and its address are ONE credential and are written in ONE call.
+ * The clone reads this as the authority on its sender precisely because the
+ * key makes it the only address that can work; the tenant's own contact
+ * address remains the tenant's, and remains what appears in body copy.
+ */
+export const CLONE_RESEND_FROM_SECRET = "RESEND_FROM_EMAIL";
+
 const RESEND_REGIONS = new Set(["us-east-1", "eu-west-1", "sa-east-1", "ap-northeast-1"]);
 
 export type EmailIdentityState = {
@@ -245,6 +262,59 @@ async function installDnsViaCloudflare(
   };
 }
 
+/**
+ * Write `RESEND_FROM_EMAIL` to a clone that already holds its key.
+ *
+ * The repair half of the pairing. Every identity provisioned before the key
+ * and its address travelled together has `key_written_at` set and
+ * `from_address_written_at` null, and no amount of re-minting would fix it —
+ * the mint branch is guarded on `!row.resend_key_id`. Rotating the key to get
+ * the address across would replace a working credential to deliver a string.
+ *
+ * It writes the address and nothing else, so it is safe to run against a live
+ * clone: no key is minted, none is retired, and the value is derived from the
+ * domain Resend has already verified. Idempotent — the secrets endpoint is an
+ * upsert, and the stamp only records that it happened.
+ */
+async function ensureFromAddressSecret(
+  supabase: Db,
+  cloneId: string,
+  row: EmailIdentityRow,
+): Promise<{ ok: true; row: EmailIdentityRow; address: string } | Fail> {
+  let target;
+  try {
+    target = await resolveCloneSecretTarget(supabase, cloneId);
+  } catch (e) {
+    const reason = e instanceof CloneSecretTargetError ? ` (${e.reason})` : "";
+    return fail(`Refusing to write the clone's sender address${reason}: ${msg(e)}`);
+  }
+
+  const address = row.default_from_address ?? deriveFromAddress(row.sending_domain);
+  const { setCloneSecretValues } = await import("./backend-provisioning.server");
+  const res = await setCloneSecretValues(target.projectRef, [
+    { name: CLONE_RESEND_FROM_SECRET, value: address },
+  ]);
+  if (!res.ok) return fail(`Could not write the clone's sender address: ${res.error}`);
+
+  const now = new Date().toISOString();
+  await persistIdentity(supabase, cloneId, {
+    sending_domain: row.sending_domain,
+    from_address_written_at: now,
+    default_from_address: address,
+    last_error: null,
+  });
+  return {
+    ok: true,
+    address,
+    row: {
+      ...row,
+      from_address_written_at: now,
+      default_from_address: address,
+      last_error: null,
+    },
+  };
+}
+
 export type AdvanceResult = (EmailIdentityState & { advanced: string[] }) | Fail;
 
 /**
@@ -263,6 +333,13 @@ export async function advanceEmailIdentity(
     sendingDomain?: string;
     region?: string;
     actorUserId?: string | null;
+    /**
+     * Clear a revocation and start sending again. Passed by the operator's
+     * Resume action and by nothing else — an automated caller must never be
+     * able to undo a deliberate stop, which is the whole reason `revoked_at`
+     * exists.
+     */
+    resume?: boolean;
   },
 ): Promise<AdvanceResult> {
   if (!isResendConfigured()) {
@@ -315,6 +392,21 @@ export async function advanceEmailIdentity(
       row = await readIdentity(supabase, cloneId);
       if (!row) return fail("The identity row vanished between write and read");
       advanced.push("row_created");
+    }
+
+    // ── Resume ───────────────────────────────────────────────────────
+    //
+    // Deliberate on both sides: stopping was an operator's act and so is
+    // starting again. Cleared here rather than in the mint so the rest of the
+    // pass — domain, DNS, verification — behaves as an ordinary advance.
+    if (opts.resume && row.revoked_at) {
+      await persistIdentity(supabase, cloneId, {
+        sending_domain: row.sending_domain,
+        revoked_at: null,
+        last_error: null,
+      });
+      row = { ...row, revoked_at: null, last_error: null };
+      advanced.push("resumed");
     }
 
     // ── Resend domain ────────────────────────────────────────────────
@@ -468,6 +560,28 @@ export async function advanceEmailIdentity(
       }
     }
 
+    // ── Sender address ───────────────────────────────────────────────
+    //
+    // The other half of the credential, for an identity that already holds a
+    // key from before the two were written together. `mintAndWriteKey` sends
+    // both in one call, so this only ever fires on a pre-existing row — but it
+    // is what lets the drain heal those without an operator, which matters
+    // because the failure is invisible from the clone (a 403 inside a
+    // catch-and-log in every one of its mail paths) and invisible from here
+    // (the path read "live").
+    if (opts.mode === "provision" && row.key_written_at && !row.from_address_written_at) {
+      const paired = await ensureFromAddressSecret(supabase, cloneId, row);
+      if (!paired.ok) return paired;
+      row = paired.row;
+      advanced.push("sender_address_written");
+
+      // Now that the clone can send, make its brand config agree. Best-effort
+      // on purpose: the clone's mail works on the secret alone, and an
+      // unreachable clone database must not fail the step that fixed it.
+      const aligned = await alignCloneSenderAddress(supabase, cloneId);
+      advanced.push(aligned.ok ? `sender_aligned:${aligned.outcome}` : "sender_align_skipped");
+    }
+
     return {
       ok: true,
       resendConfigured: true,
@@ -529,10 +643,30 @@ export async function sweepEmailIdentities(
   const now = opts.now ?? Date.now();
   const { data, error } = await supabase
     .from("clone_email_identities")
-    .select("clone_id, resend_domain_id, domain_status, key_written_at, last_error, updated_at")
+    .select(
+      "clone_id, resend_domain_id, domain_status, key_written_at, from_address_written_at, revoked_at, last_error, updated_at",
+    )
     // Finished identities are the overwhelming majority once a fleet settles;
     // excluding them here keeps the sweep's cost proportional to the work.
-    .is("key_written_at", null)
+    //
+    // Claimed on the ADDRESS stamp, not the key's. Every row that still owes
+    // work has this null — one with no key has never written either — so it
+    // selects the same set the old filter did, plus the identities that
+    // finished before the key and its address were paired. Those are the ones
+    // that could not send, and claiming on `key_written_at` is precisely what
+    // made them invisible to the only thing that could repair them.
+    //
+    // A single `.is()` rather than an `.or()` of the two: this platform has
+    // already been bitten by a composed filter string that parsed everywhere
+    // except at the server, and one column that is null whenever either half
+    // is outstanding needs no disjunction.
+    .is("from_address_written_at", null)
+    // A revoked identity is nobody's work. `decideEmailIdentitySweep` refuses
+    // it anyway, but a row that is never actionable must not occupy a slot in
+    // this ordered LIMIT window — a handful of revoked clones would otherwise
+    // starve every identity that still owes a key. Two `.is()` filters are
+    // ANDed by PostgREST; still no composed filter string.
+    .is("revoked_at", null)
     .order("updated_at", { ascending: true })
     .limit(opts.limit ?? 10);
   if (error) throw new Error(`Could not list email identities: ${error.message}`);
@@ -639,8 +773,14 @@ async function mintAndWriteKey(
     domain_id: row.resend_domain_id!,
   });
 
-  const { setCloneSecretValue } = await import("./backend-provisioning.server");
-  const res = await setCloneSecretValue(target.projectRef, CLONE_RESEND_SECRET, minted.token);
+  const fromAddress = row.default_from_address ?? deriveFromAddress(row.sending_domain);
+  const { setCloneSecretValues } = await import("./backend-provisioning.server");
+  // One request, both secrets. A key that arrives without the address it is
+  // scoped to is a clone that cannot send and reports as finished.
+  const res = await setCloneSecretValues(target.projectRef, [
+    { name: CLONE_RESEND_SECRET, value: minted.token },
+    { name: CLONE_RESEND_FROM_SECRET, value: fromAddress },
+  ]);
   if (!res.ok) {
     // The token was never delivered anywhere — destroy it rather than hold it.
     await resendApi.deleteApiKey(minted.id).catch(() => {});
@@ -653,6 +793,8 @@ async function mintAndWriteKey(
     resend_key_id: minted.id,
     key_last4: keyLast4(minted.token),
     key_written_at: now,
+    from_address_written_at: now,
+    default_from_address: fromAddress,
     last_error: null,
   });
   const { error: trackErr } = await supabase.from("clone_backend_secrets").upsert(
@@ -675,6 +817,8 @@ async function mintAndWriteKey(
       resend_key_id: minted.id,
       key_last4: keyLast4(minted.token),
       key_written_at: now,
+      from_address_written_at: now,
+      default_from_address: fromAddress,
       last_error: null,
     },
   };
@@ -743,6 +887,15 @@ export async function revokeEmailIdentity(
       resend_key_id: null,
       key_last4: null,
       key_written_at: null,
+      // Cleared with the key: the two are one credential, and a revoked
+      // identity that still claimed its address had been delivered would be
+      // describing a clone that cannot send.
+      from_address_written_at: null,
+      // The intent. Without it this row is indistinguishable from one that has
+      // finished DNS and is waiting to be minted, which is what both drains
+      // read it as — so a deliberate revocation was undone within five
+      // minutes. `canMintKey` refuses while this is set, whatever the caller.
+      revoked_at: new Date().toISOString(),
       domain_status: opts.deleteDomain ? "revoked" : row.domain_status,
       ...(opts.deleteDomain ? { resend_domain_id: null, dns_installed_via: null } : {}),
       last_error: null,
@@ -771,18 +924,27 @@ export async function revokeEmailIdentity(
 const SAFE_ADDRESS = /^[a-z0-9._+-]+@[a-z0-9.-]+$/;
 
 /**
- * Point the clone's brand-config sender at the verified sending domain.
+ * Point the clone's brand-config CONTACT address at the verified sender.
  *
- * The clone's edge functions build every from-header from
- * `global_report_settings.contact_details.email`; while that still carries
- * the prime's legacy address the dedicated key answers
- * `403 from address not authorized` on every send. Repairs a default, never
- * overrides a tenant's own configured domain (`mayAlignSenderAddress`).
+ * Consistency, not delivery. Delivery is settled by `RESEND_FROM_EMAIL`, which
+ * travels with the key — this only stops the clone's admin screens and body
+ * copy showing an address the clone cannot actually receive on. It repairs a
+ * default and never overrides a tenant's own configured domain
+ * (`mayAlignSenderAddress`).
+ *
+ * Two things were wrong with the write it replaces. It was a bare
+ * `UPDATE ... WHERE setting_key = 'contact_details'`, and `global_report_settings`
+ * is EMPTY on a freshly provisioned clone — zero rows on the one this was
+ * reported against — so it matched nothing, changed nothing, and returned
+ * `ok` with the address it had not written. A write that reports success
+ * without writing is worse than one that fails. It is an upsert now, on the
+ * table's own `setting_key` unique constraint, and it says which of the three
+ * things it did.
  */
 export async function alignCloneSenderAddress(
   supabase: Db,
   cloneId: string,
-): Promise<{ ok: true; address: string } | Fail> {
+): Promise<{ ok: true; address: string; outcome: "inserted" | "updated" | "unchanged" } | Fail> {
   try {
     const row = await readIdentity(supabase, cloneId);
     if (!row) return fail("This clone has no email identity yet.");
@@ -806,8 +968,12 @@ export async function alignCloneSenderAddress(
       target.projectRef,
       `select setting_value->>'email' as email from public.global_report_settings where setting_key = 'contact_details' limit 1`,
     )) as Array<{ email: string | null }>;
-    const currentEmail = Array.isArray(current) ? (current[0]?.email ?? null) : null;
+    const hasRow = Array.isArray(current) && current.length > 0;
+    const currentEmail = hasRow ? (current[0]?.email ?? null) : null;
 
+    if (hasRow && currentEmail === address) {
+      return { ok: true, address, outcome: "unchanged" };
+    }
     if (!mayAlignSenderAddress(currentEmail)) {
       return fail(
         `The clone's sender is already the tenant's own choice (${currentEmail}) — not overriding it. ` +
@@ -815,14 +981,18 @@ export async function alignCloneSenderAddress(
       );
     }
 
+    // Upsert on the table's own unique key. `setting_value` is NOT NULL with a
+    // '{}' default, so the merge is safe on a row that has never been written.
     await runSqlOnProject(
       target.projectRef,
-      `update public.global_report_settings
-          set setting_value = jsonb_set(coalesce(setting_value, '{}'::jsonb), '{email}', to_jsonb('${address}'::text), true),
-              updated_at = now()
-        where setting_key = 'contact_details'`,
+      `insert into public.global_report_settings (setting_key, setting_value)
+       values ('contact_details', jsonb_build_object('email', '${address}'::text))
+       on conflict (setting_key) do update
+          set setting_value = coalesce(global_report_settings.setting_value, '{}'::jsonb)
+                              || jsonb_build_object('email', '${address}'::text),
+              updated_at = now()`,
     );
-    return { ok: true, address };
+    return { ok: true, address, outcome: hasRow ? "updated" : "inserted" };
   } catch (e) {
     return fail(msg(e));
   }
