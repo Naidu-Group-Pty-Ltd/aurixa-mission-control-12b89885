@@ -124,4 +124,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260831080000",
     assertions: [{ kind: "column", table: "clone_backends", column: "resume_stage" }],
   },
+  {
+    migration: "20260901090000_clone_backend_retry_after.sql",
+    version: "20260901090000",
+    assertions: [{ kind: "column", table: "clone_backends", column: "retry_after" }],
+  },
 ];

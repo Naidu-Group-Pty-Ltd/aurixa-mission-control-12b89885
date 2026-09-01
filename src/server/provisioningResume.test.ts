@@ -429,9 +429,7 @@ describe("a vendor's quota is not this job failing", () => {
   it("the drain hands the attempt back rather than resetting it", () => {
     const src = drain();
     /* Not zero — a genuine failure earlier in this job's life still counts. */
-    expect(src).toMatch(
-      /upstreamLimited \? \{ attempts: Math\.max\(0, \(claimed\.attempts \?\? 0\) - 1\) \} : \{\}/,
-    );
+    expect(src).toMatch(/attempts: Math\.max\(0, \(claimed\.attempts \?\? 0\) - 1\)/);
     /* And it can never be the thing that terminates the row. */
     expect(src).toMatch(/!budgetPaused && !upstreamLimited && claimed\.attempts >= MAX_ATTEMPTS/);
   });

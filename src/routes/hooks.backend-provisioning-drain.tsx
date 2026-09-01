@@ -39,6 +39,16 @@ const INVOCATION_BUDGET_MS = 50_000;
 // a live invocation is never failed under its own feet — the next tick
 // catches it parked. clone_deployments has the same idea as STUCK_HOURS.
 const CEILING_HOURS = 3;
+/**
+ * How long a job waits after a vendor quota refuses it.
+ *
+ * GitHub's installation limit resets on a rolling hour, so retrying every
+ * minute turns one exhausted quota into sixty refused calls an hour and keeps
+ * it exhausted. Fifteen minutes is four attempts an hour: often enough to pick
+ * the reset up promptly, rare enough to stop feeding the problem. The
+ * wall-clock ceiling still bounds the whole job.
+ */
+const UPSTREAM_LIMIT_BACKOFF_MS = 15 * 60 * 1000;
 
 const IN_FLIGHT_STATUSES = ["provisioning", "migrating", "seeding_admin"] as const;
 
@@ -173,24 +183,35 @@ async function claimOne(): Promise<null | {
   const nowIso = new Date().toISOString();
   const { data: candidates, error: selectError } = await admin
     .from("clone_backends")
-    .select("clone_id, attempts")
+    .select("clone_id, attempts, retry_after")
     .eq("status", "pending")
     .is("worker_started_at", null)
     .not("queued_admin_password_enc", "is", null)
     .lt("attempts", MAX_ATTEMPTS)
     .order("queued_at", { ascending: true, nullsFirst: false })
-    .limit(1);
+    .limit(5);
   if (selectError) {
     throw new Error(`backend-provisioning claim: could not read the queue: ${selectError.message}`);
   }
-  if (!candidates?.length) return null;
-  const target = candidates[0];
+  // A job waiting out a vendor quota is not claimable yet. Filtered HERE
+  // rather than in the query because a composed PostgREST `.or()` string is
+  // forbidden in this codebase — one never parsed, and the claim it guarded
+  // had never once succeeded. Five candidates are read so a single backed-off
+  // row cannot hide the queue behind it.
+  const claimable = (candidates ?? []).filter(
+    (c) => !c.retry_after || new Date(c.retry_after).getTime() <= Date.now(),
+  );
+  if (!claimable.length) return null;
+  const target = claimable[0];
   const { data: claimed, error: claimError } = await admin
     .from("clone_backends")
     .update({
       worker_started_at: nowIso,
       attempts: (target.attempts ?? 0) + 1,
       status_detail: "Worker claimed job",
+      // The wait is spent the moment the job is claimed, so a stale stamp can
+      // never hold a job back twice.
+      retry_after: null,
     })
     .eq("clone_id", target.clone_id)
     .eq("status", "pending")
@@ -291,7 +312,16 @@ async function drainOne(
       worker_started_at: !result.ok && !isTerminal ? null : undefined,
       status: !result.ok && !isTerminal ? "pending" : undefined,
       ...(budgetPaused ? { attempts: 0 } : {}),
-      ...(upstreamLimited ? { attempts: Math.max(0, (claimed.attempts ?? 0) - 1) } : {}),
+      ...(upstreamLimited
+        ? {
+            attempts: Math.max(0, (claimed.attempts ?? 0) - 1),
+            // Wait before asking again. Without this the drain re-claims in
+            // sixty seconds and spends another refused call, sixty times an
+            // hour — the engine competing with its own retry frequency for
+            // the quota it is waiting on.
+            retry_after: new Date(Date.now() + UPSTREAM_LIMIT_BACKOFF_MS).toISOString(),
+          }
+        : {}),
     })
     .eq("clone_id", claimed.clone_id);
 
