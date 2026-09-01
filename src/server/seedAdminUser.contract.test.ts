@@ -70,6 +70,57 @@ describe("seedAdminUser grants the role on every path", () => {
   });
 });
 
+describe("the seed writes the identity the product's login path actually reads", () => {
+  // Three independent reasons the old grant could never work against this
+  // prime, all swallowed by `EXCEPTION WHEN others THEN RAISE WARNING`:
+  //   * login reads `public.custom_users` and compares a bcrypt
+  //     `password_hash`; it never consults `auth.users`;
+  //   * `user_roles.user_id` is a foreign key to `custom_users`, so an auth id
+  //     is refused 23503;
+  //   * `app_role` spells the top role `superadmin`, so `super_admin` is 22P02.
+  // Measured on the first clone: `auth.users` held ZERO rows after a run that
+  // reported this step done.
+
+  it("seeds the product's own identity table, not just Supabase Auth", () => {
+    const bare = stripComments(provisioning);
+    expect(bare).toContain("seedProductAdminIdentity");
+    expect(bare).toMatch(/to_regclass\('public\.custom_users'\)/);
+    expect(bare).toMatch(/password_hash\s*=\s*extensions\.crypt/);
+  });
+
+  it("never hard-codes a role label the column may not admit", () => {
+    // The label is read from pg_enum and chosen by `chooseRoleLabel`, which
+    // returns null rather than guessing.
+    const bare = stripComments(provisioning);
+    expect(bare).toContain("chooseRoleLabel");
+    expect(bare).toMatch(/from pg_enum/);
+    const seedFn = bare.slice(bare.indexOf("export async function seedProductAdminIdentity("));
+    expect(seedFn, "no literal role spelling may be inserted").not.toMatch(
+      /values \([^)]*'super_?admin'/i,
+    );
+  });
+
+  it("VERIFIES the credential round-trips rather than assuming the write worked", () => {
+    // A seeded admin who cannot sign in is worse than no admin, because the
+    // clone looks finished.
+    const bare = stripComments(provisioning);
+    expect(bare).toMatch(/password_verifies/);
+    expect(bare).toMatch(/password_hash = extensions\.crypt\([^)]*, password_hash\)/);
+  });
+
+  it("reports the outcome on the status line instead of swallowing it", () => {
+    const bare = stripComments(provisioning);
+    expect(bare).toContain("describeSeed");
+    const call = bare.slice(bare.indexOf("const { userId: adminUserId"));
+    expect(call.slice(0, 900)).toMatch(/onStatusUpdate\?\.\(\s*"seeding_admin"/);
+  });
+
+  it("uses the strict credential literal, which refuses what it cannot carry", () => {
+    const bare = stripComments(provisioning);
+    expect(bare).toContain("sqlCredentialLiteral");
+  });
+});
+
 describe("a clone_backends row records which account was seeded", () => {
   it("both provisioning paths write admin_email to the row", () => {
     // Only the queued path did. A clone provisioned synchronously carried
