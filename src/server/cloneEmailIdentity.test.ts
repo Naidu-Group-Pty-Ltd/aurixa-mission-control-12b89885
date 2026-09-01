@@ -32,6 +32,7 @@ const row = (over: Partial<EmailIdentityRow> = {}): EmailIdentityRow => ({
   key_last4: null,
   key_written_at: null,
   from_address_written_at: null,
+  revoked_at: null,
   default_from_address: null,
   last_error: null,
   ...over,
@@ -303,6 +304,41 @@ describe("resolveEmailDnsZone", () => {
   });
 });
 
+describe("canMintKey — a revoked identity", () => {
+  const verified = {
+    resend_domain_id: "d-1",
+    domain_status: "verified" as const,
+    dns_installed_via: "cloudflare" as const,
+  };
+
+  it("refuses to mint while revoked, even on a perfectly verified domain", () => {
+    // The exact shape a revoke leaves behind when `deleteDomain` is false —
+    // which is what the operator's Revoke button sends. The domain really is
+    // still verified at Resend, so every other precondition passes; without
+    // this check both drains read the row as "waiting to be minted" and minted.
+    const gate = canMintKey(row({ ...verified, revoked_at: "2026-08-31T09:00:00Z" }));
+    expect(gate.ok).toBe(false);
+    expect(gate.reason).toMatch(/revoked/i);
+  });
+
+  it("mints once the revocation is cleared", () => {
+    expect(canMintKey(row(verified)).ok).toBe(true);
+  });
+
+  it("is where the guard lives, because three callers reach the mint", () => {
+    // `provision` mode has three callers and two are automated
+    // (`email-identity-drain` and the deployment drain's credential arming),
+    // so a guard in the sweep alone would leave a redeploy able to undo a
+    // revocation. Asserting the pure gate is asserting all three at once.
+    for (const status of ["verified", "pending_dns", "failed"] as const) {
+      expect(
+        canMintKey(row({ ...verified, domain_status: status, revoked_at: "2026-08-31T09:00:00Z" }))
+          .ok,
+      ).toBe(false);
+    }
+  });
+});
+
 describe("identityReadiness", () => {
   it("opens on the master key before anything else", () => {
     const r = identityReadiness(null, { resendConfigured: false });
@@ -353,6 +389,21 @@ describe("identityReadiness", () => {
     );
     expect(keyOnly.next).toBe("sender");
     expect(keyOnly.live).toBe(false);
+  });
+
+  it("says a revoked identity is revoked rather than offering a mint", () => {
+    // A live step whose act every path refuses reads as a broken page.
+    const r = identityReadiness(
+      row({
+        resend_domain_id: "d-1",
+        dns_installed_via: "cloudflare",
+        domain_status: "verified",
+        revoked_at: "2026-08-31T09:00:00Z",
+      }),
+      { resendConfigured: true },
+    );
+    expect(r.live).toBe(false);
+    expect(r.steps.find((s) => s.id === "key_written")?.detail).toMatch(/revoked/i);
   });
 
   it("is live once both halves of the credential have reached the clone", () => {
@@ -433,6 +484,7 @@ describe("decideEmailIdentitySweep", () => {
     domain_status: "pending_dns" as const,
     key_written_at: null,
     from_address_written_at: null,
+    revoked_at: null,
     last_error: null,
     updated_at: "2026-08-29T09:00:00Z",
   };
@@ -481,6 +533,43 @@ describe("decideEmailIdentitySweep", () => {
     });
     expect(v.act).toBe(true);
     expect(v.act && v.why).toContain("sender address");
+  });
+
+  it("never carries a revoked identity forward", () => {
+    // Revoke with `deleteDomain: false` — the Revoke button's own call —
+    // clears the key and leaves the domain verified. That is byte-for-byte the
+    // state of an identity that has finished DNS and is waiting to be minted,
+    // and it is what the drain read it as: it minted a fresh key and wrote it
+    // to a clone somebody had deliberately stopped, within five minutes, with
+    // nothing recording that it had happened.
+    const v = decideEmailIdentitySweep({
+      identity: {
+        ...base,
+        domain_status: "verified",
+        key_written_at: null,
+        from_address_written_at: null,
+        revoked_at: "2026-08-29T09:45:00Z",
+      },
+      now: NOW,
+    });
+    expect(v).toEqual({ act: false, reason: "revoked" });
+  });
+
+  it("refuses a revoked identity before the cooling-off window is consulted", () => {
+    // Ordering matters: a revoked row with a recent error must read as
+    // revoked, not as "try again in thirty minutes" — the second says the
+    // sweep still intends to act on it.
+    const v = decideEmailIdentitySweep({
+      identity: {
+        ...base,
+        domain_status: "verified",
+        revoked_at: "2026-08-29T09:45:00Z",
+        last_error: "something failed",
+        updated_at: "2026-08-29T09:59:00Z",
+      },
+      now: NOW,
+    });
+    expect(v).toEqual({ act: false, reason: "revoked" });
   });
 
   it("polls verification while the domain is pending", () => {

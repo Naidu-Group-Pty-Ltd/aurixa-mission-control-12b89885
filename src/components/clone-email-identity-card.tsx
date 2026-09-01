@@ -13,6 +13,7 @@ import {
   checkCloneEmailIdentity,
   getCloneEmailIdentity,
   provisionCloneEmailIdentity,
+  resumeCloneEmailIdentity,
   revokeCloneEmailIdentity,
   rotateCloneEmailKey,
 } from "@/lib/email-identity.functions";
@@ -60,6 +61,7 @@ export function CloneEmailIdentityCard({ cloneId }: { cloneId: string }) {
   const rotateFn = useServerFn(rotateCloneEmailKey);
   const revokeFn = useServerFn(revokeCloneEmailIdentity);
   const alignFn = useServerFn(alignCloneSender);
+  const resumeFn = useServerFn(resumeCloneEmailIdentity);
 
   const [busy, setBusy] = useState<string | null>(null);
   const [domainInput, setDomainInput] = useState("");
@@ -75,6 +77,10 @@ export function CloneEmailIdentityCard({ cloneId }: { cloneId: string }) {
   const live = state?.readiness.live ?? false;
   const next = state?.readiness.next ?? null;
   const resendConfigured = state?.resendConfigured ?? false;
+  // Revoked is a state of its own, not a stage of provisioning: the acts that
+  // belong to a working identity (rotate, align) would all be refused, and
+  // "Advance" would offer a mint that `canMintKey` declines by design.
+  const revoked = Boolean(row?.revoked_at);
   const records: DnsRecord[] = (row?.dns_records ?? []) as DnsRecord[];
   const showRecords =
     records.length > 0 &&
@@ -108,7 +114,9 @@ export function CloneEmailIdentityCard({ cloneId }: { cloneId: string }) {
               not depend on the prime's shared credential.
             </CardDescription>
           </div>
-          {live ? (
+          {revoked ? (
+            <Badge variant="destructive">Revoked</Badge>
+          ) : live ? (
             <Badge variant="default">Dedicated key live</Badge>
           ) : row ? (
             <Badge variant="secondary">In progress</Badge>
@@ -222,22 +230,40 @@ export function CloneEmailIdentityCard({ cloneId }: { cloneId: string }) {
             )}
 
             <div className="flex flex-wrap items-center gap-2">
-              <Button
-                size="sm"
-                disabled={busy !== null || !resendConfigured}
-                onClick={() =>
-                  run("Provision", () =>
-                    provisionFn({
-                      data: {
-                        cloneId,
-                        ...(domainInput.trim() ? { sendingDomain: domainInput.trim() } : {}),
-                      },
-                    }),
-                  )
-                }
-              >
-                {row ? "Advance" : "Provision"}
-              </Button>
+              {revoked ? (
+                <Button
+                  size="sm"
+                  disabled={busy !== null || !resendConfigured}
+                  onClick={() => {
+                    if (
+                      !window.confirm(
+                        "Resume this clone's email identity? A new domain-scoped key is minted and written to the clone, and it can send again.",
+                      )
+                    )
+                      return;
+                    void run("Resume", () => resumeFn({ data: { cloneId } }));
+                  }}
+                >
+                  Resume sending
+                </Button>
+              ) : (
+                <Button
+                  size="sm"
+                  disabled={busy !== null || !resendConfigured}
+                  onClick={() =>
+                    run("Provision", () =>
+                      provisionFn({
+                        data: {
+                          cloneId,
+                          ...(domainInput.trim() ? { sendingDomain: domainInput.trim() } : {}),
+                        },
+                      }),
+                    )
+                  }
+                >
+                  {row ? "Advance" : "Provision"}
+                </Button>
+              )}
               {row && (
                 <Button
                   size="sm"
@@ -248,7 +274,7 @@ export function CloneEmailIdentityCard({ cloneId }: { cloneId: string }) {
                   <RefreshCw className="mr-1 h-3.5 w-3.5" aria-hidden /> Re-check
                 </Button>
               )}
-              {row?.domain_status === "verified" && (
+              {row?.domain_status === "verified" && !revoked && (
                 <Button
                   size="sm"
                   variant="outline"
@@ -258,7 +284,7 @@ export function CloneEmailIdentityCard({ cloneId }: { cloneId: string }) {
                   <KeyRound className="mr-1 h-3.5 w-3.5" aria-hidden /> Rotate key
                 </Button>
               )}
-              {row?.domain_status === "verified" && next === null && (
+              {row?.domain_status === "verified" && next === null && !revoked && (
                 <Button
                   size="sm"
                   variant="outline"
@@ -268,7 +294,7 @@ export function CloneEmailIdentityCard({ cloneId }: { cloneId: string }) {
                   Align sender address
                 </Button>
               )}
-              {row && (
+              {row && !revoked && (
                 <Button
                   size="sm"
                   variant="ghost"

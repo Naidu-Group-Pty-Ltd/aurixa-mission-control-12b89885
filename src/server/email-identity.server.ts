@@ -333,6 +333,13 @@ export async function advanceEmailIdentity(
     sendingDomain?: string;
     region?: string;
     actorUserId?: string | null;
+    /**
+     * Clear a revocation and start sending again. Passed by the operator's
+     * Resume action and by nothing else — an automated caller must never be
+     * able to undo a deliberate stop, which is the whole reason `revoked_at`
+     * exists.
+     */
+    resume?: boolean;
   },
 ): Promise<AdvanceResult> {
   if (!isResendConfigured()) {
@@ -385,6 +392,21 @@ export async function advanceEmailIdentity(
       row = await readIdentity(supabase, cloneId);
       if (!row) return fail("The identity row vanished between write and read");
       advanced.push("row_created");
+    }
+
+    // ── Resume ───────────────────────────────────────────────────────
+    //
+    // Deliberate on both sides: stopping was an operator's act and so is
+    // starting again. Cleared here rather than in the mint so the rest of the
+    // pass — domain, DNS, verification — behaves as an ordinary advance.
+    if (opts.resume && row.revoked_at) {
+      await persistIdentity(supabase, cloneId, {
+        sending_domain: row.sending_domain,
+        revoked_at: null,
+        last_error: null,
+      });
+      row = { ...row, revoked_at: null, last_error: null };
+      advanced.push("resumed");
     }
 
     // ── Resend domain ────────────────────────────────────────────────
@@ -622,7 +644,7 @@ export async function sweepEmailIdentities(
   const { data, error } = await supabase
     .from("clone_email_identities")
     .select(
-      "clone_id, resend_domain_id, domain_status, key_written_at, from_address_written_at, last_error, updated_at",
+      "clone_id, resend_domain_id, domain_status, key_written_at, from_address_written_at, revoked_at, last_error, updated_at",
     )
     // Finished identities are the overwhelming majority once a fleet settles;
     // excluding them here keeps the sweep's cost proportional to the work.
@@ -639,6 +661,12 @@ export async function sweepEmailIdentities(
     // except at the server, and one column that is null whenever either half
     // is outstanding needs no disjunction.
     .is("from_address_written_at", null)
+    // A revoked identity is nobody's work. `decideEmailIdentitySweep` refuses
+    // it anyway, but a row that is never actionable must not occupy a slot in
+    // this ordered LIMIT window — a handful of revoked clones would otherwise
+    // starve every identity that still owes a key. Two `.is()` filters are
+    // ANDed by PostgREST; still no composed filter string.
+    .is("revoked_at", null)
     .order("updated_at", { ascending: true })
     .limit(opts.limit ?? 10);
   if (error) throw new Error(`Could not list email identities: ${error.message}`);
@@ -861,10 +889,13 @@ export async function revokeEmailIdentity(
       key_written_at: null,
       // Cleared with the key: the two are one credential, and a revoked
       // identity that still claimed its address had been delivered would be
-      // describing a clone that cannot send. Clearing it also keeps the
-      // sweep's claim on this column selecting exactly the set
-      // `key_written_at` used to — revoke behaves as it did.
+      // describing a clone that cannot send.
       from_address_written_at: null,
+      // The intent. Without it this row is indistinguishable from one that has
+      // finished DNS and is waiting to be minted, which is what both drains
+      // read it as — so a deliberate revocation was undone within five
+      // minutes. `canMintKey` refuses while this is set, whatever the caller.
+      revoked_at: new Date().toISOString(),
       domain_status: opts.deleteDomain ? "revoked" : row.domain_status,
       ...(opts.deleteDomain ? { resend_domain_id: null, dns_installed_via: null } : {}),
       last_error: null,

@@ -1793,6 +1793,7 @@ export type Database = {
           key_written_at: string | null
           last_error: string | null
           region: string
+          revoked_at: string | null
           resend_domain_id: string | null
           resend_key_id: string | null
           sending_domain: string
@@ -1812,6 +1813,7 @@ export type Database = {
           key_written_at?: string | null
           last_error?: string | null
           region?: string
+          revoked_at?: string | null
           resend_domain_id?: string | null
           resend_key_id?: string | null
           sending_domain: string
@@ -1831,6 +1833,7 @@ export type Database = {
           key_written_at?: string | null
           last_error?: string | null
           region?: string
+          revoked_at?: string | null
           resend_domain_id?: string | null
           resend_key_id?: string | null
           sending_domain?: string

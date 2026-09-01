@@ -37,6 +37,13 @@ export type EmailIdentityRow = {
    * the state that read as finished and could not send.
    */
   from_address_written_at: string | null;
+  /**
+   * When an operator revoked this identity. Intent, not observation — see the
+   * migration: `domain_status` is what Resend says about the domain and is
+   * overwritten from Resend on every pass, so it cannot carry "we stopped
+   * this on purpose". While set, nothing may mint.
+   */
+  revoked_at: string | null;
   last_error: string | null;
 };
 
@@ -327,7 +334,11 @@ export function identityReadiness(
     Boolean(row?.key_written_at),
     row?.key_written_at
       ? `Domain-scoped key (…${row.key_last4 ?? "????"}) written to the clone as RESEND_API_KEY`
-      : "Mint the clone's domain-scoped sending key and write it to the clone",
+      : row?.revoked_at
+        ? // A revoked identity has no key by design. Saying "mint one" here
+          // offers an act every path refuses, which reads as a broken page.
+          "Revoked — this clone cannot send. Resume the identity to mint a new key."
+        : "Mint the clone's domain-scoped sending key and write it to the clone",
   );
   // The key alone is not a working mailer. A `sending_access` key scoped to
   // this domain can send from THIS DOMAIN AND NOTHING ELSE, and the clone's
@@ -385,6 +396,7 @@ export type EmailSweepFacts = {
         | "domain_status"
         | "key_written_at"
         | "from_address_written_at"
+        | "revoked_at"
         | "last_error"
       > & {
         /** Not on `EmailIdentityRow` — the flow does not read it; the sweep does. */
@@ -395,7 +407,7 @@ export type EmailSweepFacts = {
   now: number;
 };
 
-export type EmailSweepSkip = "not_started" | "complete" | "cooling_off";
+export type EmailSweepSkip = "not_started" | "complete" | "cooling_off" | "revoked";
 
 export type EmailSweepVerdict = { act: true; why: string } | { act: false; reason: EmailSweepSkip };
 
@@ -429,6 +441,16 @@ export function decideEmailIdentitySweep(facts: EmailSweepFacts): EmailSweepVerd
   // Nothing has been registered for this clone. See above: not ours to start.
   if (!id?.resend_domain_id) return { act: false, reason: "not_started" };
 
+  // Somebody stopped this clone's mail on purpose. Resuming is an operator's
+  // decision, exactly as starting one is.
+  //
+  // `canMintKey` already refuses, so this cannot mint even if it were reached
+  // — but a revoked row would otherwise be carried forward on every run,
+  // spending a Resend read and a Cloudflare check to be refused at the end,
+  // and occupying a slot in this sweep's ordered LIMIT window for ever. The
+  // query excludes them too; this is the decision saying why.
+  if (id.revoked_at) return { act: false, reason: "revoked" };
+
   // Both halves of the credential reached the clone. Finished — rotation is a
   // separate, deliberate act.
   //
@@ -459,13 +481,33 @@ export function decideEmailIdentitySweep(facts: EmailSweepFacts): EmailSweepVerd
 }
 
 /**
- * A key may be minted only for a VERIFIED domain. Resend would happily mint
- * one earlier, and every send would then 403 — refusing here converts a
- * confusing runtime failure into a named precondition.
+ * A key may be minted only for a VERIFIED domain that nobody has revoked.
+ *
+ * Resend would happily mint one before verification, and every send would then
+ * 403 — refusing here converts a confusing runtime failure into a named
+ * precondition.
+ *
+ * The revocation check is here, in the one function every mint crosses, rather
+ * than in the drain — because there are THREE callers of `provision` mode and
+ * two of them are automated (`email-identity-drain` and the deployment drain's
+ * credential arming). Revoking with `deleteDomain: false`, which is what the
+ * operator's button sends, leaves a verified domain and no key: the exact
+ * shape of an identity waiting to be minted. Both drains read it that way and
+ * re-minted, so a deliberate stop was undone within five minutes and the clone
+ * was sending again with nobody having asked. Guarding the drain alone would
+ * have left the deployment drain doing it on the next redeploy.
  */
 export function canMintKey(row: EmailIdentityRow | null): { ok: boolean; reason?: string } {
   if (!row?.resend_domain_id)
     return { ok: false, reason: "The sending domain is not registered at Resend yet" };
+  if (row.revoked_at) {
+    return {
+      ok: false,
+      reason:
+        "This identity was revoked — resume it explicitly to start sending again. " +
+        "Nothing automated may mint a key for a clone somebody deliberately stopped.",
+    };
+  }
   if (row.domain_status !== "verified") {
     return {
       ok: false,

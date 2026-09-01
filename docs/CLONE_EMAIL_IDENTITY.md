@@ -162,6 +162,26 @@ per-clone buttons; and the prime rotating its own key affects nobody.
   forever and never close the gap. A failed identity is left alone for thirty
   minutes; a healthy one mid-propagation is not, because the window is for
   failures and applying it to everything would stall every normal run.
+- **A revocation is not undone by a sweep.** Revoking with
+  `deleteDomain: false` — what the Revoke button sends — deletes the key at
+  Resend and deliberately leaves the domain alone, so the row is left with a
+  verified domain and no key. That is byte-for-byte an identity that has
+  finished DNS and is waiting to be minted, and it is what both automated
+  callers of `provision` mode read it as: `email-identity-drain` minted a
+  fresh key and wrote it to the clone within five minutes, and the deployment
+  drain's credential arming would do it again on the next redeploy. An
+  operator's deliberate stop was reversed by a scheduled job, with nothing
+  recording that it had happened. `revoked_at` carries the INTENT — it needs a
+  column of its own because `domain_status` is what Resend says about the
+  domain and is overwritten from Resend on every pass, so an intent parked
+  there is erased on the next tick. The guard is in **`canMintKey`**, the one
+  function every mint crosses, rather than in either drain: there are three
+  callers of `provision` mode and two of them are automated, so guarding the
+  sweep alone would have left the redeploy path doing it. Clearing it is an
+  explicit **Resume**, the only caller that passes `resume: true` — asserted
+  by `emailIdentityResume.contract.test.ts`, because every one of those call
+  sites still works with `resume` added and simply stops revocation meaning
+  anything.
 - **The key and the address it may send from are ONE credential.** A
   `sending_access` key scoped to a domain can send from that domain and
   nothing else, so a key delivered without its address is not a working
@@ -287,7 +307,9 @@ is checked and logged.
    the card to re-run it after a tenant edits their contact details. Prove the
    loop end-to-end with a password-reset OTP request on the clone.
 5. **Rotate key** after any re-provision of the clone's backend, or on
-   suspicion of exposure. **Revoke** kills sending for the clone at Resend.
+   suspicion of exposure. **Revoke** kills sending for the clone at Resend and
+   stays killed: no drain re-mints, and the card offers **Resume sending**
+   rather than *Advance* until somebody explicitly asks for it back.
 
 ## Deliberate limits
 
