@@ -2106,13 +2106,35 @@ export async function setCloneSecretValue(
   name: string,
   value: string,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
+  return setCloneSecretValues(projectRef, [{ name, value }]);
+}
+
+/**
+ * Write several secrets to a clone project in ONE request.
+ *
+ * The Management API's secrets endpoint already takes an array; writing a set
+ * one call at a time is what makes a half-written pair possible. Two secrets
+ * that are only meaningful together — a Resend key and the single address it
+ * is scoped to send from — must arrive together or not at all, because the
+ * half-written state is indistinguishable from a healthy one at every surface
+ * that reads it, and is exactly the state the first clone shipped in.
+ */
+export async function setCloneSecretValues(
+  projectRef: string,
+  entries: Array<{ name: string; value: string }>,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (entries.length === 0) return { ok: true };
   const res = await fetch(`${MGMT_API}/projects/${projectRef}/secrets`, {
     method: "POST",
     headers: headers(),
-    body: JSON.stringify([{ name, value }]),
+    body: JSON.stringify(entries),
   });
   if (!res.ok) {
-    return { ok: false, error: `secrets API ${res.status} — ${(await res.text()).slice(0, 300)}` };
+    const names = entries.map((e) => e.name).join(", ");
+    return {
+      ok: false,
+      error: `secrets API ${res.status} writing ${names} — ${(await res.text()).slice(0, 300)}`,
+    };
   }
   return { ok: true };
 }

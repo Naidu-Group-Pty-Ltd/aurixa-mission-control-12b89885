@@ -31,6 +31,7 @@ const row = (over: Partial<EmailIdentityRow> = {}): EmailIdentityRow => ({
   resend_key_id: null,
   key_last4: null,
   key_written_at: null,
+  from_address_written_at: null,
   default_from_address: null,
   last_error: null,
   ...over,
@@ -334,8 +335,12 @@ describe("identityReadiness", () => {
     ).toBe("key_written");
   });
 
-  it("is live only when the key has been written to the clone", () => {
-    const r = identityReadiness(
+  it("is NOT live on a key alone — the sender address is the other half", () => {
+    // The state the first clone shipped in: domain registered, DNS installed,
+    // Resend verified, key written and scoped to that domain — and every send
+    // answering 403, because nothing had told the clone which address it may
+    // send from. The card read "Dedicated key live" throughout.
+    const keyOnly = identityReadiness(
       row({
         resend_domain_id: "d-1",
         dns_installed_via: "cloudflare",
@@ -346,8 +351,30 @@ describe("identityReadiness", () => {
       }),
       { resendConfigured: true },
     );
+    expect(keyOnly.next).toBe("sender");
+    expect(keyOnly.live).toBe(false);
+  });
+
+  it("is live once both halves of the credential have reached the clone", () => {
+    const r = identityReadiness(
+      row({
+        resend_domain_id: "d-1",
+        dns_installed_via: "cloudflare",
+        domain_status: "verified",
+        resend_key_id: "k-1",
+        key_last4: "XYZ9",
+        key_written_at: "2026-08-28T10:00:00Z",
+        from_address_written_at: "2026-08-28T10:00:00Z",
+        default_from_address: "notifications@send.npc.aurixasystems.com.au",
+      }),
+      { resendConfigured: true },
+    );
     expect(r.live).toBe(true);
     expect(r.next).toBeNull();
+    // The address is named, so an operator can see WHICH sender is live.
+    expect(r.steps.find((s) => s.id === "sender")?.detail).toContain(
+      "notifications@send.npc.aurixasystems.com.au",
+    );
   });
 });
 
@@ -405,6 +432,7 @@ describe("decideEmailIdentitySweep", () => {
     resend_domain_id: "d_1",
     domain_status: "pending_dns" as const,
     key_written_at: null,
+    from_address_written_at: null,
     last_error: null,
     updated_at: "2026-08-29T09:00:00Z",
   };
@@ -422,13 +450,37 @@ describe("decideEmailIdentitySweep", () => {
     ).toEqual({ act: false, reason: "not_started" });
   });
 
-  it("stops once the key has reached the clone", () => {
+  it("stops once BOTH the key and the sender address have reached the clone", () => {
     expect(
       decideEmailIdentitySweep({
-        identity: { ...base, key_written_at: "2026-08-29T09:30:00Z" },
+        identity: {
+          ...base,
+          domain_status: "verified",
+          key_written_at: "2026-08-29T09:30:00Z",
+          from_address_written_at: "2026-08-29T09:30:00Z",
+        },
         now: NOW,
       }),
     ).toEqual({ act: false, reason: "complete" });
+  });
+
+  it("carries a key-only identity forward so the drain repairs it unattended", () => {
+    // Every identity provisioned before the key and its address were written
+    // together is in this state. Testing `key_written_at` alone is what made
+    // them invisible to the only thing that could fix them, and the failure is
+    // unreadable from the clone — a 403 inside a catch-and-log on every mail
+    // path — so waiting for somebody to notice was never going to work.
+    const v = decideEmailIdentitySweep({
+      identity: {
+        ...base,
+        domain_status: "verified",
+        key_written_at: "2026-08-29T09:30:00Z",
+        from_address_written_at: null,
+      },
+      now: NOW,
+    });
+    expect(v.act).toBe(true);
+    expect(v.act && v.why).toContain("sender address");
   });
 
   it("polls verification while the domain is pending", () => {

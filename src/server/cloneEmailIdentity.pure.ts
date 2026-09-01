@@ -30,6 +30,13 @@ export type EmailIdentityRow = {
   key_last4: string | null;
   key_written_at: string | null;
   default_from_address: string | null;
+  /**
+   * When `RESEND_FROM_EMAIL` reached the clone. Separate from
+   * `key_written_at` because the key used to travel alone: an identity
+   * provisioned before the two were paired has a key and no address, which is
+   * the state that read as finished and could not send.
+   */
+  from_address_written_at: string | null;
   last_error: string | null;
 };
 
@@ -242,7 +249,13 @@ export function planDnsInstallation(
 
 // ─── Readiness — the server owns "what next" ─────────────────────────
 
-export type EmailIdentityStepId = "master_key" | "domain" | "dns" | "verified" | "key_written";
+export type EmailIdentityStepId =
+  | "master_key"
+  | "domain"
+  | "dns"
+  | "verified"
+  | "key_written"
+  | "sender";
 
 export type EmailIdentityStep = {
   id: EmailIdentityStepId;
@@ -316,6 +329,21 @@ export function identityReadiness(
       ? `Domain-scoped key (…${row.key_last4 ?? "????"}) written to the clone as RESEND_API_KEY`
       : "Mint the clone's domain-scoped sending key and write it to the clone",
   );
+  // The key alone is not a working mailer. A `sending_access` key scoped to
+  // this domain can send from THIS DOMAIN AND NOTHING ELSE, and the clone's
+  // edge functions build their from-header from their own brand config —
+  // which is empty on a fresh clone and falls back to the prime's legacy
+  // address. So a clone finished the path holding a valid key it could not
+  // use, and the card said "Dedicated key live". The address is written
+  // alongside the key as `RESEND_FROM_EMAIL`; this step is what makes the
+  // difference visible on an identity provisioned before they were paired.
+  push(
+    "sender",
+    Boolean(row?.from_address_written_at),
+    row?.from_address_written_at
+      ? `Clone sends as ${row.default_from_address ?? "its verified address"} (RESEND_FROM_EMAIL)`
+      : "Write the verified sender address to the clone as RESEND_FROM_EMAIL",
+  );
 
   const next = steps.find((s) => s.state === "open")?.id ?? null;
   return { steps, next, live: next === null };
@@ -353,7 +381,11 @@ export type EmailSweepFacts = {
   identity:
     | (Pick<
         EmailIdentityRow,
-        "resend_domain_id" | "domain_status" | "key_written_at" | "last_error"
+        | "resend_domain_id"
+        | "domain_status"
+        | "key_written_at"
+        | "from_address_written_at"
+        | "last_error"
       > & {
         /** Not on `EmailIdentityRow` — the flow does not read it; the sweep does. */
         updated_at: string | null;
@@ -397,8 +429,16 @@ export function decideEmailIdentitySweep(facts: EmailSweepFacts): EmailSweepVerd
   // Nothing has been registered for this clone. See above: not ours to start.
   if (!id?.resend_domain_id) return { act: false, reason: "not_started" };
 
-  // The key reached the clone. Finished — rotation is a separate, deliberate act.
-  if (id.key_written_at) return { act: false, reason: "complete" };
+  // Both halves of the credential reached the clone. Finished — rotation is a
+  // separate, deliberate act.
+  //
+  // This used to test `key_written_at` alone, which is what let the first
+  // clone sit "finished" for days holding a key scoped to a domain its
+  // from-header never named. The address is the other half of the same
+  // credential, so it is the other half of the finish line — and every
+  // identity provisioned before the two were paired reads as unfinished here,
+  // which is exactly how the drain repairs them without an operator.
+  if (id.key_written_at && id.from_address_written_at) return { act: false, reason: "complete" };
 
   if (id.last_error && id.updated_at) {
     const since = facts.now - Date.parse(id.updated_at);
@@ -408,7 +448,12 @@ export function decideEmailIdentitySweep(facts: EmailSweepFacts): EmailSweepVerd
   }
 
   if (id.domain_status === "verified") {
-    return { act: true, why: "domain verified, key not yet minted" };
+    return {
+      act: true,
+      why: id.key_written_at
+        ? "key written, sender address not yet paired with it"
+        : "domain verified, key not yet minted",
+    };
   }
   return { act: true, why: `domain ${id.domain_status}, polling verification` };
 }

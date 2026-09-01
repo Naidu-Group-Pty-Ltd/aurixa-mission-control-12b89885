@@ -34,6 +34,7 @@ const STEP_LABEL: Record<string, string> = {
   dns: "DNS records",
   verified: "Domain verified",
   key_written: "Clone key written",
+  sender: "Sender address written",
 };
 
 function StepIcon({ state }: { state: StepState }) {
@@ -47,7 +48,7 @@ function StepIcon({ state }: { state: StepState }) {
  * its own domain-scoped key, replacing the inherited prime key whose rotation
  * once took every clone's outbound mail down at once.
  *
- * The card leads with the PATH — five ordered steps, exactly one open — so an
+ * The card leads with the PATH — six ordered steps, exactly one open — so an
  * operator always knows the next act rather than deciphering a status word.
  * DNS records render with copy buttons whenever the operator (not Mission
  * Control) has to install them.

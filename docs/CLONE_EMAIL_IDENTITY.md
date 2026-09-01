@@ -162,14 +162,106 @@ per-clone buttons; and the prime rotating its own key affects nobody.
   forever and never close the gap. A failed identity is left alone for thirty
   minutes; a healthy one mid-propagation is not, because the window is for
   failures and applying it to everything would stall every normal run.
-- **Sender alignment repairs a default, never a choice.** The clone's
-  from-headers all derive from `global_report_settings.contact_details.email`
-  (see the prime's `_shared/brand-config.ts`); while that still carries the
-  prime's legacy address, the dedicated key answers
-  `403 from address not authorized`. *Align sender address* fills in
-  `notifications@<sending-domain>` — but only over an empty value or one on
-  the prime's legacy domain. A tenant's own configured domain is never
-  overwritten.
+- **The key and the address it may send from are ONE credential.** A
+  `sending_access` key scoped to a domain can send from that domain and
+  nothing else, so a key delivered without its address is not a working
+  mailer — it is a clone that 403s on every send while every surface reports
+  it finished. `mintAndWriteKey` writes `RESEND_API_KEY` and
+  `RESEND_FROM_EMAIL` in ONE Management API call (`setCloneSecretValues`;
+  the endpoint has always taken an array), because writing them in sequence
+  is what makes a half-written pair possible. The clone reads the environment
+  FIRST — see the fault below — and `from_address_written_at` records that the
+  address actually arrived.
+- **Sender alignment repairs a default, never a choice — and is now
+  consistency, not delivery.** Delivery is settled by `RESEND_FROM_EMAIL`.
+  Alignment additionally fills the clone's own
+  `global_report_settings.contact_details.email` with
+  `notifications@<sending-domain>`, so the clone's admin screens and body copy
+  do not show an address it cannot receive on — but only over an empty value
+  or one on the prime's legacy domain. A tenant's own configured domain is
+  never overwritten. It runs automatically after the address is written, and
+  it is an UPSERT: the previous version was a bare
+  `UPDATE … WHERE setting_key = 'contact_details'` against a table that is
+  EMPTY on a fresh clone, so it matched nothing, changed nothing and returned
+  success with the address it had not written.
+
+## The first clone could not send, and everything reported healthy
+
+Reported as *"the Resend domain Mission Control made is
+`send.npc.aurixasystems.com.au` and password recovery fails"*. The domain was
+not the fault. `send.<clone-fqdn>` is the derived default
+(`deriveSendingDomain`), the clone's `subdomain_fqdn` is
+`npc.aurixasystems.com.au`, and Resend reported the domain **verified** —
+registered 2026-08-29, DNS installed in the fleet zone, key
+`aurixa-clone-npc-client-dashboard-sending` minted 2026-08-30 and written to
+the clone. Every step of the path was green.
+
+What was missing is that **nothing ever told the clone to use it.** Three
+independent faults, each sufficient on its own:
+
+1. **The address never travelled with the key.** `mintAndWriteKey` wrote
+   `RESEND_API_KEY` and nothing else. A `sending_access` key scoped to
+   `send.npc.aurixasystems.com.au` may send from that domain alone.
+2. **The clone's from-header resolved to an address in a different Resend
+   account.** All 16 of its mail-sending edge functions build the header from
+   `getBrandConfig`, which reads
+   `global_report_settings.contact_details.email`. That table had **zero
+   rows**, so the code fell to its hard-coded
+   `noreply@npcservices.com.au` — the prime's legacy address. The platform's
+   Resend account holds exactly one domain, and it is not that one. Every
+   send: `403`.
+3. **The branding cascade could never have filled it.** `buildApplySql` wrote
+   `global_report_settings.contact_details` and `whitelabel_settings.settings`
+   — **neither column exists**, on the prime or on any clone. Both tables have
+   a different shape entirely (`(setting_key, setting_value)`; a flat column
+   list). Postgres answers `42703` and the whole `DO` block aborts, so the one
+   mechanism that was supposed to populate the sender could not write a byte.
+
+And two things hid it. `identityReadiness` reported **live** on the key alone,
+so the card read "Dedicated key live" throughout. And the scheduled drain
+claimed work with `.is("key_written_at", null)`, so an identity in exactly this
+state was excluded from the only thing that could have repaired it. On the
+clone side the 403 is swallowed by a `catch` that logs and returns the same
+enumeration-safe "if an account exists, a reset link has been sent" — correct
+for that endpoint, and it means a caller cannot tell a delivered reset from an
+undelivered one either.
+
+### What changed
+
+| Fault | Fix |
+|---|---|
+| Key written alone | `setCloneSecretValues` writes `RESEND_API_KEY` + `RESEND_FROM_EMAIL` in one request |
+| Sender resolved from empty tenant data | `brand-config.ts` resolves the SENDER from `RESEND_FROM_EMAIL` first; `contactEmail` stays the tenant's |
+| Cascade wrote phantom columns | `buildApplySql` writes the real key/value and flat shapes, every column guarded on `information_schema` |
+| Path said "live" too early | Sixth step, `sender`; `live` requires both halves |
+| Drain could not see it | Claims on `from_address_written_at`, and `ensureFromAddressSecret` repairs a key-only identity unattended |
+| Alignment silently no-op'd | Upsert on `setting_key`, and it reports `inserted` / `updated` / `unchanged` |
+
+### The rule
+
+**A credential is not delivered until everything needed to use it is
+delivered.** This is the same pairing rule the platform already applies to a
+Turnstile widget (site key + secret) and to a Supabase URL + anon key: half a
+pair authenticates to nothing, and the half-written state is indistinguishable
+from a healthy one at every surface that reads it.
+
+**The sender is a property of the KEY, not of the tenant's contact details.**
+Those are two questions — who a human replies to, and which mailbox the
+transport may use — and one value cannot answer both. `contactEmail` and
+`senderEmail` are separate fields on `BrandConfig` for that reason.
+
+### What this does not change
+
+The prime sets no `RESEND_FROM_EMAIL`, so its sender still resolves from
+`contact_details.email` (`admin@npcservices.com.au`) exactly as before —
+asserted by `senderIdentity.spec.ts` in both dashboard repos.
+
+Mail from a clone on the default domain comes from
+`notifications@send.<clone-fqdn>`, which is a **platform** address rather than
+the tenant's brand. That is the correct default for a clone with no domain of
+its own, and it is not what makes it work: to send under a tenant's own domain,
+provision the identity with an explicit `sendingDomain` and verify it. The
+sender then follows the key, because it is written from it.
 
 ## Ledger fix carried in the same change
 
@@ -190,8 +282,10 @@ is checked and logged.
    repeatedly; it advances whatever is ready and stops where it must wait.
 3. **Re-check** — polls Resend after DNS changes. Verification typically lands
    within minutes of the records resolving.
-4. When live: **Align sender address**, then prove the loop end-to-end with a
-   password-reset OTP request on the clone.
+4. Nothing to do for the sender: the address is written with the key and the
+   brand config is aligned in the same pass. *Align sender address* remains on
+   the card to re-run it after a tenant edits their contact details. Prove the
+   loop end-to-end with a password-reset OTP request on the clone.
 5. **Rotate key** after any re-provision of the clone's backend, or on
    suspicion of exposure. **Revoke** kills sending for the clone at Resend.
 

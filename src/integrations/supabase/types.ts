@@ -1785,6 +1785,7 @@ export type Database = {
           created_by: string | null
           default_from_address: string | null
           dns_installed_via: string | null
+          from_address_written_at: string | null
           dns_records: Json
           domain_status: string
           id: string
@@ -1803,6 +1804,7 @@ export type Database = {
           created_by?: string | null
           default_from_address?: string | null
           dns_installed_via?: string | null
+          from_address_written_at?: string | null
           dns_records?: Json
           domain_status?: string
           id?: string
@@ -1821,6 +1823,7 @@ export type Database = {
           created_by?: string | null
           default_from_address?: string | null
           dns_installed_via?: string | null
+          from_address_written_at?: string | null
           dns_records?: Json
           domain_status?: string
           id?: string
