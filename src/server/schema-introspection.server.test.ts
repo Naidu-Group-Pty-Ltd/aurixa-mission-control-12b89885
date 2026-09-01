@@ -68,6 +68,62 @@ describe("chunk", () => {
   });
 });
 
+describe("generated columns are generated, not defaulted", () => {
+  /* A generated column's expression lives in pg_attrdef exactly like a
+     default, so reading the column list without attgenerated produces
+     `default (released_at IS NULL)` — which Postgres refuses, because a
+     default may not reference other columns. The whole CREATE TABLE fails on
+     it: on the 1 Sep 2026 dry run seven tables could not be created at all,
+     and behind them 272 columns and 38 constraints failed with "relation does
+     not exist" — a cascade that reads as five unrelated faults and is one. */
+  it("emits the STORED clause instead of a default", () => {
+    const ddl = buildCreateTableDdl("aml", "legal_holds", [
+      { name: "id", type: "uuid", notNull: true, default: "gen_random_uuid()" },
+      { name: "released_at", type: "timestamp with time zone", notNull: false, default: null },
+      {
+        name: "active",
+        type: "boolean",
+        notNull: false,
+        default: "(released_at IS NULL)",
+        generated: "s",
+      },
+    ]);
+    expect(ddl).toContain('"active" boolean generated always as ((released_at IS NULL)) stored');
+    expect(ddl).not.toContain('"active" boolean default');
+    /* Ordinary defaults are untouched. */
+    expect(ddl).toContain('"id" uuid default gen_random_uuid() not null');
+  });
+
+  it("identity still wins over both, and a plain column is unchanged", () => {
+    const ddl = buildCreateTableDdl("public", "t", [
+      { name: "n", type: "integer", notNull: true, identity: "a", default: "nextval('x')" },
+      { name: "s", type: "text", notNull: false, default: null },
+    ]);
+    expect(ddl).toContain('"n" integer generated always as identity not null');
+    expect(ddl).toContain('"s" text');
+  });
+
+  it("the drift repair carries the expression, or the column is silently wrong", () => {
+    /* Added as a plain column it does not fail — it succeeds, reconciles, and
+       never populates. */
+    expect(
+      buildAddColumnStatements([
+        {
+          table: '"aml"."legal_holds"',
+          column: '"active"',
+          type: "boolean",
+          default: "(released_at IS NULL)",
+          generated: "s",
+        },
+        { table: '"public"."t"', column: '"s"', type: "text" },
+      ]),
+    ).toEqual([
+      'alter table "aml"."legal_holds" add column if not exists "active" boolean generated always as ((released_at IS NULL)) stored',
+      'alter table "public"."t" add column if not exists "s" text',
+    ]);
+  });
+});
+
 describe("isBenignDdlError", () => {
   it("treats already-exists / duplicate as success", () => {
     expect(isBenignDdlError('relation "foo" already exists')).toBe(true);
