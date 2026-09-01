@@ -314,3 +314,68 @@ It is *not* harmless for a clone built by replaying migrations from scratch —
 that clone would come up short by exactly these files, and there is no key that
 recovers them: the ledger's `name` column is empty for Lovable-applied rows and
 holds a bare UUID for others.
+
+## The ledger is a set; migrations are a sequence
+
+Measured on `npc-client-dashboard`, 2026-09-01.
+
+`scopeCorpusToPrime` clears a version for clones by exact membership of the
+prime's ledger. That rule is right and stays. But the result is a SET, and a
+set cannot say whether a cleared version sits behind a withheld one:
+
+| version | role | prime ledger | sent to the clone |
+| --- | --- | --- | --- |
+| `20261012000000` | **defines** `ensure_builder_stock_settlement_scheduled()` | absent | withheld |
+| `20261027010000` | **calls** it | present | **yes** |
+
+The clone answered `42883: function … does not exist`, `applyPrimeMigrations`
+halted, and provisioning stopped at step 5 of 7 — four steps short of
+`seedAdminUser`. That clone has 546 tables, zero users of any kind, and had
+been unusable since 27 August. Three of the six versions the ledger records
+above its frontier call that same withheld function.
+
+`partitionByDependency` (`fleetCorpusScope.pure.ts`) refuses to step over a
+hole. It **skips rather than halts** — halting at the first hole is precisely
+what starved the admin seed, and a 546-table clone is not made more correct by
+being denied an owner. And **every withheld version is a barrier**, not only
+the ones classified `never_applied`: this prime's repo holds `20250912170521`
+where its ledger holds `20250912050519`, twelve hours apart and therefore
+classified `never_applied` by `SKEW_WINDOW_SECONDS`. A barrier that trusted the
+classification would be trusting a test that is measurably wrong.
+
+A version the CLONE already holds is never a hole, whatever the prime's ledger
+says. Without that exception every clone freezes at its thirteenth migration.
+
+## The ledger under-reports the prime's own schema
+
+This is the reason clones now advance very little, and it is not skew:
+
+- The prime's database **has** `ensure_builder_stock_settlement_scheduled()`
+  (`pg_proc` = 1). Its ledger does not record the migration that creates it.
+- Of 64 repo migrations after `20260831060152`, the ledger records **6**.
+- 481 of its 890 rows carry an empty `name` and a version matching no repo
+  file.
+
+So "absent from the ledger" conflates two states that must never be merged: a
+migration the prime deliberately never ran (a rollback script, future-dated
+work) and one it ran under an id nothing wrote down. Only the second is
+recoverable, and only with evidence about the SCHEMA rather than the
+bookkeeping.
+
+`primeLedgerReconciliation.pure.ts` supplies that evidence: it reads what a
+migration CREATEs and asks the prime's live catalog whether those objects are
+already there. `buildPrimeLedgerReconciliation` runs it and returns a report.
+Three verdicts, and the third is the one that keeps it honest:
+
+- `satisfied` — every object it creates already exists on the prime
+- `unsatisfied` — at least one does not; the prime has not run it
+- `indeterminate` — the SQL creates nothing this module can name
+
+`indeterminate` is never merged into `satisfied`. A migration that only
+`ALTER`s, `INSERT`s or rewrites policies has no creation to look for, and
+"found nothing to check" is not "checked and found everything" — a pure-`ALTER`
+migration and one of the two `rollback_*` scripts are indistinguishable to this
+test, and one of those must never be stamped.
+
+**Nothing here stamps a ledger.** The report is evidence for an operator, and
+writing the prime's ledger stays an explicit, separate decision.
