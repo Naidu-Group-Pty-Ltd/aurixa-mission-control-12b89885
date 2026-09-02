@@ -292,6 +292,30 @@ async function markRun(runId: string, patch: Record<string, unknown>) {
     .eq("id", runId);
 }
 
+/**
+ * Say that a pass is still alive, and what it has done so far.
+ *
+ * `reclaimStalledRuns` reads `updated_at`, and until now a lane wrote
+ * nothing between claiming a run and finishing its pass — so a pass that
+ * was merely SLOW (a Management API answering in tens of seconds, a GitHub
+ * read waiting out a rate limit) looked exactly like one that had died, was
+ * requeued under it, and the drain started a second pass over the same
+ * bundles or the same migrations while the first was still running. For
+ * the deploy lane that is wasted work; for the migration lane it is two
+ * replays racing for one ledger. Measured 2 Sep 2026: the deploy run was
+ * "stalled" at 11:04 while it went on landing bundles until 11:28.
+ *
+ * Written after every item, so the reclaim's twenty minutes measure silence
+ * between ITEMS — and an item that itself takes longer than that is the
+ * budget's problem, not this one's. The table's trigger stamps `updated_at`
+ * on any update; the progress is kept where the operator reads it.
+ */
+async function touchRun(run: any, progress: Record<string, unknown>) {
+  await markRun(run.id, {
+    result: { ...(run.result ?? {}), heartbeat_at: new Date().toISOString(), ...progress },
+  });
+}
+
 async function ticketEvent(ticketId: string | null, eventType: string, payload: unknown) {
   if (!ticketId) return;
   await admin.from("support_ticket_events").insert({
@@ -667,7 +691,8 @@ async function executeSqlMigration(
   const { results, latestApplied, stoppedEarly } = await applyPrimeMigrations(
     backend.supabase_project_ref,
     runnable,
-    undefined,
+    // Alive, and which migration it is on — see `touchRun`.
+    async (_status, detail) => touchRun(run, { in_flight: detail }),
     (m) => corpus.loadSql(m.id),
     // `runnable` alone cannot say whether a cleared version sits behind a
     // withheld one. The whole corpus can.
@@ -741,14 +766,22 @@ async function executeSqlMigration(
  * nothing else.
  */
 async function deployWithinBudget(
+  run: any,
   projectRef: string,
   batch: readonly EdgeFunctionBundle[],
   deadlineAt: number,
 ): Promise<{ results: EdgeFunctionDeployResult[]; stoppedEarly: boolean }> {
   const { deployEdgeFunctions } = await import("@/server/backend-provisioning.server");
+  let done = 0;
   return runWithinBudget<EdgeFunctionBundle, EdgeFunctionDeployResult>({
     items: batch,
-    runOne: async (fn) => (await deployEdgeFunctions(projectRef, [fn])) ?? [],
+    runOne: async (fn) => {
+      const out = (await deployEdgeFunctions(projectRef, [fn])) ?? [];
+      done += 1;
+      // Alive, and this far through the batch — see `touchRun`.
+      await touchRun(run, { in_flight: { done, of: batch.length, last: fn.slug } });
+      return out;
+    },
     // Reserve the slowest deploy seen this pass: an item begun with less than
     // that left is one the invocation may not live to finish.
     isPastDeadline: (reserveMs) => Date.now() + reserveMs >= deadlineAt,
@@ -834,6 +867,7 @@ async function executeEdgeFunctionDeploy(run: any): Promise<{ status: string }> 
   }
 
   const { results, stoppedEarly } = await deployWithinBudget(
+    run,
     backend.supabase_project_ref,
     batch,
     deadlineAt,

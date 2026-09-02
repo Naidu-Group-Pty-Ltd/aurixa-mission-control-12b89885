@@ -176,7 +176,7 @@ describe("a pass stops at the budget instead of being killed by it", () => {
       the deploy and the clock as arguments so those are ordinary assertions,
       and this file only checks the lane still goes through it.
     */
-    expect(budgetedLoop).toMatch(/runWithinBudget[\s\S]{0,200}isPastDeadline/);
+    expect(budgetedLoop).toMatch(/runWithinBudget[\s\S]{0,600}isPastDeadline/);
     // The reserve is the loop's own measurement of its slowest item, so a
     // deploy is not STARTED with less time left than the last one took.
     expect(budgetedLoop).toMatch(/Date\.now\(\) \+ reserveMs >= deadlineAt/);
@@ -195,6 +195,26 @@ describe("a pass stops at the budget instead of being killed by it", () => {
     expect(resumeBlock).toMatch(/planEdgeDeployResume\(\{[\s\S]{0,240}\bstoppedEarly,/);
     expect(resumeBlock).not.toMatch(/stoppedEarly: (?:true|false)/);
     expect(resumeBlock).toContain('status: "planned"');
+  });
+});
+
+describe("a slow pass is not a dead pass", () => {
+  it("every landed bundle touches the run, so the stall reclaim sees a living pass", () => {
+    /*
+      The deploy run was "stalled" at 11:04 on 2 Sep 2026 while it went on
+      landing bundles until 11:28: nothing between claiming and finishing
+      wrote to the row, so a pass that was merely slow was requeued under
+      itself and a second pass started over the same batch.
+    */
+    expect(budgetedLoop).toMatch(
+      /runOne: async \(fn\) => \{[\s\S]{0,200}await touchRun\(run, \{ in_flight:/,
+    );
+    // After the deploy, not before: a heartbeat that precedes the work says
+    // nothing about whether the work happened.
+    const deployed = budgetedLoop.indexOf("await deployEdgeFunctions(projectRef, [fn])");
+    const touched = budgetedLoop.indexOf("await touchRun(run,");
+    expect(deployed).toBeGreaterThan(-1);
+    expect(touched).toBeGreaterThan(deployed);
   });
 });
 
