@@ -136,6 +136,22 @@ The extra read costs almost nothing: the clone's copy is fetched only for paths
 whose prime content actually names a project — one file out of 71 on the first
 mirror run.
 
+### The size rule
+
+A cascade carries a file whole — read from prime, base64-encoded, posted as
+one blob — and the invocation that does it has a ceiling the file does not.
+Measured 2 Sep 2026: the pending cascade to `npc-client-dashboard` was 48
+files, one of them a 39 MB migration seed, and the pass died on that one file
+on every attempt. Three events exhausted their claims on it while a 55-file
+cascade with nothing large in it landed first time, and nothing anywhere said
+which file was the cause.
+
+A file over `CASCADE_MAX_FILE_BYTES` (8 MB — the migration corpus's own
+ceiling) is **held**, `manual_reconcile`, with its size in the note. The rest
+of the cascade lands, the proposal says a person is owed one file, and the
+refusal is decided on the size the contents API reports, before the bytes
+travel.
+
 ### The constant had no caller
 
 `assertMirrorPolicy`'s refusal tells an operator to *"seed it from

@@ -14,6 +14,8 @@ import {
   summaryOwesReconcile,
   requireExclusions,
   type SyncExclusion,
+  CASCADE_MAX_FILE_BYTES,
+  oversizeHold,
 } from "./syncExclusions.pure";
 
 const BACKEND_IDENTITY = "src/integrations/supabase/env.ts";
@@ -391,5 +393,28 @@ describe("the reconcile marker round-trips", () => {
     ];
     expect(reportableHeld(held)).toHaveLength(1);
     expect(reconcileSuffixFor(reportableHeld(held).length)).toContain("1");
+  });
+});
+
+describe("a file over the cascade ceiling is held, and says so", () => {
+  it("is reportable, so a person is told rather than the file vanishing", () => {
+    /*
+      Measured 2 Sep 2026: one 39 MB migration seed among 48 files killed the
+      pass on every attempt. Held as `manual_reconcile` it is counted in the
+      proposal and listed with its size; held silently it would be a cascade
+      that reports success while the clone is missing a file.
+    */
+    const held = oversizeHold("supabase/migrations/x.sql", 41_010_000, CASCADE_MAX_FILE_BYTES);
+    expect(held.reason).toBe("manual_reconcile");
+    expect(reportableHeld([held])).toHaveLength(1);
+    expect(held.note).toMatch(/39\.1 MB/);
+    expect(held.note).toMatch(/8\.0 MB/);
+    expect(held.path).toBe("supabase/migrations/x.sql");
+  });
+
+  it("the ceiling is the migration corpus's own", () => {
+    // A body the migration sync refuses to carry is not one the repository
+    // cascade should carry either.
+    expect(CASCADE_MAX_FILE_BYTES).toBe(8 * 1024 * 1024);
   });
 });
