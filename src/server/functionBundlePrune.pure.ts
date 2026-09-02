@@ -104,23 +104,39 @@ export function readSpecifiers(source: string): {
   const specifiers: string[] = [];
 
   /*
-    Anchored to a statement, never matched loose.
+    Anchored to a statement BOUNDARY, never to a line, and never matched loose.
 
     A bare /from\s*["']…["']/ over the whole source reads `from "…"` inside
     ordinary strings as an import. Measured against the prime: it invented
     specifiers like `", "` and `"${heading}"` out of SQL and template
     literals, and 21 of 425 bundles fell back to carrying the whole 6.42 MB
-    tree for it — the exact payload this exists to avoid.
+    tree for it — the exact payload this exists to avoid. So an `import` or
+    `export` keyword is required, and the span before its `from` may contain
+    neither a semicolon (which would cross into the next statement) nor a
+    backtick (which would mean a template literal).
 
-    So the span between `import`/`export` and its `from` may contain neither a
-    semicolon (which would cross into the next statement) nor a backtick
-    (which would mean a template literal). Newlines are allowed, because a
-    multi-line `import { … } from "x"` is ordinary.
+    Anchoring that to `^` was wrong, and cost a real deployment. Several of
+    the prime's functions are MINIFIED onto one physical line —
+    `market-updates-feed/index.ts` is six imports separated by `; ` — so only
+    the first was seen, the walk found no internal edges at all, and the
+    bundle pruned to its entrypoint alone. Deno then answered
+    `Module not found "…/_shared/auth.ts"` at deploy. That is the failure this
+    module's header calls far worse than an oversized bundle: a bundle missing
+    a file it imports. It happened to fail loudly here; a lazier import would
+    have failed at runtime on a tenant's clone.
+
+    A statement begins at the start of a line OR after `;` or `}`, which is
+    what the prefix matches. Newlines stay allowed, because a multi-line
+    `import { … } from "x"` is ordinary.
   */
-  for (const m of src.matchAll(/^[ \t]*(?:import|export)\s[^;`]*?\bfrom\s*["']([^"']+)["']/gm)) {
+  for (const m of src.matchAll(
+    /(?:^|[;}])[ \t]*(?:import|export)\s[^;`]*?\bfrom\s*["']([^"']+)["']/gm,
+  )) {
     specifiers.push(m[1]);
   }
-  for (const m of src.matchAll(/^[ \t]*import\s*["']([^"']+)["']/gm)) specifiers.push(m[1]);
+  for (const m of src.matchAll(/(?:^|[;}])[ \t]*import\s*["']([^"']+)["']/gm)) {
+    specifiers.push(m[1]);
+  }
   // `import("x")` and `await import("x")`, literal argument only.
   for (const m of src.matchAll(/\bimport\s*\(\s*["']([^"']+)["']\s*\)/g)) specifiers.push(m[1]);
 

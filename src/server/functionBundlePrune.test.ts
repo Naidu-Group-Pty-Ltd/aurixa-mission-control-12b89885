@@ -69,6 +69,83 @@ describe("readSpecifiers", () => {
     expect(r.specifiers).toEqual(["./real.ts"]);
   });
 
+  it("finds every import on a MINIFIED line, not just the first", () => {
+    /*
+      The defect this rule was first written with, and what it cost.
+
+      Anchoring the scan to `^` reads one import per physical line. Several of
+      the prime's functions are minified onto one line —
+      `market-updates-feed/index.ts` is six imports separated by `; ` — so the
+      walk saw only the leading one, found no internal edges, and pruned the
+      bundle to its entrypoint alone. Deno answered
+      `Module not found "…/_shared/auth.ts"` at deploy.
+
+      That is the failure this module's header calls far worse than an
+      oversized bundle: a bundle missing a file it imports. Measured across
+      all 425 prime functions, exactly two were affected and both failed
+      loudly at deploy rather than at runtime — but a lazy import would not
+      have.
+    */
+    const r = readSpecifiers(
+      `import {createClient} from 'https://esm.sh/@supabase/supabase-js@2'; ` +
+        `import {verifyAuth} from '../_shared/auth.ts'; ` +
+        `import {csrfDenied} from '../_shared/csrfGuard.ts';`,
+    );
+    expect(r.specifiers).toEqual([
+      "https://esm.sh/@supabase/supabase-js@2",
+      "../_shared/auth.ts",
+      "../_shared/csrfGuard.ts",
+    ]);
+  });
+
+  it("finds an import that follows a closing brace on the same line", () => {
+    // The other statement boundary minifiers produce.
+    const r = readSpecifiers(`function f(){return 1}import a from "./a.ts";`);
+    expect(r.specifiers).toEqual(["./a.ts"]);
+  });
+
+  it("still refuses `from` inside a string that follows a semicolon", () => {
+    /*
+      Widening the anchor from "line start" to "statement boundary" must not
+      reopen the false positives the anchor exists for: an `import` or
+      `export` keyword is still required, and the span before `from` may hold
+      neither a semicolon nor a backtick.
+    */
+    const r = readSpecifiers(
+      `const a = 1; const note = 'loaded from "./ghost.ts"'; import x from "./real.ts";`,
+    );
+    expect(r.specifiers).toEqual(["./real.ts"]);
+  });
+
+  it("finds every side-effect import on a minified line too", () => {
+    // `import "./x.ts"` has no `from`, so it is scanned separately — and had
+    // the same line anchor, with the same consequence.
+    const r = readSpecifiers(`import "./a.ts";import "./b.ts";import "./c.ts";`);
+    expect(r.specifiers).toEqual(["./a.ts", "./b.ts", "./c.ts"]);
+  });
+
+  it("does not let a statement's span reach past its own semicolon", () => {
+    /*
+      A side-effect import has no `from` of its own. Without the semicolon
+      exclusion the scan runs on from that `import` keyword into whatever
+      follows and takes the next `from "…"` it finds — here inventing a
+      specifier out of a SQL string.
+    */
+    const r = readSpecifiers(`import "./real.ts"; const sql = 'select * from "users"';`);
+    expect(r.specifiers).toEqual(["./real.ts"]);
+  });
+
+  it("does not let a statement's span reach into a template literal", () => {
+    /*
+      The other half of the same guard, and the one with no semicolon to stop
+      it: an exported template holding SQL. Measured against the prime, a scan
+      without this invented `"${heading}"`-shaped specifiers and sent 21 of
+      425 bundles to the full 6.42 MB tree.
+    */
+    const r = readSpecifiers('export const q = () => `\n  select * from "users"\n`;');
+    expect(r.specifiers).toEqual([]);
+  });
+
   it("ignores a specifier that only appears in a comment", () => {
     const r = readSpecifiers(`// import x from "./ghost.ts"\nimport a from "./a.ts";`);
     expect(r.specifiers).toEqual(["./a.ts"]);
