@@ -46,11 +46,41 @@ describe("the column the pacing rests on", () => {
   });
 });
 
+describe("a rate limit on the prime read defers the event", () => {
+  // The read that resolves the prime's head sits IN FRONT of the per-clone
+  // loop, so it has its own catch and its own classification — the first of
+  // the two in the file.
+  const classifyAt = engine.indexOf("const failure = classifyGitHubFailure(e);");
+  const catchAt = engine.lastIndexOf("} catch (e) {", classifyAt);
+  const msgAt = engine.indexOf("const msg = `Cannot read prime", catchAt);
+  const block = engine.slice(catchAt, msgAt);
+
+  it("classifies before it composes the failure message", () => {
+    expect(classifyAt).toBeGreaterThan(-1);
+    expect(catchAt).toBeGreaterThan(-1);
+    expect(block).toContain("const failure = classifyGitHubFailure(e);");
+  });
+
+  it("hands the event back pending at the reset, and never fails it", () => {
+    expect(block).toMatch(/status: "pending",\s*worker_started_at: null,\s*next_attempt_at: failure\.until/);
+    expect(block).not.toContain('status: "failed"');
+    // A held event whose write was refused must not read as held.
+    expect(block).toMatch(/if \(holdError\)\s*\{\s*throw/);
+    expect(block).toContain('{ ok: true, status: "deferred", until: failure.until, done: 0, total: 0 }');
+  });
+
+  it("still fails the event when the read failed for any other reason", () => {
+    const after = engine.slice(msgAt, msgAt + 600);
+    expect(after).toContain('status: "failed"');
+  });
+});
+
 describe("a rate limit defers the event", () => {
   // The catch that owns the per-clone failure: the one that classifies. The
   // loop holds two nested catches before it (redeploy, backend sync), so the
   // anchor is the classification itself and the block is found backwards.
-  const classifyAt = engine.indexOf("const failure = classifyGitHubFailure(e);");
+  // `lastIndexOf`, because the prime read above classifies the same way.
+  const classifyAt = engine.lastIndexOf("const failure = classifyGitHubFailure(e);");
   const catchAt = engine.lastIndexOf("} catch (e) {", classifyAt);
   const catchBlock = engine.slice(catchAt, catchAt + 3_000);
 

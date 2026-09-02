@@ -176,6 +176,39 @@ export async function executeCascade(
     });
     sourceSha = br.commit.sha;
   } catch (e) {
+    // The same window the per-clone loop already defers on, one step earlier.
+    // Measured 2 Sep 2026 at 15:10: event 9039d1ed reached this read with the
+    // installation's hourly budget spent, and failed — "Cannot read prime …:
+    // API rate limit exceeded for installation ID 157200201" — with two clones
+    // still `queued`. A failed event is never claimed again, so the prime
+    // commit it carried would have reached neither of them without a person
+    // re-arming the row. The classifier was added for the loop below and this
+    // read sits in front of it, which is the only reason it was not consulted
+    // here.
+    const failure = classifyGitHubFailure(e);
+    if (failure.kind === "rate_limited") {
+      const summary = describeDeferral({
+        until: failure.until,
+        detail: failure.detail,
+        done: 0,
+        total: 0,
+      });
+      const { error: holdError } = await supabase
+        .from("cascade_events")
+        .update({
+          status: "pending",
+          worker_started_at: null,
+          next_attempt_at: failure.until,
+          summary,
+        })
+        .eq("id", event.id);
+      if (holdError) {
+        throw new Error(
+          `cascade ${event.id}: could not hold the event after a rate limit on the prime read: ${holdError.message}`,
+        );
+      }
+      return { ok: true, status: "deferred", until: failure.until, done: 0, total: 0 };
+    }
     const msg = `Cannot read prime ${primeRef.owner}/${primeRef.repo}@${primeRef.branch}: ${e instanceof Error ? e.message : "unknown"}`;
     await supabase
       .from("cascade_events")
