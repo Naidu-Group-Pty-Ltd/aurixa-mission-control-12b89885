@@ -433,6 +433,63 @@ export async function listProjectEdgeFunctionSlugs(projectRef: string): Promise<
 }
 
 /**
+ * The clone's live functions, each with the moment it was last deployed.
+ *
+ * `listProjectEdgeFunctionSlugs` answers "which of these does the target
+ * have". A REDEPLOY needs a different question — "which has this pass
+ * already refreshed" — and the two stop agreeing the moment the target holds
+ * every slug, which is the ordinary state for a cascade: all 423 exist and
+ * are simply stale. Answering the first question there would skip every
+ * bundle and deploy nothing.
+ *
+ * Kept beside the existing reader rather than widening it. Provisioning asks
+ * the first question on every pass, and changing that return type would edit
+ * the one path already known to work.
+ *
+ * A failed read answers an EMPTY map, never a full one: empty means "nothing
+ * is known to be fresh", which redeploys more than strictly necessary. The
+ * opposite mistake skips bundles that were never deployed, and does it
+ * silently — the same asymmetry `skipFunctionSlugs`' own `.catch(() => [])`
+ * is written for.
+ */
+export async function listProjectEdgeFunctionFreshness(
+  projectRef: string,
+): Promise<Map<string, number>> {
+  const fresh = new Map<string, number>();
+  try {
+    const res = await fetch(`${MGMT_API}/projects/${projectRef}/functions`, {
+      headers: headers(),
+    });
+    if (!res.ok) return fresh;
+    const raw = (await res.json()) as unknown;
+    if (!Array.isArray(raw)) return fresh;
+    for (const r of raw) {
+      const o = r as Record<string, unknown>;
+      const slug =
+        typeof o.slug === "string" ? o.slug : typeof o.name === "string" ? (o.name as string) : "";
+      if (!slug) continue;
+      // The Management API reports epoch milliseconds. A seconds value or an
+      // ISO string is accepted rather than assumed away, and anything
+      // unreadable is left ABSENT — absent means "not known to be fresh",
+      // which redeploys, so a format change costs work rather than coverage.
+      const stamp = o.updated_at ?? o.created_at;
+      const ms =
+        typeof stamp === "number"
+          ? stamp < 1e12
+            ? stamp * 1000
+            : stamp
+          : typeof stamp === "string"
+            ? Date.parse(stamp)
+            : Number.NaN;
+      if (Number.isFinite(ms)) fresh.set(slug, ms);
+    }
+    return fresh;
+  } catch {
+    return fresh;
+  }
+}
+
+/**
  * List secret NAMES only on a project. Never returns values. Used by G3
  * parity to flag secret keys the target is missing.
  */

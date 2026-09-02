@@ -32,6 +32,7 @@ import {
   type TicketPriority,
 } from "@/lib/ticket-classification";
 import { asJson, asRow } from "@/lib/json-cast";
+import { planEdgeDeployPass, refreshedSince } from "@/server/edgeDeployBatch.pure";
 
 function secretsCleanFromVerification(verification: Json | null | undefined): boolean {
   if (verification && typeof verification === "object" && !Array.isArray(verification)) {
@@ -49,6 +50,28 @@ const MONITOR_RETRY_MINUTES = 5;
 const MONITOR_HEALTHY_WITHIN_MINUTES = 15;
 const AUTO_MERGE_SCAN_BATCH = 5;
 const INGEST_LEDGER_RETENTION_DAYS = 7;
+
+/**
+ * Function bundles one pass may fetch and deploy.
+ *
+ * The same sixty the provisioning runner uses, for the same measured reason:
+ * 423 bundles over ~1,033 files does not fit one invocation, of the GitHub
+ * App's hourly quota or of the request itself. Measured 2 Sep 2026, this
+ * lane's FIRST live run asked for all of them, ran thirty minutes and
+ * deployed nothing at all before its invocation was killed.
+ */
+const EDGE_DEPLOY_BATCH = 60;
+
+/**
+ * How long a run may sit in `executing` before it is presumed dead.
+ *
+ * `executeRemediationRun` accepts only `planned` and `approved`, so a row
+ * left `executing` by a killed invocation is never looked at again by
+ * anything — it is not on any work list and no lane reads that state. Twenty
+ * minutes is far above any real invocation's budget and far below the point
+ * where a stuck row stops looking like progress on the clone page.
+ */
+const RUN_STALL_MINUTES = 20;
 
 const admin = supabaseAdmin;
 
@@ -598,29 +621,100 @@ async function executeEdgeFunctionDeploy(run: any): Promise<{ status: string }> 
   const source = await resolvePrimeSource(admin);
   if (!source) return parkRun(run, ["prime source repo is not configured"]);
 
+  const wanted: string[] | null = run.plan?.slugs ?? null;
+
+  // What THIS run has already put on the clone — asked of the TARGET, never
+  // of a diary the run keeps about itself. A pass that deployed sixty
+  // bundles and then lost its invocation still counts, which is the whole
+  // point: the state that has to survive is on the clone, not in a `result`
+  // column the dying pass never got to write.
+  const { listProjectEdgeFunctionFreshness, deployEdgeFunctions } =
+    await import("@/server/backend-provisioning.server");
+  const freshness = await listProjectEdgeFunctionFreshness(backend.supabase_project_ref);
+  const refreshed = refreshedSince(freshness, run.started_at);
+
   // This lane redeploys FUNCTION bundles; migration SQL bodies are half the
   // snapshot's round trips and nothing here reads them.
+  //
+  // `functionLimit` is applied only where this run owes the WHOLE fleet.
+  // Against a named list it measures truncation over the UNFILTERED set, so
+  // a pass could fetch sixty bundles containing none of the wanted ones and
+  // then read its own empty batch as "nothing left to do" — succeeding on a
+  // deployment it never performed. A named list is bounded by the cascade
+  // that produced it and is sliced here instead.
   const snapshot = await fetchPrimeBackendSnapshot(getAppOctokit(), source, {
     includeMigrationSql: false,
+    skipFunctionSlugs: refreshed,
+    ...(wanted === null ? { functionLimit: EDGE_DEPLOY_BATCH } : {}),
   });
-  const wanted: string[] | null = run.plan?.slugs ?? null;
-  const bundles = (snapshot.functions ?? []).filter(
-    (fn: any) => !wanted || wanted.includes(fn.slug),
-  );
-  if (bundles.length === 0) {
-    return succeedRun(run, { deployed: 0, note: "no function bundles to deploy" });
+
+  const fetched = snapshot.functions ?? [];
+  const pass = planEdgeDeployPass({
+    wanted,
+    fetched: fetched.map((fn) => fn.slug),
+    truncated: snapshot.functionSourceTruncated,
+    batchLimit: EDGE_DEPLOY_BATCH,
+  });
+  const chosen = new Set(pass.batch);
+  const batch = fetched.filter((fn) => chosen.has(fn.slug));
+
+  if (batch.length === 0) {
+    return succeedRun(run, {
+      deployed: refreshed.length,
+      note:
+        refreshed.length > 0
+          ? "every bundle this run owed is on the clone"
+          : "no function bundles to deploy",
+      source_sha: snapshot.sourceSha ?? null,
+    });
   }
 
-  const { deployEdgeFunctions } = await import("@/server/backend-provisioning.server");
-  const results = await deployEdgeFunctions(backend.supabase_project_ref, bundles);
+  const results = await deployEdgeFunctions(backend.supabase_project_ref, batch);
   const failures = (results ?? []).filter((r: any) => r.error);
   if (failures.length === (results ?? []).length && failures.length > 0) {
     throw new Error(`all ${failures.length} function deploys failed: ${failures[0].error}`);
   }
+  const landed = (results ?? []).length - failures.length;
+  const failedDetail = failures.map((f: any) => ({
+    slug: f.slug,
+    error: String(f.error).slice(0, 200),
+  }));
+
+  // More to come? Hand the run back to the queue rather than pronouncing a
+  // partial deployment complete — the rule `functionSourceTruncated` is
+  // documented for, and the shape `monitor_recovery` already uses.
+  if (pass.moreRemain) {
+    const attempts = run.attempts ?? 1;
+    // A bundle that fails every pass never becomes `refreshed`, so without a
+    // bound this would resume for ever. `monitor_recovery` bounds itself the
+    // same way, and past the budget it is a person's problem.
+    if (attempts >= (run.max_attempts ?? 30)) {
+      return parkRun(run, [
+        `${refreshed.length + landed} bundle(s) deployed over ${attempts} passes and more remain`,
+        ...(failedDetail.length > 0
+          ? [`last pass could not deploy ${failedDetail[0].slug}: ${failedDetail[0].error}`]
+          : []),
+      ]);
+    }
+    await markRun(run.id, {
+      status: "planned",
+      // Due now: the drain runs every two minutes and has already chosen
+      // this pass's batch, so it is the NEXT pass that picks this up.
+      next_attempt_at: new Date().toISOString(),
+      result: {
+        resuming: true,
+        deployed: refreshed.length + landed,
+        last_batch: landed,
+        failed: failedDetail,
+        source_sha: snapshot.sourceSha ?? null,
+      },
+    });
+    return { status: "resuming" };
+  }
 
   return succeedRun(run, {
-    deployed: (results ?? []).length - failures.length,
-    failed: failures.map((f: any) => ({ slug: f.slug, error: String(f.error).slice(0, 200) })),
+    deployed: refreshed.length + landed,
+    failed: failedDetail,
     source_sha: snapshot.sourceSha ?? null,
   });
 }
@@ -725,10 +819,76 @@ export type SweepResult = {
   ticketsRolledUp: number;
   slaEscalations: number;
   scanMergesPlanned: number;
+  /** Runs whose invocation died mid-flight and were put back on the queue. */
+  runsReclaimed: number;
 };
 
 /**
+ * Put back on the queue any run whose invocation died while it held the row.
+ *
+ * `executeRemediationRun` accepts only `planned` and `approved`. A row left
+ * in `executing` is therefore on no work list and read by no lane — it is
+ * stuck for ever, and it reads as progress while it is stuck, which is worse
+ * than reading as nothing. Measured 2 Sep 2026: the first live
+ * `edge_function_deploy` run sat in `executing` with zero bundles deployed
+ * and no error, and nothing in the engine could ever have moved it.
+ *
+ * Reclaiming is safe because every lane is idempotent by construction — a
+ * redeploy overwrites, a merge is a no-op on an already-merged pull request,
+ * a migration replay re-checks what is pending, a rescan re-enqueues. What
+ * is NOT safe is retrying without end, so a run past its attempt budget goes
+ * to a human instead of back to the queue.
+ *
+ * ## Why `updated_at` and not `started_at`
+ *
+ * `started_at` is the moment the run FIRST executed and is deliberately kept
+ * across passes — `edge_function_deploy` measures "what have I already
+ * deployed" from it. A resumable run therefore carries a `started_at` older
+ * than this threshold long before anything is wrong, and reclaiming on that
+ * would seize a run in the middle of a legitimate pass: two passes would then
+ * execute the same row at once and burn its attempt budget racing itself.
+ *
+ * `updated_at` is trigger-maintained on every write, so it is the moment THIS
+ * pass claimed the row. That is the clock a stall is measured on.
+ */
+async function reclaimStalledRuns(): Promise<number> {
+  const stalledBefore = new Date(Date.now() - RUN_STALL_MINUTES * 60_000).toISOString();
+  const { data: stalled } = await admin
+    .from("remediation_runs")
+    .select("id, attempts, max_attempts, action_type, ticket_id")
+    .eq("status", "executing")
+    .lt("updated_at", stalledBefore)
+    .order("updated_at", { ascending: true })
+    .limit(DRAIN_BATCH);
+
+  let reclaimed = 0;
+  for (const row of stalled ?? []) {
+    const reasons = [
+      `run stalled in "executing" for over ${RUN_STALL_MINUTES} minutes — its pass did not finish`,
+    ];
+    if ((row.attempts ?? 0) >= (row.max_attempts ?? 30)) {
+      await markRun(row.id, {
+        status: "awaiting_validation",
+        requires_human: true,
+        policy: { autoExecute: false, requiresHuman: true, reasons },
+        last_error: `stalled after ${row.attempts ?? 0} attempt(s)`,
+      });
+      await notifyAwaitingValidation(row.ticket_id, row.action_type, reasons);
+    } else {
+      await markRun(row.id, {
+        status: "planned",
+        next_attempt_at: new Date().toISOString(),
+        last_error: reasons[0],
+      });
+    }
+    reclaimed += 1;
+  }
+  return reclaimed;
+}
+
+/**
  * One pass of the self-healing drain (pg_cron, every 2 minutes):
+ *   0. Reclaim runs a dead invocation left stuck in `executing`.
  *   1. Execute due runs (planned/approved, next_attempt_at reached).
  *   2. Plan auto-merge runs for freshly verified scan remediations, so the
  *      security pipeline self-heals even without a ticket.
@@ -738,6 +898,10 @@ export type SweepResult = {
  */
 export async function sweepSupportRemediations(): Promise<SweepResult> {
   const executed: SweepResult["executed"] = [];
+
+  // 0. Reclaim runs a dead invocation left holding the row. Before step 1,
+  //    so a reclaimed run is due on this pass rather than the next one.
+  const runsReclaimed = await reclaimStalledRuns();
 
   // 1. Execute due runs, oldest first, bounded per pass.
   const { data: dueRuns } = await admin
@@ -772,7 +936,7 @@ export async function sweepSupportRemediations(): Promise<SweepResult> {
       new Date(Date.now() - INGEST_LEDGER_RETENTION_DAYS * 24 * 60 * 60_000).toISOString(),
     );
 
-  return { executed, ticketsRolledUp, slaEscalations, scanMergesPlanned };
+  return { executed, ticketsRolledUp, slaEscalations, scanMergesPlanned, runsReclaimed };
 }
 
 async function planScanAutoMerges(): Promise<number> {
