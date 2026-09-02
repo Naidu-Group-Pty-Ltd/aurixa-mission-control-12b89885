@@ -141,4 +141,14 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260901130000",
     assertions: [{ kind: "column", table: "clone_email_identities", column: "revoked_at" }],
   },
+  {
+    migration: "20260902080000_clone_secret_forwards.sql",
+    version: "20260902080000",
+    assertions: [{ kind: "table", table: "clone_secret_forwards" }],
+  },
+  {
+    migration: "20260902081000_schedule_clone_secret_forward_reconcile.sql",
+    version: "20260902081000",
+    assertions: [{ kind: "cron", jobname: "clone-secret-forward-reconcile" }],
+  },
 ];
