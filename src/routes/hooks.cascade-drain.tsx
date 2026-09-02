@@ -91,6 +91,71 @@ async function reclaimStalled() {
       throw new Error(`cascade-drain reclaim: could not requeue results: ${resultsErr.message}`);
     }
   }
+
+  // And a pass that died under an event something else had already moved to
+  // a finished status.
+  //
+  // Measured 2 Sep 2026 14:10: the merge drain's recount rewrote a `running`
+  // event to `completed` while its pass was still pushing a clone, the
+  // invocation was then cut at 60 s, and the clone's row sat at `pushing` —
+  // older than any cutoff — under an event neither rule above would ever
+  // look at. The recount no longer does that; this is the rule that heals
+  // the rows it left, and any other way a result can be orphaned under a
+  // finished event. The row itself is the evidence: a `pushing` result older
+  // than the cutoff is a pass that is not running any more, whatever its
+  // event says.
+  const { data: orphanRows, error: orphanRowsErr } = await admin
+    .from("cascade_results")
+    .select("id, cascade_event_id")
+    .eq("status", "pushing")
+    .lt("started_at", cutoff);
+  if (orphanRowsErr) {
+    throw new Error(
+      `cascade-drain reclaim: could not list orphaned results: ${orphanRowsErr.message}`,
+    );
+  }
+  const orphanEventIds = [...new Set((orphanRows ?? []).map((r) => r.cascade_event_id))];
+  if (orphanEventIds.length > 0) {
+    const { data: finishedEvents, error: finishedErr } = await admin
+      .from("cascade_events")
+      .select("id")
+      .in("id", orphanEventIds)
+      .in("status", ["completed", "partial", "failed"]);
+    if (finishedErr) {
+      throw new Error(
+        `cascade-drain reclaim: could not read orphaned events: ${finishedErr.message}`,
+      );
+    }
+    const reviveIds = (finishedEvents ?? []).map((e) => e.id);
+    if (reviveIds.length > 0) {
+      const { error: reviveErr } = await admin
+        .from("cascade_events")
+        .update({
+          status: "pending",
+          worker_started_at: null,
+          worker_finished_at: null,
+          completed_at: null,
+          next_attempt_at: new Date().toISOString(),
+        })
+        .in("id", reviveIds);
+      if (reviveErr) {
+        throw new Error(
+          `cascade-drain reclaim: could not revive orphaned events: ${reviveErr.message}`,
+        );
+      }
+      const { error: requeueErr } = await admin
+        .from("cascade_results")
+        .update({ status: "queued", started_at: null })
+        .in("cascade_event_id", reviveIds)
+        .eq("status", "pushing")
+        .lt("started_at", cutoff);
+      if (requeueErr) {
+        throw new Error(
+          `cascade-drain reclaim: could not requeue orphaned results: ${requeueErr.message}`,
+        );
+      }
+    }
+  }
 }
 
 /**

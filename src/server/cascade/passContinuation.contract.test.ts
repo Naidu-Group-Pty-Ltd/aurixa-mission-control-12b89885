@@ -211,3 +211,40 @@ describe("the module-scope pass reads the clone only when the tree could not say
     expect(hold).toContain("cloneFile = await getFileContent(octokit, cloneRef, path);");
   });
 });
+
+describe("a pass is finished when the engine says so", () => {
+  const merge = readFileSync("src/server/cascadeMergeDrain.server.ts", "utf8");
+
+  it("the merge drain's recount never writes over an event still being executed", () => {
+    /* Measured 2 Sep 2026 14:10 on event 795d73d2: the cascade drain had
+       claimed it and was pushing preflight-property-group when the recount
+       rewrote it to `completed`; the invocation was cut at 60 s, the engine's
+       own write never came, and the clone's row sat at `pushing` under a
+       finished event where no reclaim rule looked. */
+    const fn = sliceFrom(merge, "async function recountEvent", 2_500);
+    expect(fn).toContain('.select("summary, status, worker_started_at, worker_finished_at")');
+    expect(fn).toMatch(
+      /if \(current\.data\?\.status === "running" \|\| current\.data\?\.status === "pending"\) return false;/,
+    );
+    expect(fn).toMatch(
+      /if \(current\.data\?\.worker_started_at && !current\.data\?\.worker_finished_at\) return false;/,
+    );
+    // Both guards sit BEFORE the write.
+    const write = fn.indexOf(".update({ summary, status })");
+    expect(write).toBeGreaterThan(fn.indexOf('current.data?.status === "running"'));
+  });
+
+  it("the reclaim revives a pushing row left under a finished event", () => {
+    const reclaim = sliceFrom(drain, "const { data: orphanRows, error: orphanRowsErr }", 2_500);
+    expect(reclaim).toMatch(/\.eq\("status", "pushing"\)\s*\.lt\("started_at", cutoff\)/);
+    expect(reclaim).toContain('.in("status", ["completed", "partial", "failed"])');
+    expect(reclaim).toMatch(
+      /status: "pending",\s*worker_started_at: null,\s*worker_finished_at: null,\s*completed_at: null,\s*next_attempt_at: new Date\(\)\.toISOString\(\)/,
+    );
+    // Every step checked: a reclaim that half-happened is the state the
+    // header of `reclaimStalled` says this worker cannot reason about.
+    for (const err of ["orphanRowsErr", "finishedErr", "reviveErr", "requeueErr"]) {
+      expect(reclaim).toMatch(new RegExp(`if \\(${err}\\) \\{\\s*throw new Error`));
+    }
+  });
+});
