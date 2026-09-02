@@ -1876,6 +1876,14 @@ export async function applyModuleMigrations(
   return results;
 }
 
+/**
+ * The bundle shape `deployEdgeFunction` accepts.
+ *
+ * Named so a caller that passes bundles through — the self-healing lane's
+ * budgeted loop — can be typed rather than reaching for `any`.
+ */
+export type EdgeFunctionBundle = Parameters<typeof deployEdgeFunction>[1];
+
 export type EdgeFunctionDeployResult = {
   slug: string;
   success: boolean;
