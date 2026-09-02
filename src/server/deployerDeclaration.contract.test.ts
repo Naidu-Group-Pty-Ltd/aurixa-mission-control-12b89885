@@ -79,10 +79,28 @@ describe("the failure is never dropped", () => {
 });
 
 describe("reading a permission is not the same as being denied one", () => {
+  const start = vars.indexOf("export async function readInstallationPermissions");
+  const fn = vars.slice(start);
+  const body = fn.slice(0, fn.indexOf("\n}\n"));
+
+  it("the permission read exists where the test looks for it", () => {
+    expect(start).toBeGreaterThan(-1);
+  });
+
   it("the permission read answers null on failure", () => {
-    const fn = vars.slice(vars.indexOf("export async function readInstallationPermissions"));
-    const body = fn.slice(0, fn.indexOf("\n}\n"));
     expect(body).toMatch(/catch[\s\S]{0,120}return null/);
+  });
+
+  it("is never served from the token cache", () => {
+    /*
+      `@octokit/auth-app` caches an installation token with the permission map
+      it was minted under, for 59 minutes. A cached read reports a permission
+      the owner accepted a minute ago as absent for up to an hour, and sends
+      the administrator to re-grant a setting that is already right — which is
+      what happened on 2 Sep 2026. The refresh also replaces the cached token,
+      so the write that follows the read holds the permission the read saw.
+    */
+    expect(body).toMatch(/octokit\.auth\(\{ type: "installation", refresh: true \}\)/);
   });
 });
 
