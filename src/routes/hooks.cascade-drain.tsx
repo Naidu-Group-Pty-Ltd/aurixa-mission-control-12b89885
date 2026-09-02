@@ -249,7 +249,8 @@ async function drainOne(
       // fit inside the budget would otherwise be retried for ever, quietly,
       // and after the last attempt it has to be said rather than left
       // `pending` with no claim that will ever take it.
-      const refund = res.status === "deferred" || res.done > 0;
+      const refund =
+        res.status === "deferred" || res.done > 0 || (res.status === "resuming" && res.progressed);
       if (refund) {
         const { error } = await admin
           .from("cascade_events")

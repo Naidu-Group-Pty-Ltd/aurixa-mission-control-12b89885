@@ -761,6 +761,7 @@ export type Database = {
           id: string
           pr_url: string | null
           previous_sha: string | null
+          progress: Json | null
           started_at: string | null
           status: Database["public"]["Enums"]["cascade_result_status"]
           updated_at: string
@@ -777,6 +778,7 @@ export type Database = {
           id?: string
           pr_url?: string | null
           previous_sha?: string | null
+          progress?: Json | null
           started_at?: string | null
           status?: Database["public"]["Enums"]["cascade_result_status"]
           updated_at?: string
@@ -793,6 +795,7 @@ export type Database = {
           id?: string
           pr_url?: string | null
           previous_sha?: string | null
+          progress?: Json | null
           started_at?: string | null
           status?: Database["public"]["Enums"]["cascade_result_status"]
           updated_at?: string

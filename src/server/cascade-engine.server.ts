@@ -2,7 +2,7 @@
 // cascade-engine.functions.ts wraps this with auth middleware; the GitHub
 // webhook receiver invokes it directly with the admin client.
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { Database } from "@/integrations/supabase/types";
+import type { Database, Json } from "@/integrations/supabase/types";
 import {
   CHECKS_PERMISSION_REMEDY,
   checksUnreadable,
@@ -58,7 +58,14 @@ import {
 import { isBlockedByApproval } from "./cascade-approvals.server";
 import { validateClonePinsServer } from "./library-validation.server";
 import { validateModuleGlobs } from "@/lib/module-globs";
-import { mapWithConcurrency } from "@/lib/concurrency";
+import { mapWithConcurrency, mapWithConcurrencyUntil } from "@/lib/concurrency";
+import {
+  PROGRESS_FLUSH_EVERY,
+  describePreparePause,
+  readProgress,
+  resumableBlobs,
+  type CascadeProgress,
+} from "./cascade/passProgress.pure";
 
 type CascadeResultUpdate = Database["public"]["Tables"]["cascade_results"]["Update"];
 
@@ -227,6 +234,7 @@ export async function executeCascade(
   let attempted = 0;
   let slowestMs = 0;
   let stoppedEarly = false;
+  let progressed = false;
   let deferred: { until: string; detail: string } | null = null;
 
   for (const r of queuedRows) {
@@ -285,6 +293,14 @@ export async function executeCascade(
       .eq("id", r.id);
 
     try {
+      // What an earlier pass already prepared for this commit, if the budget
+      // stopped it inside this clone. Counted here so a pass that prepared
+      // blobs without finishing the clone is still known to have progressed.
+      const priorRecord = (r as { progress?: unknown }).progress ?? null;
+      const priorPrepared = Object.keys(
+        readProgress(priorRecord, sourceSha)?.prepared ?? {},
+      ).length;
+      let preparedNow = priorPrepared;
       const patch = await processClone({
         octokit,
         primeRef,
@@ -293,9 +309,49 @@ export async function executeCascade(
         clone,
         supabase,
         scopeFilter: event.scope_filter as Record<string, unknown> | null,
+        // The list rides on the result row, written HERE rather than in
+        // `processClone`, which stays write-free for the rehearsal's sake.
+        resume: {
+          progress: priorRecord,
+          onProgress: async (progress) => {
+            preparedNow = Object.keys(progress.prepared).length;
+            const { error: progressError } = await supabase
+              .from("cascade_results")
+              .update({ progress: progress as unknown as Json })
+              .eq("id", r.id);
+            if (progressError) {
+              throw new Error(
+                `cascade ${event.id}: could not record ${clone.name}'s progress: ${progressError.message}`,
+              );
+            }
+          },
+          budget: opts?.budget,
+        },
       });
 
-      await supabase.from("cascade_results").update(patch).eq("id", r.id);
+      if (patch.status === "queued") {
+        // Paused inside this clone: the row keeps its list and its place in
+        // the queue, and the event is handed back below.
+        const { error: pauseError } = await supabase
+          .from("cascade_results")
+          .update(patch)
+          .eq("id", r.id);
+        if (pauseError) {
+          throw new Error(
+            `cascade ${event.id}: could not pause ${clone.name}: ${pauseError.message}`,
+          );
+        }
+        if (preparedNow > priorPrepared) progressed = true;
+        stoppedEarly = true;
+        break;
+      }
+
+      // Any finished status clears the list: progress toward a proposal that
+      // has been made is not progress any more.
+      await supabase
+        .from("cascade_results")
+        .update({ ...patch, progress: null })
+        .eq("id", r.id);
 
       // Read off the patch, not off `queuedRes.data`: those rows were fetched
       // before this loop and still carry the pre-run `diff_summary`.
@@ -442,7 +498,7 @@ export async function executeCascade(
     }
     return deferred
       ? { ok: true, status: "deferred", until: deferred.until, done, total }
-      : { ok: true, status: "resuming", done, total };
+      : { ok: true, status: "resuming", done, total, progressed };
   }
 
   const totalQueued = (queuedRes.data ?? []).length;
@@ -647,6 +703,17 @@ export async function processClone(args: {
   dryRun?: boolean;
   /** Called with the decision, on the real path and the dry one alike. */
   onPlan?: (plan: ClonePlan) => void;
+  /**
+   * Carry a pass across invocations. Real path only: the engine supplies it
+   * from `executeCascade` and never from a rehearsal, and `processClone`
+   * itself still writes nothing — the list goes out through `onProgress`.
+   * See `cascade/passProgress.pure.ts`.
+   */
+  resume?: {
+    progress: unknown;
+    onProgress: (progress: CascadeProgress) => Promise<void>;
+    budget?: CascadeBudget;
+  };
 }): Promise<CascadeResultUpdate> {
   const { octokit, primeRef, sourceSha, mode, clone, supabase, scopeFilter } = args;
   const dryRun = args.dryRun === true;
@@ -821,6 +888,8 @@ export async function processClone(args: {
    * a truncated tree cannot say a file is absent, only that it was not listed.
    */
   let cloneShaByPath: ReadonlyMap<string, string> | null = null;
+  /** Prime's blob SHA per path, when its listing was complete. */
+  let primeShaByPath: ReadonlyMap<string, string> | null = null;
   if (isMirror) {
     const [primeTree, cloneTree] = await Promise.all([
       listTreeEntries(octokit, primeRef),
@@ -839,6 +908,7 @@ export async function processClone(args: {
       if (cloneTree.entries.get(path) !== sha) candidatePaths.push(path);
     }
     cloneShaByPath = cloneTree.entries;
+    primeShaByPath = primeTree.entries;
     for (const [path, sha] of cloneTree.entries) {
       if (!primeTree.entries.has(path)) {
         onlyInClone++;
@@ -882,6 +952,7 @@ export async function processClone(args: {
         (path) => cloneTree.entries.get(path) !== primeTree.entries.get(path),
       );
       cloneShaByPath = cloneTree.entries;
+      primeShaByPath = primeTree.entries;
     }
 
     // The clone's own tree, read for one more reason: a module-scoped cascade
@@ -1016,10 +1087,55 @@ export async function processClone(args: {
       }
     | { kind: "held"; held: HeldPath };
 
-  const prepared = await mapWithConcurrency<string, Prepared | null>(
+  // What a previous pass already prepared for this very commit, reusable
+  // wherever prime's blob is still the one it was made from. Real path only:
+  // a rehearsal reuses nothing and records nothing.
+  const resume = dryRun ? undefined : args.resume;
+  const known = resume
+    ? resumableBlobs(readProgress(resume.progress, sourceSha), primeShaByPath)
+    : new Map<string, string>();
+  const progress: CascadeProgress = {
+    version: 1,
+    source_sha: sourceSha,
+    prepared: {},
+    total: primeFiles.length,
+  };
+  for (const [path, blob] of known) {
+    const prime = primeShaByPath?.get(path);
+    if (prime) progress.prepared[path] = { blob, prime };
+  }
+  let freshlyPrepared = 0;
+  let slowestFileMs = 0;
+  // Asked before each file is started, never before the first fresh one: a
+  // pass that prepared nothing new would come back next tick exactly where
+  // it was. The reserve is the slowest file so far — one more like it.
+  const shouldStop = () =>
+    resume?.budget !== undefined &&
+    freshlyPrepared > 0 &&
+    resume.budget.isPastDeadline(slowestFileMs);
+
+  const { results: prepared, stopped: preparePaused } = await mapWithConcurrencyUntil<
+    string,
+    Prepared | null
+  >(
     primeFiles,
     8,
     async (path) => {
+      // Reused from the previous pass: no read, no create. The tree
+      // comparison already established the path differs, and the list
+      // established prime's blob is still the one this was made from.
+      const reusable = known.get(path);
+      if (reusable !== undefined) {
+        return {
+          kind: "blob",
+          path,
+          mode: "100644" as const,
+          type: "blob" as const,
+          sha: reusable,
+          content: null,
+        };
+      }
+      const fileStartedAt = Date.now();
       let primeFile: Awaited<ReturnType<typeof getFileContent>>;
       try {
         primeFile = await getFileContent(octokit, primeRef, path, {
@@ -1113,6 +1229,14 @@ export async function processClone(args: {
               encoding: "base64",
             })
           ).data.sha;
+      if (resume) {
+        progress.prepared[path] = { blob: blobSha, prime: primeFile.sha };
+        freshlyPrepared += 1;
+        slowestFileMs = Math.max(slowestFileMs, Date.now() - fileStartedAt);
+        // Written as it goes, so a pass cut by the platform rather than by
+        // its own budget still leaves most of its work on the row.
+        if (freshlyPrepared % PROGRESS_FLUSH_EVERY === 0) await resume.onProgress(progress);
+      }
       return {
         kind: "blob",
         path,
@@ -1122,7 +1246,25 @@ export async function processClone(args: {
         content: !primeFile.binary && /\.[cm]?tsx?$/.test(path) ? primeFile.content : null,
       };
     },
+    shouldStop,
   );
+
+  // The budget stopped the pass inside this clone. Everything prepared so far
+  // is on the row; the engine hands the event back and the next pass starts
+  // from the list rather than from the tree. No tree, no commit, no pull
+  // request: a proposal that carries half the diff is worse than none.
+  if (preparePaused && resume) {
+    await resume.onProgress(progress);
+    return {
+      status: "queued",
+      started_at: null,
+      diff_summary: describePreparePause({
+        prepared: Object.keys(progress.prepared).length,
+        total: primeFiles.length,
+      }),
+      progress: progress as unknown as Json,
+    };
+  }
   const deliveredSource: Record<string, string> = {};
   for (const entry of prepared) {
     if (!entry) continue;

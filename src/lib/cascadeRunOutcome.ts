@@ -48,6 +48,12 @@ export type CascadeRunResult =
       status: "resuming";
       done: number;
       total: number;
+      /**
+       * Whether the pass moved a clone forward without finishing it — blobs
+       * prepared inside a clone whose pass is larger than one tick. Progress
+       * that is not a finished clone is still progress, and is refunded as such.
+       */
+      progressed: boolean;
     }
   | { ok: false; error: string };
 

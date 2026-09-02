@@ -161,4 +161,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260902134000",
     assertions: [{ kind: "column", table: "cascade_events", column: "next_attempt_at" }],
   },
+  {
+    migration: "20260902144000_cascade_results_progress.sql",
+    version: "20260902144000",
+    assertions: [{ kind: "column", table: "cascade_results", column: "progress" }],
+  },
 ];
