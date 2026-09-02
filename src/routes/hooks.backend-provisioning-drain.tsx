@@ -276,7 +276,15 @@ async function claimOne(): Promise<null | {
     .is("worker_started_at", null)
     .not("queued_admin_password_enc", "is", null)
     .lt("attempts", MAX_ATTEMPTS)
-    .order("queued_at", { ascending: true, nullsFirst: false })
+    // Least recently SERVED first, not oldest queued. A schema build pauses at
+    // the invocation budget and returns to `pending` every tick, and ordering
+    // by `queued_at` claimed it again every tick for as long as it took —
+    // measured 2 Sep 2026: `preflight-property-group` (queued 1 Sep) held the
+    // drain for over an hour while `npc-test` (queued 11:13) was never
+    // claimed once. `updated_at` is stamped on every write, so a row that was
+    // just paused goes to the back of the line and a fresh row competes on
+    // equal terms.
+    .order("updated_at", { ascending: true, nullsFirst: false })
     .limit(5);
   if (selectError) {
     throw new Error(`backend-provisioning claim: could not read the queue: ${selectError.message}`);
@@ -317,9 +325,7 @@ async function claimOne(): Promise<null | {
   return claimed ?? null;
 }
 
-async function drainOne(
-  deadlineAt: number,
-): Promise<{
+async function drainOne(deadlineAt: number): Promise<{
   processed: boolean;
   ok?: boolean;
   error?: string;

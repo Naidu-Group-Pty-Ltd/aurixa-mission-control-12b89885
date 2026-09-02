@@ -171,7 +171,9 @@ describe("a reclaim returns rows to the shape its own claim reads", () => {
        frequency for the quota it was waiting on. */
     const src = read("hooks.backend-provisioning-drain.tsx");
     expect(src).toContain("UPSTREAM_LIMIT_BACKOFF_MS");
-    expect(bodyOf(src, "drainOne")).toMatch(/retry_after: new Date\(Date\.now\(\) \+ UPSTREAM_LIMIT_BACKOFF_MS\)/);
+    expect(bodyOf(src, "drainOne")).toMatch(
+      /retry_after: new Date\(Date\.now\(\) \+ UPSTREAM_LIMIT_BACKOFF_MS\)/,
+    );
     const claim = bodyOf(src, "claimOne");
     /* Filtered in JS, never as a composed PostgREST `.or()` string — one of
        those never parsed and the claim it guarded had never once succeeded. */
@@ -222,6 +224,19 @@ describe("a reclaim returns rows to the shape its own claim reads", () => {
     expect(body).toMatch(
       /\.is\("queued_admin_password_enc", null\)[\s\S]{0,200}\.is\("worker_started_at", null\)[\s\S]{0,80}\.is\("worker_finished_at", null\)/,
     );
+  });
+
+  it("backend drain: a job waiting behind a longer one is SERVED, not merely kept", () => {
+    /*
+      Oldest-queued-first re-claimed a schema build every tick for as long as
+      it paused at the budget: `preflight-property-group` (queued 1 Sep) held
+      the drain for over an hour on 2 Sep 2026 while `npc-test`, queued at
+      11:13, was never claimed once. Least recently served goes first, and a
+      row that was just paused goes to the back of the line.
+    */
+    const claim = stripComments(bodyOf(read("hooks.backend-provisioning-drain.tsx"), "claimOne"));
+    expect(claim).toMatch(/\.order\("updated_at", \{ ascending: true/);
+    expect(claim).not.toMatch(/\.order\("queued_at"/);
   });
 
   it("backend drain: a job WAITING behind a longer one is not stranded", () => {

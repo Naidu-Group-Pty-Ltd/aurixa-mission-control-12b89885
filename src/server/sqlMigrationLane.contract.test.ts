@@ -154,6 +154,31 @@ describe("a pass that stopped at the budget hands the run back", () => {
   });
 });
 
+describe("a slow pass is not a dead pass", () => {
+  it("the replay reports each migration it is on, so the stall reclaim sees a living pass", () => {
+    /*
+      `reclaimStalledRuns` reads `updated_at`, and a lane that writes nothing
+      between claiming and finishing looks dead the moment it is merely slow —
+      and is requeued under itself, so two replays race for one ledger.
+    */
+    expect(lane).toMatch(
+      /applyPrimeMigrations\([\s\S]{0,120}async \(_status, detail\) => touchRun\(run, \{ in_flight: detail \}\)/,
+    );
+    expect(lane).not.toMatch(/runnable,\s*undefined,/);
+  });
+
+  it("the heartbeat is a write the reclaim can see, carrying the progress an operator reads", () => {
+    const helper = healing.slice(
+      healing.indexOf("async function touchRun"),
+      healing.indexOf("async function ticketEvent"),
+    );
+    expect(helper.length).toBeGreaterThan(50);
+    expect(helper).toContain("markRun(run.id, {");
+    expect(helper).toContain("heartbeat_at: new Date().toISOString()");
+    expect(healing).toMatch(/reclaimStalledRuns[\s\S]{0,400}\.lt\("updated_at", stalledBefore\)/);
+  });
+});
+
 describe("the gate", () => {
   it("fetches bodies a few at a time", () => {
     expect(gate).toContain("SQL_GATE_FETCH_CONCURRENCY");
