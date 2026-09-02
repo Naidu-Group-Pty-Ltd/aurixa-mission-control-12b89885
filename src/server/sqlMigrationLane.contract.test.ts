@@ -94,19 +94,30 @@ describe("a pass is bounded", () => {
     expect(deadline).toBeLessThan(firstRead);
   });
 
-  it("and is handed to the replay", () => {
-    expect(lane).toContain("{ isPastDeadline: () => Date.now() >= deadlineAt }");
+  it("and is handed to the replay, with the slowest migration reserved", () => {
+    // A deadline that answers only "is it past?" lets a pass START a
+    // migration it cannot finish; the reserve is the slowest one so far.
+    expect(lane).toContain(
+      "{ isPastDeadline: (reserveMs) => Date.now() + reserveMs >= deadlineAt }",
+    );
   });
 
   it("the replay asks between migrations, never before the first, and only before a send", () => {
     const skip = replay.indexOf("skipped: true });");
-    const check = replay.indexOf("if (attempted > 0 && budget?.isPastDeadline())");
+    const check = replay.indexOf("if (attempted > 0 && budget?.isPastDeadline(slowestMs))");
     const send = replay.indexOf("await runSqlOnProject(projectRef, sql);");
     expect(skip).toBeGreaterThan(-1);
     expect(check).toBeGreaterThan(skip);
     expect(send).toBeGreaterThan(check);
     expect(replay).toContain("attempted += 1;");
     expect(replay).toContain("return { results, latestApplied, stoppedEarly };");
+  });
+
+  it("the replay measures what it applied, so the reserve is a measurement", () => {
+    const send = replay.indexOf("await runSqlOnProject(projectRef, sql);");
+    const measured = replay.indexOf("slowestMs = Math.max(slowestMs, Date.now() - startedAt);");
+    expect(measured).toBeGreaterThan(send);
+    expect(replay.indexOf("const startedAt = Date.now();")).toBeLessThan(send);
   });
 
   it("the budget is the deploy lane's, for the deploy lane's reason", () => {
@@ -158,6 +169,8 @@ describe("the gate", () => {
   });
 
   it("is skipped only for a run a person approved", () => {
-    expect(lane).toMatch(/if \(!approvedByHuman\) \{\s*const offending = await assessPendingMigrations/);
+    expect(lane).toMatch(
+      /if \(!approvedByHuman\) \{\s*const offending = await assessPendingMigrations/,
+    );
   });
 });

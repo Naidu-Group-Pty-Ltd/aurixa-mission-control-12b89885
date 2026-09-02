@@ -194,12 +194,30 @@ export function planEdgeDeployResume(input: {
 export async function runWithinBudget<T, R>(input: {
   readonly items: readonly T[];
   readonly runOne: (item: T) => Promise<readonly R[]>;
-  readonly isPastDeadline: () => boolean;
+  /**
+   * Asked before every item but the first, and handed the longest an item
+   * has taken so far in this pass.
+   *
+   * A deadline that answers only "is it past?" lets a pass START an item it
+   * cannot finish: with a 45 s budget inside a 60 s invocation, a deploy
+   * begun at 44 s that takes twenty is killed at sixty, the requeue is never
+   * written, and the run sits in `executing` until the stall reclaim moves
+   * it twenty minutes later. Observed on `npc-client-dashboard`, 2 Sep 2026,
+   * at 307 of 423 bundles. The slowest item this pass has seen is the best
+   * available estimate of the next one, so the caller can reserve it.
+   */
+  readonly isPastDeadline: (reserveMs: number) => boolean;
+  /** Injectable for tests; the wall clock otherwise. */
+  readonly now?: () => number;
 }): Promise<{ results: R[]; stoppedEarly: boolean }> {
+  const now = input.now ?? Date.now;
   const results: R[] = [];
+  let slowestMs = 0;
   for (let i = 0; i < input.items.length; i++) {
-    if (i > 0 && input.isPastDeadline()) return { results, stoppedEarly: true };
+    if (i > 0 && input.isPastDeadline(slowestMs)) return { results, stoppedEarly: true };
+    const startedAt = now();
     results.push(...(await input.runOne(input.items[i])));
+    slowestMs = Math.max(slowestMs, now() - startedAt);
   }
   return { results, stoppedEarly: false };
 }

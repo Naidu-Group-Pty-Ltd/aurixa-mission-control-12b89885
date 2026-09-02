@@ -640,11 +640,7 @@ async function executeSqlMigration(
   // What will actually be SENT: runnable, absent from the clone, and not
   // sitting behind a hole. The gate below judges exactly this set — judging
   // an orphan the replay will skip anyway is a body fetched for nothing.
-  const { send: pending, orphaned } = partitionByDependency(
-    corpus.metas,
-    runnableIds,
-    applied,
-  );
+  const { send: pending, orphaned } = partitionByDependency(corpus.metas, runnableIds, applied);
   if (pending.length === 0) {
     return succeedRun(run, {
       pending: 0,
@@ -676,7 +672,7 @@ async function executeSqlMigration(
     // `runnable` alone cannot say whether a cleared version sits behind a
     // withheld one. The whole corpus can.
     { corpus: corpus.metas, runnableIds },
-    { isPastDeadline: () => Date.now() >= deadlineAt },
+    { isPastDeadline: (reserveMs) => Date.now() + reserveMs >= deadlineAt },
   );
   const failed = (results ?? []).filter((r) => !r.success);
   if (failed.length > 0) {
@@ -753,7 +749,9 @@ async function deployWithinBudget(
   return runWithinBudget<EdgeFunctionBundle, EdgeFunctionDeployResult>({
     items: batch,
     runOne: async (fn) => (await deployEdgeFunctions(projectRef, [fn])) ?? [],
-    isPastDeadline: () => Date.now() >= deadlineAt,
+    // Reserve the slowest deploy seen this pass: an item begun with less than
+    // that left is one the invocation may not live to finish.
+    isPastDeadline: (reserveMs) => Date.now() + reserveMs >= deadlineAt,
   });
 }
 

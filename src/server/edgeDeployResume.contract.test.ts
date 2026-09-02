@@ -177,7 +177,9 @@ describe("a pass stops at the budget instead of being killed by it", () => {
       and this file only checks the lane still goes through it.
     */
     expect(budgetedLoop).toMatch(/runWithinBudget[\s\S]{0,200}isPastDeadline/);
-    expect(budgetedLoop).toMatch(/Date\.now\(\) >= deadlineAt/);
+    // The reserve is the loop's own measurement of its slowest item, so a
+    // deploy is not STARTED with less time left than the last one took.
+    expect(budgetedLoop).toMatch(/Date\.now\(\) \+ reserveMs >= deadlineAt/);
     // The loop itself, not a second copy of it living in the lane.
     expect(budgetedLoop).not.toMatch(/for \(let i = 0/);
   });
