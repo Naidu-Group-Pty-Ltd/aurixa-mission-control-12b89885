@@ -21,6 +21,7 @@ import {
   listFilesMatchingGlobs,
   listTreeEntries,
   getFileContent,
+  OversizeFileError,
   type RepoRef,
 } from "./github-app.server";
 import { cascadeEventStatus, summariseCascade } from "./cascade/prReconcile.pure";
@@ -36,6 +37,8 @@ import { probeDeletions } from "./cascadeDeletions.server";
 import {
   assertMirrorPolicy,
   backendIdentityHold,
+  CASCADE_MAX_FILE_BYTES,
+  oversizeHold,
   backendRefsIn,
   isShippedPath,
   partitionCascadePaths,
@@ -902,7 +905,20 @@ export async function processClone(args: {
     primeFiles,
     8,
     async (path) => {
-      const primeFile = await getFileContent(octokit, primeRef, path);
+      let primeFile: Awaited<ReturnType<typeof getFileContent>>;
+      try {
+        primeFile = await getFileContent(octokit, primeRef, path, {
+          maxBytes: CASCADE_MAX_FILE_BYTES,
+        });
+      } catch (e) {
+        // Held, not failed. One file past the ceiling used to kill the whole
+        // pass — and the forty-seven beside it — on every attempt until the
+        // event ran out of claims. See `CASCADE_MAX_FILE_BYTES`.
+        if (e instanceof OversizeFileError) {
+          return { kind: "held", held: oversizeHold(path, e.bytes, e.maxBytes) };
+        }
+        throw e;
+      }
       if (!primeFile) return null;
 
       // A mirror already knows this path differs -- the blob SHAs said so -- and

@@ -131,9 +131,7 @@ export async function listFilesMatchingGlobs(
   if (globs.length === 0) return [];
   // Defence in depth: even if a caller forgets to run validateModuleGlobs,
   // never build a matcher for a pattern that could escape the module scope.
-  const { validateModuleGlobs, isSafeRepoPath, globToRegex } = await import(
-    "@/lib/module-globs"
-  );
+  const { validateModuleGlobs, isSafeRepoPath, globToRegex } = await import("@/lib/module-globs");
   const { valid, invalid } = validateModuleGlobs(globs);
   if (invalid.length > 0) {
     console.warn(
@@ -264,10 +262,38 @@ export type RepoFile = {
  * 1.6 MB PDF. The blobs API has no such limit, so that case is refetched
  * through it rather than silently truncated.
  */
+/**
+ * A file the caller asked not to read whole.
+ *
+ * Thrown BEFORE the bytes travel, on the size the contents API reports, so a
+ * caller with a ceiling pays one metadata round trip and no download. The
+ * cascade engine turns it into a held path; anything else lets it propagate.
+ */
+export class OversizeFileError extends Error {
+  constructor(
+    readonly path: string,
+    readonly bytes: number,
+    readonly maxBytes: number,
+  ) {
+    super(`${path} is ${bytes} bytes, over the ${maxBytes}-byte ceiling this read was given`);
+    this.name = "OversizeFileError";
+  }
+}
+
 export async function getFileContent(
   octokit: Octokit,
   ref: RepoRef,
   path: string,
+  opts?: {
+    /**
+     * Refuse, with `OversizeFileError`, a file larger than this. Judged on
+     * the size the contents API reports alongside the metadata, so the
+     * refusal costs no download — the contents API itself carries no body
+     * past 1 MB, and the blob fetch below is where a 39 MB file used to be
+     * read whole into an invocation that could not hold it.
+     */
+    maxBytes?: number;
+  },
 ): Promise<RepoFile | null> {
   try {
     const res = await octokit.repos.getContent({
@@ -284,6 +310,13 @@ export async function getFileContent(
       size?: number;
     };
     if (data.type !== "file" || !data.sha) return null;
+    if (
+      typeof opts?.maxBytes === "number" &&
+      typeof data.size === "number" &&
+      data.size > opts.maxBytes
+    ) {
+      throw new OversizeFileError(path, data.size, opts.maxBytes);
+    }
 
     let base64 = data.encoding === "base64" ? (data.content ?? "") : "";
     if (data.encoding !== "base64") {

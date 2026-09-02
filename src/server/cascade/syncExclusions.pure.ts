@@ -428,3 +428,39 @@ export function backendIdentityHold(args: {
       `another tenant's database.`,
   };
 }
+
+/**
+ * The most a cascade will carry in one file.
+ *
+ * A cascade reads a file whole from prime, base64-encodes it and posts it as
+ * one blob, and the invocation doing that has a ceiling the file does not.
+ * Measured 2 Sep 2026: the pending cascade to `npc-client-dashboard` was 48
+ * files, one of them a 39 MB migration seed, and the pass died on that one
+ * file on every attempt — three events exhausted their claims on it while a
+ * 55-file cascade with nothing large in it landed first time. Eight megabytes
+ * is the migration corpus's own `MAX_MIGRATION_BYTES`: a body the migration
+ * sync refuses to carry is not one the repository cascade should carry
+ * either.
+ */
+export const CASCADE_MAX_FILE_BYTES = 8 * 1024 * 1024;
+
+const megabytes = (bytes: number): string => `${(bytes / 1_048_576).toFixed(1)} MB`;
+
+/**
+ * Hold a file that is too large to cascade, and say so where a person reads.
+ *
+ * `manual_reconcile`, so it is counted and listed rather than withheld in
+ * silence: the file still differs upstream and somebody has to bring it
+ * across — by hand, because the migration sync refuses a body over its own
+ * ceiling as well.
+ */
+export function oversizeHold(path: string, bytes: number, maxBytes: number): HeldPath {
+  return {
+    path,
+    pattern: "(size: over the cascade ceiling)",
+    reason: "manual_reconcile",
+    note:
+      `${megabytes(bytes)} upstream, over the ${megabytes(maxBytes)} a cascade will carry in ` +
+      `one file. Bring it across by hand; the migration sync refuses a body this size as well.`,
+  };
+}
