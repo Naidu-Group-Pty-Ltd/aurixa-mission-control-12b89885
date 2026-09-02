@@ -82,6 +82,7 @@ describe("a permission it does not hold is named, not attempted", () => {
 
 describe("a quiet pass says nothing", () => {
   const empty: DeclarationSweep = {
+    permission: "granted",
     considered: 0,
     declared: [],
     already: 0,
@@ -101,6 +102,41 @@ describe("a quiet pass says nothing", () => {
     expect(sweepIsNoteworthy({ ...empty, cannot: [{ repo: "a/b", why: "x" }] })).toBe(true);
     expect(sweepIsNoteworthy({ ...empty, unknown: [{ repo: "a/b", why: "x" }] })).toBe(true);
     expect(sweepIsNoteworthy({ ...empty, failed: [{ repo: "a/b", error: "x" }] })).toBe(true);
+  });
+});
+
+describe("a permission it does not hold is named ahead of a read that failed", () => {
+  it("says which it is, rather than the vaguer of the two", () => {
+    /*
+      Found by watching the first live pass, 2 Sep 2026: all three clone
+      repositories reported `unknown` — "GitHub did not answer" — because
+      `listRepoVariables` answers null for a 403 exactly as it does for an
+      outage, and the old order asked about the reading first. The message
+      that names the remedy was unreachable precisely when it was the one
+      needed.
+    */
+    const out = plan(undefined, "read");
+    expect(out.act).toBe("cannot");
+  });
+
+  it("and still refuses to write in either case", () => {
+    // Reordering must cost nothing in safety: both outcomes leave the
+    // repository alone, so only the sentence an operator reads changes.
+    for (const caps of ["read", null] as const) {
+      expect(plan(undefined, caps).act).not.toBe("declare");
+    }
+  });
+
+  it("an unreadable PERMISSION still falls through to the attempt", () => {
+    // `unknown` is never `missing`: refusing on a lost signal would strand
+    // every clone, and GitHub's own refusal is the better diagnostic.
+    expect(plan(null, null).act).toBe("declare");
+  });
+
+  it("a repository that already agrees is unaffected by either", () => {
+    // Nothing is owed, so no permission question arises.
+    expect(plan(DECLARED_DEPLOYER, "read").act).toBe("already");
+    expect(plan(DECLARED_DEPLOYER, null).act).toBe("already");
   });
 });
 
