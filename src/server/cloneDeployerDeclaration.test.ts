@@ -83,6 +83,7 @@ describe("a permission it does not hold is named, not attempted", () => {
 describe("a quiet pass says nothing", () => {
   const empty: DeclarationSweep = {
     permission: "granted",
+    held: [],
     considered: 0,
     declared: [],
     already: 0,

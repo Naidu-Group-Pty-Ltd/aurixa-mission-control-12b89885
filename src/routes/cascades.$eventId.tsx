@@ -48,6 +48,7 @@ import {
 import { cn } from "@/lib/utils";
 import { formatDistanceToNow } from "@/lib/format";
 import { toast } from "sonner";
+import { describeCascadeOutcome } from "@/lib/cascadeRunOutcome";
 import { useServerFn } from "@tanstack/react-start";
 import { useConfirm } from "@/components/confirm-dialog";
 import { useDebouncedCallback } from "@/lib/use-debounced-callback";
@@ -240,11 +241,8 @@ function CascadeDetailPage() {
       }
       try {
         const res = await runCascadeFn({ data: { cascadeEventId: ev.id } });
-        if (!res.ok) toast.error(res.error);
-        else
-          toast.success(
-            `Cascade ${res.status}: ${res.counts.succeeded} merged · ${res.counts.opened} PRs · ${res.counts.failed} failed`,
-          );
+        const outcome = describeCascadeOutcome(res);
+        toast[outcome.level](outcome.message);
       } catch (e) {
         toast.error(e instanceof Error ? e.message : "Cascade failed");
       }

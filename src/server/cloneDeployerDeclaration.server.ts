@@ -27,6 +27,7 @@ type Db = SupabaseClient<Database>;
 export async function reconcileCloneDeployerDeclarations(supabase: Db): Promise<DeclarationSweep> {
   const sweep: DeclarationSweep = {
     permission: "unknown",
+    held: null,
     considered: 0,
     declared: [],
     already: 0,
@@ -55,10 +56,18 @@ export async function reconcileCloneDeployerDeclarations(supabase: Db): Promise<
   // Asked once for the whole sweep: the installation's permissions are a
   // property of the App, not of a repository, and asking per clone would be
   // one wasted call each.
-  const capabilities = assessRepoWriteCapabilities(await readInstallationPermissions());
+  const permissions = await readInstallationPermissions();
+  const capabilities = assessRepoWriteCapabilities(permissions);
   // Recorded whatever the pass then does, so a row of `unknown` repositories
   // can be told apart from a row caused by a permission the App does not hold.
   sweep.permission = capabilities.variables.state;
+  // And what the token DOES carry, so "missing" can be read against the list
+  // rather than against a settings page somebody else is looking at.
+  sweep.held = permissions
+    ? Object.entries(permissions)
+        .map(([name, level]) => `${name}:${level}`)
+        .sort()
+    : null;
 
   for (const clone of targets) {
     const owner = clone.github_owner as string;

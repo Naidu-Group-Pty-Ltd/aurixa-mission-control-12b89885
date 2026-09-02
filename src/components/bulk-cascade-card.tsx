@@ -46,6 +46,7 @@ import { cn } from "@/lib/utils";
 import { useClones, type Clone } from "@/lib/queries";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
+import { describeCascadeOutcome } from "@/lib/cascadeRunOutcome";
 import { useServerFn } from "@tanstack/react-start";
 import { runCascade } from "@/server/cascade-engine.functions";
 import { assessBlastRadius } from "@/lib/blast-radius";
@@ -372,13 +373,8 @@ export function BulkCascadeCard() {
       toast.info(`Bulk cascade started — ${targets.length} clones queued`);
 
       const res = await runCascadeFn({ data: { cascadeEventId: ev.id } });
-      if (!res.ok) {
-        toast.error(res.error);
-      } else {
-        toast.success(
-          `Bulk cascade complete: ${res.counts.succeeded} succeeded, ${res.counts.failed} failed`,
-        );
-      }
+      const outcome = describeCascadeOutcome(res);
+      toast[outcome.level](outcome.message);
 
       const { data: results } = await supabase
         .from("cascade_results")
@@ -432,11 +428,8 @@ export function BulkCascadeCard() {
     toast.info(`Retrying ${toRetry.length} failed clone${toRetry.length > 1 ? "s" : ""}…`);
     try {
       const res = await runCascadeFn({ data: { cascadeEventId: eventId } });
-      if (!res.ok) toast.error(res.error);
-      else
-        toast.success(
-          `Retry complete: ${res.counts.succeeded} succeeded, ${res.counts.failed} failed`,
-        );
+      const outcome = describeCascadeOutcome(res);
+      toast[outcome.level](outcome.message);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Retry failed");
     }

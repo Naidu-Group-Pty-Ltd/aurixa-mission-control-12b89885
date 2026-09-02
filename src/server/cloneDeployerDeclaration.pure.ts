@@ -120,6 +120,19 @@ export type DeclarationSweep = {
    * operator looks.
    */
   permission: CapabilityState;
+  /**
+   * Every permission the installation's token actually carries, as
+   * `name:level`, sorted — or `null` when the read failed.
+   *
+   * Names only; a permission map holds no secret. Recorded because the
+   * reconcile of 2 Sep 2026 reported `permission: "missing"` three times over
+   * after the organisation owner had, by their account, accepted the updated
+   * permissions — and a row that says only "missing" cannot tell "the
+   * acceptance never reached this installation" from "the App's own permission
+   * set was never widened". The list the token carries settles which, from the
+   * audit row, without anybody minting a token by hand.
+   */
+  held: string[] | null;
   considered: number;
   declared: string[];
   already: number;
