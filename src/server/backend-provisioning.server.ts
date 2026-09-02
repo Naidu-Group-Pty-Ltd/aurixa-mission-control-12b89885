@@ -10,6 +10,7 @@
 import crypto from "node:crypto";
 
 import { classifySecret, TENANT_SCOPED_REMEDY } from "./prime-backend.server";
+import { OversizedMigrationError } from "./oversizedMigration.pure";
 import { assessLedgerState, ledgerRepairHint } from "./cloneLedgerState.pure";
 import { BudgetPause, pastDeadline } from "./provisioningBudget";
 import { chooseRoleLabel, describeSeed, sqlCredentialLiteral } from "./cloneAdminIdentity.pure";
@@ -1578,11 +1579,29 @@ export async function applyPrimeMigrations(
    * so the caller can requeue rather than pronounce the clone level.
    */
   budget?: { isPastDeadline: (reserveMs: number) => boolean },
+  /**
+   * What to do with a body the corpus refuses for its size.
+   *
+   * The template-library seed is one 39 MB INSERT; `loadSql` throws
+   * `OversizedMigrationError` rather than hold it. With this supplied the
+   * replay streams that migration through `seedChunking.pure.ts` and sends it
+   * as statements the API will take, each carrying the file's own ON CONFLICT
+   * clause. The cursor makes a budgeted pass RESUME: statement boundaries are
+   * deterministic for a given file and budget, so "the first N are done" is a
+   * fact the next pass can act on rather than re-sending thirty statements it
+   * already sent. Without this, an oversized body fails the migration exactly
+   * as before.
+   */
+  oversize?: OversizeApplyOptions,
 ): Promise<{
   results: PrimeMigrationResult[];
   latestApplied: string | null;
   /** True when the budget stopped the loop with migrations still unsent. */
   stoppedEarly: boolean;
+  /** Chunked statements sent this pass, for a caller deciding whether it progressed. */
+  chunksApplied: number;
+  /** Where a chunked migration stopped, when the budget stopped it mid-way. */
+  chunkCursor: ChunkCursor | null;
 }> {
   await runSqlOnProject(projectRef, TRACKING_TABLE_SQL);
 
@@ -1648,6 +1667,8 @@ export async function applyPrimeMigrations(
   let attempted = 0;
   let slowestMs = 0;
   let stoppedEarly = false;
+  let chunksApplied = 0;
+  let chunkCursor: ChunkCursor | null = null;
   for (let i = 0; i < ordered.length; i++) {
     const m = ordered[i];
     if (applied.has(m.id)) {
@@ -1672,11 +1693,31 @@ export async function applyPrimeMigrations(
       // neither an inline body nor a resolver is a programming error rather
       // than a migration failure, but it is reported through the same channel
       // so it lands in `migrations_applied` where an operator will see it.
-      const sql = m.sql ?? (loadSql ? await loadSql({ id: m.id, name: m.name }) : undefined);
-      if (sql === undefined) {
-        throw new Error(`No SQL available for migration ${m.name} and no loader was provided`);
+      let sql: string | undefined;
+      let sentInChunks = false;
+      try {
+        sql = m.sql ?? (loadSql ? await loadSql({ id: m.id, name: m.name }) : undefined);
+      } catch (e) {
+        if (!(e instanceof OversizedMigrationError) || !oversize) throw e;
+        // Too big to hold, not too big to send: streamed and chunked. A pass
+        // the budget stops inside the seed leaves a cursor and reports
+        // `stoppedEarly`; the ledger row is written only once every
+        // statement has gone, so a half-sent seed is never "applied".
+        const chunked = await applyChunkedSeed(projectRef, m, oversize, budget);
+        chunksApplied += chunked.applied;
+        if (chunked.stoppedEarly) {
+          chunkCursor = chunked.cursor;
+          stoppedEarly = true;
+          break;
+        }
+        sentInChunks = true;
       }
-      await runSqlOnProject(projectRef, sql);
+      if (!sentInChunks) {
+        if (sql === undefined) {
+          throw new Error(`No SQL available for migration ${m.name} and no loader was provided`);
+        }
+        await runSqlOnProject(projectRef, sql);
+      }
       // Record in BOTH ledgers: canonical Supabase table is the source of
       // truth going forward, aurixa is kept as a mirror so older tooling /
       // health checks keep working. (Issue #14.)
@@ -1703,7 +1744,89 @@ export async function applyPrimeMigrations(
     }
   }
 
-  return { results, latestApplied, stoppedEarly };
+  return { results, latestApplied, stoppedEarly, chunksApplied, chunkCursor };
+}
+
+/** Where a chunked seed stopped: the next pass skips this many statements. */
+export type ChunkCursor = { migrationId: string; statementsDone: number };
+
+export type OversizeApplyOptions = {
+  /** Open the migration's body as a stream. Called twice per seed (two passes). */
+  streamSql: (m: { id: string; name: string }) => Promise<AsyncIterable<string>>;
+  /** Largest statement to send. Default `DEFAULT_SEED_STATEMENT_BYTES`. */
+  maxStatementBytes?: number;
+  /** Where the previous pass stopped, if it stopped inside this migration. */
+  cursor?: ChunkCursor | null;
+  /** Called after every statement lands, so the run's heartbeat carries the cursor. */
+  onStatementDone?: (progress: {
+    migrationId: string;
+    name: string;
+    statementsDone: number;
+    label: string;
+  }) => Promise<void>;
+};
+
+/**
+ * One megabyte a statement. The prime's own workflow sends ten rows a
+ * statement and measured its largest at ~1.1 MB; the rows vary by an order of
+ * magnitude in size, so the budget is bytes rather than rows.
+ */
+export const DEFAULT_SEED_STATEMENT_BYTES = 1_000_000;
+
+async function applyChunkedSeed(
+  projectRef: string,
+  m: { id: string; name: string },
+  oversize: OversizeApplyOptions,
+  budget?: { isPastDeadline: (reserveMs: number) => boolean },
+): Promise<{ applied: number; stoppedEarly: boolean; cursor: ChunkCursor | null }> {
+  const { readSeedShape, chunkSeedStatements, SeedShapeError } =
+    await import("./seedChunking.pure");
+  const maxStatementBytes = oversize.maxStatementBytes ?? DEFAULT_SEED_STATEMENT_BYTES;
+  const skip = oversize.cursor?.migrationId === m.id ? oversize.cursor.statementsDone : 0;
+  let index = 0;
+  let applied = 0;
+  let slowestMs = 0;
+  try {
+    const shape = await readSeedShape(await oversize.streamSql(m));
+    for await (const stmt of chunkSeedStatements(await oversize.streamSql(m), shape, {
+      maxStatementBytes,
+    })) {
+      if (index < skip) {
+        index += 1;
+        continue;
+      }
+      // At least one statement a pass, so a pass never comes back with the
+      // cursor where it found it.
+      if (applied > 0 && budget?.isPastDeadline(slowestMs)) {
+        return {
+          applied,
+          stoppedEarly: true,
+          cursor: { migrationId: m.id, statementsDone: index },
+        };
+      }
+      const startedAt = Date.now();
+      await runSqlOnProject(projectRef, stmt.sql);
+      index += 1;
+      applied += 1;
+      slowestMs = Math.max(slowestMs, Date.now() - startedAt);
+      await oversize.onStatementDone?.({
+        migrationId: m.id,
+        name: m.name,
+        statementsDone: index,
+        label: stmt.label,
+      });
+    }
+  } catch (e) {
+    if (e instanceof SeedShapeError) {
+      throw new Error(
+        `${m.name} is past the size ceiling and is not a seed-shaped INSERT this replay can chunk ` +
+          `(${e.message}). Apply it to this clone by hand (psql or the SQL editor), record its ` +
+          "version in supabase_migrations.schema_migrations, then re-run the sync.",
+      );
+    }
+    throw e;
+  }
+  return { applied, stoppedEarly: false, cursor: null };
 }
 
 // ─── Module Migrations ───────────────────────────────────────────────

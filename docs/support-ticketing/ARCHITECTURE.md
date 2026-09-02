@@ -49,18 +49,56 @@ One policy decides auto vs human, everywhere:
 
 ## The lanes
 
-| lane | action | what it does |
-|---|---|---|
-| security_scan | `pr_merge` | squash-merges a **verified** codex remediation draft PR (medium severity and below only); prime-scoped merges deliberately do NOT auto-cascade — a notification points at /cascades instead |
-| security_scan | `rescan` | enqueues a codex scan when no verified fix is waiting |
-| redeploy | `sql_migration` | replays pending prime migrations onto the clone's Supabase project via the Management API — scoped to what the prime has itself applied (`openScopedPrimeCorpus`, the fleet sync's rule) and to nothing behind a hole, after the destructiveness gate, and bounded to a 45 s invocation budget with the same requeue rule as `edge_function_deploy` |
-| redeploy | `edge_function_deploy` | redeploys prime function bundles onto the clone project |
-| monitor | `monitor_recovery` | watches `clone_health_beacons`; resolves on an `ok` beacon, parks for a human when there is no telemetry or attempts run out |
+| lane          | action                 | what it does                                                                                                                                                                                                                                                                                                                                        |
+| ------------- | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| security_scan | `pr_merge`             | squash-merges a **verified** codex remediation draft PR (medium severity and below only); prime-scoped merges deliberately do NOT auto-cascade — a notification points at /cascades instead                                                                                                                                                         |
+| security_scan | `rescan`               | enqueues a codex scan when no verified fix is waiting                                                                                                                                                                                                                                                                                               |
+| redeploy      | `sql_migration`        | replays pending prime migrations onto the clone's Supabase project via the Management API — scoped to what the prime has itself applied (`openScopedPrimeCorpus`, the fleet sync's rule) and to nothing behind a hole, after the destructiveness gate, and bounded to a 45 s invocation budget with the same requeue rule as `edge_function_deploy` |
+| redeploy      | `edge_function_deploy` | redeploys prime function bundles onto the clone project                                                                                                                                                                                                                                                                                             |
+| monitor       | `monitor_recovery`     | watches `clone_health_beacons`; resolves on an `ok` beacon, parks for a human when there is no telemetry or attempts run out                                                                                                                                                                                                                        |
 
 The scan pipeline self-heals even without a ticket: each drain pass turns
 freshly verified `codex_remediations` (severity ⇒ P2 or below) into
 `pr_merge` runs, deduped on remediation id. Critical/high findings keep the
 existing two-key review gate untouched.
+
+### A migration too big to hold is streamed, not withheld
+
+The template-library seed is one 39 MB INSERT of 543 rows. The corpus refuses
+any body past 8 MB (`MAX_MIGRATION_BYTES`), and the refusal is right: a body
+that size cannot be sent as one Management API statement, and this isolate
+cannot hold it either — a 39 MB file is a 52 MB base64 response, a 78 MB
+UTF-16 string and a second copy for the split, against a 128 MB limit. For as
+long as the prime's own ledger did not record the seed, the fleet scope
+withheld it and nothing noticed. On 2 September 2026 at 13:56 UTC the prime
+recorded it (applied by hand through the prime's `apply-migration` workflow),
+and from that moment the lane would have parked every run as "unreadable" and
+an approved run would have halted the replay on the same throw — with every
+migration after the seed held back behind it, on every clone.
+
+`seedChunking.pure.ts` is the prime workflow's tuple-boundary chunker written
+as a two-pass STREAM: the first pass keeps only the INSERT header, the
+`ON CONFLICT` clause, the trailing statements and the tuple count; the second
+re-reads the blob and emits statements as tuples arrive, each carrying the
+file's own clause, grouped to `DEFAULT_SEED_STATEMENT_BYTES`. No more than one
+tuple and one statement exist in memory. The corpus opens the blob with the
+raw media type (`openSqlStream`), so the bytes are never one string.
+
+Four rules. **The checks are the prime script's, kept**: a line that is
+exactly `  (` inside a dollar-quoted JSON schema would be taken as a tuple
+boundary and every chunk around it would be invalid SQL while the parse
+looked complete, so the dollar-quote tags must balance within every tuple; the
+second read must find exactly the tuples the first did, or the blob changed
+between reads. **The ledger row is written once, after the last statement** —
+a half-sent seed is never "applied". **A budgeted pass resumes rather than
+restarts**: statement boundaries are deterministic for a file and a budget, so
+the run's heartbeat carries a `chunk_cursor` and the next pass skips what was
+sent; a pass that sent part of the seed and nothing else still counts as
+progress for the attempt decision. And **the gate assesses the skeleton** —
+header, clause and tail, which is every statement the rows are poured into —
+rather than parking the run as unreadable; the rows are data. A large file
+that is NOT this shape is refused by name with the manual remedy, exactly as
+before.
 
 ## Tables
 
