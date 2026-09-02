@@ -620,10 +620,22 @@ async function recountEvent(supabase: Db, eventId: string): Promise<boolean> {
 
   const current = await supabase
     .from("cascade_events")
-    .select("summary, status")
+    .select("summary, status, worker_started_at, worker_finished_at")
     .eq("id", eventId)
     .maybeSingle();
   if (current.error) throw new Error(`Could not read event ${eventId}: ${current.error.message}`);
+  // Never over an event that is still being executed. The engine writes the
+  // event's status and summary itself when its pass ends; a recount in the
+  // middle of that pass — from a result row that has already moved while its
+  // siblings are still `queued` or `pushing` — rewrites a `running` event to
+  // `completed`. Measured 2 Sep 2026 14:10: the drain had claimed 795d73d2
+  // and was pushing preflight-property-group when this recount marked the
+  // event `completed`; the invocation was then cut at 60 s, so the engine's
+  // own write never came, the clone's row sat at `pushing` under a finished
+  // event, and neither reclaim rule could see it. A pass is finished when
+  // the engine says so, not when the counts happen to add up.
+  if (current.data?.status === "running" || current.data?.status === "pending") return false;
+  if (current.data?.worker_started_at && !current.data?.worker_finished_at) return false;
   if (current.data?.summary === summary && current.data?.status === status) return false;
 
   const { error: writeErr } = await supabase
