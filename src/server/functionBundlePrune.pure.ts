@@ -93,6 +93,131 @@ export function resolveRelative(fromPath: string, spec: string): string | null {
 }
 
 /**
+ * The source with the TEXT of string and template literals blanked, for the
+ * opacity test alone.
+ *
+ * A dynamic `import(` whose argument is not a literal means the graph cannot
+ * be walked, so the bundle must carry everything. That test read the raw
+ * source, and English is full of the phrase: `pdf-import-monitoring` contains
+ * "PDF import(s) failed in the last 24h.", which matched, and the function
+ * shipped the whole 6.44 MB tree — refused 413 — over a plural.
+ *
+ * Blanking is applied to the opacity test alone, never to specifier
+ * extraction, which needs the very literals this removes.
+ *
+ * ## What it must not do
+ *
+ * A template literal's `${…}` holds CODE, not text, so blanking it would hide
+ * a real `${await import(path)}` and produce a bundle pruned against a graph
+ * that was never fully read — the one failure this module exists to prevent.
+ * Interpolations are therefore left exactly as they are.
+ *
+ * ## Failing safe
+ *
+ * Over-reporting opacity costs a large bundle and a loud refusal;
+ * under-reporting silently loses a file. So anything this scanner cannot make
+ * sense of — an unterminated literal, a backtick nested inside an
+ * interpolation — returns the ORIGINAL source, and the test behaves exactly
+ * as it did before.
+ */
+export function blankStringContents(src: string): string {
+  const out = src.split("");
+  let i = 0;
+
+  /** Index just past the `}` closing an interpolation opened at `from`, or -1. */
+  const endOfInterpolation = (from: number): number => {
+    let depth = 1;
+    let k = from;
+    while (k < src.length) {
+      const c = src[k];
+      if (c === "\\") {
+        k += 2;
+        continue;
+      }
+      if (c === "'" || c === '"') {
+        const quote = c;
+        k += 1;
+        while (k < src.length && src[k] !== quote) {
+          if (src[k] === "\\") k += 1;
+          else if (src[k] === "\n") return -1;
+          k += 1;
+        }
+        if (k >= src.length) return -1;
+        k += 1;
+        continue;
+      }
+      // A template nested inside an interpolation is more than this scanner
+      // claims to understand. Bail rather than guess.
+      if (c === "`") return -1;
+      if (c === "{") depth += 1;
+      if (c === "}") {
+        depth -= 1;
+        if (depth === 0) return k;
+      }
+      k += 1;
+    }
+    return -1;
+  };
+
+  while (i < src.length) {
+    const ch = src[i];
+    if (ch !== '"' && ch !== "'" && ch !== "`") {
+      i += 1;
+      continue;
+    }
+
+    if (ch === "`") {
+      let j = i + 1;
+      let closed = false;
+      while (j < src.length) {
+        const c = src[j];
+        if (c === "\\") {
+          j += 2;
+          continue;
+        }
+        if (c === "`") {
+          closed = true;
+          break;
+        }
+        if (c === "$" && src[j + 1] === "{") {
+          const close = endOfInterpolation(j + 2);
+          if (close < 0) return src;
+          j = close + 1; // the interpolation's code is left untouched
+          continue;
+        }
+        out[j] = " ";
+        j += 1;
+      }
+      if (!closed) return src;
+      i = j + 1;
+      continue;
+    }
+
+    let j = i + 1;
+    let closed = false;
+    while (j < src.length) {
+      const c = src[j];
+      if (c === "\\") {
+        j += 2;
+        continue;
+      }
+      if (c === ch) {
+        closed = true;
+        break;
+      }
+      // A newline ends an unterminated quoted string — not this scanner's
+      // assumption about the source, so say nothing rather than guess.
+      if (c === "\n") break;
+      j += 1;
+    }
+    if (!closed) return src;
+    for (let k = i + 1; k < j; k += 1) out[k] = " ";
+    i = j + 1;
+  }
+  return out.join("");
+}
+
+/**
  * Every internal specifier a source file imports, and whether anything about
  * its imports could not be read.
  */
@@ -140,10 +265,18 @@ export function readSpecifiers(source: string): {
   // `import("x")` and `await import("x")`, literal argument only.
   for (const m of src.matchAll(/\bimport\s*\(\s*["']([^"']+)["']\s*\)/g)) specifiers.push(m[1]);
 
-  // A dynamic import whose argument is NOT a plain literal cannot be followed,
-  // and this platform uses `await import(...)` heavily. Seeing one means the
-  // graph is incomplete and the bundle must not be pruned.
-  const opaque = /\bimport\s*\(\s*(?!["'])/.test(src);
+  /*
+    A dynamic import whose argument is NOT a plain literal cannot be followed,
+    and this platform uses `await import(...)` heavily. Seeing one means the
+    graph is incomplete and the bundle must not be pruned.
+
+    Tested against the source with string CONTENTS blanked, because English is
+    full of the phrase — "PDF import(s) failed in the last 24h." matched, and
+    `pdf-import-monitoring` shipped the whole 6.44 MB tree over a plural. The
+    blanking is for this test only; specifier extraction above needs the very
+    literals it removes.
+  */
+  const opaque = /\bimport\s*\(\s*(?!["'])/.test(blankStringContents(src));
 
   return { specifiers, opaque };
 }

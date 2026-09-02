@@ -4,6 +4,7 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+  blankStringContents,
   pruneBundleToReachable,
   readSpecifiers,
   resolveRelative,
@@ -149,6 +150,76 @@ describe("readSpecifiers", () => {
   it("ignores a specifier that only appears in a comment", () => {
     const r = readSpecifiers(`// import x from "./ghost.ts"\nimport a from "./a.ts";`);
     expect(r.specifiers).toEqual(["./a.ts"]);
+  });
+});
+
+describe("blankStringContents — text is blanked, code is not", () => {
+  it("blanks the text of a template but leaves its interpolations alone", () => {
+    /*
+      The distinction the opacity test depends on. Template TEXT is prose and
+      can say anything; `${…}` is code and may hold a real dynamic import.
+    */
+    const out = blankStringContents("const s = `a ${x + 1} b`;");
+    expect(out).toContain("${x + 1}");
+    expect(out).not.toContain("a ");
+    expect(out).toHaveLength("const s = `a ${x + 1} b`;".length);
+  });
+
+  it("blanks quoted strings", () => {
+    expect(blankStringContents(`const s = "hello";`)).toBe(`const s = "     ";`);
+  });
+
+  it("returns the source untouched when a literal never closes", () => {
+    // Over-reporting opacity costs a big bundle and a loud refusal;
+    // under-reporting silently loses a file. Ambiguity goes the safe way.
+    const src = "const s = `never closed";
+    expect(blankStringContents(src)).toBe(src);
+  });
+
+  it("returns the source untouched for a template nested in an interpolation", () => {
+    // More than this scanner claims to understand.
+    const src = "const s = `a ${`b`} c`;";
+    expect(blankStringContents(src)).toBe(src);
+  });
+
+  it("does not let an escaped quote end the string early", () => {
+    // `"a\"b"` holds four characters between its quotes, and the blanked
+    // source stays the same length so every offset still lines up.
+    const src = `const s = "a\\"b";`;
+    const out = blankStringContents(src);
+    expect(out).toBe(`const s = "    ";`);
+    expect(out).toHaveLength(src.length);
+  });
+});
+
+describe("prose is not a computed import", () => {
+  it("does not read English inside a template as a dynamic import", () => {
+    /*
+      `pdf-import-monitoring/index.ts` contains
+      "${failedImports24h} PDF import(s) failed in the last 24h."
+      and the opacity test matched `import(s`. The function declined to prune
+      and shipped the whole 6.42 MB tree, which the deploy API refuses at 413 —
+      one of the seven failures in the first completed fleet deploy.
+    */
+    const r = readSpecifiers("const summary = `${n} PDF import(s) failed in the last 24h.`;");
+    expect(r.opaque).toBe(false);
+  });
+
+  it("does not read it inside a quoted string either", () => {
+    expect(readSpecifiers(`const s = "3 import(s) failed";`).opaque).toBe(false);
+  });
+
+  it("STILL reports a real dynamic import inside an interpolation", () => {
+    /*
+      The direction that must not regress. Blanking a `${…}` would hide this
+      and prune the bundle against a graph that was never fully read — the one
+      failure this module exists to prevent.
+    */
+    expect(readSpecifiers("const m = `${await import(path)}`;").opaque).toBe(true);
+  });
+
+  it("still reports an ordinary computed import", () => {
+    expect(readSpecifiers("const m = await import(path);").opaque).toBe(true);
   });
 });
 
