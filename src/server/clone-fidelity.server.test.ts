@@ -1,10 +1,11 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach, beforeEach } from "vitest";
 import {
   classifySecret,
   IDENTITY_SECRETS,
   DEPLOYMENT_CONFIG_SECRETS,
 } from "./prime-backend.server";
 import {
+  enforceRequiredExtensions,
   quoteExtensionIdent,
   resolveRequiredExtensions,
   REQUIRED_EXTENSION_FLOOR,
@@ -48,6 +49,138 @@ describe("resolveRequiredExtensions", () => {
   it("does not duplicate an extension the prime shares with the floor", () => {
     const out = resolveRequiredExtensions(["pg_cron", "pg_cron"]);
     expect(out.filter((n) => n === "pg_cron")).toHaveLength(1);
+  });
+});
+
+describe("enforceRequiredExtensions", () => {
+  // This step runs BEFORE the schema build, out of the same 50-second
+  // invocation budget the build spends. The first version asked the clone
+  // "is <name> installed?" and then issued `create extension if not exists`
+  // for every extension in the set — two serial Management-API round trips
+  // each, every pass, whether or not anything was absent.
+  //
+  // Measured on the 1 Sep 2026 dry run against a clone where all twelve had
+  // been installed on the very first pass: ~30 seconds of every ~50-second
+  // pass, so the schema build got under half a budget to make progress in.
+  // Same class as the ten schema stages that never asked whether they were
+  // already done — verifying a built thing must not cost what building it did.
+
+  const originalFetch = globalThis.fetch;
+  const originalToken = process.env.SB_MGMT_API_TOKEN;
+  let bodies: string[] = [];
+
+  const stubFetch = (installedOnClone: readonly string[]) => {
+    bodies = [];
+    globalThis.fetch = (async (url: unknown, init?: { body?: string }) => {
+      const sql = init?.body ? String(JSON.parse(String(init.body)).query ?? "") : "";
+      bodies.push(sql);
+      const forClone = String(url).includes("/projects/clone-ref/");
+      const rows = /from pg_extension/.test(sql)
+        ? (forClone ? installedOnClone : PRIME_EXTENSIONS).map((extname) => ({ extname }))
+        : [];
+      return {
+        ok: true,
+        status: 200,
+        json: async () => rows,
+        text: async () => JSON.stringify(rows),
+      };
+    }) as unknown as typeof fetch;
+  };
+
+  const PRIME_EXTENSIONS = ["pg_cron", "pg_net", "vector", "uuid-ossp"];
+
+  beforeEach(() => {
+    // `headers()` throws without it, before a request is ever built — so
+    // without this the stub below is never reached and every extension comes
+    // back `failed`.
+    process.env.SB_MGMT_API_TOKEN = "test-token";
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    if (originalToken === undefined) delete process.env.SB_MGMT_API_TOKEN;
+    else process.env.SB_MGMT_API_TOKEN = originalToken;
+  });
+
+  it("asks the clone what it holds once, and creates nothing when it holds everything", async () => {
+    const wanted = resolveRequiredExtensions(PRIME_EXTENSIONS);
+    stubFetch(wanted);
+
+    const results = await enforceRequiredExtensions("clone-ref", "prime-ref");
+
+    expect(results.map((r) => r.name)).toEqual(wanted);
+    for (const r of results) expect(r.status).toBe("already_present");
+
+    // One read per side, and not one statement more. The per-extension probe
+    // is what this is here to keep gone.
+    expect(bodies.filter((b) => /from pg_extension/.test(b))).toHaveLength(2);
+    expect(bodies.filter((b) => /create extension/i.test(b))).toHaveLength(0);
+    expect(bodies).toHaveLength(2);
+  });
+
+  it("creates exactly what is missing, and reports the rest as present", async () => {
+    const wanted = resolveRequiredExtensions(PRIME_EXTENSIONS);
+    const absent = ["vector", "uuid-ossp"];
+    stubFetch(wanted.filter((n) => !absent.includes(n)));
+
+    const results = await enforceRequiredExtensions("clone-ref", "prime-ref");
+
+    for (const name of absent) {
+      expect(results.find((r) => r.name === name)?.status).toBe("installed");
+    }
+    for (const r of results) {
+      if (!absent.includes(r.name)) expect(r.status).toBe("already_present");
+    }
+
+    const creates = bodies.filter((b) => /create extension/i.test(b));
+    expect(creates).toHaveLength(absent.length);
+    // `uuid-ossp` is not a bare identifier; an unquoted one is a syntax error.
+    expect(creates.some((b) => b.includes('"uuid-ossp"'))).toBe(true);
+  });
+
+  it("puts every extension back on the create path when the clone cannot be read", async () => {
+    // `fetchProjectExtensionNames` swallows its error and answers []. Reading
+    // that as "nothing is installed" is the safe direction: the fallback does
+    // the work rather than assuming it is already done.
+    const wanted = resolveRequiredExtensions(PRIME_EXTENSIONS);
+    globalThis.fetch = (async (url: unknown, init?: { body?: string }) => {
+      const sql = init?.body ? String(JSON.parse(String(init.body)).query ?? "") : "";
+      const forClone = String(url).includes("/projects/clone-ref/");
+      if (forClone && /from pg_extension/.test(sql)) {
+        return { ok: false, status: 500, text: async () => "boom", json: async () => ({}) };
+      }
+      const rows = /from pg_extension/.test(sql)
+        ? PRIME_EXTENSIONS.map((extname) => ({ extname }))
+        : [];
+      return { ok: true, status: 200, json: async () => rows, text: async () => "[]" };
+    }) as unknown as typeof fetch;
+
+    const results = await enforceRequiredExtensions("clone-ref", "prime-ref");
+    expect(results).toHaveLength(wanted.length);
+    for (const r of results) expect(r.status).toBe("installed");
+  });
+
+  it("keeps a failed extension non-fatal and named", async () => {
+    // A clone missing pg_cron or pg_net has no background layer at all, so
+    // the failure has to reach the parity report rather than the console.
+    globalThis.fetch = (async (url: unknown, init?: { body?: string }) => {
+      const sql = init?.body ? String(JSON.parse(String(init.body)).query ?? "") : "";
+      if (/create extension/i.test(sql) && sql.includes("vector")) {
+        return { ok: false, status: 400, text: async () => "no such extension", json: async () => ({}) };
+      }
+      const rows = /from pg_extension/.test(sql)
+        ? (String(url).includes("/projects/clone-ref/") ? [] : PRIME_EXTENSIONS).map((extname) => ({
+            extname,
+          }))
+        : [];
+      return { ok: true, status: 200, json: async () => rows, text: async () => "[]" };
+    }) as unknown as typeof fetch;
+
+    const results = await enforceRequiredExtensions("clone-ref", "prime-ref");
+    const vector = results.find((r) => r.name === "vector");
+    expect(vector?.status).toBe("failed");
+    expect(vector?.error).toContain("no such extension");
+    expect(results.some((r) => r.status === "installed")).toBe(true);
   });
 });
 
