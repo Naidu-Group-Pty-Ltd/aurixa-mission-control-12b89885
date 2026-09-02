@@ -275,8 +275,17 @@ export function readSpecifiers(source: string): {
     `pdf-import-monitoring` shipped the whole 6.44 MB tree over a plural. The
     blanking is for this test only; specifier extraction above needs the very
     literals it removes.
+
+    The whitespace class sits INSIDE the lookahead on purpose. With `(?!["'])`
+    alone, `\s*` may match nothing, and the lookahead then reads the newline
+    before a literal that begins on the next line —
+    `import(\n  './x.ts')` — as "not a quote", so a plain literal import is
+    reported computed. Measured on the prime, 2 Sep 2026:
+    `_shared/builderStock/repairSourceImages.ts` breaks one such import over
+    two lines, and the two functions importing it carried the whole 6.65 MB
+    tree and were refused 413 on every pass.
   */
-  const opaque = /\bimport\s*\(\s*(?!["'])/.test(blankStringContents(src));
+  const opaque = /\bimport\s*\(\s*(?![\s"'])/.test(blankStringContents(src));
 
   return { specifiers, opaque };
 }

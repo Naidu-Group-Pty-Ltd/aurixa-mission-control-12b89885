@@ -384,3 +384,24 @@ describe("partitionByDependency — never step over a hole", () => {
     expect(part.orphaned).toEqual([]);
   });
 });
+
+describe("the self-healing sql_migration lane is the third replay path", () => {
+  it("scopes through the same function, and never passes the raw corpus", async () => {
+    /*
+      Found 2 Sep 2026: the cascade's catch-up lane took the raw listing and
+      called 341 files "pending" on a clone the fleet sync reported level —
+      fifty-eight of them destructive. Same defect as the button, one file
+      over.
+    */
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(new URL("./self-healing.server.ts", import.meta.url), "utf8");
+    const start = src.indexOf("async function executeSqlMigration");
+    const end = src.indexOf("async function deployWithinBudget");
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const lane = src.slice(start, end);
+    expect(lane).toContain("openScopedPrimeCorpus");
+    expect(lane).not.toContain("openPrimeMigrationCorpus(");
+    expect(lane).toMatch(/applyPrimeMigrations\(\s*backend\.supabase_project_ref,\s*runnable,/);
+  });
+});
