@@ -24,6 +24,11 @@
  * What IS recorded is each act: `audit_log` gets a row naming the clone, the
  * actor, the token's class and every check that ran. Never the token.
  */
+import {
+  assessRepoWriteCapabilities,
+  explainMissingDeployerVariable,
+  type RepoWriteCapabilities,
+} from "@/server/githubAppCapability.pure";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import {
   classifyAccessToken,
@@ -60,6 +65,21 @@ export type BackendDeployRun = {
   readonly completedAt: string | null;
   readonly detail: string | null;
   readonly reasons: readonly string[];
+  /**
+   * Why the last pass failed, when one did.
+   *
+   * `last_error` was READ and then discarded, so a run stuck in `executing`
+   * or retrying showed a status and nothing else — which is precisely what
+   * made the first live edge-function deploy undiagnosable without database
+   * access. The column existed the whole time.
+   */
+  readonly lastError: string | null;
+  /**
+   * How far a resumable run has got: bundles deployed so far, and whether it
+   * expects another pass. An `executing` row with no progress reads exactly
+   * like one that is working, and they need different responses.
+   */
+  readonly progress: string | null;
 };
 
 export type BackendDeployState = {
@@ -74,6 +94,16 @@ export type BackendDeployState = {
     readonly at: string;
     readonly by: string | null;
   } | null;
+  /** What GitHub says this App installation may write on this repository. */
+  readonly capabilities: RepoWriteCapabilities;
+  /**
+   * Why this repository has no `BACKEND_DEPLOYED_BY`, when it has none.
+   *
+   * Null where the variable is set, or where nothing is known — an invented
+   * explanation is worse than none. This is the line that turns "the deploy
+   * check is red again" into a remedy an administrator can act on.
+   */
+  readonly deployerBlocker: string | null;
   /** Set when the state itself could not be assembled. */
   readonly error: string | null;
 };
@@ -91,6 +121,8 @@ export async function getCloneBackendDeployState(cloneId: string): Promise<Backe
     projectRef: null,
     runs: [],
     lastTokenEvent: null,
+    capabilities: assessRepoWriteCapabilities(null),
+    deployerBlocker: null,
     error: null,
   };
 
@@ -111,7 +143,7 @@ export async function getCloneBackendDeployState(cloneId: string): Promise<Backe
     .maybeSingle();
   const projectRef = backend?.supabase_project_ref ?? null;
 
-  const [secretNames, variables, runs, lastTokenEvent] = await Promise.all([
+  const [secretNames, variables, runs, lastTokenEvent, permissions] = await Promise.all([
     (async () => {
       const { listRepoSecretNames } = await import("@/server/github-secrets.server");
       return listRepoSecretNames({ owner: clone.github_owner, repo: clone.github_repo });
@@ -122,9 +154,23 @@ export async function getCloneBackendDeployState(cloneId: string): Promise<Backe
     })(),
     readBackendRuns(cloneId),
     readLastTokenEvent(cloneId),
+    (async () => {
+      const { readInstallationPermissions } = await import("@/server/github-variables.server");
+      return readInstallationPermissions();
+    })(),
   ]);
 
+  // What Mission Control is PERMITTED to do here, asked of GitHub rather than
+  // inferred from a write that quietly did nothing. A clone whose deploy check
+  // fails on every push because one variable is missing must be able to say
+  // which of "not written yet" and "not permitted" it is.
+  const capabilities = assessRepoWriteCapabilities(permissions);
+  const variableSet =
+    (variables?.[BACKEND_DEPLOYER_VARIABLE] ?? null) === BACKEND_DEPLOYER_MISSION_CONTROL;
+
   return {
+    capabilities,
+    deployerBlocker: explainMissingDeployerVariable({ variableSet, capabilities }),
     route: deriveDeployRoute({
       hasAccessTokenSecret: secretNames === null ? null : secretNames.includes(ACCESS_TOKEN_SECRET),
       deployerVariable: variables?.[BACKEND_DEPLOYER_VARIABLE] ?? null,
@@ -181,8 +227,28 @@ async function readBackendRuns(cloneId: string): Promise<BackendDeployRun[]> {
       // was allowed to run unattended. An operator reading a surprising run
       // wants the first, and one reading a parked run wants the second.
       reasons: [...(plan.reasons ?? []), ...(policy.reasons ?? [])].slice(0, 4),
+      lastError: typeof row.last_error === "string" && row.last_error ? row.last_error : null,
+      progress: describeProgress(result),
     };
   });
+}
+
+/**
+ * A resumable run's progress, in the units an operator cares about.
+ *
+ * Null where the run has recorded nothing — an empty `result` is the ordinary
+ * state for a pass that has not finished one batch yet, and inventing a "0
+ * deployed" for it would read as failure rather than as not-yet.
+ */
+function describeProgress(result: Record<string, unknown>): string | null {
+  const deployed = typeof result.deployed === "number" ? result.deployed : null;
+  if (deployed === null) return null;
+  const resuming = result.resuming === true;
+  const failed = Array.isArray(result.failed) ? result.failed.length : 0;
+  const parts = [`${deployed} deployed`];
+  if (failed > 0) parts.push(`${failed} failed`);
+  parts.push(resuming ? "more to come" : "complete");
+  return parts.join(" · ");
 }
 
 async function readLastTokenEvent(cloneId: string): Promise<BackendDeployState["lastTokenEvent"]> {
@@ -434,4 +500,38 @@ export async function detachCloneDeployToken(input: {
   });
 
   return { ok: true };
+}
+
+/**
+ * Declare Mission Control as this repository's backend deployer, now.
+ *
+ * The declaration already happens on every cascade that queues backend work,
+ * but a clone whose cascade landed before that code shipped — or whose write
+ * was refused — has no way back except waiting for the next cascade. This is
+ * that way back, and it is also the diagnostic: it returns GitHub's own
+ * refusal rather than a summary of it, because "Resource not accessible by
+ * integration" names the remedy and "could not declare the deployer" does not.
+ *
+ * Idempotent, and verified by reading the variable back — a write that
+ * returned without throwing is not a variable the workflow can read.
+ */
+export async function declareCloneDeployer(
+  cloneId: string,
+): Promise<{ ok: boolean; error: string | null }> {
+  const { data: clone, error: cloneErr } = await admin
+    .from("clones")
+    .select("github_owner, github_repo")
+    .eq("id", cloneId)
+    .maybeSingle();
+  if (cloneErr) return { ok: false, error: `Could not read the clone: ${cloneErr.message}` };
+  if (!clone?.github_owner || !clone?.github_repo) {
+    return { ok: false, error: "This clone has no GitHub repository on record." };
+  }
+
+  const { declareMissionControlDeploysBackend } = await import("@/server/github-variables.server");
+  const declared = await declareMissionControlDeploysBackend({
+    owner: clone.github_owner,
+    repo: clone.github_repo,
+  });
+  return declared.ok ? { ok: true, error: null } : { ok: false, error: declared.error };
 }

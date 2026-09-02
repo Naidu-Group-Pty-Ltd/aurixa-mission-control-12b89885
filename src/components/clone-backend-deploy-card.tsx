@@ -9,6 +9,7 @@ import { AlertTriangle, CheckCircle2, CloudUpload, HelpCircle, ShieldCheck } fro
 import { toast } from "sonner";
 import {
   attachCloneBackendToken,
+  declareCloneBackendDeployer,
   detachCloneBackendToken,
   getCloneBackendDeploy,
 } from "@/lib/clone-backend-deploy.functions";
@@ -51,6 +52,7 @@ export function CloneBackendDeployCard({ cloneId }: { cloneId: string }) {
   const readFn = useServerFn(getCloneBackendDeploy);
   const attachFn = useServerFn(attachCloneBackendToken);
   const detachFn = useServerFn(detachCloneBackendToken);
+  const declareFn = useServerFn(declareCloneBackendDeployer);
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -73,6 +75,24 @@ export function CloneBackendDeployCard({ cloneId }: { cloneId: string }) {
       }
       setToken("");
       toast.success("Scoped token placed. This repository's CI deploys its own backend now.");
+      void refetch();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function declareDeployer() {
+    setBusy(true);
+    try {
+      const res = await declareFn({ data: { cloneId } });
+      if (!res.ok) {
+        // GitHub's own refusal, verbatim and at length. "Resource not
+        // accessible by integration" names the remedy; a tidied summary of it
+        // does not, and this is the message an administrator acts on.
+        toast.error(res.error ?? "The declaration failed.", { duration: 15_000 });
+        return;
+      }
+      toast.success("Declared. This repository's deploy check will stand down on its next push.");
       void refetch();
     } finally {
       setBusy(false);
@@ -139,6 +159,26 @@ export function CloneBackendDeployCard({ cloneId }: { cloneId: string }) {
                 {data.projectRef ? ` → ${data.projectRef}` : " · no Supabase project yet"}
               </p>
             )}
+
+            {/*
+              Why the deploy check is red, when it is. The variable being
+              absent is a fact; which of "never written" and "not permitted"
+              it is decides the remedy, and only one of them is something an
+              operator can fix from this page.
+            */}
+            {data.deployerBlocker && (
+              <div className="border-warning/40 bg-warning/5 space-y-2 rounded-md border p-3">
+                <p className="flex items-start gap-2 text-sm">
+                  <AlertTriangle className="text-warning mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+                  <span>{data.deployerBlocker}</span>
+                </p>
+                {data.capabilities.variables.state !== "missing" && (
+                  <Button variant="outline" size="sm" disabled={busy} onClick={declareDeployer}>
+                    Declare Mission Control as the deployer
+                  </Button>
+                )}
+              </div>
+            )}
           </div>
         )}
 
@@ -164,6 +204,12 @@ export function CloneBackendDeployCard({ cloneId }: { cloneId: string }) {
                 <span className="text-muted-foreground text-xs">{when(run.createdAt)}</span>
               </div>
               {run.detail && <p className="text-muted-foreground mt-1 text-xs">{run.detail}</p>}
+              {/* Progress first: an `executing` row with no progress and one
+                  that is two thirds through look identical without it. */}
+              {run.progress && <p className="mt-1 text-xs font-medium">{run.progress}</p>}
+              {run.lastError && (
+                <p className="text-destructive mt-1 text-xs break-words">{run.lastError}</p>
+              )}
               {run.reasons.length > 0 && (
                 <ul className="text-muted-foreground mt-1 list-disc pl-4 text-xs">
                   {run.reasons.map((reason, i) => (
