@@ -25,6 +25,12 @@ import {
   type RepoRef,
 } from "./github-app.server";
 import { cascadeEventStatus, summariseCascade } from "./cascade/prReconcile.pure";
+import type { CascadeBudget, CascadeRunResult } from "@/lib/cascadeRunOutcome";
+import {
+  classifyGitHubFailure,
+  describeDeferral,
+  describePause,
+} from "./cascade/rateLimitDeferral.pure";
 import {
   decideDeletion,
   deletionSuffixFor,
@@ -102,17 +108,12 @@ function branchName(sourceSha: string) {
   return `aurixa/cascade-${shortSha(sourceSha)}-${Date.now().toString(36)}`;
 }
 
-export type CascadeRunResult =
-  | {
-      ok: true;
-      status: "completed" | "failed" | "partial";
-      counts: { succeeded: number; opened: number; failed: number; skipped: number; total: number };
-    }
-  | { ok: false; error: string };
+export type { CascadeBudget, CascadeRunResult };
 
 export async function executeCascade(
   supabase: SupabaseLike,
   cascadeEventId: string,
+  opts?: { budget?: CascadeBudget },
 ): Promise<CascadeRunResult> {
   const [eventRes, primeRes, queuedRes] = await Promise.all([
     supabase.from("cascade_events").select("*").eq("id", cascadeEventId).single(),
@@ -211,7 +212,29 @@ export async function executeCascade(
     }
   }
 
+  // Bounded in time, and a stop is a pause rather than a death.
+  //
+  // A fleet event processes every queued clone in this one loop, inside one
+  // hook invocation. Measured 2 Sep 2026: a first module-scope cascade to
+  // `preflight-property-group` alone is 353 files, and with the mirror clone
+  // and the pull-request handling beside it the pass outran the 60-second
+  // window on every attempt — the isolate was cut, the results sat at
+  // `pushing`, the 10-minute reclaim requeued them, the next claim spent an
+  // attempt on the same read, and after three the event was dead with nothing
+  // delivered. Asking the budget before each clone means a pass that cannot
+  // fit another clone STOPS, leaves the rest `queued`, and hands the event
+  // back for the next tick with the work it did kept.
+  let attempted = 0;
+  let slowestMs = 0;
+  let stoppedEarly = false;
+  let deferred: { until: string; detail: string } | null = null;
+
   for (const r of queuedRows) {
+    if (attempted > 0 && opts?.budget?.isPastDeadline(slowestMs)) {
+      stoppedEarly = true;
+      break;
+    }
+    const cloneStartedAt = Date.now();
     const clone = (r as { clones: unknown }).clones as {
       id: string;
       name: string;
@@ -351,6 +374,32 @@ export async function executeCascade(
         await supabase.from("clones").update({ sync_status: "failed" }).eq("id", clone.id);
       }
     } catch (e) {
+      // A rate limit is a window, not a verdict. Measured 2 Sep 2026 at
+      // 13:19:50: event 844df9e5 failed all three clones on "API rate limit
+      // exceeded for installation ID 157200201", and a failed event is never
+      // claimed again — so the prime commit it carried would have reached no
+      // clone without a person re-arming the row. The clone goes back to
+      // `queued`, the loop stops (every clone after it would hit the same
+      // limit and spend what little is left), and the event waits for the
+      // reset GitHub named.
+      const failure = classifyGitHubFailure(e);
+      if (failure.kind === "rate_limited") {
+        const { error: requeueError } = await supabase
+          .from("cascade_results")
+          .update({
+            status: "queued",
+            started_at: null,
+            error_message: `Deferred until ${failure.until}: ${e instanceof Error ? e.message : String(e)}`,
+          })
+          .eq("id", r.id);
+        if (requeueError) {
+          throw new Error(
+            `cascade ${event.id}: could not requeue ${clone.name} after a rate limit: ${requeueError.message}`,
+          );
+        }
+        deferred = { until: failure.until, detail: failure.detail };
+        break;
+      }
       failed++;
       await supabase
         .from("cascade_results")
@@ -362,6 +411,38 @@ export async function executeCascade(
         .eq("id", r.id);
       await supabase.from("clones").update({ sync_status: "failed" }).eq("id", clone.id);
     }
+    attempted++;
+    slowestMs = Math.max(slowestMs, Date.now() - cloneStartedAt);
+  }
+
+  // Handed back rather than finished. The event is `pending` again with the
+  // moment it may next be claimed, and the summary says what was done and why
+  // it stopped, so the row is never a silent `running` and never a false
+  // `completed`. The counts below are NOT written: a partial tally rendered as
+  // a final one is how "1 of 3" comes to read as the whole fleet.
+  if (deferred || stoppedEarly) {
+    const done = succeeded + opened + failed + skipped;
+    const total = queuedRows.length;
+    const summary = deferred
+      ? describeDeferral({ until: deferred.until, detail: deferred.detail, done, total })
+      : describePause({ done, total });
+    const { error: holdError } = await supabase
+      .from("cascade_events")
+      .update({
+        status: "pending",
+        worker_started_at: null,
+        next_attempt_at: deferred ? deferred.until : new Date().toISOString(),
+        summary,
+      })
+      .eq("id", event.id);
+    if (holdError) {
+      throw new Error(
+        `cascade ${event.id}: could not hold the event for its next pass: ${holdError.message}`,
+      );
+    }
+    return deferred
+      ? { ok: true, status: "deferred", until: deferred.until, done, total }
+      : { ok: true, status: "resuming", done, total };
   }
 
   const totalQueued = (queuedRes.data ?? []).length;
@@ -732,6 +813,14 @@ export async function processClone(args: {
   const deletionCandidates: Array<{ path: string; cloneSha: string }> = [];
   /** Directories prime's tree contains. Probe ORDER only — never a verdict. */
   const primeDirectories = new Set<string>();
+  /**
+   * The clone's blob SHA for every path it holds, when BOTH trees were listed
+   * complete — the answer to "does the clone already have these bytes?" for
+   * every candidate, paid for once. `null` when either listing was truncated,
+   * in which case the prepare step reads the clone's copy per path as before:
+   * a truncated tree cannot say a file is absent, only that it was not listed.
+   */
+  let cloneShaByPath: ReadonlyMap<string, string> | null = null;
   if (isMirror) {
     const [primeTree, cloneTree] = await Promise.all([
       listTreeEntries(octokit, primeRef),
@@ -749,6 +838,7 @@ export async function processClone(args: {
     for (const [path, sha] of primeTree.entries) {
       if (cloneTree.entries.get(path) !== sha) candidatePaths.push(path);
     }
+    cloneShaByPath = cloneTree.entries;
     for (const [path, sha] of cloneTree.entries) {
       if (!primeTree.entries.has(path)) {
         onlyInClone++;
@@ -791,6 +881,7 @@ export async function processClone(args: {
       candidatePaths = candidatePaths.filter(
         (path) => cloneTree.entries.get(path) !== primeTree.entries.get(path),
       );
+      cloneShaByPath = cloneTree.entries;
     }
 
     // The clone's own tree, read for one more reason: a module-scoped cascade
@@ -950,7 +1041,17 @@ export async function processClone(args: {
       // of the one scope that cannot afford it.
       let cloneFile = null as Awaited<ReturnType<typeof getFileContent>> | null;
       let cloneFileRead = false;
-      if (!isMirror) {
+      if (cloneShaByPath !== null) {
+        // The tree listing already answered this for every path — a blob SHA
+        // is a hash of the bytes — so reading the clone's copy here is a
+        // request that cannot change the answer. It was made anyway, once per
+        // candidate, on every module-scope pass: 353 of them on the first
+        // cascade to `preflight-property-group`, repeated on each of the
+        // attempts that followed, which is a third of what spent the App's
+        // hourly budget on 2 Sep 2026. The clone's content is still fetched
+        // below, lazily, where the backend-identity hold needs it.
+        if (cloneShaByPath.get(path) === primeFile.sha) return null;
+      } else if (!isMirror) {
         cloneFile = await getFileContent(octokit, cloneRef, path);
         cloneFileRead = true;
         // Compared by blob SHA, which IS a hash of the bytes, rather than by

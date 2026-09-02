@@ -156,4 +156,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260902100000",
     assertions: [{ kind: "cron", jobname: "clone-deployer-declaration-reconcile" }],
   },
+  {
+    migration: "20260902134000_cascade_events_next_attempt_at.sql",
+    version: "20260902134000",
+    assertions: [{ kind: "column", table: "cascade_events", column: "next_attempt_at" }],
+  },
 ];

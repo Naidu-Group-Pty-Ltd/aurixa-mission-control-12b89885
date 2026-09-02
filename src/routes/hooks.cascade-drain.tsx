@@ -12,11 +12,20 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { verifyCronAuth } from "@/server/cron-auth.server";
-import { executeCascade } from "@/server/cascade-engine.server";
+import { executeCascade, type CascadeBudget } from "@/server/cascade-engine.server";
 
 const admin = supabaseAdmin;
 const STALL_MINUTES = 10;
 const MAX_JOBS_PER_RUN = 3;
+/**
+ * Wall clock one invocation may spend on cascades, out of the 60,000 ms the
+ * pg_cron `net.http_post` that drives it will wait. The engine asks before
+ * each clone whether one more pass like its slowest so far still fits, and a
+ * pass that stops here is handed back `pending` with the work it did kept —
+ * see `executeCascade`. The remainder is headroom for the reclaim, the claim
+ * and the bookkeeping around the run.
+ */
+const INVOCATION_BUDGET_MS = 45_000;
 const MAX_ATTEMPTS = 3;
 
 async function reclaimStalled() {
@@ -114,6 +123,10 @@ async function claimOne(): Promise<{ id: string; attempts: number } | null> {
     // then skipped for ever by this claim. A `pr` cascade opens a pull request
     // on the clone -- it is the SAFER of the two to retry, not the riskier.
     .is("worker_started_at", null)
+    // Not yet: an event a rate limit deferred names the reset it waits for,
+    // and one paused at its budget names now(). NOT NULL with a default, so
+    // this is one comparison and never an `.or()` string.
+    .lte("next_attempt_at", nowIso)
     .lt("attempts", MAX_ATTEMPTS)
     .order("created_at", { ascending: true })
     .limit(1);
@@ -140,12 +153,55 @@ async function claimOne(): Promise<{ id: string; attempts: number } | null> {
   return claimed ?? null;
 }
 
-async function drainOne(): Promise<{ processed: boolean; ok?: boolean; error?: string }> {
+async function drainOne(
+  budget: CascadeBudget,
+): Promise<{ processed: boolean; ok?: boolean; held?: string; error?: string }> {
   const claimed = await claimOne();
   if (!claimed) return { processed: false };
 
   try {
-    await executeCascade(supabaseAdmin, claimed.id);
+    const res = await executeCascade(supabaseAdmin, claimed.id, { budget });
+    if (res.ok && (res.status === "deferred" || res.status === "resuming")) {
+      // The engine has already put the event back to `pending` with the
+      // moment it may next be claimed. What is decided here is the ATTEMPT.
+      //
+      // A deferral never spends one: the limit is GitHub's window, not this
+      // event's fault, and `next_attempt_at` already paces the retry. A pause
+      // that landed at least one clone is refunded too — a pass that is
+      // progressing is not a pass that is failing, which is the rule the
+      // provisioning ceiling learned the hard way. A pause that landed NOTHING
+      // is the one case that keeps its attempt: a single clone that cannot
+      // fit inside the budget would otherwise be retried for ever, quietly,
+      // and after the last attempt it has to be said rather than left
+      // `pending` with no claim that will ever take it.
+      const refund = res.status === "deferred" || res.done > 0;
+      if (refund) {
+        const { error } = await admin
+          .from("cascade_events")
+          .update({ attempts: Math.max(0, claimed.attempts - 1) })
+          .eq("id", claimed.id);
+        if (error) {
+          throw new Error(
+            `cascade-drain: could not refund the attempt on ${claimed.id}: ${error.message}`,
+          );
+        }
+      } else if (claimed.attempts >= MAX_ATTEMPTS) {
+        const { error } = await admin
+          .from("cascade_events")
+          .update({
+            status: "failed",
+            worker_finished_at: new Date().toISOString(),
+            summary:
+              `No clone completed inside the invocation budget in ${MAX_ATTEMPTS} attempts ` +
+              `(${res.total} queued). One clone's pass is larger than one tick; it needs splitting.`,
+          })
+          .eq("id", claimed.id);
+        if (error) {
+          throw new Error(`cascade-drain: could not fail ${claimed.id}: ${error.message}`);
+        }
+      }
+      return { processed: true, ok: true, held: res.status };
+    }
     await admin
       .from("cascade_events")
       .update({ worker_finished_at: new Date().toISOString() })
@@ -174,12 +230,17 @@ export const Route = createFileRoute("/hooks/cascade-drain")({
         const auth = verifyCronAuth(request);
         if (!auth.ok) return auth.response;
         try {
+          const deadlineAt = Date.now() + INVOCATION_BUDGET_MS;
+          const budget: CascadeBudget = {
+            isPastDeadline: (reserveMs) => Date.now() + reserveMs >= deadlineAt,
+          };
           await reclaimStalled();
-          const results: Array<{ ok?: boolean; error?: string }> = [];
+          const results: Array<{ ok?: boolean; held?: string; error?: string }> = [];
           for (let i = 0; i < MAX_JOBS_PER_RUN; i++) {
-            const r = await drainOne();
+            if (Date.now() >= deadlineAt) break;
+            const r = await drainOne(budget);
             if (!r.processed) break;
-            results.push({ ok: r.ok, error: r.error });
+            results.push({ ok: r.ok, held: r.held, error: r.error });
           }
           return new Response(
             JSON.stringify({ success: true, processed: results.length, results }),

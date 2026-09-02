@@ -689,6 +689,7 @@ export type Database = {
           id: string
           initiated_by: string | null
           mode: Database["public"]["Enums"]["cascade_mode"]
+          next_attempt_at: string
           requires_approval: boolean
           scope_filter: Json
           source_branch: string | null
@@ -710,6 +711,7 @@ export type Database = {
           id?: string
           initiated_by?: string | null
           mode: Database["public"]["Enums"]["cascade_mode"]
+          next_attempt_at?: string
           requires_approval?: boolean
           scope_filter?: Json
           source_branch?: string | null
@@ -731,6 +733,7 @@ export type Database = {
           id?: string
           initiated_by?: string | null
           mode?: Database["public"]["Enums"]["cascade_mode"]
+          next_attempt_at?: string
           requires_approval?: boolean
           scope_filter?: Json
           source_branch?: string | null

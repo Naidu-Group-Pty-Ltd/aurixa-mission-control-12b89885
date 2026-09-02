@@ -28,6 +28,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
+import { describeCascadeOutcome } from "@/lib/cascadeRunOutcome";
 import { formatDistanceToNow } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { useServerFn } from "@tanstack/react-start";
@@ -266,14 +267,8 @@ function CascadesPage() {
 
     try {
       const res = await runCascadeFn({ data: { cascadeEventId: ev.id } });
-      if (!res.ok) {
-        toast.error(res.error);
-      } else {
-        const { succeeded, opened, failed, skipped } = res.counts;
-        toast.success(
-          `Cascade ${res.status}: ${succeeded} merged · ${opened} PRs · ${failed} failed · ${skipped} skipped`,
-        );
-      }
+      const outcome = describeCascadeOutcome(res);
+      toast[outcome.level](outcome.message);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Engine failed");
     }

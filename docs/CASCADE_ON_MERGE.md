@@ -35,13 +35,13 @@ succeed?" and it always had.
 
 **2 · A scope that can express "the whole application".** The engine cascades
 the file globs of the modules INSTALLED on a clone. A mirror has no modules — it
-*is* the prime with one build flag flipped — so a registered mirror with an
+_is_ the prime with one build flag flipped — so a registered mirror with an
 empty `clone_modules` still skips, now saying "No installed modules".
 `clones.sync_scope` adds `mirror`, which diffs the two repositories by **git
 blob SHA** instead.
 
 Blob SHAs matter for cost, not elegance. The module path re-reads both sides'
-*content* to decide whether a file changed: two API calls per file, fine for a
+_content_ to decide whether a file changed: two API calls per file, fine for a
 module and impossible for a tree of several thousand against an hourly budget of
 5,000. Git already hashed every file, so `prime[path] !== clone[path]` is the
 same answer for two calls total, and content is fetched only for what actually
@@ -66,13 +66,13 @@ read.
 
 Two reasons, both withheld, only one silent:
 
-| reason | meaning | in the pull request |
-| --- | --- | --- |
-| `protected` | the clone owns this file outright — config, identity, the fail-closed workflow guards | counted, not listed |
-| `manual_reconcile` | the clone's version is a deliberate **superset** of prime's | listed by name, with why |
+| reason             | meaning                                                                               | in the pull request      |
+| ------------------ | ------------------------------------------------------------------------------------- | ------------------------ |
+| `protected`        | the clone owns this file outright — config, identity, the fail-closed workflow guards | counted, not listed      |
+| `manual_reconcile` | the clone's version is a deliberate **superset** of prime's                           | listed by name, with why |
 
 `src/App.tsx` is the second kind. The clone carries route gates prime does not,
-so taking prime's copy would revert real work — but skipping it *silently* means
+so taking prime's copy would revert real work — but skipping it _silently_ means
 the clone never learns about a new upstream route. Both failure modes are real;
 only one of them is quiet, so that one gets a section in every pull request.
 
@@ -84,16 +84,16 @@ cascade wrote prime@14af87a over 57 paths, and **two of them carried this
 clone's own divergence and were in nobody's list**:
 
 - `public/lead-magnet-embed.html` — served verbatim out of `public/`, and it
-  hard-codes a Supabase URL *and* an anon key. Prime's pair is prime's project.
+  hard-codes a Supabase URL _and_ an anon key. Prime's pair is prime's project.
   The clone had fixed this two days earlier, under a commit whose subject was
-  *"A live lead form was writing this clone's leads into the prime's database"*;
+  _"A live lead form was writing this clone's leads into the prime's database"_;
   the cascade wrote prime's copy straight back over it, so for the twenty-eight
   minutes between that merge and the repair the lead-capture form on the
   clone's own domain was posting names, emails and phone numbers into the
   prime's database again.
 - `src/lib/reportTemplate/__tests__/renderAssetNormalisation.spec.ts` — the
   clone derives the fixture's project from `SUPABASE_URL`; prime hard-codes its
-  own. This one *announced itself*: `compileTemplateHtmlForPdf` admits
+  own. This one _announced itself_: `compileTemplateHtmlForPdf` admits
   `SUPABASE_URL` and nothing else, so prime's literal is a foreign origin here,
   the compiler correctly drops it, and the assertion fails. It was the only red
   check on the next cascade's pull request.
@@ -108,11 +108,11 @@ Before a blob is written, if the path is one the clone **ships or executes** and
 prime's content names a Supabase project that is not this clone's, the clone's
 copy is read and compared:
 
-| clone's copy | decision |
-| --- | --- |
-| names no foreign project | **held** — writing prime's would revert a fix |
-| names one too | written — prime is moving, the clone is following |
-| does not exist | **held** — a new shipped file naming another tenant |
+| clone's copy             | decision                                            |
+| ------------------------ | --------------------------------------------------- |
+| names no foreign project | **held** — writing prime's would revert a fix       |
+| names one too            | written — prime is moving, the clone is following   |
+| does not exist           | **held** — a new shipped file naming another tenant |
 
 Three things make it a guard rather than a nuisance.
 
@@ -154,8 +154,8 @@ travel.
 
 ### The constant had no caller
 
-`assertMirrorPolicy`'s refusal tells an operator to *"seed it from
-`DEFAULT_MIRROR_EXCLUSIONS` before cascading"*. Nothing in the application ever
+`assertMirrorPolicy`'s refusal tells an operator to _"seed it from
+`DEFAULT_MIRROR_EXCLUSIONS` before cascading"_. Nothing in the application ever
 did: the constant was referenced only by its own test, and the live rows had
 been inserted by hand — which is why they were incomplete. Seeding is now a
 migration, `20260826070000_seed_mirror_exclusions.sql`, generated from the
@@ -163,7 +163,7 @@ constant and re-checked against it by a test that fails on one changed
 character. It is additive and idempotent: an exclusion an operator added
 deliberately is not the migration's to withdraw.
 
-A mirror registered *after* that migration still gets no rows — the constant
+A mirror registered _after_ that migration still gets no rows — the constant
 still has no caller on the registration path. `assertMirrorPolicy` refuses to
 cascade into it, which is the safe half of the answer and not the whole of it.
 
@@ -245,11 +245,11 @@ skip" is only true of `auto_merge`.
 So `pr` mode now keeps one proposal and moves it forward, the way Dependabot
 does:
 
-| state | what happens |
-| --- | --- |
-| same tree as the open cascade PR | report that PR, open nothing |
-| new tree | move that PR's branch to the new commit and retitle it |
-| none open | open one |
+| state                            | what happens                                           |
+| -------------------------------- | ------------------------------------------------------ |
+| same tree as the open cascade PR | report that PR, open nothing                           |
+| new tree                         | move that PR's branch to the new commit and retitle it |
+| none open                        | open one                                               |
 
 The open proposal is found by branch prefix (`aurixa/cascade-`), not by author,
 because the pull request is opened by whichever App installation is configured
@@ -340,12 +340,12 @@ an audit row; a person merging one by hand wrote nothing at all. Neither reached
 
 Measured on 30 August 2026, an hour after the fact:
 
-| | GitHub | Mission Control |
-| --- | --- | --- |
-| PR #66 | merged 07:55 | `pr_opened` |
-| PR #67 | merged 08:35 | `pr_opened` |
-| both events | — | `0 merged · 1 PRs` |
-| the clone | two cascades landed | `behind`, **140 commits**, pointer frozen |
+|             | GitHub              | Mission Control                           |
+| ----------- | ------------------- | ----------------------------------------- |
+| PR #66      | merged 07:55        | `pr_opened`                               |
+| PR #67      | merged 08:35        | `pr_opened`                               |
+| both events | —                   | `0 merged · 1 PRs`                        |
+| the clone   | two cascades landed | `behind`, **140 commits**, pointer frozen |
 
 The clone's card drew a green tick and the word `PR_OPENED` beside a badge
 reading `AUTO MERGE` — three signals that together say "merged" about a pull
@@ -364,7 +364,7 @@ remembered.**
 Not "what the drain did". That misses every merge a person performed, every
 merge that landed while this control plane was down, and every proposal an
 operator closed. One `pulls.get` answers all of them, which is also what lets a
-record that fell behind *before any of this existed* be brought forward.
+record that fell behind _before any of this existed_ be brought forward.
 
 It is why the work list is Mission Control's **unreconciled rows** rather than
 GitHub's open pull requests: a merged pull request is not open any more, so a
@@ -447,7 +447,7 @@ this is regeneration rather than resolution.
 
 **It never touches a branch a person has committed to.** This is the rule the
 whole design turns on. The pull request body asks operators to fix a held file
-*in the same merge* — that is the one thing a cascade cannot deliver and a human
+_in the same merge_ — that is the one thing a cascade cannot deliver and a human
 must — and regeneration force-overwrites the branch. The test is exact rather
 than heuristic: the engine writes ONE commit with a message shape it controls,
 so one such commit and nothing else means the branch is still entirely the
@@ -495,12 +495,12 @@ one.
 
 Measured on 30 August 2026, comparing both trees blob by blob:
 
-| | |
-| --- | --- |
-| binary files in prime | **144** |
-| byte-identical on the clone | 143 |
-| **corrupted** | **1** — `public/brand/aurixa-emblem-240.png` |
-| | prime 78,450 bytes → clone 142,140 (**1.81×**) |
+|                             |                                                |
+| --------------------------- | ---------------------------------------------- |
+| binary files in prime       | **144**                                        |
+| byte-identical on the clone | 143                                            |
+| **corrupted**               | **1** — `public/brand/aurixa-emblem-240.png`   |
+|                             | prime 78,450 bytes → clone 142,140 (**1.81×**) |
 
 The proof is not the size. It is that the clone's copy **decodes cleanly as
 UTF-8**, which no PNG does — it is no longer an image at all. And it had been
@@ -542,8 +542,8 @@ blob is refetched through the blobs API, which has none.
 ## A cascade removes what prime removed
 
 Until 30 Aug 2026 a cascade delivered modifications and additions and silently
-dropped every deletion. The engine said so out loud — *"Neither scope ever
-DELETES … Prime-side deletions are counted and named, never acted on"* — and the
+dropped every deletion. The engine said so out loud — _"Neither scope ever
+DELETES … Prime-side deletions are counted and named, never acted on"_ — and the
 reasoning behind that comment was sound: a clone legitimately carries files
 prime has never had. On the client-facing mirror there are nine of them, and
 they are the difference between a clone and a copy.
@@ -569,14 +569,14 @@ clone, for every commit of this shape.
 > A deletion is delivered only where the clone's copy is byte-identical to
 > **some version prime itself held at that path.**
 
-| prime's history says | the clone's blob is | outcome |
-| --- | --- | --- |
-| never had this path | — | keep — the clone owns it |
-| deleted it | a version prime held | **delete** |
-| deleted it | a blob prime never held here | keep — somebody edited it |
+| prime's history says | the clone's blob is          | outcome                   |
+| -------------------- | ---------------------------- | ------------------------- |
+| never had this path  | —                            | keep — the clone owns it  |
+| deleted it           | a version prime held         | **delete**                |
+| deleted it           | a blob prime never held here | keep — somebody edited it |
 
-The question the rule is really asking is *did anybody here do work that would
-be lost*. Unmodified prime content at an older point is not work. A blob prime
+The question the rule is really asking is _did anybody here do work that would
+be lost_. Unmodified prime content at an older point is not work. A blob prime
 never had at that path is.
 
 #### Why "some version" and not "the version prime deleted"
@@ -611,7 +611,7 @@ prime no longer has is a deletion, and a file outside them is none of the
 cascade's business and never becomes a candidate at all.
 
 That took one extra tree read on the module path, which previously only ever
-learned what prime *has*. The globs are re-validated before any of them decides
+learned what prime _has_. The globs are re-validated before any of them decides
 a deletion: `listFilesMatchingGlobs` validates its own copy, and a pattern that
 escaped the module scope would do so here in the one direction that destroys
 something. A truncated tree read refuses the deletion pass outright, because it
@@ -619,7 +619,7 @@ looks exactly like a clone holding fewer files than it does.
 
 ### A tree comparison is not evidence
 
-The tree read produces *candidates* — thirteen on the mirror, of which nine are
+The tree read produces _candidates_ — thirteen on the mirror, of which nine are
 the clone's own isolation machinery. Evidence has to come from prime's own
 history: one `listCommits` for the path returns every commit that touched it,
 newest first, so the first is the removal and the rest are the revisions prime
@@ -637,7 +637,7 @@ wrong here does not fail loudly, it deletes the wrong file.
 referenced by a file the cascade cannot deliver — a `manual_reconcile` path like
 `src/App.tsx`, or a file only the clone has. Every surviving source the engine
 can see is scanned first. Files that are byte-identical in prime and clone are
-deliberately *not* scanned, and that is sound rather than a shortcut: prime
+deliberately _not_ scanned, and that is sound rather than a shortcut: prime
 compiles without the deleted path, so prime's copy cannot import it, so an
 identical copy cannot either.
 
@@ -649,9 +649,9 @@ this codebase (the partner-agreement removal: three Edge Functions and eleven
 shared modules) is fourteen.
 
 **Never spend the probe budget on the wrong candidates.** Ordering is a
-heuristic about which candidates to *ask about* first and never about what the
+heuristic about which candidates to _ask about_ first and never about what the
 answer is: a clone-only file in a directory prime does not have at all is almost
-certainly the clone's own, and one sitting in a directory prime *does* have is
+certainly the clone's own, and one sitting in a directory prime _does_ have is
 where a deletion hides. That is what keeps a clone with a large tree of its own
 from crowding a real removal out past the probe cap.
 
@@ -662,12 +662,12 @@ Finding out what still imports a path meant stripping comments, and the shared
 `"supabase/functions/**"` as a comment opening and closes it at the next `*/`
 anywhere in the file. The engine's own source carries eleven such globs, and
 scanning it that way loses two thirds of the file. It steps over quoted strings
-now. On the import guard that fault only ever cost a *warning*; on a deletion it
+now. On the import guard that fault only ever cost a _warning_; on a deletion it
 would have cost the file.
 
 ## The rehearsal is the engine
 
-`runCascadeDryRun` answers one question — *what would this cascade actually do?*
+`runCascadeDryRun` answers one question — _what would this cascade actually do?_
 — and until now it answered it with a walk of its own. That walk disagreed with
 the cascade on nearly every point that matters:
 
@@ -697,7 +697,7 @@ all below `if (dryRun)`, asserted by source position rather than by reading the
 code and trusting it.
 
 **`createBlob` is guarded at the call**, because it is the one write that
-happens *before* the boundary — inside the prepare loop a dry run still needs
+happens _before_ the boundary — inside the prepare loop a dry run still needs
 for the content holds and the held-file guards. Prime's own blob SHA stands in.
 
 **`processClone` writes to the database on no path at all**, which is what makes
@@ -705,7 +705,7 @@ one flag sufficient. A test asserts that too: if it ever gained a write, a
 rehearsal would start mutating Mission Control's record of a cascade that never
 happened.
 
-The flag defaults to *writing*. A safety flag that defaulted the other way would
+The flag defaults to _writing_. A safety flag that defaulted the other way would
 turn a real cascade into a silent no-op, which is the more expensive mistake
 here — nothing would fail, and the fleet would simply stop receiving anything.
 
@@ -714,3 +714,74 @@ would be **removed**, paths withheld, paths awaiting a hand-reconcile, prime
 deletions withheld and why, and any held file the cascade **would break** — the
 last of which is red regardless of file count, because one is enough to leave
 the clone's default branch unable to build.
+
+## A pass that cannot finish is handed back, never lost
+
+Two ways a fleet pass died on 2 September 2026, and each reported as
+something else.
+
+At 13:19:50 event `844df9e5` failed for all three clones with `API rate limit
+exceeded for installation ID 157200201`. The engine wrote each clone `failed`,
+the event went `failed`, and a failed event is never claimed again — so the
+prime commit it carried (`79a9cb78`) would have reached no clone without a
+person re-arming the row by hand. Nothing about that commit was wrong. The
+App's hourly budget had been spent, and GitHub said in the same response when
+it would be back.
+
+The budget had been spent by the other way. The drain runs `executeCascade`
+synchronously inside one hook invocation, and the pg_cron `net.http_post` that
+drives it gives up at 60,000 ms; the webhook path fires the same function
+without awaiting it. A fleet event processes every queued clone in one loop,
+and a first module-scope cascade to `preflight-property-group` is 353 files —
+measured against the trees, not guessed — beside a mirror clone and the
+pull-request handling. The pass outran the window on every attempt, the
+isolate was cut with its results at `pushing`, the ten-minute reclaim requeued
+them, and the next claim spent an attempt on the same read. Three attempts and
+the event was dead. Each of those reads was also paid twice: after the tree
+comparison had already narrowed the candidates to the paths whose blob SHAs
+differ, the prepare step read the CLONE's copy of every candidate anyway, to
+compare a SHA it already had.
+
+### Four rules
+
+**A rate limit is a window, not a verdict.** `classifyGitHubFailure`
+(`cascade/rateLimitDeferral.pure.ts`) recognises GitHub's own sentence, a 429,
+or an exhausted `x-ratelimit-remaining` on a 403, and reads the reset off
+`retry-after` or `x-ratelimit-reset` — falling back to fifteen minutes and
+never past sixty-five, because a reset a day away is a header this code
+misread. The clone it stopped on goes back to `queued` with its start cleared,
+the loop stops (every clone after it would meet the same limit), and the event
+is `pending` with `next_attempt_at` at the reset. A 403 for a permission the
+App does not hold is deliberately NOT a window: it will be exactly as denied in
+an hour, and deferring it would hide a configuration fault behind a clock.
+
+**The pass is bounded in time, and asks before each clone.** The drain hands
+the engine a deadline — `INVOCATION_BUDGET_MS`, 45 of the 60 seconds — and
+before each clone the engine asks whether one more pass like its slowest so
+far still fits. If not it stops, leaves the rest `queued`, and hands the event
+back `pending` with `next_attempt_at = now()`, so the next tick carries on
+where this one stopped. The first clone is always attempted: a pass that
+refused its first clone would make no progress on any tick.
+
+**Progress is never charged as an attempt.** A deferral refunds the attempt
+outright — the limit is GitHub's, not the event's. A pause that landed at least
+one clone refunds it too. The one pause that keeps its attempt is the one that
+landed nothing, because a single clone whose pass is larger than one tick
+would otherwise be retried quietly for ever; after the last attempt the drain
+says so in the summary and fails the event, rather than leaving it `pending`
+past `MAX_ATTEMPTS` where no claim will ever take it. The counts of a held pass
+are never written as the event's outcome — a partial tally rendered as a final
+one is how "1 of 3" comes to read as the whole fleet.
+
+**The tree answers "same bytes?" once.** When both listings were complete,
+`cloneShaByPath` carries the clone's blob SHA for every path and the prepare
+step compares against it; the clone's content is fetched only where the
+backend-identity hold needs it. A truncated listing cannot say a file is
+absent, only that it was not listed, so the per-path read stays for that case.
+
+`next_attempt_at` is `NOT NULL DEFAULT now()` — one comparison in the claim,
+the shape `remediation_runs` already uses, and never an `.or()` string composed
+around a timestamp. `passContinuation.contract.test.ts` pins the shape of all
+of it: the classification before the failure count, the requeue before the
+break, the return before the final tally, the refund rule, and the claim's
+comparison.
