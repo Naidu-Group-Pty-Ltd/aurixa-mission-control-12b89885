@@ -3,6 +3,12 @@
  *
  * Structural, so asserted against the source: a double would agree with wrong
  * code, and what went wrong here was not logic but a discarded return value.
+ *
+ * The CARD's side of the declaration moved: it is standing state now, kept
+ * true by `clone-deployer-declaration-reconcile` rather than offered as an
+ * act, and `cloneDeployerDeclaration.contract.test.ts` owns those properties.
+ * What remains here is the write itself and the paths that must not swallow
+ * its failure.
  */
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
@@ -69,22 +75,6 @@ describe("the failure is never dropped", () => {
     // must not be reported as one.
     const fn = sync.slice(sync.indexOf("async function declareDeployer"));
     expect(fn.slice(0, fn.indexOf("\n}\n"))).toMatch(/attempted: false/);
-  });
-});
-
-describe("the operator is told, and given the one act they can perform", () => {
-  it("the card renders the blocker", () => {
-    expect(card).toContain("data.deployerBlocker");
-  });
-
-  it("offers the declaration only where it is not the permission that blocks", () => {
-    // A button that cannot work is worse than no button: granting the App a
-    // permission is not something this page can do.
-    expect(card).toMatch(/capabilities\.variables\.state !== "missing"/);
-  });
-
-  it("shows GitHub's refusal verbatim rather than a summary", () => {
-    expect(card).toMatch(/res\.error/);
   });
 });
 

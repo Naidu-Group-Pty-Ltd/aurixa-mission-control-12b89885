@@ -501,37 +501,3 @@ export async function detachCloneDeployToken(input: {
 
   return { ok: true };
 }
-
-/**
- * Declare Mission Control as this repository's backend deployer, now.
- *
- * The declaration already happens on every cascade that queues backend work,
- * but a clone whose cascade landed before that code shipped — or whose write
- * was refused — has no way back except waiting for the next cascade. This is
- * that way back, and it is also the diagnostic: it returns GitHub's own
- * refusal rather than a summary of it, because "Resource not accessible by
- * integration" names the remedy and "could not declare the deployer" does not.
- *
- * Idempotent, and verified by reading the variable back — a write that
- * returned without throwing is not a variable the workflow can read.
- */
-export async function declareCloneDeployer(
-  cloneId: string,
-): Promise<{ ok: boolean; error: string | null }> {
-  const { data: clone, error: cloneErr } = await admin
-    .from("clones")
-    .select("github_owner, github_repo")
-    .eq("id", cloneId)
-    .maybeSingle();
-  if (cloneErr) return { ok: false, error: `Could not read the clone: ${cloneErr.message}` };
-  if (!clone?.github_owner || !clone?.github_repo) {
-    return { ok: false, error: "This clone has no GitHub repository on record." };
-  }
-
-  const { declareMissionControlDeploysBackend } = await import("@/server/github-variables.server");
-  const declared = await declareMissionControlDeploysBackend({
-    owner: clone.github_owner,
-    repo: clone.github_repo,
-  });
-  return declared.ok ? { ok: true, error: null } : { ok: false, error: declared.error };
-}
