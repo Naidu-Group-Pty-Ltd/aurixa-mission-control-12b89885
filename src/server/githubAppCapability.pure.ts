@@ -66,13 +66,15 @@ function assess(
   permissions: Readonly<Record<string, string>> | null | undefined,
   permission: string,
   whatItIsFor: string,
+  /** What the GitHub App settings page calls it, for the remedy. */
+  label: string = permission,
 ): Capability {
   if (!permissions) {
     return {
       state: "unknown",
       permission,
       detail:
-        `Whether this installation may write ${permission} could not be read, so ` +
+        `Whether this installation may write ${label} could not be read, so ` +
         "it is unknown rather than absent.",
     };
   }
@@ -81,17 +83,17 @@ function assess(
     return {
       state: "granted",
       permission,
-      detail: `This installation may write repository ${permission}.`,
+      detail: `This installation may write repository ${label}.`,
     };
   }
   return {
     state: "missing",
     permission,
     detail:
-      `This installation cannot write repository ${permission}` +
+      `This installation cannot write repository ${label} (GitHub permission \`${permission}\`)` +
       (level ? ` (it holds "${level}")` : " (the permission is not granted at all)") +
       `, so ${whatItIsFor} silently does nothing. Grant ` +
-      `"${permission}: Read and write" in the GitHub App's settings, then accept ` +
+      `"${label}: Read and write" in the GitHub App's settings, then accept ` +
       "the updated permissions on the installation — an App cannot widen its own.",
   };
 }
@@ -101,12 +103,25 @@ export function assessRepoWriteCapabilities(
   permissions: Readonly<Record<string, string>> | null | undefined,
 ): RepoWriteCapabilities {
   return {
+    // The key is GitHub's, not the settings page's. The page calls the
+    // permission "Variables"; the installation token's permission map calls it
+    // `actions_variables`. Measured 2 Sep 2026: with the owner's acceptance in
+    // place the token carried `actions_variables:write` and this read
+    // `permissions["variables"]`, so three reconciles reported the permission
+    // as "not granted at all" and sent the administrator back to a page that
+    // was already right. `held` on the sweep is what showed the real key.
     variables: assess(
       permissions,
-      "variables",
+      "actions_variables",
       "declaring Mission Control as this repository's backend deployer",
+      "Variables",
     ),
-    secrets: assess(permissions, "secrets", "placing a scoped deploy token in this repository"),
+    secrets: assess(
+      permissions,
+      "secrets",
+      "placing a scoped deploy token in this repository",
+      "Secrets",
+    ),
   };
 }
 

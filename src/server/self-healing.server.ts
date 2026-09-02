@@ -31,6 +31,7 @@ import type {
 import type { Database, Json, TablesInsert, TablesUpdate } from "@/integrations/supabase/types";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { assessSqlDestructiveness } from "@/lib/destructive-sql";
+import { OversizedMigrationError } from "@/server/oversizedMigration.pure";
 import { decideRemediation } from "@/lib/remediation-policy";
 import {
   severityToPriority,
@@ -567,6 +568,15 @@ async function executePrMerge(run: any, approvedByHuman: boolean): Promise<{ sta
 async function assessPendingMigrations(
   pending: ReadonlyArray<{ id: string; name: string }>,
   loadSql: (id: string) => Promise<string>,
+  /**
+   * For a body the ceiling refuses: the seed's SKELETON is assessed — the
+   * INSERT header, the ON CONFLICT clause and the trailing statements, which
+   * are every statement the rows are poured into. The rows are data. Without
+   * this, the 39 MB seed parked every run as "unreadable" the moment the
+   * prime's ledger recorded it, and an approval would then have halted the
+   * replay on the same throw.
+   */
+  openSqlStream?: (id: string) => Promise<AsyncIterable<string>>,
 ): Promise<Array<{ migration: string; reasons: string[] }>> {
   const offending: Array<{ migration: string; reasons: string[] }> = [];
   for (let i = 0; i < pending.length; i += SQL_GATE_FETCH_CONCURRENCY) {
@@ -574,7 +584,14 @@ async function assessPendingMigrations(
     const judged = await Promise.all(
       chunk.map(async (m) => {
         try {
-          const sql = await loadSql(m.id);
+          let sql: string;
+          try {
+            sql = await loadSql(m.id);
+          } catch (e) {
+            if (!(e instanceof OversizedMigrationError) || !openSqlStream) throw e;
+            const { readSeedShape, seedSkeleton } = await import("@/server/seedChunking.pure");
+            sql = seedSkeleton(await readSeedShape(await openSqlStream(m.id)));
+          }
           const assessment = assessSqlDestructiveness(sql);
           return assessment.destructive
             ? { migration: m.name, reasons: assessment.findings.map((f) => f.reason) }
@@ -679,7 +696,7 @@ async function executeSqlMigration(
   // batch parks. Applying "just the safe ones" would run migrations out of
   // order, which is worse than not applying any.
   if (!approvedByHuman) {
-    const offending = await assessPendingMigrations(pending, corpus.loadSql);
+    const offending = await assessPendingMigrations(pending, corpus.loadSql, corpus.openSqlStream);
     if (offending.length > 0) {
       return parkRun(
         run,
@@ -688,24 +705,42 @@ async function executeSqlMigration(
     }
   }
 
-  const { results, latestApplied, stoppedEarly } = await applyPrimeMigrations(
-    backend.supabase_project_ref,
-    runnable,
-    // Alive, and which migration it is on — see `touchRun`.
-    async (_status, detail) => touchRun(run, { in_flight: detail }),
-    (m) => corpus.loadSql(m.id),
-    // `runnable` alone cannot say whether a cleared version sits behind a
-    // withheld one. The whole corpus can.
-    { corpus: corpus.metas, runnableIds },
-    { isPastDeadline: (reserveMs) => Date.now() + reserveMs >= deadlineAt },
-  );
+  const { results, latestApplied, stoppedEarly, chunksApplied, chunkCursor } =
+    await applyPrimeMigrations(
+      backend.supabase_project_ref,
+      runnable,
+      // Alive, and which migration it is on — see `touchRun`.
+      async (_status, detail) => touchRun(run, { in_flight: detail }),
+      (m) => corpus.loadSql(m.id),
+      // `runnable` alone cannot say whether a cleared version sits behind a
+      // withheld one. The whole corpus can.
+      { corpus: corpus.metas, runnableIds },
+      { isPastDeadline: (reserveMs) => Date.now() + reserveMs >= deadlineAt },
+      // A body the ceiling refuses is streamed and chunked rather than failed.
+      // The cursor rides on the run's result, so a pass the budget stops
+      // inside the seed resumes at the statement after the last one sent.
+      {
+        streamSql: (m) => corpus.openSqlStream(m.id),
+        cursor:
+          (run.result?.chunk_cursor as { migrationId: string; statementsDone: number } | null) ??
+          null,
+        onStatementDone: (p) =>
+          touchRun(run, {
+            in_flight: `${p.name} — ${p.statementsDone} statement(s) sent (${p.label})`,
+            chunk_cursor: { migrationId: p.migrationId, statementsDone: p.statementsDone },
+          }),
+      },
+    );
   const failed = (results ?? []).filter((r) => !r.success);
   if (failed.length > 0) {
     throw new Error(
       `migration ${failed[0].id ?? failed[0].name ?? "?"} failed: ${failed[0].error ?? "unknown"}`,
     );
   }
-  const landed = (results ?? []).filter((r) => r.success && !r.skipped).length;
+  // A pass that sent part of a chunked seed and nothing else still moved the
+  // clone forward, and is counted as such below for the attempt decision.
+  const landed =
+    (results ?? []).filter((r) => r.success && !r.skipped).length + (chunksApplied > 0 ? 1 : 0);
   const heldBack = (results ?? []).filter((r) => r.blockedBy && r.blockedBy.length > 0).length;
 
   // Whether a pass that stopped at the budget is charged for its invocation
@@ -742,6 +777,9 @@ async function executeSqlMigration(
         paused_at_budget: stoppedEarly,
         held_back: heldBack,
         source_sha: scoped.sourceSha,
+        // Carried, or the next pass re-sends every statement it already sent.
+        chunk_cursor: chunkCursor,
+        chunks_applied_this_pass: chunksApplied,
       },
     });
     return { status: "resuming" };

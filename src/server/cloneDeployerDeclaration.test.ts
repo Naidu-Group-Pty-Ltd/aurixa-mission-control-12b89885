@@ -12,8 +12,9 @@ import {
 } from "./cloneDeployerDeclaration.pure";
 import { assessRepoWriteCapabilities } from "./githubAppCapability.pure";
 
+// GitHub's key for the permission the settings page calls "Variables".
 const caps = (variables: string | null) =>
-  assessRepoWriteCapabilities(variables === null ? null : { variables });
+  assessRepoWriteCapabilities(variables === null ? null : { actions_variables: variables });
 
 const plan = (variableValue: string | null | undefined, variables: string | null = "write") =>
   planDeployerDeclaration({ repo: "owner/repo", variableValue, capabilities: caps(variables) });

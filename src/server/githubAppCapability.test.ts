@@ -11,13 +11,17 @@ import {
 
 describe("reading an installation's permissions", () => {
   it("counts write and admin as permitted", () => {
-    expect(assessRepoWriteCapabilities({ variables: "write" }).variables.state).toBe("granted");
-    expect(assessRepoWriteCapabilities({ variables: "admin" }).variables.state).toBe("granted");
+    expect(assessRepoWriteCapabilities({ actions_variables: "write" }).variables.state).toBe(
+      "granted",
+    );
+    expect(assessRepoWriteCapabilities({ actions_variables: "admin" }).variables.state).toBe(
+      "granted",
+    );
     expect(assessRepoWriteCapabilities({ secrets: "write" }).secrets.state).toBe("granted");
   });
 
   it("counts read-only as missing, and says which level it holds", () => {
-    const c = assessRepoWriteCapabilities({ variables: "read" }).variables;
+    const c = assessRepoWriteCapabilities({ actions_variables: "read" }).variables;
     expect(c.state).toBe("missing");
     expect(c.detail).toContain('holds "read"');
   });
@@ -46,14 +50,14 @@ describe("reading an installation's permissions", () => {
   it("judges variables and secrets separately", () => {
     // They are distinct GitHub App permissions; an App may hold either
     // without the other, and collapsing them hides which one to grant.
-    const c = assessRepoWriteCapabilities({ variables: "write" });
+    const c = assessRepoWriteCapabilities({ actions_variables: "write" });
     expect(c.variables.state).toBe("granted");
     expect(c.secrets.state).toBe("missing");
   });
 
   it("names the permission exactly as GitHub does, so the remedy is findable", () => {
     const c = assessRepoWriteCapabilities({});
-    expect(c.variables.permission).toBe("variables");
+    expect(c.variables.permission).toBe("actions_variables");
     expect(c.secrets.permission).toBe("secrets");
     expect(c.variables.detail).toContain("Read and write");
   });
@@ -66,8 +70,8 @@ describe("reading an installation's permissions", () => {
 });
 
 describe("explaining a missing BACKEND_DEPLOYED_BY", () => {
-  const granted = assessRepoWriteCapabilities({ variables: "write", secrets: "write" });
-  const missing = assessRepoWriteCapabilities({ variables: "read" });
+  const granted = assessRepoWriteCapabilities({ actions_variables: "write", secrets: "write" });
+  const missing = assessRepoWriteCapabilities({ actions_variables: "read" });
   const unknown = assessRepoWriteCapabilities(null);
 
   it("says nothing at all when the variable is set", () => {

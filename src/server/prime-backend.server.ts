@@ -15,6 +15,7 @@
 import type { Octokit } from "@octokit/rest";
 import type { RepoRef } from "./github-app.server";
 import { pruneBundleToReachable } from "./functionBundlePrune.pure";
+import { OversizedMigrationError } from "./oversizedMigration.pure";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -751,6 +752,12 @@ export type PrimeMigrationCorpus = {
    * the body is past `MAX_MIGRATION_BYTES`.
    */
   loadSql: (id: string) => Promise<string>;
+  /**
+   * Stream one migration's SQL, with no size ceiling and no memoisation: the
+   * body never exists in memory as a whole, so there is nothing to keep. For
+   * the seed-shaped INSERT the ceiling refuses — see `seedChunking.pure.ts`.
+   */
+  openSqlStream: (id: string) => Promise<AsyncIterable<string>>;
 };
 
 export async function openPrimeMigrationCorpus(
@@ -792,20 +799,69 @@ export async function openPrimeMigrationCorpus(
     return pending;
   };
 
+  const openSqlStream = async (id: string): Promise<AsyncIterable<string>> => {
+    const meta = byId.get(id);
+    if (!meta) throw new Error(`Migration ${id} is not in the prime corpus at ${commitSha}`);
+    return fetchBlobTextStream(octokit, ref, meta.sha);
+  };
+
   return {
     metas: entries.map(({ id, name, path }) => ({ id, name, path })),
     sourceSha: commitSha,
     loadSql,
+    openSqlStream,
   };
 }
 
 function oversized(name: string, bytes: number, maxBytes: number): Error {
-  return new Error(
-    `Migration ${name} is ${(bytes / 1_048_576).toFixed(1)} MB, past the ` +
-      `${(maxBytes / 1_048_576).toFixed(0)} MB ceiling for a single Management API statement. ` +
-      "Apply it to this clone by hand (psql or the SQL editor), record its version in " +
-      "supabase_migrations.schema_migrations, then re-run the sync.",
+  return new OversizedMigrationError(name, bytes, maxBytes);
+}
+
+/**
+ * Read a blob's bytes as a stream of text, never as one string.
+ *
+ * `octokit.git.getBlob` returns the whole body base64-encoded inside a JSON
+ * document, which for a 39 MB migration is a 52 MB response, a 78 MB UTF-16
+ * string and the decode on top — past what this isolate holds. The raw media
+ * type streams the bytes themselves, and the reader below hands them on a
+ * chunk at a time, so what is in memory is a chunk and whatever the consumer
+ * keeps (`seedChunking.pure.ts` keeps one tuple and one statement).
+ */
+async function fetchBlobTextStream(
+  octokit: Octokit,
+  ref: RepoRef,
+  sha: string,
+): Promise<AsyncIterable<string>> {
+  const auth = (await octokit.auth({ type: "installation" })) as { token?: string } | null;
+  if (!auth?.token) throw new Error("No installation token to stream a blob with");
+  const res = await fetch(
+    `https://api.github.com/repos/${ref.owner}/${ref.repo}/git/blobs/${sha}`,
+    {
+      headers: {
+        Authorization: `Bearer ${auth.token}`,
+        Accept: "application/vnd.github.raw+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+    },
   );
+  if (!res.ok || !res.body) {
+    throw new Error(`Streaming blob ${sha.slice(0, 7)} failed: HTTP ${res.status}`);
+  }
+  const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+  return {
+    [Symbol.asyncIterator]() {
+      return {
+        async next() {
+          const { value, done } = await reader.read();
+          return done ? { value: undefined, done: true } : { value, done: false };
+        },
+        async return() {
+          await reader.cancel();
+          return { value: undefined, done: true };
+        },
+      };
+    },
+  };
 }
 
 /**

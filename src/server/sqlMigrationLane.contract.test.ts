@@ -110,7 +110,9 @@ describe("a pass is bounded", () => {
     expect(check).toBeGreaterThan(skip);
     expect(send).toBeGreaterThan(check);
     expect(replay).toContain("attempted += 1;");
-    expect(replay).toContain("return { results, latestApplied, stoppedEarly };");
+    expect(replay).toContain(
+      "return { results, latestApplied, stoppedEarly, chunksApplied, chunkCursor };",
+    );
   });
 
   it("the replay measures what it applied, so the reserve is a measurement", () => {
@@ -146,7 +148,12 @@ describe("a pass that stopped at the budget hands the run back", () => {
   });
 
   it("landed counts sent migrations only — not ones skipped as applied or held back", () => {
-    expect(lane).toMatch(/const landed = .*filter\(\(r\) => r\.success && !r\.skipped\)\.length/);
+    expect(lane).toMatch(
+      /const landed =\s*\(results \?\? \[\]\)\.filter\(\(r\) => r\.success && !r\.skipped\)\.length/,
+    );
+    // A pass that sent part of a chunked seed and nothing else still moved
+    // the clone forward; it is not charged as a pass that landed nothing.
+    expect(lane).toMatch(/\.length \+ \(chunksApplied > 0 \? 1 : 0\)/);
   });
 
   it("a failed migration still fails the pass loudly", () => {
