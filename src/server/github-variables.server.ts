@@ -134,6 +134,34 @@ export const BACKEND_DEPLOYER_VARIABLE = "BACKEND_DEPLOYED_BY";
 export const BACKEND_DEPLOYER_MISSION_CONTROL = "mission-control";
 
 /**
+ * The permissions GitHub granted this installation, or `null` when it could
+ * not be asked.
+ *
+ * Read from the installation token itself rather than from a settings
+ * endpoint: `@octokit/auth-app` returns the granted permission map alongside
+ * the token, so this costs no extra request and needs no App-JWT auth path.
+ *
+ * `null` is deliberately distinct from an empty map. A map says "these are the
+ * permissions"; null says "we could not find out", and the caller must not
+ * turn the second into "the App is not permitted", which would send an
+ * administrator to change a setting that was never wrong.
+ */
+export async function readInstallationPermissions(input?: {
+  installationId?: string | null;
+}): Promise<Record<string, string> | null> {
+  try {
+    const octokit = getAppOctokit(input?.installationId ?? undefined);
+    const auth = (await octokit.auth({ type: "installation" })) as {
+      permissions?: Record<string, string>;
+    } | null;
+    return auth?.permissions ?? null;
+  } catch (e) {
+    console.error("[github-variables] could not read installation permissions:", e);
+    return null;
+  }
+}
+
+/**
  * Tell a clone's CI that Mission Control deploys its Supabase project.
  *
  * Never throws. The caller is provisioning, and a clone that is otherwise
@@ -153,10 +181,35 @@ export async function declareMissionControlDeploysBackend(input: {
       name: BACKEND_DEPLOYER_VARIABLE,
       value: BACKEND_DEPLOYER_MISSION_CONTROL,
     });
-    return { ok: true };
   } catch (e) {
     const error = e instanceof Error ? e.message : String(e);
     console.error("[github-variables] could not declare the backend deployer:", error);
     return { ok: false, error };
   }
+
+  // Asserted by its EFFECT, never by the call's status.
+  //
+  // This is the rule this repository already writes down about the Airtable
+  // purge, and it is the one that would have caught this: a write that
+  // returned without throwing is not a variable the workflow can read.
+  // Measured 2 Sep 2026, the declaration was made and the variable was still
+  // absent, and nothing anywhere could tell the difference.
+  const seen = await listRepoVariables(input);
+  if (seen === null) {
+    return {
+      ok: false,
+      error:
+        "the variable was written but could not be read back, so whether the " +
+        "deploy check will see it is unknown",
+    };
+  }
+  if (seen[BACKEND_DEPLOYER_VARIABLE] !== BACKEND_DEPLOYER_MISSION_CONTROL) {
+    return {
+      ok: false,
+      error:
+        `the write reported success but ${BACKEND_DEPLOYER_VARIABLE} is not set on ` +
+        "the repository afterwards",
+    };
+  }
+  return { ok: true };
 }

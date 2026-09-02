@@ -143,7 +143,7 @@ describe("every entry point is admin-only", () => {
   it("all three server functions require an admin", () => {
     const handlers = fns.match(/createServerFn\(/g) ?? [];
     const guards = fns.match(/\.middleware\(\[requireAdmin\]\)/g) ?? [];
-    expect(handlers.length).toBe(3);
+    expect(handlers.length).toBe(4);
     expect(guards.length).toBe(handlers.length);
   });
 });

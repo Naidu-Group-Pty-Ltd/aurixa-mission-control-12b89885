@@ -84,6 +84,12 @@ export type BackendSyncRequest =
       work: CascadeBackendWork;
       /** One entry per run planned or widened; empty when everything was already queued. */
       runs: Array<{ action: "edge_function_deploy" | "sql_migration"; outcome: string }>;
+      /**
+       * Whether Mission Control could tell this repository's CI who deploys
+       * it. Carried out rather than swallowed: the write is best-effort, but
+       * a fleet-wide permission gap must not look like nothing happening.
+       */
+      deployer: DeployerDeclaration;
     }
   | { requested: false; reason: BackendSyncSkip };
 
@@ -151,30 +157,59 @@ export async function requestBackendSyncAfterCascade(input: {
   // Idempotent (create, then update on 409) and only on a cascade that
   // actually queued backend work, so it is neither a per-push cost nor a
   // claim made before it is warranted.
-  await declareDeployer(input.cloneId);
+  const deployer = await declareDeployer(input.cloneId);
 
-  return { requested: true, work, runs };
+  return { requested: true, work, runs, deployer };
 }
 
-/** Best-effort, and never the reason a queued catch-up reports as failed. */
-async function declareDeployer(cloneId: string): Promise<void> {
+/**
+ * Best-effort, and never the reason a queued catch-up reports as failed — but
+ * never SILENT either.
+ *
+ * The result used to be discarded here. Measured 2 Sep 2026 on
+ * `npc-client-dashboard`: this ran at 00:30:17, the variable was never set,
+ * and every one of that repository's 31 deploy-workflow runs has failed. The
+ * only trace was a console line. "Best-effort" has to mean the caller carries
+ * on, not that nobody is told — a capability the whole fleet depends on was
+ * missing and looked exactly like nothing happening.
+ */
+async function declareDeployer(cloneId: string): Promise<DeployerDeclaration> {
   try {
     const { data: clone } = await admin
       .from("clones")
       .select("github_owner, github_repo")
       .eq("id", cloneId)
       .maybeSingle();
-    if (!clone?.github_owner || !clone?.github_repo) return;
+    if (!clone?.github_owner || !clone?.github_repo) {
+      // Not a permission problem, and it must not be reported as one: this
+      // clone has no repository recorded to declare anything on.
+      return { attempted: false, ok: false, error: "no GitHub repository recorded for this clone" };
+    }
     const { declareMissionControlDeploysBackend } =
       await import("@/server/github-variables.server");
-    await declareMissionControlDeploysBackend({
+    const declared = await declareMissionControlDeploysBackend({
       owner: clone.github_owner,
       repo: clone.github_repo,
     });
+    if (!declared.ok) {
+      console.error("[backend-sync] backend-deployer variable not written:", declared.error);
+      return { attempted: true, ok: false, error: declared.error };
+    }
+    return { attempted: true, ok: true, error: null };
   } catch (e) {
-    console.error("[backend-sync] could not declare the deployer:", e);
+    const error = e instanceof Error ? e.message : String(e);
+    console.error("[backend-sync] could not declare the deployer:", error);
+    return { attempted: true, ok: false, error };
   }
 }
+
+/** What the declaration attempt did, so a caller can report it rather than guess. */
+export type DeployerDeclaration = {
+  /** False where there was nothing to declare on — not a failure to fix. */
+  readonly attempted: boolean;
+  readonly ok: boolean;
+  readonly error: string | null;
+};
 
 /** The prime's backend diff between two of its own revisions. */
 async function workForCascade(
