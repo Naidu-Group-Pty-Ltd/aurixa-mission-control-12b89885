@@ -14,8 +14,10 @@
 //                          (the existing scan → draft-PR pipeline authored
 //                          and verified it; this lane only releases it).
 //   sql_migration        — replay pending prime migrations onto the clone's
-//                          Supabase project, destructiveness-checked
-//                          statement by statement first.
+//                          Supabase project, scoped to what the prime has
+//                          itself applied (the fleet sync's own rule),
+//                          destructiveness-checked statement by statement
+//                          first, and bounded to the invocation budget.
 //   edge_function_deploy — redeploy the prime's function bundles onto the
 //                          clone's Supabase project via the Management API.
 //   monitor_recovery     — watch health beacons; resolve when healthy.
@@ -90,6 +92,16 @@ const EDGE_DEPLOY_BATCH = 60;
  * with room left for the five sweep steps that follow this one.
  */
 const EDGE_DEPLOY_BUDGET_MS = 45_000;
+/**
+ * The same ceiling for the migration lane, for the same reason: a replay
+ * that outlives its invocation is killed mid-loop, sits in `executing` until
+ * the stall reclaim requeues it twenty minutes later, and starts the whole
+ * replay again. Measured on `npc-client-dashboard`, 2 Sep 2026: eleven such
+ * passes over three and a half hours, and not one migration landed.
+ */
+const SQL_MIGRATION_BUDGET_MS = 45_000;
+/** Bodies fetched at once for the destructiveness gate. */
+const SQL_GATE_FETCH_CONCURRENCY = 6;
 
 /**
  * How long a run may sit in `executing` before it is presumed dead.
@@ -518,10 +530,52 @@ async function executePrMerge(run: any, approvedByHuman: boolean): Promise<{ sta
 
 // ── Lane: sql_migration ──────────────────────────────────────────────────
 
+/**
+ * Judge every body this pass would send, or say which could not be judged.
+ *
+ * Fetched a few at a time rather than one after another: the gate's cost is
+ * GitHub round trips, and a sequential walk over a long backlog spent the
+ * whole invocation before a single migration was applied. An unreadable body
+ * — oversized, or a GitHub fault — is reported as offending rather than
+ * waved through: an unread migration is not a migration judged
+ * non-destructive.
+ */
+async function assessPendingMigrations(
+  pending: ReadonlyArray<{ id: string; name: string }>,
+  loadSql: (id: string) => Promise<string>,
+): Promise<Array<{ migration: string; reasons: string[] }>> {
+  const offending: Array<{ migration: string; reasons: string[] }> = [];
+  for (let i = 0; i < pending.length; i += SQL_GATE_FETCH_CONCURRENCY) {
+    const chunk = pending.slice(i, i + SQL_GATE_FETCH_CONCURRENCY);
+    const judged = await Promise.all(
+      chunk.map(async (m) => {
+        try {
+          const sql = await loadSql(m.id);
+          const assessment = assessSqlDestructiveness(sql);
+          return assessment.destructive
+            ? { migration: m.name, reasons: assessment.findings.map((f) => f.reason) }
+            : null;
+        } catch (e) {
+          return {
+            migration: m.name,
+            reasons: [e instanceof Error ? e.message : "could not be read from the prime repo"],
+          };
+        }
+      }),
+    );
+    for (const j of judged) if (j) offending.push(j);
+  }
+  return offending;
+}
+
 async function executeSqlMigration(
   run: any,
   approvedByHuman: boolean,
 ): Promise<{ status: string }> {
+  // Measured from lane entry, as the deploy lane measures: the corpus listing
+  // and the ledger reads spend the same invocation as the replay.
+  const deadlineAt = Date.now() + SQL_MIGRATION_BUDGET_MS;
+
   if (!run.clone_id) return parkRun(run, ["no clone scope — prime SQL is never self-applied"]);
 
   const { data: backend } = await admin
@@ -538,21 +592,36 @@ async function executeSqlMigration(
     return { status: "skipped" };
   }
 
-  const { resolvePrimeSource, openPrimeMigrationCorpus } =
-    await import("@/server/prime-backend.server");
-  const { getAppOctokit } = await import("@/server/github-app.server");
+  const { resolvePrimeSource } = await import("@/server/prime-backend.server");
   const source = await resolvePrimeSource(admin);
   if (!source) return parkRun(run, ["prime source repo is not configured"]);
 
-  // Metadata only. The destructiveness gate below needs real SQL, but only for
-  // the migrations this clone is MISSING — and a clone already at the prime's
-  // head is missing none, so it now costs two API calls instead of downloading
-  // a 158 MB corpus to discover there was nothing to do.
-  const corpus = await openPrimeMigrationCorpus(getAppOctokit(), source);
-  const migrations = corpus.metas;
+  /*
+    Scoped exactly as the fleet sync is scoped, through the same function.
+
+    This lane used to take the raw repository listing and call everything the
+    clone's ledger lacked "pending". On `npc-client-dashboard` that was 341
+    files and 42 MB — the corpus and the prime's own ledger disagree by that
+    much, which is the two-namespace problem `fleetCorpusScope.pure.ts` is
+    written around — and fifty-eight of them drop policies or rewrite column
+    types. The fleet sync withholds every one of them by design; this lane
+    would have parked them for a human to approve as a batch, and an approval
+    would have replayed rollback scripts against a tenant. A migration the
+    prime has not run is not one a clone is behind on.
+
+    A scope that could not be built THROWS rather than parks: a ledger that
+    could not be read is a transient fault worth retrying, not a decision a
+    person has to take.
+  */
+  const { openScopedPrimeCorpus } = await import("@/server/fleet-migration.server");
+  const scoped = await openScopedPrimeCorpus(admin, source);
+  if (!scoped.ok) throw new Error(scoped.error);
+  const { corpus, runnable } = scoped;
+  const runnableIds = new Set(runnable.map((m) => m.id));
 
   const { runSqlOnProject, applyPrimeMigrations } =
     await import("@/server/backend-provisioning.server");
+  const { partitionByDependency } = await import("@/server/fleetCorpusScope.pure");
 
   // Which versions has the clone already applied? Same union the apply
   // helper uses; a fresh tracking table simply means "none yet".
@@ -568,35 +637,25 @@ async function executeSqlMigration(
     // Tracking tables may not exist yet — applyPrimeMigrations creates them.
   }
 
-  const pending = migrations.filter((m) => !applied.has(m.id));
+  // What will actually be SENT: runnable, absent from the clone, and not
+  // sitting behind a hole. The gate below judges exactly this set — judging
+  // an orphan the replay will skip anyway is a body fetched for nothing.
+  const { send: pending, orphaned } = partitionByDependency(corpus.metas, runnableIds, applied);
   if (pending.length === 0) {
-    return succeedRun(run, { pending: 0, note: "clone already at prime migration head" });
+    return succeedRun(run, {
+      pending: 0,
+      withheld: scoped.withheld,
+      held_back: orphaned.length,
+      source_sha: scoped.sourceSha,
+      note: "clone already at prime migration head within the fleet sync's scope",
+    });
   }
 
   // The gate: every pending statement must be non-destructive, or the whole
   // batch parks. Applying "just the safe ones" would run migrations out of
   // order, which is worse than not applying any.
   if (!approvedByHuman) {
-    const offending: Array<{ migration: string; reasons: string[] }> = [];
-    for (const m of pending) {
-      // A body that cannot be fetched — oversized, or a GitHub fault — parks
-      // the run rather than passing the gate unexamined. An unread migration
-      // is not a migration judged non-destructive.
-      let sql: string;
-      try {
-        sql = await corpus.loadSql(m.id);
-      } catch (e) {
-        offending.push({
-          migration: m.name,
-          reasons: [e instanceof Error ? e.message : "could not be read from the prime repo"],
-        });
-        continue;
-      }
-      const assessment = assessSqlDestructiveness(sql);
-      if (assessment.destructive) {
-        offending.push({ migration: m.name, reasons: assessment.findings.map((f) => f.reason) });
-      }
-    }
+    const offending = await assessPendingMigrations(pending, corpus.loadSql);
     if (offending.length > 0) {
       return parkRun(
         run,
@@ -605,22 +664,70 @@ async function executeSqlMigration(
     }
   }
 
-  const { results, latestApplied } = await applyPrimeMigrations(
+  const { results, latestApplied, stoppedEarly } = await applyPrimeMigrations(
     backend.supabase_project_ref,
-    pending,
+    runnable,
     undefined,
     (m) => corpus.loadSql(m.id),
+    // `runnable` alone cannot say whether a cleared version sits behind a
+    // withheld one. The whole corpus can.
+    { corpus: corpus.metas, runnableIds },
+    { isPastDeadline: (reserveMs) => Date.now() + reserveMs >= deadlineAt },
   );
-  const failed = (results ?? []).filter((r: any) => r.status === "failed");
+  const failed = (results ?? []).filter((r) => !r.success);
   if (failed.length > 0) {
     throw new Error(
       `migration ${failed[0].id ?? failed[0].name ?? "?"} failed: ${failed[0].error ?? "unknown"}`,
     );
   }
+  const landed = (results ?? []).filter((r) => r.success && !r.skipped).length;
+  const heldBack = (results ?? []).filter((r) => r.blockedBy && r.blockedBy.length > 0).length;
+
+  // Whether a pass that stopped at the budget is charged for its invocation
+  // is the same decision the deploy lane makes, taken by the same module:
+  // a pass that landed something is attempt-neutral, one that landed nothing
+  // counts, and a run that keeps counting eventually parks.
+  const attempts = run.attempts ?? 1;
+  const resume = planEdgeDeployResume({
+    landed,
+    moreRemain: stoppedEarly,
+    stoppedEarly,
+    attempts,
+    maxAttempts: run.max_attempts ?? 30,
+  });
+
+  if (resume.kind === "park") {
+    return parkRun(run, [
+      `${landed} migration(s) applied this pass over ${attempts} passes and more remain`,
+    ]);
+  }
+
+  if (resume.kind === "requeue") {
+    await markRun(run.id, {
+      status: "planned",
+      // `run.attempts` is the count from BEFORE `executeRemediationRun`
+      // incremented it, so writing it back undoes exactly this pass's
+      // increment — never a reset.
+      ...(resume.attemptNeutral ? { attempts: run.attempts ?? 0 } : {}),
+      next_attempt_at: new Date().toISOString(),
+      result: {
+        resuming: true,
+        applied_this_pass: landed,
+        latest_applied: latestApplied ?? null,
+        paused_at_budget: stoppedEarly,
+        held_back: heldBack,
+        source_sha: scoped.sourceSha,
+      },
+    });
+    return { status: "resuming" };
+  }
 
   return succeedRun(run, {
-    applied: (results ?? []).length,
+    applied: landed,
     latest_applied: latestApplied ?? null,
+    held_back: heldBack,
+    withheld: scoped.withheld,
+    source_sha: scoped.sourceSha,
   });
 }
 
@@ -642,7 +749,9 @@ async function deployWithinBudget(
   return runWithinBudget<EdgeFunctionBundle, EdgeFunctionDeployResult>({
     items: batch,
     runOne: async (fn) => (await deployEdgeFunctions(projectRef, [fn])) ?? [],
-    isPastDeadline: () => Date.now() >= deadlineAt,
+    // Reserve the slowest deploy seen this pass: an item begun with less than
+    // that left is one the invocation may not live to finish.
+    isPastDeadline: (reserveMs) => Date.now() + reserveMs >= deadlineAt,
   });
 }
 

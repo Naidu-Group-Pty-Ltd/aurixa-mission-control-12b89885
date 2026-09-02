@@ -1562,7 +1562,28 @@ export async function applyPrimeMigrations(
     /** Ids the scope cleared. */
     runnableIds: ReadonlySet<string>;
   },
-): Promise<{ results: PrimeMigrationResult[]; latestApplied: string | null }> {
+  /**
+   * Stop BETWEEN migrations once the caller's invocation budget is spent.
+   *
+   * Supplied by the self-healing `sql_migration` lane, which runs inside a
+   * bounded invocation: a replay that outlives it is killed mid-loop, its row
+   * sits in `executing` until the stall reclaim requeues it twenty minutes
+   * later, and every pass starts the whole replay again. The first migration
+   * of a pass is always attempted, so a deadline that is already past when
+   * the loop starts still moves the clone forward by one; the check runs
+   * only before a migration that would actually be SENT, never before one
+   * that is merely skipped as applied. The check is handed the slowest
+   * migration this pass has applied, so the caller can refuse to START one
+   * it may not live to finish. A pass that stops here reports `stoppedEarly`
+   * so the caller can requeue rather than pronounce the clone level.
+   */
+  budget?: { isPastDeadline: (reserveMs: number) => boolean },
+): Promise<{
+  results: PrimeMigrationResult[];
+  latestApplied: string | null;
+  /** True when the budget stopped the loop with migrations still unsent. */
+  stoppedEarly: boolean;
+}> {
   await runSqlOnProject(projectRef, TRACKING_TABLE_SQL);
 
   // Union both the canonical Supabase ledger and the legacy aurixa ledger,
@@ -1624,6 +1645,9 @@ export async function applyPrimeMigrations(
   }
 
   const ordered = [...sendable].sort((a, b) => a.name.localeCompare(b.name));
+  let attempted = 0;
+  let slowestMs = 0;
+  let stoppedEarly = false;
   for (let i = 0; i < ordered.length; i++) {
     const m = ordered[i];
     if (applied.has(m.id)) {
@@ -1631,6 +1655,16 @@ export async function applyPrimeMigrations(
       latestApplied = m.id;
       continue;
     }
+    // Asked only here — before a migration that would be sent — and never
+    // before the first, so a pass that arrives with no budget left still
+    // lands one rather than none. Stopping between migrations leaves the
+    // ledger consistent; stopping inside one is what the budget prevents.
+    if (attempted > 0 && budget?.isPastDeadline(slowestMs)) {
+      stoppedEarly = true;
+      break;
+    }
+    attempted += 1;
+    const startedAt = Date.now();
     await onStatusUpdate?.("migrating", `Applying migration ${i + 1}/${ordered.length}: ${m.name}`);
     try {
       // Resolved here, inside the loop and after the `applied` check above, so
@@ -1657,6 +1691,7 @@ export async function applyPrimeMigrations(
       );
       results.push({ id: m.id, name: m.name, success: true });
       latestApplied = m.id;
+      slowestMs = Math.max(slowestMs, Date.now() - startedAt);
     } catch (e) {
       results.push({
         id: m.id,
@@ -1668,7 +1703,7 @@ export async function applyPrimeMigrations(
     }
   }
 
-  return { results, latestApplied };
+  return { results, latestApplied, stoppedEarly };
 }
 
 // ─── Module Migrations ───────────────────────────────────────────────

@@ -53,7 +53,7 @@ One policy decides auto vs human, everywhere:
 |---|---|---|
 | security_scan | `pr_merge` | squash-merges a **verified** codex remediation draft PR (medium severity and below only); prime-scoped merges deliberately do NOT auto-cascade — a notification points at /cascades instead |
 | security_scan | `rescan` | enqueues a codex scan when no verified fix is waiting |
-| redeploy | `sql_migration` | replays pending prime migrations onto the clone's Supabase project via the Management API, after the destructiveness gate |
+| redeploy | `sql_migration` | replays pending prime migrations onto the clone's Supabase project via the Management API — scoped to what the prime has itself applied (`openScopedPrimeCorpus`, the fleet sync's rule) and to nothing behind a hole, after the destructiveness gate, and bounded to a 45 s invocation budget with the same requeue rule as `edge_function_deploy` |
 | redeploy | `edge_function_deploy` | redeploys prime function bundles onto the clone project |
 | monitor | `monitor_recovery` | watches `clone_health_beacons`; resolves on an `ok` beacon, parks for a human when there is no telemetry or attempts run out |
 

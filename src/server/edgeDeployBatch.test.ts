@@ -338,6 +338,50 @@ describe("runWithinBudget — stopping without losing what was done", () => {
     await h.run();
     expect(h.seen).toEqual(["a"]);
   });
+
+  it("hands the deadline the slowest item so far, so it can refuse to start one it cannot finish", async () => {
+    /*
+      With a 45 s budget inside a 60 s invocation, a deploy begun at 44 s
+      that takes twenty is killed at sixty — the requeue is never written
+      and the run sits in `executing` for the stall reclaim's twenty minutes.
+      Observed 2 Sep 2026 at 307 of 423 bundles. The slowest item this pass
+      has seen is the estimate the caller reserves.
+    */
+    const durations: Record<string, number> = { a: 10, b: 3, c: 12, d: 1 };
+    let clock = 0;
+    const reserves: number[] = [];
+    const out = await runWithinBudget<string, string>({
+      items: ["a", "b", "c", "d"],
+      runOne: async (item) => {
+        clock += durations[item];
+        return [`did:${item}`];
+      },
+      isPastDeadline: (reserveMs) => {
+        reserves.push(reserveMs);
+        return false;
+      },
+      now: () => clock,
+    });
+    expect(out.stoppedEarly).toBe(false);
+    // Before b: a took 10. Before c: still 10 (b was quicker). Before d: c took 12.
+    expect(reserves).toEqual([10, 10, 12]);
+  });
+
+  it("a reserve that overruns the deadline stops the pass with its results kept", async () => {
+    let clock = 0;
+    const deadlineAt = 20;
+    const out = await runWithinBudget<string, string>({
+      items: ["a", "b"],
+      runOne: async (item) => {
+        clock += 15;
+        return [`did:${item}`];
+      },
+      // 15 elapsed + 15 reserved > 20: b would not finish inside the budget.
+      isPastDeadline: (reserveMs) => clock + reserveMs >= deadlineAt,
+      now: () => clock,
+    });
+    expect(out).toEqual({ results: ["did:a"], stoppedEarly: true });
+  });
 });
 
 describe("countLanded — what the clone accepted, not what was sent", () => {

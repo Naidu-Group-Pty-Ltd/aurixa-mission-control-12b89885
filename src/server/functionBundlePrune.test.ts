@@ -369,3 +369,26 @@ describe("the import map travels whatever the graph says", () => {
     expect(out.keep).not.toContain("_shared/u.ts");
   });
 });
+
+describe("a literal broken over two lines is not a computed import", () => {
+  it("follows the import and does not report it opaque", () => {
+    /*
+      `\s*` may match nothing, and a lookahead placed after it then reads the
+      NEWLINE rather than the quote. Measured on the prime, 2 Sep 2026: one
+      such import in `_shared/builderStock/repairSourceImages.ts` made the two
+      functions importing it carry the whole 6.65 MB tree, refused 413 — after
+      every other cause of that refusal had been fixed.
+    */
+    const src = "const { a, b } = await import(\n      './suppliedEvidence.pure.ts');\n";
+    const r = readSpecifiers(src);
+    expect(r.opaque).toBe(false);
+    expect(r.specifiers).toContain("./suppliedEvidence.pure.ts");
+  });
+
+  it("still reports a computed argument that begins on the next line", () => {
+    // The fix must not be "require the quote on the same line": a computed
+    // specifier is computed wherever the line breaks.
+    expect(readSpecifiers("await import(\n  modulePath);").opaque).toBe(true);
+    expect(readSpecifiers("await import(\n  `./${name}.ts`);").opaque).toBe(true);
+  });
+});
