@@ -106,3 +106,115 @@ export function planEdgeDeployPass(input: {
   const batch = candidates.slice(0, limit);
   return { wholeFleet, batch, moreRemain: candidates.length > batch.length };
 }
+
+/** What the lane does with a run once its pass has finished deploying. */
+export type EdgeDeployResume =
+  /** Nothing owed — the run may finish. */
+  | { readonly kind: "complete" }
+  /** More owed, and this pass earned another. */
+  | { readonly kind: "requeue"; readonly attemptNeutral: boolean }
+  /** More owed and the run has stopped getting anywhere. A person decides. */
+  | { readonly kind: "park" };
+
+/**
+ * Whether a pass may finish, must go round again, or has stopped progressing.
+ *
+ * ## Why this is not three lines in the lane
+ *
+ * Bounding a pass in TIME as well as in count introduces a second delicate
+ * decision beside the completion rule above, and it fails in both directions.
+ *
+ * Count every requeue as an attempt and a lane that pauses every 45 seconds
+ * onto a two-minute tick spends all thirty attempts inside an hour — strictly
+ * worse than the twenty-minute stall the budget replaces, and it lands on a
+ * run that was working perfectly.
+ *
+ * Count none of them and a batch whose every deploy FAILS requeues for ever:
+ * a failed bundle never becomes `refreshed`, so the next pass fetches exactly
+ * the same work and fails at it again, silently, until somebody notices.
+ *
+ * ## The rule
+ *
+ * **A pass that landed at least one bundle made forward progress, and
+ * forward progress does not spend an attempt.**
+ *
+ * That terminates. Every landed bundle becomes `refreshed` and is skipped by
+ * the next pass, so an attempt-neutral pass strictly shrinks the remaining
+ * set — and the set is finite. A pass that lands NOTHING keeps its attempt,
+ * so `maxAttempts` still carries a genuinely stuck run to a human.
+ *
+ * `attempts` is the count from BEFORE this pass incremented it, which is what
+ * lets the caller undo exactly this pass's increment rather than resetting a
+ * counter that may be carrying a real earlier failure.
+ */
+export function planEdgeDeployResume(input: {
+  /** Bundles this pass successfully deployed. */
+  readonly landed: number;
+  /** True when the plan says the run owes bundles it has not fetched yet. */
+  readonly moreRemain: boolean;
+  /** True when the invocation budget stopped this pass mid-batch. */
+  readonly stoppedEarly: boolean;
+  readonly attempts: number;
+  readonly maxAttempts: number;
+}): EdgeDeployResume {
+  if (!input.moreRemain && !input.stoppedEarly) return { kind: "complete" };
+
+  // Landed something: this pass moved the run closer to done, so it is not
+  // charged for the invocation it took to do it.
+  if (input.landed > 0) return { kind: "requeue", attemptNeutral: true };
+
+  return input.attempts >= input.maxAttempts
+    ? { kind: "park" }
+    : { kind: "requeue", attemptNeutral: false };
+}
+
+/**
+ * Work through a batch one item at a time, stopping at the invocation budget
+ * and KEEPING what was done.
+ *
+ * ## Why the caller injects the deploy
+ *
+ * `deployEdgeFunctions` takes a `deadlineAt` of its own, and it signals the
+ * budget by throwing `BudgetPause` and discarding the pass's `results`. That
+ * is right for provisioning, which re-derives its progress by asking the
+ * target which slugs it holds. It is wrong for the self-healing lane, which
+ * has to know whether the pass it is about to requeue LANDED anything —
+ * that answer is the whole input to `planEdgeDeployResume`, and a loop that
+ * dropped its partial results would report every budget stop as barren and
+ * charge it an attempt.
+ *
+ * So the stopping is here, where a test can hold it to that; the lane injects
+ * the real deploy and the real clock.
+ *
+ * The first item is ALWAYS attempted. A budget already spent before the loop
+ * began — by a slow snapshot read, say — would otherwise produce a pass that
+ * deploys nothing, every time, each one charged an attempt for landing
+ * nothing. One item a pass is slow; zero is stuck.
+ */
+export async function runWithinBudget<T, R>(input: {
+  readonly items: readonly T[];
+  readonly runOne: (item: T) => Promise<readonly R[]>;
+  readonly isPastDeadline: () => boolean;
+}): Promise<{ results: R[]; stoppedEarly: boolean }> {
+  const results: R[] = [];
+  for (let i = 0; i < input.items.length; i++) {
+    if (i > 0 && input.isPastDeadline()) return { results, stoppedEarly: true };
+    results.push(...(await input.runOne(input.items[i])));
+  }
+  return { results, stoppedEarly: false };
+}
+
+/**
+ * How many bundles a pass actually put on the clone.
+ *
+ * Counted from the deploy results, never from the batch that was sent. The
+ * two differ constantly — a bundle can be refused for its size, its slug or
+ * its contents while the fifty beside it land — and the distinction carries
+ * two separate weights: it is the input to `planEdgeDeployResume`, where
+ * "landed nothing" is what spends an attempt, and it is what the run reports
+ * as deployed, where counting the batch would credit the clone with functions
+ * it refused.
+ */
+export function countLanded(results: readonly { readonly error?: unknown }[]): number {
+  return results.filter((r) => !r.error).length;
+}

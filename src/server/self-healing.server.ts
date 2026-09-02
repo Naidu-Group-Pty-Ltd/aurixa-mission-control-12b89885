@@ -22,6 +22,10 @@
 //   rescan               — enqueue a codex security scan; findings then
 //                          flow the normal scan → remediation pipeline.
 
+import type {
+  EdgeFunctionBundle,
+  EdgeFunctionDeployResult,
+} from "@/server/backend-provisioning.server";
 import type { Database, Json, TablesInsert, TablesUpdate } from "@/integrations/supabase/types";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { assessSqlDestructiveness } from "@/lib/destructive-sql";
@@ -32,7 +36,13 @@ import {
   type TicketPriority,
 } from "@/lib/ticket-classification";
 import { asJson, asRow } from "@/lib/json-cast";
-import { planEdgeDeployPass, refreshedSince } from "@/server/edgeDeployBatch.pure";
+import {
+  countLanded,
+  planEdgeDeployPass,
+  planEdgeDeployResume,
+  refreshedSince,
+  runWithinBudget,
+} from "@/server/edgeDeployBatch.pure";
 
 function secretsCleanFromVerification(verification: Json | null | undefined): boolean {
   if (verification && typeof verification === "object" && !Array.isArray(verification)) {
@@ -61,6 +71,25 @@ const INGEST_LEDGER_RETENTION_DAYS = 7;
  * deployed nothing at all before its invocation was killed.
  */
 const EDGE_DEPLOY_BATCH = 60;
+
+/**
+ * How long one invocation of this lane may spend deploying before it stops
+ * and hands the run back to the queue.
+ *
+ * The batch cap bounds what a pass FETCHES; it does not bound how long
+ * deploying that batch takes. Measured 2 Sep 2026 against the live run: a
+ * pass deployed ~18 bundles in about a minute and was then killed mid-batch,
+ * leaving the row in `executing` where no lane reads it. Nothing looked at it
+ * again until `reclaimStalledRuns` requeued it twenty minutes later, so the
+ * fleet advanced ~18 bundles per twenty minutes and spent an attempt on each
+ * — 88 of 423 deployed over five hours, 14 of 30 attempts gone, and the
+ * arithmetic said it would exhaust its budget short of the last bundle.
+ *
+ * Stopping deliberately turns that twenty-minute stall into the drain's own
+ * two-minute tick. The number is below the 60s at which pg_net stops waiting,
+ * with room left for the five sweep steps that follow this one.
+ */
+const EDGE_DEPLOY_BUDGET_MS = 45_000;
 
 /**
  * How long a run may sit in `executing` before it is presumed dead.
@@ -595,9 +624,36 @@ async function executeSqlMigration(
   });
 }
 
+/**
+ * Deploy a batch, stopping at the invocation budget rather than being killed
+ * by it.
+ *
+ * The stopping rule — one function at a time, the first always attempted,
+ * partial results kept — is `runWithinBudget`, where it can be held to those
+ * properties by a test. This supplies the real deploy and the real clock and
+ * nothing else.
+ */
+async function deployWithinBudget(
+  projectRef: string,
+  batch: readonly EdgeFunctionBundle[],
+  deadlineAt: number,
+): Promise<{ results: EdgeFunctionDeployResult[]; stoppedEarly: boolean }> {
+  const { deployEdgeFunctions } = await import("@/server/backend-provisioning.server");
+  return runWithinBudget<EdgeFunctionBundle, EdgeFunctionDeployResult>({
+    items: batch,
+    runOne: async (fn) => (await deployEdgeFunctions(projectRef, [fn])) ?? [],
+    isPastDeadline: () => Date.now() >= deadlineAt,
+  });
+}
+
 // ── Lane: edge_function_deploy ───────────────────────────────────────────
 
 async function executeEdgeFunctionDeploy(run: any): Promise<{ status: string }> {
+  // Measured from lane entry, not from the first deploy: a slow snapshot read
+  // spends the same invocation, so budgeting only the deploy loop would let
+  // one pass overrun the ceiling it exists to respect.
+  const deadlineAt = Date.now() + EDGE_DEPLOY_BUDGET_MS;
+
   if (!run.clone_id)
     return parkRun(run, ["no clone scope — prime functions are not self-deployed"]);
 
@@ -628,8 +684,7 @@ async function executeEdgeFunctionDeploy(run: any): Promise<{ status: string }> 
   // bundles and then lost its invocation still counts, which is the whole
   // point: the state that has to survive is on the clone, not in a `result`
   // column the dying pass never got to write.
-  const { listProjectEdgeFunctionFreshness, deployEdgeFunctions } =
-    await import("@/server/backend-provisioning.server");
+  const { listProjectEdgeFunctionFreshness } = await import("@/server/backend-provisioning.server");
   const freshness = await listProjectEdgeFunctionFreshness(backend.supabase_project_ref);
   const refreshed = refreshedSince(freshness, run.started_at);
 
@@ -669,13 +724,17 @@ async function executeEdgeFunctionDeploy(run: any): Promise<{ status: string }> 
     });
   }
 
-  const results = await deployEdgeFunctions(backend.supabase_project_ref, batch);
-  const failures = (results ?? []).filter((r: any) => r.error);
+  const { results, stoppedEarly } = await deployWithinBudget(
+    backend.supabase_project_ref,
+    batch,
+    deadlineAt,
+  );
+  const failures = (results ?? []).filter((r) => r.error);
   if (failures.length === (results ?? []).length && failures.length > 0) {
     throw new Error(`all ${failures.length} function deploys failed: ${failures[0].error}`);
   }
-  const landed = (results ?? []).length - failures.length;
-  const failedDetail = failures.map((f: any) => ({
+  const landed = countLanded(results ?? []);
+  const failedDetail = failures.map((f) => ({
     slug: f.slug,
     error: String(f.error).slice(0, 200),
   }));
@@ -683,21 +742,39 @@ async function executeEdgeFunctionDeploy(run: any): Promise<{ status: string }> 
   // More to come? Hand the run back to the queue rather than pronouncing a
   // partial deployment complete — the rule `functionSourceTruncated` is
   // documented for, and the shape `monitor_recovery` already uses.
-  if (pass.moreRemain) {
-    const attempts = run.attempts ?? 1;
-    // A bundle that fails every pass never becomes `refreshed`, so without a
-    // bound this would resume for ever. `monitor_recovery` bounds itself the
-    // same way, and past the budget it is a person's problem.
-    if (attempts >= (run.max_attempts ?? 30)) {
-      return parkRun(run, [
-        `${refreshed.length + landed} bundle(s) deployed over ${attempts} passes and more remain`,
-        ...(failedDetail.length > 0
-          ? [`last pass could not deploy ${failedDetail[0].slug}: ${failedDetail[0].error}`]
-          : []),
-      ]);
-    }
+  //
+  // `stoppedEarly` is the other way there is more to come: the batch was not
+  // finished because the invocation budget ran out. Those bundles never
+  // became `refreshed`, so the next pass's snapshot asks for them again.
+  //
+  // Whether this pass is charged for the invocation it took is the pure
+  // module's call — see `planEdgeDeployResume` for why it fails in both
+  // directions and what makes the attempt-neutral case terminate.
+  const attempts = run.attempts ?? 1;
+  const resume = planEdgeDeployResume({
+    landed,
+    moreRemain: pass.moreRemain,
+    stoppedEarly,
+    attempts,
+    maxAttempts: run.max_attempts ?? 30,
+  });
+
+  if (resume.kind === "park") {
+    return parkRun(run, [
+      `${refreshed.length + landed} bundle(s) deployed over ${attempts} passes and more remain`,
+      ...(failedDetail.length > 0
+        ? [`last pass could not deploy ${failedDetail[0].slug}: ${failedDetail[0].error}`]
+        : []),
+    ]);
+  }
+
+  if (resume.kind === "requeue") {
     await markRun(run.id, {
       status: "planned",
+      // `run.attempts` is the count from BEFORE `executeRemediationRun`
+      // incremented it, so writing it back undoes exactly this pass's
+      // increment — never a reset, so a genuine earlier failure still counts.
+      ...(resume.attemptNeutral ? { attempts: run.attempts ?? 0 } : {}),
       // Due now: the drain runs every two minutes and has already chosen
       // this pass's batch, so it is the NEXT pass that picks this up.
       next_attempt_at: new Date().toISOString(),
@@ -705,6 +782,7 @@ async function executeEdgeFunctionDeploy(run: any): Promise<{ status: string }> 
         resuming: true,
         deployed: refreshed.length + landed,
         last_batch: landed,
+        paused_at_budget: stoppedEarly,
         failed: failedDetail,
         source_sha: snapshot.sourceSha ?? null,
       },

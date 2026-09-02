@@ -3,7 +3,13 @@
  * a pass reporting a deployment complete that it never performed.
  */
 import { describe, expect, it } from "vitest";
-import { planEdgeDeployPass, refreshedSince } from "./edgeDeployBatch.pure";
+import {
+  countLanded,
+  planEdgeDeployPass,
+  planEdgeDeployResume,
+  refreshedSince,
+  runWithinBudget,
+} from "./edgeDeployBatch.pure";
 
 const LIMIT = 60;
 const slugs = (n: number, prefix = "fn") =>
@@ -199,5 +205,157 @@ describe("an empty batch is not the same question as a finished run", () => {
       batchLimit: LIMIT,
     });
     expect(pass.moreRemain).toBe(false);
+  });
+});
+
+describe("planEdgeDeployResume — what a bounded pass costs the run", () => {
+  const resume = (over: Partial<Parameters<typeof planEdgeDeployResume>[0]> = {}) =>
+    planEdgeDeployResume({
+      landed: 15,
+      moreRemain: false,
+      stoppedEarly: true,
+      attempts: 5,
+      maxAttempts: 30,
+      ...over,
+    });
+
+  it("finishes only when nothing is owed by either measure", () => {
+    expect(resume({ moreRemain: false, stoppedEarly: false })).toEqual({ kind: "complete" });
+  });
+
+  it("a batch cut short by the budget is not a finished run", () => {
+    // The whole point of the budget: the bundles it did not reach were never
+    // deployed, and a pass that called itself complete would lose them.
+    expect(resume({ moreRemain: false, stoppedEarly: true }).kind).toBe("requeue");
+  });
+
+  it("a pass that landed something is not charged for the invocation", () => {
+    /*
+      Requeuing onto a two-minute tick while charging every pass an attempt
+      spends all thirty inside an hour — on a run that is working. Measured
+      2 Sep 2026 at the twenty-minute cadence this replaces: 88 of 423
+      bundles deployed, 14 of 30 attempts already gone, and the arithmetic
+      exhausting the budget short of the last bundle.
+    */
+    expect(resume({ landed: 1, attempts: 29 })).toEqual({ kind: "requeue", attemptNeutral: true });
+  });
+
+  it("a pass that landed nothing keeps its attempt", () => {
+    // A failed bundle never becomes `refreshed`, so the next pass fetches
+    // exactly the same work. Attempt-neutral, that loops for ever.
+    expect(resume({ landed: 0, attempts: 5 })).toEqual({
+      kind: "requeue",
+      attemptNeutral: false,
+    });
+  });
+
+  it("stops asking once an unproductive run is out of attempts", () => {
+    expect(resume({ landed: 0, attempts: 30, maxAttempts: 30 })).toEqual({ kind: "park" });
+  });
+
+  it("never parks a run that is still landing bundles, however many passes it took", () => {
+    /*
+      Termination is what makes this safe: each landed bundle becomes
+      `refreshed` and is skipped next pass, so the remaining set strictly
+      shrinks and the set is finite. Parking a progressing run would abandon
+      a deployment mid-fleet for no reason but its pass count.
+    */
+    expect(resume({ landed: 1, attempts: 999, maxAttempts: 30 }).kind).toBe("requeue");
+  });
+
+  it("a completed run is complete whatever its attempt count", () => {
+    expect(resume({ landed: 0, moreRemain: false, stoppedEarly: false, attempts: 99 })).toEqual({
+      kind: "complete",
+    });
+  });
+});
+
+describe("runWithinBudget — stopping without losing what was done", () => {
+  const ran = <T>(items: readonly T[], stopAfter: number) => {
+    const seen: T[] = [];
+    return {
+      seen,
+      run: () =>
+        runWithinBudget<T, string>({
+          items,
+          runOne: async (item) => {
+            seen.push(item);
+            return [`did:${String(item)}`];
+          },
+          isPastDeadline: () => seen.length >= stopAfter,
+        }),
+    };
+  };
+
+  it("keeps the results of the items it did reach", async () => {
+    /*
+      The property the whole change rests on. `deployEdgeFunctions` signals
+      its own budget by throwing and DISCARDING its partial results — correct
+      for provisioning, which re-derives progress from the target, and fatal
+      here: the lane charges an attempt exactly when a pass landed nothing, so
+      a loop that dropped its results would report every budget stop as barren
+      and burn the run's whole attempt budget while working perfectly.
+    */
+    const h = ran(["a", "b", "c", "d"], 2);
+    const out = await h.run();
+    expect(out.stoppedEarly).toBe(true);
+    expect(out.results).toEqual(["did:a", "did:b"]);
+  });
+
+  it("says so when it got through everything", async () => {
+    const out = await ran(["a", "b"], 99).run();
+    expect(out.stoppedEarly).toBe(false);
+    expect(out.results).toEqual(["did:a", "did:b"]);
+  });
+
+  it("always attempts the first item, even past the deadline", async () => {
+    /*
+      A budget already spent before the loop began — a slow snapshot read —
+      would otherwise deploy nothing every pass, and every one of those passes
+      is charged an attempt for landing nothing. One a pass is slow; zero is
+      stuck.
+    */
+    const out = await runWithinBudget<string, string>({
+      items: ["a", "b", "c"],
+      runOne: async (i) => [`did:${i}`],
+      isPastDeadline: () => true,
+    });
+    expect(out.results).toEqual(["did:a"]);
+    expect(out.stoppedEarly).toBe(true);
+  });
+
+  it("an empty batch stops nowhere and reports nothing outstanding", async () => {
+    const out = await runWithinBudget<string, string>({
+      items: [],
+      runOne: async () => ["never"],
+      isPastDeadline: () => true,
+    });
+    expect(out).toEqual({ results: [], stoppedEarly: false });
+  });
+
+  it("does not run an item it has decided to stop before", async () => {
+    const h = ran(["a", "b", "c"], 1);
+    await h.run();
+    expect(h.seen).toEqual(["a"]);
+  });
+});
+
+describe("countLanded — what the clone accepted, not what was sent", () => {
+  it("counts only the deploys that succeeded", () => {
+    expect(countLanded([{}, { error: "413" }, {}, { error: "boom" }])).toBe(2);
+  });
+
+  it("a batch in which everything failed landed nothing", () => {
+    /*
+      This is the number that decides whether a pass is charged an attempt.
+      Counting the batch instead would make a pass that failed at all sixty
+      bundles look like forward progress, and the run would requeue on the
+      same failing work for ever without ever reaching a person.
+    */
+    expect(countLanded([{ error: "a" }, { error: "b" }])).toBe(0);
+  });
+
+  it("nothing attempted is nothing landed", () => {
+    expect(countLanded([])).toBe(0);
   });
 });
