@@ -139,7 +139,22 @@ export const BACKEND_DEPLOYER_MISSION_CONTROL = "mission-control";
  *
  * Read from the installation token itself rather than from a settings
  * endpoint: `@octokit/auth-app` returns the granted permission map alongside
- * the token, so this costs no extra request and needs no App-JWT auth path.
+ * the token, so this needs no App-JWT auth path.
+ *
+ * Asked FRESH, never from the token cache. `@octokit/auth-app` keeps an
+ * installation token — and the permission map minted with it — for 59
+ * minutes, and every request this process makes reuses it. A permission the
+ * organisation owner accepts on the installation is therefore invisible to a
+ * cached read until that token expires: measured 2 Sep 2026, the acceptance
+ * was made, the reconcile ran twice, and both passes reported the permission
+ * as "not granted at all" while sending the administrator back to a setting
+ * that was already right. `refresh: true` mints a new token, which also
+ * REPLACES the cached one, so the write that follows a fresh read is made with
+ * a token that carries the permission the read just saw — a stale token would
+ * answer 403 to the very write the read had cleared.
+ *
+ * The cost is one token mint per read, and this is read once per reconcile
+ * sweep and once per deploy-page load, never per request.
  *
  * `null` is deliberately distinct from an empty map. A map says "these are the
  * permissions"; null says "we could not find out", and the caller must not
@@ -151,7 +166,7 @@ export async function readInstallationPermissions(input?: {
 }): Promise<Record<string, string> | null> {
   try {
     const octokit = getAppOctokit(input?.installationId ?? undefined);
-    const auth = (await octokit.auth({ type: "installation" })) as {
+    const auth = (await octokit.auth({ type: "installation", refresh: true })) as {
       permissions?: Record<string, string>;
     } | null;
     return auth?.permissions ?? null;
