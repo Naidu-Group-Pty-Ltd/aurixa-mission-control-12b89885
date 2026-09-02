@@ -234,6 +234,18 @@ describe("a pass is finished when the engine says so", () => {
     expect(write).toBeGreaterThan(fn.indexOf('current.data?.status === "running"'));
   });
 
+  it("requeues a pushing row by the row's own age, never the event's", () => {
+    /* 14:24:02 on e3e2af73: the event was revived, its `started_at` sat a
+       second inside the cutoff, the row stayed at `pushing`, and the next
+       claim wrote `completed · (of 0)`. */
+    const requeue = sliceFrom(drain, "// The results have to come back with them.", 1_600);
+    expect(requeue).toMatch(
+      /\.eq\("status", "pending"\)\s*\.is\("completed_at", null\)\s*\.is\("worker_started_at", null\)/,
+    );
+    expect(requeue).toMatch(/\.in\("status", \["pushing"\]\)\s*\.lt\("started_at", cutoff\)/);
+    expect(requeue).not.toMatch(/\.is\("completed_at", null\)\s*\.lt\("started_at", cutoff\)/);
+  });
+
   it("the reclaim revives a pushing row left under a finished event", () => {
     const reclaim = sliceFrom(drain, "const { data: orphanRows, error: orphanRowsErr }", 2_500);
     expect(reclaim).toMatch(/\.eq\("status", "pushing"\)\s*\.lt\("started_at", cutoff\)/);

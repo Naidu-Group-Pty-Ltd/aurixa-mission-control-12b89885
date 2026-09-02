@@ -71,12 +71,21 @@ async function reclaimStalled() {
   }
 
   // The results have to come back with them.
+  //
+  // Keyed on the ROW's own age, not the event's `started_at`. Measured 2 Sep
+  // 2026 14:24:02: event e3e2af73 was revived by the rule above on the tick
+  // its claim went stale, but its `started_at` — rewritten by the engine at
+  // the start of the same pass — sat a second inside the cutoff, so the
+  // result the dead pass had left at `pushing` stayed there. The next claim
+  // found nothing queued and wrote the event `completed · (of 0)`. A pending,
+  // unclaimed event cannot legitimately hold a `pushing` row older than the
+  // cutoff, whatever its own timestamps say.
   const { data: revived, error: revivedErr } = await admin
     .from("cascade_events")
     .select("id")
     .eq("status", "pending")
     .is("completed_at", null)
-    .lt("started_at", cutoff);
+    .is("worker_started_at", null);
   if (revivedErr) {
     throw new Error(`cascade-drain reclaim: could not list revived events: ${revivedErr.message}`);
   }
@@ -86,7 +95,8 @@ async function reclaimStalled() {
       .from("cascade_results")
       .update({ status: "queued", started_at: null })
       .in("cascade_event_id", ids)
-      .in("status", ["pushing"]);
+      .in("status", ["pushing"])
+      .lt("started_at", cutoff);
     if (resultsErr) {
       throw new Error(`cascade-drain reclaim: could not requeue results: ${resultsErr.message}`);
     }
