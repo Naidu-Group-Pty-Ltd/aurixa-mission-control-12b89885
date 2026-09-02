@@ -9,7 +9,6 @@ import { AlertTriangle, CheckCircle2, CloudUpload, HelpCircle, ShieldCheck } fro
 import { toast } from "sonner";
 import {
   attachCloneBackendToken,
-  declareCloneBackendDeployer,
   detachCloneBackendToken,
   getCloneBackendDeploy,
 } from "@/lib/clone-backend-deploy.functions";
@@ -52,7 +51,6 @@ export function CloneBackendDeployCard({ cloneId }: { cloneId: string }) {
   const readFn = useServerFn(getCloneBackendDeploy);
   const attachFn = useServerFn(attachCloneBackendToken);
   const detachFn = useServerFn(detachCloneBackendToken);
-  const declareFn = useServerFn(declareCloneBackendDeployer);
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -75,24 +73,6 @@ export function CloneBackendDeployCard({ cloneId }: { cloneId: string }) {
       }
       setToken("");
       toast.success("Scoped token placed. This repository's CI deploys its own backend now.");
-      void refetch();
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function declareDeployer() {
-    setBusy(true);
-    try {
-      const res = await declareFn({ data: { cloneId } });
-      if (!res.ok) {
-        // GitHub's own refusal, verbatim and at length. "Resource not
-        // accessible by integration" names the remedy; a tidied summary of it
-        // does not, and this is the message an administrator acts on.
-        toast.error(res.error ?? "The declaration failed.", { duration: 15_000 });
-        return;
-      }
-      toast.success("Declared. This repository's deploy check will stand down on its next push.");
       void refetch();
     } finally {
       setBusy(false);
@@ -166,19 +146,54 @@ export function CloneBackendDeployCard({ cloneId }: { cloneId: string }) {
               it is decides the remedy, and only one of them is something an
               operator can fix from this page.
             */}
-            {data.deployerBlocker && (
-              <div className="border-warning/40 bg-warning/5 space-y-2 rounded-md border p-3">
-                <p className="flex items-start gap-2 text-sm">
+            {/*
+              A standing state, not an act.
+
+              `BACKEND_DEPLOYED_BY` is held true by
+              `clone-deployer-declaration-reconcile`, which runs every half
+              hour and writes only where a repository disagrees. It used to be
+              a button, so a clone whose write GitHub refused had no way back
+              except the next cascade or somebody remembering to press it — and
+              a declaration nothing keeps true drifts, which reads as a red
+              deploy check people learn to ignore.
+
+              So the panel reports; it does not ask. When the switch is on and
+              the repository does not agree yet, the line below says which of
+              "not written yet" and "not permitted" it is, because only one of
+              those is something a person can act on.
+            */}
+            <div
+              className={
+                data.deployerBlocker
+                  ? "border-warning/40 bg-warning/5 space-y-1 rounded-md border p-3"
+                  : "border-border/60 space-y-1 rounded-md border p-3"
+              }
+            >
+              <p className="flex items-start gap-2 text-sm">
+                {data.deployerBlocker ? (
                   <AlertTriangle className="text-warning mt-0.5 h-4 w-4 shrink-0" aria-hidden />
-                  <span>{data.deployerBlocker}</span>
-                </p>
-                {data.capabilities.variables.state !== "missing" && (
-                  <Button variant="outline" size="sm" disabled={busy} onClick={declareDeployer}>
-                    Declare Mission Control as the deployer
-                  </Button>
+                ) : (
+                  <ShieldCheck className="text-success mt-0.5 h-4 w-4 shrink-0" aria-hidden />
                 )}
-              </div>
-            )}
+                <span>
+                  <span className="font-medium">
+                    Mission Control is declared as this repository&rsquo;s backend deployer
+                  </span>
+                  {" — "}
+                  {data.deployerBlocker
+                    ? "kept on, but not in force here yet."
+                    : "in force; its deploy check stands down instead of failing every push."}
+                </span>
+              </p>
+              {data.deployerBlocker && (
+                <p className="text-muted-foreground pl-6 text-sm">{data.deployerBlocker}</p>
+              )}
+              <p className="text-muted-foreground pl-6 text-xs">
+                Held true automatically — checked every half hour, and written only when the
+                repository disagrees. A repository with its own deploy token is unaffected: its
+                workflow consults this only when no token is present.
+              </p>
+            </div>
           </div>
         )}
 

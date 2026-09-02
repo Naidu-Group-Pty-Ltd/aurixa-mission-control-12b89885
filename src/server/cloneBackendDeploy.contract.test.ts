@@ -60,7 +60,7 @@ describe("the token is judged before it is placed", () => {
 describe("what is recorded, and what is not", () => {
   it("the audit row carries the class and the checks, never the token", () => {
     const insert = bare.slice(
-      bare.indexOf('action: TOKEN_ATTACHED_ACTION'),
+      bare.indexOf("action: TOKEN_ATTACHED_ACTION"),
       bare.indexOf("return { ok: true, verdict"),
     );
     expect(insert).toContain("token_class");
@@ -140,10 +140,16 @@ describe("placing a token replaces the claim it contradicts", () => {
 });
 
 describe("every entry point is admin-only", () => {
-  it("all three server functions require an admin", () => {
+  it("every server function requires an admin", () => {
+    /*
+      The invariant is that the counts AGREE, not what they are. Pinning the
+      number meant editing this test whenever an entry point was added or
+      removed, and it had already drifted — the name said three while the
+      assertion said four.
+    */
     const handlers = fns.match(/createServerFn\(/g) ?? [];
     const guards = fns.match(/\.middleware\(\[requireAdmin\]\)/g) ?? [];
-    expect(handlers.length).toBe(4);
+    expect(handlers.length).toBeGreaterThan(0);
     expect(guards.length).toBe(handlers.length);
   });
 });

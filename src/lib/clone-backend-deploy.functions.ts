@@ -71,23 +71,3 @@ export const detachCloneBackendToken = createServerFn({ method: "POST" })
       actorUserId: context.userId ?? null,
     });
   });
-
-/**
- * Declare Mission Control as this repository's backend deployer.
- *
- * Offered as an explicit act rather than performed on read: reading a page
- * must not write to somebody's repository. It exists because the declaration
- * that happens on cascade is the only other one, so a clone whose write was
- * refused has no way back except waiting for the next cascade — and because
- * its failure message is the diagnostic. GitHub's own refusal names the
- * remedy; a summary of it does not.
- */
-export const declareCloneBackendDeployer = createServerFn({ method: "POST" })
-  .middleware([requireAdmin])
-  .inputValidator(requireCloneId)
-  .handler(async ({ data }) => {
-    const { declareCloneDeployer } = await import(
-      /* @vite-ignore */ "@/lib/_server-shims/cloneBackendDeploy.server"
-    );
-    return declareCloneDeployer(data.cloneId);
-  });

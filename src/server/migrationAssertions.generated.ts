@@ -151,4 +151,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260902081000",
     assertions: [{ kind: "cron", jobname: "clone-secret-forward-reconcile" }],
   },
+  {
+    migration: "20260902100000_schedule_clone_deployer_declaration_reconcile.sql",
+    version: "20260902100000",
+    assertions: [{ kind: "cron", jobname: "clone-deployer-declaration-reconcile" }],
+  },
 ];
