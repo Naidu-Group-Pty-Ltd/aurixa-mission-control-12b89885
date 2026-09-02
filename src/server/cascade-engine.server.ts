@@ -760,42 +760,66 @@ export async function processClone(args: {
   } else {
     candidatePaths = await listFilesMatchingGlobs(octokit, primeRef, installedGlobs);
     scopeLabel = "installed modules";
+    /** Every prime path inside the installed globs — the module's whole section. */
+    const primeInScope = new Set(candidatePaths);
 
-    // The clone's own tree, read for one reason: a module-scoped cascade
+    // Both trees, read once. The mirror branch above diffs the two trees and
+    // reads content only for paths whose blob SHAs differ; this branch used to
+    // list the module's section on prime and then read the PRIME copy and the
+    // CLONE copy of every file in it, unchanged ones included, before deciding
+    // anything. Measured 2 Sep 2026 on `preflight-property-group`: 7,923 files
+    // in the clone, thousands inside its modules, two content reads each — the
+    // pass died every time and the event burned its three claims without a
+    // result row ever starting. A tree listing is one request; the SHAs in it
+    // are hashes of the bytes, so a path whose SHA matches needs no read.
+    let primeTree: Awaited<ReturnType<typeof listTreeEntries>>;
+    let cloneTree: Awaited<ReturnType<typeof listTreeEntries>>;
+    try {
+      [primeTree, cloneTree] = await Promise.all([
+        listTreeEntries(octokit, primeRef),
+        listTreeEntries(octokit, cloneRef),
+      ]);
+    } catch (e) {
+      throw new Error(
+        `Cannot read the prime or clone tree for ${cloneRef.owner}/${cloneRef.repo}: ${e instanceof Error ? e.message : "unknown"}`,
+      );
+    }
+    // A truncated tree cannot say a file is unchanged — it may simply not have
+    // been listed — so the narrowing is skipped and every path is read, as
+    // before. The safe direction costs requests; the other loses a file.
+    if (!primeTree.truncated && !cloneTree.truncated) {
+      candidatePaths = candidatePaths.filter(
+        (path) => cloneTree.entries.get(path) !== primeTree.entries.get(path),
+      );
+    }
+
+    // The clone's own tree, read for one more reason: a module-scoped cascade
     // otherwise only ever learns what prime HAS, so a file prime removed from
-    // an installed module stays on the clone for ever. One tree read answers
-    // it, against a scope that is a handful of globs rather than the whole
-    // repository.
+    // an installed module stays on the clone for ever.
     //
     // The glob set is re-validated here rather than trusted. `listFilesMatching
     // Globs` validates its own copy before building matchers, and a deletion
     // decided by an unvalidated pattern could reach outside the module in the
-    // one direction that destroys something.
+    // one direction that destroys something. The deletion question is asked
+    // against the module's WHOLE section on prime (`primeInScope`), never the
+    // narrowed candidate list: a file prime holds unchanged is not one prime
+    // removed.
     const { validateModuleGlobs, globToRegex } = await import("@/lib/module-globs");
     const { valid } = validateModuleGlobs(installedGlobs);
     if (valid.length > 0) {
       const matchers = valid.map(globToRegex);
-      const inScope = new Set(candidatePaths);
-      let cloneTree: Awaited<ReturnType<typeof listTreeEntries>>;
-      try {
-        cloneTree = await listTreeEntries(octokit, cloneRef);
-      } catch (e) {
-        throw new Error(
-          `Cannot read clone tree for ${cloneRef.owner}/${cloneRef.repo}: ${e instanceof Error ? e.message : "unknown"}`,
-        );
-      }
       // A truncated tree read looks exactly like a clone holding fewer files
       // than it does, which here means silently missing every deletion past the
       // cut. Refusing the deletion pass is the safe half of that.
       if (!cloneTree.truncated) {
         for (const [path, sha] of cloneTree.entries) {
-          if (inScope.has(path)) continue;
+          if (primeInScope.has(path)) continue;
           if (!matchers.some((rx) => rx.test(path))) continue;
           onlyInClone++;
           deletionCandidates.push({ path, cloneSha: sha });
         }
       }
-      for (const path of inScope) primeDirectories.add(directoryOf(path));
+      for (const path of primeInScope) primeDirectories.add(directoryOf(path));
     }
   }
 
