@@ -37,7 +37,7 @@
  * variable when it reports which route is actually in force.
  */
 
-import type { RepoWriteCapabilities } from "./githubAppCapability.pure";
+import type { CapabilityState, RepoWriteCapabilities } from "./githubAppCapability.pure";
 
 /** The one value the clone workflow accepts, restated where the plan is made. */
 export const DECLARED_DEPLOYER = "mission-control";
@@ -69,19 +69,27 @@ export function planDeployerDeclaration(input: {
   readonly variableValue: string | null | undefined;
   readonly capabilities: RepoWriteCapabilities;
 }): DeclarationPlan {
-  if (input.variableValue === undefined) {
-    return {
-      act: "unknown",
-      repo: input.repo,
-      why: "GitHub did not answer for this repository's Actions variables, so whether it is declared is unknown rather than absent.",
-    };
-  }
+  // Read succeeded and the repository already says it: nothing is owed, so no
+  // permission question arises.
   if (input.variableValue === DECLARED_DEPLOYER) return { act: "already", repo: input.repo };
 
-  // A permission that could not be READ answers `unknown`, never `missing` —
-  // the rule this capability module exists for. So only an explicit `missing`
-  // stops the attempt; anything else tries, and GitHub's own refusal is the
-  // diagnostic if it is wrong.
+  /*
+    A permission we KNOW is absent is named before a read that failed, because
+    the absent permission is usually WHY it failed.
+
+    Measured on the first live pass, 2 Sep 2026: all three clone repositories
+    reported `unknown` — "GitHub did not answer" — and the message that names
+    the remedy was unreachable, because `listRepoVariables` answers null for a
+    403 exactly as it does for an outage, and the old order asked about the
+    reading first. Both outcomes refuse to write, so the order costs nothing
+    in safety and decides only which sentence an operator reads: one of them
+    can be acted on and the other cannot.
+
+    A permission that could not be READ still answers `unknown`, never
+    `missing` — the rule this capability module exists for — so it falls
+    through to the attempt below and GitHub's own refusal becomes the
+    diagnostic.
+  */
   if (input.capabilities.variables.state === "missing") {
     return {
       act: "cannot",
@@ -89,10 +97,29 @@ export function planDeployerDeclaration(input: {
       why: input.capabilities.variables.detail,
     };
   }
+
+  if (input.variableValue === undefined) {
+    return {
+      act: "unknown",
+      repo: input.repo,
+      why: "GitHub did not answer for this repository's Actions variables, so whether it is declared is unknown rather than absent.",
+    };
+  }
+
   return { act: "declare", repo: input.repo };
 }
 
 export type DeclarationSweep = {
+  /**
+   * What the App installation's own permission read said about `variables`.
+   *
+   * On the sweep rather than only in each plan, because the first live pass
+   * reported three repositories as `unknown` and there was no way, from the
+   * outside, to tell "the App may not read variables" from "GitHub was having
+   * a moment". Those need different actions and the audit row is where an
+   * operator looks.
+   */
+  permission: CapabilityState;
   considered: number;
   declared: string[];
   already: number;

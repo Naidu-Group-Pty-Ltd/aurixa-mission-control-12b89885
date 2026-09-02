@@ -26,6 +26,7 @@ type Db = SupabaseClient<Database>;
  */
 export async function reconcileCloneDeployerDeclarations(supabase: Db): Promise<DeclarationSweep> {
   const sweep: DeclarationSweep = {
+    permission: "unknown",
     considered: 0,
     declared: [],
     already: 0,
@@ -55,6 +56,9 @@ export async function reconcileCloneDeployerDeclarations(supabase: Db): Promise<
   // property of the App, not of a repository, and asking per clone would be
   // one wasted call each.
   const capabilities = assessRepoWriteCapabilities(await readInstallationPermissions());
+  // Recorded whatever the pass then does, so a row of `unknown` repositories
+  // can be told apart from a row caused by a permission the App does not hold.
+  sweep.permission = capabilities.variables.state;
 
   for (const clone of targets) {
     const owner = clone.github_owner as string;

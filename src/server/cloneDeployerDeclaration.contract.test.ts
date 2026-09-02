@@ -15,6 +15,7 @@ const stripComments = (src: string): string =>
   src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
 
 const server = stripComments(read("src/server/cloneDeployerDeclaration.server.ts"));
+const pure = stripComments(read("src/server/cloneDeployerDeclaration.pure.ts"));
 const cron = stripComments(read("src/routes/hooks.clone-deployer-declaration-reconcile.tsx"));
 const card = stripComments(read("src/components/clone-backend-deploy-card.tsx"));
 const fns = stripComments(read("src/lib/clone-backend-deploy.functions.ts"));
@@ -109,6 +110,32 @@ describe("the sweep never writes on a reading nobody has", () => {
     const loop = server.slice(server.indexOf("for (const clone of targets)"));
     expect(loop).not.toContain("readInstallationPermissions");
     expect(server).toContain("readInstallationPermissions()");
+  });
+});
+
+describe("the audit row can tell the two silences apart", () => {
+  it("carries what the App's own permission read said", () => {
+    /*
+      The first live pass reported three repositories as `unknown` and there
+      was no way from the outside to tell "the App may not read variables"
+      from "GitHub was having a moment" — which need different actions.
+    */
+    expect(server).toContain("sweep.permission = capabilities.variables.state");
+  });
+
+  it("a missing permission is asked about BEFORE a failed reading", () => {
+    /*
+      `listRepoVariables` answers null for a 403 exactly as it does for an
+      outage, so asking about the reading first makes the actionable message
+      unreachable in the one case where it is the right one. Both refuse to
+      write, so the order costs nothing but the sentence.
+    */
+    const fn = pure.slice(pure.indexOf("export function planDeployerDeclaration"));
+    const missing = fn.indexOf('state === "missing"');
+    const unreadable = fn.indexOf("variableValue === undefined");
+    expect(missing).toBeGreaterThan(-1);
+    expect(unreadable).toBeGreaterThan(-1);
+    expect(missing).toBeLessThan(unreadable);
   });
 });
 
