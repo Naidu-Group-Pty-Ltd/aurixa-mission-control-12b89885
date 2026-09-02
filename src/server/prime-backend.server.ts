@@ -14,6 +14,7 @@
  */
 import type { Octokit } from "@octokit/rest";
 import type { RepoRef } from "./github-app.server";
+import { pruneBundleToReachable } from "./functionBundlePrune.pure";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -975,15 +976,69 @@ export async function fetchPrimeBackendSnapshot(
     fileByPath.set(rel, { path: rel, contentBase64 });
   }
 
-  const functions: PrimeEdgeFunction[] = selected.map(
-    ({ slug, bundlePaths, entrypointPath }) => ({
+  /*
+    Each bundle carries only the shared files its entrypoint reaches.
+
+    Measured 2 Sep 2026: the shared tree is 6.42 MB across 523 files and a
+    typical function's own source is one 24 KB `index.ts`, so more than 96% of
+    every deploy was code the function does not import — and the Management
+    API refuses it. The first live cascade deploy this platform attempted
+    failed on every function with
+
+      413 — {"message":"request entity too large"}
+
+    Not a batching problem: the limit is per request, so sixty bundles, six or
+    one fail identically. The payload is already multipart with raw bytes, so
+    there was no encoding left to win either.
+
+    Across all 425 prime functions this takes the average bundle from 6.44 MB
+    to 0.20 MB, with the largest at 0.72 MB and none above 5 MB. Five bundles
+    decline to prune and carry the tree whole, which is the safe direction —
+    see `functionBundlePrune.pure.ts` for why an unreadable graph never prunes.
+
+    Decoding is per DISTINCT file, never per bundle entry: the same 1,033 files
+    the secret scan below walks. Decoding per bundle would be 423 × a 6.3 MB
+    tree, which is the 2.7 GB that killed this worker on 31 Aug.
+  */
+  const textCache = new Map<string, string | null>();
+  const textOf = (rel: string): string | null => {
+    const hit = textCache.get(rel);
+    if (hit !== undefined) return hit;
+    const file = fileByPath.get(rel);
+    let text: string | null = null;
+    if (file && isTextFile(rel)) {
+      try {
+        text = decodeBase64Utf8(file.contentBase64);
+      } catch {
+        text = null; // undecodable is "not text", which contributes no edges
+      }
+    }
+    textCache.set(rel, text);
+    return text;
+  };
+
+  const functions: PrimeEdgeFunction[] = selected.map(({ slug, bundlePaths, entrypointPath }) => {
+    const prune = pruneBundleToReachable({
+      entrypointPath,
+      files: bundlePaths.map((path) => ({ path })),
+      importMapPath,
+      textOf,
+    });
+    if (!prune.pruned) {
+      // Loud, because a bundle carrying the whole tree is one the deploy API
+      // will refuse — and the reason names which file to look at.
+      console.warn(
+        `[prime-backend] ${slug}: carrying the whole shared tree — ${prune.reason ?? "unknown"}`,
+      );
+    }
+    return {
       slug,
-      files: bundlePaths.map((rel) => fileByPath.get(rel)!),
+      files: prune.keep.map((rel) => fileByPath.get(rel)!),
       entrypointPath,
       importMapPath,
       verifyJwt: fnConfig.get(slug)?.verifyJwt ?? true,
-    }),
-  );
+    };
+  });
 
   // ── Secret shells ──
   //

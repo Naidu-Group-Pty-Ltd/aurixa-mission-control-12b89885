@@ -237,7 +237,15 @@ describe("the snapshot materialises once per file, never once per bundle", () =>
       primeBackend().indexOf("export async function fetchPrimeBackendSnapshot"),
     );
     expect(fn).toMatch(/const fileByPath = new Map<string, PrimeFunctionFile>\(\)/);
-    expect(fn).toMatch(/files: bundlePaths\.map\(\(rel\) => fileByPath\.get\(rel\)!\)/);
+    /*
+      The property is that a bundle's files come OUT of `fileByPath` by
+      reference, not that they come from any particular list — bundles are
+      pruned to the paths their entrypoint reaches now, so the list is
+      `prune.keep`. Pinning the array's name pinned the wrong half.
+    */
+    expect(fn).toMatch(/files: \w+(?:\.\w+)*\.map\(\(rel\) => fileByPath\.get\(rel\)!\)/);
+    // And never a fresh object per bundle entry, which is the 2.7 GB shape.
+    expect(fn).not.toMatch(/files: \w+\.map\(\([^)]*\) => \(\{\s*path:/);
   });
 
   it("scans distinct files for secret names, never the bundles", () => {
@@ -273,7 +281,6 @@ describe("every stage can be interrupted at batch granularity", () => {
     /* The two stages that re-apply a whole statement set until it converges. */
     expect(src).toMatch(/applyStatements\(cloneRef, "functions", fnStmts, 15, pauseIfDue\)/);
     expect(src).toMatch(/applyStatements\(cloneRef, "views", viewStmts, 30, pauseIfDue\)/);
-
   });
 
   it("a finished stage is skipped by asking the clone, not by keeping notes", () => {
@@ -393,9 +400,9 @@ describe("a vendor's quota is not this job failing", () => {
         new Error("You have exceeded a secondary rate limit. Please wait a few minutes."),
       ),
     ).toBe(true);
-    expect(isUpstreamRateLimit(Object.assign(new Error("Too Many Requests"), { status: 429 }))).toBe(
-      true,
-    );
+    expect(
+      isUpstreamRateLimit(Object.assign(new Error("Too Many Requests"), { status: 429 })),
+    ).toBe(true);
   });
 
   it("does NOT swallow a permission denial, which is also a 403", () => {
@@ -572,8 +579,13 @@ describe("every stage asks whether it is already done", () => {
     /* The statements are a thunk, so a skipped stage never even queries the
        prime's catalogue for DDL it is not going to apply. */
     const src = introspection();
-    const helper = src.slice(src.indexOf("const stageOrSkip ="), src.indexOf("await ensureApplyHelper"));
-    expect(helper).toMatch(/statements: \(\) => Promise<readonly string\[\]> \| readonly string\[\]/);
+    const helper = src.slice(
+      src.indexOf("const stageOrSkip ="),
+      src.indexOf("await ensureApplyHelper"),
+    );
+    expect(helper).toMatch(
+      /statements: \(\) => Promise<readonly string\[\]> \| readonly string\[\]/,
+    );
     expect(helper).toMatch(/const done = await alreadyReconciled\(stage, primeRef, cloneRef\)/);
     expect(helper).toMatch(/if \(done\) return done;/);
     expect(helper).toMatch(/await statements\(\)/);
@@ -708,7 +720,9 @@ describe("the edge-function fetch is budgeted like everything else", () => {
   it("the cap takes a stable prefix and only the selected bundles are fetched", () => {
     const src = primeBackend();
     /* Sorted, so the same functions lead every pass and none is re-fetched. */
-    expect(src).toMatch(/const selected = functionSourceTruncated \? deployable\.slice\(0, limit\)/);
+    expect(src).toMatch(
+      /const selected = functionSourceTruncated \? deployable\.slice\(0, limit\)/,
+    );
     expect(src).toMatch(/for \(const bundle of selected\)/);
     /* The blob walk must never iterate the unfiltered list again. */
     expect(src).not.toMatch(/for \(const bundle of deployable\)/);
@@ -748,7 +762,9 @@ describe("a schema that is already built costs almost nothing to verify", () => 
      functions. The engine could complete the schema and never get past it. */
   it("skips the creation when every table is present, and says so", () => {
     const src = introspection();
-    expect(src).toMatch(/const tablesAlreadyPresent = reconcile\(tableCounts\[0\], tableCounts\[1\]\)/);
+    expect(src).toMatch(
+      /const tablesAlreadyPresent = reconcile\(tableCounts\[0\], tableCounts\[1\]\)/,
+    );
     expect(src).toMatch(/every table present — creation skipped, drift still checked/);
   });
 
