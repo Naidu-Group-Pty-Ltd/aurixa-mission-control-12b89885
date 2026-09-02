@@ -16,7 +16,7 @@ const stripComments = (src: string): string =>
 const engine = stripComments(read("src/server/cascade-engine.server.ts"));
 const github = stripComments(read("src/server/github-app.server.ts"));
 
-const prepareStart = engine.indexOf("const prepared = await mapWithConcurrency");
+const prepareStart = engine.indexOf("await mapWithConcurrencyUntil<");
 const prepareEnd = engine.indexOf("const deliveredSource");
 const prepare = engine.slice(prepareStart, prepareEnd);
 

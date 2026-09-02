@@ -165,7 +165,9 @@ describe("the drain", () => {
 
   it("refunds the attempt on a deferral and on a pause that landed something", () => {
     const one = sliceFrom(drain, "async function drainOne", 4_000);
-    expect(one).toContain('const refund = res.status === "deferred" || res.done > 0;');
+    expect(one).toMatch(
+      /const refund =\s*res\.status === "deferred" \|\| res\.done > 0 \|\| \(res\.status === "resuming" && res\.progressed\);/,
+    );
     expect(one).toMatch(/attempts: Math\.max\(0, claimed\.attempts - 1\)/);
   });
 
@@ -258,5 +260,72 @@ describe("a pass is finished when the engine says so", () => {
     for (const err of ["orphanRowsErr", "finishedErr", "reviveErr", "requeueErr"]) {
       expect(reclaim).toMatch(new RegExp(`if \\(${err}\\) \\{\\s*throw new Error`));
     }
+  });
+});
+
+describe("a pass resumes inside a clone", () => {
+  /* Measured 2 Sep 2026 at 14:10 and 14:14 on preflight-property-group: a
+     first module-scope pass of 353 files was still preparing blobs when the
+     hook was abandoned at 60 s, twice; the invocation budget only stopped
+     between clones. The list of prepared blobs now rides on the result row
+     and the next pass starts from it. See cascade/passProgress.pure.ts. */
+  const process = sliceFrom(engine, "export async function processClone(", 60_000);
+
+  it("the reuse is consulted before any GitHub call for the path", () => {
+    const worker = sliceFrom(process, "const reusable = known.get(path);", 1_200);
+    expect(worker.indexOf("if (reusable !== undefined)")).toBeLessThan(
+      worker.indexOf("getFileContent(octokit, primeRef, path"),
+    );
+  });
+
+  it("reuses only on the real path, and only against prime's listing", () => {
+    expect(process).toContain("const resume = dryRun ? undefined : args.resume;");
+    expect(process).toContain(
+      "resumableBlobs(readProgress(resume.progress, sourceSha), primeShaByPath)",
+    );
+  });
+
+  it("asks the budget before each fresh file, never before the first", () => {
+    expect(process).toMatch(
+      /const shouldStop = \(\) =>\s*resume\?\.budget !== undefined &&\s*freshlyPrepared > 0 &&\s*resume\.budget\.isPastDeadline\(slowestFileMs\);/,
+    );
+    expect(process).toContain("await mapWithConcurrencyUntil<");
+  });
+
+  it("writes the list as it goes and hands the clone back queued with it", () => {
+    expect(process).toMatch(
+      /if \(freshlyPrepared % PROGRESS_FLUSH_EVERY === 0\) await resume\.onProgress\(progress\);/,
+    );
+    const pause = sliceFrom(process, "if (preparePaused && resume) {", 700);
+    expect(pause).toContain("await resume.onProgress(progress);");
+    expect(pause).toMatch(/status: "queued",\s*started_at: null,/);
+    expect(pause).toContain("progress: progress as unknown as Json,");
+    // Nothing is committed from a half-prepared list.
+    expect(pause).not.toContain("createTree");
+  });
+
+  it("the engine supplies the writer, and only from the real pass", () => {
+    const loop = sliceFrom(engine, "for (const r of queuedRows) {", 8_000);
+    expect(loop).toContain("resume: {");
+    expect(loop).toMatch(
+      /onProgress: async \(progress\) => \{[\s\S]{0,400}\.update\(\{ progress: progress as unknown as Json \}\)/,
+    );
+    // A rehearsal passes no `resume` at all.
+    const rehearsal = sliceFrom(engine, "export async function regenerateCloneProposal", 3_000);
+    expect(rehearsal).not.toContain("resume:");
+  });
+
+  it("a paused clone stops the pass; a finished one clears its list", () => {
+    const loop = sliceFrom(engine, "for (const r of queuedRows) {", 8_000);
+    expect(loop).toMatch(
+      /if \(patch\.status === "queued"\) \{[\s\S]{0,600}stoppedEarly = true;\s*break;/,
+    );
+    expect(loop).toContain(".update({ ...patch, progress: null })");
+  });
+
+  it("progress inside a clone is refunded like a finished clone", () => {
+    const loop = sliceFrom(engine, "for (const r of queuedRows) {", 8_000);
+    expect(loop).toContain("if (preparedNow > priorPrepared) progressed = true;");
+    expect(engine).toContain('{ ok: true, status: "resuming", done, total, progressed }');
   });
 });

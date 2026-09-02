@@ -779,6 +779,36 @@ step compares against it; the clone's content is fetched only where the
 backend-identity hold needs it. A truncated listing cannot say a file is
 absent, only that it was not listed, so the per-path read stays for that case.
 
+### And inside a clone
+
+The four rules above stop a pass BETWEEN clones. A first module-scope
+cascade to `preflight-property-group` is 353 files — a content read and a
+blob create each, after two tree listings and the deletion probes, before
+the tree, the commit and the pull request — and measured at 14:10 and again
+at 14:14 on 2 September 2026 it was still preparing blobs when the hook was
+abandoned at 60 seconds. The stall reclaim requeued it ten minutes later and
+the next attempt did the same 353 reads and creates again.
+
+The blobs a cut pass created are not lost: they exist in the clone's
+repository, addressed by SHA, whether or not a tree ever referenced them.
+What was lost was the list. `cascade_results.progress` keeps it —
+`cascade/passProgress.pure.ts` — for every path prepared, the blob SHA the
+clone now holds and the prime blob SHA it was made from, keyed by the prime
+commit the pass was for. The prepare step asks the budget before each fresh
+file (never before the first, so every pass moves), writes the list every
+`PROGRESS_FLUSH_EVERY` blobs so a pass cut by the platform rather than by its
+own budget still leaves most of its work behind, and when stopped hands the
+clone back `queued` with the list and commits nothing — a proposal that
+carries half the diff is worse than none. The next pass reuses every entry
+whose prime SHA still matches, reads nothing for it, and only then starts
+fresh work. Three rules: **an entry is reused only while prime still holds
+the blob it was made from**; **a record made for another commit is not
+consulted**; and **the list is written by the engine, never by
+`processClone`**, which stays write-free for the rehearsal's sake — and is
+cleared on any finished status. A pass that prepared blobs without finishing
+a clone reports `progressed`, and the drain refunds its attempt as it would
+a finished clone.
+
 `next_attempt_at` is `NOT NULL DEFAULT now()` — one comparison in the claim,
 the shape `remediation_runs` already uses, and never an `.or()` string composed
 around a timestamp. `passContinuation.contract.test.ts` pins the shape of all

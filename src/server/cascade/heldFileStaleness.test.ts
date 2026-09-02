@@ -275,7 +275,12 @@ describe("the engine actually runs this check", () => {
     // Anchored on the object LITERAL (`kind: "blob",`) rather than on the type
     // declaration above it (`kind: "blob";`), which is what the first version
     // of this slice caught.
-    const at = src.indexOf('kind: "blob",');
+    // And on the literal the REAL prepare returns — the one after the blob is
+    // created — rather than the reuse shortcut above it, which carries no
+    // content by construction.
+    const created = src.indexOf("const blobSha = dryRun");
+    expect(created).toBeGreaterThan(-1);
+    const at = src.indexOf('kind: "blob",', created);
     expect(at).toBeGreaterThan(-1);
     const clause = src.slice(at, at + 400);
     expect(clause).toContain("primeFile.binary");
