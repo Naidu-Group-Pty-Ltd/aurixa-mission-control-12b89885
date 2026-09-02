@@ -210,14 +210,51 @@ async function runBackendProvisioning(
 
     // Resolve which secret names are safe to forward from the prime env into
     // this clone (empty shells cause 500s at first function invocation).
-    const { data: forwardRows } = await supabase
+    // Read the whole fleet list, not just the inheriting half: the per-clone
+    // union below has to SEE a deliberate `inherit = false` in order to refuse
+    // it, and a filtered read would present that name as having no policy.
+    const { data: forwardAll } = await supabase
       .from("prime_secret_forwards")
-      .select("name, inherit")
-      .eq("inherit", true);
+      .select("name, inherit");
+    const forwardRows = (forwardAll ?? []).filter((r) => r.inherit);
     const inheritedSecrets: Record<string, string> = {};
     for (const row of forwardRows ?? []) {
       const val = process.env[row.name];
       if (typeof val === "string" && val.length > 0) inheritedSecrets[row.name] = val;
+    }
+
+    /*
+      This clone's OWN authorised forwards, on top of the fleet's.
+
+      Without this a re-provision silently drops them: the clone comes back
+      holding every fleet-wide key and none of the ones authorised for it
+      alone, which reads as a healthy provision at every surface and fails at
+      the vendor. They go through the same `decideForward` the push uses — one
+      decision, so a class refusal cannot be reachable here and not there.
+    */
+    const { data: cloneForwardRows } = await supabase
+      .from("clone_secret_forwards")
+      .select("name")
+      .eq("clone_id", input.cloneId);
+    if (cloneForwardRows?.length) {
+      const { planCloneForwards, namesToWrite } = await import(
+        /* @vite-ignore */ "@/lib/_server-shims/cloneSecretForward.pure"
+      );
+      const { classifySecret } = await import(
+        /* @vite-ignore */ "@/lib/_server-shims/prime-backend.server"
+      );
+      const { hasEnvValue } = await import(
+        /* @vite-ignore */ "@/lib/_server-shims/cloneSecretForward.server"
+      );
+      const planned = planCloneForwards({
+        authorised: cloneForwardRows.map((r) => r.name),
+        fleet: new Map((forwardAll ?? []).map((r) => [r.name, r.inherit])),
+        classOf: classifySecret,
+        envHas: hasEnvValue,
+      });
+      for (const name of namesToWrite(planned)) {
+        inheritedSecrets[name] = process.env[name] as string;
+      }
     }
 
     // A clone with its own email identity holds a DEDICATED Resend key — that
@@ -1095,4 +1132,122 @@ export const addModulesToBackend = createServerFn({ method: "POST" })
       installed: succeededRequested.map((r) => r.id),
       failed: failed.map((r) => ({ id: r.id, name: r.name, error: r.error })),
     };
+  });
+
+// ─── Per-clone credential forwarding ────────────────────────────────
+//
+// `prime_secret_forwards` is fleet policy applied at provisioning time.
+// These serve the other case: a credential ONE tenant should hold, wanted on
+// a clone that was provisioned days ago. See `cloneSecretForward.pure.ts` for
+// what may travel and what may never.
+
+/** List this clone's authorised forwards and what a push would do with each. */
+export const listCloneSecretForwards = createServerFn({ method: "GET" })
+  .middleware([requireAdmin])
+  .inputValidator((input: { cloneId: string }) => {
+    if (!input?.cloneId?.trim()) throw new Error("cloneId is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    const { supabase } = context;
+    const { resolveCloneForwardOutcomes } = await import(
+      /* @vite-ignore */ "@/lib/_server-shims/cloneSecretForward.server"
+    );
+    const resolved = await resolveCloneForwardOutcomes(supabase, data.cloneId);
+    if (!resolved.ok) return { ok: false as const, error: resolved.error };
+    return { ok: true as const, outcomes: resolved.outcomes };
+  });
+
+/** Authorise one name for this clone. The row IS the authorisation. */
+export const upsertCloneSecretForward = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
+  .inputValidator((input: { cloneId: string; name: string; description?: string | null }) => {
+    if (!input?.cloneId?.trim()) throw new Error("cloneId is required");
+    if (!input?.name?.trim()) throw new Error("name is required");
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(input.name)) throw new Error("invalid secret name");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    const { supabase, userId } = context;
+    const { writeAuditLog } = await import(/* @vite-ignore */ "@/lib/_server-shims/audit.server");
+    const { error } = await supabase.from("clone_secret_forwards").upsert(
+      {
+        clone_id: data.cloneId,
+        name: data.name,
+        description: data.description ?? null,
+        created_by: userId,
+      },
+      { onConflict: "clone_id,name" },
+    );
+    if (error) return { ok: false as const, error: error.message };
+    await writeAuditLog({
+      action: "clone_secret_forward.authorised",
+      entityType: "clone",
+      entityId: data.cloneId,
+      actorUserId: userId,
+      metadata: { name: data.name },
+    });
+    return { ok: true as const };
+  });
+
+/**
+ * Withdraw an authorisation.
+ *
+ * This removes permission to forward the name again; it does NOT unset the
+ * secret already on the clone's project, and says so, because deleting a
+ * credential a live deployment is using is a different and much larger act
+ * than withdrawing a policy row.
+ */
+export const removeCloneSecretForward = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
+  .inputValidator((input: { cloneId: string; name: string }) => {
+    if (!input?.cloneId?.trim()) throw new Error("cloneId is required");
+    if (!input?.name?.trim()) throw new Error("name is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    const { supabase, userId } = context;
+    const { writeAuditLog } = await import(/* @vite-ignore */ "@/lib/_server-shims/audit.server");
+    const { error } = await supabase
+      .from("clone_secret_forwards")
+      .delete()
+      .eq("clone_id", data.cloneId)
+      .eq("name", data.name);
+    if (error) return { ok: false as const, error: error.message };
+    await writeAuditLog({
+      action: "clone_secret_forward.withdrawn",
+      entityType: "clone",
+      entityId: data.cloneId,
+      actorUserId: userId,
+      metadata: { name: data.name, note: "authorisation only — the clone still holds the value" },
+    });
+    return { ok: true as const };
+  });
+
+/** Write this clone's authorised, available credentials onto its project now. */
+export const pushCloneSecretForwardsNow = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
+  .inputValidator((input: { cloneId: string }) => {
+    if (!input?.cloneId?.trim()) throw new Error("cloneId is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    const { supabase, userId } = context;
+    const { writeAuditLog } = await import(/* @vite-ignore */ "@/lib/_server-shims/audit.server");
+    const { pushCloneSecretForwards } = await import(
+      /* @vite-ignore */ "@/lib/_server-shims/cloneSecretForward.server"
+    );
+    const res = await pushCloneSecretForwards(supabase, data.cloneId, { actorUserId: userId });
+    await writeAuditLog({
+      action: "clone_secret_forward.pushed",
+      entityType: "clone",
+      entityId: data.cloneId,
+      actorUserId: userId,
+      // Names only. A value never reaches an audit row.
+      metadata: res.ok
+        ? { written: res.written, outcomes: res.outcomes }
+        : { reason: res.reason, error: res.error },
+    });
+    if (!res.ok) return { ok: false as const, error: res.error, reason: res.reason };
+    return { ok: true as const, written: res.written, outcomes: res.outcomes };
   });

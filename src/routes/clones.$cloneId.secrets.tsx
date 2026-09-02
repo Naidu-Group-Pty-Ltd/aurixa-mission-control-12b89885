@@ -5,7 +5,11 @@ import { useState } from "react";
 import {
   backfillCloneAllowedOrigins,
   listCloneBackendSecrets,
+  listCloneSecretForwards,
+  pushCloneSecretForwardsNow,
+  removeCloneSecretForward,
   setCloneBackendSecret,
+  upsertCloneSecretForward,
 } from "@/lib/backend-provisioning.functions";
 import { AppShell } from "@/components/app-shell";
 import { Button } from "@/components/ui/button";
@@ -158,6 +162,8 @@ function CloneSecretsPage() {
           </p>
         </div>
 
+        <ForwardedCredentialsPanel cloneId={cloneId} onChanged={refetch} />
+
         {isLoading && <div className="text-sm text-muted-foreground">Loading…</div>}
 
         {!isLoading && data && !data.ok && (
@@ -240,6 +246,162 @@ function SecretRowCard({ row, onSave }: { row: SecretRow; onSave: (v: string) =>
         />
         <Button type="submit" disabled={!value || saving}>
           {saving ? "Saving…" : "Save"}
+        </Button>
+      </form>
+    </div>
+  );
+}
+
+type ForwardOutcome =
+  | { act: "forward"; name: string }
+  | { act: "no_value"; name: string; why: string }
+  | { act: "refuse"; name: string; why: string }
+  | { act: "already_fleet_wide"; name: string; why: string };
+
+const OUTCOME_META: Record<
+  ForwardOutcome["act"],
+  { label: string; variant: "default" | "secondary" | "destructive" | "outline" }
+> = {
+  forward: { label: "Ready to forward", variant: "default" },
+  no_value: { label: "No value on this deployment", variant: "destructive" },
+  refuse: { label: "Refused", variant: "destructive" },
+  already_fleet_wide: { label: "Already fleet-wide", variant: "secondary" },
+};
+
+/**
+ * The credentials authorised for THIS clone alone.
+ *
+ * Separate from the fleet forwarding list on purpose: that one decides what
+ * every clone gets, and a vendor account one tenant holds is not that. The row
+ * is the authorisation and a scheduled job applies it, so this panel exists to
+ * make the state legible and to push without waiting half an hour — not
+ * because the push depends on somebody finding it.
+ */
+function ForwardedCredentialsPanel({
+  cloneId,
+  onChanged,
+}: {
+  cloneId: string;
+  onChanged: () => Promise<unknown>;
+}) {
+  const listFn = useServerFn(listCloneSecretForwards);
+  const addFn = useServerFn(upsertCloneSecretForward);
+  const removeFn = useServerFn(removeCloneSecretForward);
+  const pushFn = useServerFn(pushCloneSecretForwardsNow);
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const { data, refetch } = useQuery({
+    queryKey: ["clone-secret-forwards", cloneId],
+    queryFn: async () => listFn({ data: { cloneId } }),
+  });
+
+  const outcomes: ForwardOutcome[] = data?.ok ? (data.outcomes as ForwardOutcome[]) : [];
+  const ready = outcomes.filter((o) => o.act === "forward").length;
+
+  return (
+    <div className="border p-4">
+      <div className="mb-2 flex items-start justify-between gap-4">
+        <div>
+          <p className="font-medium">Credentials forwarded from the prime to this clone</p>
+          <p className="text-sm text-muted-foreground">
+            Authorised for this clone alone — the fleet list decides what every clone gets, and a
+            vendor account one tenant holds is not that. Values are read from this deployment's own
+            environment at push time and are never stored here.
+          </p>
+        </div>
+        <Button
+          variant="outline"
+          disabled={busy || ready === 0}
+          onClick={async () => {
+            setBusy(true);
+            try {
+              const res = await pushFn({ data: { cloneId } });
+              if (!res?.ok) {
+                toast.error(res?.error ?? "Could not forward");
+              } else if (res.written.length > 0) {
+                toast.success(`Forwarded ${res.written.join(", ")} to this clone`);
+              } else {
+                // Never a success toast over an empty write.
+                toast.error("Nothing was forwarded — see the reasons listed below");
+              }
+              await refetch();
+              await onChanged();
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          {busy ? "Forwarding…" : `Forward now${ready > 0 ? ` (${ready})` : ""}`}
+        </Button>
+      </div>
+
+      {data && !data.ok && (
+        <div className="my-2 border border-destructive/40 bg-destructive/10 p-2 text-sm">
+          {data.error}
+        </div>
+      )}
+
+      {outcomes.length === 0 ? (
+        <p className="my-3 text-sm text-muted-foreground">
+          Nothing authorised for this clone. Add a secret name below to allow it to be copied from
+          the prime.
+        </p>
+      ) : (
+        <ul className="my-3 space-y-2">
+          {outcomes.map((o) => (
+            <li key={o.name} className="border p-3">
+              <div className="flex items-center justify-between gap-3">
+                <span className="font-mono text-sm">{o.name}</span>
+                <div className="flex items-center gap-2">
+                  <Badge variant={OUTCOME_META[o.act].variant}>{OUTCOME_META[o.act].label}</Badge>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={async () => {
+                      const res = await removeFn({ data: { cloneId, name: o.name } });
+                      if (res?.ok) {
+                        toast.success(
+                          `${o.name} is no longer authorised. The clone still holds the value — unset it above if it should not.`,
+                        );
+                        await refetch();
+                      } else {
+                        toast.error(res?.error ?? "Could not withdraw");
+                      }
+                    }}
+                  >
+                    Withdraw
+                  </Button>
+                </div>
+              </div>
+              {"why" in o && <p className="mt-1 text-xs text-muted-foreground">{o.why}</p>}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <form
+        className="flex gap-2"
+        onSubmit={async (e) => {
+          e.preventDefault();
+          if (!name.trim()) return;
+          const res = await addFn({ data: { cloneId, name: name.trim() } });
+          if (res?.ok) {
+            setName("");
+            await refetch();
+          } else {
+            toast.error(res?.error ?? "Could not authorise that name");
+          }
+        }}
+      >
+        <Input
+          value={name}
+          onChange={(e) => setName(e.target.value.toUpperCase())}
+          placeholder="SECRET_NAME"
+          className="font-mono"
+        />
+        <Button type="submit" variant="outline" disabled={!name.trim()}>
+          Authorise
         </Button>
       </form>
     </div>
