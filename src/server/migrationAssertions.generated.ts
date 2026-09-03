@@ -166,4 +166,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260902144000",
     assertions: [{ kind: "column", table: "cascade_results", column: "progress" }],
   },
+  {
+    migration: "20260903160000_clone_backends_repair_requested_at.sql",
+    version: "20260903160000",
+    assertions: [{ kind: "column", table: "clone_backends", column: "repair_requested_at" }],
+  },
 ];
