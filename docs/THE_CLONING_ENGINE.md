@@ -27,10 +27,10 @@ Creating a clone is one operator action and four independent machines.
 Everything slow is a **row in a queue**, and each queue has its own worker
 behind a `/hooks/*` route driven by `pg_cron`:
 
-| Queue               | Worker                              | Cadence      | What it produces                                                                 |
-| ------------------- | ----------------------------------- | ------------ | -------------------------------------------------------------------------------- |
-| `cascade_events`    | `/hooks/cascade-drain`              | every minute | the module files, merged into the clone's repo                                   |
-| `clone_backends`    | `/hooks/backend-provisioning-drain` | every minute | the clone's own Supabase project — schema, edge functions, secrets, seeded admin |
+| Queue               | Worker                              | Cadence      | What it produces                                                                                           |
+| ------------------- | ----------------------------------- | ------------ | ---------------------------------------------------------------------------------------------------------- |
+| `cascade_events`    | `/hooks/cascade-drain`              | every minute | the module files, merged into the clone's repo                                                             |
+| `clone_backends`    | `/hooks/backend-provisioning-drain` | every minute | the clone's own Supabase project — schema, edge functions, secrets, seeded admin                           |
 | `clone_deployments` | `/hooks/deployment-drain`           | every minute | the Vercel project, its environment (including this clone's OWN Turnstile site key), the build, the domain |
 
 That is the whole engine. There is no orchestrator above these three; they are
@@ -169,7 +169,7 @@ on everything near it.
 
 ## Still open
 
-*(updated 28 Aug 2026)*
+_(updated 28 Aug 2026)_
 
 - **Provider credentials — Vercel is live now.** `VERCEL_API_TOKEN`,
   `VERCEL_TEAM_ID` and `VERCEL_WEBHOOK_SECRET` are configured and proven: the
@@ -246,7 +246,7 @@ produces tokens rejected by the very database they are for.
 
 ### Repairing the clones that were provisioned before any of that
 
-Provisioning covers clones provisioned *after* the capture existed and nothing
+Provisioning covers clones provisioned _after_ the capture existed and nothing
 else. Every clone already in the fleet has `JWT_SECRET` missing, and so does
 any project adopted rather than created here. The documented remedy for those
 was a person opening the clone's Supabase settings and pasting a signing key
@@ -313,3 +313,78 @@ missing.
 The prime and every clone that already exists are unaffected, by construction:
 a `clone_payment_gates` row IS the gate, this is the only code path that writes
 one, and a test asserts no migration backfills the table.
+
+---
+
+## Re-running a backend: two levers, and the state that had neither
+
+September 2026. Added after the first two engine-provisioned clones reached
+`ready` and could not be brought forward when the engine behind them was
+fixed.
+
+`clone_backends` is a queue with exactly one writer,
+`enqueueCloneBackendProvisioning` — the upsert IS the contract with the drain,
+and a second writer of that row shape is how the queue and the worker drift.
+Everything that wants a pass run asks that function, and it has two modes.
+
+| The row is | The lever                            | What it does                                                                         |
+| ---------- | ------------------------------------ | ------------------------------------------------------------------------------------ |
+| `failed`   | `/hooks/backend-provisioning-retry`  | mints a fresh admin credential and re-queues, resuming onto the same project         |
+| `ready`    | `/hooks/backend-provisioning-repair` | converges it onto the current engine, resuming onto the same project, seeding nobody |
+| in flight  | neither                              | a worker has it; a fresh upsert would reset its attempts and credential under it     |
+
+The dashboard's **Reprovision** button now picks between the two by status, per
+clone, through the same enqueue.
+
+### Why a repair is not just the retry with a looser guard
+
+**It seeds nobody, and that is the point.** `seedProductAdminIdentity` rewrites
+`password_hash` and clears `failed_login_attempts` and `locked_until` on an
+existing row unconditionally. Over a clone that has been handed over, running
+it again is a silent password reset and a lockout release, reported as a
+successful step. The admin identity belongs to the tenant. So a repair carries
+no credential at all — which is also what makes a clone repairable after a
+terminal failure has cleared the queued one.
+
+Two consequences follow from a queued row with no credential, and both are in
+the drain:
+
+- **the claim** cannot require `queued_admin_password_enc`, so that predicate
+  moved out of the query and into the same JS filter the `retry_after` backoff
+  uses (a composed PostgREST `.or()` is forbidden here — one never parsed, and
+  the claim it guarded had never once succeeded). The candidate window widened
+  from five rows to ten, because unclaimable rows now reach the filter;
+- **the stranded sweep** must skip it. That sweep fails a parked row precisely
+  BECAUSE it has no credential and so can never be claimed — which is a
+  repair's normal state. Without the exclusion it would fail a pass that was
+  working, 45 minutes in, telling the operator to retry something that had not
+  gone wrong.
+
+`repair_requested_at` carries the flag, and its presence means "the pass now
+queued is a repair". It is spent on any terminal outcome, success or failure:
+left standing, the next ordinary provisioning of that clone would be taken for
+a repair and would skip the admin seed.
+
+### What a repair actually costs
+
+Almost nothing, and that is a property of the hardening rather than of the
+repair. Every replication step asks the target before it writes — the schema
+stages prove themselves reconciled in one round trip per side, extensions
+report `already_present`, cron and the realtime publication compare before
+adding, and the deploy step asks the project which functions it holds. So a
+repair over a complete clone reconciles what is already right and carries only
+what is missing.
+
+### The state this was built to reach
+
+On 3 September 2026 both engine-provisioned clones were at `ready` holding **0
+of the prime's 32 storage buckets** and **9 of its 86 secrets** — two engine
+defects whose fixes landed after those clones finished. There was no way to
+apply the fixes: the enqueue refused a `ready` row, the retry hook refused
+anything that was not `failed`, and the dashboard's Reprovision button wrote
+`status='pending'` itself, with no credential, producing a row nothing could
+claim and which the stranded sweep then marked `failed` three quarters of an
+hour later. It reported "Re-queued N backends" every time.
+
+The remedy the product offered for a clone provisioned before a fix was to
+destroy a tenant's Supabase project and build a new one.

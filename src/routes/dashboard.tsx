@@ -735,10 +735,31 @@ function BulkReprovisionButton({ ids, onDone }: { ids: string[]; onDone: () => v
         setBusy(true);
         const result = await fn({ data: { cloneIds: ids } });
         setBusy(false);
-        if (result.ok) {
-          toast.success(`Re-queued ${result.count} backend${result.count === 1 ? "" : "s"}`);
-          onDone();
-        } else toast.error(result.error ?? "Reprovision failed");
+        if (!result.ok) {
+          toast.error(result.error ?? "Reprovision failed");
+          return;
+        }
+        // What was SELECTED is not what was queued. This used to report the
+        // tick count whatever the server did with it — and the server did
+        // nothing, on every row (see bulkReprovisionBackends). A skipped
+        // backend is named, because "Re-queued 4" over 4 refusals is how an
+        // operator comes to wait on work nobody started.
+        const skipped = result.skipped ?? [];
+        if (result.count > 0) {
+          toast.success(`Re-queued ${result.count} backend${result.count === 1 ? "" : "s"}`, {
+            description:
+              skipped.length > 0
+                ? `${skipped.length} skipped — ${skipped[0].reason}${skipped.length > 1 ? ", …" : ""}`
+                : undefined,
+          });
+        } else {
+          toast.error(
+            skipped.length > 0
+              ? `Nothing re-queued — ${skipped[0].reason}${skipped.length > 1 ? ` (and ${skipped.length - 1} more)` : ""}`
+              : "Nothing re-queued",
+          );
+        }
+        onDone();
       }}
     >
       <RefreshCw className="mr-1.5 h-3.5 w-3.5" /> Reprovision

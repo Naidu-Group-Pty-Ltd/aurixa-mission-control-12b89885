@@ -1400,6 +1400,7 @@ export type Database = {
           queued_at: string | null
           queued_module_ids: string[] | null
           reference_sync_started_at: string | null
+          repair_requested_at: string | null
           resume_stage: string | null
           retry_after: string | null
           region: string
@@ -1436,6 +1437,7 @@ export type Database = {
           queued_at?: string | null
           queued_module_ids?: string[] | null
           reference_sync_started_at?: string | null
+          repair_requested_at?: string | null
           resume_stage?: string | null
           retry_after?: string | null
           region?: string
@@ -1472,6 +1474,7 @@ export type Database = {
           queued_at?: string | null
           queued_module_ids?: string[] | null
           reference_sync_started_at?: string | null
+          repair_requested_at?: string | null
           resume_stage?: string | null
           retry_after?: string | null
           region?: string

@@ -207,6 +207,12 @@ async function reclaimStalled() {
       status_detail: "Provisioning stranded — nothing could claim it",
     })
     .is("queued_admin_password_enc", null)
+    // A REPAIR queues no credential BY DESIGN — it seeds nobody — so the very
+    // condition that makes an ordinary row unclaimable is a repair's normal
+    // state. Without this it would be failed 45 minutes into a pass that was
+    // working correctly, and the message would tell the operator to retry
+    // something that had not gone wrong.
+    .is("repair_requested_at", null)
     .lt("updated_at", stallCutoff)
     .is("worker_started_at", null)
     .is("worker_finished_at", null)
@@ -262,6 +268,7 @@ async function reclaimStalled() {
 async function claimOne(): Promise<null | {
   clone_id: string;
   queued_admin_password_enc: string | null;
+  repair_requested_at: string | null;
   queued_module_ids: string[] | null;
   admin_email: string | null;
   region: string | null;
@@ -271,10 +278,9 @@ async function claimOne(): Promise<null | {
   const nowIso = new Date().toISOString();
   const { data: candidates, error: selectError } = await admin
     .from("clone_backends")
-    .select("clone_id, attempts, retry_after")
+    .select("clone_id, attempts, retry_after, queued_admin_password_enc, repair_requested_at")
     .eq("status", "pending")
     .is("worker_started_at", null)
-    .not("queued_admin_password_enc", "is", null)
     .lt("attempts", MAX_ATTEMPTS)
     // Least recently SERVED first, not oldest queued. A schema build pauses at
     // the invocation budget and returns to `pending` every tick, and ordering
@@ -285,17 +291,27 @@ async function claimOne(): Promise<null | {
     // just paused goes to the back of the line and a fresh row competes on
     // equal terms.
     .order("updated_at", { ascending: true, nullsFirst: false })
-    .limit(5);
+    // Ten rather than five since the credential predicate moved out of the
+    // query (below): unclaimable rows are now filtered here instead of by the
+    // server, so the window has to be wide enough that a couple of them cannot
+    // hide a claimable job behind them.
+    .limit(10);
   if (selectError) {
     throw new Error(`backend-provisioning claim: could not read the queue: ${selectError.message}`);
   }
-  // A job waiting out a vendor quota is not claimable yet. Filtered HERE
-  // rather than in the query because a composed PostgREST `.or()` string is
-  // forbidden in this codebase — one never parsed, and the claim it guarded
-  // had never once succeeded. Five candidates are read so a single backed-off
-  // row cannot hide the queue behind it.
+  // Two reasons a queued row is not claimable YET, both decided here rather
+  // than in the query. A composed PostgREST `.or()` string is forbidden in
+  // this codebase — one never parsed, and the claim it guarded had never once
+  // succeeded — and "has a credential OR is a repair" is exactly the shape
+  // that would need one. Candidates are read wide enough (see the limit above)
+  // that unclaimable rows cannot hide the queue behind them.
   const claimable = (candidates ?? []).filter(
-    (c) => !c.retry_after || new Date(c.retry_after).getTime() <= Date.now(),
+    (c) =>
+      // A provisioning pass without its queued credential can never run; a
+      // repair deliberately has none, because it seeds nobody.
+      (Boolean(c.queued_admin_password_enc) || Boolean(c.repair_requested_at)) &&
+      // A job waiting out a vendor quota is not claimable yet.
+      (!c.retry_after || new Date(c.retry_after).getTime() <= Date.now()),
   );
   if (!claimable.length) return null;
   const target = claimable[0];
@@ -313,7 +329,7 @@ async function claimOne(): Promise<null | {
     .eq("status", "pending")
     .is("worker_started_at", null)
     .select(
-      "clone_id, queued_admin_password_enc, queued_module_ids, admin_email, region, enqueued_by, attempts",
+      "clone_id, queued_admin_password_enc, repair_requested_at, queued_module_ids, admin_email, region, enqueued_by, attempts",
     )
     .maybeSingle();
   // Losing the race returns no row and no error. A fault is not that.
@@ -353,20 +369,25 @@ async function drainOne(deadlineAt: number): Promise<{
     return { processed: true, ok: false, error: "clone_not_found" };
   }
 
-  let adminPassword: string;
-  try {
-    adminPassword = decryptSecret(claimed.queued_admin_password_enc!);
-  } catch (e) {
-    await admin
-      .from("clone_backends")
-      .update({
-        status: "failed",
-        error_message: "Could not decrypt queued admin password",
-        worker_finished_at: new Date().toISOString(),
-        queued_admin_password_enc: null,
-      })
-      .eq("clone_id", claimed.clone_id);
-    return { processed: true, ok: false, error: "decrypt_failed" };
+  // A repair converges an existing backend and seeds nobody, so there is no
+  // credential to decrypt and none is expected. Everything else must have one.
+  const isRepair = Boolean(claimed.repair_requested_at);
+  let adminPassword: string | null = null;
+  if (!isRepair) {
+    try {
+      adminPassword = decryptSecret(claimed.queued_admin_password_enc!);
+    } catch (e) {
+      await admin
+        .from("clone_backends")
+        .update({
+          status: "failed",
+          error_message: "Could not decrypt queued admin password",
+          worker_finished_at: new Date().toISOString(),
+          queued_admin_password_enc: null,
+        })
+        .eq("clone_id", claimed.clone_id);
+      return { processed: true, ok: false, error: "decrypt_failed" };
+    }
   }
 
   const result = await runQueuedBackendProvisioning({
@@ -375,6 +396,7 @@ async function drainOne(deadlineAt: number): Promise<{
     region: claimed.region ?? undefined,
     adminEmail: claimed.admin_email ?? "",
     adminPassword,
+    repair: isRepair,
     moduleIds: claimed.queued_module_ids ?? [],
     actorUserId: claimed.enqueued_by ?? null,
     deadlineAt,
@@ -402,6 +424,12 @@ async function drainOne(deadlineAt: number): Promise<{
     .update({
       worker_finished_at: isTerminal ? new Date().toISOString() : null,
       queued_admin_password_enc: isTerminal ? null : claimed.queued_admin_password_enc,
+      // The flag describes the pass NOW QUEUED, so it is spent when that pass
+      // reaches a terminal outcome — including a failed one. Left standing, a
+      // finished repair would keep telling the drain's claim and its stranded
+      // sweep that a credential-less row is expected, and the next genuine
+      // provisioning of this clone would be read as a repair.
+      ...(isTerminal ? { repair_requested_at: null } : {}),
       // If we failed but still have retries left, allow another worker to claim.
       worker_started_at: !result.ok && !isTerminal ? null : undefined,
       status: !result.ok && !isTerminal ? "pending" : undefined,

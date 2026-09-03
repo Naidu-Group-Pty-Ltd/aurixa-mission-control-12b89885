@@ -186,8 +186,11 @@ describe("a reclaim returns rows to the shape its own claim reads", () => {
     expect(claimCode).not.toMatch(/\.or\(/);
     /* The wait is spent on claim, so a stale stamp cannot hold a job twice. */
     expect(claim).toMatch(/retry_after: null/);
-    /* And a single backed-off row must not hide the queue behind it. */
-    expect(claim).toMatch(/\.limit\(5\)/);
+    /* And unclaimable rows must not hide the queue behind them. The window
+       widened from 5 to 10 when the credential predicate moved out of the
+       query too (a repair pass carries no queued credential by design), so
+       more than one kind of unclaimable row can now reach this filter. */
+    expect(claim).toMatch(/\.limit\(10\)/);
   });
 
   it("backend drain: wall clock bounds the recycling that attempts no longer do", () => {
@@ -221,8 +224,12 @@ describe("a reclaim returns rows to the shape its own claim reads", () => {
     expect(body).toMatch(/Provisioning stranded — nothing could claim it/);
     // Parked rows only, exactly as the ceiling is: a live invocation is never
     // failed under its own feet.
+    // A REPAIR pass is credential-less BY DESIGN — it seeds nobody — so the
+    // condition that makes an ordinary row unclaimable is its normal state.
+    // Excluded here, or the sweep fails a pass that is working correctly.
+    expect(body).toMatch(/\.is\("repair_requested_at", null\)/);
     expect(body).toMatch(
-      /\.is\("queued_admin_password_enc", null\)[\s\S]{0,200}\.is\("worker_started_at", null\)[\s\S]{0,80}\.is\("worker_finished_at", null\)/,
+      /\.is\("queued_admin_password_enc", null\)[\s\S]{0,700}\.is\("worker_started_at", null\)[\s\S]{0,80}\.is\("worker_finished_at", null\)/,
     );
   });
 

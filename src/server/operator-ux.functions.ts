@@ -157,6 +157,42 @@ export const bulkPauseClones = createServerFn({ method: "POST" })
     return { ok: true as const, count: data.cloneIds.length };
   });
 
+/**
+ * Re-queue selected clone backends — through the SAME enqueue every other
+ * caller uses.
+ *
+ * ## What this used to do, and why it could not work
+ *
+ * It wrote `clone_backends.status = 'pending'` directly, for any row at
+ * `failed` or `ready`, and reported "Re-queued N backends" every time. It was
+ * the second writer of a row shape whose only writer is supposed to be
+ * `enqueueCloneBackendProvisioning` — "two writers of that row shape is how
+ * the queue and the worker drift" is written above that function — and the
+ * drift was total:
+ *
+ *   * the drain's `claimOne` will not take a row whose queued admin credential
+ *     is absent, and this wrote none. A terminal outcome CLEARS that column,
+ *     so neither a `failed` row nor a `ready` one has one to begin with. The
+ *     re-queued job was therefore unclaimable by construction, on every row,
+ *     every time;
+ *   * `reclaimStalled` then found it — parked, credential-less, untouched for
+ *     45 minutes — and marked it **failed**: "Provisioning stranded — nothing
+ *     could claim it."
+ *
+ * So the button did not reprovision anything. On a `failed` clone it changed a
+ * message; on a READY one it destroyed the `ready` status the whole product
+ * reads and left a healthy tenant's backend recorded as failed three quarters
+ * of an hour later. The operator was told it had worked.
+ *
+ * ## What it does now
+ *
+ * The status decides the lever, and both go through the one enqueue:
+ * a `failed` backend is retried with a freshly minted credential (exactly what
+ * /hooks/backend-provisioning-retry does), and a `ready` one is REPAIRED —
+ * converged onto the current engine, resuming onto its existing project, with
+ * the admin identity left alone because it belongs to the tenant now.
+ * Anything in flight is skipped and said, never clobbered.
+ */
 export const bulkReprovisionBackends = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((d: { cloneIds: string[] }) =>
@@ -164,23 +200,79 @@ export const bulkReprovisionBackends = createServerFn({ method: "POST" })
   )
   .handler(async ({ data, context }) => {
     const { supabase, userId } = context;
-    const { error } = await supabase
+    const { enqueueCloneBackendProvisioning, generateSecurePassword } = await import(
+      /* @vite-ignore */ "@/lib/_server-shims/backend-provisioning.server"
+    );
+
+    const { data: rows, error: readErr } = await supabase
       .from("clone_backends")
-      .update({
-        status: "pending" as const,
-        error_message: null,
-        status_detail: "Re-queued by bulk reprovision",
-      })
-      .in("clone_id", data.cloneIds)
-      .in("status", ["failed", "ready"] as const);
+      .select("clone_id, status, admin_email, region, queued_module_ids, supabase_project_ref")
+      .in("clone_id", data.cloneIds);
+    // A read that FAILED is not a selection that is EMPTY. Reporting "0
+    // queued" over a database fault is the reading this whole surface was
+    // built out of.
+    if (readErr) return { ok: false as const, error: readErr.message };
+
+    const { data: clones } = await supabase
+      .from("clones")
+      .select("id, name")
+      .in("id", data.cloneIds);
+    const nameOf = new Map((clones ?? []).map((c) => [c.id, c.name as string]));
+
+    const queued: string[] = [];
+    const skipped: Array<{ cloneId: string; reason: string }> = [];
+    for (const row of rows ?? []) {
+      const cloneName = nameOf.get(row.clone_id);
+      if (!cloneName) {
+        skipped.push({ cloneId: row.clone_id, reason: "no clone row" });
+        continue;
+      }
+      const repair = row.status === "ready";
+      if (!repair && row.status !== "failed") {
+        // In flight. A fresh upsert here would reset its attempts and its
+        // credential under a worker that is mid-run.
+        skipped.push({ cloneId: row.clone_id, reason: `backend is '${row.status}'` });
+        continue;
+      }
+      if (repair && !row.supabase_project_ref) {
+        skipped.push({ cloneId: row.clone_id, reason: "ready but names no Supabase project" });
+        continue;
+      }
+      if (!repair && !row.admin_email) {
+        skipped.push({ cloneId: row.clone_id, reason: "no admin_email to seed with" });
+        continue;
+      }
+      const enq = await enqueueCloneBackendProvisioning(supabase, userId, {
+        cloneId: row.clone_id,
+        cloneName,
+        region: row.region ?? undefined,
+        adminEmail: row.admin_email ?? "",
+        // A repair seeds nobody, so it queues no credential — see the enqueue.
+        adminPassword: repair ? null : generateSecurePassword(),
+        repair,
+        moduleIds: (row.queued_module_ids as string[] | null) ?? [],
+      });
+      if (enq.ok) queued.push(row.clone_id);
+      else skipped.push({ cloneId: row.clone_id, reason: enq.error });
+    }
+
     await supabase.from("audit_log").insert({
       action: "clones.bulk_reprovision_queued",
       entity_type: "clone_backend",
       actor_user_id: userId,
-      metadata: { count: data.cloneIds.length, ids: data.cloneIds },
+      // What actually happened, per clone. The old metadata recorded the
+      // SELECTION — every id, with a count that was really "how many were
+      // ticked" — so the audit trail agreed with the toast and neither agreed
+      // with the database.
+      metadata: {
+        queued: queued.length,
+        skipped: skipped.length,
+        ids: queued,
+        skipped_detail: skipped,
+      },
     });
-    if (error) return { ok: false as const, error: error.message };
-    return { ok: true as const, count: data.cloneIds.length };
+
+    return { ok: true as const, count: queued.length, skipped };
   });
 
 // ─── Audit log export (CSV-friendly batch) ────────────────────────────
