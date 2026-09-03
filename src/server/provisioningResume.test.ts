@@ -854,3 +854,71 @@ describe("the emptiness scan is a reading, not a gate", () => {
     expect(body.split("takeResumeBatch(").length - 1).toBe(1);
   });
 });
+
+describe("a pass that built nothing must not spend its budget re-proving it", () => {
+  // Measured on 3 Sep 2026, with the schema already complete on both clones:
+  // a pass took ~16s snapshotting, ~19s re-verifying all twelve stages (every
+  // one of them answering `alreadyReconciled`), and ~18s on the emptiness scan
+  // and the ledger stamp — then arrived at the edge-function deploy loop with
+  // enough budget for exactly ONE of 423 functions:
+  //
+  //   "deployed 1/60 edge functions this pass — the rest resume next tick"
+  //
+  // The loop is correct (it always deploys one, then checks the clock). It was
+  // being starved. At one a pass, 423 functions is ~423 passes.
+  const introspection = readFileSync("src/server/schema-introspection.server.ts", "utf8");
+  const provisioning = readFileSync("src/server/backend-provisioning.server.ts", "utf8");
+
+  it("skips the emptiness scan on a pass where every stage was already reconciled", () => {
+    // A pass that applied no DDL cannot have changed what the previous pass
+    // counted, so the count is a repetition — and it is spending the tail of
+    // the budget that the deployment below is the only remaining use for.
+    expect(provisioning).toMatch(
+      /const builtSomething = result\.stages\.some\(\(st\) => st\.applied > 0 \|\| !st\.reconciled\)/,
+    );
+    expect(provisioning).toMatch(/const emptiness = builtSomething\s*\?\s*await verifyCloneIsEmpty\(/);
+  });
+
+  it("keeps the reading on the pass that does build the schema", () => {
+    // Dropping it everywhere would be removing a control. It is kept exactly
+    // where it means something.
+    const call = provisioning.slice(provisioning.indexOf("const builtSomething"));
+    expect(call.slice(0, 400)).toContain("verifyCloneIsEmpty(");
+    expect(call.slice(0, 400)).toContain(": null");
+  });
+
+  it("asks the clone's ledger before re-stamping it", () => {
+    const fn = introspection.slice(
+      introspection.indexOf("export async function stampMigrationLedgerFromPrime"),
+    );
+    const body = fn.slice(0, fn.indexOf("\n}\n") + 2);
+    const askAt = body.indexOf("count(*)::int as n from supabase_migrations.schema_migrations");
+    const insertAt = body.indexOf("insert into supabase_migrations.schema_migrations");
+    expect(askAt).toBeGreaterThan(-1);
+    expect(insertAt).toBeGreaterThan(askAt);
+    expect(body).toMatch(/return \{ stamped: 0, reconciled: true \}/);
+  });
+
+  it("still refuses an EMPTY prime ledger, and still stamps a short clone one", () => {
+    // The reconcile check is about repetition, never about skipping the work.
+    // A clone that is behind still gets stamped, and a prime with no ledger at
+    // all still throws — that guard is what keeps a clone syncable.
+    const fn = introspection.slice(
+      introspection.indexOf("export async function stampMigrationLedgerFromPrime"),
+    );
+    const body = fn.slice(0, fn.indexOf("\n}\n") + 2);
+    const throwAt = body.indexOf("has no rows in supabase_migrations.schema_migrations");
+    const reconcileAt = body.indexOf("if (reconcile(rows.length");
+    expect(throwAt).toBeGreaterThan(-1);
+    expect(reconcileAt).toBeGreaterThan(throwAt);
+    expect(body).toMatch(/reconcile\(rows\.length, num\(cloneLedger\[0\]\?\.n\)\)/);
+  });
+
+  it("says the ledger was already stamped rather than reporting zero", () => {
+    // "stamped 0 migration ID(s)" is the exact sentence this function's own
+    // guard exists to stop being printed by a swallowed failure. A skip must
+    // not borrow it.
+    expect(provisioning).toMatch(/stamp\.reconciled/);
+    expect(provisioning).toMatch(/migration ledger already stamped/);
+  });
+});
