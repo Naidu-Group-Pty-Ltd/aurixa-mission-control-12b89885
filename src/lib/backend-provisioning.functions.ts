@@ -374,7 +374,29 @@ async function runBackendProvisioning(
         status: "ready" as const,
         // The schema build is done; a later re-provision starts from the top.
         resume_stage: null,
-        parity_report: parity ?? null,
+        // The per-item replication results travel WITH the parity report.
+        //
+        // `runBackendProvisioning` has always returned `cronJobs` and
+        // `realtimePublication` — every job and every table, with the error
+        // each failure gave — and nothing here read them. Edge functions and
+        // secret shells get columns of their own; these two were computed and
+        // dropped on the floor, so a per-item failure existed only in a status
+        // line that the next step overwrote.
+        //
+        // That is why two failing cron jobs and seventy failing publication
+        // adds were undiagnosable on the Preflight clone rather than merely
+        // badly worded: the words were the only copy. The parity report is
+        // where an operator already looks to ask whether a clone matches, and
+        // a replication that did not complete is an answer to that question.
+        parity_report: parity
+          ? {
+              ...parity,
+              replication: {
+                cron_jobs: result.cronJobs,
+                realtime_publication: result.realtimePublication,
+              },
+            }
+          : null,
         parity_checked_at: parity ? new Date().toISOString() : null,
         repo_retarget: repoRetarget ?? null,
         status_detail:
