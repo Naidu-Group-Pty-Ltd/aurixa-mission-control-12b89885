@@ -808,6 +808,16 @@ export async function replicateSchemaByIntrospection(
   ): Promise<StageResult> => {
     const done = await alreadyReconciled(stage, primeRef, cloneRef);
     if (done) return done;
+    // BUILDING a stage's statements is work too, and `applyStatements` only
+    // checks the budget between batches — so a build that overruns takes the
+    // worker with it. Grants is the one that shows it: its statement list is
+    // ~8,900 rows read out of `information_schema.role_table_grants`, and a
+    // resumed pass rebuilds the whole list before applying its next slice.
+    // The marker carries no batch index here on purpose: nothing has been
+    // applied, so the next pass re-enters this stage at the batch it left off
+    // at rather than at one it never reached.
+    const startBatch = takeResumeBatch(stage);
+    pauseIfDue(`introspection: ${stage} statements build resumes next tick`, startBatch);
     return runStage(
       stage,
       primeRef,
@@ -816,7 +826,7 @@ export async function replicateSchemaByIntrospection(
       batchSize,
       undefined,
       pauseIfDue,
-      takeResumeBatch(stage),
+      startBatch,
     );
   };
 
@@ -1306,15 +1316,33 @@ export type EmptinessResult = {
   empty: boolean;
   totalRows: number;
   nonEmpty: Array<{ table: string; rows: number }>;
+  /** False when the budget ran out mid-scan: `totalRows` is then a floor, not a total. */
+  complete: boolean;
+  tablesScanned: number;
+  tablesTotal: number;
 };
 
 /**
  * The clone must hold zero rows after introspection (apart from the seeded
  * admin). Counts every row across the replicated schemas.
+ *
+ * Budgeted, because it runs immediately after the schema build — the step
+ * most likely to have just spent the invocation's whole allowance — and it is
+ * a DIAGNOSTIC that gates nothing: its result is recorded on the introspection
+ * summary and nothing branches on it. On the 2 Sep 2026 dry run it counted 649
+ * tables in seven Management-API round trips with no deadline check anywhere
+ * in front of it or inside it, so a pass that arrived here with no budget left
+ * was KILLED rather than paused — and a kill costs a 15-minute stall reclaim
+ * where a pause costs 60 seconds. A measurement must never be able to cost
+ * more than the thing it measures.
+ *
+ * An interrupted scan reports `complete: false` and its caller records the
+ * row count as unknown. A partial count read as a total is a clone certified
+ * empty on the strength of the tables that happened to be scanned first.
  */
 export async function verifyCloneIsEmpty(
   cloneRef: string,
-  options?: { allowRows?: number },
+  options?: { allowRows?: number; deadlineAt?: number },
 ): Promise<EmptinessResult> {
   const listSql = `select n.nspname as schema, c.relname as name
                    from pg_class c join pg_namespace n on n.oid = c.relnamespace
@@ -1323,8 +1351,14 @@ export async function verifyCloneIsEmpty(
   const tables = await query(cloneRef, listSql);
   const nonEmpty: Array<{ table: string; rows: number }> = [];
   let totalRows = 0;
+  let tablesScanned = 0;
+  let complete = true;
   for (const group of chunk(tables, 100)) {
     if (!group.length) continue;
+    if (pastDeadline(options?.deadlineAt)) {
+      complete = false;
+      break;
+    }
     const union = group
       .map(
         (t) =>
@@ -1334,13 +1368,23 @@ export async function verifyCloneIsEmpty(
       )
       .join(" union all ");
     const rows = toRows(await runSqlOnProject(cloneRef, assertReadOnlySourceQuery(union)));
+    tablesScanned += group.length;
     for (const r of rows) {
       const n = num(r.n);
       totalRows += n;
       if (n > 0) nonEmpty.push({ table: str(r.t), rows: n });
     }
   }
-  return { empty: totalRows <= (options?.allowRows ?? 0), totalRows, nonEmpty };
+  return {
+    // A scan that did not finish has not shown the clone to be empty, however
+    // few rows it found before it stopped.
+    empty: complete && totalRows <= (options?.allowRows ?? 0),
+    totalRows,
+    nonEmpty,
+    complete,
+    tablesScanned,
+    tablesTotal: tables.length,
+  };
 }
 
 // ─── Migration ledger stamping ───────────────────────────────────────

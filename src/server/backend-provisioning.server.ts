@@ -1329,26 +1329,46 @@ export async function fetchProjectExtensionNames(projectRef: string): Promise<st
  *
  * Pass the prime's ref to mirror its extensions. Without it only the floor is
  * installed, which is the old behaviour and is not enough for this prime.
+ *
+ * Asks the clone what it already holds ONCE, and issues `create extension`
+ * only for what is missing. The first version probed and then created per
+ * extension — two serial Management-API round trips each, on every pass,
+ * whether or not anything was absent. This step runs before the schema build
+ * (see its call site for why it has to), so that cost came out of the same
+ * 50-second invocation budget the build spends: measured on the 1 Sep 2026
+ * dry run it was ~30 seconds of every pass on a clone where all twelve
+ * extensions had been installed on the first one, leaving the build under
+ * half a budget to make progress in.
+ *
+ * Same class of fault as the schema stages that never asked whether they were
+ * already done — verifying a built thing must not cost what building it did.
+ *
+ * A clone whose extension list cannot be read reports none, which puts every
+ * extension back on the create path: the fallback does the work rather than
+ * assuming it is done.
  */
 export async function enforceRequiredExtensions(
   projectRef: string,
   primeRef?: string | null,
 ): Promise<RequiredExtensionResult[]> {
-  const primeNames = primeRef ? await fetchProjectExtensionNames(primeRef) : [];
+  const [primeNames, cloneNames] = await Promise.all([
+    primeRef ? fetchProjectExtensionNames(primeRef) : Promise.resolve<string[]>([]),
+    fetchProjectExtensionNames(projectRef),
+  ]);
   const wanted = resolveRequiredExtensions(primeNames);
+  const present = new Set(cloneNames);
   const results: RequiredExtensionResult[] = [];
   for (const name of wanted) {
+    if (present.has(name)) {
+      results.push({ name, status: "already_present" });
+      continue;
+    }
     try {
-      const rows = (await runSqlOnProject(
-        projectRef,
-        `select 1 as present from pg_extension where extname = ${sqlLiteral(name)}`,
-      )) as Array<{ present?: number }> | null;
-      const present = Array.isArray(rows) && rows.length > 0;
       await runSqlOnProject(
         projectRef,
         `create extension if not exists ${quoteExtensionIdent(name)};`,
       );
-      results.push({ name, status: present ? "already_present" : "installed" });
+      results.push({ name, status: "installed" });
     } catch (err) {
       results.push({
         name,
@@ -3182,12 +3202,25 @@ export async function provisionCloneBackend(
       deadlineAt: input.deadlineAt,
       resumeFrom: input.introspectionResumeStage ?? null,
     });
-    const emptiness = await verifyCloneIsEmpty(projectRef, { allowRows: 0 }).catch(() => null);
+    // Counting every row on the clone is a reading, not a gate — nothing below
+    // branches on it. So it gets the budget that is LEFT, never the budget the
+    // schema build needed: it sits directly behind the heaviest step in the
+    // pipeline, and a diagnostic that can kill the worker costs a 15-minute
+    // stall reclaim to learn something no decision uses.
+    const emptiness = await verifyCloneIsEmpty(projectRef, {
+      allowRows: 0,
+      deadlineAt: input.deadlineAt ?? undefined,
+    }).catch(() => null);
     introspection = {
       ok: result.ok,
       stages: result.stages,
       shortStages: result.shortStages,
-      rowsOnClone: emptiness?.totalRows ?? null,
+      // A scan cut short by the budget is not a row count. `null` already
+      // means "not measured" here; reporting a partial sum as the total would
+      // certify a clone empty on the tables that happened to be scanned first.
+      rowsOnClone: emptiness?.complete ? emptiness.totalRows : null,
+      // Whereas a table it DID find rows in really does hold them, finished or
+      // not — that half of the reading is sound either way.
       nonEmptyTables: emptiness?.nonEmpty.map((t) => t.table).slice(0, 20) ?? [],
     };
     if (result.partial) {

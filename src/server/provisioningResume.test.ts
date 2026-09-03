@@ -783,3 +783,74 @@ describe("a schema that is already built costs almost nothing to verify", () => 
     expect(src).toMatch(/const cloneCols = await query\(cloneRef, Q\.columns\)/);
   });
 });
+
+describe("the emptiness scan is a reading, not a gate", () => {
+  // The 2 Sep 2026 dry run died here twice, fifteen minutes apart. The schema
+  // build reconciled every stage, returned, and the very next line counted
+  // rows in all 649 tables over seven Management-API round trips — with no
+  // deadline check in front of it and none inside its loop. A pass arriving
+  // with the budget already spent was KILLED rather than paused, which costs
+  // a 15-minute stall reclaim AND an attempt, so three passes exhausted the
+  // row and failed a clone whose schema was complete.
+  //
+  // Nothing branches on the result: it is recorded as `rowsOnClone` and
+  // `nonEmptyTables` on the introspection summary and read by no decision.
+  const introspection = readFileSync("src/server/schema-introspection.server.ts", "utf8");
+  const provisioning = readFileSync("src/server/backend-provisioning.server.ts", "utf8");
+
+  it("stops at the deadline instead of running the worker out", () => {
+    const fn = introspection.slice(
+      introspection.indexOf("export async function verifyCloneIsEmpty"),
+    );
+    const body = fn.slice(0, fn.indexOf("\n}\n") + 2);
+    expect(body).toMatch(/deadlineAt\?:\s*number/);
+    // The check has to be INSIDE the per-batch loop. In front of the loop it
+    // only declines to start, which is not the case that killed the worker.
+    const loopAt = body.indexOf("for (const group of chunk(tables, 100))");
+    expect(loopAt).toBeGreaterThan(-1);
+    expect(body.indexOf("pastDeadline(options?.deadlineAt)")).toBeGreaterThan(loopAt);
+  });
+
+  it("never reports a partial scan as a row count", () => {
+    // A count that stopped early is a floor. Read as a total it certifies the
+    // clone empty on the strength of whichever tables were scanned first.
+    const fn = introspection.slice(
+      introspection.indexOf("export async function verifyCloneIsEmpty"),
+    );
+    const body = fn.slice(0, fn.indexOf("\n}\n") + 2);
+    expect(body).toMatch(/empty:\s*complete && totalRows <=/);
+    expect(provisioning).toMatch(/rowsOnClone: emptiness\?\.complete \? emptiness\.totalRows : null/);
+  });
+
+  it("hands the scan the budget that is left, not a fresh one", () => {
+    const call = provisioning.slice(
+      provisioning.indexOf("await verifyCloneIsEmpty("),
+      provisioning.indexOf("await verifyCloneIsEmpty(") + 260,
+    );
+    expect(call).toMatch(/deadlineAt: input\.deadlineAt/);
+  });
+
+  it("checks the budget before a stage builds its statements, not only between batches", () => {
+    // `applyStatements` guards the apply. Building the list is work too — the
+    // grants stage reads ~8,900 rows out of `information_schema` — and a
+    // resumed pass rebuilds the whole list before applying its next slice.
+    const fn = introspection.slice(introspection.indexOf("const stageOrSkip = async ("));
+    const body = fn.slice(0, fn.indexOf("\n  };") + 4);
+    const reconciledAt = body.indexOf("alreadyReconciled(stage");
+    const pauseAt = body.indexOf("pauseIfDue(");
+    const buildAt = body.indexOf("await statements()");
+    expect(reconciledAt).toBeGreaterThan(-1);
+    expect(pauseAt).toBeGreaterThan(reconciledAt);
+    expect(buildAt).toBeGreaterThan(pauseAt);
+  });
+
+  it("takes the resume batch exactly once per stage", () => {
+    // `takeResumeBatch` CONSUMES the marker. Called twice — once for the
+    // pause, once for the apply — the second answers 0 and the pass restarts
+    // a stage at batch zero that it had already worked most of the way
+    // through.
+    const fn = introspection.slice(introspection.indexOf("const stageOrSkip = async ("));
+    const body = fn.slice(0, fn.indexOf("\n  };") + 4);
+    expect(body.split("takeResumeBatch(").length - 1).toBe(1);
+  });
+});
