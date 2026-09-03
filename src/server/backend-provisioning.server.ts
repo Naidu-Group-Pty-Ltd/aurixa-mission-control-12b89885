@@ -3618,13 +3618,27 @@ export async function provisionCloneBackend(
   // background layer for whatever they drive, which is exactly the silent
   // failure this platform has had before.
   const deferredCron = cronJobs.filter((c) => c.status === "deferred");
+  const failedCron = cronJobs.filter((c) => c.status === "failed");
   if (deferredCron.length > 0) {
     await onStatusUpdate?.(
       "migrating",
       `${cronJobs.length - deferredCron.length}/${cronJobs.length} cron job(s) replicated this pass — the rest resume next tick`,
     );
+    // A DEFERRAL MUST NOT HIDE A FAILURE. The failure line above is written to
+    // the same `status_detail` this pause is about to overwrite, so a job that
+    // can NEVER replicate looked exactly like one that merely ran out of time
+    // — on every pass, for ever, while the count of "carried" jobs oscillated
+    // and the clone's schedule never grew. Observed on the Preflight clone,
+    // 3 Sep 2026: 45 of 47 jobs, holding, with two failing silently behind a
+    // deferral message.
     throw new BudgetPause(
-      `${deferredCron.length} of ${cronJobs.length} cron job(s) carried to the next pass`,
+      `${deferredCron.length} of ${cronJobs.length} cron job(s) carried to the next pass` +
+        (failedCron.length > 0
+          ? ` — ${failedCron.length} FAILED and will not replicate on a retry: ${failedCron
+              .slice(0, 3)
+              .map((c) => `${c.jobname} (${c.error ?? "no error recorded"})`)
+              .join("; ")}`
+          : ""),
       "",
     );
   }

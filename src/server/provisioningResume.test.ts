@@ -963,6 +963,24 @@ describe("the pg_cron schedule is budgeted and asks the clone first", () => {
     expect(readBlock).not.toMatch(/throw/);
   });
 
+  it("never lets a deferral hide a failure", () => {
+    // The failure line and the pause both write `status_detail`, and the pause
+    // is written last. On the Preflight clone that made two jobs which can
+    // never replicate look exactly like two that merely ran out of time — on
+    // every pass, for ever, while the count of "carried" jobs oscillated and
+    // the clone's schedule stayed at 45 of 47.
+    const callSite = provisioning.slice(
+      provisioning.indexOf("const deferredCron = cronJobs.filter"),
+    );
+    const block = callSite.slice(0, 1400);
+    expect(block).toMatch(/const failedCron = cronJobs\.filter\(\(c\) => c\.status === "failed"\)/);
+    expect(block).toMatch(/failedCron\.length > 0/);
+    // The names and the reasons, not just a count: "2 failed" sends nobody
+    // anywhere.
+    expect(block).toMatch(/c\.jobname/);
+    expect(block).toMatch(/c\.error/);
+  });
+
   it("pauses on a deferral OUTSIDE the catch that would swallow it", () => {
     // The cron block is wrapped in a try/catch that reports any throw as
     // "Cron replication skipped". A BudgetPause thrown inside it would be
