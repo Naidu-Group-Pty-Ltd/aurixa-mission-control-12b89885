@@ -1071,3 +1071,40 @@ describe("every per-item step in the tail is budgeted, not just guarded in front
     expect(callSite.slice(deferAt, deferAt + 1600)).toMatch(/throw new BudgetPause/);
   });
 });
+
+describe("a result that is computed must be recorded somewhere a person looks", () => {
+  // `runBackendProvisioning` returns `cronJobs` and `realtimePublication` —
+  // every job and every table, each failure carrying the error it gave — and
+  // the caller that writes the row never read either. Edge functions and
+  // secret shells have columns; these two had nothing, so a per-item failure
+  // existed ONLY in a status line the next step overwrote.
+  //
+  // That is why two failing cron jobs and seventy failing publication adds
+  // were undiagnosable on the Preflight clone rather than merely badly
+  // worded: the words were the only copy.
+  const fns = readFileSync("src/lib/backend-provisioning.functions.ts", "utf8");
+
+  it("writes the cron and realtime results onto the row", () => {
+    expect(fns).toMatch(/cron_jobs: result\.cronJobs/);
+    expect(fns).toMatch(/realtime_publication: result\.realtimePublication/);
+  });
+
+  it("carries them with the parity report rather than replacing it", () => {
+    // The diffs are what an operator opens the report FOR; the per-item
+    // results are the reasons behind them. Losing either half is the defect.
+    const at = fns.indexOf("parity_report: parity");
+    expect(at).toBeGreaterThan(-1);
+    const block = fns.slice(at, at + 500);
+    expect(block).toMatch(/\.\.\.parity/);
+    expect(block).toMatch(/replication:/);
+  });
+
+  it("still writes null when parity could not run", () => {
+    // A replication result is not a parity report. Inventing one from the
+    // half we happen to hold would make `parity_checked_at` a lie.
+    const at = fns.indexOf("parity_report: parity");
+    const block = fns.slice(at, at + 600);
+    expect(block).toMatch(/:\s*null,/);
+    expect(fns).toMatch(/parity_checked_at: parity \? new Date\(\)\.toISOString\(\) : null/);
+  });
+});
