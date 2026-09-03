@@ -548,9 +548,34 @@ export type BucketReplicationResult = {
   bytes_copied?: number;
 };
 
+/**
+ * Create one bucket on the clone, through the PROJECT's Storage API.
+ *
+ * Not the Management API. `GET /v1/projects/{ref}/storage/buckets` exists and
+ * is how the prime's buckets are read — but there is no POST beside it, and
+ * asking for one answers:
+ *
+ *   404 — {"message":"Cannot POST /v1/projects/{ref}/storage/buckets"}
+ *
+ * So this had never created a bucket. Not once, on any clone: the first
+ * complete parity report the engine ever produced, 3 Sep 2026, read
+ * `missing_buckets:32` against a prime with 32 and a clone with none, and all
+ * 32 results in the audit log carry that same 404.
+ *
+ * Nothing said so, and the schema hides it: the row-level policies on
+ * `storage.objects` arrive with the migrations, so a clone has every policy
+ * governing buckets that do not exist. Uploads and signed URLs then 404 at
+ * runtime — the app looks built and cannot store a file.
+ *
+ * The object copy in this same module has always used the Storage API with a
+ * service-role key (`replicateBucketObjects`), so the module already knew
+ * where storage lives; only creation went to the wrong door.
+ */
 export async function createStorageBucket(
   projectRef: string,
   bucket: StorageBucketConfig,
+  /** Service-role key for the TARGET project. The Storage API takes no management token. */
+  serviceRoleKey: string,
 ): Promise<BucketReplicationResult> {
   const body = {
     id: bucket.id,
@@ -559,9 +584,13 @@ export async function createStorageBucket(
     file_size_limit: bucket.file_size_limit,
     allowed_mime_types: bucket.allowed_mime_types,
   };
-  const res = await fetch(`${MGMT_API}/projects/${projectRef}/storage/buckets`, {
+  const res = await fetch(`${getProjectUrl(projectRef)}/storage/v1/bucket`, {
     method: "POST",
-    headers: headers(),
+    headers: {
+      Authorization: `Bearer ${serviceRoleKey}`,
+      apikey: serviceRoleKey,
+      "Content-Type": "application/json",
+    },
     body: JSON.stringify(body),
   });
   if (res.ok) return { id: bucket.id, status: "created" };
@@ -745,8 +774,20 @@ export async function replicateStorageBuckets(
 
   for (const bucket of primeBuckets) {
     let configResult: BucketReplicationResult;
+    // Creation needs the target's service-role key, the same credential the
+    // object copy below uses. Without it there is no way to reach the
+    // project's Storage API at all, so say that rather than reporting a
+    // bucket as failed for a reason that names nothing.
+    if (!targetService) {
+      results.push({
+        id: bucket.id,
+        status: "failed",
+        error: "no service-role key for the clone — its Storage API cannot be reached",
+      });
+      continue;
+    }
     try {
-      configResult = await createStorageBucket(targetRef, bucket);
+      configResult = await createStorageBucket(targetRef, bucket, targetService);
     } catch (err) {
       configResult = {
         id: bucket.id,

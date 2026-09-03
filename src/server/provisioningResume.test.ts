@@ -1165,3 +1165,43 @@ describe("proving a finished schema costs one round trip per side", () => {
     expect(body).not.toMatch(/prefetch/);
   });
 });
+
+describe("a bucket is created through the project's Storage API, not the Management API", () => {
+  // `GET /v1/projects/{ref}/storage/buckets` exists and is how the prime's
+  // buckets are read. There is no POST beside it, and asking for one answers
+  //
+  //   404 — {"message":"Cannot POST /v1/projects/{ref}/storage/buckets"}
+  //
+  // So bucket creation had never once succeeded, on any clone. The first
+  // complete parity report this engine ever produced, 3 Sep 2026, read
+  // `missing_buckets:32` against a prime with 32 and a clone with none, and
+  // all 32 audit-log results carry that same 404.
+  //
+  // The schema hides it: the row-level policies on `storage.objects` arrive
+  // with the migrations, so a clone holds every policy governing buckets that
+  // do not exist, and uploads and signed URLs 404 at runtime instead.
+  const provisioning = readFileSync("src/server/backend-provisioning.server.ts", "utf8");
+  const fn = provisioning.slice(provisioning.indexOf("export async function createStorageBucket"));
+  const body = fn.slice(0, fn.indexOf("\n}\n") + 2);
+
+  it("posts to the project's Storage API", () => {
+    expect(body).toMatch(/getProjectUrl\(projectRef\)\}\/storage\/v1\/bucket/);
+    expect(body).not.toMatch(/MGMT_API/);
+  });
+
+  it("authorises with the target's service-role key, not a management token", () => {
+    // The Storage API does not accept the management token; `headers()` is
+    // what sent one, and what made this a 404 rather than a 401.
+    expect(body).toMatch(/serviceRoleKey: string/);
+    expect(body).toMatch(/Authorization: `Bearer \$\{serviceRoleKey\}`/);
+    expect(body).not.toMatch(/headers\(\)/);
+  });
+
+  it("says the credential is missing rather than blaming the bucket", () => {
+    // Without a service-role key the clone's Storage API is unreachable at
+    // all. Reporting 32 buckets as individually failed for an unnamed reason
+    // is how a credential gap reads as a storage fault.
+    const loop = provisioning.slice(provisioning.indexOf("for (const bucket of primeBuckets)"));
+    expect(loop.slice(0, 900)).toMatch(/no service-role key for the clone/);
+  });
+});
