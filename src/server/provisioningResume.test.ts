@@ -981,3 +981,58 @@ describe("the pg_cron schedule is budgeted and asks the clone first", () => {
     expect(block).toMatch(/throw new BudgetPause/);
   });
 });
+
+describe("every per-item step in the tail is budgeted, not just guarded in front", () => {
+  // The class, not the instance. Each step in the provisioning tail has a
+  // `pauseIfDue` in FRONT of it, so a pass with no budget declines to start —
+  // but a step whose per-item work exceeds one budget was killed rather than
+  // paused, and began at its first item again on the next pass. A kill costs
+  // a 15-minute stall reclaim AND an attempt; a pause costs 60 seconds.
+  //
+  // Measured on the Preflight clone, 3 Sep 2026: 47 cron jobs (~40-70s) and
+  // 95 realtime tables (~75s), both against a 50-second budget, both dying on
+  // the step, over and over.
+  const provisioning = readFileSync("src/server/backend-provisioning.server.ts", "utf8");
+
+  const loopBody = (fnName: string) => {
+    const fn = provisioning.slice(provisioning.indexOf(`export async function ${fnName}`));
+    return fn.slice(0, fn.indexOf("\n}\n") + 2);
+  };
+
+  it.each([
+    ["deployEdgeFunctions", "deadlineAt"],
+    ["replicateCronJobs", "deadlineAt"],
+    ["replicateRealtimePublication", "deadlineAt"],
+  ])("%s takes the invocation deadline and checks it in its loop", (fnName, param) => {
+    const body = loopBody(fnName);
+    expect(body).toContain(param);
+    expect(body).toMatch(/pastDeadline\(deadlineAt\)/);
+    const loopAt = body.search(/\n {2}for \(/);
+    expect(loopAt).toBeGreaterThan(-1);
+    expect(body.indexOf("pastDeadline(deadlineAt)")).toBeGreaterThan(loopAt);
+  });
+
+  it("the realtime step asks the clone what it already publishes", () => {
+    const body = loopBody("replicateRealtimePublication");
+    expect(body).toMatch(/fetchRealtimePublicationTables\(cloneRef\)/);
+    expect(body).toMatch(/publishedOnClone\.has\(/);
+  });
+
+  it("a deferred realtime table is not reported as replicated", () => {
+    // "replicated" on an incomplete publication marks a clone ready while
+    // every channel subscribed to a missing table is silently dead.
+    const body = loopBody("replicateRealtimePublication");
+    expect(body).toMatch(/deferred\.length > 0\s*\?\s*"partial"/);
+  });
+
+  it("pauses on a realtime deferral outside the catch that records a failure", () => {
+    const callSite = provisioning.slice(
+      provisioning.indexOf("Replicating realtime publication from prime"),
+    );
+    const catchAt = callSite.indexOf('status: "failed"');
+    const deferAt = callSite.indexOf("realtimePublication.deferred.length > 0");
+    expect(catchAt).toBeGreaterThan(-1);
+    expect(deferAt).toBeGreaterThan(catchAt);
+    expect(callSite.slice(deferAt, deferAt + 500)).toMatch(/throw new BudgetPause/);
+  });
+});

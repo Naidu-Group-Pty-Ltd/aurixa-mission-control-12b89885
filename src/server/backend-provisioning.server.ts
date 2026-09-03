@@ -1479,6 +1479,10 @@ export async function fetchRealtimePublicationTables(
 export type RealtimeReplicationResult = {
   status: "replicated" | "partial" | "skipped" | "failed";
   added: RealtimePublicationTable[];
+  /** Already on the clone's publication — no round trip spent. */
+  alreadyPublished: RealtimePublicationTable[];
+  /** Not reached before the invocation budget ran out. Neither done nor failed. */
+  deferred: RealtimePublicationTable[];
   failures: Array<RealtimePublicationTable & { error: string }>;
   error?: string;
 };
@@ -1490,9 +1494,21 @@ export type RealtimeReplicationResult = {
 export async function replicateRealtimePublication(
   cloneRef: string,
   primeTables: RealtimePublicationTable[],
+  /**
+   * Stop between tables once this passes, deferring the rest.
+   *
+   * One Management-API round trip per table, and this prime publishes 95 of
+   * them — ~75 seconds against a 50-second invocation budget. The step was
+   * guarded in FRONT (a pass with no budget declined to start it) and nowhere
+   * inside, so a pass that did start it was killed: a 15-minute stall reclaim
+   * and an attempt, where a pause costs 60 seconds. Measured on the Preflight
+   * clone, 3 Sep 2026: 22 of the prime's 95 tables published, the worker dead
+   * on the step.
+   */
+  deadlineAt?: number | null,
 ): Promise<RealtimeReplicationResult> {
   if (primeTables.length === 0) {
-    return { status: "skipped", added: [], failures: [] };
+    return { status: "skipped", added: [], alreadyPublished: [], deferred: [], failures: [] };
   }
   try {
     await runSqlOnProject(
@@ -1507,15 +1523,39 @@ export async function replicateRealtimePublication(
     return {
       status: "failed",
       added: [],
+      alreadyPublished: [],
+      deferred: [],
       failures: [],
       error: err instanceof Error ? err.message : String(err),
     };
   }
 
+  // Ask the clone what it already publishes — one query against 95 round
+  // trips. The target is the authority, never a diary: this is what turns
+  // repeated budgeted passes into compound progress instead of the same
+  // prefix re-added and re-abandoned.
+  //
+  // A publication membership carries no attributes to drift, so unlike a cron
+  // job "present" really is "done" here. A clone whose publication cannot be
+  // read reports nothing, which puts every table back on the write path.
+  const publishedOnClone = new Set(
+    (await fetchRealtimePublicationTables(cloneRef)).map((t) => `${t.schema}.${t.table}`),
+  );
+
   const q = (s: string) => `"${s.replace(/"/g, '""')}"`;
   const added: RealtimePublicationTable[] = [];
+  const alreadyPublished: RealtimePublicationTable[] = [];
+  const deferred: RealtimePublicationTable[] = [];
   const failures: Array<RealtimePublicationTable & { error: string }> = [];
   for (const t of primeTables) {
+    if (publishedOnClone.has(`${t.schema}.${t.table}`)) {
+      alreadyPublished.push(t);
+      continue;
+    }
+    if (pastDeadline(deadlineAt)) {
+      deferred.push(t);
+      continue;
+    }
     const fq = `${q(t.schema)}.${q(t.table)}`;
     try {
       await runSqlOnProject(
@@ -1537,8 +1577,19 @@ export async function replicateRealtimePublication(
     }
   }
   return {
-    status: failures.length === 0 ? "replicated" : added.length > 0 ? "partial" : "failed",
+    // A deferral is not a failure, but it is not "replicated" either: the
+    // publication is incomplete until the next pass carries the rest.
+    status:
+      failures.length > 0
+        ? added.length > 0 || alreadyPublished.length > 0
+          ? "partial"
+          : "failed"
+        : deferred.length > 0
+          ? "partial"
+          : "replicated",
     added,
+    alreadyPublished,
+    deferred,
     failures,
   };
 }
@@ -3585,26 +3636,46 @@ export async function provisionCloneBackend(
   let realtimePublication: RealtimeReplicationResult = {
     status: "skipped",
     added: [],
+    alreadyPublished: [],
+    deferred: [],
     failures: [],
   };
   try {
     const primeRef = input.primeBackendRef;
     await onStatusUpdate?.("migrating", "Replicating realtime publication from prime...");
     const primeTables = await fetchRealtimePublicationTables(primeRef);
-    realtimePublication = await replicateRealtimePublication(projectRef, primeTables);
+    realtimePublication = await replicateRealtimePublication(
+      projectRef,
+      primeTables,
+      input.deadlineAt,
+    );
     if (realtimePublication.status === "partial" || realtimePublication.status === "failed") {
       await onStatusUpdate?.(
         "migrating",
-        `Realtime publication ${realtimePublication.status}: ${realtimePublication.added.length}/${primeTables.length} table(s) added, ${realtimePublication.failures.length} failure(s)`,
+        `Realtime publication ${realtimePublication.status}: ${realtimePublication.added.length} added, ${realtimePublication.alreadyPublished.length} already present, ${realtimePublication.deferred.length} deferred of ${primeTables.length} table(s), ${realtimePublication.failures.length} failure(s)`,
       );
     }
   } catch (err) {
     realtimePublication = {
       status: "failed",
       added: [],
+      alreadyPublished: [],
+      deferred: [],
       failures: [],
       error: err instanceof Error ? err.message : String(err),
     };
+  }
+
+  // Outside the catch, for the same reason the cron deferral is: a throw
+  // inside it is recorded as a FAILED replication and the pass runs on, so a
+  // clone would be marked ready publishing a fraction of the prime's tables —
+  // and a table missing from the publication drops every realtime channel
+  // subscribed to it, silently.
+  if (realtimePublication.deferred.length > 0) {
+    throw new BudgetPause(
+      `${realtimePublication.deferred.length} of ${realtimePublication.deferred.length + realtimePublication.added.length + realtimePublication.alreadyPublished.length} realtime table(s) carried to the next pass`,
+      "",
+    );
   }
 
   pauseIfDue("syncing secrets");
