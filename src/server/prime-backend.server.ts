@@ -1004,9 +1004,29 @@ export async function fetchPrimeBackendSnapshot(
   // not per-blob round trips. ~1,033 function files (15.6 MB) become about
   // fourteen requests; see fetchBlobTextsBatched for why per-blob REST could
   // never finish inside the drain invocation, at any pool width.
+  //
+  // The scan set is EVERY deployable bundle's files; the assembly set is only
+  // the selected ones. Those were the same list until the fetch learned to
+  // skip functions the project already holds and to cap how many it carries —
+  // and the secret-name scan below reads whatever was fetched, so narrowing
+  // the fetch silently narrowed the scan.
+  //
+  // The comment under that scan states the invariant it relied on: "a name
+  // found in a file is found whichever bundles that file happens to travel
+  // in". True while every bundle was fetched. Not true once some are not.
+  //
+  // Measured 3 Sep 2026 on the first clone this engine drove to `ready`: the
+  // final pass had almost nothing left to deploy, so it fetched almost
+  // nothing, scanned almost nothing, and synced ZERO of the prime's 86
+  // secrets — no vendor key, no internal signing secret, no derived URL. The
+  // clone came up looking finished and unable to call anything.
+  //
+  // So the scan takes the full set whenever source was asked for at all. The
+  // saving that matters is untouched: a resumed schema pass passes
+  // `includeFunctionSource: false` and still fetches nothing whatsoever.
   const neededRels: string[] = [];
   const seenRel = new Set<string>();
-  for (const bundle of selected) {
+  for (const bundle of deployable) {
     for (const rel of bundle.bundlePaths) {
       if (seenRel.has(rel)) continue;
       seenRel.add(rel);

@@ -722,15 +722,31 @@ describe("the edge-function fetch is budgeted like everything else", () => {
     expect(skipAt).toBeLessThan(fetchAt);
   });
 
-  it("the cap takes a stable prefix and only the selected bundles are fetched", () => {
+  it("assembles only the selected bundles, but scans EVERY deployable one", () => {
     const src = primeBackend();
-    /* Sorted, so the same functions lead every pass and none is re-fetched. */
-    expect(src).toMatch(
-      /const selected = functionSourceTruncated \? deployable\.slice\(0, limit\)/,
-    );
-    expect(src).toMatch(/for \(const bundle of selected\)/);
-    /* The blob walk must never iterate the unfiltered list again. */
-    expect(src).not.toMatch(/for \(const bundle of deployable\)/);
+    // These were the same list until the fetch learned to skip functions the
+    // project already holds and to cap how many it carries. The secret-name
+    // scan reads whatever was fetched, so narrowing the fetch silently
+    // narrowed the scan — and on the first clone this engine drove to `ready`
+    // (3 Sep 2026) the final pass had almost nothing left to deploy, fetched
+    // almost nothing, and synced ZERO of the prime's 86 secrets.
+    //
+    // A clone with no vendor key and no internal signing secret comes up
+    // looking finished and unable to call anything.
+    expect(src).toMatch(/for \(const bundle of deployable\) \{/);
+    expect(src).toMatch(/const selected = functionSourceTruncated \? deployable\.slice\(0, limit\) : deployable/);
+    // Assembly still respects the cap — that is what keeps a pass carrying a
+    // payload it can actually deploy.
+    expect(src).toMatch(/const functions: PrimeEdgeFunction\[\] = selected\.map\(/);
+  });
+
+  it("still fetches nothing at all when source was not asked for", () => {
+    const src = primeBackend();
+    // The saving that matters is the resumed schema pass, and it is untouched:
+    // `includeFunctionSource: false` returns before any of this.
+    const early = src.slice(0, src.indexOf("const functionBlobs = blobs.filter"));
+    expect(early).toMatch(/secretNames: \[\]/);
+    expect(early).toMatch(/functionSourceOmitted: true/);
   });
 
   it("the runner asks the target, then caps what remains", () => {
