@@ -1043,6 +1043,23 @@ describe("every per-item step in the tail is budgeted, not just guarded in front
     expect(body).toMatch(/deferred\.length > 0\s*\?\s*"partial"/);
   });
 
+  it.each([
+    ["cron", "const deferredCron = cronJobs.filter", /failedCron\.length > 0/],
+    ["realtime", "const rtFailures = realtimePublication.failures", /rtFailures\.length > 0/],
+  ])("%s: a deferral never hides a failure", (_name, marker, guard) => {
+    // Both deferrals are LATE writers to `status_detail` — the last thing a
+    // pass does — so anything they overwrite is lost for the life of the
+    // clone. Measured: cron held at 45 of 47 and the realtime publication at
+    // 22 of 95, each with the reason overwritten by "carried to the next
+    // pass". A step that can never complete must not read as a slow one.
+    const at = provisioning.indexOf(marker);
+    expect(at).toBeGreaterThan(-1);
+    const block = provisioning.slice(at, at + 1600);
+    expect(block).toMatch(guard);
+    expect(block).toMatch(/FAILED and will not/);
+    expect(block).toMatch(/throw new BudgetPause/);
+  });
+
   it("pauses on a realtime deferral outside the catch that records a failure", () => {
     const callSite = provisioning.slice(
       provisioning.indexOf("Replicating realtime publication from prime"),
@@ -1051,6 +1068,6 @@ describe("every per-item step in the tail is budgeted, not just guarded in front
     const deferAt = callSite.indexOf("realtimePublication.deferred.length > 0");
     expect(catchAt).toBeGreaterThan(-1);
     expect(deferAt).toBeGreaterThan(catchAt);
-    expect(callSite.slice(deferAt, deferAt + 500)).toMatch(/throw new BudgetPause/);
+    expect(callSite.slice(deferAt, deferAt + 1600)).toMatch(/throw new BudgetPause/);
   });
 });
