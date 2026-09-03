@@ -1397,7 +1397,7 @@ export async function verifyCloneIsEmpty(
 export async function stampMigrationLedgerFromPrime(
   cloneRef: string,
   primeRef: string,
-): Promise<{ stamped: number }> {
+): Promise<{ stamped: number; reconciled: boolean }> {
   const ref = primeRef;
   const rows = await query(
     ref,
@@ -1425,6 +1425,24 @@ export async function stampMigrationLedgerFromPrime(
        version text primary key, name text, statements text[]
      );`,
   );
+
+  // Ask before writing, the same rule every schema stage follows. The inserts
+  // are idempotent (`on conflict do nothing`), so re-running them is harmless
+  // — but not free, and this runs on EVERY pass, ahead of the edge-function
+  // deployment that is the pass's actual remaining work. One count is cheaper
+  // than five multi-row inserts.
+  //
+  // Skipping on an equal count is not the silent skip this function's own
+  // guard is about: a short ledger still gets stamped, and an EMPTY prime
+  // ledger still throws above. What is refused here is only the repetition.
+  const cloneLedger = await query(
+    cloneRef,
+    `select count(*)::int as n from supabase_migrations.schema_migrations`,
+  ).catch(() => [] as Array<Record<string, unknown>>);
+  if (reconcile(rows.length, num(cloneLedger[0]?.n))) {
+    return { stamped: 0, reconciled: true };
+  }
+
   let stamped = 0;
   for (const group of chunk(rows, 200)) {
     const values = group
@@ -1437,5 +1455,5 @@ export async function stampMigrationLedgerFromPrime(
     );
     stamped += group.length;
   }
-  return { stamped };
+  return { stamped, reconciled: false };
 }

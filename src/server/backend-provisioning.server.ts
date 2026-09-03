@@ -3207,10 +3207,27 @@ export async function provisionCloneBackend(
     // schema build needed: it sits directly behind the heaviest step in the
     // pipeline, and a diagnostic that can kill the worker costs a 15-minute
     // stall reclaim to learn something no decision uses.
-    const emptiness = await verifyCloneIsEmpty(projectRef, {
-      allowRows: 0,
-      deadlineAt: input.deadlineAt ?? undefined,
-    }).catch(() => null);
+    //
+    // And it only runs on a pass that BUILT something. A pass where every
+    // stage answered `alreadyReconciled` applied no DDL and inserted no row,
+    // so the clone holds exactly what the previous pass already counted —
+    // re-counting 649 tables tells nobody anything new, and it is spending
+    // the tail of a budget the edge-function deployment below needs. That
+    // deployment always makes at least one function of progress and then
+    // checks the clock, so whatever this scan takes comes straight out of
+    // the pass's only remaining productive work: measured on 3 Sep 2026, a
+    // pass arrived at the deploy loop with enough budget for exactly ONE of
+    // 423 functions.
+    //
+    // The reading is kept where it means something (the pass that builds the
+    // schema) and dropped where it is a repetition.
+    const builtSomething = result.stages.some((st) => st.applied > 0 || !st.reconciled);
+    const emptiness = builtSomething
+      ? await verifyCloneIsEmpty(projectRef, {
+          allowRows: 0,
+          deadlineAt: input.deadlineAt ?? undefined,
+        }).catch(() => null)
+      : null;
     introspection = {
       ok: result.ok,
       stages: result.stages,
@@ -3259,7 +3276,9 @@ export async function provisionCloneBackend(
       [...snapshot.migrations].sort((a, b) => a.name.localeCompare(b.name)).at(-1)?.id ?? null;
     await onStatusUpdate?.(
       "migrating",
-      `Catalog introspection reconciled; stamped ${stamp.stamped} migration ID(s)`,
+      stamp.reconciled
+        ? "Catalog introspection reconciled; migration ledger already stamped"
+        : `Catalog introspection reconciled; stamped ${stamp.stamped} migration ID(s)`,
     );
   } else {
     await onStatusUpdate?.(
