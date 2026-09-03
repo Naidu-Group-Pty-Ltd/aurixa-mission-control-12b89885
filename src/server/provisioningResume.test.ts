@@ -922,3 +922,62 @@ describe("a pass that built nothing must not spend its budget re-proving it", ()
     expect(provisioning).toMatch(/migration ledger already stamped/);
   });
 });
+
+describe("the pg_cron schedule is budgeted and asks the clone first", () => {
+  // This prime schedules 47 jobs and each is a separate Management-API round
+  // trip: 40-70 seconds against a 50-second budget. The step could never
+  // finish inside one pass and began at the first job every time, so both
+  // clones provisioned on 3 Sep 2026 sat on "Replicating pg_cron schedule
+  // from prime..." until the stall reclaim took them, repeatedly — the same
+  // closed loop the tables stage had.
+  const provisioning = readFileSync("src/server/backend-provisioning.server.ts", "utf8");
+  const fn = provisioning.slice(provisioning.indexOf("export async function replicateCronJobs"));
+  const body = fn.slice(0, fn.indexOf("\n}\n") + 2);
+
+  it("stops between jobs, never mid-job", () => {
+    // An unschedule that lands without its reschedule leaves the clone with
+    // the job GONE, which is worse than leaving it stale.
+    const checkAt = body.indexOf("pastDeadline(deadlineAt)");
+    const unscheduleAt = body.indexOf("cron.unschedule");
+    expect(checkAt).toBeGreaterThan(-1);
+    expect(unscheduleAt).toBeGreaterThan(checkAt);
+    expect(body).toMatch(/status: "deferred"/);
+  });
+
+  it("asks the clone what it already schedules, in one query", () => {
+    expect(body).toMatch(/select jobname, schedule, command, active from cron\.job/);
+    expect(body.split("from cron.job").length - 1).toBe(1);
+  });
+
+  it("still repairs a job whose schedule or command drifted", () => {
+    // 22 of this prime's jobs carry an anon key inline that has to be
+    // rewritten. Skipping every job that merely EXISTS would stop that repair.
+    expect(body).toMatch(
+      /already\.schedule === job\.schedule && already\.command === command && already\.active === job\.active/,
+    );
+  });
+
+  it("puts every job back on the write path when the clone cannot be read", () => {
+    const readBlock = body.slice(body.indexOf("const existing = new Map"), body.indexOf("const results"));
+    expect(readBlock).toMatch(/catch \{/);
+    expect(readBlock).not.toMatch(/throw/);
+  });
+
+  it("pauses on a deferral OUTSIDE the catch that would swallow it", () => {
+    // The cron block is wrapped in a try/catch that reports any throw as
+    // "Cron replication skipped". A BudgetPause thrown inside it would be
+    // reported as a decision not to do the work, and the pass would run on and
+    // mark the clone ready holding a partial schedule.
+    const callSite = provisioning.slice(provisioning.indexOf("Replicating pg_cron schedule from prime"));
+    const catchAt = callSite.indexOf("Cron replication skipped");
+    const deferredAt = callSite.indexOf("const deferredCron");
+    expect(catchAt).toBeGreaterThan(-1);
+    expect(deferredAt).toBeGreaterThan(catchAt);
+    const block = callSite.slice(deferredAt, deferredAt + 900);
+    // The guard itself, not merely a BudgetPause somewhere near it: a
+    // short-circuited condition keeps both the `if` and the `throw` while
+    // never pausing, and the clone is marked ready on a partial schedule.
+    expect(block).toMatch(/if \(deferredCron\.length > 0\) \{/);
+    expect(block).toMatch(/throw new BudgetPause/);
+  });
+});

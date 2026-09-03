@@ -701,6 +701,28 @@ export type ParityResult = {
   matviews_diff: ReturnType<typeof diffMatviews>;
   sequences_diff: ReturnType<typeof diffSequences>;
   blocking_issues: string[];
+  /**
+   * What the CLONE holds and the prime does not.
+   *
+   * Catalog introspection creates and never drops, and every stage reconciles
+   * on `cloneCount >= primeCount` — so an object the prime DELETES survives on
+   * the clone for ever and the engine reads that as reconciled. Measured on
+   * the Preflight clone, 3 Sep 2026: `public.builder_design_images`, present
+   * on the clone and in no schema of the prime, against a `tables` stage that
+   * reported reconciled.
+   *
+   * Every `extra_in_target` list this function already computed was written to
+   * the jsonb column and named by nothing an operator reads: `blocking_issues`
+   * counts only what is MISSING, and the row's own status line said "verified
+   * against the prime". So the surplus is rolled up here and put in the
+   * summary.
+   *
+   * NOT blocking, deliberately. Removing an object from a live tenant database
+   * destroys data if the object is theirs rather than the prime's leftover,
+   * and nothing in the schema distinguishes the two. This names the drift; it
+   * does not act on it.
+   */
+  surplus_in_target: { total: number; by_class: Record<string, number>; sample: string[] };
   risk_level: "low" | "medium" | "high" | "blocking";
   summary: string;
 };
@@ -772,6 +794,32 @@ export async function computeParity(primeRef: string, targetRef: string): Promis
   if (sequences.missing_in_target.length)
     blocking.push(`missing_sequences:${sequences.missing_in_target.length}`);
 
+  // `clone >= prime` is a CONTAINMENT check, not an equality check. Reporting
+  // containment as "matches the prime" is what let a dropped table sit on a
+  // tenant's database unremarked.
+  const surplusSources: Array<[string, readonly string[]]> = [
+    ["tables", tables.extra_in_target],
+    ["functions", functions.extra_in_target],
+    ["edge_functions", edgeFns.extra_in_target],
+    ["triggers", triggers.extra_in_target],
+    ["constraints", constraints.extra_in_target],
+    ["indexes", indexes.extra_in_target],
+    ["matviews", matviews.extra_in_target],
+    ["sequences", sequences.extra_in_target],
+  ];
+  const byClass: Record<string, number> = {};
+  const surplusSample: string[] = [];
+  let surplusTotal = 0;
+  for (const [name, list] of surplusSources) {
+    if (!Array.isArray(list) || list.length === 0) continue;
+    byClass[name] = list.length;
+    surplusTotal += list.length;
+    // Named, capped, and prefixed by class so a sample of twenty is readable
+    // rather than twenty bare identifiers from nine different catalogs.
+    for (const item of list.slice(0, 5)) surplusSample.push(`${name}:${item}`);
+  }
+  const surplus = { total: surplusTotal, by_class: byClass, sample: surplusSample.slice(0, 20) };
+
   let risk: ParityResult["risk_level"] = "low";
   if (
     extensions.version_skew.length ||
@@ -795,7 +843,16 @@ export async function computeParity(primeRef: string, targetRef: string): Promis
     `target=${tables.target_count} tables / ${target.functionSigs.size} fns / ` +
     `${buckets.target_count} buckets / ${cron.target_count} cron / ${edgeFns.target_count} edge-fns / ` +
     `${secrets.target_count} secrets / ${target.enumsByName.size} enums / ${triggers.target_count} triggers · ` +
-    `blocking=${blocking.length}`;
+    `blocking=${blocking.length}` +
+    // Said in the summary because the jsonb is where it was already recorded
+    // and nobody reads jsonb.
+    (surplus.total > 0
+      ? ` · clone-only (prime dropped or tenant-added)=${surplus.total} [${Object.entries(
+          surplus.by_class,
+        )
+          .map(([k, v]) => `${k}:${v}`)
+          .join(" ")}]`
+      : "");
 
   return {
     prime_ref: primeRef,
@@ -819,6 +876,7 @@ export async function computeParity(primeRef: string, targetRef: string): Promis
     matviews_diff: matviews,
     sequences_diff: sequences,
     blocking_issues: blocking,
+    surplus_in_target: surplus,
     risk_level: risk,
     summary,
   };
