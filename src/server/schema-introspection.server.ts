@@ -632,6 +632,40 @@ async function countOn(ref: string, stage: StageName): Promise<number> {
   return num(rows[0]?.n);
 }
 
+/**
+ * Every stage's count for one side, in ONE round trip.
+ *
+ * `alreadyReconciled` asked two questions per stage and there are twelve
+ * stages, so proving a finished schema cost 24 serial Management-API calls at
+ * roughly a second each. On a clone whose schema is already complete that is
+ * the entire purpose of the pass, and it was ~19 seconds of a 50-second
+ * budget — which the tail of the pipeline then does not have. Measured 3 Sep
+ * 2026: the cron schedule and the realtime publication were each landing one
+ * to three items a pass, not because anything failed but because nothing was
+ * left to spend.
+ *
+ * The counts are the same SQL, composed into one statement per side. A side
+ * that cannot be read answers an empty map and every stage falls back to
+ * asking for itself — the fallback does the work rather than assuming it is
+ * done.
+ */
+async function countAllOn(ref: string): Promise<Partial<Record<StageName, number>>> {
+  const sql = STAGE_SEQUENCE.map(
+    (stage) => `select ${sqlLiteral(stage)} as stage, (${COUNTS[stage]}) as n`,
+  ).join(" union all ");
+  try {
+    const rows = await query(ref, sql);
+    const out: Partial<Record<StageName, number>> = {};
+    for (const r of rows) {
+      const stage = str(r.stage) as StageName;
+      if (STAGE_SEQUENCE.includes(stage)) out[stage] = num(r.n);
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
 /** A stage is reconciled when the clone holds at least as many objects as the prime. */
 export function reconcile(primeCount: number, cloneCount: number): boolean {
   return cloneCount >= primeCount;
@@ -656,11 +690,21 @@ async function alreadyReconciled(
   stage: StageName,
   primeRef: string,
   cloneRef: string,
+  /**
+   * Counts taken once at the start of the pass. A clone's count only ever
+   * GROWS during a pass, so a prefetched figure is a lower bound: reading it
+   * as reconciled stays true, and reading it as short only re-runs a stage
+   * that had nothing to do. Both directions are safe; the expensive one is
+   * safe in the harmless direction.
+   */
+  prefetch?: { prime: Partial<Record<StageName, number>>; clone: Partial<Record<StageName, number>> },
 ): Promise<StageResult | null> {
-  const [primeCount, cloneCount] = await Promise.all([
-    countOn(primeRef, stage),
-    countOn(cloneRef, stage),
-  ]);
+  const pre = prefetch?.prime[stage];
+  const cre = prefetch?.clone[stage];
+  const [primeCount, cloneCount] =
+    typeof pre === "number" && typeof cre === "number"
+      ? [pre, cre]
+      : await Promise.all([countOn(primeRef, stage), countOn(cloneRef, stage)]);
   if (!reconcile(primeCount, cloneCount)) return null;
   return {
     stage,
@@ -806,7 +850,7 @@ export async function replicateSchemaByIntrospection(
     statements: () => Promise<readonly string[]> | readonly string[],
     batchSize: number,
   ): Promise<StageResult> => {
-    const done = await alreadyReconciled(stage, primeRef, cloneRef);
+    const done = await alreadyReconciled(stage, primeRef, cloneRef, prefetch);
     if (done) return done;
     // BUILDING a stage's statements is work too, and `applyStatements` only
     // checks the budget between batches — so a build that overruns takes the
@@ -829,6 +873,14 @@ export async function replicateSchemaByIntrospection(
       startBatch,
     );
   };
+
+  // One round trip per side instead of 24, taken before the first stage.
+  // Both sides in parallel: they are different projects.
+  const [prefetchPrime, prefetchClone] = await Promise.all([
+    countAllOn(primeRef),
+    countAllOn(cloneRef),
+  ]);
+  const prefetch = { prime: prefetchPrime, clone: prefetchClone };
 
   await ensureApplyHelper(cloneRef);
   await runSqlOnProject(
@@ -929,10 +981,13 @@ export async function replicateSchemaByIntrospection(
     // the application. The column-drift repair below still runs, which is the
     // whole reason this stage does not use `alreadyReconciled`: equal counts
     // do not mean equal tables.
-    const tableCounts = await Promise.all([
-      countOn(primeRef, "tables"),
-      countOn(cloneRef, "tables"),
-    ]);
+    // From the prefetch where it has both sides — this is the same "is it
+    // already there" question every other stage asks, and on a complete
+    // schema it is the only question the pass has.
+    const tableCounts =
+      typeof prefetch.prime.tables === "number" && typeof prefetch.clone.tables === "number"
+        ? [prefetch.prime.tables, prefetch.clone.tables]
+        : await Promise.all([countOn(primeRef, "tables"), countOn(cloneRef, "tables")]);
     const tablesAlreadyPresent = reconcile(tableCounts[0], tableCounts[1]);
     tableStage = tablesAlreadyPresent
       ? {
@@ -1156,7 +1211,9 @@ export async function replicateSchemaByIntrospection(
 
   // 7. views — a view on a view fails when the callee is not in place yet, and
   // catalog order is not dependency order, so converge the same way functions do.
-  const viewsDone = enterStage("views") ? await alreadyReconciled("views", primeRef, cloneRef) : null;
+  const viewsDone = enterStage("views")
+    ? await alreadyReconciled("views", primeRef, cloneRef, prefetch)
+    : null;
   if (viewsDone) stages.push(viewsDone);
   else if (STAGE_SEQUENCE.indexOf("views") >= startIndex) {
     await say("Replicating views...");

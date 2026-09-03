@@ -586,7 +586,12 @@ describe("every stage asks whether it is already done", () => {
     expect(helper).toMatch(
       /statements: \(\) => Promise<readonly string\[\]> \| readonly string\[\]/,
     );
-    expect(helper).toMatch(/const done = await alreadyReconciled\(stage, primeRef, cloneRef\)/);
+    // The counts now come from a prefetch taken once per pass — one round trip
+    // per side instead of two per stage — so what this pins is that the
+    // question is still ASKED before the stage runs, not how it is answered.
+    expect(helper).toMatch(
+      /const done = await alreadyReconciled\(stage, primeRef, cloneRef, prefetch\)/,
+    );
     expect(helper).toMatch(/if \(done\) return done;/);
     expect(helper).toMatch(/await statements\(\)/);
   });
@@ -1106,5 +1111,57 @@ describe("a result that is computed must be recorded somewhere a person looks", 
     const block = fns.slice(at, at + 600);
     expect(block).toMatch(/:\s*null,/);
     expect(fns).toMatch(/parity_checked_at: parity \? new Date\(\)\.toISOString\(\) : null/);
+  });
+});
+
+describe("proving a finished schema costs one round trip per side", () => {
+  // `alreadyReconciled` asked two questions per stage and there are twelve
+  // stages: 24 serial Management-API calls at roughly a second each. On a
+  // clone whose schema is already complete that IS the pass, and it was ~19
+  // seconds of a 50-second budget — which the tail of the pipeline then does
+  // not have. Measured 3 Sep 2026, with nothing failing anywhere: the cron
+  // schedule and the realtime publication were each landing one to three
+  // items a pass because nothing was left to spend on them.
+  const introspection = readFileSync("src/server/schema-introspection.server.ts", "utf8");
+
+  it("composes every stage's count into one statement per side", () => {
+    const fn = introspection.slice(introspection.indexOf("async function countAllOn"));
+    const body = fn.slice(0, fn.indexOf("\n}\n") + 2);
+    // Built from the same COUNTS the per-stage path uses, over the declared
+    // stage list — a second hand-written list is how the two drift.
+    expect(body).toMatch(/STAGE_SEQUENCE\.map\(/);
+    expect(body).toMatch(/COUNTS\[stage\]/);
+    expect(body).toMatch(/union all/);
+  });
+
+  it("falls back to asking per stage when a side cannot be read", () => {
+    // An empty map must put every stage back on the ask path rather than
+    // reading absent as reconciled.
+    const fn = introspection.slice(introspection.indexOf("async function countAllOn"));
+    const body = fn.slice(0, fn.indexOf("\n}\n") + 2);
+    expect(body).toMatch(/catch \{\s*return \{\};/);
+
+    const rec = introspection.slice(introspection.indexOf("async function alreadyReconciled"));
+    const recBody = rec.slice(0, rec.indexOf("\n}\n") + 2);
+    expect(recBody).toMatch(/typeof pre === "number" && typeof cre === "number"/);
+    expect(recBody).toMatch(/await Promise\.all\(\[countOn\(primeRef, stage\), countOn\(cloneRef, stage\)\]\)/);
+  });
+
+  it("takes the prefetch once, before the first stage", () => {
+    const at = introspection.indexOf("const [prefetchPrime, prefetchClone]");
+    expect(at).toBeGreaterThan(-1);
+    // Before the schema creation and the first stage, and exactly once.
+    expect(at).toBeLessThan(introspection.indexOf('if (enterStage("enums"))'));
+    expect(introspection.split("countAllOn(primeRef)").length - 1).toBe(1);
+  });
+
+  it("still re-counts AFTER a stage applies, which is a different question", () => {
+    // The prefetch answers "was it already done". What a stage reports having
+    // done has to be measured after the work, or the report is the guess.
+    const fn = introspection.slice(introspection.indexOf("async function runStage"));
+    const body = fn.slice(0, fn.indexOf("\n}\n") + 2);
+    expect(body).toMatch(/countOn\(primeRef, stage\)/);
+    expect(body).toMatch(/countOn\(cloneRef, stage\)/);
+    expect(body).not.toMatch(/prefetch/);
   });
 });
