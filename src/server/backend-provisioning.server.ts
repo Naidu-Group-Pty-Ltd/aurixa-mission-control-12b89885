@@ -1020,7 +1020,12 @@ export async function fetchPrimeCronJobs(primeRef: string): Promise<PrimeCronJob
 
 export type CronJobReplicationResult = {
   jobname: string;
-  status: "replicated" | "skipped" | "failed";
+  /**
+   * `deferred` is neither done nor failed: the invocation budget ran out
+   * before this job was reached. The caller pauses on it so the next tick
+   * carries the rest.
+   */
+  status: "replicated" | "skipped" | "failed" | "deferred" | "already_present";
   rewrote_url: boolean;
   reason?: string;
   error?: string;
@@ -1193,6 +1198,17 @@ export async function replicateCronJobs(
    * scheduled and permanently rejected. Omit to rewrite the host only.
    */
   keys?: { primeAnonKey?: string | null; cloneAnonKey?: string | null },
+  /**
+   * Stop between jobs once this passes, marking the rest `deferred`.
+   *
+   * This prime schedules 47 jobs and each one is a separate Management-API
+   * round trip, so the step costs 40-70 seconds against a 50-second
+   * invocation budget: it could never finish inside one pass, and it started
+   * from the first job every time. Both clones provisioned on 3 Sep 2026 sat
+   * on "Replicating pg_cron schedule from prime..." until the stall reclaim
+   * took them, over and over — the same closed loop the tables stage had.
+   */
+  deadlineAt?: number | null,
 ): Promise<CronJobReplicationResult[]> {
   if (primeJobs.length === 0) return [];
   // Ensure pg_cron exists on the clone. Extension is idempotent.
@@ -1207,6 +1223,37 @@ export async function replicateCronJobs(
     }));
   }
 
+  // Ask the CLONE what it already schedules — one query for the whole step,
+  // against 47 unschedule+reschedule round trips. The target is the authority,
+  // never a diary of past runs: this is what turns repeated budgeted passes
+  // into compound progress instead of 47 jobs re-done and re-abandoned.
+  //
+  // A job is left alone only when its schedule AND its rewritten command both
+  // already match, so the drift repair this step exists for (22 of this
+  // prime's jobs carry an anon key inline that must be rewritten) still runs
+  // on anything that does not.
+  const existing = new Map<string, { schedule: string; command: string; active: boolean }>();
+  try {
+    const rows = (await runSqlOnProject(
+      cloneRef,
+      `select jobname, schedule, command, active from cron.job`,
+    )) as Array<{ jobname?: string; schedule?: string; command?: string; active?: boolean }> | null;
+    if (Array.isArray(rows)) {
+      for (const r of rows) {
+        if (!r?.jobname) continue;
+        existing.set(String(r.jobname), {
+          schedule: String(r.schedule ?? ""),
+          command: String(r.command ?? ""),
+          active: r.active !== false,
+        });
+      }
+    }
+  } catch {
+    // A clone whose schedule cannot be read is treated as holding nothing,
+    // which puts every job back on the write path. The fallback does the work
+    // rather than assuming it is done.
+  }
+
   const results: CronJobReplicationResult[] = [];
   for (const job of primeJobs) {
     const hostRewrite = rewriteCronCommand(job.command, primeRef, cloneRef);
@@ -1217,6 +1264,31 @@ export async function replicateCronJobs(
     );
     const command = keyRewrite.command;
     const changed = hostRewrite.changed || keyRewrite.changed;
+
+    const already = existing.get(job.jobname);
+    if (already && already.schedule === job.schedule && already.command === command && already.active === job.active) {
+      results.push({
+        jobname: job.jobname,
+        status: "already_present",
+        rewrote_url: changed,
+        reason: "schedule and command already match",
+      });
+      continue;
+    }
+
+    // Between jobs, never mid-job: an unschedule that lands without its
+    // reschedule leaves the clone with the job GONE, which is worse than
+    // leaving it stale.
+    if (pastDeadline(deadlineAt)) {
+      results.push({
+        jobname: job.jobname,
+        status: "deferred",
+        rewrote_url: changed,
+        reason: "invocation budget spent — carried to the next pass",
+      });
+      continue;
+    }
+
     // Escape single quotes for embedding into SQL literals.
     const q = (s: string) => s.replace(/'/g, "''");
     try {
@@ -3463,10 +3535,16 @@ export async function provisionCloneBackend(
     await onStatusUpdate?.("migrating", "Replicating pg_cron schedule from prime...");
     const primeJobs = await fetchPrimeCronJobs(primeRef);
     const primeKeys = selectProjectKeys(await getProjectApiKeys(primeRef).catch(() => []));
-    cronJobs = await replicateCronJobs(projectRef, primeRef, primeJobs, {
-      primeAnonKey: primeKeys.anonKey,
-      cloneAnonKey: anonKey,
-    });
+    cronJobs = await replicateCronJobs(
+      projectRef,
+      primeRef,
+      primeJobs,
+      {
+        primeAnonKey: primeKeys.anonKey,
+        cloneAnonKey: anonKey,
+      },
+      input.deadlineAt,
+    );
     const failed = cronJobs.filter((c) => c.status === "failed");
     if (failed.length > 0) {
       await onStatusUpdate?.(
@@ -3478,6 +3556,25 @@ export async function provisionCloneBackend(
     await onStatusUpdate?.(
       "migrating",
       `Cron replication skipped: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  // OUTSIDE the try, deliberately. `replicateCronJobs` returns its deferrals
+  // rather than throwing them, because the catch above would turn a
+  // BudgetPause into "Cron replication skipped" — a pause reported as a
+  // decision not to do the work, and the pass would run on and mark the clone
+  // ready holding a partial schedule. A clone missing cron jobs has no
+  // background layer for whatever they drive, which is exactly the silent
+  // failure this platform has had before.
+  const deferredCron = cronJobs.filter((c) => c.status === "deferred");
+  if (deferredCron.length > 0) {
+    await onStatusUpdate?.(
+      "migrating",
+      `${cronJobs.length - deferredCron.length}/${cronJobs.length} cron job(s) replicated this pass — the rest resume next tick`,
+    );
+    throw new BudgetPause(
+      `${deferredCron.length} of ${cronJobs.length} cron job(s) carried to the next pass`,
+      "",
     );
   }
 

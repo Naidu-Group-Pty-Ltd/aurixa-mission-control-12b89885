@@ -388,7 +388,15 @@ async function runBackendProvisioning(
                 ? `Backend ready with warnings: ${failedFunctions.length} function deploy(s) and ${failedSecrets.length} secret sync(s) failed; ${missingSecrets.length} secret(s) awaiting operator input`
                 : missingSecrets.length > 0
                   ? `Backend ready — ${missingSecrets.length} secret(s) awaiting operator input at /clones/${input.cloneId}/secrets`
-                  : "Backend is ready — verified against the prime",
+                  : // `clone >= prime` is CONTAINMENT, not equality, and the
+                    // schema build creates without ever dropping — so a clone
+                    // holds every object the prime has since deleted, and every
+                    // stage still reports reconciled. Saying "verified against
+                    // the prime" over that is the reading that hid a table the
+                    // prime does not have on the Preflight clone.
+                    (parity?.surplus_in_target?.total ?? 0) > 0
+                    ? `Backend is ready — every object the prime has is present, and ${parity?.surplus_in_target.total} the prime does NOT have are also on the clone (prime-dropped or tenant-added; nothing was removed). Review at /clones/${input.cloneId}`
+                    : "Backend is ready — verified against the prime",
         // Recorded on the ROW, not only in the audit metadata.
         //
         // Only the queued path wrote this column, so a clone provisioned
