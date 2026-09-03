@@ -3686,8 +3686,22 @@ export async function provisionCloneBackend(
   // and a table missing from the publication drops every realtime channel
   // subscribed to it, silently.
   if (realtimePublication.deferred.length > 0) {
+    const rtFailures = realtimePublication.failures;
+    // Same rule as the cron deferral: A DEFERRAL MUST NOT HIDE A FAILURE.
+    // Observed on the Preflight clone, 3 Sep 2026 — the publication grew from
+    // 22 to 23 across a dozen passes while each pass reported roughly twenty
+    // tables "carried", because the twenty it actually attempted were failing
+    // and the failure line was overwritten by this pause. Without the reason
+    // travelling with the pause, a publication that can never complete is
+    // indistinguishable from one that is merely slow.
     throw new BudgetPause(
-      `${realtimePublication.deferred.length} of ${realtimePublication.deferred.length + realtimePublication.added.length + realtimePublication.alreadyPublished.length} realtime table(s) carried to the next pass`,
+      `${realtimePublication.deferred.length} of ${realtimePublication.deferred.length + realtimePublication.added.length + realtimePublication.alreadyPublished.length} realtime table(s) carried to the next pass` +
+        (rtFailures.length > 0
+          ? ` — ${rtFailures.length} FAILED and will not publish on a retry: ${rtFailures
+              .slice(0, 3)
+              .map((f) => `${f.schema}.${f.table} (${f.error})`)
+              .join("; ")}`
+          : ""),
       "",
     );
   }
