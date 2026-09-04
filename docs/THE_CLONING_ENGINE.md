@@ -797,3 +797,41 @@ permanent and indistinguishable from a correct answer.
 **An empty cached list is a miss.** The prime references 86 secrets. Zero is
 the shape a broken scan leaves behind, so it buys the fetch rather than being
 trusted.
+
+## An absent function source has two causes, and only one is a reason to stop
+
+The fix above moved the wall rather than removing it, and production said so
+within four minutes of the publish:
+
+```
+Paused at the invocation budget — the edge functions need the prime's source,
+which this pass did not fetch — taking a full snapshot next tick
+```
+
+Both clones, every tick, for the same good reason each time. The pass declined
+the fetch **because the project already holds every function the repo
+declares**, and then the edge-function stage refused to proceed *because the
+pass had declined the fetch*. A livelock one stage earlier than the last one.
+
+The guard it hit was written for a different cause and was right about that
+one: a resumed schema pass declines the fetch and provably cannot reach this
+stage, so arriving here with no source meant something had gone wrong, and
+deploying nothing while reporting success is the worst outcome available. What
+the guard could not do is tell that cause from the new one.
+
+**The distinction is settled against the project, never against the snapshot.**
+`declaredFunctionSlugs` is the repo's tree walk and is complete on every pass
+including this one; the project is asked what it is actually running. If
+anything declared is not yet deployed, the pass pauses and fetches — today's
+behaviour. If nothing is, the stage is already satisfied, says so, and the
+pipeline moves on.
+
+Both conservative readings still pause. **An empty declared list is "not
+established", never "the prime has no functions"** — the same rule
+`functionSourceOmitted` exists to state. And a project whose function list
+cannot be read counts as holding nothing, so every declared slug reads as
+outstanding and the pass buys the fetch.
+
+The lesson is the general one, and it is now two for two: **a stage that
+refuses on the ABSENCE of an input has to know why the input is absent.**
+Declining to buy something is not the same as failing to get it.

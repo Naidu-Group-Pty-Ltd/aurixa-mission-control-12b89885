@@ -496,10 +496,16 @@ describe("a resumed pass does not buy what it cannot use", () => {
     expect(guardAt).toBeGreaterThan(-1);
     expect(guardAt).toBeLessThan(deployAt);
     /* It pauses with an EMPTY resume stage: the marker clears, so the pass
-       after it takes a full snapshot rather than declining again for ever. */
-    const branch = src.slice(guardAt, guardAt + 500);
+       after it takes a full snapshot rather than declining again for ever.
+       Bounded at the structural end of the guarded branch rather than at a
+       character count — the branch grew when standing down became one of its
+       two outcomes, and a fixed window is how a rule comes to be asserted
+       about the wrong code. */
+    const branch = src.slice(guardAt, deployAt);
     expect(branch).toMatch(/throw new BudgetPause\(/);
-    expect(branch).toMatch(/"",/);
+    expect(branch).toMatch(/"",\n\s*\);/);
+    /* And the pause is inside the guarded branch, ahead of any deploy. */
+    expect(branch.indexOf("throw new BudgetPause(")).toBeGreaterThan(-1);
   });
 });
 
@@ -2025,5 +2031,38 @@ describe("a fixed cost in front of the first stage is a livelock", () => {
     );
     expect(sql).toContain("primary key (repo, git_sha)");
     expect(sql).not.toMatch(/primary key \([^)]*branch/);
+  });
+});
+
+describe("an absent function source has two causes, and only one is a reason to stop", () => {
+  const body = () => readFileSync("src/server/backend-provisioning.server.ts", "utf8");
+
+  it("stands down when the project already holds every slug the repo declares", () => {
+    const src = body();
+    const at = src.indexOf("if (snapshot.functionSourceOmitted) {");
+    expect(at).toBeGreaterThan(-1);
+    const block = src.slice(at, at + 1400);
+    // The decision is settled against the PROJECT and the repo's tree, never
+    // against the snapshot's own (deliberately empty) function list.
+    expect(block).toContain("snapshot.declaredFunctionSlugs");
+    expect(block).toContain("listProjectEdgeFunctionSlugs(projectRef)");
+    expect(block).toMatch(/declared\.length === 0 \|\| notYetDeployed\.length > 0/);
+    expect(block).toContain("throw new BudgetPause");
+  });
+
+  it("pauses when anything the repo declares is not yet on the project", () => {
+    const src = body();
+    const at = src.indexOf("if (snapshot.functionSourceOmitted) {");
+    const block = src.slice(at, at + 1400);
+    // A project whose list cannot be read falls back to holding nothing, so
+    // every declared slug reads as not-yet-deployed and the pass fetches.
+    expect(block).toMatch(/catch\(\(\) => \[\] as string\[\]\)/);
+  });
+
+  it("never treats an empty declared list as a prime with no functions", () => {
+    const src = body();
+    const at = src.indexOf("if (snapshot.functionSourceOmitted) {");
+    const block = src.slice(at, at + 1400);
+    expect(block).toContain("declared.length === 0");
   });
 });
