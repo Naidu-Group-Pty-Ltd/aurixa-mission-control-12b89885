@@ -988,7 +988,11 @@ describe("the pg_cron schedule is budgeted and asks the clone first", () => {
 
   it("asks the clone what it already schedules, in one query", () => {
     expect(body).toMatch(/select jobname, schedule, command, active from cron\.job/);
-    expect(body.split("from cron.job").length - 1).toBe(1);
+    // Counts the READ specifically: `cron.alter_job ... from cron.job` is a
+    // per-job write and has nothing to do with the one-query rule.
+    expect(body.split("select jobname, schedule, command, active from cron.job").length - 1).toBe(
+      1,
+    );
   });
 
   it("still repairs a job whose schedule or command drifted", () => {
@@ -1532,5 +1536,50 @@ describe("a count cannot see a definition that drifted", () => {
     expect(toReplaceableTriggerDdl(constraintTrigger)).toBe(constraintTrigger);
     // And anything that is not a trigger definition at all passes through.
     expect(toReplaceableTriggerDdl("select 1")).toBe("select 1");
+  });
+});
+
+describe("a job the prime has disabled is replicated as disabled, or not at all", () => {
+  // The prime disables exactly two of its 47 scheduled jobs, and those two are
+  // the only two missing from BOTH engine-provisioned clones — each of which
+  // holds 45 jobs and not one inactive. Two of two, twice, independently.
+  //
+  // The deactivation used to be `update cron.job set active = false`: a direct
+  // write to an extension's catalogue table, in the SAME multi-statement batch
+  // as the schedule. So whatever refused it took the schedule down with it,
+  // and the job was left absent rather than present-and-active — which is the
+  // shape the clones are actually in.
+  const src = pipeline();
+  const fn = src.slice(src.indexOf("export async function replicateCronJobs"));
+  const body = fn.slice(0, fn.indexOf("\n// ─── G4"));
+
+  it("deactivates through pg_cron's own API, not a catalogue write", () => {
+    expect(body).toMatch(/cron\.alter_job\(jobid, active := false\)/);
+    // Judged on the code: the comment above it names the catalogue write
+    // precisely to record what it replaced.
+    expect(body.replace(/\/\/[^\n]*/g, "")).not.toMatch(/update cron\.job set active = false/);
+  });
+
+  it("does not let a failed deactivation discard a schedule that succeeded", () => {
+    // Two statements, two calls: the schedule commits on its own.
+    const scheduleAt = body.indexOf("select cron.schedule(");
+    const alterAt = body.indexOf("cron.alter_job(jobid");
+    expect(scheduleAt).toBeGreaterThan(-1);
+    expect(alterAt).toBeGreaterThan(scheduleAt);
+    // The schedule statement must END before the deactivation begins.
+    expect(body.slice(scheduleAt, alterAt)).toMatch(/\$cronbody\$\);`,\s*\);/);
+  });
+
+  it("withdraws a job it could not disable, rather than leaving it running", () => {
+    // A copy of a job the prime deliberately stopped, left running on a
+    // tenant's database, is worse than not having it.
+    const guard = body.slice(body.indexOf("catch (deactivateErr)"));
+    expect(guard.slice(0, 800)).toMatch(/perform cron\.unschedule/);
+    expect(guard.slice(0, 1200)).toMatch(/status: "failed"/);
+    expect(guard.slice(0, 1200)).toMatch(/withdrawn rather than/);
+  });
+
+  it("still reports an active job replicated without touching alter_job", () => {
+    expect(body).toMatch(/if \(!job\.active\) \{/);
   });
 });

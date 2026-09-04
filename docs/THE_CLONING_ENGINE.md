@@ -395,8 +395,8 @@ destroy a tenant's Supabase project and build a new one.
 
 September 2026. The schema stages skip themselves when the clone holds at
 least as many objects as the prime, which is what makes a resumed pass cheap
-(24 round trips became 2). A count answers *does the clone hold as many of
-these*. It cannot answer *are they the same ones*, and for anything whose
+(24 round trips became 2). A count answers _does the clone hold as many of
+these_. It cannot answer _are they the same ones_, and for anything whose
 identity is its DDL rather than its existence those are different questions.
 
 Measured on both engine-provisioned clones. The prime's
@@ -419,7 +419,7 @@ what parity found.
 
 Two things had to change.
 
-**`pg_get_triggerdef` renders a bare `CREATE TRIGGER`**, which is an *error*
+**`pg_get_triggerdef` renders a bare `CREATE TRIGGER`**, which is an _error_
 against a trigger that already exists — so the one statement that could
 repair a drifted trigger was the one guaranteed to fail. `CREATE OR REPLACE
 TRIGGER` (Postgres 14+, and every project here runs 17) replaces the
@@ -435,13 +435,13 @@ nothing. Two rules keep it honest:
 - **only EQUALITY is conclusive.** Equal digests prove the clone holds
   exactly the prime's definitions and the stage is skipped for free. Unequal
   digests prove nothing — a clone legitimately holds objects the prime has
-  since dropped, and treating that as *not reconciled* would re-apply all 474
+  since dropped, and treating that as _not reconciled_ would re-apply all 474
   triggers on every pass, which is the closed loop the `tables` stage already
   had once;
 - **the count still gates it.** A digest can never promote a stage that has
   not got enough objects yet.
 
-So an unequal digest sends the stage on to compare *definition lists*, and
+So an unequal digest sends the stage on to compare _definition lists_, and
 only the prime definitions the clone does not already hold are applied. That
 set is normally empty, and when it is not it names exactly what drifted. The
 cost is two round trips on a stage that would otherwise be skipped, and only
@@ -450,3 +450,42 @@ when the digests differ — the price of being able to act on drift at all.
 `tables` remains the older exception for the same underlying reason, stated
 in its own comment: `create table if not exists` skips a table that already
 exists, so **column** drift survives with the counts matching exactly.
+
+---
+
+## A job the prime has disabled is replicated as disabled, or not at all
+
+September 2026. The prime disables exactly **two** of its 47 scheduled jobs —
+`sync-ghl-conversations-cron` and `sync-ghl-marketing-assets-6h` — and those
+two are the only two missing from **both** engine-provisioned clones, each of
+which holds 45 jobs and not one inactive. Two of two, twice, on independent
+runs.
+
+The deactivation used to be
+
+```sql
+update cron.job set active = false where jobname = '…';
+```
+
+a direct write to an extension's catalogue table, issued in the **same
+multi-statement batch** as the schedule. So whatever refused it took the
+schedule down with it, and the job was left **absent** rather than
+present-and-active — which is exactly the shape the clones are in.
+
+`cron.alter_job(jobid, active := false)` is pg_cron's own API for this and is
+what the direct write should always have been. Two rules go with it:
+
+- **it runs as its own statement**, so a failure to deactivate can never
+  discard a schedule that succeeded;
+- **a job that cannot be disabled is withdrawn and reported**, never left
+  running. A copy of a job the prime deliberately stopped, running on a
+  tenant's database, is worse than not having it: silence there is work
+  nobody asked for.
+
+The exact reason the catalogue write was refused is not established here —
+the engine records the per-job error and that record lives in the parity
+report, which was unreadable while Mission Control's own database was down.
+The correlation is 2/2 across two runs and a direct catalogue write is the
+wrong API regardless, so this is fixed on its own merits rather than on a
+diagnosis. The next repair pass will say what the error was, if there still
+is one.
