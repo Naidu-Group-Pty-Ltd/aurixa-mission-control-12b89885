@@ -1217,7 +1217,9 @@ describe("a result that is computed must be recorded somewhere a person looks", 
     // A replication result is not a parity report. Inventing one from the
     // half we happen to hold would make `parity_checked_at` a lie.
     const at = fns.indexOf("parity_report: parity");
-    const block = fns.slice(at, at + 600);
+    // Bounded at the next field rather than by a character count: the block
+    // grows every time a replication result joins the report.
+    const block = fns.slice(at, fns.indexOf("parity_checked_at:", at));
     expect(block).toMatch(/:\s*null,/);
     expect(fns).toMatch(/parity_checked_at: parity \? new Date\(\)\.toISOString\(\) : null/);
   });
@@ -1315,8 +1317,12 @@ describe("a bucket is created through the project's Storage API, not the Managem
     // Without a service-role key the clone's Storage API is unreachable at
     // all. Reporting 32 buckets as individually failed for an unnamed reason
     // is how a credential gap reads as a storage fault.
+    // Bounded at the creation call rather than by a character count: the loop
+    // grows every time a bucket rule is added ahead of it.
     const loop = provisioning.slice(provisioning.indexOf("for (const bucket of primeBuckets)"));
-    expect(loop.slice(0, 900)).toMatch(/no service-role key for the clone/);
+    expect(loop.slice(0, loop.indexOf("createStorageBucket(targetRef"))).toMatch(
+      /no service-role key for the clone/,
+    );
   });
 });
 
@@ -1752,7 +1758,7 @@ describe("a bucket may not ask for more room than the project allows", () => {
   });
 
   it("runs before any bucket is created", () => {
-    const configAt = src.indexOf("const storageConfig = await replicateStorageConfig(");
+    const configAt = src.indexOf("storageConfig = await replicateStorageConfig(");
     const bucketsAt = src.indexOf("storageBuckets = await replicateStorageBuckets(");
     expect(configAt).toBeGreaterThan(-1);
     expect(configAt).toBeLessThan(bucketsAt);
@@ -1761,9 +1767,80 @@ describe("a bucket may not ask for more room than the project allows", () => {
   it("is non-fatal, and says what a failure will cost", () => {
     // The buckets that fit are still worth creating; the ones that do not will
     // say exactly why.
-    const caller = src.slice(src.indexOf("const storageConfig = await replicateStorageConfig("));
+    const caller = src.slice(src.indexOf("storageConfig = await replicateStorageConfig("));
     expect(caller.slice(0, 600)).toMatch(/Project upload limit not replicated/);
     expect(caller.slice(0, 600)).toMatch(/more room than this project allows/);
     expect(caller.slice(0, 600)).not.toMatch(/throw /);
+  });
+});
+
+describe("a result that is computed must be recorded somewhere a person looks — buckets too", () => {
+  // F25 put the cron and realtime per-item results into the parity report,
+  // because "the words were the only copy" and the next step overwrote them.
+  // The bucket results were left out of that fix and had exactly the same
+  // fault: when two of the prime's 32 buckets were refused on every clone,
+  // the only record of WHY was a status line that the pg_cron step replaced a
+  // few seconds later. Diagnosing it required changing the engine to say what
+  // it already knew — which is the definition of the gap.
+  const runner = () => read("src/lib/backend-provisioning.functions.ts");
+
+  it("carries the bucket results and the project limit into the parity report", () => {
+    const src = runner();
+    expect(src).toMatch(/storage_buckets: result\.storageBuckets/);
+    expect(src).toMatch(/storage_config: result\.storageConfig/);
+    // Beside the two that were already there, not instead of them.
+    expect(src).toMatch(/cron_jobs: result\.cronJobs/);
+    expect(src).toMatch(/realtime_publication: result\.realtimePublication/);
+  });
+
+  it("the pipeline returns the project limit rather than only logging it", () => {
+    const src = pipeline();
+    expect(src).toMatch(/storageConfig: StorageConfigResult;/);
+    // Both exits — the repair path returns early and must carry it too, or a
+    // repair reports a blank where a provision reports a reason.
+    expect(src.split(/\n\s+storageConfig,\n/).length - 1).toBe(2);
+  });
+});
+
+describe("the bucket step asks the clone what it already holds", () => {
+  // Measured 4 Sep 2026: both clones held all 32 of the prime's buckets while
+  // the engine still reported "28 of 32 carried to the next pass" and never
+  // got past this step to reach the secrets. It re-attempted every bucket on
+  // every pass and spent the whole budget answering "exists" 32 times.
+  //
+  // The same rule the schema stages (F12, F20) and the cron step (F23) already
+  // follow: verifying a built thing must not cost what building it did.
+  const src = pipeline();
+  const fn = src.slice(src.indexOf("export async function replicateStorageBuckets"));
+  const body = fn.slice(0, fn.indexOf("\n/**"));
+
+  it("lists the clone's buckets once, not once per bucket", () => {
+    expect(body).toMatch(/listProjectStorageBuckets\(targetRef\)/);
+    expect(body.split("listProjectStorageBuckets(targetRef)").length - 1).toBe(1);
+  });
+
+  it("leaves a bucket alone only when its CONFIGURATION also matches", () => {
+    // Existing is not the same as correct: a bucket whose size limit or
+    // visibility drifted is exactly what this step exists to repair.
+    expect(body).toMatch(/const sameConfig = /);
+    expect(body).toMatch(/a\.public === b\.public/);
+    expect(body).toMatch(/a\.file_size_limit === b\.file_size_limit/);
+    expect(body).toMatch(/allowed_mime_types/);
+    expect(body).toMatch(/if \(already && sameConfig\(already, bucket\)\)/);
+  });
+
+  it("falls back to creating everything when the clone cannot be listed", () => {
+    // Treating an unreadable clone as holding everything would skip work that
+    // was never done — the same direction the schema prefetch fails in.
+    const guard = body.slice(body.indexOf("const onClone = new Map"));
+    expect(guard.slice(0, 700)).toMatch(/catch \{/);
+    expect(guard.slice(0, 700)).toMatch(/treated as holding none/);
+  });
+
+  it("skips before the deadline check, so a converged clone costs nothing", () => {
+    const skipAt = body.indexOf("if (already && sameConfig(already, bucket))");
+    const deferAt = body.indexOf("if (pastDeadline(deadlineAt))");
+    expect(skipAt).toBeGreaterThan(-1);
+    expect(skipAt).toBeLessThan(deferAt);
   });
 });

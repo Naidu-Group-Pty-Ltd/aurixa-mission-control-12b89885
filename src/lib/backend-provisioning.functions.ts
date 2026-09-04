@@ -409,6 +409,13 @@ async function runBackendProvisioning(
               replication: {
                 cron_jobs: result.cronJobs,
                 realtime_publication: result.realtimePublication,
+                // Buckets were computed and dropped on the floor, exactly as
+                // the two above were before F25 — so when two of the prime's
+                // 32 were refused on every clone, the only copy of the reason
+                // was a status line the next step overwrote. Diagnosing it
+                // needed the engine changed to say what it already knew.
+                storage_buckets: result.storageBuckets,
+                storage_config: result.storageConfig,
               },
             }
           : null,

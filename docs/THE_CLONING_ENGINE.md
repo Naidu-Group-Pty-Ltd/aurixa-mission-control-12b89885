@@ -656,3 +656,39 @@ clone's before any bucket is created. Two rules:
 This is the third defect in one step found by making the step work
 (F26 → F34, F35, and this). The step had returned 404 for its whole existence,
 so nothing downstream of that 404 had ever executed.
+
+### The bucket results were computed and dropped, like the two before them
+
+F25's rule was that **a result that is computed must be recorded somewhere a
+person looks** — it moved the per-item cron and realtime results into the
+parity report, because "the words were the only copy" and the next step
+overwrote them.
+
+The bucket results were left out of that fix and had exactly the same fault.
+When two of the prime's 32 buckets were refused on every clone, the only
+record of _why_ was a status line that the pg_cron step replaced seconds
+later. Diagnosing it required changing the engine to say what it already knew,
+which is the definition of the gap.
+
+`storage_buckets` and `storage_config` now travel in the parity report beside
+`cron_jobs` and `realtime_publication`. The project-level limit is carried out
+of the pipeline rather than only logged, and **both exits carry it** — the
+repair path returns early, and without it a repair would report a blank where
+a provision reports a reason.
+
+### The bucket step asks the clone what it already holds
+
+Measured 4 September 2026, immediately after the two oversized buckets were
+fixed: **both clones held all 32 of the prime's buckets while the engine still
+reported `28 of 32 carried to the next pass`** — and never got past this step
+to reach the secrets. It re-attempted every bucket on every pass and spent the
+whole budget answering "exists" 32 times.
+
+That is the rule the schema stages and the cron step already follow:
+**verifying a built thing must not cost what building it did.** The clone's
+buckets are listed once for the whole step, and a bucket is skipped only when
+its **configuration also matches** — existing is not the same as correct, and
+a bucket whose size limit or visibility drifted is exactly what this step
+exists to repair. A clone whose buckets cannot be listed is treated as holding
+**none**, which puts every bucket back on the create path: the fallback does
+the work rather than assuming it is done.

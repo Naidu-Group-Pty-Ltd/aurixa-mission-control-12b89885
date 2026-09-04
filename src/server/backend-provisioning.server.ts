@@ -877,6 +877,31 @@ export async function replicateStorageBuckets(
   const primeBuckets = await listProjectStorageBuckets(primeRef);
   const results: BucketReplicationResult[] = [];
 
+  // Ask the CLONE what it already holds — one call for the whole step, against
+  // 32 creations that all answer "exists".
+  //
+  // Without this the step re-attempts every bucket on every pass, spends the
+  // budget doing it, and defers the tail: measured 4 Sep 2026, both clones
+  // held all 32 buckets while the engine still reported "28 of 32 carried to
+  // the next pass" and never got past this step to reach the secrets. That is
+  // the rule the schema stages and the cron step already follow — verifying a
+  // built thing must not cost what building it did.
+  //
+  // A bucket is left alone only when its CONFIGURATION also matches, so the
+  // drift this step exists to correct is still corrected.
+  const onClone = new Map<string, StorageBucketConfig>();
+  try {
+    for (const b of await listProjectStorageBuckets(targetRef)) onClone.set(b.id, b);
+  } catch {
+    // A clone whose buckets cannot be listed is treated as holding none, which
+    // puts every bucket back on the create path. The fallback does the work
+    // rather than assuming it is done.
+  }
+  const sameConfig = (a: StorageBucketConfig, b: StorageBucketConfig) =>
+    a.public === b.public &&
+    a.file_size_limit === b.file_size_limit &&
+    JSON.stringify(a.allowed_mime_types ?? null) === JSON.stringify(b.allowed_mime_types ?? null);
+
   let primeService: string | null = null;
   let targetService: string | null = null;
   try {
@@ -890,6 +915,17 @@ export async function replicateStorageBuckets(
 
   for (const bucket of primeBuckets) {
     let configResult: BucketReplicationResult;
+    const already = onClone.get(bucket.id);
+    if (already && sameConfig(already, bucket)) {
+      results.push({
+        id: bucket.id,
+        status: "exists",
+        contents_withheld:
+          "not seed material — a clone receives the bucket, never the prime's objects",
+      });
+      continue;
+    }
+
     // Between buckets, never mid-bucket: a half-copied bucket is worse than an
     // uncreated one, and the next pass re-enters here having kept what landed.
     if (pastDeadline(deadlineAt)) {
@@ -3423,6 +3459,8 @@ export type ProvisionBackendResult = {
   cronJobs: CronJobReplicationResult[];
   requiredExtensions: RequiredExtensionResult[];
   realtimePublication: RealtimeReplicationResult;
+  /** The project-level upload limit, which decides which buckets can exist. */
+  storageConfig: StorageConfigResult;
 };
 
 /**
@@ -3742,12 +3780,16 @@ export async function provisionCloneBackend(
   // surface per-bucket errors so operators can retry from the clone page.
   pauseIfDue("replicating storage buckets");
   let storageBuckets: BucketReplicationResult[] = [];
+  let storageConfig: StorageConfigResult = {
+    status: "skipped",
+    reason: "not attempted on this pass",
+  };
   try {
     const primeRef = input.primeBackendRef;
     // The project's upload limit FIRST: a bucket may not ask for more room
     // than the project allows, and the refusal reads as a bucket fault rather
     // than a missing project setting (see replicateStorageConfig).
-    const storageConfig = await replicateStorageConfig(primeRef, projectRef);
+    storageConfig = await replicateStorageConfig(primeRef, projectRef);
     if (storageConfig.status === "failed") {
       await onStatusUpdate?.(
         "migrating",
@@ -4047,6 +4089,7 @@ export async function provisionCloneBackend(
       cronJobs,
       requiredExtensions,
       realtimePublication,
+      storageConfig,
     };
   }
   pauseIfDue("seeding the admin user");
@@ -4095,6 +4138,7 @@ export async function provisionCloneBackend(
     cronJobs,
     requiredExtensions,
     realtimePublication,
+    storageConfig,
   };
 }
 
