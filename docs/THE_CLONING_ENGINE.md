@@ -388,3 +388,65 @@ hour later. It reported "Re-queued N backends" every time.
 
 The remedy the product offered for a clone provisioned before a fix was to
 destroy a tenant's Supabase project and build a new one.
+
+---
+
+## A count cannot see a definition that drifted
+
+September 2026. The schema stages skip themselves when the clone holds at
+least as many objects as the prime, which is what makes a resumed pass cheap
+(24 round trips became 2). A count answers *does the clone hold as many of
+these*. It cannot answer *are they the same ones*, and for anything whose
+identity is its DDL rather than its existence those are different questions.
+
+Measured on both engine-provisioned clones. The prime's
+`builder_stock_items_rearm_settlement` fires
+
+```
+AFTER INSERT OR UPDATE OF enrichment_status, image_work_stage
+```
+
+and both clones carry a trigger of that name firing `AFTER INSERT` alone —
+the narrow form the prime's own **repository** still declares, copied before
+the prime was widened by hand in its live project. One trigger row on each
+side, so every count reconciles, the stage is skipped for ever, and the
+trigger silently does not fire for the updates it exists for.
+
+Only the parity report saw it, because parity keys triggers per EVENT:
+`builder_stock_items.builder_stock_items_rearm_settlement.AFTER.UPDATE`.
+**Seeing it was never the problem** — the schema build had no way to act on
+what parity found.
+
+Two things had to change.
+
+**`pg_get_triggerdef` renders a bare `CREATE TRIGGER`**, which is an *error*
+against a trigger that already exists — so the one statement that could
+repair a drifted trigger was the one guaranteed to fail. `CREATE OR REPLACE
+TRIGGER` (Postgres 14+, and every project here runs 17) replaces the
+definition. A **constraint** trigger is deliberately left alone: `CREATE OR
+REPLACE CONSTRAINT TRIGGER` is not valid syntax, so rewriting one would turn
+a trigger that merely fails as a duplicate into a trigger that fails to
+parse.
+
+**The stage has to be entered at all.** A definition digest rides in the same
+prefetch union as the count, so proving a triggers stage finished still costs
+nothing. Two rules keep it honest:
+
+- **only EQUALITY is conclusive.** Equal digests prove the clone holds
+  exactly the prime's definitions and the stage is skipped for free. Unequal
+  digests prove nothing — a clone legitimately holds objects the prime has
+  since dropped, and treating that as *not reconciled* would re-apply all 474
+  triggers on every pass, which is the closed loop the `tables` stage already
+  had once;
+- **the count still gates it.** A digest can never promote a stage that has
+  not got enough objects yet.
+
+So an unequal digest sends the stage on to compare *definition lists*, and
+only the prime definitions the clone does not already hold are applied. That
+set is normally empty, and when it is not it names exactly what drifted. The
+cost is two round trips on a stage that would otherwise be skipped, and only
+when the digests differ — the price of being able to act on drift at all.
+
+`tables` remains the older exception for the same underlying reason, stated
+in its own comment: `create table if not exists` skips a table that already
+exists, so **column** drift survives with the counts matching exactly.

@@ -8,6 +8,7 @@ import {
   parseResumeMarker,
   pastDeadline,
 } from "./provisioningBudget";
+import { toReplaceableTriggerDdl } from "./schema-introspection.server";
 
 /**
  * Provisioning must survive the invocation it runs in.
@@ -1186,7 +1187,10 @@ describe("proving a finished schema costs one round trip per side", () => {
 
     const rec = introspection.slice(introspection.indexOf("async function alreadyReconciled"));
     const recBody = rec.slice(0, rec.indexOf("\n}\n") + 2);
-    expect(recBody).toMatch(/typeof pre === "number" && typeof cre === "number"/);
+    // The prefetch entry became `{ n, digest }` when the digest joined the
+    // same union (see "a count cannot see a definition that drifted"); the
+    // rule this pins is unchanged — a MISSING entry falls back to asking.
+    expect(recBody).toMatch(/pre && cre\s*\?\s*\[pre\.n, cre\.n\]/);
     expect(recBody).toMatch(
       /await Promise\.all\(\[countOn\(primeRef, stage\), countOn\(cloneRef, stage\)\]\)/,
     );
@@ -1452,5 +1456,81 @@ describe("the queue row has exactly one writer, and the bulk button is not a sec
 
   it("does not report an empty selection over a failed read", () => {
     expect(body).toMatch(/if \(readErr\) return \{ ok: false as const, error: readErr\.message \}/);
+  });
+});
+
+describe("a count cannot see a definition that drifted", () => {
+  // The prime's `builder_stock_items_rearm_settlement` fires
+  //   AFTER INSERT OR UPDATE OF enrichment_status, image_work_stage
+  // Both engine-provisioned clones carry a trigger of that name firing
+  //   AFTER INSERT
+  // — the narrow form the prime's own repository still declares, copied
+  // before the prime was widened by hand. One trigger row on each side, so
+  // every count reconciles and the stage is skipped for ever, while the
+  // trigger silently does not fire for the updates it exists for.
+  //
+  // Only the parity report saw it, because parity keys triggers per EVENT:
+  // `builder_stock_items.builder_stock_items_rearm_settlement.AFTER.UPDATE`.
+  // Seeing it was never the problem; the schema build had no way to act on it.
+  const src = introspection();
+
+  it("proves a definition stage finished by digest, in the same round trip as the count", () => {
+    // The saving F28 bought must not be spent to buy this back: the digest
+    // rides in the prefetch union rather than costing a query of its own.
+    expect(src).toMatch(/const DIGESTS: Partial<Record<StageName, string>> = \{/);
+    expect(src).toMatch(/DIGESTS\[stage\] \? `\(\$\{DIGESTS\[stage\]\}\)` : "null"/);
+    expect(src).toMatch(/select \$\{sqlLiteral\(stage\)\} as stage/);
+  });
+
+  it("treats only digest EQUALITY as conclusive", () => {
+    // A clone legitimately holds objects the prime has since dropped, so its
+    // digest differs for ever. Reading that as "not reconciled" would re-apply
+    // all 474 triggers on every pass — F20, rebuilt.
+    expect(src).toMatch(
+      /if \(DIGESTS\[stage\] && pre\?\.digest && cre\?\.digest && pre\.digest !== cre\.digest\) return null;/,
+    );
+    // And the count check still gates it: a digest can never promote a stage
+    // that has not got enough objects yet.
+    const fn = src.slice(src.indexOf("async function alreadyReconciled"));
+    const body = fn.slice(0, fn.indexOf("\nasync function runStage"));
+    expect(body.indexOf("if (!reconcile(primeCount, cloneCount)) return null;")).toBeLessThan(
+      body.indexOf("DIGESTS[stage] && pre?.digest"),
+    );
+  });
+
+  it("carries only the definitions the clone does not already hold", () => {
+    const stage = src.slice(src.indexOf("// 9. triggers"));
+    const body = stage.slice(0, stage.indexOf("// 10. RLS enable"));
+    expect(body).toMatch(/query\(cloneRef, Q\.triggers\)/);
+    expect(body).toMatch(/const held = new Set\(cloneDefs\.map/);
+    expect(body).toMatch(/\.filter\(\(def\) => !held\.has\(def\)\)/);
+    // A clone whose triggers cannot be read must fall back to writing them
+    // all, never to assuming they are present.
+    expect(body).toMatch(/\.catch\(\(\) => \[\] as Array<Record<string, unknown>>\)/);
+  });
+
+  it("applies triggers with a statement that can replace one", () => {
+    // `pg_get_triggerdef` renders a bare CREATE TRIGGER, which ERRORS against
+    // a trigger that already exists — so the one statement that could repair a
+    // drifted trigger was the one guaranteed to fail.
+    expect(src).toMatch(/export function toReplaceableTriggerDdl/);
+    const stage = src.slice(src.indexOf("// 9. triggers"));
+    expect(stage.slice(0, stage.indexOf("// 10. RLS enable"))).toMatch(
+      /\.map\(toReplaceableTriggerDdl\)/,
+    );
+  });
+
+  it("never rewrites a CONSTRAINT trigger, which has no OR REPLACE form", () => {
+    const plain = "CREATE TRIGGER t AFTER INSERT ON public.x FOR EACH ROW EXECUTE FUNCTION f()";
+    const constraintTrigger =
+      "CREATE CONSTRAINT TRIGGER t AFTER INSERT ON public.x FOR EACH ROW EXECUTE FUNCTION f()";
+    expect(toReplaceableTriggerDdl(plain)).toBe(
+      "create or replace trigger t AFTER INSERT ON public.x FOR EACH ROW EXECUTE FUNCTION f()",
+    );
+    // Rewriting this one turns a trigger that fails as a duplicate into a
+    // trigger that fails to parse.
+    expect(toReplaceableTriggerDdl(constraintTrigger)).toBe(constraintTrigger);
+    // And anything that is not a trigger definition at all passes through.
+    expect(toReplaceableTriggerDdl("select 1")).toBe("select 1");
   });
 });

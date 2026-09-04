@@ -649,16 +649,25 @@ async function countOn(ref: string, stage: StageName): Promise<number> {
  * asking for itself — the fallback does the work rather than assuming it is
  * done.
  */
-async function countAllOn(ref: string): Promise<Partial<Record<StageName, number>>> {
+type StageProbe = { n: number; digest: string | null };
+
+async function countAllOn(ref: string): Promise<Partial<Record<StageName, StageProbe>>> {
+  // The digest rides in the SAME union as the count, so a stage that needs a
+  // definition comparison costs nothing extra to prove finished. A stage with
+  // no digest declared answers null and falls back to counting alone.
   const sql = STAGE_SEQUENCE.map(
-    (stage) => `select ${sqlLiteral(stage)} as stage, (${COUNTS[stage]}) as n`,
+    (stage) =>
+      `select ${sqlLiteral(stage)} as stage, (${COUNTS[stage]}) as n, ` +
+      `${DIGESTS[stage] ? `(${DIGESTS[stage]})` : "null"}::text as d`,
   ).join(" union all ");
   try {
     const rows = await query(ref, sql);
-    const out: Partial<Record<StageName, number>> = {};
+    const out: Partial<Record<StageName, StageProbe>> = {};
     for (const r of rows) {
       const stage = str(r.stage) as StageName;
-      if (STAGE_SEQUENCE.includes(stage)) out[stage] = num(r.n);
+      if (STAGE_SEQUENCE.includes(stage)) {
+        out[stage] = { n: num(r.n), digest: r.d == null ? null : str(r.d) };
+      }
     }
     return out;
   } catch {
@@ -666,9 +675,67 @@ async function countAllOn(ref: string): Promise<Partial<Record<StageName, number
   }
 }
 
+/**
+ * A DEFINITION digest, for the stages where a count cannot see drift.
+ *
+ * A count answers "does the clone hold as many of these as the prime". It
+ * cannot answer "are they the same ones", and for anything whose identity is
+ * its DDL rather than its existence, those are different questions.
+ *
+ * Measured 4 Sep 2026 on both engine-provisioned clones. The prime's
+ * `builder_stock_items_rearm_settlement` fires
+ * `AFTER INSERT OR UPDATE OF enrichment_status, image_work_stage`; both clones
+ * carry a trigger of that name firing `AFTER INSERT` alone — the narrow form
+ * the prime's own repository still declares, copied before the prime was
+ * widened by hand. One trigger row on each side, so every count reconciles,
+ * and the trigger silently does not fire for the updates it exists for. Only
+ * the parity report saw it, because parity keys triggers per EVENT.
+ *
+ * Two things had to change for the engine to be able to repair that.
+ * `pg_get_triggerdef` renders a bare `CREATE TRIGGER`, which ERRORS on a
+ * trigger that already exists (see toReplaceableTriggerDdl), and the count
+ * skip meant the stage was never entered to try.
+ *
+ * The digest is a FAST PATH and never a verdict of its own: equal digests
+ * prove the clone holds exactly the prime's definitions, so the stage is
+ * skipped for free. Unequal digests prove nothing — a clone legitimately
+ * holds objects the prime has since dropped (see the surplus reading), which
+ * would make an equality test re-run the stage for ever. So the stage then
+ * asks both sides for their definition LISTS and applies containment.
+ */
+const DIGESTS: Partial<Record<StageName, string>> = {
+  triggers: `select md5(coalesce(string_agg(d, E'\n' order by d), '')) from (
+               select pg_get_triggerdef(t.oid) as d
+                 from pg_trigger t
+                 join pg_class c on c.oid = t.tgrelid
+                 join pg_namespace n on n.oid = c.relnamespace
+                where not t.tgisinternal and n.nspname in (${SCHEMA_LIST})) g`,
+};
+
 /** A stage is reconciled when the clone holds at least as many objects as the prime. */
 export function reconcile(primeCount: number, cloneCount: number): boolean {
   return cloneCount >= primeCount;
+}
+
+/**
+ * Make a trigger definition re-appliable.
+ *
+ * `pg_get_triggerdef` renders `CREATE TRIGGER x ...`, which is an ERROR
+ * against a trigger that already exists — so the one statement that could
+ * repair a drifted trigger was the one statement guaranteed to fail. Postgres
+ * 14 added `CREATE OR REPLACE TRIGGER`, and every project this engine builds
+ * is well past that.
+ *
+ * A CONSTRAINT trigger is deliberately left alone: `CREATE OR REPLACE
+ * CONSTRAINT TRIGGER` is not valid syntax, so rewriting one would turn a
+ * trigger that merely fails as a duplicate into a trigger that fails to parse.
+ * The prime carries none today; this is here so that stays true by
+ * construction rather than by luck.
+ */
+export function toReplaceableTriggerDdl(def: string): string {
+  return /^\s*create\s+trigger\s/i.test(def)
+    ? def.replace(/^(\s*)create\s+trigger\s/i, "$1create or replace trigger ")
+    : def;
 }
 
 // ─── Stage runner ────────────────────────────────────────────────────
@@ -697,15 +764,27 @@ async function alreadyReconciled(
    * that had nothing to do. Both directions are safe; the expensive one is
    * safe in the harmless direction.
    */
-  prefetch?: { prime: Partial<Record<StageName, number>>; clone: Partial<Record<StageName, number>> },
+  prefetch?: {
+    prime: Partial<Record<StageName, StageProbe>>;
+    clone: Partial<Record<StageName, StageProbe>>;
+  },
 ): Promise<StageResult | null> {
   const pre = prefetch?.prime[stage];
   const cre = prefetch?.clone[stage];
   const [primeCount, cloneCount] =
-    typeof pre === "number" && typeof cre === "number"
-      ? [pre, cre]
+    pre && cre
+      ? [pre.n, cre.n]
       : await Promise.all([countOn(primeRef, stage), countOn(cloneRef, stage)]);
   if (!reconcile(primeCount, cloneCount)) return null;
+
+  // Counting says the clone holds enough. For a stage whose identity is its
+  // DDL that is not the same as holding the RIGHT ones, and a digest is how
+  // this pass can tell for free (see DIGESTS). Only EQUALITY is conclusive:
+  // unequal digests are the ordinary state of a clone carrying objects the
+  // prime has since dropped, so they send the stage on to compare definitions
+  // rather than deciding anything.
+  if (DIGESTS[stage] && pre?.digest && cre?.digest && pre.digest !== cre.digest) return null;
+
   return {
     stage,
     primeCount,
@@ -1278,13 +1357,37 @@ export async function replicateSchemaByIntrospection(
   }
 
   // 9. triggers
+  //
+  // The one stage that carries only what the clone is actually missing.
+  //
+  // Reaching here means the digests disagreed (or could not be taken), which
+  // is the ordinary state of a clone holding triggers the prime has dropped —
+  // so applying the prime's whole list every pass would be F20 again, 474
+  // statements to change nothing. Both sides' definitions are compared as
+  // TEXT and only the prime definitions the clone does not already hold are
+  // applied. That set is normally empty, and when it is not it is one or two
+  // statements naming exactly what drifted.
   if (enterStage("triggers")) {
     await say("Replicating triggers...");
     stages.push(
       await stageOrSkip(
         "triggers",
-        async () =>
-          (await query(primeRef, Q.triggers)).map((r) => str(r.def)).filter(Boolean),
+        async () => {
+          const [primeDefs, cloneDefs] = await Promise.all([
+            query(primeRef, Q.triggers),
+            // A clone whose triggers cannot be read holds nothing as far as
+            // this is concerned, which puts every definition back on the
+            // write path: the fallback does the work rather than assuming it
+            // is done. `create or replace` makes that safe to repeat.
+            query(cloneRef, Q.triggers).catch(() => [] as Array<Record<string, unknown>>),
+          ]);
+          const held = new Set(cloneDefs.map((r) => str(r.def)).filter(Boolean));
+          return primeDefs
+            .map((r) => str(r.def))
+            .filter(Boolean)
+            .filter((def) => !held.has(def))
+            .map(toReplaceableTriggerDdl);
+        },
         60,
       ),
     );
