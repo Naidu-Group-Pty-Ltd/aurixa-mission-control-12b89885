@@ -526,3 +526,94 @@ digest inequality is never conclusive for triggers either.
 The rule this leaves: a digest belongs to a class only where an identical
 definition on both sides is the _expected_ outcome. That is triggers today,
 and it is a per-class judgement rather than a mechanism to spread.
+
+---
+
+## The bucket travels; the prime's objects do not
+
+4 September 2026, and the most serious thing this pre-flight found.
+
+The engine's governing rule is **structure only, never data** — the
+replication path carries schema, functions and configuration, and no prime
+row is ever destined for a clone. The rule held for rows. It had never been
+tested for **storage objects**, because bucket CREATION had never once
+succeeded: every bucket answered 404 at the Management API, so the object
+copy in the same step could not run and nobody found out what it would do.
+
+Fixing creation made the second half of that step run for the first time. It
+began walking all 32 of the prime's buckets — **59,050 objects, 25.1 GB** —
+copying what it found onto a tenant's Supabase project. Before the pass was
+stopped by hand it had moved 21–24 branding assets onto each clone and, onto
+one of them, **a customer document and a customer form**.
+
+`SEED_ASSET_LIMITS` bounded it only by accident: 500 objects and 512 MB **per
+bucket**, across 32 buckets, authorises ~16,000 objects and ~16 GB. **A limit
+is not a policy.**
+
+So the copy is allow-listed and **`SEED_ASSET_BUCKETS` is empty**. That is the
+policy rather than a placeholder. A bucket earns a place in it by being seed
+material the product genuinely needs and that belongs to nobody — never by
+being small, and never by being convenient. Adding a name there is a
+disclosure decision, so it is made once, in the open, and a test asserts the
+list stays empty until somebody does.
+
+Three things follow.
+
+**Withholding is recorded, not silent.** A bucket whose contents were
+deliberately not copied carries `contents_withheld` with the reason, so an
+operator reading the replication report sees a decision rather than a copy
+that failed.
+
+**The loop is budgeted.** It had no deadline check of any kind — not in front
+of it, not inside it — so the worker was killed rather than pausing, which
+costs a hard attempt where a pause costs sixty seconds. Both clones sat on
+"Replicating storage buckets…" until that was found. Deferral is **between
+buckets, never mid-bucket**: a half-copied bucket is worse than an uncreated
+one.
+
+**The pause is thrown outside the catch.** Inside it, a `BudgetPause` is
+swallowed as a failed replication and the pipeline runs on to mark a clone
+ready holding some of the prime's 32 buckets — the same rule the cron and
+realtime steps already follow, and a failure that does occur travels with the
+pause rather than being lost behind it.
+
+### What this cost, and why it was cheap
+
+Both affected projects were rehearsal workspaces owned by the same account, in
+the same Supabase organisation, so nothing left the owner's control. With a
+paying tenant it would have been a data-protection breach: the prime's buckets
+hold listing photographs, generated reports, uploaded documents and the
+identity captures `aml-idv-retention` deletes on a clock.
+
+The general lesson is the one this programme keeps relearning: **a step that
+has never worked has never been tested.** Every measure taken against the
+bucket step — the limits, the "structure only" control in the runbook, the
+report that listed it as held — was measuring a step that returned 404 before
+reaching any of the behaviour those measures were about.
+
+### A test that enumerates its instances cannot pin a class
+
+The budget rule above had a test, and the test carried this comment:
+
+> The test now pins the class, so a fourth per-item step added without a
+> deadline fails it.
+
+It could not. It was `it.each` over three hardcoded function names.
+`replicateStorageBuckets` was not among them, had no deadline check of any
+kind, and was never checked — for as long as the step 404'd, nothing noticed.
+
+The set is derived from the source now: every exported async function in the
+module that runs an awaited call inside a `for` loop must either take the
+invocation deadline and check it **inside** that loop, or appear in a named
+exemption list. Each exemption states a **bound**, not an opinion:
+
+| function                                        | why it needs no deadline                                                                                             |
+| ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `deployEdgeFunction`                            | inner helper; `deployEdgeFunctions` holds the budget                                                                 |
+| `enforceRequiredExtensions`                     | bounded by the prime's extension set (9), writes only what is absent                                                 |
+| `repointPrimeUrlsInFunctions`                   | bounded by its own predicate — measured 4 Sep 2026: four functions name the prime ref                                |
+| `applyPrimeMigrations`, `applyModuleMigrations` | the legacy migration-replay path, not the default strategy — a known gap on an unused path, named rather than hidden |
+
+The discovery also asserts it found something, because a scan that silently
+matches nothing makes every assertion after it vacuous — which is the failure
+this replaces.

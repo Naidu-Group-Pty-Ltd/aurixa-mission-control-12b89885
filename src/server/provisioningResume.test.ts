@@ -9,6 +9,7 @@ import {
   pastDeadline,
 } from "./provisioningBudget";
 import { toReplaceableTriggerDdl } from "./schema-introspection.server";
+import { SEED_ASSET_BUCKETS } from "./backend-provisioning.server";
 
 /**
  * Provisioning must survive the invocation it runs in.
@@ -1070,17 +1071,77 @@ describe("every per-item step in the tail is budgeted, not just guarded in front
     return fn.slice(0, fn.indexOf("\n}\n") + 2);
   };
 
-  it.each([
-    ["deployEdgeFunctions", "deadlineAt"],
-    ["replicateCronJobs", "deadlineAt"],
-    ["replicateRealtimePublication", "deadlineAt"],
-  ])("%s takes the invocation deadline and checks it in its loop", (fnName, param) => {
-    const body = loopBody(fnName);
-    expect(body).toContain(param);
-    expect(body).toMatch(/pastDeadline\(deadlineAt\)/);
-    const loopAt = body.search(/\n {2}for \(/);
-    expect(loopAt).toBeGreaterThan(-1);
-    expect(body.indexOf("pastDeadline(deadlineAt)")).toBeGreaterThan(loopAt);
+  /*
+    THE LIST IS DERIVED, NOT TYPED.
+
+    This test used to name three functions and claim to pin "the class, not the
+    instance" — and its own comment promised that "a fourth per-item step added
+    without a deadline fails it". It could not. `replicateStorageBuckets` had no
+    deadline check of any kind, was never in the list, and was never checked;
+    it was found in production on 4 Sep 2026 when fixing bucket creation made
+    that step do real work for the first time and both clones sat on it until
+    the stall reclaim took them.
+
+    A test that enumerates its instances cannot pin a class. So the set is now
+    discovered from the source: every exported async function in the module
+    whose body runs an awaited call inside a `for` loop. Each must either take
+    the invocation deadline and check it inside that loop, or be named below
+    with the reason it does not need one.
+  */
+  const perItemNetworkLoops = (): string[] => {
+    const found: string[] = [];
+    for (const m of provisioning.matchAll(/export async function (\w+)\(/g)) {
+      const from = provisioning.slice(m.index ?? 0);
+      const end = from.indexOf("\n}\n");
+      const body = end > 0 ? from.slice(0, end + 2) : from;
+      const loop = body.search(/\n {2}for \((?:const|let) /);
+      if (loop === -1) continue;
+      if (!/\bawait \w/.test(body.slice(loop))) continue;
+      found.push(m[1]);
+    }
+    return found;
+  };
+
+  /*
+    Exempt, each for a reason that is a BOUND rather than an opinion.
+    Removing a name here must fail the test, not quietly pass.
+  */
+  const EXEMPT: Record<string, string> = {
+    // The outer `deployEdgeFunctions` is budgeted and decides how many
+    // bundles are attempted; this is the per-bundle helper it calls.
+    deployEdgeFunction: "inner helper — its caller holds the budget",
+    // Bounded by the prime's own extension set (9 today), and it reads the
+    // clone's set once and writes only what is missing, so a converged clone
+    // does no writes at all.
+    enforceRequiredExtensions: "bounded by the prime's extension set, writes only what is absent",
+    // Bounded by its own query: only functions whose source names the prime
+    // ref are selected. Measured on the prime, 4 September 2026: four.
+    repointPrimeUrlsInFunctions: "bounded by its own predicate — 4 functions name the prime ref",
+    // The legacy migration-replay strategy, which the default introspection
+    // path does not use. A known gap on an unused path, named rather than
+    // hidden; budget it before that strategy is made default again.
+    applyPrimeMigrations: "legacy migration-replay path, not the default strategy",
+    applyModuleMigrations: "legacy migration-replay path, not the default strategy",
+  };
+
+  it("discovers every per-item network loop in the module", () => {
+    // A guard against the discovery silently matching nothing, which would
+    // make every assertion below vacuous — the failure mode this replaces.
+    const found = perItemNetworkLoops();
+    expect(found.length).toBeGreaterThanOrEqual(6);
+    expect(found).toContain("replicateStorageBuckets");
+    expect(found).toContain("replicateCronJobs");
+  });
+
+  it("every discovered loop is budgeted, or exempt for a stated reason", () => {
+    const offenders = perItemNetworkLoops().filter((name) => {
+      if (name in EXEMPT) return false;
+      const body = loopBody(name);
+      if (!body.includes("deadlineAt")) return true;
+      const loopAt = body.search(/\n {2}for \(/);
+      return body.indexOf("pastDeadline(deadlineAt)") < loopAt;
+    });
+    expect(offenders).toEqual([]);
   });
 
   it("the realtime step asks the clone what it already publishes", () => {
@@ -1581,5 +1642,80 @@ describe("a job the prime has disabled is replicated as disabled, or not at all"
 
   it("still reports an active job replicated without touching alter_job", () => {
     expect(body).toMatch(/if \(!job\.active\) \{/);
+  });
+});
+
+describe("the bucket travels; the prime's objects do not", () => {
+  // The engine's governing rule is "structure only, never data" — and it held
+  // for rows while being untested for storage objects, because bucket CREATION
+  // had never once succeeded. Every bucket answered 404 at the Management API,
+  // so the object copy could not run and nobody found out what it would do.
+  //
+  // Fixing creation made the second half of that step run for the first time,
+  // on 4 Sep 2026. It began walking all 32 of the prime's buckets — 59,050
+  // objects, 25.1 GB — copying what it found onto a tenant's project. It moved
+  // 21-24 branding assets onto each clone and, on one of them, a customer
+  // document and a customer form, before the pass was stopped by hand.
+  //
+  // SEED_ASSET_LIMITS bounded it only by accident: 500 objects and 512 MB PER
+  // BUCKET, across 32 buckets, authorises ~16,000 objects and ~16 GB.
+  // A limit is not a policy.
+  const src = pipeline();
+  const fn = src.slice(src.indexOf("export async function replicateStorageBuckets"));
+  const body = fn.slice(0, fn.indexOf("\n/**\n * Replicate the prime's [auth]"));
+
+  it("copies contents only from an explicit allow-list", () => {
+    expect(src).toMatch(/export const SEED_ASSET_BUCKETS: readonly string\[\] = \[\];/);
+    expect(body).toMatch(/if \(!SEED_ASSET_BUCKETS\.includes\(bucket\.id\)\) \{/);
+    // And the withholding is BEFORE the copy, not a filter after it.
+    const guardAt = body.indexOf("SEED_ASSET_BUCKETS.includes(bucket.id)");
+    const copyAt = body.indexOf("replicateBucketObjects(");
+    expect(guardAt).toBeGreaterThan(-1);
+    expect(copyAt).toBeGreaterThan(guardAt);
+  });
+
+  it("keeps the allow-list empty, because adding a name is a disclosure decision", () => {
+    // A bucket earns a place by being seed material that belongs to nobody —
+    // never by being small, and never by being convenient. If this test is
+    // failing, that decision is being made: make it in the open.
+    expect(SEED_ASSET_BUCKETS).toEqual([]);
+  });
+
+  it("says the contents were withheld, rather than reporting a copy that failed", () => {
+    expect(body).toMatch(/contents_withheld:/);
+    expect(body).toMatch(/never the prime's objects/);
+  });
+
+  it("stops between buckets when the invocation budget is spent", () => {
+    // No deadline check existed here at all — not in front of the loop, not
+    // inside it — so the worker was killed rather than pausing, which costs a
+    // hard attempt where a pause costs sixty seconds.
+    expect(body).toMatch(/if \(pastDeadline\(deadlineAt\)\) \{/);
+    expect(body).toMatch(/status: "deferred"/);
+    // Between buckets, never mid-bucket.
+    const deferAt = body.indexOf("pastDeadline(deadlineAt)");
+    const createAt = body.indexOf("createStorageBucket(targetRef");
+    expect(deferAt).toBeLessThan(createAt);
+  });
+
+  it("pauses on a deferral OUTSIDE the catch that reports a failed replication", () => {
+    // Thrown inside it, a BudgetPause is swallowed and the pipeline runs on to
+    // mark a clone ready holding some of the prime's 32 buckets.
+    const caller = src.slice(src.indexOf("let storageBuckets: BucketReplicationResult[] = []"));
+    const upTo = caller.slice(0, caller.indexOf("// Step 5c:"));
+    const catchEnds = upTo.indexOf("Storage bucket replication skipped");
+    const pauseAt = upTo.indexOf("const deferredBuckets");
+    expect(catchEnds).toBeGreaterThan(-1);
+    expect(pauseAt).toBeGreaterThan(catchEnds);
+    expect(upTo.slice(pauseAt)).toMatch(/throw new BudgetPause\(/);
+    // A failure that does occur travels with the pause rather than being lost
+    // behind it — the same rule the cron step learned (F25).
+    expect(upTo.slice(pauseAt)).toMatch(/FAILED and will not replicate on a retry/);
+  });
+
+  it("passes the invocation deadline from the pipeline", () => {
+    expect(src).toMatch(
+      /replicateStorageBuckets\(primeRef, projectRef, input\.deadlineAt \?\? null\)/,
+    );
   });
 });
