@@ -46,6 +46,16 @@ const NOT_SCHEDULED = new Map([
       "fault burns Supabase project slots unattended. What IS scheduled is " +
       "/hooks/backend-provisioning-drain, which works whatever this re-queues.",
   ],
+  [
+    "backend-provisioning-repair",
+    "The retry hook's mirror: invoked on demand (cron-secret bearer) to converge " +
+      "an already-READY clone backend onto the engine as it now stands, after a " +
+      "fix that the clone was provisioned before. Never a schedule, for a " +
+      "stronger reason than retry's: a repair spends vendor calls against a " +
+      "LIVE tenant's project, so it happens because somebody decided it should. " +
+      "What IS scheduled is /hooks/backend-provisioning-drain, which works the " +
+      "pass this queues exactly as it works any other.",
+  ],
 ]);
 
 const hooks = readdirSync(ROUTES)

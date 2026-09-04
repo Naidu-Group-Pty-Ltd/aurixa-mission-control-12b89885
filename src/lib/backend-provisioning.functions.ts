@@ -43,7 +43,10 @@ async function runBackendProvisioning(
     cloneName: string;
     region?: string;
     adminEmail: string;
-    adminPassword: string;
+    /** Null on a repair pass, which seeds nobody and needs no credential. */
+    adminPassword: string | null;
+    /** Converge an already-ready backend instead of building a new one. */
+    repair?: boolean;
     moduleIds?: string[];
     /** Force the legacy migration replay instead of catalog introspection. */
     schemaStrategy?: "introspection" | "migration-replay";
@@ -128,6 +131,17 @@ async function runBackendProvisioning(
       );
     }
     const resumingSchema = Boolean(existingRow?.resume_stage);
+
+    // A repair converges an existing backend. If the row names no project the
+    // pipeline would CREATE one — a second paid project for a clone that
+    // already has a working one, which is the opposite of what was asked for.
+    // The enqueue refuses this case too; asserted again here because the two
+    // are separated by a queue and a worker restart.
+    if (input.repair && !existingRow?.supabase_project_ref) {
+      throw new Error(
+        "Repair was asked for a backend that names no Supabase project — refusing to create a second one",
+      );
+    }
 
     // What the clone already has. Asked of the TARGET, never of a diary — the
     // same rule the schema stages follow. Cheap (one Supabase call) and it is
@@ -275,6 +289,7 @@ async function runBackendProvisioning(
         region: input.region,
         adminEmail: input.adminEmail,
         adminPassword: input.adminPassword,
+        repair: input.repair ?? false,
         snapshot,
         existingProjectRef: existingRow?.supabase_project_ref ?? null,
         inheritedSecrets,
@@ -419,6 +434,13 @@ async function runBackendProvisioning(
                     (parity?.surplus_in_target?.total ?? 0) > 0
                     ? `Backend is ready — every object the prime has is present, and ${parity?.surplus_in_target.total} the prime does NOT have are also on the clone (prime-dropped or tenant-added; nothing was removed). Review at /clones/${input.cloneId}`
                     : "Backend is ready — verified against the prime",
+        // Spent. The flag describes the pass that was queued, and this pass
+        // has now finished it; the drain clears it on a terminal FAILURE for
+        // the same reason. Left standing, the next ordinary provisioning of
+        // this clone would be taken for a repair and would skip the admin
+        // seed — a clone nobody can sign in to, which is a state this
+        // pipeline has already shipped once.
+        repair_requested_at: null,
         // Recorded on the ROW, not only in the audit metadata.
         //
         // Only the queued path wrote this column, so a clone provisioned
@@ -652,7 +674,13 @@ export async function runQueuedBackendProvisioning(input: {
   cloneName: string;
   region?: string;
   adminEmail: string;
-  adminPassword: string;
+  /** Null on a repair pass, which seeds nobody and needs no credential. */
+  adminPassword: string | null;
+  /**
+   * Converge an already-ready backend onto the current engine rather than
+   * build a new one. Skips the admin seed — see ProvisionBackendInput.repair.
+   */
+  repair?: boolean;
   moduleIds?: string[];
   actorUserId: string | null;
   /** The drain invocation's wall-clock deadline — see runBackendProvisioning. */
@@ -680,6 +708,7 @@ export async function runQueuedBackendProvisioning(input: {
     region: input.region,
     adminEmail: input.adminEmail,
     adminPassword: input.adminPassword,
+    repair: input.repair ?? false,
     moduleIds: input.moduleIds,
     deadlineAt: input.deadlineAt ?? null,
   });

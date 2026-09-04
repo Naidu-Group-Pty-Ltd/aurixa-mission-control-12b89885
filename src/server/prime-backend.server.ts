@@ -982,17 +982,21 @@ export async function fetchPrimeBackendSnapshot(
 
   // Decide which bundles are deployable FIRST, so the fetch pool below pulls
   // exactly the set of blobs the bundles need — each once, whole set pooled.
-  const skip = new Set(opts?.skipFunctionSlugs ?? []);
-  const deployable: Array<{ slug: string; bundlePaths: string[]; entrypointPath: string }> = [];
+  // EVERY bundle the prime repo defines, whatever the target already holds.
+  // This is the set the secret scan reads (see below); the deploy set is
+  // derived from it.
+  const allBundles: Array<{ slug: string; bundlePaths: string[]; entrypointPath: string }> = [];
   for (const [slug, ownPaths] of Array.from(slugs.entries()).sort((a, b) =>
     a[0].localeCompare(b[0]),
   )) {
-    if (skip.has(slug)) continue; // the target already holds it — do not pay for it
     const bundlePaths = [...ownPaths, ...sharedFiles];
     const entrypointPath = pickEntrypoint(slug, bundlePaths);
     if (!entrypointPath) continue; // no runnable entrypoint — not a deployable function
-    deployable.push({ slug, bundlePaths, entrypointPath });
+    allBundles.push({ slug, bundlePaths, entrypointPath });
   }
+  // What this pass may DEPLOY: minus whatever the project already holds.
+  const skip = new Set(opts?.skipFunctionSlugs ?? []);
+  const deployable = allBundles.filter((b) => !skip.has(b.slug));
   // Sorted above, so the cap takes a STABLE prefix: the same functions are
   // deployed first on every pass, and a pass never re-fetches what the last
   // one landed.
@@ -1005,28 +1009,42 @@ export async function fetchPrimeBackendSnapshot(
   // fourteen requests; see fetchBlobTextsBatched for why per-blob REST could
   // never finish inside the drain invocation, at any pool width.
   //
-  // The scan set is EVERY deployable bundle's files; the assembly set is only
-  // the selected ones. Those were the same list until the fetch learned to
-  // skip functions the project already holds and to cap how many it carries —
-  // and the secret-name scan below reads whatever was fetched, so narrowing
-  // the fetch silently narrowed the scan.
+  // THE SCAN SET IS EVERY BUNDLE THE PRIME DEFINES. The assembly set is only
+  // the selected ones.
   //
-  // The comment under that scan states the invariant it relied on: "a name
-  // found in a file is found whichever bundles that file happens to travel
-  // in". True while every bundle was fetched. Not true once some are not.
+  // Those were one list until the fetch learned two economies — skip the
+  // functions the project already holds, and cap how many of the rest one
+  // pass carries — and the secret-name scan below reads whatever was fetched,
+  // so each economy silently narrowed the scan. The comment under that scan
+  // states the invariant it relied on: "a name found in a file is found
+  // whichever bundles that file happens to travel in". True while every
+  // bundle was fetched. Not true once some are not.
   //
-  // Measured 3 Sep 2026 on the first clone this engine drove to `ready`: the
-  // final pass had almost nothing left to deploy, so it fetched almost
-  // nothing, scanned almost nothing, and synced ZERO of the prime's 86
-  // secrets — no vendor key, no internal signing secret, no derived URL. The
-  // clone came up looking finished and unable to call anything.
+  // Measured 3 Sep 2026 on the first clones this engine drove to `ready`:
+  // both came up holding 9 of the prime's 86 secret shells — no vendor key,
+  // no internal signing secret, no derived URL — looking finished and unable
+  // to call anything.
   //
-  // So the scan takes the full set whenever source was asked for at all. The
-  // saving that matters is untouched: a resumed schema pass passes
-  // `includeFunctionSource: false` and still fetches nothing whatsoever.
+  // Both economies caused it, and fixing one left the other. The CAP was
+  // addressed first, by scanning `deployable` rather than `selected`; but
+  // `deployable` was itself built with `skip` already applied, so on the pass
+  // that matters — the last one, where the project holds nearly everything —
+  // it is nearly empty. Nine names is what a couple of leftover bundles
+  // yields. So the scan is taken from `allBundles`, which neither economy
+  // touches: the prime's secret set is a property of the PRIME at this
+  // commit, and cannot depend on how far this clone has got.
+  //
+  // The cost is bounded and was measured before it was accepted: the extra
+  // files are ~510 of ~1,033, fetched 80 to a GraphQL query, so a full scan
+  // is about thirteen requests against an installation quota of thousands.
+  // What made the fetch unaffordable was per-blob REST, and that is gone. The
+  // saving that actually matters is untouched — a resumed schema pass passes
+  // `includeFunctionSource: false` and still fetches nothing whatsoever — and
+  // so is the expensive half of skipping, which is not deploying those
+  // bundles to the Management API.
   const neededRels: string[] = [];
   const seenRel = new Set<string>();
-  for (const bundle of deployable) {
+  for (const bundle of allBundles) {
     for (const rel of bundle.bundlePaths) {
       if (seenRel.has(rel)) continue;
       seenRel.add(rel);

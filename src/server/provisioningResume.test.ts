@@ -715,29 +715,45 @@ describe("the edge-function fetch is budgeted like everything else", () => {
   it("the snapshot skips slugs the target already holds", () => {
     const src = primeBackend();
     expect(src).toMatch(/skipFunctionSlugs\?: readonly string\[\]/);
-    /* Skipped BEFORE the bundle paths are collected, or it costs the same. */
-    const skipAt = src.indexOf("if (skip.has(slug)) continue;");
+    /* Skipping decides what is DEPLOYED, and it decides it before the deploy
+       set is built — the expensive half of the economy, the Management API
+       calls, is what it exists to save. It deliberately no longer narrows the
+       fetch, because the fetch is what the secret scan reads (next test). */
+    const skipAt = src.indexOf("const deployable = allBundles.filter((b) => !skip.has(b.slug));");
     const fetchAt = src.indexOf("fetchBlobTextsBatched(octokit, ref, neededEntries)");
     expect(skipAt).toBeGreaterThan(-1);
     expect(skipAt).toBeLessThan(fetchAt);
   });
 
-  it("assembles only the selected bundles, but scans EVERY deployable one", () => {
+  it("scans EVERY bundle the prime defines, and assembles only the selected ones", () => {
     const src = primeBackend();
-    // These were the same list until the fetch learned to skip functions the
-    // project already holds and to cap how many it carries. The secret-name
-    // scan reads whatever was fetched, so narrowing the fetch silently
-    // narrowed the scan — and on the first clone this engine drove to `ready`
-    // (3 Sep 2026) the final pass had almost nothing left to deploy, fetched
-    // almost nothing, and synced ZERO of the prime's 86 secrets.
+    // Three sets, and conflating any two of them empties the clone's secrets.
     //
-    // A clone with no vendor key and no internal signing secret comes up
-    // looking finished and unable to call anything.
-    expect(src).toMatch(/for \(const bundle of deployable\) \{/);
-    expect(src).toMatch(/const selected = functionSourceTruncated \? deployable\.slice\(0, limit\) : deployable/);
-    // Assembly still respects the cap — that is what keeps a pass carrying a
-    // payload it can actually deploy.
+    // The fetch learned two economies — skip what the project already holds,
+    // cap how many of the rest one pass carries — and the secret-name scan
+    // reads whatever was fetched, so each one silently narrowed the scan.
+    // BOTH caused it, and fixing one left the other: scanning `deployable`
+    // rather than `selected` addressed the cap, but `deployable` already has
+    // `skip` applied, so on the pass that matters — the last one, where the
+    // project holds nearly everything — it is nearly empty. Both clones this
+    // engine drove to `ready` on 3 Sep 2026 came up with 9 of the prime's 86
+    // secret shells: no vendor key, no internal signing secret, no derived
+    // URL. A clone like that looks finished and cannot call anything.
+    //
+    // So the scan reads `allBundles`, which neither economy touches: the
+    // prime's secret set is a property of the PRIME at this commit and cannot
+    // depend on how far this clone has got.
+    expect(src).toMatch(/for \(const bundle of allBundles\) \{/);
+    expect(src).toMatch(/const deployable = allBundles\.filter\(\(b\) => !skip\.has\(b\.slug\)\)/);
+    expect(src).toMatch(
+      /const selected = functionSourceTruncated \? deployable\.slice\(0, limit\) : deployable/,
+    );
+    // Assembly still respects both economies — that is what keeps a pass
+    // carrying a payload it can actually deploy.
     expect(src).toMatch(/const functions: PrimeEdgeFunction\[\] = selected\.map\(/);
+    // And the scan must not be reachable from either narrowed list.
+    const scanLoop = src.slice(src.indexOf("const neededRels: string[] = [];"));
+    expect(scanLoop.slice(0, 300)).not.toMatch(/of (deployable|selected)\)/);
   });
 
   it("still fetches nothing at all when source was not asked for", () => {
@@ -840,7 +856,9 @@ describe("the emptiness scan is a reading, not a gate", () => {
     );
     const body = fn.slice(0, fn.indexOf("\n}\n") + 2);
     expect(body).toMatch(/empty:\s*complete && totalRows <=/);
-    expect(provisioning).toMatch(/rowsOnClone: emptiness\?\.complete \? emptiness\.totalRows : null/);
+    expect(provisioning).toMatch(
+      /rowsOnClone: emptiness\?\.complete \? emptiness\.totalRows : null/,
+    );
   });
 
   it("hands the scan the budget that is left, not a fresh one", () => {
@@ -897,7 +915,9 @@ describe("a pass that built nothing must not spend its budget re-proving it", ()
     expect(provisioning).toMatch(
       /const builtSomething = result\.stages\.some\(\(st\) => st\.applied > 0 \|\| !st\.reconciled\)/,
     );
-    expect(provisioning).toMatch(/const emptiness = builtSomething\s*\?\s*await verifyCloneIsEmpty\(/);
+    expect(provisioning).toMatch(
+      /const emptiness = builtSomething\s*\?\s*await verifyCloneIsEmpty\(/,
+    );
   });
 
   it("keeps the reading on the pass that does build the schema", () => {
@@ -973,13 +993,18 @@ describe("the pg_cron schedule is budgeted and asks the clone first", () => {
   it("still repairs a job whose schedule or command drifted", () => {
     // 22 of this prime's jobs carry an anon key inline that has to be
     // rewritten. Skipping every job that merely EXISTS would stop that repair.
-    expect(body).toMatch(
+    // Whitespace-insensitive: the rule is that all three are compared, not how
+    // the formatter chose to break the line.
+    expect(body.replace(/\s+/g, " ")).toMatch(
       /already\.schedule === job\.schedule && already\.command === command && already\.active === job\.active/,
     );
   });
 
   it("puts every job back on the write path when the clone cannot be read", () => {
-    const readBlock = body.slice(body.indexOf("const existing = new Map"), body.indexOf("const results"));
+    const readBlock = body.slice(
+      body.indexOf("const existing = new Map"),
+      body.indexOf("const results"),
+    );
     expect(readBlock).toMatch(/catch \{/);
     expect(readBlock).not.toMatch(/throw/);
   });
@@ -1007,7 +1032,9 @@ describe("the pg_cron schedule is budgeted and asks the clone first", () => {
     // "Cron replication skipped". A BudgetPause thrown inside it would be
     // reported as a decision not to do the work, and the pass would run on and
     // mark the clone ready holding a partial schedule.
-    const callSite = provisioning.slice(provisioning.indexOf("Replicating pg_cron schedule from prime"));
+    const callSite = provisioning.slice(
+      provisioning.indexOf("Replicating pg_cron schedule from prime"),
+    );
     const catchAt = callSite.indexOf("Cron replication skipped");
     const deferredAt = callSite.indexOf("const deferredCron");
     expect(catchAt).toBeGreaterThan(-1);
@@ -1160,7 +1187,9 @@ describe("proving a finished schema costs one round trip per side", () => {
     const rec = introspection.slice(introspection.indexOf("async function alreadyReconciled"));
     const recBody = rec.slice(0, rec.indexOf("\n}\n") + 2);
     expect(recBody).toMatch(/typeof pre === "number" && typeof cre === "number"/);
-    expect(recBody).toMatch(/await Promise\.all\(\[countOn\(primeRef, stage\), countOn\(cloneRef, stage\)\]\)/);
+    expect(recBody).toMatch(
+      /await Promise\.all\(\[countOn\(primeRef, stage\), countOn\(cloneRef, stage\)\]\)/,
+    );
   });
 
   it("takes the prefetch once, before the first stage", () => {
@@ -1219,5 +1248,209 @@ describe("a bucket is created through the project's Storage API, not the Managem
     // is how a credential gap reads as a storage fault.
     const loop = provisioning.slice(provisioning.indexOf("for (const bucket of primeBuckets)"));
     expect(loop.slice(0, 900)).toMatch(/no service-role key for the clone/);
+  });
+});
+
+describe("a backend that is already ready can be converged onto a fixed engine", () => {
+  // The state that had no lever. `enqueueCloneBackendProvisioning` refuses a
+  // row at `ready` ("This clone already has a provisioned backend") and the
+  // retry hook refuses anything that is not `failed` — so between them, a
+  // FINISHED clone could never be re-run. That is the ordinary case, not an
+  // exotic one: every fix to this pipeline leaves the clones provisioned
+  // before it frozen holding the gaps it closed, and the only remedy the
+  // product offered was to destroy a tenant's Supabase project.
+  //
+  // Measured 3 Sep 2026 on the two engine-provisioned clones, both at
+  // `ready`: 0 of the prime's 32 storage buckets and 9 of its 86 secrets,
+  // because the fixes for both landed after they finished.
+  const src = pipeline();
+  const enqueue = src.slice(src.indexOf("export async function enqueueCloneBackendProvisioning"));
+  const repairHook = read("src/routes/hooks.backend-provisioning-repair.tsx");
+  const drainSrc = read("src/routes/hooks.backend-provisioning-drain.tsx");
+  // Bounded at `drainOne`, so a match cannot be picked up from the rest of
+  // the file — an unbounded slice runs to EOF and quietly passes on somebody
+  // else's code.
+  const claimOneBody = () => {
+    const from = drainSrc.indexOf("async function claimOne()");
+    const to = drainSrc.indexOf("async function drainOne(");
+    expect(from).toBeGreaterThan(-1);
+    expect(to).toBeGreaterThan(from);
+    return drainSrc.slice(from, to);
+  };
+
+  it("takes a READY row and refuses every other status", () => {
+    // The mirror of the retry hook's `failed` guard: between the two levers
+    // every terminal state has one, and neither can claim a row in flight.
+    expect(enqueue).toMatch(/if \(input\.repair\) \{/);
+    expect(enqueue).toMatch(/existing\.status !== "ready"/);
+    expect(enqueue).toMatch(/This clone has no backend to repair/);
+  });
+
+  it("still refuses to provision over a ready backend when it is NOT a repair", () => {
+    // The guard this widens must stay exactly as strong for the wizard: a
+    // repair is a second door, never a hole in the first one.
+    expect(enqueue).toMatch(
+      /if \(existing && existing\.status === "ready"\) \{\s*return \{ ok: false, error: "This clone already has a provisioned backend" \};/,
+    );
+  });
+
+  it("refuses a repair that would create a second paid project", () => {
+    // Asserted in BOTH places on purpose: the enqueue and the pipeline are
+    // separated by a queue and a worker restart, and the pipeline's own
+    // resume path creates a project when the ref is absent.
+    expect(enqueue).toMatch(/nothing to converge onto/);
+    expect(runner()).toMatch(
+      /input\.repair && !existingRow\?\.supabase_project_ref[\s\S]{0,300}refusing to create a second one/,
+    );
+  });
+
+  it("never re-seeds the admin, because that would reset a live tenant's credential", () => {
+    // `seedProductAdminIdentity` rewrites `password_hash` and clears
+    // `failed_login_attempts` and `locked_until` on an existing row
+    // unconditionally. Over a handed-over clone that is a silent password
+    // reset and a lockout release, reported as a successful step.
+    const step7 = src.slice(src.indexOf("// Step 7: Seed admin"));
+    const guarded = step7.slice(0, step7.indexOf('pauseIfDue("seeding the admin user")'));
+    expect(guarded).toMatch(/if \(input\.repair\) \{/);
+    expect(guarded).toMatch(/never re-seeds a tenant's credential/);
+    // And it returns rather than falling through — a `return` inside the
+    // guard is the whole mechanism.
+    expect(guarded).toMatch(/return \{[\s\S]*adminUserId: null/);
+  });
+
+  it("distinguishes an admin seed that was skipped from one that found nothing", () => {
+    // A caller that cannot tell those apart is how a clone nobody could sign
+    // in to came to look finished once already.
+    expect(src).toMatch(/adminSeed: AdminSeedReport \| null;/);
+    expect(src).toMatch(/adminSeed: null,/);
+  });
+
+  it("refuses to seed an administrator with an empty credential", () => {
+    // `adminPassword` became nullable for the repair path. On the path that
+    // DOES seed, a null must be a loud failure and never a blank password.
+    expect(src).toMatch(
+      /if \(!input\.adminPassword\) \{[\s\S]{0,300}refusing to seed an administrator with an empty credential/,
+    );
+  });
+
+  it("queues no credential with a repair, and clears the flag when the pass ends", () => {
+    expect(enqueue).toMatch(
+      /queued_admin_password_enc: input\.adminPassword \? encryptSecret\(input\.adminPassword\) : null/,
+    );
+    expect(enqueue).toMatch(
+      /repair_requested_at: input\.repair \? new Date\(\)\.toISOString\(\) : null/,
+    );
+    // Terminal FAILURE (the drain) and success (the runner) both spend it.
+    expect(drainSrc).toMatch(/isTerminal \? \{ repair_requested_at: null \} : \{\}/);
+    expect(runner()).toMatch(/repair_requested_at: null,/);
+  });
+
+  it("lets the drain claim a credential-less row only when it is a repair", () => {
+    // The claim used to require `queued_admin_password_enc IS NOT NULL` in
+    // the query. A repair has none by design, so the predicate moved into JS
+    // — where the `retry_after` filter already lives, because a composed
+    // PostgREST `.or()` string is forbidden here (one never parsed, and the
+    // claim it guarded had never once succeeded).
+    const claim = claimOneBody();
+    expect(claim).not.toMatch(/\.not\("queued_admin_password_enc", "is", null\)/);
+    expect(claim).toMatch(
+      /Boolean\(c\.queued_admin_password_enc\) \|\| Boolean\(c\.repair_requested_at\)/,
+    );
+    // Judged on the code, not the prose: the comment above the filter names
+    // `.or()` precisely to say why it is not used.
+    expect(claim.replace(/\/\/[^\n]*/g, "")).not.toMatch(/\.or\(/);
+  });
+
+  it("widens the candidate window now that unclaimable rows are filtered locally", () => {
+    // With the credential predicate out of the query, unclaimable rows reach
+    // the client. Five was sized for one backed-off row; ten is sized for a
+    // couple of stranded ones, so a claimable job cannot hide behind them.
+    expect(claimOneBody()).toMatch(/\.limit\(10\)/);
+  });
+
+  it("never calls a parked repair stranded", () => {
+    // The stranded sweep fails a parked row BECAUSE it has no queued
+    // credential and so can never be claimed. That is a repair's normal
+    // state, so without this it would fail a pass that was working — 45
+    // minutes in, with a message telling the operator to retry something
+    // that had not gone wrong.
+    const sweep = drainSrc.slice(drainSrc.indexOf("const stallCutoff"));
+    const upd = sweep.slice(0, sweep.indexOf("if (strandedErr)"));
+    expect(upd).toMatch(/\.is\("queued_admin_password_enc", null\)/);
+    expect(upd).toMatch(/\.is\("repair_requested_at", null\)/);
+  });
+
+  it("does not decrypt a password a repair never queued", () => {
+    const drainOne = drainSrc.slice(drainSrc.indexOf("async function drainOne("));
+    expect(drainOne).toMatch(/const isRepair = Boolean\(claimed\.repair_requested_at\)/);
+    expect(drainOne).toMatch(/if \(!isRepair\) \{[\s\S]{0,600}decryptSecret/);
+    expect(drainOne).toMatch(/repair: isRepair,/);
+  });
+
+  it("is a hook an operator drives, never a schedule", () => {
+    // A repair spends vendor calls against a LIVE tenant's project. The
+    // cron-coverage gate carries the same reasoning; this pins the route.
+    expect(repairHook).toMatch(/verifyCronAuth\(request\)/);
+    expect(repairHook).toMatch(/repair: true,/);
+    expect(repairHook).toMatch(/adminPassword: null,/);
+  });
+
+  it("names the right lever when it refuses", () => {
+    // "backend is 'failed', not 'ready'" on its own sends an operator back to
+    // the same button. The refusal says which door to use instead.
+    expect(repairHook).toMatch(/Use the retry hook for a failed one\./);
+    expect(repairHook).toMatch(/already being worked/);
+  });
+});
+
+describe("the queue row has exactly one writer, and the bulk button is not a second", () => {
+  // `bulkReprovisionBackends` is a live control on the dashboard, offered over
+  // any selection of clones, and it wrote `clone_backends.status = 'pending'`
+  // ITSELF — for rows at `failed` or `ready` — then reported
+  // "Re-queued N backends" whatever happened.
+  //
+  // It could not work, and the reason is structural rather than incidental.
+  // The drain's claim will not take a row whose queued admin credential is
+  // absent, and a terminal outcome CLEARS that column — so neither a failed
+  // row nor a ready one has one. The re-queued job was unclaimable by
+  // construction, on every row. `reclaimStalled` then found it parked and
+  // credential-less and marked it FAILED 45 minutes later.
+  //
+  // So on a READY clone the button destroyed a healthy backend's status and
+  // recorded a working tenant as failed, while telling the operator it had
+  // been re-queued. This is the "two writers of that row shape is how the
+  // queue and the worker drift" the enqueue's own header warns about.
+  const bulk = read("src/server/operator-ux.functions.ts");
+  const fn = bulk.slice(bulk.indexOf("export const bulkReprovisionBackends"));
+  const body = fn.slice(0, fn.indexOf("\n// ─"));
+
+  it("goes through the one enqueue instead of writing the row itself", () => {
+    expect(body).toMatch(/enqueueCloneBackendProvisioning\(supabase, userId, \{/);
+    expect(body).not.toMatch(/status: "pending" as const/);
+    expect(body).not.toMatch(/\.from\("clone_backends"\)\s*\.update\(/);
+  });
+
+  it("picks the lever by status: repair a ready one, retry a failed one", () => {
+    expect(body).toMatch(/const repair = row\.status === "ready"/);
+    expect(body).toMatch(/adminPassword: repair \? null : generateSecurePassword\(\)/);
+  });
+
+  it("never clobbers a backend that is in flight", () => {
+    // A fresh upsert would reset attempts and credential under a live worker.
+    expect(body).toMatch(/if \(!repair && row\.status !== "failed"\)/);
+    expect(body).toMatch(/backend is '\$\{row\.status\}'/);
+  });
+
+  it("reports what was queued, not what was ticked", () => {
+    expect(body).toMatch(/count: queued\.length/);
+    expect(body).toMatch(/skipped/);
+    // And the audit trail records the same thing the caller is told.
+    expect(body.replace(/\s+/g, " ")).toMatch(
+      /metadata: \{ queued: queued\.length, skipped: skipped\.length/,
+    );
+  });
+
+  it("does not report an empty selection over a failed read", () => {
+    expect(body).toMatch(/if \(readErr\) return \{ ok: false as const, error: readErr\.message \}/);
   });
 });

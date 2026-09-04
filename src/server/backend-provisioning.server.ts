@@ -1307,7 +1307,12 @@ export async function replicateCronJobs(
     const changed = hostRewrite.changed || keyRewrite.changed;
 
     const already = existing.get(job.jobname);
-    if (already && already.schedule === job.schedule && already.command === command && already.active === job.active) {
+    if (
+      already &&
+      already.schedule === job.schedule &&
+      already.command === command &&
+      already.active === job.active
+    ) {
       results.push({
         jobname: job.jobname,
         status: "already_present",
@@ -3108,7 +3113,8 @@ export type ProvisionBackendInput = {
   cloneName: string;
   region?: string;
   adminEmail: string;
-  adminPassword: string;
+  /** Null only when `repair` is set, where no identity is seeded at all. */
+  adminPassword: string | null;
   /** The prime repo's Supabase architecture to replicate onto the new project. */
   snapshot: PrimeBackendSnapshot;
   /**
@@ -3171,6 +3177,19 @@ export type ProvisionBackendInput = {
    */
   introspectionResumeStage?: string | null;
   /**
+   * Converge a backend that is already provisioned, rather than build one.
+   *
+   * Every replication step here checks the target before it writes — that is
+   * what the budget work made them do — so a repair pass reconciles what is
+   * already right and carries only what is missing. The ONE step that does not
+   * work that way is the admin seed, which rewrites `password_hash` and clears
+   * `failed_login_attempts` / `locked_until` whether or not anybody has since
+   * signed in. So a repair skips it: the admin identity belongs to the tenant
+   * once the clone is handed over, and a convergence pass is not entitled to
+   * reset it. `adminPassword` is not read in this mode.
+   */
+  repair?: boolean;
+  /**
    * Called the MOMENT a project is created, before anything else is spent on
    * it. The caller persists the ref so a death anywhere after creation can
    * never orphan a paid project: the resume path reads the persisted ref and
@@ -3198,6 +3217,13 @@ export type ProvisionBackendResult = {
   /** null when resuming an existing project — the original password is kept */
   dbPass: string | null;
   adminUserId: string | null;
+  /**
+   * What the admin seed managed, or null when the pass deliberately did not
+   * run it (a repair). Null is "not attempted", never "attempted and empty" —
+   * a caller that cannot tell those apart is how a clone nobody can sign into
+   * came to look finished once already.
+   */
+  adminSeed: AdminSeedReport | null;
   migrationsApplied: PrimeMigrationResult[];
   latestMigration: string | null;
   /** Present when the schema was built by catalog introspection. */
@@ -3767,8 +3793,48 @@ export async function provisionCloneBackend(
     ownJwtSecret ? { JWT_SECRET: ownJwtSecret } : undefined,
   );
 
-  // Step 7: Seed admin
+  // Step 7: Seed admin — UNLESS this is a repair.
+  //
+  // A convergence pass may not touch the tenant's own credential. The seed
+  // below rewrites `password_hash` and clears `failed_login_attempts` and
+  // `locked_until` on an existing row unconditionally, so running it over a
+  // handed-over clone silently resets the administrator's password and
+  // releases a lockout — and reports success while doing it. Skipped
+  // explicitly and SAID, so the step is visibly not-run rather than absent.
+  if (input.repair) {
+    await onStatusUpdate?.(
+      "seeding_admin",
+      "Admin identity left untouched — a repair converges infrastructure and never re-seeds a tenant's credential.",
+    );
+    return {
+      projectRef,
+      projectUrl,
+      anonKey,
+      serviceRoleKey,
+      dbPass,
+      adminUserId: null,
+      adminSeed: null,
+      migrationsApplied,
+      latestMigration: latestApplied,
+      introspection,
+
+      edgeFunctions,
+      secretShells,
+      storageBuckets,
+      authConfig: authConfigResult,
+      cronJobs,
+      requiredExtensions,
+      realtimePublication,
+    };
+  }
   pauseIfDue("seeding the admin user");
+  // Loudly, rather than seeding a blank credential: an empty password on an
+  // administrator account is worse than any failure this could report.
+  if (!input.adminPassword) {
+    throw new Error(
+      "No admin password was supplied for a provisioning pass — refusing to seed an administrator with an empty credential",
+    );
+  }
   await onStatusUpdate?.("seeding_admin", "Creating admin user...");
   const { userId: adminUserId, report: adminSeed } = await seedAdminUser(
     projectRef,
@@ -3795,6 +3861,7 @@ export async function provisionCloneBackend(
     serviceRoleKey,
     dbPass,
     adminUserId,
+    adminSeed,
     migrationsApplied,
     latestMigration: latestApplied,
     introspection,
@@ -3820,14 +3887,37 @@ export function generateSecurePassword(): string {
 /**
  * Queue a clone's backend for the pg_cron drain worker.
  *
- * One implementation with two callers — the operator wizard's
- * `provisionBackend` server function and the signed-agreement flow — because
- * this upsert IS the contract with `/hooks/backend-provisioning-drain`, and
- * two writers of that row shape is how the queue and the worker drift.
+ * One implementation with several callers — the operator wizard's
+ * `provisionBackend` server function, the signed-agreement flow, the retry
+ * hook and the repair hook — because this upsert IS the contract with
+ * `/hooks/backend-provisioning-drain`, and two writers of that row shape is
+ * how the queue and the worker drift.
  *
  * Issue #12 lives here now: `clone_modules` (written by provisionClone) is
  * the authoritative module set; the caller's `moduleIds` are only a fallback
  * for a clone with nothing installed yet.
+ *
+ * ── The two modes, and why `repair` is not just a relaxed guard ──
+ *
+ * A PROVISION builds a backend that does not exist yet and refuses a row at
+ * `ready`, because the wizard must never provision the same clone twice.
+ *
+ * A REPAIR takes a row at `ready` and NOTHING ELSE, and converges it onto the
+ * engine as it now stands. That is the case the `ready` refusal had no answer
+ * for: every fix to this pipeline leaves the clones provisioned before it
+ * frozen holding the old gaps, and the only remedy the product offered was to
+ * destroy a tenant's Supabase project. Between the two modes and the retry
+ * hook (`failed` only) every terminal state has a lever and no in-flight row
+ * can be claimed by any of them.
+ *
+ * A repair carries NO admin credential, and that is deliberate rather than a
+ * convenience: `seedProductAdminIdentity` rewrites `password_hash` and clears
+ * `failed_login_attempts` / `locked_until` unconditionally, so re-running step
+ * 7 over a live tenant is a silent credential reset and a lockout release. The
+ * admin belongs to the tenant once the clone is handed over. It is also what
+ * makes a clone repairable at all after a terminal failure cleared its queued
+ * password — which is the state the first two engine-provisioned clones were
+ * actually in.
  */
 export async function enqueueCloneBackendProvisioning(
   // Narrow structural type: both the request-scoped client and the
@@ -3841,8 +3931,11 @@ export async function enqueueCloneBackendProvisioning(
     cloneName: string;
     region?: string;
     adminEmail: string;
-    adminPassword: string;
+    /** Null only in repair mode, where nothing is seeded and none is needed. */
+    adminPassword: string | null;
     moduleIds?: string[];
+    /** Converge an already-ready backend rather than build a new one. */
+    repair?: boolean;
   },
 ): Promise<{ ok: true; queued: true } | { ok: false; error: string }> {
   const { encryptSecret } = await import("./crypto.server");
@@ -3856,11 +3949,33 @@ export async function enqueueCloneBackendProvisioning(
 
   const { data: existing } = await supabase
     .from("clone_backends")
-    .select("id, status")
+    .select("id, status, supabase_project_ref")
     .eq("clone_id", input.cloneId)
     .maybeSingle();
-  if (existing && existing.status === "ready") {
-    return { ok: false, error: "This clone already has a provisioned backend" };
+  if (input.repair) {
+    // The mirror of the retry hook's `failed` guard. Stated as three separate
+    // refusals because each one is a different thing to tell an operator.
+    if (!existing) return { ok: false, error: "This clone has no backend to repair" };
+    if (existing.status !== "ready") {
+      return {
+        ok: false,
+        error: `Repair converges a READY backend — this one is '${existing.status}'. A failed backend is re-queued by the retry hook; one in flight is already being worked.`,
+      };
+    }
+    if (!existing.supabase_project_ref) {
+      return {
+        ok: false,
+        error:
+          "This backend names no Supabase project, so there is nothing to converge onto — provision it rather than repairing it",
+      };
+    }
+  } else {
+    if (existing && existing.status === "ready") {
+      return { ok: false, error: "This clone already has a provisioned backend" };
+    }
+    if (!input.adminPassword) {
+      return { ok: false, error: "An admin password is required to provision a backend" };
+    }
   }
 
   const { data: installed } = await supabase
@@ -3889,7 +4004,11 @@ export async function enqueueCloneBackendProvisioning(
       status: "pending" as const,
       region: input.region || "us-east-1",
       admin_email: input.adminEmail,
-      queued_admin_password_enc: encryptSecret(input.adminPassword),
+      // A repair seeds nobody, so it queues no credential — and the drain's
+      // claim and its stranded sweep both read `repair_requested_at` for
+      // exactly that reason.
+      queued_admin_password_enc: input.adminPassword ? encryptSecret(input.adminPassword) : null,
+      repair_requested_at: input.repair ? new Date().toISOString() : null,
       queued_module_ids: resolvedModuleIds,
       queued_at: new Date().toISOString(),
       worker_started_at: null,
@@ -3897,7 +4016,9 @@ export async function enqueueCloneBackendProvisioning(
       attempts: 0,
       enqueued_by: userId,
       error_message: null,
-      status_detail: "Queued — background worker will start within ~60 seconds",
+      status_detail: input.repair
+        ? "Repair queued — the worker will converge this backend onto the current engine within ~60 seconds"
+        : "Queued — background worker will start within ~60 seconds",
     },
     { onConflict: "clone_id" },
   );
