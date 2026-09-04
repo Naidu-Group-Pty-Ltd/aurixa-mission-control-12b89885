@@ -388,3 +388,141 @@ hour later. It reported "Re-queued N backends" every time.
 
 The remedy the product offered for a clone provisioned before a fix was to
 destroy a tenant's Supabase project and build a new one.
+
+---
+
+## A count cannot see a definition that drifted
+
+September 2026. The schema stages skip themselves when the clone holds at
+least as many objects as the prime, which is what makes a resumed pass cheap
+(24 round trips became 2). A count answers _does the clone hold as many of
+these_. It cannot answer _are they the same ones_, and for anything whose
+identity is its DDL rather than its existence those are different questions.
+
+Measured on both engine-provisioned clones. The prime's
+`builder_stock_items_rearm_settlement` fires
+
+```
+AFTER INSERT OR UPDATE OF enrichment_status, image_work_stage
+```
+
+and both clones carry a trigger of that name firing `AFTER INSERT` alone —
+the narrow form the prime's own **repository** still declares, copied before
+the prime was widened by hand in its live project. One trigger row on each
+side, so every count reconciles, the stage is skipped for ever, and the
+trigger silently does not fire for the updates it exists for.
+
+Only the parity report saw it, because parity keys triggers per EVENT:
+`builder_stock_items.builder_stock_items_rearm_settlement.AFTER.UPDATE`.
+**Seeing it was never the problem** — the schema build had no way to act on
+what parity found.
+
+Two things had to change.
+
+**`pg_get_triggerdef` renders a bare `CREATE TRIGGER`**, which is an _error_
+against a trigger that already exists — so the one statement that could
+repair a drifted trigger was the one guaranteed to fail. `CREATE OR REPLACE
+TRIGGER` (Postgres 14+, and every project here runs 17) replaces the
+definition. A **constraint** trigger is deliberately left alone: `CREATE OR
+REPLACE CONSTRAINT TRIGGER` is not valid syntax, so rewriting one would turn
+a trigger that merely fails as a duplicate into a trigger that fails to
+parse.
+
+**The stage has to be entered at all.** A definition digest rides in the same
+prefetch union as the count, so proving a triggers stage finished still costs
+nothing. Two rules keep it honest:
+
+- **only EQUALITY is conclusive.** Equal digests prove the clone holds
+  exactly the prime's definitions and the stage is skipped for free. Unequal
+  digests prove nothing — a clone legitimately holds objects the prime has
+  since dropped, and treating that as _not reconciled_ would re-apply all 474
+  triggers on every pass, which is the closed loop the `tables` stage already
+  had once;
+- **the count still gates it.** A digest can never promote a stage that has
+  not got enough objects yet.
+
+So an unequal digest sends the stage on to compare _definition lists_, and
+only the prime definitions the clone does not already hold are applied. That
+set is normally empty, and when it is not it names exactly what drifted. The
+cost is two round trips on a stage that would otherwise be skipped, and only
+when the digests differ — the price of being able to act on drift at all.
+
+`tables` remains the older exception for the same underlying reason, stated
+in its own comment: `create table if not exists` skips a table that already
+exists, so **column** drift survives with the counts matching exactly.
+
+---
+
+## A job the prime has disabled is replicated as disabled, or not at all
+
+September 2026. The prime disables exactly **two** of its 47 scheduled jobs —
+`sync-ghl-conversations-cron` and `sync-ghl-marketing-assets-6h` — and those
+two are the only two missing from **both** engine-provisioned clones, each of
+which holds 45 jobs and not one inactive. Two of two, twice, on independent
+runs.
+
+The deactivation used to be
+
+```sql
+update cron.job set active = false where jobname = '…';
+```
+
+a direct write to an extension's catalogue table, issued in the **same
+multi-statement batch** as the schedule. So whatever refused it took the
+schedule down with it, and the job was left **absent** rather than
+present-and-active — which is exactly the shape the clones are in.
+
+`cron.alter_job(jobid, active := false)` is pg_cron's own API for this and is
+what the direct write should always have been. Two rules go with it:
+
+- **it runs as its own statement**, so a failure to deactivate can never
+  discard a schedule that succeeded;
+- **a job that cannot be disabled is withdrawn and reported**, never left
+  running. A copy of a job the prime deliberately stopped, running on a
+  tenant's database, is worse than not having it: silence there is work
+  nobody asked for.
+
+The exact reason the catalogue write was refused is not established here —
+the engine records the per-job error and that record lives in the parity
+report, which was unreadable while Mission Control's own database was down.
+The correlation is 2/2 across two runs and a direct catalogue write is the
+wrong API regardless, so this is fixed on its own merits rather than on a
+diagnosis. The next repair pass will say what the error was, if there still
+is one.
+
+### Why triggers is the only class with a digest
+
+Measured across every definitional class on 4 Sep 2026, prime against clone,
+scoped to `public` and `aml`:
+
+| class     | prime | clone | definition digests                   |
+| --------- | ----- | ----- | ------------------------------------ |
+| views     | 14    | 14    | **identical**                        |
+| functions | 620   | 620   | differ — **by design**, see below    |
+| policies  | 1,154 | 1,155 | differ by the known surplus (+1)     |
+| indexes   | 2,166 | 2,169 | differ by the known surplus (+3)     |
+| triggers  | 474   | 474   | differ by **one drifted definition** |
+
+Only triggers carried real drift, and the other three rows are each a reason
+NOT to extend the digest naively.
+
+**A clone's function bodies must differ from the prime's.** The pipeline
+re-points any function body that names the prime's project, and it does:
+exactly four of the prime's 620 functions name `dduzbchuswwbefdunfct`
+(`bootstrap_cron_vault`, `dispatch_web_push_for_portal_notification`,
+`dispatch_web_push_on_notification`, `invoke_pdf_parse_recover_stuck_jobs`),
+and exactly four on the clone name the clone's own ref with **zero** still
+naming the prime. Those four are the whole difference. So a functions digest
+would be permanently unequal _because the engine did its job_ — and if
+inequality were ever treated as conclusive it would re-apply 620 definitions
+on every pass, for ever.
+
+**Policies and indexes differ only by the surplus** a clone keeps when the
+prime drops something (see the surplus reading). That is the same reason
+digest inequality is never conclusive for triggers either.
+
+**Views are byte-identical**, so there is nothing to add there.
+
+The rule this leaves: a digest belongs to a class only where an identical
+definition on both sides is the _expected_ outcome. That is triggers today,
+and it is a per-class judgement rather than a mechanism to spread.

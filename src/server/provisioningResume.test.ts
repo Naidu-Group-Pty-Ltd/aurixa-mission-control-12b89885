@@ -8,6 +8,7 @@ import {
   parseResumeMarker,
   pastDeadline,
 } from "./provisioningBudget";
+import { toReplaceableTriggerDdl } from "./schema-introspection.server";
 
 /**
  * Provisioning must survive the invocation it runs in.
@@ -987,7 +988,11 @@ describe("the pg_cron schedule is budgeted and asks the clone first", () => {
 
   it("asks the clone what it already schedules, in one query", () => {
     expect(body).toMatch(/select jobname, schedule, command, active from cron\.job/);
-    expect(body.split("from cron.job").length - 1).toBe(1);
+    // Counts the READ specifically: `cron.alter_job ... from cron.job` is a
+    // per-job write and has nothing to do with the one-query rule.
+    expect(body.split("select jobname, schedule, command, active from cron.job").length - 1).toBe(
+      1,
+    );
   });
 
   it("still repairs a job whose schedule or command drifted", () => {
@@ -1186,7 +1191,10 @@ describe("proving a finished schema costs one round trip per side", () => {
 
     const rec = introspection.slice(introspection.indexOf("async function alreadyReconciled"));
     const recBody = rec.slice(0, rec.indexOf("\n}\n") + 2);
-    expect(recBody).toMatch(/typeof pre === "number" && typeof cre === "number"/);
+    // The prefetch entry became `{ n, digest }` when the digest joined the
+    // same union (see "a count cannot see a definition that drifted"); the
+    // rule this pins is unchanged — a MISSING entry falls back to asking.
+    expect(recBody).toMatch(/pre && cre\s*\?\s*\[pre\.n, cre\.n\]/);
     expect(recBody).toMatch(
       /await Promise\.all\(\[countOn\(primeRef, stage\), countOn\(cloneRef, stage\)\]\)/,
     );
@@ -1452,5 +1460,126 @@ describe("the queue row has exactly one writer, and the bulk button is not a sec
 
   it("does not report an empty selection over a failed read", () => {
     expect(body).toMatch(/if \(readErr\) return \{ ok: false as const, error: readErr\.message \}/);
+  });
+});
+
+describe("a count cannot see a definition that drifted", () => {
+  // The prime's `builder_stock_items_rearm_settlement` fires
+  //   AFTER INSERT OR UPDATE OF enrichment_status, image_work_stage
+  // Both engine-provisioned clones carry a trigger of that name firing
+  //   AFTER INSERT
+  // — the narrow form the prime's own repository still declares, copied
+  // before the prime was widened by hand. One trigger row on each side, so
+  // every count reconciles and the stage is skipped for ever, while the
+  // trigger silently does not fire for the updates it exists for.
+  //
+  // Only the parity report saw it, because parity keys triggers per EVENT:
+  // `builder_stock_items.builder_stock_items_rearm_settlement.AFTER.UPDATE`.
+  // Seeing it was never the problem; the schema build had no way to act on it.
+  const src = introspection();
+
+  it("proves a definition stage finished by digest, in the same round trip as the count", () => {
+    // The saving F28 bought must not be spent to buy this back: the digest
+    // rides in the prefetch union rather than costing a query of its own.
+    expect(src).toMatch(/const DIGESTS: Partial<Record<StageName, string>> = \{/);
+    expect(src).toMatch(/DIGESTS\[stage\] \? `\(\$\{DIGESTS\[stage\]\}\)` : "null"/);
+    expect(src).toMatch(/select \$\{sqlLiteral\(stage\)\} as stage/);
+  });
+
+  it("treats only digest EQUALITY as conclusive", () => {
+    // A clone legitimately holds objects the prime has since dropped, so its
+    // digest differs for ever. Reading that as "not reconciled" would re-apply
+    // all 474 triggers on every pass — F20, rebuilt.
+    expect(src).toMatch(
+      /if \(DIGESTS\[stage\] && pre\?\.digest && cre\?\.digest && pre\.digest !== cre\.digest\) return null;/,
+    );
+    // And the count check still gates it: a digest can never promote a stage
+    // that has not got enough objects yet.
+    const fn = src.slice(src.indexOf("async function alreadyReconciled"));
+    const body = fn.slice(0, fn.indexOf("\nasync function runStage"));
+    expect(body.indexOf("if (!reconcile(primeCount, cloneCount)) return null;")).toBeLessThan(
+      body.indexOf("DIGESTS[stage] && pre?.digest"),
+    );
+  });
+
+  it("carries only the definitions the clone does not already hold", () => {
+    const stage = src.slice(src.indexOf("// 9. triggers"));
+    const body = stage.slice(0, stage.indexOf("// 10. RLS enable"));
+    expect(body).toMatch(/query\(cloneRef, Q\.triggers\)/);
+    expect(body).toMatch(/const held = new Set\(cloneDefs\.map/);
+    expect(body).toMatch(/\.filter\(\(def\) => !held\.has\(def\)\)/);
+    // A clone whose triggers cannot be read must fall back to writing them
+    // all, never to assuming they are present.
+    expect(body).toMatch(/\.catch\(\(\) => \[\] as Array<Record<string, unknown>>\)/);
+  });
+
+  it("applies triggers with a statement that can replace one", () => {
+    // `pg_get_triggerdef` renders a bare CREATE TRIGGER, which ERRORS against
+    // a trigger that already exists — so the one statement that could repair a
+    // drifted trigger was the one guaranteed to fail.
+    expect(src).toMatch(/export function toReplaceableTriggerDdl/);
+    const stage = src.slice(src.indexOf("// 9. triggers"));
+    expect(stage.slice(0, stage.indexOf("// 10. RLS enable"))).toMatch(
+      /\.map\(toReplaceableTriggerDdl\)/,
+    );
+  });
+
+  it("never rewrites a CONSTRAINT trigger, which has no OR REPLACE form", () => {
+    const plain = "CREATE TRIGGER t AFTER INSERT ON public.x FOR EACH ROW EXECUTE FUNCTION f()";
+    const constraintTrigger =
+      "CREATE CONSTRAINT TRIGGER t AFTER INSERT ON public.x FOR EACH ROW EXECUTE FUNCTION f()";
+    expect(toReplaceableTriggerDdl(plain)).toBe(
+      "create or replace trigger t AFTER INSERT ON public.x FOR EACH ROW EXECUTE FUNCTION f()",
+    );
+    // Rewriting this one turns a trigger that fails as a duplicate into a
+    // trigger that fails to parse.
+    expect(toReplaceableTriggerDdl(constraintTrigger)).toBe(constraintTrigger);
+    // And anything that is not a trigger definition at all passes through.
+    expect(toReplaceableTriggerDdl("select 1")).toBe("select 1");
+  });
+});
+
+describe("a job the prime has disabled is replicated as disabled, or not at all", () => {
+  // The prime disables exactly two of its 47 scheduled jobs, and those two are
+  // the only two missing from BOTH engine-provisioned clones — each of which
+  // holds 45 jobs and not one inactive. Two of two, twice, independently.
+  //
+  // The deactivation used to be `update cron.job set active = false`: a direct
+  // write to an extension's catalogue table, in the SAME multi-statement batch
+  // as the schedule. So whatever refused it took the schedule down with it,
+  // and the job was left absent rather than present-and-active — which is the
+  // shape the clones are actually in.
+  const src = pipeline();
+  const fn = src.slice(src.indexOf("export async function replicateCronJobs"));
+  const body = fn.slice(0, fn.indexOf("\n// ─── G4"));
+
+  it("deactivates through pg_cron's own API, not a catalogue write", () => {
+    expect(body).toMatch(/cron\.alter_job\(jobid, active := false\)/);
+    // Judged on the code: the comment above it names the catalogue write
+    // precisely to record what it replaced.
+    expect(body.replace(/\/\/[^\n]*/g, "")).not.toMatch(/update cron\.job set active = false/);
+  });
+
+  it("does not let a failed deactivation discard a schedule that succeeded", () => {
+    // Two statements, two calls: the schedule commits on its own.
+    const scheduleAt = body.indexOf("select cron.schedule(");
+    const alterAt = body.indexOf("cron.alter_job(jobid");
+    expect(scheduleAt).toBeGreaterThan(-1);
+    expect(alterAt).toBeGreaterThan(scheduleAt);
+    // The schedule statement must END before the deactivation begins.
+    expect(body.slice(scheduleAt, alterAt)).toMatch(/\$cronbody\$\);`,\s*\);/);
+  });
+
+  it("withdraws a job it could not disable, rather than leaving it running", () => {
+    // A copy of a job the prime deliberately stopped, left running on a
+    // tenant's database, is worse than not having it.
+    const guard = body.slice(body.indexOf("catch (deactivateErr)"));
+    expect(guard.slice(0, 800)).toMatch(/perform cron\.unschedule/);
+    expect(guard.slice(0, 1200)).toMatch(/status: "failed"/);
+    expect(guard.slice(0, 1200)).toMatch(/withdrawn rather than/);
+  });
+
+  it("still reports an active job replicated without touching alter_job", () => {
+    expect(body).toMatch(/if \(!job\.active\) \{/);
   });
 });

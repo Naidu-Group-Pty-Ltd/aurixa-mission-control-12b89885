@@ -1339,14 +1339,64 @@ export async function replicateCronJobs(
     const q = (s: string) => s.replace(/'/g, "''");
     try {
       // Unschedule any existing job with the same name (silently) then re-schedule.
+      //
+      // A job the prime has DISABLED is scheduled and then deactivated, and
+      // how that second step is written decides whether a failure is visible.
+      //
+      // It used to be `update cron.job set active = false`, a direct write to
+      // an extension's catalogue table, in the same multi-statement batch as
+      // the schedule — so anything that refused it took the schedule down with
+      // it and the job was left ABSENT rather than present-and-active. That is
+      // the state measured on 4 Sep 2026: the prime disables exactly two of
+      // its 47 jobs, and those two are the only two missing from BOTH
+      // engine-provisioned clones, each of which holds 45 jobs and not one
+      // inactive. Two of two, twice, independently.
+      //
+      // `cron.alter_job` is pg_cron's own API for this and is what the direct
+      // write should always have been. Two rules go with it. It runs as its
+      // own statement, so a failure to deactivate cannot discard a schedule
+      // that succeeded. And a failure to deactivate UNSCHEDULES the job again
+      // and reports it, because a copy of a job the prime deliberately stopped,
+      // left running on a tenant's database, is worse than not having it:
+      // silence there is work nobody asked for.
       await runSqlOnProject(
         cloneRef,
         `do $$ begin
            perform cron.unschedule('${q(job.jobname)}');
          exception when others then null; end $$;
-         select cron.schedule('${q(job.jobname)}', '${q(job.schedule)}', $cronbody$${command}$cronbody$);
-         ${job.active ? "" : `update cron.job set active = false where jobname = '${q(job.jobname)}';`}`,
+         select cron.schedule('${q(job.jobname)}', '${q(job.schedule)}', $cronbody$${command}$cronbody$);`,
       );
+      if (!job.active) {
+        try {
+          await runSqlOnProject(
+            cloneRef,
+            `select cron.alter_job(jobid, active := false)
+               from cron.job where jobname = '${q(job.jobname)}';`,
+          );
+        } catch (deactivateErr) {
+          const why =
+            deactivateErr instanceof Error ? deactivateErr.message : String(deactivateErr);
+          try {
+            await runSqlOnProject(
+              cloneRef,
+              `do $$ begin
+                 perform cron.unschedule('${q(job.jobname)}');
+               exception when others then null; end $$;`,
+            );
+          } catch {
+            // Reported below either way; the job's own error is what matters.
+          }
+          results.push({
+            jobname: job.jobname,
+            status: "failed",
+            rewrote_url: changed,
+            error:
+              `scheduled, but could not be disabled as the prime has it — withdrawn rather than ` +
+              `left running: ${why}`,
+          });
+          continue;
+        }
+      }
       results.push({
         jobname: job.jobname,
         status: "replicated",
