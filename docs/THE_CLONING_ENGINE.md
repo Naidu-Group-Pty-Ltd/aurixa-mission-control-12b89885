@@ -997,3 +997,35 @@ means "do the work", never "assume it is done".
 Every drop is recorded on the stage the operator reads. Three per-item steps have
 already computed a result and thrown it away; a removal is the one that must
 least be silent.
+
+## A pass that did nothing overwrote three facts with the shape of nothing
+
+The fleet migration sync wrote its result unconditionally. So a clone that was
+already level — the ordinary, healthy case, where the pass applies nothing —
+had three facts replaced:
+
+| Column | Was | Became |
+| --- | --- | --- |
+| `migration_version` | the version provisioning recorded | `null` |
+| `migrations_applied` | what it applied | `[]` |
+| `status_detail` | the parity verdict | `Synced to null` |
+
+Measured 4 Sep 2026: **both** ready clones carried exactly that. The third — the
+one that is `failed`, and therefore outside this worker's query — still held its
+real version and its three migration rows. **Only the healthy clones lost their
+record**, which is the wrong way round and is why nobody noticed.
+
+The status line is the worst of the three. It replaced the verdict the
+provisioning run had just written — *"Backend provisioned but DOES NOT MATCH the
+prime — missing_secrets:72"* — with a string that means nothing and reads like a
+bug. That is the two-writers-of-one-status-field rule again: the last writer
+wins, and **a sync that applied nothing has nothing to say about the row's
+health.**
+
+A no-op pass now writes only what it genuinely establishes — where the prime is
+(`source_repo`, `source_ref`, `source_sha`) and the release of its own claim —
+and leaves every fact about the clone's schema as it found it. Where the pass
+did do something, a null `latestApplied` is never interpolated into prose.
+
+Saying nothing on a no-op must not become saying nothing at all: a failure and a
+held-back migration still report exactly as before, and a test pins both.

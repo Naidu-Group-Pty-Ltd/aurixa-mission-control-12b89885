@@ -377,32 +377,69 @@ export async function runFleetMigrationSync(
         out.advanced++;
       }
 
+      /*
+        A PASS THAT DID NOTHING MUST SAY NOTHING.
+
+        This update used to be unconditional, so a clone that was already level
+        — the ordinary, healthy case — had three facts overwritten with the
+        shape of "nothing happened":
+
+          migration_version  → null   (the recorded version, erased)
+          migrations_applied → []     (what provisioning applied, emptied)
+          status_detail      → "Synced to null"
+
+        Measured 4 Sep 2026: both ready clones carried exactly that, and the
+        third — the one that is `failed`, and therefore outside this worker's
+        query — still held its real version and its three migration rows. Only
+        the HEALTHY clones lost their record, which is the wrong way round and
+        is why nobody noticed.
+
+        The status line is the worst of the three: it replaced the parity
+        verdict the provisioning run had just written ("Backend provisioned but
+        DOES NOT MATCH the prime — …") with a string that means nothing and
+        reads like a bug. That is the two-writers-of-one-status-field rule
+        again: the last writer wins, and a sync that applied nothing has
+        nothing to say about the row's health.
+
+        So a no-op pass writes only what it genuinely establishes — where the
+        prime is, and the release of its own claim — and leaves every fact
+        about the clone's schema exactly as it found it. And where the pass DID
+        do something, a null `latestApplied` is never interpolated into prose.
+      */
+      const didNothing = successes.length === 0 && failures.length === 0 && blocked.length === 0;
+      const syncedTo = latestApplied ?? "the prime's latest recorded migration";
       const { error: updErr } = await supabase
         .from("clone_backends")
         .update({
-          migration_version: latestApplied,
+          // Where the prime is: established by this pass whatever it applied.
           source_repo: `${source.owner}/${source.repo}`,
           source_ref: source.branch,
           source_sha: sourceSha,
-          migrations_applied: results,
-          status: failures.length > 0 ? ("failed" as const) : ("ready" as const),
-          status_detail:
-            failures.length > 0
-              ? `Migration failed at ${failures[0].name}`
-              : blocked.length > 0
-                ? // `ready` and NOT level. Saying only "Synced to X" here would
-                  // report a clone that is holding dozens of migrations back as
-                  // healthy — the exact shape of report this module exists to
-                  // stop. The first hole is named because it is the one to
-                  // reconcile first.
-                  `Synced to ${latestApplied} — ${blocked.length} migration(s) held back behind ` +
-                  `${blocked[0].blockedBy?.[0] ?? "a withheld version"}, which the prime's ledger does not record`
-                : `Synced to ${latestApplied}`,
-          error_message: failures.length > 0 ? failures[0].error : null,
           // Released here, not in a finally: on the failure path the row is
           // deliberately left `failed`, and a `failed` row is outside this
           // worker's query anyway.
           worker_started_at: null,
+          // Facts about the CLONE — written only by a pass that changed one.
+          ...(didNothing
+            ? {}
+            : {
+                ...(latestApplied ? { migration_version: latestApplied } : {}),
+                migrations_applied: results,
+                status: failures.length > 0 ? ("failed" as const) : ("ready" as const),
+                status_detail:
+                  failures.length > 0
+                    ? `Migration failed at ${failures[0].name}`
+                    : blocked.length > 0
+                      ? // `ready` and NOT level. Saying only "Synced to X" here
+                        // would report a clone holding dozens of migrations back
+                        // as healthy — the exact shape of report this module
+                        // exists to stop. The first hole is named because it is
+                        // the one to reconcile first.
+                        `Synced to ${syncedTo} — ${blocked.length} migration(s) held back behind ` +
+                        `${blocked[0].blockedBy?.[0] ?? "a withheld version"}, which the prime's ledger does not record`
+                      : `Synced to ${syncedTo}`,
+                error_message: failures.length > 0 ? failures[0].error : null,
+              }),
         })
         .eq("clone_id", cloneId);
       if (updErr) {

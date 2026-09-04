@@ -2256,3 +2256,46 @@ describe("surplus is dropped for indexes, and for nothing else", () => {
     expect(whole).not.toMatch(/drop\s+(function|trigger|type|sequence|schema)/i);
   });
 });
+
+describe("a fleet-sync pass that did nothing says nothing", () => {
+  const src = () => readFileSync("src/server/fleet-migration.server.ts", "utf8");
+  const block = () => {
+    const b = src();
+    const at = b.indexOf("const didNothing =");
+    return b.slice(at, b.indexOf('.eq("clone_id", cloneId)', at));
+  };
+
+  it("writes no fact about the clone when it applied, failed and blocked nothing", () => {
+    const bl = block();
+    expect(bl).toMatch(/const didNothing =\s*successes\.length === 0 && failures\.length === 0 && blocked\.length === 0/);
+    expect(bl).toMatch(/\.\.\.\(didNothing\s*\?\s*\{\}/);
+  });
+
+  it("never erases a recorded migration version with a null", () => {
+    // A level clone has nothing to apply, so `latestApplied` is null — and
+    // writing it erased the version provisioning had established.
+    expect(block()).toMatch(/latestApplied \? \{ migration_version: latestApplied \} : \{\}/);
+  });
+
+  it("never interpolates a null into the operator's status line", () => {
+    const bl = block();
+    expect(bl).not.toMatch(/Synced to \$\{latestApplied\}/);
+    expect(bl).toMatch(/Synced to \$\{syncedTo\}/);
+    expect(src()).toMatch(/const syncedTo = latestApplied \?\?/);
+  });
+
+  it("still reports a failure and a held-back migration", () => {
+    // Saying nothing on a no-op must not become saying nothing at all.
+    const bl = block();
+    expect(bl).toContain("Migration failed at");
+    expect(bl).toContain("migration(s) held back behind");
+    expect(bl).toMatch(/status: failures\.length > 0 \? \("failed" as const\)/);
+  });
+
+  it("still records where the prime is, on every pass", () => {
+    // The one thing a no-op pass DOES establish.
+    const bl = block();
+    expect(bl).toContain("source_sha: sourceSha");
+    expect(bl).toContain("worker_started_at: null");
+  });
+});
