@@ -540,13 +540,47 @@ export async function getProjectAuthConfig(
  */
 export type BucketReplicationResult = {
   id: string;
-  status: "created" | "exists" | "failed";
+  status: "created" | "exists" | "failed" | "deferred";
   error?: string;
   objects_copied?: number;
   objects_failed?: number;
   objects_skipped?: number;
   bytes_copied?: number;
+  /** Set when the bucket's CONTENTS were deliberately not copied. */
+  contents_withheld?: string;
 };
+
+/**
+ * Which buckets, if any, may have their CONTENTS copied onto a clone.
+ *
+ * EMPTY, and that is the policy rather than a placeholder.
+ *
+ * This engine's governing rule is "structure only, never data" — the
+ * replication path carries schema, functions and configuration, and no prime
+ * row is ever destined for a clone. Storage objects are data. They are the
+ * prime's customers' files: listing photographs, identity captures the AML
+ * retention job deletes on a clock, generated reports, uploaded documents.
+ *
+ * The rule held for rows and had never been tested for objects, because
+ * bucket CREATION had never once succeeded — every bucket answered 404 at the
+ * Management API, so the object copy below could not run and nobody found out
+ * what it would do. Fixing creation made the second half of this step run for
+ * the first time, on 4 Sep 2026, and it began walking all 32 of the prime's
+ * buckets — 59,050 objects, 25.1 GB — copying what it found onto a tenant's
+ * project. It moved 21-24 branding assets onto each clone and, on one of
+ * them, a customer document and a customer form, before the pass was stopped.
+ *
+ * `SEED_ASSET_LIMITS` bounded it only by accident: 500 objects and 512 MB PER
+ * BUCKET across 32 buckets authorises ~16,000 objects and ~16 GB. A limit is
+ * not a policy.
+ *
+ * So the copy is now allow-listed and the list is empty. A bucket earns a
+ * place here only by being seed material the product genuinely needs and that
+ * belongs to nobody — never by being small, and never by being convenient.
+ * Adding a name here is a disclosure decision, so it is made once, in the
+ * open, and asserted by a test.
+ */
+export const SEED_ASSET_BUCKETS: readonly string[] = [];
 
 /**
  * Create one bucket on the clone, through the PROJECT's Storage API.
@@ -757,6 +791,19 @@ async function replicateBucketObjects(
 export async function replicateStorageBuckets(
   primeRef: string,
   targetRef: string,
+  /**
+   * Stop between buckets once this passes, marking the rest `deferred`.
+   *
+   * The config half is 32 Management-API round trips and the object half is
+   * unbounded work, and this loop had no deadline check of any kind — not in
+   * front of it, not inside it. It was invisible while every bucket 404'd
+   * instantly; the moment creation worked, both clones sat on
+   * "Replicating storage buckets..." until the stall reclaim took them, which
+   * costs a hard attempt where a pause costs sixty seconds. That is the same
+   * class as the cron and realtime steps, found the same way: by making the
+   * step do real work for the first time.
+   */
+  deadlineAt?: number | null,
 ): Promise<BucketReplicationResult[]> {
   const primeBuckets = await listProjectStorageBuckets(primeRef);
   const results: BucketReplicationResult[] = [];
@@ -774,6 +821,16 @@ export async function replicateStorageBuckets(
 
   for (const bucket of primeBuckets) {
     let configResult: BucketReplicationResult;
+    // Between buckets, never mid-bucket: a half-copied bucket is worse than an
+    // uncreated one, and the next pass re-enters here having kept what landed.
+    if (pastDeadline(deadlineAt)) {
+      results.push({
+        id: bucket.id,
+        status: "deferred",
+        error: "invocation budget spent — carried to the next pass",
+      });
+      continue;
+    }
     // Creation needs the target's service-role key, the same credential the
     // object copy below uses. Without it there is no way to reach the
     // project's Storage API at all, so say that rather than reporting a
@@ -797,6 +854,18 @@ export async function replicateStorageBuckets(
     }
     if (configResult.status === "failed" || !primeService || !targetService) {
       results.push(configResult);
+      continue;
+    }
+    // THE BUCKET TRAVELS; ITS CONTENTS DO NOT. See SEED_ASSET_BUCKETS for why
+    // the list is empty and what happened when there was no list at all.
+    // Recorded rather than silent: an operator reading this report should see
+    // that the contents were withheld on purpose, not that a copy failed.
+    if (!SEED_ASSET_BUCKETS.includes(bucket.id)) {
+      results.push({
+        ...configResult,
+        contents_withheld:
+          "not seed material — a clone receives the bucket, never the prime's objects",
+      });
       continue;
     }
     try {
@@ -3606,8 +3675,8 @@ export async function provisionCloneBackend(
   let storageBuckets: BucketReplicationResult[] = [];
   try {
     const primeRef = input.primeBackendRef;
-    await onStatusUpdate?.("migrating", "Replicating storage buckets + seed assets from prime...");
-    storageBuckets = await replicateStorageBuckets(primeRef, projectRef);
+    await onStatusUpdate?.("migrating", "Replicating storage bucket configuration from prime...");
+    storageBuckets = await replicateStorageBuckets(primeRef, projectRef, input.deadlineAt ?? null);
     const failed = storageBuckets.filter((b) => b.status === "failed");
     const totalObjects = storageBuckets.reduce((n, b) => n + (b.objects_copied ?? 0), 0);
     const totalBytes = storageBuckets.reduce((n, b) => n + (b.bytes_copied ?? 0), 0);
@@ -3630,6 +3699,30 @@ export async function provisionCloneBackend(
     await onStatusUpdate?.(
       "migrating",
       `Storage bucket replication skipped: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  // Deferred buckets pause the pass, OUTSIDE the catch above — thrown from
+  // inside it, a BudgetPause would be swallowed as a failed replication and
+  // the pipeline would run on and mark a clone ready holding some of the
+  // prime's 32 buckets. The same rule the cron and realtime steps follow, and
+  // for the same reason.
+  const deferredBuckets = storageBuckets.filter((b) => b.status === "deferred");
+  if (deferredBuckets.length > 0) {
+    const failedBuckets = storageBuckets.filter((b) => b.status === "failed");
+    await onStatusUpdate?.(
+      "migrating",
+      `${storageBuckets.length - deferredBuckets.length}/${storageBuckets.length} storage bucket(s) replicated this pass — the rest resume next tick`,
+    );
+    throw new BudgetPause(
+      `${deferredBuckets.length} of ${storageBuckets.length} storage bucket(s) carried to the next pass` +
+        (failedBuckets.length > 0
+          ? ` — ${failedBuckets.length} FAILED and will not replicate on a retry: ${failedBuckets
+              .slice(0, 3)
+              .map((b) => `${b.id} (${b.error ?? "no error recorded"})`)
+              .join("; ")}`
+          : ""),
+      "",
     );
   }
 
