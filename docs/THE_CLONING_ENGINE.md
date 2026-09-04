@@ -675,3 +675,20 @@ which is the definition of the gap.
 of the pipeline rather than only logged, and **both exits carry it** — the
 repair path returns early, and without it a repair would report a blank where
 a provision reports a reason.
+
+### The bucket step asks the clone what it already holds
+
+Measured 4 September 2026, immediately after the two oversized buckets were
+fixed: **both clones held all 32 of the prime's buckets while the engine still
+reported `28 of 32 carried to the next pass`** — and never got past this step
+to reach the secrets. It re-attempted every bucket on every pass and spent the
+whole budget answering "exists" 32 times.
+
+That is the rule the schema stages and the cron step already follow:
+**verifying a built thing must not cost what building it did.** The clone's
+buckets are listed once for the whole step, and a bucket is skipped only when
+its **configuration also matches** — existing is not the same as correct, and
+a bucket whose size limit or visibility drifted is exactly what this step
+exists to repair. A clone whose buckets cannot be listed is treated as holding
+**none**, which puts every bucket back on the create path: the fallback does
+the work rather than assuming it is done.

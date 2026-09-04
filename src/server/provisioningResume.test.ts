@@ -1317,8 +1317,12 @@ describe("a bucket is created through the project's Storage API, not the Managem
     // Without a service-role key the clone's Storage API is unreachable at
     // all. Reporting 32 buckets as individually failed for an unnamed reason
     // is how a credential gap reads as a storage fault.
+    // Bounded at the creation call rather than by a character count: the loop
+    // grows every time a bucket rule is added ahead of it.
     const loop = provisioning.slice(provisioning.indexOf("for (const bucket of primeBuckets)"));
-    expect(loop.slice(0, 900)).toMatch(/no service-role key for the clone/);
+    expect(loop.slice(0, loop.indexOf("createStorageBucket(targetRef"))).toMatch(
+      /no service-role key for the clone/,
+    );
   });
 });
 
@@ -1795,5 +1799,48 @@ describe("a result that is computed must be recorded somewhere a person looks �
     // Both exits — the repair path returns early and must carry it too, or a
     // repair reports a blank where a provision reports a reason.
     expect(src.split(/\n\s+storageConfig,\n/).length - 1).toBe(2);
+  });
+});
+
+describe("the bucket step asks the clone what it already holds", () => {
+  // Measured 4 Sep 2026: both clones held all 32 of the prime's buckets while
+  // the engine still reported "28 of 32 carried to the next pass" and never
+  // got past this step to reach the secrets. It re-attempted every bucket on
+  // every pass and spent the whole budget answering "exists" 32 times.
+  //
+  // The same rule the schema stages (F12, F20) and the cron step (F23) already
+  // follow: verifying a built thing must not cost what building it did.
+  const src = pipeline();
+  const fn = src.slice(src.indexOf("export async function replicateStorageBuckets"));
+  const body = fn.slice(0, fn.indexOf("\n/**"));
+
+  it("lists the clone's buckets once, not once per bucket", () => {
+    expect(body).toMatch(/listProjectStorageBuckets\(targetRef\)/);
+    expect(body.split("listProjectStorageBuckets(targetRef)").length - 1).toBe(1);
+  });
+
+  it("leaves a bucket alone only when its CONFIGURATION also matches", () => {
+    // Existing is not the same as correct: a bucket whose size limit or
+    // visibility drifted is exactly what this step exists to repair.
+    expect(body).toMatch(/const sameConfig = /);
+    expect(body).toMatch(/a\.public === b\.public/);
+    expect(body).toMatch(/a\.file_size_limit === b\.file_size_limit/);
+    expect(body).toMatch(/allowed_mime_types/);
+    expect(body).toMatch(/if \(already && sameConfig\(already, bucket\)\)/);
+  });
+
+  it("falls back to creating everything when the clone cannot be listed", () => {
+    // Treating an unreadable clone as holding everything would skip work that
+    // was never done — the same direction the schema prefetch fails in.
+    const guard = body.slice(body.indexOf("const onClone = new Map"));
+    expect(guard.slice(0, 700)).toMatch(/catch \{/);
+    expect(guard.slice(0, 700)).toMatch(/treated as holding none/);
+  });
+
+  it("skips before the deadline check, so a converged clone costs nothing", () => {
+    const skipAt = body.indexOf("if (already && sameConfig(already, bucket))");
+    const deferAt = body.indexOf("if (pastDeadline(deadlineAt))");
+    expect(skipAt).toBeGreaterThan(-1);
+    expect(skipAt).toBeLessThan(deferAt);
   });
 });
