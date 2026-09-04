@@ -1217,7 +1217,9 @@ describe("a result that is computed must be recorded somewhere a person looks", 
     // A replication result is not a parity report. Inventing one from the
     // half we happen to hold would make `parity_checked_at` a lie.
     const at = fns.indexOf("parity_report: parity");
-    const block = fns.slice(at, at + 600);
+    // Bounded at the next field rather than by a character count: the block
+    // grows every time a replication result joins the report.
+    const block = fns.slice(at, fns.indexOf("parity_checked_at:", at));
     expect(block).toMatch(/:\s*null,/);
     expect(fns).toMatch(/parity_checked_at: parity \? new Date\(\)\.toISOString\(\) : null/);
   });
@@ -1752,7 +1754,7 @@ describe("a bucket may not ask for more room than the project allows", () => {
   });
 
   it("runs before any bucket is created", () => {
-    const configAt = src.indexOf("const storageConfig = await replicateStorageConfig(");
+    const configAt = src.indexOf("storageConfig = await replicateStorageConfig(");
     const bucketsAt = src.indexOf("storageBuckets = await replicateStorageBuckets(");
     expect(configAt).toBeGreaterThan(-1);
     expect(configAt).toBeLessThan(bucketsAt);
@@ -1761,9 +1763,37 @@ describe("a bucket may not ask for more room than the project allows", () => {
   it("is non-fatal, and says what a failure will cost", () => {
     // The buckets that fit are still worth creating; the ones that do not will
     // say exactly why.
-    const caller = src.slice(src.indexOf("const storageConfig = await replicateStorageConfig("));
+    const caller = src.slice(src.indexOf("storageConfig = await replicateStorageConfig("));
     expect(caller.slice(0, 600)).toMatch(/Project upload limit not replicated/);
     expect(caller.slice(0, 600)).toMatch(/more room than this project allows/);
     expect(caller.slice(0, 600)).not.toMatch(/throw /);
+  });
+});
+
+describe("a result that is computed must be recorded somewhere a person looks — buckets too", () => {
+  // F25 put the cron and realtime per-item results into the parity report,
+  // because "the words were the only copy" and the next step overwrote them.
+  // The bucket results were left out of that fix and had exactly the same
+  // fault: when two of the prime's 32 buckets were refused on every clone,
+  // the only record of WHY was a status line that the pg_cron step replaced a
+  // few seconds later. Diagnosing it required changing the engine to say what
+  // it already knew — which is the definition of the gap.
+  const runner = () => read("src/lib/backend-provisioning.functions.ts");
+
+  it("carries the bucket results and the project limit into the parity report", () => {
+    const src = runner();
+    expect(src).toMatch(/storage_buckets: result\.storageBuckets/);
+    expect(src).toMatch(/storage_config: result\.storageConfig/);
+    // Beside the two that were already there, not instead of them.
+    expect(src).toMatch(/cron_jobs: result\.cronJobs/);
+    expect(src).toMatch(/realtime_publication: result\.realtimePublication/);
+  });
+
+  it("the pipeline returns the project limit rather than only logging it", () => {
+    const src = pipeline();
+    expect(src).toMatch(/storageConfig: StorageConfigResult;/);
+    // Both exits — the repair path returns early and must carry it too, or a
+    // repair reports a blank where a provision reports a reason.
+    expect(src.split(/\n\s+storageConfig,\n/).length - 1).toBe(2);
   });
 });

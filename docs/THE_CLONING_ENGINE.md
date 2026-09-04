@@ -656,3 +656,22 @@ clone's before any bucket is created. Two rules:
 This is the third defect in one step found by making the step work
 (F26 → F34, F35, and this). The step had returned 404 for its whole existence,
 so nothing downstream of that 404 had ever executed.
+
+### The bucket results were computed and dropped, like the two before them
+
+F25's rule was that **a result that is computed must be recorded somewhere a
+person looks** — it moved the per-item cron and realtime results into the
+parity report, because "the words were the only copy" and the next step
+overwrote them.
+
+The bucket results were left out of that fix and had exactly the same fault.
+When two of the prime's 32 buckets were refused on every clone, the only
+record of _why_ was a status line that the pg_cron step replaced seconds
+later. Diagnosing it required changing the engine to say what it already knew,
+which is the definition of the gap.
+
+`storage_buckets` and `storage_config` now travel in the parity report beside
+`cron_jobs` and `realtime_publication`. The project-level limit is carried out
+of the pipeline rather than only logged, and **both exits carry it** — the
+repair path returns early, and without it a repair would report a blank where
+a provision reports a reason.

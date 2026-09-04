@@ -3423,6 +3423,8 @@ export type ProvisionBackendResult = {
   cronJobs: CronJobReplicationResult[];
   requiredExtensions: RequiredExtensionResult[];
   realtimePublication: RealtimeReplicationResult;
+  /** The project-level upload limit, which decides which buckets can exist. */
+  storageConfig: StorageConfigResult;
 };
 
 /**
@@ -3742,12 +3744,16 @@ export async function provisionCloneBackend(
   // surface per-bucket errors so operators can retry from the clone page.
   pauseIfDue("replicating storage buckets");
   let storageBuckets: BucketReplicationResult[] = [];
+  let storageConfig: StorageConfigResult = {
+    status: "skipped",
+    reason: "not attempted on this pass",
+  };
   try {
     const primeRef = input.primeBackendRef;
     // The project's upload limit FIRST: a bucket may not ask for more room
     // than the project allows, and the refusal reads as a bucket fault rather
     // than a missing project setting (see replicateStorageConfig).
-    const storageConfig = await replicateStorageConfig(primeRef, projectRef);
+    storageConfig = await replicateStorageConfig(primeRef, projectRef);
     if (storageConfig.status === "failed") {
       await onStatusUpdate?.(
         "migrating",
@@ -4047,6 +4053,7 @@ export async function provisionCloneBackend(
       cronJobs,
       requiredExtensions,
       realtimePublication,
+      storageConfig,
     };
   }
   pauseIfDue("seeding the admin user");
@@ -4095,6 +4102,7 @@ export async function provisionCloneBackend(
     cronJobs,
     requiredExtensions,
     realtimePublication,
+    storageConfig,
   };
 }
 
