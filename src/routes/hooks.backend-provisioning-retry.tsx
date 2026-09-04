@@ -81,16 +81,21 @@ export const Route = createFileRoute("/hooks/backend-provisioning-retry")({
           // verbatim, so a retry is attributed to the ORIGINAL enqueuer — the
           // honest reading of "do that enqueue again". The hook's first live
           // call proved a literal "system" is refused by the column itself.
-          if (!row.enqueued_by) {
-            return json(
-              {
-                success: false,
-                error:
-                  "backend row records no original enqueuer to attribute the retry to — re-provision from the clone page instead",
-              },
-              409,
-            );
-          }
+          //
+          // A row carrying NO enqueuer used to be REFUSED here, with the
+          // operator pointed at the clone page — whose button routes back to
+          // this same hook. So a failed backend with no recorded enqueuer had
+          // no lever anywhere in the product. Measured 4 Sep 2026: the NPC
+          // Client Dashboard clone sat `failed` holding a complete schema —
+          // 649 tables, 624 functions, 2,166 indexes — unrecoverable for want
+          // of an audit field.
+          //
+          // The authority to retry is the CRON_SECRET this handler already
+          // verified, not this column. Attribution is a record, not a
+          // permission: an unknown enqueuer is carried as null (which the
+          // column accepts) and SAID in the audit metadata, rather than
+          // blocking the repair.
+          const attributedTo = row.enqueued_by ?? null;
 
           const { data: clone, error: cloneErr } = await admin
             .from("clones")
@@ -100,7 +105,7 @@ export const Route = createFileRoute("/hooks/backend-provisioning-retry")({
           if (cloneErr) throw new Error(`could not read clones: ${cloneErr.message}`);
           if (!clone) return json({ success: false, error: "clone not found" }, 404);
 
-          const enq = await enqueueCloneBackendProvisioning(admin, row.enqueued_by, {
+          const enq = await enqueueCloneBackendProvisioning(admin, attributedTo, {
             cloneId,
             cloneName: clone.name,
             region: row.region ?? undefined,
@@ -114,7 +119,12 @@ export const Route = createFileRoute("/hooks/backend-provisioning-retry")({
             action: "clone_backend.retry_enqueued",
             entityType: "clone",
             entityId: cloneId,
-            metadata: { via: "hooks/backend-provisioning-retry" },
+            metadata: {
+              via: "hooks/backend-provisioning-retry",
+              // Said rather than silently absent: a reader can tell "nobody
+              // recorded who first asked" from "this person asked again".
+              attributed_to: attributedTo ?? "unknown — the backend row records no original enqueuer",
+            },
           });
 
           return json({ success: true, queued: true, cloneId });

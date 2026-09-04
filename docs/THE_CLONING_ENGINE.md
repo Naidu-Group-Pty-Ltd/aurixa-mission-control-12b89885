@@ -933,3 +933,67 @@ as in the code: `clone_backend_secrets.status` is CHECK-constrained, so a
 status the column will not accept is refused by Postgres while looking, from
 the function, exactly like a write nobody attempted. That is how this table's
 ledger came to be empty once already.
+
+## A failed backend with no recorded enqueuer had no lever at all
+
+The retry hook attributes a retry to the row's ORIGINAL enqueuer — the honest
+reading of "do that enqueue again", and the fix for a first live call that tried
+to write a literal `"system"` into a uuid column. It also **refused** a row
+carrying no enqueuer, pointing the operator at the clone page, whose button
+routes back to this same hook.
+
+So a failed backend with a null `enqueued_by` had no lever anywhere in the
+product. Measured 4 Sep 2026: the NPC Client Dashboard clone sat `failed`
+holding a **complete schema** — 649 tables, 624 functions, 2,166 indexes, 32
+buckets — unrecoverable for want of an audit field.
+
+**The authority to retry is the CRON_SECRET the handler already verified, not
+the column.** Attribution is a record, not a permission, and refusing to repair
+a tenant's backend because the audit trail is incomplete gets the trade
+backwards. An unknown enqueuer is carried as `null` — which the column accepts —
+and SAID in the audit metadata, so a reader can tell "nobody recorded who first
+asked" from "this person asked again".
+
+Two things stay exactly as they were. Only a `failed` row may be retried:
+widening attribution must not widen which rows qualify. And no literal is ever
+written into the uuid column, which is the defect that produced this rule in the
+first place.
+
+## The surplus is dropped for indexes, and for nothing else
+
+Introspection creates and never drops, so a clone keeps every object the prime
+has since removed. That has been reported and not acted on — correctly, because
+nothing in a schema distinguishes a prime leftover from something a tenant added,
+and removing the wrong one destroys data.
+
+**An index is the one class where that risk does not exist.** It holds no data of
+its own: dropping one can only relax a constraint or remove an access path, and
+both are recoverable by creating it again. A table may hold tenant rows, dropping
+a policy WIDENS access, and a constraint may be the only thing guarding a column
+— so those stay reported and untouched, and a test asserts this module issues no
+DROP for any of them.
+
+It is not cosmetic. Measured on **both** clones:
+
+```
+builder_stock_items_org_development_unit_key
+  CREATE UNIQUE INDEX … (organisation_id, development, unit) WHERE …
+```
+
+The prime replaced it with one that also keys on the house design — precisely so
+two units in one development with different designs are legal — and then dropped
+the old one. The clones kept both, so **every clone refuses builder stock rows
+the prime accepts.** A surplus object that changes behaviour, found by looking
+rather than assumed absent.
+
+Three guards. A **constraint-backed** index is never dropped: it belongs to a
+constraint, and removing it is that other act. The sets are keyed by **schema and
+name**, because an index name is unique only within its schema and a collision
+across two could otherwise hide a shortfall or target the wrong object. And a
+clone whose index list cannot be read yields an empty held set and therefore **no
+drops at all** — the same failure direction as the create path, where unreadable
+means "do the work", never "assume it is done".
+
+Every drop is recorded on the stage the operator reads. Three per-item steps have
+already computed a result and thrown it away; a removal is the one that must
+least be silent.

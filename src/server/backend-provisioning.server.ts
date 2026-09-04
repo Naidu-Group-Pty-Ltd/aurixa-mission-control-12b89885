@@ -4275,7 +4275,25 @@ export async function enqueueCloneBackendProvisioning(
   supabase: {
     from: (table: string) => any;
   },
-  userId: string,
+  /**
+   * Who asked. NULL is a legitimate value and means "not known", never
+   * "nobody may".
+   *
+   * `enqueued_by` is a nullable uuid, and the retry hook used to REFUSE a
+   * failed backend whose row carried none — pointing the operator at the
+   * clone page, whose button routes to the same hook. Measured 4 Sep 2026:
+   * the NPC Client Dashboard clone sat `failed` with a complete schema and
+   * `enqueued_by` null, and had no lever anywhere in the product.
+   *
+   * Authority to enqueue comes from the caller's own authentication — an
+   * operator session, or the hook's CRON_SECRET — never from this column.
+   * Attribution is a RECORD, not a permission, and refusing to repair a
+   * tenant's backend because the audit trail is incomplete gets the trade
+   * backwards. What must never happen is the original defect: writing a
+   * literal like "system" into a uuid column, which the column itself
+   * refuses.
+   */
+  userId: string | null,
   input: {
     cloneId: string;
     cloneName: string;

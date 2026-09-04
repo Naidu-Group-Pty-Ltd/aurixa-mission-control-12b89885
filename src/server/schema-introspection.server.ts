@@ -1310,6 +1310,8 @@ export async function replicateSchemaByIntrospection(
   // views exist, since an index can belong to one. A pass that skipped this
   // stage has none, and 8b is guarded on that.
   let idxStmts: string[] | null = null;
+  /** Surplus index names this pass dropped — reported, never silent. */
+  let droppedIdx: string[] = [];
   if (enterStage("indexes")) {
     await say("Replicating indexes...");
     stages.push(
@@ -1328,24 +1330,99 @@ export async function replicateSchemaByIntrospection(
           // for ever. A clone whose index list cannot be read is treated as
           // holding NONE, so every index goes back on the create path rather
           // than being assumed present.
+          // Keyed by SCHEMA and name: an index name is unique only within its
+          // schema, and this set decides both what to skip and what to drop.
           const heldIdx = new Set(
             (await query(cloneRef, Q.indexes).catch(() => [] as Array<Record<string, unknown>>)).map(
-              (r) => str(r.indexname),
+              (r) => `${str(r.schema)}.${str(r.indexname)}`,
             ),
           );
           idxStmts = filterCreatableIndexes(
             idxRows
-              .map((r) => ({ indexname: str(r.indexname), indexdef: str(r.indexdef) }))
-              .filter((i) => !heldIdx.has(i.indexname)),
+              .map((r) => ({
+                schema: str(r.schema),
+                indexname: str(r.indexname),
+                indexdef: str(r.indexdef),
+              }))
+              .filter((i) => !heldIdx.has(`${i.schema}.${i.indexname}`)),
             conIdxNames,
           ).map((def) =>
             def.replace(/^create (unique )?index /i, (m) => `${m.trimEnd()} if not exists `),
           );
-          return idxStmts;
+
+          /*
+            AND DROP THE SURPLUS — indexes, and nothing else.
+
+            Introspection creates and never drops, so a clone keeps every
+            object the prime has since removed. That has been reported and not
+            acted on, correctly, because nothing in a schema distinguishes a
+            prime leftover from something a tenant added, and removing the
+            wrong one destroys data.
+
+            An INDEX is the one class where that risk does not exist. It holds
+            no data of its own: dropping one can only relax a constraint or
+            remove an access path, and both are recoverable by creating it
+            again. A table may hold tenant rows, a policy's removal WIDENS
+            access, and a constraint may be the only thing guarding a column —
+            so those stay reported and untouched.
+
+            It is not cosmetic. Measured 4 Sep 2026, on BOTH clones:
+            `builder_stock_items_org_development_unit_key` is a UNIQUE index on
+            (organisation, development, unit). The prime replaced it with one
+            that also keys on the house design, precisely so two units in one
+            development with different designs are legal — and then dropped the
+            old one. The clones kept both, so every clone REFUSES builder stock
+            rows the prime accepts. A surplus object that changes behaviour,
+            found by looking rather than assumed absent.
+
+            Two guards. A constraint-backed index is never dropped: it belongs
+            to a constraint, and removing it is that other act rather than this
+            one. And a clone whose index list could not be read holds an empty
+            `heldIdx`, which yields no drops at all — the same failure direction
+            as the create path, where unreadable means "do the work", never
+            "assume it is done".
+          */
+          const primeIdxKeys = new Set(idxRows.map((r) => `${str(r.schema)}.${str(r.indexname)}`));
+          const cloneConIdxNames = new Set(
+            (
+              await query(cloneRef, Q.constraintIndexNames).catch(
+                () => [] as Array<Record<string, unknown>>,
+              )
+            ).map((r) => str(r.indexname)),
+          );
+          const surplusIdx = [...heldIdx]
+            .filter((key) => {
+              const dot = key.indexOf(".");
+              if (dot <= 0 || dot === key.length - 1) return false;
+              const name = key.slice(dot + 1);
+              return !primeIdxKeys.has(key) && !cloneConIdxNames.has(name);
+            })
+            .sort();
+          droppedIdx = surplusIdx;
+          return [
+            ...idxStmts,
+            ...surplusIdx.map((key) => {
+              const dot = key.indexOf(".");
+              return `drop index if exists ${quoteIdent(key.slice(0, dot))}.${quoteIdent(key.slice(dot + 1))}`;
+            }),
+          ];
         },
         60,
       ),
     );
+    // A DROP that is not recorded is a change nobody can review. Three
+    // per-item steps have already computed a result and thrown it away
+    // (the cron jobs, the realtime tables, the storage buckets); a removal
+    // is the one that must least be silent, so it rides on the stage the
+    // operator reads.
+    if (droppedIdx.length > 0) {
+      const idxStage = stages[stages.length - 1];
+      idxStage.notes = [
+        ...(idxStage.notes ?? []),
+        `dropped ${droppedIdx.length} index(es) the prime no longer has: ${droppedIdx.slice(0, 10).join(", ")}` +
+          (droppedIdx.length > 10 ? ` (+${droppedIdx.length - 10} more)` : ""),
+      ];
+    }
   }
 
   // 7. views — a view on a view fails when the callee is not in place yet, and
