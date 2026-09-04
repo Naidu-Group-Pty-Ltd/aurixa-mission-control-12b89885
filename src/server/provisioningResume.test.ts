@@ -9,7 +9,7 @@ import {
   pastDeadline,
 } from "./provisioningBudget";
 import { toReplaceableTriggerDdl } from "./schema-introspection.server";
-import { SEED_ASSET_BUCKETS } from "./backend-provisioning.server";
+import { SEED_ASSET_BUCKETS, planCloneSecrets } from "./backend-provisioning.server";
 import { declaredFunctionSlugsFromPaths } from "./prime-backend.server";
 import { classifyEdgeFunctionShortfall } from "./handoff-parity.server";
 import { scanIsCacheable, shouldSkipFunctionSource } from "./primeScanCache.pure";
@@ -2094,5 +2094,81 @@ describe("a clone's functions must never be left naming the prime", () => {
     // earlier engine naming the prime, with nothing to correct it.
     const pipelineSrc = readFileSync("src/server/backend-provisioning.server.ts", "utf8");
     expect(pipelineSrc).toContain("repointPrimeUrlsInFunctions");
+  });
+});
+
+describe("an authorised forward that did not happen is not an unauthorised name", () => {
+  const gen = () => "generated-value";
+
+  it("reports a marked-inheritable name with no value as its own state", () => {
+    const { toWrite, results } = planCloneSecrets(
+      ["ANTHROPIC_API_KEY"],
+      {},
+      gen,
+      null,
+      undefined,
+      undefined,
+      new Set(["ANTHROPIC_API_KEY"]),
+    );
+    expect(toWrite).toEqual([]);
+    expect(results.get("ANTHROPIC_API_KEY")?.status).toBe("authorised_no_value");
+    // And it names the remedy, which is on Mission Control rather than the clone.
+    expect(results.get("ANTHROPIC_API_KEY")?.error).toMatch(/Mission Control/);
+  });
+
+  it("still reads `missing` when nobody authorised it", () => {
+    const { results } = planCloneSecrets(["SOME_VENDOR_KEY"], {}, gen, null, undefined, undefined, new Set());
+    expect(results.get("SOME_VENDOR_KEY")?.status).toBe("missing");
+  });
+
+  it("with no authorisation set supplied, behaves exactly as before", () => {
+    const { results } = planCloneSecrets(["SOME_VENDOR_KEY"], {}, gen);
+    expect(results.get("SOME_VENDOR_KEY")?.status).toBe("missing");
+  });
+
+  it("a value that DID arrive is still inherited, authorised or not", () => {
+    const { toWrite, results } = planCloneSecrets(
+      ["ANTHROPIC_API_KEY"],
+      { ANTHROPIC_API_KEY: "sk-real" },
+      gen,
+      null,
+      undefined,
+      undefined,
+      new Set(["ANTHROPIC_API_KEY"]),
+    );
+    expect(toWrite).toEqual([{ name: "ANTHROPIC_API_KEY", value: "sk-real" }]);
+    expect(results.get("ANTHROPIC_API_KEY")?.status).toBe("inherited");
+  });
+
+  it("the column accepts the status, or every write is refused while looking unattempted", () => {
+    const sql = readFileSync(
+      "supabase/migrations/20260904073000_clone_backend_secrets_authorised_no_value.sql",
+      "utf8",
+    );
+    expect(sql).toContain("'authorised_no_value'::text");
+    expect(sql).toContain("clone_backend_secrets_status_check");
+  });
+});
+
+describe("a count cannot see WHICH index is missing", () => {
+  const introspectionSrc = () => readFileSync("src/server/schema-introspection.server.ts", "utf8");
+
+  it("digests indexes by name, so a surplus cannot mask a shortfall", () => {
+    const src = introspectionSrc();
+    const at = src.indexOf("const DIGESTS");
+    const block = src.slice(at, src.indexOf("export function reconcile", at));
+    expect(block).toMatch(/indexes:\s*`select md5/);
+    expect(block).toContain("i.indexname");
+  });
+
+  it("carries only the indexes the clone lacks, so entering the stage stays cheap", () => {
+    const src = introspectionSrc();
+    const at = src.indexOf("const heldIdx = new Set(");
+    expect(at).toBeGreaterThan(-1);
+    const block = src.slice(at, at + 700);
+    expect(block).toContain("query(cloneRef, Q.indexes)");
+    expect(block).toMatch(/!heldIdx\.has\(i\.indexname\)/);
+    // A clone whose list cannot be read holds NONE, so everything is created.
+    expect(block).toMatch(/catch\(\(\) => \[\]/);
   });
 });

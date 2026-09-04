@@ -534,7 +534,7 @@ export function canMintKey(row: EmailIdentityRow | null): { ok: boolean; reason?
  */
 export function ledgerStatusForShell(
   status: SecretShellStatus,
-): "missing" | "set" | "failed" | "inherited" | null {
+): "missing" | "set" | "failed" | "inherited" | "authorised_no_value" | null {
   switch (status) {
     case "missing":
     case "set":
@@ -552,6 +552,13 @@ export function ledgerStatusForShell(
     // has no CAPTCHA at all or refuses everyone.
     case "tenant_scoped_pending":
       return "missing";
+    // Its own reading, and its own remedy: the forward was authorised and
+    // Mission Control holds no value, so the fix is on Mission Control rather
+    // than on the clone. Reported as `missing` this was indistinguishable
+    // from a name nobody authorised — see the migration that widened the
+    // column to accept it.
+    case "authorised_no_value":
+      return "authorised_no_value";
   }
 }
 

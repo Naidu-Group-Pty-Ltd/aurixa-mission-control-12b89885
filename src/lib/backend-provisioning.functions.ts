@@ -381,6 +381,9 @@ async function runBackendProvisioning(
         snapshot,
         existingProjectRef: existingRow?.supabase_project_ref ?? null,
         inheritedSecrets,
+        // Every name an operator marked inheritable — including the ones no
+        // value was found for. Without this the two are the same reading.
+        authorisedForwardNames: (forwardAll ?? []).filter((r) => r.inherit).map((r) => r.name),
         dedicatedSecretNames,
         cloneOrigins,
         schemaStrategy: input.schemaStrategy ?? "introspection",

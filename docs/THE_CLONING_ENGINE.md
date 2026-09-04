@@ -881,3 +881,55 @@ simply has nothing left to undo.
 The general rule: **two steps that correct each other are not two controls,
 they are one oscillation.** The clone's state between them is real, reachable
 and, here, wrong.
+
+## A count cannot see WHICH index is missing
+
+The trigger digest closed this for triggers and left it open for indexes, and
+the first completed repair found the gap:
+
+```
+missing_indexes:1 — public.builder_stock_items_org_development_unit_design_key
+```
+
+That is a partial, expression-based UNIQUE index — the key that stops duplicate
+builder stock rows. Both sides report **2,166 indexes**, so `cloneCount >=
+primeCount` reconciles and the stage is skipped; the clone legitimately holds a
+surplus (introspection creates and never drops), which guarantees the count can
+never fall short however much is missing.
+
+It was **never attempted**: `aurixa.ddl_failures` holds no record of it, because
+the stage was skipped rather than failing. Parity could see it; the builder
+could not act on it.
+
+Indexes are digested by **name**, not by definition. Only equality is
+conclusive, exactly as for triggers — and here an unequal digest is the
+*ordinary* state, because the surplus guarantees it. So it sends the stage on
+to compare name lists and **apply only what the clone lacks**. Entering costs
+one query and, when nothing is missing, zero statements.
+
+## An authorised forward that did not happen is not an unauthorised name
+
+The same parity report read `missing_secrets:72`. Most of that is correct and
+expected: the engine never writes a placeholder, so a vendor secret nobody
+marked inheritable stays unset for an operator to supply.
+
+**Ten of the seventy-two were not that.** They were marked inheritable in
+`prime_secret_forwards` and silently did not travel: `ANTHROPIC_API_KEY`,
+`OPENROUTER_API_KEY`, `PERPLEXITY_API_KEY`, `GOOGLE_MAPS_API_KEY`,
+`DOMAIN_API_KEY`, `GAMMA_API_KEY`, `FIRECRAWL_API_KEY`, `API2PDF_API_KEY`,
+`PDF_PARSE_SERVICE_TOKEN`, `WEASYPRINT_SERVICE_TOKEN` — exactly the vendor keys
+a tenant is supposed to boot with under the prime's accounts.
+
+The cause is not a bug in the forward: the model reads the prime's credentials
+out of **Mission Control's own environment**, so a name MC does not hold cannot
+travel however it is marked. The defect is that both cases reported as
+`missing`, so nothing anywhere distinguished *"nobody said this may travel"*
+from *"somebody said it may, and it did not"* — and the remedies are different.
+One is filled in on the clone; the other is fixed on Mission Control, or the
+forward is withdrawn.
+
+`authorised_no_value` is its own status, and it went on the **column** as well
+as in the code: `clone_backend_secrets.status` is CHECK-constrained, so a
+status the column will not accept is refused by Postgres while looking, from
+the function, exactly like a write nobody attempted. That is how this table's
+ledger came to be empty once already.

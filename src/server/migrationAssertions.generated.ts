@@ -176,4 +176,14 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260904060000",
     assertions: [{ kind: "table", table: "prime_snapshot_scans" }],
   },
+  {
+    migration: "20260904073000_clone_backend_secrets_authorised_no_value.sql",
+    version: "20260904073000",
+    assertions: [
+      {
+        kind: "none",
+        reason: "widens a CHECK constraint. The effect is real and observable — a write of",
+      },
+    ],
+  },
 ];
