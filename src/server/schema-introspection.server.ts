@@ -704,6 +704,27 @@ async function countAllOn(ref: string): Promise<Partial<Record<StageName, StageP
  * asks both sides for their definition LISTS and applies containment.
  */
 const DIGESTS: Partial<Record<StageName, string>> = {
+  /*
+    Indexes are digested by NAME, not by definition.
+
+    A count cannot see WHICH indexes, and a clone legitimately holds a surplus
+    (introspection creates and never drops), so `cloneCount >= primeCount`
+    reconciles while the clone is genuinely short. Measured 4 Sep 2026 on the
+    NPC Test clone: 2,166 indexes on each side, reconciled on every pass, and
+    `builder_stock_items_org_development_unit_design_key` — the partial,
+    expression-based UNIQUE index that stops duplicate builder stock rows —
+    absent. Never attempted: `aurixa.ddl_failures` holds no record of it,
+    because the stage was skipped rather than failing. Parity could see it and
+    the builder could not act on it, which is the shortfall the trigger digest
+    already closed for its own class.
+
+    Only equality is conclusive, exactly as for triggers: an unequal digest is
+    the ORDINARY state here (the surplus guarantees it), so it sends the stage
+    on to compare name LISTS and apply only what the clone lacks. Entering
+    costs one query and, when nothing is missing, zero statements.
+  */
+  indexes: `select md5(coalesce(string_agg(i.indexname, E'\n' order by i.indexname), ''))
+              from pg_indexes i where i.schemaname in (${SCHEMA_LIST})`,
   triggers: `select md5(coalesce(string_agg(d, E'\n' order by d), '')) from (
                select pg_get_triggerdef(t.oid) as d
                  from pg_trigger t
@@ -1301,8 +1322,21 @@ export async function replicateSchemaByIntrospection(
           );
           // Captured for step 8b. A pass that SKIPPED this stage leaves it
           // null, and 8b is guarded on that.
+          // ASK THE CLONE WHICH IT HOLDS, and carry only the rest — the
+          // same rule the triggers stage follows, and what makes entering
+          // this stage cheap now that a surplus keeps its digest unequal
+          // for ever. A clone whose index list cannot be read is treated as
+          // holding NONE, so every index goes back on the create path rather
+          // than being assumed present.
+          const heldIdx = new Set(
+            (await query(cloneRef, Q.indexes).catch(() => [] as Array<Record<string, unknown>>)).map(
+              (r) => str(r.indexname),
+            ),
+          );
           idxStmts = filterCreatableIndexes(
-            idxRows.map((r) => ({ indexname: str(r.indexname), indexdef: str(r.indexdef) })),
+            idxRows
+              .map((r) => ({ indexname: str(r.indexname), indexdef: str(r.indexdef) }))
+              .filter((i) => !heldIdx.has(i.indexname)),
             conIdxNames,
           ).map((def) =>
             def.replace(/^create (unique )?index /i, (m) => `${m.trimEnd()} if not exists `),

@@ -2613,7 +2613,30 @@ export type SecretShellStatus =
    * copied from the prime (see TENANT_SCOPED_SECRETS). Left unset here; the
    * clone's own identity flow writes it.
    */
-  | "tenant_scoped_pending";
+  | "tenant_scoped_pending"
+  /**
+   * AUTHORISED to forward, and nothing to forward.
+   *
+   * An operator marked the name inheritable in `prime_secret_forwards`, and
+   * Mission Control holds no value for it — the forwarded-key model reads the
+   * prime's credentials out of MC's OWN environment, so a name it does not
+   * hold cannot travel however it is marked.
+   *
+   * This used to report as `missing`, which is also what a name nobody
+   * authorised reports as. Measured 4 Sep 2026 on the first clone this engine
+   * drove to `ready` with a repair: 72 secrets read `missing`, and TEN of them
+   * were authorised forwards that silently did not happen —
+   * ANTHROPIC_API_KEY, OPENROUTER_API_KEY, PERPLEXITY_API_KEY,
+   * GOOGLE_MAPS_API_KEY, DOMAIN_API_KEY, GAMMA_API_KEY, FIRECRAWL_API_KEY,
+   * API2PDF_API_KEY, PDF_PARSE_SERVICE_TOKEN and WEASYPRINT_SERVICE_TOKEN.
+   * Those are the vendor keys a tenant is supposed to boot with under the
+   * prime's accounts, and no surface distinguished "nobody said this may
+   * travel" from "somebody said it may and it did not".
+   *
+   * The remedy is different too, which is the point: set the value on Mission
+   * Control, or withdraw the forward. Neither is "fill this in on the clone".
+   */
+  | "authorised_no_value";
 
 export type SecretShellResult = {
   name: string;
@@ -2670,6 +2693,13 @@ export function planCloneSecrets(
    * project's own `jwt_secret`, captured from the create response.
    */
   selfValues?: Record<string, string>,
+  /**
+   * Names an operator marked inheritable. Supplied so a vendor secret that was
+   * AUTHORISED to forward and had no value to forward can be told apart from
+   * one nobody authorised — see `authorised_no_value`. Omitted, every valueless
+   * vendor name reads `missing` exactly as it did.
+   */
+  authorisedForwards?: ReadonlySet<string>,
 ): { toWrite: { name: string; value: string }[]; results: Map<string, SecretShellResult> } {
   const toWrite: { name: string; value: string }[] = [];
   const results = new Map<string, SecretShellResult>();
@@ -2732,6 +2762,18 @@ export function planCloneSecrets(
     if (typeof val === "string" && val.length > 0) {
       toWrite.push({ name, value: val });
       results.set(name, { name, status: "inherited", success: true });
+    } else if (authorisedForwards?.has(name)) {
+      // Marked inheritable and nothing arrived. Reporting this as `missing`
+      // hides an authorised forward that did not happen behind the ordinary
+      // state of a name nobody authorised.
+      results.set(name, {
+        name,
+        status: "authorised_no_value",
+        success: true,
+        error:
+          `${name} is marked inheritable, and Mission Control holds no value for it — ` +
+          `so nothing was forwarded. Set it on Mission Control, or withdraw the forward.`,
+      });
     } else {
       results.set(name, { name, status: "missing", success: true });
     }
@@ -2747,6 +2789,7 @@ export async function syncCloneSecrets(
   origins?: CloneOrigins | null,
   dedicatedNames?: ReadonlySet<string>,
   selfValues?: Record<string, string>,
+  authorisedForwards?: ReadonlySet<string>,
 ): Promise<SecretShellResult[]> {
   if (names.length === 0) return [];
 
@@ -2757,6 +2800,7 @@ export async function syncCloneSecrets(
     origins ?? null,
     dedicatedNames,
     selfValues,
+    authorisedForwards,
   );
 
   if (toWrite.length > 0) {
@@ -3354,6 +3398,12 @@ export type ProvisionBackendInput = {
    * on the clone and surfaced to operators via the clone secrets UI.
    */
   inheritedSecrets?: Record<string, string>;
+  /**
+   * Every name an operator marked inheritable, whether or not a value was
+   * found for it. `inheritedSecrets` carries the ones that HAVE a value; this
+   * carries the authorisation, so the gap between the two can be reported.
+   */
+  authorisedForwardNames?: readonly string[];
   /**
    * Secret names this clone holds a DEDICATED credential for (today: a
    * per-clone Resend key from `clone_email_identities`). Never inherited from
@@ -4086,6 +4136,9 @@ export async function provisionCloneBackend(
     // inherited, which would otherwise leave every clone unable to sign its
     // own access tokens — so provisioning supplies the project's own.
     ownJwtSecret ? { JWT_SECRET: ownJwtSecret } : undefined,
+    // What an operator SAID may travel, so a forward that did not happen is
+    // reported as that rather than as an unauthorised name.
+    input.authorisedForwardNames ? new Set(input.authorisedForwardNames) : undefined,
   );
 
   // Step 7: Seed admin — UNLESS this is a repair.
