@@ -1144,7 +1144,33 @@ export async function replicateSchemaByIntrospection(
   if (enterStage("functions")) {
     await say("Replicating functions...");
     const fnRows = await query(primeRef, Q.functions);
-    const allFnStmts = fnRows.map((r) => str(r.def)).filter(Boolean);
+    // RE-POINT BEFORE COMPARING, AND BEFORE APPLYING.
+    //
+    // Exactly four of the prime's functions embed its project ref, and the
+    // pipeline rewrites them to the clone's own ref at step 5c — a clone whose
+    // functions call the prime's project is a tenant reaching into somebody
+    // else's database. But this stage compared the prime's definition text
+    // against the clone's, so those four read as outstanding on EVERY pass and
+    // were re-applied with the prime's ref in them, for step 5c to rewrite
+    // again later in the same pass.
+    //
+    // Measured 4 Sep 2026 on the NPC Test clone, caught mid-pass: all four of
+    // `bootstrap_cron_vault`, `dispatch_web_push_for_portal_notification`,
+    // `dispatch_web_push_on_notification` and
+    // `invoke_pdf_parse_recover_stuck_jobs` were naming the PRIME's project,
+    // because that pass had run this stage and had not yet reached step 5c.
+    // Passes pause constantly between the two — that is the whole design — so
+    // a clone can sit in that state indefinitely, and a pass that dies in the
+    // window leaves it there.
+    //
+    // Rewriting here closes the window rather than narrowing it: what the
+    // clone SHOULD hold is the re-pointed text, so that is what "already held"
+    // has to mean, and a definition that genuinely needs applying is applied
+    // already pointing at the clone. Step 5c stays as the repair for rows
+    // written before this, and now has nothing to undo.
+    const toCloneRef = (def: string) =>
+      primeRef && def.includes(primeRef) ? def.split(primeRef).join(cloneRef) : def;
+    const allFnStmts = fnRows.map((r) => toCloneRef(str(r.def))).filter(Boolean);
     const history: number[] = [];
     let lastApply: BatchApplyResult = { applied: 0, failed: 0, errors: [] };
     let totalApplied = 0;
