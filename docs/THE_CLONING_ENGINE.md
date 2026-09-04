@@ -489,3 +489,40 @@ The correlation is 2/2 across two runs and a direct catalogue write is the
 wrong API regardless, so this is fixed on its own merits rather than on a
 diagnosis. The next repair pass will say what the error was, if there still
 is one.
+
+### Why triggers is the only class with a digest
+
+Measured across every definitional class on 4 Sep 2026, prime against clone,
+scoped to `public` and `aml`:
+
+| class     | prime | clone | definition digests                   |
+| --------- | ----- | ----- | ------------------------------------ |
+| views     | 14    | 14    | **identical**                        |
+| functions | 620   | 620   | differ — **by design**, see below    |
+| policies  | 1,154 | 1,155 | differ by the known surplus (+1)     |
+| indexes   | 2,166 | 2,169 | differ by the known surplus (+3)     |
+| triggers  | 474   | 474   | differ by **one drifted definition** |
+
+Only triggers carried real drift, and the other three rows are each a reason
+NOT to extend the digest naively.
+
+**A clone's function bodies must differ from the prime's.** The pipeline
+re-points any function body that names the prime's project, and it does:
+exactly four of the prime's 620 functions name `dduzbchuswwbefdunfct`
+(`bootstrap_cron_vault`, `dispatch_web_push_for_portal_notification`,
+`dispatch_web_push_on_notification`, `invoke_pdf_parse_recover_stuck_jobs`),
+and exactly four on the clone name the clone's own ref with **zero** still
+naming the prime. Those four are the whole difference. So a functions digest
+would be permanently unequal _because the engine did its job_ — and if
+inequality were ever treated as conclusive it would re-apply 620 definitions
+on every pass, for ever.
+
+**Policies and indexes differ only by the surplus** a clone keeps when the
+prime drops something (see the surplus reading). That is the same reason
+digest inequality is never conclusive for triggers either.
+
+**Views are byte-identical**, so there is nothing to add there.
+
+The rule this leaves: a digest belongs to a class only where an identical
+definition on both sides is the _expected_ outcome. That is triggers today,
+and it is a per-class judgement rather than a mechanism to spread.
