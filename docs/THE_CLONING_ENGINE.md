@@ -835,3 +835,49 @@ outstanding and the pass buys the fetch.
 The lesson is the general one, and it is now two for two: **a stage that
 refuses on the ABSENCE of an input has to know why the input is absent.**
 Declining to buy something is not the same as failing to get it.
+
+## The schema build was undoing the re-point, every pass
+
+Exactly four of the prime's 620 database functions embed its project ref, and
+step 5c rewrites them to the clone's own — **a clone whose functions call the
+prime's project is a tenant reaching into somebody else's database**, which is
+why that control exists and why the audit checked it end to end.
+
+The functions stage compared the prime's definition text against the clone's.
+So those four read as outstanding on **every pass**, and were re-applied *with
+the prime's ref in them*, for step 5c to rewrite again later in the same pass.
+
+Caught mid-pass on the NPC Test clone, 4 Sep 2026:
+
+```
+bootstrap_cron_vault                          NAMES THE PRIME
+dispatch_web_push_for_portal_notification     NAMES THE PRIME
+dispatch_web_push_on_notification             NAMES THE PRIME
+invoke_pdf_parse_recover_stuck_jobs           NAMES THE PRIME
+```
+
+Its pass had run the functions stage and had not yet reached step 5c. Between
+those two points sit the edge-function deploy, the buckets, the storage config
+and the auth policy — and **passes pause constantly in that window, because
+that is the whole design.** A clone can sit pointing at the prime indefinitely,
+and a pass that dies there leaves it that way. A clone marked `ready` by a pass
+that died in the window would ship like that.
+
+Nothing reported it. Both stages did exactly what they were written to do, the
+count reconciled at 620 = 620, and the re-point step reported four successful
+rewrites every time — which reads as the control working rather than as the
+control fighting the stage in front of it.
+
+**The rewrite moves to the way IN.** What the clone should hold is the
+re-pointed text, so that is what "already held" has to mean, and a definition
+that genuinely needs applying is applied already pointing at the clone. That
+closes the window rather than narrowing it, and the four stop being permanently
+outstanding work that every pass pays for before it can reach the tail.
+
+`repointPrimeUrlsInFunctions` stays exactly where it is. It is the repair for
+every clone provisioned before this, which nothing else would correct — it now
+simply has nothing left to undo.
+
+The general rule: **two steps that correct each other are not two controls,
+they are one oscillation.** The clone's state between them is real, reachable
+and, here, wrong.

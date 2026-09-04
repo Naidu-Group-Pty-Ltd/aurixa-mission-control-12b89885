@@ -2066,3 +2066,33 @@ describe("an absent function source has two causes, and only one is a reason to 
     expect(block).toContain("declared.length === 0");
   });
 });
+
+describe("a clone's functions must never be left naming the prime", () => {
+  const introspectionSrc = () => readFileSync("src/server/schema-introspection.server.ts", "utf8");
+
+  it("re-points the prime's definitions before comparing them with the clone's", () => {
+    const src = introspectionSrc();
+    const at = src.indexOf('const fnRows = await query(primeRef, Q.functions);');
+    expect(at).toBeGreaterThan(-1);
+    const block = src.slice(at, src.indexOf("while (shouldRunAnotherFunctionPass", at));
+    // The rewrite happens on the way IN, so both the comparison and the apply
+    // see the clone's own ref.
+    expect(block).toContain("const toCloneRef =");
+    expect(block).toMatch(/def\.split\(primeRef\)\.join\(cloneRef\)/);
+    expect(block).toMatch(/allFnStmts = fnRows\.map\(\(r\) => toCloneRef\(str\(r\.def\)\)\)/);
+  });
+
+  it("rewrites nothing when the definition does not name the prime", () => {
+    const src = introspectionSrc();
+    const at = src.indexOf("const toCloneRef =");
+    const line = src.slice(at, src.indexOf(";", src.indexOf("def;", at)) + 1);
+    expect(line).toMatch(/def\.includes\(primeRef\)/);
+  });
+
+  it("keeps step 5c as the repair for rows written before this", () => {
+    // Removing the re-point step would leave every clone provisioned by an
+    // earlier engine naming the prime, with nothing to correct it.
+    const pipelineSrc = readFileSync("src/server/backend-provisioning.server.ts", "utf8");
+    expect(pipelineSrc).toContain("repointPrimeUrlsInFunctions");
+  });
+});
