@@ -1719,3 +1719,51 @@ describe("the bucket travels; the prime's objects do not", () => {
     );
   });
 });
+
+describe("a bucket may not ask for more room than the project allows", () => {
+  // Measured 4 Sep 2026, on the first pass that ever created buckets. Two of
+  // the prime's 32 were refused on every clone:
+  //
+  //   vsl-media   file_size_limit 21,474,836,480 (20 GB)
+  //   qa_exports  file_size_limit    104,857,600 (100 MB)
+  //
+  // both answering
+  //   400 {"statusCode":"413","error":"Payload too large",
+  //        "message":"The object exceeded the maximum allowed size"}
+  //
+  // A bucket's limit may not exceed the PROJECT's global upload limit, and a
+  // fresh project gets the platform default while the prime's has been raised.
+  // The error names the bucket, so it reads as a bucket fault; no bucket-level
+  // retry could ever have fixed it.
+  const src = pipeline();
+  const fn = src.slice(src.indexOf("export async function replicateStorageConfig"));
+  const body = fn.slice(0, fn.indexOf("\n/**"));
+
+  it("reads the prime's limit rather than assuming one", () => {
+    expect(body).toMatch(/\$\{MGMT_API\}\/projects\/\$\{ref\}\/config\/storage/);
+    expect(body).toMatch(/read\(primeRef\), read\(cloneRef\)/);
+  });
+
+  it("never lowers a clone's limit to match the prime", () => {
+    // The buckets are what need room; a clone that already allows more is not
+    // a defect to correct.
+    expect(body).toMatch(/if \(current !== null && current >= wanted\)/);
+    expect(body).toMatch(/status: "already_matches"/);
+  });
+
+  it("runs before any bucket is created", () => {
+    const configAt = src.indexOf("const storageConfig = await replicateStorageConfig(");
+    const bucketsAt = src.indexOf("storageBuckets = await replicateStorageBuckets(");
+    expect(configAt).toBeGreaterThan(-1);
+    expect(configAt).toBeLessThan(bucketsAt);
+  });
+
+  it("is non-fatal, and says what a failure will cost", () => {
+    // The buckets that fit are still worth creating; the ones that do not will
+    // say exactly why.
+    const caller = src.slice(src.indexOf("const storageConfig = await replicateStorageConfig("));
+    expect(caller.slice(0, 600)).toMatch(/Project upload limit not replicated/);
+    expect(caller.slice(0, 600)).toMatch(/more room than this project allows/);
+    expect(caller.slice(0, 600)).not.toMatch(/throw /);
+  });
+});
