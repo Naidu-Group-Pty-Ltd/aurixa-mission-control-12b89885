@@ -2167,8 +2167,135 @@ describe("a count cannot see WHICH index is missing", () => {
     expect(at).toBeGreaterThan(-1);
     const block = src.slice(at, at + 700);
     expect(block).toContain("query(cloneRef, Q.indexes)");
-    expect(block).toMatch(/!heldIdx\.has\(i\.indexname\)/);
+    // The rule is "carry only what the clone lacks". How the held set is
+    // KEYED is an implementation detail that has already changed once (bare
+    // name → schema-qualified, so a name collision across schemas cannot
+    // hide a shortfall), so the assertion is on the filter, not the key.
+    expect(block).toMatch(/\.filter\(\(i\) => !heldIdx\.has\(/);
     // A clone whose list cannot be read holds NONE, so everything is created.
     expect(block).toMatch(/catch\(\(\) => \[\]/);
+  });
+});
+
+describe("a failed backend with no recorded enqueuer still has a lever", () => {
+  const retrySrc = () => readFileSync("src/routes/hooks.backend-provisioning-retry.tsx", "utf8");
+
+  it("does not refuse a row whose enqueued_by is null", () => {
+    const src = retrySrc();
+    // The refusal is gone; the null is carried instead.
+    expect(src).not.toMatch(/records no original enqueuer to attribute the retry to[^]*?409/);
+    expect(src).toContain("const attributedTo = row.enqueued_by ?? null;");
+    expect(src).toContain("enqueueCloneBackendProvisioning(admin, attributedTo,");
+  });
+
+  it("says in the audit metadata that the enqueuer was unknown", () => {
+    // Silently absent and "nobody recorded it" read the same to somebody
+    // auditing later; only one of them is true.
+    expect(retrySrc()).toMatch(/attributed_to:[^]*?unknown/);
+  });
+
+  it("still refuses anything that is not `failed`", () => {
+    // Widening attribution must not widen WHICH rows may be retried.
+    const src = retrySrc();
+    expect(src).toContain('row.status !== "failed"');
+  });
+
+  it("never writes a literal actor into the uuid column", () => {
+    // The original defect: a literal "system" the column itself refuses.
+    const src = retrySrc();
+    expect(src).not.toMatch(/enqueueCloneBackendProvisioning\(admin, ["'`]/);
+  });
+});
+
+describe("surplus is dropped for indexes, and for nothing else", () => {
+  const src = () => readFileSync("src/server/schema-introspection.server.ts", "utf8");
+  const stage = () => {
+    const b = src();
+    const at = b.indexOf('if (enterStage("indexes"))');
+    return b.slice(at, b.indexOf("// 7. views", at));
+  };
+
+  it("drops an index the prime does not have", () => {
+    expect(stage()).toMatch(/drop index if exists/);
+    expect(stage()).toContain("const surplusIdx =");
+  });
+
+  it("never drops a constraint-backed index — that is a different act", () => {
+    expect(stage()).toMatch(/!cloneConIdxNames\.has\(name\)/);
+  });
+
+  it("keys by schema, because an index name is unique only within one", () => {
+    const st = stage();
+    expect(st).toMatch(/\$\{str\(r\.schema\)\}\.\$\{str\(r\.indexname\)\}/);
+    expect(st).toContain("const primeIdxKeys =");
+    // and the DROP is schema-qualified
+    expect(st).toMatch(/drop index if exists \$\{quoteIdent\(key\.slice\(0, dot\)\)\}/);
+  });
+
+  it("drops nothing when the clone's index list could not be read", () => {
+    // An unreadable list yields an empty held set, and surplus is derived
+    // from the held set — so the failure direction is "do nothing", never
+    // "drop everything".
+    expect(stage()).toMatch(/query\(cloneRef, Q\.indexes\)\.catch\(\(\) => \[\]/);
+    expect(stage()).toMatch(/surplusIdx = \[\.\.\.heldIdx\]/);
+  });
+
+  it("records what it dropped", () => {
+    expect(stage()).toMatch(/dropped \$\{droppedIdx\.length\} index\(es\)/);
+  });
+
+  it("drops no other object class", () => {
+    // A table may hold tenant rows, dropping a policy WIDENS access, and a
+    // constraint may be the only guard on a column. None of them may be
+    // removed by this stage — or by any other.
+    const whole = src();
+    expect(whole).not.toMatch(/drop\s+table/i);
+    expect(whole).not.toMatch(/drop\s+policy/i);
+    expect(whole).not.toMatch(/drop\s+constraint/i);
+    expect(whole).not.toMatch(/drop\s+(materialized\s+)?view/i);
+    expect(whole).not.toMatch(/drop\s+(function|trigger|type|sequence|schema)/i);
+  });
+});
+
+describe("a fleet-sync pass that did nothing says nothing", () => {
+  const src = () => readFileSync("src/server/fleet-migration.server.ts", "utf8");
+  const block = () => {
+    const b = src();
+    const at = b.indexOf("const didNothing =");
+    return b.slice(at, b.indexOf('.eq("clone_id", cloneId)', at));
+  };
+
+  it("writes no fact about the clone when it applied, failed and blocked nothing", () => {
+    const bl = block();
+    expect(bl).toMatch(/const didNothing =\s*successes\.length === 0 && failures\.length === 0 && blocked\.length === 0/);
+    expect(bl).toMatch(/\.\.\.\(didNothing\s*\?\s*\{\}/);
+  });
+
+  it("never erases a recorded migration version with a null", () => {
+    // A level clone has nothing to apply, so `latestApplied` is null — and
+    // writing it erased the version provisioning had established.
+    expect(block()).toMatch(/latestApplied \? \{ migration_version: latestApplied \} : \{\}/);
+  });
+
+  it("never interpolates a null into the operator's status line", () => {
+    const bl = block();
+    expect(bl).not.toMatch(/Synced to \$\{latestApplied\}/);
+    expect(bl).toMatch(/Synced to \$\{syncedTo\}/);
+    expect(src()).toMatch(/const syncedTo = latestApplied \?\?/);
+  });
+
+  it("still reports a failure and a held-back migration", () => {
+    // Saying nothing on a no-op must not become saying nothing at all.
+    const bl = block();
+    expect(bl).toContain("Migration failed at");
+    expect(bl).toContain("migration(s) held back behind");
+    expect(bl).toMatch(/status: failures\.length > 0 \? \("failed" as const\)/);
+  });
+
+  it("still records where the prime is, on every pass", () => {
+    // The one thing a no-op pass DOES establish.
+    const bl = block();
+    expect(bl).toContain("source_sha: sourceSha");
+    expect(bl).toContain("worker_started_at: null");
   });
 });
