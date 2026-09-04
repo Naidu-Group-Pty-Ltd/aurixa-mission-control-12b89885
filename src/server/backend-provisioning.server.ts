@@ -582,6 +582,75 @@ export type BucketReplicationResult = {
  */
 export const SEED_ASSET_BUCKETS: readonly string[] = [];
 
+export type StorageConfigResult =
+  | { status: "applied"; fileSizeLimit: number; previous?: number | null }
+  | { status: "already_matches"; fileSizeLimit: number }
+  | { status: "skipped"; reason: string }
+  | { status: "failed"; error: string };
+
+/**
+ * Give the clone the prime's PROJECT-LEVEL upload limit, before any bucket
+ * is created against it.
+ *
+ * A bucket's `file_size_limit` may not exceed the project's global upload
+ * limit, and a fresh project gets the platform default while the prime's has
+ * been raised. The Storage API does not explain that: it answers the bucket
+ * creation with
+ *
+ *   400 {"statusCode":"413","error":"Payload too large",
+ *        "message":"The object exceeded the maximum allowed size"}
+ *
+ * which reads as something wrong with the bucket. Measured 4 Sep 2026 on the
+ * first pass that ever created buckets: `vsl-media` asks for 20 GB and
+ * `qa_exports` for 100 MB, and both were refused on every clone — 2 of 32
+ * buckets that could never exist, for a reason no bucket-level retry could
+ * ever fix.
+ *
+ * Two rules. The limit is READ from the prime rather than assumed, like every
+ * other replicated setting. And a failure here is reported and non-fatal: the
+ * buckets that fit are still worth creating, and the two that do not will say
+ * exactly why.
+ */
+export async function replicateStorageConfig(
+  primeRef: string,
+  cloneRef: string,
+): Promise<StorageConfigResult> {
+  const read = async (ref: string): Promise<number | null> => {
+    const res = await fetch(`${MGMT_API}/projects/${ref}/config/storage`, {
+      headers: headers(),
+    });
+    if (!res.ok) throw new Error(`${res.status} — ${await res.text()}`);
+    const body = (await res.json()) as { fileSizeLimit?: unknown };
+    return typeof body?.fileSizeLimit === "number" ? body.fileSizeLimit : null;
+  };
+  let wanted: number | null;
+  let current: number | null;
+  try {
+    [wanted, current] = await Promise.all([read(primeRef), read(cloneRef)]);
+  } catch (err) {
+    return { status: "failed", error: err instanceof Error ? err.message : String(err) };
+  }
+  if (wanted === null) {
+    return { status: "skipped", reason: "the prime's project reports no upload limit" };
+  }
+  // Never LOWER a clone's limit to match: the buckets are what need room, and
+  // a clone that already allows more is not a defect to correct.
+  if (current !== null && current >= wanted) {
+    return { status: "already_matches", fileSizeLimit: current };
+  }
+  try {
+    const res = await fetch(`${MGMT_API}/projects/${cloneRef}/config/storage`, {
+      method: "PATCH",
+      headers: headers(),
+      body: JSON.stringify({ fileSizeLimit: wanted }),
+    });
+    if (!res.ok) return { status: "failed", error: `${res.status} — ${await res.text()}` };
+    return { status: "applied", fileSizeLimit: wanted, previous: current };
+  } catch (err) {
+    return { status: "failed", error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 /**
  * Create one bucket on the clone, through the PROJECT's Storage API.
  *
@@ -3675,6 +3744,16 @@ export async function provisionCloneBackend(
   let storageBuckets: BucketReplicationResult[] = [];
   try {
     const primeRef = input.primeBackendRef;
+    // The project's upload limit FIRST: a bucket may not ask for more room
+    // than the project allows, and the refusal reads as a bucket fault rather
+    // than a missing project setting (see replicateStorageConfig).
+    const storageConfig = await replicateStorageConfig(primeRef, projectRef);
+    if (storageConfig.status === "failed") {
+      await onStatusUpdate?.(
+        "migrating",
+        `Project upload limit not replicated (${storageConfig.error}) — buckets asking for more room than this project allows will be refused`,
+      );
+    }
     await onStatusUpdate?.("migrating", "Replicating storage bucket configuration from prime...");
     storageBuckets = await replicateStorageBuckets(primeRef, projectRef, input.deadlineAt ?? null);
     const failed = storageBuckets.filter((b) => b.status === "failed");

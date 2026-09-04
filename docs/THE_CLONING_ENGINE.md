@@ -617,3 +617,42 @@ exemption list. Each exemption states a **bound**, not an opinion:
 The discovery also asserts it found something, because a scan that silently
 matches nothing makes every assertion after it vacuous — which is the failure
 this replaces.
+
+---
+
+## A bucket may not ask for more room than the project allows
+
+4 September 2026, found by the first pass that ever created buckets.
+
+Two of the prime's 32 were refused on every clone:
+
+| bucket       | `file_size_limit` |        |
+| ------------ | ----------------- | ------ |
+| `vsl-media`  | 21,474,836,480    | 20 GB  |
+| `qa_exports` | 104,857,600       | 100 MB |
+
+both answering
+
+```
+400 {"statusCode":"413","error":"Payload too large",
+     "message":"The object exceeded the maximum allowed size"}
+```
+
+A bucket's limit may not exceed the **project's** global upload limit, and a
+fresh project gets the platform default while the prime's has been raised.
+The error names the bucket, so it reads as a bucket fault — and **no
+bucket-level retry could ever have fixed it**, because the setting that
+refuses it is one level up.
+
+`replicateStorageConfig` reads the prime's `config/storage` and patches the
+clone's before any bucket is created. Two rules:
+
+- **it never LOWERS a clone's limit** to match the prime. The buckets are what
+  need room; a clone that already allows more is not a defect to correct;
+- **a failure is reported and non-fatal**, and says what it will cost: the
+  buckets that fit are still worth creating, and the ones that do not now say
+  exactly why rather than looking like a storage fault.
+
+This is the third defect in one step found by making the step work
+(F26 → F34, F35, and this). The step had returned 404 for its whole existence,
+so nothing downstream of that 404 had ever executed.
