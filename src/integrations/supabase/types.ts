@@ -8136,6 +8136,30 @@ export type Database = {
         }
         Relationships: []
       }
+      prime_snapshot_scans: {
+        Row: {
+          declared_function_slugs: Json
+          git_sha: string
+          repo: string
+          scanned_at: string
+          secret_names: Json
+        }
+        Insert: {
+          declared_function_slugs: Json
+          git_sha: string
+          repo: string
+          scanned_at?: string
+          secret_names: Json
+        }
+        Update: {
+          declared_function_slugs?: Json
+          git_sha?: string
+          repo?: string
+          scanned_at?: string
+          secret_names?: Json
+        }
+        Relationships: []
+      }
       profiles: {
         Row: {
           avatar_url: string | null

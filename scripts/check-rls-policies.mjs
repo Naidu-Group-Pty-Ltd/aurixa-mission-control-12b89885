@@ -35,6 +35,12 @@ const SERVICE_ROLE_ONLY = new Set([
   // the explicit REVOKE of the default grants in its migration, not a policy.
   // A policy here would open a queue whose payload executes as `postgres`.
   "schema_migration_queue",
+  // A per-commit cache of what the PRIME repo declares — secret NAMES and
+  // function slugs, never a value. Written and read only by the provisioning
+  // server routes, which hold the service role; its migration REVOKEs the
+  // default grants from anon and authenticated, so there is no policy to
+  // write and adding one would open a table no browser has business reading.
+  "prime_snapshot_scans",
 ]);
 
 const sql = readdirSync(MIGRATIONS)

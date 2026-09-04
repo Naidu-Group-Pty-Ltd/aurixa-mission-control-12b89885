@@ -94,8 +94,23 @@ export const Route = createFileRoute("/hooks/handoff-parity-refresh")({
         }
 
         const { computeParity } = await import("@/server/handoff-parity.server");
-        const { resolvePrimeBackendRef } = await import("@/server/prime-backend.server");
+        const { resolvePrimeBackendRef, resolvePrimeSource, fetchDeclaredEdgeFunctionSlugs } =
+          await import("@/server/prime-backend.server");
         const primeRef = await resolvePrimeBackendRef(supabaseAdmin);
+        // Resolved ONCE: every handoff in this sweep is measured against the
+        // same prime, and a tree walk per handoff would spend the GitHub App's
+        // quota on the same answer. Null when it cannot be established — the
+        // comparison then reads deployment-against-deployment, as it always did.
+        const declaredEdgeFunctions = await (async () => {
+          try {
+            const { getAppOctokit } = await import("@/server/github-app.server");
+            const source = await resolvePrimeSource(supabaseAdmin);
+            if (!source) return null;
+            return await fetchDeclaredEdgeFunctionSlugs(getAppOctokit(), source);
+          } catch {
+            return null;
+          }
+        })();
 
         const results = { refreshed: 0, skipped: 0, failed: 0, details: [] as any[] };
         for (const h of stale) {
@@ -107,7 +122,7 @@ export const Route = createFileRoute("/hooks/handoff-parity-refresh")({
               results.details.push({ id: h.id, reason: "no_target_backend" });
               continue;
             }
-            const parity = await computeParity(primeRef, targetRef);
+            const parity = await computeParity(primeRef, targetRef, { declaredEdgeFunctions });
             const { data: row, error: insErr } = await supabaseAdmin
               .from("handoff_parity_reports")
               .insert({

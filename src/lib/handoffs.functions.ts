@@ -499,9 +499,25 @@ export const runParityDryRun = createServerFn({ method: "POST" })
     // Compute parity (server-only module — imported inside the handler so it
     // never leaks into the client bundle).
     const { computeParity } = await import("@/server/handoff-parity.server");
-    const { resolvePrimeBackendRef } = await import("@/server/prime-backend.server");
+    const { resolvePrimeBackendRef, resolvePrimeSource, fetchDeclaredEdgeFunctionSlugs } =
+      await import("@/server/prime-backend.server");
     const primeRef = await resolvePrimeBackendRef(context.supabase);
-    const parity = await computeParity(primeRef, backend.supabase_project_ref);
+    // A handoff leaves draft only on an empty `blocking_issues`, so this is
+    // the caller that most needs to tell a shortfall from the prime's own
+    // dead deployments. Null when it cannot be established — never partial.
+    const declaredEdgeFunctions = await (async () => {
+      try {
+        const { getAppOctokit } = await import("@/server/github-app.server");
+        const source = await resolvePrimeSource(context.supabase);
+        if (!source) return null;
+        return await fetchDeclaredEdgeFunctionSlugs(getAppOctokit(), source);
+      } catch {
+        return null;
+      }
+    })();
+    const parity = await computeParity(primeRef, backend.supabase_project_ref, {
+      declaredEdgeFunctions,
+    });
 
     const { data: row, error: insErr } = await context.supabase
       .from("handoff_parity_reports")
