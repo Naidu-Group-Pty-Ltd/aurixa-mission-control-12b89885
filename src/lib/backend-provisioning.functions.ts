@@ -89,9 +89,12 @@ async function runBackendProvisioning(
   };
 
   try {
-    const { resolvePrimeSource, fetchPrimeBackendSnapshot, resolvePrimeBackendRef } = await import(
-      /* @vite-ignore */ "@/lib/_server-shims/prime-backend.server"
-    );
+    const {
+      resolvePrimeSource,
+      fetchPrimeBackendSnapshot,
+      resolvePrimeBackendRef,
+      resolvePrimeHeadSha,
+    } = await import(/* @vite-ignore */ "@/lib/_server-shims/prime-backend.server");
     const { getAppOctokit } = await import(
       /* @vite-ignore */ "@/lib/_server-shims/github-app.server"
     );
@@ -156,17 +159,62 @@ async function runBackendProvisioning(
       `Snapshotting backend architecture from ${source.owner}/${source.repo}@${source.branch}...`,
     );
     const octokit = getAppOctokit();
+
+    // ── Is the expensive half of the snapshot worth buying on THIS pass? ──
+    //
+    // Fetching every bundle the prime defines is what the secret-name scan
+    // needs, and it is the dominant fixed cost of a pass: ~1,033 files across
+    // 423 bundles, batched into about thirteen GraphQL requests plus the
+    // decode. It is paid BEFORE the first stage runs, so once it grew past
+    // what the invocation budget could absorb the pipeline stopped advancing
+    // altogether — every tick spent its 50s and paused at the same stage.
+    //
+    // Both things that fetch buys — the secret names and the declared slug
+    // list — are properties of (repo, commit). So they are cached by commit,
+    // and a pass skips the fetch when all three hold:
+    //   * the schema is not being resumed (a resumed pass omits it anyway),
+    //   * a COMPLETE scan is cached for exactly this commit, and
+    //   * the clone already holds every function the repo declares, so no
+    //     bundle would be deployed even if it were fetched.
+    // Miss any one and the pass buys the fetch exactly as before.
+    const headSha = await resolvePrimeHeadSha(octokit, source);
+    const repoKey = `${source.owner}/${source.repo}`;
+    const cachedScan = headSha
+      ? (
+          await supabase
+            .from("prime_snapshot_scans")
+            .select("secret_names, declared_function_slugs")
+            .eq("repo", repoKey)
+            .eq("git_sha", headSha)
+            .maybeSingle()
+        ).data
+      : null;
+    const cachedSecretNames = Array.isArray(cachedScan?.secret_names)
+      ? (cachedScan.secret_names as string[])
+      : null;
+    const cachedDeclaredSlugs = Array.isArray(cachedScan?.declared_function_slugs)
+      ? (cachedScan.declared_function_slugs as string[])
+      : null;
+    const { shouldSkipFunctionSource, scanIsCacheable } = await import(
+      /* @vite-ignore */ "@/lib/_server-shims/primeScanCache.pure"
+    );
+    const skipFunctionSource = shouldSkipFunctionSource({
+      resumingSchema,
+      cachedSecretNames,
+      cachedDeclaredSlugs,
+      liveFunctionSlugs,
+    });
     // Migration SQL bodies are ~half the snapshot's round trips and only the
     // replay strategy reads them; the default introspection path needs the
     // file LIST alone. See fetchPrimeBackendSnapshot's opts doc.
-    const snapshot = await fetchPrimeBackendSnapshot(octokit, source, {
+    const rawSnapshot = await fetchPrimeBackendSnapshot(octokit, source, {
       includeMigrationSql: (input.schemaStrategy ?? "introspection") === "migration-replay",
       // A resumed schema pass cannot reach the edge-function stage — it
       // reports `partial` and the pipeline pauses to verify from the first
       // stage next tick — so its bundle source would be fetched, decoded,
       // scanned and discarded. That fetch is what exhausts the GitHub App
       // installation's hourly quota when a long build resumes every minute.
-      includeFunctionSource: !resumingSchema,
+      includeFunctionSource: !resumingSchema && !skipFunctionSource,
       // Do not pay for bundles the target already holds. The deploy step has
       // always skipped live functions — but only AFTER the snapshot had
       // fetched every one of them, so the work was bought and discarded on
@@ -178,11 +226,51 @@ async function runBackendProvisioning(
       // could reach the edge-function stage and never get through it.
       functionLimit: EDGE_FUNCTION_FETCH_LIMIT,
     });
-    if (snapshot.migrations.length === 0) {
+    if (rawSnapshot.migrations.length === 0) {
       throw new Error(
         `No migrations found under supabase/migrations in ${source.owner}/${source.repo}@${source.branch} — nothing to replicate`,
       );
     }
+
+    // Record the scan when this pass actually performed one, so the NEXT pass
+    // does not. Only a complete scan is written: `functionSourceOmitted` means
+    // no bundle was read, and an empty list stored under a real commit would
+    // teach every later pass that the prime references no secrets at all.
+    // (The cap does not narrow it — the scan reads every bundle the repo
+    // defines, which is the whole reason it is expensive.)
+    if (scanIsCacheable(rawSnapshot)) {
+      const { error: scanErr } = await supabase.from("prime_snapshot_scans").upsert(
+        {
+          repo: rawSnapshot.sourceRepo,
+          git_sha: rawSnapshot.sourceSha,
+          secret_names: rawSnapshot.secretNames,
+          declared_function_slugs: rawSnapshot.declaredFunctionSlugs,
+          scanned_at: new Date().toISOString(),
+        },
+        { onConflict: "repo,git_sha" },
+      );
+      // Never fatal. A cache that cannot be written costs the next pass the
+      // fetch it would have skipped; failing the provisioning run over it
+      // would cost the tenant their backend.
+      if (scanErr) console.warn("[provisioning] prime scan cache write failed:", scanErr.message);
+    }
+
+    // And when the fetch was skipped on the strength of that cache, put the
+    // two cached facts back where the pipeline reads them. Everything else the
+    // omitted half would have carried — the bundles themselves — is genuinely
+    // not needed: the clone already holds every function the repo declares,
+    // which is one of the conditions that allowed the skip.
+    // Shadowing the raw snapshot on purpose: every consumer below reads
+    // `snapshot`, so splicing here covers all of them rather than whichever
+    // ones anyone remembered to update.
+    const snapshot: typeof rawSnapshot =
+      skipFunctionSource && cachedSecretNames && cachedDeclaredSlugs
+        ? {
+            ...rawSnapshot,
+            secretNames: cachedSecretNames,
+            declaredFunctionSlugs: cachedDeclaredSlugs,
+          }
+        : rawSnapshot;
 
     // `existingRow` was read above the snapshot — it carries both the project
     // left behind by an earlier pass (resume onto it rather than orphaning it)
@@ -365,7 +453,12 @@ async function runBackendProvisioning(
     let parityError: string | null = null;
     try {
       await updateStatus("migrating", "Comparing the new backend with the prime...");
-      parity = await computeParity(primeBackendRef, result.projectRef);
+      parity = await computeParity(primeBackendRef, result.projectRef, {
+        // What the clone was CONTRACTED to carry. Read from the prime repo's
+        // tree, so it is complete even on a pass that fetched no bundle
+        // source — see `declaredFunctionSlugs`.
+        declaredEdgeFunctions: snapshot.declaredFunctionSlugs,
+      });
     } catch (err) {
       parityError = err instanceof Error ? err.message : String(err);
       await updateStatus("migrating", `Parity check could not run: ${parityError}`);

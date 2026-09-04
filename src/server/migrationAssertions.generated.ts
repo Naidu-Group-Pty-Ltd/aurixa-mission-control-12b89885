@@ -171,4 +171,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260903160000",
     assertions: [{ kind: "column", table: "clone_backends", column: "repair_requested_at" }],
   },
+  {
+    migration: "20260904060000_prime_snapshot_scans.sql",
+    version: "20260904060000",
+    assertions: [{ kind: "table", table: "prime_snapshot_scans" }],
+  },
 ];

@@ -502,16 +502,70 @@ function diffCron(prime: Snapshot, target: Snapshot) {
   };
 }
 
-function diffEdgeFunctions(prime: Snapshot, target: Snapshot) {
+/**
+ * `declared` is every slug the prime's REPOSITORY declares at the commit the
+ * clone was built from, or null when the caller could not establish it.
+ *
+ * A function deployed on the prime's project that the prime's repo no longer
+ * declares is not a shortfall on the tenant — it is dead code on the prime.
+ * Measured 4 Sep 2026 on both engine-provisioned clones: ten such functions,
+ * among them the three the prime's own docs record as DELETED
+ * (`manage-partner-agreements`, `finance-portal-agreements`,
+ * `agreement-centre-render`) and five one-off probes named `tmp-`, `mc-diag-`
+ * and `-probe`. All ten counted as `missing_edge_functions:10`, which is a
+ * blocking issue — and a handoff leaves draft only when `blocking_issues` is
+ * empty. So every clone this engine will ever produce was permanently
+ * un-handoff-able, for a reason no act on the clone could discharge.
+ *
+ * The narrowing is disclosed, never silent: what the prime runs and the repo
+ * has dropped is reported as `prime_only_undeclared` and named in the summary.
+ * With `declared` null the behaviour is exactly what it was — a caller that
+ * cannot establish the contract gets the conservative reading.
+ */
+export function classifyEdgeFunctionShortfall(
+  primeSlugs: Iterable<string>,
+  targetSlugs: Iterable<string>,
+  declared: ReadonlySet<string> | null,
+): { missing: string[]; undeclared: string[]; extra: string[] } {
+  const target = new Set<string>(targetSlugs);
+  const prime = new Set<string>(primeSlugs);
   const missing: string[] = [];
+  const undeclared: string[] = [];
   const extra: string[] = [];
-  for (const slug of prime.edgeFnSet) if (!target.edgeFnSet.has(slug)) missing.push(slug);
-  for (const slug of target.edgeFnSet) if (!prime.edgeFnSet.has(slug)) extra.push(slug);
+  for (const slug of prime) {
+    if (target.has(slug)) continue;
+    if (declared && !declared.has(slug)) undeclared.push(slug);
+    else missing.push(slug);
+  }
+  for (const slug of target) if (!prime.has(slug)) extra.push(slug);
+  return { missing: missing.sort(), undeclared: undeclared.sort(), extra: extra.sort() };
+}
+
+function diffEdgeFunctions(
+  prime: Snapshot,
+  target: Snapshot,
+  declared: ReadonlySet<string> | null,
+) {
+  const { missing, undeclared, extra } = classifyEdgeFunctionShortfall(
+    prime.edgeFnSet,
+    target.edgeFnSet,
+    declared,
+  );
   return {
     prime_count: prime.edgeFnSet.size,
     target_count: target.edgeFnSet.size,
-    missing_in_target: missing.sort(),
-    extra_in_target: extra.sort(),
+    /** Declared by the repo, running on the prime, absent from the clone. */
+    missing_in_target: missing,
+    /**
+     * Running on the prime, absent from the clone, and NOT declared by the
+     * prime's repository — the prime's own residue, reported and not blocking.
+     * Empty when the caller supplied no declared set, which is not the same
+     * thing as the prime having no residue.
+     */
+    prime_only_undeclared: undeclared,
+    /** True when a declared set was supplied, so the two lists above mean what they say. */
+    declared_known: declared !== null,
+    extra_in_target: extra,
   };
 }
 
@@ -727,7 +781,22 @@ export type ParityResult = {
   summary: string;
 };
 
-export async function computeParity(primeRef: string, targetRef: string): Promise<ParityResult> {
+export type ComputeParityOptions = {
+  /**
+   * Every edge-function slug the prime's repository declares. Supply it and a
+   * function the repo has dropped stops counting against the tenant; omit it
+   * and the comparison is deployment-against-deployment exactly as before.
+   * Never pass a partial list — see `declaredFunctionSlugsFromPaths`, which is
+   * derived from the tree walk precisely so it cannot be one.
+   */
+  declaredEdgeFunctions?: readonly string[] | null;
+};
+
+export async function computeParity(
+  primeRef: string,
+  targetRef: string,
+  opts?: ComputeParityOptions,
+): Promise<ParityResult> {
   const [prime, target] = await Promise.all([
     snapshotProject(primeRef),
     snapshotProject(targetRef),
@@ -739,7 +808,10 @@ export async function computeParity(primeRef: string, targetRef: string): Promis
   const extensions = diffExtensions(prime, target);
   const buckets = diffBuckets(prime, target);
   const cron = diffCron(prime, target);
-  const edgeFns = diffEdgeFunctions(prime, target);
+  const declaredEdgeFns = opts?.declaredEdgeFunctions
+    ? new Set<string>(opts.declaredEdgeFunctions)
+    : null;
+  const edgeFns = diffEdgeFunctions(prime, target, declaredEdgeFns);
   const secrets = diffSecrets(prime, target);
   const authCfg = diffAuthConfig(prime, target);
   const requiredExt = diffRequiredExtensions(target);
@@ -852,6 +924,11 @@ export async function computeParity(primeRef: string, targetRef: string): Promis
         )
           .map(([k, v]) => `${k}:${v}`)
           .join(" ")}]`
+      : "") +
+    // The prime's residue is reported wherever the shortfall is, or the
+    // narrowing above is invisible and reads as a clone that matches.
+    (edgeFns.prime_only_undeclared.length > 0
+      ? ` · prime-only edge-fns its repo no longer declares=${edgeFns.prime_only_undeclared.length}`
       : "");
 
   return {

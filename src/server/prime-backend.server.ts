@@ -80,6 +80,16 @@ export type PrimeBackendSnapshot = {
    */
   functionSourceOmitted: boolean;
   /**
+   * Every slug the repository declares at this commit, from the tree walk.
+   *
+   * Unlike `functions`, this is never narrowed by `skipFunctionSlugs`, by
+   * `functionLimit` or by `includeFunctionSource: false` — see
+   * `declaredFunctionSlugsFromPaths`. It is what a clone is CONTRACTED to
+   * carry, which is not the same set as what the prime's project happens to
+   * be running.
+   */
+  declaredFunctionSlugs: string[];
+  /**
    * True when the function list was CAPPED and more bundles remain unfetched.
    *
    * A pass that carries only some of the functions may not pronounce the
@@ -178,6 +188,30 @@ export function pickEntrypoint(slug: string, files: string[]): string | null {
       !f.slice(slug.length + 1).includes("/"),
   );
   return fallback ?? null;
+}
+
+/**
+ * Every function slug the repository DECLARES, from the file tree alone.
+ *
+ * What the repo declares and what a snapshot CARRIES are different questions,
+ * and the engine had only ever been able to answer the second. The snapshot's
+ * `functions` list is narrowed by two economies — `skipFunctionSlugs` and
+ * `functionLimit` — and emptied outright by `includeFunctionSource: false`,
+ * so it says how far THIS pass got, never what the prime repo contains. This
+ * is derived from the tree walk, which neither economy touches and every pass
+ * pays for, so it is complete on every pass including the ones that fetch no
+ * bundle source at all.
+ *
+ * A slug with no runnable entrypoint is excluded, exactly as the deploy set
+ * excludes it: a directory that cannot be deployed is not a declaration.
+ */
+export function declaredFunctionSlugsFromPaths(relPaths: string[]): string[] {
+  const { slugs, sharedFiles } = groupFunctionPaths(relPaths);
+  const out: string[] = [];
+  for (const [slug, ownPaths] of slugs) {
+    if (pickEntrypoint(slug, [...ownPaths, ...sharedFiles])) out.push(slug);
+  }
+  return out.sort();
 }
 
 /**
@@ -868,6 +902,56 @@ async function fetchBlobTextStream(
  * Full snapshot of the prime repo's Supabase architecture: migration SQL,
  * edge function bundles, and the secret names those functions reference.
  */
+/**
+ * Just the declared slug list, for callers that need the CONTRACT without
+ * paying for a snapshot.
+ *
+ * One tree walk and nothing else — no blob bodies, no config.toml, no bundle
+ * assembly. The parity refresh and the handoff check both compare a live
+ * clone against a live prime and had no repo context at all; this is the
+ * cheapest thing that gives them one.
+ *
+ * Returns null when the walk fails. Null means "not established", which the
+ * comparison reads as the conservative case — a PARTIAL list would silently
+ * excuse whatever it omitted, which is the failure mode this whole change
+ * exists to close.
+ */
+/**
+ * The commit a branch currently points at — one REST call, no tree walk.
+ *
+ * Needed BEFORE the snapshot, because the per-commit scan cache is keyed by
+ * it and the whole point of the cache is to decide whether the expensive half
+ * of the snapshot has to be bought at all.
+ */
+export async function resolvePrimeHeadSha(octokit: Octokit, ref: RepoRef): Promise<string | null> {
+  try {
+    const { data } = await octokit.repos.getBranch({
+      owner: ref.owner,
+      repo: ref.repo,
+      branch: ref.branch,
+    });
+    return data.commit?.sha ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchDeclaredEdgeFunctionSlugs(
+  octokit: Octokit,
+  ref: RepoRef,
+): Promise<string[] | null> {
+  try {
+    const { blobs } = await listSupabaseBlobs(octokit, ref);
+    return declaredFunctionSlugsFromPaths(
+      blobs
+        .filter((b) => b.path.startsWith(FUNCTIONS_PREFIX))
+        .map((b) => b.path.slice(FUNCTIONS_PREFIX.length)),
+    );
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchPrimeBackendSnapshot(
   octokit: Octokit,
   ref: RepoRef,
@@ -951,6 +1035,14 @@ export async function fetchPrimeBackendSnapshot(
   if (!includeFunctionSource) {
     // Everything above this point is cheap (one tree walk); everything below
     // is the ~1,033-file fetch. Stop here and say so.
+    // Declared FROM THE TREE, which this branch has already walked. A pass
+    // that fetches no bundle source still knows exactly what the repo
+    // declares — the two facts were never the same one.
+    const declaredEarly = declaredFunctionSlugsFromPaths(
+      blobs
+        .filter((b) => b.path.startsWith(FUNCTIONS_PREFIX))
+        .map((b) => b.path.slice(FUNCTIONS_PREFIX.length)),
+    );
     const configBlobEarly = blobs.find((b) => b.path === CONFIG_TOML_PATH);
     const configTomlEarly = configBlobEarly
       ? decodeBase64Utf8(await fetchBlobBase64(octokit, ref, configBlobEarly.sha))
@@ -963,6 +1055,7 @@ export async function fetchPrimeBackendSnapshot(
       functions: [],
       secretNames: [],
       authConfig: parseAuthConfig(configTomlEarly),
+      declaredFunctionSlugs: declaredEarly,
       functionSourceOmitted: true,
       functionSourceTruncated: false,
     };
@@ -1158,6 +1251,7 @@ export async function fetchPrimeBackendSnapshot(
     functions,
     secretNames,
     authConfig: parseAuthConfig(configToml),
+    declaredFunctionSlugs: declaredFunctionSlugsFromPaths(relPaths),
     functionSourceOmitted: false,
     functionSourceTruncated,
   };

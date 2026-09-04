@@ -10,6 +10,9 @@ import {
 } from "./provisioningBudget";
 import { toReplaceableTriggerDdl } from "./schema-introspection.server";
 import { SEED_ASSET_BUCKETS } from "./backend-provisioning.server";
+import { declaredFunctionSlugsFromPaths } from "./prime-backend.server";
+import { classifyEdgeFunctionShortfall } from "./handoff-parity.server";
+import { scanIsCacheable, shouldSkipFunctionSource } from "./primeScanCache.pure";
 
 /**
  * Provisioning must survive the invocation it runs in.
@@ -1842,5 +1845,185 @@ describe("the bucket step asks the clone what it already holds", () => {
     const deferAt = body.indexOf("if (pastDeadline(deadlineAt))");
     expect(skipAt).toBeGreaterThan(-1);
     expect(skipAt).toBeLessThan(deferAt);
+  });
+});
+
+describe("a function the prime's repo deleted is not a shortfall on the tenant", () => {
+  const prime = ["a", "b", "manage-partner-agreements", "tmp-ghl-field-probe"];
+  const target = ["a"];
+
+  it("counts an undeclared prime-only function separately from a real gap", () => {
+    const declared = new Set(["a", "b"]);
+    const r = classifyEdgeFunctionShortfall(prime, target, declared);
+    expect(r.missing).toEqual(["b"]);
+    expect(r.undeclared).toEqual(["manage-partner-agreements", "tmp-ghl-field-probe"]);
+  });
+
+  it("names the residue rather than dropping it — the narrowing must be visible", () => {
+    const r = classifyEdgeFunctionShortfall(prime, target, new Set(["a", "b"]));
+    expect(r.undeclared.length).toBeGreaterThan(0);
+  });
+
+  it("with no declared set, reads exactly as it did before — everything is a gap", () => {
+    const r = classifyEdgeFunctionShortfall(prime, target, null);
+    expect(r.missing).toEqual(["b", "manage-partner-agreements", "tmp-ghl-field-probe"]);
+    expect(r.undeclared).toEqual([]);
+  });
+
+  it("a function the clone has and the prime does not is surplus, never a gap", () => {
+    const r = classifyEdgeFunctionShortfall(["a"], ["a", "tenant-only"], new Set(["a"]));
+    expect(r.extra).toEqual(["tenant-only"]);
+    expect(r.missing).toEqual([]);
+  });
+
+  it("blocks on the narrowed list, so a clean clone can reach an empty verdict", () => {
+    const body = readFileSync("src/server/handoff-parity.server.ts", "utf8");
+    expect(body).toContain("blocking.push(`missing_edge_functions:${edgeFns.missing_in_target.length}`)");
+    expect(body).not.toContain("edgeFns.prime_only_undeclared.length)\n    blocking");
+  });
+
+  it("every parity comparison states what the contract is, or states that it cannot", () => {
+    // A two-argument call is a comparison that silently forgot to say. Passing
+    // an explicit `{ declaredEdgeFunctions: null }` is allowed and honest.
+    const sources = [
+      "src/lib/backend-provisioning.functions.ts",
+      "src/lib/handoffs.functions.ts",
+      "src/routes/hooks.handoff-parity-refresh.tsx",
+      "src/server/handoff-parity.server.ts",
+    ];
+    for (const file of sources) {
+      const body = readFileSync(file, "utf8").replace(/^\s*\/\/.*$/gm, "");
+      // `(?<!function )` skips the declaration; every remaining occurrence is
+      // a call, and a call must say.
+      for (const m of body.matchAll(/(?<!function )computeParity\(([^;]*?)\)/gs)) {
+        expect(m[1], `${file}: computeParity called without stating the declared set`).toMatch(
+          /declaredEdgeFunctions/,
+        );
+      }
+    }
+  });
+});
+
+describe("what the repo declares is read from the tree, never from the fetch", () => {
+  const paths = [
+    "alpha/index.ts",
+    "beta/main.ts",
+    "gamma/README.md",
+    "_shared/util.ts",
+    "import_map.json",
+  ];
+
+  it("declares a slug with a runnable entrypoint and no others", () => {
+    expect(declaredFunctionSlugsFromPaths(paths)).toEqual(["alpha", "beta"]);
+  });
+
+  it("is unaffected by the two economies that narrow the snapshot's own list", () => {
+    // No skip set, no cap: the tree walk takes no options at all, which is
+    // the property that makes the list safe to compare a tenant against.
+    const body = readFileSync("src/server/prime-backend.server.ts", "utf8");
+    const fn = body.slice(body.indexOf("export function declaredFunctionSlugsFromPaths"));
+    const end = fn.indexOf("\n}");
+    const source = fn.slice(0, end);
+    expect(source).not.toMatch(/skipFunctionSlugs|functionLimit|selected|deployable/);
+  });
+
+  it("is populated on BOTH snapshot returns, including the one that fetches no source", () => {
+    const body = readFileSync("src/server/prime-backend.server.ts", "utf8");
+    const omitted = body.indexOf("functionSourceOmitted: true");
+    const full = body.indexOf("functionSourceOmitted: false");
+    expect(omitted).toBeGreaterThan(-1);
+    expect(full).toBeGreaterThan(-1);
+    // Each return must carry the field within the object literal that declares it.
+    expect(body.slice(Math.max(0, omitted - 400), omitted)).toContain("declaredFunctionSlugs");
+    expect(body.slice(Math.max(0, full - 400), full)).toContain("declaredFunctionSlugs");
+  });
+});
+
+describe("a fixed cost in front of the first stage is a livelock", () => {
+  const declared = ["a", "b"];
+  const names = ["OPENAI_API_KEY"];
+
+  it("skips the fetch only when the cache is complete and the clone holds everything", () => {
+    expect(
+      shouldSkipFunctionSource({
+        resumingSchema: false,
+        cachedSecretNames: names,
+        cachedDeclaredSlugs: declared,
+        liveFunctionSlugs: ["a", "b", "extra"],
+      }),
+    ).toBe(true);
+  });
+
+  it("buys the fetch on a cache miss — unknown is not empty", () => {
+    expect(
+      shouldSkipFunctionSource({
+        resumingSchema: false,
+        cachedSecretNames: null,
+        cachedDeclaredSlugs: declared,
+        liveFunctionSlugs: declared,
+      }),
+    ).toBe(false);
+  });
+
+  it("treats an empty cached secret list as a miss, never as a prime with no secrets", () => {
+    expect(
+      shouldSkipFunctionSource({
+        resumingSchema: false,
+        cachedSecretNames: [],
+        cachedDeclaredSlugs: declared,
+        liveFunctionSlugs: declared,
+      }),
+    ).toBe(false);
+  });
+
+  it("buys the fetch when the clone is missing a declared function — the bundles are the point", () => {
+    expect(
+      shouldSkipFunctionSource({
+        resumingSchema: false,
+        cachedSecretNames: names,
+        cachedDeclaredSlugs: declared,
+        liveFunctionSlugs: ["a"],
+      }),
+    ).toBe(false);
+  });
+
+  it("never skips on a resumed schema pass", () => {
+    expect(
+      shouldSkipFunctionSource({
+        resumingSchema: true,
+        cachedSecretNames: names,
+        cachedDeclaredSlugs: declared,
+        liveFunctionSlugs: declared,
+      }),
+    ).toBe(false);
+  });
+
+  it("refuses to cache a scan that read no bundle", () => {
+    expect(
+      scanIsCacheable({ functionSourceOmitted: true, sourceSha: "abc", secretNames: [] }),
+    ).toBe(false);
+    // Completeness is the FLAG, never the list looking plausible. A pass that
+    // read no bundle did not produce these names, whatever they are.
+    expect(
+      scanIsCacheable({ functionSourceOmitted: true, sourceSha: "abc", secretNames: ["X"] }),
+    ).toBe(false);
+    expect(
+      scanIsCacheable({ functionSourceOmitted: false, sourceSha: "abc", secretNames: [] }),
+    ).toBe(false);
+    expect(
+      scanIsCacheable({ functionSourceOmitted: false, sourceSha: "", secretNames: ["X"] }),
+    ).toBe(false);
+    expect(
+      scanIsCacheable({ functionSourceOmitted: false, sourceSha: "abc", secretNames: ["X"] }),
+    ).toBe(true);
+  });
+
+  it("keys the cache by commit, never by branch", () => {
+    const sql = readFileSync(
+      "supabase/migrations/20260904060000_prime_snapshot_scans.sql",
+      "utf8",
+    );
+    expect(sql).toContain("primary key (repo, git_sha)");
+    expect(sql).not.toMatch(/primary key \([^)]*branch/);
   });
 });

@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Re-run the gates on demand. GitHub does not always schedule a run for a
+  # pull request opened on a branch that was pushed first, and there is no
+  # honest way to kick one otherwise: an empty commit or a close-and-reopen
+  # fakes an event rather than asking for the checks. This asks for them.
+  workflow_dispatch:
 
 # Cancel superseded runs on the same ref to save CI minutes.
 concurrency:

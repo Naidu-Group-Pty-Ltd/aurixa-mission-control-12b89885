@@ -692,3 +692,108 @@ a bucket whose size limit or visibility drifted is exactly what this step
 exists to repair. A clone whose buckets cannot be listed is treated as holding
 **none**, which puts every bucket back on the create path: the fallback does
 the work rather than assuming it is done.
+
+## A function the prime's repo deleted is not a shortfall on the tenant
+
+`computeParity` compared the prime's **deployed** edge functions against the
+clone's, and reported everything the prime ran and the clone did not as
+`missing_edge_functions`. That count is a **blocking issue**, and a handoff
+leaves `draft` only when `blocking_issues` is empty:
+
+```ts
+if (handoff.state === "draft" && parity.blocking_issues.length === 0) { … }
+```
+
+Measured 4 Sep 2026, on both engine-provisioned clones: ten such functions,
+and not one of them is declared by the prime's repository at `main`.
+
+| Function | What it is |
+| --- | --- |
+| `manage-partner-agreements` | Deleted — the prime's own docs record the removal |
+| `finance-portal-agreements` | Deleted, same change |
+| `agreement-centre-render` | Deleted, same change |
+| `gamma-agreement-generator` | Belonged to the same withdrawn feature |
+| `sync-vault-internal-secret` | A one-off repair, run once |
+| `mc-diag-tmp`, `mc-wallet-diag` | Diagnostics |
+| `tmp-ghl-field-probe`, `ghl-workflow-probe`, `builder-stock-inpaint-probe` | Probes |
+
+So every clone this engine will ever produce was permanently un-handoff-able,
+for ten reasons no act on the clone could discharge. The clone was right and
+the verdict was wrong.
+
+**What the repo declares and what the prime happens to be running are
+different questions.** A clone is contracted to carry the first. The second is
+the prime's own deployment history, dead code included, and measuring a tenant
+against it makes the tenant answer for somebody else's residue.
+
+Three rules hold the fix.
+
+**The narrowing is disclosed, never silent.** What the prime runs and its repo
+has dropped is reported as `prime_only_undeclared` and named in the summary
+line. Hiding it would trade a verdict nobody can clear for a verdict nobody
+can trust, which is the worse of the two.
+
+**A declared set that is not known is not an empty one.** `declaredEdgeFunctions`
+is `readonly string[] | null`; `null` restores exactly the old comparison. The
+tree walk that produces the list is never capped, skipped or filtered — that is
+why `declaredFunctionSlugsFromPaths` reads the TREE rather than the snapshot's
+`functions` array, which two economies narrow and a third empties outright.
+
+**Every comparison states what the contract is, or states that it cannot.** A
+test rejects any `computeParity` call made with two arguments: a caller that
+genuinely has no repo context passes `{ declaredEdgeFunctions: null }` and says
+so.
+
+## A fixed cost in front of the first stage is a livelock
+
+Widening the secret-name scan to every bundle the prime defines was the right
+fix for nine-of-eighty-six secrets. It also made the snapshot the dominant
+fixed cost of a pass — ~1,033 files across 423 bundles, about thirteen batched
+GraphQL requests plus the decode — and that cost is paid **before the first
+stage runs**.
+
+Measured 4 Sep 2026 across half an hour of one-minute ticks:
+
+```
+{"processed":1,"results":[{"ok":false,"error":"deploying edge functions","budgetPaused":true}]}
+{"processed":1,"results":[{"ok":false,"error":"replicating the pg_cron schedule","budgetPaused":true}]}
+```
+
+Every invocation claimed one job, spent its 50 s, and paused at the same stage
+it had paused at the tick before. `attempts` stayed 0 — a budget pause is
+forward progress by construction — so nothing anywhere reported a problem.
+Two clones sat there indefinitely, each one pass from finishing.
+
+That is not slow progress. **When the fixed prologue exceeds the invocation
+budget, the pipeline cannot advance at any number of ticks**, and the signal
+that would say so is the one signal the design deliberately treats as healthy.
+
+The two things the expensive fetch buys — the secret names and the declared
+slug list — are properties of `(repo, commit)`. Nothing about a clone can
+change them. So they are cached by commit in `prime_snapshot_scans`, and a
+pass skips the fetch when all three hold:
+
+- the schema is not being resumed (a resumed pass omits the fetch anyway),
+- a complete scan is cached for **exactly this commit**, and
+- the clone already holds every function the repo declares, so no bundle would
+  be deployed even if it were fetched.
+
+Miss any one and the pass buys the fetch exactly as before.
+`shouldSkipFunctionSource` is pure so the conditions are pinned rather than
+described.
+
+Three rules bite.
+
+**The key is the commit, never the branch.** A branch moves; a scan attributed
+to a moved branch is a scan of a tree nobody has.
+
+**Only a complete scan is written.** `scanIsCacheable` judges completeness by
+`functionSourceOmitted` — the flag — and not by the list looking plausible. A
+pass that read no bundle did not produce those names, whatever they are, and
+recording its empty list under a real commit would teach every later pass that
+the prime references no secrets at all: the nine-of-eighty-six defect, made
+permanent and indistinguishable from a correct answer.
+
+**An empty cached list is a miss.** The prime references 86 secrets. Zero is
+the shape a broken scan leaves behind, so it buys the fetch rather than being
+trusted.
