@@ -3716,46 +3716,77 @@ export async function provisionCloneBackend(
   // Step 5: Deploy the prime's edge functions (non-fatal per function)
   pauseIfDue("deploying edge functions");
   // An empty function list must never be mistaken for a prime with no
-  // functions. A resumed schema pass declines to fetch the bundle source
-  // because it cannot reach this point — so if it somehow does, stop and
-  // fetch it, rather than "successfully" deploying nothing. The empty
-  // resumeStage clears the marker, so the next pass takes a full snapshot.
+  // functions, and the empty resumeStage on the pause below clears the
+  // marker so the next pass takes a full snapshot.
+  //
+  // An absent source has two causes and they are NOT the same thing.
+  //
+  // One is a resumed schema pass, which declines the fetch because it cannot
+  // reach this point — so if it somehow does, the only safe move is to stop
+  // and fetch, rather than "successfully" deploying nothing.
+  //
+  // The other is a pass that declined the fetch BECAUSE the project already
+  // holds every function the repo declares (see `shouldSkipFunctionSource`).
+  // There is nothing for this stage to do, and pausing on it is a livelock:
+  // the next pass declines the fetch for the same good reason and pauses in
+  // the same place, for ever. That is what the first version of this did.
+  //
+  // The distinction is settled against the PROJECT, never against the
+  // snapshot: `declaredFunctionSlugs` comes from the repo's tree walk and is
+  // complete on every pass, and the project is asked what it is actually
+  // running. Both conservative readings pause — an empty declared list is
+  // "not established" rather than "the prime has none", and a project whose
+  // function list cannot be read counts as holding nothing.
+  let edgeFunctions: EdgeFunctionDeployResult[];
   if (snapshot.functionSourceOmitted) {
-    throw new BudgetPause(
-      "the edge functions need the prime's source, which this pass did not fetch — taking a full snapshot next tick",
-      "",
-    );
-  }
-  // On a resume, ask the PROJECT which functions it already holds and deploy
-  // only the rest — the target is the authority, never a diary of past runs.
-  // This is what turns repeated budgeted invocations into compound progress
-  // over the longest stage in the pipeline.
-  let functionsToDeploy = snapshot.functions;
-  let alreadyDeployed: EdgeFunctionDeployResult[] = [];
-  if (input.existingProjectRef) {
+    const declared = snapshot.declaredFunctionSlugs;
     const liveSlugs = new Set(
       await listProjectEdgeFunctionSlugs(projectRef).catch(() => [] as string[]),
     );
-    if (liveSlugs.size > 0) {
-      alreadyDeployed = snapshot.functions
-        .filter((f) => liveSlugs.has(f.slug))
-        .map((f) => ({ slug: f.slug, success: true, skipped: true }));
-      functionsToDeploy = snapshot.functions.filter((f) => !liveSlugs.has(f.slug));
-      if (alreadyDeployed.length > 0) {
-        await onStatusUpdate?.(
-          "migrating",
-          `Resume: ${alreadyDeployed.length}/${snapshot.functions.length} edge functions already on the project — deploying the remaining ${functionsToDeploy.length}`,
-        );
+    const notYetDeployed = declared.filter((slug) => !liveSlugs.has(slug));
+    if (declared.length === 0 || notYetDeployed.length > 0) {
+      throw new BudgetPause(
+        "the edge functions need the prime's source, which this pass did not fetch — taking a full snapshot next tick",
+        "",
+      );
+    }
+    await onStatusUpdate?.(
+      "migrating",
+      `All ${declared.length} edge functions the prime's repository declares are already on the project — nothing to deploy this pass`,
+    );
+    edgeFunctions = declared.map((slug) => ({ slug, success: true, skipped: true }));
+  } else {
+    // On a resume, ask the PROJECT which functions it already holds and deploy
+    // only the rest — the target is the authority, never a diary of past runs.
+    // This is what turns repeated budgeted invocations into compound progress
+    // over the longest stage in the pipeline.
+    let functionsToDeploy = snapshot.functions;
+    let alreadyDeployed: EdgeFunctionDeployResult[] = [];
+    if (input.existingProjectRef) {
+      const liveSlugs = new Set(
+        await listProjectEdgeFunctionSlugs(projectRef).catch(() => [] as string[]),
+      );
+      if (liveSlugs.size > 0) {
+        alreadyDeployed = snapshot.functions
+          .filter((f) => liveSlugs.has(f.slug))
+          .map((f) => ({ slug: f.slug, success: true, skipped: true }));
+        functionsToDeploy = snapshot.functions.filter((f) => !liveSlugs.has(f.slug));
+        if (alreadyDeployed.length > 0) {
+          await onStatusUpdate?.(
+            "migrating",
+            `Resume: ${alreadyDeployed.length}/${snapshot.functions.length} edge functions already on the project — deploying the remaining ${functionsToDeploy.length}`,
+          );
+        }
       }
     }
+    const deployedNow = await deployEdgeFunctions(
+      projectRef,
+      functionsToDeploy,
+      onStatusUpdate,
+      input.deadlineAt,
+    );
+    edgeFunctions = [...alreadyDeployed, ...deployedNow];
   }
-  const deployedNow = await deployEdgeFunctions(
-    projectRef,
-    functionsToDeploy,
-    onStatusUpdate,
-    input.deadlineAt,
-  );
-  const edgeFunctions = [...alreadyDeployed, ...deployedNow];
 
   // A pass that carried only SOME of the functions may not pronounce the
   // deployment complete, exactly as a resumed schema pass may not pronounce
