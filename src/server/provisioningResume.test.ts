@@ -2267,7 +2267,9 @@ describe("a fleet-sync pass that did nothing says nothing", () => {
 
   it("writes no fact about the clone when it applied, failed and blocked nothing", () => {
     const bl = block();
-    expect(bl).toMatch(/const didNothing =\s*successes\.length === 0 && failures\.length === 0 && blocked\.length === 0/);
+    expect(bl).toMatch(
+      /const didNothing =\s*successes\.length === 0 && failures\.length === 0 && blocked\.length === 0 && held\.length === 0/,
+    );
     expect(bl).toMatch(/\.\.\.\(didNothing\s*\?\s*\{\}/);
   });
 
@@ -2297,5 +2299,91 @@ describe("a fleet-sync pass that did nothing says nothing", () => {
     const bl = block();
     expect(bl).toContain("source_sha: sourceSha");
     expect(bl).toContain("worker_started_at: null");
+  });
+});
+
+describe("a body too big to hold is not a migration that failed", () => {
+  const replay = () => readFileSync("src/server/backend-provisioning.server.ts", "utf8");
+  const fleet = () => readFileSync("src/server/fleet-migration.server.ts", "utf8");
+  const button = () => readFileSync("src/server/migration-sync.functions.ts", "utf8");
+
+  /** The oversize branch of the replay loop, from the catch to the chunker. */
+  const oversizeBranch = () => {
+    const s = replay();
+    const at = s.indexOf("if (!(e instanceof OversizedMigrationError))");
+    expect(at).toBeGreaterThan(-1);
+    return s.slice(at, s.indexOf("if (!sentInChunks)", at));
+  };
+
+  it("reports a hold rather than rethrowing into the generic failure path", () => {
+    // Rethrowing sent it to the outer catch, which pushes `success: false`
+    // with no way to tell it apart from a schema rejection.
+    const b = oversizeBranch();
+    expect(b).toMatch(/if \(!oversize\) \{/);
+    expect(b).toMatch(/heldOversize: true/);
+    // Still halts: the versions after this one would run against a schema
+    // missing its effect.
+    expect(b).toMatch(/break;/);
+  });
+
+  it("keeps rethrowing anything that is NOT an oversize refusal", () => {
+    expect(oversizeBranch()).toMatch(/if \(!\(e instanceof OversizedMigrationError\)\) throw e;/);
+  });
+
+  it("gives the two scoped callers the stream they already hold", () => {
+    // Both build a corpus and both pass `loadSql` from it; `openSqlStream` is
+    // on the same object. One of four callers supplied it, which is why the
+    // other three could not apply the 39 MB seed at all.
+    for (const src of [fleet(), button()]) {
+      expect(src).toMatch(/streamSql: \(m\) => corpus\.openSqlStream\(m\.id\)/);
+    }
+  });
+
+  it("never lets a hold move a clone out of ready, in either caller", () => {
+    for (const src of [fleet(), button()]) {
+      // The failure set that decides `status` must exclude holds.
+      expect(src).toMatch(/const failures = results\.filter\(\(r\) => !r\.success && !r\.heldOversize\)/);
+      expect(src).toMatch(/const held = results\.filter\(\(r\) => r\.heldOversize\)/);
+      // And `held` must not appear in the status expression itself.
+      const at = src.indexOf('status: failures.length > 0 ? ("failed" as const)');
+      expect(at).toBeGreaterThan(-1);
+      expect(src.slice(at, at + 90)).not.toContain("held");
+    }
+  });
+
+  it("names the hold on the operator's status line, as a hold", () => {
+    // An operator who reads "failed" goes looking for what the clone
+    // rejected. There is nothing to find, because nothing was sent.
+    for (const src of [fleet(), button()]) {
+      expect(src).toMatch(/held\.length > 0/);
+      expect(src).toContain("is too large for this pass to carry");
+      expect(src).toContain("still in the fleet");
+    }
+  });
+
+  it("raises no operator alert for a clone that is fine", () => {
+    // `cascade_failed` says "no further prime migrations will reach this
+    // clone's database". A held migration means the opposite.
+    const s = fleet();
+    const at = s.indexOf("for (const h of held)");
+    expect(at).toBeGreaterThan(-1);
+    const upToNotify = s.slice(at, s.indexOf("notifyOperators", at));
+    // The failure guard must stand between the hold loop and the notify.
+    expect(upToNotify).toMatch(/if \(failures\.length > 0\) \{/);
+  });
+
+  it("counts a hold in the run's own result, separately from a failure", () => {
+    const s = fleet();
+    expect(s).toMatch(/heldOversize: Array<\{ cloneId: string; cloneName: string; migration: string \}>/);
+    expect(s).toMatch(/out\.heldOversize\.push\(\{ cloneId, cloneName, migration: h\.name \}\)/);
+    expect(s).toMatch(/held_oversize: out\.heldOversize\.map/);
+  });
+
+  it("stops the sync BUTTON erasing a version the way the sweep used to", () => {
+    // The same defect as the scheduled pass, in its sibling. One button press
+    // would have re-introduced what the sweep was just fixed for.
+    const s = button();
+    expect(s).toMatch(/\.\.\.\(latestApplied \? \{ migration_version: latestApplied \} : \{\}\)/);
+    expect(s).not.toMatch(/^\s*migration_version: latestApplied,$/m);
   });
 });

@@ -101,6 +101,17 @@ export type FleetMigrationResult = {
    */
   excluded: number;
   /**
+   * Clones where a migration was left unsent because its body is past the
+   * corpus ceiling and this pass could not stream it.
+   *
+   * Its own field rather than a line in `failed`, because the two are opposite
+   * claims about the clone: `failed` says the clone rejected something and has
+   * left the fleet, `heldOversize` says nothing was sent and it has not. A run
+   * that reported the second as the first is what ejected a healthy clone for
+   * a day.
+   */
+  heldOversize: Array<{ cloneId: string; cloneName: string; migration: string }>;
+  /**
    * Repo migrations the prime has NOT applied, and which were therefore not
    * offered to any clone. Reported rather than silently filtered — a run that
    * says "962 files, 4 applied" with no account of the rest is how a corpus
@@ -130,6 +141,7 @@ const EMPTY: FleetMigrationResult = {
   upToDate: 0,
   failed: [],
   excluded: 0,
+  heldOversize: [],
   withheld: 0,
   withheldBreakdown: { neverApplied: 0, skewSuspected: 0 },
 };
@@ -301,7 +313,12 @@ export async function runFleetMigrationSync(
     };
   }
 
-  const out: FleetMigrationResult = { ...EMPTY, failed: [], excluded: excludedCount ?? 0 };
+  const out: FleetMigrationResult = {
+    ...EMPTY,
+    failed: [],
+    heldOversize: [],
+    excluded: excludedCount ?? 0,
+  };
   if (!backends || backends.length === 0) return out;
 
   // List the prime's migrations ONCE, as metadata, and let the bodies arrive on
@@ -363,15 +380,60 @@ export async function runFleetMigrationSync(
         // `runnable` alone cannot say whether a cleared version sits behind a
         // withheld one. The whole corpus can.
         { corpus: corpus.metas, runnableIds: new Set(runnable.map((m) => m.id)) },
+        undefined,
+        /*
+          A BODY TOO BIG TO HOLD IS STILL SENDABLE.
+
+          `openPrimeMigrationCorpus` refuses a body past its ceiling, and the
+          ceiling is right: the template-library seed is one 39 MB INSERT, and
+          this runtime cannot hold it. But `applyPrimeMigrations` has always
+          been able to STREAM such a body and send it as statements — and only
+          one of its four callers ever supplied the option, so the other three
+          could not apply that migration at all.
+
+          The corpus this function already holds exposes the stream. Passing it
+          is the whole fix: the chunker sends the file's own ON CONFLICT clause
+          with every statement, so a pass that dies mid-seed is re-sent by the
+          next one rather than double-inserting, and the ledger row is written
+          only once every statement has landed.
+
+          No cursor is passed. The self-healing lane persists one because it
+          runs inside a hard invocation budget; this job is reclaimed after
+          `STALE_CLAIM_MINUTES` and re-sends from the first statement, which is
+          idempotent by the clause above. Slower, never wrong.
+        */
+        { streamSql: (m) => corpus.openSqlStream(m.id) },
       );
       const successes = results.filter((r) => r.success && !r.skipped);
-      const failures = results.filter((r) => !r.success);
+      /*
+        A HOLD IS NOT A FAILURE, AND THE DIFFERENCE IS THE CLONE'S LIFE.
+
+        A body past the corpus ceiling with no streaming option available is
+        reported `heldOversize`: the clone was never sent anything and is
+        exactly as healthy as it was. An ordinary failure means the clone's
+        schema REJECTED something and the replay must stop.
+
+        Both halt the replay. Only one may move the clone out of `ready` — and
+        conflating them is what put `NPC Client Dashboard` at `failed` on 3
+        September under `Migration failed at 20260916100000_seed_template_
+        library_v9_report_part_numbering.sql`, ejected from this worker's own
+        query, with an operator notice reading "no further prime migrations
+        will reach this clone's database". It was true, and nothing was wrong
+        with the clone.
+
+        With `streamSql` supplied above this branch should now be unreachable
+        from here. It is kept because it is the safety net for the NEXT caller,
+        and because the cost of getting it wrong is measured rather than
+        imagined.
+      */
+      const held = results.filter((r) => r.heldOversize);
+      const failures = results.filter((r) => !r.success && !r.heldOversize);
       // Runnable, but sitting behind a version this clone has not got. Skipped
       // rather than run — see `partitionByDependency`.
       const blocked = results.filter((r) => r.blockedBy && r.blockedBy.length > 0);
 
       out.processed++;
-      if (successes.length === 0 && failures.length === 0) {
+      if (successes.length === 0 && failures.length === 0 && held.length === 0) {
         out.upToDate++;
       } else if (failures.length === 0) {
         out.advanced++;
@@ -406,7 +468,8 @@ export async function runFleetMigrationSync(
         about the clone's schema exactly as it found it. And where the pass DID
         do something, a null `latestApplied` is never interpolated into prose.
       */
-      const didNothing = successes.length === 0 && failures.length === 0 && blocked.length === 0;
+      const didNothing =
+        successes.length === 0 && failures.length === 0 && blocked.length === 0 && held.length === 0;
       const syncedTo = latestApplied ?? "the prime's latest recorded migration";
       const { error: updErr } = await supabase
         .from("clone_backends")
@@ -425,11 +488,19 @@ export async function runFleetMigrationSync(
             : {
                 ...(latestApplied ? { migration_version: latestApplied } : {}),
                 migrations_applied: results,
+                // `held` is deliberately absent from this expression: a body
+                // this worker declined to carry never moves the clone.
                 status: failures.length > 0 ? ("failed" as const) : ("ready" as const),
                 status_detail:
                   failures.length > 0
                     ? `Migration failed at ${failures[0].name}`
-                    : blocked.length > 0
+                    : held.length > 0
+                      ? // Named, and named as a HOLD. An operator who reads
+                        // "failed" goes looking for what the clone rejected;
+                        // there is nothing to find, because nothing was sent.
+                        `Synced to ${syncedTo} — ${held[0].name} is too large for this pass to carry ` +
+                        `and is left for the chunking lane; the clone is unchanged and still in the fleet`
+                      : blocked.length > 0
                       ? // `ready` and NOT level. Saying only "Synced to X" here
                         // would report a clone holding dozens of migrations back
                         // as healthy — the exact shape of report this module
@@ -445,6 +516,14 @@ export async function runFleetMigrationSync(
       if (updErr) {
         out.failed.push({ cloneId, cloneName, error: `result not recorded: ${updErr.message}` });
         continue;
+      }
+
+      // Reported, and reported as what it is. No notification: nothing has
+      // gone wrong with this clone, it is still in the fleet, and the run's
+      // own result is where a held migration belongs. `cascade_failed` here
+      // would be an alert about a healthy tenant.
+      for (const h of held) {
+        out.heldOversize.push({ cloneId, cloneName, migration: h.name });
       }
 
       if (failures.length > 0) {
@@ -501,6 +580,7 @@ export async function runFleetMigrationSync(
       advanced: out.advanced,
       up_to_date: out.upToDate,
       failed: out.failed.length,
+      held_oversize: out.heldOversize.map((h) => `${h.cloneName}: ${h.migration}`),
       excluded: out.excluded,
       withheld: out.withheld,
       withheld_never_applied: scoped.breakdown.neverApplied,
