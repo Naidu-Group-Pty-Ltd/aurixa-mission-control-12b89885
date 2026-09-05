@@ -47,12 +47,35 @@ describe("the corpus streams a body it will not hold", () => {
 });
 
 describe("the replay chunks an oversized seed", () => {
-  const loop = sliceFrom(replay, "let sentInChunks = false;", 2_000);
+  // Sized to the whole iteration rather than a magic length: this window has
+  // already gone stale once, when a comment pushed the ledger insert past it
+  // and a live rule reported as broken.
+  const loop = (() => {
+    const at = replay.indexOf("let sentInChunks = false;");
+    expect(at, "anchor not found: let sentInChunks = false;").toBeGreaterThan(-1);
+    const end = replay.indexOf("slowestMs = Math.max(slowestMs", at);
+    expect(end, "end anchor not found").toBeGreaterThan(at);
+    return replay.slice(at, end);
+  })();
 
-  it("falls back only for that error and only when told how", () => {
-    expect(loop).toMatch(
-      /if \(!\(e instanceof OversizedMigrationError\) \|\| !oversize\) throw e;/,
-    );
+  it("falls back only for that error, and only when told how", () => {
+    // Three outcomes, and the middle one is the fix of 4 Sep 2026. Anything
+    // that is NOT an oversize refusal rethrows. An oversize refusal with no
+    // streaming option is HELD — reported, halting, and never a failure that
+    // moves the clone. With the option it chunks.
+    expect(loop).toMatch(/if \(!\(e instanceof OversizedMigrationError\)\) throw e;/);
+    expect(loop).toMatch(/if \(!oversize\) \{/);
+    expect(loop).toMatch(/heldOversize: true/);
+    expect(loop).toContain("applyChunkedSeed(projectRef, m, oversize, budget)");
+  });
+
+  it("a held body is never reported as a failed migration", () => {
+    // The whole point of the split: `success: false` alone is what the fleet
+    // sync read as "this clone rejected something", and it ejected a healthy
+    // clone from the fleet for a day on the strength of it.
+    const held = loop.slice(loop.indexOf("if (!oversize) {"), loop.indexOf("break;"));
+    expect(held).toContain("heldOversize: true");
+    expect(held).not.toContain("throw ");
   });
 
   it("records the ledger only after every statement has gone", () => {

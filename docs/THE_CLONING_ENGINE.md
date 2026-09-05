@@ -1029,3 +1029,49 @@ did do something, a null `latestApplied` is never interpolated into prose.
 
 Saying nothing on a no-op must not become saying nothing at all: a failure and a
 held-back migration still report exactly as before, and a test pins both.
+
+## A body too big to hold is not a migration that failed
+
+`openPrimeMigrationCorpus` refuses a body past its ceiling, and the ceiling is
+right: the template-library seed is one 39 MB `INSERT`, and this runtime cannot
+hold it — a 39 MB file is a 52 MB base64 response, a 78 MB UTF-16 string and a
+second copy for the split, against a 128 MB isolate.
+
+`applyPrimeMigrations` has always been able to STREAM such a body and send it as
+statements the Management API will take. **Only one of its four callers ever
+supplied the option.** The other three rethrew the refusal into the generic
+failure path, where a failed migration means the clone REJECTED something — so
+the fleet sync read `failures.length > 0`, moved the clone to `failed`, ejected
+it from its own eligible query, and notified operators that "no further prime
+migrations will reach this clone's database."
+
+That is exactly where `NPC Client Dashboard` sat from 3 September, under
+`Migration failed at 20260916100000_seed_template_library_v9_report_part_
+numbering.sql`. Nothing was wrong with the clone. Nothing had been sent to it.
+
+Two halves to the fix, and the second is the one that matters.
+
+**The two scoped callers now pass the stream they already hold.** Both build a
+corpus and both pass `loadSql` from it; `openSqlStream` is on the same object.
+One line each. Neither passes a cursor — the self-healing lane persists one
+because it runs inside a hard invocation budget, while these are reclaimed after
+`STALE_CLAIM_MINUTES` and re-send from the first statement, which is idempotent
+because the chunker carries the file's own `ON CONFLICT` clause on every
+statement and the ledger row is written only after the last one lands.
+
+**And an oversize refusal is now its own outcome, `heldOversize`.** It halts the
+replay exactly as a failure does — the versions after it would run against a
+schema missing its effect — and it must never move the clone out of `ready`. The
+status line says so in words, because an operator who reads "failed" goes looking
+for what the clone rejected and there is nothing to find. With the stream wired
+in this branch should be unreachable from both callers; it is kept because it is
+the safety net for the next caller, and because the cost of getting it wrong was
+measured rather than imagined.
+
+Two things came out of the same file. The sync BUTTON carried its own copy of the
+no-op-overwrite defect — `migration_version: latestApplied` unconditionally, so
+one press on a level clone would have re-erased the version the scheduled sweep
+had just been fixed for keeping. And the discarded-error ratchet had been reading
+three of that file's writes as checked **because the word `error` appears in
+them — as the name of the `error_message` column**. They were never checked. All
+three are bound and branched now and the file's budget is 0.

@@ -161,13 +161,23 @@ export const syncCloneMigrations = createServerFn({ method: "POST" })
       }
 
       // Update status to migrating
-      await supabase
+      // The "I have started" mark. If it does not land, the row still reads
+      // `ready` for the length of the run and a second press claims the same
+      // clone — so a failure here is worth a line even though it does not
+      // stop the sync.
+      const { error: startErr } = await supabase
         .from("clone_backends")
         .update({
           status: "migrating" as const,
           status_detail: `Syncing migrations from ${source.owner}/${source.repo}...`,
         })
         .eq("clone_id", data.cloneId);
+      if (startErr) {
+        console.error("[migration-sync] start mark not recorded", {
+          cloneId: data.cloneId,
+          error: startErr.message,
+        });
+      }
 
       try {
         // The SCOPED corpus — the same one the scheduled fleet sync replays —
@@ -188,7 +198,10 @@ export const syncCloneMigrations = createServerFn({ method: "POST" })
         // here is what made this button time out at 60 s without finishing.
         const scoped = await openScopedPrimeCorpus(supabase, source);
         if (!scoped.ok) {
-          await supabase
+          // The refusal is the whole outcome of this press, so a write that
+          // silently failed would leave the operator with a row that says
+          // nothing happened and a toast that says it was refused.
+          const { error: refusalErr } = await supabase
             .from("clone_backends")
             .update({
               status: "ready" as const,
@@ -196,6 +209,12 @@ export const syncCloneMigrations = createServerFn({ method: "POST" })
               error_message: scoped.error,
             })
             .eq("clone_id", data.cloneId);
+          if (refusalErr) {
+            console.error("[migration-sync] refusal not recorded", {
+              cloneId: data.cloneId,
+              error: refusalErr.message,
+            });
+          }
           return { ok: false, error: scoped.error };
         }
         const { corpus, runnable } = scoped;
@@ -208,17 +227,40 @@ export const syncCloneMigrations = createServerFn({ method: "POST" })
           // Same rule as the fleet sync: this button is the other scoped
           // caller, so it gets the same refusal to step over a hole.
           { corpus: corpus.metas, runnableIds: new Set(runnable.map((m) => m.id)) },
+          undefined,
+          // And the same stream. A body past the corpus ceiling used to make
+          // this button report "Migration failed at <the 39 MB seed>" — the
+          // one migration an operator is most likely to press it FOR.
+          { streamSql: (m) => corpus.openSqlStream(m.id) },
         );
 
         const successes = results.filter((r) => r.success && !r.skipped);
-        const failures = results.filter((r) => !r.success);
+        // Same split as the fleet sync, and for the same reason: a body this
+        // pass declined to carry is not something the clone rejected, and only
+        // one of those may take a healthy clone out of `ready`.
+        const held = results.filter((r) => r.heldOversize);
+        const failures = results.filter((r) => !r.success && !r.heldOversize);
         const newVersion = latestApplied ?? backend.migration_version ?? "none";
 
-        // Update backend record
-        await supabase
+        /*
+          Bound and branched, not fired and forgotten.
+
+          The ratchet had been reading this statement as checked because the
+          word `error` appears in it — as the NAME of the `error_message`
+          column. It was never checked: this is the write that carries the
+          verdict an operator reads, and a rejected update leaves the row
+          saying whatever it said before the button was pressed, with the
+          function still reporting success.
+        */
+        const { error: recordErr } = await supabase
           .from("clone_backends")
           .update({
-            migration_version: latestApplied,
+            // NEVER null. `latestApplied` is null whenever the ordered list was
+            // empty — which is the ordinary shape of a press on a clone that is
+            // already level — and writing it erases the version the row holds.
+            // That is the defect the scheduled sync carried until 4 Sep 2026;
+            // one button press would have re-introduced it here.
+            ...(latestApplied ? { migration_version: latestApplied } : {}),
             source_repo: `${source.owner}/${source.repo}`,
             source_ref: source.branch,
             source_sha: sourceSha,
@@ -227,13 +269,25 @@ export const syncCloneMigrations = createServerFn({ method: "POST" })
             status_detail:
               failures.length > 0
                 ? `Migration failed at ${failures[0].name}: ${failures[0].error}`
-                : `Migrations up to date (${newVersion})`,
+                : held.length > 0
+                  ? `Synced to ${newVersion} — ${held[0].name} is too large for this pass to carry ` +
+                    `and is left for the chunking lane; the clone is unchanged and still in the fleet`
+                  : `Migrations up to date (${newVersion})`,
             error_message: failures.length > 0 ? failures[0].error : null,
           })
           .eq("clone_id", data.cloneId);
+        if (recordErr) {
+          // Not thrown: the migrations really were applied, and claiming
+          // otherwise would be a worse lie than a stale status line. Said
+          // once, where somebody will see it.
+          console.error("[migration-sync] result not recorded", {
+            cloneId: data.cloneId,
+            error: recordErr.message,
+          });
+        }
 
         // Audit log
-        await supabase.from("audit_log").insert({
+        const { error: auditWriteErr } = await supabase.from("audit_log").insert({
           action: "clone_backend.migrations_synced",
           entity_type: "clone",
           entity_id: data.cloneId,
@@ -241,12 +295,21 @@ export const syncCloneMigrations = createServerFn({ method: "POST" })
           metadata: {
             applied: successes.length,
             failed: failures.length,
+            // Counted separately in the record too, so an audit row cannot
+            // report a hold as a failure any more than the status line can.
+            held_oversize: held.map((h) => h.name),
             new_version: newVersion,
             source_repo: `${source.owner}/${source.repo}`,
             source_sha: sourceSha,
             failures: failures.map((f) => ({ id: f.id, error: f.error })),
           },
         });
+        if (auditWriteErr) {
+          console.error("[migration-sync] audit row not written", {
+            cloneId: data.cloneId,
+            error: auditWriteErr.message,
+          });
+        }
 
         return {
           ok: true,

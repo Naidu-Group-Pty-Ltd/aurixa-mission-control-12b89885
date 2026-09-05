@@ -1936,6 +1936,26 @@ export type PrimeMigrationResult = {
    * bare "skipped". See `partitionByDependency`.
    */
   blockedBy?: string[];
+  /**
+   * Set when the body was too large for this runtime to HOLD and this caller
+   * supplied no streaming option, so the replay declined to carry it.
+   *
+   * It is deliberately distinct from an ordinary failure, because the two mean
+   * opposite things about the clone. A failed migration says the clone's schema
+   * rejected something and the clone is broken; this says the clone was never
+   * sent anything and is exactly as healthy as before. Collapsing them is what
+   * left `NPC Client Dashboard` at `failed` from 3 September — the 39 MB
+   * template-library seed is refused by the corpus ceiling by design, the
+   * fleet sync reported that refusal as `Migration failed at
+   * 20260916100000_seed_template_library_v9_report_part_numbering.sql`, and the
+   * clone was ejected from the fleet with an operator notice reading "no
+   * further prime migrations will reach this clone's database."
+   *
+   * Like a real failure it HALTS the replay — every later version would run
+   * against a schema missing this one's effect. Unlike a real failure it must
+   * never move the clone out of `ready`.
+   */
+  heldOversize?: boolean;
 };
 
 /**
@@ -2111,7 +2131,27 @@ export async function applyPrimeMigrations(
       try {
         sql = m.sql ?? (loadSql ? await loadSql({ id: m.id, name: m.name }) : undefined);
       } catch (e) {
-        if (!(e instanceof OversizedMigrationError) || !oversize) throw e;
+        if (!(e instanceof OversizedMigrationError)) throw e;
+        if (!oversize) {
+          // A body this runtime declines to HOLD is not a migration that
+          // FAILED. Rethrowing here sent it through the generic failure path,
+          // where the fleet sync reads `failures.length > 0` and moves the
+          // clone to `failed` — which takes a perfectly healthy clone out of
+          // the fleet and stops every LATER migration reaching it too.
+          //
+          // Halt the replay, because the versions after this one would run
+          // against a schema missing its effect. But halt it as a HOLD, so the
+          // caller can leave the clone where it is and name the lane that can
+          // carry it.
+          results.push({
+            id: m.id,
+            name: m.name,
+            success: false,
+            heldOversize: true,
+            error: e.message,
+          });
+          break;
+        }
         // Too big to hold, not too big to send: streamed and chunked. A pass
         // the budget stops inside the seed leaves a cursor and reports
         // `stoppedEarly`; the ledger row is written only once every
