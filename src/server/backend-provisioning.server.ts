@@ -670,6 +670,109 @@ export async function replicateStorageConfig(
   }
 }
 
+export type ApiConfigResult =
+  | { status: "applied"; schemas: string; previous: string }
+  | { status: "already_matches"; schemas: string }
+  | { status: "skipped"; reason: string }
+  | { status: "failed"; error: string };
+
+/**
+ * Union the prime's exposed schemas into the clone's, preserving order.
+ *
+ * NEVER NARROWS. The clone's own list comes first and is kept whole: a
+ * deployment that has exposed a schema of its own must not lose it because
+ * the prime does not have one — the same rule that stops
+ * `replicateStorageConfig` lowering a clone's upload limit, for the same
+ * reason. This replicates what the prime NEEDS; it does not make the clone a
+ * copy of the prime's opinions.
+ */
+export function mergeExposedSchemas(cloneCsv: string, primeCsv: string): string {
+  const split = (csv: string) =>
+    csv
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean);
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const name of [...split(cloneCsv), ...split(primeCsv)]) {
+    if (seen.has(name)) continue;
+    seen.add(name);
+    out.push(name);
+  }
+  return out.join(", ");
+}
+
+/**
+ * Give the clone the prime's PROJECT-LEVEL exposed schemas.
+ *
+ * PostgREST serves only the schemas named in its `db_schema` config. The prime
+ * exposes `public, graphql_public, aml`; a fresh project gets the platform
+ * default, which is the first two. So every one of the 29 modules across 22
+ * edge functions that reaches `.schema('aml')` answered
+ *
+ *   PGRST106 {"code":"PGRST106","message":"Invalid schema: aml"}
+ *
+ * on every clone, from the day it was built. Measured 6 Sep 2026 on NPC Test:
+ * `aml-verification-processor` returned HTTP 500 on 510 of 510 cron runs in
+ * twenty-four hours, logging exactly that, and the whole AML/CTF module was
+ * dead at the API layer on all three clones.
+ *
+ * It was invisible to every check the engine has because IT IS NOT A DATABASE
+ * OBJECT. Catalog introspection compares tables, columns, indexes, policies
+ * and triggers, and it was right about every one of them: the 113 `aml`
+ * tables and their 112 RLS policies are present and identical to the prime.
+ * They simply were not addressable. Same class as the project upload limit
+ * above, which made two storage buckets impossible to create for a reason no
+ * bucket-level retry could ever fix.
+ *
+ * Three rules, and the first cost the most time. **The control plane owns
+ * this setting**: writing `pgrst.db_schemas` onto the `authenticator` role —
+ * which is what this endpoint does underneath, and what the dashboard's
+ * "Exposed schemas" control writes — does NOT reach a running PostgREST on
+ * Supabase Cloud. Two `NOTIFY pgrst, 'reload config'` over seventeen minutes
+ * changed nothing; this PATCH is the only thing that does. **It never
+ * narrows** (see `mergeExposedSchemas`). And **a failure is reported and
+ * non-fatal**, because a clone with an unexposed schema is still worth
+ * finishing — it just cannot serve that module, and the status line says so
+ * rather than leaving an operator to find out from a 500 a day later.
+ */
+export async function replicateApiConfig(
+  primeRef: string,
+  cloneRef: string,
+): Promise<ApiConfigResult> {
+  const read = async (ref: string): Promise<string | null> => {
+    const res = await fetch(`${MGMT_API}/projects/${ref}/postgrest`, { headers: headers() });
+    if (!res.ok) throw new Error(`${res.status} — ${await res.text()}`);
+    const body = (await res.json()) as { db_schema?: unknown };
+    return typeof body?.db_schema === "string" ? body.db_schema : null;
+  };
+  let wanted: string | null;
+  let current: string | null;
+  try {
+    [wanted, current] = await Promise.all([read(primeRef), read(cloneRef)]);
+  } catch (err) {
+    return { status: "failed", error: err instanceof Error ? err.message : String(err) };
+  }
+  if (wanted === null) {
+    return { status: "skipped", reason: "the prime's project reports no exposed schemas" };
+  }
+  const merged = mergeExposedSchemas(current ?? "", wanted);
+  if (current !== null && merged === current) {
+    return { status: "already_matches", schemas: current };
+  }
+  try {
+    const res = await fetch(`${MGMT_API}/projects/${cloneRef}/postgrest`, {
+      method: "PATCH",
+      headers: headers(),
+      body: JSON.stringify({ db_schema: merged }),
+    });
+    if (!res.ok) return { status: "failed", error: `${res.status} — ${await res.text()}` };
+    return { status: "applied", schemas: merged, previous: current ?? "" };
+  } catch (err) {
+    return { status: "failed", error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 /**
  * Create one bucket on the clone, through the PROJECT's Storage API.
  *
@@ -3734,6 +3837,7 @@ export type ProvisionBackendResult = {
   realtimePublication: RealtimeReplicationResult;
   /** The project-level upload limit, which decides which buckets can exist. */
   storageConfig: StorageConfigResult;
+  apiConfig: ApiConfigResult;
 };
 
 /**
@@ -4090,6 +4194,10 @@ export async function provisionCloneBackend(
     status: "skipped",
     reason: "not attempted on this pass",
   };
+  let apiConfig: ApiConfigResult = {
+    status: "skipped",
+    reason: "not attempted on this pass",
+  };
   try {
     const primeRef = input.primeBackendRef;
     // The project's upload limit FIRST: a bucket may not ask for more room
@@ -4100,6 +4208,17 @@ export async function provisionCloneBackend(
       await onStatusUpdate?.(
         "migrating",
         `Project upload limit not replicated (${storageConfig.error}) — buckets asking for more room than this project allows will be refused`,
+      );
+    }
+    // The project's EXPOSED SCHEMAS, for the same reason and in the same
+    // place: a setting that lives on the project rather than in the database,
+    // which catalog introspection cannot see and cannot repair. Without it
+    // every `.schema('aml')` call on this clone answers "Invalid schema".
+    apiConfig = await replicateApiConfig(primeRef, projectRef);
+    if (apiConfig.status === "failed") {
+      await onStatusUpdate?.(
+        "migrating",
+        `Exposed schemas not replicated (${apiConfig.error}) — this clone's AML module will answer "Invalid schema: aml" until the project's API settings expose it`,
       );
     }
     await onStatusUpdate?.("migrating", "Replicating storage bucket configuration from prime...");
@@ -4528,6 +4647,7 @@ export async function provisionCloneBackend(
       requiredExtensions,
       realtimePublication,
       storageConfig,
+      apiConfig,
     };
   }
   pauseIfDue("seeding the admin user");
@@ -4579,6 +4699,7 @@ export async function provisionCloneBackend(
     requiredExtensions,
     realtimePublication,
     storageConfig,
+    apiConfig,
   };
 }
 
