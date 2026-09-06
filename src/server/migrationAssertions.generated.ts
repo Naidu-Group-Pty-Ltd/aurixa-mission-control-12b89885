@@ -213,4 +213,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "rows", table: "api_provider_rates", atLeast: 20 },
     ],
   },
+  {
+    migration: "20260906120000_requeue_stuck_domain_verification.sql",
+    version: "20260906120000",
+    assertions: [{ kind: "rows", table: "clone_deployments", atLeast: 3 }],
+  },
 ];
