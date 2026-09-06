@@ -26,7 +26,7 @@
  *    group by table_name;
  */
 import { describe, it, expect } from "vitest";
-import { REFERENCE_TABLES, planColumns } from "@/server/referenceTables.pure";
+import { REFERENCE_TABLES, planColumns, refName } from "@/server/referenceTables.pure";
 
 // Column lists read verbatim from the prime (dduzbchuswwbefdunfct) today.
 const LIVE: Record<string, string[]> = {
@@ -38,16 +38,32 @@ const LIVE: Record<string, string[]> = {
   report_structure_templates: "id,name,description,template_type,report_tier,report_category,file_path,file_name,file_size,mime_type,parsed_content,is_active,priority,metadata,created_by,created_at,updated_at".split(","),
   suburb_directory: "id,suburb,state,postcode,created_at".split(","),
   template_library_entries: "id,family_id,slug,version,name,description,long_description,category,report_type,tier,variant,industry,tags,style,orientation,page_size,page_count,schema,config,custom_css,engine,preview_schema,thumbnail_path,preview_image_paths,supported_modules,required_bindings,brand_safe,production_ready,compatibility_version,status,access_tier,visibility,agency_id,source_template_id,created_by_user_id,created_at,updated_at,published_at,deprecated_at,usage_count,last_used_at,design_meta".split(","),
+  feature_flags: "key,value,description,updated_by,created_at,updated_at".split(","),
+  "aml.plan_tiers": "id,key,label,description,entitlements,monthly_price_cents,sort_order,active,created_at,updated_at".split(","),
+  "aml.tenant_settings": "tenant_id,display_name,brand_kit_id,plan_tier_key,terminology_overrides,contact_email,mlro_contact_name,mlro_contact_email,locale,timezone,disposal_grace_days,support_url,metadata,created_at,updated_at,rollout_stage,rollout_stage_since,rollout_notes,risk_program_version,straight_through_config,review_interval_config".split(","),
+  "aml.provider_configs": "id,tenant_id,capability,provider_key,display_label,priority,cost_per_unit_cents,currency,active,secret_ref,config,last_health_at,last_health_status,last_health_message,created_by,created_at,updated_at,mode".split(","),
+  "aml.risk_factors": "id,key,label,category,weight,active,description,scoring,created_by,created_at,updated_at".split(","),
+  "aml.mandatory_triggers": "id,key,label,description,severity,rule,active,created_by,created_at,updated_at".split(","),
+  "aml.monitoring_rules": "id,name,description,trigger_kind,criteria,severity,is_enabled,cooldown_minutes,created_by,created_at,updated_at".split(","),
+  "aml.tipping_off_rules": "id,surface,pattern,is_regex,suppression_mode,replacement_copy,note,active,created_by,created_at,updated_at".split(","),
+  "aml.retention_schedules": "id,entity_type,retention_years,legal_basis,disposal_method,notes,active,created_at,updated_at,created_by,updated_by".split(","),
+  "aml.record_class_catalogue": "record_code,family,label,information_classification,default_visibility,storage_zone,access_logging_required,retention_trigger_kind,disposal_rule,partner_exportable,notes,created_at".split(","),
+  "aml.partner_event_catalogue": "event_type,aggregate_type,destination_class,emitted_by,description,created_at".split(","),
+  "aml.partner_sla_targets": "queue_key,label,warn_hours,escalate_hours,responsible_role,note,active,updated_at,updated_by".split(","),
+  "aml.sanctions_list_syncs": "id,list_code,source_url,payload_sha256,entry_count,status,error_detail,started_at,completed_at,created_at".split(","),
+  "aml.sanctions_entries": "id,list_code,external_id,entry_type,primary_name,aliases,normalised_names,date_of_birth,place_of_birth,nationalities,listing_reference,listing_detail,sync_id,created_at,updated_at".split(","),
+  "aml.pep_officeholder_syncs": "id,source_code,status,started_at,completed_at,source_as_at,entry_count,removed_count,payload_sha256,error_message,detail,created_at".split(","),
+  "aml.pep_officeholders": "id,source_code,external_id,full_name,aliases,normalised_names,position_title,pep_type,jurisdiction,position_start,position_end,currently_held,confirm_url,source_detail,sync_id,created_at,updated_at,date_of_birth".split(","),
 };
 
 describe("the allow-list against the LIVE prime schema", () => {
   it("covers exactly the tables the allow-list names", () => {
-    expect(REFERENCE_TABLES.map((t) => t.table).sort()).toEqual(Object.keys(LIVE).sort());
+    expect(REFERENCE_TABLES.map((t) => refName(t)).sort()).toEqual(Object.keys(LIVE).sort());
   });
 
   for (const entry of REFERENCE_TABLES) {
-    it(`${entry.table} passes planColumns against production`, () => {
-      const plan = planColumns(entry, LIVE[entry.table]);
+    it(`${refName(entry)} passes planColumns against production`, () => {
+      const plan = planColumns(entry, LIVE[refName(entry)]);
       if (!plan.ok) throw new Error(plan.refusal);
       expect(plan.ok).toBe(true);
     });
@@ -56,14 +72,35 @@ describe("the allow-list against the LIVE prime schema", () => {
   it("nulls exactly the identity columns production actually has", () => {
     const nulled: Record<string, string[]> = {};
     for (const entry of REFERENCE_TABLES) {
-      const plan = planColumns(entry, LIVE[entry.table]);
-      if (plan.ok && plan.nulled.length) nulled[entry.table] = plan.nulled;
+      const plan = planColumns(entry, LIVE[refName(entry)]);
+      if (plan.ok && plan.nulled.length) nulled[refName(entry)] = plan.nulled;
     }
     expect(nulled).toEqual({
       depreciation_comps: ["created_by"],
       checklist_templates: ["created_by"],
       report_structure_templates: ["created_by"],
       template_library_entries: ["agency_id", "source_template_id", "created_by_user_id"],
+      feature_flags: ["updated_by"],
+      "aml.tenant_settings": [
+        "brand_kit_id",
+        "contact_email",
+        "mlro_contact_name",
+        "mlro_contact_email",
+        "support_url",
+        "rollout_notes",
+      ],
+      "aml.provider_configs": [
+        "last_health_at",
+        "last_health_status",
+        "last_health_message",
+        "created_by",
+      ],
+      "aml.risk_factors": ["created_by"],
+      "aml.mandatory_triggers": ["created_by"],
+      "aml.monitoring_rules": ["created_by"],
+      "aml.tipping_off_rules": ["created_by"],
+      "aml.retention_schedules": ["created_by", "updated_by"],
+      "aml.partner_sla_targets": ["updated_by"],
     });
   });
 });

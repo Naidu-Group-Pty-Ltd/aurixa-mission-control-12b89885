@@ -125,6 +125,44 @@ is exactly what the hourly sweep claims, so a new clone is seeded without the
 provisioning pipeline growing a step that can fail and leave a half-built tenant
 behind. **Seeding is a property of a ready clone, not a stage of building one.**
 
+## The AML programme, the flags, and the registers
+
+The list grew by sixteen on 6 September 2026, and the reason is the same gap
+this file opens with, one layer down: the schema travels by catalog
+introspection, and a seed `INSERT` in a migration is data the introspection
+cannot see. Every clone therefore held **zero** rows in `public.feature_flags`
+(34 on the prime — so every flagged module read as off) and zero in every
+`aml.*` table, including the programme configuration the module refuses to run
+without and the two registers screening fails closed against.
+
+Three shapes of entry, and the rules each turns on:
+
+- **`public.feature_flags`** — the switches themselves. `on conflict do
+  nothing` is what makes this safe: a flag a tenant has since set keeps the
+  tenant's value, because seeding is not replication.
+- **The programme configuration** (`aml.plan_tiers` → `aml.tenant_settings` →
+  `aml.provider_configs`, then the factors, triggers, rules, retention and
+  catalogues). The order is load-bearing twice over — two real foreign keys.
+  `tenant_settings` is the entry to read before adding anything like it: the
+  prime's row is entirely generic (the module's own default title, no contact,
+  no MLRO, no brand kit), and every person-shaped field is nulled anyway —
+  including `mlro_contact_name`, which the identity pattern cannot flag and is
+  classified by hand. `provider_configs` also nulls the prime's own
+  provider-health readings: a tenant earns its own.
+- **The registers** (`aml.sanctions_list_syncs` → `aml.sanctions_entries`,
+  `aml.pep_officeholder_syncs` → `aml.pep_officeholders`) — published
+  reference data in the most literal sense. The LEDGERS travel first and are
+  part of the register: the provider judges freshness by the latest recorded
+  load, so entries without their ledger read as a register that never loaded,
+  and screening keeps refusing. `normalised_names` travels verbatim because it
+  was written by the same server-side normaliser the screening query uses.
+
+Mechanically this is the `schema` field on an entry and `refName()` everywhere
+a table is named outside the allow-list — the SQL builders qualify with the
+entry's schema, and the `clone_reference_syncs` state row for an `aml` table is
+keyed `aml.<table>` while public tables keep their bare key, so nothing
+already complete re-copied when the field arrived.
+
 ## Adding a table
 
 1. Confirm it is reference data — check whether its identity columns are

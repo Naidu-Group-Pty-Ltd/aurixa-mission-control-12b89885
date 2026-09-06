@@ -65,8 +65,15 @@ export type ColumnClassification = {
 };
 
 export type ReferenceTable = {
-  /** Table name in `public`. */
+  /** Table name, unqualified. */
   table: string;
+  /**
+   * Schema the table lives in. Absent means `public`, which is what every
+   * entry was before the AML programme's configuration joined the list — the
+   * copier's state rows for public tables keep their unqualified key, so
+   * nothing already complete re-copies.
+   */
+  schema?: "aml";
   /**
    * Unique, orderable column used to page and to resume. Paging on anything
    * non-unique silently skips or repeats rows at a page boundary.
@@ -226,9 +233,307 @@ export const REFERENCE_TABLES: readonly ReferenceTable[] = [
     },
     reason: "Report section structures the generators read when composing a document.",
   },
+  // ── The AML/CTF programme, and the switches in front of it ───────────────
+  //
+  // Every clone held ZERO rows in `public.feature_flags` and in every `aml.*`
+  // table, because the schema travels by catalog introspection and a seed
+  // INSERT in a migration is data the introspection cannot see. The flags read
+  // as all-off, so the module told every operator it did not exist; the
+  // programme configuration (risk factors, triggers, retention, the provider
+  // catalogue) was empty, so nothing behind the flags could run either.
+  {
+    table: "feature_flags",
+    pageKey: "key",
+    conflictKey: ["key"],
+    rowsPerPage: 200,
+    columns: {
+      updated_by: {
+        policy: "null_on_copy",
+        reason: "uuid of the prime operator who last flipped the flag. Nulled regardless.",
+      },
+    },
+    reason:
+      "The platform's feature switches. A clone with an empty table reads every flag as off " +
+      "and hides whole modules; `on conflict do nothing` keeps any flag a tenant has since set.",
+  },
+  {
+    table: "plan_tiers",
+    schema: "aml",
+    pageKey: "key",
+    conflictKey: ["key"],
+    rowsPerPage: 100,
+    columns: {},
+    reason:
+      "The AML plan-tier catalogue (three published tiers). Pure product configuration; " +
+      "`aml.tenant_settings.plan_tier_key` references it, so it lands first.",
+  },
+  {
+    table: "tenant_settings",
+    schema: "aml",
+    pageKey: "tenant_id",
+    conflictKey: ["tenant_id"],
+    rowsPerPage: 10,
+    columns: {
+      tenant_id: {
+        policy: "keep",
+        reason:
+          "The deployment key, 'default' on every deployment by design (CASE_TENANT_COLUMN.md). " +
+          "A key, not a person.",
+      },
+      contact_email: {
+        policy: "null_on_copy",
+        reason: "The prime's own contact address. Null on the prime today; nulled regardless.",
+      },
+      mlro_contact_email: {
+        policy: "null_on_copy",
+        reason: "The prime's MLRO's address — a person. Nulled regardless of population.",
+      },
+      mlro_contact_name: {
+        policy: "null_on_copy",
+        reason:
+          "The prime's MLRO's NAME — a person the identity pattern cannot see (no matching " +
+          "token), classified by hand for exactly that reason.",
+      },
+      brand_kit_id: {
+        policy: "null_on_copy",
+        reason: "uuid of a prime brand-kit row that does not travel; a dangling pointer otherwise.",
+      },
+      support_url: {
+        policy: "null_on_copy",
+        reason: "The prime's own support site. A tenant's support is their own affair.",
+      },
+      rollout_notes: {
+        policy: "null_on_copy",
+        reason: "The prime's internal rollout notes — prose about the prime, not configuration.",
+      },
+    },
+    reason:
+      "The one programme row everything else hangs off: `aml.provider_configs` has a foreign " +
+      "key onto it, and half the module reads its defaults. Every identity-shaped field is " +
+      "null on the prime and nulled here regardless; what remains is generic programme " +
+      "configuration (locale, timezone, review intervals, the module's own default title).",
+  },
+  {
+    table: "provider_configs",
+    schema: "aml",
+    pageKey: "id",
+    conflictKey: ["id"],
+    rowsPerPage: 50,
+    columns: {
+      tenant_id: {
+        policy: "keep",
+        reason: "The deployment key, 'default' everywhere by design. A key, not a person.",
+      },
+      created_by: {
+        policy: "null_on_copy",
+        reason: "uuid referencing a prime operator. Nulled regardless of population.",
+      },
+      last_health_at: {
+        policy: "null_on_copy",
+        reason: "The PRIME's provider-health reading. A tenant earns its own.",
+      },
+      last_health_status: {
+        policy: "null_on_copy",
+        reason: "Same: the prime's reading, not the tenant's.",
+      },
+      last_health_message: {
+        policy: "null_on_copy",
+        reason: "Same: the prime's reading, not the tenant's.",
+      },
+    },
+    reason:
+      "The provider catalogue: which verification and screening providers exist, which is " +
+      "active, in which mode, at what unit cost. Without it resolveTenantProvider answers " +
+      "null and identity verification refuses as not configured — the fleet's Didit decision " +
+      "cannot take effect on a clone that lacks the didit_standalone row. secret_ref NAMES " +
+      "a secret and never holds one.",
+  },
+  {
+    table: "risk_factors",
+    schema: "aml",
+    pageKey: "id",
+    conflictKey: ["id"],
+    rowsPerPage: 100,
+    columns: {
+      created_by: {
+        policy: "null_on_copy",
+        reason: "uuid referencing a prime operator. Nulled regardless of population.",
+      },
+    },
+    reason: "The factors every risk assessment is scored against. Programme policy, not data.",
+  },
+  {
+    table: "mandatory_triggers",
+    schema: "aml",
+    pageKey: "id",
+    conflictKey: ["id"],
+    rowsPerPage: 100,
+    columns: {
+      created_by: {
+        policy: "null_on_copy",
+        reason: "uuid referencing a prime operator. Nulled regardless of population.",
+      },
+    },
+    reason: "The mandatory EDD triggers the programme evaluates. Policy, not data.",
+  },
+  {
+    table: "monitoring_rules",
+    schema: "aml",
+    pageKey: "id",
+    conflictKey: ["id"],
+    rowsPerPage: 100,
+    columns: {
+      created_by: {
+        policy: "null_on_copy",
+        reason: "uuid referencing a prime operator. Nulled regardless of population.",
+      },
+    },
+    reason: "The ongoing-monitoring rules. Policy, not data.",
+  },
+  {
+    table: "tipping_off_rules",
+    schema: "aml",
+    pageKey: "id",
+    conflictKey: ["id"],
+    rowsPerPage: 100,
+    columns: {
+      created_by: {
+        policy: "null_on_copy",
+        reason: "uuid referencing a prime operator. Nulled regardless of population.",
+      },
+    },
+    reason:
+      "The s.123 tipping-off suppression patterns. Statutory posture, identical fleet-wide; " +
+      "a clone without them relies on the projection guards alone.",
+  },
+  {
+    table: "retention_schedules",
+    schema: "aml",
+    pageKey: "id",
+    conflictKey: ["id"],
+    rowsPerPage: 100,
+    columns: {
+      created_by: {
+        policy: "null_on_copy",
+        reason: "uuid referencing a prime operator. Nulled regardless of population.",
+      },
+      updated_by: {
+        policy: "null_on_copy",
+        reason: "uuid referencing a prime operator. Nulled regardless of population.",
+      },
+    },
+    reason:
+      "How long each record class is kept and on what legal basis — statutory configuration " +
+      "(35 rows) the retention machinery is meaningless without.",
+  },
+  {
+    table: "record_class_catalogue",
+    schema: "aml",
+    pageKey: "record_code",
+    conflictKey: ["record_code"],
+    rowsPerPage: 100,
+    columns: {
+      partner_exportable: {
+        policy: "keep",
+        reason:
+          "A boolean policy bit — may this record class be disclosed to a partner. The " +
+          "pattern flags the word 'partner'; the column names a rule, not an organisation.",
+      },
+    },
+    reason: "The record-class taxonomy retention and disclosure decisions key on.",
+  },
+  {
+    table: "partner_event_catalogue",
+    schema: "aml",
+    pageKey: "event_type",
+    conflictKey: ["event_type"],
+    rowsPerPage: 100,
+    columns: {},
+    reason: "The catalogue of partner-facing events and their destination classes.",
+  },
+  {
+    table: "partner_sla_targets",
+    schema: "aml",
+    pageKey: "queue_key",
+    conflictKey: ["queue_key"],
+    rowsPerPage: 100,
+    columns: {
+      updated_by: {
+        policy: "null_on_copy",
+        reason: "uuid referencing a prime operator. Nulled regardless of population.",
+      },
+    },
+    reason: "Queue SLA targets the compliance dashboards read. Configuration, not data.",
+  },
+  // ── The two registers ────────────────────────────────────────────────────
+  //
+  // A sanctions register and the office-holder index are PUBLISHED reference
+  // data — DFAT/UN/OFAC listings and a public index — and the emptiest tables
+  // on every clone: `sanctions_entries` held 24,235 rows on the prime and zero
+  // on every tenant. The provider fails closed on an empty or unloaded
+  // register, so every screening on every clone refused. The sync LEDGERS
+  // travel with the entries and land first: freshness is judged by the latest
+  // recorded load, so entries without their ledger read as a register that
+  // never loaded.
+  {
+    table: "sanctions_list_syncs",
+    schema: "aml",
+    pageKey: "id",
+    conflictKey: ["id"],
+    rowsPerPage: 100,
+    columns: {},
+    reason:
+      "The register's load ledger. The screening provider fails closed on a register whose " +
+      "latest load is absent or failed, so the ledger is part of the register.",
+  },
+  {
+    table: "sanctions_entries",
+    schema: "aml",
+    pageKey: "id",
+    conflictKey: ["id"],
+    rowsPerPage: 400,
+    columns: {},
+    reason:
+      "The DFAT/UN/OFAC register itself — published sanctions listings. normalised_names " +
+      "travels verbatim: it was written by the same server-side normaliser the screening " +
+      "query uses, so a copied row matches exactly as it does on the prime.",
+  },
+  {
+    table: "pep_officeholder_syncs",
+    schema: "aml",
+    pageKey: "id",
+    conflictKey: ["id"],
+    rowsPerPage: 100,
+    columns: {},
+    reason:
+      "The office-holder index's load ledger, including the measured coverage detail the " +
+      "panel renders. An index without its ledger reads as unavailable, correctly.",
+  },
+  {
+    table: "pep_officeholders",
+    schema: "aml",
+    pageKey: "id",
+    conflictKey: ["id"],
+    rowsPerPage: 500,
+    columns: {},
+    reason:
+      "The public office-holder index — published positions from a collaboratively edited " +
+      "source, each row carrying its own confirm_url. A lead generator, never an outcome.",
+  },
 ];
 
-const BY_NAME = new Map(REFERENCE_TABLES.map((t) => [t.table, t]));
+/**
+ * The name a table is known by everywhere outside this file: the SQL the
+ * copier builds, the `clone_reference_syncs` state row, the run report. A
+ * public table keeps its bare name so existing state rows still match; any
+ * other schema is qualified, because two schemas may each hold a table of one
+ * name.
+ */
+export function refName(entry: ReferenceTable): string {
+  return entry.schema ? `${entry.schema}.${entry.table}` : entry.table;
+}
+
+const BY_NAME = new Map(REFERENCE_TABLES.map((t) => [refName(t), t]));
 
 export function isReferenceTable(table: string): boolean {
   return BY_NAME.has(table);

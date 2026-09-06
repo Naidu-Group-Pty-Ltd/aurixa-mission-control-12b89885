@@ -120,16 +120,43 @@ describe("the small queries", () => {
     expect(buildCountQuery(suburbs)).not.toContain("where");
   });
 
-  it("asks information_schema for the live column list", () => {
-    const sql = buildColumnsQuery("template_library_entries");
+  it("asks information_schema for the live column list, in the entry's schema", () => {
+    const sql = buildColumnsQuery({ ...suburbs, table: "template_library_entries" });
     expect(sql).toContain("information_schema.columns");
+    expect(sql).toContain("table_schema = 'public'");
     expect(sql).toContain("'template_library_entries'");
     expect(sql).toContain("order by ordinal_position");
+    expect(buildColumnsQuery({ ...suburbs, table: "risk_factors", schema: "aml" })).toContain(
+      "table_schema = 'aml'",
+    );
   });
 
   it("asks whether the clone has the table by effect, via to_regclass", () => {
-    expect(buildTableExistsQuery("suburb_directory")).toContain(
+    expect(buildTableExistsQuery(suburbs)).toContain(
       `to_regclass('public.suburb_directory') is not null`,
     );
+    expect(buildTableExistsQuery({ ...suburbs, table: "sanctions_entries", schema: "aml" })).toContain(
+      `to_regclass('aml.sanctions_entries') is not null`,
+    );
+  });
+});
+
+describe("a table outside public", () => {
+  const amlTable: ReferenceTable = {
+    table: "provider_configs",
+    schema: "aml",
+    pageKey: "id",
+    conflictKey: ["id"],
+    rowsPerPage: 50,
+    columns: {},
+    reason: "test",
+  };
+
+  it("reads, counts and writes through the qualified name", () => {
+    expect(buildPageQuery(amlTable, [], null, 10)).toContain('from aml."provider_configs" t');
+    expect(buildCountQuery(amlTable)).toContain('from aml."provider_configs" t');
+    const insert = buildInsertStatement(amlTable, "[]");
+    expect(insert).toContain('insert into aml."provider_configs"');
+    expect(insert).toContain('null::aml."provider_configs"');
   });
 });

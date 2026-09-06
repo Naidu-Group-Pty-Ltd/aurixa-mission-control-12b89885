@@ -30,6 +30,15 @@
 
 import type { ReferenceTable } from "./referenceTables.pure";
 
+/**
+ * Schema-qualify the table for SQL. The allow-list's `schema` field is a
+ * closed union and the table names are our own, so this composes identifiers
+ * from reviewed constants — never from a request.
+ */
+function qualified(entry: ReferenceTable): string {
+  return `${entry.schema ?? "public"}.${quoteIdent(entry.table)}`;
+}
+
 /** Escape a string for a single-quoted SQL literal. */
 export function sqlLiteral(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
@@ -59,7 +68,7 @@ export function buildPageQuery(
   cursor: string | null,
   limit: number,
 ): string {
-  const t = quoteIdent(entry.table);
+  const t = qualified(entry);
   const key = quoteIdent(entry.pageKey);
   const strip =
     nulled.length > 0
@@ -73,7 +82,7 @@ export function buildPageQuery(
 
   return (
     `select ${key}::text as __cursor, to_jsonb(t)${strip} as __row ` +
-    `from public.${t} t ${whereSql} order by ${key}::text asc limit ${limit};`
+    `from ${t} t ${whereSql} order by ${key}::text asc limit ${limit};`
   );
 }
 
@@ -87,27 +96,28 @@ export function buildPageQuery(
  * replication.
  */
 export function buildInsertStatement(entry: ReferenceTable, rowsJson: string): string {
-  const t = quoteIdent(entry.table);
+  const t = qualified(entry);
   const conflict = entry.conflictKey.map(quoteIdent).join(", ");
   return (
-    `insert into public.${t} ` +
-    `select * from jsonb_populate_recordset(null::public.${t}, ${sqlLiteral(rowsJson)}::jsonb) ` +
+    `insert into ${t} ` +
+    `select * from jsonb_populate_recordset(null::${t}, ${sqlLiteral(rowsJson)}::jsonb) ` +
     `on conflict (${conflict}) do nothing;`
   );
 }
 
 /** Count what the prime holds, so a run can report progress against a total. */
 export function buildCountQuery(entry: ReferenceTable): string {
-  const t = quoteIdent(entry.table);
+  const t = qualified(entry);
   const whereSql = entry.where ? `where ${entry.where}` : "";
-  return `select count(*)::int as n from public.${t} t ${whereSql};`;
+  return `select count(*)::int as n from ${t} t ${whereSql};`;
 }
 
 /** Read a table's live column list from the prime, for {@link planColumns}. */
-export function buildColumnsQuery(table: string): string {
+export function buildColumnsQuery(entry: ReferenceTable): string {
   return (
     `select column_name from information_schema.columns ` +
-    `where table_schema = 'public' and table_name = ${sqlLiteral(table)} ` +
+    `where table_schema = ${sqlLiteral(entry.schema ?? "public")} ` +
+    `and table_name = ${sqlLiteral(entry.table)} ` +
     `order by ordinal_position;`
   );
 }
@@ -120,6 +130,9 @@ export function buildColumnsQuery(table: string): string {
  * skip with a reason — the clone is behind on migrations, which is a different
  * problem with a different fix.
  */
-export function buildTableExistsQuery(table: string): string {
-  return `select to_regclass(${sqlLiteral(`public.${table}`)}) is not null as present;`;
+export function buildTableExistsQuery(entry: ReferenceTable): string {
+  return (
+    `select to_regclass(${sqlLiteral(`${entry.schema ?? "public"}.${entry.table}`)}) ` +
+    `is not null as present;`
+  );
 }

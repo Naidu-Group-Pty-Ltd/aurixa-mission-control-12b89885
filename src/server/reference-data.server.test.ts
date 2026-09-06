@@ -46,7 +46,7 @@ vi.mock("./audit.server", () => ({
 }));
 
 import { runReferenceDataSync } from "./reference-data.server";
-import { REFERENCE_TABLES } from "./referenceTables.pure";
+import { REFERENCE_TABLES, refName } from "./referenceTables.pure";
 
 /** Minimal supabase-js double covering exactly the chains the worker uses. */
 function fakeSupabase() {
@@ -142,7 +142,7 @@ describe("runReferenceDataSync", () => {
     const out = await runReferenceDataSync(fakeSupabase());
     expect(out.error).toBeUndefined();
     expect(out.cloneId).toBe(CLONE_ID);
-    expect(out.tables.map((t) => t.table)).toEqual(REFERENCE_TABLES.map((t) => t.table));
+    expect(out.tables.map((t) => t.table)).toEqual(REFERENCE_TABLES.map((t) => refName(t)));
     expect(out.done).toBe(true);
   });
 
