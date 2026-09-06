@@ -46,7 +46,7 @@ import type { Database } from "@/integrations/supabase/types";
 import { resolvePrimeBackendRef } from "./prime-backend.server";
 import { runSqlOnProject } from "./backend-provisioning.server";
 import { notifyOperators, writeAuditLog } from "./audit.server";
-import { REFERENCE_TABLES, planColumns, type ReferenceTable } from "./referenceTables.pure";
+import { REFERENCE_TABLES, planColumns, refName, type ReferenceTable } from "./referenceTables.pure";
 import {
   buildPageQuery,
   buildInsertStatement,
@@ -151,7 +151,7 @@ async function copyTable(args: {
 
     const raw = await runSqlOnProject(
       primeRef,
-      buildPageQuery(entry, PLANNED_NULLS.get(entry.table) ?? [], cursor, pageSize),
+      buildPageQuery(entry, PLANNED_NULLS.get(refName(entry)) ?? [], cursor, pageSize),
     );
     const page = rowsOf(raw) as Array<{ __cursor?: unknown; __row?: unknown }>;
     if (page.length === 0) return { rowsCopied, complete: true, cursor };
@@ -291,10 +291,11 @@ export async function runReferenceDataSync(
   };
 
   for (const entry of REFERENCE_TABLES) {
-    const prior = stateOf.get(entry.table);
+    const name = refName(entry);
+    const prior = stateOf.get(name);
     if (prior?.status === "complete" || prior?.status === "skipped") {
       out.tables.push({
-        table: entry.table,
+        table: name,
         status: prior.status,
         rowsCopied: prior.rows_copied ?? 0,
         sourceRows: null,
@@ -305,7 +306,7 @@ export async function runReferenceDataSync(
     if (now() >= deadline) {
       out.budgetExhausted = true;
       out.tables.push({
-        table: entry.table,
+        table: name,
         status: "in_progress",
         rowsCopied: prior?.rows_copied ?? 0,
         sourceRows: null,
@@ -318,7 +319,7 @@ export async function runReferenceDataSync(
       const { error } = await supabase.from("clone_reference_syncs").upsert(
         {
           clone_id: cloneId,
-          table_name: entry.table,
+          table_name: name,
           updated_at: new Date().toISOString(),
           ...fields,
         } as never,
@@ -327,7 +328,7 @@ export async function runReferenceDataSync(
       if (error) {
         console.error("[reference-data] progress not recorded", {
           cloneId,
-          table: entry.table,
+          table: name,
           error: error.message,
         });
       }
@@ -336,7 +337,7 @@ export async function runReferenceDataSync(
     try {
       // Does the clone even have the table? A clone behind on migrations does
       // not, and that is a different problem with a different fix.
-      const present = rowsOf(await runSqlOnProject(cloneRef, buildTableExistsQuery(entry.table)));
+      const present = rowsOf(await runSqlOnProject(cloneRef, buildTableExistsQuery(entry)));
       if ((present[0] as { present?: unknown } | undefined)?.present !== true) {
         await record({
           status: "skipped",
@@ -344,7 +345,7 @@ export async function runReferenceDataSync(
           completed_at: new Date().toISOString(),
         });
         out.tables.push({
-          table: entry.table,
+          table: name,
           status: "skipped",
           rowsCopied: 0,
           sourceRows: null,
@@ -355,7 +356,7 @@ export async function runReferenceDataSync(
 
       // Vet the LIVE schema before a single row is read. This is the guard that
       // protects a tenant, and it runs every time rather than at review time.
-      const colRows = rowsOf(await runSqlOnProject(primeRef, buildColumnsQuery(entry.table)));
+      const colRows = rowsOf(await runSqlOnProject(primeRef, buildColumnsQuery(entry)));
       const actualColumns = colRows
         .map((r) => (r as { column_name?: unknown }).column_name)
         .filter((c): c is string => typeof c === "string");
@@ -363,7 +364,7 @@ export async function runReferenceDataSync(
       if (!plan.ok) {
         await record({ status: "failed", detail: plan.refusal });
         out.tables.push({
-          table: entry.table,
+          table: name,
           status: "failed",
           rowsCopied: prior?.rows_copied ?? 0,
           sourceRows: null,
@@ -372,15 +373,15 @@ export async function runReferenceDataSync(
         await notifyOperators({
           kind: "cascade_failed",
           severity: "error",
-          title: `Reference sync refused ${entry.table}`,
+          title: `Reference sync refused ${name}`,
           body: plan.refusal,
           cloneId,
           url: `/clones/${cloneId}`,
-          metadata: { table: entry.table },
+          metadata: { table: name },
         });
         continue;
       }
-      PLANNED_NULLS.set(entry.table, plan.nulled);
+      PLANNED_NULLS.set(name, plan.nulled);
 
       const countRows = rowsOf(await runSqlOnProject(primeRef, buildCountQuery(entry)));
       const sourceRows = Number((countRows[0] as { n?: unknown } | undefined)?.n ?? 0) || 0;
@@ -414,7 +415,7 @@ export async function runReferenceDataSync(
         completed_at: complete ? new Date().toISOString() : null,
       });
       out.tables.push({
-        table: entry.table,
+        table: name,
         status: complete ? "complete" : "in_progress",
         rowsCopied: carried + rowsCopied,
         sourceRows,
@@ -424,7 +425,7 @@ export async function runReferenceDataSync(
       const detail = e instanceof Error ? e.message : "Unknown error";
       await record({ status: "failed", detail });
       out.tables.push({
-        table: entry.table,
+        table: name,
         status: "failed",
         rowsCopied: prior?.rows_copied ?? 0,
         sourceRows: null,

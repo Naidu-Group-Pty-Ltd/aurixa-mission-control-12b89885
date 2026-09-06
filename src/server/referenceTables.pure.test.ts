@@ -6,6 +6,7 @@ import {
   planColumns,
   referenceTable,
   type ReferenceTable,
+  refName,
 } from "./referenceTables.pure";
 
 const entry = (table: string): ReferenceTable => {
@@ -91,6 +92,59 @@ describe("the allow-list", () => {
     expect(order.indexOf("checklist_template_sections")).toBeLessThan(
       order.indexOf("checklist_template_items"),
     );
+    // aml.tenant_settings → aml.plan_tiers and aml.provider_configs →
+    // aml.tenant_settings are real foreign keys; the register ledgers must
+    // land before the entries that reference them.
+    expect(order.indexOf("plan_tiers")).toBeLessThan(order.indexOf("tenant_settings"));
+    expect(order.indexOf("tenant_settings")).toBeLessThan(order.indexOf("provider_configs"));
+    expect(order.indexOf("sanctions_list_syncs")).toBeLessThan(order.indexOf("sanctions_entries"));
+    expect(order.indexOf("pep_officeholder_syncs")).toBeLessThan(order.indexOf("pep_officeholders"));
+  });
+});
+
+describe("the aml entries", () => {
+  it("qualifies every aml entry's name and leaves public names bare", () => {
+    for (const t of REFERENCE_TABLES) {
+      expect(refName(t)).toBe(t.schema ? `aml.${t.table}` : t.table);
+    }
+    const names = REFERENCE_TABLES.map(refName);
+    expect(names).toContain("aml.provider_configs");
+    expect(names).toContain("aml.sanctions_entries");
+    expect(names).toContain("feature_flags");
+  });
+
+  it("still refuses the tenant tables that sit beside the programme config", () => {
+    // Case data, screenings, decisions and reports are a TENANT's records; the
+    // allow-list must never grow them. Named so a future entry fails loudly.
+    for (const denied of [
+      "cases",
+      "case_events",
+      "screening_checks",
+      "verification_checks",
+      "decisions",
+      "reports",
+      "reliance_grants",
+      "pep_determinations",
+      "risk_assessments",
+    ]) {
+      expect(isReferenceTable(denied), denied).toBe(false);
+      expect(isReferenceTable(`aml.${denied}`), `aml.${denied}`).toBe(false);
+    }
+  });
+
+  it("keeps the deployment key and nulls every person-shaped field on tenant_settings", () => {
+    const ts = REFERENCE_TABLES.find((t) => refName(t) === "aml.tenant_settings")!;
+    expect(ts.columns.tenant_id?.policy).toBe("keep");
+    for (const c of ["contact_email", "mlro_contact_email", "mlro_contact_name", "brand_kit_id"]) {
+      expect(ts.columns[c]?.policy, c).toBe("null_on_copy");
+    }
+  });
+
+  it("nulls the prime's own provider-health reading", () => {
+    const pc = REFERENCE_TABLES.find((t) => refName(t) === "aml.provider_configs")!;
+    for (const c of ["last_health_at", "last_health_status", "last_health_message"]) {
+      expect(pc.columns[c]?.policy, c).toBe("null_on_copy");
+    }
   });
 });
 
