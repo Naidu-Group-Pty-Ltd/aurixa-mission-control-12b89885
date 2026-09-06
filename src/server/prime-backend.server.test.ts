@@ -155,7 +155,9 @@ describe("selectProjectKeys", () => {
       { name: "anon", api_key: "anon-key" },
       { name: "service_role", api_key: "sr-key" },
     ]);
-    expect(keys).toEqual({ anonKey: "anon-key", serviceRoleKey: "sr-key" });
+    // `gatewayKey` is the form the runtime injects: the sb_secret_ key where the
+    // project has one, the legacy JWT only when it does not — here, the JWT.
+    expect(keys).toEqual({ anonKey: "anon-key", serviceRoleKey: "sr-key", gatewayKey: "sr-key" });
   });
 
   it("falls back to publishable/secret key types", () => {
@@ -163,10 +165,14 @@ describe("selectProjectKeys", () => {
       { name: "default", api_key: "sb_publishable_abc" },
       { name: "default", api_key: "sb_secret_def" },
     ] as never);
-    expect(keys).toEqual({ anonKey: "sb_publishable_abc", serviceRoleKey: "sb_secret_def" });
+    expect(keys).toEqual({
+      anonKey: "sb_publishable_abc",
+      serviceRoleKey: "sb_secret_def",
+      gatewayKey: "sb_secret_def",
+    });
   });
 
   it("returns nulls when nothing matches", () => {
-    expect(selectProjectKeys([])).toEqual({ anonKey: null, serviceRoleKey: null });
+    expect(selectProjectKeys([])).toEqual({ anonKey: null, serviceRoleKey: null, gatewayKey: null });
   });
 });
