@@ -200,4 +200,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "cron", jobname: "clone-secrets-reconcile" },
     ],
   },
+  {
+    migration: "20260906080000_prime_secret_pairs.sql",
+    version: "20260906080000",
+    assertions: [{ kind: "cron", jobname: "prime-secret-pairs" }],
+  },
 ];

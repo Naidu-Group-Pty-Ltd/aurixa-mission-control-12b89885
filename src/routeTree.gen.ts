@@ -73,6 +73,7 @@ import { Route as HooksTokenAlertsRouteImport } from './routes/hooks.token-alert
 import { Route as HooksSupportRemediationDrainRouteImport } from './routes/hooks.support-remediation-drain'
 import { Route as HooksRunSchedulesRouteImport } from './routes/hooks.run-schedules'
 import { Route as HooksReferenceDataSyncRouteImport } from './routes/hooks.reference-data-sync'
+import { Route as HooksPrimeSecretPairsRouteImport } from './routes/hooks.prime-secret-pairs'
 import { Route as HooksMigrationEnqueueRouteImport } from './routes/hooks.migration-enqueue'
 import { Route as HooksMigrationDriftRouteImport } from './routes/hooks.migration-drift'
 import { Route as HooksHeldFileDriftRouteImport } from './routes/hooks.held-file-drift'
@@ -508,6 +509,11 @@ const HooksRunSchedulesRoute = HooksRunSchedulesRouteImport.update({
 const HooksReferenceDataSyncRoute = HooksReferenceDataSyncRouteImport.update({
   id: '/hooks/reference-data-sync',
   path: '/hooks/reference-data-sync',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksPrimeSecretPairsRoute = HooksPrimeSecretPairsRouteImport.update({
+  id: '/hooks/prime-secret-pairs',
+  path: '/hooks/prime-secret-pairs',
   getParentRoute: () => rootRouteImport,
 } as any)
 const HooksMigrationEnqueueRoute = HooksMigrationEnqueueRouteImport.update({
@@ -1197,6 +1203,7 @@ export interface FileRoutesByFullPath {
   '/hooks/held-file-drift': typeof HooksHeldFileDriftRoute
   '/hooks/migration-drift': typeof HooksMigrationDriftRoute
   '/hooks/migration-enqueue': typeof HooksMigrationEnqueueRoute
+  '/hooks/prime-secret-pairs': typeof HooksPrimeSecretPairsRoute
   '/hooks/reference-data-sync': typeof HooksReferenceDataSyncRoute
   '/hooks/run-schedules': typeof HooksRunSchedulesRoute
   '/hooks/support-remediation-drain': typeof HooksSupportRemediationDrainRoute
@@ -1374,6 +1381,7 @@ export interface FileRoutesByTo {
   '/hooks/held-file-drift': typeof HooksHeldFileDriftRoute
   '/hooks/migration-drift': typeof HooksMigrationDriftRoute
   '/hooks/migration-enqueue': typeof HooksMigrationEnqueueRoute
+  '/hooks/prime-secret-pairs': typeof HooksPrimeSecretPairsRoute
   '/hooks/reference-data-sync': typeof HooksReferenceDataSyncRoute
   '/hooks/run-schedules': typeof HooksRunSchedulesRoute
   '/hooks/support-remediation-drain': typeof HooksSupportRemediationDrainRoute
@@ -1553,6 +1561,7 @@ export interface FileRoutesById {
   '/hooks/held-file-drift': typeof HooksHeldFileDriftRoute
   '/hooks/migration-drift': typeof HooksMigrationDriftRoute
   '/hooks/migration-enqueue': typeof HooksMigrationEnqueueRoute
+  '/hooks/prime-secret-pairs': typeof HooksPrimeSecretPairsRoute
   '/hooks/reference-data-sync': typeof HooksReferenceDataSyncRoute
   '/hooks/run-schedules': typeof HooksRunSchedulesRoute
   '/hooks/support-remediation-drain': typeof HooksSupportRemediationDrainRoute
@@ -1733,6 +1742,7 @@ export interface FileRouteTypes {
     | '/hooks/held-file-drift'
     | '/hooks/migration-drift'
     | '/hooks/migration-enqueue'
+    | '/hooks/prime-secret-pairs'
     | '/hooks/reference-data-sync'
     | '/hooks/run-schedules'
     | '/hooks/support-remediation-drain'
@@ -1910,6 +1920,7 @@ export interface FileRouteTypes {
     | '/hooks/held-file-drift'
     | '/hooks/migration-drift'
     | '/hooks/migration-enqueue'
+    | '/hooks/prime-secret-pairs'
     | '/hooks/reference-data-sync'
     | '/hooks/run-schedules'
     | '/hooks/support-remediation-drain'
@@ -2088,6 +2099,7 @@ export interface FileRouteTypes {
     | '/hooks/held-file-drift'
     | '/hooks/migration-drift'
     | '/hooks/migration-enqueue'
+    | '/hooks/prime-secret-pairs'
     | '/hooks/reference-data-sync'
     | '/hooks/run-schedules'
     | '/hooks/support-remediation-drain'
@@ -2264,6 +2276,7 @@ export interface RootRouteChildren {
   HooksHeldFileDriftRoute: typeof HooksHeldFileDriftRoute
   HooksMigrationDriftRoute: typeof HooksMigrationDriftRoute
   HooksMigrationEnqueueRoute: typeof HooksMigrationEnqueueRoute
+  HooksPrimeSecretPairsRoute: typeof HooksPrimeSecretPairsRoute
   HooksReferenceDataSyncRoute: typeof HooksReferenceDataSyncRoute
   HooksRunSchedulesRoute: typeof HooksRunSchedulesRoute
   HooksSupportRemediationDrainRoute: typeof HooksSupportRemediationDrainRoute
@@ -2787,6 +2800,13 @@ declare module '@tanstack/react-router' {
       path: '/hooks/reference-data-sync'
       fullPath: '/hooks/reference-data-sync'
       preLoaderRoute: typeof HooksReferenceDataSyncRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/prime-secret-pairs': {
+      id: '/hooks/prime-secret-pairs'
+      path: '/hooks/prime-secret-pairs'
+      fullPath: '/hooks/prime-secret-pairs'
+      preLoaderRoute: typeof HooksPrimeSecretPairsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/hooks/migration-enqueue': {
@@ -3774,6 +3794,7 @@ const rootRouteChildren: RootRouteChildren = {
   HooksHeldFileDriftRoute: HooksHeldFileDriftRoute,
   HooksMigrationDriftRoute: HooksMigrationDriftRoute,
   HooksMigrationEnqueueRoute: HooksMigrationEnqueueRoute,
+  HooksPrimeSecretPairsRoute: HooksPrimeSecretPairsRoute,
   HooksReferenceDataSyncRoute: HooksReferenceDataSyncRoute,
   HooksRunSchedulesRoute: HooksRunSchedulesRoute,
   HooksSupportRemediationDrainRoute: HooksSupportRemediationDrainRoute,

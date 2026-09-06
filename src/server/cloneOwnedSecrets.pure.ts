@@ -1,5 +1,5 @@
 /**
- * Clone-owned secrets with a vault mirror — minted once, re-asserted for ever.
+ * Clone-owned secrets with a database mirror — minted once, re-asserted for ever.
  *
  * ## What this fixes
  *
@@ -15,45 +15,61 @@
  * `missing` in the ledger, and the only one of the class that WAS written —
  * `CSRF_TOKEN_PEPPER` — was minted afresh on every repair pass.
  *
+ * Two more are PAIRS with a database half the prime's own cron reads:
+ * `FINANCE_PORTAL_CRON_SECRET` against the vault's `finance_portal_cron_secret`,
+ * and `MARKET_INGESTION_CRON_SECRET` against the database setting
+ * `app.market_ingestion_cron_secret`, which two scheduled jobs put in an
+ * `x-cron-secret` header that ten functions compare byte for byte. The prime
+ * held neither half of either, so those jobs answered 401 on the prime and,
+ * faithfully, on every clone.
+ *
  * ## The rules
  *
- * **Minted once, mirrored in the vault, re-asserted from there.** The function
- * environment cannot be read back, so a pass that minted anew would ROTATE:
- * outstanding reset tokens stop verifying and every push subscription — bound
- * to the VAPID public key it subscribed with — goes dead. The clone's own vault
- * holds the readable half, exactly as the signing pair's does; a pass reuses
- * what it finds there and mints only what is missing, vault first, then
- * environment, so a failed environment write converges on the next pass.
+ * **Minted once, mirrored in the database, re-asserted from there.** The
+ * function environment cannot be read back, so a pass that minted anew would
+ * ROTATE: outstanding reset tokens stop verifying and every push subscription —
+ * bound to the VAPID public key it subscribed with — goes dead. The project's
+ * own vault (or, for a setting the cron reads with `current_setting`, the
+ * database-level setting itself) holds the readable half, exactly as the
+ * signing pair's does; a pass reuses what it finds there and mints only what is
+ * missing, database first, then environment, so a failed environment write
+ * converges on the next pass.
  *
  * **A key pair is one thing.** A VAPID public key without its private half
  * signs nothing, and a private key whose public half nobody holds delivers to
  * nobody. If either half is missing or malformed the PAIR is re-minted.
  *
- * **Mirror the prime's shape; never invent a pair the prime does not hold.**
- * `FINANCE_PORTAL_CRON_SECRET` has a database half the prime's own cron reads
- * from ITS vault (`finance_portal_cron_secret`), and the reminder job is only
- * ever scheduled where that entry exists. A clone whose prime holds it gets its
- * own; one whose prime does not is left alone and told why. And when the prime
- * cannot be read the answer is "unknown", never "none" — a probe that fails
- * closed rather than into a fabricated pair.
+ * **A clone mirrors the prime's shape; it never invents a pair the prime does
+ * not hold.** A clone gets its own finance or market pair only where the
+ * prime's vault (or settings) carries the same name, read for NAMES and never
+ * for a value. When the prime cannot be read the answer is "unknown", never
+ * "none" — a probe that fails closed rather than into a fabricated pair. The
+ * prime itself is paired by `PRIME_PAIR_SPECS`, which carry no gate, because
+ * on the prime the question is not "what does the prime hold" but "what do
+ * the prime's own jobs read".
  *
- * Pure: no I/O. The server module supplies the vault reading and the mints.
+ * Pure: no I/O. The server module supplies the reads and the mints.
  */
 
-/** `resetTokens.ts` and the finance cron both refuse a value shorter than this. */
+/** `resetTokens.ts`, the finance batch and the market functions all refuse a value shorter than this. */
 export const MIN_OWNED_SECRET_LENGTH = 16;
+
+/** Where the readable half lives: a vault secret, or a database-level setting. */
+export type OwnedSecretStore = "vault" | "guc";
 
 export type OwnedSecretSpec =
   | {
       kind: "random";
       env: string;
-      vault: string;
+      /** The vault secret or database setting that mirrors `env`. */
+      store: OwnedSecretStore;
+      key: string;
       /** Bytes of entropy to mint; the value is hex, so twice this in characters. */
       bytes: number;
-      /** The consumer's floor: a vault value at or above it is reused, below it replaced. */
+      /** The consumer's floor: a mirrored value at or above it is reused, below it replaced. */
       floor: number;
-      /** Only paired where the PRIME's vault carries the same name. */
-      requiresPrimeVault?: true;
+      /** Only paired where the PRIME holds the same key in the same store. */
+      requiresPrime?: true;
       why: string;
     }
   | {
@@ -65,41 +81,82 @@ export type OwnedSecretSpec =
       why: string;
     };
 
+const RESET_PEPPER: OwnedSecretSpec = {
+  kind: "random",
+  env: "RESET_TOKEN_PEPPER",
+  store: "vault",
+  key: "reset_token_pepper",
+  bytes: 32,
+  floor: MIN_OWNED_SECRET_LENGTH,
+  why: "hashResetToken() throws without it, so no password reset can be issued",
+};
+
+const CSRF_PEPPER: OwnedSecretSpec = {
+  kind: "random",
+  env: "CSRF_TOKEN_PEPPER",
+  store: "vault",
+  key: "csrf_token_pepper",
+  bytes: 32,
+  floor: MIN_OWNED_SECRET_LENGTH,
+  why: "a fresh random on every repair pass invalidated every CSRF token in flight",
+};
+
+const VAPID_PAIR: OwnedSecretSpec = {
+  kind: "vapid",
+  publicEnv: "VAPID_PUBLIC_KEY",
+  privateEnv: "VAPID_PRIVATE_KEY",
+  publicVault: "vapid_public_key",
+  privateVault: "vapid_private_key",
+  why: "send-web-push answers 503 without the pair, and a subscription is bound to the public key it saw",
+};
+
+/**
+ * The finance reminder function compares `x-cron-secret` against this; the
+ * older schedule read it from the vault under this name, and the pair is what
+ * `isCronCall` needs to ever answer yes.
+ */
+const FINANCE_CRON_PAIR: Omit<Extract<OwnedSecretSpec, { kind: "random" }>, "requiresPrime"> = {
+  kind: "random",
+  env: "FINANCE_PORTAL_CRON_SECRET",
+  store: "vault",
+  key: "finance_portal_cron_secret",
+  bytes: 32,
+  floor: MIN_OWNED_SECRET_LENGTH,
+  why: "finance-portal-batch6 compares x-cron-secret against the environment half; the vault half is what a schedule reads",
+};
+
+/**
+ * Two scheduled jobs (`agent-planner-run-scheduled`,
+ * `market-qa-subscriptions-run-due`) send `current_setting('app.market_ingestion_cron_secret')`
+ * as `x-cron-secret`, and ten market functions compare it against the
+ * environment. The setting is database-level so that every new cron session
+ * sees it.
+ */
+const MARKET_CRON_PAIR: Omit<Extract<OwnedSecretSpec, { kind: "random" }>, "requiresPrime"> = {
+  kind: "random",
+  env: "MARKET_INGESTION_CRON_SECRET",
+  store: "guc",
+  key: "app.market_ingestion_cron_secret",
+  bytes: 32,
+  floor: MIN_OWNED_SECRET_LENGTH,
+  why: "two scheduled jobs send the database setting as x-cron-secret and ten market functions compare it against the environment",
+};
+
+/** What a CLONE owns. The two pairs are gated on the prime holding the same half. */
 export const OWNED_SECRET_SPECS: readonly OwnedSecretSpec[] = [
-  {
-    kind: "random",
-    env: "RESET_TOKEN_PEPPER",
-    vault: "reset_token_pepper",
-    bytes: 32,
-    floor: MIN_OWNED_SECRET_LENGTH,
-    why: "hashResetToken() throws without it, so no password reset can be issued",
-  },
-  {
-    kind: "random",
-    env: "CSRF_TOKEN_PEPPER",
-    vault: "csrf_token_pepper",
-    bytes: 32,
-    floor: MIN_OWNED_SECRET_LENGTH,
-    why: "a fresh random on every repair pass invalidated every CSRF token in flight",
-  },
-  {
-    kind: "vapid",
-    publicEnv: "VAPID_PUBLIC_KEY",
-    privateEnv: "VAPID_PRIVATE_KEY",
-    publicVault: "vapid_public_key",
-    privateVault: "vapid_private_key",
-    why: "send-web-push answers 503 without the pair, and a subscription is bound to the public key it saw",
-  },
-  {
-    kind: "random",
-    env: "FINANCE_PORTAL_CRON_SECRET",
-    vault: "finance_portal_cron_secret",
-    bytes: 32,
-    floor: MIN_OWNED_SECRET_LENGTH,
-    requiresPrimeVault: true,
-    why: "the finance reminder cron reads the vault half and the function verifies the environment half",
-  },
+  RESET_PEPPER,
+  CSRF_PEPPER,
+  VAPID_PAIR,
+  { ...FINANCE_CRON_PAIR, requiresPrime: true },
+  { ...MARKET_CRON_PAIR, requiresPrime: true },
 ];
+
+/**
+ * What the PRIME is paired with, by the owner's decision (6 Sep 2026). No
+ * gate: these are the halves the prime's own jobs read. Nothing else — the
+ * prime's peppers and push identity are the owner's to hold.
+ */
+export const PRIME_PAIR_SPECS: readonly OwnedSecretSpec[] = [FINANCE_CRON_PAIR, MARKET_CRON_PAIR];
 
 /** A VAPID public key is a 65-byte uncompressed P-256 point: 87 base64url chars, first byte 0x04 → 'B'. */
 const VAPID_PUBLIC_RX = /^B[A-Za-z0-9_-]{86}$/;
@@ -118,15 +175,31 @@ export function ownedSecretEnvNames(specs: readonly OwnedSecretSpec[] = OWNED_SE
   return specs.flatMap((s) => (s.kind === "vapid" ? [s.publicEnv, s.privateEnv] : [s.env]));
 }
 
+/** The vault names a spec list mirrors into. */
 export function ownedSecretVaultNames(specs: readonly OwnedSecretSpec[] = OWNED_SECRET_SPECS): string[] {
-  return specs.flatMap((s) => (s.kind === "vapid" ? [s.publicVault, s.privateVault] : [s.vault]));
+  return specs.flatMap((s) =>
+    s.kind === "vapid" ? [s.publicVault, s.privateVault] : s.store === "vault" ? [s.key] : [],
+  );
 }
 
+/** The database settings a spec list mirrors into. */
+export function ownedSecretGucNames(specs: readonly OwnedSecretSpec[] = OWNED_SECRET_SPECS): string[] {
+  return specs.flatMap((s) => (s.kind === "random" && s.store === "guc" ? [s.key] : []));
+}
+
+/** The NAMES the prime holds, by store. Never a value. */
+export type PrimeShape = {
+  vaultNames: ReadonlySet<string>;
+  gucNames: ReadonlySet<string>;
+};
+
 export type OwnedSecretFacts = {
-  /** Vault name → decrypted value, null where the vault holds no such row. */
+  /** Vault name → decrypted value on the target project, null where absent. */
   vault: Record<string, string | null>;
-  /** Names the PRIME's vault holds; null when the prime could not be read. */
-  primeVaultNames: ReadonlySet<string> | null;
+  /** Database setting → value on the target project, null where absent. */
+  guc: Record<string, string | null>;
+  /** What the prime holds; null when the prime could not be read. Ignored by an ungated spec. */
+  primeShape: PrimeShape | null;
 };
 
 export type OwnedSecretMint = {
@@ -136,15 +209,16 @@ export type OwnedSecretMint = {
 
 export type OwnedSecretWrite = {
   env: string;
-  vault: string;
+  store: OwnedSecretStore;
+  key: string;
   /** Never log. */
   value: string;
-  source: "vault" | "minted";
+  source: "mirror" | "minted";
 };
 
 export type OwnedSecretSkipReason = "prime_holds_none" | "prime_unreadable";
 
-export type OwnedSecretSkip = { env: string; vault: string; reason: OwnedSecretSkipReason };
+export type OwnedSecretSkip = { env: string; store: OwnedSecretStore; key: string; reason: OwnedSecretSkipReason };
 
 export type OwnedSecretsPlan = {
   /** Every environment name this pass asserts, with the value both sides get. */
@@ -153,6 +227,10 @@ export type OwnedSecretsPlan = {
   /** One line per spec, for the status trail. Carries no secret material. */
   why: string[];
 };
+
+function primeHolds(shape: PrimeShape, store: OwnedSecretStore, key: string): boolean {
+  return store === "vault" ? shape.vaultNames.has(key) : shape.gucNames.has(key);
+}
 
 export function planOwnedSecrets(
   specs: readonly OwnedSecretSpec[],
@@ -165,19 +243,19 @@ export function planOwnedSecrets(
 
   for (const spec of specs) {
     if (spec.kind === "random") {
-      if (spec.requiresPrimeVault) {
-        if (facts.primeVaultNames === null) {
-          skipped.push({ env: spec.env, vault: spec.vault, reason: "prime_unreadable" });
-          why.push(`${spec.env}: the prime's vault could not be read — not paired this pass`);
+      if (spec.requiresPrime) {
+        if (facts.primeShape === null) {
+          skipped.push({ env: spec.env, store: spec.store, key: spec.key, reason: "prime_unreadable" });
+          why.push(`${spec.env}: the prime could not be read — not paired this pass`);
           continue;
         }
-        if (!facts.primeVaultNames.has(spec.vault)) {
-          skipped.push({ env: spec.env, vault: spec.vault, reason: "prime_holds_none" });
-          why.push(`${spec.env}: the prime's vault holds no ${spec.vault} — nothing to mirror`);
+        if (!primeHolds(facts.primeShape, spec.store, spec.key)) {
+          skipped.push({ env: spec.env, store: spec.store, key: spec.key, reason: "prime_holds_none" });
+          why.push(`${spec.env}: the prime holds no ${spec.store === "vault" ? "vault secret" : "database setting"} ${spec.key} — nothing to mirror`);
           continue;
         }
       }
-      const held = (facts.vault[spec.vault] ?? "").trim();
+      const held = ((spec.store === "vault" ? facts.vault[spec.key] : facts.guc[spec.key]) ?? "").trim();
       const usable = held.length >= spec.floor;
       const value = usable ? held : mint.random(spec.bytes);
       if (!usable && value.length < spec.floor) {
@@ -185,13 +263,14 @@ export function planOwnedSecrets(
           `${spec.env}: the generator produced ${value.length} characters; the consumer requires at least ${spec.floor}`,
         );
       }
-      writes.push({ env: spec.env, vault: spec.vault, value, source: usable ? "vault" : "minted" });
+      writes.push({ env: spec.env, store: spec.store, key: spec.key, value, source: usable ? "mirror" : "minted" });
+      const where = spec.store === "vault" ? "vault" : "database setting";
       why.push(
         usable
-          ? `${spec.env}: vault holds a usable value — reused, environment re-asserted`
+          ? `${spec.env}: ${where} holds a usable value — reused, environment re-asserted`
           : held.length === 0
-            ? `${spec.env}: vault holds none — minted, written to vault then environment`
-            : `${spec.env}: vault value is ${held.length} characters, below the floor of ${spec.floor} — replaced`,
+            ? `${spec.env}: ${where} holds none — minted, written to ${where} then environment`
+            : `${spec.env}: ${where} value is ${held.length} characters, below the floor of ${spec.floor} — replaced`,
       );
       continue;
     }
@@ -200,8 +279,8 @@ export function planOwnedSecrets(
     const priv = facts.vault[spec.privateVault];
     const usable = isVapidPublicKey(pub) && isVapidPrivateKey(priv);
     if (usable) {
-      writes.push({ env: spec.publicEnv, vault: spec.publicVault, value: pub.trim(), source: "vault" });
-      writes.push({ env: spec.privateEnv, vault: spec.privateVault, value: priv.trim(), source: "vault" });
+      writes.push({ env: spec.publicEnv, store: "vault", key: spec.publicVault, value: pub.trim(), source: "mirror" });
+      writes.push({ env: spec.privateEnv, store: "vault", key: spec.privateVault, value: priv.trim(), source: "mirror" });
       why.push(`${spec.publicEnv}/${spec.privateEnv}: vault holds a well-formed pair — reused, environment re-asserted`);
       continue;
     }
@@ -211,8 +290,8 @@ export function planOwnedSecrets(
       // which would fail EVERY push rather than none.
       throw new Error(`${spec.publicEnv}: the VAPID generator produced a malformed pair`);
     }
-    writes.push({ env: spec.publicEnv, vault: spec.publicVault, value: pair.publicKey, source: "minted" });
-    writes.push({ env: spec.privateEnv, vault: spec.privateVault, value: pair.privateKey, source: "minted" });
+    writes.push({ env: spec.publicEnv, store: "vault", key: spec.publicVault, value: pair.publicKey, source: "minted" });
+    writes.push({ env: spec.privateEnv, store: "vault", key: spec.privateVault, value: pair.privateKey, source: "minted" });
     const halves = [pub ? "public" : null, priv ? "private" : null].filter(Boolean);
     why.push(
       halves.length === 0
@@ -243,7 +322,7 @@ export const OWNED_SECRETS_REPAIR_COOLDOWN_MS = 30 * 60 * 1000;
 
 /**
  * Like the signing pair's sweep, a ledger reading `set` does NOT settle this:
- * the pass is one vault read per clone and writes nothing new when the vault
+ * the pass is one read per clone and writes nothing new when the mirror
  * already agrees. Only a recent FAILED row holds it off.
  */
 export function decideOwnedSecretsRepair(facts: OwnedSecretsRepairFacts): OwnedSecretsRepairVerdict {
@@ -255,5 +334,5 @@ export function decideOwnedSecretsRepair(facts: OwnedSecretsRepairFacts): OwnedS
       return { act: false, reason: "cooling_off" };
     }
   }
-  return { act: true, why: "the vault is verified regardless of what the ledger says" };
+  return { act: true, why: "the mirror is verified regardless of what the ledger says" };
 }

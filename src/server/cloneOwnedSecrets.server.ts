@@ -1,16 +1,25 @@
 /**
- * Write a clone's OWN secrets — the peppers and the VAPID pair — to its vault
- * and its function environment, so a repair pass re-asserts rather than
- * rotates. The rules and the measurement are in `cloneOwnedSecrets.pure.ts`.
+ * Write a project's OWN secrets — the peppers, the VAPID pair, and the two
+ * cron pairs — to their database mirror and to the function environment, so
+ * a repair pass re-asserts rather than rotates. The rules and the measurement
+ * are in `cloneOwnedSecrets.pure.ts`.
  *
  * ## The rule that governs the write
  *
- * **The ref that reads is the ref that writes.** The vault is read on one
- * project and both halves are written on the SAME project, and every ref
- * comes from `resolveCloneSecretTarget`, which refuses the prime, refuses
- * Mission Control's own, and refuses when it cannot tell. The prime is read
- * for one thing only — the NAMES its vault holds, so a clone mirrors the
- * prime's shape — and never for a value.
+ * **The ref that reads is the ref that writes.** The mirror is read on one
+ * project and both halves are written on the SAME project. For a clone every
+ * ref comes from `resolveCloneSecretTarget`, which refuses the prime, refuses
+ * Mission Control's own, and refuses when it cannot tell; the prime is read
+ * for one thing only — the NAMES it holds, so a clone mirrors the prime's
+ * shape — and never for a value. The prime's own pairs are written by
+ * `primeSecretPairs.server.ts`, through the writer below, and that is the one
+ * caller that hands this module the prime's ref.
+ *
+ * **A database setting is written at the level the cron reads it.** The
+ * market jobs read `current_setting(...)` in a fresh session started for the
+ * job's owner, so the setting is written database-wide where this role owns
+ * the database, and on the role otherwise — and read back from the same
+ * place, so the two can never be asked of different scopes.
  *
  * The values are never logged, never put in an event row, and never returned
  * to anything but the provisioning pipeline that hands them to the secrets
@@ -30,10 +39,13 @@ import {
   planOwnedSecrets,
   ownedSecretEnvNames,
   ownedSecretVaultNames,
+  ownedSecretGucNames,
   decideOwnedSecretsRepair,
   type OwnedSecretSkip,
+  type OwnedSecretSpec,
   type OwnedSecretsPlan,
   type OwnedSecretsRepairSkip,
+  type PrimeShape,
 } from "./cloneOwnedSecrets.pure";
 
 type Db = SupabaseClient<Database>;
@@ -41,6 +53,9 @@ type Db = SupabaseClient<Database>;
 const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 export const OWNED_SECRETS_EVENT_ACTION = "set_owned_secrets";
+
+/** A setting name this module will inline into SQL: lower-case, dotted, nothing else. */
+const GUC_NAME_RX = /^[a-z_][a-z0-9_]*(\.[a-z_][a-z0-9_]*)+$/;
 
 /**
  * A P-256 pair in the form `web-push` takes: the public key as the 65-byte
@@ -61,21 +76,39 @@ export function mintVapidKeyPair(): { publicKey: string; privateKey: string } {
 }
 
 /**
- * The NAMES the prime's vault holds — never a value. Null when the prime could
- * not be read, which the planner treats as "unknown" rather than "none".
+ * The settings a project's cron sessions see, by NAME: database-level rows and
+ * the rows on the role this API runs as. Values are read by the writer only.
  */
-export async function readPrimeVaultNames(primeRef: string | null): Promise<ReadonlySet<string> | null> {
+const SETTINGS_SQL = `
+  select split_part(c, '=', 1) as name, substr(c, strpos(c, '=') + 1) as value,
+         case when s.setrole = 0 then 'database' else 'role' end as level
+    from pg_db_role_setting s, unnest(s.setconfig) c
+   where s.setdatabase = (select oid from pg_database where datname = current_database())
+     and (s.setrole = 0 or s.setrole = (select oid from pg_roles where rolname = current_user))`;
+
+/**
+ * The NAMES the prime holds, by store — never a value. Null when the prime
+ * could not be read, which the planner treats as "unknown" rather than "none".
+ */
+export async function readPrimeShape(primeRef: string | null): Promise<PrimeShape | null> {
   if (!primeRef) return null;
   try {
     const { runSqlOnProject } = await import("./backend-provisioning.server");
-    const rows = (await runSqlOnProject(primeRef, "select name from vault.secrets;")) as Array<{ name?: unknown }>;
-    const names = new Set<string>();
+    const rows = (await runSqlOnProject(
+      primeRef,
+      `select 'vault' as store, name from vault.secrets
+       union all
+       select 'guc' as store, name from (${SETTINGS_SQL}) settings;`,
+    )) as Array<{ store?: unknown; name?: unknown }>;
+    const vaultNames = new Set<string>();
+    const gucNames = new Set<string>();
     for (const row of Array.isArray(rows) ? rows : []) {
-      if (typeof row?.name === "string" && row.name.length > 0) names.add(row.name);
+      if (typeof row?.name !== "string" || row.name.length === 0) continue;
+      (row.store === "guc" ? gucNames : vaultNames).add(row.name);
     }
-    return names;
+    return { vaultNames, gucNames };
   } catch (e) {
-    console.error("[owned_secrets] could not read the prime's vault names", { primeRef, error: msg(e) });
+    console.error("[owned_secrets] could not read the prime's shape", { primeRef, error: msg(e) });
     return null;
   }
 }
@@ -90,7 +123,7 @@ export type OwnedSecretsOutcome = {
 
 export type EnsureOwnedSecretsResult =
   | { ok: true; outcome: OwnedSecretsOutcome; /** In-process only. Never log. */ values: Record<string, string> }
-  | { ok: false; stage: "vault_read" | "plan" | "vault_write" | "env_write"; error: string };
+  | { ok: false; stage: "mirror_read" | "plan" | "mirror_write" | "env_write"; error: string };
 
 function vaultUpsertSql(
   sqlLiteral: (v: string) => string,
@@ -109,61 +142,97 @@ function vaultUpsertSql(
 }
 
 /**
- * Bring one project's owned secrets into agreement: vault first, then the
- * environment, every value in ONE secrets request.
+ * `ALTER DATABASE … SET` where this role owns the database (the level the
+ * cron's fresh session reads first), `ALTER ROLE current_user SET` otherwise —
+ * which the same cron session reads too, since the jobs run as this role.
  */
-export async function ensureCloneOwnedSecrets(
+function settingWriteSql(sqlLiteral: (v: string) => string, name: string, value: string): string {
+  if (!GUC_NAME_RX.test(name)) throw new Error(`refusing to write a setting named ${JSON.stringify(name)}`);
+  return `
+      if (select pg_get_userbyid(datdba) from pg_database where datname = current_database()) = current_user then
+        execute format('alter database %I set ${name} = %L', current_database(), ${sqlLiteral(value)});
+      else
+        execute format('alter role %I set ${name} = %L', current_user, ${sqlLiteral(value)});
+      end if;`;
+}
+
+/**
+ * Bring one project's owned secrets into agreement for the given specs:
+ * mirror first, then the environment, every value in ONE secrets request.
+ * The gated specs consult `primeShape`; an ungated spec ignores it.
+ */
+export async function ensureOwnedSecrets(
   projectRef: string,
-  primeVaultNames: ReadonlySet<string> | null,
+  specs: readonly OwnedSecretSpec[],
+  primeShape: PrimeShape | null,
 ): Promise<EnsureOwnedSecretsResult> {
   const { runSqlOnProject, sqlLiteral, setCloneSecretValues } =
     await import("./backend-provisioning.server");
 
-  const vaultNames = ownedSecretVaultNames();
+  const vaultNames = ownedSecretVaultNames(specs);
+  const gucNames = ownedSecretGucNames(specs);
   const vault: Record<string, string | null> = Object.fromEntries(vaultNames.map((n) => [n, null]));
+  const guc: Record<string, string | null> = Object.fromEntries(gucNames.map((n) => [n, null]));
   try {
-    const rows = (await runSqlOnProject(
-      projectRef,
-      `select name, decrypted_secret from vault.decrypted_secrets
-         where name in (${vaultNames.map(sqlLiteral).join(", ")});`,
-    )) as Array<{ name?: unknown; decrypted_secret?: unknown }>;
-    for (const row of Array.isArray(rows) ? rows : []) {
-      if (typeof row?.name === "string" && typeof row?.decrypted_secret === "string") {
-        vault[row.name] = row.decrypted_secret;
+    const parts: string[] = [];
+    if (vaultNames.length > 0) {
+      parts.push(
+        `select 'vault' as store, name as key, decrypted_secret as value
+           from vault.decrypted_secrets where name in (${vaultNames.map(sqlLiteral).join(", ")})`,
+      );
+    }
+    if (gucNames.length > 0) {
+      parts.push(
+        `select 'guc' as store, name as key, value from (${SETTINGS_SQL}) settings
+          where name in (${gucNames.map(sqlLiteral).join(", ")})`,
+      );
+    }
+    if (parts.length > 0) {
+      const rows = (await runSqlOnProject(projectRef, `${parts.join("\n union all \n")};`)) as Array<{
+        store?: unknown;
+        key?: unknown;
+        value?: unknown;
+      }>;
+      for (const row of Array.isArray(rows) ? rows : []) {
+        if (typeof row?.key !== "string" || typeof row?.value !== "string") continue;
+        if (row.store === "guc") guc[row.key] = row.value;
+        else vault[row.key] = row.value;
       }
     }
   } catch (e) {
-    return { ok: false, stage: "vault_read", error: `Could not read the clone's vault: ${msg(e)}` };
+    return { ok: false, stage: "mirror_read", error: `Could not read the project's mirror: ${msg(e)}` };
   }
 
   let plan: OwnedSecretsPlan;
   try {
     plan = planOwnedSecrets(
-      OWNED_SECRET_SPECS,
-      { vault, primeVaultNames },
+      specs,
+      { vault, guc, primeShape },
       { random: (bytes) => randomBytes(bytes).toString("hex"), vapid: mintVapidKeyPair },
     );
   } catch (e) {
     return { ok: false, stage: "plan", error: msg(e) };
   }
 
-  // Vault FIRST, and only what was minted: a reused value is already there.
+  // Mirror FIRST, and only what was minted: a reused value is already there.
   const minted = plan.writes.filter((w) => w.source === "minted");
   if (minted.length > 0) {
-    const body = minted
-      .map((w) =>
-        vaultUpsertSql(
-          sqlLiteral,
-          w.vault,
-          w.value,
-          `Clone-owned secret mirrored from the function environment's ${w.env}`,
-        ),
-      )
-      .join("");
+    let body: string;
+    try {
+      body = minted
+        .map((w) =>
+          w.store === "vault"
+            ? vaultUpsertSql(sqlLiteral, w.key, w.value, `Owned secret mirrored from the function environment's ${w.env}`)
+            : settingWriteSql(sqlLiteral, w.key, w.value),
+        )
+        .join("");
+    } catch (e) {
+      return { ok: false, stage: "plan", error: msg(e) };
+    }
     try {
       await runSqlOnProject(projectRef, `do $owned$ begin ${body} end $owned$;`);
     } catch (e) {
-      return { ok: false, stage: "vault_write", error: `Could not write the clone's vault: ${msg(e)}` };
+      return { ok: false, stage: "mirror_write", error: `Could not write the project's mirror: ${msg(e)}` };
     }
   }
 
@@ -181,24 +250,43 @@ export async function ensureCloneOwnedSecrets(
     values: Object.fromEntries(plan.writes.map((w) => [w.env, w.value])),
     outcome: {
       minted: minted.map((w) => w.env),
-      reused: plan.writes.filter((w) => w.source === "vault").map((w) => w.env),
+      reused: plan.writes.filter((w) => w.source === "mirror").map((w) => w.env),
       skipped: plan.skipped,
       why: plan.why,
     },
   };
 }
 
+/** A CLONE's owned secrets: the gated list, against the prime's shape. */
+export function ensureCloneOwnedSecrets(
+  projectRef: string,
+  primeShape: PrimeShape | null,
+): Promise<EnsureOwnedSecretsResult> {
+  return ensureOwnedSecrets(projectRef, OWNED_SECRET_SPECS, primeShape);
+}
+
 export type OwnedSecretsRepairFailure =
   | CloneSecretRefusal
-  | "vault_read"
+  | "mirror_read"
   | "plan"
-  | "vault_write"
+  | "mirror_write"
   | "env_write";
 
 export type OwnedSecretsRepairResult =
   | { ok: true; cloneId: string; projectRef: string; changed: boolean; outcome: OwnedSecretsOutcome }
   | { ok: true; cloneId: string; changed: false; skipped: OwnedSecretsRepairSkip }
   | { ok: false; cloneId: string; reason: OwnedSecretsRepairFailure; error: string };
+
+async function primeShapeForSweep(supabase: Db): Promise<PrimeShape | null> {
+  let primeRef: string | null = null;
+  try {
+    const { resolvePrimeBackendRef } = await import("./prime-backend.server");
+    primeRef = await resolvePrimeBackendRef(supabase);
+  } catch {
+    primeRef = null; // unknown, never "none" — see the planner
+  }
+  return readPrimeShape(primeRef);
+}
 
 /**
  * Repair one clone, reading everything from that clone's own project. Never
@@ -213,7 +301,7 @@ export async function repairCloneOwnedSecrets(
     force?: boolean;
     now?: number;
     /** Read once per sweep by the caller; `undefined` means read it here. */
-    primeVaultNames?: ReadonlySet<string> | null;
+    primeShape?: PrimeShape | null;
   },
 ): Promise<OwnedSecretsRepairResult> {
   let target: CloneSecretTarget;
@@ -246,19 +334,9 @@ export async function repairCloneOwnedSecrets(
     if (!verdict.act) return { ok: true, cloneId, changed: false, skipped: verdict.reason };
   }
 
-  let primeVaultNames = opts?.primeVaultNames;
-  if (primeVaultNames === undefined) {
-    let primeRef: string | null = null;
-    try {
-      const { resolvePrimeBackendRef } = await import("./prime-backend.server");
-      primeRef = await resolvePrimeBackendRef(supabase);
-    } catch {
-      primeRef = null; // unknown, never "none" — see the planner
-    }
-    primeVaultNames = await readPrimeVaultNames(primeRef);
-  }
+  const primeShape = opts?.primeShape === undefined ? await primeShapeForSweep(supabase) : opts.primeShape;
 
-  const res = await ensureCloneOwnedSecrets(projectRef, primeVaultNames);
+  const res = await ensureCloneOwnedSecrets(projectRef, primeShape);
   const now = new Date().toISOString();
   const written = res.ok ? Object.keys(res.values) : envNames;
   const { error: trackErr } = await supabase.from("clone_backend_secrets").upsert(
@@ -312,13 +390,13 @@ export type OwnedSecretsReconcileResult = {
   alreadyHeld: number;
   skipped: Record<string, number>;
   refused: { cloneId: string; reason: OwnedSecretsRepairFailure }[];
-  primeVaultReadable: boolean;
+  primeReadable: boolean;
 };
 
 /**
- * Carry every clone whose owned secrets are missing or malformed. One vault
- * read per clone, nothing written when the vault already agrees; the prime's
- * vault NAMES are read once for the whole sweep.
+ * Carry every clone whose owned secrets are missing or malformed. One mirror
+ * read per clone, nothing written when the mirror already agrees; the prime's
+ * shape is read once for the whole sweep.
  */
 export async function reconcileCloneOwnedSecrets(
   supabase: Db,
@@ -333,14 +411,7 @@ export async function reconcileCloneOwnedSecrets(
   // A candidate list that could not be READ is not an empty one.
   if (error) throw new Error(`Could not list clone backends: ${error.message}`);
 
-  let primeRef: string | null = null;
-  try {
-    const { resolvePrimeBackendRef } = await import("./prime-backend.server");
-    primeRef = await resolvePrimeBackendRef(supabase);
-  } catch {
-    primeRef = null;
-  }
-  const primeVaultNames = await readPrimeVaultNames(primeRef);
+  const primeShape = await primeShapeForSweep(supabase);
 
   const candidates = (data ?? [])
     .map((r) => r as { clone_id: string | null })
@@ -352,11 +423,11 @@ export async function reconcileCloneOwnedSecrets(
     alreadyHeld: 0,
     skipped: {},
     refused: [],
-    primeVaultReadable: primeVaultNames !== null,
+    primeReadable: primeShape !== null,
   };
 
   for (const c of candidates) {
-    const res = await repairCloneOwnedSecrets(supabase, c.clone_id, { now, primeVaultNames });
+    const res = await repairCloneOwnedSecrets(supabase, c.clone_id, { now, primeShape });
     if (!res.ok) {
       out.refused.push({ cloneId: c.clone_id, reason: res.reason });
     } else if ("skipped" in res) {

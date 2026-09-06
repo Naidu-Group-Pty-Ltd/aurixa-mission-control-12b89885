@@ -1136,10 +1136,11 @@ needs repairing. What makes a settled fleet cheap instead is the step itself —
 one vault read per clone and no write when both halves already agree. And **the
 value never reaches an event row, a log line or the recorded outcome**; a test
 scans every `console.*` line in the module and the whole of `recordEvent` for
-it. `MARKET_INGESTION_CRON_SECRET` is deliberately NOT paired: ten functions
-gate on it, but the prime itself sets no such GUC, so the clones mirror the
-prime faithfully there and an engine that invented one would be inventing a
-value the prime does not hold.
+it. `MARKET_INGESTION_CRON_SECRET` was deliberately NOT paired at first: ten
+functions gate on it, but the prime itself set no such setting, so the clones
+mirrored the prime faithfully there and an engine that invented one would be
+inventing a value the prime does not hold. That became a data-driven rule on
+6 Sep — see "The prime's own pairs" below.
 
 `/hooks/clone-signing-pair-reconcile` runs every thirty minutes and is what
 carries the fleet as it stands.
@@ -1221,8 +1222,8 @@ never invent a pair the prime does not hold**: `FINANCE_PORTAL_CRON_SECRET` has
 a database half the prime's own cron reads from ITS vault, and the reminder job
 is scheduled only where that entry exists — so a clone gets its own only where
 the prime holds one, the prime is read for NAMES and never for a value, and a
-prime that cannot be read is "unknown", never "none". `MARKET_INGESTION_CRON_SECRET`
-stays unpaired for the reason recorded above.
+prime that cannot be read is "unknown", never "none". `MARKET_INGESTION_CRON_SECRET` follows the same rule: a clone gets its own
+only where the prime holds the database setting — see "The prime's own pairs".
 
 The same pass fixed what the ledger SAID. `clone_backend_secrets` read `missing`
 for `TURNSTILE_SECRET_KEY`, `REQUIRE_TURNSTILE`, `RESEND_API_KEY` and
@@ -1258,3 +1259,47 @@ moment a domain goes live (`applyCloneDerivedConfig`, beside
 `applyCloneAllowedOrigins`), and from the reconcile sweep — writing only what
 moved since its own last write, so a value an operator set by hand for a name
 it does not own is never stomped.
+
+
+## The prime's own pairs — and the rule that lets every clone follow
+
+Two of the prime's scheduled jobs (`agent-planner-run-scheduled`,
+`market-qa-subscriptions-run-due`) send `x-cron-secret` from
+`current_setting('app.market_ingestion_cron_secret')`, which was never set, to
+ten market functions comparing it against `MARKET_INGESTION_CRON_SECRET`, which
+was never set either: **401 on every tick on the prime**, and — because a clone
+mirrors the prime's shape — on every clone. The finance reminder function
+compares the same header against `FINANCE_PORTAL_CRON_SECRET`, whose vault half
+the prime never held; and its schedule had since moved onto the signed envelope
+(`cron_invoke_signed_function`) and sends no header at all, so the function
+also had to learn to accept the envelope from `pg_cron` — that half is in the
+prime repository.
+
+By the owner's decision on 6 Sep 2026 the prime is paired too. Four rules.
+
+**One module hands the prime's ref to a secret writer, and it is
+`primeSecretPairs.server.ts`.** Every clone-side writer takes its ref from
+`resolveCloneSecretTarget`, which refuses the prime by design; this one takes
+it from `resolvePrimeBackendRef` — the resolver that refuses to name Mission
+Control's own project — and nowhere else, and hands the writer
+`PRIME_PAIR_SPECS` and nothing else. A test asserts every clause, and that no
+third module calls the generic writer.
+
+**A database setting is written at the level the cron reads it.** The market
+jobs read `current_setting(...)` in a fresh session started for the job's
+owner. The writer sets it database-wide where the API's role owns the database
+(it does, on every project here) and on the role otherwise, and reads it back
+from the same rows of `pg_db_role_setting`, so the two are never asked of
+different scopes. Only a lower-case dotted name may be inlined.
+
+**Converge, never rotate.** `/hooks/prime-secret-pairs` runs hourly. A pass
+over a prime whose mirror already holds a usable value reuses it and
+re-asserts the environment; only a missing half is minted. A pass over a
+prime somebody half-changed puts it back.
+
+**Once the prime holds a half, every clone follows — with its OWN value.** The
+clone sweep reads the prime's shape (`readPrimeShape`: vault names and setting
+names, never a value) and `OWNED_SECRET_SPECS` gates the two pairs on it. A
+clone whose prime holds `finance_portal_cron_secret` mints its own; one whose
+prime holds `app.market_ingestion_cron_secret` sets its own. The prime's value
+never travels.

@@ -382,9 +382,12 @@ export const TENANT_SCOPED_SECRETS = new Set([
   // a real pair and mirrors it in the clone's vault.
   "VAPID_PUBLIC_KEY",
   "VAPID_PRIVATE_KEY",
-  // Paired (vault + environment) only where the prime's own vault carries
-  // `finance_portal_cron_secret`, by the clone-owned secrets step.
+  // Paired (mirror + environment) only where the prime holds the same half —
+  // the vault's `finance_portal_cron_secret`, the database setting
+  // `app.market_ingestion_cron_secret` — by the clone-owned secrets step. The
+  // prime's own pairs are written by `primeSecretPairs.server.ts`.
   "FINANCE_PORTAL_CRON_SECRET",
+  "MARKET_INGESTION_CRON_SECRET",
   // The clone's OWN Mission Control key and its own webhook secret. A shared
   // key bills every tenant's usage to one account; the link step mints each
   // clone its own and writes it where the prime's functions read it.
@@ -420,9 +423,13 @@ export const TENANT_SCOPED_REMEDY: Record<string, string> = {
     "Minted as a pair with VAPID_PUBLIC_KEY by the clone-owned secrets step and mirrored in " +
     "the clone's vault; the clone-secrets-reconcile job repairs any clone still without one.",
   FINANCE_PORTAL_CRON_SECRET:
-    "Paired only where the prime's vault holds finance_portal_cron_secret, because the finance " +
-    "reminder cron is scheduled only there. The prime holds none today, so the job runs nowhere; " +
-    "add the pair on the prime and the clone-secrets-reconcile job gives each clone its own.",
+    "Paired with the vault's finance_portal_cron_secret by the clone-owned secrets step, on every " +
+    "clone whose prime holds the same name (the prime-secret-pairs job keeps the prime's). Never " +
+    "the prime's value.",
+  MARKET_INGESTION_CRON_SECRET:
+    "Paired with the database setting app.market_ingestion_cron_secret by the clone-owned secrets " +
+    "step, on every clone whose prime holds the same setting (the prime-secret-pairs job keeps the " +
+    "prime's). Two scheduled jobs send it and ten market functions compare it. Never the prime's value.",
   MISSION_CONTROL_CLONE_API_KEY:
     "Minted and written by the Mission Control link step at provisioning, into the environment " +
     "the prime's functions read; the clone-secrets-reconcile job links any clone still without one.",
