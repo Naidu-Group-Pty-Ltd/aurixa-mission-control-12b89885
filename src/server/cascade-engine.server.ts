@@ -1801,7 +1801,13 @@ export async function processClone(args: {
     }
 
     let checkData: {
-      check_runs?: Array<{ name: string; status: string; conclusion: string | null }>;
+      check_runs?: Array<{
+        name: string;
+        status: string;
+        conclusion: string | null;
+        started_at?: string | null;
+        completed_at?: string | null;
+      }>;
     };
     try {
       ({ data: checkData } = await octokit.checks.listForRef({
@@ -1830,6 +1836,8 @@ export async function processClone(args: {
         name: c.name,
         status: c.status,
         conclusion: c.conclusion,
+        started_at: c.started_at,
+        completed_at: c.completed_at,
       })),
     );
 

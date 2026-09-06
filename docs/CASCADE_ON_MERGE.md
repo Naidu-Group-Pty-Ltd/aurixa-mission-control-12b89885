@@ -815,3 +815,35 @@ around a timestamp. `passContinuation.contract.test.ts` pins the shape of all
 of it: the classification before the failure count, the requeue before the
 break, the return before the final tally, the refund rule, and the claim's
 comparison.
+
+## A CI that never started is not a failing tree
+
+From 05:35 UTC on 4 September 2026 every job on every run in the three
+private clone repositories completed as `failure` two to ten seconds after it
+was created — no runner assigned, no step run, no log to download — and kept
+doing so on every push for two days. The public repositories beside them
+(the prime, Mission Control) ran the same workflows untouched. That is the
+shape GitHub gives a job it declines to start on a private repository once
+the organisation's included Actions minutes are spent or its spending limit
+is reached: an account setting, not a fault in any tree.
+
+The gate read it as `2 check(s) failing: verify (failure), security
+(failure)`, each cascade row read `pr_opened`, and the run summary read
+`1 awaiting manual reconcile` — the wording of a healthy run. Nothing
+anywhere said the fleet had stopped receiving the prime's code. Three
+proposals grew to several hundred files each while every clone ran the prime
+as it stood at 04:40 on 4 September.
+
+`decideCascadeMerge` now reads `started_at` and `completed_at` on each check
+run, which both callers pass. A failure that ended within
+`NEVER_STARTED_CEILING_MS` of starting — and only when **every** failed job
+on the head did — is the verdict `never_started`, and its reason names the
+condition and where it is remedied (the organisation's Actions spending
+limit) rather than sending an operator to read a tree nothing built. Three
+rules hold it honest: **it still refuses** (never started is not a pass);
+**a job with no timestamps, a fast pass, or any one job that actually ran
+and failed reads exactly as before**, because a guess here would hide a real
+failure behind a billing note; and **the engine never merges blind** — the
+remedy is on the account, and the drain lands the proposals on green the
+moment the checks can run. `autoMergeGate.test.ts` pins all of it, including
+that the timestamps travel through both callers.

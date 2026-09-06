@@ -476,6 +476,8 @@ async function handleOne(args: {
           name: c.name,
           status: c.status,
           conclusion: c.conclusion,
+          started_at: c.started_at,
+          completed_at: c.completed_at,
         })),
         REQUIRED_CHECKS,
       );
