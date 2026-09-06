@@ -401,6 +401,65 @@ export function buildGrantDdl(
   return `grant ${privilege.toLowerCase()} on ${quoteIdent(schema)}.${quoteIdent(table)} to ${quoteIdent(grantee)}`;
 }
 
+/**
+ * A privilege on the SCHEMA itself, which is a different grant from a
+ * privilege on the tables inside it and was never replicated.
+ *
+ * Without `usage` on the schema a role cannot address anything in it however
+ * complete its table grants are, so this is the grant that has to land first.
+ * Measured 6 Sep 2026 on all three clones: the prime's `aml` schema carries
+ * `service_role=U/postgres` and every clone carried nothing at all.
+ */
+export function buildSchemaGrantDdl(
+  schema: string,
+  grantee: string,
+  privilege: string,
+): string {
+  return `grant ${privilege.toLowerCase()} on schema ${quoteIdent(schema)} to ${quoteIdent(grantee)}`;
+}
+
+/** `pg_default_acl.defaclobjtype` → the noun ALTER DEFAULT PRIVILEGES uses. */
+const DEFACL_OBJECT_NOUN: Record<string, string> = {
+  r: "tables",
+  S: "sequences",
+  f: "functions",
+  T: "types",
+  n: "schemas",
+};
+
+export function defaultAclNoun(objtype: string): string | null {
+  return DEFACL_OBJECT_NOUN[objtype] ?? null;
+}
+
+/**
+ * Replicate a DEFAULT privilege, so a table that does not exist yet is
+ * reachable when it arrives.
+ *
+ * Table grants are a snapshot: they cover the tables that exist at the moment
+ * the stage runs. A migration cascaded later creates a table with no grants on
+ * it at all, and the deficit re-opens silently — which is exactly how the
+ * `aml` schema would have regressed after being repaired by hand.
+ *
+ * Returns null for an object type ALTER DEFAULT PRIVILEGES has no noun for,
+ * rather than guessing one: an unknown type is skipped and reported, never
+ * rendered as somebody else's noun.
+ */
+export function buildDefaultAclDdl(
+  ownerRole: string,
+  schema: string,
+  objtype: string,
+  grantee: string,
+  privilege: string,
+): string | null {
+  const noun = defaultAclNoun(objtype);
+  if (!noun) return null;
+  return (
+    `alter default privileges for role ${quoteIdent(ownerRole)} ` +
+    `in schema ${quoteIdent(schema)} ` +
+    `grant ${privilege.toLowerCase()} on ${noun} to ${quoteIdent(grantee)}`
+  );
+}
+
 // ─── Batch DDL application ───────────────────────────────────────────
 
 /**
@@ -599,11 +658,47 @@ const Q = {
              order by tablename, policyname`,
 
   // PostgREST reaches nothing without these: RLS alone is not access.
-  grants: `select table_schema as schema, table_name, grantee, privilege_type
-           from information_schema.role_table_grants
-           where table_schema in (${SCHEMA_LIST})
-             and grantee in (${API_ROLE_LIST})
-           order by 1, 2, 3, 4`,
+  /*
+    Read from the CATALOG, never from `information_schema.role_table_grants`.
+
+    That view is filtered to grants whose grantor or grantee is a role the
+    CURRENT user is a member of, so what it returns depends on who is asking.
+    Two projects read by two different connections answer two different
+    questions, which is not a comparison. `pg_class.relacl` is the same set
+    whoever reads it.
+  */
+  grants: `select n.nspname as schema, c.relname as table_name,
+                  r.rolname as grantee, a.privilege_type
+             from pg_class c
+             join pg_namespace n on n.oid = c.relnamespace
+             cross join lateral aclexplode(c.relacl) a
+             join pg_roles r on r.oid = a.grantee
+            where n.nspname in (${SCHEMA_LIST})
+              and c.relkind in ('r', 'v', 'm', 'p', 'f')
+              and r.rolname in (${API_ROLE_LIST})
+            order by 1, 2, 3, 4`,
+
+  /** The schema itself. Without `usage` here every table grant is unreachable. */
+  schemaGrants: `select n.nspname as schema, r.rolname as grantee, a.privilege_type
+                   from pg_namespace n
+                   cross join lateral aclexplode(n.nspacl) a
+                   join pg_roles r on r.oid = a.grantee
+                  where n.nspname in (${SCHEMA_LIST})
+                    and r.rolname in (${API_ROLE_LIST})
+                  order by 1, 2, 3`,
+
+  /** So a table created by a LATER cascaded migration is not born unreachable. */
+  defaultAcls: `select n.nspname as schema,
+                       pg_get_userbyid(d.defaclrole) as owner_role,
+                       d.defaclobjtype::text as objtype,
+                       r.rolname as grantee, a.privilege_type
+                  from pg_default_acl d
+                  join pg_namespace n on n.oid = d.defaclnamespace
+                  cross join lateral aclexplode(d.defaclacl) a
+                  join pg_roles r on r.oid = a.grantee
+                 where n.nspname in (${SCHEMA_LIST})
+                   and r.rolname in (${API_ROLE_LIST})
+                 order by 1, 2, 3, 4, 5`,
 };
 
 /** Count queries used for reconciliation — run identically on both sides. */
@@ -620,7 +715,7 @@ const COUNTS: Record<StageName, string> = {
   triggers: `select count(*)::int as n from pg_trigger t join pg_class c on c.oid=t.tgrelid join pg_namespace n on n.oid=c.relnamespace where not t.tgisinternal and n.nspname in (${SCHEMA_LIST})`,
   rls: `select count(*)::int as n from pg_class c join pg_namespace n on n.oid=c.relnamespace where c.relkind='r' and c.relrowsecurity and n.nspname in (${SCHEMA_LIST})`,
   policies: `select count(*)::int as n from pg_policies where schemaname in (${SCHEMA_LIST})`,
-  grants: `select count(*)::int as n from information_schema.role_table_grants where table_schema in (${SCHEMA_LIST}) and grantee in (${API_ROLE_LIST})`,
+  grants: `select count(*)::int as n from pg_class c join pg_namespace n on n.oid=c.relnamespace cross join lateral aclexplode(c.relacl) a join pg_roles r on r.oid=a.grantee where n.nspname in (${SCHEMA_LIST}) and c.relkind in ('r','v','m','p','f') and r.rolname in (${API_ROLE_LIST})`,
 };
 
 async function query(ref: string, sql: string): Promise<Array<Record<string, unknown>>> {
@@ -731,6 +826,45 @@ const DIGESTS: Partial<Record<StageName, string>> = {
                  join pg_class c on c.oid = t.tgrelid
                  join pg_namespace n on n.oid = c.relnamespace
                 where not t.tgisinternal and n.nspname in (${SCHEMA_LIST})) g`,
+  /*
+    Grants are digested for the same reason indexes are, and the miss cost the
+    whole AML module on every clone.
+
+    The count is ONE number across every replicated schema and all three API
+    roles. A clone's `public` grants are written by this stage in a uniform
+    sweep and legitimately come out ABOVE the prime's, so the total reconciled
+    — `cloneCount >= primeCount` — while the `aml` schema held, measured
+    6 Sep 2026 on all three clones, no schema usage, no table privileges and
+    no default privileges AT ALL. The stage was skipped rather than failing,
+    so nothing was recorded anywhere: `aurixa.ddl_failures` is empty of it and
+    parity reported the clone exact, because every table, column, index and
+    policy really was present. They simply could not be addressed, and the
+    live symptom was aml-verification-processor answering HTTP 500 on 510 of
+    510 cron runs in a day.
+
+    The SCHEMA acls ride in the same digest as the table acls: a missing
+    `usage` on the schema makes every table grant inside it unreachable, so a
+    digest that could not see it would reconcile a clone that cannot read one
+    row. Only equality is conclusive — an unequal digest is the ordinary state
+    here, exactly as for indexes, and sends the stage on to diff and apply
+    only what the clone lacks.
+  */
+  grants: `select md5(coalesce(string_agg(g, E'\n' order by g), '')) from (
+             select n.nspname || '.' || c.relname || ' ' || r.rolname || ' ' || a.privilege_type as g
+               from pg_class c
+               join pg_namespace n on n.oid = c.relnamespace
+               cross join lateral aclexplode(c.relacl) a
+               join pg_roles r on r.oid = a.grantee
+              where n.nspname in (${SCHEMA_LIST})
+                and c.relkind in ('r', 'v', 'm', 'p', 'f')
+                and r.rolname in (${API_ROLE_LIST})
+             union all
+             select 'schema ' || n.nspname || ' ' || r.rolname || ' ' || a.privilege_type
+               from pg_namespace n
+               cross join lateral aclexplode(n.nspacl) a
+               join pg_roles r on r.oid = a.grantee
+              where n.nspname in (${SCHEMA_LIST})
+                and r.rolname in (${API_ROLE_LIST})) x`,
 };
 
 /** A stage is reconciled when the clone holds at least as many objects as the prime. */
@@ -1578,10 +1712,60 @@ export async function replicateSchemaByIntrospection(
       await stageOrSkip(
         "grants",
         async () => {
-          const grantRows = await query(primeRef, Q.grants);
-          return grantRows.map((r) =>
-            buildGrantDdl(str(r.schema), str(r.table_name), str(r.grantee), str(r.privilege_type)),
-          );
+          // ASK THE CLONE WHAT IT HOLDS and carry only the rest — the rule
+          // the indexes and triggers stages already follow, and what keeps
+          // entering this stage cheap now that a legitimate surplus on
+          // `public` keeps its digest unequal for ever. A clone whose grants
+          // cannot be read is treated as holding NONE, so every grant goes
+          // back on the apply path rather than being assumed present.
+          const held = async (q: string, key: (r: Record<string, unknown>) => string) =>
+            new Set(
+              (await query(cloneRef, q).catch(() => [] as Array<Record<string, unknown>>)).map(key),
+            );
+
+          // 1. The SCHEMA first. Every table grant below it is unreachable
+          //    until this lands.
+          const schemaKey = (r: Record<string, unknown>) =>
+            `${str(r.schema)}|${str(r.grantee)}|${str(r.privilege_type)}`;
+          const heldSchema = await held(Q.schemaGrants, schemaKey);
+          const schemaDdl = (await query(primeRef, Q.schemaGrants))
+            .filter((r) => !heldSchema.has(schemaKey(r)))
+            .map((r) => buildSchemaGrantDdl(str(r.schema), str(r.grantee), str(r.privilege_type)));
+
+          // 2. The tables the prime grants and this clone does not hold.
+          const tableKey = (r: Record<string, unknown>) =>
+            `${str(r.schema)}.${str(r.table_name)}|${str(r.grantee)}|${str(r.privilege_type)}`;
+          const heldTables = await held(Q.grants, tableKey);
+          const tableDdl = (await query(primeRef, Q.grants))
+            .filter((r) => !heldTables.has(tableKey(r)))
+            .map((r) =>
+              buildGrantDdl(
+                str(r.schema),
+                str(r.table_name),
+                str(r.grantee),
+                str(r.privilege_type),
+              ),
+            );
+
+          // 3. The DEFAULTS, so the next cascaded migration's table is not
+          //    born unreachable and this deficit cannot re-open silently.
+          const defaultKey = (r: Record<string, unknown>) =>
+            `${str(r.schema)}|${str(r.objtype)}|${str(r.grantee)}|${str(r.privilege_type)}`;
+          const heldDefaults = await held(Q.defaultAcls, defaultKey);
+          const defaultDdl = (await query(primeRef, Q.defaultAcls))
+            .filter((r) => !heldDefaults.has(defaultKey(r)))
+            .map((r) =>
+              buildDefaultAclDdl(
+                str(r.owner_role),
+                str(r.schema),
+                str(r.objtype),
+                str(r.grantee),
+                str(r.privilege_type),
+              ),
+            )
+            .filter((d): d is string => d !== null);
+
+          return [...schemaDdl, ...tableDdl, ...defaultDdl];
         },
         60,
       ),

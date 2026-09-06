@@ -1306,3 +1306,72 @@ clone sweep reads the prime's shape (`readPrimeShape`: vault names, never a
 value) and `OWNED_SECRET_SPECS` gates the two pairs on it. A clone whose prime
 holds `finance_portal_cron_secret` mints its own; one whose prime holds
 `market_ingestion_cron_secret` mints its own. The prime's value never travels.
+
+## A clone is a PROJECT, not only a database
+
+The whole AML/CTF module was dead at the API layer on every clone, from the day
+each was built, for **two independent reasons — each fatal on its own, and the
+second hidden behind the first**.
+
+**PostgREST serves only the schemas its project exposes.** The prime's
+`db_schema` is `public, graphql_public, aml`; a fresh project gets the platform
+default, which is the first two. So all 29 modules across 22 edge functions
+that reach `.schema('aml')` answered `PGRST106 Invalid schema: aml`. Measured
+6 September 2026 on NPC Test: `aml-verification-processor` returned HTTP 500 on
+**510 of 510** cron runs in twenty-four hours, logging exactly that. The prime's
+same function returned 200 on all 1,410.
+
+**And the `aml` schema had no grants of any kind** — no schema `usage`, no table
+privileges, no default privileges, for any API role. So fixing the exposure
+alone would have moved the error to `permission denied` and looked like a brand
+new fault.
+
+### Why nothing saw it
+
+Neither is a database object. Catalog introspection compares tables, columns,
+indexes, policies and triggers, and it was **right about every one of them**:
+the 113 `aml` tables and their 112 RLS policies are present and byte-identical
+to the prime. They were simply not addressable. This is the same class as
+[the project's upload limit](#a-bucket-may-not-ask-for-more-room-than-the-project-allows),
+which made two storage buckets impossible to create for a reason no
+bucket-level retry could ever fix.
+
+The grants half has a second cause, and it is
+[the index lesson](#a-count-cannot-see-which-index-is-missing) again in a new
+place. The grants stage reconciled on **one number across every replicated
+schema and all three API roles**. A clone's `public` grants are written by this
+stage in a uniform sweep and legitimately come out ABOVE the prime's, so the
+total satisfied `cloneCount >= primeCount` while `aml` held nothing at all. The
+stage was **skipped rather than failed**, so nothing was recorded anywhere:
+`aurixa.ddl_failures` is empty of it, and parity reported the clone exact.
+
+### What now holds it
+
+- **`replicateApiConfig`** mirrors the prime's exposed schemas through the
+  Management API, beside `replicateStorageConfig`, for the same reason and in
+  the same place. It **never narrows** — a schema only the clone exposes
+  survives — and a failure is reported and non-fatal.
+- **The control plane owns that setting.** Writing `pgrst.db_schemas` onto the
+  `authenticator` role — which is what the endpoint does underneath, and what
+  the dashboard's *Exposed schemas* control writes — does NOT reach a running
+  PostgREST on Supabase Cloud. Two `NOTIFY pgrst, 'reload config'` over
+  seventeen minutes changed nothing. The `PATCH` is the only thing that does,
+  which is why this cannot be a migration.
+- **Grants are digested**, so a surplus on one schema can no longer mask an
+  absence on another. The SCHEMA acls ride in the same digest as the table
+  acls, because a missing `usage` makes every table grant inside it unreachable
+  and a digest blind to it would reconcile a clone that cannot read one row.
+- **The stage diffs before it applies** — it asks the clone what it holds and
+  carries only the rest, the rule the indexes and triggers stages already
+  follow. That is what keeps entering it cheap now that a legitimate surplus
+  keeps its digest unequal for ever.
+- **Schema `usage` lands first**, because every table grant under it is inert
+  until it does.
+- **Default privileges are replicated**, so a table created by a migration
+  cascaded later is not born unreachable and this deficit cannot re-open
+  silently.
+- **Grants are read from `pg_class.relacl`, never from
+  `information_schema.role_table_grants`.** That view is filtered to grants
+  whose grantor or grantee is a role the *current* user belongs to, so two
+  projects read by two connections answer two different questions. That is not
+  a comparison.
