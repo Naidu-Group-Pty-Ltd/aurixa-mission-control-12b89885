@@ -2760,6 +2760,20 @@ export function planCloneSecrets(
       continue;
     }
     if (kind === "identity") {
+      // ONE WRITER OF THE VALUE. An identity secret that has a database half —
+      // `INTERNAL_EDGE_SECRET` is the vault's `internal_edge_secret`, or every
+      // cron job on the clone signs with a key no function accepts — is decided
+      // by the signing-pair step, which reads the vault and hands the value in
+      // through `selfValues`. Generating a fresh random here as well is what
+      // put every clone's function environment out of step with its vault on
+      // every repair pass (see `signingPair.pure.ts`). A name the pair step
+      // did not decide is minted exactly as before.
+      const decided = selfValues?.[name];
+      if (typeof decided === "string" && decided.length > 0) {
+        toWrite.push({ name, value: decided });
+        results.set(name, { name, status: "derived", success: true });
+        continue;
+      }
       toWrite.push({ name, value: generate() });
       results.set(name, { name, status: "generated", success: true });
       continue;
@@ -4158,6 +4172,43 @@ export async function provisionCloneBackend(
     );
   }
 
+  // Step 5e: the internal signing PAIR — one value, both sides.
+  //
+  // `cron_signed_internal_headers` signs every scheduled call with the vault's
+  // `internal_edge_secret`; the functions verify with `INTERNAL_EDGE_SECRET`
+  // from their environment. Provisioning wrote only the environment half, as a
+  // random it kept nowhere, and every clone's background layer was dead from
+  // the day it was built: ~13,900 refused runs a day per clone, measured 6 Sep
+  // 2026. The pair step reads the vault (the only side that can be read),
+  // writes vault then environment, and hands the value to the secrets batch
+  // below so the generic generator re-asserts the SAME value rather than a new
+  // one. Non-fatal: a clone with no background layer is exactly what it was
+  // before, and the reconcile sweep carries it on the next pass.
+  pauseIfDue("writing the internal signing pair");
+  let signingPairValue: string | null = null;
+  let signingPair: import("./cloneSigningPair.server").SigningPairOutcome | null = null;
+  try {
+    await onStatusUpdate?.("migrating", "Writing this project's internal signing pair (vault + environment)...");
+    const { ensureCloneSigningPair } = await import("./cloneSigningPair.server");
+    const pair = await ensureCloneSigningPair(projectRef, serviceRoleKey);
+    if (pair.ok) {
+      signingPairValue = pair.value;
+      signingPair = pair.outcome;
+      // The reason, never the value.
+      await onStatusUpdate?.("migrating", `Signing pair: ${signingPair.why}`);
+    } else {
+      await onStatusUpdate?.(
+        "migrating",
+        `Signing pair not written (${pair.stage}: ${pair.error}) — every scheduled job on this clone will be refused until the reconcile sweep repairs it`,
+      );
+    }
+  } catch (err) {
+    await onStatusUpdate?.(
+      "migrating",
+      `Signing pair step skipped: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
   pauseIfDue("syncing secrets");
   await onStatusUpdate?.(
     "migrating",
@@ -4174,8 +4225,15 @@ export async function provisionCloneBackend(
     // Values that belong to THIS clone rather than being copied from the
     // prime. `JWT_SECRET` is tenant-scoped precisely so it can never be
     // inherited, which would otherwise leave every clone unable to sign its
-    // own access tokens — so provisioning supplies the project's own.
-    ownJwtSecret ? { JWT_SECRET: ownJwtSecret } : undefined,
+    // own access tokens — so provisioning supplies the project's own. And
+    // `INTERNAL_EDGE_SECRET` is the value the pair step just put in the vault,
+    // so the batch re-asserts it instead of minting a second one.
+    ownJwtSecret || signingPairValue
+      ? {
+          ...(ownJwtSecret ? { JWT_SECRET: ownJwtSecret } : {}),
+          ...(signingPairValue ? { INTERNAL_EDGE_SECRET: signingPairValue } : {}),
+        }
+      : undefined,
     // What an operator SAID may travel, so a forward that did not happen is
     // reported as that rather than as an unauthorised name.
     input.authorisedForwardNames ? new Set(input.authorisedForwardNames) : undefined,
