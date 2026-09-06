@@ -551,10 +551,26 @@ async function step(row: DeploymentRow): Promise<StepOutcome> {
       }
       const state = await provider.getDomain(row.project_id, row.domain, row.team_id);
       if (!state.verified) {
+        // A challenge is written wherever it APPEARS, not only where it was
+        // first looked for. Vercel answered `addDomain` with no challenge for
+        // two clones on 3 September 2026 and then, once the CNAME resolved,
+        // asked for a TXT on `_vercel.<zone>` — which this step recorded on the
+        // row, every two minutes, for six hours, and never wrote. Both rows were
+        // then failed as "stuck" with the exact record they needed sitting in
+        // `domain_verification`. The job is keyed on the challenge's own value,
+        // so asking on every pass is free once it has been queued.
+        const txt = await enqueueDomainVerificationJobs({
+          cloneId: row.clone_id,
+          zoneId: config?.cloudflare_zone_id,
+          challenges: state.challenges,
+        });
         return {
           kind: "wait",
           seconds: 120,
-          detail: "Waiting for DNS to propagate and the provider to verify the domain.",
+          detail:
+            txt.enqueued > 0
+              ? `The provider asked for ${txt.enqueued} DNS challenge record(s); writing them, then waiting for the provider to verify the domain.`
+              : "Waiting for DNS to propagate and the provider to verify the domain.",
           patch: { domain_verification: state.challenges },
         };
       }

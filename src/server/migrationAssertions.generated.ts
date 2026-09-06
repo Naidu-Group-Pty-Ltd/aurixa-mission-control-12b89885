@@ -205,4 +205,12 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260906080000",
     assertions: [{ kind: "cron", jobname: "prime-secret-pairs" }],
   },
+  {
+    migration: "20260906100000_didit_fleet_forward.sql",
+    version: "20260906100000",
+    assertions: [
+      { kind: "rows", table: "prime_secret_forwards", atLeast: 45 },
+      { kind: "rows", table: "api_provider_rates", atLeast: 20 },
+    ],
+  },
 ];
