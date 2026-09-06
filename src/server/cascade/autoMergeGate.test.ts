@@ -2,8 +2,10 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  checkNeverStarted,
   checksUnreadable,
   decideCascadeMerge,
+  NEVER_STARTED_CEILING_MS,
   REQUIRED_CHECKS,
   type CheckRun,
 } from "./autoMergeGate.pure";
@@ -84,6 +86,102 @@ describe("decideCascadeMerge", () => {
     expect(
       decideCascadeMerge([...required(), { name: "x", status: "completed", conclusion: null }]),
     ).toMatchObject({ merge: false, reason: "failing" });
+  });
+});
+
+describe("a CI that never started", () => {
+  // The shape every private clone repository showed from 05:35 UTC on
+  // 4 September 2026: created, "failed" two to ten seconds later, no runner, no
+  // step, no log. The public repositories beside them ran the same workflows.
+  const at = (seconds: number) => new Date(Date.UTC(2026, 8, 6, 8, 17, 53 + seconds)).toISOString();
+  const dead = (name: string, seconds = 2): CheckRun => ({
+    name,
+    status: "completed",
+    conclusion: "failure",
+    started_at: at(0),
+    completed_at: at(seconds),
+  });
+  const ranAndFailed = (name: string, seconds = 480): CheckRun => dead(name, seconds);
+
+  it("names the condition when every failed job ended within seconds of starting", () => {
+    const v = decideCascadeMerge([dead("verify"), dead("security", 3)]);
+    expect(v).toMatchObject({ merge: false, reason: "never_started" });
+    expect(v.why).toContain("verify");
+    expect(v.why).toContain("security");
+    // Where it is fixed, because "failing" sent an operator to read a tree
+    // nothing had built.
+    expect(v.why).toContain("spending limit");
+    expect(v.why).toContain("Billing");
+  });
+
+  it("still refuses — never started is not a pass", () => {
+    expect(decideCascadeMerge([dead("verify"), dead("security")]).merge).toBe(false);
+  });
+
+  it("reads a job that ran for minutes and failed as a real failure", () => {
+    expect(decideCascadeMerge([ok("verify"), ranAndFailed("security")])).toMatchObject({
+      reason: "failing",
+    });
+  });
+
+  it("reads a mix as a real failure — one job did run", () => {
+    expect(decideCascadeMerge([ranAndFailed("verify"), dead("security")])).toMatchObject({
+      reason: "failing",
+    });
+  });
+
+  it("never guesses without timestamps", () => {
+    expect(decideCascadeMerge([red("verify"), red("security")])).toMatchObject({
+      reason: "failing",
+    });
+    expect(checkNeverStarted({ name: "verify", status: "completed", conclusion: "failure" })).toBe(
+      false,
+    );
+    expect(
+      checkNeverStarted({
+        name: "verify",
+        status: "completed",
+        conclusion: "failure",
+        started_at: "not a date",
+        completed_at: at(1),
+      }),
+    ).toBe(false);
+  });
+
+  it("does not read a fast pass, or a running job, as never started", () => {
+    const fast: CheckRun = {
+      name: "Vercel Preview Comments",
+      status: "completed",
+      conclusion: "success",
+      started_at: at(0),
+      completed_at: at(0),
+    };
+    expect(checkNeverStarted(fast)).toBe(false);
+    expect(decideCascadeMerge([...required(), fast]).merge).toBe(true);
+    expect(checkNeverStarted({ ...dead("verify"), status: "in_progress", conclusion: null })).toBe(
+      false,
+    );
+  });
+
+  it("holds the ceiling where a genuine failure cannot reach", () => {
+    // A runner, a checkout and one step take longer than this; the observed
+    // never-started jobs took two to ten seconds.
+    expect(NEVER_STARTED_CEILING_MS).toBeGreaterThanOrEqual(10_000);
+    expect(NEVER_STARTED_CEILING_MS).toBeLessThanOrEqual(30_000);
+    expect(checkNeverStarted(dead("verify", NEVER_STARTED_CEILING_MS / 1000 + 1))).toBe(false);
+  });
+
+  it("is a reading both callers can take — the timestamps travel", () => {
+    // Without `started_at`/`completed_at` on the mapped check, the gate can
+    // only ever say "failing"; the engine and the drain must both pass them.
+    for (const file of [
+      "src/server/cascade-engine.server.ts",
+      "src/server/cascadeMergeDrain.server.ts",
+    ]) {
+      const src = readFileSync(join(process.cwd(), file), "utf8");
+      expect(src, file).toContain("started_at: c.started_at");
+      expect(src, file).toContain("completed_at: c.completed_at");
+    }
   });
 });
 

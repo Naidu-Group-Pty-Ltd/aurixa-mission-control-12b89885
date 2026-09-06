@@ -44,13 +44,27 @@ export type CheckRun = {
    * | `action_required` | `skipped` | `stale` | null while running.
    */
   conclusion: string | null;
+  /**
+   * When the job began and ended, as GitHub reports them. Optional: a caller
+   * holding only the three fields above gets every verdict it always did.
+   * With both present, a failure can be told from a job that was never run at
+   * all — see `NEVER_STARTED_CEILING_MS`.
+   */
+  started_at?: string | null;
+  completed_at?: string | null;
 };
 
 export type MergeVerdict =
   | { merge: true; why: string }
   | {
       merge: false;
-      reason: "pending" | "failing" | "no_checks" | "awaiting_required" | "checks_unreadable";
+      reason:
+        | "pending"
+        | "failing"
+        | "never_started"
+        | "no_checks"
+        | "awaiting_required"
+        | "checks_unreadable";
       why: string;
     };
 
@@ -82,6 +96,52 @@ export const REQUIRED_CHECKS = ["verify", "security"] as const;
  * is how a gate quietly stops being one.
  */
 const PASSING = new Set(["success", "neutral", "skipped", "stale"]);
+
+/**
+ * A failed job that ended within this long of starting was never run.
+ *
+ * From 05:35 UTC on 4 September 2026 every job on every private clone
+ * repository completed as `failure` two to ten seconds after it was created —
+ * no runner assigned, no step run, no log to download — and kept doing so on
+ * every push for two days, while the public repositories beside them (the
+ * prime, Mission Control) ran the same workflows untouched. That is how GitHub
+ * declines to start a job on a private repository once the organisation's
+ * included Actions minutes are spent or its spending limit is reached. It is
+ * an account setting, not a fault in any tree.
+ *
+ * The gate read it as "2 check(s) failing: verify (failure), security
+ * (failure)", the cascade row read `pr_opened`, and the run summary read
+ * "1 awaiting manual reconcile" — the wording of a healthy run. Nothing
+ * anywhere said the fleet had stopped receiving the prime's code, and three
+ * proposals grew to several hundred files each while every clone ran the
+ * prime as it stood on 4 September.
+ *
+ * A job that actually ran needs a runner, a checkout and at least one step,
+ * so a genuine failure takes far longer than this. Below the ceiling — and
+ * only when EVERY failed job on the head is below it — the verdict names the
+ * condition and where it is fixed. A job with no timestamps, a fast pass, or
+ * any one job that ran and failed reads exactly as it always did: a guess
+ * here would hide a real failure behind a billing note.
+ */
+export const NEVER_STARTED_CEILING_MS = 20_000;
+
+/** Where the condition is remedied — on the organisation, never in the tree. */
+export const NEVER_STARTED_REMEDY =
+  "GitHub does not start jobs on a private repository once the organisation's included " +
+  "Actions minutes are spent or its spending limit is reached. Check the organisation's " +
+  "Settings → Billing and plans → Spending limits (Actions), then re-run the checks; " +
+  "nothing in the cascade or the tree needs to change.";
+
+/** A completed, non-passing run that ended within the ceiling of starting. */
+export function checkNeverStarted(check: CheckRun): boolean {
+  if (check.status !== "completed") return false;
+  if (PASSING.has(check.conclusion ?? "")) return false;
+  const started = check.started_at ? Date.parse(check.started_at) : Number.NaN;
+  const ended = check.completed_at ? Date.parse(check.completed_at) : Number.NaN;
+  if (!Number.isFinite(started) || !Number.isFinite(ended)) return false;
+  const ran = ended - started;
+  return ran >= 0 && ran <= NEVER_STARTED_CEILING_MS;
+}
 
 export function decideCascadeMerge(
   checks: readonly CheckRun[],
@@ -119,6 +179,18 @@ export function decideCascadeMerge(
   // the rest changes nothing, and reporting "still running" would send an
   // operator back later to read the same answer.
   if (failed.length > 0) {
+    // Every failure ended within seconds of starting: nothing ran these, and
+    // "failing" would send an operator to read a tree that was never built.
+    if (failed.every(checkNeverStarted)) {
+      return {
+        merge: false,
+        reason: "never_started",
+        why:
+          `Not merging — ${failed.length} check(s) failed without running (each ended within ` +
+          `${NEVER_STARTED_CEILING_MS / 1000}s of starting; no runner was assigned): ` +
+          `${failed.map((c) => c.name).join(", ")}. ${NEVER_STARTED_REMEDY}`,
+      };
+    }
     return {
       merge: false,
       reason: "failing",
