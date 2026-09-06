@@ -1216,6 +1216,8 @@ export type Database = {
           clone_id: string | null
           created_at: string
           created_by: string | null
+          delivered_env_at: string | null
+          delivered_project_ref: string | null
           first_used_at: string | null
           id: string
           key_hash: string
@@ -1232,6 +1234,8 @@ export type Database = {
           clone_id?: string | null
           created_at?: string
           created_by?: string | null
+          delivered_env_at?: string | null
+          delivered_project_ref?: string | null
           first_used_at?: string | null
           id?: string
           key_hash: string
@@ -1248,6 +1252,8 @@ export type Database = {
           clone_id?: string | null
           created_at?: string
           created_by?: string | null
+          delivered_env_at?: string | null
+          delivered_project_ref?: string | null
           first_used_at?: string | null
           id?: string
           key_hash?: string

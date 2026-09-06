@@ -196,8 +196,21 @@ export async function resolveCloneOrigins(supabase: Db, cloneId: string): Promis
       (hostingCfg as { primary_domain?: string | null } | null)?.primary_domain,
     );
 
+  // The origin this clone is FOR, as opposed to the one GoTrue redirects to
+  // today: the allocated hostname outranks the provider's, which `siteUrl`
+  // falls back to until the custom domain is live. Passkeys and invite links
+  // bound to a provider hostname go wrong the moment the domain goes live.
+  const deploymentStatus = (deploymentRow as { status?: string | null } | null)?.status ?? null;
+  const liveOrigin = deploymentStatus === "live" ? deploymentOrigin : null;
+
   return {
     siteUrl: row?.deploy_url ?? deploymentOrigin ?? row?.lovable_project_url ?? null,
+    canonicalOrigin:
+      row?.deploy_url ??
+      liveOrigin ??
+      (allocatedFqdn ? `https://${allocatedFqdn}` : null) ??
+      deploymentOrigin ??
+      null,
     additionalRedirectUrls: [
       row?.deploy_url ?? null,
       deploymentOrigin,

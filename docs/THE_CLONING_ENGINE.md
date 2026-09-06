@@ -1143,3 +1143,118 @@ value the prime does not hold.
 
 `/hooks/clone-signing-pair-reconcile` runs every thirty minutes and is what
 carries the fleet as it stands.
+
+## F52 — the clone's link to Mission Control was delivered to a file nothing reads
+
+Every clone is issued a Mission Control API key at creation. The key is hashed
+into `clone_api_keys` and its plaintext committed into the clone's repository as
+`.aurixa/credentials.json`, "so the clone's frontend can read it at build time".
+**Nothing reads that file** — not the prime, not any clone, not a workflow. What
+reads the key is the prime's edge functions: `_shared/missionControl.ts`,
+`missionControlCatalog.ts`, `missionControlSeats.ts`, `missionControlDevices.ts`
+and four more, every one through `Deno.env.get("MISSION_CONTROL_URL")` and
+`Deno.env.get("MISSION_CONTROL_CLONE_API_KEY")`. Neither name was ever written to
+a clone's environment. Measured 6 Sep 2026: every key in `clone_api_keys` had
+`last_used_at` NULL — no clone had ever presented one — and one clone had no key
+row at all. Every token reservation, seat check and catalogue read on every
+clone failed with "MISSION_CONTROL_URL or MISSION_CONTROL_CLONE_API_KEY missing".
+
+The webhook half had the same shape. `fireTokenWebhook` signs each event with
+the endpoint row's secret and the clone's `mission-control-webhook` function
+verifies against `MISSION_CONTROL_WEBHOOK_SECRET`. No clone had an endpoint row,
+and the one row that existed was global and pointed at a misspelt prime
+hostname — every delivery since May answered `error code: 1016`.
+
+Four rules carry the fix, in `missionControlLink.pure.ts` and
+`cloneMissionControlLink.server.ts`.
+
+**The link is written to the place that reads it.** Four names, one batch — the
+URL, the key, the agency name and the webhook secret — in ONE secrets request,
+so a half-written link cannot exist. The pipeline runs it as step 5g and hands
+the values to the secrets batch through `selfValues`, exactly as the signing
+pair does.
+
+**The key is minted where it is delivered, and never rotated on a repair.** A
+key's plaintext exists once, at mint. The row records `delivered_project_ref`
+and `delivered_env_at`, so "is this project linked" is a fact the next pass
+reads rather than guesses: a live key delivered to THIS project is left alone;
+a new one is minted only when none is; and the link keys an earlier pass minted
+but never delivered — or delivered to a project the clone no longer has — are
+revoked when the new one lands. The repository cascade is untouched: whether a
+credential nobody reads should keep being committed is a decision for the
+owner, recorded in the pre-flight report rather than taken here.
+
+**The webhook endpoint is the readable half.** Its secret lives in
+`token_webhook_endpoints`, which is what the sender signs with, so a pass reuses
+it and re-asserts the environment — the same convergence rule the signing pair
+follows. The link owns exactly one endpoint per clone, recognised by URL shape
+(`https://<ref>.supabase.co/functions/v1/mission-control-webhook`); an endpoint
+an operator registered by hand is never touched.
+
+**The ref that is written is the ref the key is recorded against.** Every
+environment write takes the one `projectRef` from `resolveCloneSecretTarget`
+(or, at provisioning, the ref the pipeline is building), and the key row is
+stamped with that same ref. `/hooks/clone-secrets-reconcile` carries the fleet
+as it stands, twice an hour.
+
+## The clone's OWN secrets, and the ledger that said `missing` for what was there
+
+Three of the prime's features need a secret that belongs to the deployment and
+to nobody else. Password-reset tokens are hashed with `RESET_TOKEN_PEPPER`, and
+`resetTokens.ts` THROWS without one — so every password reset on every clone
+failed. Web push signs with a VAPID key pair, and `send-web-push` answered 503
+on every clone for want of one. CSRF tokens are peppered. None of the three can
+be inherited — a shared pepper makes reset tokens interchangeable across tenants
+and a shared VAPID key makes every tenant's push identity the same key — and
+only one of them was minted at all (`CSRF_TOKEN_PEPPER`, as a fresh random on
+every repair pass).
+
+`cloneOwnedSecrets.pure.ts` carries the rules. **Minted once, mirrored in the
+clone's vault, re-asserted from there**: the environment cannot be read back,
+so a pass that minted anew would ROTATE — outstanding reset tokens stop
+verifying and every push subscription, bound to the VAPID public key it
+subscribed with, goes dead. **A key pair is one thing**: a public key without
+its private half signs nothing, so if either half is missing or malformed the
+PAIR is re-minted, and a generator that produces a malformed key throws rather
+than write a value `setVapidDetails` would refuse. **Mirror the prime's shape;
+never invent a pair the prime does not hold**: `FINANCE_PORTAL_CRON_SECRET` has
+a database half the prime's own cron reads from ITS vault, and the reminder job
+is scheduled only where that entry exists — so a clone gets its own only where
+the prime holds one, the prime is read for NAMES and never for a value, and a
+prime that cannot be read is "unknown", never "none". `MARKET_INGESTION_CRON_SECRET`
+stays unpaired for the reason recorded above.
+
+The same pass fixed what the ledger SAID. `clone_backend_secrets` read `missing`
+for `TURNSTILE_SECRET_KEY`, `REQUIRE_TURNSTILE`, `RESEND_API_KEY` and
+`RESEND_FROM_EMAIL` on every clone that had all four, because the batch only
+knew what IT had written and the identity steps write directly. The batch now
+takes `settled` — names another step wrote, with the time it did — records them
+`set` at that time and writes nothing; a `REQUIRE_TURNSTILE` the batch could
+neither settle nor derive is `tenant_scoped`, because the prime's `true` on a
+clone with no widget refuses every login.
+
+## Deployment config is derived from THIS clone's hostnames — and re-derived when they change
+
+`DERIVED_DEPLOYMENT_CONFIG` used to hold one name. Left unset, `APP_BASE_URL`
+made a clone's builder-portal invite link to
+`https://command-centre.npcservices.com.au` — the prime's own site — and
+`WEBAUTHN_RP_ID` unset switched passkeys off. Eleven names are derived now:
+the public URL trio, the web-push host, the WebAuthn relying party (its id, its
+origins and its display name), the Mission Control URL and agency name, and
+`AML_PROVIDER_MODE=live` — the one constant, because a clone is a production
+deployment of a reporting entity and the prime's own rule is that production
+never runs the AML simulator.
+
+Two rules. **The canonical origin is the hostname the clone is FOR** —
+`CloneOrigins.canonicalOrigin`, the allocated subdomain, outranking the hosting
+provider's origin that `siteUrl` falls back to until the custom domain is live;
+a passkey relying party or an invite link bound to a provider hostname goes
+wrong the moment the domain goes live. And **the WebAuthn origins are only the
+relying party's own host and subdomains**, because a browser refuses a
+credential whose relying party is not a registrable suffix of the page's host.
+
+The derivation runs at provisioning, again from the deployment drain the
+moment a domain goes live (`applyCloneDerivedConfig`, beside
+`applyCloneAllowedOrigins`), and from the reconcile sweep — writing only what
+moved since its own last write, so a value an operator set by hand for a name
+it does not own is never stomped.

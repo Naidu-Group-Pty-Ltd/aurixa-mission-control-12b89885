@@ -651,6 +651,12 @@ async function onLive(row: DeploymentRow, origin: string | null) {
   try {
     const { applyCloneAllowedOrigins } = await import("@/server/cloneAllowedOrigins.server");
     await applyCloneAllowedOrigins(admin, row.clone_id, { providerSlug: row.provider_slug });
+    // And the rest of the derived deployment config — public URL, WebAuthn
+    // relying party, web-push host — from the same origins, for the same
+    // reason: provisioning derived them from the provider's hostname, and this
+    // is the first moment the clone's own is live.
+    const { applyCloneDerivedConfig } = await import("@/server/cloneDerivedConfig.server");
+    await applyCloneDerivedConfig(admin, row.clone_id, { providerSlug: row.provider_slug });
   } catch (e) {
     // Defensive only — that function reports its own refusals and does not
     // throw for them. Same judgement as above: the deployment IS live.
