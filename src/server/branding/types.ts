@@ -14,6 +14,13 @@ export type BrandConfig = {
   logo_light_url?: string | null;
   logo_dark_url?: string | null;
   favicon_url?: string | null;
+  // The square mark, and the two lockups a generated document prints. The
+  // workspace has read all three out of `whitelabel_settings.logo_config`
+  // since the report design system shipped; the bundle had no field for any of
+  // them, so no upload could ever reach a page. See `marks.ts`.
+  icon_url?: string | null;
+  report_logo_url?: string | null;
+  report_logo_mono_url?: string | null;
   email_signature_html?: string | null;
   email_signature_text?: string | null;
   support_url?: string | null;

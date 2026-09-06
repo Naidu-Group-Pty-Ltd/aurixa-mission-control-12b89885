@@ -3,6 +3,17 @@
 // the clone is self-sufficient. Best-effort — failures don't block cascades.
 import type { BrandAsset } from "./types";
 
+/**
+ * The bucket a workspace keeps its brand marks in.
+ *
+ * Named here rather than at the call site because it was a literal there, it
+ * was wrong (`branding`), and nothing could tell: Storage answers
+ * `404 Bucket not found`, mirroring is best-effort, and the cascade reported a
+ * successful apply with every asset dropped. Both the prime and every clone
+ * built from its schema hold `branding-assets`, public.
+ */
+export const CLONE_BRAND_BUCKET = "branding-assets";
+
 const SUPABASE_URL = process.env.SUPABASE_URL ?? "";
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";
 
@@ -60,9 +71,16 @@ export async function mirrorAssetsToClone(args: {
       );
       if (!upRes.ok) {
         const txt = await upRes.text();
+        // A missing bucket is not one failure among many — it is every asset
+        // failing for one reason an operator can actually fix, and it is how
+        // this shipped for months reporting success. Say so in those words.
+        const missingBucket = upRes.status === 404 && /bucket not found/i.test(txt);
         failed.push({
           asset,
-          error: `Clone upload failed: ${upRes.status} — ${txt.slice(0, 200)}`,
+          error: missingBucket
+            ? `Clone upload failed: the workspace has no "${args.cloneBucket}" storage bucket. ` +
+              `Create it (public) on the clone's Supabase project, then re-apply the brand.`
+            : `Clone upload failed: ${upRes.status} — ${txt.slice(0, 200)}`,
         });
         continue;
       }

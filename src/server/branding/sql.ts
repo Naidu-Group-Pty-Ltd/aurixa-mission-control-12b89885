@@ -33,6 +33,7 @@
 // every column write binds out of it with `EXECUTE … USING`, so tenant-supplied
 // brand text cannot carry SQL structure. Only column names are interpolated,
 // and those come from the fixed map below rather than from any input.
+import { markColumnSources, markLogoConfigSources } from "@/lib/brand/marks";
 import type { BrandConfig, ReportContact } from "./types";
 
 /**
@@ -81,12 +82,21 @@ export function primeContactPayload(contact: ReportContact): Record<string, unkn
 /**
  * Which `whitelabel_settings` column each brand-bundle field lands in.
  *
- * Deliberately short. `theme_config` and `logo_config` are NOT written: they
- * carry a structured shape the prime's `BrandProvider` and nine PDF renderers
- * parse, and pouring this bundle into them would replace a schema those
- * readers depend on with a foreign one. A bundle field with no column here has
- * no home in this schema, and dropping it is the honest outcome — writing it
- * somewhere adjacent is how a column comes to mean two things.
+ * Deliberately short. `theme_config` is still NOT written: it carries a
+ * structured shape the prime's `BrandProvider` parses, and pouring this bundle
+ * into it would replace a schema that reader depends on with a foreign one. A
+ * bundle field with no column here has no home in this schema, and dropping it
+ * is the honest outcome — writing it somewhere adjacent is how a column comes
+ * to mean two things.
+ *
+ * `logo_config` is the one that changed, and only in the narrow way the same
+ * rule allows: the NAMED keys in `marks.ts` are merged in, one at a time, and
+ * nothing else is. It had to, because the columns below serve the interface
+ * while every generated document reads the map — so a fully branded workspace
+ * was printing documents with no mark on them at all.
+ *
+ * The mark rows come from `marks.ts` so the editor's uploads, the columns and
+ * the map keys cannot drift apart again.
  */
 export const WHITELABEL_COLUMN_SOURCES: ReadonlyArray<{
   column: string;
@@ -95,9 +105,7 @@ export const WHITELABEL_COLUMN_SOURCES: ReadonlyArray<{
   { column: "company_name", from: "brand_name" },
   { column: "primary_color", from: "primary_color" },
   { column: "accent_color", from: "accent_color" },
-  { column: "auth_logo", from: "logo_light_url" },
-  { column: "sidebar_logo", from: "logo_light_url" },
-  { column: "favicon", from: "favicon_url" },
+  ...markColumnSources(),
 ];
 
 /** `IF` guard that a column exists on a public table. */
@@ -128,6 +136,19 @@ export function buildApplySql(args: {
     END IF;`,
   ).join("");
 
+  // The `logo_config` map, one named key at a time. The key literals come from
+  // `marks.ts`; the values are read out of the bound payload inside the block,
+  // so nothing a tenant typed is ever interpolated into SQL. A key with no
+  // value contributes nothing rather than blanking what the workspace holds.
+  const logoConfigAssignments = markLogoConfigSources()
+    .map(
+      ({ key, from }) => `
+    IF _wl ? '${from}' AND nullif(trim(_wl->>'${from}'), '') IS NOT NULL THEN
+      _marks := _marks || jsonb_build_object('${key}', trim(_wl->>'${from}'));
+    END IF;`,
+    )
+    .join("");
+
   return `
 -- Aurixa branding cascade — hash:${config_hash}
 DO $$
@@ -136,6 +157,7 @@ DECLARE
   _rc jsonb := ${rcPayload};
   _wl_id uuid;
   _rs_id uuid;
+  _marks jsonb := '{}'::jsonb;
 BEGIN
   -- ── whitelabel_settings ──────────────────────────────────────────────────
   IF EXISTS (SELECT 1 FROM information_schema.tables
@@ -149,6 +171,20 @@ BEGIN
     SELECT id INTO _wl_id FROM public.whitelabel_settings
       ORDER BY updated_at DESC NULLS LAST LIMIT 1;
 ${whitelabelColumnWrites}
+${logoConfigAssignments}
+
+    -- The map every generated document reads. MERGED, never replaced: a key
+    -- this platform has never heard of, and one the workspace set for itself,
+    -- both survive. Skipped entirely when the bundle carries no mark, so an
+    -- unbranded workspace is left exactly as it was.
+    IF _marks <> '{}'::jsonb THEN
+      ${ifColumn("whitelabel_settings", "logo_config")} THEN
+        EXECUTE 'UPDATE public.whitelabel_settings
+                    SET logo_config = COALESCE(logo_config, ''{}''::jsonb) || $1
+                  WHERE id = $2'
+          USING _marks, _wl_id;
+      END IF;
+    END IF;
 
     -- Legacy jsonb blob, on a schema that has one. Kept so a clone that
     -- already stores the bundle this way kicks on receiving it.

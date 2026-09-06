@@ -14,6 +14,7 @@ import {
   type ApplyBrandResult,
 } from "./branding.server";
 import { assessBlastRadius } from "@/lib/blast-radius";
+import { BRAND_MARK_SLOTS } from "@/lib/brand/marks";
 
 type Json = Database["public"]["Tables"]["clone_brand_profiles"]["Insert"]["brand_config"];
 
@@ -65,6 +66,72 @@ export const listBrandHistory = createServerFn({ method: "POST" })
     const { data: rows, error } = await q;
     if (error) return { ok: false as const, error: error.message, history: [] };
     return { ok: true as const, history: rows ?? [] };
+  });
+
+/**
+ * The brand marks this one workspace holds, and the ones it does not.
+ *
+ * Read per clone rather than off the fleet list because this is the question an
+ * operator asks while provisioning: *has this workspace got a logo yet, and
+ * will its documents carry one?* Those were different answers for a long time
+ * — the cascade filled the interface columns and never `logo_config`, which is
+ * the map every generated document reads.
+ *
+ * Reports what is ABSENT, never what is broken. A workspace with no report mark
+ * still gets a branded document: the renderer walks
+ * `report → sidebar → auth → sidebarIcon`.
+ */
+export const getCloneBrandMarks = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((data: { cloneId: string }) => {
+    if (!data?.cloneId) throw new Error("cloneId required");
+    return data;
+  })
+  .handler(async ({ data, context }) => {
+    const { data: assignment, error } = await context.supabase
+      .from("clone_brand_assignments")
+      .select(
+        "profile_id, status, applied_at, clone_brand_profiles(id, name, slug, version, brand_config)",
+      )
+      .eq("clone_id", data.cloneId)
+      .maybeSingle();
+
+    if (error) {
+      // A read that FAILED is not a workspace with no brand.
+      return { ok: false as const, error: error.message };
+    }
+    if (!assignment) {
+      return {
+        ok: true as const,
+        assigned: false as const,
+        slots: BRAND_MARK_SLOTS.map((slot) => ({ ...slot, url: null as string | null })),
+      };
+    }
+
+    const profile =
+      (
+        assignment as {
+          clone_brand_profiles?: {
+            id: string;
+            name: string;
+            version: number;
+            brand_config: unknown;
+          } | null;
+        }
+      ).clone_brand_profiles ?? null;
+    const config = (profile?.brand_config ?? {}) as BrandConfig;
+
+    return {
+      ok: true as const,
+      assigned: true as const,
+      status: assignment.status,
+      appliedAt: assignment.applied_at,
+      profile: profile ? { id: profile.id, name: profile.name, version: profile.version } : null,
+      slots: BRAND_MARK_SLOTS.map((slot) => {
+        const value = config[slot.field];
+        return { ...slot, url: typeof value === "string" && value.trim() ? value.trim() : null };
+      }),
+    };
   });
 
 // ─── Create / update profile ─────────────────────────────────────────

@@ -11,7 +11,7 @@ import { decryptSecret } from "./crypto.server";
 
 import { hashBrandBundle } from "./branding/hash";
 import { buildApplySql } from "./branding/sql";
-import { mirrorAssetsToClone } from "./branding/mirror";
+import { CLONE_BRAND_BUCKET, mirrorAssetsToClone } from "./branding/mirror";
 import { runBrandDriftScan } from "./branding/drift";
 import { mergeOverrides, sanitizeOverrides } from "./branding/overrides";
 import { registerAssetVariants } from "./branding/variants";
@@ -131,12 +131,20 @@ export async function applyBrandToClone(
   if (!backend.supabase_url || !backend.service_role_key || !backend.supabase_project_ref)
     return fail("Clone backend credentials incomplete");
 
-  // 2. Mirror assets
+  // 2. Mirror assets into the bucket the workspace actually has.
+  //
+  // This said `"branding"`, and no deployment of this platform has ever had a
+  // bucket by that name — the prime's is `branding-assets`, public, and so is
+  // every clone's, because the clone is built from the prime's schema. Storage
+  // answers `404 Bucket not found`, mirroring is best-effort by design, so the
+  // brand applied with the assets silently dropped and the cascade reported
+  // success. Verified on the live prime and the live clone: both hold
+  // `branding-assets`, neither holds `branding`.
   const assets = (profile.asset_manifest as unknown as BrandAsset[]) ?? [];
   const mirror = await mirrorAssetsToClone({
     cloneSupabaseUrl: backend.supabase_url,
     cloneServiceRoleKey: decryptSecret(backend.service_role_key),
-    cloneBucket: "branding",
+    cloneBucket: CLONE_BRAND_BUCKET,
     assets,
   });
 

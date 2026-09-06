@@ -1,4 +1,4 @@
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { ProtectedRoute } from "@/components/protected-route";
 import { Button } from "@/components/ui/button";
@@ -35,7 +35,7 @@ import {
   type GithubPreflightResult,
 } from "@/lib/github-preflight.functions";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { CheckCircle2, AlertTriangle, Loader2 } from "lucide-react";
+import { CheckCircle2, AlertTriangle, Image as ImageIcon, Loader2 } from "lucide-react";
 
 export const Route = createFileRoute("/clones/new")({
   component: () => (
@@ -954,6 +954,33 @@ function NewClone() {
               Reuse an existing Stripe customer for this client, if you have one.
             </p>
           </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <ImageIcon className="h-4 w-4" aria-hidden /> 8 · Brand marks
+          </CardTitle>
+          <CardDescription>Uploaded after the workspace exists, on its own page.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-2 text-xs text-muted-foreground">
+          <p>
+            A workspace needs six marks: the sign-in wordmark, the sidebar logo, the square icon
+            beside a collapsed sidebar, the favicon, and two lockups for paper — one for ivory, one
+            knocked out for the cover's dark ground. The last two are the ones that were missing for
+            a long time, which is how a fully branded deployment came to generate documents with no
+            mark on them.
+          </p>
+          <p>
+            They are uploaded on a{" "}
+            <Link to="/branding" className="underline underline-offset-2">
+              brand profile
+            </Link>{" "}
+            and copied into the workspace from the <strong>Brand marks</strong> section of its own
+            page, once provisioning has given it a backend to copy them into. Nothing is uploaded
+            here, because there is no workspace to put them in yet.
+          </p>
         </CardContent>
       </Card>
 

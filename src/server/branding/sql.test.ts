@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import { buildApplySql, primeContactPayload, WHITELABEL_COLUMN_SOURCES } from "./sql";
+import { BRAND_MARK_SLOTS, markLogoConfigSources, missingMarks } from "@/lib/brand/marks";
+import { CLONE_BRAND_BUCKET } from "./mirror";
 
 describe("primeContactPayload", () => {
   it("maps the bundle's contact_* keys onto the keys the prime reads", () => {
@@ -63,6 +66,22 @@ describe("buildApplySql — against the schema that actually exists", () => {
       config_hash: "h1",
     });
 
+  /** The same bundle, carrying every mark a workspace can hold. */
+  const marked = () =>
+    buildApplySql({
+      brand_config: {
+        brand_name: "Acme Property Co",
+        logo_light_url: "https://cdn.example/logo.png",
+        logo_dark_url: "https://cdn.example/logo-dark.png",
+        icon_url: "https://cdn.example/icon.png",
+        favicon_url: "https://cdn.example/fav.ico",
+        report_logo_url: "https://cdn.example/report.png",
+        report_logo_mono_url: "https://cdn.example/report-mono.png",
+      },
+      report_contact: { legal_name: "Acme Property Co Pty Ltd" },
+      config_hash: "h2",
+    });
+
   it("writes global_report_settings as the KEY/VALUE table it is", () => {
     // `(setting_key unique, setting_value jsonb)` in the prime's own first
     // migration and in every clone built from it. The previous version wrote a
@@ -116,12 +135,106 @@ describe("buildApplySql — against the schema that actually exists", () => {
     expect(out).toContain("USING trim(_wl->>'brand_name'), _wl_id");
   });
 
-  it("does not write theme_config or logo_config", () => {
-    // Structured columns the prime's BrandProvider and nine PDF renderers
-    // parse. A bundle field with no column has no home here, and dropping it
-    // is honest; writing it into one of these makes a column mean two things.
-    const out = sql();
-    expect(out).not.toContain("theme_config");
-    expect(out).not.toContain("logo_config");
+  it("still does not write theme_config", () => {
+    // A structured column the prime's BrandProvider parses. A bundle field
+    // with no column has no home here, and dropping it is honest; writing it
+    // into this one makes a column mean two things.
+    expect(sql()).not.toContain("theme_config");
+  });
+
+  it("writes logo_config as a MERGE of named keys, never a replacement", () => {
+    // The rule that let this column be written at all: only the keys named in
+    // marks.ts, one at a time, merged into whatever the workspace already
+    // holds. A key this platform has never heard of survives.
+    const out = marked();
+    expect(out).toContain("SET logo_config = COALESCE(logo_config, ''{}''::jsonb) || $1");
+    expect(out).not.toMatch(/SET logo_config\s*=\s*\$1/);
+    // Every key comes from the map, and no other.
+    for (const { key } of markLogoConfigSources()) {
+      expect(out).toContain(`jsonb_build_object('${key}'`);
+    }
+    const emitted = [...out.matchAll(/jsonb_build_object\('([A-Za-z]+)'/g)].map((m) => m[1]);
+    expect(new Set(emitted)).toEqual(new Set(markLogoConfigSources().map((s) => s.key)));
+  });
+
+  it("leaves logo_config alone when the bundle carries no mark", () => {
+    // An unbranded workspace must come out of a cascade exactly as it went in.
+    // The guard is in the SQL rather than in the generator, because the values
+    // are read inside the block.
+    expect(sql()).toContain("IF _marks <> '{}'::jsonb THEN");
+  });
+
+  it("fills the interface columns AND the map, because they are read separately", () => {
+    // The defect this closes: the columns dress the sign-in page and the
+    // sidebar, while every generated document reads logo_config. Filling one
+    // and not the other is a workspace that looks branded and prints unmarked.
+    const out = marked();
+    expect(out).toContain("'auth_logo'");
+    expect(out).toContain("'sidebar_logo'");
+    expect(out).toContain("'sidebar_icon'");
+    expect(out).toContain("'favicon'");
+    expect(out).toContain("jsonb_build_object('report'");
+    expect(out).toContain("jsonb_build_object('reportMono'");
+  });
+
+  it("never interpolates a mark URL into the SQL", () => {
+    // Same rule as every other value here: the payload is dollar-quoted once
+    // and every write binds out of it.
+    const out = marked();
+    const body = out.slice(out.indexOf("BEGIN"));
+    expect(body).not.toContain("https://cdn.example/report.png");
+  });
+});
+
+describe("BRAND_MARK_SLOTS", () => {
+  it("covers every logo_config key the workspace's renderers read", () => {
+    // assets.pure.ts: 'report' | 'reportMono' | 'sidebar' | 'auth' |
+    // 'sidebarIcon' | 'cover'. `cover` is a photograph a report supplies per
+    // document, not a brand mark, so it is deliberately not here.
+    expect(new Set(markLogoConfigSources().map((s) => s.key))).toEqual(
+      new Set(["auth", "sidebar", "sidebarIcon", "favicon", "report", "reportMono"]),
+    );
+  });
+
+  it("maps the ambiguous dark logo to nothing at all", () => {
+    // "Logo (dark)" means the dark lockup for a light ground in half the brand
+    // kits that ship one and the knockout for a dark ground in the other half.
+    // Guessing puts an invisible mark on a client's cover, so the knockout has
+    // a slot of its own and this one is cascaded nowhere.
+    const dark = BRAND_MARK_SLOTS.find((s) => s.field === "logo_dark_url");
+    expect(dark).toBeDefined();
+    expect(dark?.columns).toEqual([]);
+    expect(dark?.logoKeys).toEqual([]);
+  });
+
+  it("names each mark once", () => {
+    const fields = BRAND_MARK_SLOTS.map((s) => s.field);
+    expect(new Set(fields).size).toBe(fields.length);
+    const keys = markLogoConfigSources().map((s) => s.key);
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  it("reports what a workspace is missing without calling it broken", () => {
+    const missing = missingMarks({ logo_light_url: "https://cdn.example/logo.png" });
+    expect(missing.map((s) => s.field)).not.toContain("logo_light_url");
+    expect(missing.map((s) => s.field)).toContain("report_logo_url");
+    expect(missingMarks(null)).toHaveLength(BRAND_MARK_SLOTS.length);
+  });
+});
+
+describe("CLONE_BRAND_BUCKET", () => {
+  it("is the bucket a workspace actually has", () => {
+    // It was "branding". No deployment of this platform has ever had a bucket
+    // by that name — the prime's is branding-assets, public, and so is every
+    // clone's, because a clone is built from the prime's schema. Storage
+    // answers 404, mirroring is best-effort, and the cascade reported success
+    // with every asset dropped.
+    expect(CLONE_BRAND_BUCKET).toBe("branding-assets");
+  });
+
+  it("is what the apply pipeline passes, rather than a literal beside it", () => {
+    const src = readFileSync(new URL("../branding.server.ts", import.meta.url), "utf8");
+    expect(src).toContain("cloneBucket: CLONE_BRAND_BUCKET");
+    expect(src).not.toContain('cloneBucket: "');
   });
 });
