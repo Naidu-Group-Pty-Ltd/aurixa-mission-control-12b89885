@@ -303,6 +303,11 @@ export const IDENTITY_SECRETS = new Set([
   "INTERNAL_EDGE_SECRET",
   "INTERNAL_EDGE_SECRET_V2",
   "CSRF_TOKEN_PEPPER",
+  // `resetTokens.ts` THROWS without one, so no password reset could be issued
+  // on any clone. Minted by the clone-owned secrets step and mirrored in the
+  // clone's vault; the identity branch here only ever mints when that step
+  // decided nothing.
+  "RESET_TOKEN_PEPPER",
 ]);
 
 /**
@@ -314,6 +319,21 @@ export const DEPLOYMENT_CONFIG_SECRETS = new Set([
   "CORS_STRICT_ALLOWED_ORIGINS",
   "APP_URL",
   "APP_BASE_URL",
+  // Each of these named the PRIME's hostname on a clone when copied — a
+  // builder-portal invite on a clone linked to
+  // `https://command-centre.npcservices.com.au` — or, left unset, fell back
+  // to a literal that did. Derived per clone from its own origins and name
+  // (see DERIVED_DEPLOYMENT_CONFIG), never inherited.
+  "PUBLIC_APP_URL",
+  "WEB_PUSH_ALLOWED_HOST",
+  "WEBAUTHN_RP_ID",
+  "WEBAUTHN_RP_ORIGINS",
+  "WEBAUTHN_RP_NAME",
+  "MISSION_CONTROL_URL",
+  "MISSION_CONTROL_AGENCY_NAME",
+  // A production posture, not a credential: the prime's own rule is that
+  // production never runs the AML simulator, and a clone is production.
+  "AML_PROVIDER_MODE",
 ]);
 
 /**
@@ -345,7 +365,32 @@ export const DEPLOYMENT_CONFIG_SECRETS = new Set([
  * is what makes it impossible for one to be added later, which is the whole
  * point of this list.
  */
-export const TENANT_SCOPED_SECRETS = new Set(["TURNSTILE_SECRET_KEY", "JWT_SECRET"]);
+export const TENANT_SCOPED_SECRETS = new Set([
+  "TURNSTILE_SECRET_KEY",
+  "JWT_SECRET",
+  // Written beside the widget's secret by the Turnstile identity step. The
+  // prime's value is `true`, and `true` on a clone with no widget refuses
+  // every login — so it can never be copied, only settled by the step that
+  // owns the widget.
+  "REQUIRE_TURNSTILE",
+  // The clone's own sender, written by its email identity once the sending
+  // domain verifies; the prime's address must never be a clone's.
+  "RESEND_FROM_EMAIL",
+  // A VAPID pair is a push identity. Shared, every tenant's push subscriptions
+  // answer to the same key; and a random string is not a P-256 key, so the
+  // generic generator can never stand in — the clone-owned secrets step mints
+  // a real pair and mirrors it in the clone's vault.
+  "VAPID_PUBLIC_KEY",
+  "VAPID_PRIVATE_KEY",
+  // Paired (vault + environment) only where the prime's own vault carries
+  // `finance_portal_cron_secret`, by the clone-owned secrets step.
+  "FINANCE_PORTAL_CRON_SECRET",
+  // The clone's OWN Mission Control key and its own webhook secret. A shared
+  // key bills every tenant's usage to one account; the link step mints each
+  // clone its own and writes it where the prime's functions read it.
+  "MISSION_CONTROL_CLONE_API_KEY",
+  "MISSION_CONTROL_WEBHOOK_SECRET",
+]);
 
 /**
  * What an operator should DO about a tenant-scoped secret that is still
@@ -361,6 +406,29 @@ export const TENANT_SCOPED_REMEDY: Record<string, string> = {
     "that project). Provisioning writes it, and the clone-jwt-secret-reconcile job repairs any " +
     "clone that is still without it — so this should settle on its own within half an hour. " +
     "Set it by hand from the clone's Secrets page only if it does not.",
+  REQUIRE_TURNSTILE:
+    "Written to `true` beside TURNSTILE_SECRET_KEY by the Turnstile identity step when the " +
+    "clone's widget is minted. Nothing to set by hand: a clone without a widget must not fail " +
+    "closed, and one with a widget already has it.",
+  RESEND_FROM_EMAIL:
+    "Written by the clone's email identity once its sending domain verifies (the email " +
+    "identity panel). Never the prime's address.",
+  VAPID_PUBLIC_KEY:
+    "Minted as a pair with VAPID_PRIVATE_KEY by the clone-owned secrets step and mirrored in " +
+    "the clone's vault; the clone-secrets-reconcile job repairs any clone still without one.",
+  VAPID_PRIVATE_KEY:
+    "Minted as a pair with VAPID_PUBLIC_KEY by the clone-owned secrets step and mirrored in " +
+    "the clone's vault; the clone-secrets-reconcile job repairs any clone still without one.",
+  FINANCE_PORTAL_CRON_SECRET:
+    "Paired only where the prime's vault holds finance_portal_cron_secret, because the finance " +
+    "reminder cron is scheduled only there. The prime holds none today, so the job runs nowhere; " +
+    "add the pair on the prime and the clone-secrets-reconcile job gives each clone its own.",
+  MISSION_CONTROL_CLONE_API_KEY:
+    "Minted and written by the Mission Control link step at provisioning, into the environment " +
+    "the prime's functions read; the clone-secrets-reconcile job links any clone still without one.",
+  MISSION_CONTROL_WEBHOOK_SECRET:
+    "Written by the Mission Control link step, matching the secret on this clone's own webhook " +
+    "endpoint in Mission Control.",
 };
 
 export type SecretClass =

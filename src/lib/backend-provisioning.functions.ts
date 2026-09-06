@@ -364,12 +364,43 @@ async function runBackendProvisioning(
     // re-provision. The token itself cannot be read back; the operator
     // re-mints it from the clone's email identity panel afterwards.
     const dedicatedSecretNames: string[] = [];
-    const { data: emailIdentity } = await supabase
+    const { data: emailIdentity, error: emailIdentityErr } = await supabase
       .from("clone_email_identities")
-      .select("resend_key_id")
+      .select("resend_key_id, key_written_at, from_address_written_at, revoked_at")
       .eq("clone_id", input.cloneId)
       .maybeSingle();
+    if (emailIdentityErr) {
+      console.error("[backend-provisioning] email identity read failed:", emailIdentityErr.message);
+    }
     if (emailIdentity?.resend_key_id) dedicatedSecretNames.push("RESEND_API_KEY");
+
+    // Secrets another step already wrote to this project, with the time it
+    // did. The batch records them `set` at that time and writes nothing: the
+    // Turnstile identity minted the widget and wrote its secret and the
+    // fail-closed flag; the email identity wrote its key and sender. Before
+    // this the ledger read `missing` for all four on every clone that had
+    // them, because the batch only knew what IT had written.
+    const settledSecrets: Record<string, string> = {};
+    if (emailIdentity && !emailIdentity.revoked_at) {
+      if (emailIdentity.key_written_at) settledSecrets.RESEND_API_KEY = emailIdentity.key_written_at;
+      if (emailIdentity.from_address_written_at) {
+        settledSecrets.RESEND_FROM_EMAIL = emailIdentity.from_address_written_at;
+      }
+    }
+    const { data: turnstileIdentity, error: turnstileErr } = await supabase
+      .from("clone_turnstile_identities")
+      .select("status, secret_written_at, fail_closed_at")
+      .eq("clone_id", input.cloneId)
+      .maybeSingle();
+    if (turnstileErr) {
+      console.error("[backend-provisioning] turnstile identity read failed:", turnstileErr.message);
+    }
+    if (turnstileIdentity && turnstileIdentity.status !== "revoked") {
+      if (turnstileIdentity.secret_written_at) {
+        settledSecrets.TURNSTILE_SECRET_KEY = turnstileIdentity.secret_written_at;
+      }
+      if (turnstileIdentity.fail_closed_at) settledSecrets.REQUIRE_TURNSTILE = turnstileIdentity.fail_closed_at;
+    }
 
     const result = await provisionCloneBackend(
       {
@@ -385,6 +416,17 @@ async function runBackendProvisioning(
         // value was found for. Without this the two are the same reading.
         authorisedForwardNames: (forwardAll ?? []).filter((r) => r.inherit).map((r) => r.name),
         dedicatedSecretNames,
+        settledSecrets,
+        // Writes Mission Control's own tables (the key row, the endpoint row),
+        // so it is supplied from here rather than inside the pipeline.
+        linkMissionControl: async (ref: string) => {
+          const { ensureCloneMissionControlLink } = await import(
+            /* @vite-ignore */ "@/lib/_server-shims/cloneMissionControlLink.server"
+          );
+          return ensureCloneMissionControlLink(supabase, input.cloneId, ref, input.cloneName, {
+            actorUserId: userId,
+          });
+        },
         cloneOrigins,
         schemaStrategy: input.schemaStrategy ?? "introspection",
         primeBackendRef,
@@ -594,7 +636,8 @@ async function runBackendProvisioning(
             name: s.name,
             status,
             last_set_at:
-              status === "inherited" || status === "set" ? new Date().toISOString() : null,
+              s.settledAt ??
+              (status === "inherited" || status === "set" ? new Date().toISOString() : null),
             last_error: s.error ?? null,
           },
         ];

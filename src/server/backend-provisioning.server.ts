@@ -17,6 +17,7 @@ import { chooseRoleLabel, describeSeed, sqlCredentialLiteral } from "./cloneAdmi
 import type { AdminSeedReport } from "./cloneAdminIdentity.pure";
 import type { PrimeBackendSnapshot } from "./prime-backend.server";
 import type { StageName, StageResult } from "./schema-introspection.server";
+import { resolveMissionControlOrigin } from "./missionControlLink.pure";
 
 const MGMT_API = "https://api.supabase.com/v1";
 
@@ -1039,6 +1040,13 @@ export type CloneOrigins = {
   siteUrl?: string | null;
   /** Any other origins we should whitelist (deploy_url, lovable preview, cloudflare zone, etc.). */
   additionalRedirectUrls?: (string | null | undefined)[];
+  /**
+   * The origin this clone is FOR — its allocated hostname where it has one —
+   * as opposed to `siteUrl`, which may be the hosting provider's hostname
+   * until the custom domain is live. What a passkey relying party, a public
+   * URL or a web-push host is derived from. See `cloneCanonicalOrigin`.
+   */
+  canonicalOrigin?: string | null;
 };
 
 /**
@@ -1096,17 +1104,121 @@ export function cloneAllowedOrigins(origins: CloneOrigins | null | undefined): s
 }
 
 /**
+ * What a derivation may know beyond the origins: the clone's display name and
+ * where Mission Control is. Both are facts about THIS clone or about this
+ * deployment, never about the prime.
+ */
+export type CloneSecretFacts = {
+  displayName?: string | null;
+  missionControlOrigin?: string | null;
+  /**
+   * Names another step has already written, with the time it did (ISO) — the
+   * Turnstile identity's secret and its fail-closed flag, the email identity's
+   * key and sender. The batch records them `set` at that time and writes
+   * nothing, so the ledger stops reading `missing` for a secret that is there.
+   */
+  settled?: ReadonlyMap<string, string>;
+};
+
+function nonEmpty(v: string | null | undefined): string | null {
+  const s = (v ?? "").trim();
+  return s.length > 0 ? s : null;
+}
+
+/**
+ * The origin this clone is FOR: its allocated hostname where it has one, the
+ * provider's origin only as a last resort. `siteUrl` is what GoTrue redirects
+ * to today and may be the hosting provider's hostname until the custom domain
+ * is live; a passkey relying party or an invite link bound to that hostname
+ * goes wrong the moment the domain goes live.
+ */
+export function cloneCanonicalOrigin(origins: CloneOrigins | null | undefined): string | null {
+  return (
+    normalizeOriginEntry(origins?.canonicalOrigin ?? null) ??
+    normalizeOriginEntry(origins?.siteUrl ?? null)
+  );
+}
+
+export function cloneCanonicalHost(origins: CloneOrigins | null | undefined): string | null {
+  const origin = cloneCanonicalOrigin(origins);
+  if (!origin) return null;
+  try {
+    return new URL(origin).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The origins a passkey may be used from: the relying party's own host and
+ * its subdomains, canonical first. A browser refuses to create a credential
+ * for a relying party that is not a registrable suffix of the page's host, so
+ * listing the provider's hostname here would be a promise the browser exposes.
+ */
+export function cloneWebAuthnOrigins(origins: CloneOrigins | null | undefined): string | null {
+  const rpId = cloneCanonicalHost(origins);
+  if (!rpId) return null;
+  const entries = [
+    cloneCanonicalOrigin(origins),
+    origins?.siteUrl ?? null,
+    ...(origins?.additionalRedirectUrls ?? []),
+  ]
+    .map(normalizeOriginEntry)
+    .filter((v): v is string => v !== null)
+    .filter((o) => {
+      const host = new URL(o).hostname.toLowerCase();
+      return host === rpId || host.endsWith(`.${rpId}`);
+    });
+  return entries.length > 0 ? Array.from(new Set(entries)).join(",") : null;
+}
+
+/**
  * Deployment-config secrets whose value Mission Control can compute for a
  * clone. Everything else in that class stays unset and is filled in by an
  * operator from the clone page — guessing a webhook URL or a sender address is
  * how a clone starts writing into somebody else's account.
+ *
+ * Every entry is a fact about THIS clone or this deployment. Before these
+ * existed, `APP_BASE_URL` unset made a clone's builder-portal invite link to
+ * `https://command-centre.npcservices.com.au` — the prime's own site — and
+ * `WEBAUTHN_RP_ID` unset switched passkeys off. `AML_PROVIDER_MODE` is the
+ * one constant: a clone is a production deployment of a reporting entity, and
+ * the prime's own rule is that production never runs the AML simulator —
+ * `live` makes a missing provider refuse visibly rather than clear confidently.
  */
 const DERIVED_DEPLOYMENT_CONFIG: Record<
   string,
-  (origins: CloneOrigins | null | undefined) => string | null
+  (origins: CloneOrigins | null | undefined, facts?: CloneSecretFacts | null) => string | null
 > = {
-  ALLOWED_ORIGINS: cloneAllowedOrigins,
+  ALLOWED_ORIGINS: (origins) => cloneAllowedOrigins(origins),
+  PUBLIC_APP_URL: (origins) => cloneCanonicalOrigin(origins),
+  APP_URL: (origins) => cloneCanonicalOrigin(origins),
+  APP_BASE_URL: (origins) => cloneCanonicalOrigin(origins),
+  WEB_PUSH_ALLOWED_HOST: (origins) => cloneCanonicalHost(origins),
+  WEBAUTHN_RP_ID: (origins) => cloneCanonicalHost(origins),
+  WEBAUTHN_RP_ORIGINS: (origins) => cloneWebAuthnOrigins(origins),
+  WEBAUTHN_RP_NAME: (_origins, facts) => nonEmpty(facts?.displayName),
+  MISSION_CONTROL_URL: (_origins, facts) => nonEmpty(facts?.missionControlOrigin),
+  MISSION_CONTROL_AGENCY_NAME: (_origins, facts) => nonEmpty(facts?.displayName),
+  AML_PROVIDER_MODE: () => "live",
 };
+
+export const DERIVED_DEPLOYMENT_CONFIG_NAMES: readonly string[] = Object.keys(DERIVED_DEPLOYMENT_CONFIG);
+
+/** Every derivable name that resolves to a value for this clone. */
+export function deriveDeploymentConfig(
+  origins: CloneOrigins | null | undefined,
+  facts?: CloneSecretFacts | null,
+  opts?: { exclude?: ReadonlySet<string> },
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [name, derive] of Object.entries(DERIVED_DEPLOYMENT_CONFIG)) {
+    if (opts?.exclude?.has(name)) continue;
+    const value = derive(origins, facts);
+    if (value) out[name] = value;
+  }
+  return out;
+}
 
 /** Normalize a URL/host into a redirect entry. Returns null if unusable. */
 function normalizeOriginEntry(raw: string | null | undefined): string | null {
@@ -2701,6 +2813,8 @@ export type SecretShellResult = {
   status: SecretShellStatus;
   success: boolean;
   error?: string;
+  /** When another step wrote this name (ISO); present only for a settled name. */
+  settledAt?: string;
 };
 
 /**
@@ -2758,11 +2872,23 @@ export function planCloneSecrets(
    * vendor name reads `missing` exactly as it did.
    */
   authorisedForwards?: ReadonlySet<string>,
+  /** The clone's name, where Mission Control is, and what other steps settled. */
+  facts?: CloneSecretFacts | null,
 ): { toWrite: { name: string; value: string }[]; results: Map<string, SecretShellResult> } {
   const toWrite: { name: string; value: string }[] = [];
   const results = new Map<string, SecretShellResult>();
 
   for (const name of names) {
+    // Written by another step that owns it — the Turnstile identity, the
+    // email identity — and READ here rather than re-decided. The ledger says
+    // `set` at the time that step wrote it; the alternative was `missing` for
+    // a secret that is there, which is what every clone's secret page read for
+    // its CAPTCHA and its sender.
+    const settledAt = facts?.settled?.get(name);
+    if (settledAt) {
+      results.set(name, { name, status: "set", success: true, settledAt });
+      continue;
+    }
     // A name the clone holds a dedicated credential for is never inherited —
     // see `dedicatedSecretNames` on the provisioning input. `missing` is
     // honest for a fresh backend: the dedicated token cannot be read back, so
@@ -2819,7 +2945,7 @@ export function planCloneSecrets(
     }
     if (kind === "deployment_config") {
       const derive = DERIVED_DEPLOYMENT_CONFIG[name];
-      const derived = derive ? derive(origins) : null;
+      const derived = derive ? derive(origins, facts) : null;
       if (derived) {
         toWrite.push({ name, value: derived });
         results.set(name, { name, status: "derived", success: true });
@@ -2862,6 +2988,7 @@ export async function syncCloneSecrets(
   dedicatedNames?: ReadonlySet<string>,
   selfValues?: Record<string, string>,
   authorisedForwards?: ReadonlySet<string>,
+  facts?: CloneSecretFacts | null,
 ): Promise<SecretShellResult[]> {
   if (names.length === 0) return [];
 
@@ -2873,6 +3000,7 @@ export async function syncCloneSecrets(
     dedicatedNames,
     selfValues,
     authorisedForwards,
+    facts,
   );
 
   if (toWrite.length > 0) {
@@ -3488,6 +3616,25 @@ export type ProvisionBackendInput = {
    */
   dedicatedSecretNames?: string[];
   /**
+   * Writes this clone's Mission Control link — key, URL, agency name, webhook
+   * secret — into the project's environment and hands the values back for the
+   * secrets batch to record. Supplied by the caller because the link lives in
+   * Mission Control's own tables and this pipeline holds no database client.
+   * Absent, the clone-secrets-reconcile sweep links the clone later.
+   */
+  linkMissionControl?: (
+    projectRef: string,
+  ) => Promise<import("./cloneMissionControlLink.server").EnsureMissionControlLinkResult>;
+  /**
+   * Secrets another step has already written to this project, with the time
+   * it did (ISO): the Turnstile identity's secret and its fail-closed flag,
+   * the email identity's key and sender. Recorded `set` at that time rather
+   * than re-decided here.
+   */
+  settledSecrets?: Record<string, string>;
+  /** Where this deployment of Mission Control is reached; resolved from the environment when absent. */
+  missionControlOrigin?: string | null;
+  /**
    * The clone's own frontend origins. Used to rewrite the prime's
    * [auth] `site_url` + `uri_allow_list` so the new backend accepts
    * sign-ins from the clone's own hosts, not the prime's (G8).
@@ -3576,6 +3723,10 @@ export type ProvisionBackendResult = {
   introspection?: IntrospectionSummary | null;
   edgeFunctions: EdgeFunctionDeployResult[];
   secretShells: SecretShellResult[];
+  /** The clone-owned secrets step (peppers, VAPID pair). Null when it did not run or failed. */
+  ownedSecrets?: import("./cloneOwnedSecrets.server").OwnedSecretsOutcome | null;
+  /** The Mission Control link step. Null when no linker was supplied or it failed. */
+  missionControlLink?: import("./cloneMissionControlLink.server").MissionControlLinkOutcome | null;
   storageBuckets: BucketReplicationResult[];
   authConfig: AuthConfigResult;
   cronJobs: CronJobReplicationResult[];
@@ -4233,6 +4384,77 @@ export async function provisionCloneBackend(
     );
   }
 
+  // Step 5f: the secrets that are this clone's OWN — the reset and CSRF
+  // peppers and the VAPID pair. Minted once, mirrored in the clone's vault so
+  // a repair pass re-asserts the same values rather than rotating them (a
+  // rotated VAPID key kills every push subscription; a rotated pepper every
+  // outstanding reset token). The prime is read for the NAMES its vault holds
+  // and nothing else, so a pair the prime does not carry is never invented.
+  // Non-fatal, and carried by the clone-secrets-reconcile sweep.
+  pauseIfDue("writing clone-owned secrets");
+  let ownedValues: Record<string, string> = {};
+  let ownedSecrets: import("./cloneOwnedSecrets.server").OwnedSecretsOutcome | null = null;
+  try {
+    await onStatusUpdate?.(
+      "migrating",
+      "Writing this clone's own secrets (peppers, VAPID pair) — vault then environment...",
+    );
+    const { ensureCloneOwnedSecrets, readPrimeVaultNames } = await import("./cloneOwnedSecrets.server");
+    const owned = await ensureCloneOwnedSecrets(projectRef, await readPrimeVaultNames(input.primeBackendRef));
+    if (owned.ok) {
+      ownedValues = owned.values;
+      ownedSecrets = owned.outcome;
+      // Names and counts, never a value.
+      await onStatusUpdate?.(
+        "migrating",
+        `Owned secrets: ${owned.outcome.minted.length} minted, ${owned.outcome.reused.length} reused` +
+          (owned.outcome.skipped.length
+            ? `; not paired: ${owned.outcome.skipped.map((k) => `${k.env} (${k.reason})`).join(", ")}`
+            : ""),
+      );
+    } else {
+      await onStatusUpdate?.(
+        "migrating",
+        `Owned secrets not written (${owned.stage}: ${owned.error}) — password reset and web push stay refused until the reconcile sweep repairs it`,
+      );
+    }
+  } catch (err) {
+    await onStatusUpdate?.(
+      "migrating",
+      `Owned secrets step skipped: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  // Step 5g: the link back to Mission Control — URL, API key, agency name and
+  // webhook secret, in the environment the prime's functions read them from.
+  // The key used to reach only a repository file nothing reads; no clone had
+  // ever presented one. Supplied by the caller because it writes Mission
+  // Control's own tables; absent, the sweep links the clone later.
+  pauseIfDue("linking to Mission Control");
+  let linkValues: Record<string, string> = {};
+  let missionControlLink: import("./cloneMissionControlLink.server").MissionControlLinkOutcome | null = null;
+  if (input.linkMissionControl) {
+    try {
+      await onStatusUpdate?.("migrating", "Linking this clone to Mission Control (key, URL, webhook)...");
+      const link = await input.linkMissionControl(projectRef);
+      if (link.ok) {
+        linkValues = link.values;
+        missionControlLink = link.outcome;
+        await onStatusUpdate?.("migrating", `Mission Control link: ${link.outcome.why.join("; ")}`);
+      } else {
+        await onStatusUpdate?.(
+          "migrating",
+          `Mission Control link not written (${link.stage}: ${link.error}) — metering and seat checks stay refused until the reconcile sweep repairs it`,
+        );
+      }
+    } catch (err) {
+      await onStatusUpdate?.(
+        "migrating",
+        `Mission Control link step skipped: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
   pauseIfDue("syncing secrets");
   await onStatusUpdate?.(
     "migrating",
@@ -4252,15 +4474,22 @@ export async function provisionCloneBackend(
     // own access tokens — so provisioning supplies the project's own. And
     // `INTERNAL_EDGE_SECRET` is the value the pair step just put in the vault,
     // so the batch re-asserts it instead of minting a second one.
-    ownJwtSecret || signingPairValue
-      ? {
-          ...(ownJwtSecret ? { JWT_SECRET: ownJwtSecret } : {}),
-          ...(signingPairValue ? { INTERNAL_EDGE_SECRET: signingPairValue } : {}),
-        }
-      : undefined,
+    {
+      ...(ownJwtSecret ? { JWT_SECRET: ownJwtSecret } : {}),
+      ...(signingPairValue ? { INTERNAL_EDGE_SECRET: signingPairValue } : {}),
+      // The clone-owned secrets and the Mission Control link, decided by their
+      // own steps above; the batch re-asserts the SAME values.
+      ...ownedValues,
+      ...linkValues,
+    },
     // What an operator SAID may travel, so a forward that did not happen is
     // reported as that rather than as an unauthorised name.
     input.authorisedForwardNames ? new Set(input.authorisedForwardNames) : undefined,
+    {
+      displayName: input.cloneName,
+      missionControlOrigin: input.missionControlOrigin ?? resolveMissionControlOrigin(process.env),
+      settled: new Map(Object.entries(input.settledSecrets ?? {})),
+    },
   );
 
   // Step 7: Seed admin — UNLESS this is a repair.
@@ -4290,6 +4519,8 @@ export async function provisionCloneBackend(
 
       edgeFunctions,
       secretShells,
+      ownedSecrets,
+      missionControlLink,
       storageBuckets,
       authConfig: authConfigResult,
       cronJobs,
@@ -4339,6 +4570,8 @@ export async function provisionCloneBackend(
 
     edgeFunctions,
     secretShells,
+    ownedSecrets,
+    missionControlLink,
     storageBuckets,
     authConfig: authConfigResult,
     cronJobs,

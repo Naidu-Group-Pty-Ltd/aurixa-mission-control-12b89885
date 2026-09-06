@@ -191,4 +191,13 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260906030000",
     assertions: [{ kind: "cron", jobname: "clone-signing-pair-reconcile" }],
   },
+  {
+    migration: "20260906070000_clone_secrets_reconcile.sql",
+    version: "20260906070000",
+    assertions: [
+      { kind: "column", table: "clone_api_keys", column: "delivered_project_ref" },
+      { kind: "column", table: "clone_api_keys", column: "delivered_env_at" },
+      { kind: "cron", jobname: "clone-secrets-reconcile" },
+    ],
+  },
 ];
