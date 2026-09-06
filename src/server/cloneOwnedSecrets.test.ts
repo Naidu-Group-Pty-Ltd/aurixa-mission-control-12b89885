@@ -11,7 +11,6 @@ import {
   isVapidPrivateKey,
   ownedSecretEnvNames,
   ownedSecretVaultNames,
-  ownedSecretGucNames,
   type OwnedSecretFacts,
   type PrimeShape,
 } from "./cloneOwnedSecrets.pure";
@@ -25,12 +24,10 @@ const mint = {
 };
 const shape = (over: Partial<PrimeShape> = {}): PrimeShape => ({
   vaultNames: new Set(["internal_edge_secret", "supabase_service_role_key", "supabase_url"]),
-  gucNames: new Set(["app.settings.jwt_exp"]),
   ...over,
 });
 const facts = (over: Partial<OwnedSecretFacts> = {}): OwnedSecretFacts => ({
   vault: {},
-  guc: {},
   primeShape: shape(),
   ...over,
 });
@@ -48,9 +45,9 @@ describe("the specs name the prime's contract", () => {
       "MARKET_INGESTION_CRON_SECRET",
     ]);
     // The finance function's older schedule read exactly this vault name; the
-    // market jobs read exactly this setting.
+    // market jobs read exactly this one since market_cron_secret_from_vault.
     expect(ownedSecretVaultNames()).toContain("finance_portal_cron_secret");
-    expect(ownedSecretGucNames()).toEqual(["app.market_ingestion_cron_secret"]);
+    expect(ownedSecretVaultNames()).toContain("market_ingestion_cron_secret");
   });
 
   it("the prime is paired with the two cron pairs and nothing else, ungated", () => {
@@ -60,7 +57,7 @@ describe("the specs name the prime's contract", () => {
       expect((spec as { requiresPrime?: true }).requiresPrime).toBeUndefined();
     }
     // The prime's peppers and push identity are the owner's, not the engine's.
-    expect(ownedSecretVaultNames(PRIME_PAIR_SPECS)).toEqual(["finance_portal_cron_secret"]);
+    expect(ownedSecretVaultNames(PRIME_PAIR_SPECS)).toEqual(["finance_portal_cron_secret", "market_ingestion_cron_secret"]);
   });
 
   it("the clone's copies of the two pairs ARE gated on the prime", () => {
@@ -158,32 +155,35 @@ describe("planOwnedSecrets — minted once, mirrored, re-asserted", () => {
     expect(withIt.skipped.map((s) => s.env)).not.toContain("FINANCE_PORTAL_CRON_SECRET");
   });
 
-  it("pairs the market secret only where the prime holds the database setting, and mirrors it as a setting", () => {
+  it("pairs the market secret only where the prime's vault holds it, as a vault pair", () => {
+    // A database setting was the first design and cannot be one: a placeholder
+    // parameter is settable database-wide or on a role only by a superuser,
+    // which this role is not (42501, measured on the prime).
     const without = planOwnedSecrets(OWNED_SECRET_SPECS, facts(), mint);
     expect(write(without, "MARKET_INGESTION_CRON_SECRET")).toBeUndefined();
     expect(without.skipped).toContainEqual({
       env: "MARKET_INGESTION_CRON_SECRET",
-      store: "guc",
-      key: "app.market_ingestion_cron_secret",
+      store: "vault",
+      key: "market_ingestion_cron_secret",
       reason: "prime_holds_none",
     });
 
     const withIt = planOwnedSecrets(
       OWNED_SECRET_SPECS,
-      facts({ primeShape: shape({ gucNames: new Set(["app.market_ingestion_cron_secret"]) }) }),
+      facts({ primeShape: shape({ vaultNames: new Set(["market_ingestion_cron_secret"]) }) }),
       mint,
     );
     const w = write(withIt, "MARKET_INGESTION_CRON_SECRET");
     expect(w?.source).toBe("minted");
-    expect(w?.store).toBe("guc");
-    expect(w?.key).toBe("app.market_ingestion_cron_secret");
+    expect(w?.store).toBe("vault");
+    expect(w?.key).toBe("market_ingestion_cron_secret");
 
-    // And a clone whose setting is already there reuses it — never the prime's value.
+    // And a clone whose vault already holds one reuses it — never the prime's value.
     const held = planOwnedSecrets(
       OWNED_SECRET_SPECS,
       facts({
-        guc: { "app.market_ingestion_cron_secret": "m".repeat(64) },
-        primeShape: shape({ gucNames: new Set(["app.market_ingestion_cron_secret"]) }),
+        vault: { market_ingestion_cron_secret: "m".repeat(64) },
+        primeShape: shape({ vaultNames: new Set(["market_ingestion_cron_secret"]) }),
       }),
       mint,
     );
@@ -195,7 +195,7 @@ describe("planOwnedSecrets — minted once, mirrored, re-asserted", () => {
     expect(plan.skipped).toEqual([]);
     expect(plan.writes.map((w) => [w.env, w.store, w.source])).toEqual([
       ["FINANCE_PORTAL_CRON_SECRET", "vault", "minted"],
-      ["MARKET_INGESTION_CRON_SECRET", "guc", "minted"],
+      ["MARKET_INGESTION_CRON_SECRET", "vault", "minted"],
     ]);
   });
 
@@ -214,7 +214,6 @@ describe("planOwnedSecrets — minted once, mirrored, re-asserted", () => {
       [...OWNED_SECRET_SPECS, ...PRIME_PAIR_SPECS],
       facts({
         vault: { reset_token_pepper: "p".repeat(40), vapid_public_key: PUB, vapid_private_key: PRIV },
-        guc: { "app.market_ingestion_cron_secret": "m".repeat(64) },
       }),
       mint,
     );
@@ -318,21 +317,22 @@ describe("the step is written mirror first, fed to the batch, and never logged",
     expect(s).toMatch(/const minted = plan\.writes\.filter\(\(w\) => w\.source === "minted"\)/);
   });
 
-  it("a database setting is written at the level the cron reads it, and read back from the same place", () => {
-    const s = server();
-    // Database-wide where this role owns the database, on the role otherwise —
-    // and the settings read covers both.
-    expect(s).toMatch(/alter database %I set \$\{name\} = %L/);
-    expect(s).toMatch(/alter role %I set \$\{name\} = %L/);
-    expect(s).toMatch(/s\.setrole = 0 or s\.setrole = \(select oid from pg_roles where rolname = current_user\)/);
-    // Only a lower-case dotted name may ever be inlined.
-    expect(s).toMatch(/GUC_NAME_RX = \/\^\[a-z_\]\[a-z0-9_\]\*\(\\\.\[a-z_\]\[a-z0-9_\]\*\)\+\$\//);
+  it("never writes a database setting — the vault is the only mirror", () => {
+    // `alter database … set` and `alter role … set` of a placeholder parameter
+    // are superuser-only on this platform (42501, measured on the prime), so a
+    // writer that reached for either would fail on every project.
+    const code = server()
+      .split("\n")
+      .filter((l) => !/^\s*(\/\/|\/\*|\*)/.test(l))
+      .join("\n");
+    expect(code).not.toMatch(/alter (database|role|system)/i);
+    expect(code).not.toMatch(/pg_db_role_setting|current_setting/);
   });
 
   it("the prime is read for NAMES only", () => {
     const s = server();
     const probe = s.slice(s.indexOf("export async function readPrimeShape"), s.indexOf("/** What is recorded and reported."));
-    expect(probe).toContain("select 'vault' as store, name from vault.secrets");
+    expect(probe).toContain('"select name from vault.secrets;"');
     expect(probe).not.toMatch(/decrypted_secret/);
     expect(probe).not.toMatch(/value/);
   });

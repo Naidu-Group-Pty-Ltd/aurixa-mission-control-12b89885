@@ -15,25 +15,29 @@
  * `missing` in the ledger, and the only one of the class that WAS written —
  * `CSRF_TOKEN_PEPPER` — was minted afresh on every repair pass.
  *
- * Two more are PAIRS with a database half the prime's own cron reads:
- * `FINANCE_PORTAL_CRON_SECRET` against the vault's `finance_portal_cron_secret`,
- * and `MARKET_INGESTION_CRON_SECRET` against the database setting
- * `app.market_ingestion_cron_secret`, which two scheduled jobs put in an
- * `x-cron-secret` header that ten functions compare byte for byte. The prime
- * held neither half of either, so those jobs answered 401 on the prime and,
- * faithfully, on every clone.
+ * Two more are PAIRS with a vault half the prime's own cron reads:
+ * `FINANCE_PORTAL_CRON_SECRET` against `finance_portal_cron_secret`, and
+ * `MARKET_INGESTION_CRON_SECRET` against `market_ingestion_cron_secret`, which
+ * two scheduled jobs put in an `x-cron-secret` header that ten functions
+ * compare byte for byte. The prime held neither half of either, so those jobs
+ * answered 401 on the prime and, faithfully, on every clone. (The market jobs
+ * used to read a DATABASE SETTING instead: on this platform the `postgres`
+ * role is not a superuser, and a placeholder parameter can be set
+ * database-wide or on a role only by one — `42501: permission denied to set
+ * parameter`, measured 6 Sep 2026 — so a setting can never be an
+ * engine-writable mirror, and the jobs were moved onto the vault.)
  *
  * ## The rules
  *
- * **Minted once, mirrored in the database, re-asserted from there.** The
- * function environment cannot be read back, so a pass that minted anew would
- * ROTATE: outstanding reset tokens stop verifying and every push subscription —
- * bound to the VAPID public key it subscribed with — goes dead. The project's
- * own vault (or, for a setting the cron reads with `current_setting`, the
- * database-level setting itself) holds the readable half, exactly as the
- * signing pair's does; a pass reuses what it finds there and mints only what is
- * missing, database first, then environment, so a failed environment write
- * converges on the next pass.
+ * **Minted once, mirrored in the vault, re-asserted from there.** The function
+ * environment cannot be read back, so a pass that minted anew would ROTATE:
+ * outstanding reset tokens stop verifying and every push subscription — bound
+ * to the VAPID public key it subscribed with — goes dead. The project's own
+ * vault holds the readable half, exactly as the signing pair's does; a pass
+ * reuses what it finds there and mints only what is missing, vault first, then
+ * environment, so a failed environment write converges on the next pass. The
+ * vault is the ONLY mirror: it is the one store this role can write on every
+ * project.
  *
  * **A key pair is one thing.** A VAPID public key without its private half
  * signs nothing, and a private key whose public half nobody holds delivers to
@@ -41,8 +45,7 @@
  *
  * **A clone mirrors the prime's shape; it never invents a pair the prime does
  * not hold.** A clone gets its own finance or market pair only where the
- * prime's vault (or settings) carries the same name, read for NAMES and never
- * for a value. When the prime cannot be read the answer is "unknown", never
+ * prime's vault carries the same name, read for NAMES and never for a value. When the prime cannot be read the answer is "unknown", never
  * "none" — a probe that fails closed rather than into a fabricated pair. The
  * prime itself is paired by `PRIME_PAIR_SPECS`, which carry no gate, because
  * on the prime the question is not "what does the prime hold" but "what do
@@ -54,21 +57,25 @@
 /** `resetTokens.ts`, the finance batch and the market functions all refuse a value shorter than this. */
 export const MIN_OWNED_SECRET_LENGTH = 16;
 
-/** Where the readable half lives: a vault secret, or a database-level setting. */
-export type OwnedSecretStore = "vault" | "guc";
+/**
+ * Where the readable half lives. Only the vault: a database-level setting
+ * cannot be written by a non-superuser role for a placeholder parameter, so it
+ * can never be a mirror the engine keeps.
+ */
+export type OwnedSecretStore = "vault";
 
 export type OwnedSecretSpec =
   | {
       kind: "random";
       env: string;
-      /** The vault secret or database setting that mirrors `env`. */
+      /** The vault secret that mirrors `env`. */
       store: OwnedSecretStore;
       key: string;
       /** Bytes of entropy to mint; the value is hex, so twice this in characters. */
       bytes: number;
       /** The consumer's floor: a mirrored value at or above it is reused, below it replaced. */
       floor: number;
-      /** Only paired where the PRIME holds the same key in the same store. */
+      /** Only paired where the PRIME's vault holds the same key. */
       requiresPrime?: true;
       why: string;
     }
@@ -127,19 +134,18 @@ const FINANCE_CRON_PAIR: Omit<Extract<OwnedSecretSpec, { kind: "random" }>, "req
 
 /**
  * Two scheduled jobs (`agent-planner-run-scheduled`,
- * `market-qa-subscriptions-run-due`) send `current_setting('app.market_ingestion_cron_secret')`
- * as `x-cron-secret`, and ten market functions compare it against the
- * environment. The setting is database-level so that every new cron session
- * sees it.
+ * `market-qa-subscriptions-run-due`) send the vault's
+ * `market_ingestion_cron_secret` as `x-cron-secret`, and ten market functions
+ * compare it against the environment.
  */
 const MARKET_CRON_PAIR: Omit<Extract<OwnedSecretSpec, { kind: "random" }>, "requiresPrime"> = {
   kind: "random",
   env: "MARKET_INGESTION_CRON_SECRET",
-  store: "guc",
-  key: "app.market_ingestion_cron_secret",
+  store: "vault",
+  key: "market_ingestion_cron_secret",
   bytes: 32,
   floor: MIN_OWNED_SECRET_LENGTH,
-  why: "two scheduled jobs send the database setting as x-cron-secret and ten market functions compare it against the environment",
+  why: "two scheduled jobs send the vault half as x-cron-secret and ten market functions compare it against the environment",
 };
 
 /** What a CLONE owns. The two pairs are gated on the prime holding the same half. */
@@ -177,27 +183,17 @@ export function ownedSecretEnvNames(specs: readonly OwnedSecretSpec[] = OWNED_SE
 
 /** The vault names a spec list mirrors into. */
 export function ownedSecretVaultNames(specs: readonly OwnedSecretSpec[] = OWNED_SECRET_SPECS): string[] {
-  return specs.flatMap((s) =>
-    s.kind === "vapid" ? [s.publicVault, s.privateVault] : s.store === "vault" ? [s.key] : [],
-  );
+  return specs.flatMap((s) => (s.kind === "vapid" ? [s.publicVault, s.privateVault] : [s.key]));
 }
 
-/** The database settings a spec list mirrors into. */
-export function ownedSecretGucNames(specs: readonly OwnedSecretSpec[] = OWNED_SECRET_SPECS): string[] {
-  return specs.flatMap((s) => (s.kind === "random" && s.store === "guc" ? [s.key] : []));
-}
-
-/** The NAMES the prime holds, by store. Never a value. */
+/** The NAMES the prime's vault holds. Never a value. */
 export type PrimeShape = {
   vaultNames: ReadonlySet<string>;
-  gucNames: ReadonlySet<string>;
 };
 
 export type OwnedSecretFacts = {
   /** Vault name → decrypted value on the target project, null where absent. */
   vault: Record<string, string | null>;
-  /** Database setting → value on the target project, null where absent. */
-  guc: Record<string, string | null>;
   /** What the prime holds; null when the prime could not be read. Ignored by an ungated spec. */
   primeShape: PrimeShape | null;
 };
@@ -228,9 +224,6 @@ export type OwnedSecretsPlan = {
   why: string[];
 };
 
-function primeHolds(shape: PrimeShape, store: OwnedSecretStore, key: string): boolean {
-  return store === "vault" ? shape.vaultNames.has(key) : shape.gucNames.has(key);
-}
 
 export function planOwnedSecrets(
   specs: readonly OwnedSecretSpec[],
@@ -249,13 +242,13 @@ export function planOwnedSecrets(
           why.push(`${spec.env}: the prime could not be read — not paired this pass`);
           continue;
         }
-        if (!primeHolds(facts.primeShape, spec.store, spec.key)) {
+        if (!facts.primeShape.vaultNames.has(spec.key)) {
           skipped.push({ env: spec.env, store: spec.store, key: spec.key, reason: "prime_holds_none" });
-          why.push(`${spec.env}: the prime holds no ${spec.store === "vault" ? "vault secret" : "database setting"} ${spec.key} — nothing to mirror`);
+          why.push(`${spec.env}: the prime's vault holds no ${spec.key} — nothing to mirror`);
           continue;
         }
       }
-      const held = ((spec.store === "vault" ? facts.vault[spec.key] : facts.guc[spec.key]) ?? "").trim();
+      const held = (facts.vault[spec.key] ?? "").trim();
       const usable = held.length >= spec.floor;
       const value = usable ? held : mint.random(spec.bytes);
       if (!usable && value.length < spec.floor) {
@@ -264,13 +257,12 @@ export function planOwnedSecrets(
         );
       }
       writes.push({ env: spec.env, store: spec.store, key: spec.key, value, source: usable ? "mirror" : "minted" });
-      const where = spec.store === "vault" ? "vault" : "database setting";
       why.push(
         usable
-          ? `${spec.env}: ${where} holds a usable value — reused, environment re-asserted`
+          ? `${spec.env}: vault holds a usable value — reused, environment re-asserted`
           : held.length === 0
-            ? `${spec.env}: ${where} holds none — minted, written to ${where} then environment`
-            : `${spec.env}: ${where} value is ${held.length} characters, below the floor of ${spec.floor} — replaced`,
+            ? `${spec.env}: vault holds none — minted, written to vault then environment`
+            : `${spec.env}: vault value is ${held.length} characters, below the floor of ${spec.floor} — replaced`,
       );
       continue;
     }
