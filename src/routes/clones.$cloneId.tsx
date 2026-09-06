@@ -33,6 +33,7 @@ import { CloneDeploymentCard } from "@/components/clone-deployment-card";
 import { CloneEmailIdentityCard } from "@/components/clone-email-identity-card";
 import { CloneAccessCredentialsCard } from "@/components/clone-access-credentials-card";
 import { CloneTurnstileCard } from "@/components/clone-turnstile-card";
+import { CloneBrandMarksCard } from "@/components/clone-brand-marks-card";
 import { CloneBackendDeployCard } from "@/components/clone-backend-deploy-card";
 import { CloneEdgeCard } from "@/components/clone-edge-card";
 import { CloneHealthCard } from "@/components/clone-health-card";
@@ -380,6 +381,7 @@ function CloneDetail() {
         in the fleet sat with `RESEND_API_KEY` missing and no visible way to
         fix it.
       */}
+      <CloneBrandMarksCard cloneId={cloneId} />
       <CloneEmailIdentityCard cloneId={cloneId} />
       {/*
         Beside the other two per-clone credentials, because it is the third:

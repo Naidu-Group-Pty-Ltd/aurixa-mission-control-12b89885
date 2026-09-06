@@ -82,6 +82,7 @@ import { BrandVersionTimelineDialog } from "@/components/branding/brand-version-
 import { CloneOverrideEditorDialog } from "@/components/branding/clone-override-editor";
 import { BrandPlaygroundDialog } from "@/components/branding/brand-playground";
 import { MetricCell } from "@/components/metric-bar";
+import { BRAND_MARK_SLOTS } from "@/lib/brand/marks";
 
 export const Route = createFileRoute("/branding")({
   errorComponent: RouteError,
@@ -155,11 +156,16 @@ type BrandSchedule = {
   notes: string | null;
 };
 
-const ASSET_FIELDS = [
-  { field: "logo_light_url", label: "Logo (light)", target: "branding/logo-light.png" },
-  { field: "logo_dark_url", label: "Logo (dark)", target: "branding/logo-dark.png" },
-  { field: "favicon_url", label: "Favicon", target: "branding/favicon.png" },
-] as const;
+// Drawn from the one list of marks rather than written out again here. It was
+// written out here, it offered three of the six the workspace reads, and the
+// three it missed are the ones a generated document needs — so a brand could be
+// complete on screen and every PDF came out unmarked. See `branding/marks.ts`.
+const ASSET_FIELDS = BRAND_MARK_SLOTS.map((slot) => ({
+  field: slot.field,
+  label: slot.label,
+  purpose: slot.purpose,
+  target: slot.target,
+}));
 
 const STATUS_BADGE: Record<string, string> = {
   draft: "bg-muted text-muted-foreground",
@@ -1341,6 +1347,11 @@ function ProfileEditor({
                   </div>
                   <div className="flex-1 min-w-0">
                     <div className="text-sm font-medium">{def.label}</div>
+                    {/* What the mark is FOR. Two of the six print on paper and
+                        four dress the interface, and nothing here said which —
+                        so "Logo (dark)" was uploaded as a knockout lockup about
+                        as often as it was not. */}
+                    <div className="text-xs text-muted-foreground">{def.purpose}</div>
                     <div className="truncate font-mono text-[10px] text-muted-foreground">
                       {url || "Not set"}
                     </div>
