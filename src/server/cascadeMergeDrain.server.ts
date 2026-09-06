@@ -75,6 +75,7 @@ import {
 } from "./cascade/prReconcile.pure";
 import { summaryOwesReconcile } from "./cascade/syncExclusions.pure";
 import { repairConflictedProposal } from "./cascadeProposalRepair.server";
+import { resolveConflictedProposal } from "./cascadeConflictMerge.server";
 
 type Db = SupabaseClient<Database>;
 
@@ -98,6 +99,12 @@ export type MergeDrainOutcome =
   | { clone: string; pr: number; outcome: "failed"; error: string }
   /** The proposal had gone stale and was rebuilt on the clone's current head. */
   | { clone: string; pr: number; outcome: "repaired"; why: string }
+  /**
+   * The proposal was conflicted in a way regeneration refuses, and has been
+   * resolved in the proposal's favour by a merge commit — the standing
+   * instruction that a conflict always accepts the current change and merges.
+   */
+  | { clone: string; pr: number; outcome: "resolved"; why: string }
   /** The record was behind and has been brought forward. */
   | { clone: string; pr: number; outcome: "reconciled"; to: string; rows: number; why: string };
 
@@ -293,7 +300,7 @@ export async function drainCascadeMerges(
           advancedClones.add(clone.id);
         } else if (outcome.outcome === "held") {
           report.held[outcome.reason] = (report.held[outcome.reason] ?? 0) + 1;
-        } else if (outcome.outcome === "repaired") {
+        } else if (outcome.outcome === "repaired" || outcome.outcome === "resolved") {
           report.repaired += 1;
         } else if (outcome.outcome === "reconciled") {
           report.reconciled += outcome.rows;
@@ -412,6 +419,12 @@ async function handleOne(args: {
   // `cascade/proposalRepair.pure.ts` for why a cascade branch has nothing in it
   // worth merging, and for the three things the repair refuses to do.
   //
+  // What the repair refuses no longer ends the story: those refusals used to be
+  // permanent, and by the owner's standing instruction a conflict always
+  // resolves in the proposal's favour and merges. `resolveConflictedProposal`
+  // (cascade/conflictMerge.pure.ts) is that fall-through — a merge commit that
+  // restates the proposal over the current head, never a force-push.
+  //
   // This reads `mergeable` ONLY to refuse and to repair. It is never
   // permission: `clean` is also what a pull request with no checks at all
   // reports, so believing it would reopen the `no_checks` hole exactly where
@@ -441,23 +454,63 @@ async function handleOne(args: {
         };
       }
       if (repair?.act === "hold") {
+        // Every refusal regeneration makes used to be PERMANENT — a branch
+        // somebody committed to, a repair cap spent — and "whenever there are
+        // merge conflicts it never closes" was the owner's exact report. By
+        // standing instruction those conflicts now resolve in the proposal's
+        // favour: a merge commit that restates every path the proposal touches
+        // over the clone's current head, so nothing on the branch is rewritten
+        // and the merge still waits for checks on the resolved head.
+        const resolved = await resolveConflictedProposal({
+          supabase,
+          octokit,
+          clone: { id: cloneId, label, owner, repo },
+          prNumber: number,
+          headRef: pr.head.ref,
+          headSha: pr.head.sha,
+          baseRef: pr.base.ref,
+          cause: repair.reason ?? "unrepairable",
+        });
+        if (resolved.act === "resolved") {
+          await writeReconciliation(supabase, rows, facts, resolved.why);
+          return { clone: label, pr: number, outcome: "resolved", why: resolved.why };
+        }
         return {
           clone: label,
           pr: number,
           outcome: "held",
-          reason: repair.reason ?? "unrepairable",
-          why: repair.why,
+          reason: resolved.reason,
+          why: resolved.why,
         };
       }
+    } else {
+      // No event to rebuild from — the proposal exists on GitHub and Mission
+      // Control has no record of which cascade opened it. That used to end at
+      // "closed or resolved by hand", which in practice meant never: the pull
+      // request's own file list IS the statement, so it is resolved from
+      // GitHub alone, in the proposal's favour, like every other conflict.
+      const resolved = await resolveConflictedProposal({
+        supabase,
+        octokit,
+        clone: { id: cloneId, label, owner, repo },
+        prNumber: number,
+        headRef: pr.head.ref,
+        headSha: pr.head.sha,
+        baseRef: pr.base.ref,
+        cause: "no_cascade_record",
+      });
+      await writeReconciliation(supabase, rows, facts, resolved.why);
+      if (resolved.act === "resolved") {
+        return { clone: label, pr: number, outcome: "resolved", why: resolved.why };
+      }
+      return {
+        clone: label,
+        pr: number,
+        outcome: "held",
+        reason: resolved.reason,
+        why: resolved.why,
+      };
     }
-    // No event to rebuild from — the proposal exists on GitHub and Mission
-    // Control has no record of which cascade opened it, so there is nothing to
-    // rebuild it from. Say so rather than retrying a merge that cannot succeed.
-    const why =
-      "This proposal conflicts with the clone's default branch, and Mission Control has no " +
-      "cascade record for it to rebuild from. It has to be closed or resolved by hand.";
-    await writeReconciliation(supabase, rows, facts, why);
-    return { clone: label, pr: number, outcome: "held", reason: "conflicted", why };
   }
 
   if (facts.state === "open") {

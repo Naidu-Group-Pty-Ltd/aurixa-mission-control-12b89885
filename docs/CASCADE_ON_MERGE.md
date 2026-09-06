@@ -485,6 +485,50 @@ hand fix, a Lovable edit. Any of them touching a file an open proposal carries
 conflicts it. That is the case regeneration exists for, and it is why the repair
 is a standing mechanism rather than a one-off fix.
 
+### What regeneration refuses no longer ends the story
+
+Every refusal above used to be PERMANENT. A branch somebody had committed to, a
+proposal whose repair cap was spent, and a pull request Mission Control held no
+cascade record for each sat open indefinitely, with a notification an operator
+had already learned to filter out — the owner's exact report was "whenever
+there are merge conflicts it never closes", with the standing instruction that
+a conflict always resolves by accepting the CURRENT change (the proposal's own
+side) and then merges.
+
+`resolveConflictedProposal` (`cascade/conflictMerge.pure.ts`) is that
+fall-through, and it is a MERGE, not a regeneration:
+
+```
+tree    = the clone's current default-branch tree
+          + the head's version of every path the pull request touches
+parents = [proposal head, default-branch head]
+```
+
+Read as a three-way merge that is "accept current change" on every conflicting
+hunk — the proposal's side stands for everything it states, which is exactly
+what a CLEAN cascade merge produces, so a conflicted file cannot land
+differently from an unconflicted one. Everything the proposal does not state
+keeps the branch's content.
+
+Five rules carry it. **A merge commit destroys nothing** — the ref update is a
+fast-forward (`force: false`, head is the first parent), so a human's commit
+stays in the history AND in the result, since the head tree their commit is
+part of is the side that wins; that is what makes this safe exactly where
+regeneration is not. **The pull request's own file list is the statement**, so
+no Mission Control record is needed — which is what closes the
+"no cascade record, resolve by hand" hold. **The head's tree is the only
+source of content**: every entry is a `(path, mode, sha)` taken verbatim, no
+blob is fetched, no hunk is spliced. **A truncated tree or an over-cap file
+list is a refusal, never a guess** — resolving from a partial listing silently
+drops everything past the cut. And **the resolution commit never wears the
+engine's statement prefix**, because `isEngineOnlyBranch` recognises an
+untouched proposal by it and a many-commit branch must not read as pristine.
+
+It grants nothing: the merge still goes through `decideCascadeMerge` once
+checks report on the resolved head, and the loop is bounded by its own
+audit-counted cap in the same window as the repair path, written BEFORE the
+push so a crash still counts.
+
 ## A cascade delivers BYTES, not a reading of them
 
 `getFileContent` returned the UTF-8 decoding of a blob and nothing else, and the
