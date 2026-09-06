@@ -275,6 +275,23 @@ is not something to learn the shape of by running it.
 
 ---
 
+### A7 — A challenge is written wherever it appears
+
+Vercel answered `addDomain` with no ownership challenge for two clones on
+3 September 2026, and then — once their CNAMEs resolved — asked for a TXT on
+`_vercel.<zone>` (`vc-domain-verify=<host>,<token>`). Only the attach step
+queued `verify_domain_txt` jobs; the `verifying_domain` step recorded the
+challenge on the row every two minutes for six hours, never wrote it, and then
+failed both deployments as "stuck" with the exact record they needed sitting in
+`domain_verification`. The live zone had no `_vercel` TXT at all.
+
+The verifying step now queues the provider's challenges before it waits. The
+job is keyed on the challenge's own value, so asking on every pass costs
+nothing once it has been queued, and the status line says the record is being
+written rather than that DNS is "propagating". `domainChallenge.contract.test.ts`
+pins it against the source, because the drain needs a hosting credential to
+run.
+
 ## Data model
 
 | Table                                | Purpose                                                                                                                                                                |
