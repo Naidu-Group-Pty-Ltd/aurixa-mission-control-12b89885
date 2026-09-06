@@ -4389,7 +4389,8 @@ export async function provisionCloneBackend(
   // a repair pass re-asserts the same values rather than rotating them (a
   // rotated VAPID key kills every push subscription; a rotated pepper every
   // outstanding reset token). The prime is read for the NAMES its vault holds
-  // and nothing else, so a pair the prime does not carry is never invented.
+  // and nothing else (vault names, database settings), so a pair the prime
+  // does not carry is never invented.
   // Non-fatal, and carried by the clone-secrets-reconcile sweep.
   pauseIfDue("writing clone-owned secrets");
   let ownedValues: Record<string, string> = {};
@@ -4399,8 +4400,8 @@ export async function provisionCloneBackend(
       "migrating",
       "Writing this clone's own secrets (peppers, VAPID pair) — vault then environment...",
     );
-    const { ensureCloneOwnedSecrets, readPrimeVaultNames } = await import("./cloneOwnedSecrets.server");
-    const owned = await ensureCloneOwnedSecrets(projectRef, await readPrimeVaultNames(input.primeBackendRef));
+    const { ensureCloneOwnedSecrets, readPrimeShape } = await import("./cloneOwnedSecrets.server");
+    const owned = await ensureCloneOwnedSecrets(projectRef, await readPrimeShape(input.primeBackendRef));
     if (owned.ok) {
       ownedValues = owned.values;
       ownedSecrets = owned.outcome;

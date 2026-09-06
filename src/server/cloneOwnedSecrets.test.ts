@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import {
   OWNED_SECRET_SPECS,
+  PRIME_PAIR_SPECS,
   MIN_OWNED_SECRET_LENGTH,
   OWNED_SECRETS_REPAIR_COOLDOWN_MS,
   planOwnedSecrets,
@@ -10,7 +11,9 @@ import {
   isVapidPrivateKey,
   ownedSecretEnvNames,
   ownedSecretVaultNames,
+  ownedSecretGucNames,
   type OwnedSecretFacts,
+  type PrimeShape,
 } from "./cloneOwnedSecrets.pure";
 
 const NOW = Date.parse("2026-09-06T06:00:00.000Z");
@@ -20,29 +23,54 @@ const mint = {
   random: (bytes: number) => "r".repeat(bytes * 2),
   vapid: () => ({ publicKey: "B" + "m".repeat(86), privateKey: "n".repeat(43) }),
 };
+const shape = (over: Partial<PrimeShape> = {}): PrimeShape => ({
+  vaultNames: new Set(["internal_edge_secret", "supabase_service_role_key", "supabase_url"]),
+  gucNames: new Set(["app.settings.jwt_exp"]),
+  ...over,
+});
 const facts = (over: Partial<OwnedSecretFacts> = {}): OwnedSecretFacts => ({
   vault: {},
-  primeVaultNames: new Set(),
+  guc: {},
+  primeShape: shape(),
   ...over,
 });
 const write = (plan: ReturnType<typeof planOwnedSecrets>, env: string) =>
   plan.writes.find((w) => w.env === env);
 
 describe("the specs name the prime's contract", () => {
-  it("cover the pepper that throws, the CSRF pepper, the VAPID pair and the finance cron", () => {
+  it("a clone owns the pepper that throws, the CSRF pepper, the VAPID pair and the two cron pairs", () => {
     expect(ownedSecretEnvNames()).toEqual([
       "RESET_TOKEN_PEPPER",
       "CSRF_TOKEN_PEPPER",
       "VAPID_PUBLIC_KEY",
       "VAPID_PRIVATE_KEY",
       "FINANCE_PORTAL_CRON_SECRET",
+      "MARKET_INGESTION_CRON_SECRET",
     ]);
-    // The finance cron on the prime reads exactly this vault name.
+    // The finance function's older schedule read exactly this vault name; the
+    // market jobs read exactly this setting.
     expect(ownedSecretVaultNames()).toContain("finance_portal_cron_secret");
+    expect(ownedSecretGucNames()).toEqual(["app.market_ingestion_cron_secret"]);
+  });
+
+  it("the prime is paired with the two cron pairs and nothing else, ungated", () => {
+    expect(ownedSecretEnvNames(PRIME_PAIR_SPECS)).toEqual(["FINANCE_PORTAL_CRON_SECRET", "MARKET_INGESTION_CRON_SECRET"]);
+    for (const spec of PRIME_PAIR_SPECS) {
+      expect(spec.kind).toBe("random");
+      expect((spec as { requiresPrime?: true }).requiresPrime).toBeUndefined();
+    }
+    // The prime's peppers and push identity are the owner's, not the engine's.
+    expect(ownedSecretVaultNames(PRIME_PAIR_SPECS)).toEqual(["finance_portal_cron_secret"]);
+  });
+
+  it("the clone's copies of the two pairs ARE gated on the prime", () => {
+    for (const spec of OWNED_SECRET_SPECS) {
+      if (spec.kind === "random" && /CRON/.test(spec.env)) expect(spec.requiresPrime).toBe(true);
+    }
   });
 
   it("every random floor is the consumers' floor", () => {
-    for (const spec of OWNED_SECRET_SPECS) {
+    for (const spec of [...OWNED_SECRET_SPECS, ...PRIME_PAIR_SPECS]) {
       if (spec.kind === "random") expect(spec.floor).toBeGreaterThanOrEqual(MIN_OWNED_SECRET_LENGTH);
     }
   });
@@ -53,7 +81,8 @@ describe("planOwnedSecrets — minted once, mirrored, re-asserted", () => {
     const plan = planOwnedSecrets(OWNED_SECRET_SPECS, facts({ vault: { reset_token_pepper: "p".repeat(40) } }), mint);
     const w = write(plan, "RESET_TOKEN_PEPPER");
     expect(w?.value).toBe("p".repeat(40));
-    expect(w?.source).toBe("vault");
+    expect(w?.source).toBe("mirror");
+    expect(w?.store).toBe("vault");
   });
 
   it("mints when the vault holds nothing", () => {
@@ -63,7 +92,7 @@ describe("planOwnedSecrets — minted once, mirrored, re-asserted", () => {
     expect(w?.value.length).toBe(64);
   });
 
-  it("treats a vault value below the consumer's floor as absent", () => {
+  it("treats a mirrored value below the consumer's floor as absent", () => {
     // `resetTokens.ts` throws under 16 characters; reusing it would write a
     // pepper the consumer refuses and stamp the ledger `set`.
     const plan = planOwnedSecrets(OWNED_SECRET_SPECS, facts({ vault: { reset_token_pepper: "short" } }), mint);
@@ -82,7 +111,7 @@ describe("planOwnedSecrets — minted once, mirrored, re-asserted", () => {
     );
     expect(write(plan, "VAPID_PUBLIC_KEY")?.value).toBe(PUB);
     expect(write(plan, "VAPID_PRIVATE_KEY")?.value).toBe(PRIV);
-    expect(write(plan, "VAPID_PUBLIC_KEY")?.source).toBe("vault");
+    expect(write(plan, "VAPID_PUBLIC_KEY")?.source).toBe("mirror");
   });
 
   it("re-mints the WHOLE pair when either half is missing or malformed", () => {
@@ -110,27 +139,71 @@ describe("planOwnedSecrets — minted once, mirrored, re-asserted", () => {
     ).toThrow(/malformed/);
   });
 
-  it("pairs the finance cron secret only where the prime's vault holds it", () => {
-    const without = planOwnedSecrets(OWNED_SECRET_SPECS, facts({ primeVaultNames: new Set(["supabase_url"]) }), mint);
+  it("pairs the finance secret only where the prime's vault holds it", () => {
+    const without = planOwnedSecrets(OWNED_SECRET_SPECS, facts(), mint);
     expect(write(without, "FINANCE_PORTAL_CRON_SECRET")).toBeUndefined();
-    expect(without.skipped).toEqual([
-      { env: "FINANCE_PORTAL_CRON_SECRET", vault: "finance_portal_cron_secret", reason: "prime_holds_none" },
-    ]);
+    expect(without.skipped).toContainEqual({
+      env: "FINANCE_PORTAL_CRON_SECRET",
+      store: "vault",
+      key: "finance_portal_cron_secret",
+      reason: "prime_holds_none",
+    });
 
     const withIt = planOwnedSecrets(
       OWNED_SECRET_SPECS,
-      facts({ primeVaultNames: new Set(["finance_portal_cron_secret"]) }),
+      facts({ primeShape: shape({ vaultNames: new Set(["finance_portal_cron_secret"]) }) }),
       mint,
     );
     expect(write(withIt, "FINANCE_PORTAL_CRON_SECRET")?.source).toBe("minted");
-    expect(withIt.skipped).toEqual([]);
+    expect(withIt.skipped.map((s) => s.env)).not.toContain("FINANCE_PORTAL_CRON_SECRET");
+  });
+
+  it("pairs the market secret only where the prime holds the database setting, and mirrors it as a setting", () => {
+    const without = planOwnedSecrets(OWNED_SECRET_SPECS, facts(), mint);
+    expect(write(without, "MARKET_INGESTION_CRON_SECRET")).toBeUndefined();
+    expect(without.skipped).toContainEqual({
+      env: "MARKET_INGESTION_CRON_SECRET",
+      store: "guc",
+      key: "app.market_ingestion_cron_secret",
+      reason: "prime_holds_none",
+    });
+
+    const withIt = planOwnedSecrets(
+      OWNED_SECRET_SPECS,
+      facts({ primeShape: shape({ gucNames: new Set(["app.market_ingestion_cron_secret"]) }) }),
+      mint,
+    );
+    const w = write(withIt, "MARKET_INGESTION_CRON_SECRET");
+    expect(w?.source).toBe("minted");
+    expect(w?.store).toBe("guc");
+    expect(w?.key).toBe("app.market_ingestion_cron_secret");
+
+    // And a clone whose setting is already there reuses it — never the prime's value.
+    const held = planOwnedSecrets(
+      OWNED_SECRET_SPECS,
+      facts({
+        guc: { "app.market_ingestion_cron_secret": "m".repeat(64) },
+        primeShape: shape({ gucNames: new Set(["app.market_ingestion_cron_secret"]) }),
+      }),
+      mint,
+    );
+    expect(write(held, "MARKET_INGESTION_CRON_SECRET")).toMatchObject({ source: "mirror", value: "m".repeat(64) });
+  });
+
+  it("the prime's own list needs no prime shape and mints both pairs", () => {
+    const plan = planOwnedSecrets(PRIME_PAIR_SPECS, facts({ primeShape: null }), mint);
+    expect(plan.skipped).toEqual([]);
+    expect(plan.writes.map((w) => [w.env, w.store, w.source])).toEqual([
+      ["FINANCE_PORTAL_CRON_SECRET", "vault", "minted"],
+      ["MARKET_INGESTION_CRON_SECRET", "guc", "minted"],
+    ]);
   });
 
   it("an unreadable prime is unknown, never none", () => {
     // Inventing a pair because the probe failed is the confident answer
     // against nothing this platform has shipped before.
-    const plan = planOwnedSecrets(OWNED_SECRET_SPECS, facts({ primeVaultNames: null }), mint);
-    expect(plan.skipped.map((s) => s.reason)).toEqual(["prime_unreadable"]);
+    const plan = planOwnedSecrets(OWNED_SECRET_SPECS, facts({ primeShape: null }), mint);
+    expect(plan.skipped.map((s) => s.reason)).toEqual(["prime_unreadable", "prime_unreadable"]);
     // The specs that need no prime are still written.
     expect(write(plan, "RESET_TOKEN_PEPPER")).toBeDefined();
     expect(write(plan, "VAPID_PUBLIC_KEY")).toBeDefined();
@@ -138,8 +211,11 @@ describe("planOwnedSecrets — minted once, mirrored, re-asserted", () => {
 
   it("never puts a value in the reason lines", () => {
     const plan = planOwnedSecrets(
-      OWNED_SECRET_SPECS,
-      facts({ vault: { reset_token_pepper: "p".repeat(40), vapid_public_key: PUB, vapid_private_key: PRIV } }),
+      [...OWNED_SECRET_SPECS, ...PRIME_PAIR_SPECS],
+      facts({
+        vault: { reset_token_pepper: "p".repeat(40), vapid_public_key: PUB, vapid_private_key: PRIV },
+        guc: { "app.market_ingestion_cron_secret": "m".repeat(64) },
+      }),
       mint,
     );
     for (const w of plan.writes) for (const line of plan.why) expect(line).not.toContain(w.value);
@@ -197,7 +273,7 @@ describe("decideOwnedSecretsRepair", () => {
   });
 });
 
-describe("the step is written vault first, fed to the batch, and never logged", () => {
+describe("the step is written mirror first, fed to the batch, and never logged", () => {
   const provisioning = () => readFileSync("src/server/backend-provisioning.server.ts", "utf8");
   const server = () => readFileSync("src/server/cloneOwnedSecrets.server.ts", "utf8");
 
@@ -217,6 +293,8 @@ describe("the step is written vault first, fed to the batch, and never logged", 
     // The batch is told the clone's name and what other steps settled.
     expect(between).toMatch(/displayName: input\.cloneName/);
     expect(between).toMatch(/settled: new Map\(Object\.entries\(input\.settledSecrets \?\? \{\}\)\)/);
+    // The prime is consulted for its SHAPE, through the one probe.
+    expect(s).toMatch(/ensureCloneOwnedSecrets\(projectRef, await readPrimeShape\(input\.primeBackendRef\)\)/);
   });
 
   it("the pipeline reports names and counts, never a value", () => {
@@ -231,19 +309,32 @@ describe("the step is written vault first, fed to the batch, and never logged", 
     expect(block).not.toMatch(/onStatusUpdate\?\.\([^)]*linkValues/);
   });
 
-  it("the server step writes the vault before the environment, and only what was minted", () => {
+  it("the server step writes the mirror before the environment, and only what was minted", () => {
     const s = server();
-    const vault = s.indexOf("do $owned$ begin");
+    const mirror = s.indexOf("do $owned$ begin");
     const env = s.indexOf("setCloneSecretValues(");
-    expect(vault).toBeGreaterThan(-1);
-    expect(env).toBeGreaterThan(vault);
+    expect(mirror).toBeGreaterThan(-1);
+    expect(env).toBeGreaterThan(mirror);
     expect(s).toMatch(/const minted = plan\.writes\.filter\(\(w\) => w\.source === "minted"\)/);
+  });
+
+  it("a database setting is written at the level the cron reads it, and read back from the same place", () => {
+    const s = server();
+    // Database-wide where this role owns the database, on the role otherwise —
+    // and the settings read covers both.
+    expect(s).toMatch(/alter database %I set \$\{name\} = %L/);
+    expect(s).toMatch(/alter role %I set \$\{name\} = %L/);
+    expect(s).toMatch(/s\.setrole = 0 or s\.setrole = \(select oid from pg_roles where rolname = current_user\)/);
+    // Only a lower-case dotted name may ever be inlined.
+    expect(s).toMatch(/GUC_NAME_RX = \/\^\[a-z_\]\[a-z0-9_\]\*\(\\\.\[a-z_\]\[a-z0-9_\]\*\)\+\$\//);
   });
 
   it("the prime is read for NAMES only", () => {
     const s = server();
-    expect(s).toContain('"select name from vault.secrets;"');
-    expect(s).not.toMatch(/decrypted_secret[^\n]*primeRef/);
+    const probe = s.slice(s.indexOf("export async function readPrimeShape"), s.indexOf("/** What is recorded and reported."));
+    expect(probe).toContain("select 'vault' as store, name from vault.secrets");
+    expect(probe).not.toMatch(/decrypted_secret/);
+    expect(probe).not.toMatch(/value/);
   });
 
   it("the value never reaches an event row or a log line", () => {

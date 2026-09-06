@@ -37,7 +37,7 @@ describe("classification — what may never be copied from the prime", () => {
   });
 
   it("the clone's own identities and its Mission Control credential are tenant-scoped", () => {
-    for (const n of ["REQUIRE_TURNSTILE", "RESEND_FROM_EMAIL", "VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY", "FINANCE_PORTAL_CRON_SECRET", "MISSION_CONTROL_CLONE_API_KEY", "MISSION_CONTROL_WEBHOOK_SECRET"]) {
+    for (const n of ["REQUIRE_TURNSTILE", "RESEND_FROM_EMAIL", "VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY", "FINANCE_PORTAL_CRON_SECRET", "MARKET_INGESTION_CRON_SECRET", "MISSION_CONTROL_CLONE_API_KEY", "MISSION_CONTROL_WEBHOOK_SECRET"]) {
       expect(classifySecret(n)).toBe("tenant_scoped");
       expect(TENANT_SCOPED_REMEDY[n]).toBeTruthy();
     }
