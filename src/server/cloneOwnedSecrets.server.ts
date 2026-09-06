@@ -15,11 +15,12 @@
  * `primeSecretPairs.server.ts`, through the writer below, and that is the one
  * caller that hands this module the prime's ref.
  *
- * **A database setting is written at the level the cron reads it.** The
- * market jobs read `current_setting(...)` in a fresh session started for the
- * job's owner, so the setting is written database-wide where this role owns
- * the database, and on the role otherwise — and read back from the same
- * place, so the two can never be asked of different scopes.
+ * **The vault is the only mirror.** A database-level setting looked like a
+ * second one, and is not: on this platform the `postgres` role is not a
+ * superuser, and a placeholder parameter can be set database-wide or on a role
+ * only by one — `42501: permission denied to set parameter`, measured 6 Sep
+ * 2026 from the role that owns the database. The market jobs were moved onto
+ * the vault instead; see the prime's `market_cron_secret_from_vault` migration.
  *
  * The values are never logged, never put in an event row, and never returned
  * to anything but the provisioning pipeline that hands them to the secrets
@@ -39,7 +40,6 @@ import {
   planOwnedSecrets,
   ownedSecretEnvNames,
   ownedSecretVaultNames,
-  ownedSecretGucNames,
   decideOwnedSecretsRepair,
   type OwnedSecretSkip,
   type OwnedSecretSpec,
@@ -53,9 +53,6 @@ type Db = SupabaseClient<Database>;
 const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 export const OWNED_SECRETS_EVENT_ACTION = "set_owned_secrets";
-
-/** A setting name this module will inline into SQL: lower-case, dotted, nothing else. */
-const GUC_NAME_RX = /^[a-z_][a-z0-9_]*(\.[a-z_][a-z0-9_]*)+$/;
 
 /**
  * A P-256 pair in the form `web-push` takes: the public key as the 65-byte
@@ -76,37 +73,19 @@ export function mintVapidKeyPair(): { publicKey: string; privateKey: string } {
 }
 
 /**
- * The settings a project's cron sessions see, by NAME: database-level rows and
- * the rows on the role this API runs as. Values are read by the writer only.
- */
-const SETTINGS_SQL = `
-  select split_part(c, '=', 1) as name, substr(c, strpos(c, '=') + 1) as value,
-         case when s.setrole = 0 then 'database' else 'role' end as level
-    from pg_db_role_setting s, unnest(s.setconfig) c
-   where s.setdatabase = (select oid from pg_database where datname = current_database())
-     and (s.setrole = 0 or s.setrole = (select oid from pg_roles where rolname = current_user))`;
-
-/**
- * The NAMES the prime holds, by store — never a value. Null when the prime
- * could not be read, which the planner treats as "unknown" rather than "none".
+ * The NAMES the prime's vault holds — never a value. Null when the prime could
+ * not be read, which the planner treats as "unknown" rather than "none".
  */
 export async function readPrimeShape(primeRef: string | null): Promise<PrimeShape | null> {
   if (!primeRef) return null;
   try {
     const { runSqlOnProject } = await import("./backend-provisioning.server");
-    const rows = (await runSqlOnProject(
-      primeRef,
-      `select 'vault' as store, name from vault.secrets
-       union all
-       select 'guc' as store, name from (${SETTINGS_SQL}) settings;`,
-    )) as Array<{ store?: unknown; name?: unknown }>;
+    const rows = (await runSqlOnProject(primeRef, "select name from vault.secrets;")) as Array<{ name?: unknown }>;
     const vaultNames = new Set<string>();
-    const gucNames = new Set<string>();
     for (const row of Array.isArray(rows) ? rows : []) {
-      if (typeof row?.name !== "string" || row.name.length === 0) continue;
-      (row.store === "guc" ? gucNames : vaultNames).add(row.name);
+      if (typeof row?.name === "string" && row.name.length > 0) vaultNames.add(row.name);
     }
-    return { vaultNames, gucNames };
+    return { vaultNames };
   } catch (e) {
     console.error("[owned_secrets] could not read the prime's shape", { primeRef, error: msg(e) });
     return null;
@@ -142,21 +121,6 @@ function vaultUpsertSql(
 }
 
 /**
- * `ALTER DATABASE … SET` where this role owns the database (the level the
- * cron's fresh session reads first), `ALTER ROLE current_user SET` otherwise —
- * which the same cron session reads too, since the jobs run as this role.
- */
-function settingWriteSql(sqlLiteral: (v: string) => string, name: string, value: string): string {
-  if (!GUC_NAME_RX.test(name)) throw new Error(`refusing to write a setting named ${JSON.stringify(name)}`);
-  return `
-      if (select pg_get_userbyid(datdba) from pg_database where datname = current_database()) = current_user then
-        execute format('alter database %I set ${name} = %L', current_database(), ${sqlLiteral(value)});
-      else
-        execute format('alter role %I set ${name} = %L', current_user, ${sqlLiteral(value)});
-      end if;`;
-}
-
-/**
  * Bring one project's owned secrets into agreement for the given specs:
  * mirror first, then the environment, every value in ONE secrets request.
  * The gated specs consult `primeShape`; an ungated spec ignores it.
@@ -170,33 +134,16 @@ export async function ensureOwnedSecrets(
     await import("./backend-provisioning.server");
 
   const vaultNames = ownedSecretVaultNames(specs);
-  const gucNames = ownedSecretGucNames(specs);
   const vault: Record<string, string | null> = Object.fromEntries(vaultNames.map((n) => [n, null]));
-  const guc: Record<string, string | null> = Object.fromEntries(gucNames.map((n) => [n, null]));
   try {
-    const parts: string[] = [];
     if (vaultNames.length > 0) {
-      parts.push(
-        `select 'vault' as store, name as key, decrypted_secret as value
-           from vault.decrypted_secrets where name in (${vaultNames.map(sqlLiteral).join(", ")})`,
-      );
-    }
-    if (gucNames.length > 0) {
-      parts.push(
-        `select 'guc' as store, name as key, value from (${SETTINGS_SQL}) settings
-          where name in (${gucNames.map(sqlLiteral).join(", ")})`,
-      );
-    }
-    if (parts.length > 0) {
-      const rows = (await runSqlOnProject(projectRef, `${parts.join("\n union all \n")};`)) as Array<{
-        store?: unknown;
-        key?: unknown;
-        value?: unknown;
-      }>;
+      const rows = (await runSqlOnProject(
+        projectRef,
+        `select name as key, decrypted_secret as value
+           from vault.decrypted_secrets where name in (${vaultNames.map(sqlLiteral).join(", ")});`,
+      )) as Array<{ key?: unknown; value?: unknown }>;
       for (const row of Array.isArray(rows) ? rows : []) {
-        if (typeof row?.key !== "string" || typeof row?.value !== "string") continue;
-        if (row.store === "guc") guc[row.key] = row.value;
-        else vault[row.key] = row.value;
+        if (typeof row?.key === "string" && typeof row?.value === "string") vault[row.key] = row.value;
       }
     }
   } catch (e) {
@@ -207,7 +154,7 @@ export async function ensureOwnedSecrets(
   try {
     plan = planOwnedSecrets(
       specs,
-      { vault, guc, primeShape },
+      { vault, primeShape },
       { random: (bytes) => randomBytes(bytes).toString("hex"), vapid: mintVapidKeyPair },
     );
   } catch (e) {
@@ -217,18 +164,9 @@ export async function ensureOwnedSecrets(
   // Mirror FIRST, and only what was minted: a reused value is already there.
   const minted = plan.writes.filter((w) => w.source === "minted");
   if (minted.length > 0) {
-    let body: string;
-    try {
-      body = minted
-        .map((w) =>
-          w.store === "vault"
-            ? vaultUpsertSql(sqlLiteral, w.key, w.value, `Owned secret mirrored from the function environment's ${w.env}`)
-            : settingWriteSql(sqlLiteral, w.key, w.value),
-        )
-        .join("");
-    } catch (e) {
-      return { ok: false, stage: "plan", error: msg(e) };
-    }
+    const body = minted
+      .map((w) => vaultUpsertSql(sqlLiteral, w.key, w.value, `Owned secret mirrored from the function environment's ${w.env}`))
+      .join("");
     try {
       await runSqlOnProject(projectRef, `do $owned$ begin ${body} end $owned$;`);
     } catch (e) {

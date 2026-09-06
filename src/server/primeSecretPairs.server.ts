@@ -63,15 +63,18 @@ export async function ensurePrimeSecretPairs(
   const res = await ensureOwnedSecrets(projectRef, PRIME_PAIR_SPECS, null);
 
   const { writeAuditLog } = await import("./audit.server");
+  // `audit_log.entity_id` is a uuid column and a project ref is not one — the
+  // first pass put the ref there and the row was refused silently. The ref
+  // travels in the metadata instead.
   await writeAuditLog({
     action: PRIME_SECRET_PAIRS_AUDIT_ACTION,
     entityType: "prime_backend",
-    entityId: projectRef,
+    entityId: null,
     actorUserId: opts?.actorUserId ?? null,
     // Names and reasons only.
     metadata: res.ok
-      ? { success: true, names: ownedSecretEnvNames(PRIME_PAIR_SPECS), ...res.outcome }
-      : { success: false, stage: res.stage, error: res.error },
+      ? { success: true, project_ref: projectRef, names: ownedSecretEnvNames(PRIME_PAIR_SPECS), ...res.outcome }
+      : { success: false, project_ref: projectRef, stage: res.stage, error: res.error },
   });
 
   if (!res.ok) return { ok: false, reason: res.stage, error: res.error };

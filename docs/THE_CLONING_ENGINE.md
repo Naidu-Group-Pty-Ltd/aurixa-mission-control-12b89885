@@ -1264,11 +1264,18 @@ it does not own is never stomped.
 ## The prime's own pairs — and the rule that lets every clone follow
 
 Two of the prime's scheduled jobs (`agent-planner-run-scheduled`,
-`market-qa-subscriptions-run-due`) send `x-cron-secret` from
+`market-qa-subscriptions-run-due`) sent `x-cron-secret` from
 `current_setting('app.market_ingestion_cron_secret')`, which was never set, to
 ten market functions comparing it against `MARKET_INGESTION_CRON_SECRET`, which
 was never set either: **401 on every tick on the prime**, and — because a clone
-mirrors the prime's shape — on every clone. The finance reminder function
+mirrors the prime's shape — on every clone. And nothing COULD set it: the
+first pass tried, and the role that owns the database answered `42501:
+permission denied to set parameter` — on this platform `postgres` is not a
+superuser, and a placeholder parameter can be set database-wide or on a role
+only by one. So a database setting can never be a mirror the engine keeps. The
+two jobs were moved onto the vault (the prime's `market_cron_secret_from_vault`
+migration, which is also their first declaration — both had been scheduled by
+hand), and the market pair is a vault pair like the finance one. The finance reminder function
 compares the same header against `FINANCE_PORTAL_CRON_SECRET`, whose vault half
 the prime never held; and its schedule had since moved onto the signed envelope
 (`cron_invoke_signed_function`) and sends no header at all, so the function
@@ -1285,12 +1292,9 @@ Control's own project — and nowhere else, and hands the writer
 `PRIME_PAIR_SPECS` and nothing else. A test asserts every clause, and that no
 third module calls the generic writer.
 
-**A database setting is written at the level the cron reads it.** The market
-jobs read `current_setting(...)` in a fresh session started for the job's
-owner. The writer sets it database-wide where the API's role owns the database
-(it does, on every project here) and on the role otherwise, and reads it back
-from the same rows of `pg_db_role_setting`, so the two are never asked of
-different scopes. Only a lower-case dotted name may be inlined.
+**The vault is the only mirror.** It is the one store this role can write on
+every project, and a test asserts the writer never reaches for `ALTER
+DATABASE`, `ALTER ROLE` or `ALTER SYSTEM`.
 
 **Converge, never rotate.** `/hooks/prime-secret-pairs` runs hourly. A pass
 over a prime whose mirror already holds a usable value reuses it and
@@ -1298,8 +1302,7 @@ re-asserts the environment; only a missing half is minted. A pass over a
 prime somebody half-changed puts it back.
 
 **Once the prime holds a half, every clone follows — with its OWN value.** The
-clone sweep reads the prime's shape (`readPrimeShape`: vault names and setting
-names, never a value) and `OWNED_SECRET_SPECS` gates the two pairs on it. A
-clone whose prime holds `finance_portal_cron_secret` mints its own; one whose
-prime holds `app.market_ingestion_cron_secret` sets its own. The prime's value
-never travels.
+clone sweep reads the prime's shape (`readPrimeShape`: vault names, never a
+value) and `OWNED_SECRET_SPECS` gates the two pairs on it. A clone whose prime
+holds `finance_portal_cron_secret` mints its own; one whose prime holds
+`market_ingestion_cron_secret` mints its own. The prime's value never travels.
