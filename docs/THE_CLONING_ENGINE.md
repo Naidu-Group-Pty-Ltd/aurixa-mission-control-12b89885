@@ -1075,3 +1075,71 @@ had just been fixed for keeping. And the discarded-error ratchet had been readin
 three of that file's writes as checked **because the word `error` appears in
 them — as the name of the `error_message` column**. They were never checked. All
 three are bound and branched now and the file's budget is 0.
+
+## The internal signing pair was written by one hand
+
+Every scheduled job on the prime calls an edge function through
+`cron_signed_internal_headers`, which HMAC-signs the request with the vault's
+`internal_edge_secret`; the function verifies it against `INTERNAL_EDGE_SECRET`
+from its environment. **One secret, two places** — and the call works only
+while they are the same string. Strict signed verification is hard-locked in
+`auth_v2.ts`: there is no fallback to a bearer key.
+
+Provisioning wrote exactly one of them. `planCloneSecrets` classifies
+`INTERNAL_EDGE_SECRET` as an identity secret — correctly never inherited from
+the prime, since a shared value makes a request signed for either deployment
+valid on the other — and **minted a random for the environment that it kept
+nowhere.** Nothing wrote the vault half. Measured 6 Sep 2026, identically on all
+three clones: the vault held `supabase_url` and nothing else, and
+`cron.job_run_details` recorded **~13,900 failed runs in 24 hours per clone**,
+every one `internal_edge_secret not configured in vault`. The 138 calls a day
+that did leave a clone's database came back 400 or 401. No background job on any
+clone had ever run — the prime's own "17,174 refused invocations" incident,
+replayed on every tenant from the day it was built.
+
+Four rules carry the fix, in `signingPair.pure.ts` and
+`cloneSigningPair.server.ts`.
+
+**The vault is the source of truth, because the environment cannot be read
+back.** The Management API lists secret names and never returns a value, so the
+only side that can say what the pair IS is the database. The step reads the
+vault; a usable value is reused and the environment re-asserted with it; none
+is minted and written **vault first, then environment**. If the environment
+write fails, the next pass finds the vault value and tries again — it
+converges, it never rotates.
+
+**One writer of the value.** Before this, every repair pass minted a fresh
+random for the environment (the generic generator has no memory), so even a
+populated vault would have been out of step after the next repair. The pair
+step decides the value and hands it to the secrets batch through `selfValues`;
+the identity branch of `planCloneSecrets` honours a decided value and mints
+only for a name nobody decided. Two deliveries of the same value are
+idempotent; two *decisions* were the defect.
+
+**The verifier's floor is the plan's floor.** `auth_v2.ts` ignores a key under
+16 characters and the signer raises on one, so a vault value below that is
+treated as absent and replaced rather than trusted. A generator that cannot
+meet the floor throws, because a too-short pair stamped `set` is worse than no
+pair.
+
+**The ref that reads is the ref that writes.** The vault is read on one project
+and the environment written on the same one, both from
+`resolveCloneSecretTarget`, which refuses the prime and Mission Control's own.
+The `supabase_service_role_key` placed beside it in the vault — the gateway
+credential the signer also needs, and the one the prime's vault carries — is
+read from that same project's API keys, so it can only ever be the clone's own.
+
+Two more things. **A ledger reading `set` does not settle this sweep**, unlike
+the JWT one: `set` was being written by the generic generator for a value the
+vault never received, so on the fleet as it stands it is exactly the state that
+needs repairing. What makes a settled fleet cheap instead is the step itself —
+one vault read per clone and no write when both halves already agree. And **the
+value never reaches an event row, a log line or the recorded outcome**; a test
+scans every `console.*` line in the module and the whole of `recordEvent` for
+it. `MARKET_INGESTION_CRON_SECRET` is deliberately NOT paired: ten functions
+gate on it, but the prime itself sets no such GUC, so the clones mirror the
+prime faithfully there and an engine that invented one would be inventing a
+value the prime does not hold.
+
+`/hooks/clone-signing-pair-reconcile` runs every thirty minutes and is what
+carries the fleet as it stands.
