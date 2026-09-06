@@ -200,7 +200,12 @@ export async function repairCloneSigningPair(
   const { getProjectApiKeys, selectProjectKeys } = await import("./backend-provisioning.server");
   let serviceRoleKey: string | null = null;
   try {
-    serviceRoleKey = selectProjectKeys(await getProjectApiKeys(projectRef)).serviceRoleKey;
+    // The GATEWAY form (`sb_secret_…` where the project has one): the format
+    // the runtime injects as `SUPABASE_SERVICE_ROLE_KEY`, which is what a
+    // function comparing the bearer byte for byte holds, and what the prime's
+    // own vault carries. The legacy JWT is the fallback, never the preference.
+    const keys = selectProjectKeys(await getProjectApiKeys(projectRef));
+    serviceRoleKey = keys.gatewayKey ?? keys.serviceRoleKey;
   } catch (e) {
     await recordFailure(supabase, cloneId, `Could not read the project's API keys: ${msg(e)}`, opts?.actorUserId);
     return { ok: false, cloneId, reason: "keys_unreadable", error: msg(e) };

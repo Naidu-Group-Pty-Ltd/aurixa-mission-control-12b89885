@@ -52,6 +52,18 @@
  * clone's OWN key, read from the clone's own project by the same ref that is
  * written to — never the prime's.
  *
+ * **And it is the key in the form the RUNTIME injects.** A project can hold
+ * two privileged keys — the legacy `service_role` JWT and the current
+ * `sb_secret_…` key — and the gateway accepts either. The edge runtime injects
+ * exactly one of them as `SUPABASE_SERVICE_ROLE_KEY`: the `sb_` form wherever
+ * it exists. One function on the prime, `listing-images`, compares the bearer
+ * on its cron ops against that injected value byte for byte, so the vault has
+ * to carry the same form. The first fleet pass wrote the JWT (the legacy-first
+ * selector's preference) and that one function answered 401 on every refresh
+ * — 312 times on NPC Test in a day — while the prime, whose vault holds the
+ * `sb_` form, entered it. `selectProjectKeys.gatewayKey` is the rule, and both
+ * callers of the pair step take it.
+ *
  * Pure: no I/O, so every rule above is asserted without a database.
  */
 

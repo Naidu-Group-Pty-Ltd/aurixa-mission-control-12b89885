@@ -134,7 +134,7 @@ describe("the pair is written by one hand, vault first, and never logged", () =>
     expect(pair).toBeGreaterThan(-1);
     expect(batch).toBeGreaterThan(pair);
     const between = s.slice(pair, s.indexOf("// Step 7:", batch));
-    expect(between).toContain("ensureCloneSigningPair(projectRef, serviceRoleKey)");
+    expect(between).toContain("ensureCloneSigningPair(projectRef, gatewayKey ?? serviceRoleKey)");
     expect(between).toMatch(/INTERNAL_EDGE_SECRET: signingPairValue/);
   });
 
@@ -161,7 +161,7 @@ describe("the pair is written by one hand, vault first, and never logged", () =>
     expect(s).toContain("const projectRef = target.projectRef;");
     // The service-role key is read from that same project — never from a
     // stored column and never from the prime.
-    expect(s).toMatch(/selectProjectKeys\(await getProjectApiKeys\(projectRef\)\)\.serviceRoleKey/);
+    expect(s).toMatch(/const keys = selectProjectKeys\(await getProjectApiKeys\(projectRef\)\)/);
   });
 
   it("the value never reaches an event row, a log line or the recorded outcome", () => {
@@ -189,10 +189,45 @@ describe("the pair is written by one hand, vault first, and never logged", () =>
     expect(ENV_INTERNAL_EDGE_SECRET).toBe("INTERNAL_EDGE_SECRET");
   });
 
+  it("both callers hand the pair step the GATEWAY form of the privileged key", () => {
+    // `sb_secret_…` where the project has one. The runtime injects that form
+    // as SUPABASE_SERVICE_ROLE_KEY, `listing-images` compares the bearer
+    // against it byte for byte, and the prime's vault carries it. The first
+    // fleet pass wrote the legacy JWT and that function refused every refresh.
+    expect(provisioning()).toContain("ensureCloneSigningPair(projectRef, gatewayKey ?? serviceRoleKey)");
+    expect(server()).toMatch(/serviceRoleKey = keys\.gatewayKey \?\? keys\.serviceRoleKey/);
+  });
+
   it("the reconcile hook is scheduled by a migration", () => {
     const scheduled = readdirSync("supabase/migrations")
       .filter((f) => f.endsWith(".sql"))
       .some((f) => readFileSync(`supabase/migrations/${f}`, "utf8").includes("'clone-signing-pair-reconcile'"));
     expect(scheduled).toBe(true);
+  });
+});
+
+describe("selectProjectKeys — the gateway form of the privileged key", () => {
+  const k = (name: string, api_key: string, type?: string) => ({ name, api_key, ...(type ? { type } : {}) });
+  const JWT = "eyJhbGciOiJIUzI1NiJ9.service-role.sig";
+  const SB = "sb_secret_abcdefghijklmnopqrstuvwxyz0123456789";
+
+  it("prefers the sb_secret_ key for the gateway form and the legacy JWT for serviceRoleKey", async () => {
+    const { selectProjectKeys } = await import("./backend-provisioning.server");
+    const out = selectProjectKeys([k("anon", "eyJ.anon"), k("service_role", JWT), k("default", SB, "secret")]);
+    expect(out.gatewayKey).toBe(SB);
+    expect(out.serviceRoleKey).toBe(JWT);
+  });
+
+  it("recognises the secret key by prefix when the listing carries no type", async () => {
+    const { selectProjectKeys } = await import("./backend-provisioning.server");
+    const out = selectProjectKeys([k("service_role", JWT), k("whatever", SB)]);
+    expect(out.gatewayKey).toBe(SB);
+  });
+
+  it("falls back to the legacy JWT when the project has no secret key, and vice versa", async () => {
+    const { selectProjectKeys } = await import("./backend-provisioning.server");
+    expect(selectProjectKeys([k("service_role", JWT)]).gatewayKey).toBe(JWT);
+    expect(selectProjectKeys([k("default", SB, "secret")]).serviceRoleKey).toBe(SB);
+    expect(selectProjectKeys([]).gatewayKey).toBeNull();
   });
 });

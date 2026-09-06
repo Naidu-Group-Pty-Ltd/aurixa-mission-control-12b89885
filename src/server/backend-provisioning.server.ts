@@ -297,14 +297,32 @@ export async function getProjectJwtSecret(projectRef: string): Promise<string | 
 export function selectProjectKeys(keys: ApiKey[]): {
   anonKey: string | null;
   serviceRoleKey: string | null;
+  /**
+   * The privileged key in the format the edge RUNTIME injects as
+   * `SUPABASE_SERVICE_ROLE_KEY` — the current `sb_secret_…` key when the
+   * project has one, the legacy JWT only when it does not.
+   *
+   * `serviceRoleKey` prefers the legacy JWT, which is right for every caller
+   * that presents it to the gateway (both formats are accepted there). It is
+   * WRONG for the one place a function compares the presented bearer against
+   * its own injected key byte for byte — `listing-images`' cron ops do exactly
+   * that — and for the vault's `supabase_service_role_key`, which
+   * `cron_signed_internal_headers` puts on the wire. The prime's vault holds
+   * the `sb_` form and its jobs pass; a clone given the JWT form answers 401 on
+   * every refresh (measured 6 Sep 2026, 312 refusals on NPC Test alone).
+   */
+  gatewayKey: string | null;
 } {
   const byName = (n: string) => keys.find((k) => k.name === n)?.api_key ?? null;
   const byType = (t: string) =>
     keys.find((k) => (k as { type?: string }).type === t)?.api_key ?? null;
   const byPrefix = (p: string) => keys.find((k) => k.api_key?.startsWith(p))?.api_key ?? null;
+  const secretKey = byType("secret") ?? byPrefix("sb_secret_");
+  const legacyServiceRole = byName("service_role");
   return {
     anonKey: byName("anon") ?? byType("publishable") ?? byPrefix("sb_publishable_"),
-    serviceRoleKey: byName("service_role") ?? byType("secret") ?? byPrefix("sb_secret_"),
+    serviceRoleKey: legacyServiceRole ?? secretKey,
+    gatewayKey: secretKey ?? legacyServiceRole,
   };
 }
 
@@ -3641,7 +3659,9 @@ export async function provisionCloneBackend(
 
   // Step 3: Get API keys
   await onStatusUpdate?.("provisioning", "Retrieving API keys...");
-  const { anonKey, serviceRoleKey } = selectProjectKeys(await getProjectApiKeys(projectRef));
+  const { anonKey, serviceRoleKey, gatewayKey } = selectProjectKeys(
+    await getProjectApiKeys(projectRef),
+  );
   if (!anonKey || !serviceRoleKey) {
     throw new Error("Could not retrieve client/privileged API keys from new project");
   }
@@ -4190,7 +4210,11 @@ export async function provisionCloneBackend(
   try {
     await onStatusUpdate?.("migrating", "Writing this project's internal signing pair (vault + environment)...");
     const { ensureCloneSigningPair } = await import("./cloneSigningPair.server");
-    const pair = await ensureCloneSigningPair(projectRef, serviceRoleKey);
+    // The GATEWAY form of the privileged key — `sb_secret_…` where the project
+    // has one — because that is what the runtime injects as
+    // `SUPABASE_SERVICE_ROLE_KEY`, and `listing-images` compares the bearer
+    // against it byte for byte. See `selectProjectKeys.gatewayKey`.
+    const pair = await ensureCloneSigningPair(projectRef, gatewayKey ?? serviceRoleKey);
     if (pair.ok) {
       signingPairValue = pair.value;
       signingPair = pair.outcome;
