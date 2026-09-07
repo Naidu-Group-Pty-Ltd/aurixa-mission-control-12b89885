@@ -15,7 +15,8 @@ export type CloneApiScope = {
     | "edge"
     | "health"
     | "usage"
-    | "gate";
+    | "gate"
+    | "clones";
   label: string;
   description: string;
   default?: boolean;
@@ -105,6 +106,21 @@ export const CLONE_API_SCOPES: CloneApiScope[] = [
     label: "Activation gate — read",
     description:
       "Read this clone's own activation-gate status and start the activation checkout. On by default: a gated clone that cannot read its gate has no way to tell a customer why it is locked, or how to pay.",
+    default: true,
+  },
+  {
+    value: "clones:rotate",
+    group: "clones",
+    label: "Clone — rotate its own key",
+    description:
+      "Let this clone replace its own Mission Control key through the public rotate endpoint, receiving the new one in the response.",
+    // On by default, and it was not in this catalogue at all until now. The
+    // endpoint required it and the only key that ever carried it was the
+    // `auto-provisioned` one, delivered solely by committing its plaintext to
+    // the clone's repository — a file with no readers. So the scope existed,
+    // the endpoint existed, and no credential anybody could present had it:
+    // self-rotation was unreachable from the day it shipped. It belongs on the
+    // key that is actually delivered.
     default: true,
   },
   {

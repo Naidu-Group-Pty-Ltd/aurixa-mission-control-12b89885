@@ -338,11 +338,17 @@ async function step(row: DeploymentRow): Promise<StepOutcome> {
           detail: "Waiting for the clone's Supabase backend to report its URL and key.",
         };
       }
-      // The Aurixa API key is deliberately NOT pushed here. It already lives in
-      // the clone's own private repo at `.aurixa/credentials.json`, which the
-      // build reads, and `cascadeApiKeyToRepo` rewrites that file on rotation.
-      // A second copy in the hosting provider's environment is a second source
-      // of truth that goes stale the first time the key is rotated.
+      // The Mission Control key is deliberately NOT pushed into the HOSTING
+      // provider's environment here. It belongs in the clone's own Supabase
+      // project, which is where every reader of it looks
+      // (`_shared/missionControl.ts` and seven siblings), and
+      // `ensureCloneMissionControlLink` writes it there. A second copy in the
+      // hosting environment is a second source of truth that goes stale the
+      // first time the key is rotated.
+      //
+      // This comment used to say the key "already lives in the clone's own
+      // private repo at `.aurixa/credentials.json`, which the build reads".
+      // Nothing read that file; the write is deleted.
       // Best-effort: a deployment that has not configured the prime backend
       // still gets the pairing checks, it just has no name to compare against.
       // Resolving it must never be able to STOP a deployment — an unconfigured

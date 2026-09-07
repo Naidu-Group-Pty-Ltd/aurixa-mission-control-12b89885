@@ -3,8 +3,8 @@ import { z } from "zod";
 import { requireAdmin } from "@/integrations/supabase/role-middleware";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { generateApiKey } from "@/server/clone-api-keys.server";
+import { notifyOperators } from "@/server/audit.server";
 import { fireTokenWebhook } from "@/server/token-webhooks.server";
-import { cascadeApiKeyToRepo } from "@/server/clone-credentials.server";
 
 export const listCloneApiKeys = createServerFn({ method: "GET" })
   .middleware([requireAdmin])
@@ -114,48 +114,42 @@ export const rotateCloneApiKey = createServerFn({ method: "POST" })
 
     const newId = insert.data.id;
     const revokeAt = new Date(Date.now() + data.graceHours * 3600_000).toISOString();
-    await supabaseAdmin
+    // This write is what ends the old key's life. Discarded, a failure here
+    // leaves BOTH keys live for ever while the caller is told the rotation
+    // succeeded — the opposite of what rotating is for.
+    const { error: supersedeErr } = await supabaseAdmin
       .from("clone_api_keys")
       .update({ rotated_to: newId, revoke_at: revokeAt })
       .eq("id", old.id);
+    if (supersedeErr) {
+      return {
+        ok: false as const,
+        error: `New key ${prefix}… was minted but the old one could not be scheduled for revocation: ${supersedeErr.message}. Both are live — revoke the old key by hand.`,
+      };
+    }
 
-    // Re-cascade the new key to the clone's repo (best effort).
-    let cascadeResult: {
-      ok: boolean;
-      path: string;
-      error?: string;
-      commit_sha?: string | null;
-    } | null = null;
+    // The rotated key is NOT written into the clone's repository. That write
+    // is gone: nothing has ever read `.aurixa/credentials.json`, and what it
+    // left behind is a plaintext credential in git history that no later
+    // commit can remove. A rotation delivers through the environment, the
+    // same channel the key was minted into.
     if (old.clone_id) {
       const { data: clone } = await supabaseAdmin
         .from("clones")
-        .select("name, github_owner, github_repo, default_branch, github_url")
+        .select("name")
         .eq("id", old.clone_id)
         .maybeSingle();
-      if (clone?.github_url && clone.github_owner && clone.github_repo) {
-        cascadeResult = await cascadeApiKeyToRepo({
-          owner: clone.github_owner,
-          repo: clone.github_repo,
-          branch: clone.default_branch || "main",
-          apiKey: raw,
-          apiKeyPrefix: prefix,
-          reason: "rotation",
-          metadata: { clone_id: old.clone_id, old_key_id: old.id, source: "mission_control" },
-        });
-      }
 
-      // Notify Mission Control with the full new key (one-time reveal in the
-      // notification drawer) so the operator can confirm the rotation.
-      await supabaseAdmin.from("notifications").insert({
+      // The one-time reveal in Mission Control's own notification drawer. It
+      // stays: an operator who rotates a key by hand has to be able to read
+      // the new one once, and this is inside Mission Control rather than in a
+      // tenant's repository.
+      await notifyOperators({
         kind: "tokens_key_rotated",
-        severity: cascadeResult?.ok === false ? "warning" : "info",
+        severity: "info",
         title: `API key rotated for ${clone?.name ?? "clone"}`,
-        body: cascadeResult?.ok
-          ? `New prefix ${prefix}… cascaded to repo. Old key revokes at ${new Date(revokeAt).toLocaleString()}.`
-          : cascadeResult
-            ? `New prefix ${prefix}… created but repo cascade failed: ${cascadeResult.error ?? "unknown"}.`
-            : `New prefix ${prefix}… created. Old key revokes at ${new Date(revokeAt).toLocaleString()}.`,
-        clone_id: old.clone_id,
+        body: `New prefix ${prefix}… created. Old key revokes at ${new Date(revokeAt).toLocaleString()}.`,
+        cloneId: old.clone_id,
         url: `/settings/billing`,
         metadata: {
           old_key_id: old.id,
@@ -164,7 +158,6 @@ export const rotateCloneApiKey = createServerFn({ method: "POST" })
           new_key_secret: raw,
           revoke_at: revokeAt,
           grace_hours: data.graceHours,
-          repo_cascade: cascadeResult,
           source: "mission_control",
         },
       });
@@ -178,10 +171,9 @@ export const rotateCloneApiKey = createServerFn({ method: "POST" })
         new_key_prefix: prefix,
         revoke_at: revokeAt,
         grace_hours: data.graceHours,
-        repo_cascade: cascadeResult,
       },
       old.clone_id,
     );
 
-    return { ok: true as const, key: raw, prefix, newId, revokeAt, repoCascade: cascadeResult };
+    return { ok: true as const, key: raw, prefix, newId, revokeAt };
   });

@@ -6,10 +6,15 @@
  *  1. Authenticate the caller via its current key (scope `clones:rotate`).
  *  2. Mint a new key (same clone, same scopes).
  *  3. Schedule the old key for revocation after `grace_hours` (default 1h).
- *  4. Re-cascade the new key into the clone's repo (`.aurixa/credentials.json`).
- *  5. Insert a notification on Mission Control with the new key prefix +
+ *  4. Insert a notification on Mission Control with the new key prefix +
  *     full secret (one-time reveal) so operators can see the rotation live.
- *  6. Fire the `tokens.key.rotated` webhook to every subscribed endpoint.
+ *  5. Fire the `tokens.key.rotated` webhook to every subscribed endpoint.
+ *
+ * The rotated key is NOT written back into the clone's repository. That step
+ * existed and is deleted: nothing anywhere read `.aurixa/credentials.json`,
+ * and every write of it left a plaintext credential in git history that no
+ * later commit removes. The caller receives the new key in this response,
+ * which is the channel it asked on.
  *
  * Returns the new key plaintext exactly once to the caller.
  */
@@ -17,7 +22,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { z } from "zod";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { generateApiKey, jsonResponse, resolveCloneApiKey } from "@/server/clone-api-keys.server";
-import { cascadeApiKeyToRepo } from "@/server/clone-credentials.server";
+import { notifyOperators, writeAuditLog } from "@/server/audit.server";
 import { fireTokenWebhook } from "@/server/token-webhooks.server";
 import { checkRateLimit } from "@/server/token-rate-limit.server";
 
@@ -92,47 +97,39 @@ export const Route = createFileRoute("/api/public/clones/rotate-key")({
         }
         const newId = ins.data.id;
         const revokeAt = new Date(Date.now() + parsed.data.grace_hours * 3600_000).toISOString();
-        await supabaseAdmin
+        // The write that ends the old key's life. Discarded, a failure leaves
+        // BOTH keys live for ever while the caller is handed the new one and
+        // told it rotated.
+        const { error: supersedeErr } = await supabaseAdmin
           .from("clone_api_keys")
           .update({ rotated_to: newId, revoke_at: revokeAt })
           .eq("id", current.id);
+        if (supersedeErr) {
+          return jsonResponse(
+            {
+              ok: false,
+              error: "rotation_incomplete",
+              detail:
+                "A new key was minted but the old one could not be scheduled for revocation. Both are live — revoke the old key from Mission Control.",
+              key_prefix: prefix,
+            },
+            500,
+          );
+        }
 
-        // Cascade to repo (best effort — won't block the rotation)
         const { data: clone } = await supabaseAdmin
           .from("clones")
-          .select("name, github_owner, github_repo, default_branch, github_url")
+          .select("name")
           .eq("id", current.clone_id)
           .maybeSingle();
 
-        let cascadeResult: Awaited<ReturnType<typeof cascadeApiKeyToRepo>> | null = null;
-        if (clone?.github_url && clone.github_owner && clone.github_repo) {
-          cascadeResult = await cascadeApiKeyToRepo({
-            owner: clone.github_owner,
-            repo: clone.github_repo,
-            branch: clone.default_branch || "main",
-            apiKey: raw,
-            apiKeyPrefix: prefix,
-            reason: "rotation",
-            metadata: {
-              clone_id: current.clone_id,
-              old_key_id: current.id,
-              source: "clone_self_rotate",
-              reason: parsed.data.reason ?? null,
-            },
-          });
-        }
-
-        // Notify Mission Control with the new key for visibility
-        await supabaseAdmin.from("notifications").insert({
+        // Notify Mission Control with the new key prefix for visibility
+        await notifyOperators({
           kind: "tokens_key_rotated",
-          severity: cascadeResult?.ok === false ? "warning" : "info",
+          severity: "info",
           title: `API key self-rotated by ${clone?.name ?? "clone"}`,
-          body: cascadeResult?.ok
-            ? `Clone rotated its own key. New prefix ${prefix}… cascaded to repo. Old revokes at ${new Date(revokeAt).toLocaleString()}.`
-            : cascadeResult
-              ? `Clone rotated its own key (prefix ${prefix}…). Repo cascade failed: ${cascadeResult.error ?? "unknown"}.`
-              : `Clone rotated its own key (prefix ${prefix}…). Old revokes at ${new Date(revokeAt).toLocaleString()}.`,
-          clone_id: current.clone_id,
+          body: `Clone rotated its own key (prefix ${prefix}…). Old revokes at ${new Date(revokeAt).toLocaleString()}.`,
+          cloneId: current.clone_id,
           url: `/settings/billing`,
           metadata: {
             old_key_id: current.id,
@@ -142,22 +139,20 @@ export const Route = createFileRoute("/api/public/clones/rotate-key")({
             // It is returned exactly once in the HTTP response (see below).
             revoke_at: revokeAt,
             grace_hours: parsed.data.grace_hours,
-            repo_cascade: cascadeResult,
             reason: parsed.data.reason ?? null,
             source: "clone_self_rotate",
           },
         });
 
-        await supabaseAdmin.from("audit_log").insert({
+        await writeAuditLog({
           action: "clone.api_key.self_rotated",
-          entity_type: "clone_api_key",
-          entity_id: newId,
+          entityType: "clone_api_key",
+          entityId: newId,
           metadata: {
             clone_id: current.clone_id,
             old_key_id: current.id,
             new_key_prefix: prefix,
             grace_hours: parsed.data.grace_hours,
-            repo_cascade: cascadeResult,
             reason: parsed.data.reason ?? null,
           },
         });
@@ -172,7 +167,6 @@ export const Route = createFileRoute("/api/public/clones/rotate-key")({
             new_key_prefix: prefix,
             revoke_at: revokeAt,
             grace_hours: parsed.data.grace_hours,
-            repo_cascade: cascadeResult,
           },
           current.clone_id,
         );
@@ -184,7 +178,6 @@ export const Route = createFileRoute("/api/public/clones/rotate-key")({
           new_key_id: newId,
           old_key_id: current.id,
           revoke_at: revokeAt,
-          repo_cascade: cascadeResult,
         });
       },
       OPTIONS: async () => {

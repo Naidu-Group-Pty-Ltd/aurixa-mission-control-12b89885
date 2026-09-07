@@ -7,7 +7,6 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { getAppOctokit } from "./github-app.server";
 import { generateApiKey } from "./clone-api-keys.server";
-import { cascadeApiKeyToRepo } from "./clone-credentials.server";
 import { fireTokenWebhook } from "./token-webhooks.server";
 import { armGate } from "./payment-gate.server";
 import type { Database } from "@/integrations/supabase/types";
@@ -285,60 +284,34 @@ export async function provisionCloneCore(
     }
   }
 
-  // ─── Auto-issue + cascade Aurixa API key ──────────────────────────
-  // Every new clone gets a Mission Control API key generated immediately
-  // and committed into its own repo (`.aurixa/credentials.json`) so the
-  // clone's frontend can read it at build time. Failure here is non-fatal:
-  // the clone is still considered created and the operator can re-issue.
-  let issuedApiKey: { raw: string; prefix: string; id: string } | null = null;
-  let cascadeResult: {
-    ok: boolean;
-    path: string;
-    commit_sha?: string | null;
-    error?: string;
-  } | null = null;
-  try {
-    const { raw, hash, prefix } = generateApiKey();
-    const keyInsert = await supabaseAdmin
-      .from("clone_api_keys")
-      .insert({
-        clone_id: inserted.id,
-        label: "auto-provisioned",
-        scopes: ["tokens:meter", "clones:rotate", "seats:manage"],
-        key_hash: hash,
-        key_prefix: prefix,
-        created_by: userId,
-      })
-      .select("id")
-      .single();
-    if (!keyInsert.error && keyInsert.data) {
-      issuedApiKey = { raw, prefix, id: keyInsert.data.id };
-      if (data.method !== "clone" && githubUrl) {
-        cascadeResult = await cascadeApiKeyToRepo({
-          owner: githubOwner,
-          repo: githubRepo,
-          branch: prime.default_branch || "main",
-          apiKey: raw,
-          apiKeyPrefix: prefix,
-          reason: "initial",
-          metadata: { clone_id: inserted.id, clone_name: data.name },
-        });
-      }
-      void fireTokenWebhook(
-        "tokens.key.rotated",
-        {
-          event_reason: "initial_provision",
-          clone_id: inserted.id,
-          new_key_id: keyInsert.data.id,
-          new_key_prefix: prefix,
-          repo_cascade: cascadeResult,
-        },
-        inserted.id,
-      );
-    }
-  } catch (e) {
-    console.error("[provisionClone] api key auto-issue failed:", e);
-  }
+  // ─── The clone's Mission Control key ──────────────────────────────
+  //
+  // There is ONE key and it is minted where it is delivered:
+  // `ensureCloneMissionControlLink` writes `MISSION_CONTROL_CLONE_API_KEY`
+  // into the clone's own Supabase project, which is the only place anything
+  // reads it from (`_shared/missionControl.ts` and seven siblings).
+  //
+  // What stood here minted a SECOND key labelled `auto-provisioned` and
+  // committed its plaintext into the clone's repository as
+  // `.aurixa/credentials.json`, "so the clone's frontend can read it at build
+  // time". Nothing has ever read that file — not in the prime, not in a clone,
+  // not in a workflow — so the key had no delivery channel at all: both of the
+  // two ever minted show `first_used_at` NULL and `last_used_at` NULL, from
+  // 30 Aug and 1 Sep. What it did have was permanence. The file was later
+  // overwritten by an ordinary cascade, so it is absent from `main` and
+  // present in history: commit 79d3a13 of `preflight-property-group` still
+  // serves the full key in plaintext to anyone with repository access, and a
+  // history rewrite is the only removal.
+  //
+  // So the writer is DELETED rather than left unused. A dormant helper that
+  // commits a live credential is one import away from committing one again,
+  // and there is nothing left for it to deliver. Both orphaned keys are
+  // revoked.
+  //
+  // Self-rotation survives the change: `clones:rotate` moved onto the key
+  // that is actually delivered (see `CLONE_API_SCOPES`), so the public rotate
+  // endpoint is reachable for the first time rather than reachable only by a
+  // credential nobody could read.
 
   // ─── Tell the clone's CI who deploys its Supabase project ─────────
   //
@@ -502,8 +475,6 @@ export async function provisionCloneCore(
       modules: data.moduleIds,
       github_url: githubUrl,
       subdomain: reservedSubdomain,
-      api_key_prefix: issuedApiKey?.prefix ?? null,
-      repo_cascade: cascadeResult,
     },
   });
 
@@ -520,27 +491,12 @@ export async function provisionCloneCore(
     metadata: { method: data.method, cloudflare: data.cloudflareEnabled, github_url: githubUrl },
   });
 
-  if (issuedApiKey) {
-    await supabase.from("notifications").insert({
-      kind: "tokens_key_issued",
-      severity: cascadeResult?.ok === false ? "warning" : "success",
-      title: `API key issued for ${data.name}`,
-      body: cascadeResult?.ok
-        ? `Prefix ${issuedApiKey.prefix}… cascaded to ${cascadeResult.path} on ${githubOwner}/${githubRepo}.`
-        : cascadeResult
-          ? `Prefix ${issuedApiKey.prefix}… created but repo cascade failed: ${cascadeResult.error ?? "unknown"}. Re-cascade from the API Keys tab.`
-          : `Prefix ${issuedApiKey.prefix}… created (no repo cascade — independent clone).`,
-      clone_id: inserted.id,
-      url: `/settings/billing`,
-      metadata: {
-        new_key_id: issuedApiKey.id,
-        new_key_prefix: issuedApiKey.prefix,
-        new_key_secret: issuedApiKey.raw,
-        repo_cascade: cascadeResult,
-        reason: "initial_provision",
-      },
-    });
-  }
+  // No "API key issued" notification here any more, and no `new_key_secret`
+  // in its metadata. That notification announced the auto-provisioned key,
+  // whose plaintext it also stored a SECOND copy of — a credential nobody
+  // could use, in a drawer, for ever. The key the clone actually runs on is
+  // minted and delivered by `ensureCloneMissionControlLink`, which reports
+  // its own outcome.
 
   return { ok: true, cloneId: inserted.id, githubUrl };
 }

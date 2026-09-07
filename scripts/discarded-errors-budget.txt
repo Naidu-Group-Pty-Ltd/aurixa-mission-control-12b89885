@@ -21,7 +21,7 @@ src/lib/seats.functions.ts 4
 src/lib/security-intake.functions.ts 5
 src/lib/support-tickets.functions.ts 9
 src/lib/token-webhooks.functions.ts 2
-src/routes/api.public.clones.rotate-key.ts 2
+src/routes/api.public.clones.rotate-key.ts 1
 src/routes/api.public.handoff.audit-ingest.ts 2
 src/routes/api.public.handoffs.consent.ts 3
 src/routes/api.public.hooks.codex-security.ts 6
