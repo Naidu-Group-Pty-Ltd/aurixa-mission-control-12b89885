@@ -105,3 +105,20 @@ describe("the run lane spends the deferral rather than an attempt", () => {
     expect(lane.indexOf("planUpstreamDeferral(")).toBeLessThan(lane.indexOf("const exhausted ="));
   });
 });
+
+describe("the drain shares its invocation between the runs that are due", () => {
+  const lane = readFileSync(new URL("./self-healing.server.ts", import.meta.url), "utf8");
+
+  it("takes the least recently served run first, not the oldest", () => {
+    // Each lane hands its run a 45s budget of its own while the whole sweep
+    // runs inside one pg_net request that stops being waited on at sixty, so
+    // a FIXED order gives the invocation to the first run and starves the
+    // last. Three catch-up runs created seven seconds apart: 154, 131 and 6.
+    const at = lane.indexOf('.in("status", ["planned", "approved"])');
+    expect(at, "the due-runs query").toBeGreaterThan(-1);
+    const query = lane.slice(at, at + 400);
+    expect(query).toContain('.order("updated_at", { ascending: true })');
+    // created_at breaks the tie, so a set of fresh runs is still FIFO.
+    expect(query).toContain('.order("created_at", { ascending: true })');
+  });
+});

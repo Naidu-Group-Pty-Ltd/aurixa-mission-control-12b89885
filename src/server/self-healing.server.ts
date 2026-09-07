@@ -1201,12 +1201,29 @@ export async function sweepSupportRemediations(): Promise<SweepResult> {
   //    so a reclaimed run is due on this pass rather than the next one.
   const runsReclaimed = await reclaimStalledRuns();
 
-  // 1. Execute due runs, oldest first, bounded per pass.
+  // 1. Execute due runs, LEAST RECENTLY SERVED first, bounded per pass.
+  //
+  //    Not oldest-created. Each lane hands its run a budget of its own (45s
+  //    for a deploy or a migration replay) while the whole sweep runs inside
+  //    one pg_net request that stops being waited on at sixty seconds — so a
+  //    fixed order does not share the invocation between the runs, it gives
+  //    it to the first one and starves the last. Measured 7 Sep 2026 on the
+  //    three clones' backend catch-up, all created within seven seconds of
+  //    each other: over five hours the first two deployed 154 and 131 of the
+  //    prime's 423 bundles and the third deployed SIX.
+  //
+  //    `updated_at` is written by every pass and by the heartbeat inside one,
+  //    so a run that was reached last sweep sinks and a run that was starved
+  //    rises — over successive sweeps each one gets to be the run that has a
+  //    whole invocation to work in, which is worth far more than three runs
+  //    each getting a third of one. `created_at` breaks the tie, so a set of
+  //    fresh runs (whose `updated_at` is their insert) is still FIFO.
   const { data: dueRuns } = await admin
     .from("remediation_runs")
     .select("id, action_type")
     .in("status", ["planned", "approved"])
     .lte("next_attempt_at", new Date().toISOString())
+    .order("updated_at", { ascending: true })
     .order("created_at", { ascending: true })
     .limit(DRAIN_BATCH);
   for (const due of dueRuns ?? []) {
