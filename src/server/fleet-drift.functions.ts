@@ -152,22 +152,30 @@ export async function runFleetDriftScan(
       continue;
     }
 
-    // Pseudo "git diff" — in real wiring, compare last_synced_sha vs prime HEAD.
-    // A clone with no cascade yet is NOT 99,999 minutes behind: a template
-    // copy is born AT prime HEAD, so its clock starts at creation. Inventing
-    // a number here is the "fabricated zero" rule in reverse — and it was a
-    // fabricated forty.
-    const clockBase = c.last_cascade_at ?? c.created_at;
-    const minutesSinceCascade = clockBase
-      ? (Date.now() - new Date(clockBase).getTime()) / 60000
-      : 99999;
-    const drift = Math.min(40, Math.max(0, Math.floor(minutesSinceCascade / 30)));
-    const newCommitsBehind = c.sync_status === "in_sync" && drift < 2 ? 0 : drift;
-
-    let newStatus = c.sync_status;
-    if (newCommitsBehind === 0) newStatus = "in_sync";
-    else if (newCommitsBehind > 10) newStatus = "behind";
-    else newStatus = c.sync_status === "failed" ? "failed" : "behind";
+    // This scan ADVISES. It does not measure, and it must never write the
+    // measurement.
+    //
+    // What stood here was a self-described "pseudo git diff" — a placeholder
+    // that derived `commits_behind` from a CLOCK (minutes since the last
+    // cascade, over 30, capped at 40) and then wrote it, and `sync_status`
+    // with it, straight over the reading `runDriftRefresh` had taken from
+    // GitHub ten minutes earlier. Two cron jobs, one column: `drift-refresh`
+    // every 5 minutes measuring, `fleet-drift-scan` every 15 fabricating.
+    //
+    // The fabrication won whenever it ran last, and its arithmetic produced
+    // the worst possible answer. A cascade that merely UPDATES a pull request
+    // stamps `last_cascade_at`, so the clock reads near zero, so drift reads
+    // 0, so the status is set to `in_sync` — measured 7 Sep 02:30 on
+    // NPC Client Dashboard, which was and is 131 commits behind the prime with
+    // its cascade still an open proposal. A false green on a fleet page says a
+    // tenant is running current code when it is a hundred commits stale, which
+    // is worse than any red.
+    //
+    // The number now comes from the one place that asks GitHub for it. The
+    // suggestions below read what was measured rather than what was invented,
+    // so a model can no longer be briefed on a fabricated figure either.
+    const newCommitsBehind = c.commits_behind ?? 0;
+    const newStatus = c.sync_status;
 
     const { data: cmods } = await supabase
       .from("clone_modules")
@@ -194,15 +202,21 @@ export async function runFleetDriftScan(
       );
     }
 
-    await supabase
+    // Suggestions and the stamp — never `commits_behind`, never
+    // `sync_status`. Those two are `runDriftRefresh`'s to write, from a
+    // comparison GitHub actually performed.
+    const { error: suggestionsErr } = await supabase
       .from("clones")
       .update({
-        commits_behind: newCommitsBehind,
-        sync_status: newStatus,
         drift_suggestions: suggestions,
         last_drift_check_at: new Date().toISOString(),
       })
       .eq("id", c.id);
+    if (suggestionsErr) {
+      console.error(
+        `[fleet-drift] could not write suggestions for clone ${c.id}: ${suggestionsErr.message}`,
+      );
+    }
     updated++;
 
     // Emit notifications when the clone ENTERS a behind state, not on every
