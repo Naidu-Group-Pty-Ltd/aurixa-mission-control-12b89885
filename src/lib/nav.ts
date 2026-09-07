@@ -30,6 +30,8 @@ import {
   Handshake,
   KeyRound,
   LayoutDashboard,
+  Mail,
+  MailX,
   Newspaper,
   Palette,
   Phone,
@@ -283,6 +285,24 @@ export const NAV_SECTIONS: NavSection[] = [
         label: "Agreements",
         icon: FileSignature,
         keywords: "sla service level agreement docusign contract sign envelope signature",
+      },
+    ],
+  },
+  {
+    heading: "Outbound",
+    items: [
+      {
+        to: "/email",
+        label: "Email Campaigns",
+        icon: Mail,
+        keywords:
+          "email campaign scheduler bulk send list upload spreadsheet csv xlsx microsoft graph outlook mailbox merge quota",
+      },
+      {
+        to: "/email/suppressions",
+        label: "Do-not-send",
+        icon: MailX,
+        keywords: "suppression bounce unsubscribe complaint register blocklist do not send",
       },
     ],
   },

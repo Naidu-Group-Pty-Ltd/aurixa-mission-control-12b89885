@@ -230,4 +230,29 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "none", reason: "widens a CHECK constraint — pg_constraint is not observable" },
     ],
   },
+  {
+    migration: "20260907090000_email_campaigns.sql",
+    version: "20260907090000",
+    assertions: [
+      { kind: "table", table: "email_campaigns" },
+      { kind: "table", table: "email_lists" },
+      { kind: "table", table: "email_list_contacts" },
+      { kind: "table", table: "email_campaign_recipients" },
+      { kind: "table", table: "email_campaign_messages" },
+      { kind: "table", table: "email_campaign_quotas" },
+      { kind: "table", table: "email_campaign_imports" },
+      { kind: "table", table: "email_suppressions" },
+      { kind: "table", table: "email_bounce_scans" },
+      { kind: "rpc", fn: "email_import_list_into_campaign" },
+      { kind: "table", table: "email_campaign_recipient_counts" },
+    ],
+  },
+  {
+    migration: "20260907091000_schedule_email_campaign_workers.sql",
+    version: "20260907091000",
+    assertions: [
+      { kind: "cron", jobname: "email-campaign-dispatch-1min" },
+      { kind: "cron", jobname: "email-bounce-scan-15min" },
+    ],
+  },
 ];

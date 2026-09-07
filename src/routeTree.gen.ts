@@ -39,6 +39,7 @@ import { Route as AgreementsRouteImport } from './routes/agreements'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as SettingsIndexRouteImport } from './routes/settings.index'
 import { Route as SecurityIndexRouteImport } from './routes/security.index'
+import { Route as EmailIndexRouteImport } from './routes/email.index'
 import { Route as CrmIndexRouteImport } from './routes/crm.index'
 import { Route as VoicePhoneRouteImport } from './routes/voice.phone'
 import { Route as VoiceOutboundRouteImport } from './routes/voice.outbound'
@@ -86,6 +87,8 @@ import { Route as HooksFeedbackForwardRetryRouteImport } from './routes/hooks.fe
 import { Route as HooksExpireReservationsRouteImport } from './routes/hooks.expire-reservations'
 import { Route as HooksEntitlementDrainRouteImport } from './routes/hooks.entitlement-drain'
 import { Route as HooksEmailIdentityDrainRouteImport } from './routes/hooks.email-identity-drain'
+import { Route as HooksEmailCampaignDispatchRouteImport } from './routes/hooks.email-campaign-dispatch'
+import { Route as HooksEmailBounceScanRouteImport } from './routes/hooks.email-bounce-scan'
 import { Route as HooksEdgeDriftRouteImport } from './routes/hooks.edge-drift'
 import { Route as HooksEdgeDrainRouteImport } from './routes/hooks.edge-drain'
 import { Route as HooksDriftRefreshRouteImport } from './routes/hooks.drift-refresh'
@@ -112,6 +115,7 @@ import { Route as HandoffsNewRouteImport } from './routes/handoffs.new'
 import { Route as HandoffsHandoffIdRouteImport } from './routes/handoffs.$handoffId'
 import { Route as FleetEdgeRouteImport } from './routes/fleet.edge'
 import { Route as FleetDeploymentsRouteImport } from './routes/fleet.deployments'
+import { Route as EmailSuppressionsRouteImport } from './routes/email.suppressions'
 import { Route as CrmTicketsRouteImport } from './routes/crm.tickets'
 import { Route as CrmJourneyRouteImport } from './routes/crm.journey'
 import { Route as CrmFitRouteImport } from './routes/crm.fit'
@@ -130,6 +134,7 @@ import { Route as BillingCancelRouteImport } from './routes/billing.cancel'
 import { Route as BillingApiUsageRouteImport } from './routes/billing.api-usage'
 import { Route as ApiHealthRouteImport } from './routes/api.health'
 import { Route as CrmAccountsIndexRouteImport } from './routes/crm.accounts.index'
+import { Route as EmailCampaignsCampaignIdRouteImport } from './routes/email.campaigns.$campaignId'
 import { Route as CrmAccountsAccountIdRouteImport } from './routes/crm.accounts.$accountId'
 import { Route as ClonesCloneIdSecretsRouteImport } from './routes/clones.$cloneId.secrets'
 import { Route as ClientsHandoffTokenRouteImport } from './routes/clients.handoff.$token'
@@ -173,6 +178,7 @@ import { Route as ApiPublicHooksCodexRemediationRouteImport } from './routes/api
 import { Route as ApiPublicHandoffsConsentRouteImport } from './routes/api.public.handoffs.consent'
 import { Route as ApiPublicHandoffBeaconRouteImport } from './routes/api.public.handoff.beacon'
 import { Route as ApiPublicHandoffAuditIngestRouteImport } from './routes/api.public.handoff.audit-ingest'
+import { Route as ApiPublicEmailUnsubscribeRouteImport } from './routes/api.public.email.unsubscribe'
 import { Route as ApiPublicEdgeStatusRouteImport } from './routes/api.public.edge.status'
 import { Route as ApiPublicClonesRotateKeyRouteImport } from './routes/api.public.clones.rotate-key'
 import { Route as ApiPublicClonesGateRouteImport } from './routes/api.public.clones.gate'
@@ -335,6 +341,11 @@ const SettingsIndexRoute = SettingsIndexRouteImport.update({
 const SecurityIndexRoute = SecurityIndexRouteImport.update({
   id: '/security/',
   path: '/security/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const EmailIndexRoute = EmailIndexRouteImport.update({
+  id: '/email/',
+  path: '/email/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const CrmIndexRoute = CrmIndexRouteImport.update({
@@ -579,6 +590,17 @@ const HooksEmailIdentityDrainRoute = HooksEmailIdentityDrainRouteImport.update({
   path: '/hooks/email-identity-drain',
   getParentRoute: () => rootRouteImport,
 } as any)
+const HooksEmailCampaignDispatchRoute =
+  HooksEmailCampaignDispatchRouteImport.update({
+    id: '/hooks/email-campaign-dispatch',
+    path: '/hooks/email-campaign-dispatch',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const HooksEmailBounceScanRoute = HooksEmailBounceScanRouteImport.update({
+  id: '/hooks/email-bounce-scan',
+  path: '/hooks/email-bounce-scan',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const HooksEdgeDriftRoute = HooksEdgeDriftRouteImport.update({
   id: '/hooks/edge-drift',
   path: '/hooks/edge-drift',
@@ -718,6 +740,11 @@ const FleetDeploymentsRoute = FleetDeploymentsRouteImport.update({
   path: '/fleet/deployments',
   getParentRoute: () => rootRouteImport,
 } as any)
+const EmailSuppressionsRoute = EmailSuppressionsRouteImport.update({
+  id: '/email/suppressions',
+  path: '/email/suppressions',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const CrmTicketsRoute = CrmTicketsRouteImport.update({
   id: '/crm/tickets',
   path: '/crm/tickets',
@@ -808,6 +835,12 @@ const CrmAccountsIndexRoute = CrmAccountsIndexRouteImport.update({
   path: '/crm/accounts/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const EmailCampaignsCampaignIdRoute =
+  EmailCampaignsCampaignIdRouteImport.update({
+    id: '/email/campaigns/$campaignId',
+    path: '/email/campaigns/$campaignId',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const CrmAccountsAccountIdRoute = CrmAccountsAccountIdRouteImport.update({
   id: '/crm/accounts/$accountId',
   path: '/crm/accounts/$accountId',
@@ -1043,6 +1076,12 @@ const ApiPublicHandoffAuditIngestRoute =
     path: '/api/public/handoff/audit-ingest',
     getParentRoute: () => rootRouteImport,
   } as any)
+const ApiPublicEmailUnsubscribeRoute =
+  ApiPublicEmailUnsubscribeRouteImport.update({
+    id: '/api/public/email/unsubscribe',
+    path: '/api/public/email/unsubscribe',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiPublicEdgeStatusRoute = ApiPublicEdgeStatusRouteImport.update({
   id: '/api/public/edge/status',
   path: '/api/public/edge/status',
@@ -1165,6 +1204,7 @@ export interface FileRoutesByFullPath {
   '/crm/fit': typeof CrmFitRoute
   '/crm/journey': typeof CrmJourneyRoute
   '/crm/tickets': typeof CrmTicketsRoute
+  '/email/suppressions': typeof EmailSuppressionsRoute
   '/fleet/deployments': typeof FleetDeploymentsRoute
   '/fleet/edge': typeof FleetEdgeRoute
   '/handoffs/$handoffId': typeof HandoffsHandoffIdRoute
@@ -1191,6 +1231,8 @@ export interface FileRoutesByFullPath {
   '/hooks/drift-refresh': typeof HooksDriftRefreshRoute
   '/hooks/edge-drain': typeof HooksEdgeDrainRoute
   '/hooks/edge-drift': typeof HooksEdgeDriftRoute
+  '/hooks/email-bounce-scan': typeof HooksEmailBounceScanRoute
+  '/hooks/email-campaign-dispatch': typeof HooksEmailCampaignDispatchRoute
   '/hooks/email-identity-drain': typeof HooksEmailIdentityDrainRoute
   '/hooks/entitlement-drain': typeof HooksEntitlementDrainRoute
   '/hooks/expire-reservations': typeof HooksExpireReservationsRoute
@@ -1238,12 +1280,14 @@ export interface FileRoutesByFullPath {
   '/voice/outbound': typeof VoiceOutboundRoute
   '/voice/phone': typeof VoicePhoneRoute
   '/crm/': typeof CrmIndexRoute
+  '/email/': typeof EmailIndexRoute
   '/security/': typeof SecurityIndexRoute
   '/settings/': typeof SettingsIndexRoute
   '/api/public/purchases': typeof ApiPublicPurchasesRoute
   '/clients/handoff/$token': typeof ClientsHandoffTokenRoute
   '/clones/$cloneId/secrets': typeof ClonesCloneIdSecretsRoute
   '/crm/accounts/$accountId': typeof CrmAccountsAccountIdRoute
+  '/email/campaigns/$campaignId': typeof EmailCampaignsCampaignIdRoute
   '/crm/accounts/': typeof CrmAccountsIndexRoute
   '/api/public/billing/handoff': typeof ApiPublicBillingHandoffRoute
   '/api/public/billing/invoice-pdf': typeof ApiPublicBillingInvoicePdfRoute
@@ -1252,6 +1296,7 @@ export interface FileRoutesByFullPath {
   '/api/public/clones/gate': typeof ApiPublicClonesGateRouteWithChildren
   '/api/public/clones/rotate-key': typeof ApiPublicClonesRotateKeyRoute
   '/api/public/edge/status': typeof ApiPublicEdgeStatusRoute
+  '/api/public/email/unsubscribe': typeof ApiPublicEmailUnsubscribeRoute
   '/api/public/handoff/audit-ingest': typeof ApiPublicHandoffAuditIngestRoute
   '/api/public/handoff/beacon': typeof ApiPublicHandoffBeaconRoute
   '/api/public/handoffs/consent': typeof ApiPublicHandoffsConsentRoute
@@ -1343,6 +1388,7 @@ export interface FileRoutesByTo {
   '/crm/fit': typeof CrmFitRoute
   '/crm/journey': typeof CrmJourneyRoute
   '/crm/tickets': typeof CrmTicketsRoute
+  '/email/suppressions': typeof EmailSuppressionsRoute
   '/fleet/deployments': typeof FleetDeploymentsRoute
   '/fleet/edge': typeof FleetEdgeRoute
   '/handoffs/$handoffId': typeof HandoffsHandoffIdRoute
@@ -1369,6 +1415,8 @@ export interface FileRoutesByTo {
   '/hooks/drift-refresh': typeof HooksDriftRefreshRoute
   '/hooks/edge-drain': typeof HooksEdgeDrainRoute
   '/hooks/edge-drift': typeof HooksEdgeDriftRoute
+  '/hooks/email-bounce-scan': typeof HooksEmailBounceScanRoute
+  '/hooks/email-campaign-dispatch': typeof HooksEmailCampaignDispatchRoute
   '/hooks/email-identity-drain': typeof HooksEmailIdentityDrainRoute
   '/hooks/entitlement-drain': typeof HooksEntitlementDrainRoute
   '/hooks/expire-reservations': typeof HooksExpireReservationsRoute
@@ -1416,12 +1464,14 @@ export interface FileRoutesByTo {
   '/voice/outbound': typeof VoiceOutboundRoute
   '/voice/phone': typeof VoicePhoneRoute
   '/crm': typeof CrmIndexRoute
+  '/email': typeof EmailIndexRoute
   '/security': typeof SecurityIndexRoute
   '/settings': typeof SettingsIndexRoute
   '/api/public/purchases': typeof ApiPublicPurchasesRoute
   '/clients/handoff/$token': typeof ClientsHandoffTokenRoute
   '/clones/$cloneId/secrets': typeof ClonesCloneIdSecretsRoute
   '/crm/accounts/$accountId': typeof CrmAccountsAccountIdRoute
+  '/email/campaigns/$campaignId': typeof EmailCampaignsCampaignIdRoute
   '/crm/accounts': typeof CrmAccountsIndexRoute
   '/api/public/billing/handoff': typeof ApiPublicBillingHandoffRoute
   '/api/public/billing/invoice-pdf': typeof ApiPublicBillingInvoicePdfRoute
@@ -1430,6 +1480,7 @@ export interface FileRoutesByTo {
   '/api/public/clones/gate': typeof ApiPublicClonesGateRouteWithChildren
   '/api/public/clones/rotate-key': typeof ApiPublicClonesRotateKeyRoute
   '/api/public/edge/status': typeof ApiPublicEdgeStatusRoute
+  '/api/public/email/unsubscribe': typeof ApiPublicEmailUnsubscribeRoute
   '/api/public/handoff/audit-ingest': typeof ApiPublicHandoffAuditIngestRoute
   '/api/public/handoff/beacon': typeof ApiPublicHandoffBeaconRoute
   '/api/public/handoffs/consent': typeof ApiPublicHandoffsConsentRoute
@@ -1523,6 +1574,7 @@ export interface FileRoutesById {
   '/crm/fit': typeof CrmFitRoute
   '/crm/journey': typeof CrmJourneyRoute
   '/crm/tickets': typeof CrmTicketsRoute
+  '/email/suppressions': typeof EmailSuppressionsRoute
   '/fleet/deployments': typeof FleetDeploymentsRoute
   '/fleet/edge': typeof FleetEdgeRoute
   '/handoffs/$handoffId': typeof HandoffsHandoffIdRoute
@@ -1549,6 +1601,8 @@ export interface FileRoutesById {
   '/hooks/drift-refresh': typeof HooksDriftRefreshRoute
   '/hooks/edge-drain': typeof HooksEdgeDrainRoute
   '/hooks/edge-drift': typeof HooksEdgeDriftRoute
+  '/hooks/email-bounce-scan': typeof HooksEmailBounceScanRoute
+  '/hooks/email-campaign-dispatch': typeof HooksEmailCampaignDispatchRoute
   '/hooks/email-identity-drain': typeof HooksEmailIdentityDrainRoute
   '/hooks/entitlement-drain': typeof HooksEntitlementDrainRoute
   '/hooks/expire-reservations': typeof HooksExpireReservationsRoute
@@ -1596,12 +1650,14 @@ export interface FileRoutesById {
   '/voice/outbound': typeof VoiceOutboundRoute
   '/voice/phone': typeof VoicePhoneRoute
   '/crm/': typeof CrmIndexRoute
+  '/email/': typeof EmailIndexRoute
   '/security/': typeof SecurityIndexRoute
   '/settings/': typeof SettingsIndexRoute
   '/api/public/purchases': typeof ApiPublicPurchasesRoute
   '/clients/handoff/$token': typeof ClientsHandoffTokenRoute
   '/clones/$cloneId/secrets': typeof ClonesCloneIdSecretsRoute
   '/crm/accounts/$accountId': typeof CrmAccountsAccountIdRoute
+  '/email/campaigns/$campaignId': typeof EmailCampaignsCampaignIdRoute
   '/crm/accounts/': typeof CrmAccountsIndexRoute
   '/api/public/billing/handoff': typeof ApiPublicBillingHandoffRoute
   '/api/public/billing/invoice-pdf': typeof ApiPublicBillingInvoicePdfRoute
@@ -1610,6 +1666,7 @@ export interface FileRoutesById {
   '/api/public/clones/gate': typeof ApiPublicClonesGateRouteWithChildren
   '/api/public/clones/rotate-key': typeof ApiPublicClonesRotateKeyRoute
   '/api/public/edge/status': typeof ApiPublicEdgeStatusRoute
+  '/api/public/email/unsubscribe': typeof ApiPublicEmailUnsubscribeRoute
   '/api/public/handoff/audit-ingest': typeof ApiPublicHandoffAuditIngestRoute
   '/api/public/handoff/beacon': typeof ApiPublicHandoffBeaconRoute
   '/api/public/handoffs/consent': typeof ApiPublicHandoffsConsentRoute
@@ -1704,6 +1761,7 @@ export interface FileRouteTypes {
     | '/crm/fit'
     | '/crm/journey'
     | '/crm/tickets'
+    | '/email/suppressions'
     | '/fleet/deployments'
     | '/fleet/edge'
     | '/handoffs/$handoffId'
@@ -1730,6 +1788,8 @@ export interface FileRouteTypes {
     | '/hooks/drift-refresh'
     | '/hooks/edge-drain'
     | '/hooks/edge-drift'
+    | '/hooks/email-bounce-scan'
+    | '/hooks/email-campaign-dispatch'
     | '/hooks/email-identity-drain'
     | '/hooks/entitlement-drain'
     | '/hooks/expire-reservations'
@@ -1777,12 +1837,14 @@ export interface FileRouteTypes {
     | '/voice/outbound'
     | '/voice/phone'
     | '/crm/'
+    | '/email/'
     | '/security/'
     | '/settings/'
     | '/api/public/purchases'
     | '/clients/handoff/$token'
     | '/clones/$cloneId/secrets'
     | '/crm/accounts/$accountId'
+    | '/email/campaigns/$campaignId'
     | '/crm/accounts/'
     | '/api/public/billing/handoff'
     | '/api/public/billing/invoice-pdf'
@@ -1791,6 +1853,7 @@ export interface FileRouteTypes {
     | '/api/public/clones/gate'
     | '/api/public/clones/rotate-key'
     | '/api/public/edge/status'
+    | '/api/public/email/unsubscribe'
     | '/api/public/handoff/audit-ingest'
     | '/api/public/handoff/beacon'
     | '/api/public/handoffs/consent'
@@ -1882,6 +1945,7 @@ export interface FileRouteTypes {
     | '/crm/fit'
     | '/crm/journey'
     | '/crm/tickets'
+    | '/email/suppressions'
     | '/fleet/deployments'
     | '/fleet/edge'
     | '/handoffs/$handoffId'
@@ -1908,6 +1972,8 @@ export interface FileRouteTypes {
     | '/hooks/drift-refresh'
     | '/hooks/edge-drain'
     | '/hooks/edge-drift'
+    | '/hooks/email-bounce-scan'
+    | '/hooks/email-campaign-dispatch'
     | '/hooks/email-identity-drain'
     | '/hooks/entitlement-drain'
     | '/hooks/expire-reservations'
@@ -1955,12 +2021,14 @@ export interface FileRouteTypes {
     | '/voice/outbound'
     | '/voice/phone'
     | '/crm'
+    | '/email'
     | '/security'
     | '/settings'
     | '/api/public/purchases'
     | '/clients/handoff/$token'
     | '/clones/$cloneId/secrets'
     | '/crm/accounts/$accountId'
+    | '/email/campaigns/$campaignId'
     | '/crm/accounts'
     | '/api/public/billing/handoff'
     | '/api/public/billing/invoice-pdf'
@@ -1969,6 +2037,7 @@ export interface FileRouteTypes {
     | '/api/public/clones/gate'
     | '/api/public/clones/rotate-key'
     | '/api/public/edge/status'
+    | '/api/public/email/unsubscribe'
     | '/api/public/handoff/audit-ingest'
     | '/api/public/handoff/beacon'
     | '/api/public/handoffs/consent'
@@ -2061,6 +2130,7 @@ export interface FileRouteTypes {
     | '/crm/fit'
     | '/crm/journey'
     | '/crm/tickets'
+    | '/email/suppressions'
     | '/fleet/deployments'
     | '/fleet/edge'
     | '/handoffs/$handoffId'
@@ -2087,6 +2157,8 @@ export interface FileRouteTypes {
     | '/hooks/drift-refresh'
     | '/hooks/edge-drain'
     | '/hooks/edge-drift'
+    | '/hooks/email-bounce-scan'
+    | '/hooks/email-campaign-dispatch'
     | '/hooks/email-identity-drain'
     | '/hooks/entitlement-drain'
     | '/hooks/expire-reservations'
@@ -2134,12 +2206,14 @@ export interface FileRouteTypes {
     | '/voice/outbound'
     | '/voice/phone'
     | '/crm/'
+    | '/email/'
     | '/security/'
     | '/settings/'
     | '/api/public/purchases'
     | '/clients/handoff/$token'
     | '/clones/$cloneId/secrets'
     | '/crm/accounts/$accountId'
+    | '/email/campaigns/$campaignId'
     | '/crm/accounts/'
     | '/api/public/billing/handoff'
     | '/api/public/billing/invoice-pdf'
@@ -2148,6 +2222,7 @@ export interface FileRouteTypes {
     | '/api/public/clones/gate'
     | '/api/public/clones/rotate-key'
     | '/api/public/edge/status'
+    | '/api/public/email/unsubscribe'
     | '/api/public/handoff/audit-ingest'
     | '/api/public/handoff/beacon'
     | '/api/public/handoffs/consent'
@@ -2240,6 +2315,7 @@ export interface RootRouteChildren {
   CrmFitRoute: typeof CrmFitRoute
   CrmJourneyRoute: typeof CrmJourneyRoute
   CrmTicketsRoute: typeof CrmTicketsRoute
+  EmailSuppressionsRoute: typeof EmailSuppressionsRoute
   FleetDeploymentsRoute: typeof FleetDeploymentsRoute
   FleetEdgeRoute: typeof FleetEdgeRoute
   HooksAgreementsRefreshRoute: typeof HooksAgreementsRefreshRoute
@@ -2264,6 +2340,8 @@ export interface RootRouteChildren {
   HooksDriftRefreshRoute: typeof HooksDriftRefreshRoute
   HooksEdgeDrainRoute: typeof HooksEdgeDrainRoute
   HooksEdgeDriftRoute: typeof HooksEdgeDriftRoute
+  HooksEmailBounceScanRoute: typeof HooksEmailBounceScanRoute
+  HooksEmailCampaignDispatchRoute: typeof HooksEmailCampaignDispatchRoute
   HooksEmailIdentityDrainRoute: typeof HooksEmailIdentityDrainRoute
   HooksEntitlementDrainRoute: typeof HooksEntitlementDrainRoute
   HooksExpireReservationsRoute: typeof HooksExpireReservationsRoute
@@ -2295,10 +2373,12 @@ export interface RootRouteChildren {
   VoiceOutboundRoute: typeof VoiceOutboundRoute
   VoicePhoneRoute: typeof VoicePhoneRoute
   CrmIndexRoute: typeof CrmIndexRoute
+  EmailIndexRoute: typeof EmailIndexRoute
   SecurityIndexRoute: typeof SecurityIndexRoute
   ApiPublicPurchasesRoute: typeof ApiPublicPurchasesRoute
   ClientsHandoffTokenRoute: typeof ClientsHandoffTokenRoute
   CrmAccountsAccountIdRoute: typeof CrmAccountsAccountIdRoute
+  EmailCampaignsCampaignIdRoute: typeof EmailCampaignsCampaignIdRoute
   CrmAccountsIndexRoute: typeof CrmAccountsIndexRoute
   ApiPublicBillingHandoffRoute: typeof ApiPublicBillingHandoffRoute
   ApiPublicBillingInvoicePdfRoute: typeof ApiPublicBillingInvoicePdfRoute
@@ -2307,6 +2387,7 @@ export interface RootRouteChildren {
   ApiPublicClonesGateRoute: typeof ApiPublicClonesGateRouteWithChildren
   ApiPublicClonesRotateKeyRoute: typeof ApiPublicClonesRotateKeyRoute
   ApiPublicEdgeStatusRoute: typeof ApiPublicEdgeStatusRoute
+  ApiPublicEmailUnsubscribeRoute: typeof ApiPublicEmailUnsubscribeRoute
   ApiPublicHandoffAuditIngestRoute: typeof ApiPublicHandoffAuditIngestRoute
   ApiPublicHandoffBeaconRoute: typeof ApiPublicHandoffBeaconRoute
   ApiPublicHandoffsConsentRoute: typeof ApiPublicHandoffsConsentRoute
@@ -2562,6 +2643,13 @@ declare module '@tanstack/react-router' {
       path: '/security'
       fullPath: '/security/'
       preLoaderRoute: typeof SecurityIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/email/': {
+      id: '/email/'
+      path: '/email'
+      fullPath: '/email/'
+      preLoaderRoute: typeof EmailIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/crm/': {
@@ -2893,6 +2981,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof HooksEmailIdentityDrainRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/hooks/email-campaign-dispatch': {
+      id: '/hooks/email-campaign-dispatch'
+      path: '/hooks/email-campaign-dispatch'
+      fullPath: '/hooks/email-campaign-dispatch'
+      preLoaderRoute: typeof HooksEmailCampaignDispatchRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/email-bounce-scan': {
+      id: '/hooks/email-bounce-scan'
+      path: '/hooks/email-bounce-scan'
+      fullPath: '/hooks/email-bounce-scan'
+      preLoaderRoute: typeof HooksEmailBounceScanRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/hooks/edge-drift': {
       id: '/hooks/edge-drift'
       path: '/hooks/edge-drift'
@@ -3075,6 +3177,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof FleetDeploymentsRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/email/suppressions': {
+      id: '/email/suppressions'
+      path: '/email/suppressions'
+      fullPath: '/email/suppressions'
+      preLoaderRoute: typeof EmailSuppressionsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/crm/tickets': {
       id: '/crm/tickets'
       path: '/crm/tickets'
@@ -3199,6 +3308,13 @@ declare module '@tanstack/react-router' {
       path: '/crm/accounts'
       fullPath: '/crm/accounts/'
       preLoaderRoute: typeof CrmAccountsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/email/campaigns/$campaignId': {
+      id: '/email/campaigns/$campaignId'
+      path: '/email/campaigns/$campaignId'
+      fullPath: '/email/campaigns/$campaignId'
+      preLoaderRoute: typeof EmailCampaignsCampaignIdRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/crm/accounts/$accountId': {
@@ -3502,6 +3618,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicHandoffAuditIngestRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/email/unsubscribe': {
+      id: '/api/public/email/unsubscribe'
+      path: '/api/public/email/unsubscribe'
+      fullPath: '/api/public/email/unsubscribe'
+      preLoaderRoute: typeof ApiPublicEmailUnsubscribeRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/edge/status': {
       id: '/api/public/edge/status'
       path: '/api/public/edge/status'
@@ -3757,6 +3880,7 @@ const rootRouteChildren: RootRouteChildren = {
   CrmFitRoute: CrmFitRoute,
   CrmJourneyRoute: CrmJourneyRoute,
   CrmTicketsRoute: CrmTicketsRoute,
+  EmailSuppressionsRoute: EmailSuppressionsRoute,
   FleetDeploymentsRoute: FleetDeploymentsRoute,
   FleetEdgeRoute: FleetEdgeRoute,
   HooksAgreementsRefreshRoute: HooksAgreementsRefreshRoute,
@@ -3782,6 +3906,8 @@ const rootRouteChildren: RootRouteChildren = {
   HooksDriftRefreshRoute: HooksDriftRefreshRoute,
   HooksEdgeDrainRoute: HooksEdgeDrainRoute,
   HooksEdgeDriftRoute: HooksEdgeDriftRoute,
+  HooksEmailBounceScanRoute: HooksEmailBounceScanRoute,
+  HooksEmailCampaignDispatchRoute: HooksEmailCampaignDispatchRoute,
   HooksEmailIdentityDrainRoute: HooksEmailIdentityDrainRoute,
   HooksEntitlementDrainRoute: HooksEntitlementDrainRoute,
   HooksExpireReservationsRoute: HooksExpireReservationsRoute,
@@ -3813,10 +3939,12 @@ const rootRouteChildren: RootRouteChildren = {
   VoiceOutboundRoute: VoiceOutboundRoute,
   VoicePhoneRoute: VoicePhoneRoute,
   CrmIndexRoute: CrmIndexRoute,
+  EmailIndexRoute: EmailIndexRoute,
   SecurityIndexRoute: SecurityIndexRoute,
   ApiPublicPurchasesRoute: ApiPublicPurchasesRoute,
   ClientsHandoffTokenRoute: ClientsHandoffTokenRoute,
   CrmAccountsAccountIdRoute: CrmAccountsAccountIdRoute,
+  EmailCampaignsCampaignIdRoute: EmailCampaignsCampaignIdRoute,
   CrmAccountsIndexRoute: CrmAccountsIndexRoute,
   ApiPublicBillingHandoffRoute: ApiPublicBillingHandoffRoute,
   ApiPublicBillingInvoicePdfRoute: ApiPublicBillingInvoicePdfRoute,
@@ -3825,6 +3953,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPublicClonesGateRoute: ApiPublicClonesGateRouteWithChildren,
   ApiPublicClonesRotateKeyRoute: ApiPublicClonesRotateKeyRoute,
   ApiPublicEdgeStatusRoute: ApiPublicEdgeStatusRoute,
+  ApiPublicEmailUnsubscribeRoute: ApiPublicEmailUnsubscribeRoute,
   ApiPublicHandoffAuditIngestRoute: ApiPublicHandoffAuditIngestRoute,
   ApiPublicHandoffBeaconRoute: ApiPublicHandoffBeaconRoute,
   ApiPublicHandoffsConsentRoute: ApiPublicHandoffsConsentRoute,
