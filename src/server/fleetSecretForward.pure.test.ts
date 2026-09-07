@@ -6,6 +6,9 @@ import {
   fleetNamesToWrite,
   fleetNamesWithoutValue,
   planFleetForwards,
+  decideFleetWithdraw,
+  planFleetWithdrawals,
+  fleetNamesToWithdraw,
 } from "./cloneSecretForward.pure";
 import type { SecretClass } from "./prime-backend.server";
 
@@ -180,5 +183,86 @@ describe("the class boundary is one implementation", () => {
       3,
     );
     expect(src.match(/CLASS_REFUSAL\[/g) ?? []).toHaveLength(1);
+  });
+});
+
+describe("taking a forwarded credential back off the fleet", () => {
+  it("withdraws a name the forward delivered that policy no longer authorises", () => {
+    expect(
+      decideFleetWithdraw({ name: "DIDIT_API_KEY", ledgerStatus: "inherited", inherit: false }),
+    ).toEqual({ act: "withdraw", name: "DIDIT_API_KEY" });
+  });
+
+  it("treats a DELETED fleet row as withdrawal, not as silence", () => {
+    // Removing the row is the obvious way to revoke a forward. If that were
+    // the one spelling that left the credential in place, the lever would be
+    // worse than useless.
+    expect(
+      decideFleetWithdraw({ name: "DIDIT_API_KEY", ledgerStatus: "inherited", inherit: undefined }).act,
+    ).toBe("withdraw");
+  });
+
+  it("never touches a secret the clone OWNS", () => {
+    /*
+     * The rule that protects a tenant. A clone's peppers, push keys, signing
+     * secret and CAPTCHA pair are `set`/`generated`/`skipped_*` — deleting one
+     * would break the clone in a way no forward could have caused. The ledger
+     * status is the whole guard and it is asked FIRST.
+     */
+    for (const status of [
+      "set",
+      "generated",
+      "missing",
+      "failed",
+      "authorised_no_value",
+      "skipped_platform",
+      "skipped_deployment_config",
+    ]) {
+      const out = decideFleetWithdraw({ name: "RESET_TOKEN_PEPPER", ledgerStatus: status, inherit: false });
+      expect(out.act, `${status} must not be withdrawable`).toBe("not_forwarded");
+    }
+  });
+
+  it("leaves a name fleet policy still forwards", () => {
+    // A lever that fights another lever makes a credential flap rather than
+    // leave: the forward would put it straight back.
+    expect(
+      decideFleetWithdraw({ name: "OPENAI_API_KEY", ledgerStatus: "inherited", inherit: true }).act,
+    ).toBe("still_authorised");
+  });
+
+  it("plans a whole clone and names only what it will delete", () => {
+    const outcomes = planFleetWithdrawals({
+      ledger: new Map([
+        ["DIDIT_API_KEY", "inherited"],
+        ["OPENAI_API_KEY", "inherited"],
+        ["RESET_TOKEN_PEPPER", "generated"],
+        ["TURNSTILE_SECRET_KEY", "set"],
+        ["GONE_FROM_POLICY", "inherited"],
+      ]),
+      fleet: new Map([
+        ["DIDIT_API_KEY", false],
+        ["OPENAI_API_KEY", true],
+        ["RESET_TOKEN_PEPPER", false],
+      ]),
+    });
+    expect(fleetNamesToWithdraw(outcomes)).toEqual(["DIDIT_API_KEY", "GONE_FROM_POLICY"]);
+    // Every other name is accounted for rather than dropped.
+    expect(outcomes).toHaveLength(5);
+    expect(outcomes.every((o) => o.act !== "withdraw" || o.name.length > 0)).toBe(true);
+  });
+
+  it("the performer decides nothing — the policy module does", () => {
+    const server = readFileSync("src/server/backend-provisioning.server.ts", "utf8");
+    const fn = server.slice(
+      server.indexOf("export async function deleteCloneSecretValues"),
+      server.indexOf("// ─── Legacy bootstrap schema"),
+    );
+    expect(fn).toContain('method: "DELETE"');
+    // No policy in the performer: it must not re-decide what may go.
+    expect(fn).not.toContain("inherited");
+    expect(fn).not.toContain("ledger");
+    // An empty list is a no-op rather than a DELETE with no body.
+    expect(fn).toContain("if (names.length === 0) return { ok: true }");
   });
 });

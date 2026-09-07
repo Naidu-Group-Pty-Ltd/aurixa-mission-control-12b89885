@@ -133,7 +133,11 @@ describe("the lane", () => {
   });
 
   it("carries the cursor across a requeue, or the next pass re-sends everything", () => {
-    const requeue = sliceFrom(lane, 'status: "planned",', 900);
+    // Anchored on the migration lane's OWN requeue result rather than on
+    // `status: "planned"`, which the file writes five times — the deferral
+    // path, the generic error path and three lanes — so a first-occurrence
+    // anchor tested whichever one happened to be written earliest.
+    const requeue = sliceFrom(lane, "applied_this_pass: landed,", 900);
     expect(requeue).toContain("chunk_cursor: chunkCursor,");
   });
 });

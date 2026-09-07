@@ -500,7 +500,54 @@ export function decodeBase64Utf8(b64: string): string {
  */
 type TreeBlob = { path: string; sha: string; size?: number };
 
-async function listSupabaseBlobs(
+/**
+ * One in-process copy of what the prime repo looks like, so a sweep that
+ * serves several clones reads GitHub once instead of once per clone.
+ *
+ * ## Why this is here and not "an optimisation"
+ *
+ * The support drain executes every due run inside ONE invocation, and the
+ * backend catch-up makes one run per clone against the SAME prime commit.
+ * Each run's snapshot re-walked the tree and re-fetched all ~1,033 function
+ * files — about sixteen GitHub requests — so three clones paid for three
+ * identical reads, every two minutes, for ever: ~1,440 requests an hour
+ * against an installation quota of 5,000, before anything else Mission
+ * Control does with GitHub.
+ *
+ * That is not merely wasteful. Measured 7 Sep 2026 it was the STARVATION:
+ * the drain takes runs oldest-first, the first two spent what quota there
+ * was, and the third — NPC Test — was refused on nearly every pass. Over
+ * five hours its two siblings deployed 154 and 131 bundles and it deployed
+ * six. Serving all three from one read is what makes the order stop
+ * mattering.
+ *
+ * ## The two rules
+ *
+ * **Blob contents are keyed by COMMIT, so they can never go stale.** A
+ * different commit is a different key and misses. This is the half that
+ * carries the saving — the ~14 GraphQL batches — and it is safe to hold for
+ * as long as the process lives.
+ *
+ * **The tree listing is keyed by BRANCH, so it is held for less than one
+ * sweep.** A branch head moves, so this entry can be wrong; a TTL shorter
+ * than the drain's two-minute cadence means it can only ever collapse reads
+ * WITHIN a single sweep and never carry a stale head into the next one. A
+ * long-lived container therefore sees every new commit on the sweep after it
+ * lands, exactly as it did before.
+ */
+const TREE_CACHE_TTL_MS = 60_000;
+
+let treeCache: { key: string; at: number; value: { blobs: TreeBlob[]; commitSha: string } } | null =
+  null;
+let blobCache: { key: string; value: Map<string, string> } | null = null;
+
+/** Test seam: forget everything cached. Never called in production. */
+export function resetPrimeSnapshotCache(): void {
+  treeCache = null;
+  blobCache = null;
+}
+
+async function listSupabaseBlobsUncached(
   octokit: Octokit,
   ref: RepoRef,
 ): Promise<{ blobs: TreeBlob[]; commitSha: string }> {
@@ -533,6 +580,25 @@ async function listSupabaseBlobs(
   }
 
   return { blobs, commitSha };
+}
+
+/**
+ * The tree listing, served from the short-lived cache when this sweep has
+ * already read it. See the cache block above for why the TTL is shorter than
+ * the drain's cadence.
+ */
+async function listSupabaseBlobs(
+  octokit: Octokit,
+  ref: RepoRef,
+): Promise<{ blobs: TreeBlob[]; commitSha: string }> {
+  const key = `${ref.owner}/${ref.repo}#${ref.branch}`;
+  const now = Date.now();
+  if (treeCache && treeCache.key === key && now - treeCache.at < TREE_CACHE_TTL_MS) {
+    return treeCache.value;
+  }
+  const value = await listSupabaseBlobsUncached(octokit, ref);
+  treeCache = { key, at: now, value };
+  return value;
 }
 
 async function listDirRecursive(octokit: Octokit, ref: RepoRef, dir: string): Promise<TreeBlob[]> {
@@ -642,6 +708,45 @@ async function fetchBlobTextsBatched(
     await mapPool(restFallback, BLOB_FETCH_CONCURRENCY, async (e) => {
       out.set(e.rel, await fetchBlobBase64(octokit, ref, e.sha));
     });
+  }
+  return out;
+}
+
+/**
+ * Blob bodies for one commit, fetching only what this process has not already
+ * read at that commit.
+ *
+ * Keyed by commit, so a hit is byte-identical by construction and there is no
+ * staleness to reason about. A partial hit still costs only the misses: the
+ * cache is consulted per path and the remainder goes to `fetchBlobTextsBatched`
+ * as usual, which is what keeps a caller asking for a DIFFERENT set of paths
+ * at the same commit correct rather than merely lucky.
+ */
+async function fetchBlobTextsForCommit(
+  octokit: Octokit,
+  ref: RepoRef,
+  commitSha: string,
+  entries: Array<{ rel: string; sha: string }>,
+): Promise<Map<string, string>> {
+  const key = `${ref.owner}/${ref.repo}@${commitSha}`;
+  // A different commit replaces the entry outright, so the cache holds one
+  // snapshot's worth of bytes and never grows.
+  if (!blobCache || blobCache.key !== key) blobCache = { key, value: new Map() };
+  const store = blobCache.value;
+
+  const out = new Map<string, string>();
+  const missing: Array<{ rel: string; sha: string }> = [];
+  for (const e of entries) {
+    const hit = store.get(e.rel);
+    if (hit !== undefined) out.set(e.rel, hit);
+    else missing.push(e);
+  }
+  if (missing.length > 0) {
+    const fetched = await fetchBlobTextsBatched(octokit, ref, missing);
+    for (const [rel, b64] of fetched) {
+      store.set(rel, b64);
+      out.set(rel, b64);
+    }
   }
   return out;
 }
@@ -1192,8 +1297,15 @@ export async function fetchPrimeBackendSnapshot(
   const { slugs, sharedFiles, importMapPath } = groupFunctionPaths(relPaths);
 
   const configBlob = blobs.find((b) => b.path === CONFIG_TOML_PATH);
+  // Through the commit cache like every other body, so a sweep serving three
+  // clones reads it once. Its key is the full repo path, which cannot collide
+  // with a function file's key — those are relative to `supabase/functions/`.
   const configToml = configBlob
-    ? decodeBase64Utf8(await fetchBlobBase64(octokit, ref, configBlob.sha))
+    ? decodeBase64Utf8(
+        (await fetchBlobTextsForCommit(octokit, ref, commitSha, [
+          { rel: CONFIG_TOML_PATH, sha: configBlob.sha },
+        ])).get(CONFIG_TOML_PATH) ?? "",
+      )
     : null;
   const fnConfig = parseFunctionConfig(configToml);
 
@@ -1273,7 +1385,7 @@ export async function fetchPrimeBackendSnapshot(
     if (!sha) throw new Error(`Blob not found for ${rel}`);
     return { rel, sha };
   });
-  const contentCache = await fetchBlobTextsBatched(octokit, ref, neededEntries);
+  const contentCache = await fetchBlobTextsForCommit(octokit, ref, commitSha, neededEntries);
 
   // ONE file object per distinct path, shared BY REFERENCE across every bundle
   // that carries it. Every bundle includes the whole `_shared` tree by

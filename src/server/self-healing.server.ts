@@ -46,6 +46,10 @@ import {
   refreshedSince,
   runWithinBudget,
 } from "@/server/edgeDeployBatch.pure";
+import {
+  planUpstreamDeferral,
+  UPSTREAM_DEFERRAL_KEY,
+} from "@/server/upstreamRefusal.pure";
 
 function secretsCleanFromVerification(verification: Json | null | undefined): boolean {
   if (verification && typeof verification === "object" && !Array.isArray(verification)) {
@@ -379,6 +383,41 @@ export async function executeRemediationRun(runId: string): Promise<{ status: st
     }
   } catch (err) {
     const message = (err as Error).message ?? String(err);
+
+    // Somebody upstream declining to serve us is not this run's failure.
+    // Charging it an attempt is how the whole fleet's backend catch-up came
+    // to be 90 minutes from parking with two thirds of its bundles never
+    // deployed — see upstreamRefusal.pure.ts for the arithmetic and for why
+    // the deferral is bounded rather than unconditional.
+    const deferral = planUpstreamDeferral({ error: err, result: run.result });
+    if (deferral.kind === "defer") {
+      await markRun(run.id, {
+        status: "planned",
+        // `run.attempts` is the count from BEFORE this invocation
+        // incremented it, so writing it back undoes exactly this pass's
+        // increment — never a reset, so a genuine earlier failure still
+        // counts towards `max_attempts`.
+        attempts: run.attempts ?? 0,
+        last_error: `deferred (upstream quota): ${message}`.slice(0, 2000),
+        next_attempt_at: new Date(Date.now() + MONITOR_RETRY_MINUTES * 60_000).toISOString(),
+        // Carried on the result the lanes replace, so a pass that does work
+        // clears the streak without anything having to remember to.
+        result: {
+          ...(run.result && typeof run.result === "object" && !Array.isArray(run.result)
+            ? (run.result as Record<string, unknown>)
+            : {}),
+          [UPSTREAM_DEFERRAL_KEY]: deferral.deferrals,
+        },
+      });
+      await ticketEvent(run.ticket_id, "remediation.deferred", {
+        run_id: run.id,
+        action_type: run.action_type,
+        reason: "upstream quota",
+        deferrals: deferral.deferrals,
+      });
+      return { status: "deferred" };
+    }
+
     const exhausted = (run.attempts ?? 0) + 1 >= (run.max_attempts ?? 30);
     await markRun(run.id, {
       status: exhausted ? "failed" : "planned",
@@ -1162,12 +1201,29 @@ export async function sweepSupportRemediations(): Promise<SweepResult> {
   //    so a reclaimed run is due on this pass rather than the next one.
   const runsReclaimed = await reclaimStalledRuns();
 
-  // 1. Execute due runs, oldest first, bounded per pass.
+  // 1. Execute due runs, LEAST RECENTLY SERVED first, bounded per pass.
+  //
+  //    Not oldest-created. Each lane hands its run a budget of its own (45s
+  //    for a deploy or a migration replay) while the whole sweep runs inside
+  //    one pg_net request that stops being waited on at sixty seconds — so a
+  //    fixed order does not share the invocation between the runs, it gives
+  //    it to the first one and starves the last. Measured 7 Sep 2026 on the
+  //    three clones' backend catch-up, all created within seven seconds of
+  //    each other: over five hours the first two deployed 154 and 131 of the
+  //    prime's 423 bundles and the third deployed SIX.
+  //
+  //    `updated_at` is written by every pass and by the heartbeat inside one,
+  //    so a run that was reached last sweep sinks and a run that was starved
+  //    rises — over successive sweeps each one gets to be the run that has a
+  //    whole invocation to work in, which is worth far more than three runs
+  //    each getting a third of one. `created_at` breaks the tie, so a set of
+  //    fresh runs (whose `updated_at` is their insert) is still FIFO.
   const { data: dueRuns } = await admin
     .from("remediation_runs")
     .select("id, action_type")
     .in("status", ["planned", "approved"])
     .lte("next_attempt_at", new Date().toISOString())
+    .order("updated_at", { ascending: true })
     .order("created_at", { ascending: true })
     .limit(DRAIN_BATCH);
   for (const due of dueRuns ?? []) {

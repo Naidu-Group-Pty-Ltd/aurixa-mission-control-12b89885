@@ -334,3 +334,107 @@ export function fleetNamesToWrite(outcomes: readonly FleetForwardOutcome[]): str
 export function fleetNamesWithoutValue(outcomes: readonly FleetForwardOutcome[]): string[] {
   return outcomes.filter((o) => o.act === "no_value").map((o) => o.name);
 }
+
+/* ────────────────────────────────────────────────────────────────────────
+ * Taking a forwarded credential back off the fleet.
+ *
+ * The forward has always been one-way. A name marked `inherit` travels to
+ * every clone; unmarking it stops FUTURE clones receiving it and leaves it on
+ * every clone that already has it, for ever, with the ledger still reading
+ * `inherited`. So a credential could be authorised fleet-wide and never
+ * withdrawn — and the case that made that matter is the Didit key, which is
+ * scoped to an APPLICATION and so lets any holder read every other tenant's
+ * customers' identity documents. Brokering the call (the verification
+ * endpoint) is only half of closing that: the other half is the key ceasing
+ * to sit on three tenant projects.
+ *
+ * Three rules, and the first is the one that protects a tenant.
+ *
+ * **Only what the forward itself delivered.** A withdrawal may touch a name
+ * whose ledger says `inherited` and nothing else. A clone's OWN secrets — its
+ * peppers, its push keys, its signing secret, its CAPTCHA pair, its derived
+ * hostnames — are `set`, `generated` or `skipped_*`, and deleting one would
+ * break the clone in a way no forward could have caused. The status is the
+ * whole guard, and it is asked before anything else.
+ *
+ * **Fleet policy has to have STOPPED authorising it.** A name still marked
+ * `inherit` is not withdrawable, however it looks: the forward would simply
+ * put it back on the next sweep, and a lever that fights another lever is how
+ * a credential flaps rather than leaves.
+ *
+ * **Absence of a row is withdrawal.** A fleet row that has been deleted
+ * authorises nothing, which has to mean the same as `inherit = false` — or
+ * removing the row (the obvious way to revoke a forward) would be the one
+ * spelling that leaves the credential in place.
+ * ──────────────────────────────────────────────────────────────────────── */
+
+/** What a withdrawal pass does with one delivered name on one clone. */
+export type FleetWithdrawOutcome =
+  /** Delivered by the forward, no longer authorised — will be deleted. */
+  | { readonly act: "withdraw"; readonly name: string }
+  /** Fleet policy still forwards it. Left alone. */
+  | { readonly act: "still_authorised"; readonly name: string; readonly why: string }
+  /** Not something the forward delivered. Never touched. */
+  | { readonly act: "not_forwarded"; readonly name: string; readonly why: string };
+
+export type FleetWithdrawFacts = {
+  readonly name: string;
+  /** The clone's ledger status for this name. */
+  readonly ledgerStatus: string;
+  /** The fleet row's `inherit`, or undefined where no row exists at all. */
+  readonly inherit: boolean | undefined;
+};
+
+/**
+ * Decide whether one name is taken back off one clone.
+ *
+ * The ledger is asked FIRST and it is the protective question: a name the
+ * forward did not deliver is not this lever's to remove, whatever fleet
+ * policy now says about it.
+ */
+export function decideFleetWithdraw(facts: FleetWithdrawFacts): FleetWithdrawOutcome {
+  if (facts.ledgerStatus !== "inherited") {
+    return {
+      act: "not_forwarded",
+      name: facts.name,
+      why:
+        `This clone's ledger records the name as \`${facts.ledgerStatus}\` rather than ` +
+        "`inherited`, so the fleet forward did not put it there and this lever may not " +
+        "take it away. A clone's own secrets are removed by whatever created them.",
+    };
+  }
+
+  // Undefined — no fleet row at all — authorises nothing, exactly as
+  // `inherit = false` does. Anything else would make deleting the row the one
+  // spelling of "stop forwarding this" that leaves the credential in place.
+  if (facts.inherit === true) {
+    return {
+      act: "still_authorised",
+      name: facts.name,
+      why: "Fleet policy still forwards this name, so withdrawing it would only be undone.",
+    };
+  }
+
+  return { act: "withdraw", name: facts.name };
+}
+
+/** Every delivered name decided together for one clone. */
+export function planFleetWithdrawals(input: {
+  /** The clone's ledger, name → status. */
+  readonly ledger: ReadonlyMap<string, string>;
+  /** Every fleet row, including the `inherit = false` ones. */
+  readonly fleet: ReadonlyMap<string, boolean>;
+}): FleetWithdrawOutcome[] {
+  return [...input.ledger.keys()].sort().map((name) =>
+    decideFleetWithdraw({
+      name,
+      ledgerStatus: input.ledger.get(name) ?? "",
+      inherit: input.fleet.get(name),
+    }),
+  );
+}
+
+/** The names a withdrawal pass will actually delete, in a stable order. */
+export function fleetNamesToWithdraw(outcomes: readonly FleetWithdrawOutcome[]): string[] {
+  return outcomes.filter((o) => o.act === "withdraw").map((o) => o.name);
+}

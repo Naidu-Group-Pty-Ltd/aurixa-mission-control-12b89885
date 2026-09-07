@@ -1,5 +1,14 @@
-import { describe, it, expect, vi } from "vitest";
-import { openPrimeMigrationCorpus, MAX_MIGRATION_BYTES } from "./prime-backend.server";
+import { beforeEach, describe, it, expect, vi } from "vitest";
+import {
+  openPrimeMigrationCorpus,
+  MAX_MIGRATION_BYTES,
+  resetPrimeSnapshotCache,
+} from "./prime-backend.server";
+
+// The snapshot holds the prime's tree and blob bodies in-process so one
+// sweep serving several clones reads GitHub once. Every test here uses the
+// same ref, so without this the second test measures the first one's fetch.
+beforeEach(() => resetPrimeSnapshotCache());
 
 const REF = { owner: "Naidu-Group-Pty-Ltd", repo: "npc-property-dashbord", branch: "main" };
 
