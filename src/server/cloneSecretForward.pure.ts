@@ -234,7 +234,17 @@ export type FleetForwardOutcome =
   /** Mission Control's own environment holds nothing under this name. */
   | { readonly act: "no_value"; readonly name: string; readonly why: string }
   /** The clone's ledger already records it. Not rewritten — this settles. */
-  | { readonly act: "already_set"; readonly name: string; readonly why: string };
+  | { readonly act: "already_set"; readonly name: string; readonly why: string }
+  /**
+   * Fleet policy forwards it and THIS clone has had it deliberately taken
+   * away. Never written back.
+   *
+   * A separate outcome from `already_set` because the two say opposite things
+   * about the project: `already_set` means the clone holds the value, this
+   * means it must not. Folding them together would make the sweep's report
+   * read as a delivered credential.
+   */
+  | { readonly act: "withheld"; readonly name: string; readonly why: string };
 
 export type FleetForwardFacts = {
   readonly name: string;
@@ -250,6 +260,15 @@ export type FleetForwardFacts = {
    * the same rule the per-clone sweep follows.
    */
   readonly settledOnClone: boolean;
+  /**
+   * Whether this clone's ledger records the name as deliberately withheld.
+   *
+   * Asked BEFORE `settledOnClone`, and it is the reason `withheld` is not one
+   * of the settled statuses: settled would silence the sweep by claiming the
+   * clone holds the value, which is the opposite of true, and the operator's
+   * secret list would then show a credential the project does not have.
+   */
+  readonly withheldOnClone: boolean;
 };
 
 /**
@@ -273,6 +292,19 @@ export function decideFleetForward(facts: FleetForwardFacts): FleetForwardOutcom
       act: "not_inherited",
       name: facts.name,
       why: "Fleet policy records this name as not forwarded.",
+    };
+  }
+
+  // Ahead of everything but the class refusal and fleet policy itself: a
+  // withdrawal that a later question could overturn is a credential that
+  // flaps back onto a tenant on the next sweep.
+  if (facts.withheldOnClone) {
+    return {
+      act: "withheld",
+      name: facts.name,
+      why:
+        "This clone has had the name deliberately taken away, so fleet policy does not " +
+        "put it back. Remove the `withheld` ledger row to forward it again.",
     };
   }
 
@@ -307,7 +339,10 @@ export function planFleetForwards(input: {
   readonly envHas: (name: string) => boolean;
   /** The names this clone's ledger records as delivered. */
   readonly settled: ReadonlySet<string>;
+  /** The names this clone's ledger records as deliberately withheld. */
+  readonly withheld?: ReadonlySet<string>;
 }): FleetForwardOutcome[] {
+  const withheld = input.withheld ?? new Set<string>();
   return [...input.fleet.keys()].sort().map((name) =>
     decideFleetForward({
       name,
@@ -315,6 +350,7 @@ export function planFleetForwards(input: {
       inherit: input.fleet.get(name) === true,
       presentInEnv: input.envHas(name),
       settledOnClone: input.settled.has(name),
+      withheldOnClone: withheld.has(name),
     }),
   );
 }
@@ -437,4 +473,96 @@ export function planFleetWithdrawals(input: {
 /** The names a withdrawal pass will actually delete, in a stable order. */
 export function fleetNamesToWithdraw(outcomes: readonly FleetWithdrawOutcome[]): string[] {
   return outcomes.filter((o) => o.act === "withdraw").map((o) => o.name);
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+ * Taking a forwarded credential back off ONE clone.
+ *
+ * The fleet withdrawal above answers "this name should stop travelling".
+ * This answers the different question the Didit key actually posed: the name
+ * still travels — two tenants keep it and their verification depends on it —
+ * and ONE tenant must not hold it, because that clone reaches the vendor
+ * through Mission Control's broker instead.
+ *
+ * Deleting the value is not enough on its own, and this is the whole reason
+ * the act needs a decision module rather than one Management API call:
+ * `pushFleetSecretForwards` writes every fleet name a clone is not settled
+ * on, every thirty minutes, so a deleted value is back before anybody looks.
+ * The withdrawal is therefore a LEDGER act that happens to delete a value,
+ * not a delete that happens to be recorded.
+ *
+ * Three rules.
+ *
+ * **Only what the forward delivered**, exactly as the fleet withdrawal has
+ * it: a name whose ledger says anything but `inherited` is not this lever's
+ * to remove. A clone's own peppers, push keys and signing secret are `set` or
+ * `generated`, and deleting one breaks the clone in a way no forward could
+ * have caused.
+ *
+ * **`withheld` is not settled.** It would be easy to silence the sweep by
+ * calling the name delivered, and it would be a lie in the one register an
+ * operator reads to answer "what does this project hold". The status says the
+ * project does NOT hold it and no sweep may write it — two facts, one word,
+ * neither of them "delivered".
+ *
+ * **A withdrawal is recorded prose.** The fleet rows carry their reasons in
+ * words ("Prime-only Supabase management token — do not forward") because a
+ * policy nobody can read is one somebody undoes. A per-clone withdrawal is
+ * rarer and more surprising than a fleet one, so it is refused without a
+ * reason rather than accepting a blank.
+ * ──────────────────────────────────────────────────────────────────────── */
+
+/** What withholding one name from one clone will do. */
+export type CloneWithholdOutcome =
+  /** Delete the value from the project and record the withdrawal. */
+  | { readonly act: "withhold"; readonly name: string; readonly reason: string }
+  /** Already withheld from this clone. Nothing to do, and not an error. */
+  | { readonly act: "already_withheld"; readonly name: string; readonly why: string }
+  /** Refused, with the reason an operator has to read. */
+  | { readonly act: "refuse"; readonly name: string; readonly why: string };
+
+export type CloneWithholdFacts = {
+  readonly name: string;
+  /** This clone's ledger status for the name, or null when it has no row. */
+  readonly ledgerStatus: string | null;
+  /** Why this tenant must not hold it. Required — see the third rule above. */
+  readonly reason: string;
+};
+
+/** The shortest reason that is an explanation rather than a shrug. */
+export const MIN_WITHHOLD_REASON = 12;
+
+export function decideCloneWithhold(facts: CloneWithholdFacts): CloneWithholdOutcome {
+  const reason = (facts.reason ?? "").trim();
+  if (reason.length < MIN_WITHHOLD_REASON) {
+    return {
+      act: "refuse",
+      name: facts.name,
+      why:
+        `Withholding a forwarded credential from one clone needs a reason of at least ` +
+        `${MIN_WITHHOLD_REASON} characters. It is rarer and more surprising than a fleet ` +
+        `decision, and the next operator reads it to decide whether to undo it.`,
+    };
+  }
+
+  if (facts.ledgerStatus === "withheld") {
+    return {
+      act: "already_withheld",
+      name: facts.name,
+      why: "This clone already has the name withheld; the project does not hold a value.",
+    };
+  }
+
+  if (facts.ledgerStatus !== "inherited") {
+    return {
+      act: "refuse",
+      name: facts.name,
+      why:
+        `This clone's ledger records the name as \`${facts.ledgerStatus ?? "absent"}\` rather ` +
+        "than `inherited`, so the fleet forward did not put it there and this lever may not " +
+        "take it away. A clone's own secrets are removed by whatever created them.",
+    };
+  }
+
+  return { act: "withhold", name: facts.name, reason };
 }

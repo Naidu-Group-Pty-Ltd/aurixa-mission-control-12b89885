@@ -9,6 +9,7 @@ import {
   decideFleetWithdraw,
   planFleetWithdrawals,
   fleetNamesToWithdraw,
+  decideCloneWithhold,
 } from "./cloneSecretForward.pure";
 import type { SecretClass } from "./prime-backend.server";
 
@@ -36,6 +37,7 @@ describe("decideFleetForward", () => {
         inherit: true,
         presentInEnv: true,
         settledOnClone: false,
+        withheldOnClone: false,
       }),
     ).toEqual({ act: "forward", name: "DIDIT_API_KEY" });
   });
@@ -48,6 +50,7 @@ describe("decideFleetForward", () => {
         inherit: true,
         presentInEnv: true,
         settledOnClone: false,
+        withheldOnClone: false,
       });
       expect(out.act).toBe("refuse");
     }
@@ -60,6 +63,7 @@ describe("decideFleetForward", () => {
       inherit: false,
       presentInEnv: true,
       settledOnClone: false,
+      withheldOnClone: false,
     });
     expect(out.act).toBe("not_inherited");
   });
@@ -71,6 +75,7 @@ describe("decideFleetForward", () => {
       inherit: true,
       presentInEnv: true,
       settledOnClone: true,
+      withheldOnClone: false,
     });
     expect(out.act).toBe("already_set");
   });
@@ -85,6 +90,7 @@ describe("decideFleetForward", () => {
       inherit: true,
       presentInEnv: false,
       settledOnClone: true,
+      withheldOnClone: false,
     });
     expect(out.act).toBe("already_set");
   });
@@ -96,6 +102,7 @@ describe("decideFleetForward", () => {
       inherit: true,
       presentInEnv: false,
       settledOnClone: false,
+      withheldOnClone: false,
     });
     expect(out.act).toBe("no_value");
     expect(out.act === "no_value" && out.why).toMatch(/empty secret is not written/);
@@ -264,5 +271,121 @@ describe("taking a forwarded credential back off the fleet", () => {
     expect(fn).not.toContain("ledger");
     // An empty list is a no-op rather than a DELETE with no body.
     expect(fn).toContain("if (names.length === 0) return { ok: true }");
+  });
+});
+
+describe("withholding one forwarded credential from ONE clone", () => {
+  const REASON = "reaches Didit through the Mission Control broker instead";
+
+  it("withholds a name the forward delivered, with a reason", () => {
+    expect(
+      decideCloneWithhold({ name: "DIDIT_API_KEY", ledgerStatus: "inherited", reason: REASON }),
+    ).toEqual({ act: "withhold", name: "DIDIT_API_KEY", reason: REASON });
+  });
+
+  it("refuses without a real reason, whatever the ledger says", () => {
+    for (const reason of ["", "   ", "no", "cleanup"]) {
+      const out = decideCloneWithhold({
+        name: "DIDIT_API_KEY",
+        ledgerStatus: "inherited",
+        reason,
+      });
+      expect(out.act, JSON.stringify(reason)).toBe("refuse");
+    }
+  });
+
+  it("never touches a secret the forward did not deliver", () => {
+    // A clone's OWN peppers, push keys, signing secret and CAPTCHA pair are
+    // `set` or `generated`. Deleting one breaks the clone in a way no forward
+    // could have caused, so the ledger status is the guard.
+    for (const status of ["set", "generated", "missing", "failed", "authorised_no_value", null]) {
+      const out = decideCloneWithhold({
+        name: "TURNSTILE_SECRET_KEY",
+        ledgerStatus: status,
+        reason: REASON,
+      });
+      expect(out.act, String(status)).toBe("refuse");
+    }
+  });
+
+  it("is idempotent — withholding twice is not an error", () => {
+    const out = decideCloneWithhold({
+      name: "DIDIT_API_KEY",
+      ledgerStatus: "withheld",
+      reason: REASON,
+    });
+    expect(out.act).toBe("already_withheld");
+  });
+});
+
+describe("a withheld name survives the thirty-minute sweep", () => {
+  it("is not forwarded back, though fleet policy still says inherit", () => {
+    // The whole point: two tenants keep the key and one must not have it, so
+    // fleet policy is UNCHANGED and the exclusion has to hold against it.
+    const out = decideFleetForward({
+      name: "DIDIT_API_KEY",
+      secretClass: "vendor",
+      inherit: true,
+      presentInEnv: true,
+      settledOnClone: false,
+      withheldOnClone: true,
+    });
+    expect(out.act).toBe("withheld");
+  });
+
+  it("reads as withheld, never as delivered", () => {
+    // Silencing the sweep by calling it settled would make the operator's
+    // secret list show a credential the project does not hold.
+    const outcomes = planFleetForwards({
+      fleet: new Map([["DIDIT_API_KEY", true]]),
+      classOf: () => "vendor",
+      envHas: () => true,
+      settled: new Set<string>(),
+      withheld: new Set(["DIDIT_API_KEY"]),
+    });
+    expect(fleetNamesToWrite(outcomes)).toEqual([]);
+    expect(outcomes.map((o) => o.act)).toEqual(["withheld"]);
+  });
+
+  it("still forwards every OTHER fleet name to that clone", () => {
+    const outcomes = planFleetForwards({
+      fleet: new Map([
+        ["DIDIT_API_KEY", true],
+        ["OPENAI_API_KEY", true],
+      ]),
+      classOf: () => "vendor",
+      envHas: () => true,
+      settled: new Set<string>(),
+      withheld: new Set(["DIDIT_API_KEY"]),
+    });
+    expect(fleetNamesToWrite(outcomes)).toEqual(["OPENAI_API_KEY"]);
+  });
+
+  it("the sweep reads the withheld set from the ledger, not from nowhere", () => {
+    const server = readFileSync(
+      new URL("./fleetSecretForward.server.ts", import.meta.url),
+      "utf8",
+    );
+    expect(server).toContain("withheld: new Set(");
+    expect(server).toContain('(r.status ?? "") === WITHHELD');
+    // `withheld` must never join SETTLED — that would silence the sweep by
+    // claiming the clone holds the value.
+    expect(server).toContain('const SETTLED = new Set(["inherited", "set"]);');
+  });
+
+  it("the column accepts the status, or every write is refused by Postgres", () => {
+    // A CHECK-constrained column rejects an unknown value while looking, from
+    // the function that tried to write it, exactly like a write nobody
+    // attempted — the defect this platform paid for on `reminder_type`.
+    const sql = readFileSync(
+      new URL("../../supabase/migrations/20260907160000_clone_secret_withheld_status.sql",
+        import.meta.url),
+      "utf8",
+    );
+    expect(sql).toContain("clone_backend_secrets_status_check");
+    expect(sql).toMatch(/CHECK \(status IN \([^)]*'withheld'[^)]*\)\)/);
+    for (const kept of ["missing", "set", "failed", "inherited", "authorised_no_value"]) {
+      expect(sql, `must not drop ${kept}`).toContain(`'${kept}'`);
+    }
   });
 });

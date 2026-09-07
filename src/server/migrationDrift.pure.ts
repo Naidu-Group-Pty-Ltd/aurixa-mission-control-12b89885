@@ -83,6 +83,22 @@ export function judge(assertion: Assertion, probe: Probe | null): CheckResult {
     };
   }
 
+  // A widened CHECK constraint lives in pg_constraint, which PostgREST does
+  // not expose either. The claim is still worth writing down — it is what the
+  // migration makes true, and `none` would say the opposite — but the thing
+  // that catches a value the column still refuses is a write that fails, so
+  // the detail says where to look rather than pretending to have looked.
+  if (assertion.kind === "check") {
+    return {
+      assertion,
+      status: "unassertable",
+      detail:
+        `pg_constraint is not exposed by PostgREST, so the CHECK on ` +
+        `\`${assertion.table}.${assertion.column}\` cannot be observed from here. ` +
+        `A value the column refuses fails at the write, not here.`,
+    };
+  }
+
   if (probe === null) {
     return { assertion, status: "unassertable", detail: "not probed on this run" };
   }
