@@ -94,16 +94,23 @@ export const Route = createFileRoute("/hooks/backend-provisioning-repair")({
           // the enqueue writes its actor verbatim, so the pass is attributed
           // to the original enqueuer. A literal "system" is refused by the
           // column itself.
-          if (!row.enqueued_by) {
-            return json(
-              {
-                success: false,
-                error:
-                  "backend row records no original enqueuer to attribute the repair to — re-provision from the clone page instead",
-              },
-              409,
-            );
-          }
+          //
+          // A row carrying NO enqueuer used to be REFUSED here, and the
+          // operator was pointed at the clone page — whose button routes back
+          // to this same hook. That is the defect the retry hook already had
+          // and already fixed, left standing in its sibling: measured
+          // 7 Sep 2026, the NPC Client Dashboard clone was the one row in the
+          // fleet written by a system path rather than by a person, so it was
+          // the one clone that could not be converged onto the fixed engine —
+          // for want of an audit field, on the very pass that carries the
+          // exposed-schema repair its AML module needs.
+          //
+          // The authority to repair is the CRON_SECRET this handler already
+          // verified, not this column. Attribution is a RECORD, not a
+          // permission: an unknown enqueuer is carried as null, and the audit
+          // entry says in words that the row named none, so an unattributed
+          // pass reads as one rather than as an attributed pass with a field
+          // nobody filled in.
 
           const { data: clone, error: cloneErr } = await admin
             .from("clones")
@@ -113,7 +120,9 @@ export const Route = createFileRoute("/hooks/backend-provisioning-repair")({
           if (cloneErr) throw new Error(`could not read clones: ${cloneErr.message}`);
           if (!clone) return json({ success: false, error: "clone not found" }, 404);
 
-          const enq = await enqueueCloneBackendProvisioning(admin, row.enqueued_by, {
+          const attributedTo = row.enqueued_by ?? null;
+
+          const enq = await enqueueCloneBackendProvisioning(admin, attributedTo, {
             cloneId,
             cloneName: clone.name,
             region: row.region ?? undefined,
@@ -134,6 +143,11 @@ export const Route = createFileRoute("/hooks/backend-provisioning-repair")({
             metadata: {
               via: "hooks/backend-provisioning-repair",
               project_ref: row.supabase_project_ref,
+              // Said in words, exactly as the retry hook says it: an
+              // unattributed pass must read as one, rather than as an
+              // attributed pass with a field nobody filled in.
+              attributed_to:
+                attributedTo ?? "unknown — the backend row records no original enqueuer",
             },
           });
 
