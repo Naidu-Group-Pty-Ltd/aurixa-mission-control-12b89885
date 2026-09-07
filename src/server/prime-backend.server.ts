@@ -331,6 +331,13 @@ export const DEPLOYMENT_CONFIG_SECRETS = new Set([
   "WEBAUTHN_RP_NAME",
   "MISSION_CONTROL_URL",
   "MISSION_CONTROL_AGENCY_NAME",
+  // The contact a push service uses about the sender, and every clone is its
+  // own sender — `VAPID_PUBLIC_KEY`/`VAPID_PRIVATE_KEY` are tenant-scoped and
+  // never inherited, so the subject beside them cannot be the prime's either.
+  // `prime_secret_forwards` marked `VAPID_SUBJECT` inheritable, a name no
+  // function anywhere reads, while THIS name — the one `send-web-push`
+  // consults — was forwarded by nothing at all.
+  "VAPID_SUBJECT_EMAIL",
   // A production posture, not a credential: the prime's own rule is that
   // production never runs the AML simulator, and a clone is production.
   "AML_PROVIDER_MODE",

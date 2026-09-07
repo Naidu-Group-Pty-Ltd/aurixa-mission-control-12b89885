@@ -91,6 +91,10 @@ describe("derived deployment config — this clone's own hostnames and name", ()
       WEBAUTHN_RP_NAME: "NPC Test",
       MISSION_CONTROL_URL: "https://mission-control.aurixasystems.com.au",
       MISSION_CONTROL_AGENCY_NAME: "NPC Test",
+      // RFC 8292 admits an `https:` contact URI as well as a `mailto:`, and
+      // the clone's own origin is one — derivable with nothing to ask anybody,
+      // where an address for each tenant would be a question.
+      VAPID_SUBJECT_EMAIL: "https://npc-test.aurixasystems.com.au",
       AML_PROVIDER_MODE: "live",
     });
   });

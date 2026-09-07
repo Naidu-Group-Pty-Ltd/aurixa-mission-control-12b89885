@@ -1302,6 +1302,21 @@ const DERIVED_DEPLOYMENT_CONFIG: Record<
   APP_URL: (origins) => cloneCanonicalOrigin(origins),
   APP_BASE_URL: (origins) => cloneCanonicalOrigin(origins),
   WEB_PUSH_ALLOWED_HOST: (origins) => cloneCanonicalHost(origins),
+  // The contact a push service uses about THIS sender, and the sender is this
+  // clone: `VAPID_PUBLIC_KEY`/`VAPID_PRIVATE_KEY` are minted per deployment
+  // and deliberately never inherited, so the subject cannot be the prime's
+  // either. RFC 8292 §2.1 admits an `https:` URI as well as a `mailto:`, and
+  // the clone's own canonical origin is one — derivable here with nothing to
+  // ask anybody.
+  //
+  // It had never been set on any clone. `prime_secret_forwards` marked
+  // `VAPID_SUBJECT` inheritable, which no function anywhere reads, while
+  // `VAPID_SUBJECT_EMAIL` — the name `send-web-push` actually consults — was
+  // forwarded by nothing. Every clone therefore told push services to contact
+  // `admin@example.com` about it, a domain RFC 2606 reserves so that nobody
+  // can. The prime now refuses to send on an unusable subject rather than
+  // signing with a placeholder.
+  VAPID_SUBJECT_EMAIL: (origins) => cloneCanonicalOrigin(origins),
   WEBAUTHN_RP_ID: (origins) => cloneCanonicalHost(origins),
   WEBAUTHN_RP_ORIGINS: (origins) => cloneWebAuthnOrigins(origins),
   WEBAUTHN_RP_NAME: (_origins, facts) => nonEmpty(facts?.displayName),
