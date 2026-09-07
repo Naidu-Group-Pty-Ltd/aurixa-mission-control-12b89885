@@ -108,6 +108,7 @@ import { Route as HooksBrandDriftRouteImport } from './routes/hooks.brand-drift'
 import { Route as HooksBackendProvisioningRetryRouteImport } from './routes/hooks.backend-provisioning-retry'
 import { Route as HooksBackendProvisioningRepairRouteImport } from './routes/hooks.backend-provisioning-repair'
 import { Route as HooksBackendProvisioningDrainRouteImport } from './routes/hooks.backend-provisioning-drain'
+import { Route as HooksBackendCatchupRouteImport } from './routes/hooks.backend-catchup'
 import { Route as HooksApiUsageSettleRouteImport } from './routes/hooks.api-usage-settle'
 import { Route as HooksAllowedOriginsReconcileRouteImport } from './routes/hooks.allowed-origins-reconcile'
 import { Route as HooksAirtableSyncRouteImport } from './routes/hooks.airtable-sync'
@@ -707,6 +708,11 @@ const HooksBackendProvisioningDrainRoute =
     path: '/hooks/backend-provisioning-drain',
     getParentRoute: () => rootRouteImport,
   } as any)
+const HooksBackendCatchupRoute = HooksBackendCatchupRouteImport.update({
+  id: '/hooks/backend-catchup',
+  path: '/hooks/backend-catchup',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const HooksApiUsageSettleRoute = HooksApiUsageSettleRouteImport.update({
   id: '/hooks/api-usage-settle',
   path: '/hooks/api-usage-settle',
@@ -1227,6 +1233,7 @@ export interface FileRoutesByFullPath {
   '/hooks/airtable-sync': typeof HooksAirtableSyncRoute
   '/hooks/allowed-origins-reconcile': typeof HooksAllowedOriginsReconcileRoute
   '/hooks/api-usage-settle': typeof HooksApiUsageSettleRoute
+  '/hooks/backend-catchup': typeof HooksBackendCatchupRoute
   '/hooks/backend-provisioning-drain': typeof HooksBackendProvisioningDrainRoute
   '/hooks/backend-provisioning-repair': typeof HooksBackendProvisioningRepairRoute
   '/hooks/backend-provisioning-retry': typeof HooksBackendProvisioningRetryRoute
@@ -1413,6 +1420,7 @@ export interface FileRoutesByTo {
   '/hooks/airtable-sync': typeof HooksAirtableSyncRoute
   '/hooks/allowed-origins-reconcile': typeof HooksAllowedOriginsReconcileRoute
   '/hooks/api-usage-settle': typeof HooksApiUsageSettleRoute
+  '/hooks/backend-catchup': typeof HooksBackendCatchupRoute
   '/hooks/backend-provisioning-drain': typeof HooksBackendProvisioningDrainRoute
   '/hooks/backend-provisioning-repair': typeof HooksBackendProvisioningRepairRoute
   '/hooks/backend-provisioning-retry': typeof HooksBackendProvisioningRetryRoute
@@ -1601,6 +1609,7 @@ export interface FileRoutesById {
   '/hooks/airtable-sync': typeof HooksAirtableSyncRoute
   '/hooks/allowed-origins-reconcile': typeof HooksAllowedOriginsReconcileRoute
   '/hooks/api-usage-settle': typeof HooksApiUsageSettleRoute
+  '/hooks/backend-catchup': typeof HooksBackendCatchupRoute
   '/hooks/backend-provisioning-drain': typeof HooksBackendProvisioningDrainRoute
   '/hooks/backend-provisioning-repair': typeof HooksBackendProvisioningRepairRoute
   '/hooks/backend-provisioning-retry': typeof HooksBackendProvisioningRetryRoute
@@ -1790,6 +1799,7 @@ export interface FileRouteTypes {
     | '/hooks/airtable-sync'
     | '/hooks/allowed-origins-reconcile'
     | '/hooks/api-usage-settle'
+    | '/hooks/backend-catchup'
     | '/hooks/backend-provisioning-drain'
     | '/hooks/backend-provisioning-repair'
     | '/hooks/backend-provisioning-retry'
@@ -1976,6 +1986,7 @@ export interface FileRouteTypes {
     | '/hooks/airtable-sync'
     | '/hooks/allowed-origins-reconcile'
     | '/hooks/api-usage-settle'
+    | '/hooks/backend-catchup'
     | '/hooks/backend-provisioning-drain'
     | '/hooks/backend-provisioning-repair'
     | '/hooks/backend-provisioning-retry'
@@ -2163,6 +2174,7 @@ export interface FileRouteTypes {
     | '/hooks/airtable-sync'
     | '/hooks/allowed-origins-reconcile'
     | '/hooks/api-usage-settle'
+    | '/hooks/backend-catchup'
     | '/hooks/backend-provisioning-drain'
     | '/hooks/backend-provisioning-repair'
     | '/hooks/backend-provisioning-retry'
@@ -2348,6 +2360,7 @@ export interface RootRouteChildren {
   HooksAirtableSyncRoute: typeof HooksAirtableSyncRoute
   HooksAllowedOriginsReconcileRoute: typeof HooksAllowedOriginsReconcileRoute
   HooksApiUsageSettleRoute: typeof HooksApiUsageSettleRoute
+  HooksBackendCatchupRoute: typeof HooksBackendCatchupRoute
   HooksBackendProvisioningDrainRoute: typeof HooksBackendProvisioningDrainRoute
   HooksBackendProvisioningRepairRoute: typeof HooksBackendProvisioningRepairRoute
   HooksBackendProvisioningRetryRoute: typeof HooksBackendProvisioningRetryRoute
@@ -3156,6 +3169,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof HooksBackendProvisioningDrainRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/hooks/backend-catchup': {
+      id: '/hooks/backend-catchup'
+      path: '/hooks/backend-catchup'
+      fullPath: '/hooks/backend-catchup'
+      preLoaderRoute: typeof HooksBackendCatchupRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/hooks/api-usage-settle': {
       id: '/hooks/api-usage-settle'
       path: '/hooks/api-usage-settle'
@@ -3929,6 +3949,7 @@ const rootRouteChildren: RootRouteChildren = {
   HooksAirtableSyncRoute: HooksAirtableSyncRoute,
   HooksAllowedOriginsReconcileRoute: HooksAllowedOriginsReconcileRoute,
   HooksApiUsageSettleRoute: HooksApiUsageSettleRoute,
+  HooksBackendCatchupRoute: HooksBackendCatchupRoute,
   HooksBackendProvisioningDrainRoute: HooksBackendProvisioningDrainRoute,
   HooksBackendProvisioningRepairRoute: HooksBackendProvisioningRepairRoute,
   HooksBackendProvisioningRetryRoute: HooksBackendProvisioningRetryRoute,
