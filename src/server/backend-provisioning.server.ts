@@ -3190,6 +3190,41 @@ export async function setCloneSecretValues(
   return { ok: true };
 }
 
+/**
+ * Delete named secrets from a clone's function environment.
+ *
+ * The inverse of `setCloneSecretValues`, and it exists because the forward has
+ * always been one-way: unmarking a name `inherit` stopped FUTURE clones
+ * receiving it and left it on every clone that already had it, for ever.
+ *
+ * WHAT may be deleted is decided in `cloneSecretForward.pure.ts`, never here —
+ * this only performs it. The protective rule is there: a name whose ledger
+ * says anything other than `inherited` is not the forward's to remove, because
+ * a clone's OWN peppers, push keys and signing secret are `set` or
+ * `generated`, and deleting one would break the clone in a way no forward
+ * could have caused.
+ *
+ * The Management API takes the names as a JSON array on DELETE.
+ */
+export async function deleteCloneSecretValues(
+  projectRef: string,
+  names: readonly string[],
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (names.length === 0) return { ok: true };
+  const res = await fetch(`${MGMT_API}/projects/${projectRef}/secrets`, {
+    method: "DELETE",
+    headers: headers(),
+    body: JSON.stringify([...names]),
+  });
+  if (!res.ok) {
+    return {
+      ok: false,
+      error: `secrets API ${res.status} deleting ${names.join(", ")} — ${(await res.text()).slice(0, 300)}`,
+    };
+  }
+  return { ok: true };
+}
+
 // ─── Legacy bootstrap schema (reference only) ────────────────────────
 
 /**
