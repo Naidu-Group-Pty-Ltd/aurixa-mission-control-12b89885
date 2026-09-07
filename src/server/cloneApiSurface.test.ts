@@ -166,3 +166,31 @@ describe("a value a COLUMN refuses must not read as a write nobody attempted", (
     }
   });
 });
+
+describe("the two levers for a finished backend agree about attribution", () => {
+  /*
+    F47 made the RETRY hook carry a null enqueuer: the authority is the
+    CRON_SECRET the handler already verified, not an audit column, and a
+    failed backend written by a system path had otherwise no lever anywhere in
+    the product. The REPAIR hook beside it kept the refusal, so on 7 Sep 2026
+    the one clone in the fleet whose row named no person was the one clone that
+    could not be converged onto the fixed engine — on the very pass carrying
+    the exposed-schema repair its AML module needed.
+  */
+  const retry = readFileSync(join(__dirname, "..", "routes", "hooks.backend-provisioning-retry.tsx"), "utf8");
+  const repair = readFileSync(join(__dirname, "..", "routes", "hooks.backend-provisioning-repair.tsx"), "utf8");
+
+  it("neither hook refuses a row that records no enqueuer", () => {
+    for (const [name, src] of [["retry", retry], ["repair", repair]] as const) {
+      expect(name && src).toBeTruthy();
+      expect(src).not.toMatch(/if \(!row\.enqueued_by\) \{[\s\S]{0,400}?409,/);
+    }
+  });
+
+  it("both carry the unknown attribution as null and say so in the audit", () => {
+    for (const src of [retry, repair]) {
+      expect(src).toContain("row.enqueued_by ?? null");
+      expect(src).toContain("records no original enqueuer");
+    }
+  });
+});
