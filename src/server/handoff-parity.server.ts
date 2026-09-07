@@ -36,6 +36,12 @@ import {
   type RealtimePublicationTable,
 } from "./backend-provisioning.server";
 import {
+  diffProjectSettings,
+  projectSettingsBlockers,
+  projectSettingsSummary,
+  type ProjectSettingsDiff,
+} from "./projectSettingsParity.pure";
+import {
   summariseSurplusOrigin,
   type MigrationObjectIndex,
   type SurplusClassification,
@@ -781,6 +787,17 @@ export type ParityResult = {
    * and nothing in the schema distinguishes the two. This names the drift; it
    * does not act on it.
    */
+  /**
+   * The settings that live on the PROJECT rather than in the database.
+   *
+   * Every other section here reads the database, so a clone could be
+   * reconciled on all twenty at once while a module on it was completely
+   * unreachable — which is what happened: `aml` existed on three clones with
+   * every table, policy and function correct, and every call against it
+   * answered `Invalid schema` because the project's exposed-schema list did
+   * not name it. Nothing measured that.
+   */
+  project_settings_diff: ProjectSettingsDiff;
   surplus_in_target: {
     total: number;
     by_class: Record<string, number>;
@@ -832,6 +849,24 @@ export async function computeParity(
     snapshotProject(primeRef),
     snapshotProject(targetRef),
   ]);
+
+  // The PROJECT-level settings, read through the Management API rather than
+  // the database — which is the whole reason this class was invisible. Never
+  // allowed to fail the run: the twenty database sections below are still
+  // worth having, and a read that failed reads `unavailable` rather than
+  // "matches".
+  const projectSettings = await (async (): Promise<ProjectSettingsDiff> => {
+    const { readProjectSettings, managementApiUnavailable } = await import(
+      "./projectSettingsParity.server"
+    );
+    const noToken = managementApiUnavailable();
+    if (noToken) return diffProjectSettings(noToken, noToken);
+    const [primeSettings, targetSettings] = await Promise.all([
+      readProjectSettings(primeRef),
+      readProjectSettings(targetRef),
+    ]);
+    return diffProjectSettings(primeSettings, targetSettings);
+  })();
 
   const tables = diffTables(prime, target);
   const policies = diffPolicies(prime, target);
@@ -896,6 +931,11 @@ export async function computeParity(
     blocking.push(`missing_matviews:${matviews.missing_in_target.length}`);
   if (sequences.missing_in_target.length)
     blocking.push(`missing_sequences:${sequences.missing_in_target.length}`);
+  // A schema the prime exposes and this project does not is a module that
+  // answers "Invalid schema" to every caller, for ever. It blocks for the
+  // same reason a missing table does, and it is the one project setting that
+  // does — see `projectSettingsBlockers`.
+  blocking.push(...projectSettingsBlockers(projectSettings));
 
   // `clone >= prime` is a CONTAINMENT check, not an equality check. Reporting
   // containment as "matches the prime" is what let a dropped table sit on a
@@ -942,10 +982,21 @@ export async function computeParity(
     cron.schedule_drift.length ||
     authCfg.drift.length ||
     grants.drift.length ||
-    triggers.extra_in_target.length
+    triggers.extra_in_target.length ||
+    // A project that allows a SMALLER upload than the prime refuses the
+    // buckets that need the room, and one exposing a schema the prime does
+    // not has surface the prime has not reviewed. Neither stops the clone
+    // working, so neither blocks — but neither is "low" either.
+    projectSettings.upload_limit.target_is_lower ||
+    projectSettings.exposed_schemas.extra_in_target.length
   ) {
     risk = "medium";
   }
+  // An UNAVAILABLE settings reading deliberately does not move the risk. It
+  // is an absence of measurement rather than a measured problem, and raising
+  // the level on "we could not check" would make every environment without a
+  // Management API token read medium until nobody read the field at all. It
+  // is stated in the summary instead, which is where a reader can act on it.
   if (functions.extra_in_target.length || edgeFns.extra_in_target.length) risk = "medium";
   if (blocking.length) risk = "blocking";
 
@@ -968,6 +1019,11 @@ export async function computeParity(
       : "") +
     // Whose the surplus is, beside how much of it there is. A bare count reads
     // as a to-do list; this says which part of it must never be touched.
+    // Placed before the surplus reading: a module that answers nothing
+    // outranks a count of objects nobody has decided about.
+    (projectSettingsSummary(projectSettings)
+      ? ` · ${projectSettingsSummary(projectSettings)}`
+      : "") +
     (origin.line ? ` · ${origin.line}` : "") +
     // The prime's residue is reported wherever the shortfall is, or the
     // narrowing above is invisible and reads as a clone that matches.
@@ -997,6 +1053,7 @@ export async function computeParity(
     matviews_diff: matviews,
     sequences_diff: sequences,
     blocking_issues: blocking,
+    project_settings_diff: projectSettings,
     surplus_in_target: surplus,
     risk_level: risk,
     summary,
