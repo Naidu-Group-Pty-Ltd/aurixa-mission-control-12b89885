@@ -260,4 +260,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "cron", jobname: "email-bounce-scan-15min" },
     ],
   },
+  {
+    migration: "20260907100000_schedule_backend_catchup.sql",
+    version: "20260907100000",
+    assertions: [{ kind: "cron", jobname: "backend-catchup" }],
+  },
 ];
