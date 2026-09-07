@@ -42,6 +42,15 @@ export const upsertWebhookEndpoint = createServerFn({ method: "POST" })
       .parse(input),
   )
   .handler(async ({ data, context }) => {
+    // A fleet-wide endpoint (no clone scope) receives EVERY tenant's balance,
+    // key and alert events, so it may not be a tenant's own host. Refused
+    // here, where the mistake is made, as well as at delivery — the one row
+    // that existed was written long before this rule and pointed at the
+    // prime's own site.
+    const { assertWebhookEndpointScope } = await import("@/server/tokenWebhookScope.server");
+    const refusal = await assertWebhookEndpointScope(data.url, data.cloneId ?? null);
+    if (refusal) return { ok: false as const, error: refusal.message };
+
     if (data.id) {
       const newSecret = data.rotateSecret
         ? crypto.randomBytes(32).toString("base64url")

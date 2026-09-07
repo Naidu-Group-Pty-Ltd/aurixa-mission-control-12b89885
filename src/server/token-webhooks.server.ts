@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
+import { tenantHostsFrom, webhookEndpointRefusal } from "./tokenWebhookScope.pure";
 
 // How many due deliveries one retry pass takes.
 const DELIVERY_RETRY_BATCH = 50;
@@ -12,6 +13,27 @@ export type TokenWebhookEvent =
 
 function sign(secret: string, body: string): string {
   return crypto.createHmac("sha256", secret).update(body).digest("hex");
+}
+
+/**
+ * Every host a tenant of this control plane answers on.
+ *
+ * Read here rather than passed in because `fireTokenWebhook` is called from
+ * sixteen places and the guard must not be one of them to remember.
+ */
+async function tenantHosts() {
+  const [clones, deployments, backends, prime] = await Promise.all([
+    supabaseAdmin.from("clones").select("id, name, deploy_url, subdomain_fqdn"),
+    supabaseAdmin.from("clone_deployments").select("clone_id, domain"),
+    supabaseAdmin.from("clone_backends").select("clone_id, supabase_project_ref"),
+    supabaseAdmin.from("prime_config").select("supabase_project_ref").limit(1).maybeSingle(),
+  ]);
+  return tenantHostsFrom({
+    clones: clones.data ?? [],
+    deployments: deployments.data ?? [],
+    backends: backends.data ?? [],
+    primeProjectRef: prime.data?.supabase_project_ref ?? null,
+  });
 }
 
 /**
@@ -28,11 +50,41 @@ export async function fireTokenWebhook(
     .select("id, url, secret, events, clone_id")
     .eq("is_active", true);
 
-  const matches = (endpoints ?? []).filter((e) => {
+  const subscribed = (endpoints ?? []).filter((e) => {
     if (!(e.events ?? []).includes(event)) return false;
     if (e.clone_id == null) return true;
     return cloneId == null ? false : e.clone_id === cloneId;
   });
+  if (subscribed.length === 0) return;
+
+  // A fleet-wide endpoint receives every tenant's events, so it may not BE a
+  // tenant's host. Enforced here as well as at the write, because a row that
+  // predates the rule — the one that existed did, pointing at the prime's own
+  // site — must not be able to ship a single event. Only the fleet-wide rows
+  // are checked, so the per-clone endpoints cost nothing.
+  const matches: typeof subscribed = [];
+  const hosts = subscribed.some((e) => e.clone_id == null) ? await tenantHosts() : [];
+  for (const e of subscribed) {
+    const refusal = webhookEndpointRefusal(e.url, e.clone_id, hosts);
+    if (!refusal) {
+      matches.push(e);
+      continue;
+    }
+    // Recorded, never silent: a refused delivery is a fact an operator has to
+    // be able to find, and "nothing arrived" is indistinguishable from a
+    // receiver that is down.
+    const { error } = await supabaseAdmin.from("token_webhook_deliveries").insert({
+      endpoint_id: e.id,
+      event_type: event,
+      payload: { event, data: {} } as never,
+      status: "failed",
+      response_body: `Refused before sending — ${refusal.message}`,
+      attempts: 1,
+    });
+    if (error) {
+      console.error(`[webhook] could not record the refusal for endpoint ${e.id}:`, error.message);
+    }
+  }
   if (matches.length === 0) return;
 
   const body = JSON.stringify({
