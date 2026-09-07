@@ -1,6 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
-import { mapPool } from "./prime-backend.server";
+import { mapPool, resetPrimeSnapshotCache } from "./prime-backend.server";
+
+// The snapshot holds the prime's tree and blob bodies in-process so one
+// sweep serving several clones reads GitHub once instead of once per clone.
+// Several tests here count that fetch against the same ref, so without this
+// the second one would be measuring the first one's cache.
+beforeEach(() => resetPrimeSnapshotCache());
 import {
   BudgetPause,
   formatResumeMarker,
@@ -88,7 +94,13 @@ describe("the snapshot fetches blobs batched, never one round trip each", () => 
        thousand REST calls never did. */
     const src = primeBackend();
     const fn = src.slice(src.indexOf("export async function fetchPrimeBackendSnapshot"));
-    expect(fn).toMatch(/await fetchBlobTextsBatched\(octokit, ref, neededEntries\)/);
+    expect(fn).toMatch(
+      /await fetchBlobTextsForCommit\(octokit, ref, commitSha, neededEntries\)/,
+    );
+    /* The snapshot reaches the batch through the commit-keyed cache, so both
+       links are asserted: losing either one puts a thousand REST calls back. */
+    const cached = src.slice(src.indexOf("async function fetchBlobTextsForCommit"));
+    expect(cached).toMatch(/await fetchBlobTextsBatched\(octokit, ref, missing\)/);
     expect(fn).toMatch(/await mapPool\(migrationMetas/);
     /* The defect's exact shape: one awaited round trip per iteration of a
        bare for-loop. Neither loop may come back. */
@@ -473,7 +485,9 @@ describe("a resumed pass does not buy what it cannot use", () => {
     /* The early return must sit BEFORE the bundle fetch, or declining costs
        exactly as much as not declining. */
     const guardAt = src.indexOf("if (!includeFunctionSource)");
-    const fetchAt = src.indexOf("fetchBlobTextsBatched(octokit, ref, neededEntries)");
+    const fetchAt = src.indexOf(
+      "fetchBlobTextsForCommit(octokit, ref, commitSha, neededEntries)",
+    );
     expect(guardAt).toBeGreaterThan(-1);
     expect(fetchAt).toBeGreaterThan(-1);
     expect(guardAt).toBeLessThan(fetchAt);
@@ -738,7 +752,9 @@ describe("the edge-function fetch is budgeted like everything else", () => {
        calls, is what it exists to save. It deliberately no longer narrows the
        fetch, because the fetch is what the secret scan reads (next test). */
     const skipAt = src.indexOf("const deployable = allBundles.filter((b) => !skip.has(b.slug));");
-    const fetchAt = src.indexOf("fetchBlobTextsBatched(octokit, ref, neededEntries)");
+    const fetchAt = src.indexOf(
+      "fetchBlobTextsForCommit(octokit, ref, commitSha, neededEntries)",
+    );
     expect(skipAt).toBeGreaterThan(-1);
     expect(skipAt).toBeLessThan(fetchAt);
   });

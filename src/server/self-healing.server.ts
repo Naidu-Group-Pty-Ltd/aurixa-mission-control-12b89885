@@ -46,6 +46,10 @@ import {
   refreshedSince,
   runWithinBudget,
 } from "@/server/edgeDeployBatch.pure";
+import {
+  planUpstreamDeferral,
+  UPSTREAM_DEFERRAL_KEY,
+} from "@/server/upstreamRefusal.pure";
 
 function secretsCleanFromVerification(verification: Json | null | undefined): boolean {
   if (verification && typeof verification === "object" && !Array.isArray(verification)) {
@@ -379,6 +383,41 @@ export async function executeRemediationRun(runId: string): Promise<{ status: st
     }
   } catch (err) {
     const message = (err as Error).message ?? String(err);
+
+    // Somebody upstream declining to serve us is not this run's failure.
+    // Charging it an attempt is how the whole fleet's backend catch-up came
+    // to be 90 minutes from parking with two thirds of its bundles never
+    // deployed — see upstreamRefusal.pure.ts for the arithmetic and for why
+    // the deferral is bounded rather than unconditional.
+    const deferral = planUpstreamDeferral({ error: err, result: run.result });
+    if (deferral.kind === "defer") {
+      await markRun(run.id, {
+        status: "planned",
+        // `run.attempts` is the count from BEFORE this invocation
+        // incremented it, so writing it back undoes exactly this pass's
+        // increment — never a reset, so a genuine earlier failure still
+        // counts towards `max_attempts`.
+        attempts: run.attempts ?? 0,
+        last_error: `deferred (upstream quota): ${message}`.slice(0, 2000),
+        next_attempt_at: new Date(Date.now() + MONITOR_RETRY_MINUTES * 60_000).toISOString(),
+        // Carried on the result the lanes replace, so a pass that does work
+        // clears the streak without anything having to remember to.
+        result: {
+          ...(run.result && typeof run.result === "object" && !Array.isArray(run.result)
+            ? (run.result as Record<string, unknown>)
+            : {}),
+          [UPSTREAM_DEFERRAL_KEY]: deferral.deferrals,
+        },
+      });
+      await ticketEvent(run.ticket_id, "remediation.deferred", {
+        run_id: run.id,
+        action_type: run.action_type,
+        reason: "upstream quota",
+        deferrals: deferral.deferrals,
+      });
+      return { status: "deferred" };
+    }
+
     const exhausted = (run.attempts ?? 0) + 1 >= (run.max_attempts ?? 30);
     await markRun(run.id, {
       status: exhausted ? "failed" : "planned",
