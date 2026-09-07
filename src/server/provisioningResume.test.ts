@@ -199,12 +199,19 @@ describe("the drift sweep leaves provisioning clones alone", () => {
     expect(scan.slice(guard, guard + 700)).toContain("continue");
   });
 
-  it("a clone with no cascade yet is clocked from creation, not from 1970", () => {
+  it("no clone is scored from a clock at all any more", () => {
+    /* This used to pin the clock's BASE — `last_cascade_at ?? created_at` —
+       because a null base scored as 99,999 minutes and drew a fabricated
+       "40 commits behind" every 15 minutes. The clock itself has since gone:
+       it was writing `commits_behind` and `sync_status` over the reading
+       `runDriftRefresh` takes from GitHub, and its arithmetic answered
+       `in_sync` for a clone 131 commits behind whenever a cascade had merely
+       updated a pull request. Nothing to base correctly on if nothing is
+       derived — see `syncBaseline.contract.test.ts`. */
     const src = drift();
-    expect(src).toMatch(/c\.last_cascade_at \?\? c\.created_at/);
-    /* The fabricated forty: null → 99999 minutes → drift 40. The fallback
-       to 99999 may only remain for a row with NO usable clock at all. */
-    expect(src).not.toMatch(/c\.last_cascade_at\s*\?\s*\(Date\.now/);
+    expect(src).not.toMatch(/minutesSinceCascade/);
+    expect(src).not.toMatch(/Math\.min\(40/);
+    expect(src).not.toMatch(/99999/);
   });
 
   it("alarms fire on the transition into behind, not on every scan there", () => {

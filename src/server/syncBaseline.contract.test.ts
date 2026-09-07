@@ -34,6 +34,7 @@ const stripComments = (src: string): string =>
 const provisioning = stripComments(read("src/server/clone-provisioning.server.ts"));
 const drift = stripComments(read("src/server/drift-refresh.server.ts"));
 const planner = read("src/server/backendSync.server.ts");
+const fleetScan = stripComments(read("src/server/fleet-drift.functions.ts"));
 
 describe("the baseline a clone is provisioned with is the prime's revision", () => {
   it("reads the branch from the prime repository, never from the new clone", () => {
@@ -97,5 +98,31 @@ describe("the contract is stated where the other consumer reads it", () => {
 
   it("and still refuses rather than guesses when it cannot compare them", () => {
     expect(planner).toContain('return "compare_failed"');
+  });
+});
+
+describe("one writer measures, and it is the one that asks GitHub", () => {
+  it("the AI fleet scan writes suggestions and the stamp, and nothing else", () => {
+    // Two cron jobs shared these columns: `drift-refresh` every 5 minutes
+    // measuring, `fleet-drift-scan` every 15 fabricating from a clock. The
+    // fabrication won whenever it ran last, and it produced `in_sync` on a
+    // clone 131 commits behind, because a cascade that merely UPDATES a pull
+    // request stamps `last_cascade_at` and the clock then reads zero.
+    const write = fleetScan.slice(fleetScan.indexOf("drift_suggestions: suggestions"));
+    const update = write.slice(0, write.indexOf(".eq("));
+    expect(update).toContain("last_drift_check_at");
+    expect(update).not.toContain("commits_behind:");
+    expect(update).not.toContain("sync_status:");
+  });
+
+  it("the scan derives no distance of its own", () => {
+    // The tells of the placeholder: a clock read as a commit count, and a cap.
+    expect(fleetScan).not.toContain("minutesSinceCascade");
+    expect(fleetScan).not.toContain("Math.min(40");
+  });
+
+  it("the drift sweep is still the one that measures", () => {
+    expect(drift).toContain("compareCommitsWithBasehead");
+    expect(drift).toContain("commits_behind: behind");
   });
 });
