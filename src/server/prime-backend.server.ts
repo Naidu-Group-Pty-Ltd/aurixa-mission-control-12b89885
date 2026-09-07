@@ -13,6 +13,7 @@
  * values. Secret names become empty shells on the clone project.
  */
 import type { Octokit } from "@octokit/rest";
+import type { MigrationObjectIndex } from "./surplusOrigin.pure";
 import type { RepoRef } from "./github-app.server";
 import { pruneBundleToReachable } from "./functionBundlePrune.pure";
 import { OversizedMigrationError } from "./oversizedMigration.pure";
@@ -1029,6 +1030,47 @@ export async function fetchDeclaredEdgeFunctionSlugs(
         .filter((b) => b.path.startsWith(FUNCTIONS_PREFIX))
         .map((b) => b.path.slice(FUNCTIONS_PREFIX.length)),
     );
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The prime's generated record of every object its migrations have created and
+ * dropped — `supabase/migration-object-index.json`, kept current by the
+ * prime's own CI (`npm run migrations:index:check`).
+ *
+ * It is what lets the parity surplus be classified: an object a clone holds
+ * and the prime does not is the PRIME's leftover if the prime's migrations
+ * created it, and the TENANT'S OWN if they never mention it. The clone's live
+ * schema cannot tell those apart — both are "here and not there" — and the
+ * difference is between tidying and destroying somebody's data.
+ *
+ * One file, ~150 KB, one API call. Null on anything unexpected, and null means
+ * `undetermined` downstream, never "the tenant's own": a classifier that
+ * guesses from an unread index is exactly the failure this guards.
+ */
+export async function fetchMigrationObjectIndex(
+  octokit: Octokit,
+  ref: RepoRef,
+): Promise<MigrationObjectIndex | null> {
+  try {
+    const res = await octokit.repos.getContent({
+      owner: ref.owner,
+      repo: ref.repo,
+      path: "supabase/migration-object-index.json",
+    });
+    const data = res.data as { type?: string; content?: string; encoding?: string };
+    if (data.type !== "file" || !data.content) return null;
+    const parsed = JSON.parse(Buffer.from(data.content, "base64").toString("utf8"));
+    if (
+      typeof parsed?.schema_version !== "number" ||
+      !Array.isArray(parsed?.created) ||
+      !Array.isArray(parsed?.dropped)
+    ) {
+      return null;
+    }
+    return parsed as MigrationObjectIndex;
   } catch {
     return null;
   }

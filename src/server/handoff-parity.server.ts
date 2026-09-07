@@ -35,6 +35,11 @@ import {
   type PrimeCronJob,
   type RealtimePublicationTable,
 } from "./backend-provisioning.server";
+import {
+  summariseSurplusOrigin,
+  type MigrationObjectIndex,
+  type SurplusClassification,
+} from "./surplusOrigin.pure";
 
 type Row = Record<string, unknown>;
 
@@ -776,7 +781,26 @@ export type ParityResult = {
    * and nothing in the schema distinguishes the two. This names the drift; it
    * does not act on it.
    */
-  surplus_in_target: { total: number; by_class: Record<string, number>; sample: string[] };
+  surplus_in_target: {
+    total: number;
+    by_class: Record<string, number>;
+    sample: string[];
+    /**
+     * Whose each sampled object is — the prime's leftover, or the tenant's own.
+     *
+     * "Nothing in the schema distinguishes the two" was true of the SCHEMA and
+     * false of the system: the prime's migration history distinguishes them
+     * exactly, and `supabase/migration-object-index.json` is that history.
+     * Still nothing is dropped on it. What changes is that the owner's
+     * decision is per-object with its evidence attached, rather than one
+     * unanswerable "537 tables against 536".
+     */
+    origin?: {
+      counts: Record<string, number>;
+      line: string;
+      classified: SurplusClassification[];
+    };
+  };
   risk_level: "low" | "medium" | "high" | "blocking";
   summary: string;
 };
@@ -790,6 +814,13 @@ export type ComputeParityOptions = {
    * derived from the tree walk precisely so it cannot be one.
    */
   declaredEdgeFunctions?: readonly string[] | null;
+  /**
+   * The prime's generated migration object index, for classifying the surplus.
+   * Omit it and every surplus object reads `undetermined` — never "the
+   * tenant's own", which is the verdict that matters and the one an unread
+   * index must never produce.
+   */
+  migrationObjectIndex?: MigrationObjectIndex | null;
 };
 
 export async function computeParity(
@@ -890,7 +921,17 @@ export async function computeParity(
     // rather than twenty bare identifiers from nine different catalogs.
     for (const item of list.slice(0, 5)) surplusSample.push(`${name}:${item}`);
   }
-  const surplus = { total: surplusTotal, by_class: byClass, sample: surplusSample.slice(0, 20) };
+  const surplusSampleCapped = surplusSample.slice(0, 20);
+  // Classified over the SAMPLE rather than every entry: the sample is what a
+  // person reads, and classifying thousands of rows to render twenty of them
+  // would cost the walk for nothing.
+  const origin = summariseSurplusOrigin(surplusSampleCapped, opts?.migrationObjectIndex ?? null);
+  const surplus = {
+    total: surplusTotal,
+    by_class: byClass,
+    sample: surplusSampleCapped,
+    origin: { counts: origin.counts, line: origin.line, classified: origin.classified },
+  };
 
   let risk: ParityResult["risk_level"] = "low";
   if (
@@ -925,6 +966,9 @@ export async function computeParity(
           .map(([k, v]) => `${k}:${v}`)
           .join(" ")}]`
       : "") +
+    // Whose the surplus is, beside how much of it there is. A bare count reads
+    // as a to-do list; this says which part of it must never be touched.
+    (origin.line ? ` · ${origin.line}` : "") +
     // The prime's residue is reported wherever the shortfall is, or the
     // narrowing above is invisible and reads as a clone that matches.
     (edgeFns.prime_only_undeclared.length > 0

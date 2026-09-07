@@ -503,6 +503,19 @@ async function runBackendProvisioning(
         // tree, so it is complete even on a pass that fetched no bundle
         // source — see `declaredFunctionSlugs`.
         declaredEdgeFunctions: snapshot.declaredFunctionSlugs,
+        // Whose each surplus object is. Best effort — a clone that came up
+        // short is recorded as short, and an unread index reads
+        // `undetermined` rather than making a claim about the tenant.
+        migrationObjectIndex: await (async () => {
+          try {
+            if (!source) return null;
+            const { getAppOctokit } = await import("@/server/github-app.server");
+            const { fetchMigrationObjectIndex } = await import("@/server/prime-backend.server");
+            return await fetchMigrationObjectIndex(getAppOctokit(), source);
+          } catch {
+            return null;
+          }
+        })(),
       });
     } catch (err) {
       parityError = err instanceof Error ? err.message : String(err);
