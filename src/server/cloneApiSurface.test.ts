@@ -81,7 +81,7 @@ describe("the engine replicates the project's API surface, not only its database
     );
   });
 
-  it("PATCHes the project's postgrest config — the role setting alone does not reach it", () => {
+  it("PATCHes the project's postgrest config rather than relying on a recycle", () => {
     const fn = prov.slice(prov.indexOf("export async function replicateApiConfig"));
     expect(fn).toContain("/postgrest`");
     expect(fn).toContain('method: "PATCH"');

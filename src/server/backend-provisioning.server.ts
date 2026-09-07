@@ -725,16 +725,20 @@ export function mergeExposedSchemas(cloneCsv: string, primeCsv: string): string 
  * above, which made two storage buckets impossible to create for a reason no
  * bucket-level retry could ever fix.
  *
- * Three rules, and the first cost the most time. **The control plane owns
- * this setting**: writing `pgrst.db_schemas` onto the `authenticator` role —
- * which is what this endpoint does underneath, and what the dashboard's
- * "Exposed schemas" control writes — does NOT reach a running PostgREST on
- * Supabase Cloud. Two `NOTIFY pgrst, 'reload config'` over seventeen minutes
- * changed nothing; this PATCH is the only thing that does. **It never
- * narrows** (see `mergeExposedSchemas`). And **a failure is reported and
- * non-fatal**, because a clone with an unexposed schema is still worth
- * finishing — it just cannot serve that module, and the status line says so
- * rather than leaving an operator to find out from a 500 a day later.
+ * Three rules. **This PATCH is the deterministic way to apply it, and the
+ * only timely one.** Writing `pgrst.db_schemas` onto the `authenticator` role
+ * — what this endpoint does underneath, and what the dashboard's "Exposed
+ * schemas" control writes — does eventually reach PostgREST, but only when it
+ * next recycles and re-reads its in-database config. `NOTIFY pgrst, 'reload
+ * config'` does NOT bring that forward: two of them over seventeen minutes
+ * changed nothing on 6 September 2026, and the schema became reachable about
+ * eighteen minutes after the role setting was written, on PostgREST's own
+ * schedule rather than on ours. A repair pass that cannot say when its own
+ * effect lands is not a repair, which is why this goes through the API.
+ * **It never narrows** (see `mergeExposedSchemas`). And **a failure is
+ * reported and non-fatal**, because a clone with an unexposed schema is still
+ * worth finishing — it just cannot serve that module, and the status line
+ * says so rather than leaving an operator to find out from a 500 a day later.
  */
 export async function replicateApiConfig(
   primeRef: string,
