@@ -568,9 +568,11 @@ async function step(row: DeploymentRow): Promise<StepOutcome> {
           kind: "wait",
           seconds: 120,
           detail:
-            txt.enqueued > 0
-              ? `The provider asked for ${txt.enqueued} DNS challenge record(s); writing them, then waiting for the provider to verify the domain.`
-              : "Waiting for DNS to propagate and the provider to verify the domain.",
+            txt.errors.length > 0
+              ? `The provider asked for ${state.challenges.length} DNS challenge record(s) and they could NOT be queued: ${txt.errors[0]}. The domain cannot verify until that is fixed.`
+              : txt.enqueued > 0
+                ? `The provider asked for ${txt.enqueued} DNS challenge record(s); writing them, then waiting for the provider to verify the domain.`
+                : "Waiting for DNS to propagate and the provider to verify the domain.",
           patch: { domain_verification: state.challenges },
         };
       }

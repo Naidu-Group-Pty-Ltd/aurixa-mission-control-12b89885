@@ -128,3 +128,41 @@ describe("the engine replicates the project's API surface, not only its database
     expect(intro).toContain("pg_default_acl");
   });
 });
+
+describe("a value a COLUMN refuses must not read as a write nobody attempted", () => {
+  /*
+    `verify_domain_txt` was added to the TypeScript and to the edge worker and
+    never to the `action` CHECK constraint that stores it, so every enqueue
+    answered 23514 and nothing queued. It stayed invisible for four days
+    because the caller counted the failure as a "skip" and threw the reason
+    away — which is indistinguishable from the provider asking for nothing.
+  */
+  const jobs = read("hosting/subdomainJobs.server.ts");
+  const drain = readFileSync(join(__dirname, "..", "routes", "hooks.deployment-drain.tsx"), "utf8");
+
+  it("carries the database's reason out of the enqueue", () => {
+    expect(jobs).toContain("errors: string[]");
+    expect(jobs).toContain("errors.push(");
+  });
+
+  it("says so on the row an operator reads, rather than 'waiting for DNS'", () => {
+    expect(drain).toContain("could NOT be queued");
+    // The failure branch must be tested BEFORE the happy count, or a zero
+    // enqueue with an error still renders as the reassuring line.
+    expect(drain.indexOf("txt.errors.length > 0")).toBeLessThan(
+      drain.indexOf("txt.enqueued > 0"),
+    );
+  });
+
+  it("the migration teaches the column every action the worker dispatches", () => {
+    const sql = readFileSync(
+      join(__dirname, "..", "..", "supabase", "migrations",
+        "20260906180000_edge_job_verify_domain_txt_action.sql"),
+      "utf8",
+    );
+    const worker = readFileSync(join(__dirname, "..", "routes", "hooks.edge-drain.tsx"), "utf8");
+    for (const action of worker.matchAll(/job\.action === "([a-z_]+)"/g)) {
+      expect(sql).toContain(`'${action[1]}'`);
+    }
+  });
+});
