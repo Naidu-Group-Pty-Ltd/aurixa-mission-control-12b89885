@@ -99,6 +99,7 @@ import { Route as HooksCodexSweepRouteImport } from './routes/hooks.codex-sweep'
 import { Route as HooksCodexNightlyRouteImport } from './routes/hooks.codex-nightly'
 import { Route as HooksCloneSigningPairReconcileRouteImport } from './routes/hooks.clone-signing-pair-reconcile'
 import { Route as HooksCloneSecretsReconcileRouteImport } from './routes/hooks.clone-secrets-reconcile'
+import { Route as HooksCloneSecretWithholdRouteImport } from './routes/hooks.clone-secret-withhold'
 import { Route as HooksCloneSecretForwardReconcileRouteImport } from './routes/hooks.clone-secret-forward-reconcile'
 import { Route as HooksCloneJwtSecretReconcileRouteImport } from './routes/hooks.clone-jwt-secret-reconcile'
 import { Route as HooksCloneDeployerDeclarationReconcileRouteImport } from './routes/hooks.clone-deployer-declaration-reconcile'
@@ -655,6 +656,12 @@ const HooksCloneSecretsReconcileRoute =
   HooksCloneSecretsReconcileRouteImport.update({
     id: '/hooks/clone-secrets-reconcile',
     path: '/hooks/clone-secrets-reconcile',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const HooksCloneSecretWithholdRoute =
+  HooksCloneSecretWithholdRouteImport.update({
+    id: '/hooks/clone-secret-withhold',
+    path: '/hooks/clone-secret-withhold',
     getParentRoute: () => rootRouteImport,
   } as any)
 const HooksCloneSecretForwardReconcileRoute =
@@ -1243,6 +1250,7 @@ export interface FileRoutesByFullPath {
   '/hooks/clone-deployer-declaration-reconcile': typeof HooksCloneDeployerDeclarationReconcileRoute
   '/hooks/clone-jwt-secret-reconcile': typeof HooksCloneJwtSecretReconcileRoute
   '/hooks/clone-secret-forward-reconcile': typeof HooksCloneSecretForwardReconcileRoute
+  '/hooks/clone-secret-withhold': typeof HooksCloneSecretWithholdRoute
   '/hooks/clone-secrets-reconcile': typeof HooksCloneSecretsReconcileRoute
   '/hooks/clone-signing-pair-reconcile': typeof HooksCloneSigningPairReconcileRoute
   '/hooks/codex-nightly': typeof HooksCodexNightlyRoute
@@ -1430,6 +1438,7 @@ export interface FileRoutesByTo {
   '/hooks/clone-deployer-declaration-reconcile': typeof HooksCloneDeployerDeclarationReconcileRoute
   '/hooks/clone-jwt-secret-reconcile': typeof HooksCloneJwtSecretReconcileRoute
   '/hooks/clone-secret-forward-reconcile': typeof HooksCloneSecretForwardReconcileRoute
+  '/hooks/clone-secret-withhold': typeof HooksCloneSecretWithholdRoute
   '/hooks/clone-secrets-reconcile': typeof HooksCloneSecretsReconcileRoute
   '/hooks/clone-signing-pair-reconcile': typeof HooksCloneSigningPairReconcileRoute
   '/hooks/codex-nightly': typeof HooksCodexNightlyRoute
@@ -1619,6 +1628,7 @@ export interface FileRoutesById {
   '/hooks/clone-deployer-declaration-reconcile': typeof HooksCloneDeployerDeclarationReconcileRoute
   '/hooks/clone-jwt-secret-reconcile': typeof HooksCloneJwtSecretReconcileRoute
   '/hooks/clone-secret-forward-reconcile': typeof HooksCloneSecretForwardReconcileRoute
+  '/hooks/clone-secret-withhold': typeof HooksCloneSecretWithholdRoute
   '/hooks/clone-secrets-reconcile': typeof HooksCloneSecretsReconcileRoute
   '/hooks/clone-signing-pair-reconcile': typeof HooksCloneSigningPairReconcileRoute
   '/hooks/codex-nightly': typeof HooksCodexNightlyRoute
@@ -1809,6 +1819,7 @@ export interface FileRouteTypes {
     | '/hooks/clone-deployer-declaration-reconcile'
     | '/hooks/clone-jwt-secret-reconcile'
     | '/hooks/clone-secret-forward-reconcile'
+    | '/hooks/clone-secret-withhold'
     | '/hooks/clone-secrets-reconcile'
     | '/hooks/clone-signing-pair-reconcile'
     | '/hooks/codex-nightly'
@@ -1996,6 +2007,7 @@ export interface FileRouteTypes {
     | '/hooks/clone-deployer-declaration-reconcile'
     | '/hooks/clone-jwt-secret-reconcile'
     | '/hooks/clone-secret-forward-reconcile'
+    | '/hooks/clone-secret-withhold'
     | '/hooks/clone-secrets-reconcile'
     | '/hooks/clone-signing-pair-reconcile'
     | '/hooks/codex-nightly'
@@ -2184,6 +2196,7 @@ export interface FileRouteTypes {
     | '/hooks/clone-deployer-declaration-reconcile'
     | '/hooks/clone-jwt-secret-reconcile'
     | '/hooks/clone-secret-forward-reconcile'
+    | '/hooks/clone-secret-withhold'
     | '/hooks/clone-secrets-reconcile'
     | '/hooks/clone-signing-pair-reconcile'
     | '/hooks/codex-nightly'
@@ -2370,6 +2383,7 @@ export interface RootRouteChildren {
   HooksCloneDeployerDeclarationReconcileRoute: typeof HooksCloneDeployerDeclarationReconcileRoute
   HooksCloneJwtSecretReconcileRoute: typeof HooksCloneJwtSecretReconcileRoute
   HooksCloneSecretForwardReconcileRoute: typeof HooksCloneSecretForwardReconcileRoute
+  HooksCloneSecretWithholdRoute: typeof HooksCloneSecretWithholdRoute
   HooksCloneSecretsReconcileRoute: typeof HooksCloneSecretsReconcileRoute
   HooksCloneSigningPairReconcileRoute: typeof HooksCloneSigningPairReconcileRoute
   HooksCodexNightlyRoute: typeof HooksCodexNightlyRoute
@@ -3104,6 +3118,13 @@ declare module '@tanstack/react-router' {
       path: '/hooks/clone-secrets-reconcile'
       fullPath: '/hooks/clone-secrets-reconcile'
       preLoaderRoute: typeof HooksCloneSecretsReconcileRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/clone-secret-withhold': {
+      id: '/hooks/clone-secret-withhold'
+      path: '/hooks/clone-secret-withhold'
+      fullPath: '/hooks/clone-secret-withhold'
+      preLoaderRoute: typeof HooksCloneSecretWithholdRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/hooks/clone-secret-forward-reconcile': {
@@ -3960,6 +3981,7 @@ const rootRouteChildren: RootRouteChildren = {
     HooksCloneDeployerDeclarationReconcileRoute,
   HooksCloneJwtSecretReconcileRoute: HooksCloneJwtSecretReconcileRoute,
   HooksCloneSecretForwardReconcileRoute: HooksCloneSecretForwardReconcileRoute,
+  HooksCloneSecretWithholdRoute: HooksCloneSecretWithholdRoute,
   HooksCloneSecretsReconcileRoute: HooksCloneSecretsReconcileRoute,
   HooksCloneSigningPairReconcileRoute: HooksCloneSigningPairReconcileRoute,
   HooksCodexNightlyRoute: HooksCodexNightlyRoute,
