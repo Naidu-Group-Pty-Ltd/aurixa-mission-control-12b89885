@@ -515,8 +515,23 @@ export const runParityDryRun = createServerFn({ method: "POST" })
         return null;
       }
     })();
+    // Fetched beside the declared slugs, from the same source and octokit, so
+    // one round trip covers both. Null is a legitimate answer and means every
+    // surplus object reads `undetermined` rather than "the tenant's own".
+    const migrationObjectIndex = await (async () => {
+      try {
+        const { getAppOctokit } = await import("@/server/github-app.server");
+        const { fetchMigrationObjectIndex } = await import("@/server/prime-backend.server");
+        const source = await resolvePrimeSource(context.supabase);
+        if (!source) return null;
+        return await fetchMigrationObjectIndex(getAppOctokit(), source);
+      } catch {
+        return null;
+      }
+    })();
     const parity = await computeParity(primeRef, backend.supabase_project_ref, {
       declaredEdgeFunctions,
+      migrationObjectIndex,
     });
 
     const { data: row, error: insErr } = await context.supabase

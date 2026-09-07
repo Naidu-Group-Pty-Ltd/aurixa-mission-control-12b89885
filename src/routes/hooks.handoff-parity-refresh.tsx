@@ -112,6 +112,21 @@ export const Route = createFileRoute("/hooks/handoff-parity-refresh")({
           }
         })();
 
+        // Resolved once for the same reason: one file, the same prime, every
+        // handoff in the sweep. Null means every surplus object reads
+        // `undetermined` rather than "the tenant's own".
+        const migrationObjectIndex = await (async () => {
+          try {
+            const { getAppOctokit } = await import("@/server/github-app.server");
+            const { fetchMigrationObjectIndex } = await import("@/server/prime-backend.server");
+            const source = await resolvePrimeSource(supabaseAdmin);
+            if (!source) return null;
+            return await fetchMigrationObjectIndex(getAppOctokit(), source);
+          } catch {
+            return null;
+          }
+        })();
+
         const results = { refreshed: 0, skipped: 0, failed: 0, details: [] as any[] };
         for (const h of stale) {
           if (Date.now() - started > DEADLINE_MS) break;
@@ -122,7 +137,10 @@ export const Route = createFileRoute("/hooks/handoff-parity-refresh")({
               results.details.push({ id: h.id, reason: "no_target_backend" });
               continue;
             }
-            const parity = await computeParity(primeRef, targetRef, { declaredEdgeFunctions });
+            const parity = await computeParity(primeRef, targetRef, {
+              declaredEdgeFunctions,
+              migrationObjectIndex,
+            });
             const { data: row, error: insErr } = await supabaseAdmin
               .from("handoff_parity_reports")
               .insert({
