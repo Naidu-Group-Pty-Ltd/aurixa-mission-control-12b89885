@@ -99,12 +99,19 @@ export async function enqueueDomainVerificationJobs(input: {
   zoneId: string | null | undefined;
   challenges: Array<{ type: string; domain: string; value: string }>;
   createdBy?: string | null;
-}): Promise<{ enqueued: number; skipped: number }> {
+}): Promise<{ enqueued: number; skipped: number; errors: string[] }> {
   if (!input.zoneId || input.challenges.length === 0) {
-    return { enqueued: 0, skipped: input.challenges.length };
+    return { enqueued: 0, skipped: input.challenges.length, errors: [] };
   }
   let enqueued = 0;
   let skipped = 0;
+  // WHY the reason travels rather than only the count: `verify_domain_txt` was
+  // refused by this table's own `action` CHECK constraint for four days, and
+  // the caller could not tell that from "the provider asked for nothing". A
+  // count of skips is not a diagnosis — 23514 from the column looks exactly
+  // like an empty challenge list from the provider, and the drain reported
+  // "Waiting for DNS to propagate" either way.
+  const errors: string[] = [];
   for (const challenge of input.challenges) {
     // Only DNS challenges are ours to satisfy. An HTTP challenge is served by
     // the deployment itself, and writing a DNS record for one would be a record
@@ -131,8 +138,10 @@ export async function enqueueDomainVerificationJobs(input: {
       },
       { onConflict: "clone_id,provider_slug,action,payload_hash" },
     );
-    if (error) skipped++;
-    else enqueued++;
+    if (error) {
+      skipped++;
+      errors.push(`${challenge.domain}: ${error.message}`);
+    } else enqueued++;
   }
-  return { enqueued, skipped };
+  return { enqueued, skipped, errors };
 }
