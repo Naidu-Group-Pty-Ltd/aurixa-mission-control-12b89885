@@ -230,4 +230,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "none", reason: "widens a CHECK constraint — pg_constraint is not observable" },
     ],
   },
+  {
+    migration: "20260907070000_schedule_fleet_secret_forward_reconcile.sql",
+    version: "20260907070000",
+    assertions: [{ kind: "cron", jobname: "fleet-secret-forward-reconcile" }],
+  },
 ];
