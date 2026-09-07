@@ -81,6 +81,7 @@ import { Route as HooksHeldFileDriftRouteImport } from './routes/hooks.held-file
 import { Route as HooksHandoffParityRefreshRouteImport } from './routes/hooks.handoff-parity-refresh'
 import { Route as HooksHandoffObservabilityPollRouteImport } from './routes/hooks.handoff-observability-poll'
 import { Route as HooksGithubRouteImport } from './routes/hooks.github'
+import { Route as HooksFleetSecretForwardReconcileRouteImport } from './routes/hooks.fleet-secret-forward-reconcile'
 import { Route as HooksFleetMigrationSyncRouteImport } from './routes/hooks.fleet-migration-sync'
 import { Route as HooksFleetDriftRouteImport } from './routes/hooks.fleet-drift'
 import { Route as HooksFeedbackForwardRetryRouteImport } from './routes/hooks.feedback-forward-retry'
@@ -559,6 +560,12 @@ const HooksGithubRoute = HooksGithubRouteImport.update({
   path: '/hooks/github',
   getParentRoute: () => rootRouteImport,
 } as any)
+const HooksFleetSecretForwardReconcileRoute =
+  HooksFleetSecretForwardReconcileRouteImport.update({
+    id: '/hooks/fleet-secret-forward-reconcile',
+    path: '/hooks/fleet-secret-forward-reconcile',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const HooksFleetMigrationSyncRoute = HooksFleetMigrationSyncRouteImport.update({
   id: '/hooks/fleet-migration-sync',
   path: '/hooks/fleet-migration-sync',
@@ -1239,6 +1246,7 @@ export interface FileRoutesByFullPath {
   '/hooks/feedback-forward-retry': typeof HooksFeedbackForwardRetryRoute
   '/hooks/fleet-drift': typeof HooksFleetDriftRoute
   '/hooks/fleet-migration-sync': typeof HooksFleetMigrationSyncRoute
+  '/hooks/fleet-secret-forward-reconcile': typeof HooksFleetSecretForwardReconcileRoute
   '/hooks/github': typeof HooksGithubRoute
   '/hooks/handoff-observability-poll': typeof HooksHandoffObservabilityPollRoute
   '/hooks/handoff-parity-refresh': typeof HooksHandoffParityRefreshRoute
@@ -1423,6 +1431,7 @@ export interface FileRoutesByTo {
   '/hooks/feedback-forward-retry': typeof HooksFeedbackForwardRetryRoute
   '/hooks/fleet-drift': typeof HooksFleetDriftRoute
   '/hooks/fleet-migration-sync': typeof HooksFleetMigrationSyncRoute
+  '/hooks/fleet-secret-forward-reconcile': typeof HooksFleetSecretForwardReconcileRoute
   '/hooks/github': typeof HooksGithubRoute
   '/hooks/handoff-observability-poll': typeof HooksHandoffObservabilityPollRoute
   '/hooks/handoff-parity-refresh': typeof HooksHandoffParityRefreshRoute
@@ -1609,6 +1618,7 @@ export interface FileRoutesById {
   '/hooks/feedback-forward-retry': typeof HooksFeedbackForwardRetryRoute
   '/hooks/fleet-drift': typeof HooksFleetDriftRoute
   '/hooks/fleet-migration-sync': typeof HooksFleetMigrationSyncRoute
+  '/hooks/fleet-secret-forward-reconcile': typeof HooksFleetSecretForwardReconcileRoute
   '/hooks/github': typeof HooksGithubRoute
   '/hooks/handoff-observability-poll': typeof HooksHandoffObservabilityPollRoute
   '/hooks/handoff-parity-refresh': typeof HooksHandoffParityRefreshRoute
@@ -1796,6 +1806,7 @@ export interface FileRouteTypes {
     | '/hooks/feedback-forward-retry'
     | '/hooks/fleet-drift'
     | '/hooks/fleet-migration-sync'
+    | '/hooks/fleet-secret-forward-reconcile'
     | '/hooks/github'
     | '/hooks/handoff-observability-poll'
     | '/hooks/handoff-parity-refresh'
@@ -1980,6 +1991,7 @@ export interface FileRouteTypes {
     | '/hooks/feedback-forward-retry'
     | '/hooks/fleet-drift'
     | '/hooks/fleet-migration-sync'
+    | '/hooks/fleet-secret-forward-reconcile'
     | '/hooks/github'
     | '/hooks/handoff-observability-poll'
     | '/hooks/handoff-parity-refresh'
@@ -2165,6 +2177,7 @@ export interface FileRouteTypes {
     | '/hooks/feedback-forward-retry'
     | '/hooks/fleet-drift'
     | '/hooks/fleet-migration-sync'
+    | '/hooks/fleet-secret-forward-reconcile'
     | '/hooks/github'
     | '/hooks/handoff-observability-poll'
     | '/hooks/handoff-parity-refresh'
@@ -2348,6 +2361,7 @@ export interface RootRouteChildren {
   HooksFeedbackForwardRetryRoute: typeof HooksFeedbackForwardRetryRoute
   HooksFleetDriftRoute: typeof HooksFleetDriftRoute
   HooksFleetMigrationSyncRoute: typeof HooksFleetMigrationSyncRoute
+  HooksFleetSecretForwardReconcileRoute: typeof HooksFleetSecretForwardReconcileRoute
   HooksGithubRoute: typeof HooksGithubRoute
   HooksHandoffObservabilityPollRoute: typeof HooksHandoffObservabilityPollRoute
   HooksHandoffParityRefreshRoute: typeof HooksHandoffParityRefreshRoute
@@ -2937,6 +2951,13 @@ declare module '@tanstack/react-router' {
       path: '/hooks/github'
       fullPath: '/hooks/github'
       preLoaderRoute: typeof HooksGithubRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/fleet-secret-forward-reconcile': {
+      id: '/hooks/fleet-secret-forward-reconcile'
+      path: '/hooks/fleet-secret-forward-reconcile'
+      fullPath: '/hooks/fleet-secret-forward-reconcile'
+      preLoaderRoute: typeof HooksFleetSecretForwardReconcileRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/hooks/fleet-migration-sync': {
@@ -3914,6 +3935,7 @@ const rootRouteChildren: RootRouteChildren = {
   HooksFeedbackForwardRetryRoute: HooksFeedbackForwardRetryRoute,
   HooksFleetDriftRoute: HooksFleetDriftRoute,
   HooksFleetMigrationSyncRoute: HooksFleetMigrationSyncRoute,
+  HooksFleetSecretForwardReconcileRoute: HooksFleetSecretForwardReconcileRoute,
   HooksGithubRoute: HooksGithubRoute,
   HooksHandoffObservabilityPollRoute: HooksHandoffObservabilityPollRoute,
   HooksHandoffParityRefreshRoute: HooksHandoffParityRefreshRoute,

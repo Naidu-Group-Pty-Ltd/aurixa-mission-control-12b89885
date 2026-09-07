@@ -93,6 +93,19 @@ const CLASS_REFUSAL: Partial<Record<SecretClass, string>> = {
 };
 
 /**
+ * The absolute refusals, as one function.
+ *
+ * Extracted so the per-clone decision and the FLEET decision below cannot
+ * hold different ideas of what may never travel. Two copies of the security
+ * boundary is exactly the shape this file's own header warns about, and it
+ * would be invisible from outside: both paths would keep working, and only
+ * one of them would refuse a signing key.
+ */
+export function classRefusalFor(secretClass: SecretClass): string | undefined {
+  return CLASS_REFUSAL[secretClass];
+}
+
+/**
  * Decide what a push does with one authorised name.
  *
  * The order is the guarantee: class first, so no arrangement of rows can
@@ -101,7 +114,7 @@ const CLASS_REFUSAL: Partial<Record<SecretClass, string>> = {
  * question left once the name is allowed to travel at all.
  */
 export function decideForward(facts: ForwardFacts): ForwardOutcome {
-  const classRefusal = CLASS_REFUSAL[facts.secretClass];
+  const classRefusal = classRefusalFor(facts.secretClass);
   if (classRefusal) return { act: "refuse", name: facts.name, why: classRefusal };
 
   if (facts.fleetInherit === false) {
@@ -183,4 +196,141 @@ export function planCloneForwards(input: {
       presentInEnv: input.envHas(name),
     }),
   );
+}
+
+/* ─────────────────────────── fleet-wide forwards ──────────────────────────
+ *
+ * `decideForward` above answers a per-clone row's question and, for a name
+ * fleet policy already carries, returns `already_fleet_wide` — "fleet policy
+ * already forwards this name to every clone; this row adds nothing."
+ *
+ * That sentence is true of PROVISIONING and false of the fleet. Fleet policy
+ * is applied when a clone is built, and nothing re-applies it, so a name added
+ * to `prime_secret_forwards` after a clone was provisioned reaches that clone
+ * never — while every surface that asks the per-clone path reports the name as
+ * already handled. Measured 7 Sep 2026: the five Didit names were marked
+ * `inherit` fleet-wide and read `missing` on all three clones, and identity
+ * verification on each of them refused as unconfigured.
+ *
+ * The remedy that existed was a full convergence pass over the whole engine —
+ * minutes and vendor calls against a live tenant, refused outright unless the
+ * backend is `ready`, to deliver five environment variables. So the ordinary
+ * act of adding a fleet credential had no ordinary lever.
+ *
+ * This is that lever, and it is deliberately the same shape as the per-clone
+ * sweep: the ledger is the filter so it settles, an absent value is never
+ * written, and the class refusals are the SAME function rather than a second
+ * copy that agrees today.
+ */
+
+/** What a fleet pass does with one fleet-policy name on one clone. */
+export type FleetForwardOutcome =
+  /** Marked inheritable, held here, not yet on this clone — will be written. */
+  | { readonly act: "forward"; readonly name: string }
+  /** Fleet policy declines this name. Never written. */
+  | { readonly act: "not_inherited"; readonly name: string; readonly why: string }
+  /** Refused on class, ahead of every other question. */
+  | { readonly act: "refuse"; readonly name: string; readonly why: string }
+  /** Mission Control's own environment holds nothing under this name. */
+  | { readonly act: "no_value"; readonly name: string; readonly why: string }
+  /** The clone's ledger already records it. Not rewritten — this settles. */
+  | { readonly act: "already_set"; readonly name: string; readonly why: string };
+
+export type FleetForwardFacts = {
+  readonly name: string;
+  readonly secretClass: SecretClass;
+  /** The fleet row's `inherit`. */
+  readonly inherit: boolean;
+  /** Whether Mission Control's own environment holds a non-empty value. */
+  readonly presentInEnv: boolean;
+  /**
+   * Whether this clone's ledger already records the name as delivered.
+   *
+   * `failed` must NOT count as settled — that is the state a retry exists for,
+   * the same rule the per-clone sweep follows.
+   */
+  readonly settledOnClone: boolean;
+};
+
+/**
+ * Decide what a fleet pass does with one name on one clone.
+ *
+ * Same order as `decideForward`, for the same reason: class first, so no
+ * arrangement of rows or sweeps can forward a signing key; then policy; then
+ * the ledger; then the value.
+ *
+ * The ledger is asked BEFORE the environment so a settled name reports as
+ * settled even on a deployment that has since dropped the value — otherwise a
+ * clone that legitimately holds a credential would be reported as missing it
+ * because Mission Control's own environment changed.
+ */
+export function decideFleetForward(facts: FleetForwardFacts): FleetForwardOutcome {
+  const classRefusal = classRefusalFor(facts.secretClass);
+  if (classRefusal) return { act: "refuse", name: facts.name, why: classRefusal };
+
+  if (!facts.inherit) {
+    return {
+      act: "not_inherited",
+      name: facts.name,
+      why: "Fleet policy records this name as not forwarded.",
+    };
+  }
+
+  if (facts.settledOnClone) {
+    return {
+      act: "already_set",
+      name: facts.name,
+      why: "This clone's secret ledger already records the name as delivered.",
+    };
+  }
+
+  if (!facts.presentInEnv) {
+    return {
+      act: "no_value",
+      name: facts.name,
+      why:
+        "Fleet policy forwards this name and Mission Control's environment holds no value " +
+        "under it, so there is nothing to forward. Set it on this deployment — an empty " +
+        "secret is not written, because a name set to the empty string fails authentication " +
+        "rather than reporting as unset.",
+    };
+  }
+
+  return { act: "forward", name: facts.name };
+}
+
+/** Every fleet name decided together for one clone. */
+export function planFleetForwards(input: {
+  /** Every fleet row, including the `inherit = false` ones. */
+  readonly fleet: ReadonlyMap<string, boolean>;
+  readonly classOf: (name: string) => SecretClass;
+  readonly envHas: (name: string) => boolean;
+  /** The names this clone's ledger records as delivered. */
+  readonly settled: ReadonlySet<string>;
+}): FleetForwardOutcome[] {
+  return [...input.fleet.keys()].sort().map((name) =>
+    decideFleetForward({
+      name,
+      secretClass: input.classOf(name),
+      inherit: input.fleet.get(name) === true,
+      presentInEnv: input.envHas(name),
+      settledOnClone: input.settled.has(name),
+    }),
+  );
+}
+
+/** The names a fleet pass will actually write, in a stable order. */
+export function fleetNamesToWrite(outcomes: readonly FleetForwardOutcome[]): string[] {
+  return outcomes.filter((o) => o.act === "forward").map((o) => o.name);
+}
+
+/**
+ * Fleet names this deployment cannot deliver because it holds no value.
+ *
+ * Reported rather than counted as settled: a name that is fleet policy, is
+ * allowed to travel, and has nothing behind it is an operator action — and it
+ * is precisely the state that reads as healthy everywhere else.
+ */
+export function fleetNamesWithoutValue(outcomes: readonly FleetForwardOutcome[]): string[] {
+  return outcomes.filter((o) => o.act === "no_value").map((o) => o.name);
 }
