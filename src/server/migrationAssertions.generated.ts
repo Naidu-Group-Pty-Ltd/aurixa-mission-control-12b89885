@@ -218,4 +218,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260906120000",
     assertions: [{ kind: "rows", table: "clone_deployments", atLeast: 3 }],
   },
+  {
+    migration: "20260906170000_prune_cron_run_history.sql",
+    version: "20260906170000",
+    assertions: [{ kind: "cron", jobname: "mc-purge-cron-history" }],
+  },
 ];
