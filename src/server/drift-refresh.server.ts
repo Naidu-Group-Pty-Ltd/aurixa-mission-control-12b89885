@@ -89,14 +89,48 @@ export async function runDriftRefresh(supabase: SupabaseLike): Promise<DriftRefr
 
   const processOne = async (c: (typeof clones)[number]) => {
     try {
-      let baseSha = c.last_synced_sha;
+      // `last_synced_sha` is a PRIME revision — the commit of the prime that
+      // this clone's content was last brought up to. That is what makes the
+      // comparison below legal at all: it is asked of the PRIME repository,
+      // so a base it cannot resolve is not a comparison, it is a 404.
+      //
+      // This used to fall back to the CLONE's own HEAD when no baseline was
+      // recorded. A clone repository is created from a template rather than
+      // forked, so its history is its own: the prime does not contain a single
+      // one of its commits. `preflight-property-group@main` was `8fefecf` and
+      // the prime answered `No commit found for SHA` — every hour, for every
+      // clone that had never merged a cascade. The throw landed in the catch
+      // below, which wrote `failed`, and `failed` is the one reading nothing
+      // here can lift. Two clones sat in it for a week looking like a broken
+      // cascade while the cascade was opening their pull requests on schedule.
+      //
+      // There is no substitute for a baseline, so none is invented. A clone
+      // with none has an UNKNOWN distance from the prime — which is a fact
+      // about our record, not a fault in the clone — and the first cascade to
+      // merge writes the real one.
+      const baseSha = c.last_synced_sha;
       if (!baseSha) {
-        const { data: br } = await octokit.repos.getBranch({
-          owner: c.github_owner,
-          repo: c.github_repo,
-          branch: c.default_branch || "main",
+        const moved = c.sync_status !== "unknown" || !c.last_drift_check_at;
+        const { error: unknownErr } = await supabase
+          .from("clones")
+          .update({
+            sync_status: "unknown",
+            last_drift_check_at: new Date().toISOString(),
+          })
+          .eq("id", c.id);
+        // A write that failed is not a reading that was taken. Reported on the
+        // row rather than swallowed, so a database fault cannot look like a
+        // clone that was measured and found unmeasurable.
+        if (unknownErr) throw new Error(unknownErr.message);
+        if (moved) updated++;
+        per_clone.push({
+          id: c.id,
+          name: c.name,
+          commits_behind: c.commits_behind,
+          sync_status: "unknown",
+          error: "no recorded prime revision — drift cannot be measured until a cascade merges",
         });
-        baseSha = br.commit.sha;
+        return;
       }
 
       const { data: cmp } = await octokit.repos.compareCommitsWithBasehead({
@@ -137,10 +171,21 @@ export async function runDriftRefresh(supabase: SupabaseLike): Promise<DriftRefr
       });
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Unreachable";
+      // A measurement that failed is not a clone that failed. This wrote
+      // `failed` for anything the comparison threw — a rate limit, a network
+      // blip, a base the prime could not resolve — and `failed` is the one
+      // reading this sweep will never lift, so a transient fault became a
+      // permanent verdict on the clone page.
+      //
+      // `unknown` says what is true: we could not measure it this pass. It is
+      // replaced by the next pass that can. A `failed` the CASCADE recorded is
+      // left exactly where it is, because that one is a real outcome and only
+      // a cascade may clear it.
+      const status: SyncStatus = c.sync_status === "failed" ? "failed" : "unknown";
       await supabase
         .from("clones")
         .update({
-          sync_status: "failed",
+          sync_status: status,
           last_drift_check_at: new Date().toISOString(),
         })
         .eq("id", c.id);
@@ -148,7 +193,7 @@ export async function runDriftRefresh(supabase: SupabaseLike): Promise<DriftRefr
         id: c.id,
         name: c.name,
         commits_behind: c.commits_behind,
-        sync_status: "failed",
+        sync_status: status,
         error: msg,
       });
       updated++;

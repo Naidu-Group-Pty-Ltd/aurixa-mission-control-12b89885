@@ -99,16 +99,39 @@ export async function provisionCloneCore(
         githubUrl = created.html_url;
       }
 
-      // Fetch HEAD so we can record last_synced_sha = baseline
+      // Record the baseline: the PRIME revision this clone's content was
+      // copied from.
+      //
+      // It is read from the PRIME repository, and that is the whole point.
+      // This used to read the branch off the CLONE — which is equivalent on
+      // the fork path, where history is shared, and wrong on the template
+      // path, where `createUsingTemplate` starts a fresh history whose commits
+      // exist in no other repository. Every consumer of `last_synced_sha`
+      // reads it as a prime revision — `runDriftRefresh` compares it against
+      // the prime, and `requestBackendSyncAfterCascade` says so in its own
+      // contract — so a clone sha stored here is a base the prime answers 404
+      // to, for ever.
+      //
+      // Both outcomes of the old code were wrong and looked different: a fast
+      // template copy stored a sha nothing could resolve, and a slow one hit
+      // the catch and stored null. Preflight Property Group and NPC Test took
+      // the second road and read `failed` on every drift sweep from the day
+      // they were provisioned.
+      //
+      // Null stays a legitimate answer — `workForCascade` treats a clone with
+      // no recorded revision as owing every backend file, which is the safe
+      // reading — so a prime that cannot be read is recorded as no baseline
+      // rather than as somebody else's commit.
       try {
         const { data: br } = await octokit.repos.getBranch({
-          owner: githubOwner,
-          repo: githubRepo,
+          owner: prime.github_owner,
+          repo: prime.github_repo,
           branch: prime.default_branch || "main",
         });
         lastSyncedSha = br.commit.sha;
       } catch {
-        // Fork/template can take a moment to propagate; not fatal.
+        // The prime is unreadable this instant; a wrong baseline is worse
+        // than none, and the first cascade to merge writes the real one.
         lastSyncedSha = null;
       }
     } catch (e) {
@@ -130,7 +153,11 @@ export async function provisionCloneCore(
       github_url: githubUrl,
       default_branch: prime.default_branch || "main",
       cloudflare_enabled: data.cloudflareEnabled,
-      sync_status: "in_sync",
+      // `in_sync` is a claim that this clone holds a known prime revision, so
+      // it is only made where one was actually recorded. With no baseline the
+      // distance from the prime is unmeasurable rather than zero, and the
+      // drift sweep says exactly that until a cascade merges.
+      sync_status: lastSyncedSha ? "in_sync" : "unknown",
       last_synced_sha: lastSyncedSha,
       last_cascade_at: lastSyncedSha ? new Date().toISOString() : null,
       owner_user_id: userId,
