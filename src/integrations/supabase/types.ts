@@ -10,7 +10,7 @@ export type Database = {
   // Allows to automatically instantiate createClient with right options
   // instead of createClient<Database, { PostgrestVersion: 'XX' }>(URL, KEY)
   __InternalSupabase: {
-    PostgrestVersion: "14.17"
+    PostgrestVersion: "14.5"
   }
   public: {
     Tables: {
@@ -930,17 +930,9 @@ export type Database = {
       }
       client_agreements: {
         Row: {
+          account_id: string | null
           addon_slugs: string[]
           admin_email: string | null
-          excluded_module_ids: string[]
-          module_ids: string[]
-          plan_slug: string | null
-          provision_error: string | null
-          provision_on_signature: boolean
-          provision_region: string
-          provision_status: string
-          provisioned_clone_id: string | null
-          account_id: string | null
           client_email: string
           client_name: string
           client_org: string | null
@@ -953,26 +945,26 @@ export type Database = {
           docusign_signed_at: string | null
           docusign_status: string | null
           docusign_voided_at: string | null
+          excluded_module_ids: string[]
           id: string
           metadata: Json
+          module_ids: string[]
           notes: string | null
+          plan_slug: string | null
+          provision_error: string | null
+          provision_on_signature: boolean
+          provision_region: string
+          provision_status: string
+          provisioned_clone_id: string | null
           service_tier: string | null
           status: string
           updated_at: string
           void_reason: string | null
         }
         Insert: {
+          account_id?: string | null
           addon_slugs?: string[]
           admin_email?: string | null
-          excluded_module_ids?: string[]
-          module_ids?: string[]
-          plan_slug?: string | null
-          provision_error?: string | null
-          provision_on_signature?: boolean
-          provision_region?: string
-          provision_status?: string
-          provisioned_clone_id?: string | null
-          account_id?: string | null
           client_email: string
           client_name: string
           client_org?: string | null
@@ -985,26 +977,26 @@ export type Database = {
           docusign_signed_at?: string | null
           docusign_status?: string | null
           docusign_voided_at?: string | null
+          excluded_module_ids?: string[]
           id?: string
           metadata?: Json
-          notes?: string | null
-          service_tier?: string | null
-          status?: string
-          updated_at?: string
-          void_reason?: string | null
-        }
-        Update: {
-          addon_slugs?: string[]
-          admin_email?: string | null
-          excluded_module_ids?: string[]
           module_ids?: string[]
+          notes?: string | null
           plan_slug?: string | null
           provision_error?: string | null
           provision_on_signature?: boolean
           provision_region?: string
           provision_status?: string
           provisioned_clone_id?: string | null
+          service_tier?: string | null
+          status?: string
+          updated_at?: string
+          void_reason?: string | null
+        }
+        Update: {
           account_id?: string | null
+          addon_slugs?: string[]
+          admin_email?: string | null
           client_email?: string
           client_name?: string
           client_org?: string | null
@@ -1017,9 +1009,17 @@ export type Database = {
           docusign_signed_at?: string | null
           docusign_status?: string | null
           docusign_voided_at?: string | null
+          excluded_module_ids?: string[]
           id?: string
           metadata?: Json
+          module_ids?: string[]
           notes?: string | null
+          plan_slug?: string | null
+          provision_error?: string | null
+          provision_on_signature?: boolean
+          provision_region?: string
+          provision_status?: string
+          provisioned_clone_id?: string | null
           service_tier?: string | null
           status?: string
           updated_at?: string
@@ -1039,6 +1039,20 @@ export type Database = {
             isOneToOne: false
             referencedRelation: "crm_contacts"
             referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "client_agreements_provisioned_clone_id_fkey"
+            columns: ["provisioned_clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "client_agreements_provisioned_clone_id_fkey"
+            columns: ["provisioned_clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones_missing_isolated_backend"
+            referencedColumns: ["clone_id"]
           },
         ]
       }
@@ -1297,44 +1311,6 @@ export type Database = {
           },
         ]
       }
-      clone_secret_forwards: {
-        Row: {
-          clone_id: string
-          created_at: string
-          created_by: string | null
-          description: string | null
-          id: string
-          name: string
-          updated_at: string
-        }
-        Insert: {
-          clone_id: string
-          created_at?: string
-          created_by?: string | null
-          description?: string | null
-          id?: string
-          name: string
-          updated_at?: string
-        }
-        Update: {
-          clone_id?: string
-          created_at?: string
-          created_by?: string | null
-          description?: string | null
-          id?: string
-          name?: string
-          updated_at?: string
-        }
-        Relationships: [
-          {
-            foreignKeyName: "clone_secret_forwards_clone_id_fkey"
-            columns: ["clone_id"]
-            isOneToOne: false
-            referencedRelation: "clones"
-            referencedColumns: ["id"]
-          },
-        ]
-      }
       clone_backend_secrets: {
         Row: {
           clone_id: string
@@ -1406,11 +1382,11 @@ export type Database = {
           queued_at: string | null
           queued_module_ids: string[] | null
           reference_sync_started_at: string | null
+          region: string
           repair_requested_at: string | null
+          repo_retarget: Json | null
           resume_stage: string | null
           retry_after: string | null
-          region: string
-          repo_retarget: Json | null
           secret_shells: Json
           service_role_key: string | null
           source_ref: string | null
@@ -1443,11 +1419,11 @@ export type Database = {
           queued_at?: string | null
           queued_module_ids?: string[] | null
           reference_sync_started_at?: string | null
+          region?: string
           repair_requested_at?: string | null
+          repo_retarget?: Json | null
           resume_stage?: string | null
           retry_after?: string | null
-          region?: string
-          repo_retarget?: Json | null
           secret_shells?: Json
           service_role_key?: string | null
           source_ref?: string | null
@@ -1480,11 +1456,11 @@ export type Database = {
           queued_at?: string | null
           queued_module_ids?: string[] | null
           reference_sync_started_at?: string | null
+          region?: string
           repair_requested_at?: string | null
+          repo_retarget?: Json | null
           resume_stage?: string | null
           retry_after?: string | null
-          region?: string
-          repo_retarget?: Json | null
           secret_shells?: Json
           service_role_key?: string | null
           source_ref?: string | null
@@ -1775,146 +1751,6 @@ export type Database = {
           },
         ]
       }
-      clone_turnstile_identities: {
-        Row: {
-          clone_id: string
-          created_at: string
-          created_by: string | null
-          domains: string[]
-          fail_closed_at: string | null
-          id: string
-          last_error: string | null
-          mode: string
-          secret_last4: string | null
-          secret_written_at: string | null
-          site_key: string | null
-          site_key_published_at: string | null
-          status: string
-          updated_at: string
-          widget_name: string | null
-        }
-        Insert: {
-          clone_id: string
-          created_at?: string
-          created_by?: string | null
-          domains?: string[]
-          fail_closed_at?: string | null
-          id?: string
-          last_error?: string | null
-          mode?: string
-          secret_last4?: string | null
-          secret_written_at?: string | null
-          site_key?: string | null
-          site_key_published_at?: string | null
-          status?: string
-          updated_at?: string
-          widget_name?: string | null
-        }
-        Update: {
-          clone_id?: string
-          created_at?: string
-          created_by?: string | null
-          domains?: string[]
-          fail_closed_at?: string | null
-          id?: string
-          last_error?: string | null
-          mode?: string
-          secret_last4?: string | null
-          secret_written_at?: string | null
-          site_key?: string | null
-          site_key_published_at?: string | null
-          status?: string
-          updated_at?: string
-          widget_name?: string | null
-        }
-        Relationships: [
-          {
-            foreignKeyName: "clone_turnstile_identities_clone_id_fkey"
-            columns: ["clone_id"]
-            isOneToOne: true
-            referencedRelation: "clones"
-            referencedColumns: ["id"]
-          },
-        ]
-      }
-      clone_email_identities: {
-        Row: {
-          clone_id: string
-          created_at: string
-          created_by: string | null
-          default_from_address: string | null
-          dns_installed_via: string | null
-          from_address_written_at: string | null
-          dns_records: Json
-          domain_status: string
-          id: string
-          key_last4: string | null
-          key_written_at: string | null
-          last_error: string | null
-          region: string
-          revoked_at: string | null
-          resend_domain_id: string | null
-          resend_key_id: string | null
-          sending_domain: string
-          updated_at: string
-        }
-        Insert: {
-          clone_id: string
-          created_at?: string
-          created_by?: string | null
-          default_from_address?: string | null
-          dns_installed_via?: string | null
-          from_address_written_at?: string | null
-          dns_records?: Json
-          domain_status?: string
-          id?: string
-          key_last4?: string | null
-          key_written_at?: string | null
-          last_error?: string | null
-          region?: string
-          revoked_at?: string | null
-          resend_domain_id?: string | null
-          resend_key_id?: string | null
-          sending_domain: string
-          updated_at?: string
-        }
-        Update: {
-          clone_id?: string
-          created_at?: string
-          created_by?: string | null
-          default_from_address?: string | null
-          dns_installed_via?: string | null
-          from_address_written_at?: string | null
-          dns_records?: Json
-          domain_status?: string
-          id?: string
-          key_last4?: string | null
-          key_written_at?: string | null
-          last_error?: string | null
-          region?: string
-          revoked_at?: string | null
-          resend_domain_id?: string | null
-          resend_key_id?: string | null
-          sending_domain?: string
-          updated_at?: string
-        }
-        Relationships: [
-          {
-            foreignKeyName: "clone_email_identities_clone_id_fkey"
-            columns: ["clone_id"]
-            isOneToOne: true
-            referencedRelation: "clones"
-            referencedColumns: ["id"]
-          },
-          {
-            foreignKeyName: "clone_email_identities_clone_id_fkey"
-            columns: ["clone_id"]
-            isOneToOne: true
-            referencedRelation: "clones_missing_isolated_backend"
-            referencedColumns: ["clone_id"]
-          },
-        ]
-      }
       clone_deployments: {
         Row: {
           attempts: number
@@ -2191,6 +2027,84 @@ export type Database = {
             isOneToOne: false
             referencedRelation: "edge_providers"
             referencedColumns: ["slug"]
+          },
+        ]
+      }
+      clone_email_identities: {
+        Row: {
+          clone_id: string
+          created_at: string
+          created_by: string | null
+          default_from_address: string | null
+          dns_installed_via: string | null
+          dns_records: Json
+          domain_status: string
+          from_address_written_at: string | null
+          id: string
+          key_last4: string | null
+          key_written_at: string | null
+          last_error: string | null
+          region: string
+          resend_domain_id: string | null
+          resend_key_id: string | null
+          revoked_at: string | null
+          sending_domain: string
+          updated_at: string
+        }
+        Insert: {
+          clone_id: string
+          created_at?: string
+          created_by?: string | null
+          default_from_address?: string | null
+          dns_installed_via?: string | null
+          dns_records?: Json
+          domain_status?: string
+          from_address_written_at?: string | null
+          id?: string
+          key_last4?: string | null
+          key_written_at?: string | null
+          last_error?: string | null
+          region?: string
+          resend_domain_id?: string | null
+          resend_key_id?: string | null
+          revoked_at?: string | null
+          sending_domain: string
+          updated_at?: string
+        }
+        Update: {
+          clone_id?: string
+          created_at?: string
+          created_by?: string | null
+          default_from_address?: string | null
+          dns_installed_via?: string | null
+          dns_records?: Json
+          domain_status?: string
+          from_address_written_at?: string | null
+          id?: string
+          key_last4?: string | null
+          key_written_at?: string | null
+          last_error?: string | null
+          region?: string
+          resend_domain_id?: string | null
+          resend_key_id?: string | null
+          revoked_at?: string | null
+          sending_domain?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clone_email_identities_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: true
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "clone_email_identities_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: true
+            referencedRelation: "clones_missing_isolated_backend"
+            referencedColumns: ["clone_id"]
           },
         ]
       }
@@ -2646,6 +2560,13 @@ export type Database = {
             referencedColumns: ["id"]
           },
           {
+            foreignKeyName: "clone_payment_gate_events_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones_missing_isolated_backend"
+            referencedColumns: ["clone_id"]
+          },
+          {
             foreignKeyName: "clone_payment_gate_events_gate_id_fkey"
             columns: ["gate_id"]
             isOneToOne: false
@@ -2746,6 +2667,13 @@ export type Database = {
             isOneToOne: true
             referencedRelation: "clones"
             referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "clone_payment_gates_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: true
+            referencedRelation: "clones_missing_isolated_backend"
+            referencedColumns: ["clone_id"]
           },
         ]
       }
@@ -2984,6 +2912,51 @@ export type Database = {
         }
         Relationships: []
       }
+      clone_secret_forwards: {
+        Row: {
+          clone_id: string
+          created_at: string
+          created_by: string | null
+          description: string | null
+          id: string
+          name: string
+          updated_at: string
+        }
+        Insert: {
+          clone_id: string
+          created_at?: string
+          created_by?: string | null
+          description?: string | null
+          id?: string
+          name: string
+          updated_at?: string
+        }
+        Update: {
+          clone_id?: string
+          created_at?: string
+          created_by?: string | null
+          description?: string | null
+          id?: string
+          name?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clone_secret_forwards_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "clone_secret_forwards_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones_missing_isolated_backend"
+            referencedColumns: ["clone_id"]
+          },
+        ]
+      }
       clone_stripe_configs: {
         Row: {
           activated_at: string | null
@@ -3092,6 +3065,75 @@ export type Database = {
           },
         ]
       }
+      clone_turnstile_identities: {
+        Row: {
+          clone_id: string
+          created_at: string
+          created_by: string | null
+          domains: string[]
+          fail_closed_at: string | null
+          id: string
+          last_error: string | null
+          mode: string
+          secret_last4: string | null
+          secret_written_at: string | null
+          site_key: string | null
+          site_key_published_at: string | null
+          status: string
+          updated_at: string
+          widget_name: string | null
+        }
+        Insert: {
+          clone_id: string
+          created_at?: string
+          created_by?: string | null
+          domains?: string[]
+          fail_closed_at?: string | null
+          id?: string
+          last_error?: string | null
+          mode?: string
+          secret_last4?: string | null
+          secret_written_at?: string | null
+          site_key?: string | null
+          site_key_published_at?: string | null
+          status?: string
+          updated_at?: string
+          widget_name?: string | null
+        }
+        Update: {
+          clone_id?: string
+          created_at?: string
+          created_by?: string | null
+          domains?: string[]
+          fail_closed_at?: string | null
+          id?: string
+          last_error?: string | null
+          mode?: string
+          secret_last4?: string | null
+          secret_written_at?: string | null
+          site_key?: string | null
+          site_key_published_at?: string | null
+          status?: string
+          updated_at?: string
+          widget_name?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clone_turnstile_identities_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: true
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "clone_turnstile_identities_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: true
+            referencedRelation: "clones_missing_isolated_backend"
+            referencedColumns: ["clone_id"]
+          },
+        ]
+      }
       clones: {
         Row: {
           billing_stripe_customer_id: string | null
@@ -3100,11 +3142,11 @@ export type Database = {
           cloudflare_zone_id: string | null
           codex_nightly_enabled: boolean
           commits_behind: number
+          contract_excluded_module_slugs: string[]
           created_at: string
           default_branch: string
           deploy_url: string | null
           drift_suggestions: Json
-          contract_excluded_module_slugs: string[]
           entitled_module_slugs: string[]
           entitled_plan_slug: string | null
           entitlement_keys: string[]
@@ -3144,11 +3186,11 @@ export type Database = {
           cloudflare_zone_id?: string | null
           codex_nightly_enabled?: boolean
           commits_behind?: number
+          contract_excluded_module_slugs?: string[]
           created_at?: string
           default_branch?: string
           deploy_url?: string | null
           drift_suggestions?: Json
-          contract_excluded_module_slugs?: string[]
           entitled_module_slugs?: string[]
           entitled_plan_slug?: string | null
           entitlement_keys?: string[]
@@ -3188,11 +3230,11 @@ export type Database = {
           cloudflare_zone_id?: string | null
           codex_nightly_enabled?: boolean
           commits_behind?: number
+          contract_excluded_module_slugs?: string[]
           created_at?: string
           default_branch?: string
           deploy_url?: string | null
           drift_suggestions?: Json
-          contract_excluded_module_slugs?: string[]
           entitled_module_slugs?: string[]
           entitled_plan_slug?: string | null
           entitlement_keys?: string[]
@@ -6018,8 +6060,8 @@ export type Database = {
           recipients_per_message: number
           reply_to: string | null
           send_days: number[]
-          starts_at: string | null
           started_at: string | null
+          starts_at: string | null
           status: string
           subject_template: string
           timezone: string
@@ -6048,8 +6090,8 @@ export type Database = {
           recipients_per_message?: number
           reply_to?: string | null
           send_days?: number[]
-          starts_at?: string | null
           started_at?: string | null
+          starts_at?: string | null
           status?: string
           subject_template?: string
           timezone?: string
@@ -6078,8 +6120,8 @@ export type Database = {
           recipients_per_message?: number
           reply_to?: string | null
           send_days?: number[]
-          starts_at?: string | null
           started_at?: string | null
+          starts_at?: string | null
           status?: string
           subject_template?: string
           timezone?: string
@@ -8597,12 +8639,12 @@ export type Database = {
       }
       prime_config: {
         Row: {
+          clone_gate_default_hours: number
+          clone_gate_enabled: boolean
           codex_nightly_cron: string
           codex_nightly_enabled: boolean
           codex_post_merge_revalidate: boolean
           codex_pr_scan_enabled: boolean
-          clone_gate_default_hours: number
-          clone_gate_enabled: boolean
           codex_scan_dedup_hours: number
           created_at: string
           default_branch: string
@@ -8617,12 +8659,12 @@ export type Database = {
           updated_at: string
         }
         Insert: {
+          clone_gate_default_hours?: number
+          clone_gate_enabled?: boolean
           codex_nightly_cron?: string
           codex_nightly_enabled?: boolean
           codex_post_merge_revalidate?: boolean
           codex_pr_scan_enabled?: boolean
-          clone_gate_default_hours?: number
-          clone_gate_enabled?: boolean
           codex_scan_dedup_hours?: number
           created_at?: string
           default_branch?: string
@@ -8637,12 +8679,12 @@ export type Database = {
           updated_at?: string
         }
         Update: {
+          clone_gate_default_hours?: number
+          clone_gate_enabled?: boolean
           codex_nightly_cron?: string
           codex_nightly_enabled?: boolean
           codex_post_merge_revalidate?: boolean
           codex_pr_scan_enabled?: boolean
-          clone_gate_default_hours?: number
-          clone_gate_enabled?: boolean
           codex_scan_dedup_hours?: number
           created_at?: string
           default_branch?: string
@@ -12670,10 +12712,6 @@ export type Database = {
       ledger_source: "subscription" | "topup" | "manual" | "system" | "report"
       module_status: "proposed" | "approved" | "archived" | "rejected"
       notification_kind:
-        | "clone_gate_armed"
-        | "clone_gate_expiring"
-        | "clone_gate_locked"
-        | "clone_gate_unlocked"
         | "cascade_completed"
         | "cascade_failed"
         | "cascade_partial"
@@ -12728,10 +12766,14 @@ export type Database = {
         | "voice_outbound_failed"
         | "voice_blacklist_hit"
         | "phone_missed_call"
-        | "agreement_provisioned"
         | "agreement_signed"
         | "agreement_declined"
         | "migration_drift"
+        | "agreement_provisioned"
+        | "clone_gate_armed"
+        | "clone_gate_locked"
+        | "clone_gate_unlocked"
+        | "clone_gate_expiring"
       notification_severity: "info" | "success" | "warning" | "error"
       overage_policy: "block" | "topup_only" | "pay_as_you_go"
       provisioning_method: "fork" | "template" | "clone"
@@ -12832,12 +12874,12 @@ export type Tables<
   DefaultSchemaTableNameOrOptions extends
     | keyof (DefaultSchema["Tables"] & DefaultSchema["Views"])
     | { schema: keyof DatabaseWithoutInternals },
-  TableName extends DefaultSchemaTableNameOrOptions extends {
+  TableName extends (DefaultSchemaTableNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof (DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"] &
         DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Views"])
-    : never = never,
+    : never) = never,
 > = DefaultSchemaTableNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -12861,11 +12903,11 @@ export type TablesInsert<
   DefaultSchemaTableNameOrOptions extends
     | keyof DefaultSchema["Tables"]
     | { schema: keyof DatabaseWithoutInternals },
-  TableName extends DefaultSchemaTableNameOrOptions extends {
+  TableName extends (DefaultSchemaTableNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"]
-    : never = never,
+    : never) = never,
 > = DefaultSchemaTableNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -12886,11 +12928,11 @@ export type TablesUpdate<
   DefaultSchemaTableNameOrOptions extends
     | keyof DefaultSchema["Tables"]
     | { schema: keyof DatabaseWithoutInternals },
-  TableName extends DefaultSchemaTableNameOrOptions extends {
+  TableName extends (DefaultSchemaTableNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"]
-    : never = never,
+    : never) = never,
 > = DefaultSchemaTableNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -12911,11 +12953,11 @@ export type Enums<
   DefaultSchemaEnumNameOrOptions extends
     | keyof DefaultSchema["Enums"]
     | { schema: keyof DatabaseWithoutInternals },
-  EnumName extends DefaultSchemaEnumNameOrOptions extends {
+  EnumName extends (DefaultSchemaEnumNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof DatabaseWithoutInternals[DefaultSchemaEnumNameOrOptions["schema"]]["Enums"]
-    : never = never,
+    : never) = never,
 > = DefaultSchemaEnumNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -12928,11 +12970,11 @@ export type CompositeTypes<
   PublicCompositeTypeNameOrOptions extends
     | keyof DefaultSchema["CompositeTypes"]
     | { schema: keyof DatabaseWithoutInternals },
-  CompositeTypeName extends PublicCompositeTypeNameOrOptions extends {
+  CompositeTypeName extends (PublicCompositeTypeNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof DatabaseWithoutInternals[PublicCompositeTypeNameOrOptions["schema"]]["CompositeTypes"]
-    : never = never,
+    : never) = never,
 > = PublicCompositeTypeNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -13161,10 +13203,6 @@ export const Constants = {
       ledger_source: ["subscription", "topup", "manual", "system", "report"],
       module_status: ["proposed", "approved", "archived", "rejected"],
       notification_kind: [
-        "clone_gate_armed",
-        "clone_gate_expiring",
-        "clone_gate_locked",
-        "clone_gate_unlocked",
         "cascade_completed",
         "cascade_failed",
         "cascade_partial",
@@ -13219,10 +13257,14 @@ export const Constants = {
         "voice_outbound_failed",
         "voice_blacklist_hit",
         "phone_missed_call",
-        "agreement_provisioned",
         "agreement_signed",
         "agreement_declined",
         "migration_drift",
+        "agreement_provisioned",
+        "clone_gate_armed",
+        "clone_gate_locked",
+        "clone_gate_unlocked",
+        "clone_gate_expiring",
       ],
       notification_severity: ["info", "success", "warning", "error"],
       overage_policy: ["block", "topup_only", "pay_as_you_go"],
