@@ -24,9 +24,11 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import {
+  decideCloneWithhold,
   fleetNamesToWrite,
   fleetNamesWithoutValue,
   planFleetForwards,
+  type CloneWithholdOutcome,
   type FleetForwardOutcome,
 } from "./cloneSecretForward.pure";
 import { hasEnvValue } from "./cloneSecretForward.server";
@@ -39,6 +41,13 @@ const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 /** A ledger status that means the clone actually holds the value. */
 const SETTLED = new Set(["inherited", "set"]);
+
+/**
+ * The status that means the clone must NOT hold it, though fleet policy
+ * forwards it. Named once, because a literal at each end is how two ends
+ * drift — and the end that drifts here puts a withdrawn credential back.
+ */
+export const WITHHELD = "withheld";
 
 export type FleetPushResult =
   | {
@@ -87,6 +96,12 @@ export async function pushFleetSecretForwards(
     envHas: hasEnvValue,
     settled: new Set(
       (ledger.data ?? []).filter((r) => SETTLED.has(r.status ?? "")).map((r) => r.name),
+    ),
+    // Deliberately taken off THIS clone. Not `settled` — the project does not
+    // hold the value and the ledger must not claim it does — so it needs its
+    // own channel or this sweep writes it straight back within thirty minutes.
+    withheld: new Set(
+      (ledger.data ?? []).filter((r) => (r.status ?? "") === WITHHELD).map((r) => r.name),
     ),
   });
 
@@ -194,4 +209,79 @@ export async function reconcileFleetSecretForwards(supabase: Db): Promise<FleetR
   }
 
   return out;
+}
+
+/**
+ * Take one forwarded credential off ONE clone and keep it off.
+ *
+ * The ledger write comes AFTER the delete and is checked, because the order
+ * decides what a half-done act leaves behind. Recorded-then-deleted would, on
+ * a failed delete, leave a ledger saying the project does not hold a value it
+ * still holds — the register lying in the direction that hides a live
+ * credential on a tenant's project. Deleted-then-recorded leaves, on a failed
+ * write, a project without the value and a ledger still saying `inherited`:
+ * the next sweep puts it back, which is visible, undoes nothing, and is the
+ * state this function can be run again from.
+ */
+export async function withholdCloneSecret(
+  supabase: Db,
+  cloneId: string,
+  name: string,
+  reason: string,
+  opts: { actorUserId?: string | null } = {},
+): Promise<
+  | { ok: true; outcome: CloneWithholdOutcome }
+  | { ok: false; reason: string; error: string; outcome?: CloneWithholdOutcome }
+> {
+  const ledger = await supabase
+    .from("clone_backend_secrets")
+    .select("status")
+    .eq("clone_id", cloneId)
+    .eq("name", name)
+    .maybeSingle();
+  // An unreadable ledger is not an absent row. Deciding on a failed read would
+  // let a transport fault look like "this clone never had it".
+  if (ledger.error)
+    return { ok: false, reason: "unreadable", error: ledger.error.message };
+
+  const outcome = decideCloneWithhold({
+    name,
+    ledgerStatus: ledger.data?.status ?? null,
+    reason,
+  });
+  if (outcome.act !== "withhold") {
+    return outcome.act === "already_withheld"
+      ? { ok: true, outcome }
+      : { ok: false, reason: "refused", error: outcome.why, outcome };
+  }
+
+  let projectRef: string;
+  try {
+    projectRef = (await resolveCloneSecretTarget(supabase, cloneId)).projectRef;
+  } catch (e) {
+    const reasonCode = e instanceof CloneSecretTargetError ? e.reason : "unreadable";
+    return { ok: false, reason: reasonCode, error: msg(e) };
+  }
+
+  const { deleteCloneSecretValues } = await import("./backend-provisioning.server");
+  const del = await deleteCloneSecretValues(projectRef, [name]);
+  if (!del.ok) return { ok: false, reason: "delete_failed", error: del.error };
+
+  const { error: ledgerErr } = await supabase.from("clone_backend_secrets").upsert(
+    [
+      {
+        clone_id: cloneId,
+        name,
+        status: WITHHELD,
+        last_set_at: new Date().toISOString(),
+        last_error: null,
+        set_by: opts.actorUserId ?? null,
+      },
+    ],
+    { onConflict: "clone_id,name" },
+  );
+  if (ledgerErr)
+    return { ok: false, reason: "ledger_write_failed", error: ledgerErr.message, outcome };
+
+  return { ok: true, outcome };
 }

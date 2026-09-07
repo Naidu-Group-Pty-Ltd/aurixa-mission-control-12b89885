@@ -118,6 +118,7 @@ function targetFor(a: Assertion): Target | null {
     case "cron":
       return { kind: "cron", jobname: a.jobname };
     case "enum":
+    case "check":
     case "none":
       return null;
   }

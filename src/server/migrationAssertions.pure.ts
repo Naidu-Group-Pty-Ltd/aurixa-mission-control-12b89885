@@ -36,6 +36,7 @@
  *     -- @asserts cron:reference-data-sync-hourly
  *     -- @asserts rows:mirror_exclusions>=17
  *     -- @asserts enum:clone_backend_status
+ *     -- @asserts check:clone_backend_secrets.status=withheld
  *     -- @asserts none:documentation only — creates no object
  *
  * `none` is deliberately available and deliberately requires a reason. A
@@ -44,7 +45,15 @@
  * exempt, because "no assertion" and "nobody wrote one" have to look different.
  */
 
-export type AssertionKind = "table" | "column" | "rpc" | "cron" | "rows" | "enum" | "none";
+export type AssertionKind =
+  | "table"
+  | "column"
+  | "rpc"
+  | "cron"
+  | "rows"
+  | "enum"
+  | "check"
+  | "none";
 
 export type Assertion =
   | { kind: "table"; table: string }
@@ -53,6 +62,17 @@ export type Assertion =
   | { kind: "cron"; jobname: string }
   | { kind: "rows"; table: string; atLeast: number }
   | { kind: "enum"; type: string }
+  /**
+   * A CHECK constraint on `<table>.<column>` admits `<value>`.
+   *
+   * Widening a CHECK creates no object, so `table`/`column` cannot express it
+   * and `none` would be a false claim — the migration plainly makes something
+   * true. A value the column refuses is rejected by Postgres while looking,
+   * from the code that tried to write it, exactly like a write nobody
+   * attempted; that is a defect this platform has already paid for on a
+   * `reminder_type` column. Declared and not probed, like `enum`.
+   */
+  | { kind: "check"; table: string; column: string; value: string }
   | { kind: "none"; reason: string };
 
 export type ParseResult = { ok: true; assertions: Assertion[] } | { ok: false; errors: string[] };
@@ -135,6 +155,15 @@ export function parseAssertions(sql: string): ParseResult {
         else assertions.push({ kind: "enum", type: target });
         break;
       }
+      case "check": {
+        const cm = /^([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)=(.+)$/.exec(target);
+        if (!cm || cm[3].trim().length === 0) {
+          errors.push(bad(raw, "expected `check:<table>.<column>=<value>`"));
+        } else {
+          assertions.push({ kind: "check", table: cm[1], column: cm[2], value: cm[3].trim() });
+        }
+        break;
+      }
       case "none": {
         // A reason, not a token. Short reasons are how `none` becomes a rubber
         // stamp, so require enough words to be an actual explanation.
@@ -144,7 +173,7 @@ export function parseAssertions(sql: string): ParseResult {
       }
       default:
         errors.push(
-          bad(raw, `unknown kind \`${kind}\` (table, column, rpc, cron, rows, enum, none)`),
+          bad(raw, `unknown kind \`${kind}\` (table, column, rpc, cron, rows, enum, check, none)`),
         );
     }
   }
@@ -179,6 +208,8 @@ export function formatAssertion(a: Assertion): string {
       return `rows:${a.table}>=${a.atLeast}`;
     case "enum":
       return `enum:${a.type}`;
+    case "check":
+      return `check:${a.table}.${a.column}=${a.value}`;
     case "none":
       return `none:${a.reason}`;
   }

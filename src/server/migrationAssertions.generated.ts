@@ -265,4 +265,11 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260907100000",
     assertions: [{ kind: "cron", jobname: "backend-catchup" }],
   },
+  {
+    migration: "20260907160000_clone_secret_withheld_status.sql",
+    version: "20260907160000",
+    assertions: [
+      { kind: "check", table: "clone_backend_secrets", column: "status", value: "withheld" },
+    ],
+  },
 ];
