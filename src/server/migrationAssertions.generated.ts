@@ -223,4 +223,11 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260906170000",
     assertions: [{ kind: "cron", jobname: "mc-purge-cron-history" }],
   },
+  {
+    migration: "20260906180000_edge_job_verify_domain_txt_action.sql",
+    version: "20260906180000",
+    assertions: [
+      { kind: "none", reason: "widens a CHECK constraint — pg_constraint is not observable" },
+    ],
+  },
 ];
