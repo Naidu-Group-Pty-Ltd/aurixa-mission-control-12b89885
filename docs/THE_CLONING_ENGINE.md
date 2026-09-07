@@ -1351,12 +1351,18 @@ stage was **skipped rather than failed**, so nothing was recorded anywhere:
   Management API, beside `replicateStorageConfig`, for the same reason and in
   the same place. It **never narrows** — a schema only the clone exposes
   survives — and a failure is reported and non-fatal.
-- **The control plane owns that setting.** Writing `pgrst.db_schemas` onto the
-  `authenticator` role — which is what the endpoint does underneath, and what
-  the dashboard's *Exposed schemas* control writes — does NOT reach a running
-  PostgREST on Supabase Cloud. Two `NOTIFY pgrst, 'reload config'` over
-  seventeen minutes changed nothing. The `PATCH` is the only thing that does,
-  which is why this cannot be a migration.
+- **The API is the deterministic way to apply it, and the only timely one.**
+  Writing `pgrst.db_schemas` onto the `authenticator` role — what the endpoint
+  does underneath, and what the dashboard's *Exposed schemas* control writes —
+  does eventually reach PostgREST, but only when it next recycles and re-reads
+  its in-database config. `NOTIFY pgrst, 'reload config'` does not bring that
+  forward: two of them over seventeen minutes changed nothing, and the schema
+  became reachable about eighteen minutes later on PostgREST's own schedule.
+  **A correction to an earlier reading of this**: the conclusion at the time
+  was that the role setting never reaches a running PostgREST at all. It does.
+  What it does not do is land when you ask it to — and a repair pass that
+  cannot say when its own effect arrives is not a repair, which is why this
+  goes through the API rather than a migration.
 - **Grants are digested**, so a surplus on one schema can no longer mask an
   absence on another. The SCHEMA acls ride in the same digest as the table
   acls, because a missing `usage` makes every table grant inside it unreachable
