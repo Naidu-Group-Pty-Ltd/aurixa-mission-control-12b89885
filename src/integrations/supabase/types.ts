@@ -10,7 +10,7 @@ export type Database = {
   // Allows to automatically instantiate createClient with right options
   // instead of createClient<Database, { PostgrestVersion: 'XX' }>(URL, KEY)
   __InternalSupabase: {
-    PostgrestVersion: "14.17"
+    PostgrestVersion: "14.5"
   }
   public: {
     Tables: {
@@ -930,17 +930,9 @@ export type Database = {
       }
       client_agreements: {
         Row: {
+          account_id: string | null
           addon_slugs: string[]
           admin_email: string | null
-          excluded_module_ids: string[]
-          module_ids: string[]
-          plan_slug: string | null
-          provision_error: string | null
-          provision_on_signature: boolean
-          provision_region: string
-          provision_status: string
-          provisioned_clone_id: string | null
-          account_id: string | null
           client_email: string
           client_name: string
           client_org: string | null
@@ -953,26 +945,26 @@ export type Database = {
           docusign_signed_at: string | null
           docusign_status: string | null
           docusign_voided_at: string | null
+          excluded_module_ids: string[]
           id: string
           metadata: Json
+          module_ids: string[]
           notes: string | null
+          plan_slug: string | null
+          provision_error: string | null
+          provision_on_signature: boolean
+          provision_region: string
+          provision_status: string
+          provisioned_clone_id: string | null
           service_tier: string | null
           status: string
           updated_at: string
           void_reason: string | null
         }
         Insert: {
+          account_id?: string | null
           addon_slugs?: string[]
           admin_email?: string | null
-          excluded_module_ids?: string[]
-          module_ids?: string[]
-          plan_slug?: string | null
-          provision_error?: string | null
-          provision_on_signature?: boolean
-          provision_region?: string
-          provision_status?: string
-          provisioned_clone_id?: string | null
-          account_id?: string | null
           client_email: string
           client_name: string
           client_org?: string | null
@@ -985,26 +977,26 @@ export type Database = {
           docusign_signed_at?: string | null
           docusign_status?: string | null
           docusign_voided_at?: string | null
+          excluded_module_ids?: string[]
           id?: string
           metadata?: Json
-          notes?: string | null
-          service_tier?: string | null
-          status?: string
-          updated_at?: string
-          void_reason?: string | null
-        }
-        Update: {
-          addon_slugs?: string[]
-          admin_email?: string | null
-          excluded_module_ids?: string[]
           module_ids?: string[]
+          notes?: string | null
           plan_slug?: string | null
           provision_error?: string | null
           provision_on_signature?: boolean
           provision_region?: string
           provision_status?: string
           provisioned_clone_id?: string | null
+          service_tier?: string | null
+          status?: string
+          updated_at?: string
+          void_reason?: string | null
+        }
+        Update: {
           account_id?: string | null
+          addon_slugs?: string[]
+          admin_email?: string | null
           client_email?: string
           client_name?: string
           client_org?: string | null
@@ -1017,9 +1009,17 @@ export type Database = {
           docusign_signed_at?: string | null
           docusign_status?: string | null
           docusign_voided_at?: string | null
+          excluded_module_ids?: string[]
           id?: string
           metadata?: Json
+          module_ids?: string[]
           notes?: string | null
+          plan_slug?: string | null
+          provision_error?: string | null
+          provision_on_signature?: boolean
+          provision_region?: string
+          provision_status?: string
+          provisioned_clone_id?: string | null
           service_tier?: string | null
           status?: string
           updated_at?: string
@@ -1039,6 +1039,20 @@ export type Database = {
             isOneToOne: false
             referencedRelation: "crm_contacts"
             referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "client_agreements_provisioned_clone_id_fkey"
+            columns: ["provisioned_clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "client_agreements_provisioned_clone_id_fkey"
+            columns: ["provisioned_clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones_missing_isolated_backend"
+            referencedColumns: ["clone_id"]
           },
         ]
       }
@@ -1297,44 +1311,6 @@ export type Database = {
           },
         ]
       }
-      clone_secret_forwards: {
-        Row: {
-          clone_id: string
-          created_at: string
-          created_by: string | null
-          description: string | null
-          id: string
-          name: string
-          updated_at: string
-        }
-        Insert: {
-          clone_id: string
-          created_at?: string
-          created_by?: string | null
-          description?: string | null
-          id?: string
-          name: string
-          updated_at?: string
-        }
-        Update: {
-          clone_id?: string
-          created_at?: string
-          created_by?: string | null
-          description?: string | null
-          id?: string
-          name?: string
-          updated_at?: string
-        }
-        Relationships: [
-          {
-            foreignKeyName: "clone_secret_forwards_clone_id_fkey"
-            columns: ["clone_id"]
-            isOneToOne: false
-            referencedRelation: "clones"
-            referencedColumns: ["id"]
-          },
-        ]
-      }
       clone_backend_secrets: {
         Row: {
           clone_id: string
@@ -1406,11 +1382,11 @@ export type Database = {
           queued_at: string | null
           queued_module_ids: string[] | null
           reference_sync_started_at: string | null
+          region: string
           repair_requested_at: string | null
+          repo_retarget: Json | null
           resume_stage: string | null
           retry_after: string | null
-          region: string
-          repo_retarget: Json | null
           secret_shells: Json
           service_role_key: string | null
           source_ref: string | null
@@ -1443,11 +1419,11 @@ export type Database = {
           queued_at?: string | null
           queued_module_ids?: string[] | null
           reference_sync_started_at?: string | null
+          region?: string
           repair_requested_at?: string | null
+          repo_retarget?: Json | null
           resume_stage?: string | null
           retry_after?: string | null
-          region?: string
-          repo_retarget?: Json | null
           secret_shells?: Json
           service_role_key?: string | null
           source_ref?: string | null
@@ -1480,11 +1456,11 @@ export type Database = {
           queued_at?: string | null
           queued_module_ids?: string[] | null
           reference_sync_started_at?: string | null
+          region?: string
           repair_requested_at?: string | null
+          repo_retarget?: Json | null
           resume_stage?: string | null
           retry_after?: string | null
-          region?: string
-          repo_retarget?: Json | null
           secret_shells?: Json
           service_role_key?: string | null
           source_ref?: string | null
@@ -1775,146 +1751,6 @@ export type Database = {
           },
         ]
       }
-      clone_turnstile_identities: {
-        Row: {
-          clone_id: string
-          created_at: string
-          created_by: string | null
-          domains: string[]
-          fail_closed_at: string | null
-          id: string
-          last_error: string | null
-          mode: string
-          secret_last4: string | null
-          secret_written_at: string | null
-          site_key: string | null
-          site_key_published_at: string | null
-          status: string
-          updated_at: string
-          widget_name: string | null
-        }
-        Insert: {
-          clone_id: string
-          created_at?: string
-          created_by?: string | null
-          domains?: string[]
-          fail_closed_at?: string | null
-          id?: string
-          last_error?: string | null
-          mode?: string
-          secret_last4?: string | null
-          secret_written_at?: string | null
-          site_key?: string | null
-          site_key_published_at?: string | null
-          status?: string
-          updated_at?: string
-          widget_name?: string | null
-        }
-        Update: {
-          clone_id?: string
-          created_at?: string
-          created_by?: string | null
-          domains?: string[]
-          fail_closed_at?: string | null
-          id?: string
-          last_error?: string | null
-          mode?: string
-          secret_last4?: string | null
-          secret_written_at?: string | null
-          site_key?: string | null
-          site_key_published_at?: string | null
-          status?: string
-          updated_at?: string
-          widget_name?: string | null
-        }
-        Relationships: [
-          {
-            foreignKeyName: "clone_turnstile_identities_clone_id_fkey"
-            columns: ["clone_id"]
-            isOneToOne: true
-            referencedRelation: "clones"
-            referencedColumns: ["id"]
-          },
-        ]
-      }
-      clone_email_identities: {
-        Row: {
-          clone_id: string
-          created_at: string
-          created_by: string | null
-          default_from_address: string | null
-          dns_installed_via: string | null
-          from_address_written_at: string | null
-          dns_records: Json
-          domain_status: string
-          id: string
-          key_last4: string | null
-          key_written_at: string | null
-          last_error: string | null
-          region: string
-          revoked_at: string | null
-          resend_domain_id: string | null
-          resend_key_id: string | null
-          sending_domain: string
-          updated_at: string
-        }
-        Insert: {
-          clone_id: string
-          created_at?: string
-          created_by?: string | null
-          default_from_address?: string | null
-          dns_installed_via?: string | null
-          from_address_written_at?: string | null
-          dns_records?: Json
-          domain_status?: string
-          id?: string
-          key_last4?: string | null
-          key_written_at?: string | null
-          last_error?: string | null
-          region?: string
-          revoked_at?: string | null
-          resend_domain_id?: string | null
-          resend_key_id?: string | null
-          sending_domain: string
-          updated_at?: string
-        }
-        Update: {
-          clone_id?: string
-          created_at?: string
-          created_by?: string | null
-          default_from_address?: string | null
-          dns_installed_via?: string | null
-          from_address_written_at?: string | null
-          dns_records?: Json
-          domain_status?: string
-          id?: string
-          key_last4?: string | null
-          key_written_at?: string | null
-          last_error?: string | null
-          region?: string
-          revoked_at?: string | null
-          resend_domain_id?: string | null
-          resend_key_id?: string | null
-          sending_domain?: string
-          updated_at?: string
-        }
-        Relationships: [
-          {
-            foreignKeyName: "clone_email_identities_clone_id_fkey"
-            columns: ["clone_id"]
-            isOneToOne: true
-            referencedRelation: "clones"
-            referencedColumns: ["id"]
-          },
-          {
-            foreignKeyName: "clone_email_identities_clone_id_fkey"
-            columns: ["clone_id"]
-            isOneToOne: true
-            referencedRelation: "clones_missing_isolated_backend"
-            referencedColumns: ["clone_id"]
-          },
-        ]
-      }
       clone_deployments: {
         Row: {
           attempts: number
@@ -2191,6 +2027,84 @@ export type Database = {
             isOneToOne: false
             referencedRelation: "edge_providers"
             referencedColumns: ["slug"]
+          },
+        ]
+      }
+      clone_email_identities: {
+        Row: {
+          clone_id: string
+          created_at: string
+          created_by: string | null
+          default_from_address: string | null
+          dns_installed_via: string | null
+          dns_records: Json
+          domain_status: string
+          from_address_written_at: string | null
+          id: string
+          key_last4: string | null
+          key_written_at: string | null
+          last_error: string | null
+          region: string
+          resend_domain_id: string | null
+          resend_key_id: string | null
+          revoked_at: string | null
+          sending_domain: string
+          updated_at: string
+        }
+        Insert: {
+          clone_id: string
+          created_at?: string
+          created_by?: string | null
+          default_from_address?: string | null
+          dns_installed_via?: string | null
+          dns_records?: Json
+          domain_status?: string
+          from_address_written_at?: string | null
+          id?: string
+          key_last4?: string | null
+          key_written_at?: string | null
+          last_error?: string | null
+          region?: string
+          resend_domain_id?: string | null
+          resend_key_id?: string | null
+          revoked_at?: string | null
+          sending_domain: string
+          updated_at?: string
+        }
+        Update: {
+          clone_id?: string
+          created_at?: string
+          created_by?: string | null
+          default_from_address?: string | null
+          dns_installed_via?: string | null
+          dns_records?: Json
+          domain_status?: string
+          from_address_written_at?: string | null
+          id?: string
+          key_last4?: string | null
+          key_written_at?: string | null
+          last_error?: string | null
+          region?: string
+          resend_domain_id?: string | null
+          resend_key_id?: string | null
+          revoked_at?: string | null
+          sending_domain?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clone_email_identities_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: true
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "clone_email_identities_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: true
+            referencedRelation: "clones_missing_isolated_backend"
+            referencedColumns: ["clone_id"]
           },
         ]
       }
@@ -2646,6 +2560,13 @@ export type Database = {
             referencedColumns: ["id"]
           },
           {
+            foreignKeyName: "clone_payment_gate_events_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones_missing_isolated_backend"
+            referencedColumns: ["clone_id"]
+          },
+          {
             foreignKeyName: "clone_payment_gate_events_gate_id_fkey"
             columns: ["gate_id"]
             isOneToOne: false
@@ -2746,6 +2667,13 @@ export type Database = {
             isOneToOne: true
             referencedRelation: "clones"
             referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "clone_payment_gates_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: true
+            referencedRelation: "clones_missing_isolated_backend"
+            referencedColumns: ["clone_id"]
           },
         ]
       }
@@ -2984,6 +2912,51 @@ export type Database = {
         }
         Relationships: []
       }
+      clone_secret_forwards: {
+        Row: {
+          clone_id: string
+          created_at: string
+          created_by: string | null
+          description: string | null
+          id: string
+          name: string
+          updated_at: string
+        }
+        Insert: {
+          clone_id: string
+          created_at?: string
+          created_by?: string | null
+          description?: string | null
+          id?: string
+          name: string
+          updated_at?: string
+        }
+        Update: {
+          clone_id?: string
+          created_at?: string
+          created_by?: string | null
+          description?: string | null
+          id?: string
+          name?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clone_secret_forwards_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "clone_secret_forwards_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones_missing_isolated_backend"
+            referencedColumns: ["clone_id"]
+          },
+        ]
+      }
       clone_stripe_configs: {
         Row: {
           activated_at: string | null
@@ -3092,6 +3065,75 @@ export type Database = {
           },
         ]
       }
+      clone_turnstile_identities: {
+        Row: {
+          clone_id: string
+          created_at: string
+          created_by: string | null
+          domains: string[]
+          fail_closed_at: string | null
+          id: string
+          last_error: string | null
+          mode: string
+          secret_last4: string | null
+          secret_written_at: string | null
+          site_key: string | null
+          site_key_published_at: string | null
+          status: string
+          updated_at: string
+          widget_name: string | null
+        }
+        Insert: {
+          clone_id: string
+          created_at?: string
+          created_by?: string | null
+          domains?: string[]
+          fail_closed_at?: string | null
+          id?: string
+          last_error?: string | null
+          mode?: string
+          secret_last4?: string | null
+          secret_written_at?: string | null
+          site_key?: string | null
+          site_key_published_at?: string | null
+          status?: string
+          updated_at?: string
+          widget_name?: string | null
+        }
+        Update: {
+          clone_id?: string
+          created_at?: string
+          created_by?: string | null
+          domains?: string[]
+          fail_closed_at?: string | null
+          id?: string
+          last_error?: string | null
+          mode?: string
+          secret_last4?: string | null
+          secret_written_at?: string | null
+          site_key?: string | null
+          site_key_published_at?: string | null
+          status?: string
+          updated_at?: string
+          widget_name?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clone_turnstile_identities_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: true
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "clone_turnstile_identities_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: true
+            referencedRelation: "clones_missing_isolated_backend"
+            referencedColumns: ["clone_id"]
+          },
+        ]
+      }
       clones: {
         Row: {
           billing_stripe_customer_id: string | null
@@ -3100,11 +3142,11 @@ export type Database = {
           cloudflare_zone_id: string | null
           codex_nightly_enabled: boolean
           commits_behind: number
+          contract_excluded_module_slugs: string[]
           created_at: string
           default_branch: string
           deploy_url: string | null
           drift_suggestions: Json
-          contract_excluded_module_slugs: string[]
           entitled_module_slugs: string[]
           entitled_plan_slug: string | null
           entitlement_keys: string[]
@@ -3144,11 +3186,11 @@ export type Database = {
           cloudflare_zone_id?: string | null
           codex_nightly_enabled?: boolean
           commits_behind?: number
+          contract_excluded_module_slugs?: string[]
           created_at?: string
           default_branch?: string
           deploy_url?: string | null
           drift_suggestions?: Json
-          contract_excluded_module_slugs?: string[]
           entitled_module_slugs?: string[]
           entitled_plan_slug?: string | null
           entitlement_keys?: string[]
@@ -3188,11 +3230,11 @@ export type Database = {
           cloudflare_zone_id?: string | null
           codex_nightly_enabled?: boolean
           commits_behind?: number
+          contract_excluded_module_slugs?: string[]
           created_at?: string
           default_branch?: string
           deploy_url?: string | null
           drift_suggestions?: Json
-          contract_excluded_module_slugs?: string[]
           entitled_module_slugs?: string[]
           entitled_plan_slug?: string | null
           entitlement_keys?: string[]
@@ -5700,6 +5742,549 @@ export type Database = {
           },
         ]
       }
+      email_bounce_scans: {
+        Row: {
+          addresses_suppressed: number
+          cursor_at: string | null
+          error: string | null
+          finished_at: string | null
+          id: string
+          mailbox: string
+          messages_examined: number
+          reports_found: number
+          soft_failures: number
+          started_at: string
+          status: string
+        }
+        Insert: {
+          addresses_suppressed?: number
+          cursor_at?: string | null
+          error?: string | null
+          finished_at?: string | null
+          id?: string
+          mailbox: string
+          messages_examined?: number
+          reports_found?: number
+          soft_failures?: number
+          started_at?: string
+          status?: string
+        }
+        Update: {
+          addresses_suppressed?: number
+          cursor_at?: string | null
+          error?: string | null
+          finished_at?: string | null
+          id?: string
+          mailbox?: string
+          messages_examined?: number
+          reports_found?: number
+          soft_failures?: number
+          started_at?: string
+          status?: string
+        }
+        Relationships: []
+      }
+      email_campaign_imports: {
+        Row: {
+          campaign_id: string
+          columns: Json
+          created_at: string
+          created_by: string | null
+          email_column: string | null
+          id: string
+          imported: number
+          list_id: string | null
+          list_name: string | null
+          skipped_duplicate: number
+          skipped_suppressed: number
+        }
+        Insert: {
+          campaign_id: string
+          columns?: Json
+          created_at?: string
+          created_by?: string | null
+          email_column?: string | null
+          id?: string
+          imported?: number
+          list_id?: string | null
+          list_name?: string | null
+          skipped_duplicate?: number
+          skipped_suppressed?: number
+        }
+        Update: {
+          campaign_id?: string
+          columns?: Json
+          created_at?: string
+          created_by?: string | null
+          email_column?: string | null
+          id?: string
+          imported?: number
+          list_id?: string | null
+          list_name?: string | null
+          skipped_duplicate?: number
+          skipped_suppressed?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "email_campaign_imports_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "email_campaigns"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "email_campaign_imports_list_id_fkey"
+            columns: ["list_id"]
+            isOneToOne: false
+            referencedRelation: "email_lists"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      email_campaign_messages: {
+        Row: {
+          bcc_count: number
+          body_preview: string | null
+          campaign_id: string
+          duration_ms: number | null
+          error: string | null
+          graph_request_id: string | null
+          graph_status: number | null
+          id: string
+          mailbox: string | null
+          queued_at: string
+          recipient_count: number
+          sent_at: string | null
+          status: string
+          subject: string
+          to_address: string | null
+        }
+        Insert: {
+          bcc_count?: number
+          body_preview?: string | null
+          campaign_id: string
+          duration_ms?: number | null
+          error?: string | null
+          graph_request_id?: string | null
+          graph_status?: number | null
+          id?: string
+          mailbox?: string | null
+          queued_at?: string
+          recipient_count?: number
+          sent_at?: string | null
+          status?: string
+          subject: string
+          to_address?: string | null
+        }
+        Update: {
+          bcc_count?: number
+          body_preview?: string | null
+          campaign_id?: string
+          duration_ms?: number | null
+          error?: string | null
+          graph_request_id?: string | null
+          graph_status?: number | null
+          id?: string
+          mailbox?: string | null
+          queued_at?: string
+          recipient_count?: number
+          sent_at?: string | null
+          status?: string
+          subject?: string
+          to_address?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "email_campaign_messages_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "email_campaigns"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      email_campaign_quotas: {
+        Row: {
+          campaign_id: string
+          created_at: string
+          dimension: string
+          dimension_label: string
+          enabled: boolean
+          id: string
+          match_values: string[]
+          max_per_day: number | null
+          max_total: number | null
+          updated_at: string
+          value_label: string
+        }
+        Insert: {
+          campaign_id: string
+          created_at?: string
+          dimension: string
+          dimension_label: string
+          enabled?: boolean
+          id?: string
+          match_values: string[]
+          max_per_day?: number | null
+          max_total?: number | null
+          updated_at?: string
+          value_label: string
+        }
+        Update: {
+          campaign_id?: string
+          created_at?: string
+          dimension?: string
+          dimension_label?: string
+          enabled?: boolean
+          id?: string
+          match_values?: string[]
+          max_per_day?: number | null
+          max_total?: number | null
+          updated_at?: string
+          value_label?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "email_campaign_quotas_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "email_campaigns"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      email_campaign_recipients: {
+        Row: {
+          attempts: number
+          attributes: Json
+          attributes_norm: Json
+          campaign_id: string
+          claimed_at: string | null
+          created_at: string
+          email: string
+          email_key: string
+          id: string
+          last_error: string | null
+          list_id: string | null
+          message_id: string | null
+          position: number
+          sent_at: string | null
+          status: string
+          suppressed_reason: string | null
+          unsubscribe_token: string
+          updated_at: string
+        }
+        Insert: {
+          attempts?: number
+          attributes?: Json
+          attributes_norm?: Json
+          campaign_id: string
+          claimed_at?: string | null
+          created_at?: string
+          email: string
+          email_key: string
+          id?: string
+          last_error?: string | null
+          list_id?: string | null
+          message_id?: string | null
+          position?: number
+          sent_at?: string | null
+          status?: string
+          suppressed_reason?: string | null
+          unsubscribe_token?: string
+          updated_at?: string
+        }
+        Update: {
+          attempts?: number
+          attributes?: Json
+          attributes_norm?: Json
+          campaign_id?: string
+          claimed_at?: string | null
+          created_at?: string
+          email?: string
+          email_key?: string
+          id?: string
+          last_error?: string | null
+          list_id?: string | null
+          message_id?: string | null
+          position?: number
+          sent_at?: string | null
+          status?: string
+          suppressed_reason?: string | null
+          unsubscribe_token?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "email_campaign_recipients_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "email_campaigns"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "email_campaign_recipients_list_id_fkey"
+            columns: ["list_id"]
+            isOneToOne: false
+            referencedRelation: "email_lists"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "email_campaign_recipients_message_id_fkey"
+            columns: ["message_id"]
+            isOneToOne: false
+            referencedRelation: "email_campaign_messages"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      email_campaigns: {
+        Row: {
+          body_format: string
+          body_template: string
+          completed_at: string | null
+          created_at: string
+          created_by: string | null
+          description: string | null
+          ends_at: string | null
+          from_mailbox: string | null
+          from_name: string | null
+          id: string
+          last_message_at: string | null
+          max_messages_per_day: number | null
+          max_messages_per_run: number
+          max_recipients_per_day: number | null
+          min_gap_seconds: number
+          name: string
+          paused_reason: string | null
+          recipients_per_message: number
+          reply_to: string | null
+          send_days: number[]
+          started_at: string | null
+          starts_at: string | null
+          status: string
+          subject_template: string
+          timezone: string
+          updated_at: string
+          window_end: string
+          window_start: string
+        }
+        Insert: {
+          body_format?: string
+          body_template?: string
+          completed_at?: string | null
+          created_at?: string
+          created_by?: string | null
+          description?: string | null
+          ends_at?: string | null
+          from_mailbox?: string | null
+          from_name?: string | null
+          id?: string
+          last_message_at?: string | null
+          max_messages_per_day?: number | null
+          max_messages_per_run?: number
+          max_recipients_per_day?: number | null
+          min_gap_seconds?: number
+          name: string
+          paused_reason?: string | null
+          recipients_per_message?: number
+          reply_to?: string | null
+          send_days?: number[]
+          started_at?: string | null
+          starts_at?: string | null
+          status?: string
+          subject_template?: string
+          timezone?: string
+          updated_at?: string
+          window_end?: string
+          window_start?: string
+        }
+        Update: {
+          body_format?: string
+          body_template?: string
+          completed_at?: string | null
+          created_at?: string
+          created_by?: string | null
+          description?: string | null
+          ends_at?: string | null
+          from_mailbox?: string | null
+          from_name?: string | null
+          id?: string
+          last_message_at?: string | null
+          max_messages_per_day?: number | null
+          max_messages_per_run?: number
+          max_recipients_per_day?: number | null
+          min_gap_seconds?: number
+          name?: string
+          paused_reason?: string | null
+          recipients_per_message?: number
+          reply_to?: string | null
+          send_days?: number[]
+          started_at?: string | null
+          starts_at?: string | null
+          status?: string
+          subject_template?: string
+          timezone?: string
+          updated_at?: string
+          window_end?: string
+          window_start?: string
+        }
+        Relationships: []
+      }
+      email_list_contacts: {
+        Row: {
+          attributes: Json
+          attributes_norm: Json
+          created_at: string
+          email: string
+          email_key: string
+          id: string
+          list_id: string
+          row_number: number | null
+        }
+        Insert: {
+          attributes?: Json
+          attributes_norm?: Json
+          created_at?: string
+          email: string
+          email_key: string
+          id?: string
+          list_id: string
+          row_number?: number | null
+        }
+        Update: {
+          attributes?: Json
+          attributes_norm?: Json
+          created_at?: string
+          email?: string
+          email_key?: string
+          id?: string
+          list_id?: string
+          row_number?: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "email_list_contacts_list_id_fkey"
+            columns: ["list_id"]
+            isOneToOne: false
+            referencedRelation: "email_lists"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      email_lists: {
+        Row: {
+          checksum: string | null
+          columns: Json
+          contact_count: number
+          created_at: string
+          created_by: string | null
+          duplicate_count: number
+          email_column: string | null
+          file_name: string | null
+          file_path: string | null
+          id: string
+          invalid_count: number
+          mime_type: string | null
+          name: string
+          parse_error: string | null
+          row_count: number
+          size_bytes: number | null
+          source_format: string | null
+          status: string
+          updated_at: string
+        }
+        Insert: {
+          checksum?: string | null
+          columns?: Json
+          contact_count?: number
+          created_at?: string
+          created_by?: string | null
+          duplicate_count?: number
+          email_column?: string | null
+          file_name?: string | null
+          file_path?: string | null
+          id?: string
+          invalid_count?: number
+          mime_type?: string | null
+          name: string
+          parse_error?: string | null
+          row_count?: number
+          size_bytes?: number | null
+          source_format?: string | null
+          status?: string
+          updated_at?: string
+        }
+        Update: {
+          checksum?: string | null
+          columns?: Json
+          contact_count?: number
+          created_at?: string
+          created_by?: string | null
+          duplicate_count?: number
+          email_column?: string | null
+          file_name?: string | null
+          file_path?: string | null
+          id?: string
+          invalid_count?: number
+          mime_type?: string | null
+          name?: string
+          parse_error?: string | null
+          row_count?: number
+          size_bytes?: number | null
+          source_format?: string | null
+          status?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      email_suppressions: {
+        Row: {
+          campaign_id: string | null
+          created_by: string | null
+          detail: string | null
+          email: string
+          email_key: string
+          first_seen_at: string
+          last_seen_at: string
+          occurrences: number
+          reason: string
+          source: string
+        }
+        Insert: {
+          campaign_id?: string | null
+          created_by?: string | null
+          detail?: string | null
+          email: string
+          email_key: string
+          first_seen_at?: string
+          last_seen_at?: string
+          occurrences?: number
+          reason: string
+          source: string
+        }
+        Update: {
+          campaign_id?: string | null
+          created_by?: string | null
+          detail?: string | null
+          email?: string
+          email_key?: string
+          first_seen_at?: string
+          last_seen_at?: string
+          occurrences?: number
+          reason?: string
+          source?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "email_suppressions_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "email_campaigns"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       feedback_submissions: {
         Row: {
           additional_comments: string | null
@@ -8054,12 +8639,12 @@ export type Database = {
       }
       prime_config: {
         Row: {
+          clone_gate_default_hours: number
+          clone_gate_enabled: boolean
           codex_nightly_cron: string
           codex_nightly_enabled: boolean
           codex_post_merge_revalidate: boolean
           codex_pr_scan_enabled: boolean
-          clone_gate_default_hours: number
-          clone_gate_enabled: boolean
           codex_scan_dedup_hours: number
           created_at: string
           default_branch: string
@@ -8074,12 +8659,12 @@ export type Database = {
           updated_at: string
         }
         Insert: {
+          clone_gate_default_hours?: number
+          clone_gate_enabled?: boolean
           codex_nightly_cron?: string
           codex_nightly_enabled?: boolean
           codex_post_merge_revalidate?: boolean
           codex_pr_scan_enabled?: boolean
-          clone_gate_default_hours?: number
-          clone_gate_enabled?: boolean
           codex_scan_dedup_hours?: number
           created_at?: string
           default_branch?: string
@@ -8094,12 +8679,12 @@ export type Database = {
           updated_at?: string
         }
         Update: {
+          clone_gate_default_hours?: number
+          clone_gate_enabled?: boolean
           codex_nightly_cron?: string
           codex_nightly_enabled?: boolean
           codex_post_merge_revalidate?: boolean
           codex_pr_scan_enabled?: boolean
-          clone_gate_default_hours?: number
-          clone_gate_enabled?: boolean
           codex_scan_dedup_hours?: number
           created_at?: string
           default_branch?: string
@@ -11576,6 +12161,22 @@ export type Database = {
         }
         Relationships: []
       }
+      email_campaign_recipient_counts: {
+        Row: {
+          campaign_id: string | null
+          recipients: number | null
+          status: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "email_campaign_recipients_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "email_campaigns"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
     }
     Functions: {
       acknowledge_plan_change: {
@@ -11685,6 +12286,14 @@ export type Database = {
           last_run_status: string
           runs: number
           schedule: string
+        }[]
+      }
+      email_import_list_into_campaign: {
+        Args: { p_campaign: string; p_list: string }
+        Returns: {
+          imported: number
+          skipped_duplicate: number
+          skipped_suppressed: number
         }[]
       }
       entitlement_for_subscription: {
@@ -12103,10 +12712,6 @@ export type Database = {
       ledger_source: "subscription" | "topup" | "manual" | "system" | "report"
       module_status: "proposed" | "approved" | "archived" | "rejected"
       notification_kind:
-        | "clone_gate_armed"
-        | "clone_gate_expiring"
-        | "clone_gate_locked"
-        | "clone_gate_unlocked"
         | "cascade_completed"
         | "cascade_failed"
         | "cascade_partial"
@@ -12161,10 +12766,14 @@ export type Database = {
         | "voice_outbound_failed"
         | "voice_blacklist_hit"
         | "phone_missed_call"
-        | "agreement_provisioned"
         | "agreement_signed"
         | "agreement_declined"
         | "migration_drift"
+        | "agreement_provisioned"
+        | "clone_gate_armed"
+        | "clone_gate_locked"
+        | "clone_gate_unlocked"
+        | "clone_gate_expiring"
       notification_severity: "info" | "success" | "warning" | "error"
       overage_policy: "block" | "topup_only" | "pay_as_you_go"
       provisioning_method: "fork" | "template" | "clone"
@@ -12265,12 +12874,12 @@ export type Tables<
   DefaultSchemaTableNameOrOptions extends
     | keyof (DefaultSchema["Tables"] & DefaultSchema["Views"])
     | { schema: keyof DatabaseWithoutInternals },
-  TableName extends DefaultSchemaTableNameOrOptions extends {
+  TableName extends (DefaultSchemaTableNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof (DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"] &
         DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Views"])
-    : never = never,
+    : never) = never,
 > = DefaultSchemaTableNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -12294,11 +12903,11 @@ export type TablesInsert<
   DefaultSchemaTableNameOrOptions extends
     | keyof DefaultSchema["Tables"]
     | { schema: keyof DatabaseWithoutInternals },
-  TableName extends DefaultSchemaTableNameOrOptions extends {
+  TableName extends (DefaultSchemaTableNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"]
-    : never = never,
+    : never) = never,
 > = DefaultSchemaTableNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -12319,11 +12928,11 @@ export type TablesUpdate<
   DefaultSchemaTableNameOrOptions extends
     | keyof DefaultSchema["Tables"]
     | { schema: keyof DatabaseWithoutInternals },
-  TableName extends DefaultSchemaTableNameOrOptions extends {
+  TableName extends (DefaultSchemaTableNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"]
-    : never = never,
+    : never) = never,
 > = DefaultSchemaTableNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -12344,11 +12953,11 @@ export type Enums<
   DefaultSchemaEnumNameOrOptions extends
     | keyof DefaultSchema["Enums"]
     | { schema: keyof DatabaseWithoutInternals },
-  EnumName extends DefaultSchemaEnumNameOrOptions extends {
+  EnumName extends (DefaultSchemaEnumNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof DatabaseWithoutInternals[DefaultSchemaEnumNameOrOptions["schema"]]["Enums"]
-    : never = never,
+    : never) = never,
 > = DefaultSchemaEnumNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -12361,11 +12970,11 @@ export type CompositeTypes<
   PublicCompositeTypeNameOrOptions extends
     | keyof DefaultSchema["CompositeTypes"]
     | { schema: keyof DatabaseWithoutInternals },
-  CompositeTypeName extends PublicCompositeTypeNameOrOptions extends {
+  CompositeTypeName extends (PublicCompositeTypeNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof DatabaseWithoutInternals[PublicCompositeTypeNameOrOptions["schema"]]["CompositeTypes"]
-    : never = never,
+    : never) = never,
 > = PublicCompositeTypeNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -12594,10 +13203,6 @@ export const Constants = {
       ledger_source: ["subscription", "topup", "manual", "system", "report"],
       module_status: ["proposed", "approved", "archived", "rejected"],
       notification_kind: [
-        "clone_gate_armed",
-        "clone_gate_expiring",
-        "clone_gate_locked",
-        "clone_gate_unlocked",
         "cascade_completed",
         "cascade_failed",
         "cascade_partial",
@@ -12652,10 +13257,14 @@ export const Constants = {
         "voice_outbound_failed",
         "voice_blacklist_hit",
         "phone_missed_call",
-        "agreement_provisioned",
         "agreement_signed",
         "agreement_declined",
         "migration_drift",
+        "agreement_provisioned",
+        "clone_gate_armed",
+        "clone_gate_locked",
+        "clone_gate_unlocked",
+        "clone_gate_expiring",
       ],
       notification_severity: ["info", "success", "warning", "error"],
       overage_policy: ["block", "topup_only", "pay_as_you_go"],
