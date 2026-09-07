@@ -231,6 +231,11 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     ],
   },
   {
+    migration: "20260907070000_schedule_fleet_secret_forward_reconcile.sql",
+    version: "20260907070000",
+    assertions: [{ kind: "cron", jobname: "fleet-secret-forward-reconcile" }],
+  },
+  {
     migration: "20260907090000_email_campaigns.sql",
     version: "20260907090000",
     assertions: [

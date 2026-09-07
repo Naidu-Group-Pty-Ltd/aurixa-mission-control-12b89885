@@ -61,7 +61,13 @@ export type EnsureMissionControlLinkResult =
   | { ok: true; outcome: MissionControlLinkOutcome; /** In-process only. Never log. */ values: Record<string, string> }
   | {
       ok: false;
-      stage: "keys_read" | "endpoint_read" | "endpoint_write" | "key_write" | "env_write";
+      stage:
+        | "keys_read"
+        | "endpoint_read"
+        | "endpoint_write"
+        | "key_scope_write"
+        | "key_write"
+        | "env_write";
       error: string;
     };
 
@@ -85,13 +91,14 @@ export async function ensureCloneMissionControlLink(
 
   const keysRes = await supabase
     .from("clone_api_keys")
-    .select("id, label, revoked_at, revoke_at, delivered_project_ref, delivered_env_at")
+    .select("id, label, scopes, revoked_at, revoke_at, delivered_project_ref, delivered_env_at")
     .eq("clone_id", cloneId);
   if (keysRes.error) return { ok: false, stage: "keys_read", error: keysRes.error.message };
   const keys: LinkKeyFact[] = (keysRes.data ?? []).map((k) => {
     const row = k as {
       id: string;
       label?: string | null;
+      scopes?: string[] | null;
       revoked_at?: string | null;
       revoke_at?: string | null;
       delivered_project_ref?: string | null;
@@ -100,6 +107,7 @@ export async function ensureCloneMissionControlLink(
     return {
       id: row.id,
       label: row.label ?? null,
+      scopes: row.scopes ?? [],
       revokedAt: row.revoked_at ?? null,
       revokeAt: row.revoke_at ?? null,
       deliveredProjectRef: row.delivered_project_ref ?? null,
@@ -126,6 +134,7 @@ export async function ensureCloneMissionControlLink(
     keys,
     endpoints: endpoints.map((e) => ({ id: e.id, url: e.url, isActive: e.is_active, events: e.events ?? [] })),
     now,
+    defaultScopes: DEFAULT_SCOPES,
   });
 
   // The endpoint row FIRST: its secret is the half that can be read back.
@@ -156,6 +165,25 @@ export async function ensureCloneMissionControlLink(
         .eq("id", owned.id);
       if (endpointErr) return { ok: false, stage: "endpoint_write", error: endpointErr.message };
     }
+  }
+
+  /*
+   * Widen a live link key onto the current defaults BEFORE anything else
+   * touches it. This is not a rotation: the value is unchanged, nothing is
+   * re-delivered, and the clone's environment does not move — so it is safe on
+   * a key that is already in service, which is exactly the key that needs it.
+   *
+   * It fails loudly rather than quietly, because the failure it prevents is a
+   * key that authenticates and is then refused for scope — which reads to an
+   * operator like a bad credential and sends them to rotate a good one.
+   */
+  for (const grant of plan.grantScopes) {
+    const existing = keys.find((k) => k.id === grant.keyId);
+    const { error: scopeErr } = await supabase
+      .from("clone_api_keys")
+      .update({ scopes: Array.from(new Set([...(existing?.scopes ?? []), ...grant.add])) })
+      .eq("id", grant.keyId);
+    if (scopeErr) return { ok: false, stage: "key_scope_write", error: scopeErr.message };
   }
 
   // Then the key, only where none is delivered here.
@@ -256,6 +284,7 @@ export type MissionControlLinkRepairFailure =
   | "keys_read"
   | "endpoint_read"
   | "endpoint_write"
+  | "key_scope_write"
   | "key_write"
   | "env_write";
 

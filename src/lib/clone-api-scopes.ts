@@ -16,13 +16,26 @@ export type CloneApiScope = {
     | "health"
     | "usage"
     | "gate"
-    | "clones";
+    | "clones"
+    | "verification";
   label: string;
   description: string;
   default?: boolean;
 };
 
 export const CLONE_API_SCOPES: CloneApiScope[] = [
+  {
+    value: "verification:run",
+    group: "verification",
+    label: "Identity verification — run",
+    description:
+      "Run this clone's own identity verifications through Mission Control's Didit credential. " +
+      "On by default: the credential is deliberately NOT forwarded to any clone, because a Didit " +
+      "key can list every session in its application — including other tenants' customers' " +
+      "passport portraits — so brokering is the only way a clone can verify at all. Grants the " +
+      "three write operations of a verification sequence and nothing readable.",
+    default: true,
+  },
   {
     value: "tokens:meter",
     group: "tokens",

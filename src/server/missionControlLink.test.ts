@@ -15,6 +15,7 @@ import {
   type LinkKeyFact,
   type MissionControlLinkFacts,
 } from "./missionControlLink.pure";
+import { DEFAULT_SCOPES } from "@/lib/clone-api-scopes";
 
 const NOW = Date.parse("2026-09-06T06:00:00.000Z");
 const REF = "umrtusxohxjxzodxorim";
@@ -25,6 +26,7 @@ const key = (over: Partial<LinkKeyFact> = {}): LinkKeyFact => ({
   revokeAt: null,
   deliveredProjectRef: REF,
   deliveredEnvAt: "2026-09-06T05:00:00.000Z",
+  scopes: [...DEFAULT_SCOPES],
   ...over,
 });
 const facts = (over: Partial<MissionControlLinkFacts> = {}): MissionControlLinkFacts => ({
@@ -33,6 +35,7 @@ const facts = (over: Partial<MissionControlLinkFacts> = {}): MissionControlLinkF
   keys: [],
   endpoints: [],
   now: NOW,
+  defaultScopes: [...DEFAULT_SCOPES],
   ...over,
 });
 
@@ -132,6 +135,68 @@ describe("planMissionControlLink — minted where delivered, never rotated on a 
     expect(partial.endpoint.events.sort()).toEqual([...CLONE_WEBHOOK_EVENTS].sort());
   });
 
+  it("grants a live link key the default scopes it predates", () => {
+    /*
+     * The defect this closes, measured on the live fleet 7 Sep 2026: a key's
+     * scopes are snapshotted at mint, and a delivered key is deliberately
+     * never re-minted — so `clones:rotate` shipped "on by default" and none of
+     * the three delivered keys carried it. The scope existed, the endpoint
+     * existed, and no credential anybody could present had it.
+     */
+    const plan = planMissionControlLink(
+      facts({ keys: [key({ scopes: ["tokens:meter"] })] }),
+    );
+    expect(plan.mintKey).toBe(false);
+    expect(plan.grantScopes).toHaveLength(1);
+    expect(plan.grantScopes[0].keyId).toBe("k1");
+    expect(plan.grantScopes[0].add).toEqual(DEFAULT_SCOPES.filter((s) => s !== "tokens:meter"));
+    expect(plan.why.some((w) => w.includes("predate"))).toBe(true);
+  });
+
+  it("plans nothing for a key that already holds them", () => {
+    expect(planMissionControlLink(facts({ keys: [key()] })).grantScopes).toEqual([]);
+  });
+
+  it("never widens a key this engine does not own", () => {
+    // An operator scoped their own key on purpose in the Keys tab. Widening it
+    // because a default changed grants an authority nobody asked for.
+    const plan = planMissionControlLink(
+      facts({
+        keys: [
+          key({ id: "operator", label: "operator-issued", scopes: ["tokens:read"] }),
+          key({ id: "auto", label: "auto-provisioned", scopes: [] }),
+        ],
+      }),
+    );
+    expect(plan.grantScopes).toEqual([]);
+  });
+
+  it("never widens a key that is no longer live", () => {
+    const plan = planMissionControlLink(
+      facts({ keys: [key({ scopes: [], revokedAt: "2026-09-01T00:00:00.000Z" })] }),
+    );
+    expect(plan.grantScopes).toEqual([]);
+  });
+
+  it("adds and never replaces — a deliberately granted extra scope survives", () => {
+    const plan = planMissionControlLink(
+      facts({ keys: [key({ scopes: [...DEFAULT_SCOPES, "usage:read"] })] }),
+    );
+    // Nothing to add, and nothing proposing to take `usage:read` away.
+    expect(plan.grantScopes).toEqual([]);
+    expect(JSON.stringify(plan)).not.toContain("usage:read");
+  });
+
+  it("carries the verification scope, or a brokered clone cannot verify at all", () => {
+    // The credential is deliberately not forwarded to any clone, so brokering
+    // is the ONLY route a clone has to the vendor. A delivered key without
+    // this scope authenticates and is then refused — which reads to an
+    // operator like a bad key and sends them to rotate a good one.
+    expect(DEFAULT_SCOPES).toContain("verification:run");
+    const plan = planMissionControlLink(facts({ keys: [key({ scopes: ["tokens:meter"] })] }));
+    expect(plan.grantScopes[0].add).toContain("verification:run");
+  });
+
   it("names the agency from the clone's name and says when it cannot", () => {
     expect(planMissionControlLink(facts()).agencyName).toBe("NPC Test");
     expect(agencyNameFor("  Preflight   Property Group ")).toBe("Preflight Property Group");
@@ -170,16 +235,38 @@ describe("the link is written endpoint first, in one request, and the key is nev
     // discarded-errors guard reads a `.insert(` literal here as a write.
     // Six-space indent: the write inside the branch, not the read above it.
     const endpoint = s.indexOf('.from("token_webhook_endpoints")\n      ');
-    const keyRow = s.indexOf('.from("clone_api_keys")\n      ');
+    // The scope widen comes first of the key writes and is an UPDATE: it
+    // changes what a key may do and never what it is, so it is safe on a key
+    // already in service. The mint follows it.
+    const widen = s.indexOf('.from("clone_api_keys")\n      ');
+    const keyRow = s.indexOf('.from("clone_api_keys")\n      ', widen + 1);
     const env = s.indexOf("setCloneSecretValues(");
     const stamp = s.indexOf("delivered_env_at: nowIso");
     expect(endpoint).toBeGreaterThan(-1);
     expect(s.slice(endpoint, endpoint + 80)).toContain("insert(");
-    expect(keyRow).toBeGreaterThan(endpoint);
+    expect(widen).toBeGreaterThan(endpoint);
+    expect(s.slice(widen, widen + 80)).toContain("update(");
+    expect(keyRow).toBeGreaterThan(widen);
     expect(s.slice(keyRow, keyRow + 80)).toContain("insert(");
     expect(env).toBeGreaterThan(keyRow);
     expect(stamp).toBeGreaterThan(env);
     expect(s.match(/setCloneSecretValues\(/g)?.length).toBe(1);
+  });
+
+  it("widening a key changes what it may do and never what it is", () => {
+    /*
+     * The whole reason this is safe on a live credential: no new value, no
+     * re-delivery, no environment write. A widen that touched the hash or the
+     * prefix would be a rotation nobody asked for, on the one key the clone is
+     * currently authenticating with.
+     */
+    const s = server();
+    const widen = s.indexOf('.from("clone_api_keys")\n      ');
+    const block = s.slice(widen, s.indexOf("// Then the key", widen));
+    expect(block).toContain("scopes:");
+    for (const forbidden of ["key_hash", "key_prefix", "revoked_at", "delivered_env_at", "clone_id"]) {
+      expect(block, `a scope widen must not write ${forbidden}`).not.toContain(forbidden);
+    }
   });
 
   it("the key is recorded against the ref it was delivered to", () => {

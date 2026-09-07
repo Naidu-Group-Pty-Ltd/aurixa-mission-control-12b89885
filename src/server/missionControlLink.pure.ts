@@ -114,6 +114,8 @@ export type LinkKeyFact = {
   revokeAt: string | null;
   deliveredProjectRef: string | null;
   deliveredEnvAt: string | null;
+  /** What the key may do. Snapshotted at mint, so it goes stale — see `grantScopes`. */
+  scopes: string[];
 };
 
 export type LinkEndpointFact = {
@@ -129,12 +131,30 @@ export type MissionControlLinkFacts = {
   keys: LinkKeyFact[];
   endpoints: LinkEndpointFact[];
   now: number;
+  /** The catalogue's current defaults, passed in so this module stays pure. */
+  defaultScopes: string[];
 };
 
 export type MissionControlLinkPlan = {
   mintKey: boolean;
   /** Link keys to revoke once the new one has landed in the environment. */
   revokeKeyIds: string[];
+  /**
+   * Default scopes a live link key is missing, to be added to what it has.
+   *
+   * A key's scopes are snapshotted at mint, so a scope added to the catalogue
+   * afterwards reaches no key that already exists — and a delivered key is
+   * deliberately never re-minted, because a repair must not rotate a live
+   * credential. Those two correct rules together are why `clones:rotate`
+   * shipped "on by default" and, measured on 7 Sep 2026, was carried by none
+   * of the three delivered keys: the scope existed, the endpoint existed, and
+   * no credential anybody could present had it.
+   *
+   * Widening a key is not rotating it — nothing is re-delivered and no
+   * environment changes — so this converges exactly as the webhook events
+   * beside it already do.
+   */
+  grantScopes: { keyId: string; add: string[] }[];
   endpoint: {
     action: "create" | "update" | "reuse";
     id: string | null;
@@ -175,6 +195,28 @@ export function planMissionControlLink(facts: MissionControlLinkFacts): MissionC
       : "a live key is already delivered to this project — left alone, never rotated on a repair",
   );
 
+  /*
+   * Only the key THIS engine mints. An operator's own key in the Keys tab was
+   * scoped by a person on purpose, and widening it because a default changed
+   * would grant an authority nobody asked for — the engine owns the scopes of
+   * the key the engine owns, and nothing else.
+   */
+  const grantScopes = live
+    .filter((k) => k.label === MISSION_CONTROL_LINK_KEY_LABEL)
+    .map((k) => ({
+      keyId: k.id,
+      // Union, never replacement: a scope granted deliberately on top of the
+      // defaults survives.
+      add: facts.defaultScopes.filter((scope) => !k.scopes.includes(scope)),
+    }))
+    .filter((g) => g.add.length > 0);
+  if (grantScopes.length) {
+    why.push(
+      `granting ${grantScopes.length} link key(s) default scope(s) they predate: ` +
+        Array.from(new Set(grantScopes.flatMap((g) => g.add))).join(", "),
+    );
+  }
+
   const url = cloneWebhookUrl(facts.projectRef);
   const owned = facts.endpoints.find((e) => isMissionControlWebhookUrl(e.url)) ?? null;
   const events = [...CLONE_WEBHOOK_EVENTS];
@@ -205,7 +247,7 @@ export function planMissionControlLink(facts: MissionControlLinkFacts): MissionC
   const agencyName = agencyNameFor(facts.cloneName);
   if (!agencyName) why.push(`${ENV_MISSION_CONTROL_AGENCY_NAME} not written: the clone has no name`);
 
-  return { mintKey, revokeKeyIds, endpoint, agencyName, why };
+  return { mintKey, revokeKeyIds, grantScopes, endpoint, agencyName, why };
 }
 
 export type MissionControlLinkRepairFacts = {

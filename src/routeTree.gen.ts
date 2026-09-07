@@ -141,6 +141,7 @@ import { Route as ClonesCloneIdSecretsRouteImport } from './routes/clones.$clone
 import { Route as ClientsHandoffTokenRouteImport } from './routes/clients.handoff.$token'
 import { Route as ApiPublicPurchasesRouteImport } from './routes/api.public.purchases'
 import { Route as ApiPublicVoiceWebhookRouteImport } from './routes/api.public.voice.webhook'
+import { Route as ApiPublicVerificationOperationRouteImport } from './routes/api.public.verification.$operation'
 import { Route as ApiPublicUsageReportRouteImport } from './routes/api.public.usage.report'
 import { Route as ApiPublicTokensReserveRouteImport } from './routes/api.public.tokens.reserve'
 import { Route as ApiPublicTokensPlanChangeRouteImport } from './routes/api.public.tokens.plan-change'
@@ -873,6 +874,12 @@ const ApiPublicVoiceWebhookRoute = ApiPublicVoiceWebhookRouteImport.update({
   path: '/api/public/voice/webhook',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiPublicVerificationOperationRoute =
+  ApiPublicVerificationOperationRouteImport.update({
+    id: '/api/public/verification/$operation',
+    path: '/api/public/verification/$operation',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiPublicUsageReportRoute = ApiPublicUsageReportRouteImport.update({
   id: '/api/public/usage/report',
   path: '/api/public/usage/report',
@@ -1343,6 +1350,7 @@ export interface FileRoutesByFullPath {
   '/api/public/tokens/plan-change': typeof ApiPublicTokensPlanChangeRoute
   '/api/public/tokens/reserve': typeof ApiPublicTokensReserveRoute
   '/api/public/usage/report': typeof ApiPublicUsageReportRoute
+  '/api/public/verification/$operation': typeof ApiPublicVerificationOperationRoute
   '/api/public/voice/webhook': typeof ApiPublicVoiceWebhookRoute
   '/api/public/clones/gate/checkout': typeof ApiPublicClonesGateCheckoutRoute
   '/api/public/seats/devices/heartbeat': typeof ApiPublicSeatsDevicesHeartbeatRoute
@@ -1528,6 +1536,7 @@ export interface FileRoutesByTo {
   '/api/public/tokens/plan-change': typeof ApiPublicTokensPlanChangeRoute
   '/api/public/tokens/reserve': typeof ApiPublicTokensReserveRoute
   '/api/public/usage/report': typeof ApiPublicUsageReportRoute
+  '/api/public/verification/$operation': typeof ApiPublicVerificationOperationRoute
   '/api/public/voice/webhook': typeof ApiPublicVoiceWebhookRoute
   '/api/public/clones/gate/checkout': typeof ApiPublicClonesGateCheckoutRoute
   '/api/public/seats/devices/heartbeat': typeof ApiPublicSeatsDevicesHeartbeatRoute
@@ -1715,6 +1724,7 @@ export interface FileRoutesById {
   '/api/public/tokens/plan-change': typeof ApiPublicTokensPlanChangeRoute
   '/api/public/tokens/reserve': typeof ApiPublicTokensReserveRoute
   '/api/public/usage/report': typeof ApiPublicUsageReportRoute
+  '/api/public/verification/$operation': typeof ApiPublicVerificationOperationRoute
   '/api/public/voice/webhook': typeof ApiPublicVoiceWebhookRoute
   '/api/public/clones/gate/checkout': typeof ApiPublicClonesGateCheckoutRoute
   '/api/public/seats/devices/heartbeat': typeof ApiPublicSeatsDevicesHeartbeatRoute
@@ -1903,6 +1913,7 @@ export interface FileRouteTypes {
     | '/api/public/tokens/plan-change'
     | '/api/public/tokens/reserve'
     | '/api/public/usage/report'
+    | '/api/public/verification/$operation'
     | '/api/public/voice/webhook'
     | '/api/public/clones/gate/checkout'
     | '/api/public/seats/devices/heartbeat'
@@ -2088,6 +2099,7 @@ export interface FileRouteTypes {
     | '/api/public/tokens/plan-change'
     | '/api/public/tokens/reserve'
     | '/api/public/usage/report'
+    | '/api/public/verification/$operation'
     | '/api/public/voice/webhook'
     | '/api/public/clones/gate/checkout'
     | '/api/public/seats/devices/heartbeat'
@@ -2274,6 +2286,7 @@ export interface FileRouteTypes {
     | '/api/public/tokens/plan-change'
     | '/api/public/tokens/reserve'
     | '/api/public/usage/report'
+    | '/api/public/verification/$operation'
     | '/api/public/voice/webhook'
     | '/api/public/clones/gate/checkout'
     | '/api/public/seats/devices/heartbeat'
@@ -2440,6 +2453,7 @@ export interface RootRouteChildren {
   ApiPublicTokensPlanChangeRoute: typeof ApiPublicTokensPlanChangeRoute
   ApiPublicTokensReserveRoute: typeof ApiPublicTokensReserveRoute
   ApiPublicUsageReportRoute: typeof ApiPublicUsageReportRoute
+  ApiPublicVerificationOperationRoute: typeof ApiPublicVerificationOperationRoute
   ApiPublicVoiceWebhookRoute: typeof ApiPublicVoiceWebhookRoute
   ApiPublicSeatsDevicesHeartbeatRoute: typeof ApiPublicSeatsDevicesHeartbeatRoute
   ApiPublicSeatsDevicesListRoute: typeof ApiPublicSeatsDevicesListRoute
@@ -3373,6 +3387,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicVoiceWebhookRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/verification/$operation': {
+      id: '/api/public/verification/$operation'
+      path: '/api/public/verification/$operation'
+      fullPath: '/api/public/verification/$operation'
+      preLoaderRoute: typeof ApiPublicVerificationOperationRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/usage/report': {
       id: '/api/public/usage/report'
       path: '/api/public/usage/report'
@@ -4015,6 +4036,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPublicTokensPlanChangeRoute: ApiPublicTokensPlanChangeRoute,
   ApiPublicTokensReserveRoute: ApiPublicTokensReserveRoute,
   ApiPublicUsageReportRoute: ApiPublicUsageReportRoute,
+  ApiPublicVerificationOperationRoute: ApiPublicVerificationOperationRoute,
   ApiPublicVoiceWebhookRoute: ApiPublicVoiceWebhookRoute,
   ApiPublicSeatsDevicesHeartbeatRoute: ApiPublicSeatsDevicesHeartbeatRoute,
   ApiPublicSeatsDevicesListRoute: ApiPublicSeatsDevicesListRoute,
