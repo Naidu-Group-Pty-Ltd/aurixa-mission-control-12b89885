@@ -62,6 +62,7 @@ import {
   checksUnreadable,
   decideCascadeMerge,
   REQUIRED_CHECKS,
+  reclassifyAgainstBase,
 } from "./cascade/autoMergeGate.pure";
 import {
   cascadeEventStatus,
@@ -524,16 +525,55 @@ async function handleOne(args: {
         repo,
         ref: pr.head.sha,
       });
-      verdict = decideCascadeMerge(
-        (checkData.check_runs ?? []).map((c) => ({
-          name: c.name,
-          status: c.status,
-          conclusion: c.conclusion,
-          started_at: c.started_at,
-          completed_at: c.completed_at,
-        })),
-        REQUIRED_CHECKS,
-      );
+      const headChecks = (checkData.check_runs ?? []).map((c) => ({
+        name: c.name,
+        status: c.status,
+        conclusion: c.conclusion,
+        started_at: c.started_at,
+        completed_at: c.completed_at,
+      }));
+      verdict = decideCascadeMerge(headChecks, REQUIRED_CHECKS);
+
+      /*
+        A RED BASE IS NOT A BAD PROPOSAL.
+
+        `failing` covers two situations with opposite remedies: the cascade
+        sent something the clone cannot build, or the clone's default branch
+        was already red and every pull request against it inherits that.
+        Measured 8 Sep 2026 on `npc-test-76b3b3` PR #11 — three red checks,
+        none caused by the twenty files in the diff, all three equally red on
+        `main`, reported for a week as though the cascade kept proposing
+        broken trees.
+
+        The second read is paid ONLY on a failing verdict, so a healthy drain
+        costs exactly what it did. An unreadable base leaves the verdict
+        alone: a signal nobody could read is not evidence either way.
+      */
+      if (!verdict.merge && verdict.reason === "failing") {
+        let baseChecks: Parameters<typeof reclassifyAgainstBase>[2] = null;
+        try {
+          const { data: baseBranch } = await octokit.repos.getBranch({
+            owner,
+            repo,
+            branch: pr.base.ref,
+          });
+          const { data: baseData } = await octokit.checks.listForRef({
+            owner,
+            repo,
+            ref: baseBranch.commit.sha,
+          });
+          baseChecks = (baseData.check_runs ?? []).map((c) => ({
+            name: c.name,
+            status: c.status,
+            conclusion: c.conclusion,
+            started_at: c.started_at,
+            completed_at: c.completed_at,
+          }));
+        } catch {
+          baseChecks = null;
+        }
+        verdict = reclassifyAgainstBase(verdict, headChecks, baseChecks, pr.base.ref);
+      }
     } catch (e) {
       // "I cannot see CI" is not "the cascade failed" — it is a missing
       // read-only permission, and the correct response to an unreadable signal

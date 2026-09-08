@@ -7,6 +7,7 @@ import {
   decideCascadeMerge,
   NEVER_STARTED_CEILING_MS,
   REQUIRED_CHECKS,
+  reclassifyAgainstBase,
   type CheckRun,
 } from "./autoMergeGate.pure";
 
@@ -426,5 +427,91 @@ describe("when the App cannot read check runs", () => {
     // failure, because a conflict is neither.
     expect(handler).not.toContain('outcome: "merged"');
     expect(handler).not.toContain('outcome: "failed"');
+  });
+});
+
+describe("a red base is not a bad proposal", () => {
+  const run = (name: string, conclusion: string | null, status = "completed"): CheckRun => ({
+    name,
+    status,
+    conclusion,
+  });
+  const head = [run("verify", "failure"), run("security", "failure")];
+  const failing = decideCascadeMerge(head, ["verify", "security"]);
+
+  it("the premise: two red required checks are `failing` on their own", () => {
+    expect(failing.merge).toBe(false);
+    if (failing.merge) throw new Error("unreachable");
+    expect(failing.reason).toBe("failing");
+  });
+
+  it("reclassifies when EVERY head failure is also failing on the base", () => {
+    const v = reclassifyAgainstBase(
+      failing,
+      head,
+      [run("verify", "failure"), run("security", "failure")],
+      "main",
+    );
+    expect(v.merge).toBe(false);
+    if (v.merge) throw new Error("unreachable");
+    expect(v.reason).toBe("base_broken");
+    expect(v.why).toContain("main");
+    // The remedy has to send an operator to the base branch, not to the diff.
+    expect(v.why).toMatch(/base branch/i);
+  });
+
+  it("does NOT reclassify when one failure is the proposal's own", () => {
+    // Containment, never overlap. `security` is inherited and `verify` is not,
+    // so this proposal did break something and saying otherwise would hide
+    // exactly the case the gate exists for.
+    const v = reclassifyAgainstBase(failing, head, [run("security", "failure")], "main");
+    if (v.merge) throw new Error("unreachable");
+    expect(v.reason).toBe("failing");
+  });
+
+  it("leaves an unreadable base alone, because no signal is not evidence", () => {
+    const v = reclassifyAgainstBase(failing, head, null, "main");
+    if (v.merge) throw new Error("unreachable");
+    expect(v.reason).toBe("failing");
+  });
+
+  it("treats an EMPTY base reading as no evidence, never as a healthy base", () => {
+    // Nothing has built the base. That is the `no_checks` condition one level
+    // down and is equally not proof that this proposal is at fault.
+    const v = reclassifyAgainstBase(failing, head, [], "main");
+    if (v.merge) throw new Error("unreachable");
+    expect(v.reason).toBe("failing");
+  });
+
+  it("never touches a verdict that is not `failing`", () => {
+    // `never_started` is the billing condition, `pending` is a race,
+    // `no_checks` means nothing built the tree. A red base says nothing about
+    // any of them, and a base comparison must not paper over a merge either.
+    const base = [run("verify", "failure"), run("security", "failure")];
+    for (const v of [
+      decideCascadeMerge(
+        [run("verify", "success"), run("security", "success")],
+        ["verify", "security"],
+      ),
+      decideCascadeMerge([run("verify", "success")], ["verify", "security"]),
+      decideCascadeMerge(
+        [run("verify", null, "in_progress"), run("security", "success")],
+        ["verify", "security"],
+      ),
+      decideCascadeMerge([], ["verify"]),
+    ]) {
+      expect(reclassifyAgainstBase(v, [], base, "main")).toEqual(v);
+    }
+  });
+
+  it("a passing base with no failures at all changes nothing", () => {
+    const v = reclassifyAgainstBase(
+      failing,
+      head,
+      [run("verify", "success"), run("security", "success")],
+      "main",
+    );
+    if (v.merge) throw new Error("unreachable");
+    expect(v.reason).toBe("failing");
   });
 });

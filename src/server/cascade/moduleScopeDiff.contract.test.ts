@@ -14,7 +14,10 @@ const read = (p: string) => readFileSync(join(process.cwd(), p), "utf8");
 // meets, and this file's module globs (`src/**`) carry one inside a string —
 // a stripped copy loses the whole branch and every anchor below with it.
 const engine = read("src/server/cascade-engine.server.ts");
-const start = engine.indexOf('scopeLabel = "installed modules";');
+// The branch's own opening line. `scopeLabel` became a template literal when
+// repository invariants were added to the candidate set, so the anchor is the
+// call that BUILDS the candidates rather than the label describing them.
+const start = engine.indexOf("candidatePaths = await listFilesMatchingGlobs(");
 const end = engine.indexOf("const partition = partitionCascadePaths(candidatePaths, exclusions);");
 const branch = engine.slice(start, end);
 
@@ -56,18 +59,39 @@ describe("both trees are read once, and the SHAs decide what is read", () => {
 });
 
 describe("the deletion pass still sees the module's whole section on prime", () => {
-  it("compares clone paths against every prime path in scope, not the narrowed list", () => {
+  it("captures the in-scope set BEFORE the SHA narrowing", () => {
     /*
       Narrowing the candidate list and then asking "which clone paths are not
       candidates?" would call every UNCHANGED prime file a deletion — the one
       direction that destroys something.
     */
-    expect(branch).toContain("const primeInScope = new Set(candidatePaths);");
-    const setAt = branch.indexOf("const primeInScope = new Set(candidatePaths);");
+    const setAt = branch.indexOf("const primeInScope");
     const narrowAt = branch.indexOf("candidatePaths = candidatePaths.filter(");
     expect(setAt).toBeGreaterThan(-1);
+    expect(narrowAt).toBeGreaterThan(-1);
     expect(setAt).toBeLessThan(narrowAt);
     expect(branch).toMatch(/if \(primeInScope\.has\(path\)\) continue;/);
-    expect(branch).not.toMatch(/const inScope = new Set\(candidatePaths\)/);
+  });
+
+  it("scopes it to the INSTALLED globs, never to the widened candidate list", () => {
+    /*
+      Repository invariants (`scripts/**`, `.github/workflows/**`,
+      `package-lock.json`) widen what a module-scoped clone is SENT, because a
+      clone runs the prime's CI and CI reads the whole repository. They must
+      never widen what is REMOVED: a `scripts/**` entry inside the destructive
+      half would put the clone's own tooling in scope for a pass that was only
+      ever asked to add.
+
+      So `primeInScope` is the narrow-glob subset of the widened candidates,
+      and taking it wholesale would be the bug.
+    */
+    const decl = branch.slice(
+      branch.indexOf("const primeInScope"),
+      branch.indexOf("candidatePaths = candidatePaths.filter("),
+    );
+    expect(decl).toContain("installedGlobs");
+    expect(decl).not.toMatch(/const primeInScope = new Set\(candidatePaths\);/);
+    // And the deletion matchers themselves are still built from the narrow set.
+    expect(branch).toMatch(/validateModuleGlobs\(installedGlobs\)/);
   });
 });
