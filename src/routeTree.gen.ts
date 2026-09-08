@@ -68,6 +68,7 @@ import { Route as JoinTokenRouteImport } from './routes/join.$token'
 import { Route as HooksWarmHealthRouteImport } from './routes/hooks.warm-health'
 import { Route as HooksVoiceOutboundDispatchRouteImport } from './routes/hooks.voice-outbound-dispatch'
 import { Route as HooksVoiceCallDrainRouteImport } from './routes/hooks.voice-call-drain'
+import { Route as HooksVerificationSelftestRouteImport } from './routes/hooks.verification-selftest'
 import { Route as HooksVercelRouteImport } from './routes/hooks.vercel'
 import { Route as HooksTurnstileReconcileRouteImport } from './routes/hooks.turnstile-reconcile'
 import { Route as HooksTokenAlertsRouteImport } from './routes/hooks.token-alerts'
@@ -495,6 +496,12 @@ const HooksVoiceCallDrainRoute = HooksVoiceCallDrainRouteImport.update({
   path: '/hooks/voice-call-drain',
   getParentRoute: () => rootRouteImport,
 } as any)
+const HooksVerificationSelftestRoute =
+  HooksVerificationSelftestRouteImport.update({
+    id: '/hooks/verification-selftest',
+    path: '/hooks/verification-selftest',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const HooksVercelRoute = HooksVercelRouteImport.update({
   id: '/hooks/vercel',
   path: '/hooks/vercel',
@@ -1282,6 +1289,7 @@ export interface FileRoutesByFullPath {
   '/hooks/token-alerts': typeof HooksTokenAlertsRoute
   '/hooks/turnstile-reconcile': typeof HooksTurnstileReconcileRoute
   '/hooks/vercel': typeof HooksVercelRoute
+  '/hooks/verification-selftest': typeof HooksVerificationSelftestRoute
   '/hooks/voice-call-drain': typeof HooksVoiceCallDrainRoute
   '/hooks/voice-outbound-dispatch': typeof HooksVoiceOutboundDispatchRoute
   '/hooks/warm-health': typeof HooksWarmHealthRoute
@@ -1470,6 +1478,7 @@ export interface FileRoutesByTo {
   '/hooks/token-alerts': typeof HooksTokenAlertsRoute
   '/hooks/turnstile-reconcile': typeof HooksTurnstileReconcileRoute
   '/hooks/vercel': typeof HooksVercelRoute
+  '/hooks/verification-selftest': typeof HooksVerificationSelftestRoute
   '/hooks/voice-call-drain': typeof HooksVoiceCallDrainRoute
   '/hooks/voice-outbound-dispatch': typeof HooksVoiceOutboundDispatchRoute
   '/hooks/warm-health': typeof HooksWarmHealthRoute
@@ -1660,6 +1669,7 @@ export interface FileRoutesById {
   '/hooks/token-alerts': typeof HooksTokenAlertsRoute
   '/hooks/turnstile-reconcile': typeof HooksTurnstileReconcileRoute
   '/hooks/vercel': typeof HooksVercelRoute
+  '/hooks/verification-selftest': typeof HooksVerificationSelftestRoute
   '/hooks/voice-call-drain': typeof HooksVoiceCallDrainRoute
   '/hooks/voice-outbound-dispatch': typeof HooksVoiceOutboundDispatchRoute
   '/hooks/warm-health': typeof HooksWarmHealthRoute
@@ -1851,6 +1861,7 @@ export interface FileRouteTypes {
     | '/hooks/token-alerts'
     | '/hooks/turnstile-reconcile'
     | '/hooks/vercel'
+    | '/hooks/verification-selftest'
     | '/hooks/voice-call-drain'
     | '/hooks/voice-outbound-dispatch'
     | '/hooks/warm-health'
@@ -2039,6 +2050,7 @@ export interface FileRouteTypes {
     | '/hooks/token-alerts'
     | '/hooks/turnstile-reconcile'
     | '/hooks/vercel'
+    | '/hooks/verification-selftest'
     | '/hooks/voice-call-drain'
     | '/hooks/voice-outbound-dispatch'
     | '/hooks/warm-health'
@@ -2228,6 +2240,7 @@ export interface FileRouteTypes {
     | '/hooks/token-alerts'
     | '/hooks/turnstile-reconcile'
     | '/hooks/vercel'
+    | '/hooks/verification-selftest'
     | '/hooks/voice-call-drain'
     | '/hooks/voice-outbound-dispatch'
     | '/hooks/warm-health'
@@ -2415,6 +2428,7 @@ export interface RootRouteChildren {
   HooksTokenAlertsRoute: typeof HooksTokenAlertsRoute
   HooksTurnstileReconcileRoute: typeof HooksTurnstileReconcileRoute
   HooksVercelRoute: typeof HooksVercelRoute
+  HooksVerificationSelftestRoute: typeof HooksVerificationSelftestRoute
   HooksVoiceCallDrainRoute: typeof HooksVoiceCallDrainRoute
   HooksVoiceOutboundDispatchRoute: typeof HooksVoiceOutboundDispatchRoute
   HooksWarmHealthRoute: typeof HooksWarmHealthRoute
@@ -2901,6 +2915,13 @@ declare module '@tanstack/react-router' {
       path: '/hooks/voice-call-drain'
       fullPath: '/hooks/voice-call-drain'
       preLoaderRoute: typeof HooksVoiceCallDrainRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/verification-selftest': {
+      id: '/hooks/verification-selftest'
+      path: '/hooks/verification-selftest'
+      fullPath: '/hooks/verification-selftest'
+      preLoaderRoute: typeof HooksVerificationSelftestRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/hooks/vercel': {
@@ -4013,6 +4034,7 @@ const rootRouteChildren: RootRouteChildren = {
   HooksTokenAlertsRoute: HooksTokenAlertsRoute,
   HooksTurnstileReconcileRoute: HooksTurnstileReconcileRoute,
   HooksVercelRoute: HooksVercelRoute,
+  HooksVerificationSelftestRoute: HooksVerificationSelftestRoute,
   HooksVoiceCallDrainRoute: HooksVoiceCallDrainRoute,
   HooksVoiceOutboundDispatchRoute: HooksVoiceOutboundDispatchRoute,
   HooksWarmHealthRoute: HooksWarmHealthRoute,

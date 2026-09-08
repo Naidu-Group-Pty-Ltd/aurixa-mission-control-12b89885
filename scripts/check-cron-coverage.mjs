@@ -68,6 +68,17 @@ const NOT_SCHEDULED = new Map([
       "respect: the withdrawal stands on every later sweep without this hook " +
       "ever running again.",
   ],
+  [
+    "verification-selftest",
+    "Invoked on demand (cron-secret bearer) to ask a clone whether identity " +
+      "verification can actually reach the provider from where it runs. It " +
+      "converges nothing, so there is nothing for a timer to do, and a probe " +
+      "on a schedule spends requests answering a question nobody is holding. " +
+      "It is run when somebody wants to know — after a credential is " +
+      "withdrawn, after a clone is provisioned, or when a verification is " +
+      "reported failing and the first question is which side of the broker " +
+      "the fault is on.",
+  ],
 ]);
 
 const hooks = readdirSync(ROUTES)
