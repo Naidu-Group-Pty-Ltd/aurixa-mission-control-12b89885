@@ -28,12 +28,12 @@
  * `listingsBroker.pure.ts`.
  *
  * `GET` rather than `POST` because every operation is a read and nothing is
- * sent; the query string is the five-parameter allow-list that module owns.
+ * sent; the query string is the parameter allow-list that module owns.
  */
 import { createFileRoute } from "@tanstack/react-router";
 import { resolveCloneApiKey } from "@/server/clone-api-keys.server";
 import { checkRateLimit } from "@/server/token-rate-limit.server";
-import { refusalHeaders } from "@/server/listingsBroker.pure";
+import { parseRecordIds, refusalHeaders } from "@/server/listingsBroker.pure";
 
 /**
  * A refusal this endpoint makes, marked as ours.
@@ -96,6 +96,12 @@ export const Route = createFileRoute("/api/public/listings/$operation")({
             sortField: str(url.searchParams.get("sortField")),
             sortDirection:
               dir === "asc" || dir === "desc" ? dir : dir ? ("invalid" as never) : undefined,
+            /*
+             * Row handles, never an expression. The caller names records and
+             * Mission Control writes the `filterByFormula` — see rule 4 in
+             * `listingsBroker.pure.ts`. Split here, judged by `refuseQuery`.
+             */
+            recordIds: parseRecordIds(url.searchParams.get("recordIds")),
           },
           cloneId: key.clone_id,
           /*
