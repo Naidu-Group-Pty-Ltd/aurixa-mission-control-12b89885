@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   resolveBillingReason,
   isBillable,
+  recordsVendorCost,
   BILLING_REASONS,
   stripReservedMetadata,
   rateEvent,
@@ -85,7 +86,28 @@ describe("resolveBillingReason", () => {
     ] as const;
     for (const r of free) expect(isBillable(r), r).toBe(false);
     for (const r of ["inherited", "brokered"] as const) expect(isBillable(r), r).toBe(true);
-    expect(new Set([...free, "inherited", "brokered"]).size).toBe(BILLING_REASONS.length);
+    // `absorbed` is a spend we chose not to recharge, so it is free to the
+    // tenant in money while still being real money out of the door.
+    expect(isBillable("absorbed")).toBe(false);
+    expect(new Set([...free, "absorbed", "inherited", "brokered"]).size).toBe(
+      BILLING_REASONS.length,
+    );
+  });
+
+  it("records the vendor cost for every reason where our money left", () => {
+    // Mirrors the second `IF _reason IN(...)` in `record_api_usage_event`.
+    // Charging and costing are different questions and this is the one that
+    // keeps the margin report honest about an absorbed vendor.
+    for (const r of ["inherited", "brokered", "absorbed", "error_call", "not_billable"] as const) {
+      expect(recordsVendorCost(r), r).toBe(true);
+    }
+    for (const r of ["byok", "no_key", "unknown_secret", "rate_missing"] as const) {
+      expect(recordsVendorCost(r), r).toBe(false);
+    }
+    // Everything billable costs; nothing that costs is thereby billable.
+    for (const r of BILLING_REASONS) {
+      if (isBillable(r)) expect(recordsVendorCost(r), r).toBe(true);
+    }
   });
 
   /*
@@ -140,6 +162,53 @@ describe("resolveBillingReason", () => {
     for (const secretStatus of ["missing", "failed", "authorised_no_value"] as const) {
       expect(resolveBillingReason({ ...base, secretStatus }), secretStatus).toBe("no_key");
     }
+  });
+
+  /*
+   * Didit. Aurixa pays USD 0.30 for a complete verification and the workspace
+   * pays 5 tokens for a consumed attempt and 5 more for a verified identity,
+   * so recharging the money as well would bill the same verification twice.
+   */
+  it("absorbs a vendor's money on both routes where OUR credential was spent", () => {
+    for (const args of [
+      { secretStatus: "inherited" as const },
+      { secretStatus: "withheld" as const },
+      { secretStatus: "missing" as const, brokered: true },
+    ]) {
+      const reason = resolveBillingReason({ ...base, ...args, rateAbsorbed: true });
+      expect(reason, JSON.stringify(args)).toBe("absorbed");
+      expect(isBillable(reason)).toBe(false);
+      // The money still left. The margin report has to keep saying so.
+      expect(recordsVendorCost(reason)).toBe(true);
+    }
+  });
+
+  it("absorbs nothing a tenant paid for itself", () => {
+    // Their key, their money. There is nothing here for us to absorb, and
+    // relabelling it would misreport who spent what.
+    expect(resolveBillingReason({ ...base, secretStatus: "set", rateAbsorbed: true })).toBe("byok");
+    expect(resolveBillingReason({ ...base, secretStatus: null, rateAbsorbed: true })).toBe(
+      "unknown_secret",
+    );
+    expect(resolveBillingReason({ ...base, cloneId: null, rateAbsorbed: true })).toBe("no_key");
+  });
+
+  it("still calls a failed absorbed call a failure, not an absorption", () => {
+    // Asked before absorption, exactly as the SQL orders it. A failed call is
+    // a fact about the call; absorption is a fact about the money model.
+    expect(
+      resolveBillingReason({
+        ...base, secretStatus: "withheld", rateAbsorbed: true, callStatus: "error",
+      }),
+    ).toBe("error_call");
+  });
+
+  it("changes nothing for a vendor that is not absorbed", () => {
+    // The flag defaults off on every other rate row in the catalog.
+    expect(resolveBillingReason({ ...base, secretStatus: "inherited" })).toBe("inherited");
+    expect(
+      resolveBillingReason({ ...base, secretStatus: "inherited", rateAbsorbed: false }),
+    ).toBe("inherited");
   });
 
   it("does not let a rate-less or unbillable secret become chargeable by route", () => {

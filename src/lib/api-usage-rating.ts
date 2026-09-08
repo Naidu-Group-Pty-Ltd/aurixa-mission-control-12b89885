@@ -48,6 +48,23 @@ export type BillingReason =
    * does.
    */
   | "brokered"
+  /**
+   * The prime's credential was spent and the money is deliberately NOT
+   * recharged, because the tenant is charged for the same work in tokens.
+   *
+   * Didit is the case: Aurixa pays USD 0.30 for a complete identity
+   * verification and the workspace pays 5 tokens for a consumed attempt and 5
+   * more for a verified identity. Cost is still recorded, so the margin report
+   * keeps reading the real spend; only the charge goes.
+   *
+   * Not `not_billable`, which produces the same numbers and says the wrong
+   * thing: that one means platform overhead rather than tenant usage — a
+   * shared infra key, our own webhook secret, a free-tier service. This is
+   * genuine, per-customer, per-tenant usage of a paid vendor, priced
+   * elsewhere. The next person to read a zero here has to be told which, or
+   * they will conclude the meter is broken and "fix" it into a double charge.
+   */
+  | "absorbed"
   /** The clone supplied its own key. Metered for insight, charged at nothing. */
   | "byok"
   /** No key on the clone at all, or no clone (the prime's own tenant). */
@@ -64,6 +81,7 @@ export type BillingReason =
 export const BILLING_REASONS: BillingReason[] = [
   "inherited",
   "brokered",
+  "absorbed",
   "byok",
   "no_key",
   "unknown_secret",
@@ -116,6 +134,17 @@ export function resolveBillingReason(args: {
    * can be made for a clone whose row says something else entirely.
    */
   brokered?: boolean;
+  /**
+   * The vendor's money is the platform's to absorb, because the tenant is
+   * charged for the same work in another currency (tokens).
+   *
+   * A property of the RATE row (`api_provider_rates.absorbed`), never of the
+   * call — which is why it is asked here, after the route is known, and
+   * replaces only the two reasons in which our credential was actually spent.
+   * A tenant's own key on an absorbed vendor is still `byok`: it spent their
+   * money and there is nothing for us to absorb.
+   */
+  rateAbsorbed?: boolean;
 }): BillingReason {
   if (!args.rateExists) return "rate_missing";
   if (!args.rateIsBillable) return "not_billable";
@@ -128,6 +157,11 @@ export function resolveBillingReason(args: {
   const spentOurs =
     args.brokered === true || args.secretStatus === "withheld" || args.secretStatus === "inherited";
   if (spentOurs && args.callStatus === "error") return "error_call";
+  // Asked after `error_call` and before the two charging reasons, exactly as
+  // the SQL orders it — `record_api_usage_event` and this function are two
+  // implementations of one rule and a difference in order is a difference in
+  // answer.
+  if (args.rateAbsorbed === true && spentOurs) return "absorbed";
   if (args.brokered === true) return "brokered";
   if (args.secretStatus === null) return "unknown_secret";
   if (args.secretStatus === "set") return "byok";
@@ -147,6 +181,28 @@ export function resolveBillingReason(args: {
  */
 export function isBillable(reason: BillingReason): boolean {
   return reason === "inherited" || reason === "brokered";
+}
+
+/**
+ * Reasons whose vendor COST is still recorded, charged or not.
+ *
+ * Four of the eight. `absorbed` is here and deliberately not in `isBillable`:
+ * the money was really spent and the margin report must keep saying so, while
+ * the tenant is charged for that work in tokens instead. `error_call` and
+ * `not_billable` were already in this set for their own reasons — we paid for
+ * a call that failed, and we pay for our own overhead.
+ *
+ * Mirrors the second `IF _reason IN(...)` in `record_api_usage_event`. Two
+ * implementations of one rule; `api-usage-rating.test.ts` holds them together.
+ */
+export function recordsVendorCost(reason: BillingReason): boolean {
+  return (
+    reason === "inherited" ||
+    reason === "brokered" ||
+    reason === "absorbed" ||
+    reason === "error_call" ||
+    reason === "not_billable"
+  );
 }
 
 // ─── Money ───────────────────────────────────────────────────────────────────
