@@ -176,6 +176,7 @@ import { Route as ApiPublicSeatsListRouteImport } from './routes/api.public.seat
 import { Route as ApiPublicSeatsEntitlementRouteImport } from './routes/api.public.seats.entitlement'
 import { Route as ApiPublicSeatsCommitRouteImport } from './routes/api.public.seats.commit'
 import { Route as ApiPublicPricingCatalogRouteImport } from './routes/api.public.pricing.catalog'
+import { Route as ApiPublicListingsOperationRouteImport } from './routes/api.public.listings.$operation'
 import { Route as ApiPublicLeadsCaptureRouteImport } from './routes/api.public.leads.capture'
 import { Route as ApiPublicHooksDocusignRouteImport } from './routes/api.public.hooks.docusign'
 import { Route as ApiPublicHooksCodexSecurityRouteImport } from './routes/api.public.hooks.codex-security'
@@ -1071,6 +1072,12 @@ const ApiPublicPricingCatalogRoute = ApiPublicPricingCatalogRouteImport.update({
   path: '/api/public/pricing/catalog',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiPublicListingsOperationRoute =
+  ApiPublicListingsOperationRouteImport.update({
+    id: '/api/public/listings/$operation',
+    path: '/api/public/listings/$operation',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiPublicLeadsCaptureRoute = ApiPublicLeadsCaptureRouteImport.update({
   id: '/api/public/leads/capture',
   path: '/api/public/leads/capture',
@@ -1342,6 +1349,7 @@ export interface FileRoutesByFullPath {
   '/api/public/hooks/codex-security': typeof ApiPublicHooksCodexSecurityRoute
   '/api/public/hooks/docusign': typeof ApiPublicHooksDocusignRoute
   '/api/public/leads/capture': typeof ApiPublicLeadsCaptureRoute
+  '/api/public/listings/$operation': typeof ApiPublicListingsOperationRoute
   '/api/public/pricing/catalog': typeof ApiPublicPricingCatalogRoute
   '/api/public/seats/commit': typeof ApiPublicSeatsCommitRoute
   '/api/public/seats/entitlement': typeof ApiPublicSeatsEntitlementRoute
@@ -1531,6 +1539,7 @@ export interface FileRoutesByTo {
   '/api/public/hooks/codex-security': typeof ApiPublicHooksCodexSecurityRoute
   '/api/public/hooks/docusign': typeof ApiPublicHooksDocusignRoute
   '/api/public/leads/capture': typeof ApiPublicLeadsCaptureRoute
+  '/api/public/listings/$operation': typeof ApiPublicListingsOperationRoute
   '/api/public/pricing/catalog': typeof ApiPublicPricingCatalogRoute
   '/api/public/seats/commit': typeof ApiPublicSeatsCommitRoute
   '/api/public/seats/entitlement': typeof ApiPublicSeatsEntitlementRoute
@@ -1722,6 +1731,7 @@ export interface FileRoutesById {
   '/api/public/hooks/codex-security': typeof ApiPublicHooksCodexSecurityRoute
   '/api/public/hooks/docusign': typeof ApiPublicHooksDocusignRoute
   '/api/public/leads/capture': typeof ApiPublicLeadsCaptureRoute
+  '/api/public/listings/$operation': typeof ApiPublicListingsOperationRoute
   '/api/public/pricing/catalog': typeof ApiPublicPricingCatalogRoute
   '/api/public/seats/commit': typeof ApiPublicSeatsCommitRoute
   '/api/public/seats/entitlement': typeof ApiPublicSeatsEntitlementRoute
@@ -1914,6 +1924,7 @@ export interface FileRouteTypes {
     | '/api/public/hooks/codex-security'
     | '/api/public/hooks/docusign'
     | '/api/public/leads/capture'
+    | '/api/public/listings/$operation'
     | '/api/public/pricing/catalog'
     | '/api/public/seats/commit'
     | '/api/public/seats/entitlement'
@@ -2103,6 +2114,7 @@ export interface FileRouteTypes {
     | '/api/public/hooks/codex-security'
     | '/api/public/hooks/docusign'
     | '/api/public/leads/capture'
+    | '/api/public/listings/$operation'
     | '/api/public/pricing/catalog'
     | '/api/public/seats/commit'
     | '/api/public/seats/entitlement'
@@ -2293,6 +2305,7 @@ export interface FileRouteTypes {
     | '/api/public/hooks/codex-security'
     | '/api/public/hooks/docusign'
     | '/api/public/leads/capture'
+    | '/api/public/listings/$operation'
     | '/api/public/pricing/catalog'
     | '/api/public/seats/commit'
     | '/api/public/seats/entitlement'
@@ -2463,6 +2476,7 @@ export interface RootRouteChildren {
   ApiPublicHooksCodexSecurityRoute: typeof ApiPublicHooksCodexSecurityRoute
   ApiPublicHooksDocusignRoute: typeof ApiPublicHooksDocusignRoute
   ApiPublicLeadsCaptureRoute: typeof ApiPublicLeadsCaptureRoute
+  ApiPublicListingsOperationRoute: typeof ApiPublicListingsOperationRoute
   ApiPublicPricingCatalogRoute: typeof ApiPublicPricingCatalogRoute
   ApiPublicSeatsCommitRoute: typeof ApiPublicSeatsCommitRoute
   ApiPublicSeatsEntitlementRoute: typeof ApiPublicSeatsEntitlementRoute
@@ -3673,6 +3687,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicPricingCatalogRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/listings/$operation': {
+      id: '/api/public/listings/$operation'
+      path: '/api/public/listings/$operation'
+      fullPath: '/api/public/listings/$operation'
+      preLoaderRoute: typeof ApiPublicListingsOperationRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/leads/capture': {
       id: '/api/public/leads/capture'
       path: '/api/public/leads/capture'
@@ -4069,6 +4090,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPublicHooksCodexSecurityRoute: ApiPublicHooksCodexSecurityRoute,
   ApiPublicHooksDocusignRoute: ApiPublicHooksDocusignRoute,
   ApiPublicLeadsCaptureRoute: ApiPublicLeadsCaptureRoute,
+  ApiPublicListingsOperationRoute: ApiPublicListingsOperationRoute,
   ApiPublicPricingCatalogRoute: ApiPublicPricingCatalogRoute,
   ApiPublicSeatsCommitRoute: ApiPublicSeatsCommitRoute,
   ApiPublicSeatsEntitlementRoute: ApiPublicSeatsEntitlementRoute,
