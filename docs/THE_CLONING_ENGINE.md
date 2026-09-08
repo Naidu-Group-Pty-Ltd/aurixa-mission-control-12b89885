@@ -1501,6 +1501,50 @@ This is not special to Didit. It is how **every** schema change in this
 programme reaches a tenant, and it is the one step in the cascade that no
 timer performs.
 
+#### And a third act, which is where this one actually stopped
+
+Both acts above were performed for `20261114090000` and the next tick still
+carried nothing. `pending: 0`, `withheld: 879` — unchanged — and one field
+that had been `0` all day now read **`held_back: 1`**.
+
+**A runnable migration sitting behind a withheld one is held, not applied.**
+`applyPrimeMigrations` is handed the whole corpus alongside the runnable set
+for exactly this reason: `runnable` on its own cannot say whether a cleared
+version sits behind an uncleared one, and applying N while N−1 is unaccounted
+for is how a migration lands against a schema its author never saw. The
+result carries `blockedBy`, and the count of those is `held_back`.
+
+Fourteen files sit between the prime's ledger head (`20261112010000`) and
+this one, and **none of them is in the prime's ledger** — so the newest
+migration in the tree is behind fourteen withheld ones and cannot move.
+
+Measured, and this is the part that matters: those fourteen are **applied but
+unrecorded**, not missing. `crime_reference`, `transport_stops`,
+`investment_report_sections` and `planning_data_cache` all exist on the prime
+*and* on the clones. This is the ledger under-report the apply workflow's own
+header describes, seen from the other end — and the consequence is larger
+than one migration:
+
+> **Until the prime's ledger catches up with the prime's schema, the fleet
+> sync can deliver no new migration to any clone, ever.** Not this one and
+> not the next one. It reports the condition as a single integer in a field
+> beside two larger ones, and every other signal reads healthy.
+
+The remedy is to record the applied-but-unrecorded versions on the prime —
+`apply-migration.yml` with `record_version: true`, per file, once it has been
+confirmed that the file's effect is already present. That is a per-file
+judgement against a production database and it is the owner's to make, not a
+sweep to automate: recording a version whose effect is *absent* tells every
+clone it is done and withholds it for good, which is the same silence in the
+other direction.
+
+What was done here instead, and why it is the narrow option: the one CHECK
+widening was applied directly to each clone and recorded under the same
+version, after confirming all three carried byte-identical constraints and
+that the change only ever widens. One additive, idempotent, self-asserting
+statement is a safe thing to hand-apply; fourteen files including table
+creations and data mutations is not.
+
 ### Four rules that keep it from drifting
 
 **The trigger is the product's own `attempt_consumed`, never "a call was
@@ -1551,7 +1595,11 @@ Four readings, in the order that isolates a fault:
    the clone: `SELECT 1 FROM supabase_migrations.schema_migrations WHERE
    version = '20261114090000'`. Missing there means the dispatch above never
    happened, the fleet sync is correctly withholding the file, and no clone
-   will ever receive it however many times the catch-up runs.
+   will ever receive it however many times the catch-up runs. Present there
+   and still absent on the clone, read `held_back` on the latest
+   `sql_migration` run: non-zero means the file is runnable but sits behind
+   an unrecorded predecessor, and the prime's ledger — not the clone — is
+   what needs the repair.
 3. **Did a real verification charge?** On the clone,
    `SELECT outcome_detail->'standalone'->'token_charge' FROM
    aml.verification_checks WHERE provider = 'didit_standalone' ORDER BY
