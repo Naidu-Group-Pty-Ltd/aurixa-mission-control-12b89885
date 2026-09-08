@@ -8,6 +8,8 @@ import {
   brokeredPath,
   inboundHeaders,
   outboundHeaders,
+  refusalHeaders,
+  REFUSAL_HEADER,
 } from "./verificationBroker.pure";
 
 /**
@@ -156,5 +158,41 @@ describe("the server half holds the rules the pure half states", () => {
   it("says the broker is unconfigured without saying anything about the credential", () => {
     const block = server.slice(server.indexOf("broker_not_configured"));
     expect(block.slice(0, 400)).not.toMatch(/apiKey|process\.env/);
+  });
+});
+
+describe("who said no is unambiguous", () => {
+  it("marks a refusal Mission Control makes itself", () => {
+    const h = refusalHeaders("unauthorized");
+    expect(h[REFUSAL_HEADER]).toBe("unauthorized");
+    // Still JSON — the marker is additive, never a replacement.
+    expect(h["content-type"]).toBe("application/json");
+  });
+
+  it("leaves the relayed vendor answer unmarked", () => {
+    // The vendor's own 401 and Mission Control's 401 are the same status and
+    // a similar body, and they send an operator to opposite remedies. The
+    // ABSENCE of this header is what identifies an answer as Didit's.
+    expect(Object.keys(inboundHeaders())).not.toContain(REFUSAL_HEADER);
+  });
+
+  it("every refusal the broker makes carries it, and the relay does not", () => {
+    const server = readFileSync(
+      new URL("./verificationBroker.server.ts", import.meta.url),
+      "utf8",
+    );
+    // One refusal helper, and it is the marked one.
+    expect(server).toContain("headers: refusalHeaders(body.error)");
+    // The relay keeps the plain headers — asserted so a later edit cannot
+    // quietly mark a vendor response as ours.
+    expect(server).toContain("new Response(text, { status: upstream.status, headers: inboundHeaders() })");
+
+    const route = readFileSync(
+      new URL("../routes/api.public.verification.$operation.ts", import.meta.url),
+      "utf8",
+    );
+    expect(route).toContain("headers: refusalHeaders(error)");
+    // No unmarked refusal may survive in the route.
+    expect(route).not.toContain("jsonResponse({ ok: false");
   });
 });

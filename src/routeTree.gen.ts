@@ -68,6 +68,7 @@ import { Route as JoinTokenRouteImport } from './routes/join.$token'
 import { Route as HooksWarmHealthRouteImport } from './routes/hooks.warm-health'
 import { Route as HooksVoiceOutboundDispatchRouteImport } from './routes/hooks.voice-outbound-dispatch'
 import { Route as HooksVoiceCallDrainRouteImport } from './routes/hooks.voice-call-drain'
+import { Route as HooksVerificationSelftestRouteImport } from './routes/hooks.verification-selftest'
 import { Route as HooksVercelRouteImport } from './routes/hooks.vercel'
 import { Route as HooksTurnstileReconcileRouteImport } from './routes/hooks.turnstile-reconcile'
 import { Route as HooksTokenAlertsRouteImport } from './routes/hooks.token-alerts'
@@ -99,6 +100,7 @@ import { Route as HooksCodexSweepRouteImport } from './routes/hooks.codex-sweep'
 import { Route as HooksCodexNightlyRouteImport } from './routes/hooks.codex-nightly'
 import { Route as HooksCloneSigningPairReconcileRouteImport } from './routes/hooks.clone-signing-pair-reconcile'
 import { Route as HooksCloneSecretsReconcileRouteImport } from './routes/hooks.clone-secrets-reconcile'
+import { Route as HooksCloneSecretWithholdRouteImport } from './routes/hooks.clone-secret-withhold'
 import { Route as HooksCloneSecretForwardReconcileRouteImport } from './routes/hooks.clone-secret-forward-reconcile'
 import { Route as HooksCloneJwtSecretReconcileRouteImport } from './routes/hooks.clone-jwt-secret-reconcile'
 import { Route as HooksCloneDeployerDeclarationReconcileRouteImport } from './routes/hooks.clone-deployer-declaration-reconcile'
@@ -494,6 +496,12 @@ const HooksVoiceCallDrainRoute = HooksVoiceCallDrainRouteImport.update({
   path: '/hooks/voice-call-drain',
   getParentRoute: () => rootRouteImport,
 } as any)
+const HooksVerificationSelftestRoute =
+  HooksVerificationSelftestRouteImport.update({
+    id: '/hooks/verification-selftest',
+    path: '/hooks/verification-selftest',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const HooksVercelRoute = HooksVercelRouteImport.update({
   id: '/hooks/vercel',
   path: '/hooks/vercel',
@@ -655,6 +663,12 @@ const HooksCloneSecretsReconcileRoute =
   HooksCloneSecretsReconcileRouteImport.update({
     id: '/hooks/clone-secrets-reconcile',
     path: '/hooks/clone-secrets-reconcile',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const HooksCloneSecretWithholdRoute =
+  HooksCloneSecretWithholdRouteImport.update({
+    id: '/hooks/clone-secret-withhold',
+    path: '/hooks/clone-secret-withhold',
     getParentRoute: () => rootRouteImport,
   } as any)
 const HooksCloneSecretForwardReconcileRoute =
@@ -1243,6 +1257,7 @@ export interface FileRoutesByFullPath {
   '/hooks/clone-deployer-declaration-reconcile': typeof HooksCloneDeployerDeclarationReconcileRoute
   '/hooks/clone-jwt-secret-reconcile': typeof HooksCloneJwtSecretReconcileRoute
   '/hooks/clone-secret-forward-reconcile': typeof HooksCloneSecretForwardReconcileRoute
+  '/hooks/clone-secret-withhold': typeof HooksCloneSecretWithholdRoute
   '/hooks/clone-secrets-reconcile': typeof HooksCloneSecretsReconcileRoute
   '/hooks/clone-signing-pair-reconcile': typeof HooksCloneSigningPairReconcileRoute
   '/hooks/codex-nightly': typeof HooksCodexNightlyRoute
@@ -1274,6 +1289,7 @@ export interface FileRoutesByFullPath {
   '/hooks/token-alerts': typeof HooksTokenAlertsRoute
   '/hooks/turnstile-reconcile': typeof HooksTurnstileReconcileRoute
   '/hooks/vercel': typeof HooksVercelRoute
+  '/hooks/verification-selftest': typeof HooksVerificationSelftestRoute
   '/hooks/voice-call-drain': typeof HooksVoiceCallDrainRoute
   '/hooks/voice-outbound-dispatch': typeof HooksVoiceOutboundDispatchRoute
   '/hooks/warm-health': typeof HooksWarmHealthRoute
@@ -1430,6 +1446,7 @@ export interface FileRoutesByTo {
   '/hooks/clone-deployer-declaration-reconcile': typeof HooksCloneDeployerDeclarationReconcileRoute
   '/hooks/clone-jwt-secret-reconcile': typeof HooksCloneJwtSecretReconcileRoute
   '/hooks/clone-secret-forward-reconcile': typeof HooksCloneSecretForwardReconcileRoute
+  '/hooks/clone-secret-withhold': typeof HooksCloneSecretWithholdRoute
   '/hooks/clone-secrets-reconcile': typeof HooksCloneSecretsReconcileRoute
   '/hooks/clone-signing-pair-reconcile': typeof HooksCloneSigningPairReconcileRoute
   '/hooks/codex-nightly': typeof HooksCodexNightlyRoute
@@ -1461,6 +1478,7 @@ export interface FileRoutesByTo {
   '/hooks/token-alerts': typeof HooksTokenAlertsRoute
   '/hooks/turnstile-reconcile': typeof HooksTurnstileReconcileRoute
   '/hooks/vercel': typeof HooksVercelRoute
+  '/hooks/verification-selftest': typeof HooksVerificationSelftestRoute
   '/hooks/voice-call-drain': typeof HooksVoiceCallDrainRoute
   '/hooks/voice-outbound-dispatch': typeof HooksVoiceOutboundDispatchRoute
   '/hooks/warm-health': typeof HooksWarmHealthRoute
@@ -1619,6 +1637,7 @@ export interface FileRoutesById {
   '/hooks/clone-deployer-declaration-reconcile': typeof HooksCloneDeployerDeclarationReconcileRoute
   '/hooks/clone-jwt-secret-reconcile': typeof HooksCloneJwtSecretReconcileRoute
   '/hooks/clone-secret-forward-reconcile': typeof HooksCloneSecretForwardReconcileRoute
+  '/hooks/clone-secret-withhold': typeof HooksCloneSecretWithholdRoute
   '/hooks/clone-secrets-reconcile': typeof HooksCloneSecretsReconcileRoute
   '/hooks/clone-signing-pair-reconcile': typeof HooksCloneSigningPairReconcileRoute
   '/hooks/codex-nightly': typeof HooksCodexNightlyRoute
@@ -1650,6 +1669,7 @@ export interface FileRoutesById {
   '/hooks/token-alerts': typeof HooksTokenAlertsRoute
   '/hooks/turnstile-reconcile': typeof HooksTurnstileReconcileRoute
   '/hooks/vercel': typeof HooksVercelRoute
+  '/hooks/verification-selftest': typeof HooksVerificationSelftestRoute
   '/hooks/voice-call-drain': typeof HooksVoiceCallDrainRoute
   '/hooks/voice-outbound-dispatch': typeof HooksVoiceOutboundDispatchRoute
   '/hooks/warm-health': typeof HooksWarmHealthRoute
@@ -1809,6 +1829,7 @@ export interface FileRouteTypes {
     | '/hooks/clone-deployer-declaration-reconcile'
     | '/hooks/clone-jwt-secret-reconcile'
     | '/hooks/clone-secret-forward-reconcile'
+    | '/hooks/clone-secret-withhold'
     | '/hooks/clone-secrets-reconcile'
     | '/hooks/clone-signing-pair-reconcile'
     | '/hooks/codex-nightly'
@@ -1840,6 +1861,7 @@ export interface FileRouteTypes {
     | '/hooks/token-alerts'
     | '/hooks/turnstile-reconcile'
     | '/hooks/vercel'
+    | '/hooks/verification-selftest'
     | '/hooks/voice-call-drain'
     | '/hooks/voice-outbound-dispatch'
     | '/hooks/warm-health'
@@ -1996,6 +2018,7 @@ export interface FileRouteTypes {
     | '/hooks/clone-deployer-declaration-reconcile'
     | '/hooks/clone-jwt-secret-reconcile'
     | '/hooks/clone-secret-forward-reconcile'
+    | '/hooks/clone-secret-withhold'
     | '/hooks/clone-secrets-reconcile'
     | '/hooks/clone-signing-pair-reconcile'
     | '/hooks/codex-nightly'
@@ -2027,6 +2050,7 @@ export interface FileRouteTypes {
     | '/hooks/token-alerts'
     | '/hooks/turnstile-reconcile'
     | '/hooks/vercel'
+    | '/hooks/verification-selftest'
     | '/hooks/voice-call-drain'
     | '/hooks/voice-outbound-dispatch'
     | '/hooks/warm-health'
@@ -2184,6 +2208,7 @@ export interface FileRouteTypes {
     | '/hooks/clone-deployer-declaration-reconcile'
     | '/hooks/clone-jwt-secret-reconcile'
     | '/hooks/clone-secret-forward-reconcile'
+    | '/hooks/clone-secret-withhold'
     | '/hooks/clone-secrets-reconcile'
     | '/hooks/clone-signing-pair-reconcile'
     | '/hooks/codex-nightly'
@@ -2215,6 +2240,7 @@ export interface FileRouteTypes {
     | '/hooks/token-alerts'
     | '/hooks/turnstile-reconcile'
     | '/hooks/vercel'
+    | '/hooks/verification-selftest'
     | '/hooks/voice-call-drain'
     | '/hooks/voice-outbound-dispatch'
     | '/hooks/warm-health'
@@ -2370,6 +2396,7 @@ export interface RootRouteChildren {
   HooksCloneDeployerDeclarationReconcileRoute: typeof HooksCloneDeployerDeclarationReconcileRoute
   HooksCloneJwtSecretReconcileRoute: typeof HooksCloneJwtSecretReconcileRoute
   HooksCloneSecretForwardReconcileRoute: typeof HooksCloneSecretForwardReconcileRoute
+  HooksCloneSecretWithholdRoute: typeof HooksCloneSecretWithholdRoute
   HooksCloneSecretsReconcileRoute: typeof HooksCloneSecretsReconcileRoute
   HooksCloneSigningPairReconcileRoute: typeof HooksCloneSigningPairReconcileRoute
   HooksCodexNightlyRoute: typeof HooksCodexNightlyRoute
@@ -2401,6 +2428,7 @@ export interface RootRouteChildren {
   HooksTokenAlertsRoute: typeof HooksTokenAlertsRoute
   HooksTurnstileReconcileRoute: typeof HooksTurnstileReconcileRoute
   HooksVercelRoute: typeof HooksVercelRoute
+  HooksVerificationSelftestRoute: typeof HooksVerificationSelftestRoute
   HooksVoiceCallDrainRoute: typeof HooksVoiceCallDrainRoute
   HooksVoiceOutboundDispatchRoute: typeof HooksVoiceOutboundDispatchRoute
   HooksWarmHealthRoute: typeof HooksWarmHealthRoute
@@ -2889,6 +2917,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof HooksVoiceCallDrainRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/hooks/verification-selftest': {
+      id: '/hooks/verification-selftest'
+      path: '/hooks/verification-selftest'
+      fullPath: '/hooks/verification-selftest'
+      preLoaderRoute: typeof HooksVerificationSelftestRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/hooks/vercel': {
       id: '/hooks/vercel'
       path: '/hooks/vercel'
@@ -3104,6 +3139,13 @@ declare module '@tanstack/react-router' {
       path: '/hooks/clone-secrets-reconcile'
       fullPath: '/hooks/clone-secrets-reconcile'
       preLoaderRoute: typeof HooksCloneSecretsReconcileRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/clone-secret-withhold': {
+      id: '/hooks/clone-secret-withhold'
+      path: '/hooks/clone-secret-withhold'
+      fullPath: '/hooks/clone-secret-withhold'
+      preLoaderRoute: typeof HooksCloneSecretWithholdRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/hooks/clone-secret-forward-reconcile': {
@@ -3960,6 +4002,7 @@ const rootRouteChildren: RootRouteChildren = {
     HooksCloneDeployerDeclarationReconcileRoute,
   HooksCloneJwtSecretReconcileRoute: HooksCloneJwtSecretReconcileRoute,
   HooksCloneSecretForwardReconcileRoute: HooksCloneSecretForwardReconcileRoute,
+  HooksCloneSecretWithholdRoute: HooksCloneSecretWithholdRoute,
   HooksCloneSecretsReconcileRoute: HooksCloneSecretsReconcileRoute,
   HooksCloneSigningPairReconcileRoute: HooksCloneSigningPairReconcileRoute,
   HooksCodexNightlyRoute: HooksCodexNightlyRoute,
@@ -3991,6 +4034,7 @@ const rootRouteChildren: RootRouteChildren = {
   HooksTokenAlertsRoute: HooksTokenAlertsRoute,
   HooksTurnstileReconcileRoute: HooksTurnstileReconcileRoute,
   HooksVercelRoute: HooksVercelRoute,
+  HooksVerificationSelftestRoute: HooksVerificationSelftestRoute,
   HooksVoiceCallDrainRoute: HooksVoiceCallDrainRoute,
   HooksVoiceOutboundDispatchRoute: HooksVoiceOutboundDispatchRoute,
   HooksWarmHealthRoute: HooksWarmHealthRoute,

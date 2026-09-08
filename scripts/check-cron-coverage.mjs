@@ -56,6 +56,29 @@ const NOT_SCHEDULED = new Map([
       "What IS scheduled is /hooks/backend-provisioning-drain, which works the " +
       "pass this queues exactly as it works any other.",
   ],
+  [
+    "clone-secret-withhold",
+    "Invoked on demand (cron-secret bearer) to take ONE fleet-forwarded " +
+      "credential off ONE clone. Every other hook here is a reconcile that " +
+      "converges the fleet on a policy; this performs a decision about a single " +
+      "tenant that nothing can derive — which credential a particular customer " +
+      "must not hold — so a timer has nothing to compute and no schedule could " +
+      "be right. What holds the decision afterwards is the `withheld` ledger " +
+      "status, which /hooks/fleet-secret-forward-reconcile IS scheduled to " +
+      "respect: the withdrawal stands on every later sweep without this hook " +
+      "ever running again.",
+  ],
+  [
+    "verification-selftest",
+    "Invoked on demand (cron-secret bearer) to ask a clone whether identity " +
+      "verification can actually reach the provider from where it runs. It " +
+      "converges nothing, so there is nothing for a timer to do, and a probe " +
+      "on a schedule spends requests answering a question nobody is holding. " +
+      "It is run when somebody wants to know — after a credential is " +
+      "withdrawn, after a clone is provisioned, or when a verification is " +
+      "reported failing and the first question is which side of the broker " +
+      "the fault is on.",
+  ],
 ]);
 
 const hooks = readdirSync(ROUTES)
