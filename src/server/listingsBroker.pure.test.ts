@@ -1,12 +1,26 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
+
+/**
+ * A source file with its comments removed.
+ *
+ * Every source-level assertion here is about what the code DOES. These modules
+ * carry long headers explaining why a query language must not cross the
+ * boundary, and a scan that reads those headers as violations would fail on
+ * its own documentation — which teaches people to delete the documentation.
+ */
+const codeOf = (src: string): string =>
+  src.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:])\/\/[^\n]*/g, "$1 ");
 import {
+  AIRTABLE_RECORD_ID,
   brokeredUrl,
   isListingsOperation,
   LISTINGS_OPERATIONS,
   MAX_PAGE_SIZE,
+  MAX_RECORD_IDS,
   outboundHeaders,
   parseAllowlist,
+  parseRecordIds,
   refusalHeaders,
   refuseQuery,
   resolveTable,
@@ -98,11 +112,29 @@ describe("the query is a bounded allow-list of five parameters", () => {
     });
   });
 
-  it("never admits filterByFormula anywhere", () => {
+  it("never admits a filterByFormula the CALLER wrote", () => {
     // A query language reaching a shared table through a credential the caller
     // does not hold is an exfiltration primitive with a friendly name.
+    //
+    // This assertion used to be "no filterByFormula anywhere", which was the
+    // right rule while no read needed one. `listing-images` does — it asks for
+    // the photograph columns of the listings it has claimed — and the rule
+    // that replaces it is narrower rather than looser: the formula may be
+    // WRITTEN here, from checked row handles, and may never be READ from a
+    // request. So the pure module composes exactly one, and neither the server
+    // nor the route mentions the parameter at all.
+    // Judged on CODE, not prose: these files explain the rule in their own
+    // headers, and a scan that cannot tell an explanation from an instruction
+    // is one people learn to work around by not writing the explanation.
+    const written = codeOf(pureSrc).match(/searchParams\.set\(\s*["'`]filterByFormula/g) ?? [];
+    expect(written).toHaveLength(1);
+    for (const src of [serverSrc, routeSrc]) {
+      expect(codeOf(src)).not.toMatch(/filterByFormula/i);
+    }
+    // And no source anywhere reads one off a request.
     for (const src of [pureSrc, serverSrc, routeSrc]) {
-      expect(src.toLowerCase()).not.toMatch(/searchparams\.set\(\s*["'`]filterbyformula/);
+      expect(codeOf(src)).not.toMatch(/searchParams\.get\(\s*["'`]filterByFormula/i);
+      expect(codeOf(src)).not.toMatch(/\bq\.filterByFormula|\bquery\.filterByFormula/);
     }
     // A caller-shaped extra must not survive into the URL: `brokeredUrl` reads
     // named fields, so anything else is dropped rather than relayed.
@@ -177,5 +209,79 @@ describe("outbound headers", () => {
   it("carry the credential and nothing a caller supplied", () => {
     const h = outboundHeaders("tok") as Record<string, string>;
     expect(Object.keys(h).sort()).toEqual(["Authorization", "Content-Type"]);
+  });
+});
+
+/**
+ * `recordIds` is the one read that needs Airtable's query language, and it is
+ * admitted by inverting who writes it: the caller names ROWS and Mission
+ * Control composes the `filterByFormula`.
+ *
+ * What these pin is that inversion. `listing-images` reads the photograph
+ * columns for the listings it has claimed, which is why a clone showed a
+ * marketplace with no pictures on it — the read needed a formula, the broker
+ * refused formulas, and the function still held a direct Airtable call it had
+ * no token for. Admitting a formula outright would have reopened exactly the
+ * hole the broker exists to close, so the boundary carries opaque row handles
+ * and the composition happens on this side of it.
+ */
+const ID_A = "recAAAAAAAAAAAAAA";
+const ID_B = "recBBBBBBBBBBBBBB";
+
+describe("record ids", () => {
+  it("accepts Airtable's own shape and nothing else", () => {
+    expect(AIRTABLE_RECORD_ID.test(ID_A)).toBe(true);
+    // Everything a formula would need to be an expression:
+    for (const bad of [
+      "rec'),RECORD_ID()='x",
+      "recAAAAAAAAAAAAA", // thirteen
+      "recAAAAAAAAAAAAAAA", // fifteen
+      "tblAAAAAAAAAAAAAA", // a table, not a record
+      "rec AAAAAAAAAAAAA",
+      "rec-AAAAAAAAAAAAA",
+      "",
+    ]) {
+      expect(AIRTABLE_RECORD_ID.test(bad)).toBe(false);
+    }
+  });
+
+  it("refuses a query whose ids are not record ids", () => {
+    expect(refuseQuery({ recordIds: [ID_A, "OR(1=1)"] })?.error).toBe("invalid_record_ids");
+    expect(refuseQuery({ recordIds: [] })?.error).toBe("invalid_record_ids");
+    expect(refuseQuery({ recordIds: Array(MAX_RECORD_IDS + 1).fill(ID_A) })?.error).toBe(
+      "invalid_record_ids",
+    );
+    expect(refuseQuery({ recordIds: [ID_A, ID_B] })).toBeNull();
+  });
+
+  it("never echoes the caller's text back in the refusal", () => {
+    // The message lands in operator-facing logs; a caller must not choose what
+    // is written there.
+    const refusal = refuseQuery({ recordIds: ["<script>bad</script>"] });
+    expect(refusal?.message).not.toContain("script");
+  });
+
+  it("splits the wire form without judging it", () => {
+    expect(parseRecordIds(`${ID_A}, ${ID_B} ,`)).toEqual([ID_A, ID_B]);
+    expect(parseRecordIds(null)).toBeUndefined();
+    // Judging is refuseQuery's job, in exactly one place.
+    expect(parseRecordIds("nonsense")).toEqual(["nonsense"]);
+  });
+
+  it("composes the formula itself, from ids alone", () => {
+    const url = new URL(brokeredUrl("records", "appBASE", "Tbl", { recordIds: [ID_A, ID_B] }));
+    expect(url.searchParams.get("filterByFormula")).toBe(
+      `OR(RECORD_ID()='${ID_A}',RECORD_ID()='${ID_B}')`,
+    );
+  });
+
+  it("throws rather than composing a formula from an id it has not checked", () => {
+    // Second reader of the same rule: this function is what reaches the vendor.
+    expect(() => brokeredUrl("records", "appBASE", "Tbl", { recordIds: ["'"] })).toThrow();
+  });
+
+  it("puts no filter on a read that named no records", () => {
+    const url = new URL(brokeredUrl("records", "appBASE", "Tbl", { pageSize: 100 }));
+    expect(url.searchParams.get("filterByFormula")).toBeNull();
   });
 });

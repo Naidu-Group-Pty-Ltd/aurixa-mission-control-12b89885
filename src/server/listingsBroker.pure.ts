@@ -57,12 +57,23 @@
  * from a clone. The guarantee is structural rather than a check somebody can
  * forget.
  *
- * **4. The query is an allow-list of five parameters.** Taken from what the
- * two real callers actually send — `airtable-proxy` and `listings-cache` —
- * rather than from what Airtable accepts. `filterByFormula` is deliberately
- * NOT among them: it is a query language, and a query language reaching a
- * shared table through a credential the caller does not hold is an exfiltration
- * primitive with a friendly name.
+ * **4. The query is an allow-list of parameters.** Taken from what the real
+ * callers actually send — `airtable-proxy`, `listings-cache`, `listing-images`
+ * and `auto-report-sync` — rather than from what Airtable accepts.
+ * `filterByFormula` is deliberately NOT among them: it is a query language, and
+ * a query language reaching a shared table through a credential the caller does
+ * not hold is an exfiltration primitive with a friendly name.
+ *
+ * `recordIds` is the one read that NEEDS a formula, and it is admitted by
+ * inverting who writes it. `listing-images` asks for the photograph columns of
+ * the listings it has claimed, which Airtable spells
+ * `filterByFormula=OR(RECORD_ID()='rec…',…)`. The caller sends IDS; each is
+ * checked against `rec` plus fourteen alphanumerics; and Mission Control
+ * composes the formula itself. So what crosses the boundary is a list of
+ * opaque row handles — not an expression — and there is no input to this
+ * module from which a caller could build one. That is the difference between
+ * "the caller may name rows" and "the caller may ask questions", and only the
+ * first is safe to broker.
  *
  * **5. No caller header reaches Airtable and no Airtable header returns.** A
  * proxy that passes headers through is a confused deputy, and Airtable's own
@@ -114,6 +125,20 @@ export const MAX_OFFSET_LENGTH = 512;
 /** A field name long enough for any real column and short enough to bound a URL. */
 export const MAX_SORT_FIELD_LENGTH = 200;
 
+/**
+ * An Airtable record id: `rec` and fourteen alphanumerics.
+ *
+ * The whole safety of `recordIds` rests here. An id matching this can contain
+ * no quote, no parenthesis, no comma and no operator, so a formula composed
+ * from checked ids cannot be anything but the OR of record handles this broker
+ * intended to write. The check is an allow-list of characters, never an escape
+ * or a blocklist.
+ */
+export const AIRTABLE_RECORD_ID = /^rec[A-Za-z0-9]{14}$/;
+
+/** How many records one read may name. Airtable's page cap is the same number. */
+export const MAX_RECORD_IDS = 100;
+
 export type ListingsQuery = {
   /** Resolved against the allow-list by the caller of `brokeredUrl`, never used raw. */
   readonly table?: string;
@@ -121,6 +146,8 @@ export type ListingsQuery = {
   readonly offset?: string;
   readonly sortField?: string;
   readonly sortDirection?: "asc" | "desc";
+  /** Row handles, never an expression. See `AIRTABLE_RECORD_ID`. */
+  readonly recordIds?: readonly string[];
 };
 
 export type QueryRefusal = { readonly error: string; readonly message: string };
@@ -150,7 +177,41 @@ export function refuseQuery(q: ListingsQuery): QueryRefusal | null {
   if (q.sortDirection !== undefined && q.sortDirection !== "asc" && q.sortDirection !== "desc") {
     return { error: "invalid_sort_direction", message: "sortDirection must be asc or desc." };
   }
+  if (q.recordIds !== undefined) {
+    if (q.recordIds.length === 0) {
+      return { error: "invalid_record_ids", message: "recordIds was sent with no ids in it." };
+    }
+    if (q.recordIds.length > MAX_RECORD_IDS) {
+      return {
+        error: "invalid_record_ids",
+        message: `At most ${MAX_RECORD_IDS} records may be read at once; the caller chunks.`,
+      };
+    }
+    if (q.recordIds.some((id) => !AIRTABLE_RECORD_ID.test(id))) {
+      // Deliberately does not echo the offending value: it is caller-supplied
+      // text and this message is written into logs an operator reads.
+      return {
+        error: "invalid_record_ids",
+        message: "Every recordId must be an Airtable record id (rec + 14 alphanumerics).",
+      };
+    }
+  }
   return null;
+}
+
+/**
+ * Parse the wire form of `recordIds` — a comma-separated list — into ids.
+ *
+ * Splitting only. Nothing here decides whether an id is acceptable; that is
+ * `refuseQuery`, so there is exactly one place the rule lives and the endpoint
+ * cannot accidentally skip it by parsing leniently.
+ */
+export function parseRecordIds(raw: string | null | undefined): string[] | undefined {
+  if (raw === null || raw === undefined) return undefined;
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
 /**
@@ -221,6 +282,19 @@ export function brokeredUrl(
   if (q.sortField) {
     url.searchParams.set("sort[0][field]", q.sortField);
     url.searchParams.set("sort[0][direction]", q.sortDirection ?? "desc");
+  }
+  if (q.recordIds && q.recordIds.length > 0) {
+    // Mission Control writes the formula; the caller only named rows. Checked
+    // again here rather than trusted from the endpoint, because this function
+    // is what actually reaches the vendor and a second reader of the same rule
+    // costs nothing.
+    if (q.recordIds.some((id) => !AIRTABLE_RECORD_ID.test(id))) {
+      throw new Error("brokeredUrl refused a recordId that is not an Airtable record id");
+    }
+    url.searchParams.set(
+      "filterByFormula",
+      `OR(${q.recordIds.map((id) => `RECORD_ID()='${id}'`).join(",")})`,
+    );
   }
   return url.toString();
 }
