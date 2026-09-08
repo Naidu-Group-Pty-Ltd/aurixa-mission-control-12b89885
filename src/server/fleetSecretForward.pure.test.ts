@@ -205,7 +205,8 @@ describe("taking a forwarded credential back off the fleet", () => {
     // the one spelling that left the credential in place, the lever would be
     // worse than useless.
     expect(
-      decideFleetWithdraw({ name: "DIDIT_API_KEY", ledgerStatus: "inherited", inherit: undefined }).act,
+      decideFleetWithdraw({ name: "DIDIT_API_KEY", ledgerStatus: "inherited", inherit: undefined })
+        .act,
     ).toBe("withdraw");
   });
 
@@ -225,7 +226,11 @@ describe("taking a forwarded credential back off the fleet", () => {
       "skipped_platform",
       "skipped_deployment_config",
     ]) {
-      const out = decideFleetWithdraw({ name: "RESET_TOKEN_PEPPER", ledgerStatus: status, inherit: false });
+      const out = decideFleetWithdraw({
+        name: "RESET_TOKEN_PEPPER",
+        ledgerStatus: status,
+        inherit: false,
+      });
       expect(out.act, `${status} must not be withdrawable`).toBe("not_forwarded");
     }
   });
@@ -362,12 +367,12 @@ describe("a withheld name survives the thirty-minute sweep", () => {
   });
 
   it("the sweep reads the withheld set from the ledger, not from nowhere", () => {
-    const server = readFileSync(
-      new URL("./fleetSecretForward.server.ts", import.meta.url),
-      "utf8",
-    );
-    expect(server).toContain("withheld: new Set(");
+    const server = readFileSync(new URL("./fleetSecretForward.server.ts", import.meta.url), "utf8");
+    // The RULE, not the expression: the set comes from this clone's ledger
+    // rows whose status is WITHHELD. It was asserted as one particular
+    // spelling and moved to a named binding the moment it had a second use.
     expect(server).toContain('(r.status ?? "") === WITHHELD');
+    expect(server).toContain("withheld: withheldNames");
     // `withheld` must never join SETTLED — that would silence the sweep by
     // claiming the clone holds the value.
     expect(server).toContain('const SETTLED = new Set(["inherited", "set"]);');
@@ -378,8 +383,10 @@ describe("a withheld name survives the thirty-minute sweep", () => {
     // the function that tried to write it, exactly like a write nobody
     // attempted — the defect this platform paid for on `reminder_type`.
     const sql = readFileSync(
-      new URL("../../supabase/migrations/20260907160000_clone_secret_withheld_status.sql",
-        import.meta.url),
+      new URL(
+        "../../supabase/migrations/20260907160000_clone_secret_withheld_status.sql",
+        import.meta.url,
+      ),
       "utf8",
     );
     expect(sql).toContain("clone_backend_secrets_status_check");
@@ -387,5 +394,53 @@ describe("a withheld name survives the thirty-minute sweep", () => {
     for (const kept of ["missing", "set", "failed", "inherited", "authorised_no_value"]) {
       expect(sql, `must not drop ${kept}`).toContain(`'${kept}'`);
     }
+  });
+});
+
+describe("a withheld name is taken OFF the project, not merely left unwritten", () => {
+  const server = () =>
+    readFileSync(new URL("./fleetSecretForward.server.ts", import.meta.url), "utf8");
+
+  /*
+   * Withholding has two jobs and only one was ever done.
+   *
+   * Not writing a withheld name keeps the sweep from putting it back.
+   * REMOVING one that predates the decision is what makes the decision true —
+   * and nothing did that: `withholdCloneSecret` deletes and stamps, and had no
+   * caller anywhere in this repository.
+   *
+   * Measured 8 Sep 2026: AIRTABLE_TOKEN and AIRTABLE_BASE_ID read `withheld`
+   * on all three clones with `last_set_at: null`, while one clone went on
+   * reading Airtable directly with a pair it had been given before the policy
+   * existed — so the broker was never reached and its Listings page stayed
+   * empty for five hours.
+   */
+  it("the sweep enforces the withheld set as well as respecting it", () => {
+    expect(server()).toContain("enforceWithheld(");
+    expect(server()).toContain("deleteCloneSecretValues");
+  });
+
+  it("removes only names the project is OBSERVED to hold", () => {
+    // `listProjectSecretNames` answers [] for a transport failure exactly as
+    // for a project holding none, so an empty answer must remove nothing.
+    expect(server()).toContain("listProjectSecretNames");
+    expect(server()).toMatch(/present\.filter\(\(name\) => withheldNames\.has\(name\)\)/);
+    expect(server()).toContain("if (stale.length === 0) return []");
+  });
+
+  it("stamps the removal, because a null last_set_at is what never-enforced looked like", () => {
+    expect(server()).toMatch(/status: WITHHELD,\s*\n\s*last_set_at: now/);
+  });
+
+  it("never takes the sweep down over one clone's stale name", () => {
+    // Throwing here would stop every OTHER clone settling.
+    expect(server()).not.toMatch(/enforceWithheld[\s\S]{0,1200}throw new Error/);
+  });
+
+  it("a removal is reported separately from a write", () => {
+    // The opposite act. A sweep that removes a credential must never be
+    // reported as one that changed nothing.
+    expect(server()).toContain("removed: Array<{ clone_id: string; names: string[] }>");
+    expect(server()).toContain("out.removed.push(");
   });
 });

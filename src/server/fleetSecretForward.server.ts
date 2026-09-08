@@ -54,6 +54,8 @@ export type FleetPushResult =
       ok: true;
       cloneId: string;
       written: string[];
+      /** Withheld names that were still on the project, and are not now. */
+      removed: string[];
       withoutValue: string[];
       outcomes: FleetForwardOutcome[];
     }
@@ -90,6 +92,31 @@ export async function pushFleetSecretForwards(
   if (ledger.error)
     return { ok: false, cloneId, reason: "unreadable", error: ledger.error.message };
 
+  /*
+   * Deliberately taken off this clone.
+   *
+   * Two jobs, and only one of them was ever done. Not writing a withheld name
+   * is what keeps this sweep from putting it straight back; REMOVING one that
+   * predates the decision is what makes the decision true, and nothing did
+   * that — `withholdCloneSecret` deletes and stamps, and had no caller
+   * anywhere in this repository.
+   *
+   * Measured 8 Sep 2026: `AIRTABLE_TOKEN` and `AIRTABLE_BASE_ID` read
+   * `withheld` on all three clones with `last_set_at: null` — the shape of a
+   * policy recorded rather than enforced — while one clone went on reading
+   * Airtable DIRECTLY with a pair it had been given before the policy existed.
+   * `resolveListingsRoute` prefers the direct road whenever a token and a base
+   * id are both present, so the broker was never reached and its Listings page
+   * stayed empty for five hours.
+   *
+   * An Airtable personal access token carries its whole SCOPE. This is the
+   * exposure `AIRTABLE_KEY_OWNERSHIP.md` exists to close, and it was still
+   * live on a tenant project.
+   */
+  const withheldNames = new Set(
+    (ledger.data ?? []).filter((r) => (r.status ?? "") === WITHHELD).map((r) => r.name),
+  );
+
   const outcomes = planFleetForwards({
     fleet: new Map((fleet.data ?? []).map((r) => [r.name, r.inherit])),
     classOf: classifySecret,
@@ -100,17 +127,15 @@ export async function pushFleetSecretForwards(
     // Deliberately taken off THIS clone. Not `settled` — the project does not
     // hold the value and the ledger must not claim it does — so it needs its
     // own channel or this sweep writes it straight back within thirty minutes.
-    withheld: new Set(
-      (ledger.data ?? []).filter((r) => (r.status ?? "") === WITHHELD).map((r) => r.name),
-    ),
+    withheld: withheldNames,
   });
 
   const names = fleetNamesToWrite(outcomes);
   const withoutValue = fleetNamesWithoutValue(outcomes);
-  if (names.length === 0) {
+  if (names.length === 0 && withheldNames.size === 0) {
     // Reported as an empty write rather than as a successful one — the shape
     // every silent-success defect in this platform has taken.
-    return { ok: true, cloneId, written: [], withoutValue, outcomes };
+    return { ok: true, cloneId, written: [], removed: [], withoutValue, outcomes };
   }
 
   let projectRef: string;
@@ -119,6 +144,12 @@ export async function pushFleetSecretForwards(
   } catch (e) {
     const reason = e instanceof CloneSecretTargetError ? e.reason : "unreadable";
     return { ok: false, cloneId, reason, error: msg(e) };
+  }
+
+  const removed = await enforceWithheld(supabase, cloneId, projectRef, withheldNames, opts);
+
+  if (names.length === 0) {
+    return { ok: true, cloneId, written: [], removed, withoutValue, outcomes };
   }
 
   const { setCloneSecretValues } = await import("./backend-provisioning.server");
@@ -147,13 +178,86 @@ export async function pushFleetSecretForwards(
   }
 
   if (!res.ok) return { ok: false, cloneId, reason: "write_failed", error: res.error };
-  return { ok: true, cloneId, written: names, withoutValue, outcomes };
+  return { ok: true, cloneId, written: names, removed, withoutValue, outcomes };
+}
+
+/**
+ * Make a withheld name true on the project, not merely recorded in a ledger.
+ *
+ * Deletes only names this clone's ledger already says are withheld — a
+ * decision taken elsewhere, enforced here — and only those the project is
+ * observed to hold.
+ *
+ * `listProjectSecretNames` answers `[]` for a transport failure exactly as it
+ * does for a project holding none, so an empty answer removes nothing. That is
+ * the conservative direction and the rule this repository keeps restating: a
+ * read that FAILED is not a set that is EMPTY.
+ *
+ * A failure to delete is logged and never thrown: this runs inside the forward
+ * sweep, and taking the sweep down over one stale name would stop every OTHER
+ * clone settling.
+ */
+async function enforceWithheld(
+  supabase: Db,
+  cloneId: string,
+  projectRef: string,
+  withheldNames: ReadonlySet<string>,
+  opts: { actorUserId?: string | null },
+): Promise<string[]> {
+  if (withheldNames.size === 0) return [];
+
+  const { listProjectSecretNames, deleteCloneSecretValues } =
+    await import("./backend-provisioning.server");
+  const present = await listProjectSecretNames(projectRef);
+  const stale = present.filter((name) => withheldNames.has(name));
+  if (stale.length === 0) return [];
+
+  const del = await deleteCloneSecretValues(projectRef, stale);
+  if (!del.ok) {
+    console.error(
+      `[fleet-secret-forward] withheld names still on ${cloneId}: ${stale.join(", ")} — ${del.error}`,
+    );
+    return [];
+  }
+
+  // Stamp it. `withheld` with a null `last_set_at` is what a policy recorded
+  // but never carried out looks like, and it read the same as one that had
+  // been.
+  const now = new Date().toISOString();
+  const { error } = await supabase.from("clone_backend_secrets").upsert(
+    stale.map((name) => ({
+      clone_id: cloneId,
+      name,
+      status: WITHHELD,
+      last_set_at: now,
+      last_error: null,
+      set_by: opts.actorUserId ?? null,
+    })),
+    { onConflict: "clone_id,name" },
+  );
+  if (error) {
+    console.error(
+      `[fleet-secret-forward] removed ${stale.join(", ")} from ${cloneId} but could not stamp: ${error.message}`,
+    );
+  }
+  console.warn(
+    `[fleet-secret-forward] removed withheld names from ${cloneId}: ${stale.join(", ")}`,
+  );
+  return stale;
 }
 
 export type FleetReconcileResult = {
   considered: number;
   pushed: number;
   written: number;
+  /**
+   * Withheld names found still on a project and taken off it, per clone.
+   *
+   * Counted separately from `written` because it is the opposite act, and
+   * because a sweep that removes a credential should never be reported as one
+   * that changed nothing.
+   */
+  removed: Array<{ clone_id: string; names: string[] }>;
   /** Fleet names this deployment holds no value for, per clone. */
   withoutValue: Array<{ clone_id: string; names: string[] }>;
   refused: Array<{ clone_id: string; reason: string; error: string }>;
@@ -176,6 +280,7 @@ export async function reconcileFleetSecretForwards(supabase: Db): Promise<FleetR
     considered: 0,
     pushed: 0,
     written: 0,
+    removed: [],
     withoutValue: [],
     refused: [],
   };
@@ -198,6 +303,9 @@ export async function reconcileFleetSecretForwards(supabase: Db): Promise<FleetR
     if (!res.ok) {
       out.refused.push({ clone_id: cloneId, reason: res.reason, error: res.error });
       continue;
+    }
+    if (res.removed.length > 0) {
+      out.removed.push({ clone_id: cloneId, names: res.removed });
     }
     if (res.withoutValue.length > 0) {
       out.withoutValue.push({ clone_id: cloneId, names: res.withoutValue });
@@ -241,8 +349,7 @@ export async function withholdCloneSecret(
     .maybeSingle();
   // An unreadable ledger is not an absent row. Deciding on a failed read would
   // let a transport fault look like "this clone never had it".
-  if (ledger.error)
-    return { ok: false, reason: "unreadable", error: ledger.error.message };
+  if (ledger.error) return { ok: false, reason: "unreadable", error: ledger.error.message };
 
   const outcome = decideCloneWithhold({
     name,
