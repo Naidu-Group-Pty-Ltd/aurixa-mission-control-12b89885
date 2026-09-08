@@ -10,6 +10,7 @@ import {
   refusalHeaders,
   refuseQuery,
   resolveTable,
+  type ListingsQuery,
 } from "./listingsBroker.pure";
 
 const pureSrc = readFileSync(new URL("./listingsBroker.pure.ts", import.meta.url), "utf8");
@@ -103,11 +104,10 @@ describe("the query is a bounded allow-list of five parameters", () => {
     for (const src of [pureSrc, serverSrc, routeSrc]) {
       expect(src.toLowerCase()).not.toMatch(/searchparams\.set\(\s*["'`]filterbyformula/);
     }
-    const url = brokeredUrl("records", "appBASE", "Intake", {
-      pageSize: 10,
-      // a caller-shaped extra must not survive into the URL
-      ...({ filterByFormula: "1=1" } as never),
-    });
+    // A caller-shaped extra must not survive into the URL: `brokeredUrl` reads
+    // named fields, so anything else is dropped rather than relayed.
+    const withExtra = { pageSize: 10, filterByFormula: "1=1" } as ListingsQuery;
+    const url = brokeredUrl("records", "appBASE", "Intake", withExtra);
     expect(url).not.toMatch(/filterByFormula/i);
   });
 });
