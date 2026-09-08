@@ -1234,6 +1234,73 @@ takes `settled` — names another step wrote, with the time it did — records t
 neither settle nor derive is `tenant_scoped`, because the prime's `true` on a
 clone with no widget refuses every login.
 
+## A brokered credential is a secret CLASS, and it never reaches a clone
+
+Some vendor credentials cannot be forwarded at all, and the reason is the same
+each time: **the credential's scope is wider than the tenant**, and the vendor
+publishes no way to mint a narrower one.
+
+- `DIDIT_API_KEY` is scoped to an APPLICATION, and that scope includes the
+  application's session list — measured 7 Sep 2026, one key returned all eight
+  sessions with the customer's name and live pre-signed URLs to their passport
+  portrait and selfie.
+- `AIRTABLE_TOKEN` is a personal access token carrying a set of BASES and a set
+  of PERMISSIONS, fixed when it was minted; nothing in it narrows to one table.
+  With `data.records:write` it can rewrite the shared intake table every clone
+  reads. `AIRTABLE_BASE_ID` travels with it, because a token pointed at a base
+  the deployment was not set up for serves a plausible marketplace of somebody
+  else's listings.
+
+So the credential stops at Mission Control and the CALL travels: the clone
+reaches the vendor through a Mission Control endpoint, authenticated with the
+key it already holds.
+
+**Held by hand, this decays on the next clone.** Both credentials were kept off
+the three existing clones by per-clone `withheld` ledger rows written through an
+operator hook — correct for the clones that exist and wrong for the next one,
+which inherits no row, so the fleet forward would hand it the credential its
+broker exists to withhold. The forward's own comment says the quiet part:
+without a `withheld` row, "this sweep writes it straight back within thirty
+minutes."
+
+The fact therefore lives in the classification. `BROKERED_SECRETS` names them;
+`classifySecret` returns `brokered` **ahead of** `vendor` — these ARE vendor
+credentials, which is exactly why the check has to come before the class that
+travels — and `classRefusalFor` is consulted FIRST by both `decideForward` and
+`decideFleetForward`, so neither fleet policy nor any per-clone row can overrule
+it. Provisioning records `withheld` rather than `missing`, and the word is the
+point: `missing` means OWED, and every drift report and reconcile sweep would
+keep trying to deliver it.
+
+Four rules for adding one.
+
+1. **Name it in `BROKERED_SECRETS` and nowhere else.** The refusal text lives
+   once, in `cloneSecretForward.pure.ts`'s `CLASS_REFUSAL`.
+2. **A name with no broker endpoint REMOVES the capability rather than
+   brokering it.** Withholding a credential a clone has no other route to just
+   breaks the feature quietly. A test asserts the set names only credentials a
+   clone can actually reach an endpoint for.
+3. **A brokered call is metered at Mission Control, never at the clone.**
+   Mission Control writes the usage row because Mission Control made the vendor
+   call; both ends billing is worse than neither.
+4. **Mark your own refusals.** `x-mission-control-refusal` is set on Mission
+   Control's refusals and never on what it relays — both ends answer 401/403/429
+   with similar JSON and send an operator to opposite remedies.
+
+Configuration that merely accompanies a brokered credential still forwards.
+`AIRTABLE_TABLE_NAME` is `inherited` on every clone, because a table name is not
+a credential and `listings-cache` needs it locally for its own cache key — a
+clone without it answers `no_table_configured` and syncs nothing.
+
+**The Listings broker is read-only by construction, and stays that way.** Adding
+a write operation would hand a tenant the ability to rewrite the table every
+other tenant reads, which is the leak the arrangement exists to close. The two
+functions that PATCH the intake base (`listing-images`, `listing-enrichment`)
+are refused on the clone side by `resolveWritebackRoute`, which names the RULE
+rather than reporting a missing setting — a clone will never hold that token, so
+"not configured" would send an operator looking for something to fix that must
+not exist.
+
 ## Deployment config is derived from THIS clone's hostnames — and re-derived when they change
 
 `DERIVED_DEPLOYMENT_CONFIG` used to hold one name. Left unset, `APP_BASE_URL`
