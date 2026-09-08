@@ -809,6 +809,10 @@ async function executeSqlMigration(
       // increment — never a reset.
       ...(resume.attemptNeutral ? { attempts: run.attempts ?? 0 } : {}),
       next_attempt_at: new Date().toISOString(),
+      // Same rule as the deploy lane: a pass that carried work forward is not
+      // a failed pass, and this field is a reading of the last one. A pass
+      // that could not carry work forward parks instead, with its reasons.
+      last_error: null,
       result: {
         resuming: true,
         applied_this_pass: landed,
@@ -998,6 +1002,28 @@ async function executeEdgeFunctionDeploy(run: any): Promise<{ status: string }> 
       // Due now: the drain runs every two minutes and has already chosen
       // this pass's batch, so it is the NEXT pass that picks this up.
       next_attempt_at: new Date().toISOString(),
+      /*
+       * `last_error` describes the LAST PASS, not the run's whole history.
+       *
+       * It was otherwise cleared only on SUCCESS, and these runs pause at
+       * budget dozens of times before they succeed — so a run that erred once
+       * and has been advancing cleanly ever since kept displaying that error
+       * as its current state. Measured 8 Sep 2026: NPC Test showed
+       * `Cannot read properties of undefined (reading 'repository')` for
+       * twenty minutes while `attempts` sat unmoved at 1 and `deployed`
+       * climbed 223 → 283. Reading that page, the run looked broken and was
+       * not, which cost a real investigation to disprove.
+       *
+       * The history is not lost: `attempts` is what preserves a genuine
+       * earlier failure, and the comment above is careful never to reset it.
+       */
+      last_error:
+        failedDetail.length > 0
+          ? `last pass could not deploy ${failedDetail[0].slug}: ${failedDetail[0].error}`.slice(
+              0,
+              2000,
+            )
+          : null,
       result: {
         resuming: true,
         deployed: refreshed.length + landed,
