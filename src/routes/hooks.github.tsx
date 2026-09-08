@@ -316,10 +316,9 @@ export const Route = createFileRoute("/hooks/github")({
           // is the state the gate already reports as `pending`, and draining
           // on it would be the poll again, faster and no more informative.
           if (payload.action !== "completed" || unit?.status !== "completed") {
-            return new Response(
-              JSON.stringify({ skipped: true, reason: "check not completed" }),
-              { headers: { "Content-Type": "application/json" } },
-            );
+            return new Response(JSON.stringify({ skipped: true, reason: "check not completed" }), {
+              headers: { "Content-Type": "application/json" },
+            });
           }
           // No pull request attached: a check suite on a branch nobody has
           // proposed. There is nothing for the drain to consider.
