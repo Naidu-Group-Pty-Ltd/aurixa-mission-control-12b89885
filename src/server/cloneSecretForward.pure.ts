@@ -90,6 +90,10 @@ const CLASS_REFUSAL: Partial<Record<SecretClass, string>> = {
     "An identity secret is generated per clone, never copied — sharing one makes two deployments the same principal.",
   tenant_scoped:
     "This is the clone's OWN credential. Copying the prime's would let this clone mint tokens the prime accepts.",
+  brokered:
+    "Mission Control brokers this credential and never forwards it. A clone reaches the vendor through " +
+    "Mission Control's own endpoint with the key it already has, so the credential stops here and the CALL " +
+    "travels. Forwarding it would hand a tenant a scope it must not hold.",
 };
 
 /**

@@ -523,7 +523,8 @@ export function canMintKey(row: EmailIdentityRow | null): { ok: boolean; reason?
  * Map a provisioning shell status onto the operator ledger's vocabulary.
  *
  * `clone_backend_secrets.status` is CHECK-constrained to
- * `missing | set | failed | inherited`, while the planner also says
+ * `missing | set | failed | inherited | authorised_no_value | withheld`,
+ * while the planner also says
  * `generated`, `derived`, `skipped_platform` and `skipped_deployment_config`.
  * The provisioning ledger upsert used to write the planner's words straight
  * into the column — one `generated` row violated the constraint, Postgres
@@ -534,7 +535,7 @@ export function canMintKey(row: EmailIdentityRow | null): { ok: boolean; reason?
  */
 export function ledgerStatusForShell(
   status: SecretShellStatus,
-): "missing" | "set" | "failed" | "inherited" | "authorised_no_value" | null {
+): "missing" | "set" | "failed" | "inherited" | "authorised_no_value" | "withheld" | null {
   switch (status) {
     case "missing":
     case "set":
@@ -559,6 +560,12 @@ export function ledgerStatusForShell(
     // column to accept it.
     case "authorised_no_value":
       return "authorised_no_value";
+    // Mission Control brokers this credential, so the clone is not owed it and
+    // never will be. NOT `missing`: that word means owed, and it would have the
+    // drift report and every reconcile sweep trying to deliver a credential the
+    // broker exists to keep off a tenant.
+    case "withheld":
+      return "withheld";
   }
 }
 

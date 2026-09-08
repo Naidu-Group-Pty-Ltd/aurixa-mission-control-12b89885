@@ -373,6 +373,32 @@ export const DEPLOYMENT_CONFIG_SECRETS = new Set([
  * is what makes it impossible for one to be added later, which is the whole
  * point of this list.
  */
+/**
+ * Credentials Mission Control BROKERS. These never travel, to any clone, ever.
+ *
+ * Not a per-clone withdrawal and not a fleet-policy flag: both of those are
+ * decisions somebody makes and somebody else can undo, and both were how these
+ * two were held before — three hand-made `withheld` ledger rows apiece, which
+ * a NEW clone would not have inherited. A clone provisioned tomorrow would
+ * have been handed the credential the broker exists to keep from it.
+ *
+ * `DIDIT_API_KEY` — a Didit key is scoped to an APPLICATION and that scope
+ * includes the application's session list, so one tenant's copy reads every
+ * other tenant's customers' passport portraits (measured 7 Sep 2026).
+ *
+ * `AIRTABLE_TOKEN` / `AIRTABLE_BASE_ID` — an Airtable personal access token
+ * carries its whole scope, a set of bases and a set of permissions fixed when
+ * it was minted, and nothing in it narrows to the one table the marketplace
+ * needs. With `data.records:write` a tenant could rewrite the shared intake
+ * table every other clone reads. The base id travels with it so the clone-side
+ * rule — the caller never names a base — is true of the environment and not
+ * only of the broker.
+ *
+ * Both are reachable by a clone through Mission Control's own endpoints, which
+ * is the point: the credential stops here and the CALL travels.
+ */
+export const BROKERED_SECRETS = new Set(["DIDIT_API_KEY", "AIRTABLE_TOKEN", "AIRTABLE_BASE_ID"]);
+
 export const TENANT_SCOPED_SECRETS = new Set([
   "TURNSTILE_SECRET_KEY",
   "JWT_SECRET",
@@ -451,6 +477,8 @@ export type SecretClass =
   | "identity"
   | "deployment_config"
   | "tenant_scoped"
+  /** Mission Control holds it and makes the call; it never reaches a clone. */
+  | "brokered"
   | "vendor";
 
 /**
@@ -462,6 +490,9 @@ export function classifySecret(name: string): SecretClass {
   if (IDENTITY_SECRETS.has(name)) return "identity";
   if (DEPLOYMENT_CONFIG_SECRETS.has(name)) return "deployment_config";
   if (TENANT_SCOPED_SECRETS.has(name)) return "tenant_scoped";
+  // Ahead of `vendor`: these ARE vendor credentials, and that is exactly why
+  // the classification has to catch them before the class that travels.
+  if (BROKERED_SECRETS.has(name)) return "brokered";
   return "vendor";
 }
 
