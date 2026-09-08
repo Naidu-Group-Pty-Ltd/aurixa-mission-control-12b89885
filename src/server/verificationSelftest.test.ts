@@ -61,7 +61,37 @@ describe("the self-test asks, and never decides", () => {
   });
 
   it("answers 200 with the readings, so one unreachable clone hides no others", () => {
-    expect(hook).toContain("success: true, results");
+    /*
+     * Judged on the properties rather than the literal, because the body
+     * gained `mode` and a string match pinned the field ORDER — which is not
+     * the guarantee. What matters is that the readings travel in a 200: a
+     * clone that could not be asked is a state, and reporting the sweep as a
+     * failure would hide every clone that answered.
+     */
+    expect(hook).toMatch(/success:\s*true/);
+    expect(hook).toMatch(/JSON\.stringify\(\{[^}]*results[^}]*\}\)/);
+    // No status override on the success path: `new Response(body, { headers })`
+    // is 200, and a `status:` beside those headers would be the regression.
+    expect(hook).not.toMatch(/results\s*\}\)[\s\S]{0,120}status:\s*(?!200)\d/);
+  });
+
+  it("asks for the PROBE unless the loop is named, because only one of them spends", () => {
+    /*
+     * The probe sends an empty form and spends nothing; the loop check sends
+     * real images through all three operations and is billable on a 2xx. A
+     * diagnostic that starts billing because a caller omitted a field is not
+     * one anybody should trust, so the default is the free one.
+     */
+    expect(hook).toMatch(/body\.mode === "loop" \? \("loop" as const\) : \("probe" as const\)/);
+    expect(src).toContain('probe: "verification.selftest"');
+    expect(src).toContain('loop: "verification.loopcheck"');
+  });
+
+  it("waits longer for the loop than for the probe", () => {
+    // Three multipart requests with real images, each waiting on the vendor.
+    // Timing the caller out shorter than the work reports a healthy loop as
+    // unreachable — the diagnostic lying about the thing it measures.
+    expect(src).toMatch(/mode === "loop" \? 150_000 : 30_000/);
   });
 
   it("is behind the cron secret, like every other operator lever here", () => {
