@@ -52,6 +52,11 @@ import {
 } from "./prime-backend.server";
 import { applyPrimeMigrations, runSqlOnProject } from "./backend-provisioning.server";
 import { scopeCorpusToPrime, assertPrimeLedgerUsable } from "./fleetCorpusScope.pure";
+import {
+  MIGRATION_CLAIMABLE_STATUSES,
+  migrationEligibility,
+  type MigrationSkipReason,
+} from "./fleetMigrationEligibility.pure";
 import { notifyOperators, writeAuditLog } from "./audit.server";
 
 type Db = SupabaseClient<Database>;
@@ -101,6 +106,24 @@ export type FleetMigrationResult = {
    */
   excluded: number;
   /**
+   * The excluded ones, NAMED, with this lane's own verdict on each.
+   *
+   * `excluded: 2` is the reading that hid the defect this field exists to end.
+   * It is true, it is unactionable, and it reads identically whether the two
+   * are mid-provision (fine, they will be along shortly) or held out of the
+   * fleet for a day by a verdict another worker reached about a job. An
+   * operator cannot tell those apart from a number, and for a day nobody did.
+   *
+   * Every skip carries the clone's NAME and a sentence saying what to do, so
+   * a run that serves one of three tenants says which two it did not and why.
+   */
+  skipped: Array<{
+    cloneId: string;
+    cloneName: string;
+    reason: MigrationSkipReason;
+    detail: string;
+  }>;
+  /**
    * Clones where a migration was left unsent because its body is past the
    * corpus ceiling and this pass could not stream it.
    *
@@ -141,6 +164,7 @@ const EMPTY: FleetMigrationResult = {
   upToDate: 0,
   failed: [],
   excluded: 0,
+  skipped: [],
   heldOversize: [],
   withheld: 0,
   withheldBreakdown: { neverApplied: 0, skewSuspected: 0 },
@@ -152,15 +176,20 @@ const EMPTY: FleetMigrationResult = {
  * `worker_started_at` is reused as the claim, and that is safe rather than
  * lucky: the backend-provisioning drain claims `pending` and reclaims
  * `pending`/`provisioning`/`migrating`/`seeding_admin`. It never looks at a
- * `ready` row, which is the only status this touches. The two workers cannot
- * meet.
+ * row in `MIGRATION_CLAIMABLE_STATUSES`, which is the only set this touches.
+ * The two workers cannot meet.
+ *
+ * The set is named rather than spelled `ready` here. This lane no longer gates
+ * on `ready` — see `migrationEligibility` — so a reclaim that still did would
+ * strand its own claim on a `failed` row for ever, which is worse than the
+ * defect it was written to prevent.
  */
 async function reclaimStale(supabase: Db): Promise<void> {
   const cutoff = new Date(Date.now() - STALE_CLAIM_MINUTES * 60_000).toISOString();
   const { error } = await supabase
     .from("clone_backends")
     .update({ worker_started_at: null })
-    .eq("status", "ready")
+    .in("status", [...MIGRATION_CLAIMABLE_STATUSES])
     .not("worker_started_at", "is", null)
     .lt("worker_started_at", cutoff);
   if (error) throw new Error(`Could not reclaim stale migration claims: ${error.message}`);
@@ -281,43 +310,89 @@ export async function runFleetMigrationSync(
 
   await reclaimStale(supabase);
 
-  // Everything not eligible, counted before the batch is taken. A clone is
-  // excluded because it is mid-provision or because a migration failed on it,
-  // and the second of those is a clone silently falling out of the fleet.
-  const { count: excludedCount, error: excludedErr } = await supabase
+  /*
+    EVERY BACKEND, THEN THIS LANE'S OWN VERDICT ON EACH.
+
+    This used to be `.eq("status", "ready")` — a PROVISIONING queue status,
+    written by a different worker, read here as though it were a fact about a
+    tenant's database. It is not, and every other reader of `clone_backends`
+    in this repository already knows that: deploy, secret forwarding, signing
+    pairs, allowed origins and CI credentials all ignore `status` entirely.
+    The migration lane was the only one gating on it, which is precisely why
+    the symptom presented as "SQL migrations don't run on clones" while
+    nothing else in the fleet looked wrong.
+
+    Measured 8 Sep 2026: two clones were queued as REPAIRS on 7 September,
+    never claimed once (`attempts: 0`), and swept to `failed` 24 hours later
+    by the provisioning drain's wall-clock ceiling. Both databases were
+    healthy and level with the third. Every run for the next day reported
+    `processed 1 … excluded 2`, and two of three tenants stopped receiving the
+    prime's schema with nothing anywhere naming them.
+
+    So this lane asks its own question, in `migrationEligibility`: is there a
+    project to talk to, is the provisioning worker not currently inside it,
+    and has a migration failed here before? Only the last of those is a fact
+    about the schema, and only this lane may write it.
+  */
+  const { data: allBackends, error: excludedErr } = await supabase
     .from("clone_backends")
-    .select("clone_id", { count: "exact", head: true })
-    .neq("status", "ready");
+    .select(
+      "clone_id, supabase_project_ref, migration_version, status, worker_started_at, migration_blocked_at, migration_blocked_reason",
+    );
   if (excludedErr) {
     return { ...EMPTY, error: `Could not read clone backends: ${excludedErr.message}` };
   }
 
-  const { data: backends, error: pickErr } = await supabase
-    .from("clone_backends")
-    .select("clone_id, supabase_project_ref, migration_version")
-    .eq("status", "ready")
-    .is("worker_started_at", null)
-    .not("supabase_project_ref", "is", null)
+  const verdicts = (allBackends ?? []).map((b) => ({
+    row: b,
+    verdict: migrationEligibility({
+      supabaseProjectRef: b.supabase_project_ref,
+      status: b.status,
+      workerStartedAt: b.worker_started_at,
+      migrationBlockedAt: b.migration_blocked_at,
+      migrationBlockedReason: b.migration_blocked_reason,
+    }),
+  }));
+  const skipped = verdicts.filter((v) => !v.verdict.eligible);
+  const excludedCount = skipped.length;
+
+  const backends = verdicts
+    .filter((v) => v.verdict.eligible)
+    .map((v) => v.row)
     // Nulls first: a backend that has never recorded a version is furthest
     // behind by definition.
-    .order("migration_version", { ascending: true, nullsFirst: true })
-    .limit(batchSize);
-  // A candidate list that could not be READ is not an empty fleet. Reporting
-  // "0 clones, nothing to do" would make a database fault look like a fleet
-  // already in step, on the one job whose purpose is noticing that it is not.
-  if (pickErr) {
-    return {
-      ...EMPTY,
-      excluded: excludedCount ?? 0,
-      error: `Could not read clone backends: ${pickErr.message}`,
-    };
-  }
+    .sort((a, b) => {
+      const av = a.migration_version ?? "";
+      const bv = b.migration_version ?? "";
+      if (av === bv) return 0;
+      if (av === "") return -1;
+      if (bv === "") return 1;
+      return av < bv ? -1 : 1;
+    })
+    .slice(0, batchSize);
+
+  // Names for BOTH sets, read once. A skipped clone is reported by name, so
+  // this read has to cover the ones this run will not touch as well as the
+  // ones it will — which is the whole difference between `excluded: 2` and
+  // knowing which two.
+  const { data: clones } = await supabase
+    .from("clones")
+    .select("id, name")
+    .in("id", [...verdicts.map((v) => v.row.clone_id)]);
+  const nameOf = new Map((clones ?? []).map((c) => [c.id, c.name]));
 
   const out: FleetMigrationResult = {
     ...EMPTY,
     failed: [],
     heldOversize: [],
-    excluded: excludedCount ?? 0,
+    excluded: excludedCount,
+    skipped: skipped.map((v) => ({
+      cloneId: v.row.clone_id,
+      cloneName: nameOf.get(v.row.clone_id) ?? v.row.clone_id,
+      // Narrowed by the filter above; restated for the type.
+      reason: (v.verdict as { reason: MigrationSkipReason }).reason,
+      detail: (v.verdict as { detail: string }).detail,
+    })),
   };
   if (!backends || backends.length === 0) return out;
 
@@ -343,10 +418,6 @@ export async function runFleetMigrationSync(
   out.withheld = scoped.withheld;
   out.withheldBreakdown = scoped.breakdown;
 
-  const ids = backends.map((b) => b.clone_id);
-  const { data: clones } = await supabase.from("clones").select("id, name").in("id", ids);
-  const nameOf = new Map((clones ?? []).map((c) => [c.id, c.name]));
-
   for (const backend of backends) {
     const cloneId = backend.clone_id;
     const cloneName = nameOf.get(cloneId) ?? cloneId;
@@ -355,11 +426,19 @@ export async function runFleetMigrationSync(
     // runs cannot both take the same clone — pg_cron does not serialise its own
     // job, and applying one migration twice concurrently is how a clone gets
     // marked failed by a duplicate-object error it never really had.
+    //
+    // `status` is a COMPARE-AND-SWAP on the value eligibility was decided
+    // against, not a requirement that it be `ready`. Between the plan above
+    // and this line an operator can retry or repair a backend, which moves it
+    // to `pending` and hands it to the provisioning worker; claiming it then
+    // would put this lane inside a schema somebody else is rebuilding. A
+    // changed status returns no row and the clone waits for the next tick,
+    // which is the correct outcome and costs half an hour at most.
     const { data: claimed, error: claimErr } = await supabase
       .from("clone_backends")
       .update({ worker_started_at: new Date().toISOString() })
       .eq("clone_id", cloneId)
-      .eq("status", "ready")
+      .eq("status", backend.status)
       .is("worker_started_at", null)
       .select("clone_id");
     if (claimErr) {
@@ -491,6 +570,21 @@ export async function runFleetMigrationSync(
                 // `held` is deliberately absent from this expression: a body
                 // this worker declined to carry never moves the clone.
                 status: failures.length > 0 ? ("failed" as const) : ("ready" as const),
+                // THE ONLY WRITER OF THIS FIELD.
+                //
+                // `status` is shared with the provisioning drain and says
+                // nothing reliable about a schema; this pair is this lane's
+                // own record of the one thing only it can establish — that a
+                // prime migration was sent to this clone and refused. It is
+                // set on a failure and CLEARED on any pass that succeeds, so
+                // a repaired clone rejoins the fleet by being repaired rather
+                // than by somebody remembering to clear a flag.
+                ...(failures.length > 0
+                  ? {
+                      migration_blocked_at: new Date().toISOString(),
+                      migration_blocked_reason: `${failures[0].name}: ${failures[0].error}`,
+                    }
+                  : { migration_blocked_at: null, migration_blocked_reason: null }),
                 status_detail:
                   failures.length > 0
                     ? `Migration failed at ${failures[0].name}`
@@ -501,14 +595,14 @@ export async function runFleetMigrationSync(
                         `Synced to ${syncedTo} — ${held[0].name} is too large for this pass to carry ` +
                         `and is left for the chunking lane; the clone is unchanged and still in the fleet`
                       : blocked.length > 0
-                      ? // `ready` and NOT level. Saying only "Synced to X" here
-                        // would report a clone holding dozens of migrations back
-                        // as healthy — the exact shape of report this module
-                        // exists to stop. The first hole is named because it is
-                        // the one to reconcile first.
-                        `Synced to ${syncedTo} — ${blocked.length} migration(s) held back behind ` +
-                        `${blocked[0].blockedBy?.[0] ?? "a withheld version"}, which the prime's ledger does not record`
-                      : `Synced to ${syncedTo}`,
+                        ? // `ready` and NOT level. Saying only "Synced to X" here
+                          // would report a clone holding dozens of migrations back
+                          // as healthy — the exact shape of report this module
+                          // exists to stop. The first hole is named because it is
+                          // the one to reconcile first.
+                          `Synced to ${syncedTo} — ${blocked.length} migration(s) held back behind ` +
+                          `${blocked[0].blockedBy?.[0] ?? "a withheld version"}, which the prime's ledger does not record`
+                        : `Synced to ${syncedTo}`,
                 error_message: failures.length > 0 ? failures[0].error : null,
               }),
         })
@@ -582,6 +676,9 @@ export async function runFleetMigrationSync(
       failed: out.failed.length,
       held_oversize: out.heldOversize.map((h) => `${h.cloneName}: ${h.migration}`),
       excluded: out.excluded,
+      // WHICH ones, and why. `excluded: 2` is the reading that hid two
+      // tenants falling out of the fleet for a day.
+      skipped: out.skipped.map((sk) => `${sk.cloneName}: ${sk.reason}`),
       withheld: out.withheld,
       withheld_never_applied: scoped.breakdown.neverApplied,
       withheld_skew_suspected: scoped.breakdown.skewSuspected,

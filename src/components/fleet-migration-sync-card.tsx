@@ -177,6 +177,13 @@ export function FleetMigrationSyncCard() {
                 elsewhere: a clone leaves the eligible set the moment a
                 migration fails on it, and "5 processed" while three sit
                 outside the query is the quiet half of this whole failure.
+
+                The COUNT was still the quiet half. `2 not eligible` is true,
+                unactionable, and reads identically whether the two are
+                mid-provision (fine, along shortly) or held out of the fleet
+                for a day by a verdict a different worker reached about a job —
+                which is what happened on 7-8 Sep 2026 while every run reported
+                exactly this badge. Names and reasons are below it now.
               */}
               {lastResult.excluded > 0 && (
                 <Badge variant="outline" className="bg-warning/10 text-warning text-[10px]">
@@ -219,6 +226,30 @@ export function FleetMigrationSyncCard() {
               <div key={r.cloneId} className="flex items-start justify-between border p-2 text-xs">
                 <span className="font-mono">{r.cloneName}</span>
                 <span className="ml-2 text-right text-destructive">{r.error}</span>
+              </div>
+            ))}
+            {/*
+              Every clone this run did NOT touch, by name, with the reason and
+              what to do about it. Only `migration_blocked` is a fault in the
+              tenant's database; the rest are ordinary states this lane is
+              correct to wait on, and the difference is exactly what a count
+              could never carry.
+            */}
+            {(lastResult.skipped ?? []).map((sk) => (
+              <div
+                key={sk.cloneId}
+                className="flex items-start justify-between gap-2 border p-2 text-xs"
+              >
+                <span className="font-mono shrink-0">{sk.cloneName}</span>
+                <span
+                  className={
+                    sk.reason === "migration_blocked"
+                      ? "text-right text-destructive"
+                      : "text-muted-foreground text-right"
+                  }
+                >
+                  {sk.detail}
+                </span>
               </div>
             ))}
           </div>

@@ -302,6 +302,57 @@ describe("a reclaim returns rows to the shape its own claim reads", () => {
     expect(ceiling * 60).toBeGreaterThan(stall * 4);
   });
 
+  it("backend drain: the ceiling bounds work that was DONE, never work that was never started", () => {
+    /*
+      `claimOne` increments `attempts` on every claim and the enqueue resets it
+      to 0, so `attempts = 0` means this row has never been claimed once. For
+      such a row the ceiling's verdict — "in flight for over N hours",
+      "it was still moving", "read the stage it keeps returning to" — is false
+      in every clause, and it sends an operator to a status history that does
+      not exist.
+
+      Measured 8 Sep 2026: `NPC Test` and `Preflight Property Group` were
+      queued as REPAIRS at 01:07 and 01:08 on 7 September with `attempts: 0`
+      and `worker_started_at` never set, and were failed by that branch under
+      that sentence exactly 24 hours later — which took both out of the fleet
+      migration sync for a day while both databases were entirely healthy.
+
+      A repair is the one row that can legitimately look unclaimable and not
+      be: it queues no credential BY DESIGN, which is why the stranded sweep
+      excludes `repair_requested_at` explicitly. The ceiling never learnt the
+      same lesson.
+
+      The rule, pinned rather than the wording: the ceiling judges rows with
+      at least one attempt, and a never-claimed row gets its own verdict.
+    */
+    const src = read("hooks.backend-provisioning-drain.tsx");
+    // The branch that keeps the "still moving" wording only ever sees a row
+    // something actually worked. Bounded by the never-claimed branch that
+    // follows it, so the two cannot borrow each other's filters.
+    const ceilingBlock = src.slice(
+      src.lastIndexOf("const ceilingCutoff"),
+      src.indexOf("// Never claimed."),
+    );
+    expect(ceilingBlock).toContain("Provisioning ceiling exceeded");
+    expect(ceilingBlock).toMatch(/\.gt\("attempts",\s*0\)/);
+    expect(ceilingBlock).not.toMatch(/\.eq\("attempts",\s*0\)/);
+
+    // And a never-claimed row is judged separately, on `attempts = 0`.
+    expect(src).toMatch(/\.eq\("attempts",\s*0\)/);
+    expect(src).toContain("Provisioning was never claimed");
+
+    // The two verdicts must not share a sentence: one is a pipeline that will
+    // not converge, the other is a queue nothing drained, and they send an
+    // operator to opposite remedies.
+    const neverClaimed = src.slice(src.indexOf("Never claimed."));
+    expect(neverClaimed).not.toContain("It was still moving");
+    expect(neverClaimed).toMatch(/never been claimed/i);
+
+    // Silence is what let this run for a day. Both the sweep and its notice
+    // name the clone.
+    expect(neverClaimed).toMatch(/notifyOperators\(/);
+  });
+
   it("deployment drain: claim reads every CLAIMABLE status, which is why its reclaim may reset the timestamp alone", () => {
     // The deployment queue is a per-status state machine: claim() takes any
     // CLAIMABLE status, so nulling `worker_started_at` IS a complete

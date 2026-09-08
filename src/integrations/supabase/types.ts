@@ -1418,6 +1418,8 @@ export type Database = {
           enqueued_by: string | null
           error_message: string | null
           id: string
+          migration_blocked_at: string | null
+          migration_blocked_reason: string | null
           migration_version: string | null
           migrations_applied: Json
           parity_checked_at: string | null
@@ -1455,6 +1457,8 @@ export type Database = {
           enqueued_by?: string | null
           error_message?: string | null
           id?: string
+          migration_blocked_at?: string | null
+          migration_blocked_reason?: string | null
           migration_version?: string | null
           migrations_applied?: Json
           parity_checked_at?: string | null
@@ -1492,6 +1496,8 @@ export type Database = {
           enqueued_by?: string | null
           error_message?: string | null
           id?: string
+          migration_blocked_at?: string | null
+          migration_blocked_reason?: string | null
           migration_version?: string | null
           migrations_applied?: Json
           parity_checked_at?: string | null
