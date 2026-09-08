@@ -405,9 +405,14 @@ describe("a withheld name is taken OFF the project, not merely left unwritten", 
    * Withholding has two jobs and only one was ever done.
    *
    * Not writing a withheld name keeps the sweep from putting it back.
-   * REMOVING one that predates the decision is what makes the decision true —
-   * and nothing did that: `withholdCloneSecret` deletes and stamps, and had no
-   * caller anywhere in this repository.
+   * REMOVING one that predates the decision is what makes the decision true.
+   *
+   * `withholdCloneSecret` does that and IS reachable, at
+   * `/hooks/clone-secret-withhold` — deliberately unscheduled, one credential
+   * on one clone. What nothing covered is a name withheld by POLICY: the
+   * `brokered` class marks one for the whole fleet, writes the ledger row and
+   * removes nothing. The audit log has `clone_secret_withheld` three times,
+   * all DIDIT_API_KEY, never the Airtable pair.
    *
    * Measured 8 Sep 2026: AIRTABLE_TOKEN and AIRTABLE_BASE_ID read `withheld`
    * on all three clones with `last_set_at: null`, while one clone went on
