@@ -2896,6 +2896,13 @@ export type SecretShellStatus =
   | "generated"
   /** Platform-managed (SUPABASE_*); Supabase injects its own. */
   | "skipped_platform"
+  /**
+   * Mission Control holds this credential and makes the vendor call itself.
+   * `withheld` and never `missing`: `missing` means OWED, and every drift
+   * report and reconcile sweep would keep trying to deliver it — which is how
+   * a brokered credential reaches a tenant anyway.
+   */
+  | "withheld"
   /** Names the prime's own domain; the clone supplies its own. */
   | "skipped_deployment_config"
   /** Deployment config Mission Control can compute for THIS clone. */
@@ -3023,6 +3030,14 @@ export function planCloneSecrets(
 
     if (kind === "platform") {
       results.set(name, { name, status: "skipped_platform", success: true });
+      continue;
+    }
+    if (kind === "brokered") {
+      // Mission Control holds it and makes the call. Recorded as `withheld`
+      // rather than `missing`, because `missing` means OWED and would have
+      // every drift report and every reconcile sweep trying to deliver it —
+      // which is how a brokered credential ends up on a tenant anyway.
+      results.set(name, { name, status: "withheld", success: true });
       continue;
     }
     if (kind === "identity") {

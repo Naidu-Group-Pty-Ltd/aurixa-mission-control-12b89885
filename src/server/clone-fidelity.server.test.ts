@@ -1,9 +1,11 @@
 import { describe, it, expect, afterEach, beforeEach } from "vitest";
 import {
   classifySecret,
+  BROKERED_SECRETS,
   IDENTITY_SECRETS,
   DEPLOYMENT_CONFIG_SECRETS,
 } from "./prime-backend.server";
+import { classRefusalFor, decideFleetForward } from "./cloneSecretForward.pure";
 import {
   enforceRequiredExtensions,
   quoteExtensionIdent,
@@ -166,7 +168,12 @@ describe("enforceRequiredExtensions", () => {
     globalThis.fetch = (async (url: unknown, init?: { body?: string }) => {
       const sql = init?.body ? String(JSON.parse(String(init.body)).query ?? "") : "";
       if (/create extension/i.test(sql) && sql.includes("vector")) {
-        return { ok: false, status: 400, text: async () => "no such extension", json: async () => ({}) };
+        return {
+          ok: false,
+          status: 400,
+          text: async () => "no such extension",
+          json: async () => ({}),
+        };
       }
       const rows = /from pg_extension/.test(sql)
         ? (String(url).includes("/projects/clone-ref/") ? [] : PRIME_EXTENSIONS).map((extname) => ({
@@ -216,7 +223,48 @@ describe("classifySecret", () => {
 
   it("treats everything else as an inheritable vendor credential", () => {
     expect(classifySecret("ANTHROPIC_API_KEY")).toBe("vendor");
-    expect(classifySecret("AIRTABLE_TOKEN")).toBe("vendor");
+    expect(classifySecret("OPENAI_API_KEY")).toBe("vendor");
+  });
+
+  it("classifies a BROKERED credential ahead of vendor, so it can never travel", () => {
+    // These ARE vendor credentials, which is exactly why the classification
+    // has to catch them before the class that forwards. Held as three
+    // hand-made `withheld` ledger rows apiece they were correct for the clones
+    // that exist and wrong for the next one — a clone provisioned tomorrow
+    // would have been handed the credential its broker exists to withhold.
+    expect(classifySecret("DIDIT_API_KEY")).toBe("brokered");
+    expect(classifySecret("AIRTABLE_TOKEN")).toBe("brokered");
+    // The base id travels with the token so the clone-side rule — the caller
+    // never names a base — is true of the environment, not only of the broker.
+    expect(classifySecret("AIRTABLE_BASE_ID")).toBe("brokered");
+  });
+
+  it("names exactly the credentials Mission Control actually brokers", () => {
+    // A name added here must have an endpoint a clone can reach, or the clone
+    // loses the capability entirely rather than gaining a broker.
+    expect([...BROKERED_SECRETS].sort()).toEqual([
+      "AIRTABLE_BASE_ID",
+      "AIRTABLE_TOKEN",
+      "DIDIT_API_KEY",
+    ]);
+  });
+
+  it("refuses a brokered name absolutely, ahead of fleet policy and any per-clone row", () => {
+    const why = classRefusalFor("brokered");
+    expect(why).toBeTruthy();
+    expect(why).toMatch(/brokers this credential/i);
+    // The refusal is a CLASS fact, so both the per-clone and the fleet
+    // decision read it from the same place and cannot diverge.
+    expect(
+      decideFleetForward({
+        name: "AIRTABLE_TOKEN",
+        secretClass: "brokered",
+        inherit: true,
+        withheldOnClone: false,
+        settledOnClone: false,
+        presentInEnv: true,
+      }),
+    ).toMatchObject({ act: "refuse" });
   });
 
   it("treats a project signing key as tenant-scoped, never vendor", () => {
