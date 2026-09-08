@@ -296,4 +296,33 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "none", reason: "table, column, cron job or row count that would exist either way" },
     ],
   },
+  {
+    migration: "20260908110000_absorbed_vendor_cost.sql",
+    version: "20260908110000",
+    assertions: [
+      { kind: "column", table: "api_provider_rates", column: "absorbed" },
+      { kind: "check", table: "api_usage_events", column: "billing_reason", value: "absorbed" },
+    ],
+  },
+  {
+    migration: "20260908110100_didit_absorbed_and_token_priced.sql",
+    version: "20260908110100",
+    assertions: [
+      { kind: "none", reason: "sets flags and prices on existing catalog rows. `rows:` counts" },
+      { kind: "none", reason: "a table, and every table here already holds rows, so it would" },
+      { kind: "none", reason: "pass whether or not this ran. The effect is asserted by the" },
+      { kind: "none", reason: "verification block at the end, which fails the migration if" },
+      { kind: "none", reason: "any of the three edits did not land." },
+    ],
+  },
+  {
+    migration: "20260908110200_rerate_absorbed_didit_backlog.sql",
+    version: "20260908110200",
+    assertions: [
+      { kind: "none", reason: "re-rates existing rows and creates no object — the effect is" },
+      { kind: "none", reason: "a data correction, and every assertion kind here probes for a" },
+      { kind: "none", reason: "thing that exists. It is asserted by the block at the end," },
+      { kind: "none", reason: "which fails the migration if any charged absorbed row remains." },
+    ],
+  },
 ];

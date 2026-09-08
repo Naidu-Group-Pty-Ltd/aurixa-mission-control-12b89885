@@ -156,6 +156,7 @@ export type Database = {
       }
       api_provider_rates: {
         Row: {
+          absorbed: boolean
           category: string
           cost_micros_per_unit: number
           created_at: string
@@ -173,6 +174,7 @@ export type Database = {
           updated_at: string
         }
         Insert: {
+          absorbed?: boolean
           category?: string
           cost_micros_per_unit?: number
           created_at?: string
@@ -190,6 +192,7 @@ export type Database = {
           updated_at?: string
         }
         Update: {
+          absorbed?: boolean
           category?: string
           cost_micros_per_unit?: number
           created_at?: string

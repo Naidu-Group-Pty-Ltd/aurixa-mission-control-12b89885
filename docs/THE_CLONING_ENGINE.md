@@ -1381,3 +1381,141 @@ stage was **skipped rather than failed**, so nothing was recorded anywhere:
   whose grantor or grantee is a role the *current* user belongs to, so two
   projects read by two connections answer two different questions. That is not
   a comparison.
+
+## Identity verification costs money here and tokens there
+
+Didit bills **Aurixa**, not the tenant. A complete verification is three
+standalone calls — `id_verification_api` USD 0.20, `passive_liveness_api` USD
+0.05, `face_match_api` USD 0.05 — and **none of the `_api` endpoints carries a
+free tier**, which was measured against the live account on 8 September 2026
+rather than read off the pricing page: the 500/month allowance belongs to the
+workflow/session features, and the direct `/v3/` routes this product calls
+meter under a separate `_api` counter. USD 0.30 per verification, on the
+prime's own credential, for every clone, because the key stops here and the
+CALL travels (see the verification broker).
+
+**Aurixa shoulders that money.** A workspace pays in tokens instead:
+
+| what happened | tokens |
+|---|---|
+| an attempt was consumed | **5** |
+| …and the identity was verified | **5 more** |
+| a photograph the provider could not read, or any failure of ours | **0** |
+
+So a verified customer costs 10, a genuine decline costs 5, and a retake costs
+nothing. There is **no monetary line on a clone's statement for Didit at all**.
+
+### Where each half lives, and why it is not one place
+
+| the rule | lives in | why there |
+|---|---|---|
+| **the number** — what one attempt costs | Mission Control `report_credit_costs.aml_identity_check` | it is the platform's price list, a clone resolves its reserve from it through `getCreditCostForKind`, and it is what the Aurixa Systems pricing page publishes to customers |
+| how the number is applied (attempt, doubled on success) | prime `supabase/functions/_shared/aml/verificationTokenPrice.pure.ts` | the clone is the party that knows whether an attempt was consumed |
+| when to reserve, commit or release | prime `_shared/aml/standaloneVerification.ts` | one hold, taken after the last free step and settled at the single settle write |
+| that Didit's money is not recharged | Mission Control `api_provider_rates.absorbed` | the money is Mission Control's; the clone never sees a vendor invoice |
+
+**There is ONE number and Mission Control owns it.** The index has carried
+`aml_identity_check` at 5 credits since 28 July 2026; that row is the ATTEMPT
+price and a verified identity costs it twice, which is why nothing in the
+prime states a price of its own — a literal there would be a second list
+disagreeing with the one customers are quoted. Repricing in Mission Control
+moves both halves together and reaches every workspace without a deploy. The
+constant in the prime is the FALLBACK for an unreachable Mission Control, set
+to what a reachable one would have said.
+
+The split is deliberate and it is the same split the rest of this engine uses:
+**a clone decides what happened, Mission Control decides what it costs.**
+Neither can be moved to the other side. A clone cannot be trusted to assert
+its own money model (`normalizeEvent` strips `brokered` at the public boundary
+for exactly this reason), and Mission Control cannot know whether a
+photograph was legible.
+
+### What a clone inherits, and what it does not
+
+**Nothing here is provisioned per clone.** That is the point, and it is worth
+stating because every other section on this page is about something that had
+to be carried.
+
+- **The charge rule is code**, so it arrives through the cascade like any
+  other prime change. A clone that is behind on the cascade charges nothing —
+  it does not charge *wrongly*.
+- **`absorbed` and the token price are one row each in Mission Control's own
+  catalog**, fleet-wide. There is no per-clone copy to drift, and the price is
+  polled rather than deployed.
+- **The credential does not travel.** `DIDIT_API_KEY` is `withheld` on every
+  clone and the broker holds it. A clone that somehow held one would be rated
+  `byok` and absorb nothing, which is correct: it would be spending its own
+  money.
+- **The two Mission Control secrets are already forwarded** —
+  `MISSION_CONTROL_URL` and `MISSION_CONTROL_CLONE_API_KEY`, which the token
+  reservation needs and which the same clone already uses for reports.
+
+One thing **is** carried and must land: the prime migration
+`20261114090000_verification_workspace_out_of_tokens.sql`, which widens
+`aml.verification_checks.provider_error_category` to admit
+`workspace_out_of_tokens`. Until it applies, a refusal write is rejected by
+the column while looking, from the edge function, exactly like a write nobody
+attempted — the `reminder_type` defect this platform has already paid for
+once. The migration asserts its own effect and raises if the constraint did
+not widen, so a clone that misses it fails loudly at apply time rather than
+quietly at refusal time.
+
+### Four rules that keep it from drifting
+
+**The trigger is the product's own `attempt_consumed`, never "a call was
+made."** This product's definition of an attempt is deliberately narrower than
+"we spent money": `capture_unusable` — the provider looked and could not
+examine the document — consumes none, and every infrastructure condition is
+recorded without touching the customer's attempt count. Charging on the same
+signal means a workspace is never billed for our failures or for a bad
+photograph, and the token ledger and the attempt counter cannot disagree,
+because they are the same fact read once.
+
+**The reserve is the maximum and the commit is the truth.** The charge is
+unknown until the vendor answers and the vendor is not asked until the answer
+can be paid for, so the hold is twice the attempt price and the settle is
+nothing, once or twice it. Reserving one would let a success land that nobody
+could pay for. The price is read ONCE, before the reserve, and carried on the
+hold — the catalog is cached for minutes, and settling at a price the
+reservation was not taken at is how a workspace comes to be asked for more
+than was held.
+
+**Only an explicit refusal blocks.** An unreachable, slow or unparseable
+Mission Control lets the verification run *unmetered*, and the row records
+that it did. Same asymmetry as the activation gate, for the same reason: the
+enforcement that protects revenue is Mission Control's own 402, while the
+failure this could otherwise cause is refusing to verify somebody who has
+paid. A settle that never lands is recorded, never thrown — it must not turn a
+completed verification into a failure.
+
+**A workspace out of tokens is not a vendor out of credit.**
+`workspace_out_of_tokens` and `insufficient_credits` send an operator to
+opposite remedies (top up Mission Control; top up the Didit account), so they
+are separate codes and a test asserts they cannot be spelled the same. The
+check stays `technical_failure`, no attempt is consumed and no customer
+outcome is written, so `retry_verification_processing` re-runs it once the
+balance is topped up.
+
+### Checking it on a clone
+
+Four readings, in the order that isolates a fault:
+
+1. **Is the price there?** On the clone's repo, `git log -1 --format=%H --
+   supabase/functions/_shared/aml/verificationTokenPrice.pure.ts`. Absent means
+   the cascade has not delivered it and nothing is charged.
+2. **Can the column record a refusal?** On the clone's database,
+   `SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname =
+   'verification_checks_provider_error_category_check'` — it must contain
+   `workspace_out_of_tokens`.
+3. **Did a real verification charge?** On the clone,
+   `SELECT outcome_detail->'standalone'->'token_charge' FROM
+   aml.verification_checks WHERE provider = 'didit_standalone' ORDER BY
+   completed_at DESC LIMIT 5`. `metered: false` means Mission Control was
+   unreachable at the time — a real condition, not a silent zero — and
+   `attempt_tokens` is the price the hold was taken at, which should equal the
+   index's `credit_cost` unless it was repriced since.
+4. **Did the money stay ours?** On Mission Control, `SELECT billing_reason,
+   sum(rated_micros), sum(cost_micros) FROM api_usage_events WHERE secret_name
+   = 'DIDIT_API_KEY' GROUP BY 1`. `absorbed` rows must show a real cost and a
+   zero charge. A `brokered` row appearing again means `absorbed` was cleared
+   on the rate — and the tenant is being billed twice.
