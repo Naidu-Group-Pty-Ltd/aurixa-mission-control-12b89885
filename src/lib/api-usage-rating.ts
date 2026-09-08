@@ -34,8 +34,20 @@ export type UsageUnit = (typeof USAGE_UNITS)[number];
  * free ones — "we didn't charge you" is only credible if it says why.
  */
 export type BillingReason =
-  /** The clone is running on our forwarded key. The only billable outcome. */
+  /** The clone is running on our forwarded key. Billable. */
   | "inherited"
+  /**
+   * The clone holds no key and Mission Control made the vendor call FOR it,
+   * on the prime's credential. Billable, for exactly the reason `inherited`
+   * is: the prime's money was spent serving this tenant.
+   *
+   * A separate code rather than a reuse of `inherited`, because the two are
+   * different facts about where the credential was — one travelled to the
+   * clone, the other never left here — and an operator reading the ledger to
+   * answer "which tenants hold our keys?" must not be told a brokered tenant
+   * does.
+   */
+  | "brokered"
   /** The clone supplied its own key. Metered for insight, charged at nothing. */
   | "byok"
   /** No key on the clone at all, or no clone (the prime's own tenant). */
@@ -51,6 +63,7 @@ export type BillingReason =
 
 export const BILLING_REASONS: BillingReason[] = [
   "inherited",
+  "brokered",
   "byok",
   "no_key",
   "unknown_secret",
@@ -59,8 +72,22 @@ export const BILLING_REASONS: BillingReason[] = [
   "rate_missing",
 ];
 
-/** `clone_backend_secrets.status` — the only input to the piggyback question. */
-export type CloneSecretStatus = "inherited" | "set" | "missing" | "failed";
+/**
+ * `clone_backend_secrets.status`, as the COLUMN spells it.
+ *
+ * This must stay the column's full vocabulary and not a convenient subset: a
+ * status the union omits still arrives at runtime, falls past every named
+ * branch and is rated by the `else`. That is how `withheld` came to be rated
+ * `no_key` — the fall-through happened to be the safe answer before the
+ * broker existed, and became a silent revenue loss the moment it did.
+ */
+export type CloneSecretStatus =
+  | "inherited"
+  | "set"
+  | "missing"
+  | "failed"
+  | "authorised_no_value"
+  | "withheld";
 
 /**
  * The piggyback rule, in one place.
@@ -77,21 +104,49 @@ export function resolveBillingReason(args: {
   rateExists: boolean;
   rateIsBillable: boolean;
   callStatus: "success" | "error";
+  /**
+   * Mission Control made this vendor call itself, on the prime's credential,
+   * on the clone's behalf.
+   *
+   * Asserted by the broker, never inferred, and never accepted from a clone
+   * (`normalizeEvent` strips it) — the broker is the only party that KNOWS,
+   * because it is the party that made the call. The status column is a
+   * second, independent route to the same answer and neither is trusted to
+   * cover the other: a ledger row can lag a withdrawal, and a brokered call
+   * can be made for a clone whose row says something else entirely.
+   */
+  brokered?: boolean;
 }): BillingReason {
   if (!args.rateExists) return "rate_missing";
   if (!args.rateIsBillable) return "not_billable";
   // A tenant with no clone is the prime itself — our project, our key.
   if (args.cloneId === null) return "no_key";
+  // Only a call that actually succeeded on our credential reaches a charge.
+  // Asked BEFORE the route, so a failed brokered call is `error_call` exactly
+  // as a failed inherited one is — we do not charge for nothing delivered,
+  // whichever side of the broker the credential sat on.
+  const spentOurs =
+    args.brokered === true || args.secretStatus === "withheld" || args.secretStatus === "inherited";
+  if (spentOurs && args.callStatus === "error") return "error_call";
+  if (args.brokered === true) return "brokered";
   if (args.secretStatus === null) return "unknown_secret";
   if (args.secretStatus === "set") return "byok";
+  // The clone was deliberately stripped of the forwarded key, which is
+  // precisely the state in which the CALL travels instead of the credential.
+  // Before the broker this fell through to `no_key` and was right; after it,
+  // it is the one status that guarantees the prime paid.
+  if (args.secretStatus === "withheld") return "brokered";
   if (args.secretStatus !== "inherited") return "no_key";
-  // Only a call that actually succeeded on our key reaches a charge.
-  if (args.callStatus === "error") return "error_call";
   return "inherited";
 }
 
+/**
+ * Both routes charge, because both spend the prime's money on a tenant's
+ * behalf. What differs is where the credential was, which is what the two
+ * codes record.
+ */
 export function isBillable(reason: BillingReason): boolean {
-  return reason === "inherited";
+  return reason === "inherited" || reason === "brokered";
 }
 
 // ─── Money ───────────────────────────────────────────────────────────────────
@@ -282,7 +337,26 @@ export function normalizeEvent(raw: unknown, now = new Date()): NormalizeResult 
       feature: typeof e.feature === "string" ? e.feature.slice(0, 120) : null,
       status,
       occurred_at: occurred.toISOString(),
-      metadata: e.metadata && typeof e.metadata === "object" ? e.metadata : {},
+      metadata: stripReservedMetadata(e.metadata),
     },
   };
+}
+
+/**
+ * Keys a REPORTER may not assert about its own usage.
+ *
+ * `brokered` is a billing decision, and the only party entitled to make it is
+ * the one that made the vendor call — Mission Control's broker, which writes
+ * the event directly rather than through this endpoint. Accepting it here
+ * would let a clone rate its own traffic. That a clone could only ever use it
+ * to charge ITSELF more is not the point: an input to the money rule must
+ * come from the party that knows, or the rule is decorative.
+ */
+const RESERVED_METADATA_KEYS = ["brokered"] as const;
+
+export function stripReservedMetadata(raw: unknown): Record<string, unknown> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: Record<string, unknown> = { ...(raw as Record<string, unknown>) };
+  for (const key of RESERVED_METADATA_KEYS) delete out[key];
+  return out;
 }

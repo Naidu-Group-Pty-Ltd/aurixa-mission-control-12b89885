@@ -272,4 +272,28 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "check", table: "clone_backend_secrets", column: "status", value: "withheld" },
     ],
   },
+  {
+    migration: "20260908040000_brokered_usage_is_billable.sql",
+    version: "20260908040000",
+    assertions: [
+      { kind: "check", table: "api_usage_events", column: "billing_reason", value: "brokered" },
+    ],
+  },
+  {
+    migration: "20260908040100_per_operation_vendor_rates.sql",
+    version: "20260908040100",
+    assertions: [
+      { kind: "table", table: "api_provider_rate_features" },
+      { kind: "rows", table: "api_provider_rate_features", atLeast: 3 },
+    ],
+  },
+  {
+    migration: "20260908040300_rerate_brokered_usage_backlog.sql",
+    version: "20260908040300",
+    assertions: [
+      { kind: "none", reason: "re-rates existing rows and creates no object — the effect is" },
+      { kind: "none", reason: "a data correction, and every assertion kind here probes for a" },
+      { kind: "none", reason: "table, column, cron job or row count that would exist either way" },
+    ],
+  },
 ];

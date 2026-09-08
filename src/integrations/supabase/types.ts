@@ -113,6 +113,47 @@ export type Database = {
         }
         Relationships: []
       }
+      api_provider_rate_features: {
+        Row: {
+          cost_micros_per_unit: number
+          created_at: string
+          feature: string
+          id: string
+          notes: string | null
+          resale_micros_per_unit: number
+          secret_name: string
+          updated_at: string
+        }
+        Insert: {
+          cost_micros_per_unit: number
+          created_at?: string
+          feature: string
+          id?: string
+          notes?: string | null
+          resale_micros_per_unit: number
+          secret_name: string
+          updated_at?: string
+        }
+        Update: {
+          cost_micros_per_unit?: number
+          created_at?: string
+          feature?: string
+          id?: string
+          notes?: string | null
+          resale_micros_per_unit?: number
+          secret_name?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "api_provider_rate_features_secret_fk"
+            columns: ["secret_name"]
+            isOneToOne: false
+            referencedRelation: "api_provider_rates"
+            referencedColumns: ["secret_name"]
+          },
+        ]
+      }
       api_provider_rates: {
         Row: {
           category: string
