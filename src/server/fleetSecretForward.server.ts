@@ -95,16 +95,28 @@ export async function pushFleetSecretForwards(
   /*
    * Deliberately taken off this clone.
    *
-   * Two jobs, and only one of them was ever done. Not writing a withheld name
-   * is what keeps this sweep from putting it straight back; REMOVING one that
-   * predates the decision is what makes the decision true, and nothing did
-   * that — `withholdCloneSecret` deletes and stamps, and had no caller
-   * anywhere in this repository.
+   * Two jobs, and only one of them was ever done here. Not writing a withheld
+   * name is what keeps this sweep from putting it straight back; REMOVING one
+   * that predates the decision is what makes the decision true.
+   *
+   * `withholdCloneSecret` does exactly that, and it is reachable —
+   * `/hooks/clone-secret-withhold`, deliberately unscheduled, one credential
+   * on one clone at a time with the reason recorded. It is the right shape for
+   * a decision about a single tenant that nothing can derive.
+   *
+   * What it does not cover is a name that becomes withheld by POLICY. The
+   * `brokered` secret class marks one withheld for the whole fleet at once,
+   * which writes the ledger row and removes nothing — and no sweep read that
+   * row as work. Measured in the audit log: `clone_secret_withheld` fired
+   * three times, all for DIDIT_API_KEY, and never for the Airtable pair.
    *
    * Measured 8 Sep 2026: `AIRTABLE_TOKEN` and `AIRTABLE_BASE_ID` read
-   * `withheld` on all three clones with `last_set_at: null` — the shape of a
-   * policy recorded rather than enforced — while one clone went on reading
-   * Airtable DIRECTLY with a pair it had been given before the policy existed.
+   * `withheld` on all three clones with `last_set_at: null`, beside
+   * `DIDIT_API_KEY` carrying real timestamps from the hook above — the two
+   * shapes of the same status, one enforced and one only recorded, and
+   * nothing distinguishing them anywhere a reader would look. Meanwhile one
+   * clone went on reading Airtable DIRECTLY with a pair it had been given
+   * before the policy existed.
    * `resolveListingsRoute` prefers the direct road whenever a token and a base
    * id are both present, so the broker was never reached and its Listings page
    * stayed empty for five hours.
