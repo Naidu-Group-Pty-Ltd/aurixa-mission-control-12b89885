@@ -1,10 +1,10 @@
 -- Didit's money stops at Aurixa; the workspace pays in tokens.
 --
--- @asserts none:sets flags and prices on existing catalog rows and seeds one
--- @asserts none:token_rates row. `rows:` counts a table, and every table here
--- @asserts none:already holds rows, so it would pass whether or not this ran.
--- @asserts none:The effect is asserted by the verification block at the end,
--- @asserts none:which fails the migration if any of the three did not land.
+-- @asserts none:sets flags and prices on existing catalog rows. `rows:` counts
+-- @asserts none:a table, and every table here already holds rows, so it would
+-- @asserts none:pass whether or not this ran. The effect is asserted by the
+-- @asserts none:verification block at the end, which fails the migration if
+-- @asserts none:any of the three edits did not land.
 --
 -- Three edits, all data:
 --
@@ -21,12 +21,21 @@
 --     for the same verification is the failure worth engineering against.
 --     COST is untouched, so the margin report keeps reading the real 0.30.
 --
---  3. `token_rates` gains the identity-verification price, so what a
---     workspace is actually charged is visible in the operator UI and
---     repriceable there. It is reference data: `reserve_tokens` takes the
---     amount from the caller, and the prime states it in
---     `_shared/aml/verificationTokenPrice.pure.ts`. Both are recorded in the
---     notes so neither can be repriced in ignorance of the other.
+--  3. The token price is made honest where it is already PUBLISHED.
+--
+--     `report_credit_costs` is the platform's price list — a clone resolves
+--     its reserve from it through `getCreditCostForKind`, and the Aurixa
+--     Systems pricing page renders it to customers. It has carried
+--     `aml_identity_check` at 5 credits since 28 July. That row is the
+--     ATTEMPT price and a verified identity costs it twice, so the row is
+--     renamed to say "per attempt" (the public table shows name, category
+--     and credits, and nothing else) and the doubling is written into the
+--     description and the metadata for the operator UI.
+--
+--     Nothing new is seeded. A second price list is the defect this whole
+--     change set exists to remove: the prime had a literal 400 in one route,
+--     a 4 in a fallback table and nothing at all in the route that actually
+--     runs, while the published number said 5.
 
 BEGIN;
 
@@ -49,16 +58,23 @@ UPDATE public.api_provider_rate_features
        updated_at = now()
  WHERE secret_name = 'DIDIT_API_KEY';
 
-INSERT INTO public.token_rates (kind, base_cost, per_unit, notes)
-SELECT 'aml_identity_check', 10, '{"attempt": 5, "verified": 5}'::jsonb,
-       'Customer identity verification (Didit standalone). 5 tokens are charged when an '
-    || 'attempt is CONSUMED and 5 more when the identity is verified, so a verified customer '
-    || 'costs 10 and a decline costs 5. base_cost is the worst case, which is what the clone '
-    || 'reserves before the first paid call. An attempt is not consumed for a photograph the '
-    || 'provider could not read, or for any failure of ours — the clone decides that, in '
-    || '_shared/aml/verificationTokenPrice.pure.ts, and this row must be repriced with it. '
-    || 'Aurixa absorbs the vendor USD 0.30 separately; see api_provider_rates.absorbed.'
- WHERE NOT EXISTS (SELECT 1 FROM public.token_rates WHERE kind = 'aml_identity_check');
+-- The published price is per ATTEMPT. The credit_cost itself is NOT changed:
+-- 5 is what customers have been quoted and what the clone already resolves.
+UPDATE public.report_credit_costs
+   SET name = 'AML — Identity Check (per attempt)',
+       description =
+         'Provider-backed identity verification. Charged once when an attempt is consumed '
+      || 'and a second time if the identity is verified, so a verified customer costs twice '
+      || 'this and a decline costs it once. A photograph the provider could not read, and any '
+      || 'failure of ours, consume no attempt and cost nothing.',
+       metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+         'charge_model', 'per_attempt_doubled_on_success',
+         'reserve_multiplier', 2,
+         'priced_by', '_shared/aml/verificationTokenPrice.pure.ts',
+         'vendor_cost_absorbed', true
+       ),
+       updated_at = now()
+ WHERE slug = 'aml_identity_check';
 
 -- Asserted by effect. A data migration that ran and changed nothing is the
 -- failure mode this corpus has already paid for (`DO $$ … EXCEPTION WHEN
@@ -79,9 +95,14 @@ BEGIN
     RAISE EXCEPTION 'didit absorption did not converge: % per-operation override(s) still charge', _features;
   END IF;
 
-  SELECT count(*) INTO _rate FROM public.token_rates WHERE kind = 'aml_identity_check';
+  SELECT count(*) INTO _rate FROM public.report_credit_costs
+   WHERE slug = 'aml_identity_check'
+     AND is_active
+     AND credit_cost > 0
+     AND metadata->>'token_kind' = 'aml_identity_check'
+     AND metadata->>'charge_model' = 'per_attempt_doubled_on_success';
   IF _rate <> 1 THEN
-    RAISE EXCEPTION 'token price did not converge: % rows for aml_identity_check', _rate;
+    RAISE EXCEPTION 'token price did not converge: % priced, active aml_identity_check row(s) carrying the charge model', _rate;
   END IF;
 END $$;
 

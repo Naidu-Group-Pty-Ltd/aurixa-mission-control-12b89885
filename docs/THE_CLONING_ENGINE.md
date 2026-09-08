@@ -1409,10 +1409,19 @@ nothing. There is **no monetary line on a clone's statement for Didit at all**.
 
 | the rule | lives in | why there |
 |---|---|---|
-| what a verification costs in tokens | prime `supabase/functions/_shared/aml/verificationTokenPrice.pure.ts` | the clone is the party that knows whether an attempt was consumed |
+| **the number** — what one attempt costs | Mission Control `report_credit_costs.aml_identity_check` | it is the platform's price list, a clone resolves its reserve from it through `getCreditCostForKind`, and it is what the Aurixa Systems pricing page publishes to customers |
+| how the number is applied (attempt, doubled on success) | prime `supabase/functions/_shared/aml/verificationTokenPrice.pure.ts` | the clone is the party that knows whether an attempt was consumed |
 | when to reserve, commit or release | prime `_shared/aml/standaloneVerification.ts` | one hold, taken after the last free step and settled at the single settle write |
 | that Didit's money is not recharged | Mission Control `api_provider_rates.absorbed` | the money is Mission Control's; the clone never sees a vendor invoice |
-| what the token price IS, for an operator | Mission Control `token_rates.aml_identity_check` | reference and repricing surface — `reserve_tokens` takes the amount from the caller |
+
+**There is ONE number and Mission Control owns it.** The index has carried
+`aml_identity_check` at 5 credits since 28 July 2026; that row is the ATTEMPT
+price and a verified identity costs it twice, which is why nothing in the
+prime states a price of its own — a literal there would be a second list
+disagreeing with the one customers are quoted. Repricing in Mission Control
+moves both halves together and reaches every workspace without a deploy. The
+constant in the prime is the FALLBACK for an unreachable Mission Control, set
+to what a reachable one would have said.
 
 The split is deliberate and it is the same split the rest of this engine uses:
 **a clone decides what happened, Mission Control decides what it costs.**
@@ -1431,7 +1440,8 @@ to be carried.
   other prime change. A clone that is behind on the cascade charges nothing —
   it does not charge *wrongly*.
 - **`absorbed` and the token price are one row each in Mission Control's own
-  catalog**, fleet-wide. There is no per-clone copy to drift.
+  catalog**, fleet-wide. There is no per-clone copy to drift, and the price is
+  polled rather than deployed.
 - **The credential does not travel.** `DIDIT_API_KEY` is `withheld` on every
   clone and the broker holds it. A clone that somehow held one would be rated
   `byok` and absorb nothing, which is correct: it would be spending its own
@@ -1463,8 +1473,12 @@ because they are the same fact read once.
 
 **The reserve is the maximum and the commit is the truth.** The charge is
 unknown until the vendor answers and the vendor is not asked until the answer
-can be paid for, so the hold is 10 and the settle is 0, 5 or 10. Reserving 5
-would let a success land that nobody could pay for.
+can be paid for, so the hold is twice the attempt price and the settle is
+nothing, once or twice it. Reserving one would let a success land that nobody
+could pay for. The price is read ONCE, before the reserve, and carried on the
+hold — the catalog is cached for minutes, and settling at a price the
+reservation was not taken at is how a workspace comes to be asked for more
+than was held.
 
 **Only an explicit refusal blocks.** An unreachable, slow or unparseable
 Mission Control lets the verification run *unmetered*, and the row records
@@ -1497,7 +1511,9 @@ Four readings, in the order that isolates a fault:
    `SELECT outcome_detail->'standalone'->'token_charge' FROM
    aml.verification_checks WHERE provider = 'didit_standalone' ORDER BY
    completed_at DESC LIMIT 5`. `metered: false` means Mission Control was
-   unreachable at the time — a real condition, not a silent zero.
+   unreachable at the time — a real condition, not a silent zero — and
+   `attempt_tokens` is the price the hold was taken at, which should equal the
+   index's `credit_cost` unless it was repriced since.
 4. **Did the money stay ours?** On Mission Control, `SELECT billing_reason,
    sum(rated_micros), sum(cost_micros) FROM api_usage_events WHERE secret_name
    = 'DIDIT_API_KEY' GROUP BY 1`. `absorbed` rows must show a real cost and a
