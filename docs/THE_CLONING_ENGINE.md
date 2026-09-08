@@ -1460,6 +1460,47 @@ once. The migration asserts its own effect and raises if the constraint did
 not widen, so a clone that misses it fails loudly at apply time rather than
 quietly at refusal time.
 
+#### Landing it is two acts, and the second one is the one that gets forgotten
+
+**A migration in the prime's repo is not a migration a clone may run.**
+`scopeCorpusToPrime` decides the runnable set by exact membership of the
+prime's own `supabase_migrations.schema_migrations` and by nothing else — the
+prime's ledger is the authority on what the schema IS, the repo is the
+authority on what each version SAYS, and a version needs both to reach a
+tenant. Merging the pull request supplies only the second.
+
+The prime does not apply on merge and deliberately cannot. `supabase db push`
+trusts that ledger, and this ledger under-reports by about two orders of
+magnitude — measured 13 August 2026, it called 133 migrations pending while
+all but one family of the tables and functions those files declare already
+existed — so a push would replay ~130 applied migrations including data
+mutations that are not no-ops the second time. `apply-migration.yml` applies
+exactly the one file it is dispatched with, and choosing the file is a human
+judgement made before dispatch.
+
+So the order is:
+
+1. Merge the prime pull request.
+2. Dispatch **`apply-migration.yml`** on the prime's `main`, with
+   `file: supabase/migrations/20261114090000_verification_workspace_out_of_tokens.sql`
+   and **`record_version: true`**.
+3. Confirm the ledger row exists. That row is what the fleet sync reads.
+4. The next `backend-catchup` tick moves the migration from `withheld` to
+   `runnable` and applies it to every clone.
+
+**Step 2's checkbox is the whole risk.** Applying without recording leaves the
+prime perfectly correct and every clone permanently withheld — and the sync
+then reports `pending: 0` beside "clone already at prime migration head within
+the fleet sync's scope", which is TRUE, reads as healthy, and is how a fleet
+comes to be missing one column constraint that nothing will ever raise again.
+The `withheld` count is a single number in the eight hundreds and cannot be
+read in either direction on its own; the breakdown beside it is what an
+operator should look at, and `never_applied` is the half that matters.
+
+This is not special to Didit. It is how **every** schema change in this
+programme reaches a tenant, and it is the one step in the cascade that no
+timer performs.
+
 ### Four rules that keep it from drifting
 
 **The trigger is the product's own `attempt_consumed`, never "a call was
@@ -1506,7 +1547,11 @@ Four readings, in the order that isolates a fault:
 2. **Can the column record a refusal?** On the clone's database,
    `SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname =
    'verification_checks_provider_error_category_check'` — it must contain
-   `workspace_out_of_tokens`.
+   `workspace_out_of_tokens`. Absent, ask the PRIME's ledger before suspecting
+   the clone: `SELECT 1 FROM supabase_migrations.schema_migrations WHERE
+   version = '20261114090000'`. Missing there means the dispatch above never
+   happened, the fleet sync is correctly withholding the file, and no clone
+   will ever receive it however many times the catch-up runs.
 3. **Did a real verification charge?** On the clone,
    `SELECT outcome_detail->'standalone'->'token_charge' FROM
    aml.verification_checks WHERE provider = 'didit_standalone' ORDER BY
