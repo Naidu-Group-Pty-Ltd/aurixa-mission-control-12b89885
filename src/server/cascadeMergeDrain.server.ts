@@ -207,7 +207,23 @@ type ResultRow = {
 
 export async function drainCascadeMerges(
   supabase: Db,
-  opts: { limitPerClone?: number; budgetMs?: number; concurrency?: number } = {},
+  opts: {
+    limitPerClone?: number;
+    budgetMs?: number;
+    concurrency?: number;
+    /**
+     * Consider only this clone.
+     *
+     * The webhook path passes it: a completed check suite says something
+     * about ONE repository, and draining the fleet because one clone's CI
+     * finished would make every check suite on every clone an O(fleet)
+     * event. It is a narrowing of this engine and never a second merge path —
+     * the gate, the ordering, the reconciliation and the rotation stamp are
+     * all the ones the poll runs, because two implementations of "may this
+     * merge" is how one of them becomes wrong.
+     */
+    cloneId?: string;
+  } = {},
 ): Promise<MergeDrainReport> {
   const report: MergeDrainReport = {
     considered: 0,
@@ -251,6 +267,12 @@ export async function drainCascadeMerges(
     .not("github_owner", "is", null)
     .not("github_repo", "is", null)
     .order("merge_drain_at", { ascending: true, nullsFirst: true });
+  // Narrowed AFTER the read rather than in it, so the one query and the one
+  // ordering serve both callers and a filtered run is provably the same pass
+  // over a shorter list.
+  const scoped = opts.cloneId
+    ? (data ?? []).filter((c) => (c as { id: string }).id === opts.cloneId)
+    : (data ?? []);
   // A candidate list that could not be READ is not an empty one — reporting
   // "nothing to merge" on a database fault is how a stalled fleet looks
   // healthy.
@@ -308,7 +330,7 @@ export async function drainCascadeMerges(
     would only reach the same cliff faster; the budget is what makes stopping
     safe, and the two belong together.
   */
-  const eligible = (data ?? []).filter(
+  const eligible = scoped.filter(
     (c) =>
       (c as { github_owner: string | null }).github_owner &&
       (c as { github_repo: string | null }).github_repo,

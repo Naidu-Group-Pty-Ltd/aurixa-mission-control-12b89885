@@ -135,3 +135,72 @@ describe("a truncated run says so", () => {
     expect(guard).toMatch(/report\.truncated/);
   });
 });
+
+describe("a check suite completing drains that clone, and only that clone", () => {
+  const github = read("src/routes/hooks.github.tsx");
+  const branch = github.slice(
+    github.indexOf('if (eventType === "check_suite"'),
+    github.indexOf('if (eventType !== "push")'),
+  );
+
+  it("the branch exists and sits before the push handler's catch-all", () => {
+    expect(branch.length).toBeGreaterThan(500);
+  });
+
+  it("acts only on a COMPLETED suite carrying a pull request", () => {
+    // A queued or running suite is the state the gate already reports as
+    // `pending`; draining on it would be the poll again, faster and no more
+    // informative. A suite with no pull request has nothing to consider.
+    expect(branch).toMatch(/payload\.action !== "completed"/);
+    expect(branch).toMatch(/unit\?\.status !== "completed"/);
+    expect(branch).toMatch(/pull_requests/);
+  });
+
+  it("narrows the SAME engine rather than adding a second merge path", () => {
+    /*
+      Two implementations of "may this merge" is how one of them becomes
+      wrong. Everything the gate decides — required checks, the never-started
+      ceiling, the base comparison, oldest-first ordering, the reconciliation
+      writes — has to be the code the poll runs.
+    */
+    expect(branch).toMatch(/drainCascadeMerges\(supabaseAdmin, \{/);
+    expect(branch).toMatch(/cloneId: clone\.id/);
+    // Never its own merge call.
+    expect(branch).not.toMatch(/pulls\.merge/);
+    expect(branch).not.toMatch(/decideCascadeMerge/);
+  });
+
+  it("touches no clone but the one whose repository sent the event", () => {
+    expect(branch).toMatch(/\.eq\("github_owner", owner\)/);
+    expect(branch).toMatch(/\.eq\("github_repo", name\)/);
+    // The prime's own suites arrive here too and the prime is not in the
+    // drain's work list.
+    expect(branch).toMatch(/not a clone repository/);
+  });
+
+  it("never reports failure to GitHub, because a disabled webhook is worse than a slow merge", () => {
+    /*
+      GitHub retries a 5xx delivery and then disables the endpoint. This is an
+      OPTIMISATION over a poll that runs anyway, so a fault here costs at most
+      five minutes and must never cost the delivery endpoint.
+    */
+    const cat = branch.slice(branch.lastIndexOf("catch (err)"));
+    expect(cat).toMatch(/deferred_to_poll: true/);
+    expect(cat).not.toMatch(/status: 5\d\d/);
+  });
+
+  it("opens nothing — a finished check suite is not a cascade trigger", () => {
+    // It says something about a tree that already exists.
+    expect(branch).not.toMatch(/createCascadeForAllClones/);
+    expect(branch).not.toMatch(/executeCascade/);
+  });
+
+  it("the drain's own narrowing is applied to the same ordered read", () => {
+    // One query, one ordering, both callers — so a filtered run is provably
+    // the same pass over a shorter list rather than a different pass.
+    const narrowAt = drain.indexOf("const scoped = opts.cloneId");
+    const orderAt = drain.indexOf('.order("merge_drain_at"');
+    expect(narrowAt).toBeGreaterThan(orderAt);
+    expect(drain).toMatch(/const eligible = scoped\.filter\(/);
+  });
+});
