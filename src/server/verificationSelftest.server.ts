@@ -48,8 +48,28 @@ export type CloneVerificationProbe = {
   detail: string;
 };
 
+/**
+ * What to ask the clone.
+ *
+ * `probe` sends an empty form and spends nothing. `loop` sends real image
+ * parts through all three operations, which is the only way to prove a FILE
+ * survives the hop — and is billable on a 2xx, so it is never the default.
+ */
+export type SelftestMode = "probe" | "loop";
+
+const EVENT: Record<SelftestMode, string> = {
+  probe: "verification.selftest",
+  loop: "verification.loopcheck",
+};
+
 export type SelftestResult =
-  | { ok: true; cloneId: string; cloneName: string | null; probe: CloneVerificationProbe }
+  | {
+      ok: true;
+      cloneId: string;
+      cloneName: string | null;
+      probe?: CloneVerificationProbe;
+      report?: unknown;
+    }
   | { ok: false; cloneId: string; cloneName: string | null; reason: string; error: string };
 
 /** The webhook signature scheme the clone verifies against. */
@@ -59,6 +79,7 @@ function sign(secret: string, body: string): string {
 
 export async function runCloneVerificationSelftest(
   cloneId: string,
+  mode: SelftestMode = "probe",
 ): Promise<SelftestResult> {
   const { data: clone, error: cloneErr } = await supabaseAdmin
     .from("clones")
@@ -100,8 +121,9 @@ export async function runCloneVerificationSelftest(
     };
   }
 
+  const event = EVENT[mode];
   const body = JSON.stringify({
-    event: "verification.selftest",
+    event,
     occurred_at: new Date().toISOString(),
     data: {},
   });
@@ -113,14 +135,20 @@ export async function runCloneVerificationSelftest(
       headers: {
         "content-type": "application/json",
         "x-mc-signature": sign(endpoint.secret, body),
-        "x-mc-event": "verification.selftest",
+        "x-mc-event": event,
         // Fresh every time. The clone answers a probe BEFORE its de-dupe, so
         // this is belt and braces — but a stable key here would be a request
         // to be told what the last answer was, which is not the question.
         "x-mc-idempotency-key": randomUUID(),
       },
       body,
-      signal: AbortSignal.timeout(30_000),
+      /*
+       * A loop check carries three multipart requests with real images and
+       * waits on the vendor for each, so it needs far longer than a probe
+       * that sends an empty form. Timing the caller out shorter than the work
+       * would report a healthy loop as unreachable.
+       */
+      signal: AbortSignal.timeout(mode === "loop" ? 150_000 : 30_000),
     });
   } catch (e) {
     return {
@@ -143,7 +171,7 @@ export async function runCloneVerificationSelftest(
     };
   }
 
-  let parsed: { probe?: CloneVerificationProbe };
+  let parsed: { probe?: CloneVerificationProbe; report?: unknown };
   try {
     parsed = JSON.parse(text) as typeof parsed;
   } catch {
@@ -164,7 +192,8 @@ export async function runCloneVerificationSelftest(
         "the self-test. Deploy the current functions to it first.",
     };
   }
-  if (!parsed.probe) {
+  const answered = mode === "loop" ? parsed.report : parsed.probe;
+  if (!answered) {
     return {
       ok: false,
       cloneId,
@@ -174,18 +203,22 @@ export async function runCloneVerificationSelftest(
     };
   }
 
-  return { ok: true, cloneId, cloneName, probe: parsed.probe };
+  return mode === "loop"
+    ? { ok: true, cloneId, cloneName, report: parsed.report }
+    : { ok: true, cloneId, cloneName, probe: parsed.probe };
 }
 
 /** Every clone with a backend, asked in turn. */
-export async function runFleetVerificationSelftest(): Promise<SelftestResult[]> {
+export async function runFleetVerificationSelftest(
+  mode: SelftestMode = "probe",
+): Promise<SelftestResult[]> {
   const { data: clones } = await supabaseAdmin
     .from("clones")
     .select("id, name")
     .order("name", { ascending: true });
   const out: SelftestResult[] = [];
   for (const c of clones ?? []) {
-    out.push(await runCloneVerificationSelftest(c.id));
+    out.push(await runCloneVerificationSelftest(c.id, mode));
   }
   return out;
 }

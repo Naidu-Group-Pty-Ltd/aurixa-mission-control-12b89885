@@ -23,33 +23,41 @@ export const Route = createFileRoute("/hooks/verification-selftest")({
         const auth = verifyCronAuth(request);
         if (!auth.ok) return auth.response;
 
-        let body: { cloneId?: unknown } = {};
+        let body: { cloneId?: unknown; mode?: unknown } = {};
         try {
           body = (await request.json()) as typeof body;
         } catch {
           // No body means the whole fleet, which is the common case.
         }
         const cloneId = typeof body.cloneId === "string" ? body.cloneId.trim() : "";
+        /*
+         * `probe` unless asked otherwise, and that default is load-bearing:
+         * the probe spends nothing while the loop check sends real images
+         * through all three operations and is billable on a 2xx. A diagnostic
+         * that could start billing because somebody omitted a field is not a
+         * diagnostic anybody should trust.
+         */
+        const mode = body.mode === "loop" ? ("loop" as const) : ("probe" as const);
 
         try {
           const { runCloneVerificationSelftest, runFleetVerificationSelftest } = await import(
             "@/server/verificationSelftest.server"
           );
           const results = cloneId
-            ? [await runCloneVerificationSelftest(cloneId)]
-            : await runFleetVerificationSelftest();
+            ? [await runCloneVerificationSelftest(cloneId, mode)]
+            : await runFleetVerificationSelftest(mode);
 
           await writeAuditLog({
             action: "verification_selftest",
             entityType: cloneId ? "clone" : "fleet",
             ...(cloneId ? { entityId: cloneId } : {}),
-            metadata: { results } as unknown as Record<string, unknown>,
+            metadata: { mode, results } as unknown as Record<string, unknown>,
           });
 
           // 200 with the readings in the body. A clone that could not be
           // asked is a state, not a failed sweep — and reporting it as a
           // failure would hide the clones that answered.
-          return new Response(JSON.stringify({ success: true, results }), {
+          return new Response(JSON.stringify({ success: true, mode, results }), {
             headers: { "Content-Type": "application/json" },
           });
         } catch (e) {
