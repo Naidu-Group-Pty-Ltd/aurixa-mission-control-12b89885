@@ -14,6 +14,7 @@ import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { ensureTenant } from "./clone-api-keys.server";
 import {
   brokeredUrl,
+  describeCredential,
   outboundHeaders,
   parseAllowlist,
   refusalHeaders,
@@ -44,8 +45,15 @@ export type ListingsBrokerOutcome = {
   };
 };
 
-const json = (body: { ok: false; error: string; message: string }, status: number) =>
-  new Response(JSON.stringify(body), { status, headers: refusalHeaders(body.error) });
+/**
+ * A refusal body. Extra fields are permitted so a refusal can carry its own
+ * diagnosis; the header is always set from `error`, so every response built
+ * here is marked as Mission Control's own rather than a relayed vendor answer.
+ */
+const json = (
+  body: { ok: false; error: string; message: string } & Record<string, unknown>,
+  status: number,
+) => new Response(JSON.stringify(body), { status, headers: refusalHeaders(body.error) });
 
 /**
  * Mission Control's own Airtable configuration for the Listings pipeline.
@@ -154,6 +162,14 @@ export async function brokerListingsRead(input: {
    * so a clone walking a failing table is visible rather than invisible.
    */
   const billed = upstream.ok;
+  /*
+   * A 401 or 403 is Airtable refusing MISSION CONTROL'S OWN credential, so the
+   * shape verdict is computed once here and carried into both the ledger and
+   * the refusal below.
+   */
+  const credentialRejected = upstream.status === 401 || upstream.status === 403;
+  const credential = credentialRejected ? describeCredential(c.token) : null;
+
   await recordBrokeredUsage({
     cloneId: input.cloneId,
     tenantRef: input.tenantRef,
@@ -162,7 +178,49 @@ export async function brokerListingsRead(input: {
     quantity: billed ? 1 : 0,
     status: billed ? "success" : "error",
     upstreamStatus: upstream.status,
+    ...(credential ? { credentialShape: credential.shape } : {}),
   });
+
+  /*
+   * A vendor refusal of OUR credential is OUR refusal.
+   *
+   * The standing rule is that `x-mission-control-refusal` marks Mission
+   * Control's own refusals and never what it relays, and that rule exists to
+   * route an operator to the right remedy. A 401 or 403 here is Airtable
+   * declining the credential MISSION CONTROL holds: the tenant presented a
+   * valid key, did nothing wrong, and can do nothing about it. Relaying a bare
+   * `airtable_401` sends them to investigate their own deployment, which cannot
+   * succeed. So this is marked as ours — refining the rule to what it always
+   * meant (the remedy is at Mission Control) rather than breaking it.
+   *
+   * `credential.remedy` names the specific mistake; nothing in it, or in the
+   * ledger row, carries any part of the credential.
+   */
+  if (credential) {
+    return {
+      response: json(
+        {
+          ok: false,
+          error: "airtable_credential_rejected",
+          message:
+            "Airtable did not accept the credential Mission Control holds, so no clone can read " +
+            "the marketplace until it is corrected. This is not a fault on the calling deployment.",
+          upstream_status: upstream.status,
+          credential_shape: credential.shape,
+          credential_well_formed: credential.wellFormed,
+          remedy: credential.remedy,
+        },
+        502,
+      ),
+      detail: {
+        operation,
+        table: resolved.table,
+        upstream_status: upstream.status,
+        refused: "airtable_credential_rejected",
+        billed: false,
+      },
+    };
+  }
 
   /*
    * Airtable's 429 is about the BASE, which is a fleet resource shared by every
@@ -258,6 +316,8 @@ async function recordBrokeredUsage(input: {
   quantity: number;
   status: "success" | "error";
   upstreamStatus: number;
+  /** Only on a credential rejection, and only the KIND — never the value. */
+  credentialShape?: string;
 }): Promise<void> {
   try {
     // `clones` has no `tenant_id` column — the tenant is resolved (and created
@@ -282,6 +342,10 @@ async function recordBrokeredUsage(input: {
         upstream_status: input.upstreamStatus,
         brokered: true,
         table: input.table,
+        // Written so the diagnosis survives in the ledger: an operator reading
+        // `api_usage_events` can see WHICH of the four 401 causes it was
+        // without holding a clone key or reading the environment.
+        ...(input.credentialShape ? { credential_shape: input.credentialShape } : {}),
       } as never,
     });
     if (error) console.error(`[listings-broker] usage write failed: ${error.message}`);

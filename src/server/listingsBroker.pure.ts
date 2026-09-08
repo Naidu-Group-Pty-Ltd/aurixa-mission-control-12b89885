@@ -258,6 +258,112 @@ export function resolveTable(
 export const AIRTABLE_API_BASE = "https://api.airtable.com/v0";
 
 /**
+ * What KIND of credential Mission Control is holding — never any part of it.
+ *
+ * Airtable answers 401 with no detail, and from outside that one status covers
+ * four completely different operator mistakes: a value that was never updated
+ * in the running process, a legacy `key…` API key (Airtable retired those in
+ * February 2024 and they now fail exactly like a bad token), a base or table id
+ * pasted into the token field, and a genuine expiry or revocation. Measured 8
+ * Sep 2026: the fleet's first brokered reads returned 401 five times over half
+ * an hour with nothing anywhere able to say which of the four it was.
+ *
+ * The prefixes are Airtable's own published, public format markers — `pat`,
+ * `key`, `app`, `tbl`. Naming the marker is not disclosure; it is the same
+ * information a glance at the first three characters of a settings field gives,
+ * and it converts an unfalsifiable 401 into a named remedy. Nothing here
+ * returns, logs or derives any other part of the value, and there is
+ * deliberately no length or checksum in the output — only the kind.
+ */
+export type CredentialShape =
+  | "personal_access_token"
+  | "legacy_api_key"
+  | "base_id"
+  | "table_id"
+  | "unrecognised";
+
+export type CredentialVerdict = {
+  readonly shape: CredentialShape;
+  /** Whether it matches the full published form for its kind, not merely the prefix. */
+  readonly wellFormed: boolean;
+  /** What an operator should do. Never contains any part of the credential. */
+  readonly remedy: string;
+};
+
+/** `pat` + 14 alphanumerics + `.` + 64 alphanumerics — Airtable's published PAT form. */
+const PAT = /^pat[A-Za-z0-9]{14}\.[A-Za-z0-9]{64}$/;
+
+export function describeCredential(token: string): CredentialVerdict {
+  const t = token.trim();
+  if (t.length === 0) {
+    return {
+      shape: "unrecognised",
+      wellFormed: false,
+      remedy: "AIRTABLE_TOKEN is empty in Mission Control's environment.",
+    };
+  }
+  if (t.startsWith("pat")) {
+    return PAT.test(t)
+      ? {
+          shape: "personal_access_token",
+          wellFormed: true,
+          remedy:
+            "The value is a well-formed Airtable personal access token, so Airtable is refusing " +
+            "the token itself rather than its shape. Four causes, in the order they actually " +
+            "occur: it belongs to a DIFFERENT Airtable account from the one that owns this base " +
+            "— a perfectly valid token fails here if it was minted in the wrong account, and " +
+            "this fleet has more than one; Mission Control has not been redeployed since the " +
+            "value was changed, so the running process still holds the old one; the token lacks " +
+            "data.records:read and schema.bases:read, or does not list this base among its " +
+            "bases; or it has been revoked or regenerated. Compare against the account the prime " +
+            "reads with — its token works against this same base.",
+        }
+      : {
+          shape: "personal_access_token",
+          wellFormed: false,
+          remedy:
+            "The value begins `pat` but is not a complete Airtable personal access token — a " +
+            "truncated paste, or surrounding quotes or whitespace carried in with it.",
+        };
+  }
+  if (t.startsWith("key")) {
+    return {
+      shape: "legacy_api_key",
+      wellFormed: false,
+      remedy:
+        "That is a legacy Airtable API key (`key…`). Airtable retired those in February 2024 and " +
+        "they now fail exactly like an invalid token. Mint a personal access token (`pat…`) with " +
+        "data.records:read and schema.bases:read on this base.",
+    };
+  }
+  if (t.startsWith("app")) {
+    return {
+      shape: "base_id",
+      wellFormed: false,
+      remedy:
+        "That is an Airtable BASE id (`app…`), not a token — it belongs in AIRTABLE_BASE_ID. " +
+        "AIRTABLE_TOKEN needs a personal access token (`pat…`).",
+    };
+  }
+  if (t.startsWith("tbl")) {
+    return {
+      shape: "table_id",
+      wellFormed: false,
+      remedy:
+        "That is an Airtable TABLE id (`tbl…`), not a token — it belongs in AIRTABLE_TABLE_NAME. " +
+        "AIRTABLE_TOKEN needs a personal access token (`pat…`).",
+    };
+  }
+  return {
+    shape: "unrecognised",
+    wellFormed: false,
+    remedy:
+      "The value does not begin with any Airtable identifier prefix (`pat`, `key`, `app`, `tbl`). " +
+      "It may be a different vendor's credential, or the wrong secret entirely.",
+  };
+}
+
+/**
  * The URL this operation reads, built from Mission Control's base id.
  *
  * `baseId` is a parameter of this function and never of the request. Every

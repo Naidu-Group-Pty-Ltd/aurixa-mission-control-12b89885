@@ -14,6 +14,7 @@ const codeOf = (src: string): string =>
 import {
   AIRTABLE_RECORD_ID,
   brokeredUrl,
+  describeCredential,
   isListingsOperation,
   LISTINGS_OPERATIONS,
   MAX_PAGE_SIZE,
@@ -283,5 +284,113 @@ describe("record ids", () => {
   it("puts no filter on a read that named no records", () => {
     const url = new URL(brokeredUrl("records", "appBASE", "Tbl", { pageSize: 100 }));
     expect(url.searchParams.get("filterByFormula")).toBeNull();
+  });
+});
+
+/**
+ * Airtable answers 401 with no detail, and from outside that one status covers
+ * four different operator mistakes with four different remedies.
+ *
+ * Measured 8 Sep 2026: the fleet's first brokered reads returned 401 at 09:30,
+ * 09:45, 10:00 and 10:15 — after a valid token had been entered — with nothing
+ * anywhere able to say whether the running process had not picked the value up,
+ * whether it was a retired `key…` API key, whether a base or table id had been
+ * pasted into the token field, or whether the token was genuinely revoked. An
+ * unfalsifiable error is one nobody can act on.
+ *
+ * The prefixes are Airtable's own published format markers, so naming the KIND
+ * discloses nothing a glance at a settings field would not. These tests pin
+ * that nothing beyond the kind ever escapes.
+ */
+describe("what kind of credential Mission Control is holding", () => {
+  const PAT = `pat${"A".repeat(14)}.${"b".repeat(64)}`;
+
+  it("recognises a well-formed personal access token", () => {
+    const v = describeCredential(PAT);
+    expect(v.shape).toBe("personal_access_token");
+    expect(v.wellFormed).toBe(true);
+    // The remedy for a well-formed token names both live causes: the token is
+    // genuinely refused, OR the process never picked the new value up.
+    expect(v.remedy).toMatch(/revoked|regenerated/);
+    expect(v.remedy).toMatch(/redeployed/);
+  });
+
+  it("separates a truncated paste from a genuine token", () => {
+    const v = describeCredential("patSHORT");
+    expect(v.shape).toBe("personal_access_token");
+    expect(v.wellFormed).toBe(false);
+    expect(v.remedy).toMatch(/truncated|quotes|whitespace/);
+  });
+
+  it("names a legacy API key, which fails exactly like a bad token", () => {
+    const v = describeCredential(`key${"A".repeat(14)}`);
+    expect(v.shape).toBe("legacy_api_key");
+    expect(v.remedy).toMatch(/February 2024/);
+  });
+
+  it("catches a base id or a table id pasted into the token field", () => {
+    expect(describeCredential("appFNPL7iYiuQyHAO").shape).toBe("base_id");
+    expect(describeCredential("appFNPL7iYiuQyHAO").remedy).toContain("AIRTABLE_BASE_ID");
+    expect(describeCredential("tblumTIRYBn92B2ST").shape).toBe("table_id");
+    expect(describeCredential("tblumTIRYBn92B2ST").remedy).toContain("AIRTABLE_TABLE_NAME");
+  });
+
+  it("says so when the name is set to something empty or foreign", () => {
+    expect(describeCredential("   ").shape).toBe("unrecognised");
+    expect(describeCredential("   ").remedy).toMatch(/empty/);
+    expect(describeCredential("sk-live-whatever").shape).toBe("unrecognised");
+  });
+
+  it("NEVER returns any part of the credential", () => {
+    // The whole safety of this feature. A diagnostic that leaks the secret it
+    // diagnoses is worse than the silence it replaces.
+    const secrets = [
+      `pat${"Z".repeat(14)}.${"9".repeat(64)}`,
+      `key${"Q".repeat(14)}`,
+      "app0123456789abcd",
+      "tbl0123456789abcd",
+      "some-other-vendors-token-value",
+    ];
+    for (const secret of secrets) {
+      const v = describeCredential(secret);
+      const emitted = `${v.shape} ${v.remedy} ${v.wellFormed}`;
+      // Nothing past the three-character public prefix may appear.
+      expect(emitted).not.toContain(secret);
+      expect(emitted).not.toContain(secret.slice(3));
+      expect(emitted).not.toContain(secret.slice(-8));
+    }
+  });
+
+  it("emits no length, no checksum and no character of the value", () => {
+    const short = describeCredential(`pat${"A".repeat(14)}.${"b".repeat(64)}`);
+    const long = describeCredential(`pat${"C".repeat(14)}.${"d".repeat(64)}`);
+    // Two different tokens of the same kind are indistinguishable in the output.
+    expect(short).toEqual(long);
+  });
+});
+
+describe("a vendor refusal of Mission Control's OWN credential is Mission Control's refusal", () => {
+  const serverCode = codeOf(readFileSync("src/server/listingsBroker.server.ts", "utf8"));
+
+  it("treats 401 and 403 as ours, and nothing else", () => {
+    expect(serverCode).toMatch(/upstream\.status === 401 \|\| upstream\.status === 403/);
+    expect(serverCode).toContain("airtable_credential_rejected");
+  });
+
+  it("records the KIND in the usage ledger, so the diagnosis survives", () => {
+    // Readable from the database by an operator with no clone key and no
+    // access to the environment — which is how this one had to be diagnosed.
+    expect(serverCode).toContain("credential_shape");
+  });
+
+  it("never puts the credential itself in the ledger or the response", () => {
+    expect(serverCode).not.toMatch(/_metadata[\s\S]{0,300}c\.token/);
+    expect(serverCode).not.toMatch(/message:[^;]{0,200}c\.token/);
+  });
+
+  it("says the calling deployment is not at fault", () => {
+    // The tenant presented a valid key and can do nothing about this; telling
+    // them "airtable_401" sends them to an investigation that cannot succeed.
+    expect(serverCode).toMatch(/not a fault on the calling deployment/);
   });
 });
