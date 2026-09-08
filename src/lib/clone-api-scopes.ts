@@ -17,7 +17,8 @@ export type CloneApiScope = {
     | "usage"
     | "gate"
     | "clones"
-    | "verification";
+    | "verification"
+    | "listings";
   label: string;
   description: string;
   default?: boolean;
@@ -34,6 +35,19 @@ export const CLONE_API_SCOPES: CloneApiScope[] = [
       "key can list every session in its application — including other tenants' customers' " +
       "passport portraits — so brokering is the only way a clone can verify at all. Grants the " +
       "three write operations of a verification sequence and nothing readable.",
+    default: true,
+  },
+  {
+    value: "listings:read",
+    group: "listings",
+    label: "Listings — read the shared Airtable marketplace",
+    description:
+      "Read the Property Intake Master table that the Listings and Overview pages are built from, " +
+      "through Mission Control's Airtable credential. On by default: the token is deliberately NOT " +
+      "forwarded to any clone, because an Airtable personal access token carries its whole scope — " +
+      "every base and every permission it was minted with — and nothing in it narrows it to one " +
+      "table. Grants two read operations against a base and table this clone cannot name, and no " +
+      "write of any kind.",
     default: true,
   },
   {
