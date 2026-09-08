@@ -19,11 +19,14 @@ import {
   LISTINGS_OPERATIONS,
   MAX_PAGE_SIZE,
   MAX_RECORD_IDS,
+  ENDPOINT_HEADER,
+  LISTINGS_ENDPOINT,
   outboundHeaders,
   parseAllowlist,
   parseRecordIds,
   refusalHeaders,
   refuseQuery,
+  relayHeaders,
   resolveTable,
   type ListingsQuery,
 } from "./listingsBroker.pure";
@@ -392,5 +395,52 @@ describe("a vendor refusal of Mission Control's OWN credential is Mission Contro
     // The tenant presented a valid key and can do nothing about this; telling
     // them "airtable_401" sends them to an investigation that cannot succeed.
     expect(serverCode).toMatch(/not a fault on the calling deployment/);
+  });
+});
+
+describe("did the request reach Mission Control at all", () => {
+  /*
+   * The question `x-mission-control-refusal` cannot answer.
+   *
+   * It separates "we refused you" from "the vendor answered". It cannot
+   * separate either of those from "you never got here" — and on 8 Sep 2026 one
+   * clone spent a morning reading its own wrong MISSION_CONTROL_URL as
+   * `airtable_404`, while the two beside it were served normally and nothing
+   * from it ever appeared in this side's ledger.
+   */
+  const headerValue = (h: HeadersInit, name: string): string | undefined =>
+    (h as Record<string, string>)[name];
+
+  it("marks a relay as ours", () => {
+    expect(headerValue(relayHeaders(), ENDPOINT_HEADER)).toBe(LISTINGS_ENDPOINT);
+  });
+
+  it("marks a refusal as ours too, so absence is unambiguous", () => {
+    // If only ONE kind of answer carried it, absence would mean "the other
+    // kind" rather than "not us", and the distinction would be worthless.
+    expect(headerValue(refusalHeaders("unauthorized"), ENDPOINT_HEADER)).toBe(LISTINGS_ENDPOINT);
+  });
+
+  it("keeps the refusal header on refusals ALONE", () => {
+    // The two headers answer different questions and neither replaces the
+    // other: this one says the answer is ours, that one says the NO is ours.
+    expect(headerValue(refusalHeaders("rate_limited"), "x-mission-control-refusal")).toBe(
+      "rate_limited",
+    );
+    expect(headerValue(relayHeaders(), "x-mission-control-refusal")).toBeUndefined();
+  });
+
+  it("puts it on every answer the broker produces, refusal and relay", () => {
+    // A relay path that forgot it would make a real vendor failure read as
+    // "never arrived" — the same class of wrong answer, pointing the other way.
+    const serverCode = codeOf(readFileSync("src/server/listingsBroker.server.ts", "utf8"));
+    expect(serverCode).not.toMatch(/headers:\s*\{\s*"Content-Type":\s*"application\/json"\s*\}/);
+    expect(serverCode).toContain("relayHeaders()");
+  });
+
+  it("does not relay Airtable's own headers", () => {
+    // They describe the FLEET's standing with the vendor, not a tenant's.
+    const serverCode = codeOf(readFileSync("src/server/listingsBroker.server.ts", "utf8"));
+    expect(serverCode).not.toMatch(/upstream\.headers/);
   });
 });

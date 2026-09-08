@@ -18,6 +18,7 @@ import {
   outboundHeaders,
   parseAllowlist,
   refusalHeaders,
+  relayHeaders,
   refuseQuery,
   resolveTable,
   type ListingsOperation,
@@ -271,7 +272,7 @@ export async function brokerListingsRead(input: {
           records_visible: rows,
           upstream_status: upstream.status,
         }),
-        { status: upstream.ok ? 200 : 502, headers: { "Content-Type": "application/json" } },
+        { status: upstream.ok ? 200 : 502, headers: relayHeaders() },
       ),
       detail: {
         operation,
@@ -288,7 +289,7 @@ export async function brokerListingsRead(input: {
     // standing with the vendor and are not a tenant's to read.
     response: new Response(text, {
       status: upstream.status,
-      headers: { "Content-Type": "application/json" },
+      headers: relayHeaders(),
     }),
     detail: {
       operation,
