@@ -156,3 +156,24 @@ export function outboundHeaders(input: {
 export function inboundHeaders(): Record<string, string> {
   return { "content-type": "application/json" };
 }
+
+/** The header that names Mission Control as the one who said no. */
+export const REFUSAL_HEADER = "x-mission-control-refusal";
+
+/**
+ * Headers for a refusal Mission Control itself is making.
+ *
+ * Without this a clone cannot tell WHO refused it. Both ends answer JSON and
+ * both can answer 401: the vendor rejecting Mission Control's Didit key and
+ * Mission Control rejecting the clone's own key are the same status and a
+ * similar body, and they send an operator to opposite remedies — "the fleet's
+ * vendor credential is wrong" versus "this clone's Mission Control key is
+ * wrong or missing a scope". Guessing from the body shape is a heuristic the
+ * vendor could break at any time; a header only this side can set is not.
+ *
+ * It is set on refusals ALONE. A relayed vendor response carries no such
+ * header, which is what makes its absence mean "this answer came from Didit".
+ */
+export function refusalHeaders(reason: string): Record<string, string> {
+  return { ...inboundHeaders(), [REFUSAL_HEADER]: reason };
+}

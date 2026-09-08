@@ -14,6 +14,7 @@ import {
   brokeredPath,
   inboundHeaders,
   outboundHeaders,
+  refusalHeaders,
   MAX_BROKERED_BODY_BYTES,
 } from "./verificationBroker.pure";
 
@@ -34,8 +35,16 @@ export type BrokerOutcome = {
   };
 };
 
-const json = (body: unknown, status: number) =>
-  new Response(JSON.stringify(body), { status, headers: inboundHeaders() });
+/**
+ * A refusal Mission Control is making itself.
+ *
+ * Every one of them carries the refusal header, so a clone can tell this
+ * apart from the vendor's own answer relayed through — see `refusalHeaders`.
+ * `error` is repeated in the header rather than only in the body because a
+ * caller must not have to parse a body to learn who said no.
+ */
+const json = (body: { ok: false; error: string; message: string }, status: number) =>
+  new Response(JSON.stringify(body), { status, headers: refusalHeaders(body.error) });
 
 /**
  * Read the body with the ceiling enforced on what ARRIVES.

@@ -29,8 +29,23 @@
  * why each one is there.
  */
 import { createFileRoute } from "@tanstack/react-router";
-import { jsonResponse, resolveCloneApiKey } from "@/server/clone-api-keys.server";
+import { resolveCloneApiKey } from "@/server/clone-api-keys.server";
 import { checkRateLimit } from "@/server/token-rate-limit.server";
+import { refusalHeaders } from "@/server/verificationBroker.pure";
+
+/**
+ * A refusal this endpoint makes, marked as ours.
+ *
+ * The clone has to tell "Mission Control would not serve me" apart from "the
+ * vendor answered" — they can share a status and a body shape and they send
+ * an operator to opposite remedies. Only this side can set the header, so its
+ * ABSENCE is what makes a relayed answer identifiable as the vendor's.
+ */
+const refuse = (error: string, extra: Record<string, unknown>, status: number) =>
+  new Response(JSON.stringify({ ok: false, error, ...extra }), {
+    status,
+    headers: refusalHeaders(error),
+  });
 
 export const Route = createFileRoute("/api/public/verification/$operation")({
   server: {
@@ -40,26 +55,26 @@ export const Route = createFileRoute("/api/public/verification/$operation")({
           request.headers.get("x-clone-api-key"),
           "verification:run",
         );
-        if (!key) return jsonResponse({ ok: false, error: "unauthorized" }, 401);
+        if (!key) {
+          return refuse(
+            "unauthorized",
+            {
+              message:
+                "This Mission Control key is unknown, revoked, or lacks the verification:run scope.",
+            },
+            401,
+          );
+        }
 
         const rl = await checkRateLimit(key.id);
         if (!rl.ok) {
-          return new Response(
-            JSON.stringify({
-              ok: false,
-              error: "rate_limited",
-              count: rl.count,
-              limit: rl.limit,
-              retry_after_seconds: rl.retry_after_seconds,
-            }),
-            {
-              status: 429,
-              headers: {
-                "Content-Type": "application/json",
-                "Retry-After": String(rl.retry_after_seconds),
-              },
-            },
+          const res = refuse(
+            "rate_limited",
+            { count: rl.count, limit: rl.limit, retry_after_seconds: rl.retry_after_seconds },
+            429,
           );
+          res.headers.set("Retry-After", String(rl.retry_after_seconds));
+          return res;
         }
 
         const { brokerVerification } = await import("@/server/verificationBroker.server");
