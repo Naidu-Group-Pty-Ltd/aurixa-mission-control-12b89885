@@ -55,6 +55,15 @@ export const Route = createFileRoute("/hooks/cascade-merge-drain")({
           // would put an identical row in the audit log every five minutes
           // until the end of time. It is in the response body, where somebody
           // asking gets an answer and nobody else is told twice.
+          //
+          // `truncated` DOES trigger a write, and it is the one addition to
+          // that rule. A run that stopped at its budget with clones still
+          // unvisited is not a quiet fleet — it is the fleet outgrowing one
+          // run — and the whole reason the old starvation went unnoticed for
+          // as long as it did is that a starved tail and a quiet fleet
+          // produced the identical silence. It is bounded, unlike
+          // `foreignRepo`: it appears only while there is genuinely more work
+          // than a run can hold, and stops the moment there is not.
           if (
             report.merged > 0 ||
             report.reconciled > 0 ||
@@ -62,7 +71,8 @@ export const Route = createFileRoute("/hooks/cascade-merge-drain")({
             report.advanced > 0 ||
             report.tidied > 0 ||
             report.repaired > 0 ||
-            report.failed > 0
+            report.failed > 0 ||
+            report.truncated
           ) {
             await writeAuditLog({
               action: "cascade_merge_drain",

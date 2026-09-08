@@ -333,4 +333,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "column", table: "clone_backends", column: "migration_blocked_reason" },
     ],
   },
+  {
+    migration: "20260908170000_merge_drain_rotation_cursor.sql",
+    version: "20260908170000",
+    assertions: [{ kind: "column", table: "clones", column: "merge_drain_at" }],
+  },
 ];
