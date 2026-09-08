@@ -28,6 +28,71 @@ The lesson is the one this platform keeps relearning in different clothes: a
 green signal about the wrong question. The webhook was asked "did the delivery
 succeed?" and it always had.
 
+## A merge to Mission Control is not a release of Mission Control
+
+Everything below is about the prime's merges reaching the clones. This section
+is about the step BEFORE that, and it is the one that is easy to miss because
+the two repositories do not behave the same way.
+
+**The prime deploys itself on merge.** `deploy-supabase-functions.yml` runs on
+every push to its default branch and pushes the changed functions to Supabase.
+Merge and it ships.
+
+**Mission Control does not.** It is a Lovable project. A merge to `main` syncs
+the code into the project and rebuilds the *preview*; the production origin
+serves whatever was last **published**. Nothing in the repository does that —
+there is no deploy workflow here, and `git log` cannot tell you what production
+is running.
+
+Measured 8 Sep 2026, with nothing else touched in between:
+
+| | |
+|---|---|
+| 11:29:29 | PR merged to `main` |
+| 11:30:36 | Lovable project's `latest_commit_sha` is the merge commit |
+| 11:41 | production origin still answering **without** the new header |
+| 11:41 | published |
+| 11:43 | production origin answering **with** it |
+
+### What that costs, and why it does not look like anything
+
+An unpublished Mission Control is not a broken one. It answers, it is healthy,
+its `/api/health` is green — it is simply an older build, and an older build of
+a broker serves the older **environment** with it. So a credential corrected in
+Mission Control's settings goes on being refused, by a deployment that has no
+idea a newer value exists, and every clone downstream reports the vendor's name
+for it.
+
+That is the shape of a full morning on 8 Sep: a valid Airtable token entered,
+`401` on every brokered read for four ticks afterwards, and the fleet's
+Listings pages empty — with nothing in any log naming the gap between "the
+setting was changed" and "the deployment reading it was replaced".
+
+It is the same failure this document opens with, one layer up: **a green signal
+about the wrong question.** The webhook was asked "did the delivery succeed?".
+The repository is asked "is the fix merged?". Neither question is "is it
+running?".
+
+### The rule
+
+**A change to Mission Control is not done when it merges. It is done when it is
+published and the behaviour is observed on the production origin.**
+
+Observed means a request, not an inference. The cheapest form is a header or a
+field that only the new build can produce — the listings broker's
+`x-mission-control-endpoint` exists partly for this reason, and one unauthenticated
+`GET /api/public/listings/tables` distinguishes the builds without a credential:
+
+```
+curl -sD- -o/dev/null https://mission-control.aurixasystems.com.au/api/public/listings/tables
+```
+
+And the ordering rule that follows: where a change spans Mission Control and
+the prime, **Mission Control ships first** — it must be serving the new
+behaviour before anything downstream is taught to depend on it. That is safe by
+construction here, because publishing is immediate and the fleet cascade takes
+hours, but only if the publish is actually done rather than assumed.
+
 ## Three things had to be true, not one
 
 **1 · Something to cascade to.** `clones` is the registry. Registering
