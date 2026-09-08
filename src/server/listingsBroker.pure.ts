@@ -416,13 +416,63 @@ export function outboundHeaders(token: string): HeadersInit {
 }
 
 /**
+ * Names this endpoint on EVERY answer it produces — a refusal and a relay
+ * alike.
+ *
+ * `x-mission-control-refusal` answers "did Mission Control refuse me, or did
+ * Airtable?", and it answers it well. It cannot answer the question one step
+ * further out: **did the request reach Mission Control at all?** A refusal
+ * carries the header, a relayed vendor failure deliberately does not — and
+ * neither does a 404 from some other host that `MISSION_CONTROL_URL` happens
+ * to name. So a clone pointed at the wrong origin reads its own
+ * misconfiguration as "Airtable said 404", which is the shape of a
+ * marketplace-wide outage, and it hunts the vendor.
+ *
+ * Measured 8 Sep 2026: one clone spent a morning at `airtable_404` with zero
+ * requests arriving here, while the two beside it were served normally. There
+ * was nothing in its record that could distinguish the two cases.
+ *
+ * So this header is a POSITIVE marker of arrival, and it is on everything —
+ * which is exactly what makes its absence mean something. The rule it adds:
+ * **no `x-mission-control-endpoint` on a brokered answer means the answer is
+ * not Mission Control's**, whatever it says inside.
+ *
+ * It does not weaken the refusal header's rule; the two answer different
+ * questions and both are needed. Ordering matters on the way out: this side
+ * must be serving the header before a clone starts believing its absence,
+ * which it will be, because Mission Control deploys on merge and the fleet
+ * cascade takes hours.
+ */
+export const ENDPOINT_HEADER = "x-mission-control-endpoint";
+
+/** The value that names this particular endpoint. */
+export const LISTINGS_ENDPOINT = "listings";
+
+/**
+ * Headers for an answer Mission Control RELAYS from the vendor.
+ *
+ * No refusal header — that one stays reserved for our own no. Airtable's own
+ * headers are not relayed either: they describe the FLEET's standing with the
+ * vendor and are not a tenant's to read.
+ */
+export function relayHeaders(): HeadersInit {
+  return { "Content-Type": "application/json", [ENDPOINT_HEADER]: LISTINGS_ENDPOINT };
+}
+
+/**
  * Mark a refusal as Mission Control's own.
  *
  * The same header the verification broker uses, for the same reason: a clone
  * has to tell "Mission Control would not serve me" from "Airtable answered",
  * because they share status codes and send an operator to opposite remedies.
- * Only this side ever sets it, so its ABSENCE identifies a relayed answer.
+ * Only this side ever sets the REFUSAL header, so its absence still identifies
+ * a relayed answer — while the endpoint header above says the answer is ours
+ * to relay in the first place.
  */
 export function refusalHeaders(error: string): HeadersInit {
-  return { "Content-Type": "application/json", "x-mission-control-refusal": error };
+  return {
+    "Content-Type": "application/json",
+    "x-mission-control-refusal": error,
+    [ENDPOINT_HEADER]: LISTINGS_ENDPOINT,
+  };
 }
