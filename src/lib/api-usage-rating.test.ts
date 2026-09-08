@@ -2,6 +2,8 @@ import { describe, it, expect } from "vitest";
 import {
   resolveBillingReason,
   isBillable,
+  BILLING_REASONS,
+  stripReservedMetadata,
   rateEvent,
   microsToCents,
   settleLines,
@@ -69,8 +71,11 @@ describe("resolveBillingReason", () => {
     );
   });
 
-  it("only ever returns billable for 'inherited'", () => {
-    const reasons = [
+  it("bills the two routes that spend OUR credential, and nothing else", () => {
+    // The list is exhaustive on purpose: a new reason added without a
+    // deliberate decision about money fails here rather than defaulting into
+    // one side or the other.
+    const free = [
       "byok",
       "no_key",
       "unknown_secret",
@@ -78,7 +83,72 @@ describe("resolveBillingReason", () => {
       "error_call",
       "rate_missing",
     ] as const;
-    for (const r of reasons) expect(isBillable(r)).toBe(false);
+    for (const r of free) expect(isBillable(r), r).toBe(false);
+    for (const r of ["inherited", "brokered"] as const) expect(isBillable(r), r).toBe(true);
+    expect(new Set([...free, "inherited", "brokered"]).size).toBe(BILLING_REASONS.length);
+  });
+
+  /*
+   * The defect this suite exists to hold shut.
+   *
+   * Measured 8 Sep 2026: a full brokered verification on NPC Test cost the
+   * prime USD 0.30 and every one of its three usage rows was written
+   * `no_key`, `billable = false`, `cost_micros = 0`. `withheld` — the status
+   * that exists so a clone can stop holding a forwarded key — fell past
+   * `!== "inherited"` into the not-billable branch, which was the right
+   * answer right up until the broker made the CALL travel instead of the
+   * credential.
+   */
+  it("charges a withheld clone, because that is the state where WE paid", () => {
+    const reason = resolveBillingReason({ ...base, secretStatus: "withheld" });
+    expect(reason).toBe("brokered");
+    expect(isBillable(reason)).toBe(true);
+  });
+
+  it("charges when the broker says it made the call, whatever the ledger says", () => {
+    // The broker is the party that made the call, so it is the only party
+    // that knows. A ledger row that has not caught up must not lose the
+    // charge.
+    for (const secretStatus of ["missing", "failed", null] as const) {
+      const reason = resolveBillingReason({ ...base, secretStatus, brokered: true });
+      expect(reason, String(secretStatus)).toBe("brokered");
+      expect(isBillable(reason)).toBe(true);
+    }
+  });
+
+  it("keeps brokered and inherited APART, because they say where the key is", () => {
+    // Same charge, different fact. An operator asking the ledger which
+    // tenants hold our keys must not be told a brokered one does.
+    expect(resolveBillingReason({ ...base, secretStatus: "inherited" })).toBe("inherited");
+    expect(resolveBillingReason({ ...base, secretStatus: "withheld" })).toBe("brokered");
+  });
+
+  it("never charges for a brokered call that FAILED", () => {
+    // Nothing was delivered. The route the credential took does not change
+    // that, so this must answer exactly as a failed inherited call does.
+    expect(resolveBillingReason({ ...base, secretStatus: "withheld", callStatus: "error" })).toBe(
+      "error_call",
+    );
+    expect(resolveBillingReason({ ...base, brokered: true, callStatus: "error" })).toBe(
+      "error_call",
+    );
+  });
+
+  it("still refuses the statuses where no working credential exists at all", () => {
+    // `authorised_no_value` is the owner having said yes and supplied
+    // nothing: there is no key here to broker with and none on the clone.
+    for (const secretStatus of ["missing", "failed", "authorised_no_value"] as const) {
+      expect(resolveBillingReason({ ...base, secretStatus }), secretStatus).toBe("no_key");
+    }
+  });
+
+  it("does not let a rate-less or unbillable secret become chargeable by route", () => {
+    expect(
+      resolveBillingReason({ ...base, secretStatus: "withheld", rateExists: false }),
+    ).toBe("rate_missing");
+    expect(
+      resolveBillingReason({ ...base, brokered: true, rateIsBillable: false }),
+    ).toBe("not_billable");
   });
 });
 
@@ -255,5 +325,30 @@ describe("normalizeEvent", () => {
     const r = normalizeEvent({ ...ok, status: "error" }, now);
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.event.status).toBe("error");
+  });
+
+  it("will not let a reporter assert that its own call was brokered", () => {
+    /*
+     * `brokered` is an input to the money rule, and the only party entitled
+     * to assert it is the one that made the vendor call — the broker, which
+     * writes its event directly rather than through this endpoint. That a
+     * clone could only ever use it to charge ITSELF more is not the point:
+     * an input to a billing decision either comes from the party that knows
+     * or the rule is decorative.
+     */
+    const r = normalizeEvent({ ...ok, metadata: { brokered: true, region: "au" } }, now);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.event.metadata).not.toHaveProperty("brokered");
+      // and it strips the one key rather than discarding the reporter's data
+      expect(r.event.metadata).toEqual({ region: "au" });
+    }
+  });
+
+  it("keeps stripping defensive against the shapes metadata actually arrives in", () => {
+    expect(stripReservedMetadata(null)).toEqual({});
+    expect(stripReservedMetadata("brokered")).toEqual({});
+    expect(stripReservedMetadata(["brokered"])).toEqual({});
+    expect(stripReservedMetadata({ brokered: "true" })).toEqual({});
   });
 });
