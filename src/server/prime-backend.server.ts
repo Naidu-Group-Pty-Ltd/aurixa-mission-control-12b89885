@@ -702,8 +702,14 @@ const GRAPHQL_BLOB_BATCH = 80;
  * REST afterwards, pooled. Fidelity beats speed: a mis-decoded byte in a
  * deployed function is worse than a slow snapshot, which is why the fallback
  * is keyed on GitHub's OWN isBinary/isTruncated verdicts, never on filename.
+ *
+ * The same road carries a batch whose ANSWER is unusable — a body with no
+ * `repository`, or a thrown request — because "GraphQL could not tell us this
+ * blob" and "GraphQL could not tell us anything" want the same remedy. Only
+ * the entries of the failed batch are re-asked; the run is not restarted, and
+ * nothing is dropped.
  */
-async function fetchBlobTextsBatched(
+export async function fetchBlobTextsBatched(
   octokit: Octokit,
   ref: RepoRef,
   entries: Array<{ rel: string; sha: string }>,
@@ -719,14 +725,58 @@ async function fetchBlobTextsBatched(
       .map((e, j) => `b${j}: object(oid: "${e.sha}") { ... on Blob { text isBinary isTruncated } }`)
       .join("\n");
     const query = `query($owner: String!, $repo: String!) { repository(owner: $owner, name: $repo) { ${fields} } }`;
-    const resp = (await octokit.graphql(query, { owner: ref.owner, repo: ref.repo })) as {
-      repository: Record<
-        string,
-        { text: string | null; isBinary: boolean | null; isTruncated: boolean } | null
-      >;
-    };
+
+    // An unusable ANSWER is the same case as an unusable blob, and takes the
+    // same road. GitHub can hand back a body with no `repository` at all — a
+    // partial result beside `errors`, a 502 with an empty payload, a
+    // secondary-rate-limit response — and dereferencing it threw
+    // `Cannot read properties of undefined (reading 'repository')`: a
+    // TypeError naming nothing, spent as a whole remediation attempt, on
+    // batches of up to eighty files. REST reads each blob authoritatively, so
+    // falling back cannot deploy a wrong byte; it costs round trips, and if
+    // the reason GraphQL failed is one REST shares (a revoked token, an
+    // exhausted quota) the first REST call raises that reason BY NAME instead.
+    let repository:
+      | Record<
+          string,
+          { text: string | null; isBinary: boolean | null; isTruncated: boolean } | null
+        >
+      | undefined;
+    try {
+      const resp = (await octokit.graphql(query, { owner: ref.owner, repo: ref.repo })) as
+        | {
+            repository?: Record<
+              string,
+              { text: string | null; isBinary: boolean | null; isTruncated: boolean } | null
+            > | null;
+          }
+        | null
+        | undefined;
+      if (resp && typeof resp.repository === "object" && resp.repository !== null) {
+        repository = resp.repository;
+      } else {
+        console.warn(
+          `[prime-backend] blob batch of ${group.length} fell back to REST: ` +
+            `the GraphQL answer carried no repository`,
+        );
+      }
+    } catch (error) {
+      // Swallowed only to re-ask by REST. Nothing is dropped: every entry in
+      // `group` is pushed to `restFallback` below, and a fault REST shares
+      // surfaces there rather than here.
+      console.warn(
+        `[prime-backend] blob batch of ${group.length} fell back to REST: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    if (!repository) {
+      restFallback.push(...group);
+      continue;
+    }
+
     group.forEach((e, j) => {
-      const blob = resp.repository[`b${j}`];
+      const blob = repository[`b${j}`];
       if (blob && blob.text !== null && blob.isBinary === false && blob.isTruncated === false) {
         out.set(e.rel, Buffer.from(blob.text, "utf8").toString("base64"));
       } else {
