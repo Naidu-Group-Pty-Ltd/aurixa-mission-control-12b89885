@@ -3211,9 +3211,9 @@ export type Database = {
           last_cascade_at: string | null
           last_drift_check_at: string | null
           last_synced_sha: string | null
-          merge_drain_at: string | null
           lovable_project_id: string | null
           lovable_project_url: string | null
+          merge_drain_at: string | null
           name: string
           notes: string | null
           owner_user_id: string | null
@@ -3256,9 +3256,9 @@ export type Database = {
           last_cascade_at?: string | null
           last_drift_check_at?: string | null
           last_synced_sha?: string | null
-          merge_drain_at?: string | null
           lovable_project_id?: string | null
           lovable_project_url?: string | null
+          merge_drain_at?: string | null
           name: string
           notes?: string | null
           owner_user_id?: string | null
@@ -3301,9 +3301,9 @@ export type Database = {
           last_cascade_at?: string | null
           last_drift_check_at?: string | null
           last_synced_sha?: string | null
-          merge_drain_at?: string | null
           lovable_project_id?: string | null
           lovable_project_url?: string | null
+          merge_drain_at?: string | null
           name?: string
           notes?: string | null
           owner_user_id?: string | null
