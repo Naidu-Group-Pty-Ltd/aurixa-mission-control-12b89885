@@ -1,3 +1,13 @@
+-- @asserts column:clone_backends.migration_blocked_at
+-- @asserts column:clone_backends.migration_blocked_reason
+-- @asserts column:clones.merge_drain_at
+
+-- Applied OUT OF BAND on 9 Sep to unstick a preview build, and committed
+-- afterwards. Its statements are the same ones `20260908160000` and
+-- `20260908170000` carry, which is why those two landed as no-ops: every
+-- statement here is `IF NOT EXISTS` and the backfill is guarded. Kept rather
+-- than deleted because it is the honest record of how this schema arrived.
+
 -- Migration lane gets its own exclusion field
 alter table public.clone_backends
   add column if not exists migration_blocked_at timestamptz,

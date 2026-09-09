@@ -35,6 +35,14 @@ const SERVICE_ROLE_ONLY = new Set([
   // the explicit REVOKE of the default grants in its migration, not a policy.
   // A policy here would open a queue whose payload executes as `postgres`.
   "schema_migration_queue",
+  // The rollback record taken during the 9 Sep queue repair: a verbatim copy of
+  // six migrations' SQL, kept so that repair stays reversible. It is the same
+  // class as the queue it was copied from, and closed the same way — its own
+  // migration REVOKEs the default grants from anon and authenticated and turns
+  // RLS on, so the control is the REVOKE rather than a policy. Adding a policy
+  // here would open a table holding SQL that the drain executes as `postgres`.
+  // Remove this entry when the backup is dropped.
+  "schema_migration_queue_backup_20260909",
   // A per-commit cache of what the PRIME repo declares — secret NAMES and
   // function slugs, never a value. Written and read only by the provisioning
   // server routes, which hold the service role; its migration REVOKEs the

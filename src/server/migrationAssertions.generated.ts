@@ -338,4 +338,28 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260908170000",
     assertions: [{ kind: "column", table: "clones", column: "merge_drain_at" }],
   },
+  {
+    migration: "20260909010118_d066006a-bf90-475c-9b7f-0e5fcf9e5019.sql",
+    version: "20260909010118",
+    assertions: [
+      { kind: "column", table: "clone_backends", column: "migration_blocked_at" },
+      { kind: "column", table: "clone_backends", column: "migration_blocked_reason" },
+      { kind: "column", table: "clones", column: "merge_drain_at" },
+    ],
+  },
+  {
+    migration: "20260909072756_0ed86dad-0bfc-4247-ae03-29f2e8b20bcd.sql",
+    version: "20260909072756",
+    assertions: [{ kind: "table", table: "schema_migration_queue_backup_20260909" }],
+  },
+  {
+    migration: "20260909072847_e58597ac-7a62-42b4-a7a1-8ce07d3a41ac.sql",
+    version: "20260909072847",
+    assertions: [
+      {
+        kind: "none",
+        reason: "revokes default grants and enables RLS on the backup table; creates no object",
+      },
+    ],
+  },
 ];
