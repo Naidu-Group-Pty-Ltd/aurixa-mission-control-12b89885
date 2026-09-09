@@ -9389,6 +9389,51 @@ export type Database = {
         }
         Relationships: []
       }
+      schema_migration_queue_backup_20260909: {
+        Row: {
+          attempts: number | null
+          enqueued_at: string | null
+          enqueued_by: string | null
+          error: string | null
+          finished_at: string | null
+          id: string | null
+          name: string | null
+          sha256: string | null
+          sql: string | null
+          started_at: string | null
+          status: string | null
+          version: string | null
+        }
+        Insert: {
+          attempts?: number | null
+          enqueued_at?: string | null
+          enqueued_by?: string | null
+          error?: string | null
+          finished_at?: string | null
+          id?: string | null
+          name?: string | null
+          sha256?: string | null
+          sql?: string | null
+          started_at?: string | null
+          status?: string | null
+          version?: string | null
+        }
+        Update: {
+          attempts?: number | null
+          enqueued_at?: string | null
+          enqueued_by?: string | null
+          error?: string | null
+          finished_at?: string | null
+          id?: string | null
+          name?: string | null
+          sha256?: string | null
+          sql?: string | null
+          started_at?: string | null
+          status?: string | null
+          version?: string | null
+        }
+        Relationships: []
+      }
       seat_audit: {
         Row: {
           action: string
