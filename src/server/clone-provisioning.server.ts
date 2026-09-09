@@ -174,6 +174,46 @@ export async function provisionCloneCore(
     return { ok: false, error: insertErr?.message ?? "Clone insert failed" };
   }
 
+  // ─── The sync exclusion policy, before anything cascades ──────────
+  //
+  // `DEFAULT_MIRROR_EXCLUSIONS` has always described itself as "seeded when a
+  // mirror is registered" and nothing had ever written it — the only INSERT in
+  // the codebase was a one-off migration naming the mirrors that existed the
+  // day it ran. So every clone provisioned since has carried an empty policy,
+  // which is why moving one to `sync_scope: 'mirror'` needs a hand-written
+  // seed and why `assertMirrorPolicy` exists to refuse the state in between.
+  //
+  // Seeded for EVERY clone, not only a mirror. The list is this deployment's
+  // own identity — its Supabase project, its hosting config, its lead-capture
+  // embed — and that is true whatever the scope; an empty set on a module
+  // clone is legitimate but indistinguishable from one nobody ever wrote.
+  //
+  // Ahead of the provision cascade below on purpose: that cascade is the first
+  // thing to write into the new repository, and a policy that arrives after it
+  // protects nothing it did.
+  //
+  // Never fatal. The clone exists, its repository is forked and its modules are
+  // about to install; refusing all of that to report a policy gap that was the
+  // status quo five minutes ago would be the worse outcome. `seedSyncExclusions`
+  // is idempotent, so the operator's retry finishes it.
+  {
+    const { seedSyncExclusions } = await import("./cascade/seedSyncExclusions.server");
+    const seeded = await seedSyncExclusions(supabase, inserted.id);
+    if (!seeded.ok) {
+      console.error("[provisionCloneCore] sync exclusion policy not seeded", {
+        cloneId: inserted.id,
+        error: seeded.error,
+      });
+      await supabase.from("audit_log").insert({
+        action: "clone.sync_exclusions_seed_failed",
+        entity_type: "clone",
+        entity_id: inserted.id,
+        actor_user_id: userId,
+        metadata: { offered: seeded.offered, error: seeded.error },
+      });
+    }
+  }
+
   // Record any add-ons bought alongside the tier. Written as purchase rows,
   // not to `clones.purchased_addon_slugs` — that column is derived by a
   // trigger now, so writing it directly would be overwritten on the next

@@ -40,6 +40,7 @@ import {
   type DeletionVerdict,
 } from "./cascade/deletionPropagation.pure";
 import { probeDeletions } from "./cascadeDeletions.server";
+import { judgingWorkflowHold } from "./cascade/judgingWorkflow.pure";
 import {
   assertMirrorPolicy,
   backendIdentityHold,
@@ -1332,6 +1333,34 @@ export async function processClone(args: {
         // of replacement characters, so comparing the readings would report a
         // changed image as unchanged and never deliver it.
         if (cloneFile && cloneFile.sha === primeFile.sha) return null;
+      }
+
+      // A judge may not travel ahead of the tree it judges.
+      //
+      // The workflows directory is a repository invariant, so a module-scoped
+      // clone receives prime's workflows — including `ci.yml`, which asks
+      // questions about the whole repository while that clone holds a subset of
+      // it. Measured 9 Sep 2026: prime's `builder-stock-pdf-worker` job runs
+      // `deno check cloudflare/builder-stock-pdf-worker/src/index.ts` and
+      // neither module-scoped clone holds that directory, so the check was red
+      // on every pull request with nothing the cascade could ever send to fix
+      // it.
+      //
+      // Decided from the workflow's own `on:` block rather than from a list of
+      // filenames kept in this repository about another one — see
+      // `judgingWorkflow.pure.ts`. Held rather than skipped, so the operator is
+      // told which workflow did not arrive and why.
+      //
+      // Ordered ahead of the backend-identity rule because it is cheaper and
+      // cannot overlap: `isShippedPath` covers `src/` and `public/` only, so no
+      // workflow file ever reaches that branch.
+      if (!primeFile.binary) {
+        const workflowHold = judgingWorkflowHold({
+          path,
+          primeContent: primeFile.content,
+          scope: isMirror ? "mirror" : "modules",
+        });
+        if (workflowHold) return { kind: "held", held: workflowHold };
       }
 
       // The content rule. Path exclusions protect what somebody remembered to
