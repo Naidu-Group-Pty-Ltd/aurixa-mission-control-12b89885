@@ -16,6 +16,7 @@
 //    rather burn wall clock than saturate the Supabase Management API.
 import { createFileRoute } from "@tanstack/react-router";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
+import { notifyOperators } from "@/server/audit.server";
 import { verifyCronAuth } from "@/server/cron-auth.server";
 import { decryptSecret } from "@/server/crypto.server";
 import { runQueuedBackendProvisioning } from "@/lib/backend-provisioning.functions";
@@ -227,6 +228,31 @@ async function reclaimStalled() {
   // is set far above what a real provision needs; the stranded check above is
   // what catches a job nothing is working on. Parked rows only (see
   // CEILING_HOURS).
+  //
+  // THE CEILING BOUNDS WORK THAT WAS DONE, NEVER WORK THAT WAS NEVER STARTED.
+  //
+  // `attempts` is incremented by `claimOne` on every claim and reset to 0 by
+  // the enqueue, so `attempts = 0` means this row has never been claimed —
+  // not once, by anything. For such a row every word of the verdict below is
+  // false: it was never in flight, it was never moving, it is not a pipeline
+  // failing to converge, and there is no "stage it keeps returning to" for an
+  // operator to read. Measured 8 Sep 2026: `NPC Test` and
+  // `Preflight Property Group` were both queued as REPAIRS at 01:07/01:08 on
+  // 7 September with `attempts: 0` and `worker_started_at` never set, and
+  // were failed by this branch exactly 24 hours later under that sentence.
+  //
+  // A repair is the one row that can legitimately look unclaimable and not
+  // be: it queues no credential BY DESIGN, which is why the stranded sweep
+  // directly above excludes `repair_requested_at` rows explicitly. The
+  // ceiling never learnt the same lesson, so the very property that makes a
+  // repair valid is what this branch punished it for.
+  //
+  // So the two are separated. `attempts > 0` is the ceiling proper and keeps
+  // its wording. `attempts = 0` past the same cutoff is a QUEUE fault with
+  // its own verdict below — still terminal, because a row nothing has taken
+  // in ${CEILING_HOURS} hours against a one-minute drain is broken and must
+  // not sit silently, but named truthfully so the operator is sent to the
+  // drain rather than to a status history that does not exist.
   const ceilingCutoff = new Date(Date.now() - CEILING_HOURS * 3600 * 1000).toISOString();
   const { error: ceilingErr } = await admin
     .from("clone_backends")
@@ -243,9 +269,66 @@ async function reclaimStalled() {
     .lt("queued_at", ceilingCutoff)
     .is("worker_started_at", null)
     .is("worker_finished_at", null)
+    // Worked at least once. See the note above: without this the verdict is a
+    // false description of a row that never ran.
+    .gt("attempts", 0)
     .in("status", ["pending", ...IN_FLIGHT_STATUSES]);
   if (ceilingErr) {
     throw new Error(`backend-provisioning reclaim: ceiling: ${ceilingErr.message}`);
+  }
+
+  // Never claimed. The same cutoff, the opposite diagnosis.
+  //
+  // Read back rather than blind-updated, because this one is worth telling
+  // somebody about: a queue entry nothing has taken in a day means the drain
+  // is not delivering, or the row is unclaimable for a reason `claimOne`'s
+  // filter knows and nothing reports. Both are faults in the machinery rather
+  // than in the tenant's backend, and both were silent — neither this sweep
+  // nor the two above has ever notified anyone, which is how two clones came
+  // to sit `failed` for a day with nothing anywhere saying so.
+  const { data: neverClaimed, error: neverClaimedErr } = await admin
+    .from("clone_backends")
+    .update({
+      status: "failed",
+      worker_finished_at: new Date().toISOString(),
+      queued_admin_password_enc: null,
+      error_message:
+        `This job was queued over ${CEILING_HOURS} hours ago and has never been claimed — ` +
+        `no worker has taken it once (attempts: 0). Nothing ran, so there is no stage to read ` +
+        `and nothing about this backend's schema is implicated. Check the drain's delivery ` +
+        `health (integration_outbox.attempts and net._http_response.status_code for ` +
+        `hooks/backend-provisioning-drain), then retry from the clone page.`,
+      status_detail: "Provisioning was never claimed",
+    })
+    .lt("queued_at", ceilingCutoff)
+    .is("worker_started_at", null)
+    .is("worker_finished_at", null)
+    .eq("attempts", 0)
+    .in("status", ["pending", ...IN_FLIGHT_STATUSES])
+    .select("clone_id, repair_requested_at");
+  if (neverClaimedErr) {
+    throw new Error(`backend-provisioning reclaim: never-claimed: ${neverClaimedErr.message}`);
+  }
+  for (const row of neverClaimed ?? []) {
+    await notifyOperators({
+      // `cascade_failed` rather than a kind of its own. `notification_kind` is
+      // a Postgres enum, so a new value is an ALTER TYPE migration through
+      // Lovable, and this is the kind the fleet lane already raises when a
+      // backend leaves the fleet (`fleet-migration.server.ts`) — which is
+      // exactly what has happened here. The metadata below carries the reason
+      // so the two are still tellable apart by anything that reads them.
+      kind: "cascade_failed",
+      severity: "error",
+      title: "A provisioning job was never claimed",
+      body:
+        `A ${row.repair_requested_at ? "repair" : "provisioning"} job for this clone sat in the ` +
+        `queue for over ${CEILING_HOURS} hours and no worker ever claimed it. That is a fault in ` +
+        `the drain rather than in the backend — nothing about this clone's schema has been ` +
+        `judged. Retry from the clone page once the drain is confirmed delivering.`,
+      cloneId: row.clone_id,
+      url: `/clones/${row.clone_id}`,
+      metadata: { reason: "never_claimed", ceiling_hours: CEILING_HOURS },
+    });
   }
 }
 

@@ -259,6 +259,129 @@ export const Route = createFileRoute("/hooks/github")({
           }
         }
 
+        /*
+          A CHECK SUITE FINISHING IS THE MOMENT THE ANSWER CHANGED.
+
+          The merge drain polls every five minutes. That is a fixed cost per
+          tick multiplied by the fleet size, and — because a run is bounded by
+          a 45-second budget — the poll is also what decides how long a clone
+          waits for its turn. GitHub already knows the instant a pull request
+          becomes mergeable; asking it every five minutes instead is the whole
+          reason the drain's cost grows with the fleet at all.
+
+          So the check suite completing drains THAT clone, immediately. The
+          five-minute poll stays exactly as it is and becomes the reconciler: it
+          catches what webhooks miss (a delivery dropped, a repository whose
+          App installation is gone, a row whose pull request was merged by
+          hand), which is precisely what a poll is good at and an event is
+          not.
+
+          Three rules.
+
+          ONE ENGINE. This narrows `drainCascadeMerges` to one clone with a
+          short budget; it is not a second merge path. Everything the gate
+          decides — the required checks, the never-started ceiling, the base
+          comparison, the oldest-first ordering, the reconciliation writes —
+          is the same code the poll runs, because two implementations of "may
+          this merge" is how one of them becomes wrong.
+
+          IT NEVER REPORTS FAILURE TO GITHUB. A webhook that 500s is retried
+          and then disabled by GitHub; this is an OPTIMISATION over a poll
+          that will run anyway, so a fault here costs at most five minutes and
+          must never cost the delivery endpoint.
+
+          AND IT IS NOT A CASCADE TRIGGER. A completed check suite says
+          something about a tree that already exists. It opens nothing,
+          proposes nothing, and touches no clone but the one whose repository
+          sent it.
+        */
+        if (eventType === "check_suite" || eventType === "check_run") {
+          let payload: {
+            action?: string;
+            repository?: { name?: string; owner?: { login?: string } };
+            check_suite?: { status?: string; pull_requests?: Array<{ number?: number }> };
+            check_run?: { status?: string; pull_requests?: Array<{ number?: number }> };
+          };
+          try {
+            payload = JSON.parse(rawBody);
+          } catch {
+            return new Response(JSON.stringify({ error: "Invalid JSON" }), {
+              status: 400,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+
+          const unit = payload.check_suite ?? payload.check_run;
+          // Only a FINISHED suite changes the answer. A queued or running one
+          // is the state the gate already reports as `pending`, and draining
+          // on it would be the poll again, faster and no more informative.
+          if (payload.action !== "completed" || unit?.status !== "completed") {
+            return new Response(JSON.stringify({ skipped: true, reason: "check not completed" }), {
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          // No pull request attached: a check suite on a branch nobody has
+          // proposed. There is nothing for the drain to consider.
+          if (!(unit.pull_requests ?? []).some((p) => typeof p?.number === "number")) {
+            return new Response(
+              JSON.stringify({ skipped: true, reason: "no pull request on this check suite" }),
+              { headers: { "Content-Type": "application/json" } },
+            );
+          }
+
+          const owner = payload.repository?.owner?.login ?? null;
+          const name = payload.repository?.name ?? null;
+          if (!owner || !name) {
+            return new Response(
+              JSON.stringify({ skipped: true, reason: "no repository on the payload" }),
+              { headers: { "Content-Type": "application/json" } },
+            );
+          }
+
+          try {
+            const { data: clone } = await supabaseAdmin
+              .from("clones")
+              .select("id")
+              .eq("github_owner", owner)
+              .eq("github_repo", name)
+              .maybeSingle();
+            // Not a clone. The prime's own check suites arrive here too, and
+            // the prime is not in the merge drain's work list.
+            if (!clone) {
+              return new Response(
+                JSON.stringify({ skipped: true, reason: "not a clone repository" }),
+                { headers: { "Content-Type": "application/json" } },
+              );
+            }
+
+            const { drainCascadeMerges } = await import("@/server/cascadeMergeDrain.server");
+            const report = await drainCascadeMerges(supabaseAdmin, {
+              // One clone, and a budget far under the poll's: this runs inside
+              // a webhook delivery, which GitHub expects to be answered
+              // promptly.
+              cloneId: clone.id,
+              budgetMs: 20_000,
+              concurrency: 1,
+            });
+            return new Response(JSON.stringify({ success: true, clone: clone.id, ...report }), {
+              headers: { "Content-Type": "application/json" },
+            });
+          } catch (err) {
+            // 200, deliberately. See the rule above: the poll will do this
+            // anyway within five minutes, and a webhook GitHub disables is a
+            // far worse outcome than one slow merge.
+            console.error("[hooks/github] check-suite drain failed", err);
+            return new Response(
+              JSON.stringify({
+                success: false,
+                deferred_to_poll: true,
+                error: (err as Error).message,
+              }),
+              { headers: { "Content-Type": "application/json" } },
+            );
+          }
+        }
+
         if (eventType !== "push") {
           // Acknowledge but don't act on other events
           return new Response(

@@ -325,4 +325,17 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "none", reason: "which fails the migration if any charged absorbed row remains." },
     ],
   },
+  {
+    migration: "20260908160000_migration_lane_owns_its_own_block.sql",
+    version: "20260908160000",
+    assertions: [
+      { kind: "column", table: "clone_backends", column: "migration_blocked_at" },
+      { kind: "column", table: "clone_backends", column: "migration_blocked_reason" },
+    ],
+  },
+  {
+    migration: "20260908170000_merge_drain_rotation_cursor.sql",
+    version: "20260908170000",
+    assertions: [{ kind: "column", table: "clones", column: "merge_drain_at" }],
+  },
 ];

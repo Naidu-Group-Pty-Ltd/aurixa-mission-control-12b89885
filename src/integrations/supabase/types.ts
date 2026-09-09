@@ -1418,6 +1418,8 @@ export type Database = {
           enqueued_by: string | null
           error_message: string | null
           id: string
+          migration_blocked_at: string | null
+          migration_blocked_reason: string | null
           migration_version: string | null
           migrations_applied: Json
           parity_checked_at: string | null
@@ -1455,6 +1457,8 @@ export type Database = {
           enqueued_by?: string | null
           error_message?: string | null
           id?: string
+          migration_blocked_at?: string | null
+          migration_blocked_reason?: string | null
           migration_version?: string | null
           migrations_applied?: Json
           parity_checked_at?: string | null
@@ -1492,6 +1496,8 @@ export type Database = {
           enqueued_by?: string | null
           error_message?: string | null
           id?: string
+          migration_blocked_at?: string | null
+          migration_blocked_reason?: string | null
           migration_version?: string | null
           migrations_applied?: Json
           parity_checked_at?: string | null
@@ -3205,6 +3211,7 @@ export type Database = {
           last_cascade_at: string | null
           last_drift_check_at: string | null
           last_synced_sha: string | null
+          merge_drain_at: string | null
           lovable_project_id: string | null
           lovable_project_url: string | null
           name: string
@@ -3249,6 +3256,7 @@ export type Database = {
           last_cascade_at?: string | null
           last_drift_check_at?: string | null
           last_synced_sha?: string | null
+          merge_drain_at?: string | null
           lovable_project_id?: string | null
           lovable_project_url?: string | null
           name: string
@@ -3293,6 +3301,7 @@ export type Database = {
           last_cascade_at?: string | null
           last_drift_check_at?: string | null
           last_synced_sha?: string | null
+          merge_drain_at?: string | null
           lovable_project_id?: string | null
           lovable_project_url?: string | null
           name?: string

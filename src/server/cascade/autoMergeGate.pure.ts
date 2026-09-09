@@ -64,7 +64,8 @@ export type MergeVerdict =
         | "never_started"
         | "no_checks"
         | "awaiting_required"
-        | "checks_unreadable";
+        | "checks_unreadable"
+        | "base_broken";
       why: string;
     };
 
@@ -240,3 +241,72 @@ export const CHECKS_PERMISSION_REMEDY =
   "Checks: Read-only) and accept the permission request on the installation. " +
   "Until then a cascade pull request is opened and left for a human, never " +
   "merged unseen.";
+
+/**
+ * A failure the PROPOSAL did not cause.
+ *
+ * ## Why this exists
+ *
+ * `failing` is true of two situations that need opposite responses. Either
+ * the cascade sent something the clone cannot build — look at the diff — or
+ * the clone's own default branch was already red and every pull request
+ * opened against it inherits that, whatever it carries. The gate reported
+ * both with the same word, so a base that had been broken since the clone was
+ * created read as twenty consecutive bad proposals.
+ *
+ * Measured 8 Sep 2026 on `npc-test-76b3b3` PR #11: `verify`, `security` and
+ * `supply-chain` all red, none of them caused by the twenty files in the
+ * proposal — a generated artefact whose source had never cascaded, a security
+ * baseline that had never cascaded, and a lockfile frozen on the clone's
+ * creation day. Every one of the three was equally red on `main`.
+ *
+ * ## The rule
+ *
+ * **A failure is the base's only when EVERY failure on the head is also
+ * failing on the base.** One failure the base does not have is a failure this
+ * proposal introduced, and reporting the whole run as "not our problem"
+ * because most of it is inherited would hide exactly the case the gate is
+ * for. Overlap is not enough; containment is.
+ *
+ * A base that cannot be read at all leaves the verdict alone — an unreadable
+ * signal is never evidence, in either direction.
+ */
+export function reclassifyAgainstBase(
+  verdict: MergeVerdict,
+  headChecks: readonly CheckRun[],
+  baseChecks: readonly CheckRun[] | null,
+  baseRef: string,
+): MergeVerdict {
+  if (verdict.merge) return verdict;
+  if (verdict.reason !== "failing") return verdict;
+  // Null means the base could not be read. Not evidence, in either direction.
+  if (baseChecks === null) return verdict;
+  // An empty base reading is not "the base is fine" — nothing has built it,
+  // which is the `no_checks` condition one level down and equally not proof.
+  if (baseChecks.length === 0) return verdict;
+
+  const failed = (runs: readonly CheckRun[]) =>
+    runs.filter((c) => c.status === "completed" && !PASSING.has(c.conclusion ?? ""));
+
+  // The head's failures come from the same array `decideCascadeMerge` judged,
+  // never from re-reading its sentence: a verdict and its explanation must not
+  // be two sources that can disagree.
+  const headFailures = failed(headChecks).map((c) => c.name);
+  if (headFailures.length === 0) return verdict;
+
+  const failingOnBase = new Set(failed(baseChecks).map((c) => c.name));
+  if (failingOnBase.size === 0) return verdict;
+
+  const inherited = headFailures.every((name) => failingOnBase.has(name));
+  if (!inherited) return verdict;
+
+  return {
+    merge: false,
+    reason: "base_broken",
+    why:
+      `Not merging — ${headFailures.length} check(s) failing (${headFailures.join(", ")}), and ` +
+      `every one of them is ALSO failing on \`${baseRef}\`. This proposal did not cause them: ` +
+      `any pull request opened against this branch inherits the same result. Fix the base branch ` +
+      `first; the cascade has nothing to change.`,
+  };
+}

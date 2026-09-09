@@ -951,10 +951,54 @@ export async function processClone(args: {
     for (const path of primeTree.entries.keys()) primeDirectories.add(directoryOf(path));
     scopeLabel = "mirror";
   } else {
-    candidatePaths = await listFilesMatchingGlobs(octokit, primeRef, installedGlobs);
-    scopeLabel = "installed modules";
-    /** Every prime path inside the installed globs — the module's whole section. */
-    const primeInScope = new Set(candidatePaths);
+    /*
+      INSTALLED MODULES, PLUS WHAT THE REPOSITORY NEEDS WHATEVER IS INSTALLED.
+
+      A module's globs are drawn around a FEATURE; the prime's CI is drawn
+      around the REPOSITORY. A module-scoped clone runs that CI and receives
+      only the feature, so every check whose inputs cross a glob boundary is
+      permanently red on it and nothing the cascade can send will ever fix it.
+
+      Measured 8 Sep 2026 on `npc-test-76b3b3` (22 modules): three red checks,
+      all three this. `supabase/functions/_shared/integrationSecrets.ts` is
+      inside a module's globs and cascaded; `src/lib/integrations/registry.ts`,
+      the source it is GENERATED from, is inside none and had never cascaded
+      once — last written by "Initial commit" on 1 September. The clone
+      regenerates from its own stale source and correctly reports a mismatch.
+      `package-lock.json` and `docs/security/SECURITY_INVENTORY.json` are the
+      same shape. `npc-client-dashboard`, a mirror, is green on all three.
+
+      See `repositoryInvariants.pure.ts` for the list and the reason attached
+      to each entry.
+
+      ONE listing, not two. The widened set is fetched and the module's own
+      section is then recovered from it locally, because the narrow set is
+      still what decides DELETIONS and the two must not be confused.
+    */
+    const { REPOSITORY_INVARIANTS, globsForModuleScopedClone } =
+      await import("@/server/cascade/repositoryInvariants.pure");
+    candidatePaths = await listFilesMatchingGlobs(
+      octokit,
+      primeRef,
+      globsForModuleScopedClone(installedGlobs),
+    );
+    scopeLabel = `installed modules + ${REPOSITORY_INVARIANTS.length} repository invariant(s)`;
+    /*
+      Every prime path inside the INSTALLED globs — the module's whole section,
+      and deliberately NOT the widened set.
+
+      This is the deletion question's input, and an invariant must never widen
+      it. A repository invariant says "the clone needs prime's copy of this";
+      it says nothing about removing a file prime lacks, and a `scripts/**`
+      entry that also authorised deletion would put the clone's own tooling
+      inside the destructive half of a pass that was only ever asked to add.
+      Invariants widen what is SENT; they never widen what is REMOVED.
+    */
+    const primeInScope = await (async () => {
+      const { validateModuleGlobs: v, globToRegex: g } = await import("@/lib/module-globs");
+      const matchers = v(installedGlobs).valid.map(g);
+      return new Set(candidatePaths.filter((path) => matchers.some((m) => m.test(path))));
+    })();
 
     // Both trees, read once. The mirror branch above diffs the two trees and
     // reads content only for paths whose blob SHAs differ; this branch used to

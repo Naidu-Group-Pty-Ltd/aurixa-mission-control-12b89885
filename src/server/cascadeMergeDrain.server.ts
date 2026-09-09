@@ -57,11 +57,13 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import { getAppOctokit } from "./github-app.server";
+import { mapWithConcurrencyUntil } from "@/lib/concurrency";
 import {
   CHECKS_PERMISSION_REMEDY,
   checksUnreadable,
   decideCascadeMerge,
   REQUIRED_CHECKS,
+  reclassifyAgainstBase,
 } from "./cascade/autoMergeGate.pure";
 import {
   cascadeEventStatus,
@@ -92,6 +94,37 @@ export const CASCADE_BRANCH_PREFIX = "aurixa/cascade-";
  * first, because the rows an operator is looking at are the recent ones.
  */
 const MAX_PRS_PER_RUN = 25;
+
+/**
+ * How long one run may spend before it stops and hands the rest to the next.
+ *
+ * pg_net cuts an invocation off at 60,000 ms and does it by killing the
+ * request, so a run that overruns leaves whatever it was doing unrecorded and
+ * the operator with no report at all. `executeSqlMigration` and the edge
+ * deploy lane both carry a budget for exactly this; the merge drain never did.
+ *
+ * 45 seconds leaves headroom for the two derived passes at the end, which must
+ * always run: what a truncated pass DID do is complete and recorded, which is
+ * the whole contract that makes stopping safe.
+ */
+const MERGE_DRAIN_BUDGET_MS = 45_000;
+
+/**
+ * Clones served at once.
+ *
+ * The per-clone work is independent — different repositories, different pull
+ * requests, no shared state until the two derived passes at the end — so it
+ * parallelises cleanly. Six is well inside GitHub's secondary-rate-limit
+ * guidance (about 100 concurrent requests), and each worker issues at most one
+ * request at a time.
+ *
+ * Concurrency is ACROSS clones and never within one. GitHub asks for no more
+ * than one mutating request per second against a single repository, and the
+ * pull requests of one clone carry overlapping trees that must land oldest
+ * first — see the ordering below. Widening this is safe; widening the inner
+ * loop is not.
+ */
+const MERGE_DRAIN_CLONE_CONCURRENCY = 6;
 
 export type MergeDrainOutcome =
   | { clone: string; pr: number; outcome: "merged"; sha: string | null }
@@ -139,6 +172,19 @@ export type MergeDrainReport = {
   held: Record<string, number>;
   failed: number;
   detail: MergeDrainOutcome[];
+  /**
+   * The run stopped at its budget with clones still unvisited.
+   *
+   * Its own field, and reported even when nothing else moved. A run that ran
+   * out of time IS something that happened — the route files an audit row for
+   * it — because the alternative is what this replaced: a starved tail and a
+   * quiet fleet producing the identical silence.
+   */
+  truncated: boolean;
+  /** Clones this run did not reach. They lead the next run's rotation. */
+  clonesRemaining: number;
+  /** Clones this run visited, whether or not anything merged. */
+  clonesVisited: number;
 };
 
 const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
@@ -161,7 +207,23 @@ type ResultRow = {
 
 export async function drainCascadeMerges(
   supabase: Db,
-  opts: { limitPerClone?: number } = {},
+  opts: {
+    limitPerClone?: number;
+    budgetMs?: number;
+    concurrency?: number;
+    /**
+     * Consider only this clone.
+     *
+     * The webhook path passes it: a completed check suite says something
+     * about ONE repository, and draining the fleet because one clone's CI
+     * finished would make every check suite on every clone an O(fleet)
+     * event. It is a narrowing of this engine and never a second merge path —
+     * the gate, the ordering, the reconciliation and the rotation stamp are
+     * all the ones the poll runs, because two implementations of "may this
+     * merge" is how one of them becomes wrong.
+     */
+    cloneId?: string;
+  } = {},
 ): Promise<MergeDrainReport> {
   const report: MergeDrainReport = {
     considered: 0,
@@ -175,13 +237,42 @@ export async function drainCascadeMerges(
     held: {},
     failed: 0,
     detail: [],
+    truncated: false,
+    clonesRemaining: 0,
+    clonesVisited: 0,
   };
 
+  const deadlineAt = Date.now() + (opts.budgetMs ?? MERGE_DRAIN_BUDGET_MS);
+  const isPastDeadline = () => Date.now() >= deadlineAt;
+
+  /*
+    LONGEST-WAITED-FIRST, AND STAMPED WHETHER OR NOT ANYTHING HAPPENED.
+
+    This read had no ordering at all, and the loop below it had no budget — so
+    a run cut off by the 60,000 ms pg_net ceiling served whatever prefix the
+    planner happened to return, and the NEXT run started from the same prefix.
+    The head of the list was served every tick and the tail was never reached,
+    with nothing anywhere saying so: the route files an audit row only when
+    something CHANGED, so a starved tail and a quiet fleet are the same
+    silence.
+
+    `merge_drain_at` is a VISIT, not a merge. A clone with nothing to do still
+    had its turn, and ordering by "when did we last look" is what makes the
+    rotation fair by construction rather than by luck. `fleet-migration`
+    already orders its batch this way, for the same reason.
+  */
   const { data, error } = await supabase
     .from("clones")
-    .select("id, name, github_owner, github_repo, default_branch")
+    .select("id, name, github_owner, github_repo, default_branch, merge_drain_at")
     .not("github_owner", "is", null)
-    .not("github_repo", "is", null);
+    .not("github_repo", "is", null)
+    .order("merge_drain_at", { ascending: true, nullsFirst: true });
+  // Narrowed AFTER the read rather than in it, so the one query and the one
+  // ordering serve both callers and a filtered run is provably the same pass
+  // over a shorter list.
+  const scoped = opts.cloneId
+    ? (data ?? []).filter((c) => (c as { id: string }).id === opts.cloneId)
+    : (data ?? []);
   // A candidate list that could not be READ is not an empty one — reporting
   // "nothing to merge" on a database fault is how a stalled fleet looks
   // healthy.
@@ -207,14 +298,47 @@ export async function drainCascadeMerges(
   }
 
   const octokit = getAppOctokit();
+  /*
+    `report`, `touchedEvents` and `advancedClones` are written from several
+    clone workers at once and need no locking. JavaScript runs one turn at a
+    time: `report.merged += 1` and `set.add(...)` are each a single
+    uninterrupted turn, and a worker only ever yields at an `await`. What
+    concurrency here buys is overlapping the WAITING on GitHub, which is where
+    every second of this run goes; it introduces no shared-state hazard, and
+    saying so is cheaper than somebody discovering it by reasoning about it
+    again.
+  */
   /** Events whose counts may have moved, recounted once at the end. */
   const touchedEvents = new Set<string>();
   /** Clones where something merged, so their pointer is re-derived. */
   const advancedClones = new Set<string>();
 
-  for (const raw of data ?? []) {
+  /*
+    ACROSS CLONES, NEVER WITHIN ONE.
+
+    The per-clone work is independent — different repositories, different pull
+    requests, no shared state until the two derived passes at the end — so a
+    bounded pool multiplies throughput without changing any outcome. The pull
+    requests OF one clone stay strictly serial and strictly oldest-first: they
+    carry overlapping trees, so landing the newer one first puts the older
+    one's content on top, and GitHub asks for no more than one mutating
+    request per second against a single repository.
+
+    `mapWithConcurrencyUntil` gives the other half: `shouldStop` is asked
+    before each clone is STARTED, so a clone already begun runs to completion
+    and everything this pass did is finished and recorded. Concurrency alone
+    would only reach the same cliff faster; the budget is what makes stopping
+    safe, and the two belong together.
+  */
+  const eligible = scoped.filter(
+    (c) =>
+      (c as { github_owner: string | null }).github_owner &&
+      (c as { github_repo: string | null }).github_repo,
+  );
+
+  const perClone = async (raw: (typeof eligible)[number]) => {
     const clone = raw as CloneRow & { github_owner: string | null; github_repo: string | null };
-    if (!clone.github_owner || !clone.github_repo) continue;
+    if (!clone.github_owner || !clone.github_repo) return;
     const label = clone.name ?? `${clone.github_owner}/${clone.github_repo}`;
     const owner = clone.github_owner;
     const repo = clone.github_repo;
@@ -281,6 +405,12 @@ export async function drainCascadeMerges(
       .sort((a, b) => a - b);
 
     for (const number of numbers) {
+      // The budget binds the inner loop too. One clone holding 25 proposals
+      // could otherwise spend the whole run on its own, which is the same
+      // starvation this rotation exists to end, one level down. The clone is
+      // still STAMPED below — it had its turn, and its remaining proposals go
+      // to the back of the queue like everybody else's.
+      if (isPastDeadline()) break;
       report.considered += 1;
       const rowsForPr = rowsByPr.get(number) ?? [];
       try {
@@ -312,7 +442,39 @@ export async function drainCascadeMerges(
         report.detail.push({ clone: label, pr: number, outcome: "failed", error: msg(e) });
       }
     }
-  }
+
+    /*
+      THE VISIT IS STAMPED WHETHER OR NOT ANYTHING HAPPENED.
+
+      This is the whole rotation. A clone that held nothing, that held only
+      pull requests still waiting on CI, or that could not be reached at all
+      has still had its turn — and if the stamp were conditional on a merge, a
+      clone that never merges would sort first for ever and starve every clone
+      behind it. The one thing it must not do is fail the run: a rotation
+      cursor that could not be written is a fairness problem next tick, not a
+      reason to discard work already done.
+    */
+    report.clonesVisited += 1;
+    const { error: stampErr } = await supabase
+      .from("clones")
+      .update({ merge_drain_at: new Date().toISOString() })
+      .eq("id", clone.id);
+    if (stampErr) {
+      console.error("[cascade-merge-drain] could not stamp the rotation cursor", {
+        cloneId: clone.id,
+        error: stampErr.message,
+      });
+    }
+  };
+
+  const pass = await mapWithConcurrencyUntil(
+    eligible,
+    Math.max(1, opts.concurrency ?? MERGE_DRAIN_CLONE_CONCURRENCY),
+    perClone,
+    isPastDeadline,
+  );
+  report.truncated = pass.stopped;
+  report.clonesRemaining = eligible.length - pass.processed;
 
   // Recount the events whose results moved, and move the pointers of the clones
   // where something landed. Both are DERIVED from the reconciled rows rather
@@ -524,16 +686,55 @@ async function handleOne(args: {
         repo,
         ref: pr.head.sha,
       });
-      verdict = decideCascadeMerge(
-        (checkData.check_runs ?? []).map((c) => ({
-          name: c.name,
-          status: c.status,
-          conclusion: c.conclusion,
-          started_at: c.started_at,
-          completed_at: c.completed_at,
-        })),
-        REQUIRED_CHECKS,
-      );
+      const headChecks = (checkData.check_runs ?? []).map((c) => ({
+        name: c.name,
+        status: c.status,
+        conclusion: c.conclusion,
+        started_at: c.started_at,
+        completed_at: c.completed_at,
+      }));
+      verdict = decideCascadeMerge(headChecks, REQUIRED_CHECKS);
+
+      /*
+        A RED BASE IS NOT A BAD PROPOSAL.
+
+        `failing` covers two situations with opposite remedies: the cascade
+        sent something the clone cannot build, or the clone's default branch
+        was already red and every pull request against it inherits that.
+        Measured 8 Sep 2026 on `npc-test-76b3b3` PR #11 — three red checks,
+        none caused by the twenty files in the diff, all three equally red on
+        `main`, reported for a week as though the cascade kept proposing
+        broken trees.
+
+        The second read is paid ONLY on a failing verdict, so a healthy drain
+        costs exactly what it did. An unreadable base leaves the verdict
+        alone: a signal nobody could read is not evidence either way.
+      */
+      if (!verdict.merge && verdict.reason === "failing") {
+        let baseChecks: Parameters<typeof reclassifyAgainstBase>[2] = null;
+        try {
+          const { data: baseBranch } = await octokit.repos.getBranch({
+            owner,
+            repo,
+            branch: pr.base.ref,
+          });
+          const { data: baseData } = await octokit.checks.listForRef({
+            owner,
+            repo,
+            ref: baseBranch.commit.sha,
+          });
+          baseChecks = (baseData.check_runs ?? []).map((c) => ({
+            name: c.name,
+            status: c.status,
+            conclusion: c.conclusion,
+            started_at: c.started_at,
+            completed_at: c.completed_at,
+          }));
+        } catch {
+          baseChecks = null;
+        }
+        verdict = reclassifyAgainstBase(verdict, headChecks, baseChecks, pr.base.ref);
+      }
     } catch (e) {
       // "I cannot see CI" is not "the cascade failed" — it is a missing
       // read-only permission, and the correct response to an unreadable signal

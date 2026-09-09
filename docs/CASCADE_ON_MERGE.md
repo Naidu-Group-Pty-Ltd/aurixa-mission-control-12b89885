@@ -956,3 +956,82 @@ failure behind a billing note; and **the engine never merges blind** — the
 remedy is on the account, and the drain lands the proposals on green the
 moment the checks can run. `autoMergeGate.test.ts` pins all of it, including
 that the timestamps travel through both callers.
+
+## The drain fits its invocation, and the fleet is served in turn
+
+`drainCascadeMerges` looped over **every** clone with no cap, no ordering and
+no wall-clock budget, and inside each did one `pulls.list` plus up to 25
+sequential `pulls.get` / `checks.listForRef` / `pulls.merge` round trips. That
+is O(clones × open pull requests) serial GitHub calls inside a **60,000 ms**
+pg_net ceiling — the same wall that killed the first mirror cascade at exactly
+60,000 ms, and one `net._http_response` still records being hit here.
+Grepping the file for `Date.now`, `deadline` or `budget` returned nothing,
+while `executeSqlMigration` and the edge deploy lane beside it both carry one.
+
+At three clones it fits. The failure past that is **not "slow"** — it is
+silently partial and unfair. The clone list came back in whatever order the
+planner chose and the run was cut off wherever the ceiling fell, so every run
+served the same prefix and the tail was never reached. Nothing reported it:
+the route files an audit row only when something CHANGED, so a starved tail
+and a quiet fleet produce the identical silence.
+
+### Four rules
+
+**A budget, and the derived passes outside it.** `MERGE_DRAIN_BUDGET_MS` is 45
+seconds, asked before each clone *and* before each pull request — one clone
+holding 25 proposals could otherwise spend the whole run on its own, which is
+the same starvation one level down. `recountEvent`, `advanceClone` and
+`tidyLandedSummaries` run after the pool whatever happened, because
+"everything this pass did is complete and recorded" is the contract that makes
+stopping safe.
+
+**Longest-waited-first, stamped whether or not anything happened.**
+`clones.merge_drain_at` is a VISIT, not a merge: a clone that held nothing, or
+only proposals still waiting on CI, or that could not be reached at all, has
+still had its turn. If the stamp depended on a merge, a clone that never
+merges would sort first for ever and starve everything behind it. A stamp that
+could not be written logs and carries on — a rotation cursor is a fairness
+problem next tick, not a reason to discard work already done.
+
+**Concurrency across clones, never within one.** Six workers, well inside
+GitHub's secondary-rate-limit guidance. The pull requests OF one clone stay
+strictly serial and strictly oldest-first: they carry overlapping trees, so
+landing the newer first puts the older one's content on top, and GitHub asks
+for no more than one mutating request per second against a single repository.
+Widening the pool is safe; widening the inner loop is not.
+`mapWithConcurrencyUntil` was already in this repository with exactly this
+contract and had no caller.
+
+**A truncated run says so.** `truncated` and `clonesRemaining` are reported,
+and truncation is the one addition to the route's write-only-on-change rule —
+running out of budget IS something that happened, and unlike `foreignRepo` it
+is bounded, appearing only while there is more work than one run can hold.
+
+### A completed check suite drains that clone immediately
+
+The poll is a fixed cost per tick multiplied by the fleet, and — because a run
+is bounded — it is also what decides how long a clone waits for its turn.
+GitHub already knows the instant a proposal becomes mergeable. So
+`/hooks/github` handles `check_suite` / `check_run` **completed** and drains
+that one clone, and the five-minute poll becomes the reconciler: it catches
+what webhooks miss (a dropped delivery, a repository whose App installation is
+gone, a pull request merged by hand), which is what a poll is good at and an
+event is not.
+
+Three rules. **One engine** — the webhook narrows `drainCascadeMerges` to one
+clone with a 20-second budget; it is not a second merge path, because two
+implementations of "may this merge" is how one of them becomes wrong. **It
+never reports failure to GitHub** — a 5xx delivery is retried and then the
+endpoint is disabled, and this is an optimisation over a poll that runs
+anyway, so a fault costs at most five minutes and must never cost the
+endpoint. And **it is not a cascade trigger**: a completed check suite says
+something about a tree that already exists, so it opens nothing and touches no
+clone but the one whose repository sent it.
+
+> **Owner action — this half is inert until the App subscribes to it.**
+> The GitHub App must have **Checks: Read** and be subscribed to the
+> **Check suite** (and optionally **Check run**) webhook events, in the App's
+> own settings. Until it is, no `check_suite` delivery arrives and the branch
+> above never runs. Nothing breaks — the poll does exactly what it did — but
+> the latency improvement is not there. `mergeDrainFairness.contract.test.ts`
+> pins the code; only the App setting can pin the delivery.
