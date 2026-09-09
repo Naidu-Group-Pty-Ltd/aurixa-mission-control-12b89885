@@ -1,6 +1,7 @@
 -- @asserts table:schema_migration_queue_backup_20260909
 
 -- ONE-TIME REPAIR SCAFFOLDING — 9 Sep 2026. DO NOT REPLAY.
+-- Full account: docs/INCIDENT_2026-09-08_MIGRATION_QUEUE_HALT.md
 --
 -- This backs up six queued migrations, strips the `BEGIN;`/`COMMIT;` that had
 -- halted the drain with `0A000`, and RESETS THOSE SIX ROWS TO `queued`. That

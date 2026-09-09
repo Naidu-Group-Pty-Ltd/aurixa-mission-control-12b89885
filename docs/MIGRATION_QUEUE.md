@@ -183,3 +183,28 @@ applied by hand, by definition: it is the thing that applies the rest.
 `/health` → **Migration effects**. A queued or failed migration appears above
 the assertion list, and a failed one is drawn as the halt it is rather than as
 one bad file.
+
+## When this queue halted
+
+`INCIDENT_2026-09-08_MIGRATION_QUEUE_HALT.md` records the 41 hours this queue
+spent stopped, in September 2026, and is the one to read before retrying a
+failed row. Three things from it bear repeating here:
+
+**A failed migration halts the queue, and the halt is invisible from a caller's
+own verdict.** `action: "status"` answers about the versions the caller
+submitted, so three consecutive merges reported truthfully that their own files
+were "still queued" and none of them named the failed row holding the line. If
+migrations stop applying, read the queue whole — the head of it, not your part.
+
+**Marking a row applied without executing it is sometimes the correct repair,**
+and it was here: the database already carried the effect of six migrations that
+had been applied out of band, so replaying them would have moved it backwards.
+That decision needs evidence, and the evidence is structural — does the column
+exist, does the constraint carry the value, does the function mention it — never
+`supabase_migrations.schema_migrations`, which the app role cannot read and
+which therefore answers `[]` to every question.
+
+**One row on this queue must never run again.** `20260909072756` resets six
+rows to `queued`; replaying what that releases would double a billing rollup and
+charge for calls the business absorbs. Its header says so, and the incident
+record says why.
