@@ -68,12 +68,49 @@ const FILENAME = /^(\d{14})_(.+)\.sql$/;
  * red merge with the offending file named.
  *
  * `VACUUM` is here for the same reason. Neither list is a security control.
+ *
+ * ## Transaction control is the one that actually halted the queue
+ *
+ * The four rules above were written from first principles and had never fired:
+ * 0 of 211 files carried one. The fifth was written from an outage.
+ *
+ * `aurixa.drain_schema_migrations()` applies each migration with `EXECUTE`
+ * inside a PL/pgSQL function, so a migration that opens its own transaction
+ * raises `0A000 EXECUTE of transaction commands is not implemented`. That is
+ * not a migration that fails and moves on: **a failed migration HALTS the
+ * queue**, because migrations are ordered and applying N+1 over a failed N is
+ * how a schema silently diverges.
+ *
+ * Measured 9 Sep 2026. `20260908040000_brokered_usage_is_billable` wrapped
+ * itself in `BEGIN; … COMMIT;`, failed at 04:38 on 8 September, and every
+ * migration merged afterwards stopped applying — **eight of them**, across
+ * three pull requests, over two days, while each merge reported only that its
+ * own files were "still queued". Mission Control's database simply stopped
+ * moving, and the only place that said so was a red workflow nobody was
+ * required to read.
+ *
+ * The drain already runs each migration in a transaction. A migration that
+ * opens one is not asking for something it lacks; it is asking for something
+ * it already has.
+ *
+ * `BEGIN` and `END` are matched ONLY with their semicolon, because PL/pgSQL
+ * opens a block with a bare `BEGIN` and closes it with `END;` — `stripSqlComments`
+ * deliberately does not understand dollar-quoting, so a rule that matched a
+ * bare `BEGIN` would refuse every function body in the corpus. Measured over
+ * all 258 files: this list flags exactly the six that carry real transaction
+ * control and none of the function bodies.
  */
 const NON_TRANSACTIONAL: ReadonlyArray<{ pattern: RegExp; what: string }> = [
   { pattern: /\bconcurrently\b/i, what: "CONCURRENTLY" },
   { pattern: /^\s*vacuum\b/im, what: "VACUUM" },
   { pattern: /^\s*create\s+database\b/im, what: "CREATE DATABASE" },
   { pattern: /^\s*create\s+tablespace\b/im, what: "CREATE TABLESPACE" },
+  // Transaction control. The semicolon is load-bearing: see above.
+  { pattern: /^\s*begin\s*;/im, what: "BEGIN" },
+  { pattern: /^\s*commit\s*;/im, what: "COMMIT" },
+  { pattern: /^\s*rollback\s*;/im, what: "ROLLBACK" },
+  { pattern: /^\s*start\s+transaction\b/im, what: "START TRANSACTION" },
+  { pattern: /^\s*savepoint\b/im, what: "SAVEPOINT" },
 ];
 
 /**
