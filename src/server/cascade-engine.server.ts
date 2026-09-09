@@ -1062,6 +1062,86 @@ export async function processClone(args: {
     }
   }
 
+  /*
+    A PAYLOAD MUST CONTAIN WHAT IT IMPORTS.
+
+    A module's globs are drawn around a FEATURE; an import crosses whatever
+    boundary it needs to. So a payload built from globs alone is not
+    import-closed, and the first unresolved import fails the WHOLE build — the
+    proposal stays open with correct content and a red deployment, which is
+    what happened to `npc-test-76b3b3` #11 and `preflight-property-group` #12
+    for a day and a half:
+
+        [vite:load-fallback] Could not load src/lib/calendar/bookingNotifications.pure
+          (imported by src/pages/Calendar.tsx)
+
+    The cascade had sent `Calendar.tsx` and had never sent what it imports.
+
+    THIS RUNS BEFORE `partitionCascadePaths`, and that placement is the whole
+    safety argument. A hand repair of the same defect on 9 Sep compared blobs
+    against prime WITHOUT consulting the exclusions and overwrote
+    `src/App.tsx` on one clone — a protected path that pins its client-facing
+    mode. Feeding the closure's additions through the same partition every
+    other candidate goes through makes that class of mistake impossible here:
+    a closure can propose a protected path, and the guard rail still removes
+    it. `differs from prime` and `should be replaced by prime` are different
+    questions, and only the exclusion list answers the second.
+
+    Content is read only for the SOURCE files already in the candidate list —
+    which the tree comparison has narrowed to paths whose blob actually
+    differs, so this is bounded by the size of the diff and not by the size of
+    the repository. Each round widens the frontier, so newly-found files get
+    their own imports read; four rounds is generous for a graph that converged
+    in two on both clones, and the ceiling inside `closeOverImports` is what
+    stops a runaway becoming a whole-repository proposal.
+  */
+  if (primeShaByPath !== null && cloneShaByPath !== null) {
+    const { closeOverImports } = await import("@/server/cascade/importClosure.pure");
+    const WALKABLE = /\.[cm]?[jt]sx?$/;
+    const primeText = new Map<string, string>();
+    const readInto = async (paths: readonly string[]) => {
+      await mapWithConcurrency(
+        paths.filter((p) => WALKABLE.test(p) && !primeText.has(p)),
+        8,
+        async (path) => {
+          try {
+            const f = await getFileContent(octokit, primeRef, path, {
+              maxBytes: CASCADE_MAX_FILE_BYTES,
+            });
+            // Binary is never walked: a lossy reading of bytes that were never
+            // text cannot contain an import, and asking is how a guard starts
+            // reporting nonsense.
+            if (f && !f.binary) primeText.set(path, f.content);
+          } catch {
+            // Unreadable is carried, not fatal. Refusing the whole closure
+            // over one oversize blob would throw away every path it found.
+          }
+        },
+      );
+    };
+
+    let closureAdded: string[] = [];
+    let frontier = candidatePaths;
+    for (let round = 0; round < 4 && frontier.length > 0; round += 1) {
+      await readInto(frontier);
+      const r = closeOverImports({
+        seed: [...candidatePaths, ...closureAdded],
+        prime: primeShaByPath,
+        clone: cloneShaByPath,
+        readPrime: (path) => primeText.get(path),
+      });
+      const fresh = r.added.filter((path) => !candidatePaths.includes(path));
+      const before = closureAdded.length;
+      closureAdded = [...new Set([...closureAdded, ...fresh])];
+      frontier = closureAdded.slice(before);
+      if (r.truncated) break;
+    }
+    if (closureAdded.length > 0) {
+      candidatePaths = [...candidatePaths, ...closureAdded];
+      scopeLabel = `${scopeLabel} + ${closureAdded.length} imported module(s)`;
+    }
+  }
+
   // The guard rail. Applied in BOTH scopes: a module glob that grows to cover
   // `src/integrations/**` would otherwise reach the clone's backend identity
   // by a different route than the one this was written for.
