@@ -362,4 +362,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       },
     ],
   },
+  {
+    migration: "20260909110000_two_clones_become_mirrors.sql",
+    version: "20260909110000",
+    assertions: [{ kind: "rows", table: "clone_sync_exclusions", atLeast: 30 }],
+  },
 ];

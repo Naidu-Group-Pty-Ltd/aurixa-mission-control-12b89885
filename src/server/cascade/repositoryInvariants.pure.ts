@@ -98,9 +98,12 @@ export const REPOSITORY_INVARIANTS: readonly RepositoryInvariant[] = [
   {
     pattern: ".github/workflows/**",
     reason:
-      "The workflow file IS the definition of what the clone must pass. The two fail-closed deploy " +
-      "workflows are per-deployment and stay in DEFAULT_MIRROR_EXCLUSIONS, which is applied after " +
-      "this list and wins.",
+      "The workflow file IS the definition of what the clone must pass, so a clone running a copy " +
+      "the prime has since fixed is judged by a standard nobody maintains. Two rules narrow it " +
+      "afterwards and both win: the fail-closed deploy workflows are per-deployment and stay in " +
+      "DEFAULT_MIRROR_EXCLUSIONS, and a workflow that runs on `pull_request` or `push` is a " +
+      "verdict on the whole tree, which a module-scoped clone does not hold — see " +
+      "judgingWorkflow.pure.ts.",
   },
 
   // ── Toolchain configuration the build resolves against ────────────────────

@@ -1035,3 +1035,133 @@ clone but the one whose repository sent it.
 > above never runs. Nothing breaks — the poll does exactly what it did — but
 > the latency improvement is not there. `mergeDrainFairness.contract.test.ts`
 > pins the code; only the App setting can pin the delivery.
+
+## A judge may not travel ahead of the tree it judges
+
+`.github/workflows/` is a repository invariant, so a module-scoped clone
+receives the prime's workflow files. The argument for that is sound and still
+holds: the workflow file **is** the definition of what a clone must pass, so a
+clone running a copy the prime has since fixed is being judged by a standard
+nobody maintains any more.
+
+It is also how the prime's `ci.yml` reached two clones that could never pass it.
+Measured 9 Sep 2026: prime's `builder-stock-pdf-worker` job begins
+
+```
+deno check cloudflare/builder-stock-pdf-worker/src/index.ts
+```
+
+and neither `npc-test-76b3b3` nor `preflight-property-group` holds that
+directory. Both carry `cloudflare/builder-stock-image-worker` and nothing else
+under `cloudflare/`, and no installed module's globs reach there. The check went
+red on every pull request the moment the file arrived, with nothing the cascade
+could ever send to fix it — and while it was there it also broke base
+inheritance, because `reclassifyAgainstBase` can only call a failure the base
+branch's when the base runs the same job, and a job that exists solely on the
+head never can.
+
+`repositoryInvariants.pure.ts` records five rounds of closing that gap from the
+other side: deliver the judge, then what the judge reads, then what *that* reads.
+The closure is not finite — the next check reads the next thing — so the rule is
+inverted. Rather than growing the tree until the judge is satisfied, **the judge
+is withheld until the tree can answer it.**
+
+Decided from the workflow's own `on:` block, which is the only place that says
+what a file is for:
+
+| triggers                          | what it is            | module-scoped clone |
+| --------------------------------- | --------------------- | ------------------- |
+| `pull_request`, `push`            | a verdict on the tree | **held**            |
+| `schedule`, `workflow_dispatch`, … | an operation somebody asked for | travels   |
+
+Derived rather than listed, because a list of filenames kept in *this*
+repository about *another* one is a list the prime's next workflow is missing
+from — and missing means whatever the default is. Measured against the prime's
+eighteen workflows: seven carry `pull_request` or `push`; the eleven that remain
+(the AML register loaders, the secret rotations, the Codex scans) read
+`scripts/**` and `package.json`, both of which *are* invariants, and keep
+cascading exactly as they did.
+
+Three rules. **A mirror is never held** — it receives the whole tree, so its
+judge always has its tree, and holding would freeze that clone's CI at whatever
+it forked with, which is this defect in the other direction. **Held, not
+dropped**: the verdict is a `manual_reconcile` `HeldPath`, so the workflow is
+withheld from the commit *and* named in the pull request, because a silently
+skipped file is indistinguishable from one that never changed and this is a file
+an operator may want to port a job out of by hand. And **the `on:` block is read,
+never guessed** — a workflow with no readable triggers is treated as an
+operation, since guessing the other way would hold every file the reader fails to
+parse. `judgingWorkflow.pure.ts` is that reader, and it handles the quoted `"on":`
+key, because YAML 1.1 makes a bare `on` the boolean `true` and several linters
+insist on the quotes.
+
+## The exclusion policy nobody had ever written
+
+`DEFAULT_MIRROR_EXCLUSIONS` describes itself as *"seeded when a mirror is
+registered"*. Nothing in the codebase ever wrote it. The cascade engine reads
+`clone_sync_exclusions`, the drift sweep reads it, and the only `INSERT`
+anywhere was `20260826070000_seed_mirror_exclusions.sql` — a one-off naming the
+mirrors that existed the day it ran.
+
+Two live consequences, and both look like ordinary operation from the table.
+
+**Every clone provisioned since carries an empty policy.** `assertMirrorPolicy`
+refuses a mirror in that state, so moving a clone to `sync_scope: 'mirror'` — in
+a migration, in a repair, in the UI — makes every cascade to it throw
+`MissingExclusionPolicyError` until somebody seeds it by hand. That is the
+fail-closed half working exactly as designed, against a state provisioning
+created every time.
+
+**A module-scoped clone had no path protection at all.** An empty set is
+legitimate there — the clone receives only the globs of what it installed — but
+"allowed to be empty" and "empty because nothing ever wrote it" are different
+facts that read identically. A module whose globs reach `src/integrations/`
+would carry the prime's `src/integrations/supabase/env.ts` onto the clone, which
+is the failure the whole list exists to prevent. `backendIdentityHold` catches
+that by CONTENT, which is why it has not bitten again — but that is the second
+line, added after the first one missed two paths, and it is no reason to leave
+the first one unbuilt.
+
+`seedSyncExclusions` runs at provisioning now, for **every** clone whatever its
+scope, because the list is this deployment's own identity and that is true of a
+module clone too. Three rules. It runs **before the provision cascade**, which is
+the first thing to write into the new repository — a policy that arrives after it
+protects nothing it did. It is **idempotent and never overwrites**
+(`ignoreDuplicates` on the table's own `(clone_id, pattern)` constraint), because
+the list is a starting policy rather than a constant and an operator's edit must
+survive a retry. And it **never fails the provisioning it accompanies**: by that
+point the clone exists, its repository is forked and its modules are about to
+install, so a failure is recorded as `clone.sync_exclusions_seed_failed` in the
+audit log and the operator's retry finishes the job.
+
+There is one list, imported. A third transcription of those patterns is exactly
+how the first policy came to be incomplete — two paths missing, both reverted by
+a live cascade, one of them posting a clone's leads into the prime's database.
+
+## Which scope a clone should be on
+
+Both module-scoped clones are mirrors as of `20260909110000`. The evidence is a
+control, not an opinion: `npc-client-dashboard` is a mirror, was green on
+`verify`, `security` and `supply-chain` throughout, and stayed in sync; the two
+clones that could not sync are exactly the two that were module-scoped.
+
+The distinction matters less than it looks. A clone is forked **whole** from the
+prime at provisioning — `sync_scope` narrows what UPDATES reach it, never what it
+holds — and what a tenant may actually use is decided by entitlements, not by
+which files arrived. So module scope buys no product separation; what it buys is
+a tree that drifts away from the checks judging it, one file at a time, in the
+places no module's globs happen to cover. That is how
+`src/lib/integrations/registry.ts` came to sit at 81,894 bytes against the
+prime's 82,744, last written by "Initial commit", while the file GENERATED from
+it cascaded on schedule and the check comparing the two was red for ever.
+
+`sync_scope` still defaults to `'modules'`, and no application code writes it.
+Changing that default is a product decision rather than a repair, and it is
+safe to make now in a way it was not before: `seedSyncExclusions` gives every
+new clone the policy `assertMirrorPolicy` demands, so the flip no longer needs a
+hand-written seed.
+
+The order is the safety property, in the migration and in provisioning alike:
+**seed the exclusions, then set the scope.** A migration that flipped the column
+first would leave a window in which a whole-tree cascade with an empty policy
+could do precisely the damage that assertion exists to prevent.
