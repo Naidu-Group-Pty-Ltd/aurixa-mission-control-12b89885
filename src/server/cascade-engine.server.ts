@@ -42,6 +42,11 @@ import {
 import { probeDeletions } from "./cascadeDeletions.server";
 import { judgingWorkflowHold } from "./cascade/judgingWorkflow.pure";
 import {
+  CONFIG_TOML_PATH,
+  declaredFunctionCount,
+  reconcileConfigToml,
+} from "./cascade/configTomlReconcile.pure";
+import {
   assertMirrorPolicy,
   backendIdentityHold,
   CASCADE_MAX_FILE_BYTES,
@@ -1466,6 +1471,84 @@ export async function processClone(args: {
     if (entry.content !== null) deliveredSource[entry.path] = entry.content;
   }
 
+  // ── supabase/config.toml: one file, two kinds of fact ──────────────────
+  //
+  // The path stays excluded and is NOT written by the loop above. Its first
+  // line names the Supabase project this deployment talks to, and prime's copy
+  // landing here is the accident that once made a clone serve the prime's
+  // production database. Everything else in it is repository fact — 435
+  // `[functions.X] verify_jwt` declarations, the exposed schema list — and
+  // excluding the file whole freezes those at whatever the clone forked with.
+  //
+  // An omitted `[functions.X]` block is not "no opinion": the CLI reads it as
+  // `verify_jwt = true`. Measured 9 Sep 2026, four functions prime declares
+  // OPEN had no block on a clone and would be gated behind a JWT their callers
+  // cannot present.
+  //
+  // Stripped of `[functions.*]`, the two files differ by exactly one line, so
+  // this is prime's file with the clone's own `project_id` put back rather
+  // than a merge of two evolving documents. `reconcileConfigToml` reads the
+  // result back and refuses on anything it cannot account for; a refusal is
+  // held and named like any other.
+  //
+  // Its own step rather than part of the write path, because the write path is
+  // exactly what must never carry this file.
+  let configReconcileNote: string | null = null;
+  if (mode !== "notify") {
+    try {
+      const [primeCfg, cloneCfg] = await Promise.all([
+        getFileContent(octokit, primeRef, CONFIG_TOML_PATH),
+        getFileContent(octokit, cloneRef, CONFIG_TOML_PATH),
+      ]);
+      if (primeCfg && cloneCfg && !primeCfg.binary && !cloneCfg.binary) {
+        const verdict = reconcileConfigToml({
+          primeToml: primeCfg.content,
+          cloneToml: cloneCfg.content,
+          ownRef: ownProjectRef,
+        });
+        if (!verdict.ok) {
+          const held = {
+            path: CONFIG_TOML_PATH,
+            pattern: "(content: project identity)",
+            reason: "manual_reconcile" as const,
+            note: `Function declarations were not brought across: ${verdict.reason}.`,
+          };
+          partition.held.push(held);
+          needsReconcile.push(held);
+        } else if (verdict.changed) {
+          const was = declaredFunctionCount(cloneCfg.content);
+          const now = declaredFunctionCount(verdict.merged);
+          configReconcileNote =
+            `${CONFIG_TOML_PATH} · ${now} function declaration(s), was ${was} · ` +
+            `project ${verdict.ownRef} unchanged`;
+          if (!dryRun) {
+            const { data: cfgBlob } = await octokit.git.createBlob({
+              owner: cloneRef.owner,
+              repo: cloneRef.repo,
+              content: Buffer.from(verdict.merged, "utf8").toString("base64"),
+              encoding: "base64",
+            });
+            treeEntries.push({
+              path: CONFIG_TOML_PATH,
+              mode: "100644",
+              type: "blob",
+              sha: cfgBlob.sha,
+            });
+            deliveredSource[CONFIG_TOML_PATH] = verdict.merged;
+          }
+        }
+      }
+    } catch (e) {
+      // Never fails the pass. The clone's own config is what it had a moment
+      // ago, which is the state every cascade before this one left it in.
+      console.warn(
+        `[cascade] config.toml reconcile skipped for clone ${clone.id}: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      );
+    }
+  }
+
   // A cascade whose only work is a removal is still work. Keying this on
   // `treeEntries` alone would report "already in sync" while the clone still
   // held a file prime deleted — which is the whole defect this is here for.
@@ -1734,6 +1817,15 @@ export async function processClone(args: {
           .map((l) => `- ${l}`)
           .join("\n") +
         `\n\nAdd the import and its use to the held file in the same merge.`
+      : "") +
+    (configReconcileNote
+      ? `\n\n### The Supabase config was reconciled, not copied\n\n` +
+        `\`${CONFIG_TOML_PATH}\` is a **protected** exclusion and prime's copy was not written. ` +
+        `What travelled is prime's file with this clone's own \`project_id\` line put back, so the ` +
+        `per-function \`verify_jwt\` declarations arrive while the project this deployment talks ` +
+        `to does not change. An omitted \`[functions.X]\` block is read by the CLI as ` +
+        `\`verify_jwt = true\`, which gates a function prime declares open.\n\n` +
+        `- ${configReconcileNote}`
       : "") +
     (needsReconcile.length > 0
       ? `\n\n### Needs a human — ${needsReconcile.length} file(s) changed upstream and were held back\n\n` +
