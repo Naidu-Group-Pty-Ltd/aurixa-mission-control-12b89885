@@ -354,6 +354,79 @@ export async function runSqlOnProject(projectRef: string, sql: string): Promise<
   return res.json();
 }
 
+/**
+ * Read a clone's migration ledger — the versions it actually holds.
+ *
+ * The same union `applyPrimeMigrations` computes before it decides what to
+ * skip, so a reading taken here and the replay's own decision cannot disagree.
+ * `aurixa.schema_migrations` is the legacy Lovable-era mirror and carries no
+ * usable name, which is why only the canonical table contributes one.
+ *
+ * It answers `null` on failure and never an empty array. The two mean opposite
+ * things: an empty ledger says the clone has run nothing, and a failed read
+ * says nothing at all — collapsing them would offer to replay the whole corpus
+ * at a healthy tenant backend because a query timed out.
+ */
+export async function readCloneMigrationLedger(
+  projectRef: string,
+): Promise<
+  { ok: true; rows: { version: string; name: string | null }[] } | { ok: false; error: string }
+> {
+  try {
+    const raw = await runSqlOnProject(
+      projectRef,
+      `select version, name from supabase_migrations.schema_migrations
+       union
+       select version, null::text as name from aurixa.schema_migrations;`,
+    );
+    // The query endpoint returns rows as a bare array; tolerate wrapped shapes
+    // exactly as the replay does, so one of them cannot start reading a shape
+    // the other does not.
+    const rows = Array.isArray(raw)
+      ? raw
+      : Array.isArray((raw as { rows?: unknown[] })?.rows)
+        ? (raw as { rows: unknown[] }).rows
+        : Array.isArray((raw as { result?: unknown[] })?.result)
+          ? (raw as { result: unknown[] }).result
+          : null;
+    if (rows === null) {
+      return { ok: false, error: "the ledger query returned a shape with no rows in it" };
+    }
+    return {
+      ok: true,
+      rows: rows
+        .map((r) => r as { version?: unknown; name?: unknown })
+        .filter((r): r is { version: string; name?: unknown } => typeof r.version === "string")
+        .map((r) => ({ version: r.version, name: typeof r.name === "string" ? r.name : null })),
+    };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "ledger read failed" };
+  }
+}
+
+/**
+ * How many Edge Functions are deployed on a project right now.
+ *
+ * Kept beside `listProjectEdgeFunctionSlugs` rather than replacing it, for the
+ * reason `listProjectEdgeFunctionFreshness` is: that reader answers `[]` on
+ * failure so parity can still compute the rest of a diff, which is right there
+ * and wrong here — a page that printed "0 deployed" because a GET timed out
+ * would report a catastrophe that had not happened. Null is "not measured".
+ */
+export async function countProjectEdgeFunctions(projectRef: string): Promise<number | null> {
+  try {
+    const res = await fetch(`${MGMT_API}/projects/${projectRef}/functions`, {
+      headers: headers(),
+    });
+    if (!res.ok) return null;
+    const raw = (await res.json()) as unknown;
+    if (!Array.isArray(raw)) return null;
+    return raw.length;
+  } catch {
+    return null;
+  }
+}
+
 // ─── Storage Bucket Replication ──────────────────────────────────────
 
 /**

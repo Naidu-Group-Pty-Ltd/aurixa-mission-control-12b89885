@@ -218,28 +218,48 @@ export function CloneBackendCard({ cloneId }: { cloneId: string }) {
               const secrets = asReportArray<SecretReport>(backend.secret_shells);
               const failedFns = functions.filter((f) => !f.success);
               const failedSecrets = secrets.filter((s) => !s.success);
+              // The clone's OWN numbers where they were measured this render,
+              // and the provisioning run's report where they were not. The two
+              // used to be drawn as one snapshot: 425/425 edge functions and
+              // "2 migrations" beside a badge naming the commit the migration
+              // sync had just refreshed, on a project holding 435 functions and
+              // 948 recorded versions.
+              const measuredFns = migration?.hasBackend ? migration.deployedFunctions : null;
+              const measuredMigrations =
+                migration?.hasBackend && migration.basis === "clone_ledger"
+                  ? migration.appliedVersionCount
+                  : null;
               return (
                 <>
                   <div className="grid grid-cols-3 gap-2">
                     <div className="border p-2 text-center">
                       <div className="text-lg font-semibold">
-                        {migrations.filter((m) => m.success).length}
+                        {measuredMigrations ?? migrations.filter((m) => m.success).length}
+                        {measuredMigrations !== null && migration?.hasBackend ? (
+                          <span className="text-xs text-muted-foreground">
+                            /{migration.runnableVersionCount}
+                          </span>
+                        ) : null}
                       </div>
-                      <div className="text-[10px] text-muted-foreground">Migrations</div>
+                      <div className="text-[10px] text-muted-foreground">
+                        {measuredMigrations === null ? "Migrations (last run)" : "Migrations"}
+                      </div>
                     </div>
                     <div
                       className={cn(
                         "rounded-md border p-2 text-center",
-                        failedFns.length > 0 && "border-warning/50",
+                        measuredFns === null && failedFns.length > 0 && "border-warning/50",
                       )}
                     >
                       <div className="text-lg font-semibold">
-                        {functions.filter((f) => f.success).length}
-                        <span className="text-xs text-muted-foreground">/{functions.length}</span>
+                        {measuredFns ?? functions.filter((f) => f.success).length}
+                        {measuredFns === null && (
+                          <span className="text-xs text-muted-foreground">/{functions.length}</span>
+                        )}
                       </div>
                       <div className="text-[10px] text-muted-foreground">
                         <Zap className="mr-0.5 inline h-2.5 w-2.5" />
-                        Edge functions
+                        {measuredFns === null ? "Edge functions (last run)" : "Edge functions"}
                       </div>
                     </div>
                     <div
@@ -261,6 +281,16 @@ export function CloneBackendCard({ cloneId }: { cloneId: string }) {
 
                   {failedFns.length > 0 && (
                     <div className="space-y-1">
+                      {/*
+                        This list is the provisioning run's, and every cascade
+                        deploy since has had a chance to fix it. Saying whose
+                        it is costs a line and stops a resolved failure reading
+                        as a live one — which is the same fault as the counts
+                        above, at a smaller scale.
+                      */}
+                      <p className="text-[10px] text-muted-foreground">
+                        Reported by the provisioning run; later deploys are not reflected here.
+                      </p>
                       {failedFns.map((f) => (
                         <div
                           key={f.slug}
@@ -334,14 +364,45 @@ export function CloneBackendCard({ cloneId }: { cloneId: string }) {
             </div>
 
             <div className="flex items-center justify-between text-xs text-muted-foreground">
-              <span>
-                Version:{" "}
-                <span className="font-mono">{migration.currentVersion ?? "bootstrap"}</span>
-              </span>
+              {migration.basis === "clone_ledger" ? (
+                // Where the clone stands, read from the clone. Mission
+                // Control's own `currentVersion` is deliberately not drawn
+                // beside it: it is a record of the last sync, it was BEHIND the
+                // clone on all three deployments, and a stale cursor sitting
+                // next to a measured figure is how the two came to be read as
+                // one fact.
+                <span>
+                  Here:{" "}
+                  <span className="font-mono">
+                    {migration.latestAppliedVersion ?? "nothing recorded"}
+                  </span>
+                </span>
+              ) : (
+                <span>
+                  Synced to:{" "}
+                  <span className="font-mono">{migration.currentVersion ?? "bootstrap"}</span>
+                </span>
+              )}
               <span>
                 Latest: <span className="font-mono">{migration.latestVersion}</span>
               </span>
             </div>
+
+            {/*
+              A reading taken from somewhere other than the clone has to say so.
+              This is the whole defect: the badge read "5 pending" from Mission
+              Control's own cursor while the clone held two of the five and
+              could never take a third.
+
+              Not while a run is in progress, though: the server deliberately
+              declines to measure a moving backend, and drawing a warning about
+              a state the operator can already see moving is noise, not news.
+            */}
+            {migration.basisNote && !isActive && (
+              <p className="border border-warning/40 bg-warning/5 p-2 text-[11px] text-muted-foreground">
+                {migration.basisNote}
+              </p>
+            )}
 
             {/* Pending migration list */}
             {hasPending && migration.pendingMigrations.length > 0 && (
@@ -356,6 +417,35 @@ export function CloneBackendCard({ cloneId }: { cloneId: string }) {
                   </div>
                 ))}
               </div>
+            )}
+
+            {/*
+              Not pending, and not a defect on this clone either.
+              `schema_migrations.version` is the PRIMARY KEY, so a version
+              carried by two files records one of them; the replay skips by
+              version, so the other is skipped for ever, on this clone and on
+              every future one. Counting them as work offers a button that can
+              never discharge them — a remedy that cannot discharge the reason.
+              A disclosure, opened only when there is something in it.
+            */}
+            {migration.sharedVersions.length > 0 && (
+              <details>
+                <summary className="cursor-pointer text-[11px] text-muted-foreground hover:text-foreground">
+                  {migration.sharedVersions.length} version
+                  {migration.sharedVersions.length !== 1 ? "s" : ""} shared by more than one
+                  migration file
+                </summary>
+                <div className="mt-1 space-y-1">
+                  {migration.sharedVersions.map((s) => (
+                    <div key={s.version} className="border p-2 text-xs">
+                      <span className="font-mono text-[10px] text-muted-foreground">
+                        {s.version}
+                      </span>
+                      <p className="text-muted-foreground">{s.reading}</p>
+                    </div>
+                  ))}
+                </div>
+              </details>
             )}
 
             {hasPending && (
