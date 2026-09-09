@@ -47,6 +47,11 @@ import {
   reconcileConfigToml,
 } from "./cascade/configTomlReconcile.pure";
 import {
+  DEPLOY_WORKFLOW_PATH,
+  readsDeployerDeclaration,
+  reconcileDeployWorkflow,
+} from "./cascade/deployWorkflowReconcile.pure";
+import {
   assertMirrorPolicy,
   backendIdentityHold,
   CASCADE_MAX_FILE_BYTES,
@@ -1549,6 +1554,88 @@ export async function processClone(args: {
     }
   }
 
+  // ── the deploy workflow: the same shape, found the same way ────────────
+  //
+  // `.github/workflows/deploy-supabase-functions.yml` is excluded for a reason
+  // that was true of the file it was written about — it hard-coded a project
+  // ref twice — and the exclusion then froze the other 500 lines with it.
+  //
+  // Measured 9 Sep 2026: npc-test-76b3b3 had failed 9 of 9 runs and
+  // preflight-property-group 8 of 8, every push since each was created, while
+  // npc-client-dashboard had 19 consecutive clean ones. The difference is a
+  // date. Both failing clones were forked BEFORE the change that stands the
+  // check down where Mission Control deploys, and the exclusion meant they
+  // could never receive it — so Mission Control went on setting
+  // `BACKEND_DEPLOYED_BY` on repositories whose workflow had no line that
+  // reads it.
+  //
+  // The file carries no deploy target of its own any more: it resolves one
+  // from the repository variable and, failing that, from the repository's OWN
+  // `supabase/config.toml`. So this is a carry rather than a substitution —
+  // guarded, because the thing being carried decides where a repository's code
+  // is sent. `reconcileDeployWorkflow` refuses on any project ref outside the
+  // one position that cannot select a target, reads the result back, and is
+  // held and named like any other refusal.
+  let deployWorkflowNote: string | null = null;
+  if (mode !== "notify") {
+    try {
+      const [primeWf, cloneWf] = await Promise.all([
+        getFileContent(octokit, primeRef, DEPLOY_WORKFLOW_PATH),
+        getFileContent(octokit, cloneRef, DEPLOY_WORKFLOW_PATH),
+      ]);
+      if (primeWf && cloneWf && !primeWf.binary && !cloneWf.binary) {
+        const verdict = reconcileDeployWorkflow({
+          primeYaml: primeWf.content,
+          cloneYaml: cloneWf.content,
+          ownRef: ownProjectRef,
+        });
+        if (!verdict.ok) {
+          const held = {
+            path: DEPLOY_WORKFLOW_PATH,
+            pattern: "(content: deploy target)",
+            reason: "manual_reconcile" as const,
+            note: `The deploy workflow was not brought across: ${verdict.reason}.`,
+          };
+          partition.held.push(held);
+          needsReconcile.push(held);
+        } else if (verdict.changed) {
+          const gained =
+            !readsDeployerDeclaration(cloneWf.content) && readsDeployerDeclaration(verdict.merged);
+          deployWorkflowNote =
+            `${DEPLOY_WORKFLOW_PATH} · carried from prime` +
+            (gained ? " · gains the Mission Control stand-down" : "") +
+            (verdict.cloneWasHazardous
+              ? " · the copy it replaces defaulted its deploy target to another deployment"
+              : "");
+          if (!dryRun) {
+            const { data: wfBlob } = await octokit.git.createBlob({
+              owner: cloneRef.owner,
+              repo: cloneRef.repo,
+              content: Buffer.from(verdict.merged, "utf8").toString("base64"),
+              encoding: "base64",
+            });
+            treeEntries.push({
+              path: DEPLOY_WORKFLOW_PATH,
+              mode: "100644",
+              type: "blob",
+              sha: wfBlob.sha,
+            });
+            deliveredSource[DEPLOY_WORKFLOW_PATH] = verdict.merged;
+          }
+        }
+      }
+    } catch (e) {
+      // Never fails the pass, for the same reason the one above does not: the
+      // clone keeps the workflow it had a moment ago, which is the state every
+      // cascade before this one left it in.
+      console.warn(
+        `[cascade] deploy workflow reconcile skipped for clone ${clone.id}: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      );
+    }
+  }
+
   // A cascade whose only work is a removal is still work. Keying this on
   // `treeEntries` alone would report "already in sync" while the clone still
   // held a file prime deleted — which is the whole defect this is here for.
@@ -1826,6 +1913,16 @@ export async function processClone(args: {
         `to does not change. An omitted \`[functions.X]\` block is read by the CLI as ` +
         `\`verify_jwt = true\`, which gates a function prime declares open.\n\n` +
         `- ${configReconcileNote}`
+      : "") +
+    (deployWorkflowNote
+      ? `\n\n### The deploy workflow was carried, not copied\n\n` +
+        `\`${DEPLOY_WORKFLOW_PATH}\` is a **protected** exclusion and was not written by the ` +
+        `ordinary path. It carries no deploy target of its own any more — it resolves one from ` +
+        `the \`SUPABASE_PROJECT_REF\` repository variable and, failing that, from THIS ` +
+        `repository's own \`supabase/config.toml\` — so prime's copy can only ever deploy to ` +
+        `this deployment's project. Every project ref outside the paired-origin declaration is ` +
+        `refused rather than carried.\n\n` +
+        `- ${deployWorkflowNote}`
       : "") +
     (needsReconcile.length > 0
       ? `\n\n### Needs a human — ${needsReconcile.length} file(s) changed upstream and were held back\n\n` +
