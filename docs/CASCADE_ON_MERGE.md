@@ -1165,3 +1165,88 @@ The order is the safety property, in the migration and in provisioning alike:
 **seed the exclusions, then set the scope.** A migration that flipped the column
 first would leave a window in which a whole-tree cascade with an empty policy
 could do precisely the damage that assertion exists to prevent.
+
+## One file, two kinds of fact: `supabase/config.toml`
+
+`supabase/config.toml` is `protected` in `DEFAULT_MIRROR_EXCLUSIONS`, and that
+is correct. Its first line names the Supabase project the deployment talks to,
+and prime's copy landing on a clone is the accident that once had a deployed
+dashboard serving the prime's production database with real staff accounts
+answering the login.
+
+The cost of excluding it whole is that **the rest of the file is frozen at
+whatever the clone forked with** — and the rest of the file is 435
+`[functions.X] verify_jwt = …` declarations plus the exposed `[api] schemas`
+list, which are facts about the repository rather than about the deployment.
+
+That is not only a red check. **An omitted `[functions.X]` block is not "no
+opinion"** — the Supabase CLI reads it as `verify_jwt = true`, so the gateway
+starts demanding a Supabase JWT in front of a function the prime declares open.
+Measured 9 Sep 2026 against prime's 435 declarations:
+
+| clone | declared | missing | of which prime declares OPEN |
+| --- | --- | --- | --- |
+| `npc-test-76b3b3` | 425 | 10 | `abs-regional-service`, `planning-data-service` |
+| `preflight-property-group` | 423 | 12 | those two, plus `builder-stock-link-callback` and `mission-control-gate` |
+
+`builder-stock-link-callback` is the one that shows what this costs: an
+endpoint an external service posts to, gated behind a credential that caller
+has no way to present, answering 401 for ever. It is also why the `security`
+job cannot pass — the cascaded `SECURITY_INVENTORY.json` records
+`config_declared_function_count: 435`, the clone regenerates it from its own
+frozen file and writes 425, and CI diffs the two.
+
+### The whole difference is one line, and that was measured
+
+Strip every `[functions.*]` block from both files and diff what is left: 50
+non-blank lines each, and **one** differing line.
+
+```
+-project_id = "umrtusxohxjxzodxorim"
++project_id = "dduzbchuswwbefdunfct"
+```
+
+Everything else is local-development configuration — ports 54321-54329,
+`http://127.0.0.1:3000`, `realtime-dev` — identical on both sides because it
+describes a developer's machine rather than a deployment.
+
+So this is not a merge of two evolving documents needing a per-key policy
+somebody maintains. It is **prime's file with one line put back**, which
+carries the function declarations, the schema list, the storage limit and
+anything prime adds later.
+
+### Four rules
+
+**The exclusion is not lifted.** The path is still withheld from the ordinary
+write path; this is a separate, single-file act with its own read-back, and
+`configTomlReconcile.test.ts` asserts `config.toml` stays in
+`DEFAULT_MIRROR_EXCLUSIONS` as `protected`. If it ever left, prime's
+`project_id` would travel by the plain route and none of the guards below would
+run.
+
+**The file is the authority, never the registry.** `clone_backends_safe` is
+read as a cross-check: where it names a different project from the one in the
+file, the reconcile **refuses** rather than choosing. A reconcile that
+repointed a deployment because a registry row disagreed would be the exact
+accident it exists to prevent. A clone with no registered backend is an
+ordinary state and proceeds — `null` is not a disagreement.
+
+**The result is read back, not assumed.** The check is not "did the substitution
+run" but "what does the output say": the merged file must declare the clone's
+own `project_id`, and `backendRefsIn` must find no other project in it.
+`backendRefsIn` is deliberately not the primary reader — it matches a project
+URL and a JWT `ref` claim, shapes a bare TOML assignment does not have, so
+using it alone would have produced an assertion that always passed. It runs as
+the second, independent check, and catches the class the first one cannot.
+
+**`project_id` is read from the preamble only.** It is a top-level key; a
+same-named key under some future `[table]` is a different setting, and reading
+that one as this one is how a parser that is nearly right writes the wrong
+database name. Two top-level assignments refuse rather than letting TOML's
+last-wins pick.
+
+The act is named on the pull request — "436 function declarations, was 425 ·
+project `umrtusxohxjxzodxorim` unchanged" — because a write to the one file an
+operator has been told is never written must not be silent. A refusal is held
+and named the same way, and neither can fail the pass: a clone whose config
+could not be read is left exactly as every cascade before this one left it.
