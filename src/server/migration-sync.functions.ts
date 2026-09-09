@@ -7,8 +7,17 @@ import {
   resolvePrimeBackendRef,
   resolvePrimeSource,
 } from "./prime-backend.server";
-import { applyPrimeMigrations } from "./backend-provisioning.server";
+import {
+  applyPrimeMigrations,
+  countProjectEdgeFunctions,
+  readCloneMigrationLedger,
+} from "./backend-provisioning.server";
 import { openScopedPrimeCorpus } from "./fleet-migration.server";
+import {
+  readCloneMigrationStanding,
+  sharedVersionReading,
+  type CloneMigrationStanding,
+} from "./cloneMigrationStanding.pure";
 
 /**
  * Migration sync — prime-repo driven.
@@ -62,8 +71,20 @@ export const getMigrationRegistry = createServerFn({ method: "POST" })
   });
 
 /**
- * Get migration status for a specific clone backend, measured against the
- * prime repo's current migration list.
+ * Get migration status for a specific clone backend.
+ *
+ * The corpus is the prime's, scoped to what the prime's own database has run;
+ * WHAT IS OUTSTANDING is the clone's, read from the clone's own ledger. Those
+ * are two different questions and this handler used to answer the second with
+ * `clone_backends.migration_version` — Mission Control's cursor, written by
+ * whichever sync last finished, and behind the clone on all three deployments
+ * the day this was measured. See `cloneMigrationStanding.pure.ts` for the
+ * arithmetic and for what a shared version means.
+ *
+ * It also measures the clone's deployed Edge Functions, because the card's
+ * "Replicated Architecture" strip otherwise reports the provisioning run's
+ * arrays under a badge naming the commit the migration sync last refreshed —
+ * 425 of 425 beside a project with 435 deployed and none missing.
  */
 export const getCloneMigrationStatus = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
@@ -85,8 +106,40 @@ export const getCloneMigrationStatus = createServerFn({ method: "POST" })
     }
 
     const currentVersion = normalizeVersion(backend.migration_version);
+    const projectRef = backend.supabase_project_ref;
 
-    let pending: { id: string; description: string }[] = [];
+    /*
+      Measure only a backend that has stopped moving.
+
+      The card polls this every five seconds while a backend is provisioning or
+      migrating, and both readings below are Management API calls against the
+      clone's project. During those states the ledger is being written by the
+      run itself and the functions are being deployed, so a reading is stale
+      before it is drawn — and paying two API calls a tick per clone to draw it
+      is how a fleet page starts meeting a rate limiter it has no business
+      meeting. The stored cursor answers for the duration, which is what the
+      status line beside it is for.
+    */
+    const settled = !["pending", "provisioning", "migrating", "seeding_admin"].includes(
+      backend.status,
+    );
+
+    // Neither reading depends on the other, so they go together. Each answers
+    // "not measured" on failure rather than a number, and the page renders the
+    // difference.
+    const [ledger, deployedFunctions] = await Promise.all([
+      projectRef && settled
+        ? readCloneMigrationLedger(projectRef)
+        : Promise.resolve({
+            ok: false as const,
+            error: projectRef
+              ? `the backend is ${backend.status}`
+              : "this backend has no project reference",
+          }),
+      projectRef && settled ? countProjectEdgeFunctions(projectRef) : Promise.resolve(null),
+    ]);
+
+    let standing: CloneMigrationStanding | null = null;
     let latestVersion = "none";
     try {
       const source = await resolvePrimeSource(supabase);
@@ -99,9 +152,12 @@ export const getCloneMigrationStatus = createServerFn({ method: "POST" })
         const scoped = await openScopedPrimeCorpus(supabase, source);
         if (scoped.ok) {
           latestVersion = scoped.runnable[scoped.runnable.length - 1]?.id ?? "none";
-          pending = scoped.runnable
-            .filter((m) => !currentVersion || m.id > currentVersion)
-            .map((m) => ({ id: m.id, description: m.name }));
+          standing = readCloneMigrationStanding({
+            runnable: scoped.runnable,
+            ledger: ledger.ok ? ledger.rows : null,
+            ledgerError: ledger.ok ? null : ledger.error,
+            recordedVersion: currentVersion,
+          });
         }
       }
     } catch {
@@ -109,6 +165,7 @@ export const getCloneMigrationStatus = createServerFn({ method: "POST" })
       // show no pending rather than failing the whole clone page.
     }
 
+    const pending = standing?.pending ?? [];
     return {
       hasBackend: true as const,
       backendStatus: backend.status,
@@ -117,6 +174,24 @@ export const getCloneMigrationStatus = createServerFn({ method: "POST" })
       pendingCount: pending.length,
       pendingMigrations: pending,
       isUpToDate: pending.length === 0,
+      /** Where the pending list came from; null when the corpus was unreadable. */
+      basis: standing?.basis ?? null,
+      /** Why the clone's own ledger was not used, when it was not. */
+      basisNote: standing?.note ?? null,
+      /** Runnable VERSIONS this clone records, and how many exist. Null on fallback. */
+      appliedVersionCount: standing?.appliedVersionCount ?? null,
+      runnableVersionCount: standing?.runnableVersionCount ?? null,
+      /** The highest runnable version the clone itself records. */
+      latestAppliedVersion: standing?.latestAppliedVersion ?? null,
+      /** Recorded versions more than one runnable file claims — never pending. */
+      sharedVersions: (standing?.sharedVersions ?? []).map((s) => ({
+        version: s.version,
+        files: s.files,
+        recordedAs: s.recordedAs,
+        reading: sharedVersionReading(s),
+      })),
+      /** Edge Functions deployed on the clone's project now. Null = not measured. */
+      deployedFunctions,
     };
   });
 
