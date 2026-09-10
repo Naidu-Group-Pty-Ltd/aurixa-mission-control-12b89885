@@ -18,7 +18,8 @@ export type CloneApiScope = {
     | "gate"
     | "clones"
     | "verification"
-    | "listings";
+    | "listings"
+    | "integrations";
   label: string;
   description: string;
   default?: boolean;
@@ -48,6 +49,20 @@ export const CLONE_API_SCOPES: CloneApiScope[] = [
       "every base and every permission it was minted with — and nothing in it narrows it to one " +
       "table. Grants two read operations against a base and table this clone cannot name, and no " +
       "write of any kind.",
+    default: true,
+  },
+  {
+    value: "integrations:write",
+    group: "integrations",
+    label: "Integrations — set this workspace's own vendor keys",
+    description:
+      "Let this workspace write a vendor credential typed on its own Integrations page into its " +
+      "own Supabase project's function environment. On by default: the page is how a tenant " +
+      "brings its own GoHighLevel, Domain or OpenAI key, and without this the only button that " +
+      "reaches the runtime needs a Supabase personal access token — which is scoped to an " +
+      "ACCOUNT, not a project, and must never sit on a tenant's project. Mission Control decides " +
+      "WHICH project from this key alone (the caller cannot name one) and refuses every name " +
+      "that decides who a deployment is.",
     default: true,
   },
   {

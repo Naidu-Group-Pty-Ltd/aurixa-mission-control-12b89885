@@ -178,6 +178,7 @@ import { Route as ApiPublicSeatsCommitRouteImport } from './routes/api.public.se
 import { Route as ApiPublicPricingCatalogRouteImport } from './routes/api.public.pricing.catalog'
 import { Route as ApiPublicListingsOperationRouteImport } from './routes/api.public.listings.$operation'
 import { Route as ApiPublicLeadsCaptureRouteImport } from './routes/api.public.leads.capture'
+import { Route as ApiPublicIntegrationsSecretsRouteImport } from './routes/api.public.integrations.secrets'
 import { Route as ApiPublicHooksDocusignRouteImport } from './routes/api.public.hooks.docusign'
 import { Route as ApiPublicHooksCodexSecurityRouteImport } from './routes/api.public.hooks.codex-security'
 import { Route as ApiPublicHooksCodexRemediationRouteImport } from './routes/api.public.hooks.codex-remediation'
@@ -1083,6 +1084,12 @@ const ApiPublicLeadsCaptureRoute = ApiPublicLeadsCaptureRouteImport.update({
   path: '/api/public/leads/capture',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiPublicIntegrationsSecretsRoute =
+  ApiPublicIntegrationsSecretsRouteImport.update({
+    id: '/api/public/integrations/secrets',
+    path: '/api/public/integrations/secrets',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiPublicHooksDocusignRoute = ApiPublicHooksDocusignRouteImport.update({
   id: '/api/public/hooks/docusign',
   path: '/api/public/hooks/docusign',
@@ -1348,6 +1355,7 @@ export interface FileRoutesByFullPath {
   '/api/public/hooks/codex-remediation': typeof ApiPublicHooksCodexRemediationRoute
   '/api/public/hooks/codex-security': typeof ApiPublicHooksCodexSecurityRoute
   '/api/public/hooks/docusign': typeof ApiPublicHooksDocusignRoute
+  '/api/public/integrations/secrets': typeof ApiPublicIntegrationsSecretsRoute
   '/api/public/leads/capture': typeof ApiPublicLeadsCaptureRoute
   '/api/public/listings/$operation': typeof ApiPublicListingsOperationRoute
   '/api/public/pricing/catalog': typeof ApiPublicPricingCatalogRoute
@@ -1538,6 +1546,7 @@ export interface FileRoutesByTo {
   '/api/public/hooks/codex-remediation': typeof ApiPublicHooksCodexRemediationRoute
   '/api/public/hooks/codex-security': typeof ApiPublicHooksCodexSecurityRoute
   '/api/public/hooks/docusign': typeof ApiPublicHooksDocusignRoute
+  '/api/public/integrations/secrets': typeof ApiPublicIntegrationsSecretsRoute
   '/api/public/leads/capture': typeof ApiPublicLeadsCaptureRoute
   '/api/public/listings/$operation': typeof ApiPublicListingsOperationRoute
   '/api/public/pricing/catalog': typeof ApiPublicPricingCatalogRoute
@@ -1730,6 +1739,7 @@ export interface FileRoutesById {
   '/api/public/hooks/codex-remediation': typeof ApiPublicHooksCodexRemediationRoute
   '/api/public/hooks/codex-security': typeof ApiPublicHooksCodexSecurityRoute
   '/api/public/hooks/docusign': typeof ApiPublicHooksDocusignRoute
+  '/api/public/integrations/secrets': typeof ApiPublicIntegrationsSecretsRoute
   '/api/public/leads/capture': typeof ApiPublicLeadsCaptureRoute
   '/api/public/listings/$operation': typeof ApiPublicListingsOperationRoute
   '/api/public/pricing/catalog': typeof ApiPublicPricingCatalogRoute
@@ -1923,6 +1933,7 @@ export interface FileRouteTypes {
     | '/api/public/hooks/codex-remediation'
     | '/api/public/hooks/codex-security'
     | '/api/public/hooks/docusign'
+    | '/api/public/integrations/secrets'
     | '/api/public/leads/capture'
     | '/api/public/listings/$operation'
     | '/api/public/pricing/catalog'
@@ -2113,6 +2124,7 @@ export interface FileRouteTypes {
     | '/api/public/hooks/codex-remediation'
     | '/api/public/hooks/codex-security'
     | '/api/public/hooks/docusign'
+    | '/api/public/integrations/secrets'
     | '/api/public/leads/capture'
     | '/api/public/listings/$operation'
     | '/api/public/pricing/catalog'
@@ -2304,6 +2316,7 @@ export interface FileRouteTypes {
     | '/api/public/hooks/codex-remediation'
     | '/api/public/hooks/codex-security'
     | '/api/public/hooks/docusign'
+    | '/api/public/integrations/secrets'
     | '/api/public/leads/capture'
     | '/api/public/listings/$operation'
     | '/api/public/pricing/catalog'
@@ -2475,6 +2488,7 @@ export interface RootRouteChildren {
   ApiPublicHooksCodexRemediationRoute: typeof ApiPublicHooksCodexRemediationRoute
   ApiPublicHooksCodexSecurityRoute: typeof ApiPublicHooksCodexSecurityRoute
   ApiPublicHooksDocusignRoute: typeof ApiPublicHooksDocusignRoute
+  ApiPublicIntegrationsSecretsRoute: typeof ApiPublicIntegrationsSecretsRoute
   ApiPublicLeadsCaptureRoute: typeof ApiPublicLeadsCaptureRoute
   ApiPublicListingsOperationRoute: typeof ApiPublicListingsOperationRoute
   ApiPublicPricingCatalogRoute: typeof ApiPublicPricingCatalogRoute
@@ -3701,6 +3715,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicLeadsCaptureRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/integrations/secrets': {
+      id: '/api/public/integrations/secrets'
+      path: '/api/public/integrations/secrets'
+      fullPath: '/api/public/integrations/secrets'
+      preLoaderRoute: typeof ApiPublicIntegrationsSecretsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/hooks/docusign': {
       id: '/api/public/hooks/docusign'
       path: '/api/public/hooks/docusign'
@@ -4089,6 +4110,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPublicHooksCodexRemediationRoute: ApiPublicHooksCodexRemediationRoute,
   ApiPublicHooksCodexSecurityRoute: ApiPublicHooksCodexSecurityRoute,
   ApiPublicHooksDocusignRoute: ApiPublicHooksDocusignRoute,
+  ApiPublicIntegrationsSecretsRoute: ApiPublicIntegrationsSecretsRoute,
   ApiPublicLeadsCaptureRoute: ApiPublicLeadsCaptureRoute,
   ApiPublicListingsOperationRoute: ApiPublicListingsOperationRoute,
   ApiPublicPricingCatalogRoute: ApiPublicPricingCatalogRoute,
