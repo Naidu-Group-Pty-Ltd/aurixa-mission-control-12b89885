@@ -337,10 +337,17 @@ describe("minting never costs a workspace its boot", () => {
     // clone that has none.
     const server = read("src/server/llmKeyProvisioning.server.ts");
     const writeFail = server.indexOf("if (!write.ok) {");
-    const upsert = server.indexOf('.from("clone_backend_secrets").upsert(');
+    // Located by the status it stamps rather than by the `.from(…).upsert(`
+    // call. It is the more specific assertion anyway — the row must read
+    // `minted` — and it keeps this file from carrying a string that
+    // `check:discarded-errors` reads as an unchecked Supabase write. That
+    // guard is pattern-based, and `cloneAllowedOrigins.server.ts` already
+    // records being fooled by the same shape.
+    const ledgerWrite = server.indexOf("status: MINTED_STATUS,");
     expect(writeFail).toBeGreaterThan(-1);
+    expect(ledgerWrite).toBeGreaterThan(-1);
     // The ledger write happens only AFTER the failure path has returned.
-    expect(upsert).toBeGreaterThan(writeFail);
+    expect(ledgerWrite).toBeGreaterThan(writeFail);
     expect(server).not.toContain('status: write.ok ? MINTED_STATUS : "failed"');
   });
 
