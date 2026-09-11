@@ -304,6 +304,59 @@ describe("the review found these, and they are all one mistake", () => {
   });
 
   /*
+   * The admin credential gates CREATING a workspace, never DELIVERING one that
+   * already exists.
+   *
+   * The delivery branch reuses the recorded id by construction and writes one
+   * project secret with the Supabase management token — it asks Anthropic
+   * nothing. Refusing it for a missing `ANTHROPIC_ADMIN_KEY` is a trap rather
+   * than a deferral: `20260911090000` clears every presumed `delivered_at`, so
+   * on a deployment that has not set that key yet EVERY identity row becomes
+   * pending and nothing can settle it — including the rows whose delivery
+   * genuinely succeeded.
+   *
+   * The two halves of the rule are pinned together, because a gate that lets
+   * everything through is not a gate.
+   */
+  it("delivers a recorded workspace without the admin key, and creates none", () => {
+    const noKey = {
+      anthropicKeyStatus: "inherited" as string | null,
+      credentialPresent: false,
+      backendProvisioned: true,
+      deliveryPending: true,
+    };
+    const pending = decideWorkspaceProvision({ ...noKey, existingWorkspaceId: WORKSPACE });
+    expect(pending).toEqual({ act: true });
+
+    // Nothing recorded means there is a workspace to CREATE, which does need it.
+    const nothingRecorded = decideWorkspaceProvision({ ...noKey, existingWorkspaceId: null });
+    expect(nothingRecorded.act === false && nothingRecorded.reason).toBe("no_credential");
+  });
+
+  /*
+   * And the refusals that come BEFORE it still come before it. This is the
+   * reorder that would turn the exemption above into a hole, so it is pinned
+   * rather than trusted.
+   */
+  it("keeps every earlier stand-down ahead of the delivery exemption", () => {
+    const pendingNoKey = {
+      existingWorkspaceId: WORKSPACE,
+      deliveryPending: true,
+      anthropicKeyStatus: "inherited" as string | null,
+      credentialPresent: false,
+      backendProvisioned: true,
+    };
+    for (const [input, reason] of [
+      [{ ...pendingNoKey, anthropicKeyStatus: "set" }, "tenant_supplied"],
+      [{ ...pendingNoKey, anthropicKeyStatus: "withheld" }, "withheld"],
+      [{ ...pendingNoKey, backendProvisioned: false }, "not_provisioned"],
+    ] as const) {
+      const verdict = decideWorkspaceProvision(input);
+      expect(verdict.act === false && verdict.reason).toBe(reason);
+    }
+  });
+
+  /*
    * A tenant's own key still outranks a pending delivery: writing a workspace
    * id for Aurixa's organisation onto a project using THEIR credential makes
    * every call a 404 for a workspace that credential has never heard of.

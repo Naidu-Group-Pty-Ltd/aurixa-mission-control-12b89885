@@ -178,7 +178,25 @@ export function decideWorkspaceProvision(input: {
     };
   }
 
-  if (!input.credentialPresent) {
+  /*
+   * A RECORDED workspace that was never written onto the project needs no
+   * vendor call at all: the delivery branch reuses the recorded id by
+   * construction — it deliberately does not list or create, because a second
+   * listing could match a different workspace by name — and writes one project
+   * secret with the Supabase management token. The Anthropic admin credential
+   * is not what that step is waiting on.
+   *
+   * Refusing it here is not a deferral, it is a trap. `20260911090000` clears
+   * every presumed `delivered_at`, so on a deployment that has no
+   * `ANTHROPIC_ADMIN_KEY` yet — which is every deployment until the owner sets
+   * one — every identity row becomes pending and NOTHING can ever settle it,
+   * including the rows whose delivery genuinely succeeded. The repair that
+   * moved "is delivery owed?" onto its own column has to move the gate in
+   * front of the delivery step too, or the old dependency decides anyway.
+   */
+  const deliveryOnly = Boolean(input.existingWorkspaceId) && input.deliveryPending === true;
+
+  if (!input.credentialPresent && !deliveryOnly) {
     return {
       act: false,
       reason: "no_credential",
