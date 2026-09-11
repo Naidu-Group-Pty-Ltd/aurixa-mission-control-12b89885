@@ -98,6 +98,34 @@ export const Route = createFileRoute("/hooks/clone-secrets-reconcile")({
             console.error("Anthropic federation reconcile failed:", detail);
             anthropicFederation = { ok: false, error: detail };
           }
+
+          /*
+           * And then ask whether any of it actually WORKS.
+           *
+           * Everything above is configuration, and this platform has already
+           * had the failure where every configuration reading was green on
+           * three tenants that had never completed a single verification. This
+           * pass is the one that can tell the difference, and it runs here
+           * rather than from a button because a reading that only a click
+           * produces makes a clone's provability depend on whether anybody
+           * looked.
+           *
+           * Last on purpose: it probes what the passes above have just
+           * repaired, so a clone federated this tick is proved in the same
+           * tick rather than the next one. Bounded at two, so the cost of a
+           * tick does not grow with the fleet.
+           */
+          let anthropicReach: unknown;
+          try {
+            const { sweepAnthropicReachability } = await import(
+              /* @vite-ignore */ "@/server/anthropicSelftest.server"
+            );
+            anthropicReach = await sweepAnthropicReachability();
+          } catch (e) {
+            const detail = e instanceof Error ? e.message : String(e);
+            console.error("Anthropic reachability sweep failed:", detail);
+            anthropicReach = { ok: false, error: detail };
+          }
           // 200 with the refusals in the body: one clone that cannot be
           // repaired is not a failed sweep.
           return new Response(
@@ -109,6 +137,7 @@ export const Route = createFileRoute("/hooks/clone-secrets-reconcile")({
               llm,
               anthropicWorkspaces,
               anthropicFederation,
+              anthropicReach,
             }),
             {
               headers: { "Content-Type": "application/json" },

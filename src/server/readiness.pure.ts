@@ -316,6 +316,60 @@ export const CAPABILITIES: readonly CapabilitySpec[] = [
       },
     ],
   },
+  {
+    /*
+     * Separate from `models` on purpose. That capability asks whether a model
+     * call can be made at all; this one asks whose line it lands on, and the
+     * two fail independently — every clone can be calling Claude perfectly
+     * while the whole fleet's spend arrives as one undifferentiated figure.
+     *
+     * Anthropic publishes no endpoint that creates an API key, so the
+     * per-clone credential the other four model vendors get cannot exist. The
+     * unit of attribution is the WORKSPACE, which is creatable, and federation
+     * then removes the key entirely.
+     */
+    key: "anthropic_attribution",
+    title: "Anthropic attribution",
+    consequence:
+      "Every clone's Claude usage lands on one organisation line, so no tenant can be recharged for what they actually spent.",
+    credentials: [
+      {
+        name: "ANTHROPIC_ADMIN_KEY",
+        purpose:
+          "Creates a workspace per clone, which is what makes that clone's model spend a separate figure. Not the key a clone spends — an Admin key manages the organisation and cannot make a model call",
+        required: true,
+      },
+      /*
+       * The four below are Phase 2 and all-or-nothing: absent any one of them
+       * every clone keeps the organisation key and its own workspace header,
+       * which is a working deployment rather than a broken one. So they are
+       * optional — the capability reads `degraded`, which is exactly the
+       * truth, and the config check beside them says how far it has got.
+       */
+      {
+        name: "ANTHROPIC_FEDERATION_PRIVATE_KEY",
+        purpose:
+          "Signs the short-lived assertion that lets a clone obtain a token with no key of its own (PKCS8 PEM)",
+        required: false,
+      },
+      {
+        name: "ANTHROPIC_ORGANIZATION_ID",
+        purpose: "Names the organisation a clone's token is minted in",
+        required: false,
+      },
+      {
+        name: "ANTHROPIC_BOOTSTRAP_RULE_ID",
+        purpose:
+          "The one federation rule a person creates in the Claude Console; Anthropic refuses to let a workload grant itself organisation-admin",
+        required: false,
+      },
+      {
+        name: "ANTHROPIC_BOOTSTRAP_SERVICE_ACCOUNT_ID",
+        purpose: "The service account that rule targets",
+        required: false,
+      },
+    ],
+  },
 ];
 
 export type ReadinessInput = {
