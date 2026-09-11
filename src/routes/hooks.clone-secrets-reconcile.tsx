@@ -48,6 +48,10 @@ export const Route = createFileRoute("/hooks/clone-secrets-reconcile")({
           const { reconcileCloneDerivedConfig } =
             await import("@/server/cloneDerivedConfig.server");
           const { reconcileLlmKeys } = await import("@/server/llmKeyProvisioning.server");
+          const { reconcileAnthropicWorkspaces } =
+            await import("@/server/anthropicWorkspace.server");
+          const { reconcileAnthropicFederation } =
+            await import("@/server/anthropicFederation.server");
           const owned = await reconcileCloneOwnedSecrets(supabaseAdmin);
           const link = await reconcileCloneMissionControlLinks(supabaseAdmin);
           const derived = await reconcileCloneDerivedConfig(supabaseAdmin);
@@ -68,11 +72,77 @@ export const Route = createFileRoute("/hooks/clone-secrets-reconcile")({
             console.error("LLM key reconcile failed:", detail);
             llm = { ok: false, error: detail };
           }
+          // Same treatment, its own try/catch: an Anthropic outage must not
+          // cost the model keys their run any more than the reverse.
+          let anthropicWorkspaces: unknown;
+          try {
+            anthropicWorkspaces = await reconcileAnthropicWorkspaces(supabaseAdmin);
+          } catch (e) {
+            const detail = e instanceof Error ? e.message : String(e);
+            console.error("Anthropic workspace reconcile failed:", detail);
+            anthropicWorkspaces = { ok: false, error: detail };
+          }
+          /*
+           * Federation last, and after the workspaces above — a rule is
+           * created IN a workspace, so a clone federated before it has one
+           * would be bound to the organisation's default and land in the very
+           * undifferentiated line the workspace exists to leave behind.
+           * `decideFederation` refuses that case anyway; the ordering means it
+           * does not have to wait a whole sweep to stop refusing.
+           */
+          let anthropicFederation: unknown;
+          try {
+            anthropicFederation = await reconcileAnthropicFederation(supabaseAdmin);
+          } catch (e) {
+            const detail = e instanceof Error ? e.message : String(e);
+            console.error("Anthropic federation reconcile failed:", detail);
+            anthropicFederation = { ok: false, error: detail };
+          }
+
+          /*
+           * And then ask whether any of it actually WORKS.
+           *
+           * Everything above is configuration, and this platform has already
+           * had the failure where every configuration reading was green on
+           * three tenants that had never completed a single verification. This
+           * pass is the one that can tell the difference, and it runs here
+           * rather than from a button because a reading that only a click
+           * produces makes a clone's provability depend on whether anybody
+           * looked.
+           *
+           * Last on purpose: it probes what the passes above have just
+           * repaired, so a clone federated this tick is proved in the same
+           * tick rather than the next one. Bounded at two, so the cost of a
+           * tick does not grow with the fleet.
+           */
+          let anthropicReach: unknown;
+          try {
+            const { sweepAnthropicReachability } = await import(
+              /* @vite-ignore */ "@/server/anthropicSelftest.server"
+            );
+            anthropicReach = await sweepAnthropicReachability();
+          } catch (e) {
+            const detail = e instanceof Error ? e.message : String(e);
+            console.error("Anthropic reachability sweep failed:", detail);
+            anthropicReach = { ok: false, error: detail };
+          }
           // 200 with the refusals in the body: one clone that cannot be
           // repaired is not a failed sweep.
-          return new Response(JSON.stringify({ success: true, owned, link, derived, llm }), {
-            headers: { "Content-Type": "application/json" },
-          });
+          return new Response(
+            JSON.stringify({
+              success: true,
+              owned,
+              link,
+              derived,
+              llm,
+              anthropicWorkspaces,
+              anthropicFederation,
+              anthropicReach,
+            }),
+            {
+              headers: { "Content-Type": "application/json" },
+            },
+          );
         } catch (e) {
           const msg = e instanceof Error ? e.message : "Clone secrets reconcile failed";
           console.error("Clone secrets reconcile failed:", msg);

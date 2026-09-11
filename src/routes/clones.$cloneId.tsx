@@ -33,6 +33,7 @@ import { CloneDeploymentCard } from "@/components/clone-deployment-card";
 import { CloneEmailIdentityCard } from "@/components/clone-email-identity-card";
 import { CloneAccessCredentialsCard } from "@/components/clone-access-credentials-card";
 import { CloneTurnstileCard } from "@/components/clone-turnstile-card";
+import { CloneAnthropicCard } from "@/components/clone-anthropic-card";
 import { CloneBrandMarksCard } from "@/components/clone-brand-marks-card";
 import { CloneBackendDeployCard } from "@/components/clone-backend-deploy-card";
 import { CloneEdgeCard } from "@/components/clone-edge-card";
@@ -383,6 +384,18 @@ function CloneDetail() {
       */}
       <CloneBrandMarksCard cloneId={cloneId} />
       <CloneEmailIdentityCard cloneId={cloneId} />
+      {/*
+        And the fourth: whose Anthropic line this clone's model spend lands
+        on. It sits beside the other per-clone identities because it is one —
+        Anthropic will not create an API key through its API, so the unit of
+        attribution is a workspace rather than a credential, and federation
+        then takes the organisation key off the project entirely.
+
+        The card leads with what has been PROVED rather than what is
+        configured, because every reading on this page can be green while a
+        clone cannot obtain a credential at all.
+      */}
+      <CloneAnthropicCard cloneId={cloneId} />
       {/*
         Beside the other two per-clone credentials, because it is the third:
         an operator login for the clone itself. It exists because two people

@@ -369,9 +369,14 @@ describe("a withheld name survives the thirty-minute sweep", () => {
   it("the sweep reads the withheld set from the ledger, not from nowhere", () => {
     const server = readFileSync(new URL("./fleetSecretForward.server.ts", import.meta.url), "utf8");
     // The RULE, not the expression: the set comes from this clone's ledger
-    // rows whose status is WITHHELD. It was asserted as one particular
-    // spelling and moved to a named binding the moment it had a second use.
-    expect(server).toContain('(r.status ?? "") === WITHHELD');
+    // rows whose status means the project must NOT hold the value. It was
+    // asserted as one particular spelling and moved to a named set the moment
+    // it had a second member — `federated`, which needs the same removal for a
+    // different reason (the clone reaches Anthropic with no key at all).
+    const notOnProject = server.match(/const NOT_ON_THE_PROJECT = new Set\(\[([^\]]*)\]\)/);
+    expect(notOnProject, "the removal set must be a literal this test can read").not.toBeNull();
+    expect(notOnProject![1]).toContain("WITHHELD");
+    expect(server).toContain("NOT_ON_THE_PROJECT.has(r.status");
     expect(server).toContain("withheld: withheldNames");
     // `withheld` must never join SETTLED — that would silence the sweep by
     // claiming the clone holds the value.
@@ -385,6 +390,10 @@ describe("a withheld name survives the thirty-minute sweep", () => {
     const settled = server.match(/const SETTLED = new Set\(\[([^\]]*)\]\)/);
     expect(settled, "SETTLED must be a literal set this test can read").not.toBeNull();
     expect(settled![1]).not.toContain("withheld");
+    // Same rule, same reason: a federated clone holds no key and must not be
+    // handed one. In SETTLED the sweep would leave the project alone; the
+    // point is that it actively REMOVES the value.
+    expect(settled![1]).not.toContain("federated");
   });
 
   it("the column accepts the status, or every write is refused by Postgres", () => {

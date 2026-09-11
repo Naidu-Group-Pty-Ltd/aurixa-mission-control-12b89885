@@ -59,6 +59,27 @@ const SETTLED = new Set(["inherited", "set", "minted"]);
  */
 export const WITHHELD = "withheld";
 
+/**
+ * The status that means the clone reaches the vendor with no credential at all.
+ *
+ * Mechanically it needs exactly what `withheld` needs — the value removed from
+ * the project and never written back — so it joins that channel rather than
+ * `SETTLED`. It is a separate STATUS because `withheld` means a person
+ * deliberately took the credential off, and two provisioners read it that way:
+ * `decideWorkspaceProvision` refuses a `withheld` clone with "this clone has
+ * no Anthropic calls to attribute", which for a federated clone is the
+ * opposite of true.
+ *
+ * Left out of this set, the shared organisation key returns within thirty
+ * minutes and the clone silently stops federating — the prime prefers a key
+ * whenever one is present, so nothing would fail, and attribution would simply
+ * revert.
+ */
+export const FEDERATED = "federated";
+
+/** Statuses whose value must be REMOVED from the project, never forwarded. */
+const NOT_ON_THE_PROJECT = new Set([WITHHELD, FEDERATED]);
+
 export type FleetPushResult =
   | {
       ok: true;
@@ -136,7 +157,7 @@ export async function pushFleetSecretForwards(
    * live on a tenant project.
    */
   const withheldNames = new Set(
-    (ledger.data ?? []).filter((r) => (r.status ?? "") === WITHHELD).map((r) => r.name),
+    (ledger.data ?? []).filter((r) => NOT_ON_THE_PROJECT.has(r.status ?? "")).map((r) => r.name),
   );
 
   const outcomes = planFleetForwards({
@@ -146,9 +167,11 @@ export async function pushFleetSecretForwards(
     settled: new Set(
       (ledger.data ?? []).filter((r) => SETTLED.has(r.status ?? "")).map((r) => r.name),
     ),
-    // Deliberately taken off THIS clone. Not `settled` — the project does not
-    // hold the value and the ledger must not claim it does — so it needs its
-    // own channel or this sweep writes it straight back within thirty minutes.
+    // Not on THIS clone's project, whether because a person took it off or
+    // because the clone federates and holds nothing. Not `settled` — the
+    // project does not hold the value and the ledger must not claim it does —
+    // so it needs its own channel or this sweep writes it straight back within
+    // thirty minutes.
     withheld: withheldNames,
   });
 

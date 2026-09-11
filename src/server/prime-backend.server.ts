@@ -309,6 +309,21 @@ export const IDENTITY_SECRETS = new Set([
   // clone's vault; the identity branch here only ever mints when that step
   // decided nothing.
   "RESET_TOKEN_PEPPER",
+  /*
+   * Not a credential — an Anthropic workspace id — and in `identity` for
+   * exactly the reason that class exists: sharing one makes two deployments
+   * the same principal at the vendor.
+   *
+   * Left in the default `vendor` class the fleet sweep would forward the
+   * PRIME's workspace to every clone, and every clone's model spend would land
+   * on one line in Anthropic's usage report. Nothing would report it: a
+   * workspace id that resolves is indistinguishable from the right one, the
+   * calls succeed, and the per-tenant figure this exists to produce would be
+   * the prime's own, repeated.
+   *
+   * Each clone's is created and written by `anthropicWorkspace.server.ts`.
+   */
+  "ANTHROPIC_WORKSPACE_ID",
 ]);
 
 /**

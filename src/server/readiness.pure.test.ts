@@ -169,3 +169,112 @@ describe("the catalog", () => {
     expect(new Set(names).size).toBe(names.length);
   });
 });
+
+/*
+ * Anthropic attribution.
+ *
+ * A separate capability from `models` on purpose, and the test that matters is
+ * that they fail independently: every clone can be calling Claude perfectly
+ * while the whole fleet's spend arrives as one undifferentiated figure, and a
+ * report that collapsed the two would say "model routing is ready" and be
+ * right about the wrong question.
+ */
+describe("the Anthropic attribution capability", () => {
+  it("is its own capability, not folded into model routing", () => {
+    const r = judgeReadiness({ present: ALL, config: {} });
+    const attribution = capability(r, "anthropic_attribution");
+    const models = capability(r, "models");
+    expect(attribution.key).not.toBe(models.key);
+    // They share no credential name, which is what makes them independent.
+    const a = new Set(attribution.credentials.map((c) => c.name));
+    for (const c of models.credentials) expect(a.has(c.name)).toBe(false);
+  });
+
+  /*
+   * Phase 1 alone is a WORKING deployment: every clone gets its own workspace
+   * and keeps the organisation key. Reporting that as blocked would send an
+   * operator to fix something that is not broken.
+   */
+  it("is degraded rather than blocked when only the admin key is set", () => {
+    const present = without(
+      "ANTHROPIC_FEDERATION_PRIVATE_KEY",
+      "ANTHROPIC_ORGANIZATION_ID",
+      "ANTHROPIC_BOOTSTRAP_RULE_ID",
+      "ANTHROPIC_BOOTSTRAP_SERVICE_ACCOUNT_ID",
+    );
+    const c = capability(judgeReadiness({ present, config: {} }), "anthropic_attribution");
+    expect(c.verdict).toBe("degraded");
+  });
+
+  /*
+   * Without the admin key there is no workspace, so there is no per-tenant
+   * figure at all — which is the thing this capability exists to produce.
+   */
+  it("is blocked without the key that creates a workspace", () => {
+    const c = capability(
+      judgeReadiness({ present: without("ANTHROPIC_ADMIN_KEY"), config: {} }),
+      "anthropic_attribution",
+    );
+    expect(c.verdict).toBe("blocked");
+    expect(c.blockers.join(" ")).toContain("ANTHROPIC_ADMIN_KEY");
+  });
+
+  /*
+   * The admin key manages the organisation and cannot make a model call; the
+   * key a clone spends cannot manage the organisation. One name for both
+   * invites setting the wrong one, and each fails in a way that reads like the
+   * other — so the purpose has to say which is which.
+   */
+  it("says the admin key is not the key a clone spends", () => {
+    const c = capability(judgeReadiness({ present: ALL, config: {} }), "anthropic_attribution");
+    const admin = c.credentials.find((x) => x.name === "ANTHROPIC_ADMIN_KEY");
+    expect(admin?.purpose).toMatch(/cannot make a model call/i);
+  });
+
+  /*
+   * Configuration is not reachability, and a config check that could not be
+   * read must never read as a failure — the module's own rule, applied to the
+   * ledger this capability measures.
+   */
+  it("carries an unreadable ledger as unknown rather than as a fault", () => {
+    const c = capability(
+      judgeReadiness({
+        present: ALL,
+        config: {
+          anthropic_attribution: [
+            cfg({ label: "Per-clone workspaces", ok: null, detail: "could not be read" }),
+          ],
+        },
+      }),
+      "anthropic_attribution",
+    );
+    expect(c.verdict).toBe("unknown");
+  });
+
+  it("is blocked by a config check that failed, not only by a missing name", () => {
+    const c = capability(
+      judgeReadiness({
+        present: ALL,
+        config: {
+          anthropic_attribution: [
+            cfg({ label: "Federation bootstrap", ok: false, detail: "not configured" }),
+          ],
+        },
+      }),
+      "anthropic_attribution",
+    );
+    expect(c.verdict).toBe("blocked");
+  });
+
+  /*
+   * The consequence line is what an operator reads to decide whether to care.
+   * "Anything that calls a model fails" is the OTHER capability; this one
+   * costs money quietly rather than failing loudly, and the wording has to
+   * carry that difference.
+   */
+  it("names the consequence as a billing one rather than an outage", () => {
+    const c = capability(judgeReadiness({ present: ALL, config: {} }), "anthropic_attribution");
+    expect(c.consequence).toMatch(/recharge|spend|line/i);
+    expect(c.consequence).not.toMatch(/\bfails\b/i);
+  });
+});
