@@ -225,7 +225,22 @@ export function decideFederation(input: {
     };
   }
 
-  if (input.federationRuleId) {
+  /*
+   * A rule is not the finish line — the KEY being gone is.
+   *
+   * Federation is two acts: create the resources and record them, then remove
+   * the organisation key and mark the ledger `federated`. The second fails on
+   * its own, and a guard that reads only the rule treats that half-done state
+   * as complete: no later pass retries, the fleet sweep forwards the
+   * organisation key straight back (the status is still `inherited`, so it is
+   * not in the removal set), and every surface reports the clone as federated
+   * while it runs on a key that can act in any workspace the organisation has.
+   *
+   * So the rule plus an unfinished withdrawal means ACT — `federateClone`
+   * finds its existing resources rather than making new ones and goes to the
+   * withdrawal it did not complete.
+   */
+  if (input.federationRuleId && input.anthropicKeyStatus === FEDERATED_STATUS) {
     return {
       act: false,
       reason: "already_federated",

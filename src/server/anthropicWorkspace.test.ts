@@ -240,3 +240,80 @@ describe("the migration declares what the code reads", () => {
     expect(/^\s*begin\s*;/im.test(sql)).toBe(false);
   });
 });
+
+/*
+ * What the first version of this module got wrong.
+ *
+ * Every one of these was found by a reviewer AFTER the code merged, and each
+ * is the same shape: a guard written for the case that was imagined rather
+ * than for the hazard the comment beside it described.
+ */
+describe("the review found these, and they are all one mistake", () => {
+  const CLONE_A = "11111111-2222-3333-4444-555555555555";
+  const CLONE_B = "99999999-8888-7777-6666-555555555555";
+
+  /*
+   * The provisioner finds a workspace BY NAME. Two clones whose names
+   * normalise the same way were handed one workspace and their spend merged —
+   * which is the exact state this module exists to leave behind, and which its
+   * own comment described while guarding only the empty-slug case.
+   */
+  it("never gives two clones the same workspace name", () => {
+    expect(workspaceNameFor("Foo!", CLONE_A)).not.toBe(workspaceNameFor("foo", CLONE_B));
+    expect(workspaceNameFor("NPC Test", CLONE_A)).not.toBe(workspaceNameFor("NPC Test", CLONE_B));
+    expect(workspaceNameFor("", CLONE_A)).not.toBe(workspaceNameFor("!!!", CLONE_B));
+  });
+
+  it("keeps one clone's name stable, so a re-run adopts rather than duplicates", () => {
+    expect(workspaceNameFor("NPC Test", CLONE_A)).toBe(workspaceNameFor("NPC Test", CLONE_A));
+  });
+
+  /*
+   * Truncation takes from the front of the slug, because cutting from the back
+   * removes precisely the part that makes the name unique — two long names
+   * sharing a prefix would collide again at the cap.
+   */
+  it("keeps the clone id when the name has to be cut to the cap", () => {
+    const long = "a".repeat(400);
+    const a = workspaceNameFor(long, CLONE_A);
+    const b = workspaceNameFor(long, CLONE_B);
+    expect(a.length).toBeLessThanOrEqual(255);
+    expect(b.length).toBeLessThanOrEqual(255);
+    expect(a).not.toBe(b);
+    expect(a).toMatch(/^[a-z0-9-]+$/);
+  });
+
+  /*
+   * A workspace created at the vendor and never written to the project is
+   * HALF done. Reading it as complete left the clone on the organisation's
+   * default line for ever, while the failure's own message promised that a
+   * retry would write the same workspace.
+   */
+  it("retries delivery of a workspace that was recorded but never written", () => {
+    const base = {
+      existingWorkspaceId: "wrkspc_01JwQvzr7rXLA5AGx3HKfFUJ",
+      anthropicKeyStatus: "inherited" as string | null,
+      credentialPresent: true,
+      backendProvisioned: true,
+    };
+    expect(decideWorkspaceProvision({ ...base, deliveryPending: true })).toEqual({ act: true });
+    const settled = decideWorkspaceProvision({ ...base, deliveryPending: false });
+    expect(settled.act === false && settled.reason).toBe("already_provisioned");
+  });
+
+  /*
+   * A tenant's own key still outranks a pending delivery: writing a workspace
+   * id for Aurixa's organisation onto a project using THEIR credential makes
+   * every call a 404 for a workspace that credential has never heard of.
+   */
+  it("still stands down on a tenant's own key while delivery is pending", () => {
+    const verdict = decideWorkspaceProvision({
+      existingWorkspaceId: "wrkspc_01JwQvzr7rXLA5AGx3HKfFUJ",
+      deliveryPending: true,
+      anthropicKeyStatus: "set",
+      credentialPresent: true,
+      backendProvisioned: true,
+    });
+    expect(verdict.act === false && verdict.reason).toBe("tenant_supplied");
+  });
+});

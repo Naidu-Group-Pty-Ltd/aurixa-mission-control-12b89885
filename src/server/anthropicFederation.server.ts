@@ -431,6 +431,48 @@ export async function federateClone(
    * removed the credential, and `decideWorkspaceProvision` reads that as "this
    * clone has no Anthropic calls to attribute" — the opposite of true here.
    */
+  /*
+   * Prove the clone can USE federation before taking away what it has.
+   *
+   * A clone running a backend that predates the federation client has no
+   * federated path at all: removing `ANTHROPIC_API_KEY` leaves it with
+   * nothing, and its model calls stop. Nothing above this line can tell —
+   * creating a rule at the vendor says nothing about what the tenant's project
+   * is running.
+   *
+   * The probe answers precisely that question. It cannot prove the federated
+   * ROUTE while the key is still present (a key present always wins, by
+   * design), and it does not need to: an answer carrying a `reach` at all is
+   * proof the deployed build carries `anthropicCredential.ts`, which is the
+   * thing in doubt. The route itself is proved by the reachability sweep once
+   * the key is gone.
+   *
+   * It fails CLOSED. An unreachable clone, a clone with no Mission Control
+   * link, or a backend that answers a plain "ok" all leave the key in place:
+   * withdrawing a working credential on evidence nobody could gather is the
+   * destructive direction, and a clone left on the organisation key is the
+   * state it is in today.
+   */
+  const { runCloneAnthropicSelftest } = await import("./anthropicSelftest.server");
+  const probe = await runCloneAnthropicSelftest(cloneId);
+  if (!probe.ok) {
+    return {
+      cloneId,
+      federated: false,
+      ruleId,
+      serviceAccountId,
+      reason: "client_unproved",
+      detail:
+        probe.reason === "no_probe_in_answer"
+          ? "This clone's backend predates the federation client, so removing its Anthropic key " +
+            "would leave it unable to reach Anthropic at all. Its resources are created and " +
+            "recorded; deploy the current edge functions to it and the next pass withdraws the key."
+          : `This clone could not be asked whether it carries the federation client (${probe.reason}), ` +
+            "so its Anthropic key is untouched and nothing has stopped working.",
+      actionable: true,
+    };
+  }
+
   const withdrawn = await withdrawAnthropicKey(supabase, cloneId, target.projectRef);
   if (withdrawn) {
     return {
@@ -502,10 +544,19 @@ async function withdrawAnthropicKey(
 export async function reconcileAnthropicFederation(
   supabase: Db,
 ): Promise<{ considered: number; federated: number; outcomes: FederationOutcome[] }> {
+  /*
+   * Every identity, not just the ones with no rule.
+   *
+   * Filtering on a null rule means a clone whose resources were created and
+   * whose KEY WITHDRAWAL then failed is never looked at again — it is not a
+   * candidate, and `decideFederation` never gets the chance to refuse or
+   * retry. Refusals are ordinary here, exactly as in the workspace reconcile:
+   * a clone whose tenant supplied its own key refuses on every pass for ever,
+   * and that is the correct answer rather than a backlog.
+   */
   const { data, error } = await supabase
     .from("clone_anthropic_identity")
-    .select("clone_id")
-    .is("federation_rule_id", null);
+    .select("clone_id");
   if (error) throw new Error(`Could not list clones to federate: ${error.message}`);
 
   const outcomes: FederationOutcome[] = [];

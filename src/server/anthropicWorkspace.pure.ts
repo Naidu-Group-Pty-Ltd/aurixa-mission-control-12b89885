@@ -105,6 +105,18 @@ export type WorkspaceVerdict =
 export function decideWorkspaceProvision(input: {
   /** `clone_anthropic_identity.workspace_id` for this clone, or null. */
   existingWorkspaceId: string | null;
+  /**
+   * True when a workspace is RECORDED but was never written onto the project.
+   *
+   * The two are separate acts and the second one fails on its own: the
+   * Management API write can be refused after the vendor has created the
+   * workspace, and the row is recorded anyway so a retry cannot create a
+   * second one. Without this flag `existingWorkspaceId` alone reads as done,
+   * every later run short-circuits, and the clone bills to the organisation's
+   * default line for ever — while the failure message promises that a retry
+   * writes the same workspace.
+   */
+  deliveryPending?: boolean;
   /** `clone_backend_secrets.status` for ANTHROPIC_API_KEY, or null when absent. */
   anthropicKeyStatus: string | null;
   /** Whether Mission Control holds ANTHROPIC_ADMIN_KEY. */
@@ -112,7 +124,7 @@ export function decideWorkspaceProvision(input: {
   /** Whether the clone has a Supabase project to write the id onto. */
   backendProvisioned: boolean;
 }): WorkspaceVerdict {
-  if (input.existingWorkspaceId) {
+  if (input.existingWorkspaceId && !input.deliveryPending) {
     return {
       act: false,
       reason: "already_provisioned",
@@ -200,22 +212,39 @@ export function workspaceNameFor(cloneName: string, cloneId?: string, max = 120)
     .replace(/^-+|-+$/g, "");
 
   /*
-   * A name that slugs to nothing falls back to the clone's ID, never to a
-   * shared literal.
+   * EVERY name carries the clone's id, not just one that slugs to nothing.
    *
    * The provisioner finds a workspace by NAME before creating one, so two
-   * clones resolving to the same name would be handed the SAME workspace and
-   * their spend would merge back into a single line — which is the state this
-   * whole module exists to leave behind. The unique index would eventually
-   * refuse the second row, but only after the vendor had already been told
-   * the wrong thing.
+   * clones resolving to the same name are handed the SAME workspace and their
+   * spend merges back into a single line — the state this whole module exists
+   * to leave behind. The unique index refuses the second ledger row, but only
+   * after the vendor has already been told the wrong thing and the id has been
+   * written onto the second project.
+   *
+   * A first version suffixed only the empty-slug case, which is a narrower
+   * rule than the hazard: clone names are not unique, and `Foo!` and `foo`
+   * normalise identically. Nothing about "the slug came out non-empty" makes
+   * it distinguishing. The id is what is unique, so the id always travels.
+   *
+   * Safe to change the scheme because no workspace has ever been created under
+   * the old one: this code has not been released, and every existing clone
+   * therefore has no identity row and no workspace to adopt.
    */
+  const suffix = (cloneId ?? "").toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 12);
   const named = slug
-    ? `aurixa-${slug}`
-    : `aurixa-clone-${(cloneId ?? "").toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 12)}`
-      .replace(/-+$/, "");
+    ? (suffix ? `aurixa-${slug}-${suffix}` : `aurixa-${slug}`)
+    : `aurixa-clone-${suffix}`;
 
-  return named.length <= max ? named : named.slice(0, max).replace(/-+$/, "");
+  const trimmed = named.replace(/-+$/, "");
+  /*
+   * Truncation takes it out of the FRONT of the slug rather than the back, so
+   * the id survives: a name cut to the cap from the right would drop exactly
+   * the part that makes it unique, and two long clone names sharing a prefix
+   * would collide again at the cap.
+   */
+  if (trimmed.length <= max) return trimmed;
+  const tail = suffix ? `-${suffix}` : "";
+  return `${trimmed.slice(0, Math.max(1, max - tail.length))}`.replace(/-+$/, "") + tail;
 }
 
 /** A workspace id we are willing to store and forward, or null. */

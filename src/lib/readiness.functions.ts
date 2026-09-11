@@ -19,7 +19,7 @@ export const fetchReadiness = createServerFn({ method: "POST" })
     const { supabaseAdmin } = await import(
       /* @vite-ignore */ "@/integrations/supabase/client.server"
     );
-    const { judgeReadiness, CAPABILITIES } = await import(
+    const { judgeReadiness, CAPABILITIES, anthropicAttributionConfig } = await import(
       /* @vite-ignore */ "@/server/readiness.pure"
     );
 
@@ -134,79 +134,52 @@ export const fetchReadiness = createServerFn({ method: "POST" })
       .from("clone_anthropic_identity")
       .select("clone_id, workspace_id, federation_rule_id, verified_at, last_error");
 
-    if (identityError) {
+    /*
+     * The DENOMINATOR is the clones that could carry a workspace, read the
+     * same way `reconcileAnthropicWorkspaces` reads its candidates.
+     *
+     * Counting inside the identity table alone is tautological:
+     * `workspace_id` is NOT NULL, so every row that exists has one and
+     * "N of N" is true however many clones have no row at all. One attributed
+     * clone beside nine unattributed ones read "1 of 1" and green — a light
+     * that is true about the check and false about the world, which is the
+     * failure this whole module's header exists to warn about.
+     */
+    const { data: backends, error: backendError } = await supabaseAdmin
+      .from("clone_backends")
+      .select("clone_id, supabase_project_ref")
+      .not("supabase_project_ref", "is", null);
+
+    if (identityError || backendError) {
       config.anthropic_attribution = [
         {
           label: "Per-clone workspaces",
           ok: null,
-          detail: "clone_anthropic_identity could not be read",
+          detail: "the Anthropic identity ledger could not be read",
           remedy: "Retry; a failed read is not a missing configuration.",
         },
       ];
     } else {
       const rows = identities ?? [];
-      const withWorkspace = rows.filter((r) => Boolean(r.workspace_id)).length;
-      const federated = rows.filter((r) => Boolean(r.federation_rule_id)).length;
-      const proved = rows.filter((r) => Boolean(r.verified_at)).length;
-      const failing = rows.filter((r) => Boolean(r.last_error)).length;
-
       const bootstrapNames = [
         "ANTHROPIC_FEDERATION_PRIVATE_KEY",
         "ANTHROPIC_ORGANIZATION_ID",
         "ANTHROPIC_BOOTSTRAP_RULE_ID",
         "ANTHROPIC_BOOTSTRAP_SERVICE_ACCOUNT_ID",
       ];
-      const bootstrapSet = bootstrapNames.filter((n) => present.has(n)).length;
 
-      config.anthropic_attribution = [
-        {
-          label: "Per-clone workspaces",
-          // Zero is a real answer rather than a fault: a fleet with no clone
-          // provisioned since this shipped has nothing to attribute yet.
-          ok: rows.length === 0 ? null : withWorkspace === rows.length,
-          detail:
-            rows.length === 0
-              ? "No clone carries an Anthropic identity yet"
-              : `${withWorkspace} of ${rows.length} clones carry their own Anthropic workspace`,
-          remedy: "Clones → the secrets reconcile hook, which provisions any that are missing",
-        },
-        {
-          label: "Federation bootstrap",
-          /*
-           * All four or none. Anthropic refuses to let a workload grant itself
-           * organisation-admin, so the rule behind these is a person's one act
-           * in the Console — partial is the state that produces a confusing
-           * failure, because four names look like configuration and a rule
-           * that does not exist looks like an outage.
-           */
-          ok: bootstrapSet === 0 ? false : bootstrapSet === bootstrapNames.length,
-          detail:
-            bootstrapSet === bootstrapNames.length
-              ? `Federation is configured; ${federated} of ${rows.length} clones hold no Anthropic key at all`
-              : bootstrapSet === 0
-                ? "Federation is not configured, so every clone keeps the organisation key and its own workspace header"
-                : `Only ${bootstrapSet} of ${bootstrapNames.length} federation values are set, which cannot mint a token`,
-          remedy:
-            "Create one org:admin federation rule in the Claude Console against a dedicated issuer, then set the four ANTHROPIC_* values it returns",
-        },
-        {
-          label: "Proved reachable",
-          /*
-           * Configuration is not reachability. Every reading above is true
-           * about this side and says nothing about whether a clone can obtain
-           * a credential — which is the fault this platform has already had on
-           * three tenants that were green and had never completed a single
-           * verification.
-           */
-          ok: rows.length === 0 ? null : failing === 0 && proved > 0,
-          detail:
-            rows.length === 0
-              ? "Nothing to probe yet"
-              : `${proved} of ${rows.length} clones have proved they can reach Anthropic` +
-                (failing > 0 ? `; ${failing} reported a fault on the last probe` : ""),
-          remedy: "Clones → a clone → Anthropic attribution → Run self-test",
-        },
-      ];
+      // Built by the pure module, so what production computes is what a test
+      // can exercise — a capability test that passed `config: {}` is how the
+      // bootstrap check came to report a working Phase 1 as blocked.
+      config.anthropic_attribution = anthropicAttributionConfig({
+        provisionedClones: (backends ?? []).length,
+        identities: rows.length,
+        federated: rows.filter((r) => Boolean(r.federation_rule_id)).length,
+        proved: rows.filter((r) => Boolean(r.verified_at)).length,
+        failing: rows.filter((r) => Boolean(r.last_error)).length,
+        bootstrapSet: bootstrapNames.filter((n) => present.has(n)).length,
+        bootstrapTotal: bootstrapNames.length,
+      });
     }
 
     return judgeReadiness({ present, config });

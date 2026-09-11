@@ -19,6 +19,15 @@ import { CloneSecretTargetError, resolveCloneSecretTarget } from "./cloneAllowed
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 
+/**
+ * The phrase a delivery failure is recognised by.
+ *
+ * Named once because it is WRITTEN by the failure path and READ by the retry
+ * that the failure's own message promises — two spellings is how the promise
+ * quietly stops being kept.
+ */
+const WRITE_FAILURE_MARKER = "the workspace id could not be written to the project";
+
 const ADMIN_API = "https://api.anthropic.com/v1/organizations";
 const ANTHROPIC_VERSION = "2023-06-01";
 const REQUEST_TIMEOUT_MS = 20_000;
@@ -156,7 +165,7 @@ export async function provisionAnthropicWorkspace(
 
   const existing = await supabase
     .from("clone_anthropic_identity")
-    .select("workspace_id")
+    .select("workspace_id, last_error")
     .eq("clone_id", cloneId)
     .maybeSingle();
   if (existing.error) {
@@ -187,8 +196,19 @@ export async function provisionAnthropicWorkspace(
     };
   }
 
+  /*
+   * A workspace recorded with a write failure against it was created at the
+   * vendor and never delivered to the project. That is not "already
+   * provisioned" — it is half done, and the failure message told the operator
+   * a retry would finish it.
+   */
+  const deliveryPending = String(existing.data?.last_error ?? "").includes(
+    WRITE_FAILURE_MARKER,
+  );
+
   const verdict = decideWorkspaceProvision({
     existingWorkspaceId: (existing.data?.workspace_id as string | undefined) ?? null,
+    deliveryPending,
     anthropicKeyStatus: (keyRow.data?.status as string | undefined) ?? null,
     credentialPresent: adminKey().length > 0,
     backendProvisioned: true, // resolveCloneSecretTarget already proved it
@@ -218,10 +238,21 @@ export async function provisionAnthropicWorkspace(
      * clone's spend would be split across two lines and the organisation's
      * allowance spent twice as fast.
      */
-    const live = await listAnthropicWorkspaces();
-    warning = workspaceCapWarning(live.length) ?? undefined;
-    const already = live.find((w) => w.name === name);
-    workspace = already ?? (await createAnthropicWorkspace(name));
+    const recordedId = (existing.data?.workspace_id as string | undefined) ?? null;
+    if (deliveryPending && recordedId) {
+      /*
+       * Delivery is the only step left, so the vendor is not asked again. A
+       * second listing would be a chance to match a DIFFERENT workspace by
+       * name and write that one instead — the recorded id is what this clone
+       * is already attributed to.
+       */
+      workspace = { id: recordedId, name };
+    } else {
+      const live = await listAnthropicWorkspaces();
+      warning = workspaceCapWarning(live.length) ?? undefined;
+      const already = live.find((w) => w.name === name);
+      workspace = already ?? (await createAnthropicWorkspace(name));
+    }
   } catch (e) {
     return { cloneId, provisioned: false, reason: "create_failed", detail: msg(e), actionable: true };
   }
@@ -240,7 +271,7 @@ export async function provisionAnthropicWorkspace(
      * clone meanwhile bills to the default workspace, which is today's
      * behaviour rather than a regression.
      */
-    await recordIdentity(supabase, cloneId, workspace, `the workspace id could not be written to the project: ${write.error}`);
+    await recordIdentity(supabase, cloneId, workspace, `${WRITE_FAILURE_MARKER}: ${write.error}`);
     return {
       cloneId,
       provisioned: false,
