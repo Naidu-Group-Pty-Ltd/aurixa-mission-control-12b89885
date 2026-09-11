@@ -367,4 +367,11 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260909110000",
     assertions: [{ kind: "rows", table: "clone_sync_exclusions", atLeast: 30 }],
   },
+  {
+    migration: "20260911020000_minted_llm_key_status.sql",
+    version: "20260911020000",
+    assertions: [
+      { kind: "check", table: "clone_backend_secrets", column: "status", value: "minted" },
+    ],
+  },
 ];

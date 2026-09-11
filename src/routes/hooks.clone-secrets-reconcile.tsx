@@ -20,6 +20,15 @@ import { verifyCronAuth } from "@/server/cron-auth.server";
 //   3. The DERIVED deployment config — public URL, WebAuthn relying party,
 //      web-push host — re-computed from the clone's current origins, so a
 //      domain going live after provisioning is reflected rather than frozen.
+//   4. The clone's OWN model keys, minted on Aurixa's provider accounts so the
+//      vendor's dashboard attributes spend per clone rather than showing one
+//      undifferentiated bill. A sweep rather than a provisioning step for two
+//      reasons: every clone that already exists runs on the forwarded fleet
+//      key, and each provider is switched on by its own credential appearing
+//      in Mission Control's environment — an event with no hook to hang off.
+//      It never replaces a key the TENANT supplied, and a clone whose minting
+//      fails keeps the forwarded key, so this can only improve attribution
+//      and never take a workspace off the air.
 //
 // Each can only ever write to a clone: the ref comes from
 // `resolveCloneSecretTarget`, which refuses the prime and Mission Control's
@@ -34,16 +43,34 @@ export const Route = createFileRoute("/hooks/clone-secrets-reconcile")({
 
         try {
           const { reconcileCloneOwnedSecrets } = await import("@/server/cloneOwnedSecrets.server");
-          const { reconcileCloneMissionControlLinks } = await import(
-            "@/server/cloneMissionControlLink.server"
-          );
-          const { reconcileCloneDerivedConfig } = await import("@/server/cloneDerivedConfig.server");
+          const { reconcileCloneMissionControlLinks } =
+            await import("@/server/cloneMissionControlLink.server");
+          const { reconcileCloneDerivedConfig } =
+            await import("@/server/cloneDerivedConfig.server");
+          const { reconcileLlmKeys } = await import("@/server/llmKeyProvisioning.server");
           const owned = await reconcileCloneOwnedSecrets(supabaseAdmin);
           const link = await reconcileCloneMissionControlLinks(supabaseAdmin);
           const derived = await reconcileCloneDerivedConfig(supabaseAdmin);
+          /*
+           * Last, and never allowed to fail the sweep.
+           *
+           * The three above repair things a clone is BROKEN without — a
+           * password reset it cannot issue, a Mission Control key it cannot
+           * present, an origin it cannot be loaded from. Minting improves
+           * attribution on a workspace that already works, so a vendor being
+           * unreachable must not cost the other three their run.
+           */
+          let llm: unknown;
+          try {
+            llm = await reconcileLlmKeys(supabaseAdmin);
+          } catch (e) {
+            const detail = e instanceof Error ? e.message : String(e);
+            console.error("LLM key reconcile failed:", detail);
+            llm = { ok: false, error: detail };
+          }
           // 200 with the refusals in the body: one clone that cannot be
           // repaired is not a failed sweep.
-          return new Response(JSON.stringify({ success: true, owned, link, derived }), {
+          return new Response(JSON.stringify({ success: true, owned, link, derived, llm }), {
             headers: { "Content-Type": "application/json" },
           });
         } catch (e) {

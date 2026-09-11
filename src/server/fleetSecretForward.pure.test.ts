@@ -375,7 +375,16 @@ describe("a withheld name survives the thirty-minute sweep", () => {
     expect(server).toContain("withheld: withheldNames");
     // `withheld` must never join SETTLED — that would silence the sweep by
     // claiming the clone holds the value.
-    expect(server).toContain('const SETTLED = new Set(["inherited", "set"]);');
+    //
+    // Asserted as the RULE rather than the literal, for the same reason the
+    // two lines above are. SETTLED legitimately grows: `minted` joined it when
+    // model keys began being minted per clone, because a minted key IS held by
+    // the clone and the fleet key must not be written over it. Pinning the
+    // whole expression made that ordinary addition look like a regression
+    // while saying nothing about the thing actually at stake.
+    const settled = server.match(/const SETTLED = new Set\(\[([^\]]*)\]\)/);
+    expect(settled, "SETTLED must be a literal set this test can read").not.toBeNull();
+    expect(settled![1]).not.toContain("withheld");
   });
 
   it("the column accepts the status, or every write is refused by Postgres", () => {
