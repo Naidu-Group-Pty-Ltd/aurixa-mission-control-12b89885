@@ -174,6 +174,16 @@ export const fetchReadiness = createServerFn({ method: "POST" })
     );
 
     /*
+     * Federation COMPLETED, which is the key ledger's status and never the
+     * presence of a rule: `federated_at` and `federation_rule_id` are stamped
+     * before `withdrawAnthropicKey` runs, so a clone whose federation stopped
+     * half way carries both.
+     */
+    const federatedKey = new Set(
+      (anthropicKeys ?? []).filter((r) => r.status === "federated").map((r) => r.clone_id),
+    );
+
+    /*
      * A key-status read that FAILED is not a fleet with no stand-downs.
      * Discarding the error left `standDown` empty, so tenant-owned and
      * deliberately withheld clones re-entered the denominator and the page
@@ -221,9 +231,22 @@ export const fetchReadiness = createServerFn({ method: "POST" })
       config.anthropic_attribution = anthropicAttributionConfig({
         provisionedClones: eligible.size,
         identities: rows.length,
-        // Recorded is not delivered: a null stamp is a workspace the vendor
-        // holds and the clone never received, so it is not coverage.
-        delivered: rows.filter((r) => Boolean(r.delivered_at)).length,
+        /*
+         * Attributed by EITHER route, and this is the one place the union is
+         * computed.
+         *
+         * The id was written onto the project, or the clone holds a completed
+         * federated credential — `ensureRule` binds the token to
+         * `workspace_id` at the vendor, so a federated clone names its
+         * workspace without the header. Counting delivery alone left a working
+         * federated clone permanently uncovered wherever the secret write had
+         * failed.
+         */
+        attributed: rows.filter(
+          (r) =>
+            Boolean(r.delivered_at) ||
+            (Boolean(r.federation_rule_id) && federatedKey.has(r.clone_id)),
+        ).length,
         federated: rows.filter((r) => Boolean(r.federation_rule_id)).length,
         proved: rows.filter((r) => Boolean(r.verified_at)).length,
         failing: rows.filter((r) => Boolean(r.last_error)).length,

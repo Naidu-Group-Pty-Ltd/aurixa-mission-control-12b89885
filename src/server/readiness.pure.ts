@@ -478,16 +478,26 @@ export interface AnthropicAttributionFacts {
   /** Rows in `clone_anthropic_identity`. */
   readonly identities: number;
   /**
-   * Of those, how many carry `delivered_at` — the workspace id actually
-   * WRITTEN onto the clone's project.
+   * Of those, how many are actually ATTRIBUTED — by either of the two routes
+   * that settle it.
    *
-   * Separate from `identities` because a row records what the vendor created
-   * and `delivered_at` records what the clone received, and the second one
-   * fails on its own. Required rather than optional: an omitted count must
-   * never read as "all delivered", which is the reading that would put this
-   * check back where the review found it.
+   * A clone's spend lands on its own workspace when the workspace id was
+   * written onto its project (`delivered_at`), OR when it holds a federated
+   * credential: `ensureRule` binds the token to `workspace_id` at the vendor,
+   * so a federated clone names its workspace without the header and needs no
+   * delivery at all. Counting delivery alone reported a working federated
+   * clone as uncovered for ever whenever the secret write had failed.
+   *
+   * Completed federation is the KEY LEDGER's `federated` status, never the
+   * presence of a rule: `federated_at` and `federation_rule_id` are stamped
+   * before `withdrawAnthropicKey` runs, so both exist on a clone whose
+   * federation did not finish.
+   *
+   * Required rather than optional: an omitted count must never read as "all
+   * attributed", which is the reading that put this check where the review
+   * found it.
    */
-  readonly delivered: number;
+  readonly attributed: number;
   /** Of those, how many carry a federation rule. */
   readonly federated: number;
   /** Of those, how many have proved they can reach Anthropic. */
@@ -515,7 +525,7 @@ export function anthropicAttributionConfig(
   const {
     provisionedClones,
     identities,
-    delivered,
+    attributed,
     federated,
     proved,
     failing,
@@ -524,23 +534,24 @@ export function anthropicAttributionConfig(
   } = facts;
 
   /*
-   * Coverage is DELIVERED, never merely recorded.
+   * Coverage is ATTRIBUTED, never merely recorded.
    *
-   * It was `identities` — the count of rows that exist — which the review
-   * caught once `delivered_at` became the column that says whether the id
-   * reached the project. A row with a null stamp means the workspace exists at
-   * the vendor and the clone's `ANTHROPIC_WORKSPACE_ID` was never written, so
-   * that clone is still billing to the organisation's default line. Counting
-   * it as covered reports N of N and green over exactly the gap this check was
-   * built to find — and `20260911090000` clears every presumed stamp, so the
-   * whole fleet enters that state the moment it applies.
+   * It was `identities` — the count of rows that exist — which reported N of N
+   * and green over exactly the gap this check was built to find, for the whole
+   * fleet, the moment `20260911090000` clears every presumed stamp.
+   *
+   * It is not `delivered` either, which was the first correction and was too
+   * narrow: a federated clone is attributed by the RULE's binding rather than
+   * by the header, so a persistent secret-write failure would have left a
+   * working clone permanently uncovered. `attributed` is the union, and the
+   * caller is the one place that computes it.
    *
    * `federated`, `proved` and `failing` deliberately stay on `identities`:
    * a federation rule, a reachability probe and a recorded fault are facts
    * about the identity record, and each is true whether or not the id was
    * delivered.
    */
-  const withWorkspace = delivered;
+  const withWorkspace = attributed;
 
   return [
     {

@@ -75,11 +75,15 @@ export function CloneAnthropicCard({ cloneId }: { cloneId: string }) {
    * its own: the Management API write can be refused after Anthropic has
    * created the workspace. A row exists either way, so reading `workspace_id`
    * as "this clone has its workspace" tells an operator the step is done while
-   * the clone's `ANTHROPIC_WORKSPACE_ID` is unset and its spend is still on the
-   * organisation's default line. `20260911090000` clears every presumed stamp,
-   * so that is every clone the moment it applies.
+   * the project may never have received the id.
    *
-   * The readiness coverage check answers to `delivered_at` for the same reason.
+   * What a null stamp is NOT is proof the id was never written.
+   * `20260911090000` clears legitimate and presumed stamps alike, precisely
+   * because they are indistinguishable, so after it runs the honest reading is
+   * UNCONFIRMED — and an undelivered clone that is federated is attributed
+   * anyway, by the rule's binding rather than by the header. This card cannot
+   * see the key ledger, so it says what it knows and claims nothing about
+   * which line the spend lands on.
    */
   const recorded = Boolean(row?.workspace_id);
   const hasWorkspace = recorded && Boolean(row?.delivered_at);
@@ -94,13 +98,18 @@ export function CloneAnthropicCard({ cloneId }: { cloneId: string }) {
       detail: hasWorkspace
         ? `${row?.workspace_name ?? "(unnamed)"} carries this clone's model spend`
         : recorded
-          ? `${row?.workspace_name ?? "(unnamed)"} exists at Anthropic but its id was never written onto this clone's project, so the spend is still on the organisation's default line. The next reconcile writes the same id.`
+          ? `${row?.workspace_name ?? "(unnamed)"} exists at Anthropic; delivery of its id to this project is unconfirmed. A reconcile confirms it, or federation attributes the spend without it.`
           : "Without one, this clone's Claude usage lands on the organisation's default line with every other tenant's",
     },
     {
       id: "federation",
       label: "Holds no Anthropic key",
-      state: federated ? "done" : hasWorkspace ? "open" : "blocked",
+      // RECORDED, not delivered. `federateClone` reads `workspace_id` and never
+      // `delivered_at`: it adds the service account to that workspace and binds
+      // the rule to it, so an undelivered clone federates normally. Keying this
+      // on delivery said `blocked` and sent an operator looking for a broken
+      // step that was one reconcile from done.
+      state: federated ? "done" : recorded ? "open" : "blocked",
       detail: federated
         ? "The clone obtains a short-lived token naming itself; no organisation key is on its project"
         : "The clone still runs on the organisation key, which can act in any workspace the organisation has",

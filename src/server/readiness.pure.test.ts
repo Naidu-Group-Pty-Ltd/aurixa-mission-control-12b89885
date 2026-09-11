@@ -293,7 +293,7 @@ describe("anthropicAttributionConfig", () => {
   const facts = {
     provisionedClones: 3,
     identities: 3,
-    delivered: 3,
+    attributed: 3,
     federated: 3,
     proved: 3,
     failing: 0,
@@ -324,19 +324,49 @@ describe("anthropicAttributionConfig", () => {
    * are facts about the identity RECORD and must not move with delivery, or
    * this fix just relocates the same confusion.
    */
-  it("counts delivered workspaces as coverage, and leaves the record counts alone", () => {
-    const undelivered = check({ delivered: 0 }, "Per-clone workspaces");
-    expect(undelivered.ok).toBe(false);
-    expect(undelivered.detail).toContain("0 of 3");
+  it("counts attributed workspaces as coverage, and leaves the record counts alone", () => {
+    const none = check({ attributed: 0 }, "Per-clone workspaces");
+    expect(none.ok).toBe(false);
+    expect(none.detail).toContain("0 of 3");
 
-    const partial = check({ delivered: 2 }, "Per-clone workspaces");
+    const partial = check({ attributed: 2 }, "Per-clone workspaces");
     expect(partial.ok).toBe(false);
 
-    // Federation and reachability are about the record, so an undelivered
+    // Federation and reachability are about the record, so an unattributed
     // fleet does not drag them down with it.
     for (const label of ["Federation bootstrap", "Proved reachable"]) {
-      expect(check({ delivered: 0 }, label).ok, label).toBe(true);
+      expect(check({ attributed: 0 }, label).ok, label).toBe(true);
     }
+  });
+
+  /*
+   * `attributed` is a UNION, and the builder cannot see which route settled it.
+   *
+   * Two things settle attribution: the id reached the project, or the clone
+   * holds a completed federated credential whose rule binds the token to the
+   * workspace. The builder takes one number because the routes are
+   * interchangeable for this question — so what is pinned here is that it
+   * treats them as one, and the caller's composition is pinned where the
+   * caller is.
+   *
+   * The half that matters: coverage must not move with `identities`. Counting
+   * rows that EXIST is the defect two rounds of review have now corrected,
+   * once from `identities` and once from `delivered`.
+   */
+  it("does not move with the identity count", () => {
+    const attributedButFewRows = check(
+      { provisionedClones: 3, identities: 3, attributed: 3 },
+      "Per-clone workspaces",
+    );
+    expect(attributedButFewRows.ok).toBe(true);
+
+    // Three rows, none attributed: the row count must not rescue it.
+    const rowsWithoutAttribution = check(
+      { provisionedClones: 3, identities: 3, attributed: 0 },
+      "Per-clone workspaces",
+    );
+    expect(rowsWithoutAttribution.ok).toBe(false);
+    expect(rowsWithoutAttribution.detail).toContain("0 of 3");
   });
 
   /*
@@ -344,7 +374,10 @@ describe("anthropicAttributionConfig", () => {
    * tautological: one attributed clone beside nine unattributed read "1 of 1".
    */
   it("measures workspaces against the provisioned clones, not the identity rows", () => {
-    const c = check({ provisionedClones: 10, identities: 1, delivered: 1 }, "Per-clone workspaces");
+    const c = check(
+      { provisionedClones: 10, identities: 1, attributed: 1 },
+      "Per-clone workspaces",
+    );
     expect(c.ok).toBe(false);
     expect(c.detail).toContain("1 of 10");
   });
@@ -421,7 +454,7 @@ describe("the workspace denominator counts only clones that should have one", ()
   const facts = {
     provisionedClones: 9,
     identities: 9,
-    delivered: 9,
+    attributed: 9,
     federated: 9,
     proved: 9,
     failing: 0,
@@ -447,7 +480,7 @@ describe("the workspace denominator counts only clones that should have one", ()
   });
 
   it("still fails when an ELIGIBLE clone has no workspace", () => {
-    expect(coverage({ provisionedClones: 10, identities: 9, delivered: 9 }).ok).toBe(false);
+    expect(coverage({ provisionedClones: 10, identities: 9, attributed: 9 }).ok).toBe(false);
   });
 
   /*
