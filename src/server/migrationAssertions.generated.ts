@@ -399,12 +399,11 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     migration: "20260911090000_clear_presumed_anthropic_delivery.sql",
     version: "20260911090000",
     assertions: [
-      { kind: "none", reason: "clears a data stamp and creates no object. Claiming" },
-      { kind: "none", reason: "`column:clone_anthropic_identity.delivered_at` would be satisfied" },
-      { kind: "none", reason: "by 20260911080000 whether or not THIS file ran, so the drift card" },
-      { kind: "none", reason: "would read green on a database that never applied it. Nor is the" },
-      { kind: "none", reason: 'effect stably observable — "no row carries delivered_at" stops' },
-      { kind: "none", reason: "being true at the next real delivery." },
+      {
+        kind: "none",
+        reason:
+          "clears a data stamp; creates no object, and the cleared state is not stably observable",
+      },
     ],
   },
 ];

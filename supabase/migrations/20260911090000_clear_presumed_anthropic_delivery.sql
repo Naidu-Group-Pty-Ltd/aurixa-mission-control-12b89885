@@ -1,11 +1,28 @@
--- @asserts none:clears a data stamp and creates no object. Claiming
--- @asserts none:`column:clone_anthropic_identity.delivered_at` would be satisfied
--- @asserts none:by 20260911080000 whether or not THIS file ran, so the drift card
--- @asserts none:would read green on a database that never applied it. Nor is the
--- @asserts none:effect stably observable — "no row carries delivered_at" stops
--- @asserts none:being true at the next real delivery.
+-- @asserts none:clears a data stamp; creates no object, and the cleared state is not stably observable
 --
 -- Clear every delivery stamp that was PRESUMED rather than observed.
+--
+-- ## Why it claims `none`, in ONE line
+--
+-- It first claimed `column:clone_anthropic_identity.delivered_at`, which
+-- `20260911080000` had already added. A `column:` claim is answered by probing
+-- the catalog, so it reads SATISFIED on a database that never applied this
+-- file: the drift card shows the cleanup green having measured its
+-- predecessor's work, and there is no failed queue row either, because a file
+-- that is never enqueued never fails. That is the "ran and achieved nothing"
+-- shape the grammar exists to catch, pointed the other way.
+--
+-- There is nothing honest to claim instead. "No row carries `delivered_at`" is
+-- true only until the next real delivery, so a `rows:` assertion would go
+-- UNSATISFIED on a healthy fleet — an alarm that fires on correct operation is
+-- worse than no alarm. `none` with a reason is what the grammar provides for
+-- exactly this.
+--
+-- The reason is one line because every `@asserts` line is a separate claim, and
+-- each claim is a separate ROW in the drift card labelled `none:<reason>` and
+-- truncated. A reason wrapped over six lines renders as six fragments of a
+-- broken sentence. The reasoning belongs in prose, here, where the next person
+-- reads it.
 --
 -- ## What the previous migration got wrong
 --

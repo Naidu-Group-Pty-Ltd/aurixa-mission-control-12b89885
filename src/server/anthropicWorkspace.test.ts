@@ -422,10 +422,12 @@ describe("no existing row is assumed delivered", () => {
     const parsed = parseAssertions(corrected);
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
-    expect(parsed.assertions.length).toBeGreaterThan(0);
-    for (const assertion of parsed.assertions) {
-      expect(assertion.kind).toBe("none");
-    }
+    // One claim, not six. Every `@asserts` line is a separate claim and each is
+    // a separate ROW in the drift card, labelled `none:<reason>` and truncated —
+    // so a reason wrapped over several lines renders as several fragments of a
+    // broken sentence. The reasoning goes in prose; the claim is one line.
+    expect(parsed.assertions).toHaveLength(1);
+    expect(parsed.assertions[0].kind).toBe("none");
     // Whatever the wording, it must not become a claim about an object again.
     expect(corrected).not.toMatch(/@asserts\s+(table|column|rpc|cron|rows|enum|check):/i);
   });
