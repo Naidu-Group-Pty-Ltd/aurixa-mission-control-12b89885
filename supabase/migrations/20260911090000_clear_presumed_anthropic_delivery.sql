@@ -1,0 +1,38 @@
+-- @asserts column:clone_anthropic_identity.delivered_at
+--
+-- Clear every delivery stamp that was PRESUMED rather than observed.
+--
+-- ## What the previous migration got wrong
+--
+-- `20260911080000` added `delivered_at` and backfilled it wherever a row
+-- carried a workspace and no `last_error`, reasoning that a clean row must
+-- have got past the Management API write. That reads delivery out of
+-- `last_error` — the column `delivered_at` exists precisely to stop trusting,
+-- because four writers clear it routinely: the reachability probe on a pass,
+-- the attempt recorder, and federation when it records its resources. A row
+-- whose delivery genuinely failed can therefore be sitting clean, and the
+-- backfill stamped exactly those rows as delivered. The retry then skips them
+-- FOR EVER, which is the fault being repaired, made permanent.
+--
+-- ## Why this is a new file rather than an edit
+--
+-- `apply-migrations.yml` selects `--diff-filter=A`. A MODIFIED migration is
+-- warned about and never re-applied — "a migration that has run is history" —
+-- so deleting the backfill from the published file would leave every database
+-- that already applied it carrying the wrong stamps for ever, while the
+-- repository looked correct. The published file is left exactly as it ran.
+--
+-- ## Why clearing ALL of them is safe
+--
+-- A legitimate stamp and a backfilled one are indistinguishable: both set
+-- `delivered_at` alongside `updated_at`. So this clears every stamp rather
+-- than guessing, and the cost is bounded — the next provisioning pass sees the
+-- recorded workspace, finds delivery pending, and writes the SAME workspace id
+-- onto the project. One idempotent write per row, against a false "delivered"
+-- that nothing would ever revisit. The recoverable side is the one to fail
+-- towards, and this is the last moment a stamp can be presumed rather than
+-- earned: every one written after this comes from a run that completed the
+-- write itself.
+update public.clone_anthropic_identity
+   set delivered_at = null
+ where delivered_at is not null;

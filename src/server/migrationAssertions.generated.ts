@@ -395,4 +395,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260911080000",
     assertions: [{ kind: "column", table: "clone_anthropic_identity", column: "delivered_at" }],
   },
+  {
+    migration: "20260911090000_clear_presumed_anthropic_delivery.sql",
+    version: "20260911090000",
+    assertions: [{ kind: "column", table: "clone_anthropic_identity", column: "delivered_at" }],
+  },
 ];

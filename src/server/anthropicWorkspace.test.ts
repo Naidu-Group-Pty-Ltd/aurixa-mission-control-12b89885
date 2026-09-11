@@ -355,31 +355,56 @@ describe("pending delivery survives the other writers", () => {
 });
 
 /*
- * Round three: the backfill must not read delivery out of the column the
- * runtime just stopped trusting.
+ * No row ends up assumed delivered — across BOTH migrations.
+ *
+ * The first pass at this deleted the backfill from the published file, which
+ * repairs nothing: `apply-migrations.yml` selects `--diff-filter=A` and warns
+ * that a modified migration is never re-applied, so every database that had
+ * already run it would keep the wrong stamps while the repository looked
+ * correct. The published file stays exactly as it ran and a new one corrects
+ * the effect — which is why this asserts the END STATE rather than the
+ * contents of one file.
  */
 describe("no existing row is assumed delivered", () => {
-  const sql = readFileSync(
+  const added = readFileSync(
     "supabase/migrations/20260911080000_anthropic_workspace_delivered_at.sql",
     "utf8",
   );
+  const corrected = readFileSync(
+    "supabase/migrations/20260911090000_clear_presumed_anthropic_delivery.sql",
+    "utf8",
+  );
 
-  it("adds the column and stamps nothing", () => {
-    expect(sql).toContain("add column if not exists delivered_at");
-    expect(sql).not.toMatch(/^\s*update\s+public\.clone_anthropic_identity/im);
+  it("adds the column", () => {
+    expect(added).toContain("add column if not exists delivered_at");
   });
 
   /*
-   * The obvious backfill reads `last_error is null` as "this one got through",
-   * which is the very inference this column exists to remove: four writers
-   * clear that column routinely, so a genuinely undelivered row can sit there
-   * clean — and stamping it would make the retry skip it FOR EVER.
+   * The published migration is HISTORY. Editing it is the mistake the apply
+   * workflow exists to warn about, so this pins that its backfill is still
+   * there rather than quietly removed.
    */
-  it("never infers delivery from last_error", () => {
-    expect(sql).not.toMatch(/set\s+delivered_at[\s\S]{0,200}last_error/i);
+  it("leaves the published migration exactly as it ran", () => {
+    expect(added).toMatch(/update\s+public\.clone_anthropic_identity/i);
+    expect(added).toMatch(/last_error is null/i);
+  });
+
+  /*
+   * And the correction clears every stamp, because a backfilled one and an
+   * earned one are indistinguishable — both set `delivered_at` beside
+   * `updated_at`. Clearing costs one idempotent re-write of the same workspace
+   * id; a false "delivered" is never revisited at all.
+   */
+  it("clears every presumed stamp in a later migration", () => {
+    expect(corrected).toMatch(/set delivered_at = null/i);
+    expect(corrected).toMatch(/where delivered_at is not null/i);
+    // Never reintroduces the inference it is undoing.
+    expect(corrected).not.toMatch(/set\s+delivered_at\s*=\s*coalesce/i);
   });
 
   it("opens no transaction of its own", () => {
-    expect(/^\s*begin\s*;/im.test(sql)).toBe(false);
+    for (const sql of [added, corrected]) {
+      expect(/^\s*begin\s*;/im.test(sql)).toBe(false);
+    }
   });
 });
