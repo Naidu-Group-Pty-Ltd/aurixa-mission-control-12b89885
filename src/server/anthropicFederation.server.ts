@@ -455,20 +455,43 @@ export async function federateClone(
    */
   const { runCloneAnthropicSelftest } = await import("./anthropicSelftest.server");
   const probe = await runCloneAnthropicSelftest(cloneId);
-  if (!probe.ok) {
+
+  /*
+   * `probe.ok` and `probe.reach.ok` are different questions, and only the
+   * first was asked here.
+   *
+   * The outer flag says a READING came back — which proves the deployed build
+   * carries the federation client, the thing this guard was written for. It
+   * says nothing about whether the clone can currently reach Anthropic. A
+   * clone whose credential has already drifted answers `ok: true` with a
+   * reading of `ok: false`, and the key went anyway: the ledger was then
+   * stamped `federated`, which puts the name in the fleet sweep's removal set,
+   * so any key that returned would be taken off again. A clone that can
+   * neither federate nor keep a key is broken permanently.
+   *
+   * Withdrawal now needs the clone to be reaching Anthropic right now — on
+   * whatever route it is using. That is the honest precondition for taking a
+   * working credential away, and it fails closed on a clone that is already
+   * in trouble rather than finishing it off.
+   */
+  if (!probe.ok || !probe.reach.ok) {
     return {
       cloneId,
       federated: false,
       ruleId,
       serviceAccountId,
       reason: "client_unproved",
-      detail:
-        probe.reason === "no_probe_in_answer"
+      detail: !probe.ok
+        ? probe.reason === "no_probe_in_answer"
           ? "This clone's backend predates the federation client, so removing its Anthropic key " +
             "would leave it unable to reach Anthropic at all. Its resources are created and " +
             "recorded; deploy the current edge functions to it and the next pass withdraws the key."
           : `This clone could not be asked whether it carries the federation client (${probe.reason}), ` +
-            "so its Anthropic key is untouched and nothing has stopped working.",
+            "so its Anthropic key is untouched and nothing has stopped working."
+        : "This clone cannot currently reach Anthropic at all" +
+          (probe.reach.why ? `: ${probe.reach.why}` : "") +
+          ". Its Anthropic key is untouched — taking a credential from a deployment that is " +
+          "already failing cannot repair it, and would leave it unable to hold one at all.",
       actionable: true,
     };
   }

@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
 import {
   anthropicAttributionConfig,
   judgeReadiness,
@@ -424,5 +425,37 @@ describe("the workspace denominator counts only clones that should have one", ()
    */
   it("says nothing rather than something false when no clone is eligible", () => {
     expect(coverage({ provisionedClones: 0, identities: 0 }).ok).toBeNull();
+  });
+});
+
+/*
+ * Round three: the numerator and the denominator must come from one
+ * population, and a read that failed is never an empty answer.
+ *
+ * Both are about the caller rather than this pure function, so they are pinned
+ * at the source — but they belong beside the config they govern, because the
+ * first repair fixed the denominator and left the numerator drawn from
+ * somewhere else.
+ */
+describe("the readiness caller draws both sides from one population", () => {
+  const fn = readFileSync("src/lib/readiness.functions.ts", "utf8");
+
+  it("filters identity rows by the same eligible set as the denominator", () => {
+    expect(fn).toMatch(/const eligible = new Set\(/);
+    expect(fn).toMatch(/identities \?\? \[\]\)\.filter\([\s\S]{0,80}eligible\.has/);
+    expect(fn).toContain("provisionedClones: eligible.size");
+  });
+
+  it("treats an unreadable key-status read as unknown, not as no stand-downs", () => {
+    // Discarding it left `standDown` empty, so tenant-owned and withheld
+    // clones re-entered the denominator and the page emitted a definitive
+    // answer about a question it could not answer.
+    expect(fn).toMatch(/error: anthropicKeyError/);
+    expect(fn).toMatch(/identityError \|\| backendError \|\| anthropicKeyError/);
+  });
+
+  it("names which read failed rather than blaming the ledger for all three", () => {
+    expect(fn).toContain("the clone backends could not be read");
+    expect(fn).toContain("the Anthropic key statuses could not be read");
   });
 });

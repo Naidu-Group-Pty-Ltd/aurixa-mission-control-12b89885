@@ -24,20 +24,21 @@
 -- organisation's default line. A fact about delivery needs a column nothing
 -- else owns.
 --
--- ## The backfill
+-- ## No backfill
 --
--- A row already carrying a workspace with no error against it was recorded by
--- a run that got past the write, so it is delivered. A row with an error is
--- left NULL and the next pass retries the write, which is idempotent: it sets
--- the same id it already recorded.
+-- The obvious one would stamp every existing row that carries a workspace and
+-- no error, on the reasoning that a clean row got past the write. That reads
+-- delivery out of `last_error` — the very column this migration exists to stop
+-- trusting. Those four writers clear it routinely, so a row whose delivery
+-- genuinely failed can be sitting there clean, and stamping it would make the
+-- retry skip it FOR EVER: exactly the state being repaired, made permanent.
+--
+-- So every existing row starts NULL and is treated as pending. The cost is one
+-- idempotent write per row — the retry sets the same workspace id already
+-- recorded — against a false "delivered" that nothing ever revisits. The
+-- recoverable side is the one to fail towards.
 alter table public.clone_anthropic_identity
   add column if not exists delivered_at timestamptz;
-
-update public.clone_anthropic_identity
-   set delivered_at = coalesce(updated_at, created_at)
- where delivered_at is null
-   and workspace_id is not null
-   and last_error is null;
 
 comment on column public.clone_anthropic_identity.delivered_at is
   'When ANTHROPIC_WORKSPACE_ID was written onto the clone project. NULL means the workspace is recorded here but the project has not been told, so delivery is retried.';

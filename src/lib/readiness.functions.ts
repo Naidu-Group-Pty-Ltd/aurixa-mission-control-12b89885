@@ -162,7 +162,7 @@ export const fetchReadiness = createServerFn({ method: "POST" })
      * key would read "9 of 10" and block the capability for ever, which is the
      * opposite error to the tautological "1 of 1" it replaced.
      */
-    const { data: anthropicKeys } = await supabaseAdmin
+    const { data: anthropicKeys, error: anthropicKeyError } = await supabaseAdmin
       .from("clone_backend_secrets")
       .select("clone_id, status")
       .eq("name", "ANTHROPIC_API_KEY");
@@ -173,17 +173,41 @@ export const fetchReadiness = createServerFn({ method: "POST" })
         .map((r) => r.clone_id),
     );
 
-    if (identityError || backendError) {
+    /*
+     * A key-status read that FAILED is not a fleet with no stand-downs.
+     * Discarding the error left `standDown` empty, so tenant-owned and
+     * deliberately withheld clones re-entered the denominator and the page
+     * emitted a definitive — possibly blocked — answer about a question it
+     * could not actually answer. `null` is the reading for that, and it is the
+     * rule this module's own header states.
+     */
+    if (identityError || backendError || anthropicKeyError) {
       config.anthropic_attribution = [
         {
           label: "Per-clone workspaces",
           ok: null,
-          detail: "the Anthropic identity ledger could not be read",
+          detail: identityError
+            ? "the Anthropic identity ledger could not be read"
+            : backendError
+              ? "the clone backends could not be read"
+              : "the Anthropic key statuses could not be read",
           remedy: "Retry; a failed read is not a missing configuration.",
         },
       ];
     } else {
-      const rows = identities ?? [];
+      /*
+       * The numerator comes from the SAME population as the denominator.
+       *
+       * An already-attributed clone that is later switched to a tenant-supplied
+       * key, or withheld, leaves the denominator and kept its identity row — so
+       * a stale numerator could cover for a different, eligible clone that has
+       * no row at all, and report complete coverage over a gap. The federation
+       * and reachability counts skew the same way.
+       */
+      const eligible = new Set(
+        (backends ?? []).map((b) => b.clone_id).filter((id) => id && !standDown.has(id)),
+      );
+      const rows = (identities ?? []).filter((r) => r.clone_id && eligible.has(r.clone_id));
       const bootstrapNames = [
         "ANTHROPIC_FEDERATION_PRIVATE_KEY",
         "ANTHROPIC_ORGANIZATION_ID",
@@ -195,7 +219,7 @@ export const fetchReadiness = createServerFn({ method: "POST" })
       // can exercise — a capability test that passed `config: {}` is how the
       // bootstrap check came to report a working Phase 1 as blocked.
       config.anthropic_attribution = anthropicAttributionConfig({
-        provisionedClones: (backends ?? []).filter((b) => !standDown.has(b.clone_id)).length,
+        provisionedClones: eligible.size,
         identities: rows.length,
         federated: rows.filter((r) => Boolean(r.federation_rule_id)).length,
         proved: rows.filter((r) => Boolean(r.verified_at)).length,

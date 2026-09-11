@@ -353,3 +353,33 @@ describe("pending delivery survives the other writers", () => {
     expect(successRecord).toBeGreaterThan(writeFailure);
   });
 });
+
+/*
+ * Round three: the backfill must not read delivery out of the column the
+ * runtime just stopped trusting.
+ */
+describe("no existing row is assumed delivered", () => {
+  const sql = readFileSync(
+    "supabase/migrations/20260911080000_anthropic_workspace_delivered_at.sql",
+    "utf8",
+  );
+
+  it("adds the column and stamps nothing", () => {
+    expect(sql).toContain("add column if not exists delivered_at");
+    expect(sql).not.toMatch(/^\s*update\s+public\.clone_anthropic_identity/im);
+  });
+
+  /*
+   * The obvious backfill reads `last_error is null` as "this one got through",
+   * which is the very inference this column exists to remove: four writers
+   * clear that column routinely, so a genuinely undelivered row can sit there
+   * clean — and stamping it would make the retry skip it FOR EVER.
+   */
+  it("never infers delivery from last_error", () => {
+    expect(sql).not.toMatch(/set\s+delivered_at[\s\S]{0,200}last_error/i);
+  });
+
+  it("opens no transaction of its own", () => {
+    expect(/^\s*begin\s*;/im.test(sql)).toBe(false);
+  });
+});
