@@ -39,8 +39,18 @@ type Db = SupabaseClient<Database>;
 
 const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-/** A ledger status that means the clone actually holds the value. */
-const SETTLED = new Set(["inherited", "set"]);
+/**
+ * A ledger status that means the clone actually holds the value.
+ *
+ * `minted` is here for the same reason the other two are: the clone HOLDS a
+ * model key minted for it on Aurixa's provider account, so the fleet's shared
+ * key must not be written over it. Leaving it out would not fail loudly — the
+ * sweep would push the fleet key within thirty minutes, the ledger would flip
+ * back to `inherited`, and the per-clone attribution the minting exists for
+ * would quietly stop being true. The same shape `withheld` needed its own
+ * channel for, and the reason that one is documented at length below.
+ */
+const SETTLED = new Set(["inherited", "set", "minted"]);
 
 /**
  * The status that means the clone must NOT hold it, though fleet policy

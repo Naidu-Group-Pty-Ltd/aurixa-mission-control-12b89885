@@ -382,7 +382,8 @@ async function runBackendProvisioning(
     // them, because the batch only knew what IT had written.
     const settledSecrets: Record<string, string> = {};
     if (emailIdentity && !emailIdentity.revoked_at) {
-      if (emailIdentity.key_written_at) settledSecrets.RESEND_API_KEY = emailIdentity.key_written_at;
+      if (emailIdentity.key_written_at)
+        settledSecrets.RESEND_API_KEY = emailIdentity.key_written_at;
       if (emailIdentity.from_address_written_at) {
         settledSecrets.RESEND_FROM_EMAIL = emailIdentity.from_address_written_at;
       }
@@ -399,7 +400,8 @@ async function runBackendProvisioning(
       if (turnstileIdentity.secret_written_at) {
         settledSecrets.TURNSTILE_SECRET_KEY = turnstileIdentity.secret_written_at;
       }
-      if (turnstileIdentity.fail_closed_at) settledSecrets.REQUIRE_TURNSTILE = turnstileIdentity.fail_closed_at;
+      if (turnstileIdentity.fail_closed_at)
+        settledSecrets.REQUIRE_TURNSTILE = turnstileIdentity.fail_closed_at;
     }
 
     const result = await provisionCloneBackend(
@@ -485,6 +487,50 @@ async function runBackendProvisioning(
           `Repository re-target failed: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
+    }
+
+    /*
+     * Mint this clone's own model keys, now that its secret ledger exists.
+     *
+     * After the pipeline rather than inside it, because minting reads and
+     * writes Mission Control's OWN tables (the secret ledger says whether a
+     * name is already the tenant's, and records what was minted) — the same
+     * reason `linkMissionControl` is supplied from here.
+     *
+     * Non-fatal, and deliberately last of the per-clone steps: the five names
+     * are still forwarded as the floor, so a vendor being unreachable leaves
+     * the clone exactly as it would have been, and the half-hourly sweep
+     * repairs it. A workspace never waits on a provider's API to boot.
+     */
+    try {
+      const { provisionLlmKeys } = await import(
+        /* @vite-ignore */ "@/server/llmKeyProvisioning.server"
+      );
+      const llm = await provisionLlmKeys(supabase, input.cloneId, { actorUserId: userId });
+      if (llm.ok) {
+        const minted = llm.outcomes.filter((o) => o.minted).map((o) => o.name);
+        // Names and counts, never a value — and the skips are said too, or
+        // "0 minted" reads as a failure when it is four correct stand-downs.
+        const skipped = llm.outcomes
+          .filter((o) => !o.minted)
+          .map((o) => `${o.name} (${"reason" in o ? o.reason : "skipped"})`);
+        await updateStatus(
+          "migrating",
+          `Model keys: ${minted.length} minted${minted.length ? ` — ${minted.join(", ")}` : ""}` +
+            (skipped.length ? `; not minted: ${skipped.join(", ")}` : ""),
+        );
+      } else {
+        await updateStatus(
+          "migrating",
+          `Model keys not minted (${llm.reason}: ${llm.error}) — this clone keeps the forwarded ` +
+            "fleet keys and the reconcile sweep will retry",
+        );
+      }
+    } catch (err) {
+      await updateStatus(
+        "migrating",
+        `Model key minting skipped: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
 
     // Compare the result with the prime before calling it ready.
