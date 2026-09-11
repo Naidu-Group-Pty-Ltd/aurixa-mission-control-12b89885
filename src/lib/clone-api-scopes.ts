@@ -19,7 +19,8 @@ export type CloneApiScope = {
     | "clones"
     | "verification"
     | "listings"
-    | "integrations";
+    | "integrations"
+    | "anthropic";
   label: string;
   description: string;
   default?: boolean;
@@ -49,6 +50,19 @@ export const CLONE_API_SCOPES: CloneApiScope[] = [
       "every base and every permission it was minted with — and nothing in it narrows it to one " +
       "table. Grants two read operations against a base and table this clone cannot name, and no " +
       "write of any kind.",
+    default: true,
+  },
+  {
+    value: "anthropic:federate",
+    group: "anthropic",
+    label: "Anthropic — obtain a workspace-scoped identity",
+    description:
+      "Let this workspace ask Mission Control for a five-minute assertion naming itself, which it " +
+      "exchanges at Anthropic for a token bound to its own workspace and nothing else. On by " +
+      "default: it is what lets a clone reach Anthropic with NO static key — today every clone " +
+      "holds an organisation key that can act in every workspace the organisation has. It grants " +
+      "no credential of Mission Control's own, names no workspace but this clone's, and the " +
+      "assertion it returns is useful against exactly one federation rule.",
     default: true,
   },
   {

@@ -193,6 +193,8 @@ import { Route as ApiPublicBillingPaymentMethodsRouteImport } from './routes/api
 import { Route as ApiPublicBillingInvoicesRouteImport } from './routes/api.public.billing.invoices'
 import { Route as ApiPublicBillingInvoicePdfRouteImport } from './routes/api.public.billing.invoice-pdf'
 import { Route as ApiPublicBillingHandoffRouteImport } from './routes/api.public.billing.handoff'
+import { Route as ApiPublicAnthropicJwksRouteImport } from './routes/api.public.anthropic.jwks'
+import { Route as ApiPublicAnthropicIdentityRouteImport } from './routes/api.public.anthropic.identity'
 import { Route as ApiPublicStripeWebhookCloneIdRouteImport } from './routes/api.public.stripe.webhook.$cloneId'
 import { Route as ApiPublicSeatsDevicesReleaseRouteImport } from './routes/api.public.seats.devices.release'
 import { Route as ApiPublicSeatsDevicesRegisterRouteImport } from './routes/api.public.seats.devices.register'
@@ -1169,6 +1171,17 @@ const ApiPublicBillingHandoffRoute = ApiPublicBillingHandoffRouteImport.update({
   path: '/api/public/billing/handoff',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiPublicAnthropicJwksRoute = ApiPublicAnthropicJwksRouteImport.update({
+  id: '/api/public/anthropic/jwks',
+  path: '/api/public/anthropic/jwks',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiPublicAnthropicIdentityRoute =
+  ApiPublicAnthropicIdentityRouteImport.update({
+    id: '/api/public/anthropic/identity',
+    path: '/api/public/anthropic/identity',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiPublicStripeWebhookCloneIdRoute =
   ApiPublicStripeWebhookCloneIdRouteImport.update({
     id: '/$cloneId',
@@ -1341,6 +1354,8 @@ export interface FileRoutesByFullPath {
   '/crm/accounts/$accountId': typeof CrmAccountsAccountIdRoute
   '/email/campaigns/$campaignId': typeof EmailCampaignsCampaignIdRoute
   '/crm/accounts/': typeof CrmAccountsIndexRoute
+  '/api/public/anthropic/identity': typeof ApiPublicAnthropicIdentityRoute
+  '/api/public/anthropic/jwks': typeof ApiPublicAnthropicJwksRoute
   '/api/public/billing/handoff': typeof ApiPublicBillingHandoffRoute
   '/api/public/billing/invoice-pdf': typeof ApiPublicBillingInvoicePdfRoute
   '/api/public/billing/invoices': typeof ApiPublicBillingInvoicesRoute
@@ -1532,6 +1547,8 @@ export interface FileRoutesByTo {
   '/crm/accounts/$accountId': typeof CrmAccountsAccountIdRoute
   '/email/campaigns/$campaignId': typeof EmailCampaignsCampaignIdRoute
   '/crm/accounts': typeof CrmAccountsIndexRoute
+  '/api/public/anthropic/identity': typeof ApiPublicAnthropicIdentityRoute
+  '/api/public/anthropic/jwks': typeof ApiPublicAnthropicJwksRoute
   '/api/public/billing/handoff': typeof ApiPublicBillingHandoffRoute
   '/api/public/billing/invoice-pdf': typeof ApiPublicBillingInvoicePdfRoute
   '/api/public/billing/invoices': typeof ApiPublicBillingInvoicesRoute
@@ -1725,6 +1742,8 @@ export interface FileRoutesById {
   '/crm/accounts/$accountId': typeof CrmAccountsAccountIdRoute
   '/email/campaigns/$campaignId': typeof EmailCampaignsCampaignIdRoute
   '/crm/accounts/': typeof CrmAccountsIndexRoute
+  '/api/public/anthropic/identity': typeof ApiPublicAnthropicIdentityRoute
+  '/api/public/anthropic/jwks': typeof ApiPublicAnthropicJwksRoute
   '/api/public/billing/handoff': typeof ApiPublicBillingHandoffRoute
   '/api/public/billing/invoice-pdf': typeof ApiPublicBillingInvoicePdfRoute
   '/api/public/billing/invoices': typeof ApiPublicBillingInvoicesRoute
@@ -1919,6 +1938,8 @@ export interface FileRouteTypes {
     | '/crm/accounts/$accountId'
     | '/email/campaigns/$campaignId'
     | '/crm/accounts/'
+    | '/api/public/anthropic/identity'
+    | '/api/public/anthropic/jwks'
     | '/api/public/billing/handoff'
     | '/api/public/billing/invoice-pdf'
     | '/api/public/billing/invoices'
@@ -2110,6 +2131,8 @@ export interface FileRouteTypes {
     | '/crm/accounts/$accountId'
     | '/email/campaigns/$campaignId'
     | '/crm/accounts'
+    | '/api/public/anthropic/identity'
+    | '/api/public/anthropic/jwks'
     | '/api/public/billing/handoff'
     | '/api/public/billing/invoice-pdf'
     | '/api/public/billing/invoices'
@@ -2302,6 +2325,8 @@ export interface FileRouteTypes {
     | '/crm/accounts/$accountId'
     | '/email/campaigns/$campaignId'
     | '/crm/accounts/'
+    | '/api/public/anthropic/identity'
+    | '/api/public/anthropic/jwks'
     | '/api/public/billing/handoff'
     | '/api/public/billing/invoice-pdf'
     | '/api/public/billing/invoices'
@@ -2474,6 +2499,8 @@ export interface RootRouteChildren {
   CrmAccountsAccountIdRoute: typeof CrmAccountsAccountIdRoute
   EmailCampaignsCampaignIdRoute: typeof EmailCampaignsCampaignIdRoute
   CrmAccountsIndexRoute: typeof CrmAccountsIndexRoute
+  ApiPublicAnthropicIdentityRoute: typeof ApiPublicAnthropicIdentityRoute
+  ApiPublicAnthropicJwksRoute: typeof ApiPublicAnthropicJwksRoute
   ApiPublicBillingHandoffRoute: typeof ApiPublicBillingHandoffRoute
   ApiPublicBillingInvoicePdfRoute: typeof ApiPublicBillingInvoicePdfRoute
   ApiPublicBillingInvoicesRoute: typeof ApiPublicBillingInvoicesRoute
@@ -3820,6 +3847,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicBillingHandoffRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/anthropic/jwks': {
+      id: '/api/public/anthropic/jwks'
+      path: '/api/public/anthropic/jwks'
+      fullPath: '/api/public/anthropic/jwks'
+      preLoaderRoute: typeof ApiPublicAnthropicJwksRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/anthropic/identity': {
+      id: '/api/public/anthropic/identity'
+      path: '/api/public/anthropic/identity'
+      fullPath: '/api/public/anthropic/identity'
+      preLoaderRoute: typeof ApiPublicAnthropicIdentityRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/stripe/webhook/$cloneId': {
       id: '/api/public/stripe/webhook/$cloneId'
       path: '/$cloneId'
@@ -4096,6 +4137,8 @@ const rootRouteChildren: RootRouteChildren = {
   CrmAccountsAccountIdRoute: CrmAccountsAccountIdRoute,
   EmailCampaignsCampaignIdRoute: EmailCampaignsCampaignIdRoute,
   CrmAccountsIndexRoute: CrmAccountsIndexRoute,
+  ApiPublicAnthropicIdentityRoute: ApiPublicAnthropicIdentityRoute,
+  ApiPublicAnthropicJwksRoute: ApiPublicAnthropicJwksRoute,
   ApiPublicBillingHandoffRoute: ApiPublicBillingHandoffRoute,
   ApiPublicBillingInvoicePdfRoute: ApiPublicBillingInvoicePdfRoute,
   ApiPublicBillingInvoicesRoute: ApiPublicBillingInvoicesRoute,

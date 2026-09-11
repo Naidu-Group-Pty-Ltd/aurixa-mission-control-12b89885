@@ -50,6 +50,8 @@ export const Route = createFileRoute("/hooks/clone-secrets-reconcile")({
           const { reconcileLlmKeys } = await import("@/server/llmKeyProvisioning.server");
           const { reconcileAnthropicWorkspaces } =
             await import("@/server/anthropicWorkspace.server");
+          const { reconcileAnthropicFederation } =
+            await import("@/server/anthropicFederation.server");
           const owned = await reconcileCloneOwnedSecrets(supabaseAdmin);
           const link = await reconcileCloneMissionControlLinks(supabaseAdmin);
           const derived = await reconcileCloneDerivedConfig(supabaseAdmin);
@@ -80,10 +82,34 @@ export const Route = createFileRoute("/hooks/clone-secrets-reconcile")({
             console.error("Anthropic workspace reconcile failed:", detail);
             anthropicWorkspaces = { ok: false, error: detail };
           }
+          /*
+           * Federation last, and after the workspaces above — a rule is
+           * created IN a workspace, so a clone federated before it has one
+           * would be bound to the organisation's default and land in the very
+           * undifferentiated line the workspace exists to leave behind.
+           * `decideFederation` refuses that case anyway; the ordering means it
+           * does not have to wait a whole sweep to stop refusing.
+           */
+          let anthropicFederation: unknown;
+          try {
+            anthropicFederation = await reconcileAnthropicFederation(supabaseAdmin);
+          } catch (e) {
+            const detail = e instanceof Error ? e.message : String(e);
+            console.error("Anthropic federation reconcile failed:", detail);
+            anthropicFederation = { ok: false, error: detail };
+          }
           // 200 with the refusals in the body: one clone that cannot be
           // repaired is not a failed sweep.
           return new Response(
-            JSON.stringify({ success: true, owned, link, derived, llm, anthropicWorkspaces }),
+            JSON.stringify({
+              success: true,
+              owned,
+              link,
+              derived,
+              llm,
+              anthropicWorkspaces,
+              anthropicFederation,
+            }),
             {
               headers: { "Content-Type": "application/json" },
             },

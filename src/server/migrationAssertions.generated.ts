@@ -383,4 +383,11 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "column", table: "clone_anthropic_identity", column: "federation_rule_id" },
     ],
   },
+  {
+    migration: "20260911070000_federated_anthropic_status.sql",
+    version: "20260911070000",
+    assertions: [
+      { kind: "check", table: "clone_backend_secrets", column: "status", value: "federated" },
+    ],
+  },
 ];
