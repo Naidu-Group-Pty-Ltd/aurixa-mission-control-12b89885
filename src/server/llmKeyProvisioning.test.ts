@@ -211,6 +211,53 @@ describe("it is actually called", () => {
   });
 });
 
+describe("an operator can see which key a clone is spending", () => {
+  it("the secrets page carries every status the column accepts", () => {
+    // `STATUS_META[row.status]` is read straight into `meta.variant`, so a
+    // status the map does not carry is `undefined` and the row throws. The map
+    // listed four while the column accepted six — `withheld` and
+    // `authorised_no_value` are both live today — so the page was crashing on
+    // exactly the clones whose secrets most needed looking at.
+    const page = read("src/routes/clones.$cloneId.secrets.tsx");
+    const migration = read(MIGRATION);
+    const accepted = [...migration.matchAll(/'([a-z_]+)'/g)]
+      .map((m) => m[1])
+      .filter((v) =>
+        [
+          "missing",
+          "set",
+          "failed",
+          "inherited",
+          "authorised_no_value",
+          "withheld",
+          "minted",
+        ].includes(v),
+      );
+    expect(new Set(accepted).size).toBe(7);
+    for (const status of new Set(accepted)) {
+      expect(page, `the page must render ${status}`).toMatch(
+        new RegExp(`(^|\\s)${status}: \\{`, "m"),
+      );
+    }
+  });
+
+  it("an unrecognised status degrades to a readable row, never a blank page", () => {
+    // The eighth status will be added by somebody who is not looking at this
+    // file. It must cost them a row that says "unknown", not a page that
+    // throws.
+    const page = read("src/routes/clones.$cloneId.secrets.tsx");
+    expect(page).toContain("function statusMeta(");
+    expect(page).toContain("const meta = statusMeta(row.status);");
+    // Judged over CODE lines only: the header above quotes the old expression
+    // while explaining why it was wrong, and a prose mention is not a call.
+    const codeLines = page
+      .split("\n")
+      .filter((l) => !/^\s*(\*|\/\/|\/\*)/.test(l))
+      .join("\n");
+    expect(codeLines).not.toContain("STATUS_META[row.status]");
+  });
+});
+
 describe("what the vendor's dashboard shows", () => {
   it("leads with the clone, because that is what it exists to answer", () => {
     expect(mintedKeyLabel("NPC Test")).toBe("aurixa-npc-test");

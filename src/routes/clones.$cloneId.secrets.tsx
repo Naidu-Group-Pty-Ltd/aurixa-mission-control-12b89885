@@ -24,23 +24,91 @@ export const Route = createFileRoute("/clones/$cloneId/secrets")({
   component: CloneSecretsPage,
 });
 
+/**
+ * Every value `clone_backend_secrets_status_check` accepts.
+ *
+ * It listed four. The column has accepted six since 7 Sep 2026 and seven
+ * since `minted` — and `STATUS_META[row.status]` is read straight into
+ * `meta.variant`, so a status this map does not carry is `undefined` and the
+ * row throws. `withheld` and `authorised_no_value` are both live today, which
+ * means this page has been crashing on exactly the clones whose secrets an
+ * operator most needs to look at.
+ *
+ * The type now mirrors the constraint, and the lookup below is TOTAL, so the
+ * eighth status degrades to a readable row rather than a blank page.
+ */
+type SecretStatus =
+  | "missing"
+  | "set"
+  | "failed"
+  | "inherited"
+  | "authorised_no_value"
+  | "withheld"
+  | "minted";
+
 type SecretRow = {
   name: string;
-  status: "missing" | "set" | "failed" | "inherited";
+  status: SecretStatus;
   last_set_at: string | null;
   last_error: string | null;
   updated_at: string;
 };
 
-const STATUS_META: Record<
-  SecretRow["status"],
-  { label: string; variant: "default" | "secondary" | "destructive" | "outline" }
-> = {
-  set: { label: "Set", variant: "default" },
-  inherited: { label: "Inherited from prime", variant: "secondary" },
+type StatusMeta = {
+  label: string;
+  variant: "default" | "secondary" | "destructive" | "outline";
+  /** Why it reads this way, where the word alone would send an operator wrong. */
+  detail?: string;
+};
+
+const STATUS_META: Record<SecretStatus, StatusMeta> = {
+  set: { label: "Set", variant: "default", detail: "Supplied on this workspace." },
+  minted: {
+    label: "Minted for this clone",
+    variant: "default",
+    detail:
+      "A key created for this workspace alone on Aurixa's provider account, so the vendor's own " +
+      "dashboard attributes its spend here. Billed like a forwarded key; replace it at the " +
+      "vendor rather than on Mission Control.",
+  },
+  inherited: {
+    label: "Inherited from prime",
+    variant: "secondary",
+    detail: "The fleet's shared value, forwarded. Change it on Mission Control and re-forward.",
+  },
+  withheld: {
+    label: "Withheld — brokered",
+    variant: "outline",
+    detail:
+      "Deliberately kept off this project; Mission Control makes the call on its behalf. " +
+      "Nothing to fill in.",
+  },
+  authorised_no_value: {
+    label: "Authorised, no value held",
+    variant: "outline",
+    detail:
+      "Fleet policy forwards this name and Mission Control holds nothing to forward. Set it in " +
+      "Mission Control's own environment, or withdraw the forward — not here.",
+  },
   missing: { label: "Missing — action required", variant: "destructive" },
   failed: { label: "Failed", variant: "destructive" },
 };
+
+/**
+ * The reading for a status, never `undefined`.
+ *
+ * A row whose status this build has not been taught renders as itself rather
+ * than taking the page down — the whole point of the fix above.
+ */
+function statusMeta(status: string): StatusMeta {
+  return (
+    STATUS_META[status as SecretStatus] ?? {
+      label: status || "Unknown",
+      variant: "outline",
+      detail: "This deployment does not recognise that status.",
+    }
+  );
+}
 
 function CloneSecretsPage() {
   const { cloneId } = Route.useParams();
@@ -205,7 +273,7 @@ function CloneSecretsPage() {
 function SecretRowCard({ row, onSave }: { row: SecretRow; onSave: (v: string) => Promise<void> }) {
   const [value, setValue] = useState("");
   const [saving, setSaving] = useState(false);
-  const meta = STATUS_META[row.status];
+  const meta = statusMeta(row.status);
 
   return (
     <div className="border p-4">
@@ -213,6 +281,7 @@ function SecretRowCard({ row, onSave }: { row: SecretRow; onSave: (v: string) =>
         <div className="font-mono text-sm font-medium">{row.name}</div>
         <Badge variant={meta.variant}>{meta.label}</Badge>
       </div>
+      {meta.detail && <div className="mb-2 text-xs text-muted-foreground">{meta.detail}</div>}
       {row.last_error && (
         <div className="mb-2 text-xs text-destructive">Last error: {row.last_error}</div>
       )}
