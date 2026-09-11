@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  anthropicAttributionConfig,
   judgeReadiness,
   CAPABILITIES,
   CLONE_PATH,
@@ -276,5 +277,152 @@ describe("the Anthropic attribution capability", () => {
     const c = capability(judgeReadiness({ present: ALL, config: {} }), "anthropic_attribution");
     expect(c.consequence).toMatch(/recharge|spend|line/i);
     expect(c.consequence).not.toMatch(/\bfails\b/i);
+  });
+});
+
+/*
+ * The config this capability is actually judged on.
+ *
+ * Every one of these was a finding, and they share a cause: the capability
+ * test above passed `config: {}`, so it agreed with an empty fixture while
+ * production passed checks that disagreed. Testing the builder is the fix —
+ * what the server computes is what these assert.
+ */
+describe("anthropicAttributionConfig", () => {
+  const facts = {
+    provisionedClones: 3,
+    identities: 3,
+    federated: 3,
+    proved: 3,
+    failing: 0,
+    bootstrapSet: 4,
+    bootstrapTotal: 4,
+  };
+  const check = (over: Partial<typeof facts>, label: string) => {
+    const found = anthropicAttributionConfig({ ...facts, ...over }).find((c) => c.label === label);
+    if (!found) throw new Error(`no check ${label}`);
+    return found;
+  };
+
+  it("is green end to end when every clone is attributed and proved", () => {
+    for (const c of anthropicAttributionConfig(facts)) expect(c.ok, c.label).toBe(true);
+  });
+
+  /*
+   * `workspace_id` is NOT NULL, so counting inside the identity table is
+   * tautological: one attributed clone beside nine unattributed read "1 of 1".
+   */
+  it("measures workspaces against the provisioned clones, not the identity rows", () => {
+    const c = check({ provisionedClones: 10, identities: 1 }, "Per-clone workspaces");
+    expect(c.ok).toBe(false);
+    expect(c.detail).toContain("1 of 10");
+  });
+
+  it("says nothing rather than something false when no clone has a backend", () => {
+    expect(check({ provisionedClones: 0 }, "Per-clone workspaces").ok).toBeNull();
+  });
+
+  /*
+   * Phase 1 is a WORKING deployment. `judgeReadiness` turns a false config
+   * check into a blocker ahead of the optional flags, so reporting absent
+   * federation as false made the documented working setup read as broken.
+   */
+  it("treats federation that is absent entirely as non-blocking", () => {
+    expect(check({ bootstrapSet: 0 }, "Federation bootstrap").ok).toBe(true);
+  });
+
+  it("treats PARTIAL federation as the failure it is", () => {
+    const c = check({ bootstrapSet: 2 }, "Federation bootstrap");
+    expect(c.ok).toBe(false);
+    expect(c.detail).toContain("cannot mint a token");
+  });
+
+  /*
+   * The end-to-end version of the rule: with only the admin key set and this
+   * config attached, the capability must be `degraded` — which is what the
+   * fixture-only test claimed while production said `blocked`.
+   */
+  it("leaves Phase 1 degraded rather than blocked, through judgeReadiness", () => {
+    const report = judgeReadiness({
+      present: without(
+        "ANTHROPIC_FEDERATION_PRIVATE_KEY",
+        "ANTHROPIC_ORGANIZATION_ID",
+        "ANTHROPIC_BOOTSTRAP_RULE_ID",
+        "ANTHROPIC_BOOTSTRAP_SERVICE_ACCOUNT_ID",
+      ),
+      config: {
+        anthropic_attribution: anthropicAttributionConfig({ ...facts, bootstrapSet: 0 }),
+      },
+    });
+    expect(capability(report, "anthropic_attribution").verdict).toBe("degraded");
+  });
+
+  /*
+   * An unprobed clone has neither a stamp nor an error, so `proved > 0` went
+   * green at 1 of 100 — with the detail line saying "1 of 100" beside it.
+   */
+  it("requires every identity to have proved, not merely one", () => {
+    const c = check({ identities: 100, proved: 1 }, "Proved reachable");
+    expect(c.ok).toBe(false);
+    expect(c.detail).toContain("1 of 100");
+  });
+
+  it("is not green while any clone reported a fault", () => {
+    expect(check({ failing: 1 }, "Proved reachable").ok).toBe(false);
+  });
+
+  it("says nothing rather than something false when there is nothing to probe", () => {
+    expect(check({ identities: 0 }, "Proved reachable").ok).toBeNull();
+  });
+});
+
+/*
+ * The denominator has two ways to be wrong, and the first repair swapped one
+ * for the other.
+ *
+ * Counting inside the identity table was tautologically true. Counting every
+ * provisioned backend is permanently FALSE on a healthy fleet, because
+ * `decideWorkspaceProvision` refuses two cases on purpose — a tenant who
+ * supplied their own key, and a key somebody withheld — and neither can ever
+ * produce an identity row. The population is the clones that SHOULD have one.
+ */
+describe("the workspace denominator counts only clones that should have one", () => {
+  const facts = {
+    provisionedClones: 9,
+    identities: 9,
+    federated: 9,
+    proved: 9,
+    failing: 0,
+    bootstrapSet: 4,
+    bootstrapTotal: 4,
+  };
+  const coverage = (over: Partial<typeof facts>) => {
+    const c = anthropicAttributionConfig({ ...facts, ...over }).find(
+      (x) => x.label === "Per-clone workspaces",
+    );
+    if (!c) throw new Error("no coverage check");
+    return c;
+  };
+
+  /*
+   * Nine managed clones and one tenant-owned key: the tenant's clone is
+   * excluded by the caller, so nine of nine is complete and green rather than
+   * "9 of 10" and blocked for ever.
+   */
+  it("is green when every eligible clone is attributed", () => {
+    expect(coverage({}).ok).toBe(true);
+    expect(coverage({}).detail).toContain("9 of 9");
+  });
+
+  it("still fails when an ELIGIBLE clone has no workspace", () => {
+    expect(coverage({ provisionedClones: 10, identities: 9 }).ok).toBe(false);
+  });
+
+  /*
+   * A fleet whose every clone is a deliberate stand-down has nothing to
+   * attribute, which is a real answer rather than a fault.
+   */
+  it("says nothing rather than something false when no clone is eligible", () => {
+    expect(coverage({ provisionedClones: 0, identities: 0 }).ok).toBeNull();
   });
 });

@@ -470,3 +470,105 @@ export const PRESENCE_CAVEAT =
   "Presence only. A credential that is set may still be revoked, expired or " +
   "scoped to the wrong account — proving one valid means spending it against " +
   "the vendor, which this page deliberately does not do.";
+
+/** What the Anthropic attribution checks are computed from. */
+export interface AnthropicAttributionFacts {
+  /** Clones with a backend — the population that COULD carry a workspace. */
+  readonly provisionedClones: number;
+  /** Rows in `clone_anthropic_identity`. */
+  readonly identities: number;
+  /** Of those, how many carry a federation rule. */
+  readonly federated: number;
+  /** Of those, how many have proved they can reach Anthropic. */
+  readonly proved: number;
+  /** Of those, how many reported a fault on their last probe. */
+  readonly failing: number;
+  /** How many of the four federation bootstrap values are set. */
+  readonly bootstrapSet: number;
+  readonly bootstrapTotal: number;
+}
+
+/**
+ * The Anthropic attribution config checks, as a function.
+ *
+ * Pure, and here rather than inline in the server function, for one reason: a
+ * capability test that passed `config: {}` reported this capability as
+ * `degraded` while production passed a check that made it `blocked`. The test
+ * agreed with an empty fixture and disagreed with the world — the exact shape
+ * of the SAMPLE_REPORT_DATA trap this codebase keeps re-finding. What the
+ * server builds is now what a test can exercise.
+ */
+export function anthropicAttributionConfig(
+  facts: AnthropicAttributionFacts,
+): ConfigCheck[] {
+  const {
+    provisionedClones,
+    identities,
+    federated,
+    proved,
+    failing,
+    bootstrapSet,
+    bootstrapTotal,
+  } = facts;
+
+  const withWorkspace = identities;
+
+  return [
+    {
+      label: "Per-clone workspaces",
+      /*
+       * The denominator is the clones that COULD carry a workspace, never the
+       * identity table: `workspace_id` is NOT NULL, so counting inside that
+       * table is tautologically "N of N" however many clones have no row —
+       * one attributed clone beside nine unattributed read "1 of 1" and green.
+       *
+       * Zero provisioned clones is a real answer rather than a fault.
+       */
+      ok: provisionedClones === 0 ? null : withWorkspace >= provisionedClones,
+      detail:
+        provisionedClones === 0
+          ? "No clone has a backend to attribute yet"
+          : `${withWorkspace} of ${provisionedClones} provisioned clones carry their own Anthropic workspace`,
+      remedy: "Clones → the secrets reconcile hook, which provisions any that are missing",
+    },
+    {
+      label: "Federation bootstrap",
+      /*
+       * Absent ENTIRELY is not a failure. Phase 1 — a workspace per clone,
+       * every clone still on the organisation key — is a working deployment,
+       * which is why these four are declared optional. `judgeReadiness` turns
+       * any false config check into a blocker AHEAD of the optional flags, so
+       * `false` here reported the documented working setup as broken.
+       *
+       * PARTIAL is the failure: four names look like configuration while a
+       * rule that cannot mint a token looks like an outage.
+       */
+      ok: bootstrapSet === 0 ? true : bootstrapSet === bootstrapTotal,
+      detail:
+        bootstrapSet === bootstrapTotal
+          ? `Federation is configured; ${federated} of ${provisionedClones} provisioned clones hold no Anthropic key at all`
+          : bootstrapSet === 0
+            ? "Federation is not configured, so every clone keeps the organisation key and its own workspace header"
+            : `Only ${bootstrapSet} of ${bootstrapTotal} federation values are set, which cannot mint a token`,
+      remedy:
+        "Create one org:admin federation rule in the Claude Console against a dedicated issuer, then set the four ANTHROPIC_* values it returns",
+    },
+    {
+      label: "Proved reachable",
+      /*
+       * EVERY identity, not merely one. `proved > 0` went green the moment a
+       * single clone was probed, because an unprobed clone has neither a stamp
+       * nor an error — so 1 of 100 read as proved while ninety-nine clones'
+       * keys, scopes and rules stayed unverified, with the detail line saying
+       * "1 of 100" right beside the green.
+       */
+      ok: identities === 0 ? null : failing === 0 && proved >= identities,
+      detail:
+        identities === 0
+          ? "Nothing to probe yet"
+          : `${proved} of ${identities} clones with an identity have proved they can reach Anthropic` +
+            (failing > 0 ? `; ${failing} reported a fault on the last probe` : ""),
+      remedy: "Clones → a clone → Anthropic attribution → Run self-test",
+    },
+  ];
+}

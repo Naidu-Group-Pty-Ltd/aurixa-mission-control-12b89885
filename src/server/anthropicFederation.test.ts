@@ -17,6 +17,7 @@ import {
   CLONE_ISSUER_PATH,
   CLONE_OAUTH_SCOPE,
   FEDERATED_STATUS,
+  WITHHELD_STATUS,
   decideFederation,
   federationResourceName,
   federationRuleBody,
@@ -107,7 +108,14 @@ describe("decideFederation", () => {
   });
 
   it("never federates a clone twice", () => {
-    const verdict = decideFederation({ ...base, federationRuleId: RULE });
+    // A rule AND the key gone. This used to assert the rule alone, which is
+    // the state a half-finished withdrawal leaves behind — so the test was
+    // pinning the defect rather than the rule.
+    const verdict = decideFederation({
+      ...base,
+      federationRuleId: RULE,
+      anthropicKeyStatus: FEDERATED_STATUS,
+    });
     expect(verdict.act === false && verdict.reason).toBe("already_federated");
   });
 
@@ -304,5 +312,122 @@ describe("the three coupled edits that fail silently apart", () => {
 
   it("opens no transaction of its own", () => {
     expect(/^\s*begin\s*;/im.test(migration)).toBe(false);
+  });
+});
+
+/*
+ * Two acts, not one.
+ *
+ * Federation creates resources AND removes the organisation key. The second
+ * fails on its own, and a first version treated the first as the finish line.
+ */
+describe("federation is finished when the KEY is gone", () => {
+  const base = {
+    workspaceId: WORKSPACE,
+    federationRuleId: RULE,
+    anthropicKeyStatus: FEDERATED_STATUS as string | null,
+    signingKeyPresent: true,
+    bootstrapPresent: true,
+  };
+
+  it("stands down once the rule exists AND the key is federated", () => {
+    const verdict = decideFederation(base);
+    expect(verdict.act === false && verdict.reason).toBe("already_federated");
+  });
+
+  /*
+   * The one that bit. Resources recorded, withdrawal failed: `already_federated`
+   * meant no later pass retried, the reconciler's own candidate query excluded
+   * the row, and the fleet sweep forwarded the organisation key straight back —
+   * because the status was still `inherited`, so it was not in the removal set.
+   * Every surface reported the clone as federated while it ran on a key that
+   * can act in any workspace the organisation has.
+   */
+  it("acts again when the rule exists but the key was never withdrawn", () => {
+    for (const status of ["inherited", "minted", null]) {
+      expect(decideFederation({ ...base, anthropicKeyStatus: status }).act, String(status))
+        .not.toBe(false);
+    }
+  });
+
+  it("still refuses a tenant's own key ahead of everything", () => {
+    // `set` reaches the retry branch above only because `tenant_supplied` is
+    // checked first. If that order ever inverts, this fails.
+    const verdict = decideFederation({ ...base, anthropicKeyStatus: "set" });
+    expect(verdict.act === false && verdict.reason).toBe("tenant_supplied");
+  });
+});
+
+describe("the key is never taken before the clone can do without it", () => {
+  const server = readFileSync("src/server/anthropicFederation.server.ts", "utf8");
+
+  /*
+   * A clone running a backend that predates the federation client has no
+   * federated path: removing its key leaves it with nothing. Creating a rule
+   * at the vendor says nothing about what the tenant's project is running, so
+   * the clone is asked before the destructive step.
+   */
+  it("probes the clone before withdrawing", () => {
+    const withdrawAt = server.indexOf("await withdrawAnthropicKey(");
+    const probeAt = server.indexOf("runCloneAnthropicSelftest");
+    expect(probeAt).toBeGreaterThan(-1);
+    expect(probeAt).toBeLessThan(withdrawAt);
+  });
+
+  it("fails closed — an unprovable clone keeps its key", () => {
+    expect(server).toContain('reason: "client_unproved"');
+    expect(server).toMatch(/if \(!probe\.ok\)/);
+  });
+
+  /*
+   * The reconciler has to be able to SEE a half-finished clone. Filtering on a
+   * null rule meant the one state that needs retrying was the one state never
+   * considered.
+   */
+  it("does not exclude already-ruled clones from the sweep", () => {
+    expect(server).not.toMatch(/\.is\("federation_rule_id", null\)/);
+  });
+});
+
+/*
+ * The second review's finding, and it is a regression this branch introduced.
+ *
+ * While a rule ALONE settled the question, a withheld clone that had got as
+ * far as a rule was refused by accident. Making an unfinished withdrawal a
+ * reason to act removed that accident — so nothing stopped the next sweep from
+ * completing a withdrawal on a clone somebody had deliberately stood down, and
+ * `withdrawAnthropicKey` would have marked it `federated`, handing back the
+ * Anthropic calls that were taken away on purpose.
+ */
+describe("a deliberate stand-down outranks the retry", () => {
+  const base = {
+    workspaceId: WORKSPACE,
+    federationRuleId: RULE,
+    anthropicKeyStatus: WITHHELD_STATUS as string | null,
+    signingKeyPresent: true,
+    bootstrapPresent: true,
+  };
+
+  it("refuses a withheld clone even with a rule already created", () => {
+    const verdict = decideFederation(base);
+    expect(verdict.act === false && verdict.reason).toBe("withheld");
+    expect(verdict.act === false && verdict.actionable).toBe(false);
+  });
+
+  it("refuses a withheld clone that never got a rule either", () => {
+    const verdict = decideFederation({ ...base, federationRuleId: null });
+    expect(verdict.act === false && verdict.reason).toBe("withheld");
+  });
+
+  it("is the same stand-down the workspace side already takes", () => {
+    // Two functions, one rule: a person's decision is never undone on a
+    // schedule. Spelled from the shared constant so they cannot drift.
+    expect(WITHHELD_STATUS).toBe("withheld");
+  });
+
+  it("still retries a withdrawal that merely FAILED", () => {
+    // The distinction that matters: `inherited` with a rule is unfinished
+    // work, `withheld` with a rule is a decision.
+    expect(decideFederation({ ...base, anthropicKeyStatus: "inherited" }).act).toBe(true);
   });
 });

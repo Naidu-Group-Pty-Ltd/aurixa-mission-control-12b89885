@@ -146,3 +146,48 @@ describe("the card says what is PROVED, not what is configured", () => {
     expect(card).toMatch(/costs nothing|not a billable/i);
   });
 });
+
+/*
+ * The starvation this sweep was ordered to avoid, reintroduced by the returns
+ * that skipped the writer.
+ *
+ * The commit that shipped this said "the stamp is written on every outcome,
+ * pass or fail". That was true only of outcomes that produced a reading: a
+ * clone with no Mission Control link, or one that could not be reached,
+ * returned before `recordReach` and never advanced `updated_at` — so it stayed
+ * first in an `updated_at`-ordered queue for ever, and two such clones
+ * consumed both slots on every tick while their own failure was absent from
+ * the ledger entirely.
+ */
+describe("every attempt advances the queue", () => {
+  const returns = src.match(/return \{\s*\n?\s*ok: false[\s\S]*?\};/g) ?? [];
+
+  it("records something on every failure that reached the clone's row", () => {
+    // `unreadable` is deliberately excluded below: the ledger is the thing
+    // that failed, so writing to it is the one act that cannot be relied on.
+    for (const reason of ["no_link", "unreachable", "no_probe_in_answer"]) {
+      const before = src.slice(0, src.indexOf(`reason: "${reason}"`));
+      expect(before.lastIndexOf("recordAttempt"), reason).toBeGreaterThan(
+        before.lastIndexOf("const { data: clone"),
+      );
+    }
+  });
+
+  it("advances updated_at whenever it records an attempt", () => {
+    const writer = /async function recordAttempt[\s\S]*?\n}\n/.exec(src)?.[0] ?? "";
+    expect(writer, "recordAttempt not found").not.toBe("");
+    expect(writer).toContain("updated_at");
+    // Never the proof stamp: an attempt that failed proved nothing.
+    expect(writer).not.toContain("verified_at");
+  });
+
+  it("does not write to the ledger when the ledger is what failed", () => {
+    const unreadable = src.slice(0, src.indexOf('reason: "unreadable"'));
+    expect(unreadable.slice(-400)).not.toContain("recordAttempt");
+  });
+
+  it("still cannot fail a probe by failing to record it", () => {
+    expect(src).toMatch(/console\.warn\(\s*"\[anthropic-selftest\]/);
+    expect(returns.length).toBeGreaterThan(0);
+  });
+});

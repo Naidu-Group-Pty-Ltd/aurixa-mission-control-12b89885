@@ -96,6 +96,31 @@ async function recordReach(cloneId: string, reach: CloneAnthropicReach): Promise
   }
 }
 
+/**
+ * Record an attempt that produced no reading.
+ *
+ * The sweep orders by `updated_at`, and only a parsed `reach` used to touch
+ * the row — so a clone with no Mission Control link, or one that cannot be
+ * reached, never advanced and stayed first in the queue for ever. Two of those
+ * consumed both slots on every tick and nothing else was ever probed, while
+ * their own failure was absent from the ledger entirely. That is the exact
+ * starvation the ordering was chosen to avoid, reintroduced by the returns
+ * that skipped the writer.
+ *
+ * The wording names what actually failed. "No Mission Control link" is not a
+ * reading about Anthropic, and recording it as one would send an operator to
+ * the vendor over a webhook endpoint that was never created.
+ */
+async function recordAttempt(cloneId: string, note: string): Promise<void> {
+  const { error } = await supabaseAdmin
+    .from("clone_anthropic_identity")
+    .update({ updated_at: new Date().toISOString(), last_error: note })
+    .eq("clone_id", cloneId);
+  if (error) {
+    console.warn("[anthropic-selftest] could not record the attempt", error.message);
+  }
+}
+
 export async function runCloneAnthropicSelftest(
   cloneId: string,
 ): Promise<AnthropicSelftestResult> {
@@ -121,6 +146,8 @@ export async function runCloneAnthropicSelftest(
     .eq("is_active", true)
     .maybeSingle();
   if (epErr) {
+    // Not recorded: the ledger is what failed, so writing to it is the one
+    // thing that cannot be trusted to advance anything.
     return { ok: false, cloneId, cloneName, reason: "unreadable", error: epErr.message };
   }
   if (!endpoint?.url || !endpoint?.secret) {
@@ -129,13 +156,9 @@ export async function runCloneAnthropicSelftest(
      * the vendor or the federation, this side simply has no door — and the
      * remedy is the Mission Control link reconcile.
      */
-    return {
-      ok: false,
-      cloneId,
-      cloneName,
-      reason: "no_link",
-      error: "This clone has no active Mission Control webhook endpoint to ask through.",
-    };
+    const note = "This clone has no active Mission Control webhook endpoint to ask through.";
+    await recordAttempt(cloneId, note);
+    return { ok: false, cloneId, cloneName, reason: "no_link", error: note };
   }
 
   const body = JSON.stringify({ event: EVENT, occurred_at: new Date().toISOString(), data: {} });
@@ -159,17 +182,14 @@ export async function runCloneAnthropicSelftest(
       signal: AbortSignal.timeout(45_000),
     });
   } catch (e) {
-    return {
-      ok: false,
-      cloneId,
-      cloneName,
-      reason: "unreachable",
-      error: e instanceof Error ? e.message.slice(0, 300) : "request failed",
-    };
+    const note = e instanceof Error ? e.message.slice(0, 300) : "request failed";
+    await recordAttempt(cloneId, `the clone could not be reached to probe it: ${note}`);
+    return { ok: false, cloneId, cloneName, reason: "unreachable", error: note };
   }
 
   const text = await res.text().catch(() => "");
   if (!res.ok) {
+    await recordAttempt(cloneId, `the clone answered ${res.status} when asked to probe Anthropic`);
     return { ok: false, cloneId, cloneName, reason: `http_${res.status}`, error: text.slice(0, 300) };
   }
 
@@ -183,19 +203,16 @@ export async function runCloneAnthropicSelftest(
      * an event it does not know. Its own state, because "no probe" and "a
      * probe that failed" are opposite readings and only one is about Anthropic.
      */
-    return {
-      ok: false,
-      cloneId,
-      cloneName,
-      reason: "no_probe_in_answer",
-      error:
-        "The clone accepted the event and returned no reading — its backend predates " +
-        "the self-test. Deploy the current functions to it first.",
-    };
+    const note =
+      "The clone accepted the event and returned no reading — its backend predates " +
+      "the self-test. Deploy the current functions to it first.";
+    await recordAttempt(cloneId, note);
+    return { ok: false, cloneId, cloneName, reason: "no_probe_in_answer", error: note };
   }
 
   const reach = parsed.reach;
   if (!reach) {
+    await recordAttempt(cloneId, "the clone answered the probe without a reading in it");
     return { ok: false, cloneId, cloneName, reason: "no_probe_in_answer", error: text.slice(0, 300) };
   }
 

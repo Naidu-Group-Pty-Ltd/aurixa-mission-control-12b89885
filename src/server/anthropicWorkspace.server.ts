@@ -156,7 +156,7 @@ export async function provisionAnthropicWorkspace(
 
   const existing = await supabase
     .from("clone_anthropic_identity")
-    .select("workspace_id")
+    .select("workspace_id, delivered_at")
     .eq("clone_id", cloneId)
     .maybeSingle();
   if (existing.error) {
@@ -187,8 +187,24 @@ export async function provisionAnthropicWorkspace(
     };
   }
 
+  /*
+   * A workspace recorded with no delivery stamp was created at the vendor and
+   * never written onto the project. That is not "already provisioned" — it is
+   * half done, and the failure message told the operator a retry would finish
+   * it.
+   *
+   * Read from a column nothing else owns. The first repair recognised this by
+   * a phrase in `last_error`, which has four writers — the probe clears it on
+   * a pass and notes it on a failure, the attempt recorder overwrites it, and
+   * federation clears it — every one of them running in the SAME sweep as this
+   * one. The marker was routinely erased before the pass that needed it.
+   */
+  const deliveryPending =
+    Boolean(existing.data?.workspace_id) && !existing.data?.delivered_at;
+
   const verdict = decideWorkspaceProvision({
     existingWorkspaceId: (existing.data?.workspace_id as string | undefined) ?? null,
+    deliveryPending,
     anthropicKeyStatus: (keyRow.data?.status as string | undefined) ?? null,
     credentialPresent: adminKey().length > 0,
     backendProvisioned: true, // resolveCloneSecretTarget already proved it
@@ -218,10 +234,21 @@ export async function provisionAnthropicWorkspace(
      * clone's spend would be split across two lines and the organisation's
      * allowance spent twice as fast.
      */
-    const live = await listAnthropicWorkspaces();
-    warning = workspaceCapWarning(live.length) ?? undefined;
-    const already = live.find((w) => w.name === name);
-    workspace = already ?? (await createAnthropicWorkspace(name));
+    const recordedId = (existing.data?.workspace_id as string | undefined) ?? null;
+    if (deliveryPending && recordedId) {
+      /*
+       * Delivery is the only step left, so the vendor is not asked again. A
+       * second listing would be a chance to match a DIFFERENT workspace by
+       * name and write that one instead — the recorded id is what this clone
+       * is already attributed to.
+       */
+      workspace = { id: recordedId, name };
+    } else {
+      const live = await listAnthropicWorkspaces();
+      warning = workspaceCapWarning(live.length) ?? undefined;
+      const already = live.find((w) => w.name === name);
+      workspace = already ?? (await createAnthropicWorkspace(name));
+    }
   } catch (e) {
     return { cloneId, provisioned: false, reason: "create_failed", detail: msg(e), actionable: true };
   }
@@ -255,7 +282,7 @@ export async function provisionAnthropicWorkspace(
     };
   }
 
-  const recorded = await recordIdentity(supabase, cloneId, workspace, null);
+  const recorded = await recordIdentity(supabase, cloneId, workspace, null, true);
   if (recorded) {
     return {
       cloneId,
@@ -285,6 +312,7 @@ async function recordIdentity(
   cloneId: string,
   workspace: AnthropicWorkspace,
   lastError: string | null,
+  delivered = false,
 ): Promise<string | null> {
   const now = new Date().toISOString();
   const { error } = await supabase
@@ -296,6 +324,9 @@ async function recordIdentity(
         workspace_name: workspace.name,
         last_error: lastError,
         updated_at: now,
+        // Stamped only by a run that got past the Management API write, so
+        // "recorded" and "the project knows" can never be confused again.
+        ...(delivered ? { delivered_at: now } : {}),
       },
       { onConflict: "clone_id" },
     );
