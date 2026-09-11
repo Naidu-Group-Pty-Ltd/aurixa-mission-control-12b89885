@@ -343,7 +343,7 @@ const credentialPresent = (provider: LlmProvider): boolean =>
 export async function provisionLlmKeys(
   supabase: Db,
   cloneId: string,
-  opts?: { actorUserId?: string | null; only?: readonly string[] },
+  opts?: { actorUserId?: string | null },
 ): Promise<LlmKeyProvisionResult> {
   let target: { cloneId: string; cloneName: string; projectRef: string };
   try {
@@ -374,8 +374,6 @@ export async function provisionLlmKeys(
   const outcomes: MintOutcome[] = [];
 
   for (const provider of LLM_PROVIDERS) {
-    if (opts?.only && !opts.only.includes(provider.secretName)) continue;
-
     const verdict: MintVerdict = decideLlmKeyMint({
       secretName: provider.secretName,
       ledgerStatus: statusOf.get(provider.secretName) ?? null,
