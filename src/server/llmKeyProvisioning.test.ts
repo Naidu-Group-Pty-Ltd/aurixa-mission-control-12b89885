@@ -176,6 +176,25 @@ describe("the three edits that fail silently apart", () => {
 });
 
 describe("it is actually called", () => {
+  it("runs at provisioning, so a new clone does not wait half an hour", () => {
+    // After the pipeline rather than inside it: minting reads and writes
+    // Mission Control's OWN tables, which is the same reason
+    // `linkMissionControl` is supplied from the caller.
+    const caller = read("src/lib/backend-provisioning.functions.ts");
+    expect(caller).toContain("provisionLlmKeys");
+    // And it cannot cost a workspace its boot.
+    const call = caller.indexOf("await provisionLlmKeys(");
+    const guard = caller.lastIndexOf("try {", call);
+    expect(call).toBeGreaterThan(-1);
+    expect(guard).toBeGreaterThan(-1);
+    expect(caller.indexOf("} catch", call)).toBeGreaterThan(call);
+  });
+
+  it("says what it did NOT mint, so four correct stand-downs do not read as a failure", () => {
+    const caller = read("src/lib/backend-provisioning.functions.ts");
+    expect(caller).toContain("not minted:");
+  });
+
   it("runs on the half-hourly clone-secrets sweep", () => {
     // A pure module nothing calls is a rule that does not exist — and a
     // minting step wired only into provisioning would apply to none of the
