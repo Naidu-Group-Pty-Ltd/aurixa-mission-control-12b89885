@@ -317,3 +317,39 @@ describe("the review found these, and they are all one mistake", () => {
     expect(verdict.act === false && verdict.reason).toBe("tenant_supplied");
   });
 });
+
+/*
+ * Delivery is recorded in a column nothing else owns.
+ *
+ * The first repair recognised a pending delivery by a phrase in `last_error`.
+ * That column has four writers — the reachability probe clears it on a pass
+ * and notes it on a failure, the attempt recorder overwrites it, and
+ * federation clears it when it records resources — and every one of them runs
+ * in the SAME sweep as workspace provisioning. The marker was routinely erased
+ * before the pass that needed it, after which the recorded workspace read as
+ * already provisioned for ever.
+ */
+describe("pending delivery survives the other writers", () => {
+  const server = readFileSync("src/server/anthropicWorkspace.server.ts", "utf8");
+
+  it("reads delivery from its own column", () => {
+    expect(server).toMatch(/const deliveryPending\s*=[\s\S]{0,160}delivered_at/);
+  });
+
+  it("no longer infers it from last_error", () => {
+    expect(server).not.toMatch(/deliveryPending[\s\S]{0,120}last_error/);
+    expect(server).not.toContain("WRITE_FAILURE_MARKER");
+  });
+
+  /*
+   * Stamped only by a run that got past the Management API write, so
+   * "recorded" and "the project knows" can never be confused again.
+   */
+  it("stamps delivery only on the path that wrote the secret", () => {
+    const stamps = server.match(/delivered_at: now/g) ?? [];
+    expect(stamps).toHaveLength(1);
+    const writeFailure = server.indexOf("if (!write.ok)");
+    const successRecord = server.indexOf("recordIdentity(supabase, cloneId, workspace, null, true)");
+    expect(successRecord).toBeGreaterThan(writeFailure);
+  });
+});

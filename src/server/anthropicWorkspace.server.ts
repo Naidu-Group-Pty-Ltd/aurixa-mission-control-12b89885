@@ -19,15 +19,6 @@ import { CloneSecretTargetError, resolveCloneSecretTarget } from "./cloneAllowed
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 
-/**
- * The phrase a delivery failure is recognised by.
- *
- * Named once because it is WRITTEN by the failure path and READ by the retry
- * that the failure's own message promises — two spellings is how the promise
- * quietly stops being kept.
- */
-const WRITE_FAILURE_MARKER = "the workspace id could not be written to the project";
-
 const ADMIN_API = "https://api.anthropic.com/v1/organizations";
 const ANTHROPIC_VERSION = "2023-06-01";
 const REQUEST_TIMEOUT_MS = 20_000;
@@ -165,7 +156,7 @@ export async function provisionAnthropicWorkspace(
 
   const existing = await supabase
     .from("clone_anthropic_identity")
-    .select("workspace_id, last_error")
+    .select("workspace_id, delivered_at")
     .eq("clone_id", cloneId)
     .maybeSingle();
   if (existing.error) {
@@ -197,14 +188,19 @@ export async function provisionAnthropicWorkspace(
   }
 
   /*
-   * A workspace recorded with a write failure against it was created at the
-   * vendor and never delivered to the project. That is not "already
-   * provisioned" — it is half done, and the failure message told the operator
-   * a retry would finish it.
+   * A workspace recorded with no delivery stamp was created at the vendor and
+   * never written onto the project. That is not "already provisioned" — it is
+   * half done, and the failure message told the operator a retry would finish
+   * it.
+   *
+   * Read from a column nothing else owns. The first repair recognised this by
+   * a phrase in `last_error`, which has four writers — the probe clears it on
+   * a pass and notes it on a failure, the attempt recorder overwrites it, and
+   * federation clears it — every one of them running in the SAME sweep as this
+   * one. The marker was routinely erased before the pass that needed it.
    */
-  const deliveryPending = String(existing.data?.last_error ?? "").includes(
-    WRITE_FAILURE_MARKER,
-  );
+  const deliveryPending =
+    Boolean(existing.data?.workspace_id) && !existing.data?.delivered_at;
 
   const verdict = decideWorkspaceProvision({
     existingWorkspaceId: (existing.data?.workspace_id as string | undefined) ?? null,
@@ -271,7 +267,7 @@ export async function provisionAnthropicWorkspace(
      * clone meanwhile bills to the default workspace, which is today's
      * behaviour rather than a regression.
      */
-    await recordIdentity(supabase, cloneId, workspace, `${WRITE_FAILURE_MARKER}: ${write.error}`);
+    await recordIdentity(supabase, cloneId, workspace, `the workspace id could not be written to the project: ${write.error}`);
     return {
       cloneId,
       provisioned: false,
@@ -286,7 +282,7 @@ export async function provisionAnthropicWorkspace(
     };
   }
 
-  const recorded = await recordIdentity(supabase, cloneId, workspace, null);
+  const recorded = await recordIdentity(supabase, cloneId, workspace, null, true);
   if (recorded) {
     return {
       cloneId,
@@ -316,6 +312,7 @@ async function recordIdentity(
   cloneId: string,
   workspace: AnthropicWorkspace,
   lastError: string | null,
+  delivered = false,
 ): Promise<string | null> {
   const now = new Date().toISOString();
   const { error } = await supabase
@@ -327,6 +324,9 @@ async function recordIdentity(
         workspace_name: workspace.name,
         last_error: lastError,
         updated_at: now,
+        // Stamped only by a run that got past the Management API write, so
+        // "recorded" and "the project knows" can never be confused again.
+        ...(delivered ? { delivered_at: now } : {}),
       },
       { onConflict: "clone_id" },
     );

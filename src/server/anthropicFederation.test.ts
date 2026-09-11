@@ -17,6 +17,7 @@ import {
   CLONE_ISSUER_PATH,
   CLONE_OAUTH_SCOPE,
   FEDERATED_STATUS,
+  WITHHELD_STATUS,
   decideFederation,
   federationResourceName,
   federationRuleBody,
@@ -385,5 +386,48 @@ describe("the key is never taken before the clone can do without it", () => {
    */
   it("does not exclude already-ruled clones from the sweep", () => {
     expect(server).not.toMatch(/\.is\("federation_rule_id", null\)/);
+  });
+});
+
+/*
+ * The second review's finding, and it is a regression this branch introduced.
+ *
+ * While a rule ALONE settled the question, a withheld clone that had got as
+ * far as a rule was refused by accident. Making an unfinished withdrawal a
+ * reason to act removed that accident — so nothing stopped the next sweep from
+ * completing a withdrawal on a clone somebody had deliberately stood down, and
+ * `withdrawAnthropicKey` would have marked it `federated`, handing back the
+ * Anthropic calls that were taken away on purpose.
+ */
+describe("a deliberate stand-down outranks the retry", () => {
+  const base = {
+    workspaceId: WORKSPACE,
+    federationRuleId: RULE,
+    anthropicKeyStatus: WITHHELD_STATUS as string | null,
+    signingKeyPresent: true,
+    bootstrapPresent: true,
+  };
+
+  it("refuses a withheld clone even with a rule already created", () => {
+    const verdict = decideFederation(base);
+    expect(verdict.act === false && verdict.reason).toBe("withheld");
+    expect(verdict.act === false && verdict.actionable).toBe(false);
+  });
+
+  it("refuses a withheld clone that never got a rule either", () => {
+    const verdict = decideFederation({ ...base, federationRuleId: null });
+    expect(verdict.act === false && verdict.reason).toBe("withheld");
+  });
+
+  it("is the same stand-down the workspace side already takes", () => {
+    // Two functions, one rule: a person's decision is never undone on a
+    // schedule. Spelled from the shared constant so they cannot drift.
+    expect(WITHHELD_STATUS).toBe("withheld");
+  });
+
+  it("still retries a withdrawal that merely FAILED", () => {
+    // The distinction that matters: `inherited` with a rule is unfinished
+    // work, `withheld` with a rule is a decision.
+    expect(decideFederation({ ...base, anthropicKeyStatus: "inherited" }).act).toBe(true);
   });
 });

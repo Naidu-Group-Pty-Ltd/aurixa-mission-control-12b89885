@@ -150,6 +150,29 @@ export const fetchReadiness = createServerFn({ method: "POST" })
       .select("clone_id, supabase_project_ref")
       .not("supabase_project_ref", "is", null);
 
+    /*
+     * A clone that DELIBERATELY has no Aurixa workspace is not a gap.
+     *
+     * `decideWorkspaceProvision` refuses two cases permanently and correctly:
+     * a tenant who supplied their own Anthropic key (a workspace in Aurixa's
+     * organisation does not exist for that credential) and a key somebody
+     * withheld on purpose. Neither can ever produce an identity row — so
+     * counting them in the denominator makes this check permanently false on
+     * a perfectly healthy fleet. Nine managed clones beside one tenant-owned
+     * key would read "9 of 10" and block the capability for ever, which is the
+     * opposite error to the tautological "1 of 1" it replaced.
+     */
+    const { data: anthropicKeys } = await supabaseAdmin
+      .from("clone_backend_secrets")
+      .select("clone_id, status")
+      .eq("name", "ANTHROPIC_API_KEY");
+
+    const standDown = new Set(
+      (anthropicKeys ?? [])
+        .filter((r) => r.status === "set" || r.status === "withheld")
+        .map((r) => r.clone_id),
+    );
+
     if (identityError || backendError) {
       config.anthropic_attribution = [
         {
@@ -172,7 +195,7 @@ export const fetchReadiness = createServerFn({ method: "POST" })
       // can exercise — a capability test that passed `config: {}` is how the
       // bootstrap check came to report a working Phase 1 as blocked.
       config.anthropic_attribution = anthropicAttributionConfig({
-        provisionedClones: (backends ?? []).length,
+        provisionedClones: (backends ?? []).filter((b) => !standDown.has(b.clone_id)).length,
         identities: rows.length,
         federated: rows.filter((r) => Boolean(r.federation_rule_id)).length,
         proved: rows.filter((r) => Boolean(r.verified_at)).length,

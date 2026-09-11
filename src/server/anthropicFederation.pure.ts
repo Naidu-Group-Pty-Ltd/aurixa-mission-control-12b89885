@@ -60,6 +60,9 @@
 /** The ledger status a clone carries once it reaches Anthropic by federation. */
 export const FEDERATED_STATUS = "federated";
 
+/** A person took the credential off. Never undone on a schedule. */
+export const WITHHELD_STATUS = "withheld";
+
 /** PKCS8 PEM. Mission Control signs every clone assertion with it. */
 export const FEDERATION_KEY_ENV = "ANTHROPIC_FEDERATION_PRIVATE_KEY";
 
@@ -188,7 +191,8 @@ export type FederationVerdict =
         | "no_workspace"
         | "no_bootstrap"
         | "no_signing_key"
-        | "tenant_supplied";
+        | "tenant_supplied"
+        | "withheld";
       message: string;
       /** False where nothing an operator does on this deployment would change it. */
       actionable: boolean;
@@ -240,6 +244,28 @@ export function decideFederation(input: {
    * finds its existing resources rather than making new ones and goes to the
    * withdrawal it did not complete.
    */
+  /*
+   * `withheld` is written only by an explicit withdrawal, and federating past
+   * it would hand the clone its Anthropic calls back — undoing a person's
+   * decision on a schedule, with no signal but a row changing state. The same
+   * stand-down `decideWorkspaceProvision` already takes, for the same reason.
+   *
+   * It matters MORE here than it did before the retry rule: while a rule alone
+   * settled the question, a withheld clone that had got as far as a rule was
+   * refused by accident. Now that an unfinished withdrawal is a reason to act,
+   * nothing but this stops the next sweep from completing it.
+   */
+  if (input.anthropicKeyStatus === WITHHELD_STATUS) {
+    return {
+      act: false,
+      reason: "withheld",
+      message:
+        "Anthropic was deliberately withheld from this clone. Federating it would give it " +
+        "Anthropic calls again, which is the decision somebody made in the other direction.",
+      actionable: false,
+    };
+  }
+
   if (input.federationRuleId && input.anthropicKeyStatus === FEDERATED_STATUS) {
     return {
       act: false,

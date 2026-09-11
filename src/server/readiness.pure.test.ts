@@ -375,3 +375,54 @@ describe("anthropicAttributionConfig", () => {
     expect(check({ identities: 0 }, "Proved reachable").ok).toBeNull();
   });
 });
+
+/*
+ * The denominator has two ways to be wrong, and the first repair swapped one
+ * for the other.
+ *
+ * Counting inside the identity table was tautologically true. Counting every
+ * provisioned backend is permanently FALSE on a healthy fleet, because
+ * `decideWorkspaceProvision` refuses two cases on purpose — a tenant who
+ * supplied their own key, and a key somebody withheld — and neither can ever
+ * produce an identity row. The population is the clones that SHOULD have one.
+ */
+describe("the workspace denominator counts only clones that should have one", () => {
+  const facts = {
+    provisionedClones: 9,
+    identities: 9,
+    federated: 9,
+    proved: 9,
+    failing: 0,
+    bootstrapSet: 4,
+    bootstrapTotal: 4,
+  };
+  const coverage = (over: Partial<typeof facts>) => {
+    const c = anthropicAttributionConfig({ ...facts, ...over }).find(
+      (x) => x.label === "Per-clone workspaces",
+    );
+    if (!c) throw new Error("no coverage check");
+    return c;
+  };
+
+  /*
+   * Nine managed clones and one tenant-owned key: the tenant's clone is
+   * excluded by the caller, so nine of nine is complete and green rather than
+   * "9 of 10" and blocked for ever.
+   */
+  it("is green when every eligible clone is attributed", () => {
+    expect(coverage({}).ok).toBe(true);
+    expect(coverage({}).detail).toContain("9 of 9");
+  });
+
+  it("still fails when an ELIGIBLE clone has no workspace", () => {
+    expect(coverage({ provisionedClones: 10, identities: 9 }).ok).toBe(false);
+  });
+
+  /*
+   * A fleet whose every clone is a deliberate stand-down has nothing to
+   * attribute, which is a real answer rather than a fault.
+   */
+  it("says nothing rather than something false when no clone is eligible", () => {
+    expect(coverage({ provisionedClones: 0, identities: 0 }).ok).toBeNull();
+  });
+});

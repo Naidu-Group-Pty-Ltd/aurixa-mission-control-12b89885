@@ -1359,6 +1359,7 @@ export type Database = {
         Row: {
           clone_id: string
           created_at: string
+          delivered_at: string | null
           federated_at: string | null
           federation_issuer_id: string | null
           federation_rule_id: string | null
@@ -1372,6 +1373,7 @@ export type Database = {
         Insert: {
           clone_id: string
           created_at?: string
+          delivered_at?: string | null
           federated_at?: string | null
           federation_issuer_id?: string | null
           federation_rule_id?: string | null
@@ -1385,6 +1387,7 @@ export type Database = {
         Update: {
           clone_id?: string
           created_at?: string
+          delivered_at?: string | null
           federated_at?: string | null
           federation_issuer_id?: string | null
           federation_rule_id?: string | null
