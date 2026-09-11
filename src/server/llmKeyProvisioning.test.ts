@@ -99,6 +99,19 @@ describe("whether to mint", () => {
     }
   });
 
+  it("never puts back a key somebody deliberately took off", () => {
+    // `withheld` is written only by an explicit withdrawal, and its own header
+    // says why: "a status that a reconcile can reach is one a reconcile can
+    // reach by accident". Minting IS a reconcile — it would undo that decision
+    // on a half-hourly schedule, and the operator who made it would see the
+    // ledger read `minted` one tick later with nothing saying what happened.
+    const v = decideLlmKeyMint(facts({ ledgerStatus: "withheld" }));
+    expect(v.act).toBe(false);
+    if (v.act) return;
+    expect(v.reason).toBe("withheld");
+    expect(v.actionable).toBe(false);
+  });
+
   it("mints once, ever", () => {
     const v = decideLlmKeyMint(facts({ ledgerStatus: MINTED_STATUS }));
     expect(v.act).toBe(false);

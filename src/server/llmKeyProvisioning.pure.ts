@@ -193,6 +193,7 @@ export type MintVerdict =
         | "no_credential"
         | "not_provisioned"
         | "tenant_supplied"
+        | "withheld"
         | "already_minted";
       /** Said to an operator. Names the rule where there is nothing to fix. */
       message: string;
@@ -244,6 +245,30 @@ export function decideLlmKeyMint(input: {
         `This workspace supplied its own ${provider.label} key, so it is charged nothing for ` +
         `${provider.label} calls. Minting one here would replace it and put those calls back on ` +
         `Aurixa's account.`,
+      actionable: false,
+    };
+  }
+
+  /*
+   * A credential somebody deliberately took OFF this clone.
+   *
+   * `withheld` is written only by an explicit withdrawal, and its own header
+   * says why: "a status that a reconcile can reach is one a reconcile can
+   * reach by accident". Minting is a reconcile. Putting a fresh key on a
+   * project that a person deliberately cleared would undo that decision on a
+   * half-hourly schedule, and the operator who made it would have no signal
+   * at all — the ledger would simply read `minted` one tick later.
+   *
+   * No model key is withheld today. This is here so that adding one is a
+   * decision rather than a discovery.
+   */
+  if (input.ledgerStatus === "withheld") {
+    return {
+      act: false,
+      reason: "withheld",
+      message:
+        `${provider.label} was deliberately withheld from this clone. Minting a key here would ` +
+        "put one back on the project that somebody explicitly cleared.",
       actionable: false,
     };
   }
