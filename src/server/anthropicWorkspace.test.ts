@@ -10,6 +10,8 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 
+import { parseAssertions } from "./migrationAssertions.pure";
+
 import {
   ANTHROPIC_ADMIN_ENV,
   ANTHROPIC_WORKSPACE_CAP,
@@ -400,6 +402,32 @@ describe("no existing row is assumed delivered", () => {
     expect(corrected).toMatch(/where delivered_at is not null/i);
     // Never reintroduces the inference it is undoing.
     expect(corrected).not.toMatch(/set\s+delivered_at\s*=\s*coalesce/i);
+  });
+
+  /*
+   * The correction creates NO object, so it may claim none.
+   *
+   * It first claimed `column:clone_anthropic_identity.delivered_at` — a column
+   * `20260911080000` had already added. A `column:` claim is answered by
+   * probing the catalog, so it reads SATISFIED on a database that never
+   * applied this file at all: the drift card would show the cleanup green
+   * having measured its predecessor. That is the "ran and achieved nothing"
+   * shape the assertion grammar exists to catch, pointed the other way.
+   *
+   * There is no honest structural claim to put in its place — "no row carries
+   * `delivered_at`" stops being true at the next real delivery — so this pins
+   * the RULE: a migration that creates nothing claims `none`, with a reason.
+   */
+  it("claims none rather than a column its predecessor created", () => {
+    const parsed = parseAssertions(corrected);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.assertions.length).toBeGreaterThan(0);
+    for (const assertion of parsed.assertions) {
+      expect(assertion.kind).toBe("none");
+    }
+    // Whatever the wording, it must not become a claim about an object again.
+    expect(corrected).not.toMatch(/@asserts\s+(table|column|rpc|cron|rows|enum|check):/i);
   });
 
   it("opens no transaction of its own", () => {

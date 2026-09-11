@@ -1,4 +1,9 @@
--- @asserts column:clone_anthropic_identity.delivered_at
+-- @asserts none:clears a data stamp and creates no object. Claiming
+-- @asserts none:`column:clone_anthropic_identity.delivered_at` would be satisfied
+-- @asserts none:by 20260911080000 whether or not THIS file ran, so the drift card
+-- @asserts none:would read green on a database that never applied it. Nor is the
+-- @asserts none:effect stably observable — "no row carries delivered_at" stops
+-- @asserts none:being true at the next real delivery.
 --
 -- Clear every delivery stamp that was PRESUMED rather than observed.
 --
@@ -33,6 +38,18 @@
 -- towards, and this is the last moment a stamp can be presumed rather than
 -- earned: every one written after this comes from a run that completed the
 -- write itself.
+--
+-- ## Why there is no end-of-file verification block
+--
+-- The two data corrections this file is modelled on (`20260908110100`,
+-- `20260908110200`) end in a DO block that fails the migration if the edit did
+-- not land. They can, because nothing writes catalog prices while a migration
+-- runs. This column is written by live provisioning: a delivery that completes
+-- between the UPDATE and the check is CORRECT, and under READ COMMITTED the
+-- block would see it and abort — turning a healthy fleet into a failed queue
+-- row, which is a cost this repository has already paid. The statement is also
+-- unconditional, so it has no way to succeed having done nothing; that is the
+-- shape a verification block is for.
 update public.clone_anthropic_identity
    set delivered_at = null
  where delivered_at is not null;
