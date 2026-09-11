@@ -293,6 +293,7 @@ describe("anthropicAttributionConfig", () => {
   const facts = {
     provisionedClones: 3,
     identities: 3,
+    delivered: 3,
     federated: 3,
     proved: 3,
     failing: 0,
@@ -310,11 +311,40 @@ describe("anthropicAttributionConfig", () => {
   });
 
   /*
+   * Coverage is what the CLONE received, not what the ledger recorded.
+   *
+   * A row whose `delivered_at` is null is a workspace the vendor created and
+   * the clone never got: its `ANTHROPIC_WORKSPACE_ID` was never written, so it
+   * is still billing to the organisation's default line. Counting the row as
+   * coverage reports N of N and green over the exact gap this check exists to
+   * find — and `20260911090000` clears every presumed stamp, so the whole
+   * fleet enters that state the moment it applies.
+   *
+   * The second half is the half that keeps it honest: the other three counts
+   * are facts about the identity RECORD and must not move with delivery, or
+   * this fix just relocates the same confusion.
+   */
+  it("counts delivered workspaces as coverage, and leaves the record counts alone", () => {
+    const undelivered = check({ delivered: 0 }, "Per-clone workspaces");
+    expect(undelivered.ok).toBe(false);
+    expect(undelivered.detail).toContain("0 of 3");
+
+    const partial = check({ delivered: 2 }, "Per-clone workspaces");
+    expect(partial.ok).toBe(false);
+
+    // Federation and reachability are about the record, so an undelivered
+    // fleet does not drag them down with it.
+    for (const label of ["Federation bootstrap", "Proved reachable"]) {
+      expect(check({ delivered: 0 }, label).ok, label).toBe(true);
+    }
+  });
+
+  /*
    * `workspace_id` is NOT NULL, so counting inside the identity table is
    * tautological: one attributed clone beside nine unattributed read "1 of 1".
    */
   it("measures workspaces against the provisioned clones, not the identity rows", () => {
-    const c = check({ provisionedClones: 10, identities: 1 }, "Per-clone workspaces");
+    const c = check({ provisionedClones: 10, identities: 1, delivered: 1 }, "Per-clone workspaces");
     expect(c.ok).toBe(false);
     expect(c.detail).toContain("1 of 10");
   });
@@ -391,6 +421,7 @@ describe("the workspace denominator counts only clones that should have one", ()
   const facts = {
     provisionedClones: 9,
     identities: 9,
+    delivered: 9,
     federated: 9,
     proved: 9,
     failing: 0,
@@ -416,7 +447,7 @@ describe("the workspace denominator counts only clones that should have one", ()
   });
 
   it("still fails when an ELIGIBLE clone has no workspace", () => {
-    expect(coverage({ provisionedClones: 10, identities: 9 }).ok).toBe(false);
+    expect(coverage({ provisionedClones: 10, identities: 9, delivered: 9 }).ok).toBe(false);
   });
 
   /*

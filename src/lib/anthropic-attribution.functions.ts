@@ -23,7 +23,7 @@ export const getCloneAnthropicIdentity = createServerFn({ method: "POST" })
     const { data: row, error } = await context.supabase
       .from("clone_anthropic_identity")
       .select(
-        "clone_id, workspace_id, workspace_name, service_account_id, federation_rule_id, federation_issuer_id, federated_at, verified_at, last_error, updated_at",
+        "clone_id, workspace_id, workspace_name, delivered_at, service_account_id, federation_rule_id, federation_issuer_id, federated_at, verified_at, last_error, updated_at",
       )
       .eq("clone_id", data.cloneId)
       .maybeSingle();

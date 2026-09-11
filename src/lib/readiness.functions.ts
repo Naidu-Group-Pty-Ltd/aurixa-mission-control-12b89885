@@ -132,7 +132,7 @@ export const fetchReadiness = createServerFn({ method: "POST" })
      */
     const { data: identities, error: identityError } = await supabaseAdmin
       .from("clone_anthropic_identity")
-      .select("clone_id, workspace_id, federation_rule_id, verified_at, last_error");
+      .select("clone_id, workspace_id, delivered_at, federation_rule_id, verified_at, last_error");
 
     /*
      * The DENOMINATOR is the clones that could carry a workspace, read the
@@ -221,6 +221,9 @@ export const fetchReadiness = createServerFn({ method: "POST" })
       config.anthropic_attribution = anthropicAttributionConfig({
         provisionedClones: eligible.size,
         identities: rows.length,
+        // Recorded is not delivered: a null stamp is a workspace the vendor
+        // holds and the clone never received, so it is not coverage.
+        delivered: rows.filter((r) => Boolean(r.delivered_at)).length,
         federated: rows.filter((r) => Boolean(r.federation_rule_id)).length,
         proved: rows.filter((r) => Boolean(r.verified_at)).length,
         failing: rows.filter((r) => Boolean(r.last_error)).length,

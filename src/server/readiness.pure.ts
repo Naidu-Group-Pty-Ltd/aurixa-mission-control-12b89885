@@ -477,6 +477,17 @@ export interface AnthropicAttributionFacts {
   readonly provisionedClones: number;
   /** Rows in `clone_anthropic_identity`. */
   readonly identities: number;
+  /**
+   * Of those, how many carry `delivered_at` — the workspace id actually
+   * WRITTEN onto the clone's project.
+   *
+   * Separate from `identities` because a row records what the vendor created
+   * and `delivered_at` records what the clone received, and the second one
+   * fails on its own. Required rather than optional: an omitted count must
+   * never read as "all delivered", which is the reading that would put this
+   * check back where the review found it.
+   */
+  readonly delivered: number;
   /** Of those, how many carry a federation rule. */
   readonly federated: number;
   /** Of those, how many have proved they can reach Anthropic. */
@@ -504,6 +515,7 @@ export function anthropicAttributionConfig(
   const {
     provisionedClones,
     identities,
+    delivered,
     federated,
     proved,
     failing,
@@ -511,7 +523,24 @@ export function anthropicAttributionConfig(
     bootstrapTotal,
   } = facts;
 
-  const withWorkspace = identities;
+  /*
+   * Coverage is DELIVERED, never merely recorded.
+   *
+   * It was `identities` — the count of rows that exist — which the review
+   * caught once `delivered_at` became the column that says whether the id
+   * reached the project. A row with a null stamp means the workspace exists at
+   * the vendor and the clone's `ANTHROPIC_WORKSPACE_ID` was never written, so
+   * that clone is still billing to the organisation's default line. Counting
+   * it as covered reports N of N and green over exactly the gap this check was
+   * built to find — and `20260911090000` clears every presumed stamp, so the
+   * whole fleet enters that state the moment it applies.
+   *
+   * `federated`, `proved` and `failing` deliberately stay on `identities`:
+   * a federation rule, a reachability probe and a recorded fault are facts
+   * about the identity record, and each is true whether or not the id was
+   * delivered.
+   */
+  const withWorkspace = delivered;
 
   return [
     {

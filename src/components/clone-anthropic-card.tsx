@@ -70,7 +70,19 @@ export function CloneAnthropicCard({ cloneId }: { cloneId: string }) {
   const unreadable = data && !data.ok ? data.error : null;
   const row = data?.ok ? data.row : null;
 
-  const hasWorkspace = Boolean(row?.workspace_id);
+  /*
+   * RECORDED and DELIVERED are different facts, and the second one fails on
+   * its own: the Management API write can be refused after Anthropic has
+   * created the workspace. A row exists either way, so reading `workspace_id`
+   * as "this clone has its workspace" tells an operator the step is done while
+   * the clone's `ANTHROPIC_WORKSPACE_ID` is unset and its spend is still on the
+   * organisation's default line. `20260911090000` clears every presumed stamp,
+   * so that is every clone the moment it applies.
+   *
+   * The readiness coverage check answers to `delivered_at` for the same reason.
+   */
+  const recorded = Boolean(row?.workspace_id);
+  const hasWorkspace = recorded && Boolean(row?.delivered_at);
   const federated = Boolean(row?.federation_rule_id);
   const proved = Boolean(row?.verified_at);
 
@@ -81,7 +93,9 @@ export function CloneAnthropicCard({ cloneId }: { cloneId: string }) {
       state: hasWorkspace ? "done" : "open",
       detail: hasWorkspace
         ? `${row?.workspace_name ?? "(unnamed)"} carries this clone's model spend`
-        : "Without one, this clone's Claude usage lands on the organisation's default line with every other tenant's",
+        : recorded
+          ? `${row?.workspace_name ?? "(unnamed)"} exists at Anthropic but its id was never written onto this clone's project, so the spend is still on the organisation's default line. The next reconcile writes the same id.`
+          : "Without one, this clone's Claude usage lands on the organisation's default line with every other tenant's",
     },
     {
       id: "federation",
