@@ -314,6 +314,23 @@ describe("minting never costs a workspace its boot", () => {
     expect(server).toContain("for (const provider of LLM_PROVIDERS)");
   });
 
+  it("a failed write never downgrades the row of a key that still works", () => {
+    // The project's value is unchanged on a write failure — the clone is
+    // still running on the forwarded fleet key — so stamping `failed` would
+    // describe a state that is not true, and THREE readers act on it:
+    // `resolve_api_key_billability` would rate a working key `no_key` and
+    // stop recharging its usage, the secrets page would show "Failed" for a
+    // credential that is present, and an operator would hunt a fault in a
+    // clone that has none.
+    const server = read("src/server/llmKeyProvisioning.server.ts");
+    const writeFail = server.indexOf("if (!write.ok) {");
+    const upsert = server.indexOf('.from("clone_backend_secrets").upsert(');
+    expect(writeFail).toBeGreaterThan(-1);
+    // The ledger write happens only AFTER the failure path has returned.
+    expect(upsert).toBeGreaterThan(writeFail);
+    expect(server).not.toContain('status: write.ok ? MINTED_STATUS : "failed"');
+  });
+
   it("tells a key that exists at the vendor from one that does not", () => {
     // The two need different remedies: a `write_failed` key is real and
     // orphaned, where `mint_failed` created nothing. Reporting both as one

@@ -413,25 +413,21 @@ export async function provisionLlmKeys(
       { name: provider.secretName, value },
     ]);
 
-    const now = new Date().toISOString();
-    const { error: ledgerErr } = await supabase.from("clone_backend_secrets").upsert(
-      {
-        clone_id: cloneId,
-        name: provider.secretName,
-        status: write.ok ? MINTED_STATUS : "failed",
-        last_set_at: write.ok ? now : null,
-        last_error: write.ok ? null : write.error,
-        set_by: opts?.actorUserId ?? null,
-      },
-      { onConflict: "clone_id,name" },
-    );
-
     if (!write.ok) {
       /*
-       * The key exists at the vendor and is not on the project. Said as its
-       * own reason: a retry is safe (it mints a second key and the first is
-       * orphaned but harmless), where "mint_failed" would suggest nothing was
-       * created.
+       * The key exists at the vendor and is not on the project.
+       *
+       * The ledger row is deliberately NOT touched. The project's value is
+       * unchanged — the clone is still running on the forwarded fleet key —
+       * so writing `failed` here would describe a state that is not true, and
+       * three things read that row: `resolve_api_key_billability` would rate
+       * a working key `no_key` and stop recharging its usage, the secrets page
+       * would show "Failed" for a credential that is present, and an operator
+       * would go looking for a fault in a clone that has none.
+       *
+       * Said as its own reason too: a retry is safe (it mints a second key and
+       * the first is orphaned but harmless), where "mint_failed" would suggest
+       * nothing was created at the vendor.
        */
       outcomes.push({
         name: provider.secretName,
@@ -442,6 +438,19 @@ export async function provisionLlmKeys(
       });
       continue;
     }
+
+    const now = new Date().toISOString();
+    const { error: ledgerErr } = await supabase.from("clone_backend_secrets").upsert(
+      {
+        clone_id: cloneId,
+        name: provider.secretName,
+        status: MINTED_STATUS,
+        last_set_at: now,
+        last_error: null,
+        set_by: opts?.actorUserId ?? null,
+      },
+      { onConflict: "clone_id,name" },
+    );
 
     if (ledgerErr) {
       /*
