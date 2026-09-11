@@ -502,6 +502,38 @@ async function runBackendProvisioning(
      * the clone exactly as it would have been, and the half-hourly sweep
      * repairs it. A workspace never waits on a provider's API to boot.
      */
+    /*
+     * The clone's own Anthropic workspace, before the model keys below.
+     *
+     * Anthropic will not create an API key through its API, so the per-clone
+     * credential the other four vendors get cannot exist. A per-clone
+     * WORKSPACE can, and it is what Anthropic's usage and cost reports group
+     * by — so this is how Anthropic spend becomes answerable per tenant.
+     *
+     * Non-fatal, like the keys: a clone with no workspace reaches Anthropic
+     * exactly as every clone does today.
+     */
+    try {
+      const { provisionAnthropicWorkspace } = await import(
+        /* @vite-ignore */ "@/server/anthropicWorkspace.server"
+      );
+      const ws = await provisionAnthropicWorkspace(supabase, input.cloneId, { actorUserId: userId });
+      await updateStatus(
+        "migrating",
+        ws.provisioned
+          ? `Anthropic workspace: ${ws.workspaceId} now carries this clone's model spend`
+          : `Anthropic workspace not created (${ws.reason ?? "skipped"}): ${ws.detail ?? ""}`.trim(),
+      );
+      if (ws.warning) await updateStatus("migrating", ws.warning);
+    } catch (err) {
+      await updateStatus(
+        "migrating",
+        `Anthropic workspace step failed (${err instanceof Error ? err.message : String(err)}) — ` +
+          "this clone's Anthropic calls bill to the organisation's default workspace and the " +
+          "reconcile sweep will retry",
+      );
+    }
+
     try {
       const { provisionLlmKeys } = await import(
         /* @vite-ignore */ "@/server/llmKeyProvisioning.server"

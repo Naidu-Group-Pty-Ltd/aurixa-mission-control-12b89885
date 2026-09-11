@@ -48,6 +48,8 @@ export const Route = createFileRoute("/hooks/clone-secrets-reconcile")({
           const { reconcileCloneDerivedConfig } =
             await import("@/server/cloneDerivedConfig.server");
           const { reconcileLlmKeys } = await import("@/server/llmKeyProvisioning.server");
+          const { reconcileAnthropicWorkspaces } =
+            await import("@/server/anthropicWorkspace.server");
           const owned = await reconcileCloneOwnedSecrets(supabaseAdmin);
           const link = await reconcileCloneMissionControlLinks(supabaseAdmin);
           const derived = await reconcileCloneDerivedConfig(supabaseAdmin);
@@ -68,11 +70,24 @@ export const Route = createFileRoute("/hooks/clone-secrets-reconcile")({
             console.error("LLM key reconcile failed:", detail);
             llm = { ok: false, error: detail };
           }
+          // Same treatment, its own try/catch: an Anthropic outage must not
+          // cost the model keys their run any more than the reverse.
+          let anthropicWorkspaces: unknown;
+          try {
+            anthropicWorkspaces = await reconcileAnthropicWorkspaces(supabaseAdmin);
+          } catch (e) {
+            const detail = e instanceof Error ? e.message : String(e);
+            console.error("Anthropic workspace reconcile failed:", detail);
+            anthropicWorkspaces = { ok: false, error: detail };
+          }
           // 200 with the refusals in the body: one clone that cannot be
           // repaired is not a failed sweep.
-          return new Response(JSON.stringify({ success: true, owned, link, derived, llm }), {
-            headers: { "Content-Type": "application/json" },
-          });
+          return new Response(
+            JSON.stringify({ success: true, owned, link, derived, llm, anthropicWorkspaces }),
+            {
+              headers: { "Content-Type": "application/json" },
+            },
+          );
         } catch (e) {
           const msg = e instanceof Error ? e.message : "Clone secrets reconcile failed";
           console.error("Clone secrets reconcile failed:", msg);

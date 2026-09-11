@@ -374,4 +374,13 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "check", table: "clone_backend_secrets", column: "status", value: "minted" },
     ],
   },
+  {
+    migration: "20260911060000_clone_anthropic_identity.sql",
+    version: "20260911060000",
+    assertions: [
+      { kind: "table", table: "clone_anthropic_identity" },
+      { kind: "column", table: "clone_anthropic_identity", column: "workspace_id" },
+      { kind: "column", table: "clone_anthropic_identity", column: "federation_rule_id" },
+    ],
+  },
 ];

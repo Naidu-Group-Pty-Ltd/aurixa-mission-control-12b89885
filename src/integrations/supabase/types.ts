@@ -1355,6 +1355,63 @@ export type Database = {
           },
         ]
       }
+      clone_anthropic_identity: {
+        Row: {
+          clone_id: string
+          created_at: string
+          federated_at: string | null
+          federation_issuer_id: string | null
+          federation_rule_id: string | null
+          last_error: string | null
+          service_account_id: string | null
+          updated_at: string
+          verified_at: string | null
+          workspace_id: string
+          workspace_name: string
+        }
+        Insert: {
+          clone_id: string
+          created_at?: string
+          federated_at?: string | null
+          federation_issuer_id?: string | null
+          federation_rule_id?: string | null
+          last_error?: string | null
+          service_account_id?: string | null
+          updated_at?: string
+          verified_at?: string | null
+          workspace_id: string
+          workspace_name: string
+        }
+        Update: {
+          clone_id?: string
+          created_at?: string
+          federated_at?: string | null
+          federation_issuer_id?: string | null
+          federation_rule_id?: string | null
+          last_error?: string | null
+          service_account_id?: string | null
+          updated_at?: string
+          verified_at?: string | null
+          workspace_id?: string
+          workspace_name?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clone_anthropic_identity_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: true
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "clone_anthropic_identity_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: true
+            referencedRelation: "clones_missing_isolated_backend"
+            referencedColumns: ["clone_id"]
+          },
+        ]
+      }
       clone_backend_secrets: {
         Row: {
           clone_id: string
