@@ -13,6 +13,7 @@ import {
   readCloneMigrationLedger,
 } from "./backend-provisioning.server";
 import { openScopedPrimeCorpus } from "./fleet-migration.server";
+import { describeCoverage, type CoverageComposition } from "./migrationProvenance.pure";
 import {
   readCloneMigrationStanding,
   sharedVersionReading,
@@ -139,6 +140,31 @@ export const getCloneMigrationStatus = createServerFn({ method: "POST" })
       projectRef && settled ? countProjectEdgeFunctions(projectRef) : Promise.resolve(null),
     ]);
 
+    /*
+      What that ledger reading RESTS on.
+
+      The union the replay skips mixes versions something ran here with
+      versions somebody asserted the clone already had, and until now nothing
+      could tell them apart: measured 2026-09-12 on npc-client-dashboard, 22
+      executions beside 783 assertions in one table. A page that says "964 of
+      980 recorded" while 783 of them are somebody's 2026-09-02 judgement is
+      reporting a number that means less than it looks like.
+
+      Asked of the SAME rows the reading above used, so the composition can
+      never describe a set this page is not showing. Null when unreadable —
+      the page then shows the count with no claim about what it rests on,
+      which is what it did before this existed.
+    */
+    let coverage: CoverageComposition | null = null;
+    if (projectRef && ledger.ok) {
+      const { readCloneCoverage } = await import("@/server/migrationProvenance.server");
+      const reading = await readCloneCoverage(
+        projectRef,
+        ledger.rows.map((r) => r.version),
+      );
+      coverage = reading.ok ? reading.composition : null;
+    }
+
     let standing: CloneMigrationStanding | null = null;
     let latestVersion = "none";
     try {
@@ -183,6 +209,14 @@ export const getCloneMigrationStatus = createServerFn({ method: "POST" })
       runnableVersionCount: standing?.runnableVersionCount ?? null,
       /** The highest runnable version the clone itself records. */
       latestAppliedVersion: standing?.latestAppliedVersion ?? null,
+      /**
+       * What the recorded coverage rests on: executed here, asserted, or
+       * recorded before anybody was writing the difference down. Null = not
+       * measured, which is never the same as "all executed".
+       */
+      coverage,
+      /** One sentence for an operator, or null when there is no caveat. */
+      coverageNote: coverage ? describeCoverage(coverage) : null,
       /** Recorded versions more than one runnable file claims — never pending. */
       sharedVersions: (standing?.sharedVersions ?? []).map((s) => ({
         version: s.version,

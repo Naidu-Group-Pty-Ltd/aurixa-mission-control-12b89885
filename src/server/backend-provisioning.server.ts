@@ -2219,6 +2219,23 @@ create table if not exists aurixa.schema_migrations (
   name text not null,
   applied_at timestamptz not null default now()
 );
+-- HOW a version came to be recorded, which neither ledger above can say.
+-- Both of them mix rows the lane wrote after RUNNING a file with rows written
+-- to assert the clone was already level — measured 2026-09-12 on one clone,
+-- 22 executions beside 783 assertions, indistinguishable. See
+-- migrationProvenance.pure.ts for why the name column cannot settle it.
+--
+-- It ANNOTATES the ledgers and is never unioned into the applied-set: an
+-- assertion and an execution both mean "do not send this", and narrowing the
+-- union to executions would turn every assertion into a hole that stops the
+-- replay dead. A version with no row here is UNKNOWN, which is its own answer
+-- and the only honest one for anything written before this existed.
+create table if not exists aurixa.migration_provenance (
+  version text primary key,
+  provenance text not null check (provenance in ('applied', 'asserted')),
+  recorded_at timestamptz not null default now(),
+  note text
+);
 `.trim();
 
 export function sqlLiteral(value: string): string {
@@ -2499,6 +2516,16 @@ export async function applyPrimeMigrations(
       // Record in BOTH ledgers: canonical Supabase table is the source of
       // truth going forward, aurixa is kept as a mirror so older tooling /
       // health checks keep working. (Issue #14.)
+      //
+      // And record the PROVENANCE beside them. This is the one place in the
+      // product that can say "this version ran here" as a fact rather than a
+      // reading of a name — it is the code that just ran it. Everything
+      // written before this existed stays unclassified rather than being
+      // guessed at; see migrationProvenance.pure.ts.
+      //
+      // `do update` rather than `do nothing`: a version previously recorded by
+      // an assertion and since actually applied should say so. The reverse can
+      // never happen, because nothing else writes 'applied'.
       await runSqlOnProject(
         projectRef,
         `insert into supabase_migrations.schema_migrations (version, name, statements)
@@ -2506,7 +2533,13 @@ export async function applyPrimeMigrations(
            on conflict (version) do nothing;
          insert into aurixa.schema_migrations (version, name)
            values (${sqlLiteral(m.id)}, ${sqlLiteral(m.name)})
-           on conflict (version) do nothing;`,
+           on conflict (version) do nothing;
+         insert into aurixa.migration_provenance (version, provenance, note)
+           values (${sqlLiteral(m.id)}, 'applied', ${sqlLiteral(m.name)})
+           on conflict (version) do update
+             set provenance = 'applied',
+                 recorded_at = now(),
+                 note = excluded.note;`,
       );
       results.push({ id: m.id, name: m.name, success: true });
       latestApplied = m.id;
