@@ -43,7 +43,13 @@ export type EnqueueResult = {
   readonly enqueued: string[];
   /** Versions already on the queue; re-posting a merge is a no-op. */
   readonly alreadyQueued: string[];
-  /** Versions this queue has already applied, so never re-enqueued. */
+  /**
+   * Versions this queue has already settled, so never re-enqueued.
+   *
+   * Both terminal successes, because the question this answers is "is there
+   * anything left to do for this version" and for both the answer is no. Which
+   * of the two it was is in the verdict, where it carries information.
+   */
   readonly alreadyApplied: string[];
   readonly rejected: Rejection[];
   /** Where every submitted version stands right now. */
@@ -74,12 +80,22 @@ async function readRows(db: Db, versions: readonly string[]): Promise<QueueRow[]
  *
  * `supabase_migrations.schema_migrations` lives outside the two schemas
  * PostgREST exposes, so it cannot be read from this side at all -- and even if
- * it could, it is the wrong authority: 40 of 211 repo versions appear in it and
- * 103 of its rows match no repo file, because Lovable stamps its own apply
- * timestamps. What makes a repeat submission a no-op is the queue's own UNIQUE
- * constraint on `version`, and the drain skips a ledger stamp that already
- * exists. `alreadyApplied` therefore means "this queue applied it", which is a
- * fact this side can actually establish.
+ * it could, it is the wrong authority. Measured 12 Sep 2026 across the whole
+ * corpus: 194 ledger rows against 268 repo files, 102 ledger rows matching no
+ * repo file, and of the 141 Lovable-authored migrations only **36** appear
+ * under their own version while **138** have a row within ten seconds. Lovable
+ * stamps when it BEGINS applying and names the file when it WRITES it, so the
+ * skew runs -7s to +7s and by no constant amount. The ledger records that
+ * something ran; it cannot say which file.
+ *
+ * What makes a repeat submission a no-op is the queue's own UNIQUE constraint
+ * on `version`, and the drain skips a ledger stamp that already exists.
+ * `alreadyApplied` therefore means "this queue settled it", which is a fact
+ * this side can actually establish.
+ *
+ * The separate `MigrationSubmission.alreadyApplied` FLAG is the other half of
+ * that: the submitter declares an out-of-band apply because the ledger cannot
+ * be asked, and `20260912150000`'s header carries the full measurement.
  */
 export type EnqueueOptions = {
   /** Recorded on the row: which workflow run or operator submitted it. */
@@ -96,7 +112,9 @@ export async function enqueueMigrations(
 
   const existing = await readRows(db, versions);
   const known = new Set(existing.map((r) => r.version));
-  const applied = new Set(existing.filter((r) => r.status === "applied").map((r) => r.version));
+  const applied = new Set(
+    existing.filter((r) => r.status === "applied" || r.status === "recorded").map((r) => r.version),
+  );
 
   const fresh = accepted.filter((a) => !known.has(a.version));
 
@@ -108,6 +126,11 @@ export async function enqueueMigrations(
         name: m.name,
         sql: m.sql,
         sha256: await sha256Hex(m.sql),
+        // Always written, never conditional. An omitted column takes the
+        // table's default, which is the same value — but an explicit false is
+        // the difference between "the submitter said this must run" and "the
+        // submitter said nothing", and only one of those is a declaration.
+        already_applied: m.alreadyApplied === true,
         ...(opts.enqueuedBy ? { enqueued_by: opts.enqueuedBy } : {}),
       })),
     );

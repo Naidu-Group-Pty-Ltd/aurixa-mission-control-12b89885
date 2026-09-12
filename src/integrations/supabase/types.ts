@@ -9406,6 +9406,7 @@ export type Database = {
       }
       schema_migration_queue: {
         Row: {
+          already_applied: boolean
           attempts: number
           enqueued_at: string
           enqueued_by: string | null
@@ -9420,6 +9421,7 @@ export type Database = {
           version: string
         }
         Insert: {
+          already_applied?: boolean
           attempts?: number
           enqueued_at?: string
           enqueued_by?: string | null
@@ -9434,6 +9436,7 @@ export type Database = {
           version: string
         }
         Update: {
+          already_applied?: boolean
           attempts?: number
           enqueued_at?: string
           enqueued_by?: string | null

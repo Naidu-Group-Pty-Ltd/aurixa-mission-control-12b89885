@@ -208,3 +208,129 @@ which therefore answers `[]` to every question.
 rows to `queued`; replaying what that releases would double a billing rollup and
 charge for calls the business absorbs. Its header says so, and the incident
 record says why.
+
+## Recorded, never replayed
+
+**A migration the platform applied before it was committed is RECORDED and
+never re-executed.** Measured 12 Sep 2026; `20260912150000_recorded_never_replayed.sql`
+carries the full working.
+
+### The guard that was not one
+
+`aurixa.drain_schema_migrations()` ran `EXECUTE v_row.sql` unconditionally. The
+statement immediately after it —
+
+```sql
+INSERT INTO supabase_migrations.schema_migrations (version)
+SELECT v_row.version WHERE NOT EXISTS (…)
+```
+
+reads like an already-applied guard and is not one. It prevents a duplicate
+ledger **row**, not a duplicate **apply**.
+
+### Why that matters here and not everywhere
+
+Mission Control is edited in two places. This repository is one; Lovable is the
+other, and Lovable **applies** the migrations it authors, then commits the file
+afterwards:
+
+| | |
+| --- | --- |
+| migration files in the corpus | 268 |
+| authored by Lovable (`gpt-engineer-app[bot]`) | 141 |
+| …of those, postdating this queue | 3 |
+| …of those, that reached the queue and were replayed | 2 |
+
+Both replays were harmless **by luck**. `20260909010118`'s own header says so:
+*"every statement here is `IF NOT EXISTS` and the backfill is guarded."* That is
+a property of those files, not of the pipeline.
+
+The third shows the cost when the luck runs out. `20260909072756` reads **"DO
+NOT REPLAY"** because releasing what it releases adds a rollup quantity a second
+time — `billable_quantity + SUM(quantity)` is an absolute, not a delta — and
+flips the `absorbed` rows to billable, charging for calls the business absorbs.
+It escaped only because its own count assertion refused on the retry and an
+operator deleted the row by hand.
+
+### The ledger cannot answer it — measured, not assumed
+
+The obvious fix is for the drain to skip a version already in
+`supabase_migrations.schema_migrations`. Of the 141 Lovable-authored files:
+
+```
+ledger carries the file's OWN version exactly :  36
+ledger carries a row within 10 seconds        : 138
+no ledger row within 10 seconds               :   3
+
+skew (ledger minus filename): -7s -4s -3s -2s +2s +3s +4s +5s +6s +7s
+```
+
+Lovable stamps the ledger when it **begins** applying and names the file when it
+**writes** it. A version-equality test answers "never ran" for 105 files that
+demonstrably ran; a ±10s window is a guess that, in a burst of migrations
+seconds apart, lands on a different migration's row. **The ledger records that
+something ran; it cannot say which file.**
+
+The filename shape is not the answer either — `migrationProvenance.pure.ts` was
+written in this repository after a shape heuristic misread six genuine applies,
+and a UUID filename is a shape.
+
+### So the submitter declares it, and the declaration is an ACCOUNT
+
+`apply-migrations.yml` reads the author of the commit that **added** each file.
+A migration added by the Lovable app was applied by Lovable before it reached
+the repository. It is matched on the numeric account id (`159125892`), because a
+display name can be changed and an account id cannot.
+
+The two signals disagree on **4 of 268** files and the author is right both
+times: one bot-authored file is slug-named (the shape would have replayed it)
+and three UUID-named files were added by somebody else (the shape would have
+skipped them).
+
+### Three rules
+
+**`recorded` is not a kind of `applied`.** "this queue ran it" and "this queue
+was told it had already run" are different facts, and collapsing them loses the
+distinction at the one moment it matters — when a migration's `@asserts` claim
+later fails and the question is whether anything ever executed that file here.
+
+**The declaration decides what to RUN and never what is TRUE.** If Lovable ever
+commits a migration it did not apply, recording it would leave the schema
+silently short of the effect. That is caught by machinery this repository
+already runs: every migration declares a checkable effect, and
+`migration-drift-hourly` (`17 * * * *`) evaluates those claims against the
+database every hour and surfaces them on `/health`.
+
+**Unknown means RUN.** An unreadable author warns and executes, which is the
+behaviour that existed before this. A guard that skipped on doubt would leave
+the schema short of an effect nobody applied.
+
+## No path into the queue is ungated
+
+`ci.yml` runs the migration gates and fires on the same push as
+`apply-migrations.yml`. The two run **concurrently**, nothing makes the apply
+wait, and a red `ci.yml` has never stopped a migration executing. On a direct
+push there is no pull-request CI at all — and both migrations this queue has
+ever replayed arrived exactly that way, from `gpt-engineer-app[bot]`, commit
+messages "Work in progress" and "Changes", with no pull request and so no review
+of any kind.
+
+The four corpus gates therefore run **inside the apply job**, before the
+submission, where a merge, a direct push and a `workflow_dispatch` all pass
+them:
+
+```
+check-migration-pipeline     version format and uniqueness
+check-migration-secrets      no credential literals
+check-migration-replay       no re-creation collisions
+check-migration-assertions   every migration declares a checkable effect
+```
+
+They are plain Node scripts over `supabase/migrations` and need **no
+dependencies** — only Node ≥22.18, for the type stripping
+`check-migration-assertions` uses to import the assertion grammar rather than
+keep a second copy of it. Keeping `npm ci` off this path also keeps a registry
+outage from being able to stop migrations applying.
+
+The last gate is load-bearing in a new way: it is what makes a *recorded*
+migration's effect checkable at all.
