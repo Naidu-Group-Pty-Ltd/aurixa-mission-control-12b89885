@@ -94,6 +94,21 @@ const CLASS_REFUSAL: Partial<Record<SecretClass, string>> = {
     "Mission Control brokers this credential and never forwards it. A clone reaches the vendor through " +
     "Mission Control's own endpoint with the key it already has, so the credential stops here and the CALL " +
     "travels. Forwarding it would hand a tenant a scope it must not hold.",
+  /*
+   * The only class that is also SWEPT.
+   *
+   * Every other refusal here stops Mission Control putting something on a
+   * clone. This one additionally removes it when something else already has:
+   * `npc-client-dashboard` held `SB_MANAGEMENT_ACCESS_TOKEN` while this
+   * ledger recorded it `missing`, because Mission Control never wrote it and
+   * therefore could not see it. A refusal that only governs the forward path
+   * defends the door and not the room.
+   */
+  prime_only:
+    "This grants administrative control over Supabase projects. A personal access token is scoped to an " +
+    "ACCOUNT rather than a project, so a copy here would reach the prime, Mission Control and every other " +
+    "tenant, and Supabase publishes no way to narrow one. It is never forwarded, and the clone-secrets " +
+    "reconcile sweep removes it from any workspace found holding it.",
 };
 
 /**
