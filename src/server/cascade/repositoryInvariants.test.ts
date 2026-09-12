@@ -86,17 +86,22 @@ describe("the repository invariants", () => {
     }
   });
 
-  it("the two fail-closed deploy workflows stay excluded even though workflows are invariant", () => {
-    // `.github/workflows/**` is an invariant and those two files are inside
-    // it. They carry a guard against deploying into the wrong Supabase
-    // project, so the exclusion has to win — which it does, because the
-    // engine applies exclusions to the candidate set after it is built.
+  it("the per-deployment workflows stay excluded even though workflows are invariant", () => {
+    // `.github/workflows/**` is an invariant and every file below is inside
+    // it. Two carry a guard against deploying into the wrong Supabase project;
+    // three write a secret with a Supabase management credential the prime is
+    // the only repository in the fleet to hold. Either way the exclusion has to
+    // win — which it does, because the engine applies exclusions to the
+    // candidate set after it is built.
     const matchers = validateModuleGlobs(repositoryInvariantGlobs()).valid.map(globToRegex);
     const covered = (p: string) => matchers.some((m) => m.test(p));
     const excluded = new Set(DEFAULT_MIRROR_EXCLUSIONS.map((e) => e.pattern));
     for (const guard of [
       ".github/workflows/deploy-supabase-functions.yml",
       ".github/workflows/apply-migration.yml",
+      ".github/workflows/set-builder-stock-pdf-worker-secrets.yml",
+      ".github/workflows/set-builder-stock-link-secrets.yml",
+      ".github/workflows/rotate-internal-edge-secret.yml",
     ]) {
       expect(covered(guard), "the workflow invariant should reach it").toBe(true);
       expect(excluded.has(guard), "and the exclusion must be there to win").toBe(true);

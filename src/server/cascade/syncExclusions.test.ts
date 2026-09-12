@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   assertMirrorPolicy,
@@ -312,27 +312,54 @@ describe("the two paths the 26 Aug cascade reverted are now listed as well", () 
   });
 });
 
-describe("the seeding migration is a projection of this constant, not a second copy", () => {
+describe("the seed migrations are a projection of this constant, not a second copy", () => {
   // A hand-maintained second copy of a safety list is precisely how
   // `public/lead-magnet-embed.html` came to be missing from the live table
   // while sitting in nobody's list at all. There is one authority; this asserts
-  // the migration says what it says.
-  const MIGRATION = "supabase/migrations/20260826070000_seed_mirror_exclusions.sql";
+  // the migrations say what it says.
+  //
+  // It takes MIGRATIONS rather than a migration. Registration seeds the list,
+  // so a mirror that already exists never sees an entry added afterwards, and
+  // an applied migration is never edited — so each addition arrives in its own
+  // file and the projection is the concatenation of all of them.
+  //
+  // Which files those are is decided by what their SQL DOES, not by a list of
+  // names kept here. A hand list has the wrong failure: somebody adds a seed
+  // file, forgets to register it, and this passes while the constant and the
+  // database disagree. Discovery fails the other way — a migration that writes
+  // an exclusion row for some other purpose breaks this test and has to be
+  // reconciled, which is the loud direction.
+  const MIGRATIONS = "supabase/migrations";
 
-  const rows = () => {
-    const sql = readFileSync(join(process.cwd(), MIGRATION), "utf8");
-    const values = sql.slice(sql.indexOf("CROSS JOIN (VALUES"), sql.indexOf(") AS d(pattern"));
-    // ('pattern', 'reason', 'note') with '' as the escaped quote.
-    const rx = /\(\s*'((?:[^']|'')*)'\s*,\s*'((?:[^']|'')*)'\s*,\s*'((?:[^']|'')*)'\s*\)/g;
-    return [...values.matchAll(rx)].map((m) => ({
-      pattern: m[1].replaceAll("''", "'"),
-      reason: m[2].replaceAll("''", "'"),
-      note: m[3].replaceAll("''", "'"),
-    }));
-  };
+  // ('pattern', 'reason', 'note') with '' as the escaped quote.
+  const TRIPLE = /\(\s*'((?:[^']|'')*)'\s*,\s*'((?:[^']|'')*)'\s*,\s*'((?:[^']|'')*)'\s*\)/g;
+  const VALUES_BLOCK = /CROSS JOIN \(VALUES([\s\S]*?)\) AS \w+\(pattern, reason, note\)/g;
+
+  const literalRows = (sql: string) =>
+    [...sql.matchAll(VALUES_BLOCK)].flatMap((block) =>
+      [...block[1].matchAll(TRIPLE)].map((m) => ({
+        pattern: m[1].replaceAll("''", "'"),
+        reason: m[2].replaceAll("''", "'"),
+        note: m[3].replaceAll("''", "'"),
+      })),
+    );
+
+  /** Every migration that writes to the table, oldest first. */
+  const writers = () =>
+    readdirSync(join(process.cwd(), MIGRATIONS))
+      .filter((f) => f.endsWith(".sql"))
+      .sort()
+      .map((file) => ({
+        file,
+        sql: readFileSync(join(process.cwd(), MIGRATIONS, file), "utf8"),
+      }))
+      .filter((m) => /insert\s+into\s+public\.clone_sync_exclusions/i.test(m.sql))
+      .map((m) => ({ ...m, rows: literalRows(m.sql) }));
+
+  const seeds = () => writers().filter((m) => m.rows.length > 0);
 
   it("carries every default, in order, with the same reason and note", () => {
-    expect(rows()).toEqual(
+    expect(seeds().flatMap((m) => m.rows)).toEqual(
       DEFAULT_MIRROR_EXCLUSIONS.map((e) => ({
         pattern: e.pattern,
         reason: e.reason,
@@ -341,16 +368,45 @@ describe("the seeding migration is a projection of this constant, not a second c
     );
   });
 
+  it("is more than one file, and the newest carries the newest entries", () => {
+    // The property that makes the append-only rule real rather than stated:
+    // an entry inserted into the middle of the constant would still satisfy
+    // the equality above only if somebody had edited an applied migration.
+    const files = seeds();
+    expect(files.length).toBeGreaterThan(1);
+    const last = files[files.length - 1];
+    const tail = DEFAULT_MIRROR_EXCLUSIONS.slice(-last.rows.length).map((e) => e.pattern);
+    expect(last.rows.map((r) => r.pattern)).toEqual(tail);
+  });
+
   it("adds rows and removes none — an operator's own exclusion is not ours to withdraw", () => {
-    const sql = readFileSync(join(process.cwd(), MIGRATION), "utf8");
-    expect(sql).toContain("ON CONFLICT (clone_id, pattern) DO NOTHING");
-    expect(sql).not.toMatch(/\bDELETE\b/i);
+    for (const m of writers()) {
+      expect(m.sql, `${m.file} must be idempotent`).toContain(
+        "ON CONFLICT (clone_id, pattern) DO NOTHING",
+      );
+      expect(m.sql, `${m.file} must delete nothing`).not.toMatch(/\bDELETE\b/i);
+    }
   });
 
   it("touches mirrors only — a module-scoped clone has no business with this set", () => {
-    expect(readFileSync(join(process.cwd(), MIGRATION), "utf8")).toContain(
-      "WHERE c.sync_scope = 'mirror'",
-    );
+    for (const m of seeds()) {
+      expect(m.sql, `${m.file} must be mirror-scoped`).toContain("WHERE c.sync_scope = 'mirror'");
+    }
+  });
+
+  it("counts a migration that COPIES an existing policy as contributing nothing", () => {
+    // `20260909110000_two_clones_become_mirrors.sql` seeds two new mirrors from
+    // the rows an existing mirror already holds, deliberately writing no
+    // patterns of its own — "writing the patterns out again here would create a
+    // third copy with nothing pinning it". It must stay that way: the moment it
+    // carried literals it would join the projection above and contradict it.
+    const copiers = writers().filter((m) => m.rows.length === 0);
+    expect(copiers.map((m) => m.file)).toContain("20260909110000_two_clones_become_mirrors.sql");
+    for (const m of copiers) {
+      expect(m.sql, `${m.file} copies rather than transcribes`).toMatch(
+        /FROM public\.clone_sync_exclusions/,
+      );
+    }
   });
 });
 
