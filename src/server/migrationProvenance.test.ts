@@ -213,3 +213,38 @@ describe("the rules this module exists to keep", () => {
     }
   });
 });
+
+describe("the backfill does not depend on the replay having run", () => {
+  const server = read("src/server/migrationProvenance.server.ts");
+  const provisioning = read("src/server/backend-provisioning.server.ts");
+  const lane = read("src/server/self-healing.server.ts");
+
+  it("ensures the provenance table itself", () => {
+    // The lane returns early on `pending.length === 0` and so never reaches
+    // `applyPrimeMigrations`, where the ledgers are ensured. A backfill that
+    // relied on that would annotate nothing on an up-to-date clone — which is
+    // most clones, most of the time.
+    expect(server).toContain("PROVENANCE_TABLE_SQL");
+    const write = server.slice(server.indexOf("const entries = [...decided.entries()]"));
+    expect(write.indexOf("runSqlOnProject(projectRef, PROVENANCE_TABLE_SQL)")).toBeGreaterThan(-1);
+    expect(write.indexOf("runSqlOnProject(projectRef, PROVENANCE_TABLE_SQL)")).toBeLessThan(
+      write.indexOf("insert into aurixa.migration_provenance"),
+    );
+  });
+
+  it("keeps ONE copy of the table DDL", () => {
+    expect(provisioning).toContain("export const PROVENANCE_TABLE_SQL");
+    // The replay's own ensure interpolates it rather than restating it.
+    expect(provisioning).toContain("${PROVENANCE_TABLE_SQL}");
+    const creates = provisioning.match(/create table if not exists aurixa\.migration_provenance/g);
+    expect(creates).toHaveLength(1);
+    expect(server).not.toMatch(/create table if not exists aurixa\.migration_provenance/);
+  });
+
+  it("runs the backfill before the lane's early return", () => {
+    const backfill = lane.indexOf("recordKnownProvenance");
+    const earlyReturn = lane.indexOf("clone already at prime migration head");
+    expect(backfill).toBeGreaterThan(-1);
+    expect(backfill).toBeLessThan(earlyReturn);
+  });
+});
