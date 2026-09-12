@@ -305,6 +305,23 @@ database every hour and surfaces them on `/health`.
 behaviour that existed before this. A guard that skipped on doubt would leave
 the schema short of an effect nobody applied.
 
+### A shallow clone is refused, not tolerated
+
+`git log --diff-filter=A -1 -- <path>` walks only the commits it has. At depth 1
+that is the tip, so **every** file resolves to whoever made the last commit —
+not silence, a confident wrong answer. A push authored by the Lovable app would
+then mark its whole batch record-only and stamp all of it without running any of
+it.
+
+`apply-migrations.yml` checks out with `fetch-depth: 0` two steps above, so a
+shallow clone there means the workflow has been edited into an inconsistent
+state. The step refuses and names the cause rather than classifying.
+
+This was found by CI, not by reasoning: the first version of the test read this
+repository's real history, passed locally and failed on `ci.yml`, which checks
+out at depth 1. The test now builds a fixture repository with known authors, so
+it is coupled to the rule rather than to a mutable log.
+
 ## No path into the queue is ungated
 
 `ci.yml` runs the migration gates and fires on the same push as

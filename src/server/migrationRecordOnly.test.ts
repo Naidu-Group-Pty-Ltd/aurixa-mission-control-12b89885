@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -175,22 +175,48 @@ describe("the apply workflow classifies by ACCOUNT, never by the file", () => {
   });
 
   /*
-    Executed, not asserted about. The shell body is lifted from the YAML and run
-    against this repository's real history, because a guard nobody has run is a
-    guard nobody has tested.
+    Executed against a FIXTURE repository, not against this one.
 
-    `recordOnly` is read back from the step's real `GITHUB_OUTPUT` file rather
-    than from the log. That distinction is not pedantry: it is what a mutation
-    found. Asserting on the printed line passed happily while the file was
-    ALSO being added to `RECORD_ONLY` — the log said "execute" and the
-    submitter was handed "skip it". The output variable is the thing that acts;
-    the log is a description of it.
+    The shell body is lifted from the YAML verbatim — a guard nobody has run is
+    a guard nobody has tested — but the history it walks is built here, with
+    known authors, rather than read from this repository's own log.
+
+    That is not tidiness. The first version of this test read real history and
+    passed locally and FAILED in CI, because `ci.yml` checks out at depth 1. A
+    depth-1 clone does not answer "who added this file" with silence; it
+    answers with the TIP COMMIT'S author, for every file. So the test was
+    coupled to a mutable log, and the coupling hid the more interesting fact:
+    in a shallow clone the classification is confidently wrong, in the
+    direction that records a migration without running it.
+
+    Hence the fixture (deterministic, independent of what this repository's
+    history happens to be today) and the shallow-clone refusal below.
   */
-  const runClassify = (files: string) => {
+  const BOT = "159125892+gpt-engineer-app[bot]@users.noreply.github.com";
+
+  /** A throwaway repo whose history says exactly what a case needs it to say. */
+  const fixture = (commits: ReadonlyArray<{ author: string; file: string }>) => {
+    const dir = mkdtempSync(join(tmpdir(), "classify-repo-"));
+    const git = (...args: string[]) =>
+      spawnSync("git", args, { cwd: dir, encoding: "utf8", env: { ...process.env } });
+    git("init", "-q", "-b", "main");
+    git("config", "user.email", "fixture@example.invalid");
+    git("config", "user.name", "fixture");
+    mkdirSync(join(dir, "supabase", "migrations"), { recursive: true });
+    for (const c of commits) {
+      writeFileSync(join(dir, c.file), "select 1;\n");
+      git("add", "-A");
+      git("-c", `user.email=${c.author}`, "-c", "user.name=someone", "commit", "-q", "-m", c.file);
+    }
+    return dir;
+  };
+
+  const runClassifyIn = (cwd: string, files: string) => {
     const body = classify.run ?? "";
-    const outFile = mkdtempSync(join(tmpdir(), "classify-")) + "/out.txt";
+    const outFile = join(mkdtempSync(join(tmpdir(), "classify-out-")), "out.txt");
     writeFileSync(outFile, "");
     const out = spawnSync("bash", ["-c", body], {
+      cwd,
       env: {
         ...process.env,
         FILES: files,
@@ -199,50 +225,88 @@ describe("the apply workflow classifies by ACCOUNT, never by the file", () => {
       },
       encoding: "utf8",
     });
-    const written = readFileSync(outFile, "utf8");
-    const line = /^record_only=(.*)$/m.exec(written);
+    const line = /^record_only=(.*)$/m.exec(readFileSync(outFile, "utf8"));
     return {
       status: out.status,
       stdout: out.stdout ?? "",
+      stderr: out.stderr ?? "",
       /** Exactly what the enqueue step will receive. */
       recordOnly: (line?.[1] ?? "").trim().split(/\s+/).filter(Boolean),
     };
   };
 
   it("records a migration the Lovable app added, whatever its filename", () => {
-    // The slug-named one is the case the filename shape gets wrong: it is the
-    // app's work and would have been replayed.
-    const r = runClassify(
-      "supabase/migrations/20260909072756_0ed86dad-0bfc-4247-ae03-29f2e8b20bcd.sql " +
-        "supabase/migrations/20260614071328_clone_backends_safe_view.sql",
-    );
-    expect(r.status).toBe(0);
-    expect(r.recordOnly).toEqual([
-      "supabase/migrations/20260909072756_0ed86dad-0bfc-4247-ae03-29f2e8b20bcd.sql",
-      "supabase/migrations/20260614071328_clone_backends_safe_view.sql",
+    // The slug-named file is the case a filename rule gets wrong: it is the
+    // app's work and a UUID test would have replayed it. Measured on the real
+    // corpus, the two signals disagree on 4 of 268 files — one bot-authored
+    // file is slug-named and three UUID-named files were added by somebody
+    // else — and the author is right every time.
+    const uuidName = "supabase/migrations/20260909072756_0ed86dad-0bfc.sql";
+    const slugName = "supabase/migrations/20260614071328_clone_backends_safe_view.sql";
+    const repo = fixture([
+      { author: BOT, file: uuidName },
+      { author: BOT, file: slugName },
     ]);
-    expect(r.stdout).toContain("record-only  supabase/migrations/20260909072756");
-    expect(r.stdout).toContain("record-only  supabase/migrations/20260614071328");
+    const r = runClassifyIn(repo, `${uuidName} ${slugName}`);
+    expect(r.status).toBe(0);
+    expect(r.recordOnly).toEqual([uuidName, slugName]);
   });
 
-  it("executes a migration a person added", () => {
-    const r = runClassify("supabase/migrations/20260912100000_mirror_exclusion_delta.sql");
+  it("executes a migration a person added, even with a UUID filename", () => {
+    const uuidName = "supabase/migrations/20260609120000_177b3fee-7c98.sql";
+    const repo = fixture([{ author: "someone@example.invalid", file: uuidName }]);
+    const r = runClassifyIn(repo, uuidName);
     expect(r.status).toBe(0);
     expect(r.recordOnly).toEqual([]);
-    expect(r.stdout).toContain("execute      supabase/migrations/20260912100000");
+    expect(r.stdout).toContain("execute");
+  });
+
+  it("keeps the two apart in one batch", () => {
+    const mine = "supabase/migrations/20260912100000_mine.sql";
+    const theirs = "supabase/migrations/20260912110000_theirs.sql";
+    const repo = fixture([
+      { author: "someone@example.invalid", file: mine },
+      { author: BOT, file: theirs },
+    ]);
+    const r = runClassifyIn(repo, `${mine} ${theirs}`);
+    expect(r.status).toBe(0);
+    expect(r.recordOnly).toEqual([theirs]);
   });
 
   it("executes, and warns, when it cannot read who added the file", () => {
     // The fail-safe direction. Unknown means RUN, which is the behaviour that
     // existed before this — a guard that skipped on doubt would silently leave
     // the schema short of an effect nobody applied.
-    const r = runClassify("supabase/migrations/does-not-exist-anywhere.sql");
+    //
+    // Asserted on the output variable, not the log. A mutation that kept
+    // printing "execute" while adding the file to RECORD_ONLY passed the log
+    // assertion and failed this one.
+    const repo = fixture([{ author: BOT, file: "supabase/migrations/20260101000000_a.sql" }]);
+    const r = runClassifyIn(repo, "supabase/migrations/never-committed.sql");
     expect(r.status).toBe(0);
-    // The output variable, not the log line. A mutation that kept printing
-    // "execute" while adding the file to RECORD_ONLY passed the log assertion.
     expect(r.recordOnly).toEqual([]);
     expect(r.stdout).toContain("::warning title=Unattributed migration");
     expect(r.stdout).toContain("author unknown");
-    expect(r.stdout).not.toContain("record-only");
+  });
+
+  it("refuses a shallow clone rather than attributing every file to the tip", () => {
+    // The failure CI found. `git log --diff-filter=A -1 -- <path>` walks only
+    // the commits it has, so at depth 1 every file resolves to the tip's
+    // author — and a push authored BY the app would then record its whole
+    // batch without running any of it.
+    const src = fixture([
+      { author: "someone@example.invalid", file: "supabase/migrations/20260101000000_a.sql" },
+      { author: BOT, file: "supabase/migrations/20260102000000_b.sql" },
+    ]);
+    const shallow = mkdtempSync(join(tmpdir(), "classify-shallow-"));
+    const clone = spawnSync("git", ["clone", "--depth", "1", `file://${src}`, shallow, "-q"], {
+      encoding: "utf8",
+    });
+    expect(clone.status).toBe(0);
+
+    const r = runClassifyIn(shallow, "supabase/migrations/20260101000000_a.sql");
+    expect(r.status).not.toBe(0);
+    expect(r.stdout + r.stderr).toContain("::error title=Shallow checkout");
+    expect(r.recordOnly).toEqual([]);
   });
 });
