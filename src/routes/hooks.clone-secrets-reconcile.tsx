@@ -20,6 +20,15 @@ import { verifyCronAuth } from "@/server/cron-auth.server";
 //   3. The DERIVED deployment config — public URL, WebAuthn relying party,
 //      web-push host — re-computed from the clone's current origins, so a
 //      domain going live after provisioning is reflected rather than frozen.
+//   0. What the clone must NOT hold: a Supabase management credential. Run
+//      FIRST, because it is the only sweep that removes rather than writes
+//      and the only one whose absence is a live security exposure — a PAT is
+//      scoped to an ACCOUNT, so one sitting on a tenant project reaches the
+//      prime, Mission Control and every other tenant. It reads what the
+//      project HOLDS rather than what the ledger says was forwarded: on
+//      12 Sep 2026 `npc-client-dashboard` held SB_MANAGEMENT_ACCESS_TOKEN
+//      while `clone_backend_secrets` recorded it `missing`, because Mission
+//      Control never wrote it and so could not see it.
 //   4. The clone's OWN model keys, minted on Aurixa's provider accounts so the
 //      vendor's dashboard attributes spend per clone rather than showing one
 //      undifferentiated bill. A sweep rather than a provisioning step for two
@@ -52,6 +61,25 @@ export const Route = createFileRoute("/hooks/clone-secrets-reconcile")({
             await import("@/server/anthropicWorkspace.server");
           const { reconcileAnthropicFederation } =
             await import("@/server/anthropicFederation.server");
+          /*
+           * First, and never allowed to fail the sweep.
+           *
+           * It removes rather than writes, so a failure here leaves the clone
+           * exactly as it was — whereas letting it throw would cost the four
+           * repairs below their run, and those fix workspaces that are BROKEN
+           * without them. The outcome is returned either way so an operator
+           * reads `unreadable` rather than nothing.
+           */
+          let prohibited: unknown;
+          try {
+            const { reconcileProhibitedSecrets } =
+              await import("@/server/cloneProhibitedSecrets.server");
+            prohibited = await reconcileProhibitedSecrets(supabaseAdmin);
+          } catch (e) {
+            const detail = e instanceof Error ? e.message : String(e);
+            console.error("Prohibited-secret sweep failed:", detail);
+            prohibited = { ok: false, error: detail };
+          }
           const owned = await reconcileCloneOwnedSecrets(supabaseAdmin);
           const link = await reconcileCloneMissionControlLinks(supabaseAdmin);
           const derived = await reconcileCloneDerivedConfig(supabaseAdmin);
@@ -131,6 +159,7 @@ export const Route = createFileRoute("/hooks/clone-secrets-reconcile")({
           return new Response(
             JSON.stringify({
               success: true,
+              prohibited,
               owned,
               link,
               derived,

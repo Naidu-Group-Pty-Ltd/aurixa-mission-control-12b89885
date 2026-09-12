@@ -16,6 +16,7 @@ import type { Octokit } from "@octokit/rest";
 import type { MigrationObjectIndex } from "./surplusOrigin.pure";
 import type { RepoRef } from "./github-app.server";
 import { pruneBundleToReachable } from "./functionBundlePrune.pure";
+import { isPrimeOnlySecret } from "./primeOnlySecrets.pure";
 import { OversizedMigrationError } from "./oversizedMigration.pure";
 
 // ─── Types ───────────────────────────────────────────────────────────
@@ -107,7 +108,7 @@ const FUNCTIONS_PREFIX = "supabase/functions/";
 const CONFIG_TOML_PATH = "supabase/config.toml";
 
 /** Names Supabase injects into every edge function runtime — never shell these. */
-const AUTO_INJECTED_SECRETS = new Set([
+export const AUTO_INJECTED_SECRETS = new Set([
   "SUPABASE_URL",
   "SUPABASE_ANON_KEY",
   "SUPABASE_SERVICE_ROLE_KEY",
@@ -494,6 +495,12 @@ export type SecretClass =
   | "tenant_scoped"
   /** Mission Control holds it and makes the call; it never reaches a clone. */
   | "brokered"
+  /**
+   * Administrative control over Supabase projects and organisations. Outranks
+   * every other class, is never forwarded, and is REMOVED from any clone found
+   * holding it — see `primeOnlySecrets.pure.ts` for what each name grants.
+   */
+  | "prime_only"
   | "vendor";
 
 /**
@@ -501,6 +508,21 @@ export type SecretClass =
  * the ones a naive copy gets wrong.
  */
 export function classifySecret(name: string): SecretClass {
+  /*
+   * Ahead of everything, including the `SUPABASE_` prefix.
+   *
+   * `SUPABASE_ACCESS_TOKEN` is an account-wide management credential and was
+   * being called `platform` — the class meaning "Supabase injects this into
+   * the clone's own project" — purely because of its prefix. And
+   * `SB_MANAGEMENT_ACCESS_TOKEN`, the name the prime's own edge function
+   * reads, matched nothing at all and fell through to `vendor`, the class
+   * that TRAVELS. One name was safe by accident and the other was not safe.
+   *
+   * `isPrimeOnlySecret` defers to the clone's own platform values first, so
+   * this cannot capture `SUPABASE_SERVICE_ROLE_KEY` and take a workspace off
+   * the air.
+   */
+  if (isPrimeOnlySecret(name)) return "prime_only";
   if (AUTO_INJECTED_SECRETS.has(name) || name.startsWith("SUPABASE_")) return "platform";
   if (IDENTITY_SECRETS.has(name)) return "identity";
   if (DEPLOYMENT_CONFIG_SECRETS.has(name)) return "deployment_config";
@@ -1398,9 +1420,11 @@ export async function fetchPrimeBackendSnapshot(
   // with a function file's key — those are relative to `supabase/functions/`.
   const configToml = configBlob
     ? decodeBase64Utf8(
-        (await fetchBlobTextsForCommit(octokit, ref, commitSha, [
-          { rel: CONFIG_TOML_PATH, sha: configBlob.sha },
-        ])).get(CONFIG_TOML_PATH) ?? "",
+        (
+          await fetchBlobTextsForCommit(octokit, ref, commitSha, [
+            { rel: CONFIG_TOML_PATH, sha: configBlob.sha },
+          ])
+        ).get(CONFIG_TOML_PATH) ?? "",
       )
     : null;
   const fnConfig = parseFunctionConfig(configToml);
