@@ -6,6 +6,7 @@ import {
   CAPABILITIES,
   CLONE_PATH,
   PRESENCE_CAVEAT,
+  llmProvisioningConfig,
   type ConfigCheck,
 } from "./readiness.pure";
 
@@ -521,5 +522,102 @@ describe("the readiness caller draws both sides from one population", () => {
   it("names which read failed rather than blaming the ledger for all three", () => {
     expect(fn).toContain("the clone backends could not be read");
     expect(fn).toContain("the Anthropic key statuses could not be read");
+  });
+});
+
+/*
+ * Per-clone model keys.
+ *
+ * Both rules here are the OPPOSITE of the federation bootstrap's in the same
+ * file, which is exactly why they are pinned: the obvious mistake is to copy
+ * the neighbour.
+ */
+describe("llmProvisioningConfig", () => {
+  const provider = (
+    over: Partial<Parameters<typeof llmProvisioningConfig>[0]["providers"][number]> = {},
+  ) => ({
+    label: "OpenAI",
+    credentialPresent: true,
+    eligible: 3,
+    minted: 3,
+    ...over,
+  });
+  const find = (checks: ReturnType<typeof llmProvisioningConfig>, label: string) => {
+    const c = checks.find((x) => x.label === label);
+    if (!c) throw new Error(`no check ${label}`);
+    return c;
+  };
+
+  /*
+   * A fleet with no provisioning credential runs on the prime's forwarded
+   * keys, metered and recharged. `false` would make `judgeReadiness` call a
+   * documented working deployment a blocker.
+   */
+  it("says nothing rather than something false when nothing is configured", () => {
+    const checks = llmProvisioningConfig({
+      providers: [provider({ credentialPresent: false })],
+      consoleOnly: ["Anthropic"],
+    });
+    expect(find(checks, "Minting").ok).toBeNull();
+    expect(find(checks, "Minting").detail).toContain("forwarded");
+  });
+
+  /*
+   * Each credential is its own switch, so one on and one off is a choice. The
+   * bootstrap's all-or-nothing rule exists because four values that cannot
+   * mint a token together are an outage; nothing of that kind is true here.
+   */
+  it("does not treat a partly configured fleet as a fault", () => {
+    const checks = llmProvisioningConfig({
+      providers: [provider(), provider({ label: "Perplexity", credentialPresent: false })],
+      consoleOnly: [],
+    });
+    for (const c of checks) expect(c.ok, c.label).not.toBe(false);
+    expect(find(checks, "Minting").detail).toContain("OpenAI");
+    expect(find(checks, "Minting").detail).not.toContain("Perplexity");
+  });
+
+  /*
+   * The reading that is otherwise invisible: switched on, clones eligible, and
+   * nothing minted. A mint failure is deliberately never written to the ledger,
+   * because the clone is still running on the forwarded key and marking it
+   * failed would stop its usage being recharged.
+   */
+  it("fails where a vendor is switched on and has minted nothing", () => {
+    const checks = llmProvisioningConfig({
+      providers: [provider({ minted: 0 })],
+      consoleOnly: [],
+    });
+    expect(find(checks, "Per-clone coverage").ok).toBe(false);
+    expect(find(checks, "Per-clone coverage").detail).toContain("0 of 3");
+  });
+
+  it("is green once every eligible clone carries one", () => {
+    const checks = llmProvisioningConfig({ providers: [provider()], consoleOnly: [] });
+    expect(find(checks, "Per-clone coverage").ok).toBe(true);
+  });
+
+  /*
+   * Nobody eligible is not full coverage and not a fault — it is nothing
+   * measured, the same reading the Anthropic workspace count gives on a fleet
+   * with no provisioned clone.
+   */
+  it("says nothing where no clone is eligible", () => {
+    const checks = llmProvisioningConfig({
+      providers: [provider({ eligible: 0, minted: 0 })],
+      consoleOnly: [],
+    });
+    expect(find(checks, "Per-clone coverage").ok).toBeNull();
+  });
+
+  /*
+   * Anthropic is NAMED rather than omitted. A reader who sees four vendors
+   * where the product has five goes looking for a credential that cannot
+   * exist.
+   */
+  it("names the vendor that cannot mint at all", () => {
+    const checks = llmProvisioningConfig({ providers: [provider()], consoleOnly: ["Anthropic"] });
+    expect(find(checks, "Minting").detail).toContain("Anthropic");
+    expect(find(checks, "Minting").detail).toContain("no endpoint");
   });
 });

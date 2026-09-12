@@ -370,6 +370,61 @@ export const CAPABILITIES: readonly CapabilitySpec[] = [
       },
     ],
   },
+  {
+    /*
+     * Minting a per-clone key at the four vendors that publish an endpoint for
+     * it. Separate from `anthropic_attribution` because Anthropic is the one
+     * that CANNOT — no endpoint of theirs creates an API key — so a capability
+     * covering all five would have to report a permanent, correct state as a
+     * gap.
+     *
+     * Every credential here is OPTIONAL, and that is the design rather than
+     * caution. A fleet with none of them set runs on the prime's forwarded
+     * keys, metered and recharged per tenant; minting improves the ATTRIBUTION
+     * at the vendor's own dashboard and is never worth a clone that will not
+     * start, which is why `llmKeyProvisioning.server.ts` refuses to fail a
+     * provisioning run for it.
+     *
+     * They are independent of one another too. OpenAI on and Perplexity off is
+     * a deliberate state, not a half-finished one — so there is no
+     * all-or-nothing rule of the kind the federation bootstrap needs.
+     */
+    key: "llm_key_provisioning",
+    title: "Per-clone model keys",
+    consequence:
+      "Every clone spends the prime's own forwarded model keys, so each vendor's dashboard shows one figure for the whole fleet and per-tenant spend can only be reconstructed from our own meter.",
+    credentials: [
+      {
+        name: "OPENROUTER_PROVISIONING_KEY",
+        purpose:
+          "Mints one OpenRouter key per clone. The only vendor of the five whose minted key carries its own spend ceiling, so a runaway workspace is bounded by the vendor rather than by our meter noticing afterwards",
+        required: false,
+      },
+      {
+        name: "OPENAI_ADMIN_KEY",
+        purpose:
+          "An organisation Admin key (sk-admin-...), never a project key. Creates one OpenAI project per clone and a service account inside it, because OpenAI reports spend per project",
+        required: false,
+      },
+      {
+        name: "PERPLEXITY_PROVISIONING_KEY",
+        purpose:
+          "An existing Perplexity key, used as the authority to mint one per clone within the API group",
+        required: false,
+      },
+      {
+        name: "GOOGLE_APIKEYS_SERVICE_ACCOUNT",
+        purpose:
+          "Mints one Google Cloud API key per clone, restricted to the Generative Language API. Needs GOOGLE_APIKEYS_PROJECT_ID beside it",
+        required: false,
+      },
+      {
+        name: "GOOGLE_APIKEYS_PROJECT_ID",
+        purpose: "The Google Cloud project those keys are created in",
+        required: false,
+      },
+    ],
+  },
 ];
 
 export type ReadinessInput = {
@@ -472,6 +527,100 @@ export const PRESENCE_CAVEAT =
   "the vendor, which this page deliberately does not do.";
 
 /** What the Anthropic attribution checks are computed from. */
+/** One vendor's minting state, as the two tables hold it. */
+export interface LlmProviderFacts {
+  readonly label: string;
+  /** Mission Control holds the credential that authorises minting. */
+  readonly credentialPresent: boolean;
+  /**
+   * Clones that could carry a minted key — a backend exists and the ledger
+   * does not stand the clone down. A tenant's own key and a withheld one are
+   * both correct states that must leave the denominator rather than fail it,
+   * exactly as they do for the Anthropic workspace count.
+   */
+  readonly eligible: number;
+  /** Of those, how many carry `minted`. */
+  readonly minted: number;
+}
+
+export interface LlmProvisioningFacts {
+  readonly providers: readonly LlmProviderFacts[];
+  /**
+   * Vendors that publish no endpoint which creates a key.
+   *
+   * Named rather than omitted. A reader who sees four vendors where the
+   * product has five goes looking for a credential that cannot exist, which is
+   * the wasted search `manualRemedy` exists to prevent.
+   */
+  readonly consoleOnly: readonly string[];
+}
+
+/**
+ * The per-clone model key checks.
+ *
+ * Two rules, and both are the OPPOSITE of the federation bootstrap's beside
+ * them, which is why they are written down rather than inferred from it.
+ *
+ * **Nothing configured is not a fault.** A fleet with no provisioning
+ * credential runs on the prime's forwarded keys, metered and recharged. That
+ * is the documented working state, so it reads `null` — nothing measured — and
+ * never `false`, which `judgeReadiness` turns into a blocker.
+ *
+ * **Partial is not a fault either.** Each credential is its own switch, so
+ * OpenAI on and Perplexity off is a choice. The bootstrap's all-or-nothing
+ * rule exists because four values that cannot mint a token together are an
+ * outage; nothing of that kind is true here.
+ *
+ * What IS worth alarming on is a credential that is set and producing nothing:
+ * minting switched on, clones eligible, not one key minted. That state is
+ * otherwise invisible, because a mint failure is deliberately never written to
+ * the ledger — the clone is still running correctly on the forwarded key, and
+ * marking it `failed` would stop its usage being recharged.
+ */
+export function llmProvisioningConfig(facts: LlmProvisioningFacts): ConfigCheck[] {
+  const on = facts.providers.filter((p) => p.credentialPresent);
+  const consoleOnly =
+    facts.consoleOnly.length > 0
+      ? ` ${facts.consoleOnly.join(", ")} publishes no endpoint that creates a key, so no credential exists for it.`
+      : "";
+
+  if (on.length === 0) {
+    return [
+      {
+        label: "Minting",
+        ok: null,
+        detail: `No provisioning credential is set, so every clone spends the prime's forwarded model keys.${consoleOnly}`,
+        remedy:
+          "Optional. Set any provisioning credential in Mission Control's own environment; each one switches on its own vendor and nothing else changes.",
+      },
+    ];
+  }
+
+  // Only a switched-on vendor can be short, and only where a clone could have
+  // carried a key at all.
+  const measurable = on.filter((p) => p.eligible > 0);
+  const short = measurable.filter((p) => p.minted < p.eligible);
+
+  return [
+    {
+      label: "Minting",
+      ok: true,
+      detail: `${on.map((p) => p.label).join(", ")} can mint a key per clone.${consoleOnly}`,
+      remedy: "Each credential is its own switch; the others are optional and independent.",
+    },
+    {
+      label: "Per-clone coverage",
+      ok: measurable.length === 0 ? null : short.length === 0,
+      detail:
+        measurable.length === 0
+          ? "No clone is eligible for a minted key yet."
+          : measurable.map((p) => `${p.label} ${p.minted} of ${p.eligible}`).join(" · "),
+      remedy:
+        "Clones -> the secrets reconcile hook, which mints for any clone still without one. A vendor switched on that has minted nothing is the reading to check first.",
+    },
+  ];
+}
+
 export interface AnthropicAttributionFacts {
   /** Clones with a backend — the population that COULD carry a workspace. */
   readonly provisionedClones: number;
@@ -519,9 +668,7 @@ export interface AnthropicAttributionFacts {
  * of the SAMPLE_REPORT_DATA trap this codebase keeps re-finding. What the
  * server builds is now what a test can exercise.
  */
-export function anthropicAttributionConfig(
-  facts: AnthropicAttributionFacts,
-): ConfigCheck[] {
+export function anthropicAttributionConfig(facts: AnthropicAttributionFacts): ConfigCheck[] {
   const {
     provisionedClones,
     identities,
