@@ -406,4 +406,41 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       },
     ],
   },
+  {
+    migration: "20260912100000_mirror_exclusion_delta.sql",
+    version: "20260912100000",
+    assertions: [
+      { kind: "rows", table: "clone_sync_exclusions", atLeast: 22 },
+      {
+        kind: "check",
+        table: "clone_sync_exclusions",
+        column: "pattern",
+        value: "src/lib/turnstileSiteKey.ts",
+      },
+      {
+        kind: "check",
+        table: "clone_sync_exclusions",
+        column: "pattern",
+        value: "src/lib/__tests__/turnstileIdentity.spec.ts",
+      },
+      {
+        kind: "check",
+        table: "clone_sync_exclusions",
+        column: "pattern",
+        value: ".github/workflows/set-builder-stock-pdf-worker-secrets.yml",
+      },
+      {
+        kind: "check",
+        table: "clone_sync_exclusions",
+        column: "pattern",
+        value: ".github/workflows/set-builder-stock-link-secrets.yml",
+      },
+      {
+        kind: "check",
+        table: "clone_sync_exclusions",
+        column: "pattern",
+        value: ".github/workflows/rotate-internal-edge-secret.yml",
+      },
+    ],
+  },
 ];

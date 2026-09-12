@@ -222,6 +222,22 @@ export function summaryOwesReconcile(diffSummary: string | null | undefined): bo
  * policy, not a constant. What must not happen is a mirror registered with NO
  * policy, which is why registration seeds and `requireExclusions` refuses to
  * treat an unreadable set as an empty one.
+ *
+ * ## A new entry is APPENDED, and arrives with its own migration
+ *
+ * Registration seeds this list, so a mirror that already exists never sees an
+ * entry added after it was registered. The seed migrations carry that delta —
+ * `20260826070000_seed_mirror_exclusions.sql` first, and one more for each
+ * later addition. An applied migration is never edited, so a new default goes
+ * on the END of this array and gets a new file; inserting one in the middle
+ * would make the migrations and this list disagree about order while agreeing
+ * about content.
+ *
+ * `syncExclusions.test.ts` finds those migrations by what their SQL DOES rather
+ * than from a list of filenames, concatenates their rows in filename order, and
+ * requires the result to equal this array exactly. A seed file nobody
+ * remembered to register therefore cannot slip past, and a migration that
+ * writes an exclusion row for some other purpose fails loudly instead.
  */
 export const DEFAULT_MIRROR_EXCLUSIONS: readonly SyncExclusion[] = [
   // ── Identity. The reason this whole module exists. ────────────────────────
@@ -304,6 +320,72 @@ export const DEFAULT_MIRROR_EXCLUSIONS: readonly SyncExclusion[] = [
     pattern: "src/lib/reportTemplate/__tests__/renderAssetNormalisation.spec.ts",
     reason: "manual_reconcile",
     note: "Clone derives PROJECT from SUPABASE_URL; prime hard-codes its own project. compileTemplateHtmlForPdf admits SUPABASE_URL and nothing else, so prime's literal is a FOREIGN origin here and the fixture is correctly dropped — the assertion fails on any clone with its own backend.",
+  },
+  // ── Appended, never inserted. See the header. ─────────────────────────────
+  //
+  // Everything below arrived after a mirror was already registered, so it
+  // reached the live table through a seed migration rather than through
+  // registration. The order here is the order those migrations wrote, which is
+  // what lets `syncExclusions.test.ts` check one against the other.
+
+  // The login CAPTCHA. Both of these were on all three mirrors and in NO
+  // list — put there by hand when the per-clone Turnstile identity was built,
+  // which is the same way the first policy came to be incomplete. A mirror
+  // registered today would have received neither.
+  //
+  // The prime declares a built-in site key literal; the clone declares `null`
+  // and uses `VITE_TURNSTILE_SITE_KEY` alone. Carrying prime's copy would put
+  // the prime's live site key into a tenant's bundle — the pairing rule stops
+  // it RENDERING, because the built-in is bound to the backend its secret lives
+  // in, but the literal is still in that repository and its build.
+  {
+    pattern: "src/lib/turnstileSiteKey.ts",
+    reason: "protected",
+    note: "Declares this deployment's built-in Turnstile site key and the backend its secret is paired with. Prime declares a literal, a clone declares null and uses VITE_TURNSTILE_SITE_KEY.",
+  },
+  {
+    pattern: "src/lib/__tests__/turnstileIdentity.spec.ts",
+    reason: "protected",
+    note: "Asserts THIS deployment's Turnstile decisions, which contradict prime's. It travels with turnstileSiteKey.ts because a spec and the module it pins are one setting in two files — the split is what turned renderAssetNormalisation.spec.ts red on a clone.",
+  },
+
+  // ── The three workflows that write an Edge secret ─────────────────────────
+  //
+  // Writing a Supabase Edge secret from CI needs a Supabase management
+  // credential, and the prime repository is the only one in this fleet that
+  // holds one — `PRIME_ONLY_SECRETS` refuses to forward `SUPABASE_ACCESS_TOKEN`
+  // by name. So on a clone all three can only reach their own "check the
+  // credential" step and fail, naming a missing setting that must never be
+  // supplied there.
+  //
+  // Freezing them costs nothing, and that is the whole test for whether a
+  // workflow belongs on this list. `deploy-supabase-functions.yml` is the
+  // cautionary case: it was excluded for an equally good reason and it runs on
+  // PUSH, so the exclusion also froze the stand-down out of two clones and
+  // they failed 100% of their runs for a week — which is what
+  // `deployWorkflowReconcile` exists to undo. These three are
+  // `workflow_dispatch` only. Nothing runs them, nothing is judged by them, and
+  // prime's copy of a file a clone can never execute is never interesting.
+  //
+  // What the exclusion protects is a clone's right to diverge on them — to
+  // delete them, or to point them at infrastructure it actually owns — without
+  // the next cascade writing prime's copy back over it. That is the
+  // `public/lead-magnet-embed.html` lesson, and a list only protects what
+  // somebody remembered to add.
+  {
+    pattern: ".github/workflows/set-builder-stock-pdf-worker-secrets.yml",
+    reason: "protected",
+    note: "Writes an Edge secret and a Cloudflare worker secret. wrangler.jsonc names one worker on one account, so running it from a clone would rotate the prime's worker bearer and store the new value in the clone's own project. Guarded at source by EDGE_SECRET_OWNER_REPO; held here so a clone's own divergence is never reverted.",
+  },
+  {
+    pattern: ".github/workflows/set-builder-stock-link-secrets.yml",
+    reason: "protected",
+    note: "Writes an Edge secret, which needs a Supabase management credential no clone repository may hold. Guarded at source by EDGE_SECRET_OWNER_REPO; held here so a clone's own divergence is never reverted.",
+  },
+  {
+    pattern: ".github/workflows/rotate-internal-edge-secret.yml",
+    reason: "protected",
+    note: "Rotates INTERNAL_EDGE_SECRET, which Mission Control mints and rotates per clone through cloneSigningPair. Guarded at source by EDGE_SECRET_OWNER_REPO; held here so a clone's own divergence is never reverted.",
   },
 ];
 

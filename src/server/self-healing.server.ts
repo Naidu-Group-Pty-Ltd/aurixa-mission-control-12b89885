@@ -648,6 +648,79 @@ async function assessPendingMigrations(
   return offending;
 }
 
+/**
+ * A clone this lane repairs rejoins the fleet.
+ *
+ * `clone_backends.status` is written by the fleet sync and by the per-clone
+ * sync button, both of which set `failed` when a migration is refused and clear
+ * it on their own next success — "a repaired clone rejoins the fleet by being
+ * repaired rather than by somebody remembering to clear a flag", as
+ * `fleet-migration.server.ts` puts it. This lane repairs clones too and wrote
+ * none of it, so a clone IT fixed kept the other lane's verdict until that lane
+ * happened to run.
+ *
+ * Measured 2026-09-12: NPC Test and Preflight both read `failed`, "Migration
+ * failed at 20250124160000_prepare_extensions_schema.sql", stamped 09:31 — a
+ * file whose two syntax errors were fixed at 09:33. Both had applied all seven
+ * pending migrations successfully at 10:14 and stood at 28 of 28 target tables.
+ * Mission Control showed two healthy clones reporting a failure at a migration
+ * that no longer existed in that form.
+ *
+ * Three rules keep it safe:
+ *
+ * It only ever CLEARS. The update is a compare-and-swap on `status = 'failed'`,
+ * so it cannot promote a row the provisioning drain owns — `pending`,
+ * `provisioning`, `migrating`, `seeding_admin` and `suspended` are untouched,
+ * and this lane can never mark a clone failed.
+ *
+ * It writes only what this pass established. `migration_version` moves only
+ * when something was applied; a pass that merely confirmed the clone level
+ * clears the stale verdict and leaves the version alone.
+ *
+ * It never fails the run, and it is never silent. The migrations are applied by
+ * the time this is reached, so a status line that could undo that is worse than
+ * a stale one — but "best effort" and "silent" are different things, and this
+ * lane has already paid for confusing them once: `screeningConsumer`'s claim
+ * discarded its error, which made a database fault indistinguishable from
+ * losing a race. Here the two outcomes that must not look alike are an update
+ * that matched no row — the ordinary case, a clone that was never failed — and
+ * one the database refused, which leaves a repaired clone reporting a failure
+ * for ever. The first is silence by design; the second is logged with the
+ * driver's own message, exactly as `audit.server.ts` logs its own.
+ */
+async function clearStaleMigrationFailure(
+  cloneId: string,
+  latestApplied: string | null,
+): Promise<void> {
+  try {
+    const { error } = await admin
+      .from("clone_backends")
+      .update({
+        status: "ready" as const,
+        error_message: null,
+        migration_blocked_at: null,
+        migration_blocked_reason: null,
+        ...(latestApplied ? { migration_version: latestApplied } : {}),
+        status_detail: latestApplied
+          ? `Synced to ${latestApplied}`
+          : "Verified level with the prime's recorded migrations",
+      })
+      .eq("clone_id", cloneId)
+      .eq("status", "failed");
+    if (error) {
+      console.error(
+        `[self-healing] clone ${cloneId} was repaired but its stale migration failure could not be cleared:`,
+        error.message,
+      );
+    }
+  } catch (e) {
+    console.error(
+      `[self-healing] clone ${cloneId} was repaired but its stale migration failure could not be cleared:`,
+      e instanceof Error ? e.message : String(e),
+    );
+  }
+}
+
 async function executeSqlMigration(
   run: any,
   approvedByHuman: boolean,
@@ -743,6 +816,9 @@ async function executeSqlMigration(
   // an orphan the replay will skip anyway is a body fetched for nothing.
   const { send: pending, orphaned } = partitionByDependency(corpus.metas, runnableIds, applied);
   if (pending.length === 0) {
+    // Level with the prime within this scope: whatever verdict another lane
+    // left, it is not true now.
+    if (orphaned.length === 0) await clearStaleMigrationFailure(run.clone_id, null);
     return succeedRun(run, {
       pending: 0,
       withheld: scoped.withheld,
@@ -848,6 +924,10 @@ async function executeSqlMigration(
       },
     });
     return { status: "resuming" };
+  }
+
+  if (landed > 0 && heldBack === 0) {
+    await clearStaleMigrationFailure(run.clone_id, latestApplied ?? null);
   }
 
   return succeedRun(run, {

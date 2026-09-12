@@ -18,6 +18,7 @@
  */
 
 import {
+  BASELINE_ASSERTION_NAME,
   composeCoverage,
   provenanceFromCanonicalName,
   provenanceFromLedgerName,
@@ -34,7 +35,14 @@ import { toRows } from "@/server/schema-introspection.server";
 
 /** What one backfill pass did, or why it could not. */
 export type ProvenanceBackfill =
-  | { ok: true; considered: number; recorded: number; alreadyKnown: number }
+  | {
+      ok: true;
+      considered: number;
+      recorded: number;
+      alreadyKnown: number;
+      /** Rows whose note was upgraded off the baseline. See `upgradeNote`. */
+      upgraded: number;
+    }
   | { ok: false; error: string };
 
 /** A clone's coverage composition, or why it could not be read. */
@@ -81,19 +89,27 @@ export async function recordKnownProvenance(projectRef: string): Promise<Provena
   // One decision per version. The legacy ledger is read first because it is
   // the only one whose name can evidence an execution; a canonical row can
   // then only add an assertion for a version the legacy pass left unknown.
-  const decided = new Map<string, { provenance: MigrationProvenance; note: string }>();
+  //
+  // `from` is carried because the two ledgers are not interchangeable on a
+  // re-run. A legacy name is a REASON somebody recorded; the canonical
+  // `aurixa-baseline` is a stamp the repair wrote so the lane could see past a
+  // version. Where both exist the reason is the one worth keeping, and 59 of
+  // the 775 rows that carry one on npc-client-dashboard say `OWED` or
+  // `UNVERIFIED` rather than "already level".
+  type Decision = { provenance: MigrationProvenance; note: string; from: "legacy" | "canonical" };
+  const decided = new Map<string, Decision>();
   for (const row of legacy) {
     const version = str(row.version);
     const name = str(row.name);
     const p = provenanceFromLedgerName(name, version);
-    if (p) decided.set(version, { provenance: p, note: name });
+    if (p) decided.set(version, { provenance: p, note: name, from: "legacy" });
   }
   for (const row of canonical) {
     const version = str(row.version);
     if (decided.has(version)) continue;
     const name = str(row.name);
     const p = provenanceFromCanonicalName(name);
-    if (p) decided.set(version, { provenance: p, note: name });
+    if (p) decided.set(version, { provenance: p, note: name, from: "canonical" });
   }
 
   const considered = new Set([
@@ -101,10 +117,15 @@ export async function recordKnownProvenance(projectRef: string): Promise<Provena
     ...canonical.map((r) => str(r.version)),
   ]).size;
 
-  if (decided.size === 0) return { ok: true, considered, recorded: 0, alreadyKnown: 0 };
+  if (decided.size === 0)
+    return { ok: true, considered, recorded: 0, alreadyKnown: 0, upgraded: 0 };
 
   const entries = [...decided.entries()];
+  const legacyEntries = entries.filter(([, d]) => d.from === "legacy");
+  const canonicalEntries = entries.filter(([, d]) => d.from === "canonical");
+
   let recorded = 0;
+  let upgraded = 0;
   try {
     // Ensure the table here rather than relying on the replay to have done it.
     // The lane returns early when a clone has nothing pending and so never
@@ -113,22 +134,34 @@ export async function recordKnownProvenance(projectRef: string): Promise<Provena
     // describing. One DDL, shared, so this cannot drift from the replay's.
     await runSqlOnProject(projectRef, PROVENANCE_TABLE_SQL);
 
-    for (let i = 0; i < entries.length; i += WRITE_CHUNK) {
-      const chunk = entries.slice(i, i + WRITE_CHUNK);
-      const values = chunk
-        .map(
-          ([version, d]) =>
-            `(${sqlLiteral(version)}, ${sqlLiteral(d.provenance)}, ${sqlLiteral(d.note)})`,
-        )
-        .join(", ");
-      const raw = await runSqlOnProject(
-        projectRef,
-        `insert into aurixa.migration_provenance (version, provenance, note)
-         values ${values}
-         on conflict (version) do nothing
-         returning version;`,
-      );
-      recorded += toRows(raw).length;
+    for (const [entriesForPass, conflict] of [
+      [legacyEntries, upgradeNote()] as const,
+      [canonicalEntries, "do nothing"] as const,
+    ]) {
+      for (let i = 0; i < entriesForPass.length; i += WRITE_CHUNK) {
+        const chunk = entriesForPass.slice(i, i + WRITE_CHUNK);
+        const values = chunk
+          .map(
+            ([version, d]) =>
+              `(${sqlLiteral(version)}, ${sqlLiteral(d.provenance)}, ${sqlLiteral(d.note)})`,
+          )
+          .join(", ");
+        // `xmax = 0` distinguishes a row this statement INSERTED from one it
+        // updated. Without it an upsert's RETURNING cannot tell the two apart,
+        // and a report that counts an upgrade as a new record is the kind of
+        // number nobody can act on.
+        const raw = await runSqlOnProject(
+          projectRef,
+          `insert into aurixa.migration_provenance (version, provenance, note)
+           values ${values}
+           on conflict (version) ${conflict}
+           returning version, (xmax = 0) as inserted;`,
+        );
+        for (const row of toRows(raw)) {
+          if (row.inserted === true || row.inserted === "t") recorded += 1;
+          else upgraded += 1;
+        }
+      }
     }
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : "could not write provenance" };
@@ -138,8 +171,38 @@ export async function recordKnownProvenance(projectRef: string): Promise<Provena
     ok: true,
     considered,
     recorded,
-    alreadyKnown: entries.length - recorded,
+    alreadyKnown: entries.length - recorded - upgraded,
+    upgraded,
   };
+}
+
+/**
+ * The one case in which this inference may overwrite what is already recorded.
+ *
+ * Everything else here is `do nothing`, and that ordering is the whole safety
+ * of the module: the lane KNOWS and this only reads, so a row the lane wrote as
+ * `applied` must never be rewritten by a guess.
+ *
+ * This clause is narrow enough to preserve that. It fires only on a row this
+ * same function wrote — `asserted`, noted {@link BASELINE_ASSERTION_NAME} —
+ * and only replaces that note with the REASON the legacy ledger carries for the
+ * same version. The provenance value never changes, an `applied` row is never
+ * touched, and nothing is destroyed: `supabase_migrations.schema_migrations`
+ * still holds the baseline stamp, which is where that fact was written.
+ *
+ * It exists because `do nothing` is why the note is wrong. The backfill ran
+ * before the seven 2026-09-02 rationales were on {@link KNOWN_ASSERTION_NAMES},
+ * so the canonical pass supplied `aurixa-baseline` for all 775 of them and the
+ * legacy pass could not replace it afterwards. 52 of those rows actually read
+ * `OWED: … Never replay this file onto a tenant` and 7 read `UNVERIFIED`.
+ */
+export function upgradeNote(): string {
+  return (
+    `do update set note = excluded.note ` +
+    `where aurixa.migration_provenance.provenance = 'asserted' ` +
+    `and aurixa.migration_provenance.note = ${sqlLiteral(BASELINE_ASSERTION_NAME)} ` +
+    `and excluded.note <> ${sqlLiteral(BASELINE_ASSERTION_NAME)}`
+  );
 }
 
 /**
