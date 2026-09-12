@@ -12,6 +12,12 @@ import {
   provisionCloneAnthropicWorkspace,
   runCloneAnthropicSelftestFn,
 } from "@/lib/anthropic-attribution.functions";
+import {
+  type AnthropicIdentityFacts,
+  delivered,
+  federationComplete,
+  workspaceRecorded,
+} from "@/lib/anthropicAttribution.pure";
 
 type StepState = "done" | "open" | "blocked";
 
@@ -85,9 +91,25 @@ export function CloneAnthropicCard({ cloneId }: { cloneId: string }) {
    * see the key ledger, so it says what it knows and claims nothing about
    * which line the spend lands on.
    */
-  const recorded = Boolean(row?.workspace_id);
-  const hasWorkspace = recorded && Boolean(row?.delivered_at);
-  const federated = Boolean(row?.federation_rule_id);
+  const facts: AnthropicIdentityFacts = {
+    workspaceId: row?.workspace_id ?? null,
+    deliveredAt: row?.delivered_at ?? null,
+    federationRuleId: row?.federation_rule_id ?? null,
+    anthropicKeyStatus: (data?.ok ? data.anthropicKeyStatus : null) ?? null,
+  };
+
+  const recorded = workspaceRecorded(facts);
+  const hasWorkspace = delivered(facts);
+  /*
+   * FINISHED, not started. This was `Boolean(row.federation_rule_id)`, and a
+   * rule is stamped before `withdrawAnthropicKey` writes the ledger status —
+   * so a clone whose federation stopped half way drew "done" here while it was
+   * still holding the organisation key this step exists to remove. The
+   * readiness count and `decideFederation` have always required both halves;
+   * this card was the one surface that did not, and it is the surface an
+   * operator looks at.
+   */
+  const federated = federationComplete(facts);
   const proved = Boolean(row?.verified_at);
 
   const steps: { id: string; label: string; state: StepState; detail: string }[] = [

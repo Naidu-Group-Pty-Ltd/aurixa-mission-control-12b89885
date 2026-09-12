@@ -50,9 +50,11 @@ describe("the workspace id never travels from the prime", () => {
 });
 
 describe("decideWorkspaceProvision", () => {
+  const DELIVERED = "2026-09-11T00:00:00.000Z";
   const base = {
     existingWorkspaceId: null,
-    anthropicKeyStatus: null,
+    deliveredAt: null as string | null,
+    anthropicKeyStatus: null as string | null,
     credentialPresent: true,
     backendProvisioned: true,
   };
@@ -61,8 +63,19 @@ describe("decideWorkspaceProvision", () => {
     expect(decideWorkspaceProvision(base)).toEqual({ act: true });
   });
 
+  /*
+   * DELIVERED, not merely recorded. The input is the `delivered_at` column and
+   * it is required: an omitted stamp reads as pending, because assuming
+   * delivery is the one direction that is never safe — a wrongly-pending row
+   * costs one idempotent re-write of the same id, a wrongly-delivered one is
+   * never revisited.
+   */
   it("never creates a second workspace for a clone that has one", () => {
-    const verdict = decideWorkspaceProvision({ ...base, existingWorkspaceId: WORKSPACE });
+    const verdict = decideWorkspaceProvision({
+      ...base,
+      existingWorkspaceId: WORKSPACE,
+      deliveredAt: DELIVERED,
+    });
     expect(verdict.act).toBe(false);
     expect(verdict.act === false && verdict.reason).toBe("already_provisioned");
     expect(verdict.act === false && verdict.actionable).toBe(false);
@@ -227,7 +240,9 @@ describe("the migration declares what the code reads", () => {
    * silently.
    */
   it("makes one workspace belong to one clone", () => {
-    expect(sql).toContain("create unique index if not exists clone_anthropic_identity_workspace_key");
+    expect(sql).toContain(
+      "create unique index if not exists clone_anthropic_identity_workspace_key",
+    );
   });
 
   it("carries the federation columns, so the second half needs no second migration", () => {
@@ -298,8 +313,8 @@ describe("the review found these, and they are all one mistake", () => {
       credentialPresent: true,
       backendProvisioned: true,
     };
-    expect(decideWorkspaceProvision({ ...base, deliveryPending: true })).toEqual({ act: true });
-    const settled = decideWorkspaceProvision({ ...base, deliveryPending: false });
+    expect(decideWorkspaceProvision({ ...base, deliveredAt: null })).toEqual({ act: true });
+    const settled = decideWorkspaceProvision({ ...base, deliveredAt: "2026-09-11T00:00:00.000Z" });
     expect(settled.act === false && settled.reason).toBe("already_provisioned");
   });
 
@@ -323,7 +338,7 @@ describe("the review found these, and they are all one mistake", () => {
       anthropicKeyStatus: "inherited" as string | null,
       credentialPresent: false,
       backendProvisioned: true,
-      deliveryPending: true,
+      deliveredAt: null,
     };
     const pending = decideWorkspaceProvision({ ...noKey, existingWorkspaceId: WORKSPACE });
     expect(pending).toEqual({ act: true });
@@ -341,7 +356,7 @@ describe("the review found these, and they are all one mistake", () => {
   it("keeps every earlier stand-down ahead of the delivery exemption", () => {
     const pendingNoKey = {
       existingWorkspaceId: WORKSPACE,
-      deliveryPending: true,
+      deliveredAt: null as string | null,
       anthropicKeyStatus: "inherited" as string | null,
       credentialPresent: false,
       backendProvisioned: true,
@@ -364,7 +379,7 @@ describe("the review found these, and they are all one mistake", () => {
   it("still stands down on a tenant's own key while delivery is pending", () => {
     const verdict = decideWorkspaceProvision({
       existingWorkspaceId: "wrkspc_01JwQvzr7rXLA5AGx3HKfFUJ",
-      deliveryPending: true,
+      deliveredAt: null,
       anthropicKeyStatus: "set",
       credentialPresent: true,
       backendProvisioned: true,
@@ -388,11 +403,24 @@ describe("pending delivery survives the other writers", () => {
   const server = readFileSync("src/server/anthropicWorkspace.server.ts", "utf8");
 
   it("reads delivery from its own column", () => {
-    expect(server).toMatch(/const deliveryPending\s*=[\s\S]{0,160}delivered_at/);
+    expect(server).toMatch(/deliveredAt\s*=[\s\S]{0,80}delivered_at/);
+  });
+
+  /*
+   * And derives it in ONE place. The server used to compute `deliveryPending`
+   * itself and `decideWorkspaceProvision` computed its own `deliveryOnly` from
+   * the same two facts; keeping two expressions of one fact in step is not
+   * something any test can do, so there is now one function and both ask it.
+   */
+  it("derives it once, from the shared authority", () => {
+    expect(server).toContain('from "@/lib/anthropicAttribution.pure"');
+    expect(server).toMatch(/const pending = deliveryPending\(\{/);
+    // Never a second, private spelling of the same predicate.
+    expect(server).not.toMatch(/Boolean\(existing\.data\?\.workspace_id\)\s*&&\s*!/);
   });
 
   it("no longer infers it from last_error", () => {
-    expect(server).not.toMatch(/deliveryPending[\s\S]{0,120}last_error/);
+    expect(server).not.toMatch(/deliveredAt[\s\S]{0,120}last_error/);
     expect(server).not.toContain("WRITE_FAILURE_MARKER");
   });
 
@@ -404,7 +432,9 @@ describe("pending delivery survives the other writers", () => {
     const stamps = server.match(/delivered_at: now/g) ?? [];
     expect(stamps).toHaveLength(1);
     const writeFailure = server.indexOf("if (!write.ok)");
-    const successRecord = server.indexOf("recordIdentity(supabase, cloneId, workspace, null, true)");
+    const successRecord = server.indexOf(
+      "recordIdentity(supabase, cloneId, workspace, null, true)",
+    );
     expect(successRecord).toBeGreaterThan(writeFailure);
   });
 });

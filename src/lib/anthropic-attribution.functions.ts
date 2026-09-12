@@ -30,7 +30,31 @@ export const getCloneAnthropicIdentity = createServerFn({ method: "POST" })
     // A failed read is not an absent identity, and collapsing the two would
     // offer "provision a workspace" for a clone that already has one.
     if (error) return { ok: false as const, error: error.message };
-    return { ok: true as const, row: row ?? null };
+
+    /*
+     * The key ledger travels with the row, because federation is only FINISHED
+     * once the key is gone and this status is the only fact that says so.
+     * `federated_at` and `federation_rule_id` are both stamped before
+     * `withdrawAnthropicKey` runs, so a card reading either called a
+     * half-finished federation done.
+     *
+     * A failed read of the ledger is not a status of null — that would render
+     * a federated clone as unfederated — so it fails the whole reading, which
+     * the card already renders as "could not be read".
+     */
+    const { data: keyRow, error: keyError } = await context.supabase
+      .from("clone_backend_secrets")
+      .select("status")
+      .eq("clone_id", data.cloneId)
+      .eq("name", "ANTHROPIC_API_KEY")
+      .maybeSingle();
+    if (keyError) return { ok: false as const, error: keyError.message };
+
+    return {
+      ok: true as const,
+      row: row ?? null,
+      anthropicKeyStatus: (keyRow?.status as string | null) ?? null,
+    };
   });
 
 /**

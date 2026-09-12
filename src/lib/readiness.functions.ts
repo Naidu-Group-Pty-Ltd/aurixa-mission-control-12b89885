@@ -10,6 +10,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { requireAdmin } from "@/integrations/supabase/role-middleware";
 import type { ReadinessReport, ConfigCheck } from "@/server/readiness.pure";
+import { federationComplete, isAttributed, standsDown } from "@/lib/anthropicAttribution.pure";
 
 export type { ReadinessReport } from "@/server/readiness.pure";
 
@@ -167,20 +168,18 @@ export const fetchReadiness = createServerFn({ method: "POST" })
       .select("clone_id, status")
       .eq("name", "ANTHROPIC_API_KEY");
 
+    /*
+     * Both of these ask `anthropicAttribution.pure.ts` rather than spelling a
+     * predicate here. Five surfaces used to spell their own and six review
+     * rounds were spent finding them one at a time.
+     */
+    const keyStatus = new Map(
+      (anthropicKeys ?? []).map((r) => [r.clone_id, (r.status as string | null) ?? null]),
+    );
     const standDown = new Set(
       (anthropicKeys ?? [])
-        .filter((r) => r.status === "set" || r.status === "withheld")
+        .filter((r) => standsDown({ anthropicKeyStatus: (r.status as string | null) ?? null }))
         .map((r) => r.clone_id),
-    );
-
-    /*
-     * Federation COMPLETED, which is the key ledger's status and never the
-     * presence of a rule: `federated_at` and `federation_rule_id` are stamped
-     * before `withdrawAnthropicKey` runs, so a clone whose federation stopped
-     * half way carries both.
-     */
-    const federatedKey = new Set(
-      (anthropicKeys ?? []).filter((r) => r.status === "federated").map((r) => r.clone_id),
     );
 
     /*
@@ -218,6 +217,13 @@ export const fetchReadiness = createServerFn({ method: "POST" })
         (backends ?? []).map((b) => b.clone_id).filter((id) => id && !standDown.has(id)),
       );
       const rows = (identities ?? []).filter((r) => r.clone_id && eligible.has(r.clone_id));
+      /** One row's raw facts, from the two tables that hold them. */
+      const factsFor = (r: (typeof rows)[number]) => ({
+        workspaceId: (r.workspace_id as string | null) ?? null,
+        deliveredAt: (r.delivered_at as string | null) ?? null,
+        federationRuleId: (r.federation_rule_id as string | null) ?? null,
+        anthropicKeyStatus: keyStatus.get(r.clone_id) ?? null,
+      });
       const bootstrapNames = [
         "ANTHROPIC_FEDERATION_PRIVATE_KEY",
         "ANTHROPIC_ORGANIZATION_ID",
@@ -231,23 +237,9 @@ export const fetchReadiness = createServerFn({ method: "POST" })
       config.anthropic_attribution = anthropicAttributionConfig({
         provisionedClones: eligible.size,
         identities: rows.length,
-        /*
-         * Attributed by EITHER route, and this is the one place the union is
-         * computed.
-         *
-         * The id was written onto the project, or the clone holds a completed
-         * federated credential — `ensureRule` binds the token to
-         * `workspace_id` at the vendor, so a federated clone names its
-         * workspace without the header. Counting delivery alone left a working
-         * federated clone permanently uncovered wherever the secret write had
-         * failed.
-         */
-        attributed: rows.filter(
-          (r) =>
-            Boolean(r.delivered_at) ||
-            (Boolean(r.federation_rule_id) && federatedKey.has(r.clone_id)),
-        ).length,
-        federated: rows.filter((r) => Boolean(r.federation_rule_id)).length,
+        // Either route, decided by the one authority rather than re-spelled.
+        attributed: rows.filter((r) => isAttributed(factsFor(r))).length,
+        federated: rows.filter((r) => federationComplete(factsFor(r))).length,
         proved: rows.filter((r) => Boolean(r.verified_at)).length,
         failing: rows.filter((r) => Boolean(r.last_error)).length,
         bootstrapSet: bootstrapNames.filter((n) => present.has(n)).length,
