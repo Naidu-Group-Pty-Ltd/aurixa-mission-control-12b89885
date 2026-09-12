@@ -22,12 +22,15 @@
     "check:fk-indexes": "node scripts/check-fk-indexes.mjs",
     "check:discarded-errors": "node scripts/check-discarded-errors.mjs",
     "check:migration-assertions": "node scripts/check-migration-assertions.mjs",
+    "check:applied-digests": "node scripts/check-applied-digests.mjs",
     "migrations:assertions": "node scripts/generate-migration-assertions.mjs",
     "migrations:assertions:check": "node scripts/generate-migration-assertions.mjs --check",
     "lint": "eslint .",
     "test": "vitest run",
     "format": "prettier --write .",
-    "typecheck:strict": "tsc --noEmit"
+    "typecheck:strict": "tsc --noEmit",
+    "migrations:digests": "node scripts/refresh-applied-digests.mjs",
+    "migrations:digests:check": "node scripts/refresh-applied-digests.mjs --check"
   },
   "dependencies": {
     "@cloudflare/vite-plugin": "^1.25.5",

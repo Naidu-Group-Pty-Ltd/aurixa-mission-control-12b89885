@@ -1,0 +1,25 @@
+# Migrations whose repository file has drifted from the SQL that RAN, and which
+# are accepted anyway.
+#
+# FROZEN. Nothing may be added to this list. A migration edited after it applied
+# fails `npm run check:applied-digests`, and adding it here to make the guard
+# pass is the failure the guard exists to prevent. The list only ever shrinks —
+# an entry goes when the repository file is put back to what ran.
+#
+# Both entries below were checked BY HAND on 12 Sep 2026, by stripping comments
+# from the queue's stored SQL and from the repository file and comparing the
+# remaining statements. They are byte-identical in both cases: what drifted is
+# the header — the `-- @asserts` claims and the explanatory prose were added
+# when the files were documented, after they had already applied.
+#
+# That check is recorded here rather than performed by the checker, and
+# deliberately. `stripSqlComments` is documented as conservative and not
+# dollar-quote aware, and its failure mode is OVER-stripping — which would make
+# two genuinely different files look the same. A verdict of "only comments
+# changed" computed that way is exactly the confident-wrong answer this
+# programme keeps finding. A person looked; the checker compares bytes.
+#
+# Format: <version>  # why it is accepted
+
+20260909010118  # header added when documented: three @asserts claims plus the note recording that it was applied out of band on 9 Sep and committed afterwards. Statements verified identical.
+20260909072847  # header added when documented: one @asserts claim plus the note explaining the REVOKE. Statements verified identical.
