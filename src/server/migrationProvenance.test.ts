@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
+import { upgradeNote } from "./migrationProvenance.server";
 import { describe, expect, it } from "vitest";
 import {
+  BASELINE_ASSERTION_NAME,
   composeCoverage,
   describeCoverage,
   KNOWN_ASSERTION_NAMES,
@@ -253,6 +255,63 @@ describe("the rules this module exists to keep", () => {
       // No reader of the applied-set may narrow it by provenance.
       expect(src).not.toMatch(/schema_migrations[\s\S]{0,200}provenance\s*=\s*'applied'/i);
     }
+  });
+});
+
+describe("a reason outranks the stamp that let the lane see past it", () => {
+  /*
+    775 versions on npc-client-dashboard are in BOTH ledgers: the 2026-09-02
+    reconciliation wrote a rationale into `aurixa.schema_migrations`, and the
+    2026-09-12 repair stamped `aurixa-baseline` into
+    `supabase_migrations.schema_migrations`. The backfill ran before those seven
+    rationales were on KNOWN_ASSERTION_NAMES, so the canonical pass supplied the
+    baseline for all 775 and `on conflict do nothing` meant the legacy pass
+    could never replace it. 52 of them actually read `OWED: … Never replay this
+    file onto a tenant` and 7 read `UNVERIFIED` — the distinction the operator
+    needs, collapsed into the one word that does not carry it.
+  */
+  const server = readFileSync("src/server/migrationProvenance.server.ts", "utf8");
+  // The clause itself, as the database will receive it — not the source that
+  // composes it. `sqlLiteral` is what turns the constant into SQL, so reading
+  // the source would assert about the template and not about the statement.
+  const clause = upgradeNote();
+
+  it("names the baseline once, and everything else imports it", () => {
+    expect(BASELINE_ASSERTION_NAME).toBe("aurixa-baseline");
+    expect(KNOWN_ASSERTION_NAMES[0]).toBe(BASELINE_ASSERTION_NAME);
+    const pure = readFileSync("src/server/migrationProvenance.pure.ts", "utf8");
+    const declarations = pure.match(/"aurixa-baseline"/g) ?? [];
+    expect(declarations).toHaveLength(1);
+  });
+
+  it("upgrades only a row this same inference wrote", () => {
+    // `asserted`, noted with the baseline. An `applied` row is the lane's own
+    // record of running a file and is never rewritten by a guess — which is
+    // the ordering the whole module rests on.
+    expect(clause).toContain("aurixa.migration_provenance.provenance = 'asserted'");
+    expect(clause).toContain(`aurixa.migration_provenance.note = '${BASELINE_ASSERTION_NAME}'`);
+    expect(clause).not.toMatch(/set\s+provenance\s*=/);
+    expect(clause.toLowerCase()).toContain("do update set note = excluded.note");
+  });
+
+  it("never replaces a reason with the stamp", () => {
+    // The upgrade is one-directional. Without this the two passes would take
+    // turns overwriting each other on every lane run.
+    expect(clause).toContain(`excluded.note <> '${BASELINE_ASSERTION_NAME}'`);
+  });
+
+  it("leaves the canonical pass exactly as it was", () => {
+    // Only the legacy pass may upgrade. A canonical row is a stamp, and a
+    // stamp has nothing more specific to offer a row that already exists.
+    expect(server).toContain('[canonicalEntries, "do nothing"] as const');
+  });
+
+  it("counts an upgrade separately from a new record", () => {
+    // An upsert's RETURNING cannot tell an insert from an update without
+    // `xmax`, and a report that counts an upgrade as a new record is a number
+    // nobody can act on.
+    expect(server).toContain("(xmax = 0) as inserted");
+    expect(server).toMatch(/upgraded\s*\+=\s*1/);
   });
 });
 

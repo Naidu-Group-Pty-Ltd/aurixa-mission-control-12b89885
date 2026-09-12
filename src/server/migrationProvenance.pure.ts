@@ -126,14 +126,33 @@ export type CoverageComposition = {
  * only surviving record of that run's reasoning, which is why they are quoted
  * rather than summarised.
  *
+ * ## Two ledgers can both name the same version, and only one of them is a REASON
+ *
+ * 775 of those rows are in BOTH: the 2026-09-02 reconciliation wrote a rationale
+ * into `aurixa.schema_migrations`, and the 2026-09-12 repair stamped
+ * `aurixa-baseline` into `supabase_migrations.schema_migrations`. Both are true
+ * and they are not the same fact. The prose says WHY somebody concluded the
+ * clone was level; the baseline says a stamp was written so the lane could see
+ * past it.
+ *
+ * The prose is the one worth keeping in `note`, because 59 of those 775 do not
+ * say "already level" at all — 52 say `OWED: the prime carries this and this
+ * clone does not … Never replay this file onto a tenant`, and 7 say
+ * `UNVERIFIED`. Reading them all as `aurixa-baseline` erases exactly the
+ * distinction an operator needs. Nothing is lost by preferring the prose:
+ * `supabase_migrations` still holds the baseline stamp, unmodified, which is
+ * where that fact was written and where it still is.
+ *
  * What is deliberately NOT here: the eight slug-named rows on that same clone
  * (`seed_template_library_v9_report_part_numbering` and its siblings). Those
  * are hand-carried APPLIES — `20261112000000`'s two columns were verified
  * present on the prime and the clone — and classifying them as assertions is
  * the precise misreading this module was written after watching happen.
  */
+export const BASELINE_ASSERTION_NAME = "aurixa-baseline";
+
 export const KNOWN_ASSERTION_NAMES: readonly string[] = [
-  "aurixa-baseline",
+  BASELINE_ASSERTION_NAME,
   "accounted: this clone was built by catalog introspection from the prime and already carries what this file creates (objects verified 2026-09-02)",
   "accounted: the prime ran this file under a different ledger timestamp and this clone was mirrored from that schema (verified 2026-09-02)",
   "OWED: the prime carries this and this clone does not — a cron schedule that hardcodes the prime project ref, a storage policy, or a seeded row that catalog introspection does not copy. Never replay this file onto a tenant.",
