@@ -20,9 +20,8 @@ export const fetchReadiness = createServerFn({ method: "POST" })
     const { supabaseAdmin } = await import(
       /* @vite-ignore */ "@/integrations/supabase/client.server"
     );
-    const { judgeReadiness, CAPABILITIES, anthropicAttributionConfig } = await import(
-      /* @vite-ignore */ "@/server/readiness.pure"
-    );
+    const { judgeReadiness, CAPABILITIES, anthropicAttributionConfig, llmProvisioningConfig } =
+      await import(/* @vite-ignore */ "@/server/readiness.pure");
 
     // Presence, gathered from the catalog rather than from a second list. Two
     // lists of credential names is how one of them goes stale and a gap stops
@@ -244,6 +243,70 @@ export const fetchReadiness = createServerFn({ method: "POST" })
         failing: rows.filter((r) => Boolean(r.last_error)).length,
         bootstrapSet: bootstrapNames.filter((n) => present.has(n)).length,
         bootstrapTotal: bootstrapNames.length,
+      });
+    }
+
+    /*
+     * Per-clone model keys. Read here, beside the Anthropic attribution counts,
+     * because both answer "whose line does this spend land on" and both are
+     * measured against the same eligible population.
+     */
+    const { LLM_PROVIDERS, MINTED_STATUS } = await import(
+      /* @vite-ignore */ "@/server/llmKeyProvisioning.pure"
+    );
+    const mintable = LLM_PROVIDERS.filter((p) => p.mint === "api" && p.provisioningEnv);
+    const { data: llmKeys, error: llmKeyError } = await supabaseAdmin
+      .from("clone_backend_secrets")
+      .select("clone_id, name, status")
+      .in(
+        "name",
+        mintable.map((p) => p.secretName),
+      );
+
+    if (backendError || llmKeyError) {
+      config.llm_key_provisioning = [
+        {
+          label: "Minting",
+          ok: null,
+          detail: backendError
+            ? "the clone backends could not be read"
+            : "the model key ledger could not be read",
+          remedy: "Retry; a failed read is not a missing configuration.",
+        },
+      ];
+    } else {
+      const withBackend = new Set(
+        (backends ?? []).map((b) => b.clone_id).filter((id): id is string => Boolean(id)),
+      );
+      config.llm_key_provisioning = llmProvisioningConfig({
+        providers: mintable.map((provider) => {
+          const rows = (llmKeys ?? []).filter((r) => r.name === provider.secretName);
+          /*
+           * A tenant's own key and a withheld one LEAVE the denominator. Asked
+           * of the shared authority rather than re-spelled, because "set" and
+           * "withheld" mean the same two things here as they do for the
+           * Anthropic workspace count, and two spellings of one rule is the
+           * shape this codebase has already paid for repeatedly.
+           */
+          const standing = new Set(
+            rows
+              .filter((r) =>
+                standsDown({ anthropicKeyStatus: (r.status as string | null) ?? null }),
+              )
+              .map((r) => r.clone_id),
+          );
+          const eligible = [...withBackend].filter((id) => !standing.has(id));
+          const mintedIds = new Set(
+            rows.filter((r) => r.status === MINTED_STATUS).map((r) => r.clone_id),
+          );
+          return {
+            label: provider.label,
+            credentialPresent: present.has(provider.provisioningEnv as string),
+            eligible: eligible.length,
+            minted: eligible.filter((id) => mintedIds.has(id)).length,
+          };
+        }),
+        consoleOnly: LLM_PROVIDERS.filter((p) => p.mint === "console_only").map((p) => p.label),
       });
     }
 
