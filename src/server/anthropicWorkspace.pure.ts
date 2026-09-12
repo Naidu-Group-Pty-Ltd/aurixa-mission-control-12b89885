@@ -49,6 +49,8 @@
  * Pure: no network, no database, no Node globals.
  */
 
+import { deliveryPending } from "@/lib/anthropicAttribution.pure";
+
 /** The name a clone's project reads to know which workspace it acts in. */
 export const ANTHROPIC_WORKSPACE_SECRET = "ANTHROPIC_WORKSPACE_ID";
 
@@ -106,17 +108,30 @@ export function decideWorkspaceProvision(input: {
   /** `clone_anthropic_identity.workspace_id` for this clone, or null. */
   existingWorkspaceId: string | null;
   /**
-   * True when a workspace is RECORDED but was never written onto the project.
+   * `clone_anthropic_identity.delivered_at` — the raw column, never a
+   * judgement about it.
    *
-   * The two are separate acts and the second one fails on its own: the
-   * Management API write can be refused after the vendor has created the
-   * workspace, and the row is recorded anyway so a retry cannot create a
-   * second one. Without this flag `existingWorkspaceId` alone reads as done,
-   * every later run short-circuits, and the clone bills to the organisation's
-   * default line for ever — while the failure message promises that a retry
-   * writes the same workspace.
+   * Recording a workspace and writing its id onto the project are separate
+   * acts and the second fails on its own: the Management API write can be
+   * refused after the vendor has created the workspace, and the row is
+   * recorded anyway so a retry cannot create a second one. Without this,
+   * `existingWorkspaceId` alone reads as done, every later run short-circuits,
+   * and the clone bills to the organisation's default line for ever — while
+   * the failure message promises that a retry writes the same workspace.
+   *
+   * It is the COLUMN rather than a `deliveryPending` boolean because the
+   * caller computed that boolean too, and two expressions of one fact in two
+   * modules is the shape that has cost this branch five review findings. The
+   * derivation is `deliveryPending()` in `anthropicAttribution.pure.ts`, here
+   * and at the call site both.
+   *
+   * REQUIRED, not optional. It replaced an optional `deliveryPending` boolean
+   * whose absence meant "not pending" — so a caller that forgot it asserted
+   * DELIVERED, which is the one direction never safe to assume: a wrongly
+   * pending row costs one idempotent re-write of the same id, and a wrongly
+   * delivered one is never revisited at all.
    */
-  deliveryPending?: boolean;
+  deliveredAt: string | null;
   /** `clone_backend_secrets.status` for ANTHROPIC_API_KEY, or null when absent. */
   anthropicKeyStatus: string | null;
   /** Whether Mission Control holds ANTHROPIC_ADMIN_KEY. */
@@ -124,7 +139,14 @@ export function decideWorkspaceProvision(input: {
   /** Whether the clone has a Supabase project to write the id onto. */
   backendProvisioned: boolean;
 }): WorkspaceVerdict {
-  if (input.existingWorkspaceId && !input.deliveryPending) {
+  // Only the two facts delivery is made of. This function has no federation
+  // rule and no business inventing one.
+  const pending = deliveryPending({
+    workspaceId: input.existingWorkspaceId,
+    deliveredAt: input.deliveredAt,
+  });
+
+  if (input.existingWorkspaceId && !pending) {
     return {
       act: false,
       reason: "already_provisioned",
@@ -173,12 +195,29 @@ export function decideWorkspaceProvision(input: {
     return {
       act: false,
       reason: "not_provisioned",
-      message: "This clone has no Supabase project yet, so there is nowhere to write the workspace id.",
+      message:
+        "This clone has no Supabase project yet, so there is nowhere to write the workspace id.",
       actionable: false,
     };
   }
 
-  if (!input.credentialPresent) {
+  /*
+   * A RECORDED workspace that was never written onto the project needs no
+   * vendor call at all: the delivery branch reuses the recorded id by
+   * construction — it deliberately does not list or create, because a second
+   * listing could match a different workspace by name — and writes one project
+   * secret with the Supabase management token. The Anthropic admin credential
+   * is not what that step is waiting on.
+   *
+   * Refusing it here is not a deferral, it is a trap. `20260911090000` clears
+   * every presumed `delivered_at`, so on a deployment that has no
+   * `ANTHROPIC_ADMIN_KEY` yet — which is every deployment until the owner sets
+   * one — every identity row becomes pending and NOTHING can ever settle it,
+   * including the rows whose delivery genuinely succeeded. The repair that
+   * moved "is delivery owed?" onto its own column has to move the gate in
+   * front of the delivery step too, or the old dependency decides anyway.
+   */
+  if (!input.credentialPresent && !pending) {
     return {
       act: false,
       reason: "no_credential",
@@ -230,9 +269,14 @@ export function workspaceNameFor(cloneName: string, cloneId?: string, max = 120)
    * the old one: this code has not been released, and every existing clone
    * therefore has no identity row and no workspace to adopt.
    */
-  const suffix = (cloneId ?? "").toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 12);
+  const suffix = (cloneId ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "")
+    .slice(0, 12);
   const named = slug
-    ? (suffix ? `aurixa-${slug}-${suffix}` : `aurixa-${slug}`)
+    ? suffix
+      ? `aurixa-${slug}-${suffix}`
+      : `aurixa-${slug}`
     : `aurixa-clone-${suffix}`;
 
   const trimmed = named.replace(/-+$/, "");

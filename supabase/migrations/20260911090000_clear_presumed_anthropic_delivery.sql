@@ -1,0 +1,72 @@
+-- @asserts none:clears a data stamp; creates no object, and the cleared state is not stably observable
+--
+-- Clear every delivery stamp that was PRESUMED rather than observed.
+--
+-- ## Why it claims `none`, in ONE line
+--
+-- It first claimed `column:clone_anthropic_identity.delivered_at`, which
+-- `20260911080000` had already added. A `column:` claim is answered by probing
+-- the catalog, so it reads SATISFIED on a database that never applied this
+-- file: the drift card shows the cleanup green having measured its
+-- predecessor's work, and there is no failed queue row either, because a file
+-- that is never enqueued never fails. That is the "ran and achieved nothing"
+-- shape the grammar exists to catch, pointed the other way.
+--
+-- There is nothing honest to claim instead. "No row carries `delivered_at`" is
+-- true only until the next real delivery, so a `rows:` assertion would go
+-- UNSATISFIED on a healthy fleet — an alarm that fires on correct operation is
+-- worse than no alarm. `none` with a reason is what the grammar provides for
+-- exactly this.
+--
+-- The reason is one line because every `@asserts` line is a separate claim, and
+-- each claim is a separate ROW in the drift card labelled `none:<reason>` and
+-- truncated. A reason wrapped over six lines renders as six fragments of a
+-- broken sentence. The reasoning belongs in prose, here, where the next person
+-- reads it.
+--
+-- ## What the previous migration got wrong
+--
+-- `20260911080000` added `delivered_at` and backfilled it wherever a row
+-- carried a workspace and no `last_error`, reasoning that a clean row must
+-- have got past the Management API write. That reads delivery out of
+-- `last_error` — the column `delivered_at` exists precisely to stop trusting,
+-- because four writers clear it routinely: the reachability probe on a pass,
+-- the attempt recorder, and federation when it records its resources. A row
+-- whose delivery genuinely failed can therefore be sitting clean, and the
+-- backfill stamped exactly those rows as delivered. The retry then skips them
+-- FOR EVER, which is the fault being repaired, made permanent.
+--
+-- ## Why this is a new file rather than an edit
+--
+-- `apply-migrations.yml` selects `--diff-filter=A`. A MODIFIED migration is
+-- warned about and never re-applied — "a migration that has run is history" —
+-- so deleting the backfill from the published file would leave every database
+-- that already applied it carrying the wrong stamps for ever, while the
+-- repository looked correct. The published file is left exactly as it ran.
+--
+-- ## Why clearing ALL of them is safe
+--
+-- A legitimate stamp and a backfilled one are indistinguishable: both set
+-- `delivered_at` alongside `updated_at`. So this clears every stamp rather
+-- than guessing, and the cost is bounded — the next provisioning pass sees the
+-- recorded workspace, finds delivery pending, and writes the SAME workspace id
+-- onto the project. One idempotent write per row, against a false "delivered"
+-- that nothing would ever revisit. The recoverable side is the one to fail
+-- towards, and this is the last moment a stamp can be presumed rather than
+-- earned: every one written after this comes from a run that completed the
+-- write itself.
+--
+-- ## Why there is no end-of-file verification block
+--
+-- The two data corrections this file is modelled on (`20260908110100`,
+-- `20260908110200`) end in a DO block that fails the migration if the edit did
+-- not land. They can, because nothing writes catalog prices while a migration
+-- runs. This column is written by live provisioning: a delivery that completes
+-- between the UPDATE and the check is CORRECT, and under READ COMMITTED the
+-- block would see it and abort — turning a healthy fleet into a failed queue
+-- row, which is a cost this repository has already paid. The statement is also
+-- unconditional, so it has no way to succeed having done nothing; that is the
+-- shape a verification block is for.
+update public.clone_anthropic_identity
+   set delivered_at = null
+ where delivered_at is not null;

@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
 import {
   anthropicAttributionConfig,
   judgeReadiness,
@@ -292,6 +293,7 @@ describe("anthropicAttributionConfig", () => {
   const facts = {
     provisionedClones: 3,
     identities: 3,
+    attributed: 3,
     federated: 3,
     proved: 3,
     failing: 0,
@@ -309,11 +311,73 @@ describe("anthropicAttributionConfig", () => {
   });
 
   /*
+   * Coverage is what the CLONE received, not what the ledger recorded.
+   *
+   * A row whose `delivered_at` is null is a workspace the vendor created and
+   * the clone never got: its `ANTHROPIC_WORKSPACE_ID` was never written, so it
+   * is still billing to the organisation's default line. Counting the row as
+   * coverage reports N of N and green over the exact gap this check exists to
+   * find — and `20260911090000` clears every presumed stamp, so the whole
+   * fleet enters that state the moment it applies.
+   *
+   * The second half is the half that keeps it honest: the other three counts
+   * are facts about the identity RECORD and must not move with delivery, or
+   * this fix just relocates the same confusion.
+   */
+  it("counts attributed workspaces as coverage, and leaves the record counts alone", () => {
+    const none = check({ attributed: 0 }, "Per-clone workspaces");
+    expect(none.ok).toBe(false);
+    expect(none.detail).toContain("0 of 3");
+
+    const partial = check({ attributed: 2 }, "Per-clone workspaces");
+    expect(partial.ok).toBe(false);
+
+    // Federation and reachability are about the record, so an unattributed
+    // fleet does not drag them down with it.
+    for (const label of ["Federation bootstrap", "Proved reachable"]) {
+      expect(check({ attributed: 0 }, label).ok, label).toBe(true);
+    }
+  });
+
+  /*
+   * `attributed` is a UNION, and the builder cannot see which route settled it.
+   *
+   * Two things settle attribution: the id reached the project, or the clone
+   * holds a completed federated credential whose rule binds the token to the
+   * workspace. The builder takes one number because the routes are
+   * interchangeable for this question — so what is pinned here is that it
+   * treats them as one, and the caller's composition is pinned where the
+   * caller is.
+   *
+   * The half that matters: coverage must not move with `identities`. Counting
+   * rows that EXIST is the defect two rounds of review have now corrected,
+   * once from `identities` and once from `delivered`.
+   */
+  it("does not move with the identity count", () => {
+    const attributedButFewRows = check(
+      { provisionedClones: 3, identities: 3, attributed: 3 },
+      "Per-clone workspaces",
+    );
+    expect(attributedButFewRows.ok).toBe(true);
+
+    // Three rows, none attributed: the row count must not rescue it.
+    const rowsWithoutAttribution = check(
+      { provisionedClones: 3, identities: 3, attributed: 0 },
+      "Per-clone workspaces",
+    );
+    expect(rowsWithoutAttribution.ok).toBe(false);
+    expect(rowsWithoutAttribution.detail).toContain("0 of 3");
+  });
+
+  /*
    * `workspace_id` is NOT NULL, so counting inside the identity table is
    * tautological: one attributed clone beside nine unattributed read "1 of 1".
    */
   it("measures workspaces against the provisioned clones, not the identity rows", () => {
-    const c = check({ provisionedClones: 10, identities: 1 }, "Per-clone workspaces");
+    const c = check(
+      { provisionedClones: 10, identities: 1, attributed: 1 },
+      "Per-clone workspaces",
+    );
     expect(c.ok).toBe(false);
     expect(c.detail).toContain("1 of 10");
   });
@@ -390,6 +454,7 @@ describe("the workspace denominator counts only clones that should have one", ()
   const facts = {
     provisionedClones: 9,
     identities: 9,
+    attributed: 9,
     federated: 9,
     proved: 9,
     failing: 0,
@@ -415,7 +480,7 @@ describe("the workspace denominator counts only clones that should have one", ()
   });
 
   it("still fails when an ELIGIBLE clone has no workspace", () => {
-    expect(coverage({ provisionedClones: 10, identities: 9 }).ok).toBe(false);
+    expect(coverage({ provisionedClones: 10, identities: 9, attributed: 9 }).ok).toBe(false);
   });
 
   /*
@@ -424,5 +489,37 @@ describe("the workspace denominator counts only clones that should have one", ()
    */
   it("says nothing rather than something false when no clone is eligible", () => {
     expect(coverage({ provisionedClones: 0, identities: 0 }).ok).toBeNull();
+  });
+});
+
+/*
+ * Round three: the numerator and the denominator must come from one
+ * population, and a read that failed is never an empty answer.
+ *
+ * Both are about the caller rather than this pure function, so they are pinned
+ * at the source — but they belong beside the config they govern, because the
+ * first repair fixed the denominator and left the numerator drawn from
+ * somewhere else.
+ */
+describe("the readiness caller draws both sides from one population", () => {
+  const fn = readFileSync("src/lib/readiness.functions.ts", "utf8");
+
+  it("filters identity rows by the same eligible set as the denominator", () => {
+    expect(fn).toMatch(/const eligible = new Set\(/);
+    expect(fn).toMatch(/identities \?\? \[\]\)\.filter\([\s\S]{0,80}eligible\.has/);
+    expect(fn).toContain("provisionedClones: eligible.size");
+  });
+
+  it("treats an unreadable key-status read as unknown, not as no stand-downs", () => {
+    // Discarding it left `standDown` empty, so tenant-owned and withheld
+    // clones re-entered the denominator and the page emitted a definitive
+    // answer about a question it could not answer.
+    expect(fn).toMatch(/error: anthropicKeyError/);
+    expect(fn).toMatch(/identityError \|\| backendError \|\| anthropicKeyError/);
+  });
+
+  it("names which read failed rather than blaming the ledger for all three", () => {
+    expect(fn).toContain("the clone backends could not be read");
+    expect(fn).toContain("the Anthropic key statuses could not be read");
   });
 });

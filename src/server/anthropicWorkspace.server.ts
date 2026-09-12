@@ -15,6 +15,7 @@ import {
   workspaceCapWarning,
   workspaceNameFor,
 } from "./anthropicWorkspace.pure";
+import { deliveryPending } from "@/lib/anthropicAttribution.pure";
 import { CloneSecretTargetError, resolveCloneSecretTarget } from "./cloneAllowedOrigins.server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
@@ -84,7 +85,10 @@ export async function listAnthropicWorkspaces(): Promise<AnthropicWorkspace[]> {
         `Anthropic refused to list workspaces (${res.status}): ${(await res.text().catch(() => "")).slice(0, 300)}`,
       );
     }
-    const body = (await res.json()) as { data?: Array<{ id?: string; name?: string }>; next_page?: string | null };
+    const body = (await res.json()) as {
+      data?: Array<{ id?: string; name?: string }>;
+      next_page?: string | null;
+    };
     for (const row of body.data ?? []) {
       const id = readWorkspaceId(row?.id);
       if (id && typeof row?.name === "string") out.push({ id, name: row.name });
@@ -149,7 +153,13 @@ export async function provisionAnthropicWorkspace(
     target = await resolveCloneSecretTarget(supabase, cloneId);
   } catch (e) {
     if (e instanceof CloneSecretTargetError) {
-      return { cloneId, provisioned: false, reason: e.reason, detail: e.message, actionable: false };
+      return {
+        cloneId,
+        provisioned: false,
+        reason: e.reason,
+        detail: e.message,
+        actionable: false,
+      };
     }
     return { cloneId, provisioned: false, reason: "unreadable", detail: msg(e), actionable: true };
   }
@@ -199,12 +209,19 @@ export async function provisionAnthropicWorkspace(
    * federation clears it — every one of them running in the SAME sweep as this
    * one. The marker was routinely erased before the pass that needed it.
    */
-  const deliveryPending =
-    Boolean(existing.data?.workspace_id) && !existing.data?.delivered_at;
+  const recordedId = (existing.data?.workspace_id as string | undefined) ?? null;
+  const deliveredAt = (existing.data?.delivered_at as string | undefined) ?? null;
+  /*
+   * One derivation, shared with the verdict below. This used to be spelled
+   * here AND again inside `decideWorkspaceProvision`, which is the shape that
+   * has cost this branch five review findings — two expressions of one fact
+   * cannot be kept in step by anything but attention.
+   */
+  const pending = deliveryPending({ workspaceId: recordedId, deliveredAt });
 
   const verdict = decideWorkspaceProvision({
-    existingWorkspaceId: (existing.data?.workspace_id as string | undefined) ?? null,
-    deliveryPending,
+    existingWorkspaceId: recordedId,
+    deliveredAt,
     anthropicKeyStatus: (keyRow.data?.status as string | undefined) ?? null,
     credentialPresent: adminKey().length > 0,
     backendProvisioned: true, // resolveCloneSecretTarget already proved it
@@ -234,8 +251,7 @@ export async function provisionAnthropicWorkspace(
      * clone's spend would be split across two lines and the organisation's
      * allowance spent twice as fast.
      */
-    const recordedId = (existing.data?.workspace_id as string | undefined) ?? null;
-    if (deliveryPending && recordedId) {
+    if (pending && recordedId) {
       /*
        * Delivery is the only step left, so the vendor is not asked again. A
        * second listing would be a chance to match a DIFFERENT workspace by
@@ -250,7 +266,13 @@ export async function provisionAnthropicWorkspace(
       workspace = already ?? (await createAnthropicWorkspace(name));
     }
   } catch (e) {
-    return { cloneId, provisioned: false, reason: "create_failed", detail: msg(e), actionable: true };
+    return {
+      cloneId,
+      provisioned: false,
+      reason: "create_failed",
+      detail: msg(e),
+      actionable: true,
+    };
   }
 
   const { setCloneSecretValues } = await import("./backend-provisioning.server");
@@ -267,7 +289,12 @@ export async function provisionAnthropicWorkspace(
      * clone meanwhile bills to the default workspace, which is today's
      * behaviour rather than a regression.
      */
-    await recordIdentity(supabase, cloneId, workspace, `the workspace id could not be written to the project: ${write.error}`);
+    await recordIdentity(
+      supabase,
+      cloneId,
+      workspace,
+      `the workspace id could not be written to the project: ${write.error}`,
+    );
     return {
       cloneId,
       provisioned: false,
@@ -315,21 +342,19 @@ async function recordIdentity(
   delivered = false,
 ): Promise<string | null> {
   const now = new Date().toISOString();
-  const { error } = await supabase
-    .from("clone_anthropic_identity")
-    .upsert(
-      {
-        clone_id: cloneId,
-        workspace_id: workspace.id,
-        workspace_name: workspace.name,
-        last_error: lastError,
-        updated_at: now,
-        // Stamped only by a run that got past the Management API write, so
-        // "recorded" and "the project knows" can never be confused again.
-        ...(delivered ? { delivered_at: now } : {}),
-      },
-      { onConflict: "clone_id" },
-    );
+  const { error } = await supabase.from("clone_anthropic_identity").upsert(
+    {
+      clone_id: cloneId,
+      workspace_id: workspace.id,
+      workspace_name: workspace.name,
+      last_error: lastError,
+      updated_at: now,
+      // Stamped only by a run that got past the Management API write, so
+      // "recorded" and "the project knows" can never be confused again.
+      ...(delivered ? { delivered_at: now } : {}),
+    },
+    { onConflict: "clone_id" },
+  );
   return error ? `the Anthropic workspace could not be recorded: ${error.message}` : null;
 }
 

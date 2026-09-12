@@ -10,6 +10,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { requireAdmin } from "@/integrations/supabase/role-middleware";
 import type { ReadinessReport, ConfigCheck } from "@/server/readiness.pure";
+import { federationComplete, isAttributed, standsDown } from "@/lib/anthropicAttribution.pure";
 
 export type { ReadinessReport } from "@/server/readiness.pure";
 
@@ -132,7 +133,7 @@ export const fetchReadiness = createServerFn({ method: "POST" })
      */
     const { data: identities, error: identityError } = await supabaseAdmin
       .from("clone_anthropic_identity")
-      .select("clone_id, workspace_id, federation_rule_id, verified_at, last_error");
+      .select("clone_id, workspace_id, delivered_at, federation_rule_id, verified_at, last_error");
 
     /*
      * The DENOMINATOR is the clones that could carry a workspace, read the
@@ -162,28 +163,67 @@ export const fetchReadiness = createServerFn({ method: "POST" })
      * key would read "9 of 10" and block the capability for ever, which is the
      * opposite error to the tautological "1 of 1" it replaced.
      */
-    const { data: anthropicKeys } = await supabaseAdmin
+    const { data: anthropicKeys, error: anthropicKeyError } = await supabaseAdmin
       .from("clone_backend_secrets")
       .select("clone_id, status")
       .eq("name", "ANTHROPIC_API_KEY");
 
+    /*
+     * Both of these ask `anthropicAttribution.pure.ts` rather than spelling a
+     * predicate here. Five surfaces used to spell their own and six review
+     * rounds were spent finding them one at a time.
+     */
+    const keyStatus = new Map(
+      (anthropicKeys ?? []).map((r) => [r.clone_id, (r.status as string | null) ?? null]),
+    );
     const standDown = new Set(
       (anthropicKeys ?? [])
-        .filter((r) => r.status === "set" || r.status === "withheld")
+        .filter((r) => standsDown({ anthropicKeyStatus: (r.status as string | null) ?? null }))
         .map((r) => r.clone_id),
     );
 
-    if (identityError || backendError) {
+    /*
+     * A key-status read that FAILED is not a fleet with no stand-downs.
+     * Discarding the error left `standDown` empty, so tenant-owned and
+     * deliberately withheld clones re-entered the denominator and the page
+     * emitted a definitive — possibly blocked — answer about a question it
+     * could not actually answer. `null` is the reading for that, and it is the
+     * rule this module's own header states.
+     */
+    if (identityError || backendError || anthropicKeyError) {
       config.anthropic_attribution = [
         {
           label: "Per-clone workspaces",
           ok: null,
-          detail: "the Anthropic identity ledger could not be read",
+          detail: identityError
+            ? "the Anthropic identity ledger could not be read"
+            : backendError
+              ? "the clone backends could not be read"
+              : "the Anthropic key statuses could not be read",
           remedy: "Retry; a failed read is not a missing configuration.",
         },
       ];
     } else {
-      const rows = identities ?? [];
+      /*
+       * The numerator comes from the SAME population as the denominator.
+       *
+       * An already-attributed clone that is later switched to a tenant-supplied
+       * key, or withheld, leaves the denominator and kept its identity row — so
+       * a stale numerator could cover for a different, eligible clone that has
+       * no row at all, and report complete coverage over a gap. The federation
+       * and reachability counts skew the same way.
+       */
+      const eligible = new Set(
+        (backends ?? []).map((b) => b.clone_id).filter((id) => id && !standDown.has(id)),
+      );
+      const rows = (identities ?? []).filter((r) => r.clone_id && eligible.has(r.clone_id));
+      /** One row's raw facts, from the two tables that hold them. */
+      const factsFor = (r: (typeof rows)[number]) => ({
+        workspaceId: (r.workspace_id as string | null) ?? null,
+        deliveredAt: (r.delivered_at as string | null) ?? null,
+        federationRuleId: (r.federation_rule_id as string | null) ?? null,
+        anthropicKeyStatus: keyStatus.get(r.clone_id) ?? null,
+      });
       const bootstrapNames = [
         "ANTHROPIC_FEDERATION_PRIVATE_KEY",
         "ANTHROPIC_ORGANIZATION_ID",
@@ -195,9 +235,11 @@ export const fetchReadiness = createServerFn({ method: "POST" })
       // can exercise — a capability test that passed `config: {}` is how the
       // bootstrap check came to report a working Phase 1 as blocked.
       config.anthropic_attribution = anthropicAttributionConfig({
-        provisionedClones: (backends ?? []).filter((b) => !standDown.has(b.clone_id)).length,
+        provisionedClones: eligible.size,
         identities: rows.length,
-        federated: rows.filter((r) => Boolean(r.federation_rule_id)).length,
+        // Either route, decided by the one authority rather than re-spelled.
+        attributed: rows.filter((r) => isAttributed(factsFor(r))).length,
+        federated: rows.filter((r) => federationComplete(factsFor(r))).length,
         proved: rows.filter((r) => Boolean(r.verified_at)).length,
         failing: rows.filter((r) => Boolean(r.last_error)).length,
         bootstrapSet: bootstrapNames.filter((n) => present.has(n)).length,

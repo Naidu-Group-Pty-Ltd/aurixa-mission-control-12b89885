@@ -477,6 +477,27 @@ export interface AnthropicAttributionFacts {
   readonly provisionedClones: number;
   /** Rows in `clone_anthropic_identity`. */
   readonly identities: number;
+  /**
+   * Of those, how many are actually ATTRIBUTED — by either of the two routes
+   * that settle it.
+   *
+   * A clone's spend lands on its own workspace when the workspace id was
+   * written onto its project (`delivered_at`), OR when it holds a federated
+   * credential: `ensureRule` binds the token to `workspace_id` at the vendor,
+   * so a federated clone names its workspace without the header and needs no
+   * delivery at all. Counting delivery alone reported a working federated
+   * clone as uncovered for ever whenever the secret write had failed.
+   *
+   * Completed federation is the KEY LEDGER's `federated` status, never the
+   * presence of a rule: `federated_at` and `federation_rule_id` are stamped
+   * before `withdrawAnthropicKey` runs, so both exist on a clone whose
+   * federation did not finish.
+   *
+   * Required rather than optional: an omitted count must never read as "all
+   * attributed", which is the reading that put this check where the review
+   * found it.
+   */
+  readonly attributed: number;
   /** Of those, how many carry a federation rule. */
   readonly federated: number;
   /** Of those, how many have proved they can reach Anthropic. */
@@ -504,6 +525,7 @@ export function anthropicAttributionConfig(
   const {
     provisionedClones,
     identities,
+    attributed,
     federated,
     proved,
     failing,
@@ -511,7 +533,25 @@ export function anthropicAttributionConfig(
     bootstrapTotal,
   } = facts;
 
-  const withWorkspace = identities;
+  /*
+   * Coverage is ATTRIBUTED, never merely recorded.
+   *
+   * It was `identities` — the count of rows that exist — which reported N of N
+   * and green over exactly the gap this check was built to find, for the whole
+   * fleet, the moment `20260911090000` clears every presumed stamp.
+   *
+   * It is not `delivered` either, which was the first correction and was too
+   * narrow: a federated clone is attributed by the RULE's binding rather than
+   * by the header, so a persistent secret-write failure would have left a
+   * working clone permanently uncovered. `attributed` is the union, and the
+   * caller is the one place that computes it.
+   *
+   * `federated`, `proved` and `failing` deliberately stay on `identities`:
+   * a federation rule, a reachability probe and a recorded fault are facts
+   * about the identity record, and each is true whether or not the id was
+   * delivered.
+   */
+  const withWorkspace = attributed;
 
   return [
     {

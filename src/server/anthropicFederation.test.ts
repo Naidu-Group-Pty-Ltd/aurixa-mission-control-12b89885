@@ -376,7 +376,26 @@ describe("the key is never taken before the clone can do without it", () => {
 
   it("fails closed — an unprovable clone keeps its key", () => {
     expect(server).toContain('reason: "client_unproved"');
-    expect(server).toMatch(/if \(!probe\.ok\)/);
+    /*
+     * BOTH flags. `probe.ok` says a reading came back, which proves the build
+     * carries the federation client; `probe.reach.ok` says the clone can
+     * actually reach Anthropic. Checking only the first withdrew the key from
+     * a clone whose credential had already drifted — and stamping the ledger
+     * `federated` puts the name in the fleet sweep's removal set, so any key
+     * that returned would be taken off again. Neither federating nor holding a
+     * key is a clone broken permanently.
+     */
+    expect(server).toMatch(/if \(!probe\.ok \|\| !probe\.reach\.ok\)/);
+  });
+
+  it("keeps the key from a clone that answers but cannot reach Anthropic", () => {
+    // The reading is the evidence, and a reading of `ok: false` is evidence
+    // AGAINST withdrawing — taking a credential from a deployment that is
+    // already failing cannot repair it.
+    const guard = /if \(!probe\.ok \|\| !probe\.reach\.ok\)[\s\S]*?\n {2}\}\n/.exec(server)?.[0] ?? "";
+    expect(guard, "guard not found").not.toBe("");
+    expect(guard).toContain("cannot currently reach Anthropic");
+    expect(guard.indexOf("return")).toBeGreaterThan(-1);
   });
 
   /*

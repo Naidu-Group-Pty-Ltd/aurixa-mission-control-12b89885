@@ -57,11 +57,19 @@
  * Pure: no network, no database, no Node globals.
  */
 
-/** The ledger status a clone carries once it reaches Anthropic by federation. */
-export const FEDERATED_STATUS = "federated";
+/*
+ * The ledger statuses, and the judgement "has federation FINISHED?", live in
+ * `anthropicAttribution.pure.ts`.
+ *
+ * They are re-exported here rather than moved, so every existing importer
+ * keeps working. They were defined here first, and while they were, five
+ * surfaces answered "is this clone attributed?" five different ways — six
+ * review rounds were spent finding them one at a time. One authority is what
+ * stops a sixth.
+ */
+export { FEDERATED_STATUS, WITHHELD_STATUS } from "@/lib/anthropicAttribution.pure";
 
-/** A person took the credential off. Never undone on a schedule. */
-export const WITHHELD_STATUS = "withheld";
+import { WITHHELD_STATUS, federationComplete } from "@/lib/anthropicAttribution.pure";
 
 /** PKCS8 PEM. Mission Control signs every clone assertion with it. */
 export const FEDERATION_KEY_ENV = "ANTHROPIC_FEDERATION_PRIVATE_KEY";
@@ -266,7 +274,19 @@ export function decideFederation(input: {
     };
   }
 
-  if (input.federationRuleId && input.anthropicKeyStatus === FEDERATED_STATUS) {
+  /*
+   * Asked of the one authority. Both halves are required and always were —
+   * the rule is stamped BEFORE `withdrawAnthropicKey` writes the status, so a
+   * half-finished federation carries a rule and is not federated — and the
+   * same predicate now answers the readiness coverage count and the clone
+   * card, which each used to spell their own version of it.
+   */
+  if (
+    federationComplete({
+      federationRuleId: input.federationRuleId,
+      anthropicKeyStatus: input.anthropicKeyStatus,
+    })
+  ) {
     return {
       act: false,
       reason: "already_federated",

@@ -10,6 +10,8 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 
+import { parseAssertions } from "./migrationAssertions.pure";
+
 import {
   ANTHROPIC_ADMIN_ENV,
   ANTHROPIC_WORKSPACE_CAP,
@@ -48,9 +50,11 @@ describe("the workspace id never travels from the prime", () => {
 });
 
 describe("decideWorkspaceProvision", () => {
+  const DELIVERED = "2026-09-11T00:00:00.000Z";
   const base = {
     existingWorkspaceId: null,
-    anthropicKeyStatus: null,
+    deliveredAt: null as string | null,
+    anthropicKeyStatus: null as string | null,
     credentialPresent: true,
     backendProvisioned: true,
   };
@@ -59,8 +63,19 @@ describe("decideWorkspaceProvision", () => {
     expect(decideWorkspaceProvision(base)).toEqual({ act: true });
   });
 
+  /*
+   * DELIVERED, not merely recorded. The input is the `delivered_at` column and
+   * it is required: an omitted stamp reads as pending, because assuming
+   * delivery is the one direction that is never safe — a wrongly-pending row
+   * costs one idempotent re-write of the same id, a wrongly-delivered one is
+   * never revisited.
+   */
   it("never creates a second workspace for a clone that has one", () => {
-    const verdict = decideWorkspaceProvision({ ...base, existingWorkspaceId: WORKSPACE });
+    const verdict = decideWorkspaceProvision({
+      ...base,
+      existingWorkspaceId: WORKSPACE,
+      deliveredAt: DELIVERED,
+    });
     expect(verdict.act).toBe(false);
     expect(verdict.act === false && verdict.reason).toBe("already_provisioned");
     expect(verdict.act === false && verdict.actionable).toBe(false);
@@ -225,7 +240,9 @@ describe("the migration declares what the code reads", () => {
    * silently.
    */
   it("makes one workspace belong to one clone", () => {
-    expect(sql).toContain("create unique index if not exists clone_anthropic_identity_workspace_key");
+    expect(sql).toContain(
+      "create unique index if not exists clone_anthropic_identity_workspace_key",
+    );
   });
 
   it("carries the federation columns, so the second half needs no second migration", () => {
@@ -296,9 +313,62 @@ describe("the review found these, and they are all one mistake", () => {
       credentialPresent: true,
       backendProvisioned: true,
     };
-    expect(decideWorkspaceProvision({ ...base, deliveryPending: true })).toEqual({ act: true });
-    const settled = decideWorkspaceProvision({ ...base, deliveryPending: false });
+    expect(decideWorkspaceProvision({ ...base, deliveredAt: null })).toEqual({ act: true });
+    const settled = decideWorkspaceProvision({ ...base, deliveredAt: "2026-09-11T00:00:00.000Z" });
     expect(settled.act === false && settled.reason).toBe("already_provisioned");
+  });
+
+  /*
+   * The admin credential gates CREATING a workspace, never DELIVERING one that
+   * already exists.
+   *
+   * The delivery branch reuses the recorded id by construction and writes one
+   * project secret with the Supabase management token — it asks Anthropic
+   * nothing. Refusing it for a missing `ANTHROPIC_ADMIN_KEY` is a trap rather
+   * than a deferral: `20260911090000` clears every presumed `delivered_at`, so
+   * on a deployment that has not set that key yet EVERY identity row becomes
+   * pending and nothing can settle it — including the rows whose delivery
+   * genuinely succeeded.
+   *
+   * The two halves of the rule are pinned together, because a gate that lets
+   * everything through is not a gate.
+   */
+  it("delivers a recorded workspace without the admin key, and creates none", () => {
+    const noKey = {
+      anthropicKeyStatus: "inherited" as string | null,
+      credentialPresent: false,
+      backendProvisioned: true,
+      deliveredAt: null,
+    };
+    const pending = decideWorkspaceProvision({ ...noKey, existingWorkspaceId: WORKSPACE });
+    expect(pending).toEqual({ act: true });
+
+    // Nothing recorded means there is a workspace to CREATE, which does need it.
+    const nothingRecorded = decideWorkspaceProvision({ ...noKey, existingWorkspaceId: null });
+    expect(nothingRecorded.act === false && nothingRecorded.reason).toBe("no_credential");
+  });
+
+  /*
+   * And the refusals that come BEFORE it still come before it. This is the
+   * reorder that would turn the exemption above into a hole, so it is pinned
+   * rather than trusted.
+   */
+  it("keeps every earlier stand-down ahead of the delivery exemption", () => {
+    const pendingNoKey = {
+      existingWorkspaceId: WORKSPACE,
+      deliveredAt: null as string | null,
+      anthropicKeyStatus: "inherited" as string | null,
+      credentialPresent: false,
+      backendProvisioned: true,
+    };
+    for (const [input, reason] of [
+      [{ ...pendingNoKey, anthropicKeyStatus: "set" }, "tenant_supplied"],
+      [{ ...pendingNoKey, anthropicKeyStatus: "withheld" }, "withheld"],
+      [{ ...pendingNoKey, backendProvisioned: false }, "not_provisioned"],
+    ] as const) {
+      const verdict = decideWorkspaceProvision(input);
+      expect(verdict.act === false && verdict.reason).toBe(reason);
+    }
   });
 
   /*
@@ -309,7 +379,7 @@ describe("the review found these, and they are all one mistake", () => {
   it("still stands down on a tenant's own key while delivery is pending", () => {
     const verdict = decideWorkspaceProvision({
       existingWorkspaceId: "wrkspc_01JwQvzr7rXLA5AGx3HKfFUJ",
-      deliveryPending: true,
+      deliveredAt: null,
       anthropicKeyStatus: "set",
       credentialPresent: true,
       backendProvisioned: true,
@@ -333,11 +403,24 @@ describe("pending delivery survives the other writers", () => {
   const server = readFileSync("src/server/anthropicWorkspace.server.ts", "utf8");
 
   it("reads delivery from its own column", () => {
-    expect(server).toMatch(/const deliveryPending\s*=[\s\S]{0,160}delivered_at/);
+    expect(server).toMatch(/deliveredAt\s*=[\s\S]{0,80}delivered_at/);
+  });
+
+  /*
+   * And derives it in ONE place. The server used to compute `deliveryPending`
+   * itself and `decideWorkspaceProvision` computed its own `deliveryOnly` from
+   * the same two facts; keeping two expressions of one fact in step is not
+   * something any test can do, so there is now one function and both ask it.
+   */
+  it("derives it once, from the shared authority", () => {
+    expect(server).toContain('from "@/lib/anthropicAttribution.pure"');
+    expect(server).toMatch(/const pending = deliveryPending\(\{/);
+    // Never a second, private spelling of the same predicate.
+    expect(server).not.toMatch(/Boolean\(existing\.data\?\.workspace_id\)\s*&&\s*!/);
   });
 
   it("no longer infers it from last_error", () => {
-    expect(server).not.toMatch(/deliveryPending[\s\S]{0,120}last_error/);
+    expect(server).not.toMatch(/deliveredAt[\s\S]{0,120}last_error/);
     expect(server).not.toContain("WRITE_FAILURE_MARKER");
   });
 
@@ -349,7 +432,92 @@ describe("pending delivery survives the other writers", () => {
     const stamps = server.match(/delivered_at: now/g) ?? [];
     expect(stamps).toHaveLength(1);
     const writeFailure = server.indexOf("if (!write.ok)");
-    const successRecord = server.indexOf("recordIdentity(supabase, cloneId, workspace, null, true)");
+    const successRecord = server.indexOf(
+      "recordIdentity(supabase, cloneId, workspace, null, true)",
+    );
     expect(successRecord).toBeGreaterThan(writeFailure);
+  });
+});
+
+/*
+ * No row ends up assumed delivered — across BOTH migrations.
+ *
+ * The first pass at this deleted the backfill from the published file, which
+ * repairs nothing: `apply-migrations.yml` selects `--diff-filter=A` and warns
+ * that a modified migration is never re-applied, so every database that had
+ * already run it would keep the wrong stamps while the repository looked
+ * correct. The published file stays exactly as it ran and a new one corrects
+ * the effect — which is why this asserts the END STATE rather than the
+ * contents of one file.
+ */
+describe("no existing row is assumed delivered", () => {
+  const added = readFileSync(
+    "supabase/migrations/20260911080000_anthropic_workspace_delivered_at.sql",
+    "utf8",
+  );
+  const corrected = readFileSync(
+    "supabase/migrations/20260911090000_clear_presumed_anthropic_delivery.sql",
+    "utf8",
+  );
+
+  it("adds the column", () => {
+    expect(added).toContain("add column if not exists delivered_at");
+  });
+
+  /*
+   * The published migration is HISTORY. Editing it is the mistake the apply
+   * workflow exists to warn about, so this pins that its backfill is still
+   * there rather than quietly removed.
+   */
+  it("leaves the published migration exactly as it ran", () => {
+    expect(added).toMatch(/update\s+public\.clone_anthropic_identity/i);
+    expect(added).toMatch(/last_error is null/i);
+  });
+
+  /*
+   * And the correction clears every stamp, because a backfilled one and an
+   * earned one are indistinguishable — both set `delivered_at` beside
+   * `updated_at`. Clearing costs one idempotent re-write of the same workspace
+   * id; a false "delivered" is never revisited at all.
+   */
+  it("clears every presumed stamp in a later migration", () => {
+    expect(corrected).toMatch(/set delivered_at = null/i);
+    expect(corrected).toMatch(/where delivered_at is not null/i);
+    // Never reintroduces the inference it is undoing.
+    expect(corrected).not.toMatch(/set\s+delivered_at\s*=\s*coalesce/i);
+  });
+
+  /*
+   * The correction creates NO object, so it may claim none.
+   *
+   * It first claimed `column:clone_anthropic_identity.delivered_at` — a column
+   * `20260911080000` had already added. A `column:` claim is answered by
+   * probing the catalog, so it reads SATISFIED on a database that never
+   * applied this file at all: the drift card would show the cleanup green
+   * having measured its predecessor. That is the "ran and achieved nothing"
+   * shape the assertion grammar exists to catch, pointed the other way.
+   *
+   * There is no honest structural claim to put in its place — "no row carries
+   * `delivered_at`" stops being true at the next real delivery — so this pins
+   * the RULE: a migration that creates nothing claims `none`, with a reason.
+   */
+  it("claims none rather than a column its predecessor created", () => {
+    const parsed = parseAssertions(corrected);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    // One claim, not six. Every `@asserts` line is a separate claim and each is
+    // a separate ROW in the drift card, labelled `none:<reason>` and truncated —
+    // so a reason wrapped over several lines renders as several fragments of a
+    // broken sentence. The reasoning goes in prose; the claim is one line.
+    expect(parsed.assertions).toHaveLength(1);
+    expect(parsed.assertions[0].kind).toBe("none");
+    // Whatever the wording, it must not become a claim about an object again.
+    expect(corrected).not.toMatch(/@asserts\s+(table|column|rpc|cron|rows|enum|check):/i);
+  });
+
+  it("opens no transaction of its own", () => {
+    for (const sql of [added, corrected]) {
+      expect(/^\s*begin\s*;/im.test(sql)).toBe(false);
+    }
   });
 });

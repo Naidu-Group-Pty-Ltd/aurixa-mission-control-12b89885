@@ -12,6 +12,12 @@ import {
   provisionCloneAnthropicWorkspace,
   runCloneAnthropicSelftestFn,
 } from "@/lib/anthropic-attribution.functions";
+import {
+  type AnthropicIdentityFacts,
+  delivered,
+  federationComplete,
+  workspaceRecorded,
+} from "@/lib/anthropicAttribution.pure";
 
 type StepState = "done" | "open" | "blocked";
 
@@ -70,8 +76,40 @@ export function CloneAnthropicCard({ cloneId }: { cloneId: string }) {
   const unreadable = data && !data.ok ? data.error : null;
   const row = data?.ok ? data.row : null;
 
-  const hasWorkspace = Boolean(row?.workspace_id);
-  const federated = Boolean(row?.federation_rule_id);
+  /*
+   * RECORDED and DELIVERED are different facts, and the second one fails on
+   * its own: the Management API write can be refused after Anthropic has
+   * created the workspace. A row exists either way, so reading `workspace_id`
+   * as "this clone has its workspace" tells an operator the step is done while
+   * the project may never have received the id.
+   *
+   * What a null stamp is NOT is proof the id was never written.
+   * `20260911090000` clears legitimate and presumed stamps alike, precisely
+   * because they are indistinguishable, so after it runs the honest reading is
+   * UNCONFIRMED — and an undelivered clone that is federated is attributed
+   * anyway, by the rule's binding rather than by the header. This card cannot
+   * see the key ledger, so it says what it knows and claims nothing about
+   * which line the spend lands on.
+   */
+  const facts: AnthropicIdentityFacts = {
+    workspaceId: row?.workspace_id ?? null,
+    deliveredAt: row?.delivered_at ?? null,
+    federationRuleId: row?.federation_rule_id ?? null,
+    anthropicKeyStatus: (data?.ok ? data.anthropicKeyStatus : null) ?? null,
+  };
+
+  const recorded = workspaceRecorded(facts);
+  const hasWorkspace = delivered(facts);
+  /*
+   * FINISHED, not started. This was `Boolean(row.federation_rule_id)`, and a
+   * rule is stamped before `withdrawAnthropicKey` writes the ledger status —
+   * so a clone whose federation stopped half way drew "done" here while it was
+   * still holding the organisation key this step exists to remove. The
+   * readiness count and `decideFederation` have always required both halves;
+   * this card was the one surface that did not, and it is the surface an
+   * operator looks at.
+   */
+  const federated = federationComplete(facts);
   const proved = Boolean(row?.verified_at);
 
   const steps: { id: string; label: string; state: StepState; detail: string }[] = [
@@ -81,12 +119,19 @@ export function CloneAnthropicCard({ cloneId }: { cloneId: string }) {
       state: hasWorkspace ? "done" : "open",
       detail: hasWorkspace
         ? `${row?.workspace_name ?? "(unnamed)"} carries this clone's model spend`
-        : "Without one, this clone's Claude usage lands on the organisation's default line with every other tenant's",
+        : recorded
+          ? `${row?.workspace_name ?? "(unnamed)"} exists at Anthropic; delivery of its id to this project is unconfirmed. A reconcile confirms it, or federation attributes the spend without it.`
+          : "Without one, this clone's Claude usage lands on the organisation's default line with every other tenant's",
     },
     {
       id: "federation",
       label: "Holds no Anthropic key",
-      state: federated ? "done" : hasWorkspace ? "open" : "blocked",
+      // RECORDED, not delivered. `federateClone` reads `workspace_id` and never
+      // `delivered_at`: it adds the service account to that workspace and binds
+      // the rule to it, so an undelivered clone federates normally. Keying this
+      // on delivery said `blocked` and sent an operator looking for a broken
+      // step that was one reconcile from done.
+      state: federated ? "done" : recorded ? "open" : "blocked",
       detail: federated
         ? "The clone obtains a short-lived token naming itself; no organisation key is on its project"
         : "The clone still runs on the organisation key, which can act in any workspace the organisation has",
