@@ -1,10 +1,11 @@
 import { afterAll, describe, expect, it } from "vitest";
 import { createServer, type Server } from "node:http";
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { load as loadYaml } from "js-yaml";
 
 /*
   `sha256` WAS WRITTEN FROM THE FIRST VERSION OF THE QUEUE AND NEVER READ.
@@ -88,6 +89,42 @@ const run = (
       },
     );
   });
+
+/** One step of a workflow job, as `js-yaml` gives it back. */
+type Step = {
+  name?: string;
+  uses?: string;
+  id?: string;
+  run?: string;
+  env?: Record<string, string>;
+};
+
+/** Git, synchronously — setup and inspection only, never while a stub must answer. */
+const spawnSyncGit = (cwd: string, args: readonly string[]) =>
+  spawnSync("git", args as string[], {
+    cwd,
+    encoding: "utf8",
+    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+  });
+
+/** A Mission Control stand-in. Closed after the file's tests finish. */
+const allServers: Server[] = [];
+const stubServer = async (handler: (body: unknown) => { status: number; json: unknown }) => {
+  const server = createServer((req, res) => {
+    let raw = "";
+    req.on("data", (c) => (raw += c));
+    req.on("end", () => {
+      const { status, json } = handler(JSON.parse(raw || "{}"));
+      res.writeHead(status, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(json));
+    });
+  });
+  allServers.push(server);
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const addr = server.address();
+  return `http://127.0.0.1:${typeof addr === "object" && addr ? addr.port : 0}`;
+};
+afterAll(() => allServers.forEach((s) => s.close()));
 
 const NAME = "20260101000000_a.sql";
 const BODY = "create table public.a ();\n";
@@ -352,5 +389,215 @@ describe("the two halves are wired where their credentials allow", () => {
     expect(apply.indexOf("refresh-applied-digests.mjs --check")).toBeLessThan(
       apply.indexOf("enqueue-migrations.mjs"),
     );
+  });
+});
+
+/*
+  THE RUN THAT MAKES THE MANIFEST STALE IS THE RUN THAT REFRESHES IT.
+
+  A migration's digest exists only once it has RUN, so the manifest is
+  necessarily short by whatever a push just applied. That gap used to stay open
+  until somebody remembered `npm run migrations:digests` — and "somebody
+  remembered" is the failure mode every other part of this pipeline exists to
+  remove.
+
+  The apply job closes it in the same run: the apply has settled, and that job
+  is the one place holding the credential to read the new digests.
+
+  The step's shell body is lifted from the YAML and EXECUTED below against a
+  real git repository with a real local remote and a stub Mission Control. One
+  line is substituted — the `ORIGIN=` URL, which hardcodes github.com — and
+  nothing else; the logic under test (regenerate, compare, commit, push, reset,
+  retry) runs verbatim.
+*/
+describe("the apply job refreshes and commits the manifest", () => {
+  const applyYaml = readFileSync(".github/workflows/apply-migrations.yml", "utf8");
+  const steps = (
+    loadYaml(applyYaml) as {
+      jobs: { apply: { permissions?: Record<string, string>; steps: Step[] } };
+    }
+  ).jobs.apply;
+  const step = steps.steps.find((s) => (s.name ?? "").startsWith("Refresh the digest"));
+
+  it("exists, and runs after the migrations have actually settled", () => {
+    expect(step).toBeDefined();
+    const order = steps.steps.map((s) => s.name ?? s.uses ?? "");
+    expect(order.indexOf("Refresh the digest manifest and commit it")).toBeGreaterThan(
+      order.indexOf("Enqueue and wait"),
+    );
+  });
+
+  it("takes the write permission on the job, not the workflow", () => {
+    // Scoped to the one job that needs it. The workflow-level default stays
+    // read, so nothing else this file might grow inherits repository write.
+    expect(steps.permissions).toEqual({ contents: "write" });
+    expect(loadYaml(applyYaml)).toMatchObject({ permissions: { contents: "read" } });
+  });
+
+  it("never persists the push credential into the checkout", () => {
+    // The same job submits SQL. Building the authenticated URL in-step keeps a
+    // repository token out of `.git/config` for every other step.
+    const checkout = steps.steps.find((s) => (s.uses ?? "").startsWith("actions/checkout"));
+    expect((checkout as unknown as { with: Record<string, unknown> }).with).toMatchObject({
+      "persist-credentials": false,
+    });
+  });
+
+  /** The step body, with only the hardcoded github.com origin redirected. */
+  const stepBody = (remote: string) =>
+    (step?.run ?? "").replace(/^\s*ORIGIN=.*$/m, `          ORIGIN=${JSON.stringify(remote)}`);
+
+  /** A repo with a bare remote and a manifest, as the job would find it. */
+  const repoWithRemote = (manifest: string) => {
+    const root = mkdtempSync(join(tmpdir(), "refresh-"));
+    const bare = join(root, "remote.git");
+    const work = join(root, "work");
+    const git = (cwd: string, ...args: string[]) => spawnSyncGit(cwd, args);
+    mkdirSync(bare, { recursive: true });
+    git(bare, "init", "--bare", "-q", "-b", "main");
+    mkdirSync(work, { recursive: true });
+    git(work, "init", "-q", "-b", "main");
+    git(work, "config", "user.email", "fixture@example.invalid");
+    git(work, "config", "user.name", "fixture");
+    mkdirSync(join(work, "scripts"), { recursive: true });
+    writeFileSync(join(work, "scripts", "applied-migration-digests.txt"), manifest);
+    // The step runs the real script from the repo root it is standing in, so
+    // the fixture carries a copy. Committed in the seed, so it survives the
+    // `reset --hard` the retry path performs.
+    writeFileSync(
+      join(work, "scripts", "refresh-applied-digests.mjs"),
+      readFileSync(ONLINE, "utf8"),
+    );
+    git(work, "add", "-A");
+    git(work, "commit", "-q", "-m", "seed");
+    git(work, "push", "-q", bare, "main");
+    return { root, bare, work };
+  };
+
+  const remoteManifest = (bare: string) =>
+    spawnSyncGit(bare, ["show", "main:scripts/applied-migration-digests.txt"]).stdout ?? "";
+
+  const runStep = (work: string, bare: string, url: string, env: Record<string, string> = {}) =>
+    new Promise<{ status: number; out: string }>((res) => {
+      execFile(
+        "bash",
+        ["-c", stepBody(bare)],
+        {
+          cwd: work,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            GH_TOKEN: "unused-for-a-local-remote",
+            GITHUB_REPOSITORY: "fixture/repo",
+            GITHUB_REF_NAME: "main",
+            MANIFEST: "scripts/applied-migration-digests.txt",
+            MISSION_CONTROL_URL: url,
+            CRON_SECRET: "x",
+            ...env,
+          },
+        },
+        (err, stdout, stderr) => {
+          const status =
+            err && typeof (err as { code?: unknown }).code === "number"
+              ? (err as { code: number }).code
+              : err
+                ? 1
+                : 0;
+          res({ status, out: (stdout ?? "") + (stderr ?? "") });
+        },
+      );
+    });
+
+  it("commits and pushes the new digests when the manifest is behind", async () => {
+    const live = [
+      { version: "20260101000000", name: NAME, sha256: sha(BODY), status: "applied" },
+      {
+        version: "20260102000000",
+        name: "20260102000000_b.sql",
+        sha256: sha("b"),
+        status: "applied",
+      },
+    ];
+    const url = await stubServer(() => ({ status: 200, json: { success: true, digests: live } }));
+    const { bare, work } = repoWithRemote(`# generated\n20260101000000  ${sha(BODY)}  ${NAME}\n`);
+
+    const r = await runStep(work, bare, url);
+    expect(r.status).toBe(0);
+    expect(r.out).toContain("Manifest refreshed and committed");
+    // The REMOTE is what matters — a local commit nobody pushed closes nothing.
+    expect(remoteManifest(bare)).toContain("20260102000000");
+    expect(remoteManifest(bare)).toContain("# generated");
+  });
+
+  it("commits nothing when the manifest already agrees", async () => {
+    const url = await stubServer(() => ({
+      status: 200,
+      json: {
+        success: true,
+        digests: [{ version: "20260101000000", name: NAME, sha256: sha(BODY), status: "applied" }],
+      },
+    }));
+    const { bare, work } = repoWithRemote(`# generated\n20260101000000  ${sha(BODY)}  ${NAME}\n`);
+    const before = spawnSyncGit(bare, ["rev-parse", "main"]).stdout?.trim();
+
+    const r = await runStep(work, bare, url);
+    expect(r.status).toBe(0);
+    // The step's OWN wording, not git's. The first version of this assertion
+    // read `toContain("nothing to commit")` and passed against a mutation that
+    // removed the guard entirely — because that is what `git commit` prints on
+    // an empty index, and stderr is captured here too. A guard asserted through
+    // somebody else's error message is not asserted.
+    expect(r.out).toContain("Manifest already agrees with the queue");
+    expect(r.out).not.toContain("Manifest refreshed and committed");
+    expect(spawnSyncGit(bare, ["rev-parse", "main"]).stdout?.trim()).toBe(before);
+  });
+
+  it("warns and leaves the run green when the digests cannot be read", async () => {
+    // The migrations are applied by the time this is reached. A bookkeeping
+    // step that could undo that is worse than a stale file.
+    const url = await stubServer(() => ({ status: 500, json: { error: "boom" } }));
+    const { bare, work } = repoWithRemote("# generated\n");
+    const r = await runStep(work, bare, url);
+    expect(r.status).toBe(0);
+    expect(r.out).toContain("::warning title=Manifest not refreshed");
+  });
+
+  it("loses a race, resets to the new tip, and still lands the manifest", async () => {
+    const url = await stubServer(() => ({
+      status: 200,
+      json: {
+        success: true,
+        digests: [
+          { version: "20260101000000", name: NAME, sha256: sha(BODY), status: "applied" },
+          {
+            version: "20260102000000",
+            name: "20260102000000_b.sql",
+            sha256: sha("b"),
+            status: "applied",
+          },
+        ],
+      },
+    }));
+    const { root, bare, work } = repoWithRemote(
+      `# generated\n20260101000000  ${sha(BODY)}  ${NAME}\n`,
+    );
+
+    // Somebody else pushes while this run was working.
+    const other = join(root, "other");
+    spawnSyncGit(root, ["clone", "-q", bare, other]);
+    spawnSyncGit(other, ["config", "user.email", "other@example.invalid"]);
+    spawnSyncGit(other, ["config", "user.name", "other"]);
+    writeFileSync(join(other, "unrelated.txt"), "landed first\n");
+    spawnSyncGit(other, ["add", "-A"]);
+    spawnSyncGit(other, ["commit", "-q", "-m", "unrelated"]);
+    spawnSyncGit(other, ["push", "-q", "origin", "main"]);
+
+    const r = await runStep(work, bare, url);
+    expect(r.status).toBe(0);
+    expect(r.out).toContain("Push rejected on attempt 1");
+    expect(r.out).toContain("Manifest refreshed and committed");
+    // Both survive: the other commit kept, the manifest added on top.
+    expect(remoteManifest(bare)).toContain("20260102000000");
+    expect(spawnSyncGit(bare, ["show", "main:unrelated.txt"]).stdout).toContain("landed first");
   });
 });

@@ -408,11 +408,42 @@ the manifest and turn the offline check into a no-op that reports success.
 A migration's digest exists only once it has run, so the manifest is always
 short by whatever the current push is about to apply.
 
-### What this does not cover
+### The run that makes the manifest stale is the run that refreshes it
 
-A migration that applied *after* the last manifest refresh is not yet in the
-manifest, and an edit to it in that window is unguarded until somebody runs
-`npm run migrations:digests` and commits the result. The apply workflow prints a
-`::notice` naming those versions on every migration push, so the window is
-visible rather than silent — but it is a window, and saying so is better than
-implying there is none.
+A migration's digest exists only once it has **run**, so the manifest is
+necessarily short by whatever a push just applied. That gap used to stay open
+until somebody remembered `npm run migrations:digests` — and "somebody
+remembered" is the failure mode every other part of this pipeline exists to
+remove.
+
+So the apply job closes it in the same run. After the enqueue settles it
+regenerates the manifest and commits it, which is the only moment where the new
+digests are both known and reachable: the apply has finished, and that job is
+the one place holding the credential to read them.
+
+Four things hold it.
+
+**It never fails the run.** The migrations are applied by the time it is
+reached, and a bookkeeping commit that could undo that would be worse than a
+stale file. A failed read, a refused push and a race all warn and exit 0.
+
+**It is never silent about giving up.** A manifest that quietly stopped
+refreshing is this same failure pointed the other way, so both the
+unreachable-Mission-Control path and the could-not-push path emit a
+`::warning` naming the remedy.
+
+**The write permission is on the JOB, not the workflow.** `contents: write`
+where it is needed, and nothing else this file might grow inherits it. The push
+credential is built into the remote URL in-step rather than persisted by
+`checkout`, so the rest of the job — which submits SQL — never has repository
+credentials in `.git/config`. This job already holds `CRON_SECRET`, which can
+execute arbitrary SQL as `postgres`; committing one generated file is strictly
+the smaller capability.
+
+**A lost race costs a regeneration, not a merge.** The manifest is a pure
+function of the live queue, so on a rejected push it resets to the current tip
+and asks again rather than stashing and replaying. Two attempts, then it warns.
+
+There is no loop: the commit touches `scripts/`, and this workflow triggers only
+on `supabase/migrations/**.sql`. It does re-run `ci.yml`, which is wanted —
+that is `check:applied-digests` reading the manifest it just wrote.
