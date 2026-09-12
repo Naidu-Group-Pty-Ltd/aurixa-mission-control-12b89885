@@ -50,10 +50,15 @@ import {
   resolvePrimeSource,
   resolvePrimeBackendRef,
 } from "./prime-backend.server";
-import { applyPrimeMigrations, runSqlOnProject } from "./backend-provisioning.server";
+import {
+  applyPrimeMigrations,
+  readCloneMigrationLedger,
+  runSqlOnProject,
+} from "./backend-provisioning.server";
 import { scopeCorpusToPrime, assertPrimeLedgerUsable } from "./fleetCorpusScope.pure";
 import {
   MIGRATION_CLAIMABLE_STATUSES,
+  blockIsDischarged,
   migrationEligibility,
   type MigrationSkipReason,
 } from "./fleetMigrationEligibility.pure";
@@ -105,6 +110,16 @@ export type FleetMigrationResult = {
    * this module exists to end.
    */
   excluded: number;
+  /**
+   * Clones whose `migration_blocked` flag this run cleared, because their own
+   * ledger now records the version the block names.
+   *
+   * Reported rather than silent for the same reason `skipped` is. A block that
+   * disappears with nothing saying so is indistinguishable from one nobody
+   * ever set, and the whole defect here was a state changing — the prime being
+   * repaired — that no reading reflected.
+   */
+  rehabilitated: string[];
   /**
    * The excluded ones, NAMED, with this lane's own verdict on each.
    *
@@ -164,6 +179,7 @@ const EMPTY: FleetMigrationResult = {
   upToDate: 0,
   failed: [],
   excluded: 0,
+  rehabilitated: [],
   skipped: [],
   heldOversize: [],
   withheld: 0,
@@ -353,6 +369,73 @@ export async function runFleetMigrationSync(
       migrationBlockedReason: b.migration_blocked_reason,
     }),
   }));
+  /*
+    A BLOCK THE CLONE HAS SINCE DISCHARGED IS NOT A BLOCK.
+
+    `migration_blocked_at` holds a clone out of this lane until it is repaired,
+    and nothing was watching for the repair. The sync will not create a run for
+    a blocked clone, and the only thing that clears the flag runs inside a run
+    — so a clone could only leave the state through a route that does not
+    consult eligibility at all. `npc-test-76b3b3` sat there for five hours
+    quoting a syntax error that had been fixed on the prime two minutes after
+    it was recorded, while its own ledger already held the version.
+
+    So each blocked clone is asked one question before it is skipped: does it
+    now record the version its block names? One ledger read, and only for a
+    clone that is already being excluded — the common path costs nothing. The
+    answer is the clone's own applied-set, which is the same union the replay
+    skips, so this cannot license a send the replay would refuse.
+
+    It clears the block and nothing else. `status` belongs to whichever lane
+    last ran a migration here; two writers on one field is the fault this
+    codebase keeps meeting, and `clearStaleMigrationFailure` settles it on the
+    pass that follows.
+  */
+  const rehabilitated: string[] = [];
+  for (const v of verdicts) {
+    if (v.verdict.eligible) continue;
+    if (v.verdict.reason !== "migration_blocked") continue;
+    const ref = v.row.supabase_project_ref;
+    if (!ref) continue;
+
+    const ledger = await readCloneMigrationLedger(ref);
+    // A read that FAILED says nothing, and an empty array is a claim. Keep the
+    // block rather than discharging one on a query that did not answer.
+    if (!ledger.ok) {
+      console.error(
+        `[fleet-migration] could not read ${v.row.clone_id}'s ledger to test its block:`,
+        ledger.error,
+      );
+      continue;
+    }
+    if (
+      !blockIsDischarged(
+        v.row.migration_blocked_reason,
+        ledger.rows.map((r) => r.version),
+      )
+    ) {
+      continue;
+    }
+
+    const { error: clearErr } = await supabase
+      .from("clone_backends")
+      .update({ migration_blocked_at: null, migration_blocked_reason: null })
+      .eq("clone_id", v.row.clone_id)
+      .not("migration_blocked_at", "is", null);
+    if (clearErr) {
+      console.error(
+        `[fleet-migration] ${v.row.clone_id} has discharged its block but it could not be cleared:`,
+        clearErr.message,
+      );
+      continue;
+    }
+
+    v.row.migration_blocked_at = null;
+    v.row.migration_blocked_reason = null;
+    v.verdict = { eligible: true };
+    rehabilitated.push(v.row.clone_id);
+  }
+
   const skipped = verdicts.filter((v) => !v.verdict.eligible);
   const excludedCount = skipped.length;
 
@@ -386,6 +469,7 @@ export async function runFleetMigrationSync(
     failed: [],
     heldOversize: [],
     excluded: excludedCount,
+    rehabilitated,
     skipped: skipped.map((v) => ({
       cloneId: v.row.clone_id,
       cloneName: nameOf.get(v.row.clone_id) ?? v.row.clone_id,
