@@ -169,7 +169,8 @@ export type SettledDigest = {
  * What this queue actually ran, by digest — the reader `sha256` never had.
  *
  * The column's own comment says it exists "so what RAN can be compared to the
- * repo", and for thirteen months nothing compared it. Measured 12 Sep 2026:
+ * repo", and from the day it was created (2026-08-27) nothing compared it.
+ * Measured 12 Sep 2026, sixteen days later:
  * **2 of 55** settled rows already differ from their repository file and
  * nothing anywhere reported it.
  *
