@@ -57,6 +57,44 @@ name: Apply migrations on merge
 # exists before its reader is inert, a column that arrives after is a 42703.
 # A migration that REMOVES something a live deployment still reads has to be
 # staged by hand, in two merges.
+#
+# ## The gates run HERE, because nothing was waiting for them
+#
+# `ci.yml` runs the four migration gates and PR #148's corpus guard. It fires
+# on the same push as this workflow and the two run CONCURRENTLY — nothing
+# makes the apply wait for the gate, and a red `ci.yml` has never stopped a
+# migration executing. On a direct push there is no pull-request CI at all.
+#
+# That is not hypothetical. Both migrations this queue has ever replayed
+# arrived by a direct push to `main` from `gpt-engineer-app[bot]`, commit
+# messages "Work in progress" and "Changes", with no pull request and so no
+# review of any kind.
+#
+# So the gates run in THIS job, before the submission, where every path into
+# the queue passes them: a merge, a direct push, and `workflow_dispatch`. They
+# are plain Node scripts over `supabase/migrations` and need no dependencies —
+# only Node ≥22.18, for the type stripping `check-migration-assertions` uses to
+# import the parser rather than re-implement it. Keeping `npm ci` off this path
+# also keeps a registry outage from being able to stop migrations applying.
+#
+# ## Which migrations must be RECORDED rather than run
+#
+# Mission Control is edited in two places, and Lovable APPLIES the migrations
+# it authors before the file reaches this repository. Re-running one is at best
+# a no-op and at worst a regression: `20260909072756` would double a billing
+# rollup and charge for calls the business absorbs, and its own header says
+# "DO NOT REPLAY".
+#
+# The ledger cannot answer which those are — Lovable stamps a version 2-7
+# seconds from the filename's, in either direction, so only 36 of 141 such
+# files carry their own version in it. Git can: the author of the commit that
+# ADDED the file. That is an account, not a guess from the filename's shape,
+# and the two disagree on 4 of 268 files with the author right both times —
+# one bot-authored file is slug-named (the shape would have replayed it) and
+# three UUID-named files were added by somebody else (the shape would have
+# skipped them).
+#
+# `20260912150000_recorded_never_replayed.sql` carries the whole measurement.
 
 on:
   push:
@@ -89,9 +127,12 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # 22, not 20: `check-migration-assertions` imports the assertion grammar
+      # from its `.ts` module directly rather than keeping a second copy, which
+      # needs Node's type stripping (≥22.18). It says so and exits 1 otherwise.
       - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Select the migrations this push added
         id: select
@@ -131,6 +172,73 @@ jobs:
           echo "Added: ${ADDED:-<none>}"
           printf 'files=%s\n' "${ADDED}" >> "$GITHUB_OUTPUT"
 
+      # Before anything is submitted, and in this job so nothing can outrun it.
+      # These judge the whole corpus, not only the files this push added: a
+      # duplicate version, a re-creation collision and an undeclared effect are
+      # all properties of the set, and the file that breaks one of them is not
+      # always the file that arrived.
+      - name: Gate the corpus before submitting any of it
+        if: steps.select.outputs.files != ''
+        run: |
+          set -euo pipefail
+          node scripts/check-migration-pipeline.mjs
+          node scripts/check-migration-secrets.mjs
+          node scripts/check-migration-replay.mjs
+          node scripts/check-migration-assertions.mjs
+
+      # Which of the selected files were applied before they were committed.
+      # Read from the author of the commit that ADDED each one; see the header.
+      - name: Classify each migration by who added it
+        id: classify
+        if: steps.select.outputs.files != ''
+        env:
+          FILES: ${{ steps.select.outputs.files }}
+          # The Lovable platform's own GitHub App. Matched on the numeric
+          # account id rather than the display name, because a display name can
+          # be changed and an account id cannot.
+          LOVABLE_APP_AUTHOR: '159125892+gpt-engineer-app[bot]@users.noreply.github.com'
+        run: |
+          set -euo pipefail
+          # A SHALLOW CLONE DOES NOT ANSWER "who added this" — IT LIES.
+          #
+          # `git log --diff-filter=A -1 -- <path>` walks only the commits it
+          # has. In a depth-1 clone that is the tip, so EVERY file resolves to
+          # whoever made the last commit. Measured: a depth-1 clone of this
+          # repository attributes `20260614071328_clone_backends_safe_view.sql`
+          # to the tip's author rather than to the Lovable app.
+          #
+          # That is the dangerous direction. A push authored by the app would
+          # mark every migration in it record-only and the whole batch would be
+          # stamped without running. `fetch-depth: 0` is declared two steps
+          # above in this same file, so a shallow checkout here means the
+          # workflow has been edited into an inconsistent state — a bug to fix
+          # rather than a state to tolerate. One red run that names the cause
+          # beats a silent mis-attribution.
+          if [ "$(git rev-parse --is-shallow-repository)" != "false" ]; then
+            echo "::error title=Shallow checkout::Provenance cannot be read from a shallow clone — every file would resolve to the tip commit's author. Restore \`fetch-depth: 0\` on this job's checkout step."
+            exit 1
+          fi
+          RECORD_ONLY=""
+          for f in ${FILES}; do
+            # The most recent commit that ADDED this path. Whole history rather
+            # than the push range, so a workflow_dispatch recovery classifies
+            # the same way a push does — the question is who added the file,
+            # and that has one answer whatever selected it today.
+            AUTHOR=$(git log --diff-filter=A --format=%ae -1 -- "$f" || true)
+            if [ "$AUTHOR" = "$LOVABLE_APP_AUTHOR" ]; then
+              echo "record-only  $f  (added by $AUTHOR)"
+              RECORD_ONLY="${RECORD_ONLY}${f} "
+            elif [ -z "$AUTHOR" ]; then
+              # Not fatal, and deliberately so: an unreadable author means the
+              # file RUNS, which is the behaviour that existed before this.
+              echo "::warning title=Unattributed migration::Could not read the author that added $f; it will be executed normally."
+              echo "execute      $f  (author unknown)"
+            else
+              echo "execute      $f  (added by $AUTHOR)"
+            fi
+          done
+          printf 'record_only=%s\n' "${RECORD_ONLY}" >> "$GITHUB_OUTPUT"
+
       - name: Enqueue and wait
         if: steps.select.outputs.files != ''
         env:
@@ -143,5 +251,6 @@ jobs:
           # deployment, and an empty one is refused rather than guessed.
           MISSION_CONTROL_URL: ${{ vars.MISSION_CONTROL_URL }}
           FILES: ${{ steps.select.outputs.files }}
+          RECORD_ONLY: ${{ steps.classify.outputs.record_only }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: node .github/scripts/enqueue-migrations.mjs

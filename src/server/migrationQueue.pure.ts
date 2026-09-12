@@ -37,6 +37,31 @@ export type MigrationSubmission = {
   /** The filename, e.g. `20260828030000_migration_queue.sql`. */
   name: string;
   sql: string;
+  /**
+   * The submitter declares this migration was applied OUT OF BAND before it
+   * was committed. The drain RECORDS such a row and never EXECUTEs it.
+   *
+   * Mission Control is edited in two places, and Lovable applies the
+   * migrations it authors before committing the file. Measured 12 Sep 2026:
+   * 141 of 268 files are Lovable-authored, three postdate this queue, and two
+   * of those three were replayed — harmlessly, but by luck, as
+   * `20260909010118`'s own header admits. The third says "DO NOT REPLAY" and
+   * escaped only because its own count assertion refused.
+   *
+   * It is set from the git author of the commit that ADDED the file, which is
+   * an account rather than an inference from the file's shape. The ledger
+   * cannot answer it: Lovable stamps a version 2-7 seconds from the
+   * filename's, in either direction, so only 36 of those 141 files appear in
+   * `supabase_migrations.schema_migrations` under their own version while 138
+   * have a row within ten seconds. `20260912150000`'s header carries the
+   * measurement.
+   *
+   * Whether the effect actually arrived is a separate question with a separate
+   * authority — the file's own `-- @asserts` claims, evaluated hourly by
+   * `migration-drift-hourly`. This flag decides what to RUN and never what is
+   * TRUE.
+   */
+  alreadyApplied?: boolean;
 };
 
 export type Rejection = { name: string; reason: string };
@@ -208,8 +233,23 @@ export function validateSubmissions(submissions: readonly MigrationSubmission[])
       continue;
     }
 
+    // Refused rather than coerced. This flag decides whether the SQL runs at
+    // all, and every non-boolean JSON value a caller might send by accident —
+    // `"false"`, `"0"`, `1` — is TRUTHY, so a coercion here would silently skip
+    // a migration that needed applying and report it as done. An absent flag is
+    // a different thing from a malformed one and defaults to false.
+    if (s.alreadyApplied !== undefined && typeof s.alreadyApplied !== "boolean") {
+      rejected.push(reject(name, "alreadyApplied must be a boolean when present"));
+      continue;
+    }
+
     seen.add(s.version);
-    accepted.push({ version: s.version, name: s.name, sql: s.sql });
+    accepted.push({
+      version: s.version,
+      name: s.name,
+      sql: s.sql,
+      alreadyApplied: s.alreadyApplied === true,
+    });
   }
 
   // Applied in version order by the drain; sorting here means the queue reads
@@ -219,13 +259,20 @@ export function validateSubmissions(submissions: readonly MigrationSubmission[])
 }
 
 /**
- * `applied` and `failed` are terminal; `queued` and `running` are not.
+ * `applied`, `recorded` and `failed` are terminal; `queued` and `running` are
+ * not.
  *
  * `failed` halts the queue rather than being skipped. Migrations are ordered
  * and applying N+1 after N failed is how a schema becomes something nobody can
  * reproduce — the same rule `applyPrimeMigrations` follows for a clone.
+ *
+ * `recorded` is deliberately NOT a kind of `applied`. "this queue ran it" and
+ * "this queue was told it had already run" are different facts, and collapsing
+ * them loses the distinction at the one moment it matters: when a migration's
+ * `@asserts` claim later fails and the question is whether anything ever
+ * executed that file here.
  */
-export type QueueStatus = "queued" | "running" | "applied" | "failed";
+export type QueueStatus = "queued" | "running" | "applied" | "recorded" | "failed";
 
 export type QueueRow = {
   version: string;
@@ -239,6 +286,8 @@ export type BatchVerdict = {
   /** Every named version reached a terminal state. */
   settled: boolean;
   applied: string[];
+  /** Terminal and successful, but nothing was executed here. See `QueueStatus`. */
+  recorded: string[];
   failed: QueueRow[];
   pending: string[];
   /** Versions that are not on the queue at all. */
@@ -256,6 +305,7 @@ export type BatchVerdict = {
 export function judgeBatch(versions: readonly string[], rows: readonly QueueRow[]): BatchVerdict {
   const byVersion = new Map(rows.map((r) => [r.version, r]));
   const applied: string[] = [];
+  const recorded: string[] = [];
   const failed: QueueRow[] = [];
   const pending: string[] = [];
   const missing: string[] = [];
@@ -267,6 +317,7 @@ export function judgeBatch(versions: readonly string[], rows: readonly QueueRow[
       continue;
     }
     if (row.status === "applied") applied.push(v);
+    else if (row.status === "recorded") recorded.push(v);
     else if (row.status === "failed") failed.push(row);
     else pending.push(v);
   }
@@ -274,6 +325,7 @@ export function judgeBatch(versions: readonly string[], rows: readonly QueueRow[
   return {
     settled: pending.length === 0 && missing.length === 0,
     applied,
+    recorded,
     failed,
     pending,
     missing,

@@ -443,4 +443,12 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       },
     ],
   },
+  {
+    migration: "20260912150000_recorded_never_replayed.sql",
+    version: "20260912150000",
+    assertions: [
+      { kind: "column", table: "schema_migration_queue", column: "already_applied" },
+      { kind: "check", table: "schema_migration_queue", column: "status", value: "recorded" },
+    ],
+  },
 ];

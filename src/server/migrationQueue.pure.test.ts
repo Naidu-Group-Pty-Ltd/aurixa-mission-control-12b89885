@@ -170,3 +170,107 @@ describe("judgeBatch", () => {
     expect(v.settled).toBe(false);
   });
 });
+
+/*
+  A MIGRATION THE PLATFORM ALREADY APPLIED IS RECORDED, NEVER RE-EXECUTED.
+
+  `aurixa.drain_schema_migrations()` ran `EXECUTE v_row.sql` unconditionally.
+  The `INSERT … WHERE NOT EXISTS` immediately after reads like an
+  already-applied guard and is not one: it prevents a duplicate ledger ROW, not
+  a duplicate APPLY.
+
+  Measured 12 Sep 2026: 141 of 268 migrations were authored by Lovable, which
+  applies them before the file reaches this repository. Three postdate this
+  queue and two were replayed — harmlessly, and by luck, as `20260909010118`'s
+  own header admits. The third says "DO NOT REPLAY" and would double a billing
+  rollup.
+*/
+describe("a migration applied out of band", () => {
+  it("is carried as a declaration and defaults to false", () => {
+    expect(validateSubmissions([sub()]).accepted[0].alreadyApplied).toBe(false);
+    expect(validateSubmissions([sub({ alreadyApplied: true })]).accepted[0].alreadyApplied).toBe(
+      true,
+    );
+    expect(validateSubmissions([sub({ alreadyApplied: false })]).accepted[0].alreadyApplied).toBe(
+      false,
+    );
+  });
+
+  it("refuses a non-boolean rather than coercing it", () => {
+    // Every non-boolean a caller might send by accident is TRUTHY — `"false"`,
+    // `"0"`, `1` — so a coercion would silently SKIP a migration that needed
+    // applying and report it done. The refusal is the whole safety of the flag.
+    for (const bad of ["true", "false", "0", 1, 0, null, {}, []]) {
+      const r = validateSubmissions([sub({ alreadyApplied: bad as never })]);
+      expect(r.accepted).toHaveLength(0);
+      expect(r.rejected[0].reason).toContain("alreadyApplied must be a boolean");
+    }
+  });
+
+  it("is judged like every other field — one bad flag does not hide a good file", () => {
+    const r = validateSubmissions([
+      sub({ version: "20260828030000", name: "20260828030000_a.sql", alreadyApplied: true }),
+      sub({
+        version: "20260828030001",
+        name: "20260828030001_b.sql",
+        alreadyApplied: "yes" as never,
+      }),
+    ]);
+    expect(r.accepted.map((a) => a.version)).toEqual(["20260828030000"]);
+    expect(r.rejected).toHaveLength(1);
+  });
+});
+
+describe("the `recorded` status", () => {
+  const row = (over: Partial<QueueRow> = {}): QueueRow => ({
+    version: "20260828030000",
+    name: "20260828030000_a.sql",
+    status: "queued",
+    attempts: 0,
+    error: null,
+    ...over,
+  });
+
+  it("is terminal, so a waiting caller settles on it", () => {
+    const v = judgeBatch(["20260828030000"], [row({ status: "recorded" })]);
+    expect(v.settled).toBe(true);
+    expect(v.pending).toEqual([]);
+  });
+
+  /*
+    The rule that makes the status worth having. "this queue ran it" and "this
+    queue was told it had already run" are different facts, and the moment they
+    matter is when a migration's `@asserts` claim later fails and somebody has
+    to know whether anything ever executed that file here.
+  */
+  it("is never reported as `applied`", () => {
+    const v = judgeBatch(["20260828030000"], [row({ status: "recorded" })]);
+    expect(v.applied).toEqual([]);
+    expect(v.recorded).toEqual(["20260828030000"]);
+  });
+
+  it("settles a mixed batch and keeps the two apart", () => {
+    const v = judgeBatch(
+      ["20260828030000", "20260828030001"],
+      [
+        row({ status: "recorded" }),
+        row({ version: "20260828030001", name: "20260828030001_b.sql", status: "applied" }),
+      ],
+    );
+    expect(v.settled).toBe(true);
+    expect(v.recorded).toEqual(["20260828030000"]);
+    expect(v.applied).toEqual(["20260828030001"]);
+  });
+
+  it("does not rescue a failure, and a failure still halts", () => {
+    const v = judgeBatch(
+      ["20260828030000", "20260828030001"],
+      [
+        row({ status: "recorded" }),
+        row({ version: "20260828030001", name: "20260828030001_b.sql", status: "failed" }),
+      ],
+    );
+    expect(v.recorded).toEqual(["20260828030000"]);
+    expect(v.failed).toHaveLength(1);
+  });
+});

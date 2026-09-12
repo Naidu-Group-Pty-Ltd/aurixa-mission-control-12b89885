@@ -89,6 +89,24 @@ if (!DRY_RUN) {
   }
 }
 
+/**
+ * Migrations the workflow has established were applied OUT OF BAND, by path.
+ *
+ * The workflow reads the git author of the commit that ADDED each file; one
+ * authored by the Lovable app was applied by Lovable before it reached the
+ * repository. See `RECORD_ONLY` in `apply-migrations.yml` and the measurement
+ * in `20260912150000_recorded_never_replayed.sql`.
+ *
+ * Empty is the safe default: an unset variable means every file runs, which is
+ * the behaviour that existed before this.
+ */
+const RECORD_ONLY = new Set(
+  (process.env.RECORD_ONLY || "")
+    .split(/[\s,]+/)
+    .map((f) => f.trim())
+    .filter(Boolean),
+);
+
 /** `20260828030000_schema_migration_queue.sql` -> its version and name. */
 const submissions = [];
 for (const path of FILES) {
@@ -107,11 +125,13 @@ for (const path of FILES) {
   } catch (e) {
     fail("Unreadable migration", `${path}: ${e.message}`);
   }
-  submissions.push({ version: m[1], name, sql });
+  submissions.push({ version: m[1], name, sql, alreadyApplied: RECORD_ONLY.has(path) });
 }
 
 console.log(`Submitting ${submissions.length} migration(s):`);
-for (const s of submissions) console.log(`  ${s.version}  ${s.name}`);
+for (const s of submissions) {
+  console.log(`  ${s.version}  ${s.name}${s.alreadyApplied ? "   [record only — applied out of band]" : ""}`);
+}
 
 if (DRY_RUN) {
   console.log("DRY_RUN=1 — parsed and validated locally, nothing sent.");
@@ -172,7 +192,7 @@ if (enqueue.status !== 200) {
 console.log(
   `Enqueued ${enqueue.json?.enqueued?.length ?? 0}; ` +
     `${enqueue.json?.alreadyQueued?.length ?? 0} already queued; ` +
-    `${enqueue.json?.alreadyApplied?.length ?? 0} already applied.`,
+    `${enqueue.json?.alreadyApplied?.length ?? 0} already settled.`,
 );
 
 // Poll. Enqueueing is not applying, and a green run that only proved the POST
@@ -188,7 +208,10 @@ for (let i = 0; i < POLL_ATTEMPTS && !(verdict && verdict.settled); i += 1) {
   verdict = status.json?.verdict ?? null;
   const pending = verdict?.pending?.length ?? 0;
   const applied = verdict?.applied?.length ?? 0;
-  console.log(`  poll ${i + 1}/${POLL_ATTEMPTS}: ${applied} applied, ${pending} pending`);
+  const recorded = verdict?.recorded?.length ?? 0;
+  console.log(
+    `  poll ${i + 1}/${POLL_ATTEMPTS}: ${applied} applied, ${recorded} recorded, ${pending} pending`,
+  );
 }
 
 if (!verdict) {
@@ -230,4 +253,23 @@ if (!verdict.settled) {
   );
 }
 
-console.log(`✓ Applied ${verdict.applied.length} migration(s): ${verdict.applied.join(", ")}`);
+// Said separately, because they are different facts. A `recorded` version was
+// stamped and NOT executed here — the submitter established it had already been
+// applied out of band — and a run that printed both as "applied" would be the
+// only place an operator could have learned the difference.
+if (verdict.applied.length > 0) {
+  console.log(`✓ Applied ${verdict.applied.length} migration(s): ${verdict.applied.join(", ")}`);
+}
+if (verdict.recorded?.length > 0) {
+  console.log(
+    `✓ Recorded ${verdict.recorded.length} migration(s) without executing them, having been ` +
+      `applied out of band before they were committed: ${verdict.recorded.join(", ")}`,
+  );
+  console.log(
+    `  Their effect is not asserted here. \`migration-drift-hourly\` checks each file's own ` +
+      `\`-- @asserts\` claims against the database every hour and reports on /health.`,
+  );
+}
+if (verdict.applied.length === 0 && !(verdict.recorded?.length > 0)) {
+  console.log("✓ Nothing left to do — every submitted version was already settled.");
+}
