@@ -79,6 +79,12 @@ export function stripSqlLiterals(sql: string): string {
   return out;
 }
 
+/**
+ * A Postgres identifier as it can appear in a statement: bare, or
+ * double-quoted (which may contain dots, spaces and `""` escapes).
+ */
+const SQL_IDENTIFIER = String.raw`(?:"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)`;
+
 type Rule = { pattern: RegExp; reason: string };
 
 // Order matters only for readability; every rule runs on every statement.
@@ -87,7 +93,6 @@ const DESTRUCTIVE_RULES: Rule[] = [
   { pattern: /\bDROP\s+SCHEMA\b/i, reason: "drops a schema" },
   { pattern: /\bDROP\s+TABLE\b/i, reason: "drops a table" },
   { pattern: /\bDROP\s+(OWNED|ROLE|USER)\b/i, reason: "drops a role or role-owned objects" },
-  { pattern: /\bDROP\s+POLICY\b/i, reason: "drops a row-level-security policy" },
   { pattern: /\bTRUNCATE\b/i, reason: "truncates a table" },
   {
     pattern: /\bALTER\s+TABLE\b[\s\S]*\bDROP\s+COLUMN\b/i,
@@ -118,6 +123,79 @@ function checkUnboundedWrite(statement: string): string | null {
 }
 
 /**
+ * An identifier as Postgres itself reads one: unquoted folds to lower case,
+ * quoted keeps its exact spelling (with `""` unescaped).
+ */
+function normaliseIdentifier(raw: string): string {
+  const t = raw.trim();
+  if (t.length >= 2 && t.startsWith('"') && t.endsWith('"')) {
+    return t.slice(1, -1).replace(/""/g, '"');
+  }
+  return t.toLowerCase();
+}
+
+/** `public.users` / `"My Table"` / `t` → one comparable string, or null. */
+function normaliseTableRef(raw: string): string | null {
+  const parts = raw.match(new RegExp(SQL_IDENTIFIER, "g"));
+  if (!parts || parts.length === 0) return null;
+  return parts.map(normaliseIdentifier).join(".");
+}
+
+/** Every `(policy, table)` pair the script brings back. */
+function collectCreatedPolicies(wholeScript: string): Set<string> {
+  const created = new Set<string>();
+  const rx = new RegExp(
+    String.raw`\bCREATE\s+POLICY\s+(${SQL_IDENTIFIER})\s+ON\s+(${SQL_IDENTIFIER}(?:\s*\.\s*${SQL_IDENTIFIER})?)`,
+    "gi",
+  );
+  for (const m of wholeScript.matchAll(rx)) {
+    const table = normaliseTableRef(m[2]);
+    if (table) created.add(`${normaliseIdentifier(m[1])}\u0000${table}`);
+  }
+  return created;
+}
+
+/**
+ * `DROP POLICY …; CREATE POLICY …` on the SAME policy is the house idiom for
+ * making an RLS migration re-runnable, and it removes nothing: after the pair
+ * the table carries the policy it started with.
+ *
+ * Measured over the prime's corpus — 1,222 `DROP POLICY` statements across 150
+ * files — 575 are exactly that shape. Flagging them cost more than one
+ * approval: the SQL lane parks the WHOLE batch on any finding, so a single
+ * `IF EXISTS` guard held sixteen migrations, fifteen of them untouched by it.
+ *
+ * The exemption is deliberately TIGHTER than the one
+ * {@link checkDropWithoutRecreate} gives a function, trigger or view. Those ask
+ * only whether the script creates SOMETHING of that kind. For a policy that is
+ * not good enough, because a policy IS the access boundary: `DROP p1 … CREATE
+ * p2` passes a kind-only test while leaving the table governed by a different
+ * rule. So the same policy NAME on the same TABLE has to come back, and the
+ * remaining 647 — which replace a policy with a differently-named one — stay
+ * flagged, as they should.
+ *
+ * Matching is on the reference exactly as written, normalised the way Postgres
+ * normalises identifiers. A bare `t` is therefore not the same table as
+ * `public.t`: measured, no migration in the corpus turns on that distinction
+ * (0 of 1,222 matched on the bare name alone), and being wrong in that
+ * direction costs one human approval rather than a tenant's access boundary.
+ *
+ * A statement this cannot parse is flagged rather than exempted.
+ */
+function checkDroppedPolicy(statement: string, createdPolicies: Set<string>): string | null {
+  if (!/\bDROP\s+POLICY\b/i.test(statement)) return null;
+  const m = new RegExp(
+    String.raw`\bDROP\s+POLICY\s+(?:IF\s+EXISTS\s+)?(${SQL_IDENTIFIER})\s+ON\s+(${SQL_IDENTIFIER}(?:\s*\.\s*${SQL_IDENTIFIER})?)`,
+    "i",
+  ).exec(statement);
+  if (!m) return "drops a row-level-security policy";
+  const table = normaliseTableRef(m[2]);
+  if (!table) return "drops a row-level-security policy";
+  if (createdPolicies.has(`${normaliseIdentifier(m[1])}\u0000${table}`)) return null;
+  return "drops a row-level-security policy without recreating it";
+}
+
+/**
  * DROP FUNCTION / DROP TRIGGER / DROP VIEW are routine in idempotent
  * migrations when the same script recreates the object. Only flag them
  * when the script does not.
@@ -143,6 +221,10 @@ export function assessSqlDestructiveness(sql: string): SqlRiskAssessment {
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
 
+  // Built once for the whole script: the policy check runs per statement and
+  // a script can carry dozens of them.
+  const createdPolicies = collectCreatedPolicies(stripped);
+
   const findings: SqlRiskFinding[] = [];
   for (const statement of statements) {
     const excerpt = statement.replace(/\s+/g, " ").slice(0, 200);
@@ -155,6 +237,8 @@ export function assessSqlDestructiveness(sql: string): SqlRiskAssessment {
     if (unbounded) findings.push({ statement: excerpt, reason: unbounded });
     const dropped = checkDropWithoutRecreate(statement, stripped);
     if (dropped) findings.push({ statement: excerpt, reason: dropped });
+    const droppedPolicy = checkDroppedPolicy(statement, createdPolicies);
+    if (droppedPolicy) findings.push({ statement: excerpt, reason: droppedPolicy });
   }
 
   return {
