@@ -25,7 +25,11 @@ import {
   type MigrationProvenance,
   type ProvenanceRow,
 } from "@/server/migrationProvenance.pure";
-import { runSqlOnProject, sqlLiteral } from "@/server/backend-provisioning.server";
+import {
+  PROVENANCE_TABLE_SQL,
+  runSqlOnProject,
+  sqlLiteral,
+} from "@/server/backend-provisioning.server";
 import { toRows } from "@/server/schema-introspection.server";
 
 /** What one backfill pass did, or why it could not. */
@@ -102,6 +106,13 @@ export async function recordKnownProvenance(projectRef: string): Promise<Provena
   const entries = [...decided.entries()];
   let recorded = 0;
   try {
+    // Ensure the table here rather than relying on the replay to have done it.
+    // The lane returns early when a clone has nothing pending and so never
+    // reaches `applyPrimeMigrations` — which is the state most clones are in
+    // most of the time, and exactly the state whose coverage is worth
+    // describing. One DDL, shared, so this cannot drift from the replay's.
+    await runSqlOnProject(projectRef, PROVENANCE_TABLE_SQL);
+
     for (let i = 0; i < entries.length; i += WRITE_CHUNK) {
       const chunk = entries.slice(i, i + WRITE_CHUNK);
       const values = chunk

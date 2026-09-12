@@ -2204,22 +2204,20 @@ export async function replicateRealtimePublication(
  * provisioned before this change stay idempotent — any version recorded in
  * either ledger is treated as applied.
  */
-const TRACKING_TABLE_SQL = `
-create schema if not exists supabase_migrations;
-create table if not exists supabase_migrations.schema_migrations (
-  version text primary key,
-  statements text[],
-  name text
-);
--- Legacy Lovable-only ledger, kept as a mirror for older tooling / health
--- checks and for clones provisioned before Issue #14.
+/**
+ * The provenance annotation, declared apart from {@link TRACKING_TABLE_SQL}
+ * because two callers need it and neither may hold a second copy.
+ *
+ * `applyPrimeMigrations` ensures it with the ledgers it sits beside; and
+ * `recordKnownProvenance` ensures it for itself, because the lane RETURNS
+ * EARLY when a clone has nothing pending and so never reaches the replay —
+ * which is the state most clones are in most of the time, and exactly the
+ * state whose coverage is worth describing. A backfill that could only run on
+ * a clone that was already behind would have annotated almost nothing.
+ */
+export const PROVENANCE_TABLE_SQL = `
 create schema if not exists aurixa;
-create table if not exists aurixa.schema_migrations (
-  version text primary key,
-  name text not null,
-  applied_at timestamptz not null default now()
-);
--- HOW a version came to be recorded, which neither ledger above can say.
+-- HOW a version came to be recorded, which neither migration ledger can say.
 -- Both of them mix rows the lane wrote after RUNNING a file with rows written
 -- to assert the clone was already level — measured 2026-09-12 on one clone,
 -- 22 executions beside 783 assertions, indistinguishable. See
@@ -2236,6 +2234,24 @@ create table if not exists aurixa.migration_provenance (
   recorded_at timestamptz not null default now(),
   note text
 );
+`.trim();
+
+const TRACKING_TABLE_SQL = `
+create schema if not exists supabase_migrations;
+create table if not exists supabase_migrations.schema_migrations (
+  version text primary key,
+  statements text[],
+  name text
+);
+-- Legacy Lovable-only ledger, kept as a mirror for older tooling / health
+-- checks and for clones provisioned before Issue #14.
+create schema if not exists aurixa;
+create table if not exists aurixa.schema_migrations (
+  version text primary key,
+  name text not null,
+  applied_at timestamptz not null default now()
+);
+${PROVENANCE_TABLE_SQL}
 `.trim();
 
 export function sqlLiteral(value: string): string {
