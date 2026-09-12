@@ -108,6 +108,9 @@ on:
         required: true
         type: string
 
+# Read at the workflow level. The apply job raises itself to `contents: write`
+# so it can commit the refreshed digest manifest — see the step at the foot of
+# this file for why that is the smaller of the two available risks.
 permissions:
   contents: read
 
@@ -120,6 +123,12 @@ concurrency:
 jobs:
   apply:
     runs-on: ubuntu-latest
+    permissions:
+      # To commit the refreshed digest manifest, and nothing else. This job
+      # already holds CRON_SECRET, which can execute arbitrary SQL as `postgres`
+      # on Mission Control; writing one generated file back is strictly the
+      # smaller capability, and it is what stops that manifest falling behind.
+      contents: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -270,3 +279,76 @@ jobs:
           RECORD_ONLY: ${{ steps.classify.outputs.record_only }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: node .github/scripts/enqueue-migrations.mjs
+
+      # THE MANIFEST IS REFRESHED BY THE RUN THAT MAKES IT STALE.
+      #
+      # A migration's digest exists only once it has RUN, so the manifest is
+      # necessarily short by whatever this push just applied. Left to a person,
+      # that gap stays open until somebody remembers `npm run migrations:digests`
+      # — and everything in this repository that depended on somebody
+      # remembering is the reason the rest of this workflow exists.
+      #
+      # So the run that opens the gap closes it. This is the only moment where
+      # the new digests are both known and reachable: the apply has settled, and
+      # this job holds the credential to read them.
+      #
+      # It never fails the run. The migrations are applied by the time it is
+      # reached, and a bookkeeping commit that could undo that would be worse
+      # than a stale file. Every path reports, because a manifest that silently
+      # stopped refreshing is the failure this closes, pointed the other way.
+      #
+      # No loop: this commits `scripts/`, and this workflow triggers only on
+      # `supabase/migrations/**.sql`. It does re-run `ci.yml`, which is wanted —
+      # that is `check:applied-digests` reading the new manifest.
+      - name: Refresh the digest manifest and commit it
+        if: steps.select.outputs.files != ''
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          MISSION_CONTROL_URL: ${{ vars.MISSION_CONTROL_URL }}
+          # Built into the push URL in-step rather than persisted by the
+          # checkout, so the rest of this job — which submits SQL — never has
+          # repository credentials sitting in `.git/config`.
+          GH_TOKEN: ${{ github.token }}
+          MANIFEST: scripts/applied-migration-digests.txt
+        run: |
+          set -uo pipefail
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          ORIGIN="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          # Two attempts. The manifest is a pure function of the live queue, so
+          # losing a race costs nothing but a regeneration: reset to the current
+          # tip and ask again. Nothing is carried across, which is what keeps
+          # this free of stash-and-replay steps that go wrong quietly.
+          for attempt in 1 2; do
+            if ! node scripts/refresh-applied-digests.mjs; then
+              echo "::warning title=Manifest not refreshed::Could not read the digests from Mission Control. The migrations applied normally; the manifest is behind until the next run or a local \`npm run migrations:digests\`."
+              exit 0
+            fi
+            if git diff --quiet -- "$MANIFEST"; then
+              echo "Manifest already agrees with the queue; nothing to commit."
+              exit 0
+            fi
+
+            git add "$MANIFEST"
+            # Checked. `set -e` is deliberately off here so a failure cannot
+            # fail the run, which means an unchecked commit would fall through
+            # to a push that reports success having changed nothing.
+            if ! git commit -q \
+              -m 'Refresh the applied-migration digest manifest' \
+              -m 'Written by the apply-migrations run that settled these versions. Regenerate locally with `npm run migrations:digests`.'; then
+              echo "Nothing staged — the manifest did not change after all."
+              exit 0
+            fi
+            if git push "$ORIGIN" "HEAD:${GITHUB_REF_NAME}"; then
+              echo "Manifest refreshed and committed."
+              exit 0
+            fi
+
+            echo "Push rejected on attempt ${attempt} — another commit landed first. Resetting to the current tip."
+            git fetch --quiet "$ORIGIN" "${GITHUB_REF_NAME}" || break
+            git reset --hard --quiet FETCH_HEAD || break
+          done
+
+          echo "::warning title=Manifest not committed::The digest manifest was refreshed but could not be pushed. The migrations applied normally; run \`npm run migrations:digests\` and commit the result."
+          exit 0
