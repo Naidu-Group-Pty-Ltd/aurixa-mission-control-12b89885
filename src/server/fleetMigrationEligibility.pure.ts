@@ -163,3 +163,64 @@ export function migrationEligibility(facts: BackendFacts): MigrationEligibility 
   // this schema, and treating them as a refusal is exactly the defect above.
   return { eligible: true };
 }
+
+/**
+ * A BLOCK IS DISCHARGED BY THE CLONE'S OWN LEDGER, AND BY NOTHING ELSE.
+ *
+ * `migration_blocked_at` is the one verdict above that is about a tenant's
+ * database, and the header says it is "held out of the fleet sync until
+ * repaired". That was written assuming the repair would be noticed. It is not:
+ * the sync will not create a run for a blocked clone, and the only thing that
+ * clears the flag — `clearStaleMigrationFailure` — runs INSIDE a run. So a
+ * clone can only be unblocked by a run that cannot exist while it is blocked.
+ *
+ * Measured 12 Sep 2026. `npc-test-76b3b3` was blocked at 09:31 by
+ * `20250124160000_prepare_extensions_schema.sql` failing on `current_schema`,
+ * a reserved word. The prime's copy was fixed at 09:33, the clone applied the
+ * file at 10:14 and stood at 28 of 28 target tables — and every sync for the
+ * next five hours still answered `excluded: 1 … reason: migration_blocked`,
+ * quoting a syntax error that no longer existed anywhere. Its sibling escaped
+ * only by accident of routing: a cascade-raised catch-up does not consult
+ * eligibility, so Preflight got a run, and that run cleared its flag.
+ *
+ * The evidence was there the whole time. Both of that clone's ledgers record
+ * `20250124160000`. The block was about work the clone has since done.
+ *
+ * ## Three rules
+ *
+ * **A reason that names no version is never discharged.** The block is written
+ * as `` `${name}: ${error}` `` and the name is the corpus filename, so the
+ * version is the leading stamp. Where it cannot be read, nothing here can
+ * prove anything and the block stands — which is the direction a guard is
+ * allowed to be wrong in.
+ *
+ * **The proof is the CLONE's applied-set, never the prime's.** The prime
+ * holding a fixed file says the file is fixed; it says nothing about whether
+ * this tenant ran it. Only the union the replay itself skips can answer that.
+ *
+ * **It clears on evidence, never on age.** A block that expires on a timer is
+ * not a block. Nothing here reads a clock.
+ */
+export function blockedVersionFrom(reason: string | null | undefined): string | null {
+  const match = /^\s*(\d{14})_/.exec(reason ?? "");
+  return match ? match[1] : null;
+}
+
+/**
+ * Whether a recorded block is discharged by the versions this clone holds.
+ *
+ * `appliedVersions` is the union of `supabase_migrations.schema_migrations`
+ * and `aurixa.schema_migrations` — the same set `applyPrimeMigrations` skips,
+ * read through `readCloneMigrationLedger`, so this cannot disagree with what
+ * the replay would decide. A read that FAILED must never be passed here as an
+ * empty array: empty means "this clone holds nothing", which is a claim, and
+ * the caller keeps the block instead.
+ */
+export function blockIsDischarged(
+  reason: string | null | undefined,
+  appliedVersions: readonly string[],
+): boolean {
+  const version = blockedVersionFrom(reason);
+  if (!version) return false;
+  return appliedVersions.includes(version);
+}

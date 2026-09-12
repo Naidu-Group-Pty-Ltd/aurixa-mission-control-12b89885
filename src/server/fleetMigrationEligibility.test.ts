@@ -3,6 +3,8 @@ import { readFileSync, readdirSync } from "node:fs";
 import {
   MIGRATION_CLAIMABLE_STATUSES,
   PROVISIONING_IN_FLIGHT,
+  blockIsDischarged,
+  blockedVersionFrom,
   migrationEligibility,
   type BackendFacts,
 } from "./fleetMigrationEligibility.pure";
@@ -149,5 +151,106 @@ describe("the status partition", () => {
       if (!v.eligible) expect(v.detail.length).toBeGreaterThan(20);
       expect(typeof v.eligible).toBe("boolean");
     }
+  });
+});
+
+describe("a block the clone has since discharged", () => {
+  /*
+    The reason string, verbatim from `npc-test-76b3b3` on 12 Sep 2026. It was
+    recorded at 09:31, the prime's copy of that file was fixed at 09:33, the
+    clone applied the version at 10:14 — and every sync for the next five hours
+    still excluded it, quoting a syntax error that no longer existed anywhere.
+  */
+  const REAL_REASON =
+    "20250124160000_prepare_extensions_schema.sql: SQL execution failed on " +
+    'umrtusxohxjxzodxorim: 400 — {"message":"Failed to run sql query: ERROR:  42601: ' +
+    'syntax error at or near \\"current_schema\\"\\nLINE 29:   current_schema TEXT NOT NULL,"}';
+
+  it("reads the version out of the reason the lane itself writes", () => {
+    expect(blockedVersionFrom(REAL_REASON)).toBe("20250124160000");
+  });
+
+  it("discharges it when the clone's own ledger records that version", () => {
+    // Both of that clone's ledgers held 20250124160000 the whole time.
+    expect(blockIsDischarged(REAL_REASON, ["20250124120000", "20250124160000"])).toBe(true);
+  });
+
+  it("keeps the block while the clone does not hold it", () => {
+    expect(blockIsDischarged(REAL_REASON, ["20250124120000"])).toBe(false);
+  });
+
+  it("never discharges a reason that names no version", () => {
+    // The guard is allowed to be wrong in one direction only. A reason this
+    // cannot parse proves nothing, so the block stands.
+    for (const reason of [
+      null,
+      undefined,
+      "",
+      "A prime migration failed on this clone and it is held out of the fleet sync until repaired.",
+      "prepare_extensions_schema.sql: failed",
+      "2025012416000_short.sql: failed",
+    ]) {
+      expect(blockIsDischarged(reason, ["20250124160000", "20250124120000"])).toBe(false);
+    }
+  });
+
+  it("never discharges against an empty applied-set", () => {
+    // A failed ledger read must not reach here as `[]`. Empty is a CLAIM —
+    // "this clone holds nothing" — and the caller keeps the block instead.
+    expect(blockIsDischarged(REAL_REASON, [])).toBe(false);
+  });
+
+  it("matches the version only at the start of the reason", () => {
+    // The stamp is the filename prefix the lane wrote, not any 14 digits that
+    // happen to appear inside a driver's error text.
+    expect(blockedVersionFrom("failed applying 20250124160000_x.sql")).toBeNull();
+  });
+});
+
+describe("the lane's rehabilitation pass", () => {
+  const lane = readFileSync("src/server/fleet-migration.server.ts", "utf8");
+  const pass = lane.slice(
+    lane.indexOf("A BLOCK THE CLONE HAS SINCE DISCHARGED IS NOT A BLOCK"),
+    lane.indexOf("const skipped = verdicts.filter"),
+  );
+
+  it("exists, and runs before the eligible set is partitioned", () => {
+    expect(pass.length).toBeGreaterThan(200);
+    expect(lane.indexOf("blockIsDischarged(")).toBeLessThan(
+      lane.indexOf("const skipped = verdicts.filter"),
+    );
+  });
+
+  it("clears the block and never the status", () => {
+    // `status` belongs to whichever lane last ran a migration here.
+    // `clearStaleMigrationFailure` settles it on the pass that follows, and two
+    // writers on one field is the fault this codebase keeps meeting.
+    expect(pass).toContain("migration_blocked_at: null");
+    expect(pass).toContain("migration_blocked_reason: null");
+    expect(pass).not.toMatch(/status:\s*["']/);
+  });
+
+  it("keeps the block when the ledger could not be read", () => {
+    // A read that FAILED says nothing. Passing its emptiness on as `[]` would
+    // be a claim, and the one it makes is the opposite of the truth.
+    expect(pass).toContain("if (!ledger.ok)");
+    expect(pass).toMatch(/if \(!ledger\.ok\)[\s\S]{0,320}?continue;/);
+  });
+
+  it("only ever considers a clone already being excluded for this reason", () => {
+    expect(pass).toContain('v.verdict.reason !== "migration_blocked"');
+    expect(pass).toContain("if (v.verdict.eligible) continue;");
+  });
+
+  it("is not silent when it cannot do its job", () => {
+    // Best effort, but a failed read and a refused write both leave a clone
+    // fenced out of the fleet, which is exactly what nobody noticed for five
+    // hours. Both paths log with the driver's own words.
+    expect((pass.match(/console\.error\(/g) ?? []).length).toBe(2);
+  });
+
+  it("reports what it rehabilitated rather than letting a count move quietly", () => {
+    expect(lane).toContain("rehabilitated: string[];");
+    expect(lane).toContain("rehabilitated,");
   });
 });
