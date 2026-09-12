@@ -171,42 +171,64 @@ describe("no surface re-spells the judgement", () => {
   /** The module itself is where the predicates are allowed to be written. */
   const AUTHORITY = join("src", "lib", "anthropicAttribution.pure.ts");
 
+  /*
+   * NORMALISED, never line by line.
+   *
+   * The first version of this guard tested each physical line, so
+   * `Boolean(f.federationRuleId) &&` on one line and the status comparison on
+   * the next slipped straight through — and that is not an exotic evasion, it
+   * is what the formatter produces, because the single-line form is over the
+   * print width. The guard's most likely bypass was the default layout of the
+   * very code it exists to catch.
+   *
+   * So comments go (they discuss these names constantly and are not code) and
+   * whitespace collapses, and the predicates are looked for as expressions
+   * within a bounded window rather than as lines.
+   */
+  const normalise = (src: string) =>
+    src
+      .replace(/\/\*[\s\S]*?\*\//g, " ")
+      .replace(/\/\/[^\n]*/g, " ")
+      .replace(/\s+/g, " ");
+
+  /** Wide enough for a wrapped predicate, narrow enough not to join neighbours. */
+  const WINDOW = 140;
+
+  const nearby = (src: string, left: RegExp, right: RegExp): string | null => {
+    const text = normalise(src);
+    const l = new RegExp(left.source, left.flags.includes("g") ? left.flags : left.flags + "g");
+    for (let m = l.exec(text); m; m = l.exec(text)) {
+      const from = Math.max(0, m.index - WINDOW);
+      const window = text.slice(from, m.index + m[0].length + WINDOW);
+      if (right.test(window)) return window.trim();
+    }
+    return null;
+  };
+
   it("nobody else compares a key status to the federated literal beside a rule", () => {
     const offenders: string[] = [];
     for (const file of files) {
       if (file === AUTHORITY) continue;
-      const src = readFileSync(file, "utf8");
-      // `federation_rule_id` (or a camelCase read of it) in the same
-      // expression as a federated-status comparison is the predicate that
-      // belongs to `federationComplete`.
-      const line = src
-        .split(/\r?\n/)
-        .find(
-          (l) =>
-            /federation_?[rR]ule_?[iI]d/.test(l) &&
-            /FEDERATED_STATUS|["'`]federated["'`]/.test(l) &&
-            !l.trimStart().startsWith("*") &&
-            !l.trimStart().startsWith("//"),
-        );
-      if (line) offenders.push(`${file}: ${line.trim()}`);
+      const hit = nearby(
+        readFileSync(file, "utf8"),
+        /federation_?[rR]ule_?[iI]d/,
+        /FEDERATED_STATUS|["'`]federated["'`]/,
+      );
+      if (hit) offenders.push(`${file}: ${hit}`);
     }
     expect(offenders).toEqual([]);
   });
 
-  it("nobody else derives delivery from a workspace id and a null stamp", () => {
+  it("nobody else derives delivery from a workspace id and a missing stamp", () => {
     const offenders: string[] = [];
     for (const file of files) {
       if (file === AUTHORITY) continue;
-      const src = readFileSync(file, "utf8");
-      const line = src
-        .split(/\r?\n/)
-        .find(
-          (l) =>
-            /!\s*\w*\.?\w*\??\.?delivered_at|!\s*deliveredAt/.test(l) &&
-            !l.trimStart().startsWith("*") &&
-            !l.trimStart().startsWith("//"),
-        );
-      if (line) offenders.push(`${file}: ${line.trim()}`);
+      const hit = nearby(
+        readFileSync(file, "utf8"),
+        /!\s*[\w.?]*delivered_?[aA]t/,
+        /workspace_?[iI]d/,
+      );
+      if (hit) offenders.push(`${file}: ${hit}`);
     }
     expect(offenders).toEqual([]);
   });
