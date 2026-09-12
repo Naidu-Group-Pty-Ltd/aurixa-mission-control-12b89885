@@ -47,7 +47,27 @@ describe("clearStaleMigrationFailure", () => {
   });
 
   it("can never fail the run that already applied the migrations", () => {
-    expect(helper).toMatch(/try\s*\{[\s\S]*\}\s*catch\s*\{/);
+    expect(helper).toMatch(/try\s*\{[\s\S]*\}\s*catch\s*\(/);
+  });
+
+  it("reads the driver's answer rather than assuming the write landed", () => {
+    // A PostgREST write resolves to `{ data, error }` and does not throw, so a
+    // bare statement reports success whatever the database said. That is the
+    // shape `screeningConsumer`'s claim had, where a database fault and losing
+    // a race were indistinguishable. Here the two that must not look alike are
+    // "matched no row" — the ordinary case — and "the database refused".
+    expect(helper).toContain("const { error } = await admin");
+    expect(helper).toMatch(/if \(error\)\s*\{/);
+  });
+
+  it("is best effort without being silent, on both failure paths", () => {
+    // Not throwing is the point; saying nothing is not. Both the refused write
+    // and a transport throw leave a repaired clone reporting a failure for
+    // ever, so both are logged with whatever the driver said.
+    const reports = helper.match(/console\.error\(/g) ?? [];
+    expect(reports.length).toBe(2);
+    expect(helper).toContain("error.message");
+    expect(helper).toContain("e instanceof Error ? e.message : String(e)");
   });
 
   it("only clears on a pass with nothing held back", () => {

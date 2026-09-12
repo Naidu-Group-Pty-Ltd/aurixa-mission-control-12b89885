@@ -677,15 +677,23 @@ async function assessPendingMigrations(
  * when something was applied; a pass that merely confirmed the clone level
  * clears the stale verdict and leaves the version alone.
  *
- * It never fails the run. The migrations are applied by the time this is
- * reached; a status line that could undo that is worse than a stale one.
+ * It never fails the run, and it is never silent. The migrations are applied by
+ * the time this is reached, so a status line that could undo that is worse than
+ * a stale one — but "best effort" and "silent" are different things, and this
+ * lane has already paid for confusing them once: `screeningConsumer`'s claim
+ * discarded its error, which made a database fault indistinguishable from
+ * losing a race. Here the two outcomes that must not look alike are an update
+ * that matched no row — the ordinary case, a clone that was never failed — and
+ * one the database refused, which leaves a repaired clone reporting a failure
+ * for ever. The first is silence by design; the second is logged with the
+ * driver's own message, exactly as `audit.server.ts` logs its own.
  */
 async function clearStaleMigrationFailure(
   cloneId: string,
   latestApplied: string | null,
 ): Promise<void> {
   try {
-    await admin
+    const { error } = await admin
       .from("clone_backends")
       .update({
         status: "ready" as const,
@@ -699,8 +707,17 @@ async function clearStaleMigrationFailure(
       })
       .eq("clone_id", cloneId)
       .eq("status", "failed");
-  } catch {
-    // Deliberately swallowed. See the third rule above.
+    if (error) {
+      console.error(
+        `[self-healing] clone ${cloneId} was repaired but its stale migration failure could not be cleared:`,
+        error.message,
+      );
+    }
+  } catch (e) {
+    console.error(
+      `[self-healing] clone ${cloneId} was repaired but its stale migration failure could not be cleared:`,
+      e instanceof Error ? e.message : String(e),
+    );
   }
 }
 
