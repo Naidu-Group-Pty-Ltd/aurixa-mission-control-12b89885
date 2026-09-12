@@ -37,6 +37,9 @@ describe("provenanceFromLedgerName", () => {
   });
 
   it.each([
+    // Each is a genuine prefix of a listed name, and each is unknown — the
+    // match is exact membership, never a prefix or a keyword. A rule loose
+    // enough to catch these is loose enough to catch a name nobody wrote.
     [
       "accounted: this clone was built by catalog introspection from the prime and already carries what this file creates",
     ],
@@ -46,11 +49,18 @@ describe("provenanceFromLedgerName", () => {
     [
       "UNVERIFIED: this file leaves no observable this check can read — a data backfill, a grant sweep",
     ],
-  ])("never infers an assertion from prose (%s)", (name) => {
-    // Prose is how the 2026-09-02 reconciliation recorded itself, but nothing
-    // about a name proves nothing ran. Only the writer may assert.
+    ["accounted: something nobody has accounted for"],
+    ["OWED:"],
+  ])("treats prose that is not on the list as unknown (%s)", (name) => {
     expect(provenanceFromLedgerName(name, "20260101000000")).toBeNull();
   });
+
+  it.each(KNOWN_ASSERTION_NAMES.map((n) => [n]))(
+    "reads a listed name as an assertion (%s)",
+    (name) => {
+      expect(provenanceFromLedgerName(name, "20260101000000")).toBe("asserted");
+    },
+  );
 
   it.each([
     ["seed_template_library_v9_report_part_numbering"],
@@ -101,9 +111,13 @@ describe("provenanceFromCanonicalName", () => {
   });
 
   it("keeps the known-writer list a list, not a pattern", () => {
-    // It grows only when somebody can say who wrote a name and why.
+    // It grows only when somebody can say who wrote a name and why: one
+    // baseline writer plus the seven rationales of the 2026-09-02 run.
     expect(KNOWN_ASSERTION_NAMES).toContain("aurixa-baseline");
-    expect(KNOWN_ASSERTION_NAMES.length).toBeLessThan(5);
+    expect(KNOWN_ASSERTION_NAMES).toHaveLength(8);
+    expect(new Set(KNOWN_ASSERTION_NAMES).size).toBe(KNOWN_ASSERTION_NAMES.length);
+    // Every entry is a literal somebody quoted, not a fragment to match on.
+    for (const n of KNOWN_ASSERTION_NAMES) expect(n.trim()).toBe(n);
   });
 });
 
@@ -185,16 +199,44 @@ describe("the rules this module exists to keep", () => {
     expect([...MIGRATION_PROVENANCE_VALUES]).toEqual(["applied", "asserted"]);
   });
 
-  it("never lets the ledger-name classifier produce 'asserted'", () => {
-    // The body of that one function. If a future edit teaches it to INFER an
-    // assertion from a name, this fails: only the code path that performs one
-    // may write it. Sliced to the function's own closing brace so a sibling
-    // that legitimately returns 'asserted' cannot satisfy or break it.
+  it("produces 'asserted' only by exact membership, never from shape", () => {
+    // The invariant, tested by behaviour rather than by reading the source:
+    // mutate any listed name by one character at either end and it must stop
+    // being an assertion. A prefix, suffix or keyword rule would survive this.
+    for (const known of KNOWN_ASSERTION_NAMES) {
+      expect(provenanceFromLedgerName(known, "20260101000000")).toBe("asserted");
+      expect(provenanceFromLedgerName(known.slice(0, -1), "20260101000000")).toBeNull();
+      expect(provenanceFromLedgerName(`${known}.`, "20260101000000")).toBeNull();
+      expect(provenanceFromCanonicalName(known.slice(1))).toBeNull();
+    }
+  });
+
+  it("keeps the classifier free of prefix and keyword matching", () => {
+    // The one source-level guard worth keeping: a `startsWith("accounted:")`
+    // would classify 783 legacy rows AND the eight applies sitting beside them.
     const start = pure.indexOf("export function provenanceFromLedgerName");
-    expect(start).toBeGreaterThan(-1);
     const end = pure.indexOf("\n}\n", start);
-    expect(end).toBeGreaterThan(start);
-    expect(pure.slice(start, end)).not.toContain("asserted");
+    const body = pure.slice(start, end);
+    expect(body).not.toMatch(/startsWith\(\s*["`']accounted|OWED|UNVERIFIED/i);
+    expect(body).toContain("KNOWN_ASSERTION_NAMES.includes");
+  });
+
+  it("leaves the eight hand-carried applies off the assertion list", () => {
+    // Real executions on npc-client-dashboard recorded under a slug. Sweeping
+    // them up with the 775 prose rows is the misreading this module prevents.
+    for (const slug of [
+      "seed_template_library_v9_report_part_numbering",
+      "reactivate_templates_v9_part_numbering",
+      "seed_template_library_v10_tier_identity_contents_figures",
+      "refresh_active_masters_from_library_v10",
+      "seed_template_library_v11_render_parts_conditional_rows",
+      "refresh_active_masters_from_library_v11",
+      "seed_template_library_v12_guarded_verdict_line",
+      "refresh_active_masters_from_library_v12",
+    ]) {
+      expect(KNOWN_ASSERTION_NAMES).not.toContain(slug);
+      expect(provenanceFromLedgerName(slug, "20260916100000")).toBeNull();
+    }
   });
 
   it("keeps the applied-set a union with no provenance filter in it", () => {

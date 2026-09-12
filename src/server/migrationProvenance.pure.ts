@@ -41,10 +41,12 @@
  *     recorded under their slug) as assertions, and would have invited an
  *     operator to re-run work the clone already holds.
  *
- * So the classifier below recognises exactly ONE thing: the format the lane
- * itself writes. Everything else is `null` — not "asserted", not "applied", but
- * **unknown**, which is its own answer and the only honest one for a row
- * written before anybody was recording the difference.
+ * So the classifier below reads a name in exactly two ways, both of them exact
+ * MEMBERSHIP tests and neither of them a judgement about shape: the filename
+ * format the lane itself writes, and a curated list of names whose writer is
+ * known ({@link KNOWN_ASSERTION_NAMES}). Everything else is `null` — not
+ * "asserted", not "applied", but **unknown**, which is its own answer and the
+ * only honest one for a row nobody can account for.
  *
  * ## Three rules
  *
@@ -61,9 +63,14 @@
  * would relabel one of the two populations wholesale — and both defaults were
  * available and both would have been wrong on real data.
  *
- * **Only the writer may assert.** Nothing here infers `asserted` from anything.
- * That value is written by the code path that performs the assertion, at the
- * moment it performs it, which is the only place that actually knows.
+ * **An assertion is accounted for, never inferred.** `asserted` is written by
+ * the code path that performs one, at the moment it performs it — or read back
+ * from a name on {@link KNOWN_ASSERTION_NAMES}, where a person has said who
+ * wrote it and why. It is never derived from a prefix, a keyword or the absence
+ * of a file extension. That list is a LIST: 783 legacy rows on one clone are
+ * classified by eight exact strings, and the eight slug-named APPLIES sitting
+ * beside them are left unknown rather than swept up by a rule that could not
+ * tell them apart.
  */
 
 /** How a recorded version came to be recorded. */
@@ -96,6 +103,47 @@ export type CoverageComposition = {
 };
 
 /**
+ * Ledger names whose WRITER is known, and known to have asserted rather than
+ * run anything.
+ *
+ * This is a LIST, never a pattern, and that is the whole of its safety. A name
+ * reaches it only when somebody can say who wrote it and why; nothing here
+ * reads a shape, a prefix or a keyword. The seven prose entries below are
+ * quoted in full for exactly that reason — a `startsWith("accounted:")` rule
+ * would be one edit away from swallowing a name nobody has accounted for.
+ *
+ * **`aurixa-baseline`** — on 2026-09-12 the prime repo and the prime's ledger
+ * shared only 142 of 980 version stamps, so 838 corpus versions read as holes
+ * and no clone could be sent anything. The repair stamped, under that name in
+ * `supabase_migrations.schema_migrations`, the versions whose schema each clone
+ * demonstrably already had. 797 rows on npc-client-dashboard, 839 each on NPC
+ * Test and Preflight. Nothing ran.
+ *
+ * **The seven rationales** — written into `aurixa.schema_migrations` on
+ * npc-client-dashboard in a single 34-second burst on 2026-09-02 16:56:53Z by a
+ * reconciliation carried out by hand, 775 rows in all. Each says in its own
+ * words that the clone was already level and nothing was sent. They are the
+ * only surviving record of that run's reasoning, which is why they are quoted
+ * rather than summarised.
+ *
+ * What is deliberately NOT here: the eight slug-named rows on that same clone
+ * (`seed_template_library_v9_report_part_numbering` and its siblings). Those
+ * are hand-carried APPLIES — `20261112000000`'s two columns were verified
+ * present on the prime and the clone — and classifying them as assertions is
+ * the precise misreading this module was written after watching happen.
+ */
+export const KNOWN_ASSERTION_NAMES: readonly string[] = [
+  "aurixa-baseline",
+  "accounted: this clone was built by catalog introspection from the prime and already carries what this file creates (objects verified 2026-09-02)",
+  "accounted: the prime ran this file under a different ledger timestamp and this clone was mirrored from that schema (verified 2026-09-02)",
+  "OWED: the prime carries this and this clone does not — a cron schedule that hardcodes the prime project ref, a storage policy, or a seeded row that catalog introspection does not copy. Never replay this file onto a tenant.",
+  "accounted: the observable this file leaves reads the same on the prime and on this clone (verified 2026-09-02) — applied and later superseded, or never run by either",
+  "accounted: the feature-flag rows this file seeds were copied from the prime by hand on 2026-09-02 — catalogue introspection carries the table and not its rows",
+  "UNVERIFIED: this file leaves no observable this check can read — a data backfill, a grant sweep, a DELETE, or a body inside a dollar-quoted block. Recorded so it cannot block later versions; nothing was sent to this clone. Worth an operator reading these seven files.",
+  "accounted: what this file creates is absent from the prime as well, so the prime has never applied it and no clone may be sent it (verified 2026-09-02)",
+] as const;
+
+/**
  * The filename `applyPrimeMigrations` writes: the corpus meta's own name, which
  * is `<version>_<slug>.sql`.
  *
@@ -112,34 +160,22 @@ function isLaneWrittenFilename(name: string, version: string): boolean {
 /**
  * Read provenance off a legacy ledger row, or answer that it cannot be read.
  *
- * Returns `"applied"` ONLY for the lane's own filename format. Never returns
- * `"asserted"`: no shape of name is evidence that nothing ran, and guessing it
- * is what misread six real applies. See the header.
+ * Two exact tests and no inference. `"applied"` comes only from the lane's own
+ * filename format; `"asserted"` only from exact membership of
+ * {@link KNOWN_ASSERTION_NAMES}. No SHAPE of a name is evidence in either
+ * direction — guessing from shape is what misread six real applies — so an
+ * unrecognised name is unknown however confidently it reads.
  */
 export function provenanceFromLedgerName(
   name: string | null | undefined,
   version: string,
 ): MigrationProvenance | null {
   if (!name || !version) return null;
-  if (name.trim() === version) return null; // the `coalesce(name, version)` case
-  return isLaneWrittenFilename(name, version) ? "applied" : null;
+  const trimmed = name.trim();
+  if (trimmed === version) return null; // the `coalesce(name, version)` case
+  if (KNOWN_ASSERTION_NAMES.includes(trimmed)) return "asserted";
+  return isLaneWrittenFilename(trimmed, version) ? "applied" : null;
 }
-
-/**
- * Ledger names whose WRITER is known, and known to have asserted rather than
- * run anything.
- *
- * This is not a heuristic and must never grow into one. `aurixa-baseline` is on
- * the list because the run that wrote it is known: on 2026-09-12 the repo and
- * the prime's ledger shared only 142 of 980 version stamps, so 838 corpus
- * versions read as holes and no clone could be sent anything; the repair
- * stamped the versions whose schema each clone demonstrably already had, under
- * that name, in `supabase_migrations.schema_migrations`. 797 rows on
- * npc-client-dashboard, 839 each on NPC Test and Preflight. Nothing ran.
- *
- * A name reaches this list only when somebody can say who wrote it and why.
- */
-export const KNOWN_ASSERTION_NAMES: readonly string[] = ["aurixa-baseline"] as const;
 
 /**
  * Read provenance off a canonical-ledger row.
