@@ -717,6 +717,27 @@ async function executeSqlMigration(
     // Tracking tables may not exist yet — applyPrimeMigrations creates them.
   }
 
+  /*
+    Record what can be READ about how this clone came to hold what it holds.
+
+    Ahead of the early return below, because a clone with nothing pending is
+    exactly the one whose coverage is worth describing — and it is the state
+    most clones are in most of the time. It classifies only rows whose
+    provenance is legible (the lane's own filename, a known assertion writer)
+    and leaves the rest unclassified; see `migrationProvenance.pure.ts`.
+
+    Never allowed to fail the run. It writes an annotation, so a failure leaves
+    the clone exactly as it was, whereas throwing would cost the replay below
+    its pass — and the replay is the work.
+  */
+  let provenance: unknown;
+  try {
+    const { recordKnownProvenance } = await import("@/server/migrationProvenance.server");
+    provenance = await recordKnownProvenance(backend.supabase_project_ref);
+  } catch (e) {
+    provenance = { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+
   // What will actually be SENT: runnable, absent from the clone, and not
   // sitting behind a hole. The gate below judges exactly this set — judging
   // an orphan the replay will skip anyway is a body fetched for nothing.
@@ -727,6 +748,7 @@ async function executeSqlMigration(
       withheld: scoped.withheld,
       held_back: orphaned.length,
       source_sha: scoped.sourceSha,
+      provenance,
       note: "clone already at prime migration head within the fleet sync's scope",
     });
   }
@@ -834,6 +856,7 @@ async function executeSqlMigration(
     held_back: heldBack,
     withheld: scoped.withheld,
     source_sha: scoped.sourceSha,
+    provenance,
   });
 }
 
