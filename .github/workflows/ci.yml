@@ -125,6 +125,18 @@ jobs:
       - name: Migration assertion manifest is current
         run: npm run migrations:assertions:check
 
+      # `schema_migration_queue.sha256` was written from the first version of
+      # the queue "so what RAN can be compared to the repo", and nothing ever
+      # compared it -- 2 of 55 settled rows already differed from their file.
+      # Editing a migration that has applied leaves the repository describing a
+      # schema that was never built. Offline, against a committed manifest: the
+      # live digests need CRON_SECRET, which authenticates 32 workers and the
+      # endpoint that runs SQL as postgres, and does not belong in a workflow
+      # that fires on every pull request. `apply-migrations.yml` holds that
+      # credential already and keeps the manifest honest from there.
+      - name: Applied migrations still match what ran
+        run: npm run check:applied-digests
+
       - name: Typecheck
         run: npm run typecheck
 

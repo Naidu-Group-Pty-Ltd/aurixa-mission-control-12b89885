@@ -157,6 +157,56 @@ export async function enqueueMigrations(
   };
 }
 
+/** One settled version, and the digest of the SQL that settled it. */
+export type SettledDigest = {
+  readonly version: string;
+  readonly name: string;
+  readonly sha256: string;
+  readonly status: "applied" | "recorded";
+};
+
+/**
+ * What this queue actually ran, by digest — the reader `sha256` never had.
+ *
+ * The column's own comment says it exists "so what RAN can be compared to the
+ * repo", and for thirteen months nothing compared it. Measured 12 Sep 2026:
+ * **2 of 55** settled rows already differ from their repository file and
+ * nothing anywhere reported it.
+ *
+ * Read-only by construction, and that is the whole reason this is an action on
+ * an endpoint rather than a credential handed to CI. `service_role` holds
+ * `SELECT, INSERT` on this table and nothing else; this reads three columns of
+ * what it may already read. It can answer no question the caller could not ask
+ * with `action: "status"`, one version at a time.
+ *
+ * A row with no digest is OMITTED rather than reported with an empty one. Every
+ * settled row carries one today (56 of 56), but a null is "we cannot say what
+ * ran", and a comparison against an absent digest would either pass everything
+ * or fail everything — both of which are answers about the reader rather than
+ * about the file.
+ */
+export async function readSettledDigests(db: Db): Promise<SettledDigest[]> {
+  const { data, error } = await db
+    .from("schema_migration_queue")
+    .select("version, name, sha256, status")
+    .in("status", ["applied", "recorded"])
+    .order("version");
+  // A read that FAILED is not a queue that settled nothing. The caller writes a
+  // manifest from this, and an empty array would quietly erase every entry.
+  if (error) throw new Error(`Could not read settled digests: ${error.message}`);
+  return (data ?? [])
+    .filter(
+      (r): r is { version: string; name: string; sha256: string; status: string } =>
+        typeof r.sha256 === "string" && r.sha256.length > 0,
+    )
+    .map((r) => ({
+      version: r.version,
+      name: r.name,
+      sha256: r.sha256,
+      status: r.status === "recorded" ? ("recorded" as const) : ("applied" as const),
+    }));
+}
+
 export type StatusResult = {
   readonly verdict: BatchVerdict;
   readonly rows: QueueRow[];

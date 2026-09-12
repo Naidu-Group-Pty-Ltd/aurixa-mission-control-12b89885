@@ -1,6 +1,10 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
-import { enqueueMigrations, readMigrationStatus } from "@/server/migration-enqueue.server";
+import {
+  enqueueMigrations,
+  readMigrationStatus,
+  readSettledDigests,
+} from "@/server/migration-enqueue.server";
 import { verifyCronAuth } from "@/server/cron-auth.server";
 import type { MigrationSubmission } from "@/server/migrationQueue.pure";
 
@@ -22,11 +26,19 @@ import type { MigrationSubmission } from "@/server/migrationQueue.pure";
 // admin schema onto a tenant. Here the target is whichever database this
 // deployment is connected to, which is the only answer there is.
 //
-// Two actions on one route rather than two routes, so the "what is scheduled"
-// story stays one line: enqueue submits, status polls, and neither is on a
-// timer because there is nothing to do until a merge happens.
+// Three actions on one route rather than three routes, so the "what is
+// scheduled" story stays one line: enqueue submits, status polls, digests
+// reports what ran, and none is on a timer because there is nothing to do
+// until a merge happens.
+//
+// `digests` is READ-ONLY and answers nothing a caller could not already get
+// from `status` one version at a time. It exists because `sha256` was written
+// from the first version of this queue "so what RAN can be compared to the
+// repo" and nothing ever compared it — measured, 2 of 55 settled rows differ
+// from their repository file today.
 type EnqueueBody = { action?: "enqueue"; migrations?: MigrationSubmission[]; enqueuedBy?: string };
 type StatusBody = { action: "status"; versions?: string[] };
+type DigestsBody = { action: "digests" };
 
 export const Route = createFileRoute("/hooks/migration-enqueue")({
   server: {
@@ -41,14 +53,19 @@ export const Route = createFileRoute("/hooks/migration-enqueue")({
             headers: { "Content-Type": "application/json" },
           });
 
-        let body: EnqueueBody | StatusBody;
+        let body: EnqueueBody | StatusBody | DigestsBody;
         try {
-          body = (await request.json()) as EnqueueBody | StatusBody;
+          body = (await request.json()) as EnqueueBody | StatusBody | DigestsBody;
         } catch {
           return json({ success: false, error: "body must be JSON" }, 400);
         }
 
         try {
+          if (body?.action === "digests") {
+            const digests = await readSettledDigests(supabaseAdmin);
+            return json({ success: true, digests });
+          }
+
           if (body?.action === "status") {
             const versions = Array.isArray(body.versions) ? body.versions : [];
             const result = await readMigrationStatus(supabaseAdmin, versions);

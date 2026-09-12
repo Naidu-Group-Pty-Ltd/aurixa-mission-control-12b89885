@@ -185,6 +185,7 @@ jobs:
           node scripts/check-migration-secrets.mjs
           node scripts/check-migration-replay.mjs
           node scripts/check-migration-assertions.mjs
+          node scripts/check-applied-digests.mjs
 
       # Which of the selected files were applied before they were committed.
       # Read from the author of the commit that ADDED each one; see the header.
@@ -238,6 +239,21 @@ jobs:
             fi
           done
           printf 'record_only=%s\n' "${RECORD_ONLY}" >> "$GITHUB_OUTPUT"
+
+      # The committed digest manifest is what `ci.yml` checks every pull request
+      # against, offline. This is the only place that can tell whether it still
+      # agrees with the live table — a hand-edited or fabricated entry would
+      # otherwise make that offline check pass against a digest nothing ran.
+      #
+      # A manifest BEHIND the queue is a notice rather than a failure, and has
+      # to be: a migration's digest exists only once it has run, so the manifest
+      # is always short by whatever this push is about to apply.
+      - name: Digest manifest still agrees with the queue
+        if: steps.select.outputs.files != ''
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          MISSION_CONTROL_URL: ${{ vars.MISSION_CONTROL_URL }}
+        run: node scripts/refresh-applied-digests.mjs --check
 
       - name: Enqueue and wait
         if: steps.select.outputs.files != ''
