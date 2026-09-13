@@ -168,7 +168,11 @@ BEGIN
       END;
 
     ELSIF v_kind = 'rows' THEN
-      v_parts := regexp_match(v_target, '^([a-z_][a-z0-9_]*)\s*>=\s*(\d+)$');
+      -- Bounded at twelve digits, not `\d+`: `999999999999999999999999::bigint`
+      -- raises 22003, and a claim that cannot be READ must not be able to throw
+      -- from inside the exception handler that is asking about it. Twelve
+      -- digits is a trillion rows; past that the claim is not a row count.
+      v_parts := regexp_match(v_target, '^([a-z_][a-z0-9_]*)\s*>=\s*(\d{1,12})$');
       IF v_parts IS NOT NULL AND to_regclass('public.' || quote_ident(v_parts[1])) IS NOT NULL THEN
         EXECUTE format('SELECT count(*) FROM public.%I', v_parts[1]) INTO v_n;
         v_ok := v_n >= v_parts[2]::bigint;
@@ -250,7 +254,12 @@ DECLARE
   v_state    text;
   v_terminal boolean;
   v_budget   integer;
-  v_present  record;
+  -- Three scalars rather than a record. `ROW(false,0,'…')::record` has no
+  -- NAMED fields, so a fallback built that way raises "record has no field" at
+  -- the first read — inside the very handler meant to make a fault harmless.
+  v_sat      boolean;
+  v_nchecked integer;
+  v_detail   text;
 BEGIN
   IF NOT pg_try_advisory_xact_lock(hashtext('aurixa.drain_schema_migrations')) THEN
     RETURN jsonb_build_object('skipped', 'another drain holds the lock');
@@ -308,9 +317,26 @@ BEGIN
         -- is the replay reporting a collision — which is exactly the September
         -- case, and exactly the verdict a person reached from the same
         -- evidence after 41 hours.
-        SELECT * INTO v_present FROM aurixa.migration_effect_present(v_row.sql);
+        --
+        -- Asked inside its own block, because a fault HERE must never be worse
+        -- than the failure it was asked about. If this raised, the outer
+        -- transaction would abort — taking the `attempts` increment with it —
+        -- and the row would return to `queued` to be retried for ever, never
+        -- failing and never progressing. A livelock is worse than a halt: a
+        -- halt at least says something. So an unevaluable claim degrades to
+        -- "cannot say", which is the behaviour that existed before this.
+        BEGIN
+          SELECT satisfied, checked, detail
+            INTO v_sat, v_nchecked, v_detail
+            FROM aurixa.migration_effect_present(v_row.sql);
+        EXCEPTION WHEN OTHERS THEN
+          v_sat := false;
+          v_nchecked := 0;
+          v_detail := 'the effect check could not be evaluated';
+        END;
+        v_sat := coalesce(v_sat, false);
 
-        IF v_present.satisfied THEN
+        IF v_sat THEN
           INSERT INTO supabase_migrations.schema_migrations (version)
           SELECT v_row.version
            WHERE NOT EXISTS (
@@ -324,7 +350,7 @@ BEGIN
                  sqlstate = v_state,
                  resolution = format(
                    'self-resolved: the effect was already present, so the %s failure was a replay. Evidence (%s claim(s)): %s. Original error: %s %s',
-                   v_state, v_present.checked, v_present.detail, v_state, v_msg)
+                   v_state, v_nchecked, v_detail, v_state, v_msg)
            WHERE id = v_row.id;
 
           v_resolved := v_resolved + 1;
@@ -341,7 +367,7 @@ BEGIN
                sqlstate = v_state,
                resolution = CASE WHEN v_terminal THEN format(
                  'halted after %s of %s attempt(s). The effect is NOT present: %s',
-                 v_row.attempts + 1, v_budget, v_present.detail) ELSE NULL END,
+                 v_row.attempts + 1, v_budget, v_detail) ELSE NULL END,
                finished_at = CASE WHEN v_terminal THEN now() ELSE NULL END
          WHERE id = v_row.id;
         v_failed := v_failed + 1;
@@ -385,7 +411,12 @@ set search_path to 'public', 'extensions', 'pg_catalog'
 as $function$
 DECLARE
   v_row     public.schema_migration_queue%ROWTYPE;
-  v_present record;
+  -- Scalars, not a record: a fallback built as `ROW(...)::record` has no named
+  -- fields, so reading `.satisfied` off it raises inside the guard that exists
+  -- to stop a fault mattering.
+  v_sat      boolean;
+  v_nchecked integer;
+  v_detail   text;
 BEGIN
   IF _action NOT IN ('retry', 'record') THEN
     RETURN jsonb_build_object('ok', false, 'error', 'action must be retry or record');
@@ -413,13 +444,23 @@ BEGIN
     RETURN jsonb_build_object('ok', true, 'action', 'retry', 'version', _version);
   END IF;
 
-  SELECT * INTO v_present FROM aurixa.migration_effect_present(v_row.sql);
-  IF NOT v_present.satisfied THEN
+  BEGIN
+    SELECT satisfied, checked, detail
+      INTO v_sat, v_nchecked, v_detail
+      FROM aurixa.migration_effect_present(v_row.sql);
+  EXCEPTION WHEN OTHERS THEN
+    -- Refusing is the safe side. An evidence check that could not run is not
+    -- evidence, and `record` settles a row without executing it.
+    v_sat := false;
+    v_nchecked := 0;
+    v_detail := 'the effect check could not be evaluated';
+  END;
+  IF NOT coalesce(v_sat, false) THEN
     RETURN jsonb_build_object(
       'ok', false,
       'error', 'refused: this migration''s declared effect is NOT present, so recording it would claim work that was never done',
-      'detail', v_present.detail,
-      'checked', v_present.checked);
+      'detail', v_detail,
+      'checked', v_nchecked);
   END IF;
 
   INSERT INTO supabase_migrations.schema_migrations (version)
@@ -431,11 +472,11 @@ BEGIN
   UPDATE public.schema_migration_queue
      SET status = 'recorded', finished_at = now(), error = NULL,
          resolution = format('recorded by an operator: %s. Evidence (%s claim(s)): %s',
-                             _reason, v_present.checked, v_present.detail)
+                             _reason, v_nchecked, v_detail)
    WHERE id = v_row.id;
 
   RETURN jsonb_build_object('ok', true, 'action', 'record', 'version', _version,
-                            'evidence', v_present.detail);
+                            'evidence', v_detail);
 END $function$;
 
 revoke all on function aurixa.resolve_migration(text, text, text) from public;

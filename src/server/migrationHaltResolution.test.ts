@@ -4,6 +4,7 @@ import { execFile } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { stripSqlComments } from "./migrationQueue.pure";
 
 /*
   A HALTED QUEUE USED TO NEED A PERSON WITH `postgres`.
@@ -352,6 +353,10 @@ describe("a blocked merge is told what is blocking it", () => {
 
 describe("what the migration itself may never stop doing", () => {
   const sql = readFileSync(MIGRATION, "utf8");
+  // Judged on the STATEMENTS, never on the prose. An assertion that fires on a
+  // comment explaining the rule is one people learn to silence, and this file
+  // explains `ROW(...)::record` in the very comment saying not to use it.
+  const code = stripSqlComments(sql);
 
   it("refuses `record` unless the declared effect is actually present", () => {
     // The safety property of the whole feature. `record` settles a row WITHOUT
@@ -386,6 +391,35 @@ describe("what the migration itself may never stop doing", () => {
     }
     expect(closing).toMatch(/grant execute on function public\.migration_queue_state/);
     expect(closing).toMatch(/to service_role/);
+  });
+
+  it("asks the evidence check inside its own guard, and never off a bare record", () => {
+    // Found by execution, not by reading. The evidence check CAN raise — an
+    // over-long `rows:` number overflows bigint — and an exception there is
+    // worse than the failure it was asked about: the outer transaction aborts,
+    // taking the `attempts` increment with it, and the row returns to `queued`
+    // to be retried for ever. A livelock says nothing; a halt at least says
+    // something.
+    //
+    // The first guard was itself broken for a reason only Postgres reports:
+    // `ROW(false, 0, '…')::record` has no NAMED fields, so reading
+    // `.satisfied` off it raises inside the handler meant to make a fault
+    // harmless. Scalars, therefore.
+    const drain = code.slice(code.indexOf("function aurixa.drain_schema_migrations"));
+    const handler = drain.slice(drain.indexOf("EXCEPTION"), drain.indexOf("END LOOP"));
+    expect(handler).toMatch(/BEGIN[\s\S]*migration_effect_present[\s\S]*EXCEPTION WHEN OTHERS/);
+    expect(code).not.toContain("::record");
+  });
+
+  it("bounds a row-count claim so it cannot overflow bigint", () => {
+    const evaluator = code.slice(
+      code.indexOf("function aurixa.migration_effect_present"),
+      code.indexOf("function aurixa.migration_attempt_budget"),
+    );
+    // `\\d+` here is `999999999999999999999999::bigint` → 22003, raised from
+    // inside the handler that is asking whether the migration succeeded.
+    expect(evaluator).toContain("(\\d{1,12})$");
+    expect(evaluator).not.toContain(">=\\s*(\\d+)$");
   });
 
   it("declares its own effect, so it could be recorded the same way", () => {
