@@ -55,7 +55,21 @@ const DRY_RUN = process.env.DRY_RUN === "1";
 
 /** ~5 minutes. The drain runs every minute; anything past this is a fault. */
 const POLL_ATTEMPTS = 30;
-const POLL_INTERVAL_MS = 10_000;
+
+/**
+ * The gap between polls, overridable so the tests can exercise the poll loop —
+ * including the halt probe, which does not fire until the third pass — without
+ * waiting half a minute for each case.
+ *
+ * An absent or unreadable value takes the default, which is what every
+ * production path does: nothing in `apply-migrations.yml` sets it. A knob that
+ * silently accepted `0` would turn the wait into a tight loop against Mission
+ * Control, so it is floored at 50ms.
+ */
+const POLL_INTERVAL_MS = (() => {
+  const n = Number(process.env.POLL_INTERVAL_MS);
+  return Number.isFinite(n) && n > 0 ? Math.max(50, n) : 10_000;
+})();
 
 const fail = (title, msg) => {
   console.error(`::error title=${title}::${msg}`);
@@ -130,7 +144,9 @@ for (const path of FILES) {
 
 console.log(`Submitting ${submissions.length} migration(s):`);
 for (const s of submissions) {
-  console.log(`  ${s.version}  ${s.name}${s.alreadyApplied ? "   [record only — applied out of band]" : ""}`);
+  console.log(
+    `  ${s.version}  ${s.name}${s.alreadyApplied ? "   [record only — applied out of band]" : ""}`,
+  );
 }
 
 if (DRY_RUN) {
@@ -195,9 +211,69 @@ console.log(
     `${enqueue.json?.alreadyApplied?.length ?? 0} already settled.`,
 );
 
+/**
+ * The whole queue, not just this run's versions.
+ *
+ * `action: "status"` answers about the versions the CALLER submitted, which is
+ * right for reporting on your own files and is exactly why the September halt
+ * was invisible from CI: three merges in a row reported truthfully that their
+ * own migrations were "still queued", and not one named the failed row from a
+ * fortnight earlier that was holding the line. This asks the other question.
+ *
+ * It returns null rather than throwing. A run whose migrations applied must not
+ * go red because the diagnostic that would have explained a failure could not
+ * be fetched.
+ */
+async function queueState() {
+  try {
+    const r = await post({ action: "queue" });
+    return r.status === 200 ? (r.json?.queue ?? null) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Renders a halt as GitHub annotations plus the line to put in `fail`. */
+function describeHalt(state, mine) {
+  const blocking = state?.blocking ?? [];
+  if (blocking.length === 0) return null;
+  const ours = new Set(mine);
+  for (const b of blocking) {
+    const whose = ours.has(b.version) ? "this run" : "an earlier merge";
+    console.error(
+      `::error file=supabase/migrations/${b.name}::the queue is HALTED here (${whose}), ` +
+        `after ${b.attempts} attempt(s)${b.sqlstate ? ` [SQLSTATE ${b.sqlstate}]` : ""}: ${b.error}`,
+    );
+  }
+  const names = blocking.map((b) => `${b.version} (${b.name})`).join(", ");
+  const foreign = blocking.filter((b) => !ours.has(b.version));
+  return (
+    `The queue is HALTED at ${names}. Migrations are ordered, so nothing behind it runs` +
+    (foreign.length > 0
+      ? ` — including every migration in THIS run, which is otherwise fine. That row came from ` +
+        `an earlier merge, not from this one.`
+      : ".") +
+    `\n\n  The drain already retried it within its budget for that SQLSTATE and already ` +
+    `checked whether the migration's declared effect is present, which would have settled it ` +
+    `automatically. Neither succeeded, so this needs a decision:\n` +
+    `    • the SQL is wrong  → fix it in a NEW migration, then run the "Resolve a halted ` +
+    `migration" workflow with \`retry\` so the queue moves past it\n` +
+    `    • the work is done  → run that workflow with \`record\`; it is refused unless the ` +
+    `schema already carries what the migration declared`
+  );
+}
+
 // Poll. Enqueueing is not applying, and a green run that only proved the POST
 // succeeded is the same silence this pipeline exists to remove.
+//
+// The halt probe runs on the third poll rather than only at the end. A queue
+// halted by somebody else's row will not move however long this waits, so the
+// remaining four and a half minutes buy nothing and the run would report a
+// timeout — which sends an operator to the drain's schedule, the one thing that
+// is working.
+const HALT_PROBE_AT = 2;
 let verdict = enqueue.json?.verdict ?? null;
+let halt = null;
 for (let i = 0; i < POLL_ATTEMPTS && !(verdict && verdict.settled); i += 1) {
   await sleep(POLL_INTERVAL_MS);
   const status = await post({ action: "status", versions });
@@ -212,7 +288,16 @@ for (let i = 0; i < POLL_ATTEMPTS && !(verdict && verdict.settled); i += 1) {
   console.log(
     `  poll ${i + 1}/${POLL_ATTEMPTS}: ${applied} applied, ${recorded} recorded, ${pending} pending`,
   );
+  if (i === HALT_PROBE_AT && pending > 0) {
+    const state = await queueState();
+    if (state?.halted) {
+      halt = state;
+      break;
+    }
+  }
 }
+
+if (halt) fail("Migration queue is halted", describeHalt(halt, versions));
 
 if (!verdict) {
   fail("No verdict", "Mission Control never returned a queue verdict. Nothing is confirmed.");
@@ -243,13 +328,24 @@ if (verdict.missing?.length > 0) {
 }
 
 if (!verdict.settled) {
+  // Ask the queue before blaming the drain. "Still queued" has two causes with
+  // opposite remedies — a halt ahead of these versions, or a drain that is not
+  // running — and the run that cannot tell them apart sends an operator to the
+  // wrong one. This is the last thing the run does, so a failed probe costs it
+  // nothing but the detail.
+  const state = await queueState();
+  if (state?.halted) fail("Migration queue is halted", describeHalt(state, versions));
   fail(
     "Timed out waiting for the drain",
     `${verdict.pending.join(", ")} are still queued after ${
       (POLL_ATTEMPTS * POLL_INTERVAL_MS) / 1000
-    }s. The \`schema-migration-drain\` job runs every minute, so check it is scheduled and ` +
-      `active: \`select jobname, active from cron.job where jobname = 'schema-migration-drain'\`. ` +
-      `The migrations remain queued and will apply when it next runs.`,
+    }s, and nothing on the queue has failed — so this is the drain, not the SQL. Check the job ` +
+      `is scheduled and active: ` +
+      `\`select jobname, active from cron.job where jobname = 'schema-migration-drain'\`. ` +
+      `The migrations remain queued and will apply when it next runs.` +
+      (state
+        ? `\n\n  Queue right now: ${state.waiting} waiting, ${state.settled} settled.`
+        : `\n\n  (The queue state could not be read, so that is all this run can say.)`),
   );
 }
 
