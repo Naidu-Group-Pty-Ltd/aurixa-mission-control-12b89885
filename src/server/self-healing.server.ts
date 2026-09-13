@@ -41,6 +41,7 @@ import {
 import { asJson, asRow } from "@/lib/json-cast";
 import {
   countLanded,
+  planDeployGeneration,
   planEdgeDeployPass,
   planEdgeDeployResume,
   refreshedSince,
@@ -997,7 +998,7 @@ async function executeEdgeFunctionDeploy(run: any): Promise<{ status: string }> 
     return { status: "skipped" };
   }
 
-  const { resolvePrimeSource, fetchPrimeBackendSnapshot } =
+  const { resolvePrimeSource, fetchPrimeBackendSnapshot, resolvePrimeHeadSha } =
     await import("@/server/prime-backend.server");
   const { getAppOctokit } = await import("@/server/github-app.server");
   const source = await resolvePrimeSource(admin);
@@ -1012,7 +1013,23 @@ async function executeEdgeFunctionDeploy(run: any): Promise<{ status: string }> 
   // column the dying pass never got to write.
   const { listProjectEdgeFunctionFreshness } = await import("@/server/backend-provisioning.server");
   const freshness = await listProjectEdgeFunctionFreshness(backend.supabase_project_ref);
-  const refreshed = refreshedSince(freshness, run.started_at);
+
+  // Which prime revision this pass is deploying, read BEFORE the snapshot so
+  // the freshness baseline is computed against it rather than discovered
+  // afterwards. One extra branch read against a snapshot that fetches ~1,033
+  // files, and it is what stops a run that spans a prime merge from marking
+  // its early bundles delivered at a tree that no longer exists — see
+  // `planDeployGeneration` for the measured case.
+  const observedSourceSha = await resolvePrimeHeadSha(getAppOctokit(), source);
+  const generation = planDeployGeneration({
+    runStartedAt: run.started_at,
+    lastGenerationAt: (run.result as { generation_at?: string | null } | null)?.generation_at ?? null,
+    lastSourceSha: (run.result as { source_sha?: string | null } | null)?.source_sha ?? null,
+    observedSourceSha,
+    now: new Date().toISOString(),
+  });
+
+  const refreshed = refreshedSince(freshness, generation.baselineAt);
 
   // This lane redeploys FUNCTION bundles; migration SQL bodies are half the
   // snapshot's round trips and nothing here reads them.
@@ -1039,7 +1056,12 @@ async function executeEdgeFunctionDeploy(run: any): Promise<{ status: string }> 
   const chosen = new Set(pass.batch);
   const batch = fetched.filter((fn) => chosen.has(fn.slug));
 
-  if (batch.length === 0) {
+  // An empty batch means "nothing left to fetch", which is only the same as
+  // "nothing left to do" while the tree has held still. On a restarted
+  // generation the skip list was computed against the SUPERSEDED revision,
+  // so this pass is empty for the wrong reason — it hands the run back with
+  // the new baseline recorded, and the next pass fetches the whole set again.
+  if (batch.length === 0 && !generation.sourceMoved) {
     return succeedRun(run, {
       deployed: refreshed.length,
       note:
@@ -1047,6 +1069,7 @@ async function executeEdgeFunctionDeploy(run: any): Promise<{ status: string }> 
           ? "every bundle this run owed is on the clone"
           : "no function bundles to deploy",
       source_sha: snapshot.sourceSha ?? null,
+      generation_at: generation.baselineAt,
     });
   }
 
@@ -1084,6 +1107,7 @@ async function executeEdgeFunctionDeploy(run: any): Promise<{ status: string }> 
     stoppedEarly,
     attempts,
     maxAttempts: run.max_attempts ?? 30,
+    sourceMoved: generation.sourceMoved,
   });
 
   if (resume.kind === "park") {
@@ -1133,7 +1157,13 @@ async function executeEdgeFunctionDeploy(run: any): Promise<{ status: string }> 
         last_batch: landed,
         paused_at_budget: stoppedEarly,
         failed: failedDetail,
-        source_sha: snapshot.sourceSha ?? null,
+        // The revision this pass deployed from, and the baseline the next
+        // pass measures "already delivered" against. Written together
+        // because they are one fact: a bundle is delivered only against the
+        // revision it came from. Read back by `planDeployGeneration`.
+        source_sha: snapshot.sourceSha ?? observedSourceSha ?? null,
+        generation_at: generation.baselineAt,
+        ...(generation.sourceMoved ? { source_moved: true } : {}),
       },
     });
     return { status: "resuming" };
@@ -1142,7 +1172,11 @@ async function executeEdgeFunctionDeploy(run: any): Promise<{ status: string }> 
   return succeedRun(run, {
     deployed: refreshed.length + landed,
     failed: failedDetail,
+    // The revision the clone's functions are now at. A run reaches here only
+    // with `sourceMoved` false, so every bundle it counts came from this one
+    // revision — which is the whole claim `succeeded` is making.
     source_sha: snapshot.sourceSha ?? null,
+    generation_at: generation.baselineAt,
   });
 }
 
