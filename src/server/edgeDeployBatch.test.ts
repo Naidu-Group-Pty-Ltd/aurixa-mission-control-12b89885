@@ -5,6 +5,7 @@
 import { describe, expect, it } from "vitest";
 import {
   countLanded,
+  planDeployGeneration,
   planEdgeDeployPass,
   planEdgeDeployResume,
   refreshedSince,
@@ -401,5 +402,136 @@ describe("countLanded — what the clone accepted, not what was sent", () => {
 
   it("nothing attempted is nothing landed", () => {
     expect(countLanded([])).toBe(0);
+  });
+});
+
+describe("planDeployGeneration — a bundle is delivered against a REVISION", () => {
+  const runStartedAt = "2026-09-13T03:53:04.279Z";
+  const now = "2026-09-13T05:40:00.000Z";
+  const before = "1f2c54af3bf9f4f9a000401340cfdd8ff3c31b18";
+  const after = "4f4759eb8495359cc2fcd8f3674ed19218fc1e67";
+
+  const gen = (over: Partial<Parameters<typeof planDeployGeneration>[0]> = {}) =>
+    planDeployGeneration({
+      runStartedAt,
+      lastGenerationAt: null,
+      lastSourceSha: null,
+      observedSourceSha: before,
+      now,
+      ...over,
+    });
+
+  it("the first pass of a run measures from the run's start", () => {
+    // Nothing has been recorded yet, so there is no revision to compare
+    // against and nothing to restart. The old behaviour exactly.
+    expect(gen()).toEqual({ baselineAt: runStartedAt, sourceMoved: false });
+  });
+
+  it("a pass on the same revision keeps the baseline it had", () => {
+    expect(gen({ lastSourceSha: before, observedSourceSha: before })).toEqual({
+      baselineAt: runStartedAt,
+      sourceMoved: false,
+    });
+  });
+
+  it("the prime moving under the run restarts the generation HERE", () => {
+    /*
+      The measured case, 13 Sep 2026 on npc-client-dashboard. One run started
+      03:53:04 deployed `email-sync-cron` at 05:16:38 from the tree before the
+      05:38:21 merge and `outlook-email-sync` at 05:48:22 from the tree after
+      it, then reported 435 deployed. Read back from the project, the first
+      carried none of the merge's code and the second carried all of it.
+
+      Restarting the baseline is what makes the next pass fetch the whole set
+      again: every bundle's copy on the clone is now OLDER than the baseline,
+      so `refreshedSince` skips none of them.
+    */
+    expect(gen({ lastSourceSha: before, observedSourceSha: after })).toEqual({
+      baselineAt: now,
+      sourceMoved: true,
+    });
+  });
+
+  it("a restarted run measures from the restart, not from the run's start", () => {
+    const restartedAt = "2026-09-13T05:40:00.000Z";
+    expect(
+      gen({
+        lastGenerationAt: restartedAt,
+        lastSourceSha: after,
+        observedSourceSha: after,
+        now: "2026-09-13T06:10:00.000Z",
+      }),
+    ).toEqual({ baselineAt: restartedAt, sourceMoved: false });
+  });
+
+  it("an unreadable revision never restarts a generation", () => {
+    /*
+      The asymmetry that keeps this terminating. A GitHub blip that answers no
+      sha would otherwise buy a 435-bundle redeploy on every pass, for ever —
+      so an absent reading keeps the baseline and lets the pass carry on. The
+      cost is one pass that may skip a stale bundle; the alternative never
+      finishes at all.
+    */
+    for (const unreadable of [null, undefined, "", "   "]) {
+      expect(gen({ lastSourceSha: before, observedSourceSha: unreadable })).toEqual({
+        baselineAt: runStartedAt,
+        sourceMoved: false,
+      });
+    }
+  });
+
+  it("a revision recorded for the first time is not a move", () => {
+    // A run whose earlier passes predate this bookkeeping has no recorded
+    // sha. Treating that absence as movement would restart every in-flight
+    // run in the fleet the moment this ships.
+    expect(gen({ lastSourceSha: null, observedSourceSha: after })).toEqual({
+      baselineAt: runStartedAt,
+      sourceMoved: false,
+    });
+  });
+});
+
+describe("planEdgeDeployResume — a restarted generation outranks a finished pass", () => {
+  const base = { landed: 60, moreRemain: false, stoppedEarly: false, attempts: 1, maxAttempts: 30 };
+
+  it("a pass that would have completed is handed back when the source moved", () => {
+    /*
+      This is the case that turned a mixed tree into a `succeeded` run: the
+      pass deployed the last outstanding bundle, saw nothing remaining, and
+      pronounced the deployment complete — over bundles from two different
+      revisions of the prime.
+    */
+    expect(planEdgeDeployResume({ ...base, sourceMoved: true })).toEqual({
+      kind: "requeue",
+      attemptNeutral: false,
+    });
+  });
+
+  it("a restart is charged an attempt even though the pass landed bundles", () => {
+    // Forward progress is attempt-neutral because it strictly SHRINKS the
+    // remaining set. A restart grows it back to the whole fleet, so that
+    // argument does not hold and `maxAttempts` is what bounds a prime
+    // merging faster than a pass can complete.
+    expect(planEdgeDeployResume({ ...base, landed: 200, sourceMoved: true })).toEqual({
+      kind: "requeue",
+      attemptNeutral: false,
+    });
+  });
+
+  it("restarts are bounded — a run that keeps being overtaken reaches a person", () => {
+    expect(planEdgeDeployResume({ ...base, attempts: 30, sourceMoved: true })).toEqual({
+      kind: "park",
+    });
+  });
+
+  it("an absent flag is the old behaviour exactly", () => {
+    expect(planEdgeDeployResume(base)).toEqual({ kind: "complete" });
+    expect(planEdgeDeployResume({ ...base, sourceMoved: false })).toEqual({ kind: "complete" });
+  });
+
+  it("a still source still lets a budget pause requeue attempt-neutrally", () => {
+    expect(
+      planEdgeDeployResume({ ...base, stoppedEarly: true, sourceMoved: false }),
+    ).toEqual({ kind: "requeue", attemptNeutral: true });
   });
 });

@@ -79,7 +79,32 @@ describe("progress is read off the target", () => {
   });
 
   it("never reads its own result row as the progress source", () => {
-    expect(lane).not.toMatch(/run\.result/);
+    /*
+      WHICH BUNDLES are deployed is asked of the clone, always — a `result`
+      column the dying pass never reached would report a pass that deployed
+      sixty bundles as having deployed none, and the ban used to be absolute
+      for that reason.
+
+      Two fields are read from it now, and neither is progress: `source_sha`
+      is which REVISION the last pass was deploying and `generation_at` is
+      when the current generation began. The distinction is not a technicality
+      — it is the direction each one fails in. A dying pass leaves both stale,
+      so the next pass compares the prime's HEAD against an older sha, calls
+      it a move it may already have handled, and redeploys bundles that were
+      fine. That costs work. Reading progress from the same stale row skips
+      bundles that were never deployed at all, silently, which is the failure
+      this whole lane exists to make impossible.
+
+      So the guard is that the batch is never derived from `result`, and that
+      these are the only two keys taken from it.
+    */
+    const reads = [...lane.matchAll(/run\.result as \{ (\w+)\?/g)].map((m) => m[1]);
+    expect(reads.sort()).toEqual(["generation_at", "source_sha"]);
+
+    // Progress itself still comes off the target and nowhere else.
+    expect(lane).toContain("refreshedSince(freshness,");
+    expect(lane).not.toMatch(/refreshedSince\([^)]*run\.result/);
+    expect(lane).not.toMatch(/(deployed|landed|batch|refreshed)\s*=\s*[^;]*run\.result/);
   });
 
   it("a failed freshness read presumes nothing fresh", () => {
@@ -382,5 +407,75 @@ describe("what this change must not have disturbed", () => {
     ]) {
       expect(healing).toContain(`case "${lane}":`);
     }
+  });
+});
+
+describe("a run that spans a prime merge cannot report a mixed tree as deployed", () => {
+  /*
+    Measured 13 Sep 2026, npc-client-dashboard. One `edge_function_deploy`
+    run started 03:53:04 and walked 435 bundles alphabetically over four
+    passes; the prime merged at 05:38:21 in the middle of it. `email-sync-cron`
+    (05:16:38), `ghl-conversations-cron` (05:30:33), `ghl-calendar` (05:32:05)
+    and `import-clients-from-ghl` (05:34:18) came from the tree before that
+    merge, `outlook-email-sync` (05:48:22) from the tree after it. Read back
+    off the project, the first four carried none of the merge's code and the
+    fifth carried all of it. The run's own result said 435 deployed.
+
+    The cause was one argument: `refreshedSince(freshness, run.started_at)`
+    reads "newer than this run began" as "this run delivered it", which holds
+    only while the tree stands still — and the lane re-resolves the prime's
+    HEAD on every pass.
+
+    These are structural because the failure is: every number the run reported
+    was true, and a Supabase double handed the same wrong baseline would agree
+    with the wrong code exactly as it agreed with the right one.
+  */
+  const generationBlock = lane.slice(
+    lane.indexOf("const freshness ="),
+    lane.indexOf("const snapshot ="),
+  );
+
+  it("the revision is read BEFORE the baseline is computed", () => {
+    // Discovered afterwards it is too late: the skip list has already been
+    // sent to the snapshot and the pass has already decided what to leave out.
+    const headRead = generationBlock.indexOf("resolvePrimeHeadSha(");
+    const baseline = generationBlock.indexOf("refreshedSince(");
+    expect(headRead).toBeGreaterThan(-1);
+    expect(baseline).toBeGreaterThan(headRead);
+  });
+
+  it("the baseline comes from the generation, never from the run's start", () => {
+    expect(generationBlock).toContain("refreshedSince(freshness, generation.baselineAt)");
+    expect(lane).not.toContain("refreshedSince(freshness, run.started_at)");
+  });
+
+  it("the generation is decided in the pure module", () => {
+    // Same reason the completion rule lives there: it fails in both
+    // directions and both failures are silent.
+    expect(generationBlock).toContain("planDeployGeneration({");
+    expect(generationBlock).toContain("lastSourceSha:");
+    expect(generationBlock).toContain("observedSourceSha,");
+  });
+
+  it("a restarted generation reaches the resume decision", () => {
+    expect(resumeBlock).toContain("sourceMoved: generation.sourceMoved");
+  });
+
+  it("an empty batch may not succeed while the source has moved", () => {
+    /*
+      The batch is empty because the skip list was computed against the
+      SUPERSEDED revision — the pass is empty for the wrong reason, and
+      succeeding here is exactly the mixed tree above.
+    */
+    expect(lane).toContain("if (batch.length === 0 && !generation.sourceMoved) {");
+  });
+
+  it("every exit records the revision AND the baseline the next pass reads", () => {
+    // Either alone is unreadable: a sha with no baseline cannot say what was
+    // already delivered, and a baseline with no sha cannot say what moved.
+    for (const exit of ["generation_at: generation.baselineAt"]) {
+      expect(lane.split(exit).length - 1).toBe(3);
+    }
+    expect(lane).toContain("source_sha: snapshot.sourceSha ?? observedSourceSha ?? null");
   });
 });

@@ -77,6 +77,76 @@ export function refreshedSince(
 }
 
 /**
+ * Where a run's "already delivered" mark starts — its GENERATION.
+ *
+ * ## The defect this closes
+ *
+ * `refreshedSince` reads "the clone holds a copy newer than this run began"
+ * as "this run has delivered that bundle." That is true only while a run
+ * deploys from ONE revision of the prime, and the lane does not: it resolves
+ * the prime's HEAD again on every pass, so a run that spans a prime merge
+ * deploys its early bundles from revision A and its late ones from revision
+ * B — and every bundle from A is now permanently `refreshed` and will never
+ * be looked at again. The run finishes `succeeded` over a clone carrying a
+ * MIXED tree, which is the silent-success shape this lane already exists to
+ * make impossible, one layer up.
+ *
+ * Measured 13 Sep 2026 on `npc-client-dashboard`. One run, started 03:53:04,
+ * walking 435 bundles alphabetically over four passes. The prime merged at
+ * 05:38:21. `email-sync-cron` (05:16:38), `ghl-conversations-cron`
+ * (05:30:33), `ghl-calendar` (05:32:05) and `import-clients-from-ghl`
+ * (05:34:18) landed from the tree BEFORE that merge; `outlook-email-sync`
+ * (05:48:22) landed from the tree after it. Read back from the project, the
+ * first four carried none of the merge's code and the fifth carried all of
+ * it — on one clone, from one run, reported as 435 deployed.
+ *
+ * It does not self-heal. The catch-up sweep widens an open run rather than
+ * queuing a second one, and once this one succeeds the sweep diffs the
+ * clone's `last_synced_sha` against the prime's HEAD, finds them equal, and
+ * answers `no_backend_work` — for ever.
+ *
+ * ## The rule
+ *
+ * **A bundle counts as delivered only against the revision this pass is
+ * deploying.** When the observed revision differs from the one the last pass
+ * recorded, the prime moved underneath the run: everything deployed so far
+ * came from a different tree, so the generation restarts HERE and the run
+ * owes the whole set again.
+ *
+ * Two directions are deliberately not symmetric. **An unreadable revision
+ * never restarts a generation** — answering "moved" to a GitHub blip would
+ * buy a 435-bundle redeploy on every pass and never terminate, so an absent
+ * sha keeps the baseline it had. And **a restart is charged an attempt**
+ * (see `planEdgeDeployResume`), because that is what bounds a prime merging
+ * faster than a pass can complete: thirty restarts and the run goes to a
+ * person instead of spinning.
+ */
+export function planDeployGeneration(input: {
+  /** When the run first executed. The baseline before any revision is known. */
+  readonly runStartedAt: string | null | undefined;
+  /** The baseline the last pass recorded, if this run has already restarted. */
+  readonly lastGenerationAt: string | null | undefined;
+  /** The prime revision the last pass deployed from, if there was one. */
+  readonly lastSourceSha: string | null | undefined;
+  /** The prime revision THIS pass is deploying from. */
+  readonly observedSourceSha: string | null | undefined;
+  /** This pass's clock, injected so a test can hold it still. */
+  readonly now: string;
+}): { readonly baselineAt: string | null; readonly sourceMoved: boolean } {
+  const held = input.lastGenerationAt ?? input.runStartedAt ?? null;
+  const observed = (input.observedSourceSha ?? "").trim();
+  const last = (input.lastSourceSha ?? "").trim();
+
+  // Nothing to compare against: the first pass of a run, or a HEAD read that
+  // failed. Both keep the baseline they have — see the header for why the
+  // failed read must not be read as movement.
+  if (!observed || !last) return { baselineAt: held, sourceMoved: false };
+  if (observed === last) return { baselineAt: held, sourceMoved: false };
+
+  return { baselineAt: input.now, sourceMoved: true };
+}
+
+/**
  * Decide this pass's batch and whether the run may finish after it.
  *
  * `fetched` is what the snapshot actually returned — already reduced by
@@ -156,8 +226,31 @@ export function planEdgeDeployResume(input: {
   readonly stoppedEarly: boolean;
   readonly attempts: number;
   readonly maxAttempts: number;
+  /**
+   * True when the prime moved under this run — `planDeployGeneration`'s
+   * answer. Everything already deployed came from a different tree, so the
+   * run owes the whole set again however finished this pass looked.
+   */
+  readonly sourceMoved?: boolean;
 }): EdgeDeployResume {
-  if (!input.moreRemain && !input.stoppedEarly) return { kind: "complete" };
+  const sourceMoved = input.sourceMoved === true;
+
+  if (!sourceMoved && !input.moreRemain && !input.stoppedEarly) return { kind: "complete" };
+
+  // The generation restarted. This outranks every reading below it: a pass
+  // that deployed the last outstanding bundle from a superseded tree has
+  // finished nothing, and must never report `complete`.
+  //
+  // Charged an attempt, unlike ordinary forward progress. A restart is the
+  // one requeue that does NOT shrink the remaining set — it grows it back to
+  // the whole fleet — so the neutral case's termination argument does not
+  // hold for it, and `maxAttempts` is what stops a prime merging faster than
+  // a pass completes from spinning this run for ever.
+  if (sourceMoved) {
+    return input.attempts >= input.maxAttempts
+      ? { kind: "park" }
+      : { kind: "requeue", attemptNeutral: false };
+  }
 
   // Landed something: this pass moved the run closer to done, so it is not
   // charged for the invocation it took to do it.
