@@ -9414,8 +9414,10 @@ export type Database = {
           finished_at: string | null
           id: string
           name: string
+          resolution: string | null
           sha256: string | null
           sql: string
+          sqlstate: string | null
           started_at: string | null
           status: string
           version: string
@@ -9429,8 +9431,10 @@ export type Database = {
           finished_at?: string | null
           id?: string
           name: string
+          resolution?: string | null
           sha256?: string | null
           sql: string
+          sqlstate?: string | null
           started_at?: string | null
           status?: string
           version: string
@@ -9444,8 +9448,10 @@ export type Database = {
           finished_at?: string | null
           id?: string
           name?: string
+          resolution?: string | null
           sha256?: string | null
           sql?: string
+          sqlstate?: string | null
           started_at?: string | null
           status?: string
           version?: string
@@ -12523,6 +12529,7 @@ export type Database = {
         Args: { _error?: string; _ok: boolean; _submission_id: string }
         Returns: undefined
       }
+      migration_queue_state: { Args: never; Returns: Json }
       prune_repo_blob_analysis: { Args: never; Returns: number }
       purge_api_usage_events: { Args: never; Returns: Json }
       purge_deployment_events: { Args: never; Returns: number }
@@ -12623,6 +12630,10 @@ export type Database = {
       resolve_api_key_billability: {
         Args: { _clone_id: string; _secret_name: string }
         Returns: string
+      }
+      resolve_migration_queue_row: {
+        Args: { _action: string; _reason: string; _version: string }
+        Returns: Json
       }
       revoke_scheduled_keys: { Args: never; Returns: Json }
       role_level: {

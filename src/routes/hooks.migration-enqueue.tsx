@@ -3,7 +3,10 @@ import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import {
   enqueueMigrations,
   readMigrationStatus,
+  readQueueState,
   readSettledDigests,
+  resolveMigration,
+  type ResolveAction,
 } from "@/server/migration-enqueue.server";
 import { verifyCronAuth } from "@/server/cron-auth.server";
 import type { MigrationSubmission } from "@/server/migrationQueue.pure";
@@ -26,10 +29,17 @@ import type { MigrationSubmission } from "@/server/migrationQueue.pure";
 // admin schema onto a tenant. Here the target is whichever database this
 // deployment is connected to, which is the only answer there is.
 //
-// Three actions on one route rather than three routes, so the "what is
-// scheduled" story stays one line: enqueue submits, status polls, digests
-// reports what ran, and none is on a timer because there is nothing to do
-// until a merge happens.
+// Five actions on one route rather than five routes, so the "what is
+// scheduled" story stays one line: enqueue submits, status polls a caller's own
+// versions, queue reports the whole queue, digests reports what ran, resolve
+// ends a halt. None is on a timer, because there is nothing to do until a merge
+// happens.
+//
+// `queue` and `resolve` are the two halves of the September incident. A halted
+// queue is ordered, so one failed row stops every migration behind it — and
+// `status` could not see it, because it answers about the versions the caller
+// submitted. Three merges reported truthfully that their own files were "still
+// queued" while a fourth version, from a fortnight earlier, held the line.
 //
 // `digests` is READ-ONLY and answers nothing a caller could not already get
 // from `status` one version at a time. It exists because `sha256` was written
@@ -39,6 +49,10 @@ import type { MigrationSubmission } from "@/server/migrationQueue.pure";
 type EnqueueBody = { action?: "enqueue"; migrations?: MigrationSubmission[]; enqueuedBy?: string };
 type StatusBody = { action: "status"; versions?: string[] };
 type DigestsBody = { action: "digests" };
+type QueueBody = { action: "queue" };
+type ResolveBody = { action: "resolve"; version?: string; resolution?: string; reason?: string };
+
+type Body = EnqueueBody | StatusBody | DigestsBody | QueueBody | ResolveBody;
 
 export const Route = createFileRoute("/hooks/migration-enqueue")({
   server: {
@@ -53,14 +67,51 @@ export const Route = createFileRoute("/hooks/migration-enqueue")({
             headers: { "Content-Type": "application/json" },
           });
 
-        let body: EnqueueBody | StatusBody | DigestsBody;
+        let body: Body;
         try {
-          body = (await request.json()) as EnqueueBody | StatusBody | DigestsBody;
+          body = (await request.json()) as Body;
         } catch {
           return json({ success: false, error: "body must be JSON" }, 400);
         }
 
         try {
+          if (body?.action === "queue") {
+            return json({ success: true, queue: await readQueueState(supabaseAdmin) });
+          }
+
+          if (body?.action === "resolve") {
+            // Every argument is checked here AND by the database. Two gates is
+            // normally how one of them becomes wrong, but these ask different
+            // questions: this one is about the shape of the request, and the
+            // function is about the state of the row and the evidence in the
+            // catalog. Neither can stand in for the other.
+            const version = typeof body.version === "string" ? body.version.trim() : "";
+            if (!/^\d{14}$/.test(version)) {
+              return json({ success: false, error: "version must be 14 digits" }, 400);
+            }
+            const resolution = body.resolution;
+            if (resolution !== "retry" && resolution !== "record") {
+              return json({ success: false, error: 'resolution must be "retry" or "record"' }, 400);
+            }
+            // A reason is what turns clearing a halt from an anonymous act into
+            // a recorded one, so an empty string is not a reason and neither is
+            // a word. The database refuses a blank; this refuses a shrug.
+            const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+            if (reason.length < 10) {
+              return json({ success: false, error: "reason must be at least 10 characters" }, 400);
+            }
+            const result = await resolveMigration(
+              supabaseAdmin,
+              version,
+              resolution as ResolveAction,
+              reason,
+            );
+            // A refusal is a 409, never a 200 with `ok: false` in the body: the
+            // caller is a workflow step, and a step that has to read a field to
+            // find out it failed is a step that goes green when nobody does.
+            return json({ success: result.ok, ...result }, result.ok ? 200 : 409);
+          }
+
           if (body?.action === "digests") {
             const digests = await readSettledDigests(supabaseAdmin);
             return json({ success: true, digests });

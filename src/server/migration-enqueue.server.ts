@@ -220,3 +220,106 @@ export async function readMigrationStatus(
   const rows = await readRows(db, versions);
   return { verdict: judgeBatch(versions, rows), rows };
 }
+
+/** What the whole queue looks like, to a caller who submitted none of it. */
+export type QueueState = {
+  /** True while any row is `failed`. Migrations are ordered, so one holds all. */
+  readonly halted: boolean;
+  /** The failed rows themselves, oldest first. Empty when nothing is halted. */
+  readonly blocking: BlockingRow[];
+  /** Rows still to run: `queued` plus `running`. */
+  readonly waiting: number;
+  /** Rows that reached a terminal success: `applied` plus `recorded`. */
+  readonly settled: number;
+};
+
+export type BlockingRow = {
+  readonly version: string;
+  readonly name: string;
+  readonly attempts: number;
+  readonly error: string | null;
+  /** The five-character SQLSTATE the drain caught, when it caught one. */
+  readonly sqlstate: string | null;
+  /** Why the row stopped being a halt, once something has resolved it. */
+  readonly resolution: string | null;
+};
+
+/**
+ * The question `action: "status"` cannot answer.
+ *
+ * `status` reports on the versions the CALLER submitted. That is right for a
+ * workflow asking after its own files, and it is why the September incident was
+ * invisible from CI: three merges in a row reported truthfully that their own
+ * migrations were "still queued" and not one of them named the failed row that
+ * was holding the line. The queue is ordered, so the answer a blocked submitter
+ * actually needs is about somebody else's row.
+ */
+export async function readQueueState(db: Db): Promise<QueueState> {
+  const { data, error } = await db.rpc("migration_queue_state");
+  // A read that FAILED is not a queue that is HEALTHY. Reporting them the same
+  // way would make an unreachable database look like a clear runway, which is
+  // the exact reading that lets a caller wait out a halt it was never told
+  // about.
+  if (error) throw new Error(`Could not read the migration queue state: ${error.message}`);
+  const raw = (data ?? {}) as {
+    halted?: boolean;
+    blocking?: BlockingRow[] | null;
+    waiting?: number;
+    settled?: number;
+  };
+  return {
+    halted: raw.halted === true,
+    blocking: Array.isArray(raw.blocking) ? raw.blocking : [],
+    waiting: typeof raw.waiting === "number" ? raw.waiting : 0,
+    settled: typeof raw.settled === "number" ? raw.settled : 0,
+  };
+}
+
+/**
+ * The two ways a halt ends.
+ *
+ * `retry` puts the row back on the queue — for the class the drain's own budget
+ * has already spent, where the fix was outside the SQL (an extension that
+ * hadn't loaded, a lock that has since cleared).
+ *
+ * `record` settles it WITHOUT running it, and the database refuses unless the
+ * migration's declared effect is already present in the catalog. That refusal
+ * is the whole safety property: `record` cannot be used to wave a migration
+ * through, only to acknowledge one whose work is demonstrably already done.
+ */
+export type ResolveAction = "retry" | "record";
+
+export type ResolveResult = {
+  readonly ok: boolean;
+  readonly version: string;
+  readonly action: ResolveAction;
+  /** What the database did, or why it declined. */
+  readonly outcome: string;
+  /** Present when `record` was refused: what the evidence check actually saw. */
+  readonly detail?: string;
+};
+
+export async function resolveMigration(
+  db: Db,
+  version: string,
+  action: ResolveAction,
+  reason: string,
+): Promise<ResolveResult> {
+  const { data, error } = await db.rpc("resolve_migration_queue_row", {
+    _version: version,
+    _action: action,
+    _reason: reason,
+  });
+  if (error) throw new Error(`Could not resolve ${version}: ${error.message}`);
+  const raw = (data ?? {}) as { ok?: boolean; outcome?: string; detail?: string };
+  return {
+    // Absent is never true. The function returns an explicit `ok` on every
+    // path, so a missing one means the shape changed, and reading that as a
+    // success would report a halt cleared that is still standing.
+    ok: raw.ok === true,
+    version,
+    action,
+    outcome: typeof raw.outcome === "string" ? raw.outcome : "no outcome reported",
+    ...(typeof raw.detail === "string" ? { detail: raw.detail } : {}),
+  };
+}

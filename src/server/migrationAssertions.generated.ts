@@ -451,4 +451,13 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "check", table: "schema_migration_queue", column: "status", value: "recorded" },
     ],
   },
+  {
+    migration: "20260913090000_a_halt_that_resolves_itself.sql",
+    version: "20260913090000",
+    assertions: [
+      { kind: "rpc", fn: "migration_queue_state" },
+      { kind: "column", table: "schema_migration_queue", column: "resolution" },
+      { kind: "column", table: "schema_migration_queue", column: "sqlstate" },
+    ],
+  },
 ];

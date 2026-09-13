@@ -1,0 +1,90 @@
+name: Migration queue
+
+# Reads Mission Control's migration queue, and ends a halt when one needs
+# ending.
+#
+# ## Why a halt needs a lever at all
+#
+# The queue is ORDERED. One row in `failed` stops every migration behind it,
+# including ones merged weeks later that are perfectly fine — and between 8 and
+# 9 September 2026 that is what happened. Clearing it took a person with
+# database access writing an UPDATE by hand, because `service_role` holds
+# `SELECT, INSERT` on the queue and nothing else. That asymmetry is deliberate
+# (the credential that SUBMITS work must not be able to report on it), but its
+# uncosted consequence was that nothing short of `postgres` could get the
+# fleet's migrations moving again.
+#
+# Almost every halt now ends without anybody: the drain retries on a budget
+# chosen from the SQLSTATE, and before giving up it asks whether the migration's
+# declared effect is already in the catalog — the September row would have
+# settled itself on the next tick. What is left is the genuinely ambiguous case.
+#
+# ## Dispatching it with nothing is the common use
+#
+# With no version this REPORTS and changes nothing. "Why has my migration not
+# applied" is nearly always answered by a row somebody else wrote, and
+# `action: "status"` cannot see it: that answers about the versions the caller
+# submitted, which is why three merges in a row reported truthfully that their
+# own files were "still queued" and none of them named the blocker.
+#
+# ## `record` cannot wave anything through
+#
+# It settles a row WITHOUT running it, and Mission Control refuses unless the
+# migration's own `-- @asserts` claims are already satisfied by the live schema.
+# So it can only acknowledge work that is demonstrably already done. A migration
+# that declares nothing checkable can never be recorded this way — the
+# conservative side of the trade, and why the assertion header is worth writing.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Migration version to resolve (14 digits). Leave empty to just report.'
+        required: false
+        type: string
+      resolution:
+        description: 'retry = put it back on the queue. record = settle it without running it (refused unless its declared effect is already present).'
+        required: false
+        default: retry
+        type: choice
+        options:
+          - retry
+          - record
+      reason:
+        description: 'Why. Recorded on the row; at least 10 characters.'
+        required: false
+        type: string
+
+# Nothing here reads the repository's contents beyond the one script it runs,
+# and nothing writes.
+permissions:
+  contents: read
+
+# Never two at once. Two operators resolving the same row would race the drain
+# for it, and the loser's reason is the one that gets recorded.
+concurrency:
+  group: resolve-migration
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # Matches the apply lane: no `npm ci`, so a registry outage cannot stop
+      # somebody clearing a halt.
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Read the queue, and resolve if asked
+        run: node .github/scripts/resolve-migration.mjs
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          MISSION_CONTROL_URL: ${{ vars.MISSION_CONTROL_URL }}
+          VERSION: ${{ inputs.version }}
+          RESOLUTION: ${{ inputs.resolution }}
+          REASON: ${{ inputs.reason }}

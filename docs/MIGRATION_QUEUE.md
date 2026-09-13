@@ -447,3 +447,108 @@ and asks again rather than stashing and replaying. Two attempts, then it warns.
 There is no loop: the commit touches `scripts/`, and this workflow triggers only
 on `supabase/migrations/**.sql`. It does re-run `ci.yml`, which is wanted —
 that is `check:applied-digests` reading the manifest it just wrote.
+
+## A halt that resolves itself
+
+`20260913090000_a_halt_that_resolves_itself.sql`.
+
+The September incident above ends with three sentences that are really one
+finding: **a halt needed a human with `postgres`, and nothing told anybody it
+was there.** `service_role` holds `SELECT, INSERT` on this queue and nothing
+else — deliberate, because the credential that submits work must not be able to
+report on it — but the uncosted consequence was that clearing one row took
+somebody opening a SQL console and writing an `UPDATE`. Forty-one hours.
+
+Three things now stand between a failure and that.
+
+### 1. Retries are budgeted by SQLSTATE, not counted
+
+`aurixa.migration_attempt_budget` reads the class of the error rather than
+counting to a fixed number. `40001`, `40P01`, `55P03`, `57014`, `53300`,
+`53400` and the `08xxx` connection classes get **six** attempts: every one of
+them is a statement that failed for a reason outside its own text — a deadlock,
+a lock timeout, a cancelled statement, a connection lost — and the same SQL run
+again is the actual remedy. `42xxx`, `23xxx` and `22xxx` get **one**: a
+syntax error, an undefined table, a violated constraint will say exactly the
+same thing the second time, and spending five more attempts on it only delays
+the report. Everything else gets three.
+
+Before this, every class shared one budget, so the transient failures gave up
+early and the permanent ones wasted a quarter of an hour looking like they
+might recover.
+
+### 2. Before it gives up, the drain asks whether the work is already done
+
+This is the half that would have prevented the incident outright. On an
+exception, the drain evaluates the migration's own `-- @asserts` claims against
+the live catalog (`aurixa.migration_effect_present`). If every checkable claim
+is satisfied, the row is stamped in the ledger, set to `recorded`, given a
+`resolution` naming the evidence, and **the queue keeps moving in the same
+tick** — the migration behind it applies immediately.
+
+That is not a way of ignoring errors. It is the specific case where a migration
+fails *because* its work was already done: a `create table` that raises `42P07`
+because the table is there, a `create policy` that raises `42710`. Replayed
+against the fixture, the September row settles itself on the first tick and the
+migration behind it lands in the same call.
+
+Three rules make it safe.
+
+**Only claims something can evaluate count.** `table`, `column`, `rpc`, `enum`,
+`cron` and `rows` are checked against the catalog. `check:` and `none:` are
+prose — deliberately NOT evaluated — and a migration whose header carries only
+those has `checked = 0`, which is not `satisfied`. A claim nothing can read
+must never be evidence, because `satisfied` is what lets a row settle without
+running.
+
+**A migration that declares nothing can never self-resolve.** That is the
+conservative side of the trade, and it is the reason the assertion header is
+worth writing: it is what buys a migration the ability to fail safely.
+
+**Genuinely broken SQL still halts.** Proven: a migration calling a function
+that does not exist fails with `42883`, holds everything behind it, and is
+refused for `record` with `table:never_made ABSENT`. Making that succeed would
+mean silently corrupting the schema, which is the one outcome this queue exists
+to prevent.
+
+### 3. What is left has a lever, and the lever is not a SQL console
+
+Two `public` SECURITY DEFINER doors owned by `postgres`, revoked from `public`,
+`anon` and `authenticated` **by name** (this database's `pg_default_acl` grants
+EXECUTE on every new `public` function to the latter two by name, and a grant
+made by name is not removed by revoking from PUBLIC) and granted only to
+`service_role`:
+
+- **`public.migration_queue_state()`** — the whole queue, for a caller who
+  submitted none of it. Reached as `action: "queue"` on
+  `/hooks/migration-enqueue`. This is the answer `status` structurally cannot
+  give: `status` reports on the versions the caller submitted, which is why
+  three merges in a row reported truthfully that their own files were "still
+  queued" and not one named the blocker.
+- **`public.resolve_migration_queue_row(version, action, reason)`** — `retry`
+  re-queues a failed row; `record` settles it without running it and is
+  **refused unless `migration_effect_present` says the effect is there**. A
+  reason is required and is recorded on the row. Neither is offered on a row
+  that is not `failed`.
+
+The operator surface is the **Migration queue** workflow
+(`.github/workflows/resolve-migration.yml`). Dispatched with no version it
+prints the queue and changes nothing, which is the common case — "why has my
+migration not applied" is nearly always answered by a row somebody else wrote.
+Dispatched with a version, a resolution and a reason, it resolves one.
+
+`enqueue-migrations.mjs` asks the same question on its own behalf. On the third
+poll, if its versions are still pending, it reads the whole queue; a halt stops
+the run there and names the blocking row, whose merge it came from and the two
+lawful routes out of it. Before this the run waited out all five minutes and
+then reported a timeout, which sent an operator to `cron.job` — the drain's
+schedule, the one part that was working.
+
+### What this does not do
+
+**It does not make a broken migration succeed.** There is no swallow, no
+`exception when others then null`, no skip. A migration whose SQL is wrong
+fails, halts the queue and says so — the only change is that it says so in
+thirty seconds instead of five minutes, names itself in the run that was
+blocked by it, and can be cleared from a workflow dispatch instead of a
+database console.
