@@ -460,4 +460,16 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "column", table: "schema_migration_queue", column: "sqlstate" },
     ],
   },
+  {
+    migration: "20260914120000_reserve_platform_service_slugs.sql",
+    version: "20260914120000",
+    assertions: [
+      {
+        kind: "check",
+        table: "platform_hosting_config",
+        column: "reserved_slugs",
+        value: "builders",
+      },
+    ],
+  },
 ];
