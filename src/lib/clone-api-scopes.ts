@@ -20,7 +20,8 @@ export type CloneApiScope = {
     | "verification"
     | "listings"
     | "integrations"
-    | "anthropic";
+    | "anthropic"
+    | "builders";
   label: string;
   description: string;
   default?: boolean;
@@ -64,6 +65,31 @@ export const CLONE_API_SCOPES: CloneApiScope[] = [
       "no credential of Mission Control's own, names no workspace but this clone's, and the " +
       "assertion it returns is useful against exactly one federation rule.",
     default: true,
+  },
+  {
+    value: "builders:federate",
+    group: "builders",
+    label: "Builders Network — obtain a workspace identity",
+    description:
+      "Let this workspace ask Mission Control for a five-minute signed assertion naming itself, " +
+      "which the Builders Network at builders.aurixasystems.com.au verifies offline against " +
+      "Mission Control's published JWKS. Off by default: connecting a workspace to the network " +
+      "is a per-workspace decision an operator makes, and granting this scope IS that decision — " +
+      "revoking it is a complete rollback. It grants no credential of Mission Control's own, and " +
+      "the assertion names this workspace, the network's origin, and nothing else.",
+    default: false,
+  },
+  {
+    value: "builders:operate",
+    group: "builders",
+    label: "Builders Network — operate (platform key only)",
+    description:
+      "Let Mission Control's operator console call the Builders Network's admin API " +
+      "(organisation approval, suspension, moderation) as the platform. Held by a NULL-clone " +
+      "platform key and never by a workspace's: Mission Control must not hold the network's " +
+      "service-role key, and this scope is how the operator plane acts there without one. Off by " +
+      "default, and it does nothing until the network exists to honour it.",
+    default: false,
   },
   {
     value: "integrations:write",
