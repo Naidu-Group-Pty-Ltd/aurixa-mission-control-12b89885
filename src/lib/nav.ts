@@ -109,6 +109,12 @@ export const NAV_SECTIONS: NavSection[] = [
         keywords: "cron recurring",
       },
       { to: "/drift", label: "Drift", icon: Sparkles, shortcut: "r", keywords: "ai suggestions" },
+      {
+        to: "/builders-network",
+        label: "Builders Network",
+        icon: Building2,
+        keywords: "builder portal organisations connections vetting",
+      },
       { to: "/branding", label: "Branding", icon: Palette, shortcut: "b" },
       {
         to: "/fleet-manager",
