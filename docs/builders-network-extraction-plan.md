@@ -548,9 +548,26 @@ someone else's mess into a fresh database. Create the NPC clone's `workspace_con
 row. **Re-point the Make scenario's link-recovery callback to the network origin.** Verify
 with the harness's verifiers pointed at the network project.
 
-**Phase 5 — re-point the FK.** One all-or-nothing prime migration in the original's own
-ship-together discipline; orphan-count gate (trivially 0 today); reversal valid only until
-Phase 7 — that window is a hard gate.
+**Phase 5 — re-point the FK.** ✅ Executed as
+`20261122000000_builder_network_phase5_inbound_fk_release.sql`: all nine inbound
+constraints released by their measured production names behind a per-edge orphan gate
+(measured at execution: E4 2 rows / E5 3 rows, every other edge 0, orphans 0 everywhere);
+columns kept as opaque remote references (Phase 4 preserved organisation ids, so the AML
+partner links and consent records keep naming the same entities); every check and drop
+`to_regclass`-guarded so a clone provisioned after Phase 7 — where the builder tables never
+exist — replays it as a clean no-op. The same file carries the §3 E1 re-point in the
+original's ship-together discipline: `builder_network_transactions` created (PK IS the
+network's transaction id; connection set-once; service-role-only RLS),
+`transaction_case_links.builder_transaction_id` re-FK'd onto it `ON DELETE SET NULL`
+behind its own zero-orphan gate, and the guard's fourth branch reads the mirror with
+`NOT FOUND → BUILDER_TRANSACTION_NOT_MIRRORED` while `CROSS_CLIENT_CASE_LINK` stays
+byte-identical — without this half, the first post-cutover link would be refused against
+yesterday's copy and Phase 7 would leave the trigger reading a dropped relation. Verified
+by execution: `builder:db:verify:transactions` 113/113 on a live PostgreSQL, second apply
+included. Deferred BY NAME to Phase 6/7 (it needs the stock mirror, which does not exist
+yet): `builder_stock_selections` (1 row) stays in the clone per §3 E3 but still carries
+seven FKs into builder tables — Phase 7's drop list must exclude it and release those
+first. Reversal valid only until Phase 7 — that window is a hard gate.
 
 **Phase 6 — turn `/builder/*` off in the clone.** 302 to the network with `?from=<slug>`.
 **Announce first** — the portal is in active use for stock testing; migrate the testers'
