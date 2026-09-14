@@ -255,10 +255,14 @@ export const revokeNetworkConnection = createServerFn({ method: "POST" })
       reason: data.reason.trim(),
     });
     if (result.ok) {
-      await supabaseAdmin
+      // The network's revocation already succeeded; the shadow row is the
+      // phone book, so a failed mirror write is logged, never surfaced as a
+      // failed revocation.
+      const { error: shadowError } = await supabaseAdmin
         .from("builders_network_connections_shadow")
         .update({ state: "revoked", reported_at: new Date().toISOString() })
         .eq("network_connection_id", data.connectionId);
+      if (shadowError) console.error("[builders-network] shadow revoke update failed", shadowError);
     }
     return result.ok
       ? { ok: true as const }
