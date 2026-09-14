@@ -189,6 +189,8 @@ import { Route as ApiPublicEmailUnsubscribeRouteImport } from './routes/api.publ
 import { Route as ApiPublicEdgeStatusRouteImport } from './routes/api.public.edge.status'
 import { Route as ApiPublicClonesRotateKeyRouteImport } from './routes/api.public.clones.rotate-key'
 import { Route as ApiPublicClonesGateRouteImport } from './routes/api.public.clones.gate'
+import { Route as ApiPublicBuildersJwksRouteImport } from './routes/api.public.builders.jwks'
+import { Route as ApiPublicBuildersIdentityRouteImport } from './routes/api.public.builders.identity'
 import { Route as ApiPublicBillingPaymentMethodsRouteImport } from './routes/api.public.billing.payment-methods'
 import { Route as ApiPublicBillingInvoicesRouteImport } from './routes/api.public.billing.invoices'
 import { Route as ApiPublicBillingInvoicePdfRouteImport } from './routes/api.public.billing.invoice-pdf'
@@ -1148,6 +1150,17 @@ const ApiPublicClonesGateRoute = ApiPublicClonesGateRouteImport.update({
   path: '/api/public/clones/gate',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiPublicBuildersJwksRoute = ApiPublicBuildersJwksRouteImport.update({
+  id: '/api/public/builders/jwks',
+  path: '/api/public/builders/jwks',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiPublicBuildersIdentityRoute =
+  ApiPublicBuildersIdentityRouteImport.update({
+    id: '/api/public/builders/identity',
+    path: '/api/public/builders/identity',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiPublicBillingPaymentMethodsRoute =
   ApiPublicBillingPaymentMethodsRouteImport.update({
     id: '/api/public/billing/payment-methods',
@@ -1360,6 +1373,8 @@ export interface FileRoutesByFullPath {
   '/api/public/billing/invoice-pdf': typeof ApiPublicBillingInvoicePdfRoute
   '/api/public/billing/invoices': typeof ApiPublicBillingInvoicesRoute
   '/api/public/billing/payment-methods': typeof ApiPublicBillingPaymentMethodsRoute
+  '/api/public/builders/identity': typeof ApiPublicBuildersIdentityRoute
+  '/api/public/builders/jwks': typeof ApiPublicBuildersJwksRoute
   '/api/public/clones/gate': typeof ApiPublicClonesGateRouteWithChildren
   '/api/public/clones/rotate-key': typeof ApiPublicClonesRotateKeyRoute
   '/api/public/edge/status': typeof ApiPublicEdgeStatusRoute
@@ -1553,6 +1568,8 @@ export interface FileRoutesByTo {
   '/api/public/billing/invoice-pdf': typeof ApiPublicBillingInvoicePdfRoute
   '/api/public/billing/invoices': typeof ApiPublicBillingInvoicesRoute
   '/api/public/billing/payment-methods': typeof ApiPublicBillingPaymentMethodsRoute
+  '/api/public/builders/identity': typeof ApiPublicBuildersIdentityRoute
+  '/api/public/builders/jwks': typeof ApiPublicBuildersJwksRoute
   '/api/public/clones/gate': typeof ApiPublicClonesGateRouteWithChildren
   '/api/public/clones/rotate-key': typeof ApiPublicClonesRotateKeyRoute
   '/api/public/edge/status': typeof ApiPublicEdgeStatusRoute
@@ -1748,6 +1765,8 @@ export interface FileRoutesById {
   '/api/public/billing/invoice-pdf': typeof ApiPublicBillingInvoicePdfRoute
   '/api/public/billing/invoices': typeof ApiPublicBillingInvoicesRoute
   '/api/public/billing/payment-methods': typeof ApiPublicBillingPaymentMethodsRoute
+  '/api/public/builders/identity': typeof ApiPublicBuildersIdentityRoute
+  '/api/public/builders/jwks': typeof ApiPublicBuildersJwksRoute
   '/api/public/clones/gate': typeof ApiPublicClonesGateRouteWithChildren
   '/api/public/clones/rotate-key': typeof ApiPublicClonesRotateKeyRoute
   '/api/public/edge/status': typeof ApiPublicEdgeStatusRoute
@@ -1944,6 +1963,8 @@ export interface FileRouteTypes {
     | '/api/public/billing/invoice-pdf'
     | '/api/public/billing/invoices'
     | '/api/public/billing/payment-methods'
+    | '/api/public/builders/identity'
+    | '/api/public/builders/jwks'
     | '/api/public/clones/gate'
     | '/api/public/clones/rotate-key'
     | '/api/public/edge/status'
@@ -2137,6 +2158,8 @@ export interface FileRouteTypes {
     | '/api/public/billing/invoice-pdf'
     | '/api/public/billing/invoices'
     | '/api/public/billing/payment-methods'
+    | '/api/public/builders/identity'
+    | '/api/public/builders/jwks'
     | '/api/public/clones/gate'
     | '/api/public/clones/rotate-key'
     | '/api/public/edge/status'
@@ -2331,6 +2354,8 @@ export interface FileRouteTypes {
     | '/api/public/billing/invoice-pdf'
     | '/api/public/billing/invoices'
     | '/api/public/billing/payment-methods'
+    | '/api/public/builders/identity'
+    | '/api/public/builders/jwks'
     | '/api/public/clones/gate'
     | '/api/public/clones/rotate-key'
     | '/api/public/edge/status'
@@ -2505,6 +2530,8 @@ export interface RootRouteChildren {
   ApiPublicBillingInvoicePdfRoute: typeof ApiPublicBillingInvoicePdfRoute
   ApiPublicBillingInvoicesRoute: typeof ApiPublicBillingInvoicesRoute
   ApiPublicBillingPaymentMethodsRoute: typeof ApiPublicBillingPaymentMethodsRoute
+  ApiPublicBuildersIdentityRoute: typeof ApiPublicBuildersIdentityRoute
+  ApiPublicBuildersJwksRoute: typeof ApiPublicBuildersJwksRoute
   ApiPublicClonesGateRoute: typeof ApiPublicClonesGateRouteWithChildren
   ApiPublicClonesRotateKeyRoute: typeof ApiPublicClonesRotateKeyRoute
   ApiPublicEdgeStatusRoute: typeof ApiPublicEdgeStatusRoute
@@ -3819,6 +3846,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicClonesGateRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/builders/jwks': {
+      id: '/api/public/builders/jwks'
+      path: '/api/public/builders/jwks'
+      fullPath: '/api/public/builders/jwks'
+      preLoaderRoute: typeof ApiPublicBuildersJwksRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/builders/identity': {
+      id: '/api/public/builders/identity'
+      path: '/api/public/builders/identity'
+      fullPath: '/api/public/builders/identity'
+      preLoaderRoute: typeof ApiPublicBuildersIdentityRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/billing/payment-methods': {
       id: '/api/public/billing/payment-methods'
       path: '/api/public/billing/payment-methods'
@@ -4143,6 +4184,8 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPublicBillingInvoicePdfRoute: ApiPublicBillingInvoicePdfRoute,
   ApiPublicBillingInvoicesRoute: ApiPublicBillingInvoicesRoute,
   ApiPublicBillingPaymentMethodsRoute: ApiPublicBillingPaymentMethodsRoute,
+  ApiPublicBuildersIdentityRoute: ApiPublicBuildersIdentityRoute,
+  ApiPublicBuildersJwksRoute: ApiPublicBuildersJwksRoute,
   ApiPublicClonesGateRoute: ApiPublicClonesGateRouteWithChildren,
   ApiPublicClonesRotateKeyRoute: ApiPublicClonesRotateKeyRoute,
   ApiPublicEdgeStatusRoute: ApiPublicEdgeStatusRoute,

@@ -472,4 +472,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       },
     ],
   },
+  {
+    migration: "20260914130000_builders_network_trust_anchor.sql",
+    version: "20260914130000",
+    assertions: [{ kind: "table", table: "builders_network_connections_shadow" }],
+  },
 ];

@@ -34,6 +34,7 @@ import {
   JWKS_PATH,
   identityClaims,
 } from "./anthropicFederation.pure";
+import { mergeAssertionClaims } from "./buildersFederation.pure";
 
 const encoder = new TextEncoder();
 
@@ -172,23 +173,36 @@ async function sign(claims: Record<string, unknown>): Promise<string> {
 /**
  * An assertion naming ONE clone.
  *
- * `aud` is Anthropic's token endpoint rather than a name of our own: an
- * assertion that names its audience cannot be replayed at a different one, and
- * the caller — the clone — is the only party that ever holds it.
+ * `aud` is the relying party's own name rather than one of ours: an assertion
+ * that names its audience cannot be replayed at a different one, and the
+ * caller — the clone — is the only party that ever holds it. Two relying
+ * parties verify against this signer's one key today: Anthropic's token
+ * endpoint, and the Builders Network's origin.
+ *
+ * `claims` is the optional profile a relying party reads out of the token
+ * (the Builders Network takes {clone_id, slug, display_name, scopes};
+ * Anthropic takes none and looks the subject up in its own rule table). The
+ * merge is `mergeAssertionClaims`, whose one rule is that the registered
+ * claims win — a profile carrying `sub`, `aud` or `exp` is overwritten, never
+ * honoured, so nothing a caller influences can change who the token says it
+ * is, who it is for, or when it dies.
  */
 export async function signCloneAssertion(input: {
   subject: string;
   audience: string;
   nowSeconds?: number;
+  claims?: Record<string, unknown>;
 }): Promise<string> {
-  const claims = identityClaims({
+  const registered = identityClaims({
     issuer: cloneIssuerUrl(),
     subject: input.subject,
     audience: input.audience,
     nowSeconds: input.nowSeconds ?? Math.floor(Date.now() / 1000),
     jti: crypto.randomUUID(),
   });
-  return sign(claims as unknown as Record<string, unknown>);
+  return sign(
+    mergeAssertionClaims(input.claims ?? {}, registered as unknown as Record<string, unknown>),
+  );
 }
 
 /**

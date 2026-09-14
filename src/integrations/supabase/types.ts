@@ -688,6 +688,60 @@ export type Database = {
         }
         Relationships: []
       }
+      builders_network_connections_shadow: {
+        Row: {
+          builder_org_label: string | null
+          builder_org_ref: string
+          clone_id: string
+          created_at: string
+          id: string
+          network_connection_id: string
+          reported_at: string
+          scopes: string[]
+          state: string
+          updated_at: string
+        }
+        Insert: {
+          builder_org_label?: string | null
+          builder_org_ref: string
+          clone_id: string
+          created_at?: string
+          id?: string
+          network_connection_id: string
+          reported_at: string
+          scopes?: string[]
+          state: string
+          updated_at?: string
+        }
+        Update: {
+          builder_org_label?: string | null
+          builder_org_ref?: string
+          clone_id?: string
+          created_at?: string
+          id?: string
+          network_connection_id?: string
+          reported_at?: string
+          scopes?: string[]
+          state?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "builders_network_connections_shadow_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "builders_network_connections_shadow_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones_missing_isolated_backend"
+            referencedColumns: ["clone_id"]
+          },
+        ]
+      }
       cascade_approvals: {
         Row: {
           approver_user_id: string
