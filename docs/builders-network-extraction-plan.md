@@ -569,10 +569,32 @@ yet): `builder_stock_selections` (1 row) stays in the clone per §3 E3 but still
 seven FKs into builder tables — Phase 7's drop list must exclude it and release those
 first. Reversal valid only until Phase 7 — that window is a hard gate.
 
-**Phase 6 — turn `/builder/*` off in the clone.** 302 to the network with `?from=<slug>`.
-**Announce first** — the portal is in active use for stock testing; migrate the testers'
-accounts and stock before the redirect, not after. Remove portal functions from deploy and
-from `typecheck:builder-edge`; admin functions stay read-only one more phase.
+**Phase 6 — turn `/builder/*` off in the clone.** ✅ Executed. Every `/builder` path
+resolves to one redirect (`BuilderPortalMoved`, the SPA's 302: `location.replace` onto the
+network origin named once in `src/lib/builderNetworkOrigin.ts`) carrying `?from=<hostname>`
+— the hostname rather than the MC slug, because the slug has never been published into a
+clone's bundle and the hostname is the workspace's public name, resolvable by MC. The
+announce-first precondition was met in order: accounts and stock migrated in Phase 4, the
+three owners emailed before the redirect merged. The sixteen portal-session functions are
+retired from deploy (filtered out of every list branch of the workflow, explicit dispatch
+requests included — bringing one back is a reviewed edit, not a form field) and from
+`typecheck:builder-edge`; they stay in the repository and in `config.toml` until Phase 7
+deletes them, and their live deployments keep answering session cookies until then — which
+is why the admin plane's freeze exempts CONTAINMENT. The eight `builder-*-admin` functions
+are read-only by server-side refusal now (`_shared/builderPortal/adminFreeze.ts`, one rule
+classified by each function's own `READ_OPERATIONS`, drift-guarded by
+`src/lib/security/builderAdminFreeze.spec.ts`): record mutations answer 403 naming the
+network, reads stay, and suspension / membership revocation / session revocation survive
+because removing a ceremony must never remove a control. The E4 in-portal Passport door is
+closed structurally (`portalHandoff` → `portal_moved` for the builder surface, checked
+before enrolment and the flag) until E4's network → clone server-side call ships; the
+emailed `/passport/<token>` link — portal-independent — remains the builder partner's way
+in, and at execution exactly one live grant (one builder partner organisation) read
+through the portal. Portal pages are unrouted, never deleted — Phase 7 removes the files.
+The non-CI static suite `tests/builder-portal/` still documents the PRE-move portal (63
+failing assertions after the cut, 44 of them pre-existing; every added one pins the old
+route tree) — it is the record of a surface that left, and it retires at Phase 7 beside
+`security:builder-portal` and the schema, never gets “fixed” to describe the redirect.
 
 **Phase 7 — delete from the prime.** One-way; soak first.
 - Delete the 59 builder migration files. Before deleting, check each against
@@ -596,8 +618,156 @@ from `typecheck:builder-edge`; admin functions stay read-only one more phase.
 - Drop, don't leave dormant: a 65-table schema nothing tests any more is pure attack
   surface.
 
-**Phase 8 — marketing.** A "for builders" page in `aurixa-systems`, linking out. No auth is
-added to the marketing site.
+**Phase 7 execution record — in waves, because the deletion is not one act.** The client
+marketplace (`builder-stock-marketplace`) serves paying customers off five builder tables,
+so dropping the schema in one migration would have taken the marketplace down with the
+portal. The order that keeps it up:
+
+- **Wave 1 ✅ (PR #2659).** The archive precedes everything: `builder_archive` live on the
+  prime — 66 snapshots, 6,222 rows, counts verified against sources, no anon/authenticated
+  grants (the same SQL re-runs idempotently as the decommission migration's opening).
+  `decommission-builder-portal-functions.yml` deletes the sixteen retired portal-session
+  deployments on dispatch — allow-listed to exactly those names, absent-tolerant, project
+  ref resolved as the deploy workflow resolves it. Dispatched after merge; the sixteen
+  verified gone from the project while the admin family, pipeline workers, marketplace
+  read and network sync door still answer. And `PartnerOnboardingWizard` stops walking
+  the doomed step: builder partners get `portal_moved` (no provisioning call, no invite,
+  no enrolment), the emailed Passport link named as their way in.
+- **Wave 2 ✅ (this change).** The marketplace stops reading anything Phase 7 deletes:
+  `20261123000000_builder_network_stock_mirror.sql` creates `builder_network_stock_items`
+  / `_item_images` / `_organisations` — full column shape, PK-no-default ids (the
+  network's ids, per E3), service-role-only RLS — and seeds them from the source tables
+  in the same file (`to_regclass`-guarded, ON CONFLICT DO NOTHING, so a post-deletion
+  clone no-ops the seed and takes sync data later). Every read in
+  `builder-stock-marketplace` re-points at the mirrors; `supply_builder_image` /
+  `create_builder_image_upload` refuse 410 `builder_stock_images_moved` (they wrote the
+  dying pipeline); `select_for_client` resolves attribution from the item's own
+  `created_by_builder_user_id` (the uploads cross-read retires) and no longer writes
+  `builder_notifications` (a feed with no reader); the Command Centre card's "Add a
+  picture" control became a disclosure. Image BYTES stay in the prime's
+  `builder-stock-images` bucket and rows keep naming them — storage moves in wave 4,
+  after the network serves mirror imagery over the connection.
+- **Wave 3 ✅ (this change) — the one-way deletion.** Every name below is measured, not
+  recalled. `20261124000000_builder_portal_decommission.sql`, ordered: quiet the two
+  dynamic settlement jobnames (guarded — the prime holds zero); re-run wave 1's archive
+  for clones (to_regclass-guarded, count-manifested; the prime no-ops on all 68
+  relations); delete the 3 builder rows of `portal_terms_acceptances` (archived slice
+  first, columns and CHECKs untouched); drop the portal's own view and redefine the two
+  SURVIVING views shape-identically without their builder legs, `security_invoker`
+  stated (`partner_agreement_records`, `cross_portal_rollout_reconciliation` — a view
+  blocks DROP TABLE, and nothing here may CASCADE); re-shape `builder_stock_selections`
+  (six FKs released by measured names, `stock_item_id` re-pointed at the mirror
+  SET NULL per E1's precedent with its NOT NULL dropped, the org guard swapped onto the
+  mirror byte-identical, and the whole table CREATE IF NOT EXISTS in final shape because
+  its creating migration is deleted and the table survives); break the one FK cycle
+  (`builder_stock_items_primary_image_fk` — note `_fk`); drop the 63 tables
+  children-before-parents (58 topo-sorted over the live FK graph + 5 isolated); then
+  drop 168 functions with identity args, AFTER the tables — every measured dependent was
+  a trigger or CHECK on a dropped table, and the survivors
+  (`builder_enforce_stock_selection_org`, `builder_stock_touch_updated_at`,
+  `guard_transaction_case_links`, `resolve_cross_portal_feature_mode_for` — full body
+  reads only surviving tables) are excluded by name. Repo side: **70** builder migration
+  files existed, not the plan's 59 — ten hide under UUID filenames, found by content —
+  and 69 are deleted while `20260810000000` is RECLASSIFIED (its shared release-plane
+  columns survive; its builder functions were dropped by the migration anyway), which
+  keeps its collision group intact; the collision JSON loses 10 groups and edits 1, and
+  `security:migration-versions` stays green both ways. 27 function directories deleted
+  with their `config.toml` blocks (409 declare `verify_jwt`, checker green); the deploy
+  workflow's RETIRED machinery removed with the dirs it guarded; the decommission
+  workflow WIDENED to the 12 further deployments (the reviewed edit its header
+  demanded), including `builder-stock-inpaint-probe`, which was deployed but never had
+  a directory. `aml-reliance` severed at both sites (`resolveBuilderSession` gone; the
+  workspace resolver and both enrolment ops answer 410 `portal_moved`), releasing the
+  three session modules; `_shared/builderStock` kept the marketplace's 11-module
+  closure + `builderStockAddress.pure` (imported from `src` — the sweep that found it
+  is why closures are verified against BOTH sides), and `primaryImage.ts` lost its
+  pipeline half, which wrote a dropped table. Frontend: both portal trees, the Command
+  Centre admin surface (its edge functions read dropped tables; the archive is the
+  operator's record), 16 orphan libs, `builder-drafting.css`, and
+  `addressWithoutLeadingDesignation` MOVED into the address module for the card titles
+  that survive. ~120 repo paths deleted (95 pipeline test files); 5 builder-stock specs
+  and 13 surviving-surface contract tests rewritten to the moved contract. **Fresh-clone
+  replay safety**: surviving migrations that referenced builder tables were edited —
+  the FK clauses Phase 5 released live are removed from 20260801000300/000400,
+  20260805100000 and its UUID twin (fresh = fleet), and both surviving views' creating
+  migrations carry the builder-less definitions (a view is validated at creation) —
+  then PROVEN by differential replay of the full surviving corpus against main's on a
+  local PostgreSQL 16.
+  Deliberately untouched: `builder_invoices` / `build_progress_payments` (finance
+  tables wearing the prefix, zero FKs into the component — measured), the terms portal
+  CHECK still admitting 'builder' (a valueless vocabulary entry, not a surface), and
+  `_shared/auth.ts`'s builder cookie writer (caller-less; a later tidy).
+- **Wave 3 tail ✅ — applied and verified on the live prime (14 Sep 2026).** The first
+  dispatch REFUSED, and correctly: `2BP01 cannot drop table builder_allocations because
+  other objects depend on it — function builder_create_allocation(…) depends on type
+  builder_allocations`. **A function declared `RETURNS <table>` holds a hard pg_depend
+  edge on that table's composite ROW TYPE**, so §8's drop came too late for §7. The
+  census behind that order asked what each table HOLDS (triggers, CHECKs, foreign keys)
+  and never what holds the table, and no body-text scan can see the class at all —
+  measured on the live prime, **46 functions** carry a doomed row type and block **38 of
+  the 63** tables, including `claim_builder_stock_image_work` and
+  `complete_builder_document_processing`, which do not even wear the prefix. The
+  differential replay could not have caught it: the degraded harness never created those
+  functions. New **§6.5** releases exactly that set before §7 and is **derived from the
+  catalogue rather than listed** — a second copy of 46 identities is a list to drift
+  from, and the doomed set needs no second list either (builder-prefixed tables minus the
+  named survivors), a predicate checked against the live prime before being trusted:
+  it returns **63**, §7's hand-written list exactly, catching **0** survivors. The failed
+  run left nothing behind (one implicit transaction, full rollback), so the file was
+  EDITED rather than repaired by a second migration — it described an act that had not
+  happened anywhere yet. Applied on run #52; verified by effect, thirteen measures:
+  **0** portal tables, **0** portal functions, **0** builder terms rows, **0** residual
+  builder FKs on `builder_stock_selections` with **1** mirror FK, the org guard reading
+  the mirror, both views kept and the portal's own gone, `builder_archive` intact at 67
+  relations, the version recorded, and the marketplace's supply untouched (2
+  organisations, 1,014 items, 2 active, 2,931 images). The widened decommission workflow
+  then removed the 12 remaining deployments: of 419 edge functions, the builder family
+  is now exactly `builder-stock-marketplace` and `builder-network-inbound`.
+  A follow-up ([#2662](https://github.com/Naidu-Group-Pty-Ltd/npc-property-dashbord/pull/2662))
+  clears the CI-only surfaces the deletion could not see from `supabase/` and `src/`:
+  both Cloudflare workers (the PDF one imports the deleted shared election; the image
+  one's only dispatchers were the deleted settler and inpaint probe), their ci.yml job
+  and typecheck step, the two now-targetless secrets workflows, the deleted
+  builder-portal security checker still named in the security job's own step list, and a
+  vitest step whose four filter paths had all been deleted — **vitest exits 1 when every
+  filter matches nothing**, so the step kept for the portal would have failed for not
+  finding it. The two workers remain DEPLOYED on Cloudflare: deleting a directory does
+  not undeploy, so that removal is account-side and outstanding.
+- **Wave 4 (deferred, post-connection).** Delete the storage bytes once the network
+  serves the mirror's imagery — dropping them earlier blanks every card.
+
+**Phase 8 — marketing. ✅ (14 Sep 2026)** `/builders` on `aurixa-systems`
+([PR #204](https://github.com/Naidu-Group-Pty-Ltd/aurixa-systems/pull/204)) — what the
+network is, four steps to get listed, the Passport arriving already attested, and both
+primary actions leaving for `builders.aurixasystems.com.au`. No auth was added. Wired the
+way that repo requires rather than the way it looks: an **eager** import (a lazy route
+prerenders as an empty shell and fails the build), a `ROUTE_METADATA` entry (the suite
+fails a route with no entry and an entry with no route), the `llms.txt` Product section,
+regenerated `sitemap.xml`/`llms.txt`, a footer link and a cross-link from `/industries` —
+the supply side of the same market, so the two point at each other. Two decisions
+recorded there: the hero visual is LOCAL (the three `*HeroVisual` components are one per
+page, and one list reaching many firms is not among them) and it is deliberately **not in
+the navbar**, because that bar was already at its overflow limit at `lg` with seven items
+and needed resizing for the eighth. 276/276 including the prerender gates — one real
+`<h1>`, 35 KB of markup against a 5 KB floor.
+
+**And the network now wears the brand** ([aurixa-builders PR #3](https://github.com/Naidu-Group-Pty-Ltd/aurixa-builders/pull/3)),
+which was not in the plan and should have been: the portal was still in the prime's
+inherited cream-and-purple scheme, so a builder crossing from the marketing site met what
+looked like a different company. Every colour is now a conversion of a token in
+`aurixa-systems/src/index.css`'s `@theme` block, with Inter and Playfair Display
+self-hosted, and the portal opens dark because the site is dark and only dark. The rule
+that carries it: **that palette had three authorities** — the stylesheet paints the first
+frame, `BrandProvider` writes the same tokens INLINE (which win), and the white-label
+resolver used to derive four of them — so a disagreement is a page that changes colour on
+hydration. The CSS is generated from the maps, the provider applies the maps, and a spec
+fails on drift. Running the resolver over a fully declared palette was itself destructive
+(it replaced the focus ring and the hover fill with the primary, and the chart ramp with
+hue rotations of it); that derivation is for a tenant who picks ONE colour.
+**And rendering the page found a real bug no reading would have**:
+`getReadableForeground` chose its ink at a luminance threshold of 0.45 when the crossover
+is 0.1791, so the teal button drew white text at **2.93:1**. It measures both candidates
+now — the same button is **6.74:1**.
 
 ---
 
@@ -641,6 +811,15 @@ added to the marketing site.
   `MIGRATION_VERSION_COLLISIONS.json` per deleted file.
 - **Drop inbound constraints before tables; never let CASCADE decide** — seven of nine
   inbound FKs cascade, five into Solicitor-shared tables.
+- **A dependency census must ask BOTH directions.** What a table holds (triggers,
+  CHECKs, foreign keys) is the easy half; what holds the table is the half that
+  refuses the drop. `RETURNS <table>` binds a function to the table's composite ROW
+  TYPE, invisible to any scan of function bodies and to a replay harness that never
+  created the function — 46 of them, blocking 38 of 63 tables, and the first apply
+  found every one of them at once. Ask `pg_depend` from `pg_proc` to `pg_type` before
+  ordering a teardown, and where the set can be DERIVED, derive it: a list of 46
+  identities beside an existing list of 168 is a second thing to drift from, and the
+  clone whose catalogue differs by one is the one it fails on.
 - **`__Host-` is structural** — the portal is a sibling subdomain of every tenant; the
   cookie factory lives in `_shared/auth.ts`, not where an auditor will look.
 - **A deterministic client ref is a correlation handle** — mint random per (connection,
