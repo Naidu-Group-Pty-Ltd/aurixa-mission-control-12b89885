@@ -486,4 +486,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "column", table: "cascade_path_approvals", column: "expires_at" },
     ],
   },
+  {
+    migration: "20260916100000_seed_september_unblock_approvals.sql",
+    version: "20260916100000",
+    assertions: [{ kind: "rows", table: "cascade_path_approvals", atLeast: 1 }],
+  },
 ];
