@@ -312,6 +312,42 @@ export async function executeCascade(
     return written;
   };
 
+  // Armed, then claimable — and if claimed anyway, held rather than judged.
+  //
+  // The trigger commits the EVENT first and its result rows a moment later,
+  // and the per-minute drain claimed one inside that gap: 807ms on 16 Sep
+  // 2026 (event dd7180c7) — this pass read zero queued rows, honestly
+  // completed "(of 0)", and the three rows landed a second later, stranded
+  // under a completed carrier with the delivery silently lost. Zero QUEUED
+  // rows is a normal end-state for a finished resume, so the question is
+  // asked of the whole ledger: an event with NO rows in ANY status is not
+  // one whose work is done, it is one whose creation has not finished (or
+  // died trying). It is handed back for a later tick, before the pre-loop
+  // exits below can fail it — failing an unarmed event settles it while its
+  // rows may still be in flight, which is the same strand again. A count
+  // that cannot be read holds too: unprovable-armed is not armed.
+  if ((queuedRes.data ?? []).length === 0) {
+    const { count, error: armError } = await supabase
+      .from("cascade_results")
+      .select("id", { count: "exact", head: true })
+      .eq("cascade_event_id", event.id);
+    if (armError || (count ?? 0) === 0) {
+      const held = await updateEvent(
+        {
+          status: "pending",
+          worker_started_at: null,
+          next_attempt_at: new Date(Date.now() + 60_000).toISOString(),
+          summary:
+            "Held: claimed before any result row was armed — the trigger that created this " +
+            "event commits its rows a moment after the event itself.",
+        },
+        "hold an unarmed event",
+      );
+      if (!held) return { ok: false, error: "claim superseded — nothing written" };
+      return { ok: true, status: "unarmed" };
+    }
+  }
+
   let octokit;
   try {
     octokit = getAppOctokit();
