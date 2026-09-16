@@ -2044,12 +2044,15 @@ export async function processClone(args: {
 
   // ── Is anything still importing what this run wants to delete? ────────────
   //
-  // Two kinds of file can be, and only two. A HELD file, because the cascade
-  // cannot change it — `src/App.tsx` is `manual_reconcile` on the client-facing
-  // mirror and imports from the AML shell. And a CLONE-ONLY file, because prime
-  // has never seen it. Everything else is either delivered by this run (prime's
-  // own content, which cannot import a path prime deleted) or byte-identical to
-  // prime's copy, which cannot either.
+  // Three kinds of file can be. A HELD file, because the cascade cannot
+  // change it — `src/App.tsx` is `manual_reconcile` on the client-facing
+  // mirror and imports from the AML shell. A CLONE-ONLY file, because prime
+  // has never seen it. And a deletion this very check WITHHOLDS: a kept file
+  // is an old prime version, and an old prime version imports exactly what
+  // prime deleted beside it, because a decommission leaves in one commit.
+  // Everything else is either delivered by this run (prime's own content,
+  // which cannot import a path prime deleted) or byte-identical to prime's
+  // copy, which cannot either.
   //
   // Only read when there is a deletion to protect, so a run that deletes
   // nothing spends nothing.
@@ -2073,6 +2076,39 @@ export async function processClone(args: {
       }),
     );
     deletionVerdicts = withholdReferencedDeletions(deletionVerdicts, surviving);
+    // The third kind, closed over: a withheld deletion is itself a survivor,
+    // and one pass over the graph is not a closure. Measured 16 Sep 2026 on
+    // npc-client#189 — held `src/App.tsx` kept `BuilderPortalAdmin.tsx`, the
+    // dialog only that page imports was deleted, and the PR could not build.
+    // Each newly kept file's source joins the survivors and is scanned like
+    // the rest, until nothing more flips. Terminates: every iteration grows
+    // `surviving` or `unreadable`, both bounded by the verdict list.
+    const unreadableSurvivors = new Set<string>();
+    for (;;) {
+      const unread = deletionVerdicts
+        .filter((v) => v.act === "keep" && v.reason === "still_referenced")
+        .map((v) => v.path)
+        .filter((p) => !(p in surviving) && !unreadableSurvivors.has(p));
+      if (unread.length === 0) break;
+      await Promise.all(
+        unread.map(async (path) => {
+          try {
+            const f = await getFileContent(octokit, cloneRef, path);
+            // A read that fails is not a file with no imports — inventing an
+            // empty one would ship the very break this check exists to stop.
+            // The path is only excused from the closure, never given content.
+            if (f && !f.binary) surviving[path] = f.content;
+            else unreadableSurvivors.add(path);
+          } catch (e) {
+            // A rate limit is the window, not this file: defer the clone
+            // rather than deliver a tree the unread survivor may contradict.
+            if (classifyGitHubFailure(e).kind === "rate_limited") throw e;
+            unreadableSurvivors.add(path);
+          }
+        }),
+      );
+      deletionVerdicts = withholdReferencedDeletions(deletionVerdicts, surviving);
+    }
   }
 
   // Approvals are consulted only past the cap, and they are never evidence:
