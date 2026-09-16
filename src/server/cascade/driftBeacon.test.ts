@@ -90,10 +90,8 @@ describe("decideDriftBeacon", () => {
 describe("the drain wires the beacon as insurance, not as a second engine", () => {
   const drain = readFileSync("src/routes/hooks.cascade-drain.tsx", "utf8");
 
-  it("asks only on an idle tick", () => {
-    expect(drain).toContain(
-      "const beacon = results.length === 0 ? await raiseDriftBeacon() : null;",
-    );
+  it("asks only on an idle tick with budget to spend", () => {
+    expect(drain).toContain("results.length === 0 && spend.proceed ? await raiseDriftBeacon()");
   });
 
   it("counts only carriers a claim could ever take", () => {

@@ -51,6 +51,7 @@ import {
   MAX_HOLD_RELEASE_PROBES,
   type HeldPathEvidence,
   type HoldRelease,
+  type SettledHeldEvidence,
 } from "./cascade/heldEvidence.pure";
 import { judgingWorkflowHold } from "./cascade/judgingWorkflow.pure";
 import {
@@ -89,8 +90,10 @@ import {
   readProgress,
   resumableBlobs,
   resumableDeletionEvidence,
+  resumableHeldEvidence,
   type CascadeProgress,
   type DeletionEvidenceEntry,
+  type HeldEvidenceEntry,
 } from "./cascade/passProgress.pure";
 
 type CascadeResultUpdate = Database["public"]["Tables"]["cascade_results"]["Update"];
@@ -195,7 +198,21 @@ export type { CascadeBudget, CascadeRunResult };
 export async function executeCascade(
   supabase: SupabaseLike,
   cascadeEventId: string,
-  opts?: { budget?: CascadeBudget },
+  opts?: {
+    budget?: CascadeBudget;
+    /**
+     * The `worker_started_at` this caller's CLAIM wrote, when it claimed.
+     * Measured 16 Sep 2026, 09:22–09:45: pg_cron abandons an invocation at
+     * 60 s but the isolate keeps executing, so a superseded pass can finish
+     * minutes later and write over a live claim's state — releasing it,
+     * re-deferring it, or stamping it finished. With a fence, every EVENT
+     * write below carries `.eq("worker_started_at", fence)`: the reclaim or
+     * a newer claim rewrites that column, and the zombie's writes match
+     * nothing. Callers that never claim (the manual trigger path) pass none
+     * and write as before.
+     */
+    fence?: string;
+  },
 ): Promise<CascadeRunResult> {
   const [eventRes, primeRes, queuedRes] = await Promise.all([
     supabase.from("cascade_events").select("*").eq("id", cascadeEventId).single(),
@@ -225,15 +242,40 @@ export async function executeCascade(
     return { ok: false, error: "Prime not configured — set it up in Settings first" };
   }
 
+  // Every write that moves the EVENT goes through this. With a fence it
+  // matches only while this invocation still holds the claim; without one
+  // (a caller that never claimed) it writes as before. `false` means the
+  // claim was superseded — the invocation is a zombie and must write nothing
+  // more, because whatever it wanted to record, a newer pass knows better.
+  const fence = opts?.fence ?? null;
+  const updateEvent = async (
+    patch: Database["public"]["Tables"]["cascade_events"]["Update"],
+    what: string,
+  ): Promise<boolean> => {
+    let q = supabase.from("cascade_events").update(patch).eq("id", event.id);
+    if (fence) q = q.eq("worker_started_at", fence);
+    const { data, error } = await q.select("id");
+    if (error) {
+      throw new Error(`cascade ${event.id}: could not ${what}: ${error.message}`);
+    }
+    const written = (data ?? []).length > 0;
+    if (!written) {
+      console.warn(
+        `[cascade] ${event.id}: ${what} fenced out — this invocation's claim was superseded`,
+      );
+    }
+    return written;
+  };
+
   let octokit;
   try {
     octokit = getAppOctokit();
   } catch (e) {
     const msg = e instanceof Error ? e.message : "GitHub App not configured";
-    await supabase
-      .from("cascade_events")
-      .update({ status: "failed", completed_at: new Date().toISOString(), summary: msg })
-      .eq("id", event.id);
+    await updateEvent(
+      { status: "failed", completed_at: new Date().toISOString(), summary: msg },
+      "record the missing GitHub App",
+    );
     return { ok: false, error: msg };
   }
 
@@ -268,39 +310,36 @@ export async function executeCascade(
         done: 0,
         total: 0,
       });
-      const { error: holdError } = await supabase
-        .from("cascade_events")
-        .update({
+      const held = await updateEvent(
+        {
           status: "pending",
           worker_started_at: null,
           next_attempt_at: failure.until,
           summary,
-        })
-        .eq("id", event.id);
-      if (holdError) {
-        throw new Error(
-          `cascade ${event.id}: could not hold the event after a rate limit on the prime read: ${holdError.message}`,
-        );
-      }
+        },
+        "hold the event after a rate limit on the prime read",
+      );
+      if (!held) return { ok: false, error: "claim superseded — nothing written" };
       return { ok: true, status: "deferred", until: failure.until, done: 0, total: 0 };
     }
     const msg = `Cannot read prime ${primeRef.owner}/${primeRef.repo}@${primeRef.branch}: ${e instanceof Error ? e.message : "unknown"}`;
-    await supabase
-      .from("cascade_events")
-      .update({ status: "failed", completed_at: new Date().toISOString(), summary: msg })
-      .eq("id", event.id);
+    await updateEvent(
+      { status: "failed", completed_at: new Date().toISOString(), summary: msg },
+      "record the failed prime read",
+    );
     return { ok: false, error: msg };
   }
 
-  await supabase
-    .from("cascade_events")
-    .update({
+  const started = await updateEvent(
+    {
       status: "running",
       started_at: new Date().toISOString(),
       source_sha: sourceSha,
       source_branch: primeRef.branch,
-    })
-    .eq("id", event.id);
+    },
+    "mark the event running",
+  );
+  if (!started) return { ok: false, error: "claim superseded — nothing written" };
 
   let succeeded = 0;
   let failed = 0;
@@ -611,20 +650,16 @@ export async function executeCascade(
     const summary = deferred
       ? describeDeferral({ until: deferred.until, detail: deferred.detail, done, total })
       : describePause({ done, total });
-    const { error: holdError } = await supabase
-      .from("cascade_events")
-      .update({
+    const held = await updateEvent(
+      {
         status: "pending",
         worker_started_at: null,
         next_attempt_at: deferred ? deferred.until : new Date().toISOString(),
         summary,
-      })
-      .eq("id", event.id);
-    if (holdError) {
-      throw new Error(
-        `cascade ${event.id}: could not hold the event for its next pass: ${holdError.message}`,
-      );
-    }
+      },
+      "hold the event for its next pass",
+    );
+    if (!held) return { ok: false, error: "claim superseded — nothing written" };
     return deferred
       ? { ok: true, status: "deferred", until: deferred.until, done, total }
       : { ok: true, status: "resuming", done, total, progressed };
@@ -652,10 +687,14 @@ export async function executeCascade(
     owedReconcile,
   });
 
-  await supabase
-    .from("cascade_events")
-    .update({ status: finalStatus, completed_at: new Date().toISOString(), summary })
-    .eq("id", event.id);
+  const finished = await updateEvent(
+    { status: finalStatus, completed_at: new Date().toISOString(), summary },
+    "record the final tally",
+  );
+  // A superseded pass records nothing else either: the notification, the
+  // audit row and the clone summaries below all describe THIS pass's counts,
+  // and a newer claim's pass is the one whose counts are true.
+  if (!finished) return { ok: false, error: "claim superseded — nothing written" };
 
   // Through the helper rather than a bare insert: it checks the error and logs
   // it. A discarded audit write is a record that silently does not exist.
@@ -1271,6 +1310,50 @@ export async function processClone(args: {
     }
   }
 
+  // ── The pass's ledger, opened before the first paid question ─────────────
+  //
+  // What a previous pass already prepared and already settled, reusable
+  // wherever the fact it recorded still holds: a blob while prime still
+  // holds the blob it was made from, a probe answer while the clone still
+  // holds the blob it was asked about. Real path only: a rehearsal reuses
+  // nothing and records nothing. Constructed HERE — above the HOLD probes,
+  // which are the first paid question a pass asks: re-walking the same held
+  // paths every pass was measured at ~90 calls and ~30 seconds of fixed
+  // cost, which pushed every working tick past the 60-second isolate window.
+  const resume = dryRun ? undefined : args.resume;
+  const priorProgress = resume ? readProgress(resume.progress) : null;
+  const known = resume ? resumableBlobs(priorProgress, primeShaByPath) : new Map<string, string>();
+  const knownEvidence = resume
+    ? resumableDeletionEvidence(priorProgress, cloneShaByPath ?? null)
+    : new Map<string, SettledDeletionEvidence>();
+  const knownHeldEvidence = resume
+    ? resumableHeldEvidence(priorProgress, cloneShaByPath ?? null)
+    : new Map<string, SettledHeldEvidence>();
+  const evidenceLedger: Record<string, DeletionEvidenceEntry> = {};
+  const heldLedger: Record<string, HeldEvidenceEntry> = {};
+  const progress: CascadeProgress = {
+    version: 1,
+    source_sha: sourceSha,
+    prepared: {},
+    deletion_evidence: evidenceLedger,
+    held_evidence: heldLedger,
+    // The write list is not final until the hold releases below have run;
+    // set once `primeFiles` exists.
+    total: 0,
+  };
+  for (const [path, blob] of known) {
+    const prime = primeShaByPath?.get(path);
+    if (prime) progress.prepared[path] = { blob, prime };
+  }
+  for (const [path, evidence] of knownEvidence) {
+    const clone = cloneShaByPath?.get(path);
+    if (clone) evidenceLedger[path] = { clone, evidence };
+  }
+  for (const [path, evidence] of knownHeldEvidence) {
+    const clone = cloneShaByPath?.get(path);
+    if (clone) heldLedger[path] = { clone, evidence };
+  }
+
   // ── A hold protects WORK, not a path ──────────────────────────────────────
   //
   // A `manual_reconcile` hold whose clone copy is byte-identical to a version
@@ -1290,12 +1373,14 @@ export async function processClone(args: {
   {
     const releasable = partition.held.filter((h) => h.reason === "manual_reconcile");
     if (releasable.length > 0) {
-      // Approved paths spend no probe; evidence probes are bounded and only
-      // possible where the clone's blob SHA is already known from the tree
-      // listing — a truncated listing releases nothing, which is yesterday's
-      // behaviour.
+      // Approved paths spend no probe, and neither does a path whose answer
+      // an earlier pass settled about the very blob the clone still holds —
+      // the walk's result cannot differ until the clone's copy does.
+      // Evidence probes are bounded and only possible where the clone's blob
+      // SHA is already known from the tree listing — a truncated listing
+      // releases nothing, which is yesterday's behaviour.
       const needsEvidence = releasable
-        .filter((h) => !overwriteApproved.has(h.path))
+        .filter((h) => !overwriteApproved.has(h.path) && !knownHeldEvidence.has(h.path))
         .map((h) => ({ path: h.path, cloneSha: cloneShaByPath?.get(h.path) ?? null }))
         .filter((c): c is { path: string; cloneSha: string } => c.cloneSha !== null)
         .slice(0, MAX_HOLD_RELEASE_PROBES);
@@ -1303,12 +1388,17 @@ export async function processClone(args: {
         needsEvidence.length > 0
           ? await probeHeldPaths({ octokit, primeRef, candidates: needsEvidence })
           : new Map();
+      for (const [path, answer] of evidence) {
+        if (answer.kind === "unsettled") continue;
+        const clone = cloneShaByPath?.get(path);
+        if (clone) heldLedger[path] = { clone, evidence: answer };
+      }
       const released = new Set<string>();
       for (const held of releasable) {
         const verdict = decideHoldRelease({
           held,
           cloneSha: cloneShaByPath?.get(held.path) ?? null,
-          evidence: evidence.get(held.path) ?? null,
+          evidence: knownHeldEvidence.get(held.path) ?? evidence.get(held.path) ?? null,
           approved: overwriteApproved.has(held.path),
         });
         holdReleases.push(verdict);
@@ -1322,6 +1412,7 @@ export async function processClone(args: {
   }
 
   const primeFiles = partition.write;
+  progress.total = primeFiles.length;
   const needsReconcile = reportableHeld(partition.held);
 
   if (mode === "notify" && !dryRun) {
@@ -1349,39 +1440,6 @@ export async function processClone(args: {
       files_changed: primeFiles.length,
       completed_at: new Date().toISOString(),
     };
-  }
-
-  // ── The pass's ledger, opened before the first paid question ─────────────
-  //
-  // What a previous pass already prepared and already settled, reusable
-  // wherever the fact it recorded still holds: a blob while prime still
-  // holds the blob it was made from, a probe answer while the clone still
-  // holds the blob it was asked about. Real path only: a rehearsal reuses
-  // nothing and records nothing. Constructed HERE — above the deletion
-  // probes, not beside the prepare loop — because the probes are the first
-  // spend a pass makes, and a ledger opened after them remembers everything
-  // except the most expensive thing the pass did.
-  const resume = dryRun ? undefined : args.resume;
-  const priorProgress = resume ? readProgress(resume.progress) : null;
-  const known = resume ? resumableBlobs(priorProgress, primeShaByPath) : new Map<string, string>();
-  const knownEvidence = resume
-    ? resumableDeletionEvidence(priorProgress, cloneShaByPath ?? null)
-    : new Map<string, SettledDeletionEvidence>();
-  const evidenceLedger: Record<string, DeletionEvidenceEntry> = {};
-  const progress: CascadeProgress = {
-    version: 1,
-    source_sha: sourceSha,
-    prepared: {},
-    deletion_evidence: evidenceLedger,
-    total: primeFiles.length,
-  };
-  for (const [path, blob] of known) {
-    const prime = primeShaByPath?.get(path);
-    if (prime) progress.prepared[path] = { blob, prime };
-  }
-  for (const [path, evidence] of knownEvidence) {
-    const clone = cloneShaByPath?.get(path);
-    if (clone) evidenceLedger[path] = { clone, evidence };
   }
 
   // ── What prime deleted ────────────────────────────────────────────────────

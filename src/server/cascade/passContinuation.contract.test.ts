@@ -66,8 +66,12 @@ describe("a rate limit on the prime read defers the event", () => {
       /status: "pending",\s*worker_started_at: null,\s*next_attempt_at: failure\.until/,
     );
     expect(block).not.toContain('status: "failed"');
-    // A held event whose write was refused must not read as held.
-    expect(block).toMatch(/if \(holdError\)\s*\{\s*throw/);
+    // Through the fenced helper, which throws on a refused write — a held
+    // event whose write was refused must not read as held — and answers
+    // false when the claim was superseded, in which case nothing more is
+    // written and the deferral is not reported as this pass's doing.
+    expect(block).toContain("const held = await updateEvent(");
+    expect(block).toMatch(/if \(!held\) return \{ ok: false/);
     expect(block).toContain(
       '{ ok: true, status: "deferred", until: failure.until, done: 0, total: 0 }',
     );
@@ -148,7 +152,10 @@ describe("handing the event back", () => {
   });
 
   it("is checked, because an event left `running` is the stall this replaces", () => {
-    expect(hold).toMatch(/if \(holdError\)\s*\{\s*throw/);
+    // The fenced helper throws on a refused write; a superseded claim writes
+    // nothing more and says so in its result.
+    expect(hold).toContain("const held = await updateEvent(");
+    expect(hold).toMatch(/if \(!held\) return \{ ok: false/);
   });
 
   it("returns before the final tally is written", () => {

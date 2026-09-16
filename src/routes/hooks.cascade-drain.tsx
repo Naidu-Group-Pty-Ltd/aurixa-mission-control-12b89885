@@ -25,6 +25,8 @@ import {
   findCommitCascadeForSha,
 } from "@/server/cascade-trigger.server";
 import { getAppOctokit } from "@/server/github-app.server";
+import { decideSpend } from "@/server/cascade/githubBudget.pure";
+import { readGitHubRemaining } from "@/server/githubAllowance.server";
 
 const admin = supabaseAdmin;
 const STALL_MINUTES = 10;
@@ -263,7 +265,7 @@ async function foldQueuedCommitEvents(): Promise<number> {
  * A genuine failure THROWS: the route's catch turns it into a non-200 that
  * lands in `net._http_response`, where `cron_delivery_health()` can see it.
  */
-async function claimOne(): Promise<{ id: string; attempts: number } | null> {
+async function claimOne(): Promise<{ id: string; attempts: number; fence: string } | null> {
   const nowIso = new Date().toISOString();
   const { data: candidates, error: selectError } = await admin
     .from("cascade_events")
@@ -306,7 +308,13 @@ async function claimOne(): Promise<{ id: string; attempts: number } | null> {
   if (claimError) {
     throw new Error(`cascade-drain claim: could not claim ${target.id}: ${claimError.message}`);
   }
-  return claimed ?? null;
+  // The claim's own timestamp is the FENCE: every event write this
+  // invocation makes carries it, so a pass the platform abandoned at 60 s
+  // that finishes minutes later — after the reclaim or a newer claim rewrote
+  // the column — matches nothing and moves nothing. Measured 16 Sep 2026,
+  // 09:22–09:45: working ticks routinely outlived the pg_cron wait and their
+  // late writes were landing unfenced on live claims.
+  return claimed ? { ...claimed, fence: nowIso } : null;
 }
 
 /**
@@ -499,7 +507,7 @@ async function drainOne(
   if (!claimed) return { processed: false };
 
   try {
-    const res = await executeCascade(supabaseAdmin, claimed.id, { budget });
+    const res = await executeCascade(supabaseAdmin, claimed.id, { budget, fence: claimed.fence });
     if (res.ok && (res.status === "deferred" || res.status === "resuming")) {
       // The engine has already put the event back to `pending` with the
       // moment it may next be claimed. What is decided here is the ATTEMPT.
@@ -516,10 +524,13 @@ async function drainOne(
       const refund =
         res.status === "deferred" || res.done > 0 || (res.status === "resuming" && res.progressed);
       if (refund) {
+        // Guarded on the counter this claim wrote: a zombie whose event a
+        // newer claim has since moved would otherwise refund the wrong pass.
         const { error } = await admin
           .from("cascade_events")
           .update({ attempts: Math.max(0, claimed.attempts - 1) })
-          .eq("id", claimed.id);
+          .eq("id", claimed.id)
+          .eq("attempts", claimed.attempts);
         if (error) {
           throw new Error(
             `cascade-drain: could not refund the attempt on ${claimed.id}: ${error.message}`,
@@ -535,17 +546,22 @@ async function drainOne(
               `No clone completed inside the invocation budget in ${MAX_ATTEMPTS} attempts ` +
               `(${res.total} queued). One clone's pass is larger than one tick; it needs splitting.`,
           })
-          .eq("id", claimed.id);
+          .eq("id", claimed.id)
+          .eq("attempts", claimed.attempts);
         if (error) {
           throw new Error(`cascade-drain: could not fail ${claimed.id}: ${error.message}`);
         }
       }
       return { processed: true, ok: true, held: res.status };
     }
+    // Fenced: a superseded invocation stamping `worker_finished_at` onto a
+    // LIVE claim would exempt it from the stall reclaim — the stuck-forever
+    // shape this whole file exists to prevent.
     await admin
       .from("cascade_events")
       .update({ worker_finished_at: new Date().toISOString() })
-      .eq("id", claimed.id);
+      .eq("id", claimed.id)
+      .eq("worker_started_at", claimed.fence);
     return { processed: true, ok: true };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -558,7 +574,8 @@ async function drainOne(
         worker_finished_at: terminal ? new Date().toISOString() : null,
         status: terminal ? "failed" : "pending",
       })
-      .eq("id", claimed.id);
+      .eq("id", claimed.id)
+      .eq("worker_started_at", claimed.fence);
     return { processed: true, ok: false, error: msg };
   }
 }
@@ -577,23 +594,35 @@ export const Route = createFileRoute("/hooks/cascade-drain")({
           await reclaimStalled();
           const folded = await foldQueuedCommitEvents();
           const exhausted = await judgeExhaustedEvents();
+          // One free call before any paid one: a claim into an empty window
+          // spends an attempt, two tree listings and a probe chunk to learn
+          // what `/rate_limit` — uncounted — already knew, then defers
+          // anyway. `null` proceeds: the deferral machinery still catches a
+          // real 403, and a gate trippable by its own telemetry is a second
+          // outage.
+          const remaining = await readGitHubRemaining();
+          const spend = decideSpend({ role: "cascade_claim", remaining });
           const results: Array<{ ok?: boolean; held?: string; error?: string }> = [];
-          for (let i = 0; i < MAX_JOBS_PER_RUN; i++) {
-            if (Date.now() >= deadlineAt) break;
-            const r = await drainOne(budget);
-            if (!r.processed) break;
-            results.push({ ok: r.ok, held: r.held, error: r.error });
+          if (spend.proceed) {
+            for (let i = 0; i < MAX_JOBS_PER_RUN; i++) {
+              if (Date.now() >= deadlineAt) break;
+              const r = await drainOne(budget);
+              if (!r.processed) break;
+              results.push({ ok: r.ok, held: r.held, error: r.error });
+            }
           }
-          // Only an idle tick asks the drift question: a tick that claimed
-          // work is following prime already, and a deferred carrier waiting
-          // out a rate-limit window counts as claimed-later, not as drift.
-          const beacon = results.length === 0 ? await raiseDriftBeacon() : null;
+          // Only an idle tick with budget asks the drift question: a tick
+          // that claimed work is following prime already, a deferred carrier
+          // waiting out a rate-limit window counts as claimed-later, and a
+          // starved tick must not spend its last calls on a branch read.
+          const beacon = results.length === 0 && spend.proceed ? await raiseDriftBeacon() : null;
           return new Response(
             JSON.stringify({
               success: true,
               processed: results.length,
               folded,
               exhausted,
+              starved: spend.proceed ? null : spend.why,
               beacon,
               results,
             }),

@@ -51,6 +51,7 @@
  */
 
 import type { SettledDeletionEvidence } from "./deletionPropagation.pure";
+import type { SettledHeldEvidence } from "./heldEvidence.pure";
 
 export type PreparedBlob = {
   /** The blob SHA the clone's repository now holds for this path. */
@@ -67,6 +68,13 @@ export type DeletionEvidenceEntry = {
   evidence: SettledDeletionEvidence;
 };
 
+/** One settled hold probe, keyed the same way: to the clone blob asked about. */
+export type HeldEvidenceEntry = {
+  clone: string;
+  /** Never `unsettled` — the same rule as the deletion ledger. */
+  evidence: SettledHeldEvidence;
+};
+
 export type CascadeProgress = {
   version: 1;
   /** The prime commit this pass was delivering. */
@@ -75,6 +83,13 @@ export type CascadeProgress = {
   prepared: Record<string, PreparedBlob>;
   /** Path → what prime's history said about deleting it. Absent on old records. */
   deletion_evidence?: Record<string, DeletionEvidenceEntry>;
+  /**
+   * Path → what prime's history said about a held path's divergence. Absent
+   * on old records. Measured 16 Sep 2026: without this, every pass re-walked
+   * the same held paths — ~90 calls and ~30 seconds of fixed cost that
+   * pushed every working tick past the 60-second isolate window.
+   */
+  held_evidence?: Record<string, HeldEvidenceEntry>;
   /** Files the pass had to prepare in total, for the sentence. */
   total: number;
 };
@@ -120,7 +135,58 @@ export function readProgress(raw: unknown): CascadeProgress | null {
       if (parsed) deletion_evidence[path] = parsed;
     }
   }
-  return { version: 1, source_sha: r.source_sha, prepared, deletion_evidence, total };
+  const held_evidence: Record<string, HeldEvidenceEntry> = {};
+  const rawHeld = (r as { held_evidence?: unknown }).held_evidence;
+  if (rawHeld && typeof rawHeld === "object" && !Array.isArray(rawHeld)) {
+    for (const [path, entry] of Object.entries(rawHeld as Record<string, unknown>)) {
+      const parsed = readHeldEntry(entry);
+      if (parsed) held_evidence[path] = parsed;
+    }
+  }
+  return {
+    version: 1,
+    source_sha: r.source_sha,
+    prepared,
+    deletion_evidence,
+    held_evidence,
+    total,
+  };
+}
+
+/** One held-evidence entry, or nothing — dropped alone by the deletion rule. */
+function readHeldEntry(raw: unknown): HeldEvidenceEntry | null {
+  if (!raw || typeof raw !== "object") return null;
+  const { clone, evidence } = raw as { clone?: unknown; evidence?: unknown };
+  if (typeof clone !== "string" || !SHA.test(clone)) return null;
+  if (!evidence || typeof evidence !== "object") return null;
+  const e = evidence as { kind?: unknown };
+  if (e.kind === "never_primes") return { clone, evidence: { kind: "never_primes" } };
+  if (e.kind !== "prime_versions") return null;
+  const { versions, versionsExhaustive } = evidence as {
+    versions?: unknown;
+    versionsExhaustive?: unknown;
+  };
+  if (!Array.isArray(versions) || versions.some((v) => typeof v !== "string" || !SHA.test(v))) {
+    return null;
+  }
+  if (typeof versionsExhaustive !== "boolean") return null;
+  return {
+    clone,
+    evidence: { kind: "prime_versions", versions: versions as string[], versionsExhaustive },
+  };
+}
+
+/** The hold answers a new pass may reuse — the deletion rule, word for word. */
+export function resumableHeldEvidence(
+  progress: CascadeProgress | null,
+  cloneShaByPath: ReadonlyMap<string, string> | null,
+): Map<string, SettledHeldEvidence> {
+  const out = new Map<string, SettledHeldEvidence>();
+  if (!progress?.held_evidence || !cloneShaByPath) return out;
+  for (const [path, entry] of Object.entries(progress.held_evidence)) {
+    if (cloneShaByPath.get(path) === entry.clone) out.set(path, entry.evidence);
+  }
+  return out;
 }
 
 /**
