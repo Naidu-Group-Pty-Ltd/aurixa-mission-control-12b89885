@@ -24,11 +24,10 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { describeCascadeOutcome, type CascadeRunResult } from "@/lib/cascadeRunOutcome";
-import { CREATION_ARM_GRACE_MS } from "../cascade-trigger.server";
+import { CREATION_ARM_GRACE_MS } from "./armGrace.pure";
 
 const drain = readFileSync("src/routes/hooks.cascade-drain.tsx", "utf8");
 const engine = readFileSync("src/server/cascade-engine.server.ts", "utf8");
-const trigger = readFileSync("src/server/cascade-trigger.server.ts", "utf8");
 const approvals = readFileSync("src/server/cascade-approvals.functions.ts", "utf8");
 
 describe("the drain backstops an approved gate", () => {
@@ -57,11 +56,16 @@ describe("the drain backstops an approved gate", () => {
 });
 
 describe("armed, then claimable", () => {
-  it("a fresh event is not drain-visible until its rows have had time to land", () => {
-    // The grace covers at least one drain interval — anything shorter can
-    // still lose the race to the next tick.
+  it("a fresh event is not drain-claimable until its rows have had time to land", () => {
+    // The floor is at the CLAIM, once, inside `selectCandidate` — so both
+    // passes and every creation site, present and future, are covered by
+    // one spelling. It covers at least one drain interval; anything shorter
+    // can still lose the race to the next tick.
     expect(CREATION_ARM_GRACE_MS).toBeGreaterThanOrEqual(60_000);
-    expect(trigger).toMatch(/next_attempt_at: new Date\(Date\.now\(\) \+ CREATION_ARM_GRACE_MS\)/);
+    expect(drain).toContain(
+      "const armedBefore = new Date(Date.now() - CREATION_ARM_GRACE_MS).toISOString();",
+    );
+    expect(drain).toContain('.lt("created_at", armedBefore)');
   });
 
   it("the engine holds a rows-less event instead of judging it", () => {

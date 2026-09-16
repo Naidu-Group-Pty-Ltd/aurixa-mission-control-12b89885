@@ -1656,12 +1656,15 @@ and nothing would ever have acted on either.
   stranded under a completed carrier, with the delivery silently lost until
   unrelated future prime traffic. Two rules close it, from both ends:
 
-  - **A fresh event is armed before it is claimable** — the trigger's
-    insert sets `next_attempt_at` a grace into the future
-    (`CREATION_ARM_GRACE_MS`), so the drain does not see the event until
-    its rows have had time to commit. The inline callers (webhook, console,
-    `approveCascade`) never claim and never read that column; they run
-    exactly as before.
+  - **A fresh event is armed before it is claimable** — the claim refuses
+    any event younger than `CREATION_ARM_GRACE_MS`
+    (`cascade/armGrace.pure.ts`), enforced at the drain's `selectCandidate`
+    ONCE rather than at the six creation sites that all share the
+    two-statement shape (trigger, provisioning, both schedule lanes, the
+    drift-suggestion apply, the bulk card) — a seventh site nobody
+    remembers to grace is covered by construction. The inline callers
+    (webhook, console, `approveCascade`) never claim and run exactly as
+    before.
   - **The engine holds a rows-less event instead of judging it** — zero
     QUEUED rows is a normal end-state for a finished resume, so the
     question is asked of the whole ledger: an event with no rows in ANY

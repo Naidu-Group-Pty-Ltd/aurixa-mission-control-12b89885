@@ -27,6 +27,7 @@ import {
   supersededSummary,
   type FoldableEvent,
 } from "@/server/cascade/eventFold.pure";
+import { CREATION_ARM_GRACE_MS } from "@/server/cascade/armGrace.pure";
 import { beaconSummary, decideDriftBeacon } from "@/server/cascade/driftBeacon.pure";
 import { decideExhaustedEvent, retirementSummary } from "@/server/cascade/exhaustedEvents.pure";
 import {
@@ -287,6 +288,13 @@ async function claimOne(
   excluded: ReadonlySet<string>,
 ): Promise<{ id: string; attempts: number; fence: string } | null> {
   const nowIso = new Date().toISOString();
+  // Armed before claimable: every creation site commits the event and its
+  // result rows in two separate statements, and this claim once landed
+  // inside that gap (807ms, event dd7180c7 — completed "(of 0)" with its
+  // three rows stranded a second behind it). The age floor is enforced
+  // HERE, once, so a creation site nobody remembers to grace is covered by
+  // construction; the engine's unarmed hold is the belt to this brace.
+  const armedBefore = new Date(Date.now() - CREATION_ARM_GRACE_MS).toISOString();
   // Two passes over the same predicates, differing only in how the approval
   // gate reads. Pass one is the ordinary queue: no gate. Pass two is the
   // RESCUE path: a gate that a second operator has already discharged.
@@ -322,7 +330,8 @@ async function claimOne(
       // and one paused at its budget names now(). NOT NULL with a default, so
       // this is one comparison and never an `.or()` string.
       .lte("next_attempt_at", nowIso)
-      .lt("attempts", MAX_ATTEMPTS);
+      .lt("attempts", MAX_ATTEMPTS)
+      .lt("created_at", armedBefore);
     if (excluded.size > 0) {
       queue = queue.not("id", "in", `(${[...excluded].join(",")})`);
     }
