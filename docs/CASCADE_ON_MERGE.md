@@ -1327,3 +1327,264 @@ writes a `protected` path; the gate still merges only on green; a deletion
 still needs prime's own history to vouch for every file; and both new levers
 are recorded operator decisions in Mission Control — reviewed, expiring,
 revocable, audited — never a rule the engine grants itself.
+
+## Sixteen September: the freeze had five more layers
+
+The September freeze section above ends with the retirement the engine could
+not express. Expressing it — 442 approved deletions, three clones, one
+installation budget — is what found the next five faults, each of which
+reported as something else and each of which is now a rule the code pins.
+Measured through one day's tick bodies, 09:16–12:30 on 16 Sep 2026:
+
+1. The deletion probe ran unbudgeted and unrecorded, so every pass re-bought
+   the evidence the killed pass before it had already bought (fixed: the pass
+   ledger, below).
+2. Working invocations outlived the 60-second wait of the pg_cron delivery
+   that started them, and their late writes landed on newer claims (fixed:
+   the claim fence).
+3. Three subsystems drew on one GitHub App budget with no arbiter, and the
+   cascade — the priority consumer — got a third of the window (fixed: the
+   budget arbiter).
+4. The running-mark re-stamped `source_sha` and had violated the commit
+   dedupe index silently on every pass since folding existed; the first
+   CHECKED write surfaced it and the carrier died of its own telemetry
+   (fixed: provenance is never re-stamped).
+5. `drainOne` re-claimed the event its own failure had just reverted, three
+   times in one second, so any transient fault spent the whole attempt
+   ceiling before it could clear (fixed: one failure per event per tick).
+
+The sixth fault it found was not in the drain at all — the deletion
+reference check was not a closure (its own section below) — and the seventh
+was not in the code: a revival raced the publish of its own fix, which is
+what the change-window rule at the end of this chapter records.
+
+## The platform abandons an invocation the isolate survives
+
+`hooks.cascade-drain` is driven by pg_cron's `net.http_post`, which stops
+WAITING at 60,000 ms — it does not stop the isolate. A working pass that
+crossed the minute kept running to completion and wrote its conclusions
+minutes later, onto an event the stall reclaim had released and a newer
+claim had re-taken. Measured 09:22–09:45, 16 Sep 2026: every working tick
+outlived the wait, and the late writes were landing unfenced on live claims.
+
+**The claim's own timestamp is the fence.** `claimOne` stamps
+`worker_started_at` and hands that exact ISO string to `executeCascade`;
+every event write inside the engine goes through one `updateEvent` helper
+that appends `.eq("worker_started_at", fence)`. A superseded invocation
+matches nothing, writes nothing more, and answers
+`claim superseded — nothing written`. The drain's own follow-ups ride the
+same fence (finished-stamp, catch-path revert) or the counter the claim
+wrote (refund, terminal mark), because a zombie stamping
+`worker_finished_at` onto a live claim would exempt it from the stall
+reclaim for ever. `githubBudget.test.ts` pins that the helper is the ONLY
+writer — a raw `.update` on `cascade_events` inside the engine is a zombie
+write waiting to happen.
+
+**The tick's own response body is the diagnostic ledger.** pg_cron records
+what it delivered, not what happened; the drain therefore self-reports into
+`net._http_response.content` — `processed`, `folded`, `exhausted`,
+`starved`, `beacon`, and one `results[]` entry per pass with its error
+verbatim. Every fault in this chapter was diagnosed from those bodies, and
+the first question about any misbehaving tick is:
+
+```sql
+select created, left(content, 900) from net._http_response
+ where created > now() - interval '30 minutes' and content like '%folded%'
+ order by created desc;
+```
+
+## One installation budget, arbitrated
+
+The GitHub App's 5,000/hour installation window is shared by the cascade,
+the drift scans and whatever zombies are still finishing. Measured 16 Sep:
+the window that opened at 09:23 was spent by 09:41, and the cascade got a
+third of it — then a claim into the empty window spent an attempt, two tree
+listings and a probe chunk to learn what `GET /rate_limit` (which is
+UNCOUNTED) already knew, and deferred anyway.
+
+`cascade/githubBudget.pure.ts` is the arbiter: one free `/rate_limit` read
+per tick, then `decideSpend`. The cascade claims above `CASCADE_CLAIM_FLOOR`
+(250); the scans (`drift-refresh`, `held-file-drift`, `backend-catchup`)
+yield below `SCAN_FLOOR` (1,500), because the cascade is the priority
+consumer. An unreadable allowance proceeds — a gate trippable by its own
+telemetry is a second outage — and the deferral machinery still catches a
+real 403: the event parks itself at GitHub's own reset time
+(`next_attempt_at`), spends no attempt, and the tick body says `starved`
+with the reason.
+
+## A pass is a ledger, and evidence is bought once
+
+`cascade_results.progress` is the pass ledger: `prepared` (blobs pushed to
+the clone, keyed to the clone blob they answer), `deletion_evidence` and
+`held_evidence` (probe answers, likewise keyed). Three rules carry it.
+
+**Only settled answers enter.** `unsettled` is a statement about the
+provider, not the path, and a ledger that remembered it would turn an
+outage into a permanent verdict. Rate-limited probes are RETHROWN so the
+event defers; they are never written down as `unsettled`.
+
+**A resumed pass reuses an entry only when the clone blob it answered still
+stands** (`resumableDeletionEvidence` / `resumableHeldEvidence` /
+`resumableBlobs`), and a finished event's ledger is borrowable by the next
+event, entry by entry under the same check — which is what took npc-client's
+second pass from 449 probes to 149.
+
+**Progress is measured by the ledger, never by one column.** The drain's
+refund counts `prepared + deletion_evidence`; a killed pass that only
+probed used to read as "no progress", lose its attempt, and die in three
+kills while converging the whole time. `judgeExhaustedEvents` applies the
+same rule at the attempt ceiling: a recent ledger write refunds one attempt
+(the kills were converging), a still ledger retires the event VISIBLY —
+`failed`, with a notification naming the operator's lever — because a
+zombie `pending` row claimable by nothing and reported nowhere is the worst
+of the four outcomes.
+
+Probes are chunked (20 per chunk, 4-wide) under the invocation budget, and
+a pass that pauses mid-probe hands back `Paused at the invocation budget —
+deletion evidence settled for N of M candidate(s); the rest resume next
+tick`, which is exactly what it does.
+
+## The dedupe index is why provenance never re-stamps
+
+`uq_cascade_events_commit_sha` is UNIQUE over `source_sha` for every commit
+event WHATEVER ITS STATUS — that is what makes the webhook race safe and
+the fold idempotent. After a fold, some completed row always carries
+prime's current head. The running-mark used to re-stamp the carrier's
+`source_sha` to the head it was about to deliver, which therefore collided
+on every pass since folding existed — silently, because the old write was
+unchecked, which is also why no working pass was ever observed at
+`running`. The first checked write surfaced it: measured 10:24:02, 16 Sep
+2026, the carrier went from healthy to failed in 600 ms on its own
+telemetry.
+
+**An event's `source_sha` is the push that created it, for ever.** What a
+pass DELIVERED is recorded where it lands: the clone's `commit_sha`, the
+pull request title, the summary. The same rule holds for the pass ledger's
+`source_sha` — provenance, never a gate — and `githubBudget.test.ts` pins
+the running-mark to `{ status, started_at }` and nothing else.
+
+## One tick cannot exhaust an event
+
+`drainOne` reverts a failed event to `pending` with its attempt kept, and
+the same tick's loop re-claimed it immediately: measured twice (10:24:02
+and 10:45:03), the carrier burned all three attempts in under a second on
+one error, leaving no tick boundary for a transient to clear. A failure is
+now remembered for the rest of its tick (`failedThisTick`), `claimOne`
+excludes those ids, and the tick moves on to OTHER queued work. An event
+loses at most one attempt per minute, and every attempt gets its own
+readable tick body.
+
+## The beacon under the webhook
+
+Every mechanism above operates on events that EXIST; a lost `push` delivery
+creates none. On a tick that claimed nothing and has budget, the drain asks
+whether prime's head has an event at all, and synthesizes one through
+`createCascadeForAllClones` when it does not — so the SHA dedupe and the
+race backstop apply, and the beacon is once-per-SHA even against the
+webhook arriving late. It never fires on a failed read (a database blip
+must not become a fleet-wide cascade), stands down for any claimable or
+deferred carrier, and cannot take down the tick it protects.
+
+## A deletion set is closed under "imported by a survivor"
+
+`withholdReferencedDeletions` keeps any deletion a surviving file still
+imports. THREE kinds of file survive a cascade: a held file, a clone-only
+file — and a deletion the check itself just withheld, which is an old prime
+version and therefore imports exactly what prime deleted beside it, because
+a decommission leaves in one commit. One pass over the import graph is not
+a closure: measured on npc-client#189, held `src/App.tsx` kept
+`BuilderPortalAdmin.tsx` while `BuilderOrganisationDialog` — imported only
+by that kept page — was deleted, and the delivered tree could not build.
+The check that exists to protect the build broke it, one level down.
+
+The engine now iterates to a fixed point: each newly kept file's source is
+read from the clone, joins the survivors, and the withhold re-runs until
+nothing more flips. An unreadable survivor is excused from the closure,
+never invented as empty content; a rate-limited read defers the clone
+rather than shipping a tree the unread survivor may contradict.
+
+## A publish is part of the change window
+
+Mission Control's fix is live when the PUBLISH has propagated, not when the
+merge lands — the top of this document measures that at eight to twelve
+minutes. The 10:45 revival of the carrier was claimed 9.5 minutes after its
+fix's publish and ran the old build, failing three times on the exact error
+the fix removes. Two rules. **An operator revival schedules
+`next_attempt_at` past merge + publish + propagation** — fifteen minutes
+after `deploy_project` is safe, five is a coin flip. And **a refailure on
+the same error immediately after a deploy is FIRST suspected as the race**,
+verified against the tick body's timestamps, before any new diagnosis is
+invented.
+
+## The operator's console
+
+Every lever below is a Mission Control write — recorded, guarded, audited.
+None of them touches a clone repository.
+
+**Revive a retired event** (after fixing what killed it, and past the
+publish window):
+
+```sql
+update cascade_events set
+  status = 'pending', attempts = 0,
+  worker_started_at = null, worker_finished_at = null, completed_at = null,
+  next_attempt_at = now() + interval '15 minutes',
+  summary = '<why, naming the fix and its PR>'
+where id = '<event>' and status = 'failed'
+returning id, status, attempts, next_attempt_at;
+
+insert into audit_log (action, entity_type, entity_id, metadata)
+values ('cascade.operator_revive', 'cascade_event', '<event>',
+        jsonb_build_object('by', '<who>', 'reason', '<why>', 'resumes_at', '<when>'));
+```
+
+The `status = 'failed'` guard makes the revive idempotent and race-safe;
+the audit row is not optional.
+
+**Rebuild the fleet without a prime push** (after an engine fix changes
+what a pass would produce): insert a `trigger: 'manual'` event — manual
+events skip the SHA dedupe and the fold on purpose, because re-running the
+same head is how a repair is delivered. Mirror `createCascadeForAllClones`
+exactly: one `cascade_events` row (`mode` as the fleet runs, `status
+'pending'`, `requires_approval` from `assessBlastRadius` — three clones on
+`auto_merge` is at the threshold, not over it) plus one `queued`
+`cascade_results` row per clone, plus the audit row
+(`cascade.operator_rebuild`). The engine reuses each clone's open cascade
+PR and branch, so a rebuild updates the standing proposal rather than
+opening a second one.
+
+**Seed approvals** (`cascade_path_approvals`): an approval is never
+evidence — a path still earns its `delete` verdict from prime's history
+before the approved set is read — and an approval names PATHS, so a set
+that grew since the approval re-refuses the overflow.
+
+## A `manual_reconcile` carry, when the owner authorises hands
+
+A held file is one the cascade must never write, and that does not change
+when a person carries the change instead. The npc-client `App.tsx`
+reconcile (16 Sep 2026, npc-client#194, on the owner's explicit authority)
+is the protocol:
+
+- **The delivered specs are the contract.** The carry is written to satisfy
+  every assertion the cascade is delivering about the held file — read them
+  from prime first, all of them, in every spec file that names the path.
+- **The clone's own structure wins everywhere the specs are silent.** The
+  client-facing gates (`RouteExcludedFromBuild`, the `__EXCLUDE_*`
+  constants) are exactly why the file is held; the carry threads prime's
+  change through them and never removes one.
+- **The carry's dependency closure travels verbatim.** A route needs its
+  page, the page needs its modules; each missing file arrives byte-identical
+  to prime's copy, so the next pass reads it as already in sync. The same
+  closure rule the deletion check learned, applied by hand.
+- **A spec that asserts the OLD state goes as prime disposed of it** —
+  updated where prime updated it (and only when it passes in full against
+  the clone's tree), deleted where prime deleted it. A repository must
+  never hold a spec asserting routes that no longer exist.
+- **The merge criterion is differential.** Run the full suite on the
+  untouched tree, then on the carry: zero new failures, byte for byte. A
+  pre-existing failure is the cascade's to fix, not the carry's to absorb.
+
+After the carry lands on the clone's default branch, the next pass reads
+the reconciled held file: the import-graph keeps stop keeping, the deletion
+set propagates, and the delivered specs pass. The hold did its job — it
+made a person decide — and the engine's rules never bent.
