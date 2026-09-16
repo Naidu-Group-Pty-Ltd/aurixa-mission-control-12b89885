@@ -17,6 +17,11 @@ import {
   type StaleHeldReference,
 } from "./cascade/heldFileStaleness.pure";
 import {
+  chunkTreeEntries,
+  toGitTreeParam,
+  type DeliveryTreeEntry,
+} from "./cascade/treeDelivery.pure";
+import {
   getAppOctokit,
   listFilesMatchingGlobs,
   listTreeEntries,
@@ -1528,12 +1533,10 @@ export async function processClone(args: {
   }
   const pendingDeletes = deletionVerdicts.filter((v) => v.act === "delete").map((v) => v.path);
 
-  const treeEntries: Array<{
-    path: string;
-    mode: "100644";
-    type: "blob";
-    sha: string | null;
-  }> = [];
+  // `sha: string` reuses an uploaded blob, `sha: null` DELETES the path, and
+  // `content` inlines text for the chunked `createTree` chain — exactly one
+  // of the two fields is ever set (`treeDelivery.pure.ts`).
+  const treeEntries: DeliveryTreeEntry[] = [];
 
   // Bounded concurrency, and this is the difference between a cascade that
   // finishes and one that does not exist.
@@ -1556,7 +1559,14 @@ export async function processClone(args: {
         path: string;
         mode: "100644";
         type: "blob";
-        sha: string;
+        /**
+         * An uploaded (or ledger-reused) blob. Undefined exactly when
+         * `inline` is set: text travels in the chunked `createTree` chain
+         * rather than buying a per-file blob (`treeDelivery.pure.ts`).
+         */
+        sha: string | undefined;
+        /** UTF-8 text for the tree chain to inline. Undefined for sha entries. */
+        inline?: string;
         /**
          * The text this cascade delivers, kept only for source modules so
          * `findStaleHeldReferences` can read the exports it is about to
@@ -1710,9 +1720,29 @@ export async function processClone(args: {
       // 78,450 bytes of PNG, and was re-corrupted by every cascade that
       // carried it. 144 binary files were exposed, including 86 `.docx`
       // partner agreement templates that both portals hand to partners.
+      //
+      // TEXT costs no call here at all: it travels INLINE in the chunked
+      // `createTree` chain (see `treeDelivery.pure.ts`), where one call
+      // carries ~a hundred files. Per-file `createBlob` on an ~830-file
+      // backfill spent a third of the App's hourly window PER CLONE —
+      // measured 16 Sep 2026, 12:24–13:25, one window synced one clone —
+      // so only binary files, which have no inline lane, still buy a blob,
+      // and only they are worth ledgering for reuse.
       // A dry run needs to know WHICH paths would be written, not to upload
       // their bytes. Prime's blob SHA stands in: it is never used for anything
       // on this path, because the write boundary is never reached.
+      if (!dryRun && !primeFile.binary) {
+        slowestFileMs = Math.max(slowestFileMs, Date.now() - fileStartedAt);
+        return {
+          kind: "blob" as const,
+          path,
+          mode: "100644" as const,
+          type: "blob" as const,
+          sha: undefined,
+          inline: primeFile.content,
+          content: /\.[cm]?tsx?$/.test(path) ? primeFile.content : null,
+        };
+      }
       const blobSha = dryRun
         ? primeFile.sha
         : (
@@ -1723,7 +1753,7 @@ export async function processClone(args: {
               encoding: "base64",
             })
           ).data.sha;
-      if (resume) {
+      if (resume && !dryRun) {
         progress.prepared[path] = { blob: blobSha, prime: primeFile.sha };
         freshlyPrepared += 1;
         slowestFileMs = Math.max(slowestFileMs, Date.now() - fileStartedAt);
@@ -1732,11 +1762,12 @@ export async function processClone(args: {
         if (freshlyPrepared % PROGRESS_FLUSH_EVERY === 0) await resume.onProgress(progress);
       }
       return {
-        kind: "blob",
+        kind: "blob" as const,
         path,
         mode: "100644" as const,
         type: "blob" as const,
         sha: blobSha,
+        inline: undefined,
         content: !primeFile.binary && /\.[cm]?tsx?$/.test(path) ? primeFile.content : null,
       };
     },
@@ -1777,7 +1808,11 @@ export async function processClone(args: {
       needsReconcile.push(entry.held);
       continue;
     }
-    treeEntries.push({ path: entry.path, mode: entry.mode, type: entry.type, sha: entry.sha });
+    if (entry.inline !== undefined) {
+      treeEntries.push({ path: entry.path, mode: entry.mode, type: entry.type, content: entry.inline });
+    } else {
+      treeEntries.push({ path: entry.path, mode: entry.mode, type: entry.type, sha: entry.sha });
+    }
     if (entry.content !== null) deliveredSource[entry.path] = entry.content;
   }
 
@@ -2208,12 +2243,24 @@ export async function processClone(args: {
     repo: cloneRef.repo,
     commit_sha: parentSha,
   });
-  const { data: newTree } = await octokit.git.createTree({
-    owner: cloneRef.owner,
-    repo: cloneRef.repo,
-    base_tree: cloneCommit.tree.sha,
-    tree: treeEntries,
-  });
+  // The chunked chain: each call layers up to ~120 entries (bounded in bytes
+  // too) over the tree the previous call produced, text travelling INLINE so
+  // the server mints its blobs — one call per ~hundred files instead of one
+  // per file. Chunks preserve order, paths are unique, and a deletion entry
+  // (`sha: null`) composes over `base_tree` exactly as it did in one call.
+  // A rate limit mid-chain throws to the per-clone classifier and the clone
+  // defers; the part-built trees are unreachable objects GitHub collects.
+  let chainedTreeSha = cloneCommit.tree.sha;
+  for (const chunk of chunkTreeEntries(treeEntries)) {
+    const { data: chunkTree } = await octokit.git.createTree({
+      owner: cloneRef.owner,
+      repo: cloneRef.repo,
+      base_tree: chainedTreeSha,
+      tree: chunk.map(toGitTreeParam),
+    });
+    chainedTreeSha = chunkTree.sha;
+  }
+  const newTree = { sha: chainedTreeSha };
 
   // A removal is marked in the commit body. The subject line's shape is
   // unchanged and deliberately so: `isEngineOnlyBranch` recognises an

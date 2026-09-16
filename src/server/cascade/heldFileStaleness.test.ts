@@ -280,7 +280,7 @@ describe("the engine actually runs this check", () => {
     // content by construction.
     const created = src.indexOf("const blobSha = dryRun");
     expect(created).toBeGreaterThan(-1);
-    const at = src.indexOf('kind: "blob",', created);
+    const at = src.indexOf('kind: "blob" as const,', created);
     expect(at).toBeGreaterThan(-1);
     const clause = src.slice(at, at + 400);
     expect(clause).toContain("primeFile.binary");
