@@ -846,6 +846,53 @@ export type Database = {
         }
         Relationships: []
       }
+      cascade_path_approvals: {
+        Row: {
+          approved_by: string
+          clone_id: string
+          created_at: string
+          expires_at: string
+          id: string
+          kind: string
+          path: string
+          reason: string
+          revoked_at: string | null
+          revoked_by: string | null
+        }
+        Insert: {
+          approved_by: string
+          clone_id: string
+          created_at?: string
+          expires_at?: string
+          id?: string
+          kind: string
+          path: string
+          reason: string
+          revoked_at?: string | null
+          revoked_by?: string | null
+        }
+        Update: {
+          approved_by?: string
+          clone_id?: string
+          created_at?: string
+          expires_at?: string
+          id?: string
+          kind?: string
+          path?: string
+          reason?: string
+          revoked_at?: string | null
+          revoked_by?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "cascade_path_approvals_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       cascade_results: {
         Row: {
           cascade_event_id: string
@@ -12949,6 +12996,7 @@ export type Database = {
         | "module_installed"
         | "module_removed"
         | "cascade_awaiting_approval"
+        | "cascade_blocked"
         | "cascade_approved"
         | "cascade_rejected"
         | "library_entry_approved"
@@ -13440,6 +13488,7 @@ export const Constants = {
         "module_installed",
         "module_removed",
         "cascade_awaiting_approval",
+        "cascade_blocked",
         "cascade_approved",
         "cascade_rejected",
         "library_entry_approved",

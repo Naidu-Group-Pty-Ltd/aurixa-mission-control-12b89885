@@ -477,4 +477,13 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260914130000",
     assertions: [{ kind: "table", table: "builders_network_connections_shadow" }],
   },
+  {
+    migration: "20260916080000_cascade_path_approvals.sql",
+    version: "20260916080000",
+    assertions: [
+      { kind: "table", table: "cascade_path_approvals" },
+      { kind: "column", table: "cascade_path_approvals", column: "kind" },
+      { kind: "column", table: "cascade_path_approvals", column: "expires_at" },
+    ],
+  },
 ];

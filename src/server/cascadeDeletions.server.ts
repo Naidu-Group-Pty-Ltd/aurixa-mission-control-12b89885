@@ -41,6 +41,7 @@ import {
   type DeletionCandidate,
   type DeletionEvidence,
 } from "./cascade/deletionPropagation.pure";
+import { MAX_HOLD_RELEASE_PROBES, type HeldPathEvidence } from "./cascade/heldEvidence.pure";
 import { mapWithConcurrency } from "@/lib/concurrency";
 
 type Octo = ReturnType<typeof getAppOctokit>;
@@ -134,9 +135,15 @@ export async function probeDeletions(args: {
   /** Directories prime's tree contains, for probe ordering only. */
   primeDirectories: ReadonlySet<string>;
   maxProbes?: number;
+  /** Slides the probe window between passes — see `orderDeletionCandidates`. */
+  rotation?: number;
 }): Promise<{ candidates: DeletionCandidate[]; unprobed: number }> {
   const max = args.maxProbes ?? MAX_DELETION_PROBES;
-  const ordered = orderDeletionCandidates(args.candidates, args.primeDirectories);
+  const ordered = orderDeletionCandidates(
+    args.candidates,
+    args.primeDirectories,
+    args.rotation ?? 0,
+  );
   const probing = ordered.slice(0, max);
 
   // Four at a time. The write path already runs eight concurrent content reads
@@ -161,4 +168,73 @@ function reasonOf(e: unknown): string {
     if (typeof status === "number") return `HTTP ${status}`;
   }
   return e instanceof Error ? e.message : "unknown error";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The same walk, asked about a path prime STILL HOLDS.
+//
+// `decideHoldRelease` (cascade/heldEvidence.pure.ts) needs the same evidence
+// the deletion rule runs on — "is the clone's blob a version prime itself
+// held at this path?" — for a `manual_reconcile` path that differs upstream.
+// The mechanics are identical to `probePrimeDeletion`: one `listCommits` for
+// the path, then the blob at each revision, newest first, stopping at the
+// first match. Only the reading differs: on a live path the first commit is
+// the newest edit rather than the removal, so the answer carries no
+// `deletedIn` and the versions include prime's current content.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** What versions prime has held at a path it still has. */
+export async function probePrimeVersions(
+  octokit: Octo,
+  primeRef: RepoRef,
+  path: string,
+  cloneSha: string,
+): Promise<HeldPathEvidence> {
+  let commits: Array<{ sha: string }>;
+  try {
+    const { data } = await octokit.repos.listCommits({
+      owner: primeRef.owner,
+      repo: primeRef.repo,
+      sha: primeRef.branch,
+      path,
+      per_page: MAX_VERSION_WALK + 1,
+    });
+    if (!Array.isArray(data) || data.length === 0) return { kind: "never_primes" };
+    commits = data as Array<{ sha: string }>;
+  } catch (e) {
+    return { kind: "unsettled", why: reasonOf(e) };
+  }
+
+  const versionsExhaustive = commits.length <= MAX_VERSION_WALK;
+  const walk = commits.slice(0, MAX_VERSION_WALK);
+
+  const versions: string[] = [];
+  for (const commit of walk) {
+    const sha = await blobAt(octokit, primeRef, path, commit.sha);
+    if (!sha) continue;
+    if (!versions.includes(sha)) versions.push(sha);
+    if (sha === cloneSha) return { kind: "prime_versions", versions, versionsExhaustive };
+  }
+
+  return { kind: "prime_versions", versions, versionsExhaustive };
+}
+
+/**
+ * Probe a bounded set of held paths, concurrently, at the same width as the
+ * deletion probe and for the same reason: this runs inside the pass, before
+ * the write path's own eight-wide content reads.
+ */
+export async function probeHeldPaths(args: {
+  octokit: Octo;
+  primeRef: RepoRef;
+  candidates: ReadonlyArray<{ path: string; cloneSha: string }>;
+  maxProbes?: number;
+}): Promise<Map<string, HeldPathEvidence>> {
+  const max = args.maxProbes ?? MAX_HOLD_RELEASE_PROBES;
+  const probing = args.candidates.slice(0, max);
+  const out = new Map<string, HeldPathEvidence>();
+  await mapWithConcurrency(probing, 4, async (c) => {
+    out.set(c.path, await probePrimeVersions(args.octokit, args.primeRef, c.path, c.cloneSha));
+  });
+  return out;
 }

@@ -102,18 +102,17 @@ export const Route = createFileRoute("/hooks/github")({
               repoOwner.toLowerCase() === primeCfgForMerge!.github_owner.toLowerCase() &&
               repoName.toLowerCase() === primeCfgForMerge!.github_repo.toLowerCase();
 
-            const decline =
-              !primeCfgForMerge
-                ? "prime_not_configured"
-                : !onPrime
-                  ? `not_prime:${repoOwner}/${repoName}`
-                  : !merged
-                    ? "closed_without_merge"
-                    : baseBranch !== primeBranch
-                      ? `not_default_branch:${baseBranch}`
-                      : !mergeSha
-                        ? "no_merge_commit_sha"
-                        : null;
+            const decline = !primeCfgForMerge
+              ? "prime_not_configured"
+              : !onPrime
+                ? `not_prime:${repoOwner}/${repoName}`
+                : !merged
+                  ? "closed_without_merge"
+                  : baseBranch !== primeBranch
+                    ? `not_default_branch:${baseBranch}`
+                    : !mergeSha
+                      ? "no_merge_commit_sha"
+                      : null;
 
             if (decline) {
               await writeAuditLog({
@@ -140,7 +139,9 @@ export const Route = createFileRoute("/hooks/github")({
               return new Response(
                 JSON.stringify({
                   skipped: true,
-                  reason: "already_cascaded_for_sha",
+                  reason: merge.foldedIntoPending
+                    ? "folded_into_pending_cascade"
+                    : "already_cascaded_for_sha",
                   cascadeEventId: merge.eventId,
                 }),
                 { headers: { "Content-Type": "application/json" } },
@@ -441,15 +442,16 @@ export const Route = createFileRoute("/hooks/github")({
         const sourceBranch = prime.default_branch || "main";
         const summary = payload.head_commit?.message?.slice(0, 200) ?? null;
 
-        const { eventId, cloneCount, error } = await createCascadeForAllClones({
-          supabase: supabaseAdmin,
-          mode,
-          trigger: "commit",
-          sourceBranch,
-          sourceSha,
-          initiatedBy: null,
-          summary,
-        });
+        const { eventId, cloneCount, error, alreadyExisted, foldedIntoPending } =
+          await createCascadeForAllClones({
+            supabase: supabaseAdmin,
+            mode,
+            trigger: "commit",
+            sourceBranch,
+            sourceSha,
+            initiatedBy: null,
+            summary,
+          });
 
         if (error || !eventId) {
           await writeAuditLog({
@@ -460,6 +462,35 @@ export const Route = createFileRoute("/hooks/github")({
           return new Response(JSON.stringify({ skipped: true, reason: error ?? "no clones" }), {
             headers: { "Content-Type": "application/json" },
           });
+        }
+
+        // An event that already existed — this SHA's own, or the pending
+        // commit cascade this push folds into — belongs to the drain, which
+        // claims before it runs. Firing it from here as well would race that
+        // claim and run the same pass twice against the same budget.
+        if (alreadyExisted) {
+          await writeAuditLog({
+            action: "webhook.skipped",
+            entityType: "cascade_event",
+            entityId: eventId,
+            metadata: {
+              delivery: deliveryId,
+              reason: foldedIntoPending
+                ? "folded_into_pending_cascade"
+                : "already_cascaded_for_sha",
+              sha: sourceSha,
+            },
+          });
+          return new Response(
+            JSON.stringify({
+              skipped: true,
+              reason: foldedIntoPending
+                ? "folded_into_pending_cascade"
+                : "already_cascaded_for_sha",
+              cascadeEventId: eventId,
+            }),
+            { headers: { "Content-Type": "application/json" } },
+          );
         }
 
         await writeAuditLog({

@@ -1250,3 +1250,80 @@ project `umrtusxohxjxzodxorim` unchanged" — because a write to the one file an
 operator has been told is never written must not be silent. A refusal is held
 and named the same way, and neither can fail the pass: a clone whose config
 could not be read is left exactly as every cascade before this one left it.
+
+## The September freeze: a retirement the engine could not express
+
+From 14 to 16 September 2026 the fleet froze at prime@66c49f8 while prime
+moved 118 commits, and the engine worked continuously the whole time. Every
+individual signal was correct and none of them was loud, which is this
+document's opening lesson at fleet scale. Two conditions compounded:
+
+**The wall.** Prime's builder-portal decommission deleted ~95 files, rewrote
+`src/App.tsx` to route `/builder/*` to `BuilderPortalMoved`, and shipped a
+source test asserting that route's presence. On every clone the deletion set
+exceeded `MAX_DELETIONS_PER_CASCADE` and was refused whole — correctly, on
+the rule's own terms — and `src/App.tsx` is a seeded `manual_reconcile`
+hold, so the route rewrite could not travel while the test asserting it did.
+`verify` and `security` (the cascaded inventory expects prime's
+post-deletion tree) failed on every rebuilt head, the auto-merge gate
+correctly refused, and both refusals said "a person has to decide" with
+nowhere to record the decision.
+
+**The treadmill.** Every prime push queued a full-cost event; each pass
+re-prepared the whole ~300-file standing diff per clone (the progress ledger
+was pinned to one commit and cleared on any finished status); the App's
+hourly budget rate-limited passes mid-flight; and the queue grew faster than
+it drained while every proposal's title fell further behind prime.
+
+Five mechanisms close it, each with the reasoning it stands on:
+
+**A hold protects work, not a path** (`cascade/heldEvidence.pure.ts`). A
+`manual_reconcile` hold is honoured only where the clone's copy carries work
+that would be lost — the deletion rule's own evidence, asked of a live path.
+On the frozen clones `clientFacing.ts` and its test were byte-identical to
+prime@fa6bed0d; the hold was protecting stale prime content from newer prime
+content. Released paths still run every content hold, and `protected` is
+never released, whatever the evidence or any approval says.
+
+**A refusal the engine cannot lift needs a place a person can**
+(`cascade_path_approvals`). `bulk_deletion` approvals deliver a refused set
+over the cap — every path still earns its delete verdict from prime's
+history first, and a set that grew past its approval re-refuses naming the
+overflow. `overwrite` approvals release one held path on one clone — the
+`App.tsx` case, where a hand-merged hybrid matches no prime version even
+when every line of it is prime's, so only a person can decide. Approvals
+expire in 14 days, are revoked rather than deleted, and are recorded and
+named in the pull request every time one is used. The dry-run card is where
+both are granted, against the exact set the engine measured.
+
+**One queued commit cascade carries every commit behind it**
+(`cascade/eventFold.pure.ts`). A commit event delivers prime's head at run
+time, so two pending commit events are the same work twice. Creation stands
+a push down while an unclaimed commit event waits; the drain folds any
+backlog into the oldest live event before claiming. Manual and scheduled
+events, gated events, scoped events, claimed events, events of another mode
+and attempts-exhausted zombies are never folded, in either direction.
+
+**The ledger outlives the commit it was written for**
+(`cascade/passProgress.pure.ts`). What makes a prepared blob reusable was
+never the commit — it is that prime's CURRENT tree still holds the blob it
+was made from, checked entry by entry against the pass's own listing. So a
+finished pass keeps its list, a pass with none borrows the clone's newest,
+and the marginal cost of a prime commit falls from the standing diff to the
+files that commit changed. A blob GitHub has since collected fails the tree
+write, which clears the list, and the next pass re-prepares fresh.
+
+**A proposal failing the same way twice is a standing condition**
+(`cascade/blockedEscalation.pure.ts`). The merge drain raises one
+`cascade_blocked` notification per failure shape — fingerprinted on the
+gate's own verdict sentence, deduped while unread, cleared by the merge — so
+"waiting on CI" and "will fail forever until a person acts" stop being the
+same silence. The deletion probe window also rotates with the prime SHA now:
+with 442 clone-only paths against a 100-probe budget, the fixed order asked
+about the same head on every pass and never examined the tail.
+
+What did NOT change is where the authority sits. The engine still never
+writes a `protected` path; the gate still merges only on green; a deletion
+still needs prime's own history to vouch for every file; and both new levers
+are recorded operator decisions in Mission Control — reviewed, expiring,
+revocable, audited — never a rule the engine grants itself.

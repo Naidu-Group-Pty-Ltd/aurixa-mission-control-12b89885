@@ -6,6 +6,7 @@ import {
   describeDeletionPlan,
   moduleSpecifiersOf,
   planDeletions,
+  probeRotationFor,
   withholdReferencedDeletions,
   orderDeletionCandidates,
   MAX_DELETIONS_PER_CASCADE,
@@ -264,6 +265,115 @@ describe("the bulk refusal", () => {
     expect(plan.refusal).toMatch(/refused/i);
     expect(deletionSuffixFor(plan)).toMatch(/REFUSED/);
   });
+
+  it("a refusal carries the exact set it withheld, for the approval surface", () => {
+    /* The person approves the SET the engine measured, not a paraphrased
+       count — so the refused paths travel with the refusal. */
+    const plan = planDeletions(many(MAX_DELETIONS_PER_CASCADE + 5));
+    expect(plan.refusedPaths).toHaveLength(MAX_DELETIONS_PER_CASCADE + 5);
+    expect(plan.refusal).toMatch(/approve/i);
+  });
+
+  it("delivers a set over the cap when EVERY path in it is approved", () => {
+    /* Prime's builder-portal decommission: 95 files, every one individually
+       proven against prime's history, refused on every pass for two days
+       while the fleet froze behind it. A person who has read the set says so
+       once, in a recorded place, and the set is delivered whole. */
+    const verdicts = many(95);
+    const approved = new Set(verdicts.map((v) => (v as { path: string }).path));
+    const plan = planDeletions(verdicts, MAX_DELETIONS_PER_CASCADE, approved);
+    expect(plan.deletes).toHaveLength(95);
+    expect(plan.refusal).toBeNull();
+    expect(plan.approvedOverCap).toBe(true);
+    expect(describeDeletionPlan(plan)).toMatch(/operator approval/);
+  });
+
+  it("re-refuses a set that GREW past its approval, naming the overflow", () => {
+    /* The operator approved what they read, not whatever the evidence says
+       next week. One unapproved path re-refuses the whole set. */
+    const verdicts = many(40);
+    const approved = new Set(verdicts.slice(0, 39).map((v) => (v as { path: string }).path));
+    const plan = planDeletions(verdicts, MAX_DELETIONS_PER_CASCADE, approved);
+    expect(plan.deletes).toEqual([]);
+    expect(plan.refusal).toMatch(/1 are not/);
+    expect(plan.approvedOverCap).toBe(false);
+  });
+
+  it("never consults approvals below the cap — the engine's own judgement was not in doubt", () => {
+    const plan = planDeletions(many(10), MAX_DELETIONS_PER_CASCADE, new Set<string>());
+    expect(plan.deletes).toHaveLength(10);
+    expect(plan.approvedOverCap).toBe(false);
+  });
+
+  it("an approval is never evidence — a kept verdict stays kept whatever is approved", () => {
+    const kept: DeletionVerdict[] = [
+      { act: "keep", path: "src/kept.ts", reason: "clone_edited", why: "edited here" },
+      ...many(30),
+    ];
+    const approved = new Set(["src/kept.ts", ...many(30).map((v) => (v as { path: string }).path)]);
+    const plan = planDeletions(kept, MAX_DELETIONS_PER_CASCADE, approved);
+    expect(plan.deletes).not.toContain("src/kept.ts");
+    expect(plan.kept.map((k) => k.path)).toContain("src/kept.ts");
+  });
+});
+
+describe("the probe window rotates between passes", () => {
+  const candidates = Array.from({ length: 10 }, (_, i) => ({ path: `src/x/${i}.ts` }));
+  const primeDirs = new Set(["src/x"]);
+
+  it("one pass asks one set of questions — rotation is deterministic per SHA", () => {
+    const a = orderDeletionCandidates(
+      candidates,
+      primeDirs,
+      probeRotationFor("ab45056" + "0".repeat(33)),
+    );
+    const b = orderDeletionCandidates(
+      candidates,
+      primeDirs,
+      probeRotationFor("ab45056" + "0".repeat(33)),
+    );
+    expect(a).toEqual(b);
+  });
+
+  it("two passes for different prime commits start the window in different places", () => {
+    /* 442 clone-only paths against a 100-probe budget: the fixed order probed
+       the same head every pass and never examined the 340-path tail. */
+    const a = orderDeletionCandidates(
+      candidates,
+      primeDirs,
+      probeRotationFor("00000010" + "0".repeat(32)),
+    );
+    const b = orderDeletionCandidates(
+      candidates,
+      primeDirs,
+      probeRotationFor("00000011" + "0".repeat(32)),
+    );
+    expect(a).not.toEqual(b);
+    expect([...a].sort((x, y) => x.path.localeCompare(y.path))).toEqual(
+      [...b].sort((x, y) => x.path.localeCompare(y.path)),
+    );
+  });
+
+  it("rotation never lets a clone-own candidate jump the prime-directory queue", () => {
+    const mixed = [
+      { path: "docs/own/a.md" },
+      { path: "docs/own/b.md" },
+      { path: "src/x/a.ts" },
+      { path: "src/x/b.ts" },
+    ];
+    for (const rotation of [0, 1, 2, 3, 7]) {
+      const ordered = orderDeletionCandidates(mixed, primeDirs, rotation);
+      const firstOwn = ordered.findIndex((c) => c.path.startsWith("docs/"));
+      const lastPrime = ordered.map((c) => c.path.startsWith("src/x/")).lastIndexOf(true);
+      expect(firstOwn).toBeGreaterThan(lastPrime);
+    }
+  });
+
+  it("no rotation is byte-identical to the original ordering", () => {
+    expect(orderDeletionCandidates(candidates, primeDirs)).toEqual(
+      orderDeletionCandidates(candidates, primeDirs, 0),
+    );
+  });
 });
 
 describe("what an operator is told", () => {
@@ -309,11 +419,29 @@ describe("the rules the engine has to keep", () => {
 
   it("checks references before it plans, and plans before it writes the tree", () => {
     const withholdAt = code.indexOf("withholdReferencedDeletions(");
-    const planAt = code.indexOf("planDeletions(deletionVerdicts)");
+    const planAt = code.indexOf(
+      "planDeletions(deletionVerdicts, MAX_DELETIONS_PER_CASCADE, deletionApproved)",
+    );
     const treeAt = code.indexOf("octokit.git.createTree(");
     expect(withholdAt).toBeGreaterThan(-1);
     expect(planAt).toBeGreaterThan(withholdAt);
     expect(treeAt).toBeGreaterThan(planAt);
+  });
+
+  it("rotates the probe window by the pass's own prime SHA", () => {
+    /* One run asks one deterministic set of questions; successive prime
+       commits walk the window across the whole candidate list, so the same
+       100 candidates are no longer the only ones ever examined. */
+    expect(code).toContain("rotation: probeRotationFor(sourceSha)");
+  });
+
+  it("release of a held path happens before the write list is read, so content holds still run", () => {
+    const releaseAt = code.indexOf("decideHoldRelease({");
+    const primeFilesAt = code.indexOf("const primeFiles = partition.write;");
+    const prepareAt = code.indexOf("mapWithConcurrencyUntil<");
+    expect(releaseAt).toBeGreaterThan(-1);
+    expect(primeFilesAt).toBeGreaterThan(releaseAt);
+    expect(prepareAt).toBeGreaterThan(primeFilesAt);
   });
 
   it("does not report a run whose only work is a removal as already in sync", () => {
