@@ -491,4 +491,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260916100000",
     assertions: [{ kind: "rows", table: "cascade_path_approvals", atLeast: 1 }],
   },
+  {
+    migration: "20260916140000_aurixa_reception_line.sql",
+    version: "20260916140000",
+    assertions: [{ kind: "rows", table: "voice_phone_numbers", atLeast: 1 }],
+  },
 ];
