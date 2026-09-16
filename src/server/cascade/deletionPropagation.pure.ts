@@ -137,16 +137,52 @@ export const MAX_VERSION_WALK = 10;
  * the candidates that can produce a deletion, so a clone that has grown a large
  * tree of its own never crowds a real removal out past the cap.
  *
- * Ties break on the path so the same run twice asks the same questions.
+ * Ties break on the path so the same run twice asks the same questions — and
+ * `rotation` slides the window BETWEEN runs, because the fixed order had a
+ * fault the September 2026 freeze made measurable: with 442 clone-only paths
+ * against a 100-probe budget, every pass probed the same alphabetical head
+ * and the same 340-path tail was never examined by any pass, ever. The
+ * rotation is derived from the pass's own prime SHA, so one run still asks
+ * one set of questions deterministically, while successive prime commits
+ * walk the window across the whole candidate list. It rotates WITHIN each
+ * rank so the prime-directory candidates keep their priority.
  */
 export function orderDeletionCandidates<T extends { path: string }>(
   candidates: readonly T[],
   primeDirectories: ReadonlySet<string>,
+  rotation = 0,
 ): T[] {
   const rank = (path: string) => (primeDirectories.has(dirOf(path)) ? 0 : 1);
-  return [...candidates].sort(
+  const sorted = [...candidates].sort(
     (a, b) => rank(a.path) - rank(b.path) || a.path.localeCompare(b.path),
   );
+  if (rotation === 0) return sorted;
+  const groups = [
+    sorted.filter((c) => rank(c.path) === 0),
+    sorted.filter((c) => rank(c.path) === 1),
+  ];
+  return groups.flatMap((group) => rotate(group, rotation));
+}
+
+/** Rotate a list left by `by` places, tolerating any non-negative integer. */
+function rotate<T>(list: readonly T[], by: number): T[] {
+  if (list.length === 0) return [];
+  const shift = ((by % list.length) + list.length) % list.length;
+  return [...list.slice(shift), ...list.slice(0, shift)];
+}
+
+/**
+ * A deterministic rotation seed from a pass's own prime SHA.
+ *
+ * Any stable reading of the hex works; the first eight characters carry more
+ * than enough spread. The point is only that two passes for different prime
+ * commits start their probe window in different places, while one pass run
+ * twice asks the same questions.
+ */
+export function probeRotationFor(sourceSha: string): number {
+  const head = sourceSha.slice(0, 8);
+  const parsed = Number.parseInt(head, 16);
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 function dirOf(path: string): string {
@@ -344,6 +380,15 @@ export type DeletionPlan = {
   kept: Array<{ path: string; reason: DeletionKeepReason; why: string }>;
   /** Set when the whole set was refused for being too large. */
   refusal: string | null;
+  /**
+   * The paths a bulk refusal withheld — the exact set an operator has to
+   * approve for it to be delivered. Empty when nothing was refused. This is
+   * what the approval surface renders, so the person approves the SET the
+   * engine measured rather than a count somebody paraphrased.
+   */
+  refusedPaths: string[];
+  /** True when the set exceeded the cap and was delivered under approvals. */
+  approvedOverCap: boolean;
 };
 
 /**
@@ -352,10 +397,30 @@ export type DeletionPlan = {
  * The refusal is all-or-nothing on purpose. Trimming to the cap would deliver
  * an arbitrary subset of a set we have just decided we do not trust, and would
  * do it again next run with a different subset.
+ *
+ * ## What an approval changes, and what it cannot
+ *
+ * The cap exists because a large set is MORE LIKELY to be evidence gone wrong
+ * than a retirement — likely, not certain. Prime's builder-portal
+ * decommission was a real 95-file retirement, every path of it individually
+ * proven against prime's own history, and the cap refused it on every pass
+ * for two days while the fleet froze behind it. "Refuse and stop" needs a
+ * second half: a person who has READ the set can say so, once, in a recorded
+ * place.
+ *
+ * `approvedPaths` is that record (`cascade_path_approvals`, kind
+ * `bulk_deletion`). A set over the cap is delivered only when EVERY path in
+ * it is approved — a set that grew since the approval re-refuses, naming the
+ * unapproved overflow, because the operator approved what they read and not
+ * whatever the evidence says next week. Below the cap approvals are not
+ * consulted at all: the engine's own judgement was never in doubt there.
+ * And an approval is never evidence — a path still has to earn its `delete`
+ * verdict from prime's history before the approval is even looked at.
  */
 export function planDeletions(
   verdicts: readonly DeletionVerdict[],
   maxDeletions: number = MAX_DELETIONS_PER_CASCADE,
+  approvedPaths?: ReadonlySet<string>,
 ): DeletionPlan {
   const deletes = verdicts.filter((v) => v.act === "delete").map((v) => v.path);
   const kept = verdicts
@@ -363,17 +428,31 @@ export function planDeletions(
     .map(({ path, reason, why }) => ({ path, reason, why }));
 
   if (deletes.length > maxDeletions) {
+    const unapproved = approvedPaths ? deletes.filter((p) => !approvedPaths.has(p)) : deletes;
+    if (approvedPaths && unapproved.length === 0) {
+      return { deletes, kept, refusal: null, refusedPaths: [], approvedOverCap: true };
+    }
+    const approvalNote =
+      approvedPaths && unapproved.length < deletes.length
+        ? ` ${deletes.length - unapproved.length} of them are approved, but ${unapproved.length} ` +
+          `are not (first: ${unapproved.slice(0, 3).join(", ")}) — the set changed since it was ` +
+          `read, so it needs reading again.`
+        : ` An operator who has read the set can approve it in Mission Control ` +
+          `(bulk-deletion approval on this clone), and the next pass delivers it whole.`;
     return {
       deletes: [],
       kept,
       refusal:
         `${deletes.length} file(s) would be deleted, above the ${maxDeletions} this engine will ` +
         `remove without a person. Nothing was deleted. A set this size is more likely to be ` +
-        `evidence gone wrong than a retirement, so it is refused whole rather than applied in part.`,
+        `evidence gone wrong than a retirement, so it is refused whole rather than applied in part.` +
+        approvalNote,
+      refusedPaths: deletes,
+      approvedOverCap: false,
     };
   }
 
-  return { deletes, kept, refusal: null };
+  return { deletes, kept, refusal: null, refusedPaths: [], approvedOverCap: false };
 }
 
 /**
@@ -401,7 +480,12 @@ export function describeDeletionPlan(plan: DeletionPlan): string {
   } else if (plan.deletes.length > 0) {
     parts.push(
       `**Removed (${plan.deletes.length}).** Prime deleted these and this clone's copies were ` +
-        `byte-identical to a version prime itself held at that path:\n` +
+        `byte-identical to a version prime itself held at that path` +
+        (plan.approvedOverCap
+          ? `, and the set — above the engine's own cap — was delivered under a recorded ` +
+            `operator approval naming every path in it`
+          : "") +
+        `:\n` +
         plan.deletes.map((p) => `- \`${p}\``).join("\n"),
     );
   }

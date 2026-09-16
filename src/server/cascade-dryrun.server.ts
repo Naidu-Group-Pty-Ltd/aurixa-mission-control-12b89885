@@ -52,6 +52,15 @@ export type CloneImpact = {
   breaks: string[];
   /** Prime deletions this cascade would not deliver, and why. */
   deletionsWithheld: Array<{ path: string; why: string }>;
+  /** Set when a deletion set above the cap was refused whole. */
+  deletionRefusal: string | null;
+  /**
+   * The exact set that refusal withheld — what a bulk-deletion approval has
+   * to name, so the operator approves what the engine measured.
+   */
+  refusedDeletionPaths: string[];
+  /** Holds this cascade released, on evidence or a recorded approval. */
+  holdReleases: Array<{ path: string; basis: string; why: string }>;
   reason: string;
 };
 
@@ -189,6 +198,9 @@ export async function runCascadeDryRun(
         needsReconcile: [],
         breaks: [],
         deletionsWithheld: [],
+        deletionRefusal: null,
+        refusedDeletionPaths: [],
+        holdReleases: [],
         reason: `Cascade would refuse: ${e instanceof Error ? e.message : "unknown error"}`,
       });
       continue;
@@ -209,6 +221,9 @@ export async function runCascadeDryRun(
         needsReconcile: [],
         breaks: [],
         deletionsWithheld: [],
+        deletionRefusal: null,
+        refusedDeletionPaths: [],
+        holdReleases: [],
         reason: patchSummary || "Nothing to cascade",
       });
       continue;
@@ -256,6 +271,11 @@ export async function runCascadeDryRun(
       deletionsWithheld: settled.deletionKept
         .filter((k) => k.reason !== "clone_owns")
         .map((k) => ({ path: k.path, why: k.why })),
+      deletionRefusal: settled.deletionRefusal,
+      refusedDeletionPaths: settled.refusedDeletionPaths,
+      holdReleases: settled.holdReleases
+        .filter((r) => r.act === "release")
+        .map((r) => ({ path: r.path, basis: (r as { basis: string }).basis, why: r.why })),
       reason:
         parts.length > 0
           ? `${parts.join(" · ")} (${settled.scope})`

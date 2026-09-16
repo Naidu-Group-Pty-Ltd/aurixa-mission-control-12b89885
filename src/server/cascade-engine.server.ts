@@ -36,10 +36,21 @@ import {
   deletionSuffixFor,
   describeDeletionPlan,
   planDeletions,
+  probeRotationFor,
   withholdReferencedDeletions,
+  MAX_DELETIONS_PER_CASCADE,
+  MAX_DELETION_PROBES,
   type DeletionVerdict,
 } from "./cascade/deletionPropagation.pure";
-import { probeDeletions } from "./cascadeDeletions.server";
+import { probeDeletions, probeHeldPaths } from "./cascadeDeletions.server";
+import {
+  decideHoldRelease,
+  describeHoldReleases,
+  holdReleaseSuffixFor,
+  MAX_HOLD_RELEASE_PROBES,
+  type HeldPathEvidence,
+  type HoldRelease,
+} from "./cascade/heldEvidence.pure";
 import { judgingWorkflowHold } from "./cascade/judgingWorkflow.pure";
 import {
   CONFIG_TOML_PATH,
@@ -104,6 +115,13 @@ export type ClonePlan = {
   /** Prime deletions NOT delivered, with the reason. */
   deletionKept: Array<{ path: string; reason: string; why: string }>;
   deletionRefusal: string | null;
+  /**
+   * The exact paths a bulk refusal withheld — what the approval surface
+   * offers an operator, so the person approves the set the engine measured.
+   */
+  refusedDeletionPaths: string[];
+  /** `manual_reconcile` holds this run released, and on what basis. */
+  holdReleases: HoldRelease[];
   staleHeld: StaleHeldReference[];
   missingHeld: MissingHeldReference[];
   onlyInClone: number;
@@ -124,6 +142,48 @@ function directoryOf(path: string): string {
 
 function branchName(sourceSha: string) {
   return `aurixa/cascade-${shortSha(sourceSha)}-${Date.now().toString(36)}`;
+}
+
+/**
+ * Whether a GitHub failure means a tree or blob SHA we supplied no longer
+ * exists in the repository — the one failure mode of reusing prepared blobs
+ * across passes, since GitHub eventually collects unreferenced objects.
+ * Deliberately narrow: a rate limit, a permission refusal and a network fault
+ * all keep the list, because the list did not cause them.
+ */
+function isStaleObjectError(e: unknown): boolean {
+  const status =
+    e && typeof e === "object" && "status" in e ? (e as { status?: unknown }).status : null;
+  if (status !== 404 && status !== 422) return false;
+  const message = e instanceof Error ? e.message : String(e);
+  return /\b(blob|tree)\b/i.test(message) && /\b(sha|not found|exist)\b/i.test(message);
+}
+
+/**
+ * The newest prepared-blob list any pass has left for this clone, when the
+ * current result row carries none of its own. Best-effort by design: the
+ * borrow is an optimisation, so an unreadable table means "nothing to reuse"
+ * and the pass pays full price exactly as it did before the ledger existed.
+ */
+async function borrowLatestProgress(
+  supabase: SupabaseLike,
+  cloneId: string,
+  excludeResultId: string,
+): Promise<unknown> {
+  const { data, error } = await supabase
+    .from("cascade_results")
+    .select("progress")
+    .eq("clone_id", cloneId)
+    .not("progress", "is", null)
+    .neq("id", excludeResultId)
+    .order("updated_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) {
+    console.warn(`[cascade] could not borrow progress for clone ${cloneId}: ${error.message}`);
+    return null;
+  }
+  return (data as { progress?: unknown } | null)?.progress ?? null;
 }
 
 export type { CascadeBudget, CascadeRunResult };
@@ -337,13 +397,17 @@ export async function executeCascade(
       .eq("id", r.id);
 
     try {
-      // What an earlier pass already prepared for this commit, if the budget
-      // stopped it inside this clone. Counted here so a pass that prepared
-      // blobs without finishing the clone is still known to have progressed.
-      const priorRecord = (r as { progress?: unknown }).progress ?? null;
-      const priorPrepared = Object.keys(
-        readProgress(priorRecord, sourceSha)?.prepared ?? {},
-      ).length;
+      // What an earlier pass already prepared, if the budget stopped it inside
+      // this clone — or what the clone's LAST pass prepared, borrowed across
+      // events. A blob created for prime@N is byte-identical for prime@N+1
+      // wherever prime still holds the same blob at the path, and
+      // `resumableBlobs` checks exactly that per entry; without the borrow,
+      // every prime commit re-prepared the whole standing diff from scratch
+      // (~300 files × 3 clones per commit through the September freeze), and
+      // the App's hourly budget went to work already done.
+      const ownRecord = (r as { progress?: unknown }).progress ?? null;
+      const priorRecord = ownRecord ?? (await borrowLatestProgress(supabase, clone.id, r.id));
+      const priorPrepared = Object.keys(readProgress(priorRecord)?.prepared ?? {}).length;
       let preparedNow = priorPrepared;
       const patch = await processClone({
         octokit,
@@ -390,12 +454,16 @@ export async function executeCascade(
         break;
       }
 
-      // Any finished status clears the list: progress toward a proposal that
-      // has been made is not progress any more.
-      await supabase
-        .from("cascade_results")
-        .update({ ...patch, progress: null })
-        .eq("id", r.id);
+      // A finished pass KEEPS its list. The blobs it prepared exist in the
+      // clone's repository whatever became of the proposal, and the next
+      // event's pass — a different prime commit — reuses every entry whose
+      // prime blob is still the one prime holds. Clearing here is what made
+      // each of prime's ~50 daily commits a full re-preparation. An entry
+      // that goes stale invalidates itself against the next pass's own tree
+      // listing, and a blob GitHub has since garbage-collected fails the
+      // tree write, which clears the list below and the pass after that
+      // re-prepares fresh.
+      await supabase.from("cascade_results").update(patch).eq("id", r.id);
 
       // Read off the patch, not off `queuedRes.data`: those rows were fetched
       // before this loop and still carry the pre-run `diff_summary`.
@@ -507,6 +575,12 @@ export async function executeCascade(
           status: "failed",
           error_message: e instanceof Error ? e.message : String(e),
           completed_at: new Date().toISOString(),
+          // A tree write that names a blob GitHub no longer holds means the
+          // reuse list has outlived its objects (unreferenced blobs are
+          // eventually collected). The list caused the failure, so the list
+          // goes with it — the next pass re-prepares fresh instead of failing
+          // on the same stale SHA for ever.
+          ...(isStaleObjectError(e) ? { progress: null } : {}),
         })
         .eq("id", r.id);
       await supabase.from("clones").update({ sync_status: "failed" }).eq("id", clone.id);
@@ -1157,6 +1231,85 @@ export async function processClone(args: {
   // `src/integrations/**` would otherwise reach the clone's backend identity
   // by a different route than the one this was written for.
   const partition = partitionCascadePaths(candidatePaths, exclusions);
+
+  // ── Recorded operator approvals for this clone ────────────────────────────
+  //
+  // Two of the engine's own refusals end in "a person has to decide", and
+  // `cascade_path_approvals` is where the decision lives: `overwrite` releases
+  // one held `manual_reconcile` path, `bulk_deletion` admits a deletion set
+  // past the cap. Read FAIL-SAFE, not fail-closed: an approval only ever
+  // WIDENS what a pass may do, so an unreadable table means no approvals and
+  // the pass runs exactly as it would have before the table existed.
+  const overwriteApproved = new Set<string>();
+  const deletionApproved = new Set<string>();
+  {
+    const approvalsRes = await supabase
+      .from("cascade_path_approvals")
+      .select("kind, path")
+      .eq("clone_id", clone.id)
+      .is("revoked_at", null)
+      .gt("expires_at", new Date().toISOString());
+    if (approvalsRes.error) {
+      console.warn(
+        `[cascade] approvals unreadable for clone ${clone.id} — proceeding with none: ${approvalsRes.error.message}`,
+      );
+    }
+    for (const row of (approvalsRes.data ?? []) as Array<{ kind: string; path: string }>) {
+      if (row.kind === "overwrite") overwriteApproved.add(row.path);
+      else if (row.kind === "bulk_deletion") deletionApproved.add(row.path);
+    }
+  }
+
+  // ── A hold protects WORK, not a path ──────────────────────────────────────
+  //
+  // A `manual_reconcile` hold whose clone copy is byte-identical to a version
+  // prime itself held is protecting stale prime content from newer prime
+  // content — the September 2026 state, where the seeded hold froze
+  // `clientFacing.ts` on two mirrors that had never edited it. The evidence
+  // rule is the deletion rule's, asked of a live path; an operator's recorded
+  // `overwrite` approval releases what evidence cannot (a hand-merged hybrid
+  // matches no prime version even when every line of it is prime's).
+  //
+  // Placement is the safety argument: releases are decided BEFORE the write
+  // list is read, so a released path flows through the prepare loop and its
+  // content holds — `judgingWorkflowHold` and `backendIdentityHold` still run
+  // on it like any other write. `protected` paths never reach this step:
+  // `decideHoldRelease` refuses them whatever the evidence or the table says.
+  const holdReleases: HoldRelease[] = [];
+  {
+    const releasable = partition.held.filter((h) => h.reason === "manual_reconcile");
+    if (releasable.length > 0) {
+      // Approved paths spend no probe; evidence probes are bounded and only
+      // possible where the clone's blob SHA is already known from the tree
+      // listing — a truncated listing releases nothing, which is yesterday's
+      // behaviour.
+      const needsEvidence = releasable
+        .filter((h) => !overwriteApproved.has(h.path))
+        .map((h) => ({ path: h.path, cloneSha: cloneShaByPath?.get(h.path) ?? null }))
+        .filter((c): c is { path: string; cloneSha: string } => c.cloneSha !== null)
+        .slice(0, MAX_HOLD_RELEASE_PROBES);
+      const evidence: Map<string, HeldPathEvidence> =
+        needsEvidence.length > 0
+          ? await probeHeldPaths({ octokit, primeRef, candidates: needsEvidence })
+          : new Map();
+      const released = new Set<string>();
+      for (const held of releasable) {
+        const verdict = decideHoldRelease({
+          held,
+          cloneSha: cloneShaByPath?.get(held.path) ?? null,
+          evidence: evidence.get(held.path) ?? null,
+          approved: overwriteApproved.has(held.path),
+        });
+        holdReleases.push(verdict);
+        if (verdict.act === "release") released.add(held.path);
+      }
+      if (released.size > 0) {
+        partition.write = [...partition.write, ...released];
+        partition.held = partition.held.filter((h) => !released.has(h.path));
+      }
+    }
+  }
+
   const primeFiles = partition.write;
   const needsReconcile = reportableHeld(partition.held);
 
@@ -1210,6 +1363,18 @@ export async function processClone(args: {
       primeRef,
       candidates: deletionCandidates.filter((c) => probeable.has(c.path)),
       primeDirectories,
+      // The window ROTATES between passes — with 442 clone-only paths against
+      // a 100-probe budget the fixed order asked about the same head on every
+      // pass and never examined the tail. Derived from the pass's own prime
+      // SHA so one run still asks one deterministic set of questions.
+      rotation: probeRotationFor(sourceSha),
+      // An operator who approved a bulk deletion has asked for the whole
+      // sweep: the pass that delivers it has to have probed every candidate,
+      // or the set it delivers is the window rather than the retirement.
+      maxProbes:
+        deletionApproved.size > 0
+          ? Math.min(Math.max(MAX_DELETION_PROBES, probeable.size), 500)
+          : undefined,
     });
     deletionVerdicts = probe.candidates.map(decideDeletion);
     unprobedDeletions = probe.unprobed;
@@ -1260,7 +1425,7 @@ export async function processClone(args: {
   // a rehearsal reuses nothing and records nothing.
   const resume = dryRun ? undefined : args.resume;
   const known = resume
-    ? resumableBlobs(readProgress(resume.progress, sourceSha), primeShaByPath)
+    ? resumableBlobs(readProgress(resume.progress), primeShaByPath)
     : new Map<string, string>();
   const progress: CascadeProgress = {
     version: 1,
@@ -1461,6 +1626,13 @@ export async function processClone(args: {
       progress: progress as unknown as Json,
     };
   }
+  // The finished pass's own ledger, carried on the result row so the NEXT
+  // pass — for whatever prime commit — reuses every blob prime still holds.
+  // Real path only; a rehearsal records nothing.
+  const finalProgress: Partial<CascadeResultUpdate> =
+    resume && Object.keys(progress.prepared).length > 0
+      ? { progress: progress as unknown as Json }
+      : {};
   const deliveredSource: Record<string, string> = {};
   for (const entry of prepared) {
     if (!entry) continue;
@@ -1770,7 +1942,10 @@ export async function processClone(args: {
     deletionVerdicts = withholdReferencedDeletions(deletionVerdicts, surviving);
   }
 
-  const deletionPlan = planDeletions(deletionVerdicts);
+  // Approvals are consulted only past the cap, and they are never evidence:
+  // a path still has to earn its delete verdict from prime's history before
+  // the approved set is even read. See `planDeletions`.
+  const deletionPlan = planDeletions(deletionVerdicts, MAX_DELETIONS_PER_CASCADE, deletionApproved);
   for (const path of deletionPlan.deletes) {
     // `sha: null` is how a tree entry removes a path from `base_tree`.
     treeEntries.push({ path, mode: "100644" as const, type: "blob" as const, sha: null });
@@ -1784,6 +1959,7 @@ export async function processClone(args: {
       diff_summary: `Nothing to cascade: ${deletionPlan.kept.length} prime deletion(s) withheld${deletionSuffixFor(deletionPlan)}`,
       files_changed: 0,
       completed_at: new Date().toISOString(),
+      ...finalProgress,
     };
   }
 
@@ -1794,8 +1970,9 @@ export async function processClone(args: {
   const pinSuffix = pinSummary ? ` · ${pinSummary}` : "";
   const heldSuffix = partition.held.length > 0 ? ` · ${partition.held.length} withheld` : "";
   const reconcileSuffix = reconcileSuffixFor(needsReconcile.length);
+  const releaseSuffix = holdReleaseSuffixFor(holdReleases);
   const deleteSuffix = deletionSuffixFor(deletionPlan);
-  const fileSummary = `${summaryFiles.join(", ")}${summarySuffix}${pinSuffix}${heldSuffix}${reconcileSuffix}${deleteSuffix}${staleSuffix}${missingSuffix}`;
+  const fileSummary = `${summaryFiles.join(", ")}${summarySuffix}${pinSuffix}${heldSuffix}${reconcileSuffix}${releaseSuffix}${deleteSuffix}${staleSuffix}${missingSuffix}`;
 
   // The decision, complete, and the last point before anything is written.
   // Emitted on BOTH paths deliberately: a dry run that took a different route
@@ -1809,6 +1986,8 @@ export async function processClone(args: {
     needsReconcile: needsReconcile.map((h) => h.path),
     deletionKept: deletionPlan.kept,
     deletionRefusal: deletionPlan.refusal,
+    refusedDeletionPaths: deletionPlan.refusedPaths,
+    holdReleases,
     staleHeld,
     missingHeld,
     onlyInClone,
@@ -1924,6 +2103,15 @@ export async function processClone(args: {
         `refused rather than carried.\n\n` +
         `- ${deployWorkflowNote}`
       : "") +
+    (holdReleases.some((r) => r.act === "release")
+      ? `\n\n### Released from hold — the clone had done no work these holds protect\n\n` +
+        `A \`manual_reconcile\` hold is honoured only where the clone's copy carries work that ` +
+        `would be lost. Where the copy is byte-identical to a version prime itself held, or an ` +
+        `operator recorded an overwrite approval in Mission Control, prime's current copy ` +
+        `travels — through the same content holds as every other write. Protected paths are ` +
+        `never released.\n\n` +
+        describeHoldReleases(holdReleases)
+      : "") +
     (needsReconcile.length > 0
       ? `\n\n### Needs a human — ${needsReconcile.length} file(s) changed upstream and were held back\n\n` +
         `These carry deliberate divergence on this clone, so the cascade will never overwrite them. ` +
@@ -2013,6 +2201,7 @@ export async function processClone(args: {
         diff_summary: `Already proposed — PR #${existing.number} carries this exact tree (${treeEntries.length} file(s))`,
         files_changed: treeEntries.length,
         completed_at: new Date().toISOString(),
+        ...finalProgress,
       };
     }
 
@@ -2079,6 +2268,7 @@ export async function processClone(args: {
         files_changed: treeEntries.length,
         error_message: prErr instanceof Error ? prErr.message : "unknown",
         completed_at: new Date().toISOString(),
+        ...finalProgress,
       };
     }
   }
@@ -2134,6 +2324,7 @@ export async function processClone(args: {
           diff_summary: durableSummary,
           files_changed: treeEntries.length,
           completed_at: new Date().toISOString(),
+          ...finalProgress,
         };
       } catch {
         // Auto-merge is a repository setting and GitHub refuses to arm it on a
@@ -2169,6 +2360,7 @@ export async function processClone(args: {
           diff_summary: durableSummary,
           files_changed: treeEntries.length,
           completed_at: new Date().toISOString(),
+          ...finalProgress,
         };
       }
       throw e;
@@ -2199,6 +2391,7 @@ export async function processClone(args: {
           diff_summary: `Merged as ${merged.sha?.slice(0, 7) ?? "?"}. ${durableSummary}`,
           files_changed: treeEntries.length,
           completed_at: new Date().toISOString(),
+          ...finalProgress,
         };
       } catch (mergeErr) {
         // Green and unmergeable is a real state — a conflict, or a head that
@@ -2217,6 +2410,7 @@ export async function processClone(args: {
     diff_summary: durableSummary,
     files_changed: treeEntries.length,
     completed_at: new Date().toISOString(),
+    ...finalProgress,
   };
 }
 

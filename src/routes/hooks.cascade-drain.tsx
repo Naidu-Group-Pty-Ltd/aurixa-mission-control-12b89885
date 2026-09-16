@@ -13,6 +13,11 @@ import { createFileRoute } from "@tanstack/react-router";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { verifyCronAuth } from "@/server/cron-auth.server";
 import { executeCascade, type CascadeBudget } from "@/server/cascade-engine.server";
+import {
+  decideEventFold,
+  supersededSummary,
+  type FoldableEvent,
+} from "@/server/cascade/eventFold.pure";
 
 const admin = supabaseAdmin;
 const STALL_MINUTES = 10;
@@ -169,6 +174,75 @@ async function reclaimStalled() {
 }
 
 /**
+ * Fold the queued commit backlog into one event.
+ *
+ * Every commit cascade delivers prime's head at run time, so two pending
+ * commit events are the same work twice — at ~300 file reads and blob
+ * creates per clone each, against the App's hourly budget. Creation now
+ * stands a duplicate down (`createCascadeForAllClones`), and this is the
+ * other half: whatever backlog predates that rule, or slipped through its
+ * race, is folded here before anything is claimed. The OLDEST foldable event
+ * survives; the rest are closed with a summary naming it, and their queued
+ * results are `skipped` with the same story.
+ *
+ * `decideEventFold` (cascade/eventFold.pure.ts) owns what may fold: never a
+ * manual or scheduled event, never one awaiting approval, never one a worker
+ * holds, never one carrying a scope filter, never across modes. The updates
+ * below re-check `pending` + unclaimed so a concurrent claim wins the race
+ * and the fold simply misses that event this tick.
+ */
+async function foldQueuedCommitEvents(): Promise<number> {
+  const { data, error } = await admin
+    .from("cascade_events")
+    .select(
+      "id, trigger, mode, status, requires_approval, worker_started_at, scope_filter, created_at, attempts",
+    )
+    .eq("status", "pending")
+    .eq("trigger", "commit")
+    .is("worker_started_at", null);
+  if (error) {
+    throw new Error(`cascade-drain fold: could not read the queue: ${error.message}`);
+  }
+  const fold = decideEventFold((data ?? []) as FoldableEvent[]);
+  if (!fold.keep || fold.supersede.length === 0) return 0;
+
+  const now = new Date().toISOString();
+  const { data: closed, error: closeErr } = await admin
+    .from("cascade_events")
+    .update({
+      status: "completed",
+      completed_at: now,
+      worker_finished_at: now,
+      summary: supersededSummary(fold.keep),
+    })
+    .in("id", fold.supersede)
+    .eq("status", "pending")
+    .is("worker_started_at", null)
+    .select("id");
+  if (closeErr) {
+    throw new Error(`cascade-drain fold: could not close superseded events: ${closeErr.message}`);
+  }
+  const closedIds = (closed ?? []).map((e) => e.id);
+  if (closedIds.length > 0) {
+    const { error: resultsErr } = await admin
+      .from("cascade_results")
+      .update({
+        status: "skipped",
+        completed_at: now,
+        diff_summary: supersededSummary(fold.keep),
+      })
+      .in("cascade_event_id", closedIds)
+      .eq("status", "queued");
+    if (resultsErr) {
+      throw new Error(
+        `cascade-drain fold: could not skip superseded results: ${resultsErr.message}`,
+      );
+    }
+  }
+  return closedIds.length;
+}
+
+/**
  * Claim one job.
  *
  * A READ THAT FAILED IS NOT A QUEUE THAT IS EMPTY, and a CLAIM that failed is
@@ -311,6 +385,7 @@ export const Route = createFileRoute("/hooks/cascade-drain")({
             isPastDeadline: (reserveMs) => Date.now() + reserveMs >= deadlineAt,
           };
           await reclaimStalled();
+          const folded = await foldQueuedCommitEvents();
           const results: Array<{ ok?: boolean; held?: string; error?: string }> = [];
           for (let i = 0; i < MAX_JOBS_PER_RUN; i++) {
             if (Date.now() >= deadlineAt) break;
@@ -319,7 +394,7 @@ export const Route = createFileRoute("/hooks/cascade-drain")({
             results.push({ ok: r.ok, held: r.held, error: r.error });
           }
           return new Response(
-            JSON.stringify({ success: true, processed: results.length, results }),
+            JSON.stringify({ success: true, processed: results.length, folded, results }),
             { headers: { "Content-Type": "application/json" } },
           );
         } catch (e) {

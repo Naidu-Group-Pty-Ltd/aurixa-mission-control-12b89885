@@ -62,11 +62,15 @@ describe("a rate limit on the prime read defers the event", () => {
   });
 
   it("hands the event back pending at the reset, and never fails it", () => {
-    expect(block).toMatch(/status: "pending",\s*worker_started_at: null,\s*next_attempt_at: failure\.until/);
+    expect(block).toMatch(
+      /status: "pending",\s*worker_started_at: null,\s*next_attempt_at: failure\.until/,
+    );
     expect(block).not.toContain('status: "failed"');
     // A held event whose write was refused must not read as held.
     expect(block).toMatch(/if \(holdError\)\s*\{\s*throw/);
-    expect(block).toContain('{ ok: true, status: "deferred", until: failure.until, done: 0, total: 0 }');
+    expect(block).toContain(
+      '{ ok: true, status: "deferred", until: failure.until, done: 0, total: 0 }',
+    );
   });
 
   it("still fails the event when the read failed for any other reason", () => {
@@ -310,9 +314,7 @@ describe("a pass resumes inside a clone", () => {
 
   it("reuses only on the real path, and only against prime's listing", () => {
     expect(process).toContain("const resume = dryRun ? undefined : args.resume;");
-    expect(process).toContain(
-      "resumableBlobs(readProgress(resume.progress, sourceSha), primeShaByPath)",
-    );
+    expect(process).toContain("resumableBlobs(readProgress(resume.progress), primeShaByPath)");
   });
 
   it("asks the budget before each fresh file, never before the first", () => {
@@ -345,12 +347,38 @@ describe("a pass resumes inside a clone", () => {
     expect(rehearsal).not.toContain("resume:");
   });
 
-  it("a paused clone stops the pass; a finished one clears its list", () => {
+  it("a paused clone stops the pass; a finished one KEEPS its list", () => {
     const loop = sliceFrom(engine, "for (const r of queuedRows) {", 8_000);
     expect(loop).toMatch(
       /if \(patch\.status === "queued"\) \{[\s\S]{0,600}stoppedEarly = true;\s*break;/,
     );
-    expect(loop).toContain(".update({ ...patch, progress: null })");
+    /* The list used to be cleared on every finished status, which made each
+       of prime's ~50 daily commits a full ~300-file re-preparation per clone
+       — the treadmill that spent the App's hourly budget on work already
+       done through the September 2026 freeze. An entry that goes stale
+       invalidates itself against the next pass's own prime listing
+       (`resumableBlobs`), so clearing bought no safety. */
+    expect(loop).not.toContain(".update({ ...patch, progress: null })");
+    expect(loop).toContain(".update(patch)");
+  });
+
+  it("a pass with no list of its own borrows the clone's newest one", () => {
+    const loop = sliceFrom(engine, "for (const r of queuedRows) {", 8_000);
+    expect(loop).toContain(
+      "const priorRecord = ownRecord ?? (await borrowLatestProgress(supabase, clone.id, r.id));",
+    );
+    // Best-effort by design: an unreadable ledger is "nothing to reuse",
+    // never a failed pass.
+    const borrow = sliceFrom(engine, "async function borrowLatestProgress(", 1_400);
+    expect(borrow).toContain("return null;");
+    expect(borrow).not.toContain("throw");
+  });
+
+  it("a stale reused blob clears the list it came from, so the retry re-prepares", () => {
+    expect(engine).toContain("...(isStaleObjectError(e) ? { progress: null } : {}),");
+    const classifier = sliceFrom(engine, "function isStaleObjectError(", 900);
+    expect(classifier).toContain("404");
+    expect(classifier).toContain("422");
   });
 
   it("progress inside a clone is refunded like a finished clone", () => {

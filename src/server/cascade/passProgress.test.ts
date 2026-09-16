@@ -22,33 +22,36 @@ const record: CascadeProgress = {
 };
 
 describe("readProgress", () => {
-  it("reads a record made for this commit", () => {
-    expect(readProgress(record, SOURCE)).toEqual(record);
+  it("reads a well-formed record", () => {
+    expect(readProgress(record)).toEqual(record);
   });
 
-  it("ignores a record made for another commit", () => {
-    expect(readProgress(record, sha(0xdef))).toBeNull();
+  it("reads a record made for ANOTHER commit — the commit pin was a proxy the per-entry check replaces", () => {
+    /* Prime merged ~50 commits a day and each fresh pass reused nothing under
+       the pin, so three clones re-prepared ~300 nearly identical blobs per
+       commit and the App's hourly budget went to work already done. What made
+       an entry safe was never the commit — it is that prime's CURRENT tree
+       still holds the blob it was made from, which `resumableBlobs` checks
+       entry by entry. */
+    const other: CascadeProgress = { ...record, source_sha: sha(0xdef) };
+    expect(readProgress(other)).toEqual(other);
   });
 
   it("refuses anything malformed rather than guessing", () => {
-    expect(readProgress(null, SOURCE)).toBeNull();
-    expect(readProgress("x", SOURCE)).toBeNull();
-    expect(readProgress({ ...record, version: 2 }, SOURCE)).toBeNull();
-    expect(readProgress({ ...record, prepared: [] }, SOURCE)).toBeNull();
+    expect(readProgress(null)).toBeNull();
+    expect(readProgress("x")).toBeNull();
+    expect(readProgress({ ...record, version: 2 })).toBeNull();
+    expect(readProgress({ ...record, source_sha: "not-a-sha" })).toBeNull();
+    expect(readProgress({ ...record, prepared: [] })).toBeNull();
     expect(
-      readProgress(
-        { ...record, prepared: { "src/a.ts": { blob: "not-a-sha", prime: sha(1) } } },
-        SOURCE,
-      ),
+      readProgress({ ...record, prepared: { "src/a.ts": { blob: "not-a-sha", prime: sha(1) } } }),
     ).toBeNull();
-    expect(
-      readProgress({ ...record, prepared: { "src/a.ts": { blob: sha(1) } } }, SOURCE),
-    ).toBeNull();
+    expect(readProgress({ ...record, prepared: { "src/a.ts": { blob: sha(1) } } })).toBeNull();
   });
 
   it("tolerates a missing total", () => {
     const { total: _t, ...noTotal } = record;
-    expect(readProgress(noTotal, SOURCE)?.total).toBe(0);
+    expect(readProgress(noTotal)?.total).toBe(0);
   });
 });
 

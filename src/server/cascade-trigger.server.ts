@@ -4,6 +4,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import { assessBlastRadius } from "./cascade-approvals.server";
+import { FOLD_MAX_ATTEMPTS } from "./cascade/eventFold.pure";
 
 type CascadeMode = Database["public"]["Enums"]["cascade_mode"];
 type CascadeTrigger = Database["public"]["Enums"]["cascade_trigger"];
@@ -64,6 +65,12 @@ export async function createCascadeForAllClones(args: {
   error?: string;
   /** True when an automatic cascade for this prime SHA already existed. */
   alreadyExisted?: boolean;
+  /**
+   * True when a pending, unclaimed commit cascade already waits: that event
+   * reads prime's head when it runs, so it will deliver this push's content
+   * and a second event would only repeat the work at full cost.
+   */
+  foldedIntoPending?: boolean;
 }> {
   const { supabase, mode, trigger, sourceBranch, sourceSha, initiatedBy, summary } = args;
 
@@ -87,6 +94,54 @@ export async function createCascadeForAllClones(args: {
         requiresApproval: false,
         alreadyExisted: true,
       };
+    }
+
+    // One queued commit cascade carries every prime commit behind it.
+    //
+    // `executeCascade` reads the branch HEAD at run time — an event delivers
+    // prime as prime stands when the pass runs, never the commit that created
+    // it — so while an UNCLAIMED commit event waits, a second one is the same
+    // work twice at ~300 file reads per clone. Prime merges ~50 times a day;
+    // through the September 2026 freeze the duplicates outran the drain and
+    // the App's hourly budget went to repeating passes for superseded trees.
+    //
+    // Only a pending, unclaimed, unfiltered, approval-free event of the SAME
+    // MODE stands this push down: a running event may already have read an
+    // older head (its next attempt re-reads), a gated one may be rejected,
+    // and a scoped one delivers a module rather than prime's head. A read
+    // that FAILED creates the event as before — a duplicate is a cost, a push
+    // that silently cascades nowhere is the webhook's original sin.
+    const { data: pendingRows, error: pendingErr } = await supabase
+      .from("cascade_events")
+      .select("id, scope_filter, requires_approval, mode")
+      .eq("status", "pending")
+      .eq("trigger", "commit")
+      .is("worker_started_at", null)
+      // A pending row at the drain's claim ceiling is one no claim will ever
+      // take. Standing pushes down for a carrier nothing will run would stop
+      // the fleet cascading behind one dead row.
+      .lt("attempts", FOLD_MAX_ATTEMPTS)
+      .order("created_at", { ascending: true })
+      .limit(10);
+    if (!pendingErr) {
+      const carrier = (pendingRows ?? []).find(
+        (e) =>
+          e.mode === mode &&
+          e.requires_approval === false &&
+          (e.scope_filter == null ||
+            (typeof e.scope_filter === "object" &&
+              !Array.isArray(e.scope_filter) &&
+              Object.keys(e.scope_filter as Record<string, unknown>).length === 0)),
+      );
+      if (carrier) {
+        return {
+          eventId: carrier.id,
+          cloneCount: 0,
+          requiresApproval: false,
+          alreadyExisted: true,
+          foldedIntoPending: true,
+        };
+      }
     }
   }
 

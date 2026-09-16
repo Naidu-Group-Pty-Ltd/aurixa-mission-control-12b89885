@@ -78,6 +78,7 @@ import {
 import { summaryOwesReconcile } from "./cascade/syncExclusions.pure";
 import { repairConflictedProposal } from "./cascadeProposalRepair.server";
 import { resolveConflictedProposal } from "./cascadeConflictMerge.server";
+import { blockedFingerprint, describeBlockedProposal } from "./cascade/blockedEscalation.pure";
 
 type Db = SupabaseClient<Database>;
 
@@ -753,6 +754,23 @@ async function handleOne(args: {
 
     if (!verdict.merge) {
       await writeReconciliation(supabase, rows, facts, verdict.why);
+      // A proposal failing the SAME WAY it failed before is a standing
+      // condition, not CI in progress — the September freeze sat exactly
+      // here for two days, every signal individually true and none of them
+      // loud. One notification per failure shape, deduped by fingerprint,
+      // cleared by the merge. `failing` only: `pending` is CI working,
+      // `base_broken` is the base branch's own story, and `never_started`
+      // already names the account-level remedy in its verdict.
+      if (verdict.reason === "failing") {
+        await raiseBlockedNotification(supabase, {
+          cloneId,
+          cloneLabel: label,
+          prNumber: number,
+          prUrl: rows[0]?.pr_url ?? null,
+          verdictWhy: verdict.why,
+          durableSummary: rows[0]?.diff_summary ?? null,
+        });
+      }
       return {
         clone: label,
         pr: number,
@@ -778,6 +796,10 @@ async function handleOne(args: {
   const applied = await writeReconciliation(supabase, rows, facts, reason);
 
   if (mergedNow) {
+    // The blockage cleared by landing, so the alarm clears with it — the
+    // next freeze has to start loud again rather than sitting under a
+    // notification somebody already read past.
+    await clearBlockedNotifications(supabase, cloneId, number);
     return {
       clone: label,
       pr: number,
@@ -804,6 +826,87 @@ async function handleOne(args: {
     reason: "already_recorded",
     why: "Mission Control's record already matches this pull request.",
   };
+}
+
+/**
+ * One loud notification per way of being blocked. See
+ * `cascade/blockedEscalation.pure.ts` for why this exists and why it is a
+ * fingerprint rather than a timer. Never fails the drain: a pass that merged
+ * and reconciled correctly must not report as failed because a notification
+ * could not be written — and on a deployment whose database has not applied
+ * the `cascade_blocked` enum value yet, this logs and stands down.
+ */
+async function raiseBlockedNotification(
+  supabase: Db,
+  args: {
+    cloneId: string;
+    cloneLabel: string;
+    prNumber: number;
+    prUrl: string | null;
+    verdictWhy: string;
+    durableSummary: string | null;
+  },
+): Promise<void> {
+  try {
+    const fingerprint = blockedFingerprint(args.prNumber, args.verdictWhy);
+    const { data: existing, error: readErr } = await supabase
+      .from("notifications")
+      .select("id")
+      .eq("kind", "cascade_blocked")
+      .eq("clone_id", args.cloneId)
+      .eq("metadata->>fingerprint", fingerprint)
+      .is("read_at", null)
+      .limit(1);
+    if (readErr) {
+      console.error("[merge-drain] blocked-notification dedupe unreadable:", readErr.message);
+      return; // Better one missed alert than one per five-minute tick.
+    }
+    if ((existing ?? []).length > 0) return;
+
+    const { title, body } = describeBlockedProposal({
+      cloneLabel: args.cloneLabel,
+      prNumber: args.prNumber,
+      prUrl: args.prUrl,
+      verdictWhy: args.verdictWhy,
+      durableSummary: args.durableSummary,
+    });
+    const { error: insertErr } = await supabase.from("notifications").insert({
+      kind: "cascade_blocked",
+      severity: "error",
+      title,
+      body,
+      clone_id: args.cloneId,
+      url: args.prUrl,
+      metadata: { fingerprint, pr: args.prNumber },
+    });
+    if (insertErr) {
+      console.error("[merge-drain] could not raise cascade_blocked:", insertErr.message);
+    }
+  } catch (e) {
+    console.error("[merge-drain] blocked-notification raise failed:", e);
+  }
+}
+
+/** A merged proposal clears its own standing alarm. Never fails the drain. */
+async function clearBlockedNotifications(
+  supabase: Db,
+  cloneId: string,
+  prNumber: number,
+): Promise<void> {
+  try {
+    const { error } = await supabase
+      .from("notifications")
+      .update({ read_at: new Date().toISOString() })
+      .eq("kind", "cascade_blocked")
+      .eq("clone_id", cloneId)
+      .eq("metadata->>pr", String(prNumber))
+      .is("read_at", null);
+    if (error) {
+      console.error("[merge-drain] could not clear cascade_blocked:", error.message);
+    }
+  } catch (e) {
+    console.error("[merge-drain] blocked-notification clear failed:", e);
+  }
 }
 
 /**
