@@ -55,6 +55,20 @@ export type CascadeRunResult =
        */
       progressed: boolean;
     }
+  | {
+      ok: true;
+      /**
+       * Claimed before it was armed: the event had NO result rows at all.
+       * The trigger commits the event first and its rows a moment later,
+       * and this claim landed inside that gap (measured 807ms on 16 Sep
+       * 2026 — event dd7180c7 completed "(of 0)" while its three rows were
+       * stranded a second behind it). The event is `pending` again for a
+       * later tick. The attempt is KEPT, so an event whose rows never
+       * arrive ends at the attempt ceiling with a story instead of looping
+       * on the claim for ever.
+       */
+      status: "unarmed";
+    }
   | { ok: false; error: string };
 
 /**
@@ -86,6 +100,13 @@ export function describeCascadeOutcome(res: CascadeRunResult): {
       message:
         `Cascade paused at the invocation budget — ${res.done} of ${res.total} clone(s) done, ` +
         `the rest resume on the next tick`,
+    };
+  }
+  if (res.status === "unarmed") {
+    return {
+      level: "info",
+      message:
+        "Cascade held — it was claimed before its clone rows were armed; it will be retried shortly",
     };
   }
   const { succeeded, opened, failed, skipped } = res.counts;

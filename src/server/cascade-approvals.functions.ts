@@ -1,7 +1,7 @@
 // Server functions for approving / rejecting / inspecting blast-radius gates.
 import { createServerFn } from "@tanstack/react-start";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
-import { executeCascade } from "./cascade-engine.server";
+import { executeCascade, terminaliseOrphanedRows } from "./cascade-engine.server";
 import { assessBlastRadius, type BlastAssessment } from "./cascade-approvals.server";
 import type { Database } from "@/integrations/supabase/types";
 
@@ -132,6 +132,16 @@ export const rejectCascade = createServerFn({ method: "POST" })
         summary: `Rejected by reviewer${data.reason ? `: ${data.reason}` : ""}`,
       })
       .eq("id", data.cascadeEventId);
+
+    // The act that settles an event settles its rows. A rejection is a
+    // settle, and without this its three queued rows sit for ever under a
+    // failed carrier, reading as live work nothing will ever act on — the
+    // one settle path the orphaned-rows sweep missed.
+    await terminaliseOrphanedRows(
+      supabase,
+      data.cascadeEventId,
+      `Skipped: the carrier event was rejected by a reviewer${data.reason ? ` — ${data.reason}` : ""}.`,
+    );
 
     await supabase.from("audit_log").insert({
       action: "cascade.rejected",

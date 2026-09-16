@@ -2,9 +2,14 @@
 // executed synchronously (e.g. provision-time module cascades). Runs every
 // minute via pg_cron with Bearer(cron_secret) auth.
 //
-// Only auto-merge events with requires_approval=false are picked up so we
-// never bypass approvals. Approval-gated cascades still execute via the
-// existing approval UI path.
+// The claim takes ungated events first, then gated events whose approval is
+// already recorded. A gate is never bypassed — `requires_approval = false`
+// OR a stamped `approved_at` is what the two passes jointly enforce — and
+// the second pass is the rescue path: `approveCascade` runs the engine
+// inline exactly once, and when that run dies (the 60s hook ceiling has
+// taken three mirror cascades), the reclaim reverts the event to
+// pending-unclaimed, where a single ungated-only pass would never offer it
+// to anyone again.
 //
 // Concurrency safety mirrors hooks.backend-provisioning-drain:
 //  - Atomic claim: UPDATE ... WHERE status='pending' AND worker_started_at IS NULL
@@ -282,36 +287,55 @@ async function claimOne(
   excluded: ReadonlySet<string>,
 ): Promise<{ id: string; attempts: number; fence: string } | null> {
   const nowIso = new Date().toISOString();
-  let queue = admin
-    .from("cascade_events")
-    .select("id, attempts")
-    .eq("status", "pending")
-    .eq("requires_approval", false)
-    // Any mode, not just auto_merge.
-    //
-    // The original filter was justified as "so we never bypass approvals", but
-    // `requires_approval = false` above is what actually enforces that, and the
-    // mode filter left `pr` cascades with no retry at all: a webhook-driven
-    // cascade that died mid-flight was reclaimed to `pending` by the sweep and
-    // then skipped for ever by this claim. A `pr` cascade opens a pull request
-    // on the clone -- it is the SAFER of the two to retry, not the riskier.
-    .is("worker_started_at", null)
-    // Not yet: an event a rate limit deferred names the reset it waits for,
-    // and one paused at its budget names now(). NOT NULL with a default, so
-    // this is one comparison and never an `.or()` string.
-    .lte("next_attempt_at", nowIso)
-    .lt("attempts", MAX_ATTEMPTS);
-  if (excluded.size > 0) {
-    queue = queue.not("id", "in", `(${[...excluded].join(",")})`);
-  }
-  const { data: candidates, error: selectError } = await queue
-    .order("created_at", { ascending: true })
-    .limit(1);
-  if (selectError) {
-    throw new Error(`cascade-drain claim: could not read the queue: ${selectError.message}`);
-  }
-  if (!candidates?.length) return null;
-  const target = candidates[0];
+  // Two passes over the same predicates, differing only in how the approval
+  // gate reads. Pass one is the ordinary queue: no gate. Pass two is the
+  // RESCUE path: a gate that a second operator has already discharged.
+  // `approveCascade` runs the engine inline exactly once, and when that run
+  // dies mid-flight the reclaim reverts the event to pending-unclaimed —
+  // where a single `requires_approval = false` pass would never offer it to
+  // anyone again, silently and for ever (found by the 16 Sep 2026 gate
+  // drill; the gate had never fired naturally, because it needs a fleet
+  // larger than three). Two queries, not one `.or()` string — a filter is
+  // never composed as a string here.
+  //
+  // Ungated first: an approved gated event is the rare case and waits behind
+  // the ordinary queue rather than jumping it.
+  const selectCandidate = async (approvedGated: boolean) => {
+    let queue = admin
+      .from("cascade_events")
+      .select("id, attempts")
+      .eq("status", "pending");
+    queue = approvedGated
+      ? queue.eq("requires_approval", true).not("approved_at", "is", null)
+      : queue.eq("requires_approval", false);
+    queue = queue
+      // Any mode, not just auto_merge.
+      //
+      // The original filter was justified as "so we never bypass approvals",
+      // but the gate predicates above are what actually enforce that, and the
+      // mode filter left `pr` cascades with no retry at all: a webhook-driven
+      // cascade that died mid-flight was reclaimed to `pending` by the sweep
+      // and then skipped for ever by this claim. A `pr` cascade opens a pull
+      // request on the clone -- it is the SAFER of the two to retry.
+      .is("worker_started_at", null)
+      // Not yet: an event a rate limit deferred names the reset it waits for,
+      // and one paused at its budget names now(). NOT NULL with a default, so
+      // this is one comparison and never an `.or()` string.
+      .lte("next_attempt_at", nowIso)
+      .lt("attempts", MAX_ATTEMPTS);
+    if (excluded.size > 0) {
+      queue = queue.not("id", "in", `(${[...excluded].join(",")})`);
+    }
+    const { data: candidates, error: selectError } = await queue
+      .order("created_at", { ascending: true })
+      .limit(1);
+    if (selectError) {
+      throw new Error(`cascade-drain claim: could not read the queue: ${selectError.message}`);
+    }
+    return candidates?.[0] ?? null;
+  };
+  const target = (await selectCandidate(false)) ?? (await selectCandidate(true));
+  if (!target) return null;
   const { data: claimed, error: claimError } = await admin
     .from("cascade_events")
     .update({
@@ -537,7 +561,10 @@ async function drainOne(
 
   try {
     const res = await executeCascade(supabaseAdmin, claimed.id, { budget, fence: claimed.fence });
-    if (res.ok && (res.status === "deferred" || res.status === "resuming")) {
+    if (
+      res.ok &&
+      (res.status === "deferred" || res.status === "resuming" || res.status === "unarmed")
+    ) {
       // The engine has already put the event back to `pending` with the
       // moment it may next be claimed. What is decided here is the ATTEMPT.
       //
@@ -546,12 +573,18 @@ async function drainOne(
       // that landed at least one clone is refunded too — a pass that is
       // progressing is not a pass that is failing, which is the rule the
       // provisioning ceiling learned the hard way. A pause that landed NOTHING
-      // is the one case that keeps its attempt: a single clone that cannot
-      // fit inside the budget would otherwise be retried for ever, quietly,
-      // and after the last attempt it has to be said rather than left
-      // `pending` with no claim that will ever take it.
+      // keeps its attempt: a single clone that cannot fit inside the budget
+      // would otherwise be retried for ever, quietly, and after the last
+      // attempt it has to be said rather than left `pending` with no claim
+      // that will ever take it. An UNARMED claim keeps its attempt for the
+      // same reason — an event whose rows never arrive must end at a story,
+      // not loop on the claim for ever.
       const refund =
-        res.status === "deferred" || res.done > 0 || (res.status === "resuming" && res.progressed);
+        res.status === "unarmed"
+          ? false
+          : res.status === "deferred" ||
+            res.done > 0 ||
+            (res.status === "resuming" && res.progressed);
       if (refund) {
         // Guarded on the counter this claim wrote: a zombie whose event a
         // newer claim has since moved would otherwise refund the wrong pass.
@@ -566,20 +599,37 @@ async function drainOne(
           );
         }
       } else if (claimed.attempts >= MAX_ATTEMPTS) {
+        // Two different exhaustions, two different stories. The budget one
+        // has rows still queued under it, and the unarmed one may have rows
+        // that raced in after its final hold — either way, the act that
+        // settles the event settles its rows, or they read as live work for
+        // ever under a failed carrier.
+        const summary =
+          res.status === "unarmed"
+            ? `Claimed ${MAX_ATTEMPTS} times before any result row appeared. The trigger that ` +
+              `created this event never finished arming it — its row insert died after the ` +
+              `event insert.`
+            : `No clone completed inside the invocation budget in ${MAX_ATTEMPTS} attempts ` +
+              `(${res.total} queued). One clone's pass is larger than one tick; it needs splitting.`;
         const { error } = await admin
           .from("cascade_events")
           .update({
             status: "failed",
             worker_finished_at: new Date().toISOString(),
-            summary:
-              `No clone completed inside the invocation budget in ${MAX_ATTEMPTS} attempts ` +
-              `(${res.total} queued). One clone's pass is larger than one tick; it needs splitting.`,
+            summary,
           })
           .eq("id", claimed.id)
           .eq("attempts", claimed.attempts);
         if (error) {
           throw new Error(`cascade-drain: could not fail ${claimed.id}: ${error.message}`);
         }
+        await terminaliseOrphanedRows(
+          admin,
+          claimed.id,
+          res.status === "unarmed"
+            ? "Skipped: the carrier event was retired after being claimed with no armed rows; this row arrived too late to be part of any pass."
+            : "Skipped: the carrier event was failed at the attempt ceiling — one clone's pass is larger than one tick.",
+        );
       }
       return { processed: true, ok: true, held: res.status };
     }
@@ -596,7 +646,7 @@ async function drainOne(
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[cascade-drain] execute failed for ${claimed.id}:`, msg);
     const terminal = claimed.attempts >= MAX_ATTEMPTS;
-    await admin
+    const { data: settled } = await admin
       .from("cascade_events")
       .update({
         worker_started_at: terminal ? undefined : null,
@@ -604,7 +654,21 @@ async function drainOne(
         status: terminal ? "failed" : "pending",
       })
       .eq("id", claimed.id)
-      .eq("worker_started_at", claimed.fence);
+      .eq("worker_started_at", claimed.fence)
+      .select("id");
+    // The act that settles the event settles its rows — and only the act:
+    // a fenced-out write means a newer claim owns this event, and a zombie
+    // settling that claim's rows is worse than the strand it would prevent.
+    if (terminal && (settled ?? []).length > 0) {
+      await terminaliseOrphanedRows(
+        admin,
+        claimed.id,
+        `Skipped: the carrier event was failed at the attempt ceiling after a pass error — ${msg}`.slice(
+          0,
+          500,
+        ),
+      );
+    }
     return { processed: true, ok: false, error: msg, id: claimed.id };
   }
 }

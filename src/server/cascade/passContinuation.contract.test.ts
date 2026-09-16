@@ -204,16 +204,16 @@ describe("the drain", () => {
     expect(budget).toBeLessThan(55_000);
   });
 
-  it("refunds the attempt on a deferral and on a pause that landed something", () => {
-    const one = sliceFrom(drain, "async function drainOne", 4_000);
+  it("refunds the attempt on a deferral and on a pause that landed something — never on an unarmed claim", () => {
+    const one = sliceFrom(drain, "async function drainOne", 6_000);
     expect(one).toMatch(
-      /const refund =\s*res\.status === "deferred" \|\| res\.done > 0 \|\| \(res\.status === "resuming" && res\.progressed\);/,
+      /const refund =\s*res\.status === "unarmed"\s*\?\s*false\s*:\s*res\.status === "deferred" \|\|\s*res\.done > 0 \|\|\s*\(res\.status === "resuming" && res\.progressed\);/,
     );
     expect(one).toMatch(/attempts: Math\.max\(0, claimed\.attempts - 1\)/);
   });
 
   it("does not stamp a held event as finished", () => {
-    const one = sliceFrom(drain, "async function drainOne", 4_000);
+    const one = sliceFrom(drain, "async function drainOne", 6_000);
     const held = one.slice(
       one.indexOf('res.status === "deferred"'),
       one.indexOf("return { processed: true, ok: true, held: res.status };"),
@@ -224,10 +224,11 @@ describe("the drain", () => {
   it("says so when a pause never lands anything and the attempts are gone", () => {
     // Left `pending` past MAX_ATTEMPTS the event is unclaimable and silent —
     // the shape `claimOne`'s `attempts < MAX_ATTEMPTS` filter would otherwise
-    // produce.
-    const one = sliceFrom(drain, "async function drainOne", 4_000);
+    // produce. The window is wide enough to cross the summary ternary that
+    // now tells the unarmed exhaustion apart from the budget one.
+    const one = sliceFrom(drain, "async function drainOne", 6_000);
     expect(one).toMatch(
-      /else if \(claimed\.attempts >= MAX_ATTEMPTS\) \{[\s\S]{0,400}status: "failed"/,
+      /else if \(claimed\.attempts >= MAX_ATTEMPTS\) \{[\s\S]{0,1600}status: "failed"/,
     );
   });
 });

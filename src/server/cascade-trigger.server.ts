@@ -50,6 +50,23 @@ function isUniqueViolation(error: { code?: string; message?: string } | null): b
   return error.code === "23505" || /duplicate key value/i.test(error.message ?? "");
 }
 
+/**
+ * Armed before claimable.
+ *
+ * The event and its result rows commit in two separate statements, and the
+ * per-minute drain claimed one in the 807ms between them (16 Sep 2026, event
+ * dd7180c7): the pass read zero rows, honestly completed "(of 0)", and the
+ * rows landed a second later — stranded, with the delivery silently lost.
+ * A fresh event therefore carries `next_attempt_at` this far in the future,
+ * so the DRAIN does not see it until its rows have had time to land. The
+ * inline callers (the webhook, the console trigger, `approveCascade`) run
+ * the engine directly, never claim, and never read this column — they are
+ * unaffected. When an inline run dies, the drain's rescue starts one grace
+ * later, which is the price of the race staying closed at its source; the
+ * engine's own unarmed hold is the belt to this brace.
+ */
+export const CREATION_ARM_GRACE_MS = 90_000;
+
 export async function createCascadeForAllClones(args: {
   supabase: SupabaseLike;
   mode: CascadeMode;
@@ -165,6 +182,9 @@ export async function createCascadeForAllClones(args: {
       summary: summary ?? null,
       status: "pending",
       requires_approval: blast.requiresApproval,
+      // See CREATION_ARM_GRACE_MS: the drain must not claim this event in
+      // the gap before the result rows below have committed.
+      next_attempt_at: new Date(Date.now() + CREATION_ARM_GRACE_MS).toISOString(),
     })
     .select()
     .single();
