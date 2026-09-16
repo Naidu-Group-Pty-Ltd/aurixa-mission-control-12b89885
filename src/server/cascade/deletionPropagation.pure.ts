@@ -209,6 +209,13 @@ export type DeletionEvidence =
   /** The probe could not answer. Never an argument for deleting. */
   | { kind: "unsettled"; why: string };
 
+/**
+ * The answers worth remembering. `unsettled` is a failed read, not a fact —
+ * the pass that stores one turns "GitHub was briefly down" into a permanent
+ * verdict about a file, so the ledger admits only the settled kinds.
+ */
+export type SettledDeletionEvidence = Exclude<DeletionEvidence, { kind: "unsettled" }>;
+
 export type DeletionCandidate = {
   path: string;
   /** The blob the clone holds at this path right now. */

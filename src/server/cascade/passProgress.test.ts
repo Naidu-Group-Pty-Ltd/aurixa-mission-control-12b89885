@@ -3,8 +3,10 @@ import { mapWithConcurrencyUntil } from "@/lib/concurrency";
 import {
   PROGRESS_FLUSH_EVERY,
   describePreparePause,
+  describeProbePause,
   readProgress,
   resumableBlobs,
+  resumableDeletionEvidence,
   type CascadeProgress,
 } from "./passProgress.pure";
 
@@ -17,6 +19,18 @@ const record: CascadeProgress = {
   prepared: {
     "src/a.ts": { blob: sha(1), prime: sha(11) },
     "src/b.ts": { blob: sha(2), prime: sha(12) },
+  },
+  deletion_evidence: {
+    "src/gone.ts": {
+      clone: sha(21),
+      evidence: {
+        kind: "removed",
+        deletedIn: sha(31),
+        versions: [sha(21), sha(22)],
+        versionsExhaustive: true,
+      },
+    },
+    "src/own.ts": { clone: sha(23), evidence: { kind: "never_primes" } },
   },
   total: 353,
 };
@@ -53,6 +67,57 @@ describe("readProgress", () => {
     const { total: _t, ...noTotal } = record;
     expect(readProgress(noTotal)?.total).toBe(0);
   });
+
+  it("reads an OLD record with no evidence at all", () => {
+    /* Every ledger written before the evidence field existed. */
+    const { deletion_evidence: _e, ...legacy } = record;
+    expect(readProgress(legacy)).toEqual({ ...legacy, deletion_evidence: {} });
+  });
+
+  it("drops a malformed evidence entry alone, keeping the blobs and the rest", () => {
+    /* The safe direction differs by section: a wrong BLOB delivers wrong
+       bytes, so a malformed blob entry voids the record; a wrong EVIDENCE
+       entry deletes the wrong file, so it is dropped alone and re-probed —
+       hundreds of sound prepared blobs must not be discarded over one
+       unreadable answer. */
+    const dirty = {
+      ...record,
+      deletion_evidence: {
+        ...record.deletion_evidence,
+        "src/bad-clone.ts": { clone: "not-a-sha", evidence: { kind: "never_primes" } },
+        "src/bad-kind.ts": { clone: sha(40), evidence: { kind: "unsettled", why: "HTTP 500" } },
+        "src/bad-versions.ts": {
+          clone: sha(41),
+          evidence: {
+            kind: "removed",
+            deletedIn: sha(42),
+            versions: ["x"],
+            versionsExhaustive: true,
+          },
+        },
+        "src/bad-exhaustive.ts": {
+          clone: sha(43),
+          evidence: {
+            kind: "removed",
+            deletedIn: sha(44),
+            versions: [],
+            versionsExhaustive: "yes",
+          },
+        },
+      },
+    };
+    expect(readProgress(dirty)).toEqual(record);
+  });
+
+  it("never reads `unsettled` back — a failed read is retried, not remembered", () => {
+    const withUnsettled = {
+      ...record,
+      deletion_evidence: {
+        "src/x.ts": { clone: sha(50), evidence: { kind: "unsettled", why: "HTTP 502" } },
+      },
+    };
+    expect(readProgress(withUnsettled)?.deletion_evidence).toEqual({});
+  });
 });
 
 describe("resumableBlobs", () => {
@@ -68,6 +133,23 @@ describe("resumableBlobs", () => {
   it("reuses nothing without a prime listing to check against", () => {
     expect(resumableBlobs(record, null).size).toBe(0);
     expect(resumableBlobs(null, new Map()).size).toBe(0);
+  });
+});
+
+describe("resumableDeletionEvidence", () => {
+  it("reuses only answers asked about the blob the clone still holds", () => {
+    const cloneTree = new Map([
+      ["src/gone.ts", sha(21)], // unchanged since the probe — reuse
+      ["src/own.ts", sha(99)], // the clone edited it — a changed question
+    ]);
+    const out = resumableDeletionEvidence(record, cloneTree);
+    expect([...out.keys()]).toEqual(["src/gone.ts"]);
+    expect(out.get("src/gone.ts")?.kind).toBe("removed");
+  });
+
+  it("reuses nothing without a clone listing to check against", () => {
+    expect(resumableDeletionEvidence(record, null).size).toBe(0);
+    expect(resumableDeletionEvidence(null, new Map()).size).toBe(0);
   });
 });
 
@@ -131,5 +213,11 @@ describe("the sentence", () => {
       "Paused at the invocation budget — 200 of 353 file(s) prepared; the rest resume next tick",
     );
     expect(PROGRESS_FLUSH_EVERY).toBeGreaterThan(0);
+  });
+
+  it("says how far the PROBE got, in candidates rather than files", () => {
+    expect(describeProbePause({ settled: 180, total: 442 })).toBe(
+      "Paused at the invocation budget — deletion evidence settled for 180 of 442 candidate(s); the rest resume next tick",
+    );
   });
 });

@@ -34,7 +34,23 @@
  * pin was standing in for, and it holds across commits exactly as well as
  * within one. The `source_sha` field stays on the record as provenance —
  * which pass wrote it — and gates nothing.
+ *
+ * ## Evidence is bought once, like blobs
+ *
+ * The deletion probe asks prime's history about every clone-only path — one
+ * `listCommits` and a couple of content reads each. An approved retirement
+ * sweep is 442 paths (~1,300 calls per clone), which no single 45-second tick
+ * survives and no hourly App budget enjoys twice. So a SETTLED answer rides
+ * the same ledger, keyed by the clone blob it was asked about: prime's
+ * history only grows, a path prime re-adds stops being a deletion candidate
+ * before any cache is consulted, and a clone blob that changed invalidates
+ * its entry by the key. `unsettled` is never stored — a failed read is
+ * retried, not remembered — and a malformed entry is DROPPED alone rather
+ * than voiding the record, because the cost of dropping is one re-probe
+ * while the cost of keeping garbage is deleting the wrong file.
  */
+
+import type { SettledDeletionEvidence } from "./deletionPropagation.pure";
 
 export type PreparedBlob = {
   /** The blob SHA the clone's repository now holds for this path. */
@@ -43,12 +59,22 @@ export type PreparedBlob = {
   prime: string;
 };
 
+/** One settled probe answer, keyed to the clone blob it was asked about. */
+export type DeletionEvidenceEntry = {
+  /** The clone blob SHA the question was asked about. A changed blob is a changed question. */
+  clone: string;
+  /** What prime's history answered. Never `unsettled` — see the module header. */
+  evidence: SettledDeletionEvidence;
+};
+
 export type CascadeProgress = {
   version: 1;
   /** The prime commit this pass was delivering. */
   source_sha: string;
   /** Path → what was prepared. */
   prepared: Record<string, PreparedBlob>;
+  /** Path → what prime's history said about deleting it. Absent on old records. */
+  deletion_evidence?: Record<string, DeletionEvidenceEntry>;
   /** Files the pass had to prepare in total, for the sentence. */
   total: number;
 };
@@ -86,7 +112,74 @@ export function readProgress(raw: unknown): CascadeProgress | null {
     prepared[path] = { blob, prime };
   }
   const total = typeof r.total === "number" && Number.isFinite(r.total) ? r.total : 0;
-  return { version: 1, source_sha: r.source_sha, prepared, total };
+  const deletion_evidence: Record<string, DeletionEvidenceEntry> = {};
+  const rawEvidence = (r as { deletion_evidence?: unknown }).deletion_evidence;
+  if (rawEvidence && typeof rawEvidence === "object" && !Array.isArray(rawEvidence)) {
+    for (const [path, entry] of Object.entries(rawEvidence as Record<string, unknown>)) {
+      const parsed = readEvidenceEntry(entry);
+      if (parsed) deletion_evidence[path] = parsed;
+    }
+  }
+  return { version: 1, source_sha: r.source_sha, prepared, deletion_evidence, total };
+}
+
+/**
+ * One evidence entry, or nothing. Unlike a malformed BLOB entry — which voids
+ * the record, because delivering a wrong blob is delivering wrong bytes — a
+ * malformed evidence entry is dropped alone: the safe direction here is a
+ * re-probe, and hundreds of sound prepared blobs must not be discarded over
+ * one unreadable answer. `unsettled` parses to nothing by the same rule that
+ * keeps it out of the ledger on the way in.
+ */
+function readEvidenceEntry(raw: unknown): DeletionEvidenceEntry | null {
+  if (!raw || typeof raw !== "object") return null;
+  const { clone, evidence } = raw as { clone?: unknown; evidence?: unknown };
+  if (typeof clone !== "string" || !SHA.test(clone)) return null;
+  if (!evidence || typeof evidence !== "object") return null;
+  const e = evidence as { kind?: unknown };
+  if (e.kind === "never_primes") return { clone, evidence: { kind: "never_primes" } };
+  if (e.kind !== "removed") return null;
+  const { deletedIn, versions, versionsExhaustive } = evidence as {
+    deletedIn?: unknown;
+    versions?: unknown;
+    versionsExhaustive?: unknown;
+  };
+  if (typeof deletedIn !== "string" || !SHA.test(deletedIn)) return null;
+  if (!Array.isArray(versions) || versions.some((v) => typeof v !== "string" || !SHA.test(v))) {
+    return null;
+  }
+  if (typeof versionsExhaustive !== "boolean") return null;
+  return {
+    clone,
+    evidence: { kind: "removed", deletedIn, versions: versions as string[], versionsExhaustive },
+  };
+}
+
+/**
+ * The probe answers a new pass may reuse: those asked about the blob the
+ * clone STILL holds at the path. `cloneShaByPath` is the clone tree listing;
+ * without it (a truncated listing) nothing is reused, the same rule
+ * `resumableBlobs` runs on. A path that is no longer a deletion candidate is
+ * simply never looked up, so an entry for a path prime re-added is inert.
+ */
+export function resumableDeletionEvidence(
+  progress: CascadeProgress | null,
+  cloneShaByPath: ReadonlyMap<string, string> | null,
+): Map<string, SettledDeletionEvidence> {
+  const out = new Map<string, SettledDeletionEvidence>();
+  if (!progress?.deletion_evidence || !cloneShaByPath) return out;
+  for (const [path, entry] of Object.entries(progress.deletion_evidence)) {
+    if (cloneShaByPath.get(path) === entry.clone) out.set(path, entry.evidence);
+  }
+  return out;
+}
+
+/** The one sentence a clone's row carries while its probe phase is paused. */
+export function describeProbePause(input: { settled: number; total: number }): string {
+  return (
+    `Paused at the invocation budget — deletion evidence settled for ${input.settled} of ` +
+    `${input.total} candidate(s); the rest resume next tick`
+  );
 }
 
 /**

@@ -28,9 +28,29 @@
  *
  * ## What a failure means
  *
- * Nothing is ever deleted on a failed read. Every error path here returns
+ * Nothing is ever deleted on a failed read. An error here returns
  * `unsettled`, which `decideDeletion` keeps. That is the same rule the
  * exclusion policy runs on: a read that FAILED is not a fact that is ABSENT.
+ *
+ * One failure is different: a RATE LIMIT is re-thrown rather than settled,
+ * because it is a statement about the App's hourly window, not about the
+ * path. Swallowed as `unsettled` it once meant a limited pass answered
+ * "could not read" for the tail of an approved sweep and delivered the head
+ * alone — half a retirement, exactly what the over-cap refusal exists to
+ * prevent. Thrown, it reaches the engine's `classifyGitHubFailure` catch and
+ * the whole pass defers to the reset GitHub named, with every answer already
+ * settled kept on the ledger.
+ *
+ * ## The probe respects the tick and remembers its answers
+ *
+ * An approved retirement sweep probes every candidate — 442 paths on the
+ * September 2026 decommission, ~1,300 calls per clone — and no 45-second
+ * drain tick survives that. Probing therefore runs in chunks: between
+ * chunks the pass asks its budget whether another chunk fits, hands each
+ * chunk's settled answers to the caller for the ledger, and stops CLEANLY
+ * when the budget says stop — so the next tick resumes from the cache
+ * instead of re-asking prime the same ~1,300 questions, which is the same
+ * treadmill the prepared-blob ledger already ended for file preparation.
  */
 import type { getAppOctokit } from "./github-app.server";
 import type { RepoRef } from "./github-app.server";
@@ -40,9 +60,19 @@ import {
   orderDeletionCandidates,
   type DeletionCandidate,
   type DeletionEvidence,
+  type SettledDeletionEvidence,
 } from "./cascade/deletionPropagation.pure";
 import { MAX_HOLD_RELEASE_PROBES, type HeldPathEvidence } from "./cascade/heldEvidence.pure";
+import { classifyGitHubFailure } from "./cascade/rateLimitDeferral.pure";
 import { mapWithConcurrency } from "@/lib/concurrency";
+
+/**
+ * Candidates probed between budget checks. Sized so one chunk is a few
+ * seconds of IO at the probe's own concurrency — small enough that the tick
+ * that takes "one more chunk" still finishes, large enough that a healthy
+ * tick clears hundreds of candidates.
+ */
+export const PROBE_CHUNK = 20;
 
 type Octo = ReturnType<typeof getAppOctokit>;
 
@@ -74,6 +104,8 @@ export async function probePrimeDeletion(
     if (!Array.isArray(data) || data.length === 0) return { kind: "never_primes" };
     commits = data as Array<{ sha: string }>;
   } catch (e) {
+    // A rate limit is the window's answer, not the path's — see the header.
+    if (classifyGitHubFailure(e).kind === "rate_limited") throw e;
     return { kind: "unsettled", why: reasonOf(e) };
   }
 
@@ -115,18 +147,30 @@ async function blobAt(
     // think it is, and nothing should be decided on the strength of it.
     if (Array.isArray(data) || !("sha" in data) || typeof data.sha !== "string") return null;
     return data.sha;
-  } catch {
+  } catch (e) {
+    // A rate limit must not read as "prime held no blob here" — that skips a
+    // version, and a skipped version can turn "the clone matches prime" into
+    // "the clone edited it". Thrown, the pass defers whole instead.
+    if (classifyGitHubFailure(e).kind === "rate_limited") throw e;
     // A 404 is the ordinary answer at the commit that removed the file.
     return null;
   }
 }
 
 /**
- * Probe a bounded set of candidates, concurrently.
+ * Probe a bounded set of candidates, concurrently, in budget-checked chunks.
  *
  * The order comes from `orderDeletionCandidates`, which spends the budget on
  * the candidates that can produce a deletion first; the overflow is reported
- * rather than dropped silently.
+ * rather than dropped silently. A candidate whose answer is already `known`
+ * costs nothing and does not count against `maxProbes` — the cap bounds
+ * QUESTIONS, and a cached answer asks none.
+ *
+ * `shouldStop` is asked between chunks, never before the first: a pass that
+ * probed nothing would come back next tick exactly where it was. `onChunk`
+ * hands each chunk's answers out as they settle, so a pass cut by the
+ * platform rather than by its own budget still leaves most of its work on
+ * the ledger.
  */
 export async function probeDeletions(args: {
   octokit: Octo;
@@ -137,29 +181,57 @@ export async function probeDeletions(args: {
   maxProbes?: number;
   /** Slides the probe window between passes — see `orderDeletionCandidates`. */
   rotation?: number;
-}): Promise<{ candidates: DeletionCandidate[]; unprobed: number }> {
+  /** Answers an earlier pass already settled, keyed by path. */
+  known?: ReadonlyMap<string, SettledDeletionEvidence>;
+  /** Asked between chunks; true stops the probe cleanly with `paused`. */
+  shouldStop?: () => boolean;
+  /** Each chunk's settled answers and how long the chunk took, as it lands. */
+  onChunk?: (settled: ReadonlyArray<DeletionCandidate>, chunkMs: number) => Promise<void> | void;
+}): Promise<{ candidates: DeletionCandidate[]; unprobed: number; paused: boolean }> {
   const max = args.maxProbes ?? MAX_DELETION_PROBES;
   const ordered = orderDeletionCandidates(
     args.candidates,
     args.primeDirectories,
     args.rotation ?? 0,
   );
-  const probing = ordered.slice(0, max);
 
-  // Four at a time. The write path already runs eight concurrent content reads
-  // against the same secondary rate limit, and this runs before it in the same
-  // request — a cascade refused for hammering GitHub delivers nothing at all.
-  const probed = await mapWithConcurrency<{ path: string; cloneSha: string }, DeletionCandidate>(
-    probing,
-    4,
-    async (c) => ({
-      path: c.path,
-      cloneSha: c.cloneSha,
-      evidence: await probePrimeDeletion(args.octokit, args.primeRef, c.path, c.cloneSha),
-    }),
-  );
+  const out: DeletionCandidate[] = [];
+  const uncached: Array<{ path: string; cloneSha: string }> = [];
+  for (const c of ordered) {
+    const cached = args.known?.get(c.path);
+    if (cached) out.push({ path: c.path, cloneSha: c.cloneSha, evidence: cached });
+    else uncached.push(c);
+  }
+  const cachedCount = out.length;
 
-  return { candidates: probed, unprobed: ordered.length - probing.length };
+  const probing = uncached.slice(0, max);
+  let paused = false;
+  for (let i = 0; i < probing.length; i += PROBE_CHUNK) {
+    if (i > 0 && args.shouldStop?.()) {
+      paused = true;
+      break;
+    }
+    const chunk = probing.slice(i, i + PROBE_CHUNK);
+    const startedAt = Date.now();
+    // Four at a time. The write path already runs eight concurrent content
+    // reads against the same secondary rate limit, and this runs before it in
+    // the same request — a cascade refused for hammering GitHub delivers
+    // nothing at all.
+    const probed = await mapWithConcurrency<{ path: string; cloneSha: string }, DeletionCandidate>(
+      chunk,
+      4,
+      async (c) => ({
+        path: c.path,
+        cloneSha: c.cloneSha,
+        evidence: await probePrimeDeletion(args.octokit, args.primeRef, c.path, c.cloneSha),
+      }),
+    );
+    out.push(...probed);
+    await args.onChunk?.(probed, Date.now() - startedAt);
+  }
+
+  const attempted = out.length - cachedCount;
+  return { candidates: out, unprobed: uncached.length - attempted, paused };
 }
 
 function reasonOf(e: unknown): string {
@@ -202,6 +274,8 @@ export async function probePrimeVersions(
     if (!Array.isArray(data) || data.length === 0) return { kind: "never_primes" };
     commits = data as Array<{ sha: string }>;
   } catch (e) {
+    // Same rule as the deletion probe: a window is deferred, never settled.
+    if (classifyGitHubFailure(e).kind === "rate_limited") throw e;
     return { kind: "unsettled", why: reasonOf(e) };
   }
 

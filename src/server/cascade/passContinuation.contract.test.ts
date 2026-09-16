@@ -314,7 +314,55 @@ describe("a pass resumes inside a clone", () => {
 
   it("reuses only on the real path, and only against prime's listing", () => {
     expect(process).toContain("const resume = dryRun ? undefined : args.resume;");
-    expect(process).toContain("resumableBlobs(readProgress(resume.progress), primeShaByPath)");
+    expect(process).toContain(
+      "const priorProgress = resume ? readProgress(resume.progress) : null;",
+    );
+    expect(process).toContain("resumableBlobs(priorProgress, primeShaByPath)");
+  });
+
+  it("opens the ledger before the deletion probes, and probes on the budget", () => {
+    // The probes are the first paid question a pass asks; a ledger opened
+    // after them remembers everything except the most expensive thing the
+    // pass did. Measured on the September 2026 retirement: 442 approved
+    // candidates ≈ ~1,300 calls a clone, re-paid on every resume until the
+    // evidence rode the ledger.
+    expect(process.indexOf("const priorProgress =")).toBeLessThan(
+      process.indexOf("await probeDeletions({"),
+    );
+    expect(process).toContain("resumableDeletionEvidence(priorProgress, cloneShaByPath ?? null)");
+    const probe = sliceFrom(process, "const probe = await probeDeletions({", 2_200);
+    expect(probe).toContain("known: knownEvidence,");
+    expect(probe).toMatch(
+      /shouldStop: \(\) =>\s*resume\?\.budget !== undefined && resume\.budget\.isPastDeadline\(slowestChunkMs\)/,
+    );
+    // Settled answers ride the ledger chunk by chunk; unsettled never does.
+    expect(probe).toContain('if (c.evidence.kind === "unsettled") continue;');
+    expect(probe).toContain("await resume.onProgress(progress);");
+  });
+
+  it("a probe pause hands the clone back queued with its evidence, planning nothing", () => {
+    const pause = sliceFrom(process, "if (probePaused && resume) {", 700);
+    expect(pause).toContain("await resume.onProgress(progress);");
+    expect(pause).toMatch(/status: "queued",\s*started_at: null,/);
+    expect(pause).toContain("progress: progress as unknown as Json,");
+    // An approved sweep planned from half its evidence is the window
+    // pretending to be the retirement.
+    expect(pause).not.toContain("planDeletions");
+    expect(process.indexOf("if (probePaused && resume) {")).toBeLessThan(
+      process.indexOf("planDeletions(deletionVerdicts"),
+    );
+  });
+
+  it("evidence counts as progress, so a probe-only pause is refunded", () => {
+    // A pass that spent its whole tick settling evidence prepared no blobs;
+    // counting only `prepared` made it read as no progress, spend its
+    // attempt, and die in three ticks inside a healthy convergence.
+    const loop = sliceFrom(engine, "for (const r of queuedRows) {", 8_000);
+    expect(loop).toMatch(
+      /const ledgerSize = \(p: CascadeProgress \| null\) =>\s*Object\.keys\(p\?\.prepared \?\? \{\}\)\.length \+ Object\.keys\(p\?\.deletion_evidence \?\? \{\}\)\.length;/,
+    );
+    expect(loop).toContain("const priorPrepared = ledgerSize(readProgress(priorRecord));");
+    expect(loop).toContain("preparedNow = ledgerSize(progress);");
   });
 
   it("asks the budget before each fresh file, never before the first", () => {
