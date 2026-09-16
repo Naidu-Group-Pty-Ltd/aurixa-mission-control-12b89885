@@ -66,6 +66,21 @@ describe("the claim fence", () => {
     );
   });
 
+  it("the running-mark never re-stamps source_sha — provenance is not a gate, and the index is UNIQUE", () => {
+    /* `uq_cascade_events_commit_sha` covers every commit event whatever its
+       status; after a fold, some row always carries prime's head, so a
+       re-stamp collides. It had violated silently on every pass since the
+       fold existed (the old write was unchecked); the first checked write
+       failed the carrier twice in 600 ms — measured 16 Sep 2026, 10:24:02. */
+    const mark = engine.slice(
+      engine.indexOf('"mark the event running"') - 400,
+      engine.indexOf('"mark the event running"'),
+    );
+    expect(mark).toContain('{ status: "running", started_at: new Date().toISOString() }');
+    expect(mark).not.toContain("source_sha: sourceSha");
+    expect(mark).not.toContain("source_branch");
+  });
+
   it("every event write in the engine goes through the fenced helper", () => {
     // The helper is the ONLY writer: a raw `.update` on cascade_events
     // inside executeCascade is a zombie write waiting to happen. The two
