@@ -52,6 +52,31 @@ describe("choosePointerAdvance", () => {
     expect(advance).toEqual({ sha: "p1", basis: "provenance", eventCreatedAt: "2026-09-16T09:00:00Z" });
   });
 
+  it("a delivered row on an OLDER event outranks provenance on a newer one", () => {
+    /* The regression this partition exists to forbid: an event created later
+       can carry provenance OLDER than what an earlier pass delivered, because
+       that pass executed after the later event's creating push. Ranked by
+       event recency alone, reconciling the legacy row late would walk the
+       pointer backwards over an engine-stamped delivered head. */
+    const advance = choosePointerAdvance([
+      row({ delivered_sha: null, event: { source_sha: "p_old_label", created_at: "2026-09-16T13:00:00Z" } }),
+      row({ delivered_sha: "x_delivered", event: { source_sha: "p1", created_at: "2026-09-16T09:00:00Z" } }),
+    ]);
+    expect(advance).toEqual({
+      sha: "x_delivered",
+      basis: "delivered",
+      eventCreatedAt: "2026-09-16T09:00:00Z",
+    });
+  });
+
+  it("an all-provenance history still advances exactly as it always did", () => {
+    const advance = choosePointerAdvance([
+      row({ delivered_sha: null, event: { source_sha: "p1", created_at: "2026-09-16T09:00:00Z" } }),
+      row({ delivered_sha: null, event: { source_sha: "p2", created_at: "2026-09-16T13:00:00Z" } }),
+    ]);
+    expect(advance).toEqual({ sha: "p2", basis: "provenance", eventCreatedAt: "2026-09-16T13:00:00Z" });
+  });
+
   it("only a succeeded row asserts content on the branch", () => {
     expect(
       choosePointerAdvance([row({ status: "skipped", delivered_sha: "x" }), row({ status: "pr_opened" })]),

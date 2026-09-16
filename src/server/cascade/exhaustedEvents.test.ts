@@ -136,3 +136,37 @@ describe("one tick cannot exhaust an event", () => {
     expect(drain).toContain("return { processed: true, ok: false, error: msg, id: claimed.id };");
   });
 });
+
+describe("a settle that skips the rows settles the rows", () => {
+  /* Measured 16 Sep 2026: 124 `queued` rows under settled events — invisible
+     to every sweeper, because the reclaim reads PENDING events. The rule:
+     the act that settles an event without walking its rows settles the rows
+     too, as `skipped` with the carrier's fate in the message. */
+  const drain = readFileSync("src/routes/hooks.cascade-drain.tsx", "utf8");
+  const engine = readFileSync("src/server/cascade-engine.server.ts", "utf8");
+
+  it("the retirement terminalises the rows its passes never reached", () => {
+    const at = drain.indexOf('verdict.act === "retire"');
+    expect(at).toBeGreaterThan(-1);
+    const block = drain.slice(at, at + 1600);
+    expect(block).toContain("terminaliseOrphanedRows(");
+    expect(block).toContain("retired after ${MAX_ATTEMPTS} attempts");
+  });
+
+  it("both pre-loop failure exits in the engine terminalise before returning", () => {
+    for (const anchor of ['"record the missing GitHub App"', '"record the failed prime read"']) {
+      const at = engine.indexOf(anchor);
+      expect(at).toBeGreaterThan(-1);
+      expect(engine.slice(at, at + 400)).toContain("terminaliseOrphanedRows(");
+    }
+  });
+
+  it("the terminaliser touches only non-terminal rows and marks them skipped, never failed", () => {
+    const at = engine.indexOf("export async function terminaliseOrphanedRows(");
+    expect(at).toBeGreaterThan(-1);
+    const body = engine.slice(at, at + 900);
+    expect(body).toContain('.in("status", ["queued", "pushing"])');
+    expect(body).toContain('status: "skipped",');
+    expect(body).not.toContain('status: "failed"');
+  });
+});

@@ -8,7 +8,7 @@
 // as code. Editing this file by hand makes the alarm report on a corpus that
 // does not exist — which is the failure it was built to catch, pointed the
 // wrong way.
-import type { Assertion } from "./migrationAssertions.pure";
+import type { Assertion, Supersede } from "./migrationAssertions.pure";
 
 export type MigrationClaims = {
   /** Migration filename, e.g. `20260828010000_client_agreements.sql`. */
@@ -16,6 +16,8 @@ export type MigrationClaims = {
   /** Its 14-digit version, the only identity it has in the ledger. */
   readonly version: string;
   readonly assertions: readonly Assertion[];
+  /** Earlier migrations' claims this one retires. Validated at generation. */
+  readonly supersedes?: readonly Supersede[];
 };
 
 export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
@@ -509,6 +511,31 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "rpc", fn: "check_api_rate_limit" },
       { kind: "table", table: "public_rate_limits" },
       { kind: "rpc", fn: "check_public_rate_limit" },
+    ],
+  },
+  {
+    migration: "20260916180000_didit_forward_floor_amended.sql",
+    version: "20260916180000",
+    assertions: [
+      { kind: "rows", table: "prime_secret_forwards", atLeast: 44 },
+      { kind: "check", table: "migration_assertion_checks", column: "status", value: "superseded" },
+    ],
+    supersedes: [
+      {
+        migration: "20260906100000_didit_fleet_forward.sql",
+        assertion: "rows:prime_secret_forwards>=45",
+      },
+    ],
+  },
+  {
+    migration: "20260916190000_settle_orphaned_cascade_rows.sql",
+    version: "20260916190000",
+    assertions: [
+      {
+        kind: "none",
+        reason:
+          "data repair only — terminalises the orphaned-row backlog and closes historical worker windows; the resulting row counts are not stable claims",
+      },
     ],
   },
 ];
