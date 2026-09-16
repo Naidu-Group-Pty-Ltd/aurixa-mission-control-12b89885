@@ -443,6 +443,21 @@ export const TENANT_SCOPED_SECRETS = new Set([
   // clone its own and writes it where the prime's functions read it.
   "MISSION_CONTROL_CLONE_API_KEY",
   "MISSION_CONTROL_WEBHOOK_SECRET",
+  // A Vapi webhook secret is one half of a PAIR: the value in this deployment's
+  // environment and the value in `server.headers` on that deployment's own Vapi
+  // assistants and phone numbers. Copying the prime's half to a clone cannot
+  // make the pair agree — the clone's Vapi objects are its own — so a forwarded
+  // value is at best inert and at worst a credential the prime's own call
+  // webhook accepts, shared with every tenant. It is already a per-deployment
+  // credential in the product: a declared field on the Integrations page's Vapi
+  // card, on that page's write allow-list, and refused by neither refusal list,
+  // so a tenant sets their own and it reaches `Deno.env` through the broker.
+  //
+  // It was safe here only by ACCIDENT: it falls through `classifySecret` to
+  // `vendor` — the class that copies the prime's value wherever a forwarding row
+  // exists — and no row happens to exist. This class is what makes one
+  // impossible to add later, which is the whole point of the list.
+  "VAPI_WEBHOOK_SECRET",
 ]);
 
 /**
@@ -486,6 +501,11 @@ export const TENANT_SCOPED_REMEDY: Record<string, string> = {
   MISSION_CONTROL_WEBHOOK_SECRET:
     "Written by the Mission Control link step, matching the secret on this clone's own webhook " +
     "endpoint in Mission Control.",
+  VAPI_WEBHOOK_SECRET:
+    "Set by this deployment's own superadmin on its Integrations page (the Vapi card's Webhook " +
+    "Secret field), and written identically into `server.headers` on that deployment's own Vapi " +
+    "assistants and phone numbers - the two halves must match or the call webhook refuses every " +
+    "call. At least 16 characters, or it fails closed. Never the prime's value.",
 };
 
 export type SecretClass =
