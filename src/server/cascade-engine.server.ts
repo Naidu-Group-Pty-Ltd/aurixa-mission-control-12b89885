@@ -41,6 +41,7 @@ import {
   MAX_DELETIONS_PER_CASCADE,
   MAX_DELETION_PROBES,
   type DeletionVerdict,
+  type SettledDeletionEvidence,
 } from "./cascade/deletionPropagation.pure";
 import { probeDeletions, probeHeldPaths } from "./cascadeDeletions.server";
 import {
@@ -84,9 +85,12 @@ import { mapWithConcurrency, mapWithConcurrencyUntil } from "@/lib/concurrency";
 import {
   PROGRESS_FLUSH_EVERY,
   describePreparePause,
+  describeProbePause,
   readProgress,
   resumableBlobs,
+  resumableDeletionEvidence,
   type CascadeProgress,
+  type DeletionEvidenceEntry,
 } from "./cascade/passProgress.pure";
 
 type CascadeResultUpdate = Database["public"]["Tables"]["cascade_results"]["Update"];
@@ -407,7 +411,14 @@ export async function executeCascade(
       // the App's hourly budget went to work already done.
       const ownRecord = (r as { progress?: unknown }).progress ?? null;
       const priorRecord = ownRecord ?? (await borrowLatestProgress(supabase, clone.id, r.id));
-      const priorPrepared = Object.keys(readProgress(priorRecord)?.prepared ?? {}).length;
+      // Progress is the LEDGER growing, not the blob count alone: a pass that
+      // spent its whole tick settling deletion evidence prepared no blobs and
+      // still moved the sweep forward. Counting only `prepared` made exactly
+      // that pass read as "no progress", spend its attempt, and after three
+      // ticks die inside a healthy convergence.
+      const ledgerSize = (p: CascadeProgress | null) =>
+        Object.keys(p?.prepared ?? {}).length + Object.keys(p?.deletion_evidence ?? {}).length;
+      const priorPrepared = ledgerSize(readProgress(priorRecord));
       let preparedNow = priorPrepared;
       const patch = await processClone({
         octokit,
@@ -422,7 +433,7 @@ export async function executeCascade(
         resume: {
           progress: priorRecord,
           onProgress: async (progress) => {
-            preparedNow = Object.keys(progress.prepared).length;
+            preparedNow = ledgerSize(progress);
             const { error: progressError } = await supabase
               .from("cascade_results")
               .update({ progress: progress as unknown as Json })
@@ -1340,6 +1351,39 @@ export async function processClone(args: {
     };
   }
 
+  // ── The pass's ledger, opened before the first paid question ─────────────
+  //
+  // What a previous pass already prepared and already settled, reusable
+  // wherever the fact it recorded still holds: a blob while prime still
+  // holds the blob it was made from, a probe answer while the clone still
+  // holds the blob it was asked about. Real path only: a rehearsal reuses
+  // nothing and records nothing. Constructed HERE — above the deletion
+  // probes, not beside the prepare loop — because the probes are the first
+  // spend a pass makes, and a ledger opened after them remembers everything
+  // except the most expensive thing the pass did.
+  const resume = dryRun ? undefined : args.resume;
+  const priorProgress = resume ? readProgress(resume.progress) : null;
+  const known = resume ? resumableBlobs(priorProgress, primeShaByPath) : new Map<string, string>();
+  const knownEvidence = resume
+    ? resumableDeletionEvidence(priorProgress, cloneShaByPath ?? null)
+    : new Map<string, SettledDeletionEvidence>();
+  const evidenceLedger: Record<string, DeletionEvidenceEntry> = {};
+  const progress: CascadeProgress = {
+    version: 1,
+    source_sha: sourceSha,
+    prepared: {},
+    deletion_evidence: evidenceLedger,
+    total: primeFiles.length,
+  };
+  for (const [path, blob] of known) {
+    const prime = primeShaByPath?.get(path);
+    if (prime) progress.prepared[path] = { blob, prime };
+  }
+  for (const [path, evidence] of knownEvidence) {
+    const clone = cloneShaByPath?.get(path);
+    if (clone) evidenceLedger[path] = { clone, evidence };
+  }
+
   // ── What prime deleted ────────────────────────────────────────────────────
   //
   // Candidates come from the tree comparison and mean nothing on their own.
@@ -1357,7 +1401,9 @@ export async function processClone(args: {
   const probeable = new Set(deletionPartition.write);
   let deletionVerdicts: DeletionVerdict[] = [];
   let unprobedDeletions = 0;
+  let probePaused = false;
   if (probeable.size > 0) {
+    let slowestChunkMs = 0;
     const probe = await probeDeletions({
       octokit,
       primeRef,
@@ -1370,14 +1416,51 @@ export async function processClone(args: {
       rotation: probeRotationFor(sourceSha),
       // An operator who approved a bulk deletion has asked for the whole
       // sweep: the pass that delivers it has to have probed every candidate,
-      // or the set it delivers is the window rather than the retirement.
+      // or the set it delivers is the window rather than the retirement. The
+      // lifted cap is never taken on a rehearsal — a dry run answers an open
+      // HTTP request, and 442 probes is minutes, not a page load; its card
+      // reads the rotated window exactly as before.
       maxProbes:
-        deletionApproved.size > 0
+        !dryRun && deletionApproved.size > 0
           ? Math.min(Math.max(MAX_DELETION_PROBES, probeable.size), 500)
           : undefined,
+      // Answers an earlier pass settled cost nothing this pass; answers this
+      // pass settles ride the ledger chunk by chunk, so a pass cut anywhere
+      // resumes from the cache instead of re-asking prime ~3 calls a path.
+      known: knownEvidence,
+      // Asked between chunks, never before the first — one chunk of progress
+      // per tick is the floor that makes the sweep converge. The reserve is
+      // the slowest chunk so far: one more like it.
+      shouldStop: () =>
+        resume?.budget !== undefined && resume.budget.isPastDeadline(slowestChunkMs),
+      onChunk: async (settled, chunkMs) => {
+        slowestChunkMs = Math.max(slowestChunkMs, chunkMs);
+        if (!resume) return;
+        for (const c of settled) {
+          if (c.evidence.kind === "unsettled") continue;
+          evidenceLedger[c.path] = { clone: c.cloneSha, evidence: c.evidence };
+        }
+        await resume.onProgress(progress);
+      },
     });
     deletionVerdicts = probe.candidates.map(decideDeletion);
     unprobedDeletions = probe.unprobed;
+    probePaused = probe.paused;
+  }
+
+  // The budget stopped the pass inside the probe phase. Every settled answer
+  // is on the row; the engine hands the event back and the next pass resumes
+  // from the cache. No plan, no tree, no commit: an approved sweep planned
+  // from half its evidence is the window pretending to be the retirement.
+  if (probePaused && resume) {
+    await resume.onProgress(progress);
+    const settled = [...probeable].filter((p) => evidenceLedger[p] !== undefined).length;
+    return {
+      status: "queued",
+      started_at: null,
+      diff_summary: describeProbePause({ settled, total: probeable.size }),
+      progress: progress as unknown as Json,
+    };
   }
   const pendingDeletes = deletionVerdicts.filter((v) => v.act === "delete").map((v) => v.path);
 
@@ -1420,23 +1503,9 @@ export async function processClone(args: {
       }
     | { kind: "held"; held: HeldPath };
 
-  // What a previous pass already prepared for this very commit, reusable
-  // wherever prime's blob is still the one it was made from. Real path only:
-  // a rehearsal reuses nothing and records nothing.
-  const resume = dryRun ? undefined : args.resume;
-  const known = resume
-    ? resumableBlobs(readProgress(resume.progress), primeShaByPath)
-    : new Map<string, string>();
-  const progress: CascadeProgress = {
-    version: 1,
-    source_sha: sourceSha,
-    prepared: {},
-    total: primeFiles.length,
-  };
-  for (const [path, blob] of known) {
-    const prime = primeShaByPath?.get(path);
-    if (prime) progress.prepared[path] = { blob, prime };
-  }
+  // The pass's ledger (`resume`, `known`, `progress`) is opened above the
+  // deletion probes — the probes are the first paid question. Only the
+  // prepare loop's own pacing lives here.
   let freshlyPrepared = 0;
   let slowestFileMs = 0;
   // Asked before each file is started, never before the first fresh one: a
