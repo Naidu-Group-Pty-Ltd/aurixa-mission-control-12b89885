@@ -732,11 +732,30 @@ async function handleBookAppointment(tc: ToolCall, message: Rec): Promise<Record
     };
   }
 
-  const { data: journey } = await supabaseAdmin
+  // A contact may hold more than one journey, and `.maybeSingle()` ERRORS on
+  // that rather than returning a row. The error used to be discarded, so
+  // `journey` came back null, the appointment was written with
+  // `journey_id: null`, and `onAppointmentScheduled` bailed on exactly that —
+  // no stage advance, no confirmation call, no reminder, and no line in the
+  // log saying why. The booking still appeared in the calendar, so the whole
+  // cadence failed invisibly.
+  //
+  // Ordering and taking one makes the multi-journey case deterministic
+  // instead of fatal, and the error is now read rather than dropped: a read
+  // that FAILED is not a row that is ABSENT.
+  const { data: journey, error: journeyError } = await supabaseAdmin
     .from("crm_client_journeys")
     .select("id")
     .eq("contact_id", ctx.contact_id)
+    .order("created_at", { ascending: false })
+    .limit(1)
     .maybeSingle();
+  if (journeyError) {
+    console.error(
+      `[voice-tools] journey read failed for contact ${ctx.contact_id}: ${journeyError.message} — ` +
+        `the booking will be written without a journey, so no confirmation call or reminder is queued`,
+    );
+  }
 
   const { data: callRow } = await supabaseAdmin
     .from("voice_calls")

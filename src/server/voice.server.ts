@@ -24,6 +24,37 @@ export function normalizePhone(raw: string | null | undefined): string {
   return kept.startsWith("+") ? "+" + kept.slice(1).replace(/\D/g, "") : kept.replace(/\D/g, "");
 }
 
+/**
+ * The E.164 form a telephony provider will accept, for the dial boundary only.
+ *
+ * `normalizePhone` deliberately does NOT do this: it is the matching function,
+ * and `phonesMatch` compares the last nine digits precisely so that
+ * `0412 345 678` and `+61412345678` are the same person. Rewriting its output
+ * would also change `voice_blacklist.normalized_number` comparisons and the
+ * stored `voice_call_context.normalized_phone`, which is a much larger blast
+ * radius than the problem.
+ *
+ * The problem is narrow and real: `dispatchOne` sends `customer.number` to
+ * VAPI verbatim, so a contact stored as `(02) 8609-3299` dials as
+ * `0286093299` — which has no country code and is rejected. The rejection
+ * surfaces as a retried then failed job and an operator push, never as a
+ * validation error naming the number.
+ *
+ * **An unrecognised shape is passed through untouched.** Guessing a country
+ * code for a number this does not recognise would dial a stranger; letting
+ * the provider refuse it keeps the failure honest and attributable.
+ */
+export function toE164AU(raw: string | null | undefined): string {
+  const n = normalizePhone(raw);
+  if (!n) return "";
+  if (n.startsWith("+")) return n;
+  // 0412345678 / 0286093299 — a national number with the trunk prefix.
+  if (/^0\d{9}$/.test(n)) return "+61" + n.slice(1);
+  // 61412345678 — the country code already present, the plus lost in storage.
+  if (/^61\d{9}$/.test(n)) return "+" + n;
+  return n;
+}
+
 /** True when two numbers agree on their last nine digits (AU national significance). */
 export function phonesMatch(a: string | null | undefined, b: string | null | undefined): boolean {
   const na = normalizePhone(a).replace(/\D/g, "");
@@ -406,7 +437,9 @@ async function dispatchOne(job: OutboundJob): Promise<"dispatched" | "failed" | 
   const scheduled = new Date(job.scheduled_at);
   const body: Record<string, unknown> = {
     assistantId: job.vapi_assistant_id,
-    customer: { number: job.phone },
+    // E.164 at the wire, never in storage — see toE164AU. The stored phone
+    // stays whatever matching wants it to be.
+    customer: { number: toE164AU(job.phone) || job.phone },
     assistantOverrides: { variableValues: job.variable_values ?? {} },
   };
   if (job.vapi_phone_number_id) body.phoneNumberId = job.vapi_phone_number_id;

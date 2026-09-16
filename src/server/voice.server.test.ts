@@ -7,6 +7,7 @@ import {
   buildVariableValues,
   computeScheduledAt,
   normalizePhone,
+  toE164AU,
   phonesMatch,
 } from "./voice.server";
 
@@ -15,6 +16,41 @@ describe("normalizePhone", () => {
     expect(normalizePhone("+61 412 345 678")).toBe("+61412345678");
     expect(normalizePhone("(02) 8609-3299")).toBe("0286093299");
     expect(normalizePhone(null)).toBe("");
+  });
+});
+
+describe("toE164AU", () => {
+  it("gives a national number its country code", () => {
+    // `(02) 8609-3299` normalises to `0286093299`, which has no country code
+    // and is what the dispatcher used to hand VAPI verbatim.
+    expect(toE164AU("(02) 8609-3299")).toBe("+61286093299");
+    expect(toE164AU("0412 345 678")).toBe("+61412345678");
+  });
+
+  it("restores a plus that was lost in storage", () => {
+    expect(toE164AU("61412345678")).toBe("+61412345678");
+  });
+
+  it("leaves an already-qualified number alone, whatever the country", () => {
+    expect(toE164AU("+61412345678")).toBe("+61412345678");
+    expect(toE164AU("+12184132393")).toBe("+12184132393");
+    expect(toE164AU("+60182548567")).toBe("+60182548567");
+  });
+
+  it("passes an unrecognised shape through untouched rather than guessing", () => {
+    // Guessing a country code here would dial a stranger. Letting the
+    // provider refuse it keeps the failure honest and attributable.
+    expect(toE164AU("12345")).toBe("12345");
+    expect(toE164AU("0412345")).toBe("0412345");
+    expect(toE164AU("041234567890")).toBe("041234567890");
+    expect(toE164AU("")).toBe("");
+    expect(toE164AU(null)).toBe("");
+  });
+
+  it("does not change what matching sees", () => {
+    // The whole reason this is separate from normalizePhone.
+    expect(normalizePhone("(02) 8609-3299")).toBe("0286093299");
+    expect(phonesMatch("(02) 8609-3299", toE164AU("(02) 8609-3299"))).toBe(true);
   });
 });
 
