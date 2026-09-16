@@ -543,4 +543,15 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260916200000",
     assertions: [{ kind: "enum", type: "notification_kind" }],
   },
+  {
+    migration: "20260916210000_clone_announcements.sql",
+    version: "20260916210000",
+    assertions: [
+      { kind: "table", table: "clone_announcements" },
+      { kind: "table", table: "clone_announcement_deliveries" },
+      { kind: "column", table: "clone_announcements", column: "audience_plan_slugs" },
+      { kind: "column", table: "clone_announcements", column: "revision" },
+      { kind: "check", table: "clone_announcements", column: "severity", value: "critical" },
+    ],
+  },
 ];
