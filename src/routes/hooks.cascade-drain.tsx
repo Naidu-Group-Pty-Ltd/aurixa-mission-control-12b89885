@@ -264,10 +264,21 @@ async function foldQueuedCommitEvents(): Promise<number> {
  *
  * A genuine failure THROWS: the route's catch turns it into a non-200 that
  * lands in `net._http_response`, where `cron_delivery_health()` can see it.
+ *
+ * `excluded` is the tick's own failure memory: an event whose pass failed in
+ * THIS invocation is not offered again by it. Without that, the loop's next
+ * iteration re-claims the reverted event immediately — measured twice on
+ * 16 Sep 2026 (10:24:02 and 10:45:03), the same carrier burned all three
+ * attempts in under a second on one error, leaving no tick boundary for a
+ * transient fault (a mid-publish build, a database blip) to clear. One
+ * failure per event per tick turns three seconds of death into three
+ * minutes of readable, separately-reported attempts.
  */
-async function claimOne(): Promise<{ id: string; attempts: number; fence: string } | null> {
+async function claimOne(
+  excluded: ReadonlySet<string>,
+): Promise<{ id: string; attempts: number; fence: string } | null> {
   const nowIso = new Date().toISOString();
-  const { data: candidates, error: selectError } = await admin
+  let queue = admin
     .from("cascade_events")
     .select("id, attempts")
     .eq("status", "pending")
@@ -285,7 +296,11 @@ async function claimOne(): Promise<{ id: string; attempts: number; fence: string
     // and one paused at its budget names now(). NOT NULL with a default, so
     // this is one comparison and never an `.or()` string.
     .lte("next_attempt_at", nowIso)
-    .lt("attempts", MAX_ATTEMPTS)
+    .lt("attempts", MAX_ATTEMPTS);
+  if (excluded.size > 0) {
+    queue = queue.not("id", "in", `(${[...excluded].join(",")})`);
+  }
+  const { data: candidates, error: selectError } = await queue
     .order("created_at", { ascending: true })
     .limit(1);
   if (selectError) {
@@ -502,8 +517,9 @@ async function raiseDriftBeacon(): Promise<string | null> {
 
 async function drainOne(
   budget: CascadeBudget,
-): Promise<{ processed: boolean; ok?: boolean; held?: string; error?: string }> {
-  const claimed = await claimOne();
+  excluded: ReadonlySet<string>,
+): Promise<{ processed: boolean; ok?: boolean; held?: string; error?: string; id?: string }> {
+  const claimed = await claimOne(excluded);
   if (!claimed) return { processed: false };
 
   try {
@@ -576,7 +592,7 @@ async function drainOne(
       })
       .eq("id", claimed.id)
       .eq("worker_started_at", claimed.fence);
-    return { processed: true, ok: false, error: msg };
+    return { processed: true, ok: false, error: msg, id: claimed.id };
   }
 }
 
@@ -603,11 +619,17 @@ export const Route = createFileRoute("/hooks/cascade-drain")({
           const remaining = await readGitHubRemaining();
           const spend = decideSpend({ role: "cascade_claim", remaining });
           const results: Array<{ ok?: boolean; held?: string; error?: string }> = [];
+          // One failure per event per tick: a failed pass is remembered and
+          // its event is not offered to this tick's remaining claims, so the
+          // loop moves on to OTHER queued work instead of spending the whole
+          // attempt ceiling on one fault in one second.
+          const failedThisTick = new Set<string>();
           if (spend.proceed) {
             for (let i = 0; i < MAX_JOBS_PER_RUN; i++) {
               if (Date.now() >= deadlineAt) break;
-              const r = await drainOne(budget);
+              const r = await drainOne(budget, failedThisTick);
               if (!r.processed) break;
+              if (r.ok === false && r.id) failedThisTick.add(r.id);
               results.push({ ok: r.ok, held: r.held, error: r.error });
             }
           }

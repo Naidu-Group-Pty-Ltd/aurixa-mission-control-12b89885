@@ -187,12 +187,12 @@ describe("the drain", () => {
   });
 
   it("passes a deadline the engine can ask, and stops claiming past it", () => {
-    const route = sliceFrom(drain, "const deadlineAt = Date.now() + INVOCATION_BUDGET_MS;", 1_200);
+    const route = sliceFrom(drain, "const deadlineAt = Date.now() + INVOCATION_BUDGET_MS;", 2_400);
     expect(route).toMatch(
       /isPastDeadline: \(reserveMs\) => Date\.now\(\) \+ reserveMs >= deadlineAt/,
     );
     expect(route).toMatch(
-      /if \(Date\.now\(\) >= deadlineAt\) break;\s*const r = await drainOne\(budget\);/,
+      /if \(Date\.now\(\) >= deadlineAt\) break;\s*const r = await drainOne\(budget, failedThisTick\);/,
     );
   });
 
