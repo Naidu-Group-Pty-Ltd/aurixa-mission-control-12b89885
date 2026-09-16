@@ -58,7 +58,7 @@ export const Route = createFileRoute("/api/public/clones/gate")({
         // direction — the reservation endpoints have their own limit and those
         // fail closed, so a workspace that out-polls this one still cannot
         // generate anything.
-        const rl = await checkRateLimit(`gate:${key.id}`, 120);
+        const rl = await checkRateLimit(key.id, 120, "gate");
         if (!rl.ok) {
           return new Response(
             JSON.stringify({

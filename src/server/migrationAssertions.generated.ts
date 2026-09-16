@@ -496,4 +496,14 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260916140000",
     assertions: [{ kind: "rows", table: "voice_phone_numbers", atLeast: 1 }],
   },
+  {
+    migration: "20260916170000_rate_limit_bucket_and_public.sql",
+    version: "20260916170000",
+    assertions: [
+      { kind: "column", table: "token_api_rate_limits", column: "bucket" },
+      { kind: "rpc", fn: "check_api_rate_limit" },
+      { kind: "table", table: "public_rate_limits" },
+      { kind: "rpc", fn: "check_public_rate_limit" },
+    ],
+  },
 ];
