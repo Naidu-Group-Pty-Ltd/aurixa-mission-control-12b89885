@@ -1588,3 +1588,57 @@ After the carry lands on the clone's default branch, the next pass reads
 the reconciled held file: the import-graph keeps stop keeping, the deletion
 set propagates, and the delivered specs pass. The hold did its job — it
 made a person decide — and the engine's rules never bent.
+
+## The pointer and the provenance — the last consumer of a folded sha
+
+`clones.last_synced_sha` is a PRIME revision: `runDriftRefresh` measures
+commits-behind FROM it, in the prime repository, every quarter hour. When
+the fold made an event's `source_sha` permanent (the carrier's identity, a
+UNIQUE index over every commit event), it split two things that had always
+happened to agree: what CREATED a pass, and what the pass DELIVERED. The
+engine resolves prime's head at run time and every clone in the pass gets
+THAT tree — so on a folded carrier the two differ by exactly the folded
+commits.
+
+Every recorder was updated except one. The clone's own `commit_sha`, the
+pull request title, the commit message and the summary all say what
+shipped; `advanceClone` in the merge drain — the function that stamps the
+pointer after a drained merge — still read `cascade_events.source_sha`.
+Measured 16 Sep 2026, 15:15: npc-test-76b3b3 merged a cascade whose tree
+was prime@`7674f46`'s, was stamped with the carrier's provenance
+`fa292ce7`, 84 commits earlier, and the next drift scan wrote "Critical
+Sync: 84 commits behind Prime" onto a clone whose content matched prime's
+head byte for byte outside its designed exclusions. The two clones that
+synced the same hour through a fresh manual event read correctly — its
+provenance HAPPENED to equal the delivered head. A reading that depends on
+how the event came to exist is not a reading of the clone.
+
+Three rules close it:
+
+- **Every terminal verdict names the revision it is about.**
+  `cascade_results.delivered_sha` carries the head the pass resolved, on
+  every patch that asserts something about the clone's content: a merge, a
+  proposal, and both verified no-ops. Not on the no-modules skip (nothing
+  was compared), not on a failure, not on the dry run (never written).
+  Legacy rows stay NULL and the drain falls back to provenance for them —
+  an understatement inside a folded window, never an overstatement, gone
+  the first time a pass writes the column.
+
+- **A verified no-op advances the pointer exactly as a merge does.** The
+  pass compared trees and found nothing owed, which is the same
+  verification a merge gets, taken by effect seconds ago. The engine
+  stamps it directly — this is what lets a clone stamped from a folded
+  carrier read true again through the engine's own machinery, with nobody
+  editing the ledger by hand. The one skip that must NOT stamp is "already
+  proposed": its claim is conditional on a standing pull request, its
+  `pr_url` is what defers it, and reconciliation flips it to `succeeded`
+  when the proposal lands — where `advanceClone`, choosing by newest
+  EVENT, reads the newest verified head even when the merged branch was
+  cut for an older one.
+
+- **The choice is one shared rule.** `choosePointerAdvance`
+  (`cascade/syncPointer.pure.ts`) is what the drain derives through:
+  succeeded rows only, newest event first, the row's delivered head over
+  the event's provenance. The spelling `newest.source_sha` is banned from
+  the drain by test, because that is the exact line the 84-commit lie
+  lived in.
