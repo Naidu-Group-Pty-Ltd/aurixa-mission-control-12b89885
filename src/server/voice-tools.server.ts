@@ -425,11 +425,38 @@ async function readContext(identity: CallIdentity): Promise<Rec | null> {
   return data ?? null;
 }
 
+/**
+ * The caller's email address as the CRM may store it, or null.
+ *
+ * The VAPI tool has declared an `email` parameter since the org tools were
+ * created (`scripts/voice/create-vapi-org-tools.py`), and this handler read it
+ * nowhere — so every address a caller spelled out was discarded, and
+ * `crm_contacts.email` is null on every voice-created row. It is the only
+ * channel a booking confirmation can travel down.
+ *
+ * What arrives is TRANSCRIPTION, not a typed field: the agent writes down what
+ * it heard. So an address that does not parse is **dropped rather than
+ * stored** — a plausible-looking wrong address is worse than none, because
+ * every later confirmation goes to it and nothing here reads a bounce
+ * (`email-bounces.server.ts` scans a mailbox the voice path never touches).
+ */
+export function parseContactEmail(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim().toLowerCase();
+  if (!trimmed || trimmed.length > 254) return null;
+  // Deliberately not RFC 5322. One `@`, no whitespace, and a dotted domain is
+  // what separates an address from a mis-heard sentence; the rest of RFC 5322
+  // admits shapes no caller ever says out loud.
+  if (!/^[^\s@]+@[^\s@.]+(\.[^\s@.]+)+$/.test(trimmed)) return null;
+  return trimmed;
+}
+
 async function handleResolveContact(tc: ToolCall, message: Rec): Promise<Record<string, unknown>> {
   const identity = identityFrom(message, tc.args);
   const fullName: string = tc.args.full_name ?? tc.args.fullName ?? "";
   const firstNameArg: string = tc.args.first_name ?? tc.args.firstName ?? "";
   const lastNameArg: string = tc.args.last_name ?? tc.args.lastName ?? "";
+  const email = parseContactEmail(tc.args.email);
   const normalized = normalizePhone(identity.callerPhone);
 
   // 1) Search our CRM by phone.
@@ -438,7 +465,7 @@ async function handleResolveContact(tc: ToolCall, message: Rec): Promise<Record<
     const last9 = normalized.replace(/\D/g, "").slice(-9);
     const { data, error } = await supabaseAdmin
       .from("crm_contacts")
-      .select("id, account_id, first_name, last_name, phone")
+      .select("id, account_id, first_name, last_name, phone, email")
       .not("phone", "is", null)
       .ilike("phone", `%${last9}`)
       .limit(5);
@@ -449,6 +476,23 @@ async function handleResolveContact(tc: ToolCall, message: Rec): Promise<Record<
   if (matched) {
     const first = matched.first_name ?? "";
     const full = [matched.first_name, matched.last_name].filter(Boolean).join(" ");
+    /*
+     * Fill a blank, never overwrite. A stored address was typed by an operator
+     * or given in writing; this one was heard over a phone line, so it is the
+     * weaker evidence of the two and must not win. The existing value is left
+     * exactly as it is even when the caller says something different — that
+     * disagreement is for a person to resolve, not for a transcript.
+     */
+    if (email && !matched.email) {
+      const { error: emailError } = await supabaseAdmin
+        .from("crm_contacts")
+        .update({ email })
+        .eq("id", matched.id)
+        .is("email", null);
+      if (emailError) {
+        console.error("[voice-tools] contact email backfill failed:", emailError.message);
+      }
+    }
     await upsertContext(identity, {
       contact_id: matched.id,
       account_id: matched.account_id,
@@ -465,6 +509,7 @@ async function handleResolveContact(tc: ToolCall, message: Rec): Promise<Record<
       firstName: first,
       fullName: full,
       phone: identity.callerPhone,
+      email: matched.email ?? email ?? null,
       contactState: "RESOLVED",
       contactFound: true,
       contactCreated: false,
@@ -516,6 +561,9 @@ async function handleResolveContact(tc: ToolCall, message: Rec): Promise<Record<
       first_name: firstName,
       last_name: lastName,
       phone: normalized || identity.callerPhone,
+      // Omitted rather than written null when nothing parsed, so the column
+      // keeps its own default and a later operator edit is the first writer.
+      ...(email ? { email } : {}),
       is_primary: true,
     })
     .select("id")
@@ -563,6 +611,7 @@ async function handleResolveContact(tc: ToolCall, message: Rec): Promise<Record<
     firstName,
     fullName: displayName,
     phone: identity.callerPhone,
+    email: email ?? null,
     contactState: "RESOLVED",
     contactFound: false,
     contactCreated: true,
@@ -886,6 +935,24 @@ const HANDOFF_ROLE: Record<HandoffIntent, string> = {
 /**
  * Answer an assistant-request / transfer webhook: pick the specialist
  * assistant and re-inject the stored context as variableValues.
+ *
+ * **The two message kinds want different bodies, and this answered only one.**
+ * `voice-webhook.server.ts` routes `assistant-request` AND
+ * `transfer-destination-request` here and returns whatever comes back as the
+ * whole HTTP body. An `assistant-request` is answered with the assistant to
+ * run — `{ assistantId, assistantOverrides }`. A `transfer-destination-request`
+ * is answered with where to send the call — `{ destination: { type, ... } }` —
+ * and VAPI cannot read the first shape as the second. Both branches used to
+ * return the first, so the transfer path would have failed on a body that
+ * looked healthy from this end.
+ *
+ * Neither kind is reachable today: VAPI sends them only when they are listed
+ * in an assistant's `serverMessages`, and nothing in this repository sets that
+ * (the Front Desk prompt transfers by squad-member name, which VAPI resolves
+ * locally without asking anyone). This is a correctness fix for the day that
+ * changes, not a switch. Turning it on additionally needs `serverMessages` on
+ * the assistants and a prompt that stops the silent by-name transfer — which
+ * would replace a path that is proven working, so it is a separate decision.
  */
 export async function routeHandoff(message: Rec): Promise<Rec | null> {
   const call = asRecord(message.call);
@@ -918,7 +985,7 @@ export async function routeHandoff(message: Rec): Promise<Rec | null> {
 
   const { data: agent, error } = await supabaseAdmin
     .from("voice_agents")
-    .select("vapi_assistant_id")
+    .select("vapi_assistant_id, name")
     .eq("role", HANDOFF_ROLE[intent])
     .eq("is_active", true)
     .maybeSingle();
@@ -929,17 +996,45 @@ export async function routeHandoff(message: Rec): Promise<Rec | null> {
   if (!agent) return null;
 
   const now = new Date();
+  const variableValues = {
+    firstName: ctx?.first_name ?? "",
+    fullName: ctx?.full_name ?? "",
+    contactId: ctx?.contact_id ?? "",
+    callerPhone: identity.callerPhone,
+    currentDate: now.toISOString(),
+    currentDateUnix: Math.floor(now.getTime() / 1000),
+  };
+
+  if (message.type === "transfer-destination-request") {
+    /*
+     * A transfer destination names a squad member BY NAME — the assistant id
+     * is not the key here, which is why `name` is selected above. An agent row
+     * with no name cannot be transferred to, and answering with a nameless
+     * destination would be a body VAPI rejects, so this refuses instead and
+     * the webhook reports `no_handoff_destination_configured`.
+     */
+    const assistantName: string = agent.name ?? "";
+    if (!assistantName) {
+      console.error(
+        `[voice-tools] handoff agent ${agent.vapi_assistant_id} has no name, ` +
+          "so there is no destination to transfer to",
+      );
+      return null;
+    }
+    return {
+      destination: {
+        type: "assistant",
+        assistantName,
+        description: `Handoff to the ${intent} specialist.`,
+      },
+      // The overrides ride along so the specialist opens holding the same
+      // context the caller already gave, exactly as on the other branch.
+      assistantOverrides: { variableValues },
+    };
+  }
+
   return {
     assistantId: agent.vapi_assistant_id,
-    assistantOverrides: {
-      variableValues: {
-        firstName: ctx?.first_name ?? "",
-        fullName: ctx?.full_name ?? "",
-        contactId: ctx?.contact_id ?? "",
-        callerPhone: identity.callerPhone,
-        currentDate: now.toISOString(),
-        currentDateUnix: Math.floor(now.getTime() / 1000),
-      },
-    },
+    assistantOverrides: { variableValues },
   };
 }
