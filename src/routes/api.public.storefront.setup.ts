@@ -4,7 +4,7 @@ import { startHandoffCardSetup, startUidCardSetup } from "@/server/checkout.serv
 import { normalizeBillingContact } from "@/server/billing-contact.server";
 import { storefrontPricingBase } from "@/server/billing-handoffs.server";
 import { storefrontJson, storefrontPreflight } from "@/server/storefront-cors.server";
-import { checkRateLimit } from "@/server/token-rate-limit.server";
+import { checkPublicRateLimit } from "@/server/token-rate-limit.server";
 
 // A buyer clicks Buy a handful of times at most; the limit is set to leave
 // real behaviour untouched while capping what one credential can mint.
@@ -74,8 +74,9 @@ export const Route = createFileRoute("/api/public/storefront/setup")({
         // Stripe Checkout Session and may create a Customer. The sibling
         // `tokens.*`, `seats.*` and `billing.*` public routes all limit; this
         // family did not, and it is the family reachable with no secret at all.
-        const rl = await checkRateLimit(
-          `storefront:setup:${data.h ?? data.uid}`,
+        const rl = await checkPublicRateLimit(
+          "storefront:setup",
+          data.h ?? data.uid ?? "",
           STOREFRONT_CHECKOUT_LIMIT,
         );
         if (!rl.ok) {

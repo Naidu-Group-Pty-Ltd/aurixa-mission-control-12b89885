@@ -77,7 +77,7 @@ export const Route = createFileRoute("/api/public/clones/gate/checkout")({
 
         // A checkout mints a Stripe Session and may create a Customer. Held to
         // the same limit as the storefront's own checkout for the same reason.
-        const rl = await checkRateLimit(`gate:checkout:${key.id}`, 12);
+        const rl = await checkRateLimit(key.id, 12, "gate:checkout");
         if (!rl.ok) {
           return jsonResponse(
             { ok: false, error: "rate_limited", retry_after_seconds: rl.retry_after_seconds },

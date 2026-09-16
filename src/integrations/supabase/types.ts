@@ -8995,6 +8995,27 @@ export type Database = {
         }
         Relationships: []
       }
+      public_rate_limits: {
+        Row: {
+          count: number
+          identity: string
+          scope: string
+          window_start: string
+        }
+        Insert: {
+          count?: number
+          identity: string
+          scope: string
+          window_start: string
+        }
+        Update: {
+          count?: number
+          identity?: string
+          scope?: string
+          window_start?: string
+        }
+        Relationships: []
+      }
       purchases: {
         Row: {
           amount_cents: number | null
@@ -11052,16 +11073,19 @@ export type Database = {
       }
       token_api_rate_limits: {
         Row: {
+          bucket: string
           count: number
           key_id: string
           window_start: string
         }
         Insert: {
+          bucket?: string
           count?: number
           key_id: string
           window_start: string
         }
         Update: {
+          bucket?: string
           count?: number
           key_id?: string
           window_start?: string
@@ -12503,7 +12527,11 @@ export type Database = {
         Returns: Json
       }
       check_api_rate_limit: {
-        Args: { _key_id: string; _limit?: number }
+        Args: { _bucket?: string; _key_id: string; _limit?: number }
+        Returns: Json
+      }
+      check_public_rate_limit: {
+        Args: { _identity: string; _limit?: number; _scope: string }
         Returns: Json
       }
       cleanup_billing_attribution: { Args: never; Returns: Json }

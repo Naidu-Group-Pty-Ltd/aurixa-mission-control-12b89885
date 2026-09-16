@@ -501,4 +501,14 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260916160000",
     assertions: [{ kind: "column", table: "cascade_results", column: "delivered_sha" }],
   },
+  {
+    migration: "20260916170000_rate_limit_bucket_and_public.sql",
+    version: "20260916170000",
+    assertions: [
+      { kind: "column", table: "token_api_rate_limits", column: "bucket" },
+      { kind: "rpc", fn: "check_api_rate_limit" },
+      { kind: "table", table: "public_rate_limits" },
+      { kind: "rpc", fn: "check_public_rate_limit" },
+    ],
+  },
 ];
