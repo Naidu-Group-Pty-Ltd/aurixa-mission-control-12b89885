@@ -538,4 +538,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       },
     ],
   },
+  {
+    migration: "20260916200000_appointment_booked_notification.sql",
+    version: "20260916200000",
+    assertions: [{ kind: "enum", type: "notification_kind" }],
+  },
 ];

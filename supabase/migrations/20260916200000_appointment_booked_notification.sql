@@ -1,0 +1,24 @@
+-- @asserts enum:notification_kind
+--
+-- The alarm a booking raises.
+--
+-- Until now a booked appointment told nobody. `onAppointmentScheduled`
+-- advanced the journey stage and queued the confirmation and reminder CALLS,
+-- and stopped there -- while every booking agent's prompt promises the caller
+-- that "the team confirms by email, usually within one business day". That
+-- sentence was true only while somebody happened to be watching the tracker.
+--
+-- The notification is the half that does not depend on an address. Most
+-- contacts the voice path created carry `crm_contacts.email = NULL`, because
+-- `resolve_contact` declared an `email` parameter and read it nowhere, so for
+-- every one of those bookings the operator notice IS the confirmation channel.
+--
+-- Its own value rather than an existing one. `crm_task_assigned` is the
+-- closest that exists and it means something different -- the mute list in
+-- `notification_preferences.muted_kinds` is keyed on this enum, so folding a
+-- booking into a task kind would mean silencing one silences the other.
+--
+-- ALTER TYPE lives in its own migration on purpose: a new enum value cannot be
+-- added and used in the same transaction, and this corpus already keeps them
+-- apart for that reason (20260729231801, 20260518181137, 20260828020000).
+ALTER TYPE public.notification_kind ADD VALUE IF NOT EXISTS 'crm_appointment_booked';

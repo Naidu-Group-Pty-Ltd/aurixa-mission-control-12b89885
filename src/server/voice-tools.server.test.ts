@@ -8,6 +8,7 @@ import {
   classifyHandoffIntent,
   extractToolCalls,
   orderSlotsByPreference,
+  parseContactEmail,
   parseSlotPreference,
   slotMatchesPreference,
   toolEnvelope,
@@ -110,6 +111,47 @@ describe("candidateSlots", () => {
 
   it("starts every slot on a half hour", () => {
     for (const s of slots) expect(s.getTime() % (30 * 60_000)).toBe(0);
+  });
+});
+
+/*
+ * The caller's email address. The VAPI tool has declared this parameter since
+ * the org tools were created and the handler read it nowhere, so
+ * `crm_contacts.email` is null on every voice-created contact — and it is the
+ * only channel a booking confirmation can travel down.
+ *
+ * What arrives is transcription, so the rule these pin is that an address
+ * which does not parse is DROPPED. A plausible-looking wrong address is worse
+ * than none: every later confirmation goes to it and nothing here reads a
+ * bounce.
+ */
+describe("parseContactEmail", () => {
+  it("takes an ordinary address, trimmed and lower-cased", () => {
+    expect(parseContactEmail("  Jane.Citizen@Example.COM ")).toBe("jane.citizen@example.com");
+    expect(parseContactEmail("a@b.co")).toBe("a@b.co");
+    expect(parseContactEmail("first+tag@sub.domain.com.au")).toBe("first+tag@sub.domain.com.au");
+  });
+
+  it("drops what a phone line mis-hears rather than storing it", () => {
+    expect(parseContactEmail("jane dot citizen at example dot com")).toBeNull();
+    expect(parseContactEmail("jane@example")).toBeNull(); // no dotted domain
+    expect(parseContactEmail("jane@@example.com")).toBeNull();
+    expect(parseContactEmail("jane @example.com")).toBeNull();
+    expect(parseContactEmail("@example.com")).toBeNull();
+    expect(parseContactEmail("jane@.com")).toBeNull();
+  });
+
+  it("treats an absent or non-string value as no address", () => {
+    expect(parseContactEmail(undefined)).toBeNull();
+    expect(parseContactEmail(null)).toBeNull();
+    expect(parseContactEmail("")).toBeNull();
+    expect(parseContactEmail("   ")).toBeNull();
+    expect(parseContactEmail(42)).toBeNull();
+    expect(parseContactEmail({ address: "jane@example.com" })).toBeNull();
+  });
+
+  it("refuses a value too long for the column's purpose", () => {
+    expect(parseContactEmail(`${"a".repeat(250)}@example.com`)).toBeNull();
   });
 });
 

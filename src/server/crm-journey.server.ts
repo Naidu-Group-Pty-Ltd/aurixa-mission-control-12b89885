@@ -8,6 +8,13 @@
 // platform.client_stage_changed events can read these unmodified.
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import type { Database, Json } from "@/integrations/supabase/types";
+import {
+  operatorBookingNotice,
+  planConfirmationEmail,
+  type AppointmentConfirmationInput,
+} from "@/lib/appointmentConfirmation.pure";
+import { notifyOperators } from "@/server/audit.server";
+import { defaultMailbox, isGraphConfigured, sendMail } from "@/server/graph-client";
 import { enqueueOutboundForTrigger, type EnqueueOutcome } from "@/server/voice.server";
 
 type VoiceTriggerType = Database["public"]["Enums"]["voice_trigger_type"];
@@ -224,17 +231,162 @@ export async function recordJourneySignal(input: {
 
 /* ------------------------------- appointments ------------------------------ */
 
+type ScheduledAppointment = {
+  id: string;
+  kind: AppointmentKind;
+  starts_at: string;
+  timezone: string | null;
+  contact_id: string | null;
+  metadata: Json | null;
+};
+
+/**
+ * Tell the caller and the operators that an appointment exists.
+ *
+ * Composition and the decision to send live in
+ * `@/lib/appointmentConfirmation.pure`; this half is the reads, the send and
+ * the record of what happened.
+ *
+ * Three rules hold it. **The operator notice is unconditional** — it is what
+ * makes the agent's spoken promise keepable when no address was captured, so
+ * an absent email makes it more important rather than less. **The send is
+ * never retried**: `sendMail` answers `sent` / `refused` / `throttled` /
+ * `unconfirmed` precisely because a failure after the request left the isolate
+ * cannot say whether a message exists, and resending on that is the duplicate
+ * the whole outcome type was built to prevent. And **nothing here throws** —
+ * the booking is already written, so a mailbox fault must cost a log line and
+ * a notice, never the appointment.
+ */
+async function announceAppointment(appointment: ScheduledAppointment): Promise<void> {
+  try {
+    /*
+     * Once per appointment. `onAppointmentScheduled` has two callers — the
+     * voice tool and the tracker UI — and nothing stops either running again
+     * for a row that already exists. A second notification is noise; a second
+     * email is the duplicate `sendMail`'s whole outcome type exists to
+     * prevent, so the stamp is the guard.
+     *
+     * Only a message that actually WENT closes it. A `not_sent`, `refused`,
+     * `throttled` or `unconfirmed` stamp leaves this open deliberately:
+     * `unconfirmed` is the one case where a resend could duplicate, and it is
+     * also the one case where refusing to try again could mean the customer
+     * hears nothing at all — so that judgement stays with a person reading the
+     * operator notice rather than being silently taken here.
+     */
+    const priorStamp =
+      appointment.metadata && typeof appointment.metadata === "object"
+        ? (appointment.metadata as Record<string, unknown>).confirmation_email
+        : null;
+    if (
+      priorStamp &&
+      typeof priorStamp === "object" &&
+      (priorStamp as Record<string, unknown>).status === "sent"
+    ) {
+      return;
+    }
+
+    let contact: { first_name: string; last_name: string | null; email: string | null } | null =
+      null;
+    if (appointment.contact_id) {
+      const { data, error } = await supabaseAdmin
+        .from("crm_contacts")
+        .select("first_name, last_name, email")
+        .eq("id", appointment.contact_id)
+        .maybeSingle();
+      if (error) {
+        // A failed read is not an absent contact. Say so, then carry on with
+        // what is known — the operators still get told a booking happened.
+        console.error("[journey] contact read for confirmation failed:", error.message);
+      }
+      contact = data ?? null;
+    }
+
+    const firstName = contact?.first_name ?? "";
+    const input: AppointmentConfirmationInput = {
+      sessionLabel: SESSION_LABEL[appointment.kind] ?? null,
+      startsAt: appointment.starts_at,
+      timezone: appointment.timezone ?? "Australia/Sydney",
+      firstName,
+      fullName: [contact?.first_name, contact?.last_name].filter(Boolean).join(" "),
+      email: contact?.email ?? null,
+      graphConfigured: isGraphConfigured(),
+      mailbox: defaultMailbox(),
+    };
+
+    const plan = planConfirmationEmail(input);
+    let stamp: Record<string, unknown>;
+
+    if (!plan.send) {
+      stamp = { status: "not_sent", reason: plan.reason, at: new Date().toISOString() };
+    } else {
+      const outcome = await sendMail(plan.mailbox, {
+        subject: plan.subject,
+        body: { contentType: "HTML", content: plan.html },
+        toRecipients: [{ emailAddress: { address: plan.to } }],
+      });
+      stamp = { status: outcome.kind, to: plan.to, at: new Date().toISOString() };
+      if (outcome.kind !== "sent") {
+        console.error(
+          `[journey] confirmation email for appointment ${appointment.id} came back ` +
+            `${outcome.kind}; it is NOT resent, and the operator notice says so`,
+        );
+      }
+    }
+
+    const notice = operatorBookingNotice(input, plan);
+    await notifyOperators({
+      kind: "crm_appointment_booked",
+      severity: "info",
+      title: notice.title,
+      body: notice.body,
+      url: "/crm",
+      metadata: { appointment_id: appointment.id, confirmation_email: stamp },
+    });
+
+    // Stamped on the row so the fact survives the notification being read and
+    // dismissed. `metadata` is merged rather than replaced — it is a shared
+    // bag, and the tracker writes to it too.
+    const existing =
+      appointment.metadata && typeof appointment.metadata === "object"
+        ? (appointment.metadata as Record<string, unknown>)
+        : {};
+    const { error: stampError } = await supabaseAdmin
+      .from("crm_appointments")
+      .update({ metadata: { ...existing, confirmation_email: stamp } as Json })
+      .eq("id", appointment.id);
+    if (stampError) {
+      console.error("[journey] confirmation stamp failed:", stampError.message);
+    }
+  } catch (err) {
+    console.error("[journey] appointment announcement failed:", (err as Error).message);
+  }
+}
+
 export async function onAppointmentScheduled(
   appointmentId: string,
   actorUserId?: string | null,
 ): Promise<EnqueueOutcome | null> {
   const { data: appointment, error } = await supabaseAdmin
     .from("crm_appointments")
-    .select("id, kind, starts_at, journey_id, contact_id, account_id")
+    .select("id, kind, starts_at, timezone, journey_id, contact_id, account_id, metadata")
     .eq("id", appointmentId)
     .maybeSingle();
   if (error) throw error;
   if (!appointment) return null;
+
+  /*
+   * Tell somebody. This sits HERE, above every early return below, for two
+   * reasons. It is the seam both booking paths pass through — the voice agent
+   * and the tracker UI — so neither can book silently. And the returns below
+   * are conditional on a journey and on the kind having triggers, which is
+   * exactly how the last silent failure in this function stayed invisible: an
+   * appointment with `journey_id: null` skipped everything and said nothing.
+   *
+   * It never throws. The appointment row is already written by the time we get
+   * here, and failing a booking because a mailbox was unreachable would turn a
+   * courtesy into an outage.
+   */
+  await announceAppointment(appointment);
 
   // Booking an appointment advances the journey to its matching stage.
   if (appointment.journey_id) {
