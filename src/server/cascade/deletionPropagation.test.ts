@@ -202,6 +202,44 @@ describe("what still imports it", () => {
       withholdReferencedDeletions(deletes, { "src/a.ts": `import x from "react";` })[0].act,
     ).toBe("delete");
   });
+
+  it("is single-pass by design — a kept file's own imports need the engine's closure loop", () => {
+    /* Measured 16 Sep 2026 on npc-client#189: held `src/App.tsx` imports
+       `BuilderPortalAdmin.tsx`, which imports `BuilderOrganisationDialog`;
+       prime deleted both in one commit (`d545665`, "the builder portal
+       leaves the prime, one way"). One pass kept the page and deleted the
+       dialog — an importer without its import, a tree that cannot build.
+       A kept file IS an old prime version, and an old prime version imports
+       exactly what prime deleted beside it. The engine reads each newly
+       kept file and re-runs until nothing more flips; this pins the pure
+       half of that contract: the pass is monotone (an earlier keep is never
+       revisited) and the enlarged survivor set finishes the chain. */
+    const chain: DeletionVerdict[] = [
+      { act: "delete", path: "src/pages/admin/BuilderPortalAdmin.tsx", deletedIn: "d545665" },
+      {
+        act: "delete",
+        path: "src/components/admin/builder-portal/BuilderOrganisationDialog.tsx",
+        deletedIn: "d545665",
+      },
+    ];
+    const held = {
+      "src/App.tsx": `import BuilderPortalAdmin from "./pages/admin/BuilderPortalAdmin";`,
+    };
+    const onePass = withholdReferencedDeletions(chain, held);
+    expect(onePass[0]).toMatchObject({ act: "keep", reason: "still_referenced" });
+    expect(onePass[1].act).toBe("delete"); // the gap the closure exists for
+
+    const survivors = {
+      ...held,
+      "src/pages/admin/BuilderPortalAdmin.tsx":
+        `import { BuilderOrganisationDialog } from ` +
+        `"@/components/admin/builder-portal/BuilderOrganisationDialog";`,
+    };
+    const twoPass = withholdReferencedDeletions(onePass, survivors);
+    expect(twoPass[0]).toMatchObject({ act: "keep", reason: "still_referenced" });
+    expect(twoPass[1]).toMatchObject({ act: "keep", reason: "still_referenced" });
+    expect((twoPass[1] as { why: string }).why).toContain("BuilderPortalAdmin");
+  });
 });
 
 describe("which candidates get asked about first", () => {
@@ -426,6 +464,28 @@ describe("the rules the engine has to keep", () => {
     expect(withholdAt).toBeGreaterThan(-1);
     expect(planAt).toBeGreaterThan(withholdAt);
     expect(treeAt).toBeGreaterThan(planAt);
+  });
+
+  it("closes the reference check over its own keeps — a withheld deletion is a survivor too", () => {
+    /* One pass kept `BuilderPortalAdmin.tsx` for held App.tsx and still
+       deleted the dialog only that page imports (npc-client#189, 16 Sep
+       2026). The engine must read each newly kept file and re-run the
+       withhold until nothing more flips. */
+    const loopAt = code.indexOf("const unreadableSurvivors = new Set<string>();");
+    expect(loopAt).toBeGreaterThan(code.indexOf("withholdReferencedDeletions(deletionVerdicts"));
+    const loop = code.slice(loopAt, loopAt + 1_800);
+    expect(loop).toContain('.filter((v) => v.act === "keep" && v.reason === "still_referenced")');
+    expect(loop).toContain("if (unread.length === 0) break;");
+    // Re-runs with the enlarged survivor set, inside the loop.
+    expect(loop).toContain(
+      "deletionVerdicts = withholdReferencedDeletions(deletionVerdicts, surviving);",
+    );
+    // An unreadable survivor is excused, never invented as empty content —
+    // and a rate limit defers the clone rather than shipping unverified.
+    expect(loop).toContain("unreadableSurvivors.add(path);");
+    expect(loop).toContain('if (classifyGitHubFailure(e).kind === "rate_limited") throw e;');
+    // The plan still reads the post-closure verdicts.
+    expect(code.indexOf("planDeletions(deletionVerdicts")).toBeGreaterThan(loopAt);
   });
 
   it("rotates the probe window by the pass's own prime SHA", () => {
