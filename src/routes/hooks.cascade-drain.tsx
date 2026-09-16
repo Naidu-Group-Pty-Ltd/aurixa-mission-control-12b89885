@@ -18,6 +18,12 @@ import {
   supersededSummary,
   type FoldableEvent,
 } from "@/server/cascade/eventFold.pure";
+import { beaconSummary, decideDriftBeacon } from "@/server/cascade/driftBeacon.pure";
+import {
+  createCascadeForAllClones,
+  findCommitCascadeForSha,
+} from "@/server/cascade-trigger.server";
+import { getAppOctokit } from "@/server/github-app.server";
 
 const admin = supabaseAdmin;
 const STALL_MINUTES = 10;
@@ -302,6 +308,100 @@ async function claimOne(): Promise<{ id: string; attempts: number } | null> {
   return claimed ?? null;
 }
 
+/**
+ * The level trigger under the edge trigger.
+ *
+ * Runs only on a tick that claimed nothing — the queue is idle — and asks
+ * whether prime's head has a cascade event at all. A lost `push` delivery is
+ * the one hole every other mechanism here shares: fold, claim, defer and
+ * reclaim all operate on events that EXIST, and a delivery that never
+ * arrived created none. `decideDriftBeacon` (cascade/driftBeacon.pure.ts)
+ * owns the refusals; the synthesis goes through `createCascadeForAllClones`
+ * so the SHA dedupe and the unique index make the beacon once-per-SHA even
+ * against a webhook racing it in either order.
+ *
+ * Never fails the tick: the beacon is insurance, and insurance that can
+ * take down the drain it protects is a second webhook problem. Every
+ * failure is logged and answered `null`.
+ */
+async function raiseDriftBeacon(): Promise<string | null> {
+  try {
+    const { data: pendingRows, error: pendingErr } = await admin
+      .from("cascade_events")
+      .select("id")
+      .eq("status", "pending")
+      .eq("trigger", "commit")
+      .is("worker_started_at", null)
+      .lt("attempts", MAX_ATTEMPTS)
+      .limit(1);
+    const claimableCommitEvents = pendingErr ? null : (pendingRows ?? []).length;
+
+    // Prime and its head, read only once the queue is known idle — the
+    // beacon's steady-state cost is one branch read a tick, and only on
+    // ticks that did nothing else.
+    const { data: prime, error: primeErr } = await admin
+      .from("prime_config")
+      .select("github_owner, github_repo, default_branch, default_cascade_mode")
+      .limit(1)
+      .maybeSingle();
+    if (primeErr || !prime) {
+      return null;
+    }
+    let headSha: string | null = null;
+    if (claimableCommitEvents === 0) {
+      try {
+        const octokit = getAppOctokit();
+        const { data: br } = await octokit.repos.getBranch({
+          owner: prime.github_owner,
+          repo: prime.github_repo,
+          branch: prime.default_branch || "main",
+        });
+        headSha = br.commit.sha;
+      } catch (e) {
+        console.warn(
+          "[cascade-drain] beacon could not read prime's head:",
+          e instanceof Error ? e.message : String(e),
+        );
+        headSha = null;
+      }
+    }
+    let headEventExists: boolean | null = null;
+    if (headSha) {
+      const existing = await findCommitCascadeForSha(admin, headSha);
+      headEventExists = existing.failed ? null : existing.eventId !== null;
+    }
+
+    const verdict = decideDriftBeacon({ claimableCommitEvents, headSha, headEventExists });
+    if (!verdict.fire || !headSha) return null;
+
+    const created = await createCascadeForAllClones({
+      supabase: admin,
+      mode: prime.default_cascade_mode,
+      trigger: "commit",
+      sourceBranch: prime.default_branch || "main",
+      sourceSha: headSha,
+      initiatedBy: null,
+      summary: beaconSummary(headSha),
+    });
+    if (!created.eventId || created.alreadyExisted) return null;
+
+    const { writeAuditLog } = await import("@/server/audit.server");
+    await writeAuditLog({
+      action: "cascade.drift_beacon",
+      entityType: "cascade_event",
+      entityId: created.eventId,
+      metadata: { source_sha: headSha, reason: "no event for prime's head on an idle tick" },
+    });
+    return created.eventId;
+  } catch (e) {
+    console.error(
+      "[cascade-drain] drift beacon failed:",
+      e instanceof Error ? e.message : String(e),
+    );
+    return null;
+  }
+}
+
 async function drainOne(
   budget: CascadeBudget,
 ): Promise<{ processed: boolean; ok?: boolean; held?: string; error?: string }> {
@@ -393,8 +493,12 @@ export const Route = createFileRoute("/hooks/cascade-drain")({
             if (!r.processed) break;
             results.push({ ok: r.ok, held: r.held, error: r.error });
           }
+          // Only an idle tick asks the drift question: a tick that claimed
+          // work is following prime already, and a deferred carrier waiting
+          // out a rate-limit window counts as claimed-later, not as drift.
+          const beacon = results.length === 0 ? await raiseDriftBeacon() : null;
           return new Response(
-            JSON.stringify({ success: true, processed: results.length, folded, results }),
+            JSON.stringify({ success: true, processed: results.length, folded, beacon, results }),
             { headers: { "Content-Type": "application/json" } },
           );
         } catch (e) {
