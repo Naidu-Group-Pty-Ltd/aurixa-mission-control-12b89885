@@ -7,6 +7,9 @@ import {
   classifyBookingIntent,
   classifyHandoffIntent,
   extractToolCalls,
+  orderSlotsByPreference,
+  parseSlotPreference,
+  slotMatchesPreference,
   toolEnvelope,
 } from "./voice-tools.server";
 
@@ -123,5 +126,93 @@ describe("classifyHandoffIntent", () => {
 
   it("defaults to the solutions advisor when nothing scores", () => {
     expect(classifyHandoffIntent("hello there")).toBe("solutions");
+  });
+});
+
+/*
+ * The caller's preferred day. `check_availability` accepted
+ * `preferred_date_text` from the day it was registered and threw it away, so
+ * "Thursday afternoon would suit" was answered with the first eight
+ * chronological slots. These pin the two halves that matter: what is
+ * understood, and that understanding it REORDERS rather than removes.
+ *
+ * September 2026 is AEST (UTC+10) — DST starts on the first Sunday in
+ * October — so the instants below are unambiguous.
+ */
+const FRI_0900 = new Date("2026-09-17T23:00:00Z"); // Fri 18 Sep 09:00 Sydney
+const FRI_1300 = new Date("2026-09-18T03:00:00Z"); // Fri 18 Sep 13:00 Sydney
+const MON_0900 = new Date("2026-09-20T23:00:00Z"); // Mon 21 Sep 09:00 Sydney
+
+describe("parseSlotPreference", () => {
+  it("reads a weekday, however the caller abbreviates it", () => {
+    expect(parseSlotPreference("thursday would suit").weekday).toBe(4);
+    expect(parseSlotPreference("how about thurs?").weekday).toBe(4);
+    expect(parseSlotPreference("tues is better for me").weekday).toBe(2);
+  });
+
+  it("reads the part of the day", () => {
+    expect(parseSlotPreference("some time in the morning").partOfDay).toBe("morning");
+    expect(parseSlotPreference("afternoon please").partOfDay).toBe("afternoon");
+  });
+
+  it("resolves a relative day against Sydney, not the server clock", () => {
+    // 15:00 UTC on the 17th is already 01:00 on the 18th in Sydney, so
+    // "tomorrow" is the 19th. A UTC-based reading would answer the 18th —
+    // which is the whole reason this goes through sydneyParts.
+    const pref = parseSlotPreference("tomorrow", new Date("2026-09-17T15:00:00Z"));
+    expect(pref.dayOfMonth).toBe(19);
+    expect(pref.month).toBe(9);
+  });
+
+  it("stays unrecognised rather than guessing", () => {
+    expect(parseSlotPreference("").recognised).toBe(false);
+    expect(parseSlotPreference("whenever you like").recognised).toBe(false);
+    expect(parseSlotPreference(null).recognised).toBe(false);
+  });
+
+  it("does not read a clock time as a day of the month", () => {
+    expect(parseSlotPreference("around 10 am").dayOfMonth).toBeNull();
+  });
+});
+
+describe("slotMatchesPreference", () => {
+  it("tests every stated constraint and ignores the unstated ones", () => {
+    const fridayAfternoon = parseSlotPreference("friday afternoon");
+    expect(slotMatchesPreference(FRI_1300, fridayAfternoon)).toBe(true);
+    expect(slotMatchesPreference(FRI_0900, fridayAfternoon)).toBe(false);
+    expect(slotMatchesPreference(MON_0900, fridayAfternoon)).toBe(false);
+
+    const anyMorning = parseSlotPreference("morning");
+    expect(slotMatchesPreference(FRI_0900, anyMorning)).toBe(true);
+    expect(slotMatchesPreference(MON_0900, anyMorning)).toBe(true);
+  });
+});
+
+describe("orderSlotsByPreference", () => {
+  const slots = [FRI_0900, FRI_1300, MON_0900];
+
+  it("is a sort, never a filter — nothing is dropped", () => {
+    const ordered = orderSlotsByPreference(slots, parseSlotPreference("monday"));
+    expect(ordered).toHaveLength(3);
+    expect(new Set(ordered.map((d) => d.getTime()))).toEqual(
+      new Set(slots.map((d) => d.getTime())),
+    );
+  });
+
+  it("puts the preferred slots first and keeps each half in time order", () => {
+    const ordered = orderSlotsByPreference(slots, parseSlotPreference("monday"));
+    expect(ordered[0]).toBe(MON_0900);
+    expect(ordered[1]).toBe(FRI_0900);
+    expect(ordered[2]).toBe(FRI_1300);
+  });
+
+  it("leaves the list untouched when nothing was understood", () => {
+    const pref = parseSlotPreference("whenever suits you");
+    expect(orderSlotsByPreference(slots, pref)).toBe(slots);
+  });
+
+  it("still offers everything when the preference cannot be met", () => {
+    const ordered = orderSlotsByPreference([FRI_0900, FRI_1300], parseSlotPreference("sunday"));
+    expect(ordered).toHaveLength(2);
   });
 });

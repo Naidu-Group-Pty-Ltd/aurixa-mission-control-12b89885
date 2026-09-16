@@ -7,6 +7,7 @@
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import type { Database, Json } from "@/integrations/supabase/types";
 import { notifyOperators, writeAuditLog } from "@/server/audit.server";
+import { CALL_INTENTS } from "@/lib/voice-vocab";
 
 type VoiceTriggerType = Database["public"]["Enums"]["voice_trigger_type"];
 type CampaignRule = Database["public"]["Tables"]["voice_campaign_rules"]["Row"];
@@ -913,6 +914,22 @@ type TranscriptAnalysis = {
 const SENTIMENTS = new Set(["positive", "neutral", "negative", "mixed"]);
 
 /**
+ * The intent vocabulary is `voice-vocab.ts`'s, imported rather than restated.
+ *
+ * It was restated, and the two copies disagreed. The analyser asked the model
+ * for the NPC set — `discovery_booking`, `strategy_booking`, `finance_consult`,
+ * `general_inquiry` — while `CALL_INTENTS` had already moved to the Aurixa
+ * funnel and `/voice/calls` builds its filter from that. So six of the seven
+ * options in that filter could never match a row, and every stored intent
+ * except `general_inquiry` was a value the page could neither label nor find.
+ *
+ * An unrecognised intent is stored as NULL rather than verbatim: a model is
+ * being asked to pick from a list, and a value outside it is a failure to
+ * answer the question, not a new category. Absent beats invented.
+ */
+const INTENT_SET = new Set<string>(CALL_INTENTS);
+
+/**
  * Post-call analysis, only when OPENAI_API_KEY is configured. Absent a key the
  * call is stored with `aiAnalyzed: false` and no sentiment — an honest blank
  * beats a guessed clear.
@@ -936,10 +953,15 @@ async function analyzeTranscript(
           {
             role: "system",
             content:
-              "You analyse property-consulting voice call transcripts. Reply with ONLY a JSON object with keys: " +
+              "You analyse voice call transcripts for Aurixa Systems, a B2B provider of governed AI " +
+              "operating platforms for Australian property, finance and advisory firms. Callers are " +
+              "applying for priority access, completing a Business Readiness Questionnaire, booking or " +
+              "attending a strategic review, discussing platform capability or pricing, or raising " +
+              "support. Reply with ONLY a JSON object with keys: " +
               "customerName (string|null — the CUSTOMER's spoken name, never the agent's, null if not stated), " +
               'sentiment ("positive"|"neutral"|"negative"|"mixed"), keyTopics (string[] max 5), ' +
-              "actionItems (string[] max 5), callIntent (one of discovery_booking, strategy_booking, finance_consult, general_inquiry), " +
+              `actionItems (string[] max 5), callIntent (exactly one of ${CALL_INTENTS.join(", ")}; ` +
+              "use general_inquiry when none of the others fits rather than inventing a value), " +
               "rootCauseCategory (string|null — only for negative calls: pricing_objection, service_complaint, agent_confusion, long_hold_time, unresolved_query, technical_issue, miscommunication, customer_frustration, wrong_transfer, information_gap), " +
               "escalationSeverity (1-5|null — only for negative calls), aiRecommendations (string[] max 3|null), " +
               "negativeSentimentMoment (object|null with quote and context), recoveryPriority (1-5|null).",
@@ -973,7 +995,10 @@ async function analyzeTranscript(
       sentiment: SENTIMENTS.has(parsed.sentiment) ? parsed.sentiment : null,
       keyTopics: strArray(parsed.keyTopics, 5),
       actionItems: strArray(parsed.actionItems, 5),
-      callIntent: typeof parsed.callIntent === "string" ? parsed.callIntent : null,
+      callIntent:
+        typeof parsed.callIntent === "string" && INTENT_SET.has(parsed.callIntent)
+          ? parsed.callIntent
+          : null,
       rootCauseCategory:
         typeof parsed.rootCauseCategory === "string" ? parsed.rootCauseCategory : null,
       escalationSeverity: clampScale(parsed.escalationSeverity),
