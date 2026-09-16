@@ -900,6 +900,7 @@ export type Database = {
           commit_sha: string | null
           completed_at: string | null
           created_at: string
+          delivered_sha: string | null
           diff_summary: string | null
           error_message: string | null
           files_changed: number
@@ -917,6 +918,7 @@ export type Database = {
           commit_sha?: string | null
           completed_at?: string | null
           created_at?: string
+          delivered_sha?: string | null
           diff_summary?: string | null
           error_message?: string | null
           files_changed?: number
@@ -934,6 +936,7 @@ export type Database = {
           commit_sha?: string | null
           completed_at?: string | null
           created_at?: string
+          delivered_sha?: string | null
           diff_summary?: string | null
           error_message?: string | null
           files_changed?: number

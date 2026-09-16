@@ -7,10 +7,12 @@
 //   { results: [{ toolCallId, result: "<stringified JSON>" }] }
 // VAPI matches results to calls by id; a bare JSON body is silently ignored.
 //
-// Availability is deterministic, not model-resolved: the Make classifier's
-// business rules (Mon–Fri 13:00–18:00 Australia/Sydney, no same-day, default
-// 30 minutes) are code here, so a compliance-adjacent promise like "we can do
-// Tuesday at 3" never depends on a model's date arithmetic.
+// Availability is deterministic, not model-resolved: the strategic-review
+// booking rules are code here (see BOOKING_WINDOW — Mon–Fri 09:00–16:30
+// Australia/Sydney, 30-minute slots, 24 hours' notice, 45 days ahead), so a
+// promise like "we can do Tuesday at 3" never depends on a model's date
+// arithmetic. That constant is the authority; this comment used to quote the
+// NPC window it replaced, which is how a reader comes to trust the wrong hours.
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import type { Json } from "@/integrations/supabase/types";
 import { normalizePhone, phonesMatch } from "@/server/voice.server";
@@ -169,6 +171,152 @@ export function classifyBookingIntent(text: string | null | undefined): {
     clarificationQuestion:
       "Is this for your strategic review, a platform discovery session, a guided demonstration, or an enterprise requirements consultation?",
   };
+}
+
+/**
+ * What the caller said about WHEN, reduced to constraints a slot can be
+ * tested against. `check_availability` has always accepted
+ * `preferred_date_text` and always thrown it away — so a caller who said
+ * "Thursday afternoon would suit" was read the first eight chronological
+ * slots regardless, which is worse than never asking.
+ *
+ * Every field is independently optional and a slot must satisfy all the ones
+ * that are set. `recognised` is false when nothing was understood, and that
+ * is the signal to leave the ordering exactly as it was.
+ */
+export type SlotPreference = {
+  weekday: number | null;
+  dayOfMonth: number | null;
+  month: number | null;
+  partOfDay: "morning" | "afternoon" | null;
+  recognised: boolean;
+};
+
+const WEEKDAY_WORDS: Array<[RegExp, number]> = [
+  [/\bsun(day)?\b/, 0],
+  [/\bmon(day)?\b/, 1],
+  [/\btue(s|sday)?\b/, 2],
+  [/\bwed(s|nesday)?\b/, 3],
+  [/\bthu(r|rs|rsday)?\b/, 4],
+  [/\bfri(day)?\b/, 5],
+  [/\bsat(urday)?\b/, 6],
+];
+
+const MONTH_WORDS = [
+  "january",
+  "february",
+  "march",
+  "april",
+  "may",
+  "june",
+  "july",
+  "august",
+  "september",
+  "october",
+  "november",
+  "december",
+];
+
+/**
+ * Parse the caller's day preference. Deliberately narrow: a weekday name, a
+ * relative day, a day-of-month with an optional month, and morning/afternoon.
+ * Anything else is left unrecognised rather than guessed — an invented
+ * preference silently reorders what the caller is offered.
+ */
+export function parseSlotPreference(
+  text: string | null | undefined,
+  now: Date = new Date(),
+): SlotPreference {
+  const pref: SlotPreference = {
+    weekday: null,
+    dayOfMonth: null,
+    month: null,
+    partOfDay: null,
+    recognised: false,
+  };
+  const t = (text ?? "").toLowerCase();
+  if (!t.trim()) return pref;
+
+  // Relative days resolve to an absolute Sydney date, because "tomorrow" said
+  // at 11pm Sydney is a different date from "tomorrow" said at 9am UTC.
+  const relativeDays = /\bday after tomorrow\b/.test(t)
+    ? 2
+    : /\btomorrow\b/.test(t)
+      ? 1
+      : /\btoday\b/.test(t)
+        ? 0
+        : null;
+  if (relativeDays !== null) {
+    const p = sydneyParts(new Date(now.getTime() + relativeDays * 24 * 60 * 60_000));
+    pref.dayOfMonth = p.d;
+    pref.month = p.m;
+    pref.recognised = true;
+  } else {
+    for (const [re, day] of WEEKDAY_WORDS) {
+      if (re.test(t)) {
+        pref.weekday = day;
+        pref.recognised = true;
+        break;
+      }
+    }
+    // "the 18th", "18 September", "18/9"
+    const dom = /\b(\d{1,2})(?:st|nd|rd|th)?\b(?!\s*(?:am|pm|:|o'?clock))/.exec(t);
+    // The full name or its three-letter form, both whole words — `\bmay` alone
+    // reads "maybe" as May.
+    const monthIndex = MONTH_WORDS.findIndex((m) =>
+      new RegExp(`\\b(${m}|${m.slice(0, 3)})\\b`).test(t),
+    );
+    if (dom) {
+      const n = Number(dom[1]);
+      if (n >= 1 && n <= 31) {
+        pref.dayOfMonth = n;
+        pref.recognised = true;
+        if (monthIndex >= 0) pref.month = monthIndex + 1;
+      }
+    }
+  }
+
+  if (/\bmorning\b|\bbefore lunch\b|\bam\b/.test(t)) {
+    pref.partOfDay = "morning";
+    pref.recognised = true;
+  } else if (/\bafternoon\b|\bafter lunch\b|\bpm\b|\blate in the day\b/.test(t)) {
+    pref.partOfDay = "afternoon";
+    pref.recognised = true;
+  }
+
+  return pref;
+}
+
+/** Does this slot satisfy every constraint the caller actually stated? */
+export function slotMatchesPreference(slot: Date, pref: SlotPreference): boolean {
+  if (!pref.recognised) return false;
+  const p = sydneyParts(slot);
+  if (pref.weekday !== null && p.day !== pref.weekday) return false;
+  if (pref.dayOfMonth !== null && p.d !== pref.dayOfMonth) return false;
+  if (pref.month !== null && p.m !== pref.month) return false;
+  if (pref.partOfDay === "morning" && p.minutes >= 12 * 60) return false;
+  if (pref.partOfDay === "afternoon" && p.minutes < 12 * 60) return false;
+  return true;
+}
+
+/**
+ * Preferred slots first, everything else after, each half still in time order.
+ *
+ * A SORT, never a filter — the same rule the prime repo's image ordering
+ * answers to. A caller who asks for Thursday and has no Thursday free must
+ * still be offered something, and an agent that goes quiet because the
+ * preference could not be met is worse than one that says "Thursday is full,
+ * but I have Wednesday at two".
+ *
+ * An unrecognised preference returns the input untouched, so the no-preference
+ * path is byte-identical to what it was.
+ */
+export function orderSlotsByPreference(slots: Date[], pref: SlotPreference): Date[] {
+  if (!pref.recognised) return slots;
+  const preferred: Date[] = [];
+  const rest: Date[] = [];
+  for (const s of slots) (slotMatchesPreference(s, pref) ? preferred : rest).push(s);
+  return [...preferred, ...rest];
 }
 
 const KIND_LABEL: Record<AppointmentKind, string> = {
@@ -500,22 +648,40 @@ async function handleCheckAvailability(tc: ToolCall): Promise<Record<string, unk
       allowed_booking_types: Object.values(KIND_LABEL),
     };
   }
-  const slots = await freeSlots(new Date());
+  const now = new Date();
+  const pref = parseSlotPreference(
+    tc.args.preferred_date_text ?? tc.args.preferredDateText ?? tc.args.preferred_date ?? "",
+    now,
+  );
+  // Look past the first handful before ordering: the caller's Thursday is
+  // often outside the eight soonest slots, and slicing first is what made the
+  // preference unhonourable rather than merely unhonoured.
+  const all = await freeSlots(now, 200);
+  const ordered = orderSlotsByPreference(all, pref);
+  const slots = ordered.slice(0, 8);
+  const preferenceMet = pref.recognised && slots.some((s) => slotMatchesPreference(s, pref));
   return {
     success: true,
     booking_type: KIND_LABEL[intent.kind],
     kind: intent.kind,
     timezone: BOOKING_WINDOW.timezone,
     duration_minutes: BOOKING_WINDOW.slotMinutes,
+    preference_understood: pref.recognised,
+    preference_met: pref.recognised ? preferenceMet : null,
     availability: slots.map((s) => ({
       startIso: s.toISOString(),
       endIso: new Date(s.getTime() + BOOKING_WINDOW.slotMinutes * 60_000).toISOString(),
       spoken: slotLabel(s),
+      matches_preference: pref.recognised ? slotMatchesPreference(s, pref) : null,
     })),
     message:
-      slots.length > 0
-        ? "Availability returned. Offer only slots from the availability list. Do not create a booking from this tool."
-        : "No slots are free in the next week. Offer to have the team call the customer back instead.",
+      slots.length === 0
+        ? "No slots are free in the next week. Offer to have the team call the customer back instead."
+        : pref.recognised && preferenceMet
+          ? "Availability returned, preferred times first. Offer only slots from the availability list. Do not create a booking from this tool."
+          : pref.recognised
+            ? "Availability returned, but nothing free matches what the caller asked for. Say so plainly, then offer the nearest alternatives from the availability list. Do not create a booking from this tool."
+            : "Availability returned. Offer only slots from the availability list. Do not create a booking from this tool.",
   };
 }
 

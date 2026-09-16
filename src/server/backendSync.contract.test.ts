@@ -71,7 +71,10 @@ describe("the revision it diffs from is the one the clone actually had", () => {
 
   it("the merge drain captures it before its own update", () => {
     const capture = drain.indexOf("const previousSha = clone.data?.last_synced_sha");
-    const overwrite = drain.indexOf("last_synced_sha: newest.source_sha");
+    // The pointer advances to the pass's DELIVERED head (`advance.sha`),
+    // never to event provenance — `syncPointer.test.ts` owns that rule; this
+    // pin only cares that the previous value is read before it is replaced.
+    const overwrite = drain.indexOf("last_synced_sha: advance.sha");
     expect(capture).toBeGreaterThan(-1);
     expect(overwrite).toBeGreaterThan(-1);
     expect(capture).toBeLessThan(overwrite);

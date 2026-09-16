@@ -497,6 +497,11 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     assertions: [{ kind: "rows", table: "voice_phone_numbers", atLeast: 1 }],
   },
   {
+    migration: "20260916160000_delivered_sha_on_cascade_results.sql",
+    version: "20260916160000",
+    assertions: [{ kind: "column", table: "cascade_results", column: "delivered_sha" }],
+  },
+  {
     migration: "20260916170000_rate_limit_bucket_and_public.sql",
     version: "20260916170000",
     assertions: [

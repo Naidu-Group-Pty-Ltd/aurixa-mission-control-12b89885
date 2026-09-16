@@ -599,6 +599,32 @@ export async function executeCascade(
             console.error("[cascade] backend sync request failed:", e);
           }
         }
+      } else if (patch.status === "skipped" && patch.delivered_sha && !patch.pr_url) {
+        // A verified no-op advances the pointer exactly as a merge does.
+        // The pass resolved prime's head, compared trees, and found nothing
+        // owed — "already in sync", or every difference withheld by this
+        // clone's own policy — which is the same verification a merge gets,
+        // taken by effect seconds ago. This is what lets a clone stamped
+        // from a folded carrier's provenance read true again through the
+        // engine's own machinery rather than a hand-edited ledger.
+        //
+        // `pr_url` excludes the "already proposed" skip: that row's claim
+        // is conditional on a standing pull request, and reconciliation
+        // flips it to `succeeded` when the proposal lands, where
+        // `advanceClone` reads its delivered head.
+        //
+        // No redeploy and no backend sync: nothing reached the branch.
+        if (clone.last_synced_sha !== patch.delivered_sha) {
+          await supabase
+            .from("clones")
+            .update({
+              sync_status: "in_sync",
+              last_synced_sha: patch.delivered_sha,
+              commits_behind: 0,
+              last_cascade_at: new Date().toISOString(),
+            })
+            .eq("id", clone.id);
+        }
       } else if (patch.status === "failed") {
         await supabase.from("clones").update({ sync_status: "failed" }).eq("id", clone.id);
       }
@@ -2000,6 +2026,12 @@ export async function processClone(args: {
       diff_summary: why,
       files_changed: 0,
       completed_at: new Date().toISOString(),
+      // A verified no-op is a claim about a revision: the pass resolved
+      // prime's head, compared trees, and found nothing owed. The pointer
+      // may advance on it exactly as on a merge, and this is what carries
+      // the revision — provenance cannot, because a folded carrier's
+      // `source_sha` predates what its pass actually verified.
+      delivered_sha: sourceSha,
     };
   }
 
@@ -2163,6 +2195,9 @@ export async function processClone(args: {
       diff_summary: `Nothing to cascade: ${deletionPlan.kept.length} prime deletion(s) withheld${deletionSuffixFor(deletionPlan)}`,
       files_changed: 0,
       completed_at: new Date().toISOString(),
+      // Withheld-by-policy is still verified: nothing DELIVERABLE from this
+      // revision is owed, which is what the pointer measures.
+      delivered_sha: sourceSha,
       ...finalProgress,
     };
   }
@@ -2417,6 +2452,15 @@ export async function processClone(args: {
         diff_summary: `Already proposed — PR #${existing.number} carries this exact tree (${treeEntries.length} file(s))`,
         files_changed: treeEntries.length,
         completed_at: new Date().toISOString(),
+        // Tree-verified for THIS revision, but conditional on the standing
+        // proposal: the pointer must not advance until it lands. `pr_url`
+        // is what defers it — the engine's own stamp passes this row over,
+        // and when the drain merges the pull request, reconciliation flips
+        // every row naming it to `succeeded`, where `advanceClone` reads
+        // the newest event's delivered head. That is how a proposal cut
+        // for an older head and re-verified against a newer one stamps the
+        // newer one.
+        delivered_sha: sourceSha,
         ...finalProgress,
       };
     }
@@ -2537,6 +2581,7 @@ export async function processClone(args: {
           status: "pr_opened",
           pr_url: proposal.url,
           commit_sha: newCommit.sha.slice(0, 7),
+          delivered_sha: sourceSha,
           diff_summary: durableSummary,
           files_changed: treeEntries.length,
           completed_at: new Date().toISOString(),
@@ -2573,6 +2618,7 @@ export async function processClone(args: {
           status: "pr_opened",
           pr_url: proposal.url,
           commit_sha: newCommit.sha.slice(0, 7),
+          delivered_sha: sourceSha,
           diff_summary: durableSummary,
           files_changed: treeEntries.length,
           completed_at: new Date().toISOString(),
@@ -2603,6 +2649,7 @@ export async function processClone(args: {
         return {
           status: "succeeded",
           commit_sha: merged.sha?.slice(0, 7) ?? null,
+          delivered_sha: sourceSha,
           pr_url: proposal.url,
           diff_summary: `Merged as ${merged.sha?.slice(0, 7) ?? "?"}. ${durableSummary}`,
           files_changed: treeEntries.length,
@@ -2623,6 +2670,7 @@ export async function processClone(args: {
     status: "pr_opened",
     pr_url: proposal.url,
     commit_sha: newCommit.sha.slice(0, 7),
+    delivered_sha: sourceSha,
     diff_summary: durableSummary,
     files_changed: treeEntries.length,
     completed_at: new Date().toISOString(),

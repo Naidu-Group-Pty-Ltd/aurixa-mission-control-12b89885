@@ -79,6 +79,7 @@ import { summaryOwesReconcile } from "./cascade/syncExclusions.pure";
 import { repairConflictedProposal } from "./cascadeProposalRepair.server";
 import { resolveConflictedProposal } from "./cascadeConflictMerge.server";
 import { blockedFingerprint, describeBlockedProposal } from "./cascade/blockedEscalation.pure";
+import { choosePointerAdvance } from "./cascade/syncPointer.pure";
 
 type Db = SupabaseClient<Database>;
 
@@ -1017,6 +1018,16 @@ async function recountEvent(supabase: Db, eventId: string): Promise<boolean> {
  * It is DERIVED from the clone's own reconciled history rather than set from
  * whatever merged in this pass, so two pull requests landing out of order
  * cannot walk the pointer backwards.
+ *
+ * And it advances to what the pass DELIVERED, never to what created the
+ * event. `cascade_events.source_sha` is provenance — permanent by the fold's
+ * own rule — and equals the delivered head only when nothing folded between
+ * the push and the run. Stamped from provenance, a clone that merged
+ * prime@7674f46's tree through a folded carrier read "84 commits behind"
+ * (npc-test-76b3b3, 16 Sep 2026 15:15) while its content matched prime's
+ * head outside its designed exclusions. `choosePointerAdvance` prefers the
+ * result row's own `delivered_sha` and falls back to provenance only on
+ * rows written before that column existed.
  */
 async function advanceClone(supabase: Db, cloneId: string): Promise<boolean> {
   // Ordered by this table's OWN column and re-sorted below by the event's.
@@ -1025,7 +1036,7 @@ async function advanceClone(supabase: Db, cloneId: string): Promise<boolean> {
   // a tidiness gain — the JS sort is what actually decides.
   const { data, error } = await supabase
     .from("cascade_results")
-    .select("cascade_event_id, cascade_events!inner(source_sha, created_at)")
+    .select("delivered_sha, cascade_events!inner(source_sha, created_at)")
     .eq("clone_id", cloneId)
     .eq("status", "succeeded")
     // The row's own creation, not `completed_at`: a bulk reconciliation stamps
@@ -1035,12 +1046,18 @@ async function advanceClone(supabase: Db, cloneId: string): Promise<boolean> {
     .limit(200);
   if (error) throw new Error(`Could not read clone history ${cloneId}: ${error.message}`);
 
-  type Joined = { cascade_events: { source_sha: string | null; created_at: string } | null };
-  const newest = ((data ?? []) as unknown as Joined[])
-    .map((r) => r.cascade_events)
-    .filter((e): e is { source_sha: string | null; created_at: string } => Boolean(e?.source_sha))
-    .sort((a, b) => (a.created_at < b.created_at ? 1 : -1))[0];
-  if (!newest?.source_sha) return false;
+  type Joined = {
+    delivered_sha: string | null;
+    cascade_events: { source_sha: string | null; created_at: string } | null;
+  };
+  const advance = choosePointerAdvance(
+    ((data ?? []) as unknown as Joined[]).map((r) => ({
+      status: "succeeded",
+      delivered_sha: r.delivered_sha,
+      event: r.cascade_events,
+    })),
+  );
+  if (!advance) return false;
 
   const clone = await supabase
     .from("clones")
@@ -1048,14 +1065,14 @@ async function advanceClone(supabase: Db, cloneId: string): Promise<boolean> {
     .eq("id", cloneId)
     .maybeSingle();
   if (clone.error) throw new Error(`Could not read clone ${cloneId}: ${clone.error.message}`);
-  if (clone.data?.last_synced_sha === newest.source_sha) return false;
+  if (clone.data?.last_synced_sha === advance.sha) return false;
   // What the clone held before this merge, kept before the update moves it.
   const previousSha = clone.data?.last_synced_sha ?? null;
 
   const { error: writeErr } = await supabase
     .from("clones")
     .update({
-      last_synced_sha: newest.source_sha,
+      last_synced_sha: advance.sha,
       sync_status: "in_sync",
       commits_behind: 0,
       last_cascade_at: new Date().toISOString(),
@@ -1079,7 +1096,7 @@ async function advanceClone(supabase: Db, cloneId: string): Promise<boolean> {
     await requestRedeployAfterPush({
       cloneId,
       reason: "cascade merge drain",
-      sha: newest.source_sha,
+      sha: advance.sha,
     });
   } catch (e) {
     console.error("[cascade-merge-drain] redeploy request failed:", e);
@@ -1098,7 +1115,7 @@ async function advanceClone(supabase: Db, cloneId: string): Promise<boolean> {
       cloneId,
       reason: "cascade merge drain",
       fromSha: previousSha,
-      toSha: newest.source_sha,
+      toSha: advance.sha,
     });
   } catch (e) {
     console.error("[cascade-merge-drain] backend sync request failed:", e);
