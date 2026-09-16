@@ -310,7 +310,7 @@ describe("a pass resumes inside a clone", () => {
      hook was abandoned at 60 s, twice; the invocation budget only stopped
      between clones. The list of prepared blobs now rides on the result row
      and the next pass starts from it. See cascade/passProgress.pure.ts. */
-  const process = sliceFrom(engine, "export async function processClone(", 60_000);
+  const process = sliceFrom(engine, "export async function processClone(", 70_000);
 
   it("the reuse is consulted before any GitHub call for the path", () => {
     const worker = sliceFrom(process, "const reusable = known.get(path);", 1_200);
