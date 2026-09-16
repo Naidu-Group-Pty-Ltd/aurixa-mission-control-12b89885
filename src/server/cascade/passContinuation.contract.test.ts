@@ -179,7 +179,10 @@ describe("handing the event back", () => {
 
 describe("the drain", () => {
   it("claims only what may run now", () => {
-    const claim = sliceFrom(drain, "async function claimOne", 2_500);
+    // Wide enough to cross the two-pass `selectCandidate` the approval-rescue
+    // and arm-grace work introduced: the predicates moved inside it, further
+    // from the function head than the old single-query claim sat.
+    const claim = sliceFrom(drain, "async function claimOne", 5_000);
     expect(claim).toContain('.lte("next_attempt_at", nowIso)');
     // Still the claim it always was.
     expect(claim).toContain('.is("worker_started_at", null)');
