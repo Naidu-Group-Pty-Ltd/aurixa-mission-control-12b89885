@@ -331,6 +331,18 @@ export async function runMigrationDrift(
     })),
   );
 
+  // Claims a later migration's `@supersedes` retired, keyed exactly as rows
+  // are. Judged BEFORE probing: a retired claim spends no probe, is never
+  // deferred, and writes its verdict every run — the ledger shows the
+  // recorded decision instead of an hourly alarm somebody has to keep
+  // explaining, which is how the next real drift gets missed.
+  const supersededBy = new Map<string, string>();
+  for (const c of claims) {
+    for (const s of c.supersedes ?? []) {
+      supersededBy.set(`${s.migration} ${s.assertion}`, c.migration);
+    }
+  }
+
   // What we knew last time. Used for three things: ordering by staleness,
   // preserving `last_satisfied_at`, and telling a NEW drift from a standing one
   // so the alarm does not re-fire every hour on the same finding.
@@ -362,6 +374,7 @@ export async function runMigrationDrift(
   // did not fit, so two claims on one object are never split across ticks.
   const targets = new Map<string, Target>();
   for (const item of ordered) {
+    if (supersededBy.has(`${item.migration} ${item.key}`)) continue;
     const t = targetFor(item.assertion);
     if (!t) continue;
     const tk = targetKey(t);
@@ -436,6 +449,29 @@ export async function runMigrationDrift(
   let deferred = 0;
 
   for (const item of ordered) {
+    const retiredBy = supersededBy.get(`${item.migration} ${item.key}`);
+    if (retiredBy) {
+      const k = `${item.migration} ${item.key}`;
+      const prev = stored.get(k);
+      results.push({
+        migration: item.migration,
+        result: {
+          assertion: item.assertion,
+          status: "superseded",
+          detail: `retired by ${retiredBy} — true when written, withdrawn by a later recorded decision`,
+        },
+      });
+      rows.push({
+        migration: item.migration,
+        assertion: item.key,
+        kind: item.assertion.kind,
+        status: "superseded",
+        detail: `retired by ${retiredBy} — true when written, withdrawn by a later recorded decision`,
+        checked_at: checkedAt,
+        last_satisfied_at: prev?.last_satisfied_at ?? null,
+      });
+      continue;
+    }
     const t = targetFor(item.assertion);
     const probe = t ? (probes.get(targetKey(t)) ?? null) : null;
     const wasDeferred = t !== null && probe === null;

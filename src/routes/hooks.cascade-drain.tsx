@@ -12,7 +12,11 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { verifyCronAuth } from "@/server/cron-auth.server";
-import { executeCascade, type CascadeBudget } from "@/server/cascade-engine.server";
+import {
+  executeCascade,
+  terminaliseOrphanedRows,
+  type CascadeBudget,
+} from "@/server/cascade-engine.server";
 import {
   decideEventFold,
   supersededSummary,
@@ -399,6 +403,15 @@ async function judgeExhaustedEvents(): Promise<{ retired: number; refunded: numb
         throw new Error(`cascade-drain: could not retire ${event.id}: ${retireErr.message}`);
       }
       if ((retired ?? []).length > 0) {
+        // The retirement settles the event; this settles the rows it never
+        // reached. Left `queued` under a failed carrier they are invisible to
+        // every sweeper — the reclaim reads pending events — and sit in the
+        // ledger for ever as work that looks owed.
+        await terminaliseOrphanedRows(
+          admin,
+          event.id,
+          `Skipped: the carrier event was retired after ${MAX_ATTEMPTS} attempts without processing this clone.`,
+        );
         const { error: notifyError } = await admin.from("notifications").insert({
           kind: "cascade_failed",
           severity: "error",

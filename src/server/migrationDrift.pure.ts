@@ -34,7 +34,20 @@
 
 import type { Assertion } from "./migrationAssertions.pure";
 
-export type CheckStatus = "satisfied" | "unsatisfied" | "unassertable" | "not_applicable" | "error";
+export type CheckStatus =
+  | "satisfied"
+  | "unsatisfied"
+  | "unassertable"
+  | "not_applicable"
+  | "error"
+  /**
+   * A later migration's `@supersedes` retired this claim. It is never probed
+   * and never an alarm: the claim was true when written, a recorded decision
+   * made it false on purpose, and the detail names the migration that says
+   * so. Distinct from `not_applicable` because the claim WAS about the
+   * database — it has an answer, and the answer is "withdrawn", not "n/a".
+   */
+  | "superseded";
 
 /**
  * What a probe came back with.
@@ -199,6 +212,8 @@ export type DriftSummary = {
   readonly unsatisfied: number;
   readonly unassertable: number;
   readonly notApplicable: number;
+  /** Claims a later migration's `@supersedes` retired. Recorded, never probed. */
+  readonly superseded: number;
   readonly errors: number;
   /** Every unsatisfied claim, formatted for an operator notification. */
   readonly drifted: readonly string[];
@@ -224,6 +239,7 @@ export function summariseDrift(
     unsatisfied,
     unassertable: count("unassertable"),
     notApplicable: count("not_applicable"),
+    superseded: count("superseded"),
     errors: count("error"),
     drifted: results
       .filter((r) => r.result.status === "unsatisfied")

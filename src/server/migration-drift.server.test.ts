@@ -464,3 +464,62 @@ describe("the default fetch", () => {
     }
   });
 });
+
+describe("a claim a later migration retired", () => {
+  /* The stale-alarm shape this exists for: `rows:prime_secret_forwards>=45`
+     read `unsatisfied` every hour for nine days after the Didit key was
+     deliberately withdrawn (7 Sep 2026). The corpus now records the decision
+     with `@supersedes`, and the run's job is to honour it: no probe spent on
+     the retired claim, a `superseded` verdict written every run, and never
+     an alarm. */
+  const OLD: MigrationClaims = {
+    migration: "20260906100000_old.sql",
+    version: "20260906100000",
+    assertions: [{ kind: "rows", table: "old_forwards", atLeast: 45 }],
+  };
+  const AMEND: MigrationClaims = {
+    migration: "20260916180000_amend.sql",
+    version: "20260916180000",
+    assertions: [{ kind: "rows", table: "new_forwards", atLeast: 44 }],
+    supersedes: [{ migration: "20260906100000_old.sql", assertion: "rows:old_forwards>=45" }],
+  };
+
+  it("is recorded as superseded, spends no probe, and never rings", async () => {
+    const { result, calls } = await run(claims(OLD, AMEND), {
+      "/rest/v1/new_forwards": { status: 200, contentRange: "0-0/44" },
+      // Deliberately no route for old_forwards: a probe against it would come
+      // back an unrouted 500 and the summary would carry an error.
+    });
+    expect(calls.some((c) => c.includes("old_forwards"))).toBe(false);
+    expect(result.summary).toMatchObject({ satisfied: 1, unsatisfied: 0, superseded: 1 });
+    expect(result.newlyDrifted).toHaveLength(0);
+    expect(state.notifications).toHaveLength(0);
+    const retired = state.upserted.find((r) => r.assertion === "rows:old_forwards>=45");
+    expect(retired).toMatchObject({
+      migration: "20260906100000_old.sql",
+      status: "superseded",
+    });
+    expect(String(retired?.detail)).toContain("retired by 20260916180000_amend.sql");
+  });
+
+  it("a superseded verdict overwrites the standing unsatisfied row, and keeps its history", async () => {
+    state.stored = [
+      {
+        migration: "20260906100000_old.sql",
+        assertion: "rows:old_forwards>=45",
+        status: "unsatisfied",
+        last_satisfied_at: "2026-09-07T03:17:11Z",
+        checked_at: "2026-09-16T16:17:06Z",
+      },
+    ];
+    await run(claims(OLD, AMEND), {
+      "/rest/v1/new_forwards": { status: 200, contentRange: "0-0/44" },
+    });
+    const retired = state.upserted.find((r) => r.assertion === "rows:old_forwards>=45");
+    expect(retired?.status).toBe("superseded");
+    // The last day the claim WAS true survives the retirement — it is the
+    // record of when the withdrawal happened, and rewriting it to null would
+    // erase the one timestamp that dates the decision.
+    expect(retired?.last_satisfied_at).toBe("2026-09-07T03:17:11Z");
+  });
+});

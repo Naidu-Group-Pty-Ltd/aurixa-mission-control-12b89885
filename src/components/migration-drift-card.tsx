@@ -59,6 +59,14 @@ function StatusPill({ row }: { row: MigrationAssertionRow }) {
           &mdash;
         </Badge>
       );
+    case "superseded":
+      // Quiet on purpose: a retired claim is a recorded decision, not a
+      // condition. The detail column names the migration that retired it.
+      return (
+        <Badge variant="outline" className="gap-1 text-muted-foreground">
+          retired
+        </Badge>
+      );
   }
 }
 
@@ -96,7 +104,9 @@ export function MigrationDriftCard() {
           ? 1
           : r.status === "unassertable"
             ? 2
-            : 3;
+            : r.status === "superseded"
+              ? 4
+              : 3;
     return rank(a) - rank(b) || a.migration.localeCompare(b.migration);
   });
 

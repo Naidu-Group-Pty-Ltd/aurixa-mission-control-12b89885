@@ -22,17 +22,26 @@
  *   whose pull request landed — the engine's "already proposed" skip rows
  *   included, because they carry the pull request's URL and
  *   `reconcileResultToPr` transitions every row that names it.
- * - **`delivered_sha` outranks provenance on the same row.** It is the head
- *   the pass resolved at run time; provenance is the push that created the
- *   event.
- * - **The newest event wins, not the newest merge.** Two proposals landing
- *   out of order must not walk the pointer backwards, so candidates are
- *   ordered by the EVENT's creation — the rule `advanceClone` has always
- *   had — and within that order the first row carrying any usable revision
- *   decides.
- * - **A legacy row falls back to provenance.** Rows written before the
- *   column existed can understate inside a folded window, never overstate,
- *   and the first pass that writes the column corrects them.
+ * - **Any delivered row outranks every provenance row — not merely the ones
+ *   on its own event.** A delivered value is the head a pass resolved at run
+ *   time; a provenance value is only the push that created a carrier, and an
+ *   event's creation order does not bound its label: an event created LATER
+ *   can carry provenance OLDER than what an earlier pass delivered, because
+ *   the earlier pass executed after the later event's creating push. Ranked
+ *   by event recency alone, a legacy row reconciled late could walk the
+ *   pointer backwards over an engine-stamped delivered head. Delivered rows
+ *   all postdate every legacy row in execution (the column shipped after the
+ *   last legacy pass ran, and the claim fence serialises passes), so the
+ *   newest delivered row is never older in content than any provenance
+ *   label, and preferring the partition is what makes regression
+ *   unspellable rather than merely unlikely.
+ * - **Within a partition the newest event wins, not the newest merge**, so
+ *   two proposals landing out of order still cannot walk the pointer
+ *   backwards — the rule `advanceClone` has always had.
+ * - **Provenance is a total fallback, never a rival.** It decides only for a
+ *   clone whose whole succeeded history predates the column: an
+ *   understatement inside a folded window, never an overstatement, and the
+ *   first pass that writes the column retires it for that clone for good.
  */
 
 export type PointerRow = {
@@ -49,23 +58,33 @@ export type PointerAdvance = {
   eventCreatedAt: string;
 };
 
+type Qualified = PointerRow & { event: { source_sha: string | null; created_at: string } };
+
+function newestFirst(a: Qualified, b: Qualified): number {
+  return a.event.created_at < b.event.created_at ? 1 : -1;
+}
+
 export function choosePointerAdvance(rows: readonly PointerRow[]): PointerAdvance | null {
-  const candidates = rows
-    .filter(
-      (r): r is PointerRow & { event: { source_sha: string | null; created_at: string } } =>
-        r.status === "succeeded" &&
-        r.event !== null &&
-        Boolean(r.delivered_sha ?? r.event.source_sha),
-    )
-    .sort((a, b) => (a.event.created_at < b.event.created_at ? 1 : -1));
-  const chosen = candidates[0];
-  if (!chosen) return null;
-  if (chosen.delivered_sha) {
-    return { sha: chosen.delivered_sha, basis: "delivered", eventCreatedAt: chosen.event.created_at };
+  const succeeded = rows.filter(
+    (r): r is Qualified => r.status === "succeeded" && r.event !== null,
+  );
+
+  const delivered = succeeded
+    .filter((r) => Boolean(r.delivered_sha))
+    .sort(newestFirst)[0];
+  if (delivered) {
+    return {
+      sha: delivered.delivered_sha as string,
+      basis: "delivered",
+      eventCreatedAt: delivered.event.created_at,
+    };
   }
+
+  const legacy = succeeded.filter((r) => Boolean(r.event.source_sha)).sort(newestFirst)[0];
+  if (!legacy) return null;
   return {
-    sha: chosen.event.source_sha as string,
+    sha: legacy.event.source_sha as string,
     basis: "provenance",
-    eventCreatedAt: chosen.event.created_at,
+    eventCreatedAt: legacy.event.created_at,
   };
 }

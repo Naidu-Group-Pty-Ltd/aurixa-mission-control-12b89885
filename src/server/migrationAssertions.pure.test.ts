@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   parseAssertions,
+  parseSupersedes,
   hasAnyAssertion,
   formatAssertion,
   isPubliclyCheckable,
@@ -152,5 +153,34 @@ describe("isPubliclyCheckable", () => {
     expect(isPubliclyCheckable({ kind: "none", reason: "no observable effect at all" })).toBe(
       false,
     );
+  });
+});
+
+describe("parseSupersedes", () => {
+  it("reads a well-formed retirement in the claim's exact source form", () => {
+    const r = parseSupersedes(
+      "-- @asserts rows:prime_secret_forwards>=44\n" +
+        "-- @supersedes 20260906100000_didit_fleet_forward.sql:rows:prime_secret_forwards>=45\n" +
+        "select 1;\n",
+    );
+    expect(r).toEqual({
+      ok: true,
+      supersedes: [
+        {
+          migration: "20260906100000_didit_fleet_forward.sql",
+          assertion: "rows:prime_secret_forwards>=45",
+        },
+      ],
+    });
+  });
+
+  it("a malformed retirement is an error, never a skip — a directive nobody can parse retires nothing", () => {
+    const r = parseSupersedes("-- @supersedes didit_fleet_forward:rows:x>=45\n");
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors[0]).toContain("@supersedes");
+  });
+
+  it("a file with no retirements parses to an empty list", () => {
+    expect(parseSupersedes("-- @asserts table:t\n")).toEqual({ ok: true, supersedes: [] });
   });
 });

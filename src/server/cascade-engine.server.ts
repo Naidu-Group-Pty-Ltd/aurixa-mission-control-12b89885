@@ -200,6 +200,46 @@ async function borrowLatestProgress(
 
 export type { CascadeBudget, CascadeRunResult };
 
+/**
+ * Settle the rows an event's own settling never reached.
+ *
+ * A settled event's `queued`/`pushing` rows are invisible to every sweeper:
+ * the reclaim rules read PENDING events, reconciliation reads `pr_opened`
+ * rows, and the pointer derivation reads `succeeded` ones — so a row left
+ * non-terminal under a `failed` or `completed` carrier sits in the ledger for
+ * ever as work that looks owed. Measured 16 Sep 2026: 124 such rows, 119 from
+ * the September freeze and five minted as recently as 14–15 Sep by exactly
+ * the exits below. The rule: **the act that settles an event without walking
+ * its rows settles the rows too.**
+ *
+ * `skipped`, never `failed`: nothing failed IN the row — the carrier died
+ * around it — and the message names the carrier's fate so the register reads
+ * as a record instead of a mystery. Never throws: the event's own fate is
+ * already written and correct, and orphaned rows are ledger debt, not a
+ * reason to report the settle itself as failed.
+ */
+export async function terminaliseOrphanedRows(
+  supabase: SupabaseLike,
+  eventId: string,
+  why: string,
+): Promise<number> {
+  const { data, error } = await supabase
+    .from("cascade_results")
+    .update({
+      status: "skipped",
+      error_message: why,
+      completed_at: new Date().toISOString(),
+    })
+    .eq("cascade_event_id", eventId)
+    .in("status", ["queued", "pushing"])
+    .select("id");
+  if (error) {
+    console.error(`[cascade] could not terminalise rows for ${eventId}:`, error.message);
+    return 0;
+  }
+  return (data ?? []).length;
+}
+
 export async function executeCascade(
   supabase: SupabaseLike,
   cascadeEventId: string,
@@ -281,6 +321,11 @@ export async function executeCascade(
       { status: "failed", completed_at: new Date().toISOString(), summary: msg },
       "record the missing GitHub App",
     );
+    await terminaliseOrphanedRows(
+      supabase,
+      event.id,
+      "Skipped: the carrier event failed before any clone was processed (GitHub App not configured).",
+    );
     return { ok: false, error: msg };
   }
 
@@ -331,6 +376,11 @@ export async function executeCascade(
     await updateEvent(
       { status: "failed", completed_at: new Date().toISOString(), summary: msg },
       "record the failed prime read",
+    );
+    await terminaliseOrphanedRows(
+      supabase,
+      event.id,
+      "Skipped: the carrier event failed reading prime before any clone was processed.",
     );
     return { ok: false, error: msg };
   }

@@ -43,6 +43,22 @@
  * migration that genuinely asserts nothing (a comment change, a data backfill
  * whose row count is not stable) must say so in words rather than be silently
  * exempt, because "no assertion" and "nobody wrote one" have to look different.
+ *
+ * ## Retiring a claim a later decision withdrew
+ *
+ *     -- @supersedes 20260906100000_didit_fleet_forward.sql:rows:prime_secret_forwards>=45
+ *
+ * An applied migration's file cannot be edited — the applied-digest manifest
+ * pins it — so a claim that a later change made false for GOOD reasons
+ * (measured: `rows:prime_secret_forwards>=45` read `unsatisfied` for nine
+ * days after the Didit key was deliberately withdrawn on 7 Sep 2026) would
+ * otherwise cry wolf for ever, and an alarm people learn to ignore is how the
+ * next real drift gets missed. `@supersedes` names an EARLIER migration's
+ * claim in its exact source form; the hourly check then records that claim as
+ * `superseded` — naming the superseding file — instead of probing it. The
+ * generator refuses a supersede that names no existing claim, or one in the
+ * same or a newer migration, so the directive can never silence a claim that
+ * was not first written down and applied.
  */
 
 export type AssertionKind =
@@ -77,8 +93,22 @@ export type Assertion =
 
 export type ParseResult = { ok: true; assertions: Assertion[] } | { ok: false; errors: string[] };
 
+/**
+ * A retirement of an earlier migration's claim, stated where the retiring
+ * change lives. `assertion` is the claim's exact source form (what
+ * `formatAssertion` renders), because a supersede that has to be matched
+ * fuzzily is one that can silence the wrong claim.
+ */
+export type Supersede = { migration: string; assertion: string };
+
+export type SupersedeParseResult =
+  | { ok: true; supersedes: Supersede[] }
+  | { ok: false; errors: string[] };
+
 /** Matches a leading-comment assertion line. */
 const LINE = /^\s*--\s*@asserts\s+(.+?)\s*$/;
+/** Matches a leading-comment supersede line: `-- @supersedes <file.sql>:<claim>`. */
+const SUPERSEDES = /^\s*--\s*@supersedes\s+(\d{14}_[a-z0-9_]+\.sql):(.+?)\s*$/;
 
 const IDENT = /^[a-z_][a-z0-9_]*$/;
 /** pg_cron job names are kebab-case throughout this corpus. */
@@ -180,6 +210,33 @@ export function parseAssertions(sql: string): ParseResult {
 
   if (errors.length > 0) return { ok: false, errors };
   return { ok: true, assertions };
+}
+
+/**
+ * Parse every `@supersedes` line in a migration file.
+ *
+ * Shape only: whether the named claim EXISTS, and whether it is strictly
+ * older, needs the whole corpus, so the generator judges that — a parse that
+ * pretended to know would pass here and lie there. A malformed line is an
+ * error rather than a skip, for the same reason a malformed `@asserts` is:
+ * a directive nobody can parse looks like a retirement and retires nothing.
+ */
+export function parseSupersedes(sql: string): SupersedeParseResult {
+  const supersedes: Supersede[] = [];
+  const errors: string[] = [];
+  for (const line of sql.split(/\r?\n/)) {
+    if (!/^\s*--\s*@supersedes\b/.test(line)) continue;
+    const m = SUPERSEDES.exec(line);
+    if (!m) {
+      errors.push(
+        `\`${line.trim()}\` — expected \`-- @supersedes <YYYYMMDDHHMMSS_name.sql>:<claim source form>\``,
+      );
+      continue;
+    }
+    supersedes.push({ migration: m[1], assertion: m[2] });
+  }
+  if (errors.length > 0) return { ok: false, errors };
+  return { ok: true, supersedes };
 }
 
 /**

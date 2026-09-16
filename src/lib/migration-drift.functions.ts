@@ -16,10 +16,12 @@ export type MigrationAssertionRow = {
   assertion: string;
   kind: string;
   /**
-   * Five verdicts, not two. `error` is the probe failing and `unassertable` is
-   * there being no channel that can answer -- neither is a failed claim.
+   * Six verdicts, not two. `error` is the probe failing, `unassertable` is
+   * there being no channel that can answer, and `superseded` is a later
+   * migration's recorded decision retiring the claim -- none of the three is
+   * a failed claim.
    */
-  status: "satisfied" | "unsatisfied" | "unassertable" | "not_applicable" | "error";
+  status: "satisfied" | "unsatisfied" | "unassertable" | "not_applicable" | "error" | "superseded";
   detail: string;
   checked_at: string;
   last_satisfied_at: string | null;

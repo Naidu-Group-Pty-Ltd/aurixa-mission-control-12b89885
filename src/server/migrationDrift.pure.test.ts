@@ -122,3 +122,33 @@ describe("summariseDrift", () => {
     expect(s.errors).toBe(2);
   });
 });
+
+describe("summariseDrift with retired claims", () => {
+  it("counts superseded on its own and never as drift", async () => {
+    const { summariseDrift } = await import("./migrationDrift.pure");
+    const s = summariseDrift([
+      {
+        migration: "a.sql",
+        result: {
+          assertion: { kind: "rows", table: "t", atLeast: 45 },
+          status: "superseded",
+          detail: "retired by b.sql",
+        },
+      },
+      {
+        migration: "b.sql",
+        result: {
+          assertion: { kind: "rows", table: "t", atLeast: 44 },
+          status: "satisfied",
+          detail: "t holds 44 row(s), claim is >= 44",
+        },
+      },
+    ]);
+    expect(s.superseded).toBe(1);
+    expect(s.unsatisfied).toBe(0);
+    expect(s.drifted).toHaveLength(0);
+    // A retired claim is not a checked one: counting it either way would let
+    // coverage move without anything being observed.
+    expect(s.checked).toBe(1);
+  });
+});
