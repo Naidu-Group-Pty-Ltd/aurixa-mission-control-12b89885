@@ -37,10 +37,26 @@ describe("classification — what may never be copied from the prime", () => {
   });
 
   it("the clone's own identities and its Mission Control credential are tenant-scoped", () => {
-    for (const n of ["REQUIRE_TURNSTILE", "RESEND_FROM_EMAIL", "VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY", "FINANCE_PORTAL_CRON_SECRET", "MARKET_INGESTION_CRON_SECRET", "MISSION_CONTROL_CLONE_API_KEY", "MISSION_CONTROL_WEBHOOK_SECRET"]) {
+    for (const n of ["REQUIRE_TURNSTILE", "RESEND_FROM_EMAIL", "VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY", "FINANCE_PORTAL_CRON_SECRET", "MARKET_INGESTION_CRON_SECRET", "MISSION_CONTROL_CLONE_API_KEY", "MISSION_CONTROL_WEBHOOK_SECRET", "VAPI_WEBHOOK_SECRET"]) {
       expect(classifySecret(n)).toBe("tenant_scoped");
       expect(TENANT_SCOPED_REMEDY[n]).toBeTruthy();
     }
+  });
+
+  // The Vapi webhook secret is half of a pair — this deployment's environment
+  // and `server.headers` on this deployment's OWN Vapi objects. The prime's half
+  // cannot make a clone's pair agree, so copying it is inert at best; at worst
+  // it shares a value the prime's own call webhook accepts. Before this it fell
+  // through to `vendor`, the class that copies whenever a forwarding row exists,
+  // and was safe only because no row happened to exist.
+  it("the Vapi webhook secret is tenant-scoped, not a forwardable vendor key", () => {
+    expect(classifySecret("VAPI_WEBHOOK_SECRET")).toBe("tenant_scoped");
+    expect(classifySecret("VAPI_WEBHOOK_SECRET")).not.toBe("vendor");
+    expect(TENANT_SCOPED_SECRETS.has("VAPI_WEBHOOK_SECRET")).toBe(true);
+    // The remedy has to send an operator to BOTH halves, or they set one and
+    // the webhook keeps refusing every call.
+    expect(TENANT_SCOPED_REMEDY.VAPI_WEBHOOK_SECRET).toMatch(/Integrations page/);
+    expect(TENANT_SCOPED_REMEDY.VAPI_WEBHOOK_SECRET).toMatch(/server\.headers/);
   });
 
   it("the reset pepper is identity: a random one is valid, the prime's would be shared", () => {
