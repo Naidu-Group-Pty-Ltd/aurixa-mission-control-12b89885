@@ -56,6 +56,16 @@
 import type { HeldPath } from "./syncExclusions.pure";
 
 /**
+ * The answers worth remembering, by the deletion ledger's rule: `unsettled`
+ * is a failed read, never a fact. A held path's evidence is asked of prime's
+ * history about the clone's CURRENT blob, so it is stable until the clone's
+ * blob changes — and re-asking it every pass was measured at ~90 GitHub
+ * calls and ~30 seconds per pass on npc-client-dashboard, whose genuinely
+ * divergent holds walk the full version history and match nothing, forever.
+ */
+export type SettledHeldEvidence = Exclude<HeldPathEvidence, { kind: "unsettled" }>;
+
+/**
  * The most holds one pass will probe prime's history for.
  *
  * Each probe is one `listCommits` plus up to `MAX_VERSION_WALK` content

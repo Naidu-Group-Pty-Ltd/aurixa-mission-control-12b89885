@@ -30,6 +30,17 @@ export const Route = createFileRoute("/hooks/held-file-drift")({
         if (!auth.ok) return auth.response;
 
         try {
+          // Yields below the scan floor: this sweep reads prime and clone
+          // files on the same installation budget the cascade runs on, and
+          // an hour's delay on a quiet-by-design report costs nothing.
+          const { decideSpend } = await import("@/server/cascade/githubBudget.pure");
+          const { readGitHubRemaining } = await import("@/server/githubAllowance.server");
+          const spend = decideSpend({ role: "scan", remaining: await readGitHubRemaining() });
+          if (!spend.proceed) {
+            return new Response(JSON.stringify({ success: true, skipped: spend.why }), {
+              headers: { "Content-Type": "application/json" },
+            });
+          }
           const { sweepHeldFileDrift } = await import("@/server/heldFileDriftSweep.server");
           const report = await sweepHeldFileDrift(supabaseAdmin);
 

@@ -7,6 +7,7 @@ import {
   readProgress,
   resumableBlobs,
   resumableDeletionEvidence,
+  resumableHeldEvidence,
   type CascadeProgress,
 } from "./passProgress.pure";
 
@@ -31,6 +32,12 @@ const record: CascadeProgress = {
       },
     },
     "src/own.ts": { clone: sha(23), evidence: { kind: "never_primes" } },
+  },
+  held_evidence: {
+    "src/App.tsx": {
+      clone: sha(61),
+      evidence: { kind: "prime_versions", versions: [sha(62), sha(63)], versionsExhaustive: false },
+    },
   },
   total: 353,
 };
@@ -69,9 +76,32 @@ describe("readProgress", () => {
   });
 
   it("reads an OLD record with no evidence at all", () => {
-    /* Every ledger written before the evidence field existed. */
-    const { deletion_evidence: _e, ...legacy } = record;
-    expect(readProgress(legacy)).toEqual({ ...legacy, deletion_evidence: {} });
+    /* Every ledger written before the evidence fields existed. */
+    const { deletion_evidence: _e, held_evidence: _h, ...legacy } = record;
+    expect(readProgress(legacy)).toEqual({
+      ...legacy,
+      deletion_evidence: {},
+      held_evidence: {},
+    });
+  });
+
+  it("caches and revalidates held evidence by the same rule as deletions", () => {
+    /* Measured 16 Sep 2026: re-walking the same held paths every pass was
+       ~90 calls and ~30 seconds of fixed cost, and a genuinely divergent
+       hold (npc-client's App.tsx) never converges — it re-paid for ever. */
+    const cloneTree = new Map([["src/App.tsx", sha(61)]]);
+    expect([...resumableHeldEvidence(record, cloneTree).keys()]).toEqual(["src/App.tsx"]);
+    // The clone edited the file → a changed question → nothing reused.
+    expect(resumableHeldEvidence(record, new Map([["src/App.tsx", sha(99)]])).size).toBe(0);
+    expect(resumableHeldEvidence(record, null).size).toBe(0);
+    // `unsettled` never parses back in.
+    const dirty = {
+      ...record,
+      held_evidence: {
+        "src/x.ts": { clone: sha(70), evidence: { kind: "unsettled", why: "HTTP 500" } },
+      },
+    };
+    expect(readProgress(dirty)?.held_evidence).toEqual({});
   });
 
   it("drops a malformed evidence entry alone, keeping the blobs and the rest", () => {

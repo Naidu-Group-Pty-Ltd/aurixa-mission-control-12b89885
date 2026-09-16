@@ -32,6 +32,17 @@ export const Route = createFileRoute("/hooks/backend-catchup")({
         if (!auth.ok) return auth.response;
 
         try {
+          // Yields below the scan floor: the catch-up reads the prime's
+          // repository on the installation budget the cascade runs on, and
+          // its own planner settles — the half-hourly cadence absorbs a skip.
+          const { decideSpend } = await import("@/server/cascade/githubBudget.pure");
+          const { readGitHubRemaining } = await import("@/server/githubAllowance.server");
+          const spend = decideSpend({ role: "scan", remaining: await readGitHubRemaining() });
+          if (!spend.proceed) {
+            return new Response(JSON.stringify({ success: true, skipped: spend.why }), {
+              headers: { "Content-Type": "application/json" },
+            });
+          }
           const { runBackendCatchup } = await import("@/server/backendCatchup.server");
           const report = await runBackendCatchup("backend catch-up sweep");
 
