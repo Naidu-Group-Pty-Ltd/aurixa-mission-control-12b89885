@@ -330,13 +330,19 @@ export async function executeCascade(
     return { ok: false, error: msg };
   }
 
+  // Deliberately NOT `source_sha: sourceSha`. The event's `source_sha` is
+  // the push that created it — provenance, exactly as on the pass ledger —
+  // and `uq_cascade_events_commit_sha` is UNIQUE over every commit event
+  // whatever its status, so re-stamping the carrier to prime's current head
+  // collides with whichever row already carries that head (after a fold,
+  // one always does). Measured 16 Sep 2026 at 10:24:02: the re-stamp had
+  // been violating the index on every pass since the fold existed — the old
+  // unchecked write swallowed it, which is also why a working pass never
+  // actually read `running` — and the first checked write failed the
+  // carrier twice in 600 ms. What a pass DELIVERED is recorded where it
+  // lands: each clone's `commit_sha`, the pull request title, the summary.
   const started = await updateEvent(
-    {
-      status: "running",
-      started_at: new Date().toISOString(),
-      source_sha: sourceSha,
-      source_branch: primeRef.branch,
-    },
+    { status: "running", started_at: new Date().toISOString() },
     "mark the event running",
   );
   if (!started) return { ok: false, error: "claim superseded — nothing written" };
