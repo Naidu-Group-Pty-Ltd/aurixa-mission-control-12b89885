@@ -19,6 +19,7 @@ import {
   type FoldableEvent,
 } from "@/server/cascade/eventFold.pure";
 import { beaconSummary, decideDriftBeacon } from "@/server/cascade/driftBeacon.pure";
+import { decideExhaustedEvent, retirementSummary } from "@/server/cascade/exhaustedEvents.pure";
 import {
   createCascadeForAllClones,
   findCommitCascadeForSha,
@@ -309,6 +310,95 @@ async function claimOne(): Promise<{ id: string; attempts: number } | null> {
 }
 
 /**
+ * Judge events at the attempt ceiling by their ledger, not their counter.
+ *
+ * A tick the platform kills spends an attempt and returns nothing, so the
+ * terminal write in `drainOne` — which needs a claim to come back
+ * empty-handed — never runs for it. Three kills and the event is a zombie:
+ * `pending` for ever, claimable by nothing, reported nowhere.
+ * `decideExhaustedEvent` (cascade/exhaustedEvents.pure.ts) reads the
+ * event's result rows for the verdict: a recent ledger write means the
+ * kills were CONVERGING and one attempt is refunded; a still ledger means
+ * three passes learned nothing, and the event is retired visibly with the
+ * operator's lever named. Every write is guarded on `pending` + unclaimed
+ * so a racing claim wins and this tick simply misses the event.
+ */
+async function judgeExhaustedEvents(): Promise<{ retired: number; refunded: number }> {
+  const out = { retired: 0, refunded: 0 };
+  const { data: exhausted, error } = await admin
+    .from("cascade_events")
+    .select("id, mode, attempts")
+    .eq("status", "pending")
+    .is("worker_started_at", null)
+    .gte("attempts", MAX_ATTEMPTS);
+  if (error) {
+    throw new Error(`cascade-drain: could not read exhausted events: ${error.message}`);
+  }
+  for (const event of exhausted ?? []) {
+    const { data: newest, error: newestErr } = await admin
+      .from("cascade_results")
+      .select("updated_at")
+      .eq("cascade_event_id", event.id)
+      .order("updated_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const verdict = decideExhaustedEvent({
+      attempts: event.attempts ?? 0,
+      maxAttempts: MAX_ATTEMPTS,
+      lastResultWriteAt: newestErr ? null : (newest?.updated_at ?? null),
+      nowMs: Date.now(),
+    });
+    if (verdict.act === "refund") {
+      const { error: refundErr } = await admin
+        .from("cascade_events")
+        .update({ attempts: MAX_ATTEMPTS - 1 })
+        .eq("id", event.id)
+        .eq("status", "pending")
+        .is("worker_started_at", null);
+      if (refundErr) {
+        throw new Error(`cascade-drain: could not refund ${event.id}: ${refundErr.message}`);
+      }
+      out.refunded += 1;
+    } else if (verdict.act === "retire") {
+      const now = new Date().toISOString();
+      const { data: retired, error: retireErr } = await admin
+        .from("cascade_events")
+        .update({
+          status: "failed",
+          worker_finished_at: now,
+          summary: retirementSummary(MAX_ATTEMPTS),
+        })
+        .eq("id", event.id)
+        .eq("status", "pending")
+        .is("worker_started_at", null)
+        .select("id");
+      if (retireErr) {
+        throw new Error(`cascade-drain: could not retire ${event.id}: ${retireErr.message}`);
+      }
+      if ((retired ?? []).length > 0) {
+        const { error: notifyError } = await admin.from("notifications").insert({
+          kind: "cascade_failed",
+          severity: "error",
+          title: `Cascade retired after ${MAX_ATTEMPTS} attempts (${event.mode})`,
+          body: retirementSummary(MAX_ATTEMPTS),
+          cascade_event_id: event.id,
+          url: `/cascades/${event.id}`,
+          metadata: { retired_by: "cascade-drain", attempts: event.attempts },
+        });
+        if (notifyError) {
+          console.error(
+            "[cascade-drain] could not raise the retirement notification:",
+            notifyError.message,
+          );
+        }
+        out.retired += 1;
+      }
+    }
+  }
+  return out;
+}
+
+/**
  * The level trigger under the edge trigger.
  *
  * Runs only on a tick that claimed nothing — the queue is idle — and asks
@@ -486,6 +576,7 @@ export const Route = createFileRoute("/hooks/cascade-drain")({
           };
           await reclaimStalled();
           const folded = await foldQueuedCommitEvents();
+          const exhausted = await judgeExhaustedEvents();
           const results: Array<{ ok?: boolean; held?: string; error?: string }> = [];
           for (let i = 0; i < MAX_JOBS_PER_RUN; i++) {
             if (Date.now() >= deadlineAt) break;
@@ -498,7 +589,14 @@ export const Route = createFileRoute("/hooks/cascade-drain")({
           // out a rate-limit window counts as claimed-later, not as drift.
           const beacon = results.length === 0 ? await raiseDriftBeacon() : null;
           return new Response(
-            JSON.stringify({ success: true, processed: results.length, folded, beacon, results }),
+            JSON.stringify({
+              success: true,
+              processed: results.length,
+              folded,
+              exhausted,
+              beacon,
+              results,
+            }),
             { headers: { "Content-Type": "application/json" } },
           );
         } catch (e) {
