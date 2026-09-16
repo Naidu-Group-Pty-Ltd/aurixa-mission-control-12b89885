@@ -32,6 +32,7 @@ import {
   LayoutDashboard,
   Mail,
   MailX,
+  Megaphone,
   Newspaper,
   Palette,
   Phone,
@@ -100,6 +101,12 @@ export const NAV_SECTIONS: NavSection[] = [
         icon: Waves,
         shortcut: "c",
         keywords: "push update pull request",
+      },
+      {
+        to: "/announcements",
+        label: "Announcements",
+        icon: Megaphone,
+        keywords: "notice broadcast banner popup message clones plans fleet comms",
       },
       {
         to: "/schedules",

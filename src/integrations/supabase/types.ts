@@ -1373,6 +1373,118 @@ export type Database = {
           },
         ]
       }
+      clone_announcement_deliveries: {
+        Row: {
+          announcement_id: string
+          clone_id: string
+          delivery_count: number
+          first_delivered_at: string
+          last_delivered_at: string
+          last_revision: number
+        }
+        Insert: {
+          announcement_id: string
+          clone_id: string
+          delivery_count?: number
+          first_delivered_at?: string
+          last_delivered_at?: string
+          last_revision?: number
+        }
+        Update: {
+          announcement_id?: string
+          clone_id?: string
+          delivery_count?: number
+          first_delivered_at?: string
+          last_delivered_at?: string
+          last_revision?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clone_announcement_deliveries_announcement_id_fkey"
+            columns: ["announcement_id"]
+            isOneToOne: false
+            referencedRelation: "clone_announcements"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "clone_announcement_deliveries_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "clone_announcement_deliveries_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones_missing_isolated_backend"
+            referencedColumns: ["clone_id"]
+          },
+        ]
+      }
+      clone_announcements: {
+        Row: {
+          archived_at: string | null
+          audience_clone_ids: string[] | null
+          audience_plan_slugs: string[] | null
+          body: string
+          created_at: string
+          created_by: string | null
+          dismissible: boolean
+          display: string
+          ends_at: string | null
+          id: string
+          link_label: string | null
+          link_url: string | null
+          published_at: string | null
+          revision: number
+          severity: string
+          starts_at: string | null
+          title: string
+          updated_at: string
+        }
+        Insert: {
+          archived_at?: string | null
+          audience_clone_ids?: string[] | null
+          audience_plan_slugs?: string[] | null
+          body: string
+          created_at?: string
+          created_by?: string | null
+          dismissible?: boolean
+          display?: string
+          ends_at?: string | null
+          id?: string
+          link_label?: string | null
+          link_url?: string | null
+          published_at?: string | null
+          revision?: number
+          severity?: string
+          starts_at?: string | null
+          title: string
+          updated_at?: string
+        }
+        Update: {
+          archived_at?: string | null
+          audience_clone_ids?: string[] | null
+          audience_plan_slugs?: string[] | null
+          body?: string
+          created_at?: string
+          created_by?: string | null
+          dismissible?: boolean
+          display?: string
+          ends_at?: string | null
+          id?: string
+          link_label?: string | null
+          link_url?: string | null
+          published_at?: string | null
+          revision?: number
+          severity?: string
+          starts_at?: string | null
+          title?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
       clone_api_keys: {
         Row: {
           clone_id: string | null
@@ -13080,6 +13192,8 @@ export type Database = {
         | "clone_gate_unlocked"
         | "clone_gate_expiring"
         | "crm_appointment_booked"
+        | "clone_announcement_published"
+        | "clone_announcement_archived"
       notification_severity: "info" | "success" | "warning" | "error"
       overage_policy: "block" | "topup_only" | "pay_as_you_go"
       provisioning_method: "fork" | "template" | "clone"
@@ -13573,6 +13687,8 @@ export const Constants = {
         "clone_gate_unlocked",
         "clone_gate_expiring",
         "crm_appointment_booked",
+        "clone_announcement_published",
+        "clone_announcement_archived",
       ],
       notification_severity: ["info", "success", "warning", "error"],
       overage_policy: ["block", "topup_only", "pay_as_you_go"],

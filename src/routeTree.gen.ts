@@ -162,6 +162,8 @@ import { Route as ApiPublicSupportAssistantActivityRouteImport } from './routes/
 import { Route as ApiPublicStripeWebhookRouteImport } from './routes/api.public.stripe.webhook'
 import { Route as ApiPublicStorefrontWalletRouteImport } from './routes/api.public.storefront.wallet'
 import { Route as ApiPublicStorefrontSetupRouteImport } from './routes/api.public.storefront.setup'
+import { Route as AnnouncementsRouteImport } from './routes/announcements'
+import { Route as ApiPublicClonesAnnouncementsRouteImport } from './routes/api.public.clones.announcements'
 import { Route as ApiPublicStorefrontSessionRouteImport } from './routes/api.public.storefront.session'
 import { Route as ApiPublicStorefrontPlanChangeRouteImport } from './routes/api.public.storefront.plan-change'
 import { Route as ApiPublicStorefrontIdentityRouteImport } from './routes/api.public.storefront.identity'
@@ -999,6 +1001,17 @@ const ApiPublicStorefrontSetupRoute =
     path: '/api/public/storefront/setup',
     getParentRoute: () => rootRouteImport,
   } as any)
+const AnnouncementsRoute = AnnouncementsRouteImport.update({
+  id: '/announcements',
+  path: '/announcements',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiPublicClonesAnnouncementsRoute =
+  ApiPublicClonesAnnouncementsRouteImport.update({
+    id: '/api/public/clones/announcements',
+    path: '/api/public/clones/announcements',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiPublicStorefrontSessionRoute =
   ApiPublicStorefrontSessionRouteImport.update({
     id: '/api/public/storefront/session',
@@ -1411,6 +1424,8 @@ export interface FileRoutesByFullPath {
   '/api/public/storefront/plan-change': typeof ApiPublicStorefrontPlanChangeRoute
   '/api/public/storefront/session': typeof ApiPublicStorefrontSessionRoute
   '/api/public/storefront/setup': typeof ApiPublicStorefrontSetupRoute
+  '/announcements': typeof AnnouncementsRoute
+  '/api/public/clones/announcements': typeof ApiPublicClonesAnnouncementsRoute
   '/api/public/storefront/wallet': typeof ApiPublicStorefrontWalletRoute
   '/api/public/stripe/webhook': typeof ApiPublicStripeWebhookRouteWithChildren
   '/api/public/support/assistant-activity': typeof ApiPublicSupportAssistantActivityRoute
@@ -1607,6 +1622,8 @@ export interface FileRoutesByTo {
   '/api/public/storefront/plan-change': typeof ApiPublicStorefrontPlanChangeRoute
   '/api/public/storefront/session': typeof ApiPublicStorefrontSessionRoute
   '/api/public/storefront/setup': typeof ApiPublicStorefrontSetupRoute
+  '/announcements': typeof AnnouncementsRoute
+  '/api/public/clones/announcements': typeof ApiPublicClonesAnnouncementsRoute
   '/api/public/storefront/wallet': typeof ApiPublicStorefrontWalletRoute
   '/api/public/stripe/webhook': typeof ApiPublicStripeWebhookRouteWithChildren
   '/api/public/support/assistant-activity': typeof ApiPublicSupportAssistantActivityRoute
@@ -1805,6 +1822,8 @@ export interface FileRoutesById {
   '/api/public/storefront/plan-change': typeof ApiPublicStorefrontPlanChangeRoute
   '/api/public/storefront/session': typeof ApiPublicStorefrontSessionRoute
   '/api/public/storefront/setup': typeof ApiPublicStorefrontSetupRoute
+  '/announcements': typeof AnnouncementsRoute
+  '/api/public/clones/announcements': typeof ApiPublicClonesAnnouncementsRoute
   '/api/public/storefront/wallet': typeof ApiPublicStorefrontWalletRoute
   '/api/public/stripe/webhook': typeof ApiPublicStripeWebhookRouteWithChildren
   '/api/public/support/assistant-activity': typeof ApiPublicSupportAssistantActivityRoute
@@ -2004,6 +2023,8 @@ export interface FileRouteTypes {
     | '/api/public/storefront/plan-change'
     | '/api/public/storefront/session'
     | '/api/public/storefront/setup'
+    | '/announcements'
+    | '/api/public/clones/announcements'
     | '/api/public/storefront/wallet'
     | '/api/public/stripe/webhook'
     | '/api/public/support/assistant-activity'
@@ -2200,6 +2221,8 @@ export interface FileRouteTypes {
     | '/api/public/storefront/plan-change'
     | '/api/public/storefront/session'
     | '/api/public/storefront/setup'
+    | '/announcements'
+    | '/api/public/clones/announcements'
     | '/api/public/storefront/wallet'
     | '/api/public/stripe/webhook'
     | '/api/public/support/assistant-activity'
@@ -2397,6 +2420,8 @@ export interface FileRouteTypes {
     | '/api/public/storefront/plan-change'
     | '/api/public/storefront/session'
     | '/api/public/storefront/setup'
+    | '/announcements'
+    | '/api/public/clones/announcements'
     | '/api/public/storefront/wallet'
     | '/api/public/stripe/webhook'
     | '/api/public/support/assistant-activity'
@@ -2574,6 +2599,8 @@ export interface RootRouteChildren {
   ApiPublicStorefrontPlanChangeRoute: typeof ApiPublicStorefrontPlanChangeRoute
   ApiPublicStorefrontSessionRoute: typeof ApiPublicStorefrontSessionRoute
   ApiPublicStorefrontSetupRoute: typeof ApiPublicStorefrontSetupRoute
+  AnnouncementsRoute: typeof AnnouncementsRoute
+  ApiPublicClonesAnnouncementsRoute: typeof ApiPublicClonesAnnouncementsRoute
   ApiPublicStorefrontWalletRoute: typeof ApiPublicStorefrontWalletRoute
   ApiPublicStripeWebhookRoute: typeof ApiPublicStripeWebhookRouteWithChildren
   ApiPublicSupportAssistantActivityRoute: typeof ApiPublicSupportAssistantActivityRoute
@@ -3670,6 +3697,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicStorefrontSetupRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/announcements': {
+      id: '/announcements'
+      path: '/announcements'
+      fullPath: '/announcements'
+      preLoaderRoute: typeof AnnouncementsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/clones/announcements': {
+      id: '/api/public/clones/announcements'
+      path: '/api/public/clones/announcements'
+      fullPath: '/api/public/clones/announcements'
+      preLoaderRoute: typeof ApiPublicClonesAnnouncementsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/storefront/session': {
       id: '/api/public/storefront/session'
       path: '/api/public/storefront/session'
@@ -4236,6 +4277,8 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPublicStorefrontPlanChangeRoute: ApiPublicStorefrontPlanChangeRoute,
   ApiPublicStorefrontSessionRoute: ApiPublicStorefrontSessionRoute,
   ApiPublicStorefrontSetupRoute: ApiPublicStorefrontSetupRoute,
+  AnnouncementsRoute: AnnouncementsRoute,
+  ApiPublicClonesAnnouncementsRoute: ApiPublicClonesAnnouncementsRoute,
   ApiPublicStorefrontWalletRoute: ApiPublicStorefrontWalletRoute,
   ApiPublicStripeWebhookRoute: ApiPublicStripeWebhookRouteWithChildren,
   ApiPublicSupportAssistantActivityRoute:
