@@ -108,3 +108,31 @@ describe("the drain wires the judgement with guarded writes", () => {
     expect(fn).toMatch(/could not read exhausted events/);
   });
 });
+
+describe("one tick cannot exhaust an event", () => {
+  /* The other way three attempts die at once: `drainOne` reverts a failed
+     event to `pending` (attempts kept) and the SAME tick's next loop
+     iteration re-claims it immediately. Measured twice on 16 Sep 2026 —
+     10:24:02 and 10:45:03, the second because the claim raced a mid-publish
+     build — the carrier went from healthy to `failed · attempts 3` in under
+     a second, with one tick body reporting the same error three times. A
+     failure is remembered for the rest of its tick, so an event loses at
+     most one attempt per minute and every attempt gets its own tick body. */
+  const drain = readFileSync("src/routes/hooks.cascade-drain.tsx", "utf8");
+
+  it("a failed pass is remembered and not re-claimed this tick", () => {
+    expect(drain).toContain("const failedThisTick = new Set<string>();");
+    expect(drain).toContain("if (r.ok === false && r.id) failedThisTick.add(r.id);");
+    expect(drain).toContain("await drainOne(budget, failedThisTick)");
+  });
+
+  it("the claim itself excludes them, so the tick moves on to other work", () => {
+    expect(drain).toContain('queue = queue.not("id", "in", `(${[...excluded].join(",")})`);');
+    // Only when there is something to exclude — the common path is untouched.
+    expect(drain).toContain("if (excluded.size > 0) {");
+  });
+
+  it("the failure return names the event, or the loop has nothing to remember", () => {
+    expect(drain).toContain("return { processed: true, ok: false, error: msg, id: claimed.id };");
+  });
+});

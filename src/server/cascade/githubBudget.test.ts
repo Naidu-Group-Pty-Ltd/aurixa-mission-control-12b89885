@@ -34,7 +34,7 @@ describe("the wiring", () => {
   it("the drain asks the free call before any paid one, and a starved tick claims nothing", () => {
     expect(drain).toContain('decideSpend({ role: "cascade_claim", remaining })');
     expect(drain.indexOf("const remaining = await readGitHubRemaining();")).toBeLessThan(
-      drain.indexOf("await drainOne(budget)"),
+      drain.indexOf("await drainOne(budget, failedThisTick)"),
     );
     expect(drain).toContain("if (spend.proceed) {");
     // The beacon is also behind the gate: a starved tick must not spend its

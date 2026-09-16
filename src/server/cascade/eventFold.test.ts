@@ -145,7 +145,7 @@ describe("the wiring the fold depends on", () => {
 
   it("the drain folds the backlog before anything is claimed", () => {
     const foldAt = drain.indexOf("await foldQueuedCommitEvents()");
-    const claimLoopAt = drain.indexOf("const r = await drainOne(budget)");
+    const claimLoopAt = drain.indexOf("const r = await drainOne(budget, failedThisTick)");
     expect(foldAt).toBeGreaterThan(-1);
     expect(claimLoopAt).toBeGreaterThan(foldAt);
   });
