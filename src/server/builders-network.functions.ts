@@ -312,3 +312,203 @@ export const listClonesForNetwork = createServerFn({ method: "GET" })
       clones: (data ?? []).map((c) => ({ id: c.id, name: c.name ?? c.slug, slug: c.slug })),
     };
   });
+
+// ---------------------------------------------------------------- ranking
+/**
+ * The marketplace ranking's operator plane.
+ *
+ * Mission Control does not compute the ranking and cannot edit a score. What
+ * it holds are the three instruments the product owner asked for — pin a
+ * builder to a position, take one out of the marketplace, freeze the whole
+ * published order — plus the commercial placement that buys a labelled band
+ * above the organic list.
+ *
+ * THERE IS NO `setBuilderMeritScore` AND THERE MUST NEVER BE ONE. An operator
+ * who could type a merit score could tell a builder a number no evidence
+ * produced, and the signal breakdown, the confidence and the list of what
+ * could not be measured would all become decoration over a typed figure. Every
+ * instrument here sits BESIDE the computed answer rather than replacing it.
+ */
+
+export interface NetworkRankedBuilder {
+  organisation_id: string;
+  legal_name: string | null;
+  trading_name: string | null;
+  status: string | null;
+  merit_score: number;
+  confidence: number;
+  measured_score: number | null;
+  band: number;
+  live_stock: number;
+  computed_at: string;
+  ranking_version: number;
+  override: {
+    id: string;
+    kind: "pin" | "suppress";
+    position: number | null;
+    reason: string;
+    created_by: string;
+    created_at: string;
+    expires_at: string | null;
+  } | null;
+  placement: {
+    id: string;
+    tier: string;
+    priority: number;
+    starts_at: string | null;
+    ends_at: string | null;
+    note: string | null;
+  } | null;
+}
+
+export interface NetworkRankingState {
+  frozen: boolean;
+  frozen_reason: string | null;
+  frozen_by: string | null;
+  frozen_at: string | null;
+  last_run_at: string | null;
+  last_run_organisations: number | null;
+  last_run_items: number | null;
+  last_run_error: string | null;
+  ranking_version: number;
+}
+
+export const listNetworkRanking = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth, requireAdmin])
+  .handler(async () => {
+    const result = await callBuilderNetworkAdmin("ranking_overview");
+    if (!result.ok) return { ok: false as const, error: result.error };
+    return {
+      ok: true as const,
+      state: (result.body.state as NetworkRankingState | null) ?? null,
+      builders: (result.body.builders as NetworkRankedBuilder[] | undefined) ?? [],
+    };
+  });
+
+export const explainNetworkRanking = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth, requireAdmin])
+  .inputValidator((data: { organisationId: string }) => {
+    if (!data?.organisationId) throw new Error("organisationId required");
+    return data;
+  })
+  .handler(async ({ data }) => {
+    const result = await callBuilderNetworkAdmin("ranking_explain", {
+      organisation_id: data.organisationId,
+    });
+    if (!result.ok) return { ok: false as const, error: result.error };
+    return { ok: true as const, snapshot: result.body.snapshot as Record<string, unknown> };
+  });
+
+export const setNetworkRankingOverride = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth, requireAdmin])
+  .inputValidator((data: {
+    organisationId: string;
+    kind: "pin" | "suppress";
+    position?: number | null;
+    reason: string;
+    /**
+     * Absent takes the network's ninety-day default. An explicit null is the
+     * deliberate ask for a STANDING override, and is passed through as null
+     * rather than being dropped — the distinction is the whole reason a
+     * forgotten pin cannot shape the marketplace for a year.
+     */
+    expiresAt?: string | null;
+  }) => {
+    if (!data?.organisationId) throw new Error("organisationId required");
+    if (data.kind !== "pin" && data.kind !== "suppress") throw new Error("kind must be pin or suppress");
+    if (!data.reason || data.reason.trim().length < 10) {
+      throw new Error("a reason of at least 10 characters is required");
+    }
+    if (data.kind === "pin" && (!Number.isInteger(data.position) || Number(data.position) < 1)) {
+      throw new Error("a pin needs a position of 1 or more");
+    }
+    return data;
+  })
+  .handler(async ({ data }) => {
+    const payload: Record<string, unknown> = {
+      organisation_id: data.organisationId,
+      kind: data.kind,
+      reason: data.reason.trim(),
+    };
+    if (data.kind === "pin") payload.position = data.position;
+    if (Object.prototype.hasOwnProperty.call(data, "expiresAt")) {
+      payload.expires_at = data.expiresAt ?? null;
+    }
+    const result = await callBuilderNetworkAdmin("ranking_set_override", payload);
+    if (!result.ok) return { ok: false as const, error: result.error };
+    return { ok: true as const, override: result.body.override as Record<string, unknown> };
+  });
+
+export const clearNetworkRankingOverride = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth, requireAdmin])
+  .inputValidator((data: { organisationId: string; kind: "pin" | "suppress"; reason?: string }) => {
+    if (!data?.organisationId) throw new Error("organisationId required");
+    if (data.kind !== "pin" && data.kind !== "suppress") throw new Error("kind must be pin or suppress");
+    return data;
+  })
+  .handler(async ({ data }) => {
+    const result = await callBuilderNetworkAdmin("ranking_clear_override", {
+      organisation_id: data.organisationId,
+      kind: data.kind,
+      ...(data.reason ? { reason: data.reason } : {}),
+    });
+    if (!result.ok) return { ok: false as const, error: result.error };
+    return { ok: true as const };
+  });
+
+export const setNetworkRankingFreeze = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth, requireAdmin])
+  .inputValidator((data: { frozen: boolean; reason?: string }) => {
+    if (typeof data?.frozen !== "boolean") throw new Error("frozen must be true or false");
+    if (data.frozen && (!data.reason || data.reason.trim().length < 10)) {
+      throw new Error("freezing the ranking requires a reason of at least 10 characters");
+    }
+    return data;
+  })
+  .handler(async ({ data }) => {
+    const result = await callBuilderNetworkAdmin("ranking_set_freeze", {
+      frozen: data.frozen,
+      ...(data.reason ? { reason: data.reason.trim() } : {}),
+    });
+    if (!result.ok) return { ok: false as const, error: result.error };
+    return { ok: true as const, frozen: Boolean(result.body.frozen) };
+  });
+
+export const setNetworkCommercialPlacement = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth, requireAdmin])
+  .inputValidator((data: {
+    organisationId: string;
+    tier: "partner" | "premium" | "featured";
+    priority?: number;
+    endsAt?: string | null;
+    note?: string;
+  }) => {
+    if (!data?.organisationId) throw new Error("organisationId required");
+    if (!["partner", "premium", "featured"].includes(data.tier)) throw new Error("unknown tier");
+    return data;
+  })
+  .handler(async ({ data }) => {
+    const result = await callBuilderNetworkAdmin("ranking_set_placement", {
+      organisation_id: data.organisationId,
+      tier: data.tier,
+      ...(Number.isInteger(data.priority) ? { priority: data.priority } : {}),
+      ...(data.endsAt !== undefined ? { ends_at: data.endsAt } : {}),
+      ...(data.note ? { note: data.note } : {}),
+    });
+    if (!result.ok) return { ok: false as const, error: result.error };
+    return { ok: true as const, placement: result.body.placement as Record<string, unknown> };
+  });
+
+export const clearNetworkCommercialPlacement = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth, requireAdmin])
+  .inputValidator((data: { organisationId: string }) => {
+    if (!data?.organisationId) throw new Error("organisationId required");
+    return data;
+  })
+  .handler(async ({ data }) => {
+    const result = await callBuilderNetworkAdmin("ranking_clear_placement", {
+      organisation_id: data.organisationId,
+    });
+    if (!result.ok) return { ok: false as const, error: result.error };
+    return { ok: true as const };
+  });

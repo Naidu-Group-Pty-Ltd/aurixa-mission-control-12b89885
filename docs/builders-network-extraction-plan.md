@@ -872,3 +872,34 @@ now — the same button is **6.74:1**.
    rewritten in the same Phase 4 pass, with counts asserted before and after — a bigger
    move than preserving paths, chosen for the clean long-term layout.
 6. **Native in-network AML compliance** stays deferred behind the server-side call (E4).
+
+---
+
+## Addendum — the marketplace ranking console (17 Sep 2026)
+
+`/builders-network` now carries the marketplace ranking panel. Mission Control
+does not compute the ranking and **cannot edit a score**: the network scores
+builders hourly from measured evidence and publishes the answer to every clone.
+
+What MC holds are the instruments, each behind the existing `builders:operate`
+federation assertion and each recorded with an actor, a reason and an expiry:
+
+| Operation | What it does |
+| --- | --- |
+| `ranking_overview` | The ranked builders, their confidence, their band, live overrides and placements |
+| `ranking_explain` | One builder's full signal breakdown, including what could not be measured |
+| `ranking_set_override` / `ranking_clear_override` | Pin to a position, or take a builder out of the marketplace |
+| `ranking_set_freeze` | Hold the published order still — it does not fall back to a default ordering |
+| `ranking_set_placement` / `ranking_clear_placement` | A commercial placement: a capped, labelled band above the organic order |
+
+Three things the console deliberately does not offer. **There is no
+`set_merit_score`** — an operator who could type one could tell a builder a
+number no evidence produced, and the confidence, band and unmeasured list beside
+it would become decoration. **A reason is not optional**: the ten-character floor
+is enforced at the column, at the network's door and in the prompt, so all three
+cannot become different standards. And **an override expires by default**
+(90 days) — a standing one has to be asked for explicitly, because the failure
+mode is not a badly chosen expiry but the pin nobody remembered to renew.
+
+The reasoning and the measurements are in the prime:
+`npc-property-dashbord/docs/builder-portal/47-builder-ranking.md`.
