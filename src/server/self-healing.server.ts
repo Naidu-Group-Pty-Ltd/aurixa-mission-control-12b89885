@@ -473,6 +473,54 @@ async function succeedRun(run: any, result: Record<string, unknown>): Promise<{ 
   return { status: "succeeded" };
 }
 
+/**
+ * Stamp the revision a clone's edge FUNCTIONS are now at.
+ *
+ * ## The silence this closes
+ *
+ * `clones.last_synced_sha` is the revision the clone's REPOSITORY content
+ * reached, and the cascade advances it the moment a pull request merges —
+ * whether or not the backend deploy that merge requested ever landed. The
+ * catch-up sweep nevertheless read it as the backend's baseline, so a clone
+ * whose deploy had stopped was diffed head-against-head and answered
+ * `no_backend_work`, for ever.
+ *
+ * Measured 17 Sep 2026: `npc-client-dashboard` parked its deploy on 14 Sep
+ * and `npc-test` on 15 Sep, both with `failed: []` — no bundle had errored;
+ * the attempt budget went on prime-generation restarts and budget pauses.
+ * The cascade then merged past both. Neither clone received a single edge
+ * function for three days, while the fleet page read `in_sync`, every
+ * cascade was green, and the sweep's own audit breadcrumb said there was no
+ * backend work to do. `mission-control-announcements` shipped to the prime
+ * on 16 Sep and reached one clone of three.
+ *
+ * Written only HERE, on the one path that can honestly claim it: a run
+ * reaches `succeedRun` with `sourceMoved` false, so every bundle it counted
+ * came from this single revision.
+ *
+ * Best-effort, and never the reason a completed deploy reports as failed —
+ * but never silent either. A stamp that cannot be written leaves the next
+ * catch-up planning from an OLDER revision, which costs a redeploy and can
+ * never skip one; that is the safe direction, and it is said out loud.
+ */
+async function recordBackendRevision(
+  cloneId: string | null | undefined,
+  sourceSha: string | null | undefined,
+): Promise<void> {
+  if (!cloneId || !sourceSha) return;
+  const { error } = await admin
+    .from("clone_backends")
+    .update({ source_sha: sourceSha })
+    .eq("clone_id", cloneId);
+  if (error) {
+    console.error(
+      "[edge_function_deploy] could not record the backend revision",
+      cloneId,
+      error.message,
+    );
+  }
+}
+
 // ── Lane: pr_merge ───────────────────────────────────────────────────────
 
 async function executePrMerge(run: any, approvedByHuman: boolean): Promise<{ status: string }> {
@@ -1168,6 +1216,10 @@ async function executeEdgeFunctionDeploy(run: any): Promise<{ status: string }> 
     });
     return { status: "resuming" };
   }
+
+  // The catch-up's from-baseline for FUNCTIONS. See `recordBackendRevision`
+  // for why the repository's own baseline could not serve as one.
+  await recordBackendRevision(run.clone_id, snapshot.sourceSha ?? null);
 
   return succeedRun(run, {
     deployed: refreshed.length + landed,
