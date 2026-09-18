@@ -27,6 +27,7 @@ import {
   closeNetworkOrganisation,
   inviteNetworkOrganisationOwner,
   ORGANISATION_FIELDS,
+  AU_STATES,
   type NetworkOrganisation,
 } from "@/server/builders-network.functions";
 
@@ -93,6 +94,11 @@ export function OrganisationFormDialog({
   const [values, setValues] = useState<OrgFormValues>(() => organisationToForm(organisation));
   const [saving, setSaving] = useState(false);
   const editing = organisation !== null;
+  // `org_type` is NOT NULL with no default and `legal_name` is NOT NULL, so a
+  // save without either is one the network refuses. Offering it and reporting
+  // the refusal afterwards is how "The organisation could not be saved"
+  // reached an operator with no field named.
+  const canSave = Boolean(values.legal_name.trim() && values.org_type.trim());
 
   // Re-seed whenever the dialog opens on a different subject, so editing one
   // organisation and then another does not show the first one's details.
@@ -107,6 +113,10 @@ export function OrganisationFormDialog({
   const save = async () => {
     if (!values.legal_name.trim()) {
       toast.error("A legal name is required");
+      return;
+    }
+    if (!values.org_type.trim()) {
+      toast.error("An organisation type is required");
       return;
     }
     setSaving(true);
@@ -157,11 +167,11 @@ export function OrganisationFormDialog({
 
         <div className="grid gap-3 sm:grid-cols-2">
           <div className="sm:col-span-2">
-            {field("legal_name", "Legal name", "Bright Homes Pty Ltd")}
+            {field("legal_name", "Legal name (required)", "Bright Homes Pty Ltd")}
           </div>
           {field("trading_name", "Trading name", "Bright Homes")}
           <div className="space-y-1">
-            <Label htmlFor="org-org_type">Type</Label>
+            <Label htmlFor="org-org_type">Type (required)</Label>
             <Select
               value={values.org_type || undefined}
               onValueChange={(next) => setValues((prev) => ({ ...prev, org_type: next }))}
@@ -186,7 +196,24 @@ export function OrganisationFormDialog({
           <div className="sm:col-span-2">{field("address_line1", "Address")}</div>
           <div className="sm:col-span-2">{field("address_line2", "Address line 2")}</div>
           {field("suburb", "Suburb")}
-          {field("state", "State", "VIC")}
+          <div className="space-y-1">
+            <Label htmlFor="org-state">State</Label>
+            <Select
+              value={values.state || undefined}
+              onValueChange={(next) => setValues((prev) => ({ ...prev, state: next }))}
+            >
+              <SelectTrigger id="org-state">
+                <SelectValue placeholder="Choose a state…" />
+              </SelectTrigger>
+              <SelectContent>
+                {AU_STATES.map((code) => (
+                  <SelectItem key={code} value={code}>
+                    {code}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
           {field("postcode", "Postcode")}
           <div className="space-y-1 sm:col-span-2">
             <Label htmlFor="org-notes">Operator notes</Label>
@@ -198,7 +225,7 @@ export function OrganisationFormDialog({
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>
             Cancel
           </Button>
-          <Button onClick={() => void save()} disabled={saving || !values.legal_name.trim()}>
+          <Button onClick={() => void save()} disabled={saving || !canSave}>
             {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden /> : null}
             {editing ? "Save changes" : "Create organisation"}
           </Button>
