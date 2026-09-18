@@ -12,6 +12,7 @@
  * is patched, never duplicated.
  */
 import { createServerFn } from "@tanstack/react-start";
+import { getRequest } from "@tanstack/react-start/server";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { requireAdmin } from "@/integrations/supabase/role-middleware";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
@@ -22,6 +23,7 @@ import {
   operateSwitch,
 } from "./buildersNetworkAdmin.server";
 import { signingKeyPresent } from "./anthropicOidc.server";
+import { clientIpFrom } from "./support-tickets.server";
 
 export interface NetworkOverview {
   organisations: Record<string, number>;
@@ -300,6 +302,166 @@ export const inviteNetworkOrganisationOwner = createServerFn({ method: "POST" })
     };
   });
 
+/**
+ * An application for Builder Portal access, from a page with no sign-in.
+ *
+ * THIS SERVER FUNCTION IS DELIBERATELY UNAUTHENTICATED, and it is the only
+ * one in this module that is. A builder lead has no Mission Control account —
+ * that is the whole point of the form — so requiring one would make the door
+ * openable only by people already inside it.
+ *
+ * Four things make that safe, and none of them is a check somebody remembers:
+ *
+ *  * **The network gains no public door.** The applicant's browser never
+ *    speaks to `builder-network-admin`; it posts here, and Mission Control
+ *    signs the federation assertion server-side. So the whole abuse surface
+ *    is this one operation, with the network still verifying a signature on
+ *    everything it accepts.
+ *
+ *  * **The operation is the narrowest one there is.** It can create a
+ *    `pending_activation` organisation and invite the address written on the
+ *    application, and it can do nothing else — no approval, no edit of an
+ *    organisation that already exists, no read of anybody's data. The
+ *    console's operations stay behind `requireAdmin` exactly as they were.
+ *
+ *  * **The client is READ, never accepted.** `source_ip` and `user_agent`
+ *    come off the real request headers. A body field of either name is
+ *    ignored, because a caller who can type its own IP into the evidence
+ *    trail has erased the evidence trail.
+ *
+ *  * **One application per address per day**, enforced on the network where
+ *    the table is. A CAPTCHA would be the control above this one and there is
+ *    no site key minted for this surface; its absence is why the window is
+ *    not optional and why nothing here returns the invitation link.
+ *
+ * The invite URL is never in the answer. It is the credential, it goes to the
+ * mailbox that asked for it, and a public endpoint that hands it back to
+ * whoever posted the form is an account-takeover primitive.
+ */
+export interface BuilderApplicationInput {
+  legal_name: string;
+  trading_name?: string;
+  org_type: string;
+  abn?: string;
+  acn?: string;
+  contact_name: string;
+  contact_email: string;
+  contact_phone?: string;
+  website?: string;
+  suburb?: string;
+  state?: string;
+  postcode?: string;
+  message?: string;
+}
+
+/** The keys that travel. A body key outside this list is dropped, not passed. */
+export const APPLICATION_FIELDS = [
+  "legal_name",
+  "trading_name",
+  "org_type",
+  "abn",
+  "acn",
+  "contact_name",
+  "contact_email",
+  "contact_phone",
+  "website",
+  "suburb",
+  "state",
+  "postcode",
+  "message",
+] as const;
+
+export const submitBuilderAccessRequest = createServerFn({ method: "POST" })
+  .inputValidator((data: BuilderApplicationInput) => {
+    // The shape check is here so an empty form never spends a federation
+    // assertion; the network remains the AUTHORITY on what it accepts, and
+    // its refusals are what the page renders. Two rules stated once is how
+    // two rules come to disagree, so this asserts only that the four
+    // required boxes were filled in at all.
+    if (!data?.legal_name?.trim()) throw new Error("a_legal_name_is_required");
+    if (!data?.contact_name?.trim()) throw new Error("a_contact_name_is_required");
+    if (!data?.contact_email?.trim()) throw new Error("a_valid_email_is_required");
+    if (!data?.org_type?.trim()) throw new Error("an_organisation_type_is_required");
+    return data;
+  })
+  .handler(async ({ data }) => {
+    const input = data as unknown as Record<string, unknown>;
+    const payload: Record<string, unknown> = {};
+    for (const key of APPLICATION_FIELDS) {
+      if (typeof input[key] === "string") payload[key] = input[key];
+    }
+
+    // Read off the request rather than the body. `getRequest()` can be absent
+    // in a non-HTTP invocation, and an application is worth more than its
+    // provenance — so a missing header omits the field rather than refusing
+    // the application.
+    try {
+      const request = getRequest();
+      const headers = request?.headers;
+      if (headers) {
+        const ip = clientIpFrom(headers);
+        if (ip && ip !== "unknown") payload.source_ip = ip;
+        const agent = headers.get("user-agent");
+        if (agent) payload.user_agent = agent.slice(0, 500);
+      }
+    } catch {
+      // No request context. The application still stands.
+    }
+
+    const result = await callBuilderNetworkAdmin("submit_access_request", payload);
+    if (!result.ok) return { ok: false as const, error: result.error };
+    return {
+      ok: true as const,
+      // `attached` means the applicant already had a network account and it
+      // was joined to the new organisation — no credential was minted, so the
+      // page must not promise a link that was never sent.
+      outcome:
+        result.body.outcome === "attached" ? ("attached" as const) : ("provisioned" as const),
+      organisation_legal_name: String(result.body.organisation_legal_name ?? ""),
+      email_sent: result.body.email_sent === true,
+    };
+  });
+
+/**
+ * Applications, newest first, for the console.
+ *
+ * Read-only and admin-gated: everything an application can DO it already did
+ * when it was submitted, so there is nothing here to act on — this is the
+ * record of what the unattended pipeline decided, which is the one thing an
+ * operator could not see about it from the outside.
+ */
+export interface NetworkAccessRequest {
+  id: string;
+  legal_name: string;
+  trading_name: string | null;
+  org_type: string | null;
+  abn: string | null;
+  contact_name: string;
+  contact_email: string;
+  contact_phone: string | null;
+  website: string | null;
+  suburb: string | null;
+  state: string | null;
+  postcode: string | null;
+  message: string | null;
+  status: string;
+  outcome_detail: string | null;
+  organisation_id: string | null;
+  invite_sent: boolean;
+  created_at: string;
+}
+
+export const listNetworkAccessRequests = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth, requireAdmin])
+  .handler(async () => {
+    const result = await callBuilderNetworkAdmin("list_access_requests");
+    if (!result.ok) return { ok: false as const, error: result.error };
+    return {
+      ok: true as const,
+      access_requests: (result.body.access_requests as NetworkAccessRequest[] | undefined) ?? [],
+    };
+  });
+
 export const suspendNetworkOrganisation = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth, requireAdmin])
   .inputValidator((data: { organisationId: string; reason: string }) => {
@@ -378,13 +540,16 @@ export const createNetworkConnection = createServerFn({ method: "POST" })
     if (connectionId) {
       const { error: shadowError } = await supabaseAdmin
         .from("builders_network_connections_shadow")
-        .upsert({
-          clone_id: data.cloneId,
-          network_connection_id: connectionId,
-          builder_org_ref: data.builderOrganisationId,
-          state: "invited",
-          reported_at: new Date().toISOString(),
-        }, { onConflict: "network_connection_id" });
+        .upsert(
+          {
+            clone_id: data.cloneId,
+            network_connection_id: connectionId,
+            builder_org_ref: data.builderOrganisationId,
+            state: "invited",
+            reported_at: new Date().toISOString(),
+          },
+          { onConflict: "network_connection_id" },
+        );
       if (shadowError) console.error("[builders-network] shadow upsert failed", shadowError);
     }
     return {
@@ -418,9 +583,7 @@ export const revokeNetworkConnection = createServerFn({ method: "POST" })
         .eq("network_connection_id", data.connectionId);
       if (shadowError) console.error("[builders-network] shadow revoke update failed", shadowError);
     }
-    return result.ok
-      ? { ok: true as const }
-      : { ok: false as const, error: result.error };
+    return result.ok ? { ok: true as const } : { ok: false as const, error: result.error };
   });
 
 export const setNetworkConnectionTransport = createServerFn({ method: "POST" })
@@ -435,9 +598,7 @@ export const setNetworkConnectionTransport = createServerFn({ method: "POST" })
       connection_id: data.connectionId,
       inbound_url: data.inboundUrl,
     });
-    return result.ok
-      ? { ok: true as const }
-      : { ok: false as const, error: result.error };
+    return result.ok ? { ok: true as const } : { ok: false as const, error: result.error };
   });
 
 export const listShadowConnections = createServerFn({ method: "GET" })
@@ -445,7 +606,9 @@ export const listShadowConnections = createServerFn({ method: "GET" })
   .handler(async () => {
     const { data, error } = await supabaseAdmin
       .from("builders_network_connections_shadow")
-      .select("id, clone_id, network_connection_id, builder_org_ref, builder_org_label, state, scopes, reported_at")
+      .select(
+        "id, clone_id, network_connection_id, builder_org_ref, builder_org_label, state, scopes, reported_at",
+      )
       .order("reported_at", { ascending: false, nullsFirst: false })
       .limit(200);
     if (error) return { ok: false as const, error: error.message };
@@ -522,10 +685,10 @@ export interface NetworkCommercialPlacement {
  */
 export type NetworkSignalReading =
   | {
-    state: "measured";
-    value: number;
-    evidence: Record<string, number | string | boolean | null>;
-  }
+      state: "measured";
+      value: number;
+      evidence: Record<string, number | string | boolean | null>;
+    }
   | { state: "not_measured"; reason: string };
 
 export interface NetworkRankingSnapshot {
@@ -610,29 +773,32 @@ export const explainNetworkRanking = createServerFn({ method: "GET" })
 
 export const setNetworkRankingOverride = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth, requireAdmin])
-  .inputValidator((data: {
-    organisationId: string;
-    kind: "pin" | "suppress";
-    position?: number | null;
-    reason: string;
-    /**
-     * Absent takes the network's ninety-day default. An explicit null is the
-     * deliberate ask for a STANDING override, and is passed through as null
-     * rather than being dropped — the distinction is the whole reason a
-     * forgotten pin cannot shape the marketplace for a year.
-     */
-    expiresAt?: string | null;
-  }) => {
-    if (!data?.organisationId) throw new Error("organisationId required");
-    if (data.kind !== "pin" && data.kind !== "suppress") throw new Error("kind must be pin or suppress");
-    if (!data.reason || data.reason.trim().length < 10) {
-      throw new Error("a reason of at least 10 characters is required");
-    }
-    if (data.kind === "pin" && (!Number.isInteger(data.position) || Number(data.position) < 1)) {
-      throw new Error("a pin needs a position of 1 or more");
-    }
-    return data;
-  })
+  .inputValidator(
+    (data: {
+      organisationId: string;
+      kind: "pin" | "suppress";
+      position?: number | null;
+      reason: string;
+      /**
+       * Absent takes the network's ninety-day default. An explicit null is the
+       * deliberate ask for a STANDING override, and is passed through as null
+       * rather than being dropped — the distinction is the whole reason a
+       * forgotten pin cannot shape the marketplace for a year.
+       */
+      expiresAt?: string | null;
+    }) => {
+      if (!data?.organisationId) throw new Error("organisationId required");
+      if (data.kind !== "pin" && data.kind !== "suppress")
+        throw new Error("kind must be pin or suppress");
+      if (!data.reason || data.reason.trim().length < 10) {
+        throw new Error("a reason of at least 10 characters is required");
+      }
+      if (data.kind === "pin" && (!Number.isInteger(data.position) || Number(data.position) < 1)) {
+        throw new Error("a pin needs a position of 1 or more");
+      }
+      return data;
+    },
+  )
   .handler(async ({ data }) => {
     const payload: Record<string, unknown> = {
       organisation_id: data.organisationId,
@@ -652,7 +818,8 @@ export const clearNetworkRankingOverride = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth, requireAdmin])
   .inputValidator((data: { organisationId: string; kind: "pin" | "suppress"; reason?: string }) => {
     if (!data?.organisationId) throw new Error("organisationId required");
-    if (data.kind !== "pin" && data.kind !== "suppress") throw new Error("kind must be pin or suppress");
+    if (data.kind !== "pin" && data.kind !== "suppress")
+      throw new Error("kind must be pin or suppress");
     return data;
   })
   .handler(async ({ data }) => {
@@ -685,17 +852,19 @@ export const setNetworkRankingFreeze = createServerFn({ method: "POST" })
 
 export const setNetworkCommercialPlacement = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth, requireAdmin])
-  .inputValidator((data: {
-    organisationId: string;
-    tier: "partner" | "premium" | "featured";
-    priority?: number;
-    endsAt?: string | null;
-    note?: string;
-  }) => {
-    if (!data?.organisationId) throw new Error("organisationId required");
-    if (!["partner", "premium", "featured"].includes(data.tier)) throw new Error("unknown tier");
-    return data;
-  })
+  .inputValidator(
+    (data: {
+      organisationId: string;
+      tier: "partner" | "premium" | "featured";
+      priority?: number;
+      endsAt?: string | null;
+      note?: string;
+    }) => {
+      if (!data?.organisationId) throw new Error("organisationId required");
+      if (!["partner", "premium", "featured"].includes(data.tier)) throw new Error("unknown tier");
+      return data;
+    },
+  )
   .handler(async ({ data }) => {
     const result = await callBuilderNetworkAdmin("ranking_set_placement", {
       organisation_id: data.organisationId,

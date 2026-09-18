@@ -22,6 +22,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { readNetworkFailure } from "@/lib/buildersNetworkFailure.pure";
+// One list of the network's organisation kinds, shared with the public
+// application form: two copies is how the console and the form come to offer
+// different types of business.
+import { ORG_TYPE_LABEL } from "@/lib/builderApplication.pure";
 import {
   createNetworkOrganisation,
   updateNetworkOrganisation,
@@ -54,12 +59,20 @@ import {
  * Reinstate and Close. A status dropdown here would be a second way to move
  * a lifecycle, and the two would disagree the first time one forgot a stamp.
  */
-const ORG_TYPE_LABEL: Record<string, string> = {
-  builder: "Builder",
-  developer: "Developer",
-  builder_developer: "Builder & developer",
-  sales_representative: "Sales representative",
-};
+/**
+ * The network's refusal, as a sentence.
+ *
+ * Every one of these was rendered RAW — `toast.error(result.error)` put
+ * `abn_already_registered` in front of an operator, which is the database
+ * vocabulary this codebase forbids reaching a person. `readNetworkFailure`
+ * already existed to answer exactly this, authored where the wording matters
+ * and unslugged where it does not, so the dialogs ask it rather than
+ * carrying a second list of their own.
+ */
+function refusal(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message) return readNetworkFailure(error.message).sentence;
+  return fallback;
+}
 
 type OrgFormValues = Record<string, string>;
 
@@ -134,7 +147,7 @@ export function OrganisationFormDialog({
       onOpenChange(false);
       onSaved();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "The organisation could not be saved");
+      toast.error(refusal(error, "The organisation could not be saved."));
     } finally {
       setSaving(false);
     }
@@ -271,7 +284,7 @@ export function CloseOrganisationDialog({
       onOpenChange(false);
       onClosed();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "The organisation could not be closed");
+      toast.error(refusal(error, "The organisation could not be closed."));
     } finally {
       setBusy(false);
     }
@@ -391,7 +404,7 @@ export function InviteOwnerDialog({
       if (!answer.ok) throw new Error(answer.error);
       setResult(answer);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "The invite could not be minted");
+      toast.error(refusal(error, "The invitation could not be issued."));
     } finally {
       setBusy(false);
     }

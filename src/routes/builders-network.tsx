@@ -3,9 +3,29 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import {
-  Building2, Cable, CheckCircle2, Copy, EyeOff, FileSignature, Inbox, KeyRound, Loader2,
-  ChevronDown, ChevronRight, Mail, PauseCircle, Pencil, Pin, PlayCircle, Plug, Plus,
-  RefreshCw, ShieldAlert, Snowflake, Trophy, XCircle,
+  Building2,
+  Cable,
+  CheckCircle2,
+  Copy,
+  EyeOff,
+  FileSignature,
+  Inbox,
+  KeyRound,
+  Loader2,
+  ChevronDown,
+  ChevronRight,
+  Mail,
+  PauseCircle,
+  Pencil,
+  Pin,
+  PlayCircle,
+  Plug,
+  Plus,
+  RefreshCw,
+  ShieldAlert,
+  Snowflake,
+  Trophy,
+  XCircle,
 } from "lucide-react";
 import { toast } from "sonner";
 import { ProtectedRoute } from "@/components/protected-route";
@@ -17,12 +37,17 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import {
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
 } from "@/components/ui/select";
 import {
   buildersNetworkStatus,
   listNetworkOrganisations,
   listNetworkJoinRequests,
+  listNetworkAccessRequests,
   listShadowConnections,
   listClonesForNetwork,
   approveNetworkOrganisation,
@@ -44,6 +69,7 @@ import {
   type NetworkSignalReading,
 } from "@/server/builders-network.functions";
 import { readNetworkFailure } from "@/lib/buildersNetworkFailure.pure";
+import { AccessRequestsPanel } from "@/components/builders-network-access-requests";
 import {
   CloseOrganisationDialog,
   InviteOwnerDialog,
@@ -170,7 +196,9 @@ function RankingPanel() {
    * different standards.
    */
   const askReason = (what: string): string | null => {
-    const reason = window.prompt(`${what}\n\nRecord why. This is kept with the override and shown to whoever reviews the marketplace next.`);
+    const reason = window.prompt(
+      `${what}\n\nRecord why. This is kept with the override and shown to whoever reviews the marketplace next.`,
+    );
     if (reason === null) return null;
     if (reason.trim().length < 10) {
       toast.error("A reason of at least 10 characters is required.");
@@ -184,7 +212,10 @@ function RankingPanel() {
     try {
       const result = await run();
       if (!result.ok) toast.error(result.error ?? "The network refused that.");
-      else { toast.success("Recorded."); refresh(); }
+      else {
+        toast.success("Recorded.");
+        refresh();
+      }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "That did not go through.");
     } finally {
@@ -218,18 +249,20 @@ function RankingPanel() {
               if (reason) void act("freeze", () => freezeFn({ data: { frozen: true, reason } }));
             }}
           >
-            {busy === "freeze"
-              ? <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
-              : <Snowflake className="mr-2 h-4 w-4" aria-hidden />}
+            {busy === "freeze" ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
+            ) : (
+              <Snowflake className="mr-2 h-4 w-4" aria-hidden />
+            )}
             {state?.frozen ? "Release the freeze" : "Freeze the ranking"}
           </Button>
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
         {/*
-          * A FREEZE IS ANNOUNCED, NOT INFERRED. A frozen ranking that nobody can
-          * see is frozen looks exactly like a scheduler that quietly stopped.
-          */}
+         * A FREEZE IS ANNOUNCED, NOT INFERRED. A frozen ranking that nobody can
+         * see is frozen looks exactly like a scheduler that quietly stopped.
+         */}
         {state?.frozen ? (
           <div className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
             <p className="font-medium">The published order is frozen.</p>
@@ -239,7 +272,8 @@ function RankingPanel() {
               {state.frozen_by ? `, by ${state.frozen_by}` : ""}
             </p>
             <p className="mt-1 text-muted-foreground">
-              Hourly runs still start and write nothing. Every clone keeps drawing the last published order.
+              Hourly runs still start and write nothing. Every clone keeps drawing the last
+              published order.
             </p>
           </div>
         ) : null}
@@ -269,32 +303,56 @@ function RankingPanel() {
                 builder={builder}
                 busy={busy}
                 onPin={() => {
-                  const raw = window.prompt("Pin this builder to which position? (1 is the top of the marketplace)");
+                  const raw = window.prompt(
+                    "Pin this builder to which position? (1 is the top of the marketplace)",
+                  );
                   if (raw === null) return;
                   const position = Number(raw);
                   if (!Number.isInteger(position) || position < 1) {
                     toast.error("A position must be a whole number of 1 or more.");
                     return;
                   }
-                  const reason = askReason(`Pin ${builder.trading_name ?? builder.legal_name} at position ${position}`);
+                  const reason = askReason(
+                    `Pin ${builder.trading_name ?? builder.legal_name} at position ${position}`,
+                  );
                   if (!reason) return;
-                  void act(builder.organisation_id, () => overrideFn({
-                    data: { organisationId: builder.organisation_id, kind: "pin", position, reason },
-                  }));
+                  void act(builder.organisation_id, () =>
+                    overrideFn({
+                      data: {
+                        organisationId: builder.organisation_id,
+                        kind: "pin",
+                        position,
+                        reason,
+                      },
+                    }),
+                  );
                 }}
                 onSuppress={() => {
-                  const reason = askReason(`Take ${builder.trading_name ?? builder.legal_name} out of the marketplace`);
+                  const reason = askReason(
+                    `Take ${builder.trading_name ?? builder.legal_name} out of the marketplace`,
+                  );
                   if (!reason) return;
-                  void act(builder.organisation_id, () => overrideFn({
-                    data: { organisationId: builder.organisation_id, kind: "suppress", reason },
-                  }));
+                  void act(builder.organisation_id, () =>
+                    overrideFn({
+                      data: { organisationId: builder.organisation_id, kind: "suppress", reason },
+                    }),
+                  );
                 }}
-                onClearOverride={(kind) => void act(builder.organisation_id, () =>
-                  clearOverrideFn({ data: { organisationId: builder.organisation_id, kind } }))}
-                onPlace={(tier) => void act(builder.organisation_id, () =>
-                  placementFn({ data: { organisationId: builder.organisation_id, tier } }))}
-                onClearPlacement={() => void act(builder.organisation_id, () =>
-                  clearPlacementFn({ data: { organisationId: builder.organisation_id } }))}
+                onClearOverride={(kind) =>
+                  void act(builder.organisation_id, () =>
+                    clearOverrideFn({ data: { organisationId: builder.organisation_id, kind } }),
+                  )
+                }
+                onPlace={(tier) =>
+                  void act(builder.organisation_id, () =>
+                    placementFn({ data: { organisationId: builder.organisation_id, tier } }),
+                  )
+                }
+                onClearPlacement={() =>
+                  void act(builder.organisation_id, () =>
+                    clearPlacementFn({ data: { organisationId: builder.organisation_id } }),
+                  )
+                }
               />
             ))}
           </div>
@@ -377,23 +435,25 @@ function RankingExplanation({ organisationId }: { organisationId: string }) {
         </ul>
       ) : (
         <p className="mt-2 text-xs text-muted-foreground">
-          Nothing about this builder has been measured yet. The score is the
-          neutral prior alone.
+          Nothing about this builder has been measured yet. The score is the neutral prior alone.
         </p>
       )}
 
       {/*
-        * The unmeasured list is the point, not a footnote. A score built on two
-        * signals out of thirteen is a different claim from the same score built
-        * on all of them, and an operator about to act on a position needs to
-        * see which it is. None of these counted against the builder.
-        */}
+       * The unmeasured list is the point, not a footnote. A score built on two
+       * signals out of thirteen is a different claim from the same score built
+       * on all of them, and an operator about to act on a position needs to
+       * see which it is. None of these counted against the builder.
+       */}
       {unmeasured.length ? (
         <div className="mt-3 border-t pt-2">
           <p className="text-xs font-medium">Not measured — and not counted against them</p>
           <ul className="mt-1 space-y-1">
             {unmeasured.map(([key, reading]) => (
-              <li key={key} className="flex items-baseline justify-between gap-3 text-xs text-muted-foreground">
+              <li
+                key={key}
+                className="flex items-baseline justify-between gap-3 text-xs text-muted-foreground"
+              >
                 <span className="capitalize">{label(key)}</span>
                 <span>{(reading as { reason: string }).reason.replace(/_/g, " ")}</span>
               </li>
@@ -406,7 +466,13 @@ function RankingExplanation({ organisationId }: { organisationId: string }) {
 }
 
 function RankingRow({
-  builder, busy, onPin, onSuppress, onClearOverride, onPlace, onClearPlacement,
+  builder,
+  busy,
+  onPin,
+  onSuppress,
+  onClearOverride,
+  onPlace,
+  onClearPlacement,
 }: {
   builder: NetworkRankedBuilder;
   busy: string | null;
@@ -437,22 +503,22 @@ function RankingRow({
         </div>
 
         <div className="text-right">
-          <p className="text-lg font-semibold tabular-nums">{Number(builder.merit_score).toFixed(1)}</p>
-          {/*
-            * The confidence is not decoration. While the network is young most
-            * of what a builder would be ranked on has never happened, so a
-            * score's evidence base is the thing an operator needs to read
-            * before treating the number as a judgement about the builder.
-            */}
-          <p className="text-xs text-muted-foreground">
-            {confidence}% of signals measured
+          <p className="text-lg font-semibold tabular-nums">
+            {Number(builder.merit_score).toFixed(1)}
           </p>
           {/*
-            * Directly under the confidence figure, because this is what that
-            * figure is short for. A percentage an operator cannot open is a
-            * number they have to take on trust, and the evidence is already
-            * stored precisely so they do not have to.
-            */}
+           * The confidence is not decoration. While the network is young most
+           * of what a builder would be ranked on has never happened, so a
+           * score's evidence base is the thing an operator needs to read
+           * before treating the number as a judgement about the builder.
+           */}
+          <p className="text-xs text-muted-foreground">{confidence}% of signals measured</p>
+          {/*
+           * Directly under the confidence figure, because this is what that
+           * figure is short for. A percentage an operator cannot open is a
+           * number they have to take on trust, and the evidence is already
+           * stored precisely so they do not have to.
+           */}
           <Button
             size="sm"
             variant="link"
@@ -460,9 +526,11 @@ function RankingRow({
             aria-expanded={explaining}
             onClick={() => setExplaining((open) => !open)}
           >
-            {explaining
-              ? <ChevronDown className="mr-1 h-3 w-3" aria-hidden />
-              : <ChevronRight className="mr-1 h-3 w-3" aria-hidden />}
+            {explaining ? (
+              <ChevronDown className="mr-1 h-3 w-3" aria-hidden />
+            ) : (
+              <ChevronRight className="mr-1 h-3 w-3" aria-hidden />
+            )}
             Why this score
           </Button>
         </div>
@@ -475,21 +543,30 @@ function RankingRow({
           <Badge variant="outline" className="border-primary/40 bg-primary/10 text-primary">
             <Pin className="mr-1 h-3 w-3" aria-hidden />
             Pinned at {override.position}
-            {override.expires_at ? ` until ${new Date(override.expires_at).toLocaleDateString("en-AU")}` : " (standing)"}
+            {override.expires_at
+              ? ` until ${new Date(override.expires_at).toLocaleDateString("en-AU")}`
+              : " (standing)"}
           </Badge>
         ) : null}
         {override?.kind === "suppress" ? (
-          <Badge variant="outline" className="border-destructive/40 bg-destructive/10 text-destructive">
+          <Badge
+            variant="outline"
+            className="border-destructive/40 bg-destructive/10 text-destructive"
+          >
             <EyeOff className="mr-1 h-3 w-3" aria-hidden />
             Out of the marketplace
-            {override.expires_at ? ` until ${new Date(override.expires_at).toLocaleDateString("en-AU")}` : ""}
+            {override.expires_at
+              ? ` until ${new Date(override.expires_at).toLocaleDateString("en-AU")}`
+              : ""}
           </Badge>
         ) : null}
         {placement ? (
           <Badge variant="outline" className="border-warning/40 bg-warning/10 text-warning">
             <Trophy className="mr-1 h-3 w-3" aria-hidden />
             {placement.tier}
-            {placement.ends_at ? ` until ${new Date(placement.ends_at).toLocaleDateString("en-AU")}` : ""}
+            {placement.ends_at
+              ? ` until ${new Date(placement.ends_at).toLocaleDateString("en-AU")}`
+              : ""}
           </Badge>
         ) : null}
       </div>
@@ -497,23 +574,39 @@ function RankingRow({
       {override ? (
         <p className="mt-2 text-xs text-muted-foreground">
           “{override.reason}” — {override.created_by}
-          {override.created_at ? `, ${new Date(override.created_at).toLocaleDateString("en-AU")}` : ""}
+          {override.created_at
+            ? `, ${new Date(override.created_at).toLocaleDateString("en-AU")}`
+            : ""}
         </p>
       ) : null}
 
       <div className="mt-3 flex flex-wrap gap-2">
         {override?.kind === "pin" ? (
-          <Button size="sm" variant="outline" disabled={working} onClick={() => onClearOverride("pin")}>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={working}
+            onClick={() => onClearOverride("pin")}
+          >
             Remove the pin
           </Button>
         ) : (
           <Button size="sm" variant="outline" disabled={working} onClick={onPin}>
-            {working ? <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden /> : <Pin className="mr-2 h-4 w-4" aria-hidden />}
+            {working ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
+            ) : (
+              <Pin className="mr-2 h-4 w-4" aria-hidden />
+            )}
             Pin to a position
           </Button>
         )}
         {override?.kind === "suppress" ? (
-          <Button size="sm" variant="outline" disabled={working} onClick={() => onClearOverride("suppress")}>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={working}
+            onClick={() => onClearOverride("suppress")}
+          >
             Return to the marketplace
           </Button>
         ) : (
@@ -527,7 +620,10 @@ function RankingRow({
             End the placement
           </Button>
         ) : (
-          <Select disabled={working} onValueChange={(value) => onPlace(value as "partner" | "premium" | "featured")}>
+          <Select
+            disabled={working}
+            onValueChange={(value) => onPlace(value as "partner" | "premium" | "featured")}
+          >
             <SelectTrigger className="h-9 w-[12rem]">
               <SelectValue placeholder="Commercial placement" />
             </SelectTrigger>
@@ -548,6 +644,7 @@ function BuildersNetworkConsole() {
   const statusFn = useServerFn(buildersNetworkStatus);
   const orgsFn = useServerFn(listNetworkOrganisations);
   const joinsFn = useServerFn(listNetworkJoinRequests);
+  const accessRequestsFn = useServerFn(listNetworkAccessRequests);
   const shadowFn = useServerFn(listShadowConnections);
   const clonesFn = useServerFn(listClonesForNetwork);
   const approveFn = useServerFn(approveNetworkOrganisation);
@@ -561,6 +658,10 @@ function BuildersNetworkConsole() {
   const status = useQuery({ queryKey: ["bn-status"], queryFn: () => statusFn() });
   const organisations = useQuery({ queryKey: ["bn-orgs"], queryFn: () => orgsFn({ data: {} }) });
   const joins = useQuery({ queryKey: ["bn-joins"], queryFn: () => joinsFn() });
+  const accessRequests = useQuery({
+    queryKey: ["bn-access-requests"],
+    queryFn: () => accessRequestsFn(),
+  });
   const shadow = useQuery({ queryKey: ["bn-shadow"], queryFn: () => shadowFn() });
   const clones = useQuery({ queryKey: ["bn-clones"], queryFn: () => clonesFn() });
 
@@ -590,10 +691,14 @@ function BuildersNetworkConsole() {
     void queryClient.invalidateQueries({ queryKey: ["bn-status"] });
     void queryClient.invalidateQueries({ queryKey: ["bn-orgs"] });
     void queryClient.invalidateQueries({ queryKey: ["bn-joins"] });
+    void queryClient.invalidateQueries({ queryKey: ["bn-access-requests"] });
     void queryClient.invalidateQueries({ queryKey: ["bn-shadow"] });
   };
 
-  const act = async (organisation: NetworkOrganisation, action: "approve" | "suspend" | "reinstate") => {
+  const act = async (
+    organisation: NetworkOrganisation,
+    action: "approve" | "suspend" | "reinstate",
+  ) => {
     setBusyOrg(organisation.id);
     try {
       if (action === "approve") {
@@ -797,10 +902,19 @@ function BuildersNetworkConsole() {
             {overview ? (
               <div className="flex flex-wrap gap-x-4 gap-y-1">
                 {Object.entries(overview.organisations).map(([key, count]) => (
-                  <span key={`o-${key}`}>{key.replaceAll("_", " ")}: <strong>{count}</strong></span>
+                  <span key={`o-${key}`}>
+                    {key.replaceAll("_", " ")}: <strong>{count}</strong>
+                  </span>
                 ))}
-                <span>join requests: <strong>{overview.pending_join_requests}</strong></span>
-                <span>dead letters: <strong className={overview.dead_letters ? "text-red-500" : ""}>{overview.dead_letters}</strong></span>
+                <span>
+                  join requests: <strong>{overview.pending_join_requests}</strong>
+                </span>
+                <span>
+                  dead letters:{" "}
+                  <strong className={overview.dead_letters ? "text-red-500" : ""}>
+                    {overview.dead_letters}
+                  </strong>
+                </span>
               </div>
             ) : (
               <span className="text-muted-foreground">Not available</span>
@@ -823,7 +937,11 @@ function BuildersNetworkConsole() {
               code={organisations.data?.error}
             />
           ) : organisations.data.organisations.length === 0 ? (
-            <EmptyState icon={<Building2 className="h-5 w-5" aria-hidden />} title="No organisations yet" description="Registrations appear here for vetting." />
+            <EmptyState
+              icon={<Building2 className="h-5 w-5" aria-hidden />}
+              title="No organisations yet"
+              description="Registrations appear here for vetting."
+            />
           ) : (
             <div className="divide-y divide-border">
               {organisations.data.organisations.map((organisation) => (
@@ -837,24 +955,45 @@ function BuildersNetworkConsole() {
                       {organisation.contact_email ? ` · ${organisation.contact_email}` : ""}
                     </p>
                     {organisation.suspension_reason && (
-                      <p className="truncate text-xs text-red-500">Suspended: {organisation.suspension_reason}</p>
+                      <p className="truncate text-xs text-red-500">
+                        Suspended: {organisation.suspension_reason}
+                      </p>
                     )}
                   </div>
                   <StatusBadge value={organisation.status} />
                   <div className="flex gap-2">
-                    {(organisation.status === "pending_verification" || organisation.status === "pending_activation") && (
-                      <Button size="sm" disabled={busyOrg === organisation.id} onClick={() => void act(organisation, "approve")}>
-                        {busyOrg === organisation.id ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <PlayCircle className="mr-1 h-4 w-4" aria-hidden />}
+                    {(organisation.status === "pending_verification" ||
+                      organisation.status === "pending_activation") && (
+                      <Button
+                        size="sm"
+                        disabled={busyOrg === organisation.id}
+                        onClick={() => void act(organisation, "approve")}
+                      >
+                        {busyOrg === organisation.id ? (
+                          <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                        ) : (
+                          <PlayCircle className="mr-1 h-4 w-4" aria-hidden />
+                        )}
                         Approve
                       </Button>
                     )}
                     {organisation.status === "active" && (
-                      <Button size="sm" variant="outline" disabled={busyOrg === organisation.id} onClick={() => void act(organisation, "suspend")}>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={busyOrg === organisation.id}
+                        onClick={() => void act(organisation, "suspend")}
+                      >
                         <PauseCircle className="mr-1 h-4 w-4" aria-hidden /> Suspend
                       </Button>
                     )}
                     {organisation.status === "suspended" && (
-                      <Button size="sm" variant="outline" disabled={busyOrg === organisation.id} onClick={() => void act(organisation, "reinstate")}>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={busyOrg === organisation.id}
+                        onClick={() => void act(organisation, "reinstate")}
+                      >
                         <PlayCircle className="mr-1 h-4 w-4" aria-hidden /> Reinstate
                       </Button>
                     )}
@@ -923,10 +1062,14 @@ function BuildersNetworkConsole() {
             <div className="w-64 space-y-1">
               <p className="text-xs font-medium text-muted-foreground">Workspace (clone)</p>
               <Select value={connClone} onValueChange={setConnClone}>
-                <SelectTrigger><SelectValue placeholder="Choose a workspace…" /></SelectTrigger>
+                <SelectTrigger>
+                  <SelectValue placeholder="Choose a workspace…" />
+                </SelectTrigger>
                 <SelectContent>
                   {(clones.data?.ok ? clones.data.clones : []).map((clone) => (
-                    <SelectItem key={clone.id} value={clone.id}>{clone.name}</SelectItem>
+                    <SelectItem key={clone.id} value={clone.id}>
+                      {clone.name}
+                    </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
@@ -934,18 +1077,26 @@ function BuildersNetworkConsole() {
             <div className="w-64 space-y-1">
               <p className="text-xs font-medium text-muted-foreground">Builder organisation</p>
               <Select value={connOrg} onValueChange={setConnOrg}>
-                <SelectTrigger><SelectValue placeholder="Choose an organisation…" /></SelectTrigger>
+                <SelectTrigger>
+                  <SelectValue placeholder="Choose an organisation…" />
+                </SelectTrigger>
                 <SelectContent>
                   {(organisations.data?.ok ? organisations.data.organisations : [])
                     .filter((organisation) => organisation.status === "active")
                     .map((organisation) => (
-                      <SelectItem key={organisation.id} value={organisation.id}>{organisation.legal_name}</SelectItem>
+                      <SelectItem key={organisation.id} value={organisation.id}>
+                        {organisation.legal_name}
+                      </SelectItem>
                     ))}
                 </SelectContent>
               </Select>
             </div>
             <Button onClick={() => void createConnection()} disabled={creatingConn}>
-              {creatingConn ? <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden /> : <Cable className="mr-2 h-4 w-4" aria-hidden />}
+              {creatingConn ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
+              ) : (
+                <Cable className="mr-2 h-4 w-4" aria-hidden />
+              )}
               Mint connection invite
             </Button>
           </div>
@@ -954,16 +1105,23 @@ function BuildersNetworkConsole() {
             <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
               <p className="font-medium">Invitation code — shown once, only the hash is stored:</p>
               <div className="mt-1 flex items-center gap-2">
-                <code className="break-all rounded bg-background px-2 py-1 text-xs">{mintedInvite.code}</code>
+                <code className="break-all rounded bg-background px-2 py-1 text-xs">
+                  {mintedInvite.code}
+                </code>
                 <Button
-                  size="sm" variant="ghost"
-                  onClick={() => { void navigator.clipboard.writeText(mintedInvite.code); toast.success("Copied"); }}
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    void navigator.clipboard.writeText(mintedInvite.code);
+                    toast.success("Copied");
+                  }}
                 >
                   <Copy className="h-4 w-4" aria-hidden />
                 </Button>
               </div>
               <p className="mt-1 text-xs text-muted-foreground">
-                Hand it to the organisation's owner out of band; they accept it in their portal. Expires {new Date(mintedInvite.expires).toLocaleString("en-AU")}.
+                Hand it to the organisation's owner out of band; they accept it in their portal.
+                Expires {new Date(mintedInvite.expires).toLocaleString("en-AU")}.
               </p>
             </div>
           )}
@@ -988,14 +1146,20 @@ function BuildersNetworkConsole() {
                           className="h-8 w-72 text-xs"
                           placeholder="https://…/builder-network-inbound"
                           value={transportDrafts[connection.network_connection_id] ?? ""}
-                          onChange={(event) => setTransportDrafts((drafts) => ({
-                            ...drafts, [connection.network_connection_id]: event.target.value,
-                          }))}
+                          onChange={(event) =>
+                            setTransportDrafts((drafts) => ({
+                              ...drafts,
+                              [connection.network_connection_id]: event.target.value,
+                            }))
+                          }
                         />
                         <Button
-                          size="sm" variant="outline"
+                          size="sm"
+                          variant="outline"
                           onClick={async () => {
-                            const inboundUrl = (transportDrafts[connection.network_connection_id] ?? "").trim();
+                            const inboundUrl = (
+                              transportDrafts[connection.network_connection_id] ?? ""
+                            ).trim();
                             const result = await transportFn({
                               data: { connectionId: connection.network_connection_id, inboundUrl },
                             });
@@ -1007,15 +1171,20 @@ function BuildersNetworkConsole() {
                         </Button>
                       </div>
                       <Button
-                        size="sm" variant="outline"
+                        size="sm"
+                        variant="outline"
                         onClick={async () => {
-                          const reason = window.prompt("Reason for revoking this connection?")?.trim();
+                          const reason = window
+                            .prompt("Reason for revoking this connection?")
+                            ?.trim();
                           if (!reason) return;
                           const result = await revokeConnFn({
                             data: { connectionId: connection.network_connection_id, reason },
                           });
-                          if (result.ok) { toast.success("Connection revoked"); refreshAll(); }
-                          else toast.error(result.error);
+                          if (result.ok) {
+                            toast.success("Connection revoked");
+                            refreshAll();
+                          } else toast.error(result.error);
                         }}
                       >
                         Revoke
@@ -1029,11 +1198,22 @@ function BuildersNetworkConsole() {
         </CardContent>
       </Card>
 
+      {/* ---------------------------------------------- access applications */}
+      {/* Placed under the organisations it creates and above the join
+          requests, because that is the order the work happens in: a lead
+          applies, an organisation appears, and only then does anybody ask
+          to join it. */}
+      <AccessRequestsPanel
+        loading={accessRequests.isLoading}
+        requests={accessRequests.data?.ok ? accessRequests.data.access_requests : null}
+        error={accessRequests.data && !accessRequests.data.ok ? accessRequests.data.error : null}
+      />
+
       {/* --------------------------------------------------- join requests */}
       <Card>
         <RankingPanel />
 
-      <CardHeader>
+        <CardHeader>
           <CardTitle className="text-base">Join requests</CardTitle>
           <p className="text-xs text-muted-foreground">
             Visibility only — organisation owners decide membership, never the platform.
@@ -1041,14 +1221,19 @@ function BuildersNetworkConsole() {
         </CardHeader>
         <CardContent>
           {!joins.data?.ok || joins.data.join_requests.length === 0 ? (
-            <EmptyState icon={<Inbox className="h-8 w-8" aria-hidden />} title="No join requests" description="ABN-matched registrations appear here while their owners decide." />
+            <EmptyState
+              icon={<Inbox className="h-8 w-8" aria-hidden />}
+              title="No join requests"
+              description="ABN-matched registrations appear here while their owners decide."
+            />
           ) : (
             <div className="divide-y divide-border">
               {joins.data.join_requests.map((request) => (
                 <div key={request.id} className="flex flex-wrap items-center gap-3 py-2 text-sm">
                   <span className="min-w-0 flex-1 basis-64 truncate">
                     <strong>{request.requester?.name ?? request.builder_user_id}</strong>
-                    {request.requester?.email ? ` <${request.requester.email}>` : ""} → {request.organisation_legal_name ?? request.organisation_id}
+                    {request.requester?.email ? ` <${request.requester.email}>` : ""} →{" "}
+                    {request.organisation_legal_name ?? request.organisation_id}
                   </span>
                   <StatusBadge value={request.status} />
                   <span className="text-xs text-muted-foreground">

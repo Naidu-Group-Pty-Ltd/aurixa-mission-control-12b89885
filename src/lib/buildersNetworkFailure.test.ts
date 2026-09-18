@@ -237,3 +237,78 @@ describe("the console reads failures through this module", () => {
     expect(source).toContain("reading.sentence");
   });
 });
+
+/**
+ * A refusal the operator caused, said in words.
+ *
+ * Production, 18 Sep 2026: a duplicate ABN reached the console as a bare 500
+ * and rendered "The organisation could not be saved", naming none of the ten
+ * fields. The network names the field now, and this is where that code turns
+ * into a sentence — because the dialogs used to `toast.error(result.error)`,
+ * putting `abn_already_registered` in front of a person.
+ */
+describe("a refusal the operator can act on", () => {
+  it("names each of the three unique indexes without quoting the value", () => {
+    for (const code of [
+      "abn_already_registered",
+      "acn_already_registered",
+      "legal_name_already_registered",
+    ]) {
+      const reading = readNetworkFailure(code);
+      expect(reading.blocking, code).toBe("operator");
+      // Authored, not slugged: `humanise` would render "Abn already
+      // registered." and the short form would be the same sentence twice.
+      expect(reading.sentence.length, code).toBeGreaterThan(reading.short.length);
+      expect(reading.sentence, code).toMatch(/already (registered|has that legal name)/i);
+      expect(reading.sentence, code).not.toMatch(/_/);
+    }
+  });
+
+  it("says nothing about who holds it — that is another organisation's record", () => {
+    expect(readNetworkFailure("abn_already_registered").sentence).not.toMatch(/\d{5,}/);
+  });
+
+  it("carries a sentence for every refusal the write paths can return", () => {
+    // Each of these is a real `error` string from builder-network-admin. A
+    // code with no entry still renders (humanise), but these are the ones an
+    // operator meets often enough to be worth writing.
+    for (const code of [
+      "an_organisation_type_is_required",
+      "a_legal_name_is_required",
+      "abn_must_be_11_digits",
+      "acn_must_be_9_digits",
+      "postcode_must_be_4_digits",
+      "state_is_not_an_australian_state",
+      "contact_email_is_not_an_email",
+      "organisation_already_has_members",
+      "that_account_has_been_withdrawn",
+      "a_closed_organisation_is_terminal",
+    ]) {
+      const reading = readNetworkFailure(code);
+      expect(reading.blocking, code).toBe("operator");
+      expect(reading.sentence, code).not.toMatch(/_/);
+      expect(reading.sentence.endsWith("."), code).toBe(true);
+    }
+  });
+
+  it("still humanises a code nobody authored, rather than showing the slug", () => {
+    const reading = readNetworkFailure("some_new_refusal_nobody_wrote");
+    expect(reading.sentence).toBe("Some new refusal nobody wrote.");
+    expect(reading.blocking).toBe("unknown");
+  });
+});
+
+describe("no raw code reaches an operator", () => {
+  const dialogs = readFileSync(
+    join(process.cwd(), "src/components/builders-network-organisation-dialogs.tsx"),
+    "utf8",
+  );
+
+  it("routes every dialog refusal through the reader", () => {
+    // Was `toast.error(error.message)` — the network's own code, verbatim.
+    expect(dialogs).toContain("readNetworkFailure");
+    expect(dialogs).not.toMatch(/toast\.error\(\s*error instanceof Error \? error\.message/);
+    const calls = [...dialogs.matchAll(/toast\.error\(refusal\(/g)];
+    expect(calls.length).toBe(3);
+  });
+});
