@@ -15,6 +15,7 @@ import {
   APPLY_GLOBAL_PER_MINUTE,
   APPLY_PER_IP_PER_MINUTE,
   DEFAULT_APPLY_ORIGINS,
+  AUTOFILL_TOKENS,
   HONEYPOT_FIELD,
   MAX_APPLY_BODY_BYTES,
   MAX_FILL_HOURS,
@@ -40,7 +41,7 @@ const application = () => ({
   contact_name: "Jo Rivera",
   contact_email: "jo@example.com",
   org_type: "builder",
-  rendered_at: new Date(Date.now() - 30_000).toISOString(),
+  elapsed_ms: 30_000,
 });
 
 describe("the boundaries", () => {
@@ -115,33 +116,60 @@ describe("the cost raisers", () => {
   it("is not named 'honeypot'", () => {
     // A bot that skips a field called `honeypot` fills one called
     // `company_website`, which is the entire value of the control.
-    expect(HONEYPOT_FIELD).not.toMatch(/honey|trap|bot|spam/i);
+    expect(HONEYPOT_FIELD).not.toMatch(/honey|trap|bot|spam|decoy/i);
+  });
+
+  it("is named outside the browser autofill taxonomy", () => {
+    // THE DEFECT THIS EXISTS FOR. It WAS `company_website`, which is a
+    // plausible name — chosen so a bot skipping `honeypot` would still fill
+    // it — and a password manager filled it for a real applicant on
+    // 18 Sep 2026, refusing them within thirty seconds of the page opening.
+    // A plausible name is exactly what autofill fills.
+    for (const token of AUTOFILL_TOKENS) {
+      expect(HONEYPOT_FIELD, token).not.toContain(token);
+    }
+    expect(HONEYPOT_FIELD).not.toBe("company_website");
   });
 
   it("refuses a form submitted faster than a person could fill it", () => {
-    const tooFast = {
-      ...application(),
-      rendered_at: new Date(Date.now() - (MIN_FILL_SECONDS - 2) * 1000).toISOString(),
-    };
-    expect(readApplyHeuristics(tooFast).ok).toBe(false);
+    expect(readApplyHeuristics({ ...application(), elapsed_ms: 900 }).ok).toBe(false);
+    expect(readApplyHeuristics({ ...application(), elapsed_ms: 4_000 }).ok).toBe(true);
   });
 
   it("refuses a form left open past the day", () => {
-    const stale = {
-      ...application(),
-      rendered_at: new Date(Date.now() - (MAX_FILL_HOURS + 1) * 3600_000).toISOString(),
-    };
+    const stale = { ...application(), elapsed_ms: (MAX_FILL_HOURS + 1) * 3600_000 };
     expect(readApplyHeuristics(stale).ok).toBe(false);
   });
 
-  it("accepts an unparseable or absent timestamp rather than refusing a person", () => {
-    // The check is a cost raiser. Refusing a real applicant because their
-    // browser wrote something unexpected trades a defect we would never see
-    // for an attack this does not stop anyway.
-    for (const rendered of [undefined, "", "yesterday", 12345, null]) {
+  it("measures a DURATION, never the difference between two clocks", () => {
+    // The first version took an ISO `rendered_at` from the browser and
+    // subtracted it from the server's `Date.now()`. A visitor's machine
+    // running half a minute fast therefore failed a form that had been open
+    // for twenty seconds, and there was no way past it.
+    const source = code("src/server/builderApplyGuard.pure.ts");
+    expect(source).toContain("body.elapsed_ms");
+    expect(source).not.toContain("rendered_at");
+    expect(source).not.toContain("Date.parse");
+    // And the reader takes no clock of its own, so it CANNOT compare two.
+    expect(source).not.toMatch(/readApplyHeuristics\([\s\S]{0,120}Date\.now\(\)/);
+  });
+
+  it("accepts a duration it cannot trust rather than refusing a person", () => {
+    // A cost raiser must never refuse on data it cannot trust, and this one
+    // has already refused somebody real once. Absent, negative, NaN and a
+    // string all read as unknown.
+    for (const elapsed of [
+      undefined,
+      null,
+      -5,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      "30000",
+      {},
+    ]) {
       expect(
-        readApplyHeuristics({ ...application(), rendered_at: rendered }).ok,
-        String(rendered),
+        readApplyHeuristics({ ...application(), elapsed_ms: elapsed }).ok,
+        String(elapsed),
       ).toBe(true);
     }
   });
@@ -152,8 +180,8 @@ describe("the cost raisers", () => {
     const codes = new Set(
       [
         { ...application(), [HONEYPOT_FIELD]: "x" },
-        { ...application(), rendered_at: new Date().toISOString() },
-        { ...application(), rendered_at: new Date(Date.now() - 864e5).toISOString() },
+        { ...application(), elapsed_ms: 10 },
+        { ...application(), elapsed_ms: 864e5 },
       ].map((body) => {
         const verdict = readApplyHeuristics(body);
         expect(verdict.ok).toBe(false);
