@@ -312,6 +312,7 @@ async function auditOneClone(args: {
     exclusions,
     primeTruncated: primeTree.truncated,
     cloneTruncated: cloneTree.truncated,
+    primeSizes: primeTree.sizes,
   });
 
   const reading = judgeConvergence({ now: new Date(), measurement, prior, sloMinutes });
@@ -394,6 +395,7 @@ async function writeObservation(
     owed_sample: row.measurement ? owedSample(row.measurement.owed) : [],
     deletion_candidates: row.measurement?.deletionCandidates ?? 0,
     held_count: row.measurement?.held ?? 0,
+    oversize_held: row.measurement?.oversizeHeld ?? 0,
     compared_count: row.measurement?.compared ?? 0,
     unchanged_since: row.unchangedSince,
     last_converged_at: row.lastConvergedAt,

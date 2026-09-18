@@ -431,6 +431,50 @@ shippable against a live fleet without a window.
 
 ---
 
+### Step 1, measured before it ran
+
+The auditor was run against the two live trees — `git ls-tree` on prime's and
+each clone's `origin/main`, through the shipped module — before it had ever
+run in production. It found a defect in itself:
+
+```
+compared 8,463 · owed 2 · held 17
+  supabase/migrations/…_seed_template_library_v13_cash_flow_foots.sql   41,671,969 B
+  supabase/migrations/…_seed_template_library_v14_tier_separation.sql   41,678,125 B
+```
+
+Both are about **41.7 MB against `CASCADE_MAX_FILE_BYTES`'s 8 MB.** The engine
+holds them on every pass, for ever, and correctly — a cascade carries a file
+whole and the invocation that does it has a limit the file does not. Reported
+as owed they would have read `delivering` for ninety minutes and then escalated
+as `stalled`, permanently, on a fleet behaving exactly as designed.
+
+That is `drift_high` in a new costume, and it would have discredited this
+reading the same way. **The rule it bought generalises past the constant: the
+auditor must refuse exactly what the engine refuses, or it reports debt on
+files that will never be delivered.** The ceiling is imported rather than
+restated, `listTreeEntries` now carries every blob's size (the tree response
+already had it, at no extra call), and an absent size reads as deliverable —
+reporting a real gap is recoverable, concealing one is the failure this exists
+to stop.
+
+The corrected reading, against all three clones:
+
+| clone | compared | owed | held | oversize | deletion candidates | state |
+|---|---|---|---|---|---|---|
+| NPC Client Dashboard | 8,463 | **0** | 17 | 2 | 14 | `converged` |
+| NPC Test | 8,463 | **0** | 7 | 2 | 2 | `converged` |
+| Preflight Property Group | 8,463 | **0** | 7 | 2 | 2 | `converged` |
+
+It agrees with `sync_status: in_sync` — and now for a reason derived from the
+repositories rather than inherited from the ledger that was being checked.
+
+**One class is still open.** `backendIdentityHold` refuses on CONTENT, which a
+tree read cannot settle, so a path it holds would read as owed. There is no
+live instance today, and the escalation that would act on one has not shipped;
+the cheap answer when it does is for the engine to record its content holds
+where the auditor can read them, rather than for the auditor to fetch blobs.
+
 ## 9 · What this does not address
 
 Named rather than implied, because a gap somebody has written down is a

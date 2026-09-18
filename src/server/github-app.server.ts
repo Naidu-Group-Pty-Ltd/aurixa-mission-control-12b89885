@@ -180,7 +180,7 @@ export async function listFilesMatchingGlobs(
 export async function listTreeEntries(
   octokit: Octokit,
   ref: RepoRef,
-): Promise<{ entries: Map<string, string>; truncated: boolean }> {
+): Promise<{ entries: Map<string, string>; sizes: Map<string, number>; truncated: boolean }> {
   const { isSafeRepoPath } = await import("@/lib/module-globs");
   const { data: branch } = await octokit.repos.getBranch({
     owner: ref.owner,
@@ -194,13 +194,19 @@ export async function listTreeEntries(
     recursive: "true",
   });
   const entries = new Map<string, string>();
+  const sizes = new Map<string, number>();
   for (const node of tree.tree ?? []) {
     if (node.type !== "blob") continue;
     if (typeof node.path !== "string" || typeof node.sha !== "string") continue;
     if (!isSafeRepoPath(node.path)) continue;
     entries.set(node.path, node.sha);
+    // The tree response already carries every blob's size, at no extra call.
+    // A reader that needs to know whether a file is deliverable BEFORE
+    // deciding anything about it would otherwise have to ask the contents API
+    // per path — see `CASCADE_MAX_FILE_BYTES` and the convergence auditor.
+    if (typeof node.size === "number") sizes.set(node.path, node.size);
   }
-  return { entries, truncated: Boolean(tree.truncated) };
+  return { entries, sizes, truncated: Boolean(tree.truncated) };
 }
 
 /**

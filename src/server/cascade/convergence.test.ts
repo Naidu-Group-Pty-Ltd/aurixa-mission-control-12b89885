@@ -7,7 +7,11 @@ import {
   owedSample,
   type PriorObservation,
 } from "./convergence.pure";
-import { DEFAULT_MIRROR_EXCLUSIONS, type SyncExclusion } from "./syncExclusions.pure";
+import {
+  CASCADE_MAX_FILE_BYTES,
+  DEFAULT_MIRROR_EXCLUSIONS,
+  type SyncExclusion,
+} from "./syncExclusions.pure";
 
 const tree = (entries: Record<string, string>) => new Map(Object.entries(entries));
 const NONE: SyncExclusion[] = [];
@@ -91,6 +95,58 @@ describe("measureConvergence", () => {
       cloneTruncated: false,
     });
     expect(m).toMatchObject({ kind: "measured", owed: [], deletionCandidates: 1 });
+  });
+
+  /*
+    Found by running this module against the two live trees before it had ever
+    run in production. `owed` was 2, and both were ~41.7 MB template-library
+    seeds against an 8 MB ceiling — held by the engine on every pass, for ever,
+    and correctly. Reported as owed they would have escalated as `stalled`
+    permanently on a fleet behaving exactly as designed.
+  */
+  it("never owes a path the cascade refuses on size", () => {
+    const m = measureConvergence({
+      prime: tree({ "supabase/migrations/huge_seed.sql": "PRIME", "src/a.ts": "PRIME" }),
+      clone: tree({ "src/a.ts": "CLONE" }),
+      exclusions: NONE,
+      primeTruncated: false,
+      cloneTruncated: false,
+      primeSizes: new Map([
+        ["supabase/migrations/huge_seed.sql", 41_671_969],
+        ["src/a.ts", 400],
+      ]),
+    });
+    expect(m.kind === "measured" && m.owed).toEqual(["src/a.ts"]);
+    expect(m.kind === "measured" && m.oversizeHeld).toBe(1);
+  });
+
+  it("a file exactly at the ceiling is still deliverable", () => {
+    const m = measureConvergence({
+      prime: tree({ "big.sql": "PRIME" }),
+      clone: tree({}),
+      exclusions: NONE,
+      primeTruncated: false,
+      cloneTruncated: false,
+      primeSizes: new Map([["big.sql", CASCADE_MAX_FILE_BYTES]]),
+    });
+    expect(m.kind === "measured" && m.owed).toEqual(["big.sql"]);
+    expect(m.kind === "measured" && m.oversizeHeld).toBe(0);
+  });
+
+  /*
+    Inventing a refusal from missing data would hide a real gap. Reporting one
+    is recoverable; concealing one is the failure this reading exists to stop.
+  */
+  it("treats an absent size as deliverable rather than as a refusal", () => {
+    const m = measureConvergence({
+      prime: tree({ "mystery.bin": "PRIME" }),
+      clone: tree({}),
+      exclusions: NONE,
+      primeTruncated: false,
+      cloneTruncated: false,
+      primeSizes: new Map(),
+    });
+    expect(m.kind === "measured" && m.owed).toEqual(["mystery.bin"]);
   });
 
   it("refuses the whole reading on a truncated tree, either side", () => {

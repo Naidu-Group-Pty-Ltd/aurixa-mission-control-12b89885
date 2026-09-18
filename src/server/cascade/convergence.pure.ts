@@ -56,7 +56,11 @@
  * is exactly how the auditor and the actor would come to disagree, and this
  * module's whole job is to be the independent check on the other one.
  */
-import { partitionCascadePaths, type SyncExclusion } from "./syncExclusions.pure";
+import {
+  CASCADE_MAX_FILE_BYTES,
+  partitionCascadePaths,
+  type SyncExclusion,
+} from "./syncExclusions.pure";
 
 /**
  * How many SLO windows a clone may go without ever reaching `converged`
@@ -85,6 +89,11 @@ export type ConvergenceMeasurement =
       deletionCandidates: number;
       /** Paths withheld by this clone's own policy. Never part of `owed`. */
       held: number;
+      /**
+       * Paths the cascade refuses on SIZE. Never part of `owed`, for the
+       * reason recorded on the constant below.
+       */
+      oversizeHeld: number;
       /** Paths compared, after scope narrowing. */
       compared: number;
     }
@@ -126,6 +135,14 @@ export function measureConvergence(input: {
   primeTruncated: boolean;
   cloneTruncated: boolean;
   /**
+   * Prime's blob size per path, as `listTreeEntries` returns it. A path prime
+   * holds that is over `CASCADE_MAX_FILE_BYTES` can never be delivered, so it
+   * is never owed — see the rule below. Absent sizes are treated as
+   * deliverable, which is the conservative direction: it reports a real gap
+   * rather than hiding one.
+   */
+  primeSizes?: ReadonlyMap<string, number> | null;
+  /**
    * For a module-scoped clone, the paths of prime that are this clone's
    * business at all. `null` for a mirror, whose section is the whole tree.
    */
@@ -155,6 +172,39 @@ export function measureConvergence(input: {
   // implementation — see the header.
   const { write, held } = partitionCascadePaths(differing, exclusions);
 
+  /*
+    A PATH THE CASCADE WOULD REFUSE IS NOT OWED.
+
+    Found by running this module against the two live trees before it had ever
+    run in production, 18 Sep 2026: `owed` was 2, and both were template-library
+    seeds of about 41.7 MB against a ceiling of 8. The engine holds them, on
+    every pass, for ever, and correctly — a cascade carries a file whole and the
+    invocation that does it has a limit the file does not.
+
+    Reported as owed they would have sat at `delivering` for ninety minutes and
+    then escalated as `stalled`, permanently, on a fleet that is behaving
+    exactly as designed. That is `drift_high` in a new costume, and shipping it
+    would have discredited this reading the same way.
+
+    The rule generalises past the constant: the auditor must refuse exactly what
+    the engine refuses, or it reports debt on files that will never be
+    delivered. The ceiling is IMPORTED rather than restated for the same reason
+    the partition is.
+  */
+  const sizes = input.primeSizes ?? null;
+  const owedWritable: string[] = [];
+  let oversizeHeld = 0;
+  for (const path of write) {
+    const bytes = sizes?.get(path);
+    // An absent size reads as deliverable: reporting a real gap is the safe
+    // direction, and inventing a refusal from missing data is not.
+    if (typeof bytes === "number" && bytes > CASCADE_MAX_FILE_BYTES) {
+      oversizeHeld += 1;
+      continue;
+    }
+    owedWritable.push(path);
+  }
+
   let deletionCandidates = 0;
   for (const path of clone.keys()) {
     if (prime.has(path)) continue;
@@ -162,13 +212,14 @@ export function measureConvergence(input: {
     deletionCandidates += 1;
   }
 
-  const owed = [...write].sort();
+  const owed = owedWritable.sort();
   return {
     kind: "measured",
     owed,
     fingerprint: owed.length === 0 ? null : fingerprintPaths(owed),
     deletionCandidates,
     held: held.length,
+    oversizeHeld,
     compared,
   };
 }

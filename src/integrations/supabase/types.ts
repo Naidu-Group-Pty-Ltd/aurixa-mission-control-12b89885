@@ -3364,6 +3364,7 @@ export type Database = {
           id: string
           last_converged_at: string | null
           observed_at: string
+          oversize_held: number
           owed_count: number
           owed_fingerprint: string | null
           owed_sample: string[]
@@ -3384,6 +3385,7 @@ export type Database = {
           id?: string
           last_converged_at?: string | null
           observed_at?: string
+          oversize_held?: number
           owed_count?: number
           owed_fingerprint?: string | null
           owed_sample?: string[]
@@ -3404,6 +3406,7 @@ export type Database = {
           id?: string
           last_converged_at?: string | null
           observed_at?: string
+          oversize_held?: number
           owed_count?: number
           owed_fingerprint?: string | null
           owed_sample?: string[]

@@ -78,6 +78,13 @@ CREATE TABLE IF NOT EXISTS public.clone_convergence_observations (
   -- implementation of the most destructive decision in the engine.
   deletion_candidates integer NOT NULL DEFAULT 0,
   held_count integer NOT NULL DEFAULT 0,
+  -- Paths the cascade refuses on SIZE (over CASCADE_MAX_FILE_BYTES). Never
+  -- owed: found by running the auditor against the two live trees before it
+  -- had ever run in production — both differing paths were ~41.7 MB template
+  -- seeds against an 8 MB ceiling, held on every pass for ever and correctly.
+  -- Reported as owed they would have escalated as `stalled` permanently, on a
+  -- fleet behaving exactly as designed, which is `drift_high` in a new costume.
+  oversize_held integer NOT NULL DEFAULT 0,
   compared_count integer NOT NULL DEFAULT 0,
   -- When the CURRENT owed set was first seen. The `stalled` clock.
   unchanged_since timestamptz,
