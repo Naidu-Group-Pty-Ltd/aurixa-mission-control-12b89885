@@ -29,15 +29,17 @@ import { verifyCronAuth } from "@/server/cron-auth.server";
 // takes, would take or refuses is written to `clone_custodial_acts` with the
 // means to reverse it.
 //
-// Nothing here queues a cascade, moves a pointer or raises a notification. Step 1 of the shipping order in
-// CASCADE_PIPELINE_HEALTH.md writes observations only, so a wrong reading
-// costs nothing while it runs beside the existing signals and is compared
-// against them. The escalation that replaces `drift_high` reads this table and
-// ships separately.
+// Nothing here queues a cascade, moves a pointer or raises a notification.
+// The two readings write only their own tables, so a wrong reading costs
+// nothing while they run beside the existing signals and are compared against
+// them; the custodian's one enabled act rewrites a proposal's URL and settles
+// no outcome, which is why it is the act that shipped first. The escalation
+// that replaces `drift_high` reads these tables and ships separately.
 //
 // The response body is the diagnostic ledger, in the shape the cascade drain
 // already uses: pg_cron records what it DELIVERED, never what happened, so the
 // tick's own body is where a misbehaving pass is read from.
+
 /** Did the custodian do or refuse anything worth an audit row? */
 function custodianActed(
   c: { performed: number; failed: number; refused: number } | { error: string },
