@@ -153,3 +153,10 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      # Must follow Build: the build is what regenerates the route tree, and
+      # this asserts the committed copy is what it produced. Placed before it
+      # the check compares a file nothing has written and passes on a stale
+      # tree — routeTreeGate.spec.ts pins this ordering for that reason.
+      - name: Route tree is current
+        run: npm run check:route-tree
