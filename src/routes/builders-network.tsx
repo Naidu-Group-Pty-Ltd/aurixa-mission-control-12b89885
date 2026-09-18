@@ -1,9 +1,9 @@
 import { useState } from "react";
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import {
-  Building2, Cable, CheckCircle2, Copy, EyeOff, Inbox, KeyRound, Loader2,
+  Building2, Cable, CheckCircle2, Copy, EyeOff, FileSignature, Inbox, KeyRound, Loader2,
   ChevronDown, ChevronRight, PauseCircle, Pin, PlayCircle, Plug, RefreshCw,
   ShieldAlert, Snowflake, Trophy,
 } from "lucide-react";
@@ -43,6 +43,7 @@ import {
   type NetworkRankedBuilder,
   type NetworkSignalReading,
 } from "@/server/builders-network.functions";
+import { readNetworkFailure } from "@/lib/buildersNetworkFailure.pure";
 
 /**
  * The Builders Network operator console (extraction plan §5).
@@ -80,6 +81,42 @@ function StatusBadge({ value }: { value: string }) {
     <Badge variant="outline" className={STATUS_TONE[value] ?? ""}>
       {value.replaceAll("_", " ")}
     </Badge>
+  );
+}
+
+/**
+ * Why the console could not act, and — where one exists here — the act that
+ * fixes it.
+ *
+ * This replaces three sites that printed the transport's own discriminant as
+ * the explanation: a live deployment told an operator the network could not be
+ * read because `operate_switch_off`. `readNetworkFailure` is the single place
+ * that wording lives, so the three cannot drift, and the remedy is a LINK to
+ * the page that already mints the key rather than a second mint built here —
+ * two mint paths is how one of them comes to be wrong.
+ *
+ * The raw code is deliberately not drawn beside the sentence. For the faults
+ * Mission Control owns the sentence is complete and the code adds nothing; for
+ * every other code the sentence IS the code, unslugged, so nothing is lost.
+ */
+function NetworkFailureNotice({ title, code }: { title: string; code: string | null | undefined }) {
+  const reading = readNetworkFailure(code);
+  return (
+    <EmptyState
+      icon={<ShieldAlert className="h-8 w-8" aria-hidden />}
+      title={title}
+      description={reading.sentence}
+      action={
+        reading.remedy ? (
+          <Button asChild size="sm">
+            <Link to={reading.remedy.to} search={reading.remedy.search}>
+              <KeyRound className="mr-2 h-4 w-4" aria-hidden />
+              {reading.remedy.label}
+            </Link>
+          </Button>
+        ) : undefined
+      }
+    />
   );
 }
 
@@ -213,11 +250,7 @@ function RankingPanel() {
         {ranking.isLoading ? (
           <p className="text-sm text-muted-foreground">Reading the ranking…</p>
         ) : !ranking.data?.ok ? (
-          <EmptyState
-            icon={<ShieldAlert className="h-8 w-8" aria-hidden />}
-            title="The ranking could not be read"
-            description={ranking.data?.error ?? "The network did not answer."}
-          />
+          <NetworkFailureNotice title="The ranking could not be read" code={ranking.data?.error} />
         ) : builders.length === 0 ? (
           <EmptyState
             icon={<Trophy className="h-8 w-8" aria-hidden />}
@@ -306,9 +339,8 @@ function RankingExplanation({ organisationId }: { organisationId: string }) {
   if (!snapshot) {
     return (
       <p className="mt-3 text-xs text-muted-foreground">
-        {query.data && !query.data.ok
-          ? `The signals could not be read — ${query.data.error}`
-          : "The signals could not be read."}
+        The signals could not be read.{" "}
+        {query.data && !query.data.ok ? readNetworkFailure(query.data.error).short : null}
       </p>
     );
   }
@@ -615,7 +647,13 @@ function BuildersNetworkConsole() {
       />
 
       {/* ---------------------------------------------------------- status */}
-      <div className="grid gap-4 md:grid-cols-3">
+      {/*
+        Three preconditions govern every call this console makes, and
+        `callBuilderNetworkAdmin` reports only the FIRST that fails. So all
+        three are drawn at once: fixing the switch must not reveal a signing
+        key nobody had been shown.
+      */}
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="flex items-center gap-2 text-sm font-medium">
@@ -625,19 +663,70 @@ function BuildersNetworkConsole() {
           <CardContent className="text-sm">
             {status.isLoading ? (
               <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+            ) : !status.data ? (
+              // The status did not load. Falling through to the switched-off
+              // wording here told an operator their console was off, and
+              // offered to mint a key, on no evidence at all.
+              <div className="flex items-start gap-2 text-muted-foreground">
+                <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+                <span>{readNetworkFailure("status_unreadable").short}</span>
+              </div>
             ) : gate?.enabled ? (
               <div className="flex items-center gap-2">
                 <CheckCircle2 className="h-4 w-4 text-emerald-500" aria-hidden />
                 <span>Live NULL-clone key{gate.label ? ` — ${gate.label}` : ""}</span>
               </div>
             ) : (
-              <div className="flex items-center gap-2 text-red-500">
-                <ShieldAlert className="h-4 w-4" aria-hidden />
-                <span>
-                  {status.data?.switch && !status.data.switch.enabled && status.data.switch.reason === "read_failed"
-                    ? "Key read failed"
-                    : "No live builders:operate key — mint a NULL-clone key to enable this console"}
-                </span>
+              <div className="space-y-2">
+                <div className="flex items-start gap-2 text-red-500">
+                  <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+                  <span>
+                    {status.data?.switch &&
+                    !status.data.switch.enabled &&
+                    status.data.switch.reason === "read_failed"
+                      ? readNetworkFailure("read_failed").short
+                      : readNetworkFailure("operate_switch_off").short}
+                  </span>
+                </div>
+                {/* The act, beside the statement that it is owed. Naming a
+                    remedy an operator cannot reach is what this card did
+                    before: the page that mints the key is titled "Billing &
+                    Tokens", which shares no word with what they are doing. */}
+                {status.data?.switch?.enabled === false &&
+                status.data.switch.reason === "no_live_operate_key" ? (
+                  <Button asChild size="sm" variant="outline">
+                    <Link to="/settings/billing" search={{ tab: "keys" }}>
+                      <KeyRound className="mr-2 h-4 w-4" aria-hidden /> Mint the operate key
+                    </Link>
+                  </Button>
+                ) : null}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="flex items-center gap-2 text-sm font-medium">
+              <FileSignature className="h-4 w-4 text-primary" aria-hidden /> Platform signing key
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="text-sm">
+            {status.isLoading ? (
+              <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+            ) : !status.data ? (
+              <div className="flex items-start gap-2 text-muted-foreground">
+                <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+                <span>{readNetworkFailure("status_unreadable").short}</span>
+              </div>
+            ) : status.data.signing_key_present ? (
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="h-4 w-4 text-emerald-500" aria-hidden />
+                <span>Assertions can be signed</span>
+              </div>
+            ) : (
+              <div className="flex items-start gap-2 text-red-500">
+                <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+                <span>{readNetworkFailure("signing_key_missing").short}</span>
               </div>
             )}
           </CardContent>
@@ -649,11 +738,23 @@ function BuildersNetworkConsole() {
             </CardTitle>
           </CardHeader>
           <CardContent className="text-sm">
-            {status.data?.network_url_configured
-              ? <span className="text-emerald-600 dark:text-emerald-400">BUILDERS_NETWORK_ADMIN_URL configured</span>
-              : <span className="text-red-500">Set BUILDERS_NETWORK_ADMIN_URL to the network's builder-network-admin function</span>}
+            {!status.data ? (
+              <span className="text-muted-foreground">
+                {readNetworkFailure("status_unreadable").short}
+              </span>
+            ) : status.data.network_url_configured ? (
+              <span className="text-emerald-600 dark:text-emerald-400">
+                BUILDERS_NETWORK_ADMIN_URL configured
+              </span>
+            ) : (
+              <span className="text-red-500">
+                {readNetworkFailure("network_url_unconfigured").short}
+              </span>
+            )}
             {status.data?.overview_error && (
-              <p className="mt-1 text-xs text-muted-foreground">Last call: {status.data.overview_error}</p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Last call: {readNetworkFailure(status.data.overview_error).short}
+              </p>
             )}
           </CardContent>
         </Card>
@@ -688,10 +789,9 @@ function BuildersNetworkConsole() {
           {organisations.isLoading ? (
             <Loader2 className="h-5 w-5 animate-spin" aria-hidden />
           ) : !organisations.data?.ok ? (
-            <EmptyState
-              icon={<ShieldAlert className="h-8 w-8" aria-hidden />}
+            <NetworkFailureNotice
               title="The network could not be read"
-              description={organisations.data?.error ?? "Unknown error"}
+              code={organisations.data?.error}
             />
           ) : organisations.data.organisations.length === 0 ? (
             <EmptyState icon={<Building2 className="h-5 w-5" aria-hidden />} title="No organisations yet" description="Registrations appear here for vetting." />
