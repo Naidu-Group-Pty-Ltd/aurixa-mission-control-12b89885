@@ -3353,6 +3353,63 @@ export type Database = {
           },
         ]
       }
+      clone_custodial_acts: {
+        Row: {
+          act: string
+          blockage_id: string | null
+          class: string
+          clone_id: string
+          created_at: string
+          detail: string
+          dry_run: boolean
+          id: string
+          outcome: string
+          reversal: Json | null
+          rows_affected: number
+        }
+        Insert: {
+          act: string
+          blockage_id?: string | null
+          class: string
+          clone_id: string
+          created_at?: string
+          detail: string
+          dry_run?: boolean
+          id?: string
+          outcome: string
+          reversal?: Json | null
+          rows_affected?: number
+        }
+        Update: {
+          act?: string
+          blockage_id?: string | null
+          class?: string
+          clone_id?: string
+          created_at?: string
+          detail?: string
+          dry_run?: boolean
+          id?: string
+          outcome?: string
+          reversal?: Json | null
+          rows_affected?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clone_custodial_acts_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "clone_custodial_acts_blockage_id_fkey"
+            columns: ["blockage_id"]
+            isOneToOne: false
+            referencedRelation: "clone_sync_blockages"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       clone_convergence_observations: {
         Row: {
           clone_id: string

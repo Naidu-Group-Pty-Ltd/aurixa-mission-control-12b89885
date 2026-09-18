@@ -446,8 +446,8 @@ The order is the safety property, as it was for seed-then-scope.
 | 2 · **shipped** | `clone_sync_blockages` + classification, **no notifications** | populate the ledger from real passes; verify the taxonomy catches what actually happens before it is allowed to speak |
 | 3 | retire `drift_high`; `stalled` becomes the only sync alert | only once §1 has proved itself, or the fleet trades a false alarm for a missing one |
 | 4 · **shipped** | the inbox carries only what needs a person | independent of the rest; takes 983 of the 2,459 out of the count with no row stamped or deleted |
-| 5 | custodian, **read-only `dryRun` first**, reporting what it would heal | the dry-run boundary rule, applied to the healer |
-| 6 | custodian writes, one act at a time, retarget first | retarget is the safest — it repairs a URL, touches no repository |
+| 5 · **shipped** | custodian, the whole catalogue **reporting** and one act switched on | the dry-run boundary rule, applied to the healer |
+| 6 · **shipped** | custodian writes, one act at a time, retarget first | retarget is the safest — it repairs a URL, touches no repository |
 | 7 | the health card reads the auditor | the surface last, because a card is a claim that the reading under it is true. `CONVERGENCE_SLO_MINUTES` shipped with step 1 |
 | 8 | give `clone_health_snapshots` a history beside its cache, so `computeFleetSlo` measures the window it is asked for | independent of everything above; §1.3 |
 
@@ -578,6 +578,65 @@ and an empty list would read as a broken page. And the default scope **counts
 as a filter**, because the bulk-mark confirmation promises "matching the
 current filters" — a default that did not count would have made that promise
 false on the one control on that page that writes.
+
+### Steps 5 and 6, and the second-order consequence they had to clear
+
+The custodian ships with **every class in the catalogue and one act switched
+on**. `enabled` is deliberately a different field from `permitted`: five acts
+are entirely within its authority and report `would_perform` without writing,
+because an act nobody has watched run is not one to trust. That is step 5 and
+step 6 in one shape rather than two deployments.
+
+The catalogue has **three** states, not two, and the third is the one worth
+recording. A machinery blockage is not automatically the custodian's:
+`event_stuck_running` belongs to the drain's stall reclaim and `invocation_cut`
+to the pass ledger, both of which already run. Building a second actor for
+either is how two things repairing one condition come to disagree, so they are
+`owned_elsewhere`, naming who. `consecutive_failures` is a third kind —
+a symptom, never a cause — and acting on it would be acting on the thermometer.
+
+**The enabled act is the retarget**, and it was chosen because it is the
+safest write this design can make: it rewrites one column from a value already
+in the clone's own record, touches no repository, and **settles nothing** — it
+hands the rows back to the merge drain's reconciler rather than deciding their
+outcome itself.
+
+Measured before it runs. The repository was **transferred** — same name, new
+owner — which GitHub performs without renumbering: pull request 27 under
+`Naidu-Group-Pty-Ltd/npc-client-dashboard` is still the cascade this platform
+opened, merged 26 August, and 42 is the single proposal that 31 of the 43 rows
+all track. All 43 repoint across 12 distinct proposals, and #27, #40, #42 and
+#44 were each confirmed present under the new owner.
+
+The rule that keeps it a repair rather than a guess: **only the OWNER may
+differ.** A transfer keeps the name and the numbering; a rename does not, and
+neither does an unrelated repository in the same account — so a differing name
+refuses, because pointing a record at a number inside a different repository
+would replace a wrong record with a more convincing one. The number itself is
+never touched, because a pull request number is the identity of a proposal.
+
+**The second-order consequence, checked rather than assumed.** Repairing those
+43 rows hands them to the reconciler, which will settle them `succeeded` —
+and `advanceClone` derives `last_synced_sha` from succeeded rows. Settling 43
+*August* rows could in principle walk the fleet's sync pointer three weeks
+backwards. It cannot: `choosePointerAdvance` sorts newest-event-first and takes
+one, and its first branch reads only rows carrying a `delivered_sha` — a column
+that did not exist until 16 September, so every August row falls to the legacy
+branch that only runs when no row has one. Verified by reading the rule, not by
+hoping.
+
+Three more rules carry the writes. **The permission is asked before anything is
+read**, so a `ci_red` costs nothing and can never be halfway acted on. **It
+reads back before it writes** — one `pulls.get` per distinct proposal, and a
+number that does not answer is left exactly as it was, because a wrong record
+is better than a confidently wrong one. And **it never clears its own
+blockage**: the ledger's next pass observes whether the condition is gone,
+because a custodian that closed what it had just repaired would make a repair
+that did not work look exactly like one that did.
+
+Every act it takes, would take or refuses lands in `clone_custodial_acts` with
+`reversal` — the rows it changed and the value each held before — so undoing it
+is reading a row rather than reconstructing an intention.
 
 ## 9 · What this does not address
 

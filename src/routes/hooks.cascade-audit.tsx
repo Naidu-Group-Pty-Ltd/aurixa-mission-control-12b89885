@@ -22,8 +22,14 @@ import { verifyCronAuth } from "@/server/cron-auth.server";
 // because a blockage may be silent or permanent but never both. That half
 // reads Mission Control's own tables only and spends no GitHub budget.
 //
-// It acts on NOTHING. No cascade is queued, no pointer is moved, no
-// notification is raised. Step 1 of the shipping order in
+// The custodian then runs on that ledger. It may RE-RUN work — a stale URL, an
+// unseeded policy, a retired delivery — and it may never change a verdict: a
+// red check is the gate working, and no amount of retrying substitutes for
+// somebody changing the code. One act is switched on today, and every act it
+// takes, would take or refuses is written to `clone_custodial_acts` with the
+// means to reverse it.
+//
+// Nothing here queues a cascade, moves a pointer or raises a notification. Step 1 of the shipping order in
 // CASCADE_PIPELINE_HEALTH.md writes observations only, so a wrong reading
 // costs nothing while it runs beside the existing signals and is compared
 // against them. The escalation that replaces `drift_high` reads this table and
@@ -32,6 +38,14 @@ import { verifyCronAuth } from "@/server/cron-auth.server";
 // The response body is the diagnostic ledger, in the shape the cascade drain
 // already uses: pg_cron records what it DELIVERED, never what happened, so the
 // tick's own body is where a misbehaving pass is read from.
+/** Did the custodian do or refuse anything worth an audit row? */
+function custodianActed(
+  c: { performed: number; failed: number; refused: number } | { error: string },
+): boolean {
+  if ("error" in c) return true;
+  return c.performed > 0 || c.failed > 0 || c.refused > 0;
+}
+
 export const Route = createFileRoute("/hooks/cascade-audit")({
   server: {
     handlers: {
@@ -82,22 +96,48 @@ export const Route = createFileRoute("/hooks/cascade-audit")({
           // times an hour is how an audit log stops being read — which is the
           // defect this whole area exists to remove, not one to repeat.
           const unclassified = "error" in blockages ? 0 : blockages.unclassified;
+          /*
+            THE CUSTODIAN RUNS LAST, ON THE LEDGER WRITTEN SECONDS AGO.
+
+            Last because it acts on what the two passes above just observed; a
+            custodian reading a quarter-hour-old ledger would repair a fleet
+            that has since moved. It yields below the SCAN floor rather than
+            the cascade's, because it is a repair actor and not the priority
+            consumer: a record corrected fifteen minutes later costs nothing,
+            and spending the window the cascade needs to make the correction
+            unnecessary would be the measurement making the thing worse again.
+
+            Like the ledger, a failure here must not lose the readings already
+            taken.
+          */
+          const { runCustodian } = await import("@/server/custodian.server");
+          let custodian: Awaited<ReturnType<typeof runCustodian>> | { error: string };
+          try {
+            custodian =
+              "error" in blockages
+                ? { error: "skipped — the blockage ledger did not complete this pass" }
+                : await runCustodian(supabaseAdmin);
+          } catch (e) {
+            custodian = { error: e instanceof Error ? e.message : "Custodian failed" };
+          }
+
           const ledgerFailed = "error" in blockages;
           if (
             report.stalled > 0 ||
             report.fallingBehind > 0 ||
             report.unknown > 0 ||
             unclassified > 0 ||
-            ledgerFailed
+            ledgerFailed ||
+            custodianActed(custodian)
           ) {
             await writeAuditLog({
               action: "cascade_convergence_audit",
               entityType: "cron",
-              metadata: { ...report, blockages } as unknown as Record<string, unknown>,
+              metadata: { ...report, blockages, custodian } as unknown as Record<string, unknown>,
             });
           }
 
-          return new Response(JSON.stringify({ success: true, ...report, blockages }), {
+          return new Response(JSON.stringify({ success: true, ...report, blockages, custodian }), {
             headers: { "Content-Type": "application/json" },
           });
         } catch (e) {

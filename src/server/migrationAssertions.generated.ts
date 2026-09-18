@@ -576,4 +576,14 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "column", table: "clone_sync_blockages", column: "cleared_at" },
     ],
   },
+  {
+    migration: "20260918180000_clone_custodial_acts.sql",
+    version: "20260918180000",
+    assertions: [
+      { kind: "table", table: "clone_custodial_acts" },
+      { kind: "column", table: "clone_custodial_acts", column: "act" },
+      { kind: "column", table: "clone_custodial_acts", column: "outcome" },
+      { kind: "column", table: "clone_custodial_acts", column: "reversal" },
+    ],
+  },
 ];
