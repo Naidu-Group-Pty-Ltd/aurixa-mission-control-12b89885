@@ -138,7 +138,6 @@ import { Route as BillingGatesRouteImport } from './routes/billing.gates'
 import { Route as BillingCatalogRouteImport } from './routes/billing.catalog'
 import { Route as BillingCancelRouteImport } from './routes/billing.cancel'
 import { Route as BillingApiUsageRouteImport } from './routes/billing.api-usage'
-import { Route as ApplyBuilderRouteImport } from './routes/apply.builder'
 import { Route as ApiHealthRouteImport } from './routes/api.health'
 import { Route as CrmAccountsIndexRouteImport } from './routes/crm.accounts.index'
 import { Route as EmailCampaignsCampaignIdRouteImport } from './routes/email.campaigns.$campaignId'
@@ -195,6 +194,7 @@ import { Route as ApiPublicClonesGateRouteImport } from './routes/api.public.clo
 import { Route as ApiPublicClonesAnnouncementsRouteImport } from './routes/api.public.clones.announcements'
 import { Route as ApiPublicBuildersJwksRouteImport } from './routes/api.public.builders.jwks'
 import { Route as ApiPublicBuildersIdentityRouteImport } from './routes/api.public.builders.identity'
+import { Route as ApiPublicBuildersApplyRouteImport } from './routes/api.public.builders.apply'
 import { Route as ApiPublicBillingPaymentMethodsRouteImport } from './routes/api.public.billing.payment-methods'
 import { Route as ApiPublicBillingInvoicesRouteImport } from './routes/api.public.billing.invoices'
 import { Route as ApiPublicBillingInvoicePdfRouteImport } from './routes/api.public.billing.invoice-pdf'
@@ -873,11 +873,6 @@ const BillingApiUsageRoute = BillingApiUsageRouteImport.update({
   path: '/billing/api-usage',
   getParentRoute: () => rootRouteImport,
 } as any)
-const ApplyBuilderRoute = ApplyBuilderRouteImport.update({
-  id: '/apply/builder',
-  path: '/apply/builder',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const ApiHealthRoute = ApiHealthRouteImport.update({
   id: '/api/health',
   path: '/api/health',
@@ -1186,6 +1181,11 @@ const ApiPublicBuildersIdentityRoute =
     path: '/api/public/builders/identity',
     getParentRoute: () => rootRouteImport,
   } as any)
+const ApiPublicBuildersApplyRoute = ApiPublicBuildersApplyRouteImport.update({
+  id: '/api/public/builders/apply',
+  path: '/api/public/builders/apply',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiPublicBillingPaymentMethodsRoute =
   ApiPublicBillingPaymentMethodsRouteImport.update({
     id: '/api/public/billing/payment-methods',
@@ -1289,7 +1289,6 @@ export interface FileRoutesByFullPath {
   '/slo': typeof SloRoute
   '/yggdrasil': typeof YggdrasilRoute
   '/api/health': typeof ApiHealthRoute
-  '/apply/builder': typeof ApplyBuilderRoute
   '/billing/api-usage': typeof BillingApiUsageRoute
   '/billing/cancel': typeof BillingCancelRoute
   '/billing/catalog': typeof BillingCatalogRoute
@@ -1401,6 +1400,7 @@ export interface FileRoutesByFullPath {
   '/api/public/billing/invoice-pdf': typeof ApiPublicBillingInvoicePdfRoute
   '/api/public/billing/invoices': typeof ApiPublicBillingInvoicesRoute
   '/api/public/billing/payment-methods': typeof ApiPublicBillingPaymentMethodsRoute
+  '/api/public/builders/apply': typeof ApiPublicBuildersApplyRoute
   '/api/public/builders/identity': typeof ApiPublicBuildersIdentityRoute
   '/api/public/builders/jwks': typeof ApiPublicBuildersJwksRoute
   '/api/public/clones/announcements': typeof ApiPublicClonesAnnouncementsRoute
@@ -1488,7 +1488,6 @@ export interface FileRoutesByTo {
   '/slo': typeof SloRoute
   '/yggdrasil': typeof YggdrasilRoute
   '/api/health': typeof ApiHealthRoute
-  '/apply/builder': typeof ApplyBuilderRoute
   '/billing/api-usage': typeof BillingApiUsageRoute
   '/billing/cancel': typeof BillingCancelRoute
   '/billing/catalog': typeof BillingCatalogRoute
@@ -1600,6 +1599,7 @@ export interface FileRoutesByTo {
   '/api/public/billing/invoice-pdf': typeof ApiPublicBillingInvoicePdfRoute
   '/api/public/billing/invoices': typeof ApiPublicBillingInvoicesRoute
   '/api/public/billing/payment-methods': typeof ApiPublicBillingPaymentMethodsRoute
+  '/api/public/builders/apply': typeof ApiPublicBuildersApplyRoute
   '/api/public/builders/identity': typeof ApiPublicBuildersIdentityRoute
   '/api/public/builders/jwks': typeof ApiPublicBuildersJwksRoute
   '/api/public/clones/announcements': typeof ApiPublicClonesAnnouncementsRoute
@@ -1689,7 +1689,6 @@ export interface FileRoutesById {
   '/slo': typeof SloRoute
   '/yggdrasil': typeof YggdrasilRoute
   '/api/health': typeof ApiHealthRoute
-  '/apply/builder': typeof ApplyBuilderRoute
   '/billing/api-usage': typeof BillingApiUsageRoute
   '/billing/cancel': typeof BillingCancelRoute
   '/billing/catalog': typeof BillingCatalogRoute
@@ -1801,6 +1800,7 @@ export interface FileRoutesById {
   '/api/public/billing/invoice-pdf': typeof ApiPublicBillingInvoicePdfRoute
   '/api/public/billing/invoices': typeof ApiPublicBillingInvoicesRoute
   '/api/public/billing/payment-methods': typeof ApiPublicBillingPaymentMethodsRoute
+  '/api/public/builders/apply': typeof ApiPublicBuildersApplyRoute
   '/api/public/builders/identity': typeof ApiPublicBuildersIdentityRoute
   '/api/public/builders/jwks': typeof ApiPublicBuildersJwksRoute
   '/api/public/clones/announcements': typeof ApiPublicClonesAnnouncementsRoute
@@ -1891,7 +1891,6 @@ export interface FileRouteTypes {
     | '/slo'
     | '/yggdrasil'
     | '/api/health'
-    | '/apply/builder'
     | '/billing/api-usage'
     | '/billing/cancel'
     | '/billing/catalog'
@@ -2003,6 +2002,7 @@ export interface FileRouteTypes {
     | '/api/public/billing/invoice-pdf'
     | '/api/public/billing/invoices'
     | '/api/public/billing/payment-methods'
+    | '/api/public/builders/apply'
     | '/api/public/builders/identity'
     | '/api/public/builders/jwks'
     | '/api/public/clones/announcements'
@@ -2090,7 +2090,6 @@ export interface FileRouteTypes {
     | '/slo'
     | '/yggdrasil'
     | '/api/health'
-    | '/apply/builder'
     | '/billing/api-usage'
     | '/billing/cancel'
     | '/billing/catalog'
@@ -2202,6 +2201,7 @@ export interface FileRouteTypes {
     | '/api/public/billing/invoice-pdf'
     | '/api/public/billing/invoices'
     | '/api/public/billing/payment-methods'
+    | '/api/public/builders/apply'
     | '/api/public/builders/identity'
     | '/api/public/builders/jwks'
     | '/api/public/clones/announcements'
@@ -2290,7 +2290,6 @@ export interface FileRouteTypes {
     | '/slo'
     | '/yggdrasil'
     | '/api/health'
-    | '/apply/builder'
     | '/billing/api-usage'
     | '/billing/cancel'
     | '/billing/catalog'
@@ -2402,6 +2401,7 @@ export interface FileRouteTypes {
     | '/api/public/billing/invoice-pdf'
     | '/api/public/billing/invoices'
     | '/api/public/billing/payment-methods'
+    | '/api/public/builders/apply'
     | '/api/public/builders/identity'
     | '/api/public/builders/jwks'
     | '/api/public/clones/announcements'
@@ -2491,7 +2491,6 @@ export interface RootRouteChildren {
   SloRoute: typeof SloRoute
   YggdrasilRoute: typeof YggdrasilRoute
   ApiHealthRoute: typeof ApiHealthRoute
-  ApplyBuilderRoute: typeof ApplyBuilderRoute
   BillingApiUsageRoute: typeof BillingApiUsageRoute
   BillingCancelRoute: typeof BillingCancelRoute
   BillingCatalogRoute: typeof BillingCatalogRoute
@@ -2582,6 +2581,7 @@ export interface RootRouteChildren {
   ApiPublicBillingInvoicePdfRoute: typeof ApiPublicBillingInvoicePdfRoute
   ApiPublicBillingInvoicesRoute: typeof ApiPublicBillingInvoicesRoute
   ApiPublicBillingPaymentMethodsRoute: typeof ApiPublicBillingPaymentMethodsRoute
+  ApiPublicBuildersApplyRoute: typeof ApiPublicBuildersApplyRoute
   ApiPublicBuildersIdentityRoute: typeof ApiPublicBuildersIdentityRoute
   ApiPublicBuildersJwksRoute: typeof ApiPublicBuildersJwksRoute
   ApiPublicClonesAnnouncementsRoute: typeof ApiPublicClonesAnnouncementsRoute
@@ -3542,13 +3542,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof BillingApiUsageRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/apply/builder': {
-      id: '/apply/builder'
-      path: '/apply/builder'
-      fullPath: '/apply/builder'
-      preLoaderRoute: typeof ApplyBuilderRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/api/health': {
       id: '/api/health'
       path: '/api/health'
@@ -3941,6 +3934,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicBuildersIdentityRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/builders/apply': {
+      id: '/api/public/builders/apply'
+      path: '/api/public/builders/apply'
+      fullPath: '/api/public/builders/apply'
+      preLoaderRoute: typeof ApiPublicBuildersApplyRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/billing/payment-methods': {
       id: '/api/public/billing/payment-methods'
       path: '/api/public/billing/payment-methods'
@@ -4176,7 +4176,6 @@ const rootRouteChildren: RootRouteChildren = {
   SloRoute: SloRoute,
   YggdrasilRoute: YggdrasilRoute,
   ApiHealthRoute: ApiHealthRoute,
-  ApplyBuilderRoute: ApplyBuilderRoute,
   BillingApiUsageRoute: BillingApiUsageRoute,
   BillingCancelRoute: BillingCancelRoute,
   BillingCatalogRoute: BillingCatalogRoute,
@@ -4268,6 +4267,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPublicBillingInvoicePdfRoute: ApiPublicBillingInvoicePdfRoute,
   ApiPublicBillingInvoicesRoute: ApiPublicBillingInvoicesRoute,
   ApiPublicBillingPaymentMethodsRoute: ApiPublicBillingPaymentMethodsRoute,
+  ApiPublicBuildersApplyRoute: ApiPublicBuildersApplyRoute,
   ApiPublicBuildersIdentityRoute: ApiPublicBuildersIdentityRoute,
   ApiPublicBuildersJwksRoute: ApiPublicBuildersJwksRoute,
   ApiPublicClonesAnnouncementsRoute: ApiPublicClonesAnnouncementsRoute,

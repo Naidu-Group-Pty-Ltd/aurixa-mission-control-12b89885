@@ -33,13 +33,27 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState } from "@/components/empty-state";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { readNetworkFailure } from "@/lib/buildersNetworkFailure.pure";
-import { ORG_TYPE_LABEL } from "@/lib/builderApplication.pure";
+import { ORG_TYPE_LABEL } from "@/lib/builderOrgTypes.pure";
 import type { NetworkAccessRequest } from "@/server/builders-network.functions";
 import { AlertTriangle, ClipboardList, Copy, ExternalLink, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 
-/** Where a lead applies. One literal, because the console links it and copies it. */
-export const APPLICATION_PATH = "/apply/builder";
+/**
+ * Where a lead applies.
+ *
+ * The form lives on the Aurixa Systems site, not here — it is a marketing
+ * surface a builder reaches from `/builders`, and Mission Control is the
+ * operator's console. This console holds the address so an operator can hand
+ * it to somebody, which is the one thing they need it for.
+ *
+ * Overridable because the site's origin differs between environments, and a
+ * hard-coded production link copied out of a staging console sends an
+ * applicant to the wrong deployment.
+ */
+export const APPLICATION_URL = (
+  (import.meta.env.VITE_BUILDER_APPLICATION_URL as string | undefined) ??
+  "https://www.aurixasystems.com.au/builders/apply"
+).replace(/\/+$/, "");
 
 const STATUS_LABEL: Record<string, { label: string; tone: "ok" | "warn" | "bad" | "quiet" }> = {
   received: { label: "In flight", tone: "quiet" },
@@ -84,9 +98,8 @@ export function AccessRequestsPanel({ loading, requests, error }: AccessRequests
   );
 
   const copyLink = async () => {
-    const url = `${window.location.origin}${APPLICATION_PATH}`;
     try {
-      await navigator.clipboard.writeText(url);
+      await navigator.clipboard.writeText(APPLICATION_URL);
       toast.success("Application link copied");
     } catch {
       // A clipboard the browser refuses is not a failure worth hiding — the
@@ -103,12 +116,12 @@ export function AccessRequestsPanel({ loading, requests, error }: AccessRequests
           <p className="text-xs text-muted-foreground">
             Submitted at{" "}
             <a
-              href={APPLICATION_PATH}
+              href={APPLICATION_URL}
               target="_blank"
               rel="noreferrer"
               className="underline underline-offset-2"
             >
-              {APPLICATION_PATH}
+              {APPLICATION_URL.replace(/^https?:\/\//, "")}
             </a>
             . Each one creates its organisation and invites its owner with no operator step —
             approval is still yours, above.
@@ -119,7 +132,7 @@ export function AccessRequestsPanel({ loading, requests, error }: AccessRequests
             <Copy className="mr-1 h-4 w-4" aria-hidden /> Copy link
           </Button>
           <Button size="sm" variant="outline" asChild>
-            <a href={APPLICATION_PATH} target="_blank" rel="noreferrer">
+            <a href={APPLICATION_URL} target="_blank" rel="noreferrer">
               <ExternalLink className="mr-1 h-4 w-4" aria-hidden /> Open form
             </a>
           </Button>

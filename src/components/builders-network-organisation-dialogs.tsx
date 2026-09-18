@@ -26,7 +26,7 @@ import { readNetworkFailure } from "@/lib/buildersNetworkFailure.pure";
 // One list of the network's organisation kinds, shared with the public
 // application form: two copies is how the console and the form come to offer
 // different types of business.
-import { ORG_TYPE_LABEL } from "@/lib/builderApplication.pure";
+import { ORG_TYPE_LABEL } from "@/lib/builderOrgTypes.pure";
 import {
   createNetworkOrganisation,
   updateNetworkOrganisation,
