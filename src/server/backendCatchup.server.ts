@@ -31,6 +31,14 @@
  * current and skip them — the clone would then run new functions against old
  * content, which is worse than being behind on both.
  *
+ * **And it never READS that baseline as the backend's, either** — the same
+ * distinction, in the other direction, and the one that had been missed. The
+ * cascade advances `last_synced_sha` when a pull request merges, whether or
+ * not the deploy that merge requested ever landed, so a clone whose deploy
+ * had parked was diffed head-against-head and answered `no_backend_work` for
+ * ever. The from-baseline is `clone_backends.source_sha`, which only a
+ * succeeded deploy writes.
+ *
  * **A clone with no recorded baseline owes everything**, which is what the
  * planner already does with a null `fromSha`. That is the safe direction: it
  * redeploys more than strictly necessary and never less.
@@ -123,6 +131,44 @@ export async function runBackendCatchup(reason = "backend catch-up sweep"): Prom
     };
   }
 
+  // The from-baseline for FUNCTIONS is the revision the clone's functions are
+  // at — `clone_backends.source_sha`, stamped by the deploy lane when a run
+  // succeeds — and never `clones.last_synced_sha`.
+  //
+  // They are different facts and only one of them is about the backend. The
+  // cascade advances `last_synced_sha` the moment a pull request merges,
+  // whether or not the deploy that merge requested ever landed, so reading it
+  // here diffed head against head and answered `no_backend_work` about a
+  // clone whose functions had stopped moving three days earlier. See
+  // `recordBackendRevision` in `self-healing.server.ts` for the measurement.
+  //
+  // A clone with no stamp yet falls back to the repository baseline rather
+  // than to null: null means "owes every backend file", which is correct but
+  // buys a full redeploy of the fleet the first time this runs. The stamp
+  // lands on that clone's next successful deploy and the fallback stops
+  // being reached.
+  const { data: backends, error: backendErr } = await supabaseAdmin
+    .from("clone_backends")
+    .select("clone_id, source_sha");
+  // A read that FAILED is not a fleet with no recorded backends — planning
+  // every clone from its repository baseline would silently re-open exactly
+  // the hole this closes, so the pass reports rather than guesses.
+  if (backendErr) {
+    return {
+      primeSha: head.sha,
+      considered: 0,
+      planned: 0,
+      outcomes: [],
+      refused: `could not read the clones' backend revisions: ${backendErr.message}`,
+    };
+  }
+  const backendSha = new Map<string, string | null>(
+    (backends ?? []).map((b) => [
+      (b as { clone_id: string }).clone_id,
+      (b as { source_sha?: string | null }).source_sha ?? null,
+    ]),
+  );
+
   const { requestBackendSyncAfterCascade } = await import("@/server/backendSync.server");
   const outcomes: CatchupOutcome[] = [];
   let planned = 0;
@@ -134,7 +180,7 @@ export async function runBackendCatchup(reason = "backend catch-up sweep"): Prom
       reason,
       // Null is legitimate and means "owes every backend file" — the planner's
       // own safe reading, and never invented here.
-      fromSha: row.last_synced_sha ?? null,
+      fromSha: backendSha.get(row.id) ?? row.last_synced_sha ?? null,
       toSha: head.sha,
     });
     if (!request.requested) {

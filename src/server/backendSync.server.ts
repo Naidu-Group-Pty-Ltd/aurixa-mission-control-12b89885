@@ -280,7 +280,7 @@ async function planFunctionDeploy(
 ): Promise<string> {
   const { data: open, error } = await admin
     .from("remediation_runs")
-    .select("id, plan")
+    .select("id, plan, status, updated_at")
     .eq("clone_id", input.cloneId)
     .eq("action_type", "edge_function_deploy")
     .in("status", [...OPEN_RUN_STATUSES])
@@ -290,8 +290,24 @@ async function planFunctionDeploy(
   if (error) return `not planned — could not read open runs: ${error.message}`;
 
   if (open) {
+    /*
+     * `awaiting_validation` is "open" in the sense that the work is still
+     * ahead of the run — but it is ahead of a PERSON, not of the drain. The
+     * drain executes `planned` and `approved` only, so a parked run will
+     * never pick this work up on its own, and every later plan is folded
+     * into it.
+     *
+     * Saying that in the same words as a live run is what made this silent:
+     * measured 17 Sep 2026, `npc-client-dashboard` and `npc-test` each had a
+     * parked deploy carrying `failed: []`, and every sweep for three days
+     * reported their backend work as queued. It was queued behind nobody.
+     */
+    const parked =
+      open.status === "awaiting_validation"
+        ? ` — BLOCKED: that run is parked for a human (since ${String(open.updated_at ?? "unknown").slice(0, 16)}) and the drain will never take it`
+        : "";
     const existing = (open.plan as { slugs?: string[] | null } | null)?.slugs ?? null;
-    if (existing === null) return "already queued (that run covers every function)";
+    if (existing === null) return `already queued (that run covers every function)${parked}`;
     if (slugs === null) {
       const { error: wErr } = await admin
         .from("remediation_runs")
@@ -299,17 +315,18 @@ async function planFunctionDeploy(
         .eq("id", open.id);
       return wErr
         ? `could not widen the open run: ${wErr.message}`
-        : "widened the open run to every function";
+        : `widened the open run to every function${parked}`;
     }
     const union = [...new Set([...existing, ...slugs])].sort();
-    if (union.length === existing.length) return "already queued (that run covers these functions)";
+    if (union.length === existing.length)
+      return `already queued (that run covers these functions)${parked}`;
     const { error: wErr } = await admin
       .from("remediation_runs")
       .update({ plan: { slugs: union, source: "cascade", reasons: [...reasons] } })
       .eq("id", open.id);
     return wErr
       ? `could not widen the open run: ${wErr.message}`
-      : `widened the open run to ${union.length} functions`;
+      : `widened the open run to ${union.length} functions${parked}`;
   }
 
   const decision = decideRemediation({
@@ -342,7 +359,7 @@ async function planMigrationCatchUp(
 ): Promise<string> {
   const { data: open, error } = await admin
     .from("remediation_runs")
-    .select("id")
+    .select("id, status, updated_at")
     .eq("clone_id", input.cloneId)
     .eq("action_type", "sql_migration")
     .in("status", [...OPEN_RUN_STATUSES])
@@ -352,7 +369,13 @@ async function planMigrationCatchUp(
   // Nothing to widen: `mode: "catch_up"` has no filter to miss. The lane
   // recomputes what is pending when it runs, so an open run already covers
   // migrations this cascade delivered.
-  if (open) return "already queued";
+  //
+  // Unless nobody is going to run it — a parked run is queued behind a
+  // person, and says so rather than reading like a healthy queue.
+  if (open)
+    return open.status === "awaiting_validation"
+      ? `already queued — BLOCKED: that run is parked for a human (since ${String(open.updated_at ?? "unknown").slice(0, 16)}) and the drain will never take it`
+      : "already queued";
 
   // The lane assesses every pending body immediately before applying it and
   // parks the batch on the first destructive statement — a stronger check than

@@ -1642,3 +1642,52 @@ Three rules close it:
   the event's provenance. The spelling `newest.source_sha` is banned from
   the drain by test, because that is the exact line the 84-commit lie
   lived in.
+
+## Armed, then claimable — and the gate's rescue path
+
+Two strands of the same species, found on 16 Sep 2026 by drilling the paths
+that had never fired in production. Both looked like ordinary pending work,
+and nothing would ever have acted on either.
+
+- **The creation race.** The trigger commits the EVENT and its result rows
+  in two separate statements, and the per-minute drain claimed one inside
+  the 807ms between them (event `dd7180c7`): the pass read zero queued rows,
+  honestly completed `(of 0)`, and the three rows landed a second later —
+  stranded under a completed carrier, with the delivery silently lost until
+  unrelated future prime traffic. Two rules close it, from both ends:
+
+  - **A fresh event is armed before it is claimable** — the claim refuses
+    any event younger than `CREATION_ARM_GRACE_MS`
+    (`cascade/armGrace.pure.ts`), enforced at the drain's `selectCandidate`
+    ONCE rather than at the six creation sites that all share the
+    two-statement shape (trigger, provisioning, both schedule lanes, the
+    drift-suggestion apply, the bulk card) — a seventh site nobody
+    remembers to grace is covered by construction. The inline callers
+    (webhook, console, `approveCascade`) never claim and run exactly as
+    before.
+  - **The engine holds a rows-less event instead of judging it** — zero
+    QUEUED rows is a normal end-state for a finished resume, so the
+    question is asked of the whole ledger: an event with no rows in ANY
+    status is handed back (`status: "unarmed"`, pending, one minute out),
+    BEFORE the pre-loop exits can fail it, because failing an unarmed event
+    settles it while its rows may still be in flight. An unarmed claim
+    KEEPS its attempt: an event whose rows never arrive ends at the attempt
+    ceiling with a story, never in an infinite claim loop.
+
+- **The approval strand.** `approveCascade` runs the engine inline exactly
+  once. When that run dies — the 60s hook ceiling has taken three mirror
+  cascades — the reclaim reverts the event to pending-unclaimed, where a
+  claim filtering `requires_approval = false` alone would never offer it to
+  anyone again. The claim is TWO passes now: the ordinary ungated queue
+  first, then events whose gate a second operator has already discharged
+  (`requires_approval = true AND approved_at IS NOT NULL`). A gate is never
+  bypassed — the pairing is pinned by test — and an approved event waits
+  behind the ordinary queue rather than jumping it.
+
+- **Every act that settles an event settles its rows.** The engine's three
+  exits already did; the sweep missed three more sites and all three settle
+  now: `rejectCascade` (a rejection is a settle — its rows read "Skipped:
+  rejected by a reviewer"), the drain's attempt-ceiling failure, and the
+  drain's terminal catch — the last one only when its own fenced write
+  landed, because a zombie settling a newer claim's rows is worse than the
+  strand it prevents.
