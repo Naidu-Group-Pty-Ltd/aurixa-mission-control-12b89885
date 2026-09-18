@@ -194,6 +194,7 @@ import { Route as ApiPublicClonesGateRouteImport } from './routes/api.public.clo
 import { Route as ApiPublicClonesAnnouncementsRouteImport } from './routes/api.public.clones.announcements'
 import { Route as ApiPublicBuildersJwksRouteImport } from './routes/api.public.builders.jwks'
 import { Route as ApiPublicBuildersIdentityRouteImport } from './routes/api.public.builders.identity'
+import { Route as ApiPublicBuildersApplyRouteImport } from './routes/api.public.builders.apply'
 import { Route as ApiPublicBillingPaymentMethodsRouteImport } from './routes/api.public.billing.payment-methods'
 import { Route as ApiPublicBillingInvoicesRouteImport } from './routes/api.public.billing.invoices'
 import { Route as ApiPublicBillingInvoicePdfRouteImport } from './routes/api.public.billing.invoice-pdf'
@@ -1180,6 +1181,11 @@ const ApiPublicBuildersIdentityRoute =
     path: '/api/public/builders/identity',
     getParentRoute: () => rootRouteImport,
   } as any)
+const ApiPublicBuildersApplyRoute = ApiPublicBuildersApplyRouteImport.update({
+  id: '/api/public/builders/apply',
+  path: '/api/public/builders/apply',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiPublicBillingPaymentMethodsRoute =
   ApiPublicBillingPaymentMethodsRouteImport.update({
     id: '/api/public/billing/payment-methods',
@@ -1394,6 +1400,7 @@ export interface FileRoutesByFullPath {
   '/api/public/billing/invoice-pdf': typeof ApiPublicBillingInvoicePdfRoute
   '/api/public/billing/invoices': typeof ApiPublicBillingInvoicesRoute
   '/api/public/billing/payment-methods': typeof ApiPublicBillingPaymentMethodsRoute
+  '/api/public/builders/apply': typeof ApiPublicBuildersApplyRoute
   '/api/public/builders/identity': typeof ApiPublicBuildersIdentityRoute
   '/api/public/builders/jwks': typeof ApiPublicBuildersJwksRoute
   '/api/public/clones/announcements': typeof ApiPublicClonesAnnouncementsRoute
@@ -1592,6 +1599,7 @@ export interface FileRoutesByTo {
   '/api/public/billing/invoice-pdf': typeof ApiPublicBillingInvoicePdfRoute
   '/api/public/billing/invoices': typeof ApiPublicBillingInvoicesRoute
   '/api/public/billing/payment-methods': typeof ApiPublicBillingPaymentMethodsRoute
+  '/api/public/builders/apply': typeof ApiPublicBuildersApplyRoute
   '/api/public/builders/identity': typeof ApiPublicBuildersIdentityRoute
   '/api/public/builders/jwks': typeof ApiPublicBuildersJwksRoute
   '/api/public/clones/announcements': typeof ApiPublicClonesAnnouncementsRoute
@@ -1792,6 +1800,7 @@ export interface FileRoutesById {
   '/api/public/billing/invoice-pdf': typeof ApiPublicBillingInvoicePdfRoute
   '/api/public/billing/invoices': typeof ApiPublicBillingInvoicesRoute
   '/api/public/billing/payment-methods': typeof ApiPublicBillingPaymentMethodsRoute
+  '/api/public/builders/apply': typeof ApiPublicBuildersApplyRoute
   '/api/public/builders/identity': typeof ApiPublicBuildersIdentityRoute
   '/api/public/builders/jwks': typeof ApiPublicBuildersJwksRoute
   '/api/public/clones/announcements': typeof ApiPublicClonesAnnouncementsRoute
@@ -1993,6 +2002,7 @@ export interface FileRouteTypes {
     | '/api/public/billing/invoice-pdf'
     | '/api/public/billing/invoices'
     | '/api/public/billing/payment-methods'
+    | '/api/public/builders/apply'
     | '/api/public/builders/identity'
     | '/api/public/builders/jwks'
     | '/api/public/clones/announcements'
@@ -2191,6 +2201,7 @@ export interface FileRouteTypes {
     | '/api/public/billing/invoice-pdf'
     | '/api/public/billing/invoices'
     | '/api/public/billing/payment-methods'
+    | '/api/public/builders/apply'
     | '/api/public/builders/identity'
     | '/api/public/builders/jwks'
     | '/api/public/clones/announcements'
@@ -2390,6 +2401,7 @@ export interface FileRouteTypes {
     | '/api/public/billing/invoice-pdf'
     | '/api/public/billing/invoices'
     | '/api/public/billing/payment-methods'
+    | '/api/public/builders/apply'
     | '/api/public/builders/identity'
     | '/api/public/builders/jwks'
     | '/api/public/clones/announcements'
@@ -2569,6 +2581,7 @@ export interface RootRouteChildren {
   ApiPublicBillingInvoicePdfRoute: typeof ApiPublicBillingInvoicePdfRoute
   ApiPublicBillingInvoicesRoute: typeof ApiPublicBillingInvoicesRoute
   ApiPublicBillingPaymentMethodsRoute: typeof ApiPublicBillingPaymentMethodsRoute
+  ApiPublicBuildersApplyRoute: typeof ApiPublicBuildersApplyRoute
   ApiPublicBuildersIdentityRoute: typeof ApiPublicBuildersIdentityRoute
   ApiPublicBuildersJwksRoute: typeof ApiPublicBuildersJwksRoute
   ApiPublicClonesAnnouncementsRoute: typeof ApiPublicClonesAnnouncementsRoute
@@ -3921,6 +3934,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicBuildersIdentityRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/builders/apply': {
+      id: '/api/public/builders/apply'
+      path: '/api/public/builders/apply'
+      fullPath: '/api/public/builders/apply'
+      preLoaderRoute: typeof ApiPublicBuildersApplyRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/billing/payment-methods': {
       id: '/api/public/billing/payment-methods'
       path: '/api/public/billing/payment-methods'
@@ -4247,6 +4267,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPublicBillingInvoicePdfRoute: ApiPublicBillingInvoicePdfRoute,
   ApiPublicBillingInvoicesRoute: ApiPublicBillingInvoicesRoute,
   ApiPublicBillingPaymentMethodsRoute: ApiPublicBillingPaymentMethodsRoute,
+  ApiPublicBuildersApplyRoute: ApiPublicBuildersApplyRoute,
   ApiPublicBuildersIdentityRoute: ApiPublicBuildersIdentityRoute,
   ApiPublicBuildersJwksRoute: ApiPublicBuildersJwksRoute,
   ApiPublicClonesAnnouncementsRoute: ApiPublicClonesAnnouncementsRoute,

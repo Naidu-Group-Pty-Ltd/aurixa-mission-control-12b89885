@@ -300,6 +300,46 @@ export const inviteNetworkOrganisationOwner = createServerFn({ method: "POST" })
     };
   });
 
+/**
+ * Applications, newest first, for the console.
+ *
+ * Read-only and admin-gated: everything an application can DO it already did
+ * when it was submitted, so there is nothing here to act on — this is the
+ * record of what the unattended pipeline decided, which is the one thing an
+ * operator could not see about it from the outside.
+ */
+export interface NetworkAccessRequest {
+  id: string;
+  legal_name: string;
+  trading_name: string | null;
+  org_type: string | null;
+  abn: string | null;
+  contact_name: string;
+  contact_email: string;
+  contact_phone: string | null;
+  website: string | null;
+  suburb: string | null;
+  state: string | null;
+  postcode: string | null;
+  message: string | null;
+  status: string;
+  outcome_detail: string | null;
+  organisation_id: string | null;
+  invite_sent: boolean;
+  created_at: string;
+}
+
+export const listNetworkAccessRequests = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth, requireAdmin])
+  .handler(async () => {
+    const result = await callBuilderNetworkAdmin("list_access_requests");
+    if (!result.ok) return { ok: false as const, error: result.error };
+    return {
+      ok: true as const,
+      access_requests: (result.body.access_requests as NetworkAccessRequest[] | undefined) ?? [],
+    };
+  });
+
 export const suspendNetworkOrganisation = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth, requireAdmin])
   .inputValidator((data: { organisationId: string; reason: string }) => {
@@ -378,13 +418,16 @@ export const createNetworkConnection = createServerFn({ method: "POST" })
     if (connectionId) {
       const { error: shadowError } = await supabaseAdmin
         .from("builders_network_connections_shadow")
-        .upsert({
-          clone_id: data.cloneId,
-          network_connection_id: connectionId,
-          builder_org_ref: data.builderOrganisationId,
-          state: "invited",
-          reported_at: new Date().toISOString(),
-        }, { onConflict: "network_connection_id" });
+        .upsert(
+          {
+            clone_id: data.cloneId,
+            network_connection_id: connectionId,
+            builder_org_ref: data.builderOrganisationId,
+            state: "invited",
+            reported_at: new Date().toISOString(),
+          },
+          { onConflict: "network_connection_id" },
+        );
       if (shadowError) console.error("[builders-network] shadow upsert failed", shadowError);
     }
     return {
@@ -418,9 +461,7 @@ export const revokeNetworkConnection = createServerFn({ method: "POST" })
         .eq("network_connection_id", data.connectionId);
       if (shadowError) console.error("[builders-network] shadow revoke update failed", shadowError);
     }
-    return result.ok
-      ? { ok: true as const }
-      : { ok: false as const, error: result.error };
+    return result.ok ? { ok: true as const } : { ok: false as const, error: result.error };
   });
 
 export const setNetworkConnectionTransport = createServerFn({ method: "POST" })
@@ -435,9 +476,7 @@ export const setNetworkConnectionTransport = createServerFn({ method: "POST" })
       connection_id: data.connectionId,
       inbound_url: data.inboundUrl,
     });
-    return result.ok
-      ? { ok: true as const }
-      : { ok: false as const, error: result.error };
+    return result.ok ? { ok: true as const } : { ok: false as const, error: result.error };
   });
 
 export const listShadowConnections = createServerFn({ method: "GET" })
@@ -445,7 +484,9 @@ export const listShadowConnections = createServerFn({ method: "GET" })
   .handler(async () => {
     const { data, error } = await supabaseAdmin
       .from("builders_network_connections_shadow")
-      .select("id, clone_id, network_connection_id, builder_org_ref, builder_org_label, state, scopes, reported_at")
+      .select(
+        "id, clone_id, network_connection_id, builder_org_ref, builder_org_label, state, scopes, reported_at",
+      )
       .order("reported_at", { ascending: false, nullsFirst: false })
       .limit(200);
     if (error) return { ok: false as const, error: error.message };
@@ -522,10 +563,10 @@ export interface NetworkCommercialPlacement {
  */
 export type NetworkSignalReading =
   | {
-    state: "measured";
-    value: number;
-    evidence: Record<string, number | string | boolean | null>;
-  }
+      state: "measured";
+      value: number;
+      evidence: Record<string, number | string | boolean | null>;
+    }
   | { state: "not_measured"; reason: string };
 
 export interface NetworkRankingSnapshot {
@@ -610,29 +651,32 @@ export const explainNetworkRanking = createServerFn({ method: "GET" })
 
 export const setNetworkRankingOverride = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth, requireAdmin])
-  .inputValidator((data: {
-    organisationId: string;
-    kind: "pin" | "suppress";
-    position?: number | null;
-    reason: string;
-    /**
-     * Absent takes the network's ninety-day default. An explicit null is the
-     * deliberate ask for a STANDING override, and is passed through as null
-     * rather than being dropped — the distinction is the whole reason a
-     * forgotten pin cannot shape the marketplace for a year.
-     */
-    expiresAt?: string | null;
-  }) => {
-    if (!data?.organisationId) throw new Error("organisationId required");
-    if (data.kind !== "pin" && data.kind !== "suppress") throw new Error("kind must be pin or suppress");
-    if (!data.reason || data.reason.trim().length < 10) {
-      throw new Error("a reason of at least 10 characters is required");
-    }
-    if (data.kind === "pin" && (!Number.isInteger(data.position) || Number(data.position) < 1)) {
-      throw new Error("a pin needs a position of 1 or more");
-    }
-    return data;
-  })
+  .inputValidator(
+    (data: {
+      organisationId: string;
+      kind: "pin" | "suppress";
+      position?: number | null;
+      reason: string;
+      /**
+       * Absent takes the network's ninety-day default. An explicit null is the
+       * deliberate ask for a STANDING override, and is passed through as null
+       * rather than being dropped — the distinction is the whole reason a
+       * forgotten pin cannot shape the marketplace for a year.
+       */
+      expiresAt?: string | null;
+    }) => {
+      if (!data?.organisationId) throw new Error("organisationId required");
+      if (data.kind !== "pin" && data.kind !== "suppress")
+        throw new Error("kind must be pin or suppress");
+      if (!data.reason || data.reason.trim().length < 10) {
+        throw new Error("a reason of at least 10 characters is required");
+      }
+      if (data.kind === "pin" && (!Number.isInteger(data.position) || Number(data.position) < 1)) {
+        throw new Error("a pin needs a position of 1 or more");
+      }
+      return data;
+    },
+  )
   .handler(async ({ data }) => {
     const payload: Record<string, unknown> = {
       organisation_id: data.organisationId,
@@ -652,7 +696,8 @@ export const clearNetworkRankingOverride = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth, requireAdmin])
   .inputValidator((data: { organisationId: string; kind: "pin" | "suppress"; reason?: string }) => {
     if (!data?.organisationId) throw new Error("organisationId required");
-    if (data.kind !== "pin" && data.kind !== "suppress") throw new Error("kind must be pin or suppress");
+    if (data.kind !== "pin" && data.kind !== "suppress")
+      throw new Error("kind must be pin or suppress");
     return data;
   })
   .handler(async ({ data }) => {
@@ -685,17 +730,19 @@ export const setNetworkRankingFreeze = createServerFn({ method: "POST" })
 
 export const setNetworkCommercialPlacement = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth, requireAdmin])
-  .inputValidator((data: {
-    organisationId: string;
-    tier: "partner" | "premium" | "featured";
-    priority?: number;
-    endsAt?: string | null;
-    note?: string;
-  }) => {
-    if (!data?.organisationId) throw new Error("organisationId required");
-    if (!["partner", "premium", "featured"].includes(data.tier)) throw new Error("unknown tier");
-    return data;
-  })
+  .inputValidator(
+    (data: {
+      organisationId: string;
+      tier: "partner" | "premium" | "featured";
+      priority?: number;
+      endsAt?: string | null;
+      note?: string;
+    }) => {
+      if (!data?.organisationId) throw new Error("organisationId required");
+      if (!["partner", "premium", "featured"].includes(data.tier)) throw new Error("unknown tier");
+      return data;
+    },
+  )
   .handler(async ({ data }) => {
     const result = await callBuilderNetworkAdmin("ranking_set_placement", {
       organisation_id: data.organisationId,

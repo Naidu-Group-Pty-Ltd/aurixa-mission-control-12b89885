@@ -63,7 +63,12 @@ export type NetworkFailureReading = {
   /** Present only where the repair is a page here. */
   remedy: NetworkFailureRemedy | null;
   /** Whose fault it is, which decides whether a remedy can exist at all. */
-  blocking: "mission_control" | "network" | "unknown";
+  /**
+   * Where the remedy is. `operator` is the newest and the narrowest:
+   * neither deployment is misconfigured and the network is answering
+   * correctly — what was typed is the thing to change.
+   */
+  blocking: "mission_control" | "network" | "operator" | "unknown";
 };
 
 /** The one place the operate key is minted. There must not be a second. */
@@ -162,6 +167,204 @@ const NETWORK: Record<string, Authored> = {
       "Control sends. The remedy is on the network rather than in this deployment.",
     remedy: null,
     blocking: "network",
+  },
+
+  /*
+   * `builder_organisations` carries three unique indexes, and a collision on
+   * any of them used to reach an operator as a bare 500 — "The organisation
+   * could not be saved", naming none of the ten fields on the form. Measured
+   * in production on 18 Sep 2026: an operator re-used the ABN from the form's
+   * own placeholder and lost the rest of the run to it, because the
+   * organisation was never created and so its owner was never invited.
+   *
+   * The value is deliberately not repeated back. It is another
+   * organisation's registration number, and this console is not the place to
+   * confirm who holds it.
+   */
+  an_organisation_type_is_required: {
+    short: "Choose a type",
+    sentence:
+      "An organisation type is required — the network stores it on every organisation and has no " +
+      "default to fall back on.",
+    remedy: null,
+    blocking: "operator",
+  },
+  a_legal_name_is_required: {
+    short: "A legal name is required",
+    sentence: "An organisation cannot be created or left without a legal name.",
+    remedy: null,
+    blocking: "operator",
+  },
+  abn_must_be_11_digits: {
+    short: "An ABN is eleven digits",
+    sentence:
+      "An ABN is exactly eleven digits. Spacing is yours to write however you like — " +
+      "\u201c12 345 678 901\u201d and \u201c12345678901\u201d are the same number.",
+    remedy: null,
+    blocking: "operator",
+  },
+  acn_must_be_9_digits: {
+    short: "An ACN is nine digits",
+    sentence:
+      "An ACN is exactly nine digits. Spacing and hyphens are yours to write however you like.",
+    remedy: null,
+    blocking: "operator",
+  },
+  postcode_must_be_4_digits: {
+    short: "A postcode is four digits",
+    sentence: "An Australian postcode is exactly four digits.",
+    remedy: null,
+    blocking: "operator",
+  },
+  state_is_not_an_australian_state: {
+    short: "Choose a state",
+    sentence:
+      "The network stores one of the eight Australian state and territory codes, so the state has " +
+      "to be chosen from the list rather than typed.",
+    remedy: null,
+    blocking: "operator",
+  },
+  contact_email_is_not_an_email: {
+    short: "That is not an email address",
+    sentence: "The contact address does not look like an email address.",
+    remedy: null,
+    blocking: "operator",
+  },
+  organisation_already_has_members: {
+    short: "This organisation already has members",
+    sentence:
+      "Seeding the first owner is offered only while an organisation has nobody in it. From then " +
+      "on its own owner invites their colleagues, which is not an operator\u2019s decision to make.",
+    remedy: null,
+    blocking: "operator",
+  },
+  that_account_has_been_withdrawn: {
+    short: "That account has been withdrawn",
+    sentence:
+      "That person\u2019s access to the network was withdrawn. Bootstrapping a new organisation is " +
+      "not a way around that decision, so it has to be reversed on their account first.",
+    remedy: null,
+    blocking: "operator",
+  },
+  a_closed_organisation_is_terminal: {
+    short: "That organisation is closed",
+    sentence:
+      "Closing is final \u2014 a closed organisation cannot be edited, approved or given an owner. " +
+      "Create a new organisation instead.",
+    remedy: null,
+    blocking: "operator",
+  },
+
+  /*
+   * The unattended application pipeline's own vocabulary. It reaches an
+   * operator through `outcome_detail` on a refused application rather than
+   * through a toast, so these are written as a statement of what HAPPENED to
+   * an application somebody else submitted — not as an instruction.
+   */
+  a_contact_name_is_required: {
+    short: "The application named nobody to write to",
+    sentence: "The application did not name a person to write to, so it was refused.",
+    remedy: null,
+    blocking: "operator",
+  },
+  a_valid_email_is_required: {
+    short: "The application carried no usable email address",
+    sentence:
+      "The address on the application was not an email address, so there was nowhere to send " +
+      "the invitation and it was refused.",
+    remedy: null,
+    blocking: "operator",
+  },
+  org_type_is_not_recognised: {
+    short: "The application named a type the network does not hold",
+    sentence:
+      "The application named a kind of business the network does not store, so it was refused.",
+    remedy: null,
+    blocking: "operator",
+  },
+  an_application_for_that_address_is_already_with_us: {
+    short: "A second application from the same address within a day",
+    sentence:
+      "That address had already applied within the last day. The window exists so one mailbox " +
+      "cannot be mailed repeatedly; a second attempt usually means the first invitation never " +
+      "arrived, so check whether it sent.",
+    remedy: null,
+    blocking: "operator",
+  },
+  application_not_recorded: {
+    short: "The application could not be written down",
+    sentence:
+      "The network could not record the application at all, so nothing was created and the " +
+      "applicant was told to try again. This is a fault on the network rather than the form.",
+    remedy: null,
+    blocking: "network",
+  },
+  organisation_not_created: {
+    short: "The organisation could not be created",
+    sentence:
+      "The application was recorded and its organisation could not be created. The application " +
+      "is kept so the details are not lost.",
+    remedy: null,
+    blocking: "network",
+  },
+  owner_not_created: {
+    short: "The owner account could not be created",
+    sentence:
+      "The organisation was created and its owner account was not. Use Invite owner on that " +
+      "organisation to finish it.",
+    remedy: null,
+    blocking: "network",
+  },
+  owner_not_attached: {
+    short: "The owner could not be joined to the organisation",
+    sentence:
+      "The organisation and the owner account both exist and the membership between them was " +
+      "not written. Use Invite owner on that organisation to finish it.",
+    remedy: null,
+    blocking: "network",
+  },
+  invite_not_issued: {
+    short: "The invitation could not be stamped on the account",
+    sentence:
+      "The account exists and no invitation credential was recorded against it, so nothing was " +
+      "sent. Use Invite owner on that organisation to mint a fresh one.",
+    remedy: null,
+    blocking: "network",
+  },
+  invite_service_unavailable: {
+    short: "No invitation could be minted",
+    sentence:
+      "The network could not mint an invitation, so the application was refused rather than " +
+      "creating an organisation nobody could reach.",
+    remedy: null,
+    blocking: "network",
+  },
+
+  abn_already_registered: {
+    short: "That ABN is already registered",
+    sentence:
+      "Another organisation on the network is already registered with that ABN. An ABN identifies " +
+      "one entity, so either this is the same business under a new name — in which case edit the " +
+      "organisation that already holds it — or the number needs checking.",
+    remedy: null,
+    blocking: "operator",
+  },
+  acn_already_registered: {
+    short: "That ACN is already registered",
+    sentence:
+      "Another organisation on the network is already registered with that ACN. An ACN identifies " +
+      "one company, so either this is the same entity under a new name — in which case edit the " +
+      "organisation that already holds it — or the number needs checking.",
+    remedy: null,
+    blocking: "operator",
+  },
+  legal_name_already_registered: {
+    short: "That legal name is already taken",
+    sentence:
+      "Another organisation on the network already has that legal name. Names are compared " +
+      "ignoring case and surrounding spaces, so a near-identical spelling still collides.",
+    remedy: null,
+    blocking: "operator",
   },
 };
 
