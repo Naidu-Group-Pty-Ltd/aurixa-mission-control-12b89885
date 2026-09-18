@@ -19,6 +19,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import { supabase } from "@/integrations/supabase/client";
+import { RECORD_KINDS_FILTER, isInboxKind } from "@/lib/notificationDisposition";
 import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 import { formatDistanceToNow } from "@/lib/format";
@@ -81,9 +82,24 @@ export function NotificationsBell() {
     if (!session) return;
 
     const load = async () => {
+      /*
+        THE BELL IS THE INBOX, NOT THE RECORD.
+
+        It used to load every kind and count the unread among them, so the
+        badge read 2,459 on 18 Sep 2026 — 79% of it successes and the normal
+        operating state of a working pipeline. A badge that is always large is
+        a badge nobody reads, and `cascade_blocked` arrives in the same place.
+
+        Nothing stopped being WRITTEN: `CloneActivityHistory` reads the same
+        table as a clone's activity feed, and the notifications page can still
+        show everything. The filter is here, at the reader, which is also why
+        the 983 already-unread records stop being counted without a single row
+        being stamped or deleted.
+      */
       const { data } = await supabase
         .from("notifications")
         .select("*")
+        .not("kind", "in", RECORD_KINDS_FILTER)
         .order("created_at", { ascending: false })
         .limit(FEED_LIMIT);
       setItems(data ?? []);
@@ -97,6 +113,10 @@ export function NotificationsBell() {
         { event: "INSERT", schema: "public", table: "notifications" },
         (payload) => {
           const n = payload.new as Notification;
+          // The same rule as the query above. A live insert that bypassed it
+          // would put a record in the inbox until the next reload, which is
+          // the kind of drift that makes a filter untrustworthy.
+          if (!isInboxKind(n.kind)) return;
           setItems((prev) => [n, ...prev].slice(0, FEED_LIMIT));
         },
       )
