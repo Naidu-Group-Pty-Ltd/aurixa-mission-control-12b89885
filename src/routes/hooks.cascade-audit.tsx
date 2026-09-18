@@ -17,6 +17,11 @@ import { verifyCronAuth } from "@/server/cron-auth.server";
 // see divergence no cascade event ever created: a force-push, a reverted
 // merge, an exclusion that grew too broad, an edit made directly on a clone.
 //
+// The same tick then classifies WHY any clone is not converging into
+// `clone_sync_blockages` — every reason with a class, an owner and a clock,
+// because a blockage may be silent or permanent but never both. That half
+// reads Mission Control's own tables only and spends no GitHub budget.
+//
 // It acts on NOTHING. No cascade is queued, no pointer is moved, no
 // notification is raised. Step 1 of the shipping order in
 // CASCADE_PIPELINE_HEALTH.md writes observations only, so a wrong reading
@@ -51,19 +56,48 @@ export const Route = createFileRoute("/hooks/cascade-audit")({
           const { auditFleetConvergence } = await import("@/server/convergenceAudit.server");
           const report = await auditFleetConvergence(supabaseAdmin);
 
+          /*
+            THE LEDGER RUNS IN THE SAME TICK, AND AFTER.
+
+            After, because it classifies against the auditor's NEWEST reading —
+            a ledger running on a quarter-hour-old observation would describe a
+            fleet that has since moved. Same tick, because every fact it needs
+            is already in Mission Control's own tables: it touches no
+            repository and asks the installation budget for nothing, so there
+            is no reason to make it wait for its own schedule.
+
+            A classification that fails must not lose the reading that was just
+            taken, so it is caught here rather than allowed to fail the tick.
+          */
+          const { reconcileBlockageLedger } = await import("@/server/blockageLedger.server");
+          let blockages: Awaited<ReturnType<typeof reconcileBlockageLedger>> | { error: string };
+          try {
+            blockages = await reconcileBlockageLedger(supabaseAdmin);
+          } catch (e) {
+            blockages = { error: e instanceof Error ? e.message : "Blockage ledger failed" };
+          }
+
           // A run-level audit row only when the fleet is not simply
           // converging. A sweep that files an identical "3 converged" row four
           // times an hour is how an audit log stops being read — which is the
           // defect this whole area exists to remove, not one to repeat.
-          if (report.stalled > 0 || report.fallingBehind > 0 || report.unknown > 0) {
+          const unclassified = "error" in blockages ? 0 : blockages.unclassified;
+          const ledgerFailed = "error" in blockages;
+          if (
+            report.stalled > 0 ||
+            report.fallingBehind > 0 ||
+            report.unknown > 0 ||
+            unclassified > 0 ||
+            ledgerFailed
+          ) {
             await writeAuditLog({
               action: "cascade_convergence_audit",
               entityType: "cron",
-              metadata: report as unknown as Record<string, unknown>,
+              metadata: { ...report, blockages } as unknown as Record<string, unknown>,
             });
           }
 
-          return new Response(JSON.stringify({ success: true, ...report }), {
+          return new Response(JSON.stringify({ success: true, ...report, blockages }), {
             headers: { "Content-Type": "application/json" },
           });
         } catch (e) {

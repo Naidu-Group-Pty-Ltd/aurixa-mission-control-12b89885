@@ -565,4 +565,15 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "column", table: "prime_config", column: "convergence_slo_minutes" },
     ],
   },
+  {
+    migration: "20260918160000_clone_sync_blockages.sql",
+    version: "20260918160000",
+    assertions: [
+      { kind: "table", table: "clone_sync_blockages" },
+      { kind: "column", table: "clone_sync_blockages", column: "class" },
+      { kind: "column", table: "clone_sync_blockages", column: "owner" },
+      { kind: "column", table: "clone_sync_blockages", column: "self_heals" },
+      { kind: "column", table: "clone_sync_blockages", column: "cleared_at" },
+    ],
+  },
 ];

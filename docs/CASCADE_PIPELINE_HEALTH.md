@@ -419,7 +419,7 @@ The order is the safety property, as it was for seed-then-scope.
 | # | ships | why here |
 |---|---|---|
 | 1 · **shipped** | `convergence.pure.ts` + the audit hook, **writing only** | a reading nobody acts on yet, so a wrong reading costs nothing. Run it beside the existing signals for a week and compare. |
-| 2 | `clone_sync_blockages` + classification, **no notifications** | populate the ledger from real passes; verify the taxonomy catches what actually happens before it is allowed to speak |
+| 2 · **shipped** | `clone_sync_blockages` + classification, **no notifications** | populate the ledger from real passes; verify the taxonomy catches what actually happens before it is allowed to speak |
 | 3 | retire `drift_high`; `stalled` becomes the only sync alert | only once §1 has proved itself, or the fleet trades a false alarm for a missing one |
 | 4 | success notifications become card rows | independent of the rest; recovers 943 of the 2,459 immediately |
 | 5 | custodian, **read-only `dryRun` first**, reporting what it would heal | the dry-run boundary rule, applied to the healer |
@@ -474,6 +474,42 @@ tree read cannot settle, so a path it holds would read as owed. There is no
 live instance today, and the escalation that would act on one has not shipped;
 the cheap answer when it does is for the engine to record its content holds
 where the auditor can read them, rather than for the auditor to fetch blobs.
+
+### Step 2, measured against the live ledger
+
+The classifier was run against the fleet's real facts — the clone records, the
+exclusion counts, every `pr_opened` row and the auditor's own verdict — as they
+stood on 18 Sep 2026:
+
+```
+NPC Client Dashboard   repo_retargeted · machinery · self-heals · since 2026-08-26
+                       "43 proposal record(s) name lavan96/npc-client-dashboard,
+                        which is not this clone's repository. No reconcile can
+                        reach them, so they stay open for ever."
+NPC Test               (nothing)
+Preflight Property Group (nothing)
+```
+
+**One finding across the whole fleet**, dated to the day the condition actually
+began rather than the day it was noticed, against a notification channel
+carrying 2,459 unread rows. That ratio is the design's whole claim.
+
+It also settled a rule that was not obvious in the abstract. Most classes
+describe a DELIVERY that went wrong, and a commit cascade delivers prime's head
+at run time — so a later pass supersedes a failed one entirely, and a retired
+event is history the moment the auditor reports `converged`. Preflight carries
+22 failed rows in the last 45 days and is owed nothing; reporting those would
+have filled the ledger with exactly the kind of noise this replaces. So
+`conditionedOnDivergence` is a field on the policy table, and the three classes
+that are **not** conditioned are the standing faults — `policy_unseeded`,
+`repo_retargeted`, `unreconciled_proposal` — which are wrong right now whatever
+today's convergence says, and will be wrong for the next cascade too.
+
+The other rule worth stating: a proposal recorded against the wrong repository
+reports as `repo_retargeted` and **not** additionally as `unreconciled_proposal`.
+One row, one blockage, the specific one — the remedies differ, and two findings
+about one row is how a list of open problems doubles in length without gaining
+information.
 
 ## 9 · What this does not address
 

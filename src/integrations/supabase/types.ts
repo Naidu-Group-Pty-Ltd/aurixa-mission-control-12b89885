@@ -3427,6 +3427,59 @@ export type Database = {
           },
         ]
       }
+      clone_sync_blockages: {
+        Row: {
+          class: string
+          cleared_at: string | null
+          clone_id: string
+          created_at: string
+          detail: string
+          escalated_at: string | null
+          fingerprint: string
+          first_seen_at: string
+          id: string
+          last_seen_at: string
+          owner: string
+          self_heals: boolean
+        }
+        Insert: {
+          class: string
+          cleared_at?: string | null
+          clone_id: string
+          created_at?: string
+          detail: string
+          escalated_at?: string | null
+          fingerprint: string
+          first_seen_at?: string
+          id?: string
+          last_seen_at?: string
+          owner: string
+          self_heals: boolean
+        }
+        Update: {
+          class?: string
+          cleared_at?: string | null
+          clone_id?: string
+          created_at?: string
+          detail?: string
+          escalated_at?: string | null
+          fingerprint?: string
+          first_seen_at?: string
+          id?: string
+          last_seen_at?: string
+          owner?: string
+          self_heals?: boolean
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clone_sync_blockages_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       clone_sync_exclusions: {
         Row: {
           clone_id: string
