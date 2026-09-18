@@ -1,0 +1,19 @@
+{
+  "//": [
+    "Frozen migration dependency-order findings: a statement that runs before the",
+    "object it needs is created. A version is the order a migration runs in, and",
+    "this tree's versions are sequence numbers wearing a date's clothes — they run",
+    "months ahead of the wall clock — so naming a new migration after today puts it",
+    "in the middle of applied history.",
+    "",
+    "This is an inventory, not an exemption list. Every entry below is a real",
+    "ordering fault in history that is not worth rewriting: the 2025-01 files are",
+    "rollback and RLS-fix migrations that could never have run (their own headers",
+    "record the parse errors) and are never replayed, because clone backends are",
+    "built by catalog introspection rather than by replaying this directory.",
+    "",
+    "Regenerate with `npm run check:migration-order -- --update`. Never hand-edit."
+  ],
+  "schema_version": 1,
+  "findings": []
+}
