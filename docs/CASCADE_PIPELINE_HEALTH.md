@@ -85,19 +85,42 @@ frequent defect committed by the person cataloguing it.
 
 **What is wrong is what reads it.** `computeFleetSlo` takes a `windowDays`
 (1–90, default 30), selects every snapshot inside that window, and computes
-`up / total` per clone. With one row per clone `total` is always 1, so **every
-clone's thirty-day uptime is 0% or 100%, decided by a single probe taken in
-the last five minutes — and the window parameter changes nothing at all.**
-A one-day and a ninety-day SLO return the same number.
+`up / total` per clone. With one row per clone `total` is always 1, so the
+window parameter changes nothing at all: a one-day and a ninety-day SLO return
+the same number.
 
 `CloneHealthTimeline` is the same shape: its own header calls it a *"30-day
 uptime/probe sparkline"*, and a UNIQUE constraint means it can never hold more
 than one bucket.
 
-So this is the document's opening lesson in a surface nobody had looked at — a
-green signal about the wrong question — and the remedy is not to delete
-anything. **A cache and a history are different tables, and an SLO needs the
-second one.**
+**And the second correction is worth more than the first.** This was written
+up as "0% or 100% from a single probe", and building step 8 found that it can
+only ever be **0%**. Both readers resolve a clone's status as
+`payload.status ?? payload.health`, and `CloneHealth` has carried **neither
+key since the day it was written** — the status is at `payload.uptime.status`.
+Measured against production on 18 Sep 2026:
+
+| clone | real status | what the reader sees | counted |
+|---|---|---|---|
+| NPC Client Dashboard | `up` · HTTP 200 · 43 ms | `unknown` | miss |
+| NPC Test | `up` · HTTP 200 · 41 ms | `unknown` | miss |
+| Preflight Property Group | `up` · HTTP 200 · 50 ms | `unknown` | miss |
+
+So the page draws **0.00% fleet uptime, in destructive red, on a fleet where
+every clone is answering in under fifty milliseconds** — and has done since the
+surface shipped. That is §1.2's defect exactly: an alarm that fires on the
+normal operating state of a working system, in a place nobody had looked.
+
+A third one sits behind it. `unknown` went into the denominator, so a clone
+with **no deployment to ping** — which the health card beside it correctly
+draws grey, because *"a red pip is worse than a grey one"* — reads 0% uptime
+rather than "not measured". That is `rentalEvidence`'s rule, which this fleet
+has now paid for on rents, on Places lookups and on builder rankings:
+**absent is never zero**, and it leaves BOTH sides of the fraction.
+
+The remedy is not to delete anything. **A cache and a history are different
+tables, and an SLO needs the second one** — and **an SLO reads a column, never
+a payload.**
 
 ### 1.4 Forty-three rows that can never reconcile, reported nowhere
 
@@ -448,11 +471,13 @@ The order is the safety property, as it was for seed-then-scope.
 | 4 · **shipped** | the inbox carries only what needs a person | independent of the rest; takes 983 of the 2,459 out of the count with no row stamped or deleted |
 | 5 · **shipped** | custodian, the whole catalogue **reporting** and one act switched on | the dry-run boundary rule, applied to the healer |
 | 6 · **shipped** | custodian writes, one act at a time, retarget first | retarget is the safest — it repairs a URL, touches no repository |
-| 7 | the health card reads the auditor | the surface last, because a card is a claim that the reading under it is true. `CONVERGENCE_SLO_MINUTES` shipped with step 1 |
-| 8 | give `clone_health_snapshots` a history beside its cache, so `computeFleetSlo` measures the window it is asked for | independent of everything above; §1.3 |
+| 7 · **shipped** | the health card reads the auditor | the surface last, because a card is a claim that the reading under it is true. `CONVERGENCE_SLO_MINUTES` shipped with step 1 |
+| 8 · **shipped** | give `clone_health_snapshots` a history beside its cache, so `computeFleetSlo` measures the window it is asked for | independent of everything above; §1.3 |
 
 Steps 1, 2 and 5 write nothing anyone acts on, which is what makes this
-shippable against a live fleet without a window.
+shippable against a live fleet without a window. Steps 5 and 6 shipped
+together as one deployment (see below), so the custodian's one enabled act is
+live; every other act reports and writes nothing.
 
 ---
 
@@ -637,6 +662,118 @@ that did not work look exactly like one that did.
 Every act it takes, would take or refuses lands in `clone_custodial_acts` with
 `reversal` — the rows it changed and the value each held before — so undoing it
 is reading a row rather than reconstructing an intention.
+
+### Step 7, and the layering rule the build taught it
+
+The reading goes **inside the sync card**, directly under the pointer, and that
+placement is the whole argument. `CloneSyncStatusCard` draws
+`sync_status`/`commits_behind` — the answer the ENGINE wrote, at the end of the
+chain this document opens by distrusting. The measurement goes in the same
+card because a separate one would let an operator read the green pill and never
+scroll to the reading that contradicts it, and **the contradiction is the
+finding**: it is the shape the 84-commit lie took.
+
+Only the DIRECTION is compared. `commits_behind` counts commits and `owed`
+counts paths; one commit can touch two hundred files and two hundred commits
+can touch one. Comparing magnitudes would manufacture a contradiction out of
+two correct readings, so `compareToLedger` answers `ledger_optimistic` (the
+pointer says level, the trees do not — the one that matters),
+`ledger_pessimistic` (ordinary and benign: a delivery has landed and the
+pointer has not caught up) or `agree`, and never a number.
+
+Four things the card will not do. **It never draws an absent reading as a
+converged one** — `never_measured` is its own state, and every clone reads it
+until the audit's first pass. **It never draws a failed read as an absent
+one**: the panel reads through a server function precisely because RLS FILTERS
+rather than erroring, so a browser read would return `[]` with HTTP 200 and be
+indistinguishable from a table with nothing in it — the trap three surfaces in
+this fleet have now hit. **It never alarms on `unknown`**, because "we could
+not check" is not "you have a problem". And **a stale reading keeps its state
+rather than being withheld**: `READING_STALE_AFTER_MINUTES` is three of the
+audit's own cadence, read out of the cron in its own migration by a test, and
+an old reading is labelled as old rather than hidden — hiding it would leave
+the card silent at the exact moment the audit has stopped running.
+
+A `stalled` badge with nothing under it is a dead end, so the panel also lists
+the clone's open blockages in the taxonomy's own prose, with `owner` rendered
+as *what it means* ("clears itself", "needs a change in prime") rather than as
+the enum. A blockage read that FAILED lists nothing and says so, because
+"nothing is blocking this clone" is a claim a read that did not happen cannot
+make.
+
+**And the build refused the first version**, which is the lesson worth keeping.
+`src/server/**` is denied to the client environment: a component that may
+import a server module may import its dependencies, which is how a database
+client ends up in a browser bundle. The label tables therefore live in
+`src/lib/convergenceLabels.ts` and the judgement stays beside the audit, with
+two type-only shims (`*.types.ts`) as the one specifier a client may name. A
+contract test now states the rule directly — a client component may name a
+server TYPE and may call a `createServerFn`, and may import no other server
+value — because a bundler noticing at the end of a build is not the same as a
+rule anybody can read.
+
+### Step 8, and the reading that could only ever be zero
+
+§1.3 above carries the measurement. Three defects, each sufficient on its own,
+all live on a healthy fleet:
+
+1. **Both readers resolved a status from a key no payload has ever had.** The
+   SLO page drew **0.00% in destructive red** while every clone answered HTTP
+   200 in under fifty milliseconds.
+2. **There was no series to compute a window over.** `windowDays` spans 1–90
+   and could not change the answer.
+3. **`unknown` was counted as down**, so a clone with no deployment to ping
+   read 0% rather than "not measured".
+
+The remedy keeps the cache exactly as it is — it is a correct five-minute
+cache and `readCachedCloneHealth` depends on its one-row-per-clone key — and
+adds `clone_health_history` beside it, append-only, one row per probe, with the
+reading in **columns**. That is the load-bearing part: **an SLO reads a column,
+never a payload**, so the only module that can misread the payload's shape is
+the one that defines its type. A contract test asserts no source file anywhere
+resolves a status out of a payload again, and that exactly one module performs
+the extraction.
+
+The aggregate is the **database's**. Three clones probed every five minutes is
+78,000 rows over the widest window this page offers and 1.3 million at fifty
+clones; counting those in a function is a mistake that only surfaces once the
+fleet has grown. `clone_health_daily` is a regular view rather than a
+materialized one, deliberately — a materialized view needs a refresh, a
+refresh needs a schedule, and this platform's own record is six pg_cron jobs
+that were never scheduled at all, silently. `security_invoker = on` is
+load-bearing for the same reason a view is not a way around RLS.
+
+**The series is the scheduled cadence and nothing else**, which a review of
+the diff found rather than the design. Three callers of `getCloneHealth` probe
+on demand — the health card's Refresh, the `/health` dashboard, a forced fleet
+walk — and those are taken at moments a PERSON chose, which in practice means
+when somebody already suspected a problem. Folding them in would make "99.9%
+over thirty days" depend on how worried people were that month, and there is
+no way to read such a number back out afterwards. So `recordSample` defaults
+to false, exactly one caller sets it, and `clone_health_history` grants SELECT
+and no INSERT — the only writer is the service role, which makes the cadence
+an access control rather than a convention.
+
+Three more rules. **A window asked for is not a window measured** — the
+history starts empty, so for its first weeks a "30-day uptime" is a few hours
+of probes wearing a thirty-day label; coverage travels with the answer and the
+page states the span it actually saw. **A day that measured nothing draws a
+gap, not a floor** (`connectNulls={false}`), and a clone nothing measured sorts
+BELOW every real reading, because an absence is not the worst clone in the
+fleet. And **the prune rides a job already proven to run** — the five-minute
+health pass — rather than becoming a seventh unscheduled cron.
+
+Two things were closed in passing, both of the same family this document is
+about. `getCloneHealthHistory` had **zero call sites** and could not have been
+useful if it had one: it read sixty rows deep from a table holding one row per
+clone. It has a caller now — `CloneHealthTimeline`, which used to query that
+cache **from the browser** and `return null` on an empty result, drawing the
+identical nothing for a clone with no probes, a clone whose read RLS had
+filtered, and a clone the card was never meant to draw for. And
+`getFleetMetrics` fetched 500 health rows on every dashboard load, destructured
+them and read them nowhere.
+
+---
 
 ## 9 · What this does not address
 

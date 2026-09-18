@@ -1,5 +1,5 @@
 // Phase 11 — Reliability server functions:
-// - SLO computation from clone_health_snapshots
+// - SLO computation from clone_health_daily (the probe series, not the cache)
 // - Module library deprecation
 // - Brand drift severity timeseries
 import { createServerFn } from "@tanstack/react-start";
@@ -8,6 +8,36 @@ import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 
 // ─── SLO surface ──────────────────────────────────────────────────────
 
+/**
+ * Fleet uptime over a window the reading can actually see.
+ *
+ * ## What this replaces
+ *
+ * The previous version read `clone_health_snapshots` — a table that is UNIQUE
+ * on `clone_id`, so it holds exactly one row per clone and `windowDays` could
+ * not change its answer. It then resolved each clone's status as
+ * `payload.status ?? payload.health`, and `CloneHealth` has carried neither
+ * key since the day it was written: the status is at `payload.uptime.status`.
+ *
+ * Measured against production on 18 Sep 2026, all three clones were up on HTTP
+ * 200 in 41-50 ms and this function returned **0.00% for every one of them and
+ * for the fleet**, which the page drew in destructive red. Not "0% or 100%
+ * from one probe" — it could only ever be 0%, because the expression had no
+ * way to resolve anything else.
+ *
+ * ## What it does now
+ *
+ * Reads `clone_health_daily`, which aggregates the append-only probe series in
+ * the database (78,000 rows over the widest window this page offers, and 1.3
+ * million at fifty clones — not numbers to count in a function). The
+ * arithmetic and the honesty are in `uptimeSlo.pure.ts`: `unknown` is excluded
+ * from both sides of the fraction, nothing measured reads `null` rather than
+ * zero, and the span the evidence actually covers travels with the answer.
+ *
+ * A failed read answers `ok: false` rather than an empty window. That
+ * distinction is the whole substance of this programme, and this function is
+ * the one that got it wrong loudest.
+ */
 export const computeFleetSlo = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((d: { windowDays?: number }) =>
@@ -15,54 +45,81 @@ export const computeFleetSlo = createServerFn({ method: "POST" })
   )
   .handler(async ({ data, context }) => {
     const { supabase } = context;
+    const { summariseUptime } = await import("@/server/health/uptimeSlo.pure");
     const days = data.windowDays ?? 30;
-    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    const now = new Date();
+    // The view buckets by UTC calendar day, so the filter is a date. The
+    // reading still reports the first and last probe it actually saw, so
+    // nothing a reader is told is rounded by this.
+    const sinceDay = new Date(now.getTime() - days * 86_400_000).toISOString().slice(0, 10);
 
-    const { data: snapshots } = await supabase
-      .from("clone_health_snapshots")
-      .select("clone_id, payload, probed_at")
-      .gte("probed_at", since)
-      .order("probed_at", { ascending: true });
+    const [daily, clones] = await Promise.all([
+      supabase
+        .from("clone_health_daily")
+        .select("clone_id, day, up, down, unmeasured, first_probed_at, last_probed_at, last_status")
+        .gte("day", sinceDay),
+      supabase.from("clones").select("id, name, slug"),
+    ]);
 
-    const byClone = new Map<string, { up: number; total: number; lastStatus?: string }>();
-    for (const s of snapshots ?? []) {
-      const payload = (s.payload ?? {}) as Record<string, unknown>;
-      const status = String(payload.status ?? payload.health ?? "unknown");
-      const ok = ["ok", "up", "healthy", "ready", "active"].includes(status.toLowerCase());
-      const prev = byClone.get(s.clone_id) ?? { up: 0, total: 0 };
-      prev.total += 1;
-      if (ok) prev.up += 1;
-      prev.lastStatus = status;
-      byClone.set(s.clone_id, prev);
+    if (daily.error) {
+      // Never an empty window. A read that did not happen has measured
+      // nothing, and rendering that as 0% uptime is the defect this function
+      // is being repaired for.
+      return { ok: false as const, error: daily.error.message };
     }
-    const { data: clones } = await supabase.from("clones").select("id, name, slug");
-    const cloneSlo = (clones ?? []).map((c) => {
+
+    const summary = summariseUptime({
+      now,
+      requestedWindowDays: days,
+      rows: (daily.data ?? []).map((r) => ({
+        cloneId: String(r.clone_id),
+        day: String(r.day),
+        up: r.up ?? 0,
+        down: r.down ?? 0,
+        unmeasured: r.unmeasured ?? 0,
+        firstProbedAt: String(r.first_probed_at),
+        lastProbedAt: String(r.last_probed_at),
+        lastStatus: (r.last_status ?? "unknown") as "up" | "down" | "unknown",
+      })),
+    });
+
+    const byClone = new Map(summary.byClone.map((c) => [c.cloneId, c]));
+    // Every clone appears, including one with no probes at all: a clone that
+    // vanishes from an SLO list because nothing measured it is the same
+    // silence in a different place.
+    const cloneSlo = (clones.data ?? []).map((c) => {
       const stat = byClone.get(c.id);
-      const uptime = stat && stat.total > 0 ? stat.up / stat.total : null;
       return {
         clone_id: c.id,
         name: c.name,
         slug: c.slug,
-        uptime_pct: uptime === null ? null : Math.round(uptime * 10000) / 100,
-        samples: stat?.total ?? 0,
-        last_status: stat?.lastStatus ?? "unknown",
+        uptime_pct: stat?.uptimePct ?? null,
+        samples: stat?.measured ?? 0,
+        unmeasured: stat?.unmeasured ?? 0,
+        last_status: stat?.lastStatus ?? null,
+        last_probed_at: stat?.lastProbedAt ?? null,
       };
     });
-    const samplesTotal = cloneSlo.reduce((s, c) => s + c.samples, 0);
-    const upTotal = (snapshots ?? []).filter((s) => {
-      const p = (s.payload ?? {}) as Record<string, unknown>;
-      const st = String(p.status ?? p.health ?? "").toLowerCase();
-      return ["ok", "up", "healthy", "ready", "active"].includes(st);
-    }).length;
-    const fleetUptime =
-      samplesTotal > 0 ? Math.round((upTotal / samplesTotal) * 10000) / 100 : null;
 
     return {
       ok: true as const,
       windowDays: days,
-      fleetUptime,
-      samplesTotal,
-      clones: cloneSlo.sort((a, b) => (a.uptime_pct ?? 0) - (b.uptime_pct ?? 0)),
+      fleetUptime: summary.fleetUptimePct,
+      samplesTotal: summary.measuredTotal,
+      unmeasuredTotal: summary.unmeasuredTotal,
+      observedFrom: summary.observedFrom,
+      observedTo: summary.observedTo,
+      observedHours: summary.observedHours,
+      coversRequestedWindow: summary.coversRequestedWindow,
+      clones: cloneSlo.sort((a, b) => {
+        // Lowest uptime first, and a clone nothing has measured is not the
+        // worst clone in the fleet — it is an absence, and it sorts after
+        // every real reading rather than at the top of the list of problems.
+        if (a.uptime_pct === null && b.uptime_pct === null) return a.name.localeCompare(b.name);
+        if (a.uptime_pct === null) return 1;
+        if (b.uptime_pct === null) return -1;
+        return a.uptime_pct - b.uptime_pct;
+      }),
     };
   });
 

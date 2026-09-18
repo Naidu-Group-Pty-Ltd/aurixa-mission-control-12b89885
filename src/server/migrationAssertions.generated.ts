@@ -586,4 +586,14 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "column", table: "clone_custodial_acts", column: "reversal" },
     ],
   },
+  {
+    migration: "20260918200000_clone_health_history.sql",
+    version: "20260918200000",
+    assertions: [
+      { kind: "table", table: "clone_health_history" },
+      { kind: "column", table: "clone_health_history", column: "status" },
+      { kind: "column", table: "clone_health_history", column: "probed_at" },
+      { kind: "table", table: "clone_health_daily" },
+    ],
+  },
 ];

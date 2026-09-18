@@ -2714,6 +2714,44 @@ export type Database = {
           },
         ]
       }
+      clone_health_history: {
+        Row: {
+          clone_id: string
+          created_at: string
+          http_status: number | null
+          id: string
+          latency_ms: number | null
+          probed_at: string
+          status: string
+        }
+        Insert: {
+          clone_id: string
+          created_at?: string
+          http_status?: number | null
+          id?: string
+          latency_ms?: number | null
+          probed_at?: string
+          status: string
+        }
+        Update: {
+          clone_id?: string
+          created_at?: string
+          http_status?: number | null
+          id?: string
+          latency_ms?: number | null
+          probed_at?: string
+          status?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clone_health_history_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       clone_health_snapshots: {
         Row: {
           clone_id: string
@@ -12747,6 +12785,27 @@ export type Database = {
           updated_at?: string | null
         }
         Relationships: []
+      }
+      clone_health_daily: {
+        Row: {
+          clone_id: string | null
+          day: string | null
+          down: number | null
+          first_probed_at: string | null
+          last_probed_at: string | null
+          last_status: string | null
+          unmeasured: number | null
+          up: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clone_health_history_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       clones_missing_isolated_backend: {
         Row: {
