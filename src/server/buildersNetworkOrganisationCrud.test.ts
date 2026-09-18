@@ -9,7 +9,7 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { ORGANISATION_FIELDS } from "./builders-network.functions";
+import { AU_STATES, ORGANISATION_FIELDS } from "./builders-network.functions";
 
 const read = (p: string) => readFileSync(join(process.cwd(), p), "utf8");
 const FUNCTIONS = "src/server/builders-network.functions.ts";
@@ -49,6 +49,40 @@ describe("what an operator may write", () => {
     for (const column of LIFECYCLE) {
       expect(body, column).not.toMatch(new RegExp(`["'\`]${column}["'\`]`));
     }
+  });
+});
+
+/**
+ * What the network's columns require, offered rather than discovered.
+ *
+ * `builder_organisations` makes `legal_name` and `org_type` NOT NULL and
+ * CHECKs the shape of `abn`, `acn`, `postcode` and `state`. Measured before
+ * this was written: six of eight realistic inputs to this form reached
+ * Postgres and came back as an unattributed 500, rendered to the operator as
+ * "The organisation could not be saved". A form must not offer a save the
+ * server is certain to refuse.
+ */
+describe("the form cannot offer a save the network will refuse", () => {
+  const dialogSource = read(DIALOGS);
+
+  it("withholds Create until both NOT NULL columns are answered", () => {
+    expect(dialogSource).toMatch(
+      /const canSave = Boolean\(values\.legal_name\.trim\(\) && values\.org_type\.trim\(\)\)/,
+    );
+    expect(dialogSource).toMatch(/disabled=\{saving \|\| !canSave\}/);
+  });
+
+  it("marks both of them required where the operator is looking", () => {
+    expect(dialogSource).toContain("Legal name (required)");
+    expect(dialogSource).toContain("Type (required)");
+  });
+
+  it("offers the eight states rather than a free-text box", () => {
+    // `vic` and `Victoria` are both plainly meant and the column takes
+    // neither, so the operator chooses from the set instead of guessing it.
+    expect(AU_STATES).toEqual(["NSW", "VIC", "QLD", "SA", "WA", "TAS", "NT", "ACT"]);
+    expect(dialogSource).toContain("AU_STATES.map");
+    expect(dialogSource).not.toMatch(/field\("state"/);
   });
 });
 

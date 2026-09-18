@@ -164,6 +164,15 @@ export const approveNetworkOrganisation = createServerFn({ method: "POST" })
  * Naming the writable fields once here keeps the create and edit forms from
  * drifting apart, and keeps a lifecycle key from being sent at all.
  */
+/**
+ * The eight the network's `builder_organisations.state` CHECK accepts.
+ *
+ * Stated so the console can OFFER them rather than let an operator type
+ * `vic` or `Victoria` into a column that takes neither — both were measured
+ * reaching Postgres and returning an unattributed 500.
+ */
+export const AU_STATES = ["NSW", "VIC", "QLD", "SA", "WA", "TAS", "NT", "ACT"] as const;
+
 export const ORGANISATION_FIELDS = [
   "legal_name",
   "trading_name",
