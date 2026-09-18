@@ -7,7 +7,7 @@
  * diagnosis in the vocabulary of `NetworkAdminResult` and no sentence at all
  * in the vocabulary of the person who has to fix it.
  *
- * Three rules shape this module.
+ * Four rules shape this module.
  *
  *  * **A failure says which kind it was.** `blocking` separates a fault this
  *    deployment can repair from one that belongs to the network and from one
@@ -28,6 +28,13 @@
  *    meaning for a code we do not know would state something nobody measured,
  *    so an unknown code is mechanically unslugged and its raw form is kept on
  *    `code` for anyone reading it as a technical detail.
+ *
+ *  * **"We could not check" is not "you do not have it."** A status that did
+ *    not load is `status_unreadable` — its own reading, carrying no remedy —
+ *    rather than the switched-off one. Every card here reads the same status
+ *    object, and `gate?.enabled` is `undefined` when that read fails, which is
+ *    falsy: without a reading of its own each card falls through to its
+ *    unhappy state and asserts on no evidence that the console is off.
  */
 
 /** Where a fault can be repaired, when that place is a page in this app. */
