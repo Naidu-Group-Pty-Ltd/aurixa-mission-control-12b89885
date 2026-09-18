@@ -69,13 +69,35 @@ per prime commit, on every clone.
 That is the whole of the 1,253. The alarm is keyed on a *level* when the fault
 is a *derivative*: drift is not a fault, drift that has stopped shrinking is.
 
-### 1.3 A dead health surface
+### 1.3 A thirty-day SLO computed from one sample
 
-`clone_health_snapshots` holds **three rows, last written 1 September 2026** —
-seventeen days ago. Nothing writes it. The repo's own rule from the builder
-portal applies exactly: *a component is not shipped until something renders
-it*, and its converse — a health table nobody writes is worse than no table,
-because its name promises a reading somebody may believe.
+This was first written up as a dead surface — *"three rows, last written
+1 September, nothing writes it"* — and that was wrong. The correction is worth
+more than the original claim.
+
+`clone_health_snapshots` is alive. `warm-clone-health-snapshots` runs every
+five minutes and last wrote at **14:30:31 on 18 Sep 2026**. Its three rows are
+three clones, because `clone_health_snapshots_clone_id_key` is UNIQUE on
+`clone_id`: it is a **five-minute cache holding exactly one row per clone**.
+The "last written 1 September" was its `created_at`, which an upsert does not
+move — a misreading of the wrong column, which is this platform's most
+frequent defect committed by the person cataloguing it.
+
+**What is wrong is what reads it.** `computeFleetSlo` takes a `windowDays`
+(1–90, default 30), selects every snapshot inside that window, and computes
+`up / total` per clone. With one row per clone `total` is always 1, so **every
+clone's thirty-day uptime is 0% or 100%, decided by a single probe taken in
+the last five minutes — and the window parameter changes nothing at all.**
+A one-day and a ninety-day SLO return the same number.
+
+`CloneHealthTimeline` is the same shape: its own header calls it a *"30-day
+uptime/probe sparkline"*, and a UNIQUE constraint means it can never hold more
+than one bucket.
+
+So this is the document's opening lesson in a surface nobody had looked at — a
+green signal about the wrong question — and the remedy is not to delete
+anything. **A cache and a history are different tables, and an SLO needs the
+second one.**
 
 ### 1.4 Forty-three rows that can never reconcile, reported nowhere
 
@@ -403,9 +425,11 @@ Each is open right now, each is silent, and none is anybody's code:
    Closed by `repo_retargeted` + the custodian's retarget.
 2. **1,253 `drift_high` on a working pipeline.** Closed by the derivative in
    §3 — the alert is deleted, not tuned.
-3. **`clone_health_snapshots`, 3 rows, dead since 1 Sep.** Either the
-   auditor's table or it goes; a health surface nobody writes is a promise of
-   a reading that does not exist.
+3. **A thirty-day SLO computed from one sample.** `computeFleetSlo` and
+   `CloneHealthTimeline` both read a table with a UNIQUE constraint on
+   `clone_id`, so the window they ask for cannot change their answer. Not
+   closed by anything here: a cache and a history are different tables, and
+   it is named in §8 as its own step.
 4. **22 failed results on Preflight that nothing accumulates.** Closed by the
    per-clone ledger — consecutive failure becomes a standing condition rather
    than a sequence of independent events.
@@ -424,7 +448,8 @@ The order is the safety property, as it was for seed-then-scope.
 | 4 · **shipped** | the inbox carries only what needs a person | independent of the rest; takes 983 of the 2,459 out of the count with no row stamped or deleted |
 | 5 | custodian, **read-only `dryRun` first**, reporting what it would heal | the dry-run boundary rule, applied to the healer |
 | 6 | custodian writes, one act at a time, retarget first | retarget is the safest — it repairs a URL, touches no repository |
-| 7 | `CONVERGENCE_SLO_MINUTES` into `prime_config`; the health card reads the auditor | the surface last, because a card is a claim that the reading under it is true |
+| 7 | the health card reads the auditor | the surface last, because a card is a claim that the reading under it is true. `CONVERGENCE_SLO_MINUTES` shipped with step 1 |
+| 8 | give `clone_health_snapshots` a history beside its cache, so `computeFleetSlo` measures the window it is asked for | independent of everything above; §1.3 |
 
 Steps 1, 2 and 5 write nothing anyone acts on, which is what makes this
 shippable against a live fleet without a window.
