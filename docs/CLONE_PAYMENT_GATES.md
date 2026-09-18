@@ -118,7 +118,10 @@ the deliberate act it leaves to a person.
 tenant from the gate row Mission Control already wrote, so the button charges
 exactly what the clone was armed for and the browser is never told a price it
 could edit. It refuses on a gate that is already paid — a CTA is the one place
-that is easy to click twice.
+that is easy to click twice — and on a gate an operator has LOCKED, for the
+reason the resolution order above gives: the override outranks `paid_at` and
+settling never clears it, so that checkout would take the money and leave the
+workspace exactly as shut.
 
 Finding the plan row is not `WHERE slug = plan_slug`, and that is the subtle
 part. The catalogue reuses `seat_plans` rows through the tier rename —
@@ -225,6 +228,62 @@ SELECT enumlabel FROM pg_enum
    AND enumlabel LIKE 'clone_gate_%';   -- expect 4 rows
 ```
 
+## One mint, and an operator can send it (18 Sep 2026)
+
+An operator locked a clone by hand and asked where its Stripe button had gone.
+It was gone correctly — see the refusal above — and the question exposed the
+real gap, which was on this side: **Payment Gates had no way to send a customer
+to Stripe at all.** The console could arm a gate, move its window, lock it,
+unlock it and record a payment that arrived elsewhere, and could not produce
+the one thing a customer who has not paid actually needs.
+
+It can now, and the link is minted by the same code the clone's own button
+calls. `gateCheckout.server.ts` holds `mintGateActivationCheckout`, and the
+public route is a thin mapping onto it — clone key, scopes, rate limit, schema,
+then the mint — so the operator's link and the customer's button cannot charge
+different amounts, resolve a different plan, or refuse on different grounds.
+The refusals are ordered and each one names what to do instead:
+
+| | | |
+| --- | --- | --- |
+| `gate_read_failed` | 503 | a read that failed is not a row that is absent |
+| `not_gated` | 404 | |
+| `already_paid` | 409 | |
+| `operator_locked` | 409 | **and no pricing URL**, because sending somebody to pay would be the same mistake one layer out |
+| `no_plan_on_gate` | 409 | |
+| `plan_lookup_failed` | 503 | |
+| `plan_not_purchasable` | 409 | the price assertion above |
+| `checkout_failed` | 500 | |
+
+**It is the one gate act that demands no reason.** Every other act on this page
+writes state and appends an event with the status either side of it; this one
+mints a link and writes nothing, and demanding a justification for producing a
+payment link is ceremony rather than control.
+
+Three defects on this side were found with it, each of which reported as a
+working gate:
+
+- **The gate quoted the wrong price.** `resolvePlanPricing` read
+  `tier.monthlyInclGstCents` — the tier WITHOUT its AML/CTF module — while
+  `seatPlanForTier`'s price assertion refuses a catalogue row that disagrees
+  with the quote. Scale is $2,015 base against a $2,210 headline, so a newly
+  armed gate would have answered `plan_not_purchasable` on every click. The
+  three live rows were armed with the headline figure and were never affected.
+  `tierHeadlineCents` is what a gate quotes, and a contract test now asserts
+  which of the two it may read.
+- **The return URL was not confined to the clone.** `returnUrlWithinClone`
+  keeps a requested return inside the clone's own deploy origin and falls back
+  to it otherwise, and `session_id={CHECKOUT_SESSION_ID}` is appended raw
+  because `searchParams.set` percent-encodes the braces Stripe substitutes.
+- **`settleGatePayment` announced an unlock it had not performed.** A payment
+  that settles a gate an operator has locked leaves the workspace shut, and the
+  operator notification said "gate unlocked" regardless. It reads the derived
+  status after the write now and says which of the two happened.
+
+The link is rendered in a readonly input carrying a `value` — never a
+`placeholder`, which is the uncopyable-empty-box defect this fleet has already
+shipped twice.
+
 ## Files
 
 | File | What it is |
@@ -234,7 +293,9 @@ SELECT enumlabel FROM pg_enum
 | `src/server/payment-gate.server.ts` | Arm, override, window, settle, and `assertGateOpen` |
 | `src/server/payment-gate.functions.ts` | The operator RPCs |
 | `src/routes/api.public.clones.gate.ts` | What a clone asks about itself |
-| `src/routes/api.public.clones.gate.checkout.ts` | The CTA's destination |
+| `src/server/gateCheckout.server.ts` | The one mint. Both the clone's CTA and the operator's link |
+| `src/routes/api.public.clones.gate.checkout.ts` | The CTA's destination. A thin mapping onto the mint |
+| `src/components/clone-gate-actions.tsx` | The operator's acts, Payment link among them |
 | `src/routes/billing.gates.tsx` | The console |
 | `src/components/clone-payment-gate-card.tsx` | The same state on the clone's own page |
 | `src/server/paymentGate.contract.test.ts` | The absences: no backfill, one status rule, 402 where it belongs |
