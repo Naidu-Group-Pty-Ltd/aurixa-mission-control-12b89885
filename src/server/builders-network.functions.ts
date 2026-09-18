@@ -21,6 +21,7 @@ import {
   networkAdminUrl,
   operateSwitch,
 } from "./buildersNetworkAdmin.server";
+import { signingKeyPresent } from "./anthropicOidc.server";
 
 export interface NetworkOverview {
   organisations: Record<string, number>;
@@ -74,6 +75,13 @@ export const buildersNetworkStatus = createServerFn({ method: "GET" })
   .handler(async () => {
     const gate = await operateSwitch();
     const configured = networkAdminUrl() !== null;
+    // The THIRD precondition, which this status used not to report at all.
+    // `callBuilderNetworkAdmin` checks switch → signing key → url and returns
+    // the FIRST failure, so an operator who fixed the switch could walk
+    // straight into `signing_key_missing` with no card on the page that had
+    // ever mentioned a signing key. Reporting all three at once is what stops
+    // one repair from revealing a wall nobody had been shown.
+    const signed = signingKeyPresent();
     // The overview is best-effort: a console that cannot reach the network
     // still renders its own switch state and says which leg is missing.
     let overview: NetworkOverview | null = null;
@@ -86,6 +94,7 @@ export const buildersNetworkStatus = createServerFn({ method: "GET" })
     return {
       switch: gate,
       network_url_configured: configured,
+      signing_key_present: signed,
       overview,
       overview_error: overviewError,
     };
