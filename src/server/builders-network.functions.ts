@@ -330,6 +330,61 @@ export const listClonesForNetwork = createServerFn({ method: "GET" })
  * instrument here sits BESIDE the computed answer rather than replacing it.
  */
 
+/*
+ * These describe what the network actually returns, rather than
+ * `Record<string, unknown>`.
+ *
+ * Two reasons, and the second is the one that failed the build. A server
+ * function's return has to be provably serializable, and an index signature of
+ * `unknown` is not — TanStack rejects it, which is a fair complaint about a
+ * value crossing a wire. And a console that renders a builder's evidence needs
+ * to know what the evidence looks like; `Record<string, unknown>` tells the
+ * page nothing and defers every mistake to runtime.
+ */
+export interface NetworkRankingOverride {
+  id: string;
+  organisation_id: string;
+  kind: "pin" | "suppress";
+  position: number | null;
+  reason: string;
+  created_at: string;
+  expires_at: string | null;
+}
+
+export interface NetworkCommercialPlacement {
+  id: string;
+  organisation_id: string;
+  tier: string;
+  priority: number;
+  starts_at: string | null;
+  ends_at: string | null;
+}
+
+/**
+ * One signal's reading. A signal is either measured — with the evidence it was
+ * read from — or it is not, with the reason why. There is no third state and
+ * no zero: an absence leaves BOTH sides of the average rather than scoring as
+ * the worst possible value, which is the rule the whole scorer turns on.
+ */
+export type NetworkSignalReading =
+  | {
+    state: "measured";
+    value: number;
+    evidence: Record<string, number | string | boolean | null>;
+  }
+  | { state: "not_measured"; reason: string };
+
+export interface NetworkRankingSnapshot {
+  organisation_id: string;
+  merit_score: number;
+  confidence: number;
+  measured_score: number | null;
+  band: number;
+  signals: Record<string, NetworkSignalReading>;
+  ranking_version: number;
+  computed_at: string;
+}
+
 export interface NetworkRankedBuilder {
   organisation_id: string;
   legal_name: string | null;
@@ -396,7 +451,7 @@ export const explainNetworkRanking = createServerFn({ method: "GET" })
       organisation_id: data.organisationId,
     });
     if (!result.ok) return { ok: false as const, error: result.error };
-    return { ok: true as const, snapshot: result.body.snapshot as Record<string, unknown> };
+    return { ok: true as const, snapshot: result.body.snapshot as NetworkRankingSnapshot };
   });
 
 export const setNetworkRankingOverride = createServerFn({ method: "POST" })
@@ -436,7 +491,7 @@ export const setNetworkRankingOverride = createServerFn({ method: "POST" })
     }
     const result = await callBuilderNetworkAdmin("ranking_set_override", payload);
     if (!result.ok) return { ok: false as const, error: result.error };
-    return { ok: true as const, override: result.body.override as Record<string, unknown> };
+    return { ok: true as const, override: result.body.override as NetworkRankingOverride };
   });
 
 export const clearNetworkRankingOverride = createServerFn({ method: "POST" })
@@ -496,7 +551,7 @@ export const setNetworkCommercialPlacement = createServerFn({ method: "POST" })
       ...(data.note ? { note: data.note } : {}),
     });
     if (!result.ok) return { ok: false as const, error: result.error };
-    return { ok: true as const, placement: result.body.placement as Record<string, unknown> };
+    return { ok: true as const, placement: result.body.placement as NetworkCommercialPlacement };
   });
 
 export const clearNetworkCommercialPlacement = createServerFn({ method: "POST" })

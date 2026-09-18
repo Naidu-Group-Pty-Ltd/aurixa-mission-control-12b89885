@@ -4,7 +4,8 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import {
   Building2, Cable, CheckCircle2, Copy, EyeOff, Inbox, KeyRound, Loader2,
-  PauseCircle, Pin, PlayCircle, Plug, RefreshCw, ShieldAlert, Snowflake, Trophy,
+  ChevronDown, ChevronRight, PauseCircle, Pin, PlayCircle, Plug, RefreshCw,
+  ShieldAlert, Snowflake, Trophy,
 } from "lucide-react";
 import { toast } from "sonner";
 import { ProtectedRoute } from "@/components/protected-route";
@@ -32,6 +33,7 @@ import {
   revokeNetworkConnection,
   setNetworkConnectionTransport,
   listNetworkRanking,
+  explainNetworkRanking,
   setNetworkRankingOverride,
   clearNetworkRankingOverride,
   setNetworkRankingFreeze,
@@ -39,6 +41,7 @@ import {
   clearNetworkCommercialPlacement,
   type NetworkOrganisation,
   type NetworkRankedBuilder,
+  type NetworkSignalReading,
 } from "@/server/builders-network.functions";
 
 /**
@@ -266,6 +269,106 @@ function RankingPanel() {
 
 const BAND_LABEL = ["Established", "Strong", "Standard", "Developing", "Unrated"];
 
+/**
+ * WHY A BUILDER RANKS WHERE THEY RANK, read rather than recomputed.
+ *
+ * The snapshot stores every signal's reading and the evidence it came from, so
+ * this explains the score the marketplace was actually ordered by. Recomputing
+ * to explain is how an explanation comes to differ from the decision it is
+ * explaining — and an operator defending a position to a builder needs the two
+ * to be the same thing.
+ *
+ * It reads only when asked. Thirteen signal readings per builder is a lot to
+ * fetch for a list nobody has questioned.
+ */
+function RankingExplanation({ organisationId }: { organisationId: string }) {
+  const explainFn = useServerFn(explainNetworkRanking);
+  const query = useQuery({
+    queryKey: ["bn-ranking-explain", organisationId],
+    queryFn: () => explainFn({ data: { organisationId } }),
+  });
+
+  if (query.isPending) {
+    return (
+      <p className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
+        <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
+        Reading the signals…
+      </p>
+    );
+  }
+
+  /*
+   * A read that FAILED is not a builder with no evidence. The distinction is
+   * the same one the recompute makes when it abandons a run rather than
+   * scoring against data that did not load.
+   */
+  const snapshot = query.data?.ok ? query.data.snapshot : null;
+  if (!snapshot) {
+    return (
+      <p className="mt-3 text-xs text-muted-foreground">
+        {query.data && !query.data.ok
+          ? `The signals could not be read — ${query.data.error}`
+          : "The signals could not be read."}
+      </p>
+    );
+  }
+
+  const readings = Object.entries(snapshot.signals ?? {}) as Array<[string, NetworkSignalReading]>;
+  const measured = readings
+    .filter(([, r]) => r.state === "measured")
+    .sort((a, b) => (b[1] as { value: number }).value - (a[1] as { value: number }).value);
+  const unmeasured = readings.filter(([, r]) => r.state === "not_measured");
+
+  const label = (key: string) => key.replace(/_/g, " ");
+
+  return (
+    <div className="mt-3 rounded-md border bg-muted/30 p-3">
+      <p className="text-xs text-muted-foreground">
+        Measured {new Date(snapshot.computed_at).toLocaleString("en-AU")}
+        {" · "}method version {snapshot.ranking_version}
+      </p>
+
+      {measured.length ? (
+        <ul className="mt-2 space-y-1">
+          {measured.map(([key, reading]) => (
+            <li key={key} className="flex items-baseline justify-between gap-3 text-xs">
+              <span className="capitalize">{label(key)}</span>
+              <span className="tabular-nums font-medium">
+                {(reading as { value: number }).value.toFixed(0)}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="mt-2 text-xs text-muted-foreground">
+          Nothing about this builder has been measured yet. The score is the
+          neutral prior alone.
+        </p>
+      )}
+
+      {/*
+        * The unmeasured list is the point, not a footnote. A score built on two
+        * signals out of thirteen is a different claim from the same score built
+        * on all of them, and an operator about to act on a position needs to
+        * see which it is. None of these counted against the builder.
+        */}
+      {unmeasured.length ? (
+        <div className="mt-3 border-t pt-2">
+          <p className="text-xs font-medium">Not measured — and not counted against them</p>
+          <ul className="mt-1 space-y-1">
+            {unmeasured.map(([key, reading]) => (
+              <li key={key} className="flex items-baseline justify-between gap-3 text-xs text-muted-foreground">
+                <span className="capitalize">{label(key)}</span>
+                <span>{(reading as { reason: string }).reason.replace(/_/g, " ")}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function RankingRow({
   builder, busy, onPin, onSuppress, onClearOverride, onPlace, onClearPlacement,
 }: {
@@ -281,6 +384,7 @@ function RankingRow({
   const override = builder.override;
   const placement = builder.placement;
   const confidence = Math.round((builder.confidence ?? 0) * 100);
+  const [explaining, setExplaining] = useState(false);
 
   return (
     <div className="rounded-lg border p-3">
@@ -307,8 +411,28 @@ function RankingRow({
           <p className="text-xs text-muted-foreground">
             {confidence}% of signals measured
           </p>
+          {/*
+            * Directly under the confidence figure, because this is what that
+            * figure is short for. A percentage an operator cannot open is a
+            * number they have to take on trust, and the evidence is already
+            * stored precisely so they do not have to.
+            */}
+          <Button
+            size="sm"
+            variant="link"
+            className="h-auto p-0 text-xs"
+            aria-expanded={explaining}
+            onClick={() => setExplaining((open) => !open)}
+          >
+            {explaining
+              ? <ChevronDown className="mr-1 h-3 w-3" aria-hidden />
+              : <ChevronRight className="mr-1 h-3 w-3" aria-hidden />}
+            Why this score
+          </Button>
         </div>
       </div>
+
+      {explaining ? <RankingExplanation organisationId={builder.organisation_id} /> : null}
 
       <div className="mt-3 flex flex-wrap items-center gap-2">
         {override?.kind === "pin" ? (
