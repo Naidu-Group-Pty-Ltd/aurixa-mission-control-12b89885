@@ -554,4 +554,15 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "check", table: "clone_announcements", column: "severity", value: "critical" },
     ],
   },
+  {
+    migration: "20260918140000_convergence_observations.sql",
+    version: "20260918140000",
+    assertions: [
+      { kind: "table", table: "clone_convergence_observations" },
+      { kind: "column", table: "clone_convergence_observations", column: "state" },
+      { kind: "column", table: "clone_convergence_observations", column: "owed_fingerprint" },
+      { kind: "column", table: "clone_convergence_observations", column: "last_converged_at" },
+      { kind: "column", table: "prime_config", column: "convergence_slo_minutes" },
+    ],
+  },
 ];

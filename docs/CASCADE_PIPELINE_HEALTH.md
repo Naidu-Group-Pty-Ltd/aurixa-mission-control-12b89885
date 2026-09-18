@@ -418,7 +418,7 @@ The order is the safety property, as it was for seed-then-scope.
 
 | # | ships | why here |
 |---|---|---|
-| 1 | `convergence.pure.ts` + the audit hook, **writing only** | a reading nobody acts on yet, so a wrong reading costs nothing. Run it beside the existing signals for a week and compare. |
+| 1 · **shipped** | `convergence.pure.ts` + the audit hook, **writing only** | a reading nobody acts on yet, so a wrong reading costs nothing. Run it beside the existing signals for a week and compare. |
 | 2 | `clone_sync_blockages` + classification, **no notifications** | populate the ledger from real passes; verify the taxonomy catches what actually happens before it is allowed to speak |
 | 3 | retire `drift_high`; `stalled` becomes the only sync alert | only once §1 has proved itself, or the fleet trades a false alarm for a missing one |
 | 4 | success notifications become card rows | independent of the rest; recovers 943 of the 2,459 immediately |
@@ -444,6 +444,16 @@ different thing from one nobody has.
 - **The clone's own commits** are legitimately its own. The auditor reports
   divergence on paths the cascade would write; it says nothing about a clone's
   private work, and it must not.
+- **A module-scoped clone is not measured.** Its section of prime is resolved
+  by the engine from `clone_modules`, the module library's `file_globs`, any
+  version pin overriding them, and the repository invariants added on top.
+  Re-deriving that inside the auditor would be a second implementation of
+  "what this clone's section is" — which is precisely the disagreement the
+  auditor exists to detect, reintroduced inside the auditor. So it reads
+  `unknown` with that reason, visibly, and the tick body counts it. Every
+  clone on this fleet is a mirror as of `20260909110000`; when one needs
+  measuring, the move is to extract the engine's resolver into a shared
+  function, not to approximate it here.
 - **A `protected` path drifting** is invisible here by design — it is excluded
   from the partition, which is the point of it. `held-file-drift` covers the
   `manual_reconcile` half; `protected` is deliberately nobody's to reconcile.

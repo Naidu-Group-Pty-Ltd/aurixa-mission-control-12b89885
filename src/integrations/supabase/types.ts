@@ -3353,6 +3353,77 @@ export type Database = {
           },
         ]
       }
+      clone_convergence_observations: {
+        Row: {
+          clone_id: string
+          clone_sha: string | null
+          compared_count: number
+          created_at: string
+          deletion_candidates: number
+          held_count: number
+          id: string
+          last_converged_at: string | null
+          observed_at: string
+          owed_count: number
+          owed_fingerprint: string | null
+          owed_sample: string[]
+          prime_sha: string | null
+          scope: string | null
+          slo_minutes: number | null
+          state: string
+          unchanged_since: string | null
+          why: string | null
+        }
+        Insert: {
+          clone_id: string
+          clone_sha?: string | null
+          compared_count?: number
+          created_at?: string
+          deletion_candidates?: number
+          held_count?: number
+          id?: string
+          last_converged_at?: string | null
+          observed_at?: string
+          owed_count?: number
+          owed_fingerprint?: string | null
+          owed_sample?: string[]
+          prime_sha?: string | null
+          scope?: string | null
+          slo_minutes?: number | null
+          state: string
+          unchanged_since?: string | null
+          why?: string | null
+        }
+        Update: {
+          clone_id?: string
+          clone_sha?: string | null
+          compared_count?: number
+          created_at?: string
+          deletion_candidates?: number
+          held_count?: number
+          id?: string
+          last_converged_at?: string | null
+          observed_at?: string
+          owed_count?: number
+          owed_fingerprint?: string | null
+          owed_sample?: string[]
+          prime_sha?: string | null
+          scope?: string | null
+          slo_minutes?: number | null
+          state?: string
+          unchanged_since?: string | null
+          why?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clone_convergence_observations_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       clone_sync_exclusions: {
         Row: {
           clone_id: string
@@ -8978,6 +9049,7 @@ export type Database = {
           clone_gate_default_hours: number
           clone_gate_enabled: boolean
           codex_nightly_cron: string
+          convergence_slo_minutes: number
           codex_nightly_enabled: boolean
           codex_post_merge_revalidate: boolean
           codex_pr_scan_enabled: boolean
@@ -8998,6 +9070,7 @@ export type Database = {
           clone_gate_default_hours?: number
           clone_gate_enabled?: boolean
           codex_nightly_cron?: string
+          convergence_slo_minutes?: number
           codex_nightly_enabled?: boolean
           codex_post_merge_revalidate?: boolean
           codex_pr_scan_enabled?: boolean
@@ -9018,6 +9091,7 @@ export type Database = {
           clone_gate_default_hours?: number
           clone_gate_enabled?: boolean
           codex_nightly_cron?: string
+          convergence_slo_minutes?: number
           codex_nightly_enabled?: boolean
           codex_post_merge_revalidate?: boolean
           codex_pr_scan_enabled?: boolean
