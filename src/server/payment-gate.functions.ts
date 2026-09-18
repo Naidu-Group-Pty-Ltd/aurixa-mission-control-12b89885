@@ -20,6 +20,7 @@ import {
   armGate,
   type GateRow,
 } from "./payment-gate.server";
+import { mintGateActivationCheckout } from "./gateCheckout.server";
 import {
   gateEligibility,
   normaliseGraceHours,
@@ -324,6 +325,57 @@ export const recordCloneGatePayment = createServerFn({ method: "POST" })
       reason: data.reason,
     }),
   );
+
+/**
+ * Mint the Stripe payment link for a gated workspace, so an operator can send
+ * it to whoever actually pays.
+ *
+ * ## Why an operator needs one at all
+ *
+ * The clone's own lock screen already carries this button and that is the
+ * right place for it — but it is reachable only by somebody who can sign in
+ * to the workspace, and only once the clock has run out. The cases an operator
+ * fields are the ones where neither holds: a finance contact who is not a user
+ * of the product, a buyer who wants to pay today while the window is still
+ * open, a workspace nobody has signed into yet.
+ *
+ * It is the SAME mint as the clone's CTA — `mintGateActivationCheckout` — so
+ * the plan resolution, the price and every refusal are identical between the
+ * link a customer clicks and the link an operator sends. `origin` only records
+ * which side started it, on the gate event and the purchase attribution.
+ *
+ * ## It asks for no reason, and that is the exception
+ *
+ * Every other act here demands one, because every other act CHANGES whether a
+ * customer can work. This changes nothing: it reads the gate and returns a
+ * URL. The gate event it writes says an operator minted it and who, which is
+ * the whole of what there is to record.
+ *
+ * `requireAdmin` all the same — it creates a Stripe Session and may create a
+ * Customer.
+ */
+export const mintCloneGatePaymentLink = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
+  .inputValidator((data: { cloneId: string }) => {
+    if (!data?.cloneId) throw new Error("cloneId required");
+    return data;
+  })
+  .handler(async ({ data, context }) => {
+    const result = await mintGateActivationCheckout({
+      cloneId: data.cloneId,
+      origin: "operator",
+      actorId: context.userId,
+    });
+    if (result.ok) {
+      return { ok: true as const, url: result.url, sessionId: result.sessionId };
+    }
+    return {
+      ok: false as const,
+      error: result.error,
+      detail: result.detail ?? null,
+      pricingUrl: result.pricingUrl,
+    };
+  });
 
 /** The platform default window, and the master switch. */
 export const setGateDefaults = createServerFn({ method: "POST" })
