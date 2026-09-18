@@ -3,8 +3,9 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import {
-  Building2, Cable, CheckCircle2, Copy, Inbox, KeyRound, Loader2,
-  PauseCircle, PlayCircle, Plug, RefreshCw, ShieldAlert,
+  Building2, Cable, CheckCircle2, Copy, EyeOff, Inbox, KeyRound, Loader2,
+  ChevronDown, ChevronRight, PauseCircle, Pin, PlayCircle, Plug, RefreshCw,
+  ShieldAlert, Snowflake, Trophy,
 } from "lucide-react";
 import { toast } from "sonner";
 import { ProtectedRoute } from "@/components/protected-route";
@@ -31,7 +32,16 @@ import {
   createNetworkConnection,
   revokeNetworkConnection,
   setNetworkConnectionTransport,
+  listNetworkRanking,
+  explainNetworkRanking,
+  setNetworkRankingOverride,
+  clearNetworkRankingOverride,
+  setNetworkRankingFreeze,
+  setNetworkCommercialPlacement,
+  clearNetworkCommercialPlacement,
   type NetworkOrganisation,
+  type NetworkRankedBuilder,
+  type NetworkSignalReading,
 } from "@/server/builders-network.functions";
 
 /**
@@ -70,6 +80,430 @@ function StatusBadge({ value }: { value: string }) {
     <Badge variant="outline" className={STATUS_TONE[value] ?? ""}>
       {value.replaceAll("_", " ")}
     </Badge>
+  );
+}
+
+
+/**
+ * THE MARKETPLACE RANKING.
+ *
+ * Every Aurixa workspace draws the same builder stock from this network, in an
+ * order the network computes hourly from measured evidence. This panel is where
+ * that order is READ and where the three manual instruments live.
+ *
+ * What it deliberately cannot do is edit a score. A merit score is a statement
+ * about a builder that the evidence produced, and an operator who could type
+ * one could tell a builder a number nothing measured — after which the
+ * confidence figure, the band and the "not measured" list beside it would all
+ * be decoration. Pin, suppress and freeze sit BESIDE the computed answer; the
+ * score stays true and the intervention stays visible as an intervention.
+ *
+ * CONFIDENCE IS DRAWN BESIDE EVERY SCORE, never behind it. A 70 evidenced on a
+ * tenth of the signals and a 70 evidenced on all of them are different claims,
+ * and the network is young enough that most builders are the first kind.
+ */
+function RankingPanel() {
+  const queryClient = useQueryClient();
+  const rankingFn = useServerFn(listNetworkRanking);
+  const overrideFn = useServerFn(setNetworkRankingOverride);
+  const clearOverrideFn = useServerFn(clearNetworkRankingOverride);
+  const freezeFn = useServerFn(setNetworkRankingFreeze);
+  const placementFn = useServerFn(setNetworkCommercialPlacement);
+  const clearPlacementFn = useServerFn(clearNetworkCommercialPlacement);
+
+  const ranking = useQuery({ queryKey: ["bn-ranking"], queryFn: () => rankingFn() });
+  const [busy, setBusy] = useState<string | null>(null);
+  const refresh = () => void queryClient.invalidateQueries({ queryKey: ["bn-ranking"] });
+
+  const data = ranking.data?.ok ? ranking.data : null;
+  const state = data?.state ?? null;
+  const builders = data?.builders ?? [];
+
+  /**
+   * Every instrument asks for a reason it will not proceed without.
+   *
+   * An intervention nobody wrote down is indistinguishable from the algorithm's
+   * own answer six months later, and this is the one surface where that
+   * distinction is the entire point. The floor is the same ten characters the
+   * database enforces, so the prompt and the constraint cannot become two
+   * different standards.
+   */
+  const askReason = (what: string): string | null => {
+    const reason = window.prompt(`${what}\n\nRecord why. This is kept with the override and shown to whoever reviews the marketplace next.`);
+    if (reason === null) return null;
+    if (reason.trim().length < 10) {
+      toast.error("A reason of at least 10 characters is required.");
+      return null;
+    }
+    return reason.trim();
+  };
+
+  const act = async (key: string, run: () => Promise<{ ok: boolean; error?: string }>) => {
+    setBusy(key);
+    try {
+      const result = await run();
+      if (!result.ok) toast.error(result.error ?? "The network refused that.");
+      else { toast.success("Recorded."); refresh(); }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "That did not go through.");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-3 space-y-0">
+        <CardTitle className="text-base">Marketplace ranking</CardTitle>
+        <div className="flex flex-wrap items-center gap-2">
+          {state?.last_run_at ? (
+            <span className="text-xs text-muted-foreground">
+              Last run {new Date(state.last_run_at).toLocaleString("en-AU")}
+              {state.last_run_items !== null ? ` · ${state.last_run_items} properties` : ""}
+            </span>
+          ) : (
+            <span className="text-xs text-muted-foreground">Not yet run</span>
+          )}
+          <Button
+            size="sm"
+            variant={state?.frozen ? "default" : "outline"}
+            disabled={busy === "freeze"}
+            onClick={() => {
+              if (state?.frozen) {
+                void act("freeze", () => freezeFn({ data: { frozen: false } }));
+                return;
+              }
+              const reason = askReason("Freeze the marketplace ranking");
+              if (reason) void act("freeze", () => freezeFn({ data: { frozen: true, reason } }));
+            }}
+          >
+            {busy === "freeze"
+              ? <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
+              : <Snowflake className="mr-2 h-4 w-4" aria-hidden />}
+            {state?.frozen ? "Release the freeze" : "Freeze the ranking"}
+          </Button>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {/*
+          * A FREEZE IS ANNOUNCED, NOT INFERRED. A frozen ranking that nobody can
+          * see is frozen looks exactly like a scheduler that quietly stopped.
+          */}
+        {state?.frozen ? (
+          <div className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
+            <p className="font-medium">The published order is frozen.</p>
+            <p className="mt-1 text-muted-foreground">
+              {state.frozen_reason}
+              {state.frozen_at ? ` — ${new Date(state.frozen_at).toLocaleString("en-AU")}` : ""}
+              {state.frozen_by ? `, by ${state.frozen_by}` : ""}
+            </p>
+            <p className="mt-1 text-muted-foreground">
+              Hourly runs still start and write nothing. Every clone keeps drawing the last published order.
+            </p>
+          </div>
+        ) : null}
+
+        {state?.last_run_error ? (
+          <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-3 text-sm">
+            <p className="font-medium">The last run did not finish.</p>
+            <p className="mt-1 text-muted-foreground">{state.last_run_error}</p>
+          </div>
+        ) : null}
+
+        {ranking.isLoading ? (
+          <p className="text-sm text-muted-foreground">Reading the ranking…</p>
+        ) : !ranking.data?.ok ? (
+          <EmptyState
+            icon={<ShieldAlert className="h-8 w-8" aria-hidden />}
+            title="The ranking could not be read"
+            description={ranking.data?.error ?? "The network did not answer."}
+          />
+        ) : builders.length === 0 ? (
+          <EmptyState
+            icon={<Trophy className="h-8 w-8" aria-hidden />}
+            title="No builder has been ranked yet"
+            description="The first hourly run scores every active builder. Until then the marketplace orders newest first, exactly as it did before."
+          />
+        ) : (
+          <div className="space-y-2">
+            {builders.map((builder: NetworkRankedBuilder) => (
+              <RankingRow
+                key={builder.organisation_id}
+                builder={builder}
+                busy={busy}
+                onPin={() => {
+                  const raw = window.prompt("Pin this builder to which position? (1 is the top of the marketplace)");
+                  if (raw === null) return;
+                  const position = Number(raw);
+                  if (!Number.isInteger(position) || position < 1) {
+                    toast.error("A position must be a whole number of 1 or more.");
+                    return;
+                  }
+                  const reason = askReason(`Pin ${builder.trading_name ?? builder.legal_name} at position ${position}`);
+                  if (!reason) return;
+                  void act(builder.organisation_id, () => overrideFn({
+                    data: { organisationId: builder.organisation_id, kind: "pin", position, reason },
+                  }));
+                }}
+                onSuppress={() => {
+                  const reason = askReason(`Take ${builder.trading_name ?? builder.legal_name} out of the marketplace`);
+                  if (!reason) return;
+                  void act(builder.organisation_id, () => overrideFn({
+                    data: { organisationId: builder.organisation_id, kind: "suppress", reason },
+                  }));
+                }}
+                onClearOverride={(kind) => void act(builder.organisation_id, () =>
+                  clearOverrideFn({ data: { organisationId: builder.organisation_id, kind } }))}
+                onPlace={(tier) => void act(builder.organisation_id, () =>
+                  placementFn({ data: { organisationId: builder.organisation_id, tier } }))}
+                onClearPlacement={() => void act(builder.organisation_id, () =>
+                  clearPlacementFn({ data: { organisationId: builder.organisation_id } }))}
+              />
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+const BAND_LABEL = ["Established", "Strong", "Standard", "Developing", "Unrated"];
+
+/**
+ * WHY A BUILDER RANKS WHERE THEY RANK, read rather than recomputed.
+ *
+ * The snapshot stores every signal's reading and the evidence it came from, so
+ * this explains the score the marketplace was actually ordered by. Recomputing
+ * to explain is how an explanation comes to differ from the decision it is
+ * explaining — and an operator defending a position to a builder needs the two
+ * to be the same thing.
+ *
+ * It reads only when asked. Thirteen signal readings per builder is a lot to
+ * fetch for a list nobody has questioned.
+ */
+function RankingExplanation({ organisationId }: { organisationId: string }) {
+  const explainFn = useServerFn(explainNetworkRanking);
+  const query = useQuery({
+    queryKey: ["bn-ranking-explain", organisationId],
+    queryFn: () => explainFn({ data: { organisationId } }),
+  });
+
+  if (query.isPending) {
+    return (
+      <p className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
+        <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
+        Reading the signals…
+      </p>
+    );
+  }
+
+  /*
+   * A read that FAILED is not a builder with no evidence. The distinction is
+   * the same one the recompute makes when it abandons a run rather than
+   * scoring against data that did not load.
+   */
+  const snapshot = query.data?.ok ? query.data.snapshot : null;
+  if (!snapshot) {
+    return (
+      <p className="mt-3 text-xs text-muted-foreground">
+        {query.data && !query.data.ok
+          ? `The signals could not be read — ${query.data.error}`
+          : "The signals could not be read."}
+      </p>
+    );
+  }
+
+  const readings = Object.entries(snapshot.signals ?? {}) as Array<[string, NetworkSignalReading]>;
+  const measured = readings
+    .filter(([, r]) => r.state === "measured")
+    .sort((a, b) => (b[1] as { value: number }).value - (a[1] as { value: number }).value);
+  const unmeasured = readings.filter(([, r]) => r.state === "not_measured");
+
+  const label = (key: string) => key.replace(/_/g, " ");
+
+  return (
+    <div className="mt-3 rounded-md border bg-muted/30 p-3">
+      <p className="text-xs text-muted-foreground">
+        Measured {new Date(snapshot.computed_at).toLocaleString("en-AU")}
+        {" · "}method version {snapshot.ranking_version}
+      </p>
+
+      {measured.length ? (
+        <ul className="mt-2 space-y-1">
+          {measured.map(([key, reading]) => (
+            <li key={key} className="flex items-baseline justify-between gap-3 text-xs">
+              <span className="capitalize">{label(key)}</span>
+              <span className="tabular-nums font-medium">
+                {(reading as { value: number }).value.toFixed(0)}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="mt-2 text-xs text-muted-foreground">
+          Nothing about this builder has been measured yet. The score is the
+          neutral prior alone.
+        </p>
+      )}
+
+      {/*
+        * The unmeasured list is the point, not a footnote. A score built on two
+        * signals out of thirteen is a different claim from the same score built
+        * on all of them, and an operator about to act on a position needs to
+        * see which it is. None of these counted against the builder.
+        */}
+      {unmeasured.length ? (
+        <div className="mt-3 border-t pt-2">
+          <p className="text-xs font-medium">Not measured — and not counted against them</p>
+          <ul className="mt-1 space-y-1">
+            {unmeasured.map(([key, reading]) => (
+              <li key={key} className="flex items-baseline justify-between gap-3 text-xs text-muted-foreground">
+                <span className="capitalize">{label(key)}</span>
+                <span>{(reading as { reason: string }).reason.replace(/_/g, " ")}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function RankingRow({
+  builder, busy, onPin, onSuppress, onClearOverride, onPlace, onClearPlacement,
+}: {
+  builder: NetworkRankedBuilder;
+  busy: string | null;
+  onPin: () => void;
+  onSuppress: () => void;
+  onClearOverride: (kind: "pin" | "suppress") => void;
+  onPlace: (tier: "partner" | "premium" | "featured") => void;
+  onClearPlacement: () => void;
+}) {
+  const working = busy === builder.organisation_id;
+  const override = builder.override;
+  const placement = builder.placement;
+  const confidence = Math.round((builder.confidence ?? 0) * 100);
+  const [explaining, setExplaining] = useState(false);
+
+  return (
+    <div className="rounded-lg border p-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-[14rem] flex-1">
+          <p className="text-sm font-medium">
+            {builder.trading_name ?? builder.legal_name ?? builder.organisation_id}
+          </p>
+          <p className="text-xs text-muted-foreground">
+            {builder.live_stock} live {builder.live_stock === 1 ? "property" : "properties"}
+            {" · "}
+            {BAND_LABEL[builder.band] ?? BAND_LABEL[BAND_LABEL.length - 1]}
+          </p>
+        </div>
+
+        <div className="text-right">
+          <p className="text-lg font-semibold tabular-nums">{Number(builder.merit_score).toFixed(1)}</p>
+          {/*
+            * The confidence is not decoration. While the network is young most
+            * of what a builder would be ranked on has never happened, so a
+            * score's evidence base is the thing an operator needs to read
+            * before treating the number as a judgement about the builder.
+            */}
+          <p className="text-xs text-muted-foreground">
+            {confidence}% of signals measured
+          </p>
+          {/*
+            * Directly under the confidence figure, because this is what that
+            * figure is short for. A percentage an operator cannot open is a
+            * number they have to take on trust, and the evidence is already
+            * stored precisely so they do not have to.
+            */}
+          <Button
+            size="sm"
+            variant="link"
+            className="h-auto p-0 text-xs"
+            aria-expanded={explaining}
+            onClick={() => setExplaining((open) => !open)}
+          >
+            {explaining
+              ? <ChevronDown className="mr-1 h-3 w-3" aria-hidden />
+              : <ChevronRight className="mr-1 h-3 w-3" aria-hidden />}
+            Why this score
+          </Button>
+        </div>
+      </div>
+
+      {explaining ? <RankingExplanation organisationId={builder.organisation_id} /> : null}
+
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        {override?.kind === "pin" ? (
+          <Badge variant="outline" className="border-primary/40 bg-primary/10 text-primary">
+            <Pin className="mr-1 h-3 w-3" aria-hidden />
+            Pinned at {override.position}
+            {override.expires_at ? ` until ${new Date(override.expires_at).toLocaleDateString("en-AU")}` : " (standing)"}
+          </Badge>
+        ) : null}
+        {override?.kind === "suppress" ? (
+          <Badge variant="outline" className="border-destructive/40 bg-destructive/10 text-destructive">
+            <EyeOff className="mr-1 h-3 w-3" aria-hidden />
+            Out of the marketplace
+            {override.expires_at ? ` until ${new Date(override.expires_at).toLocaleDateString("en-AU")}` : ""}
+          </Badge>
+        ) : null}
+        {placement ? (
+          <Badge variant="outline" className="border-warning/40 bg-warning/10 text-warning">
+            <Trophy className="mr-1 h-3 w-3" aria-hidden />
+            {placement.tier}
+            {placement.ends_at ? ` until ${new Date(placement.ends_at).toLocaleDateString("en-AU")}` : ""}
+          </Badge>
+        ) : null}
+      </div>
+
+      {override ? (
+        <p className="mt-2 text-xs text-muted-foreground">
+          “{override.reason}” — {override.created_by}
+          {override.created_at ? `, ${new Date(override.created_at).toLocaleDateString("en-AU")}` : ""}
+        </p>
+      ) : null}
+
+      <div className="mt-3 flex flex-wrap gap-2">
+        {override?.kind === "pin" ? (
+          <Button size="sm" variant="outline" disabled={working} onClick={() => onClearOverride("pin")}>
+            Remove the pin
+          </Button>
+        ) : (
+          <Button size="sm" variant="outline" disabled={working} onClick={onPin}>
+            {working ? <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden /> : <Pin className="mr-2 h-4 w-4" aria-hidden />}
+            Pin to a position
+          </Button>
+        )}
+        {override?.kind === "suppress" ? (
+          <Button size="sm" variant="outline" disabled={working} onClick={() => onClearOverride("suppress")}>
+            Return to the marketplace
+          </Button>
+        ) : (
+          <Button size="sm" variant="outline" disabled={working} onClick={onSuppress}>
+            <EyeOff className="mr-2 h-4 w-4" aria-hidden />
+            Take out of the marketplace
+          </Button>
+        )}
+        {placement ? (
+          <Button size="sm" variant="ghost" disabled={working} onClick={onClearPlacement}>
+            End the placement
+          </Button>
+        ) : (
+          <Select disabled={working} onValueChange={(value) => onPlace(value as "partner" | "premium" | "featured")}>
+            <SelectTrigger className="h-9 w-[12rem]">
+              <SelectValue placeholder="Commercial placement" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="partner">Partner</SelectItem>
+              <SelectItem value="premium">Premium partner</SelectItem>
+              <SelectItem value="featured">Featured partner</SelectItem>
+            </SelectContent>
+          </Select>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -421,7 +855,9 @@ function BuildersNetworkConsole() {
 
       {/* --------------------------------------------------- join requests */}
       <Card>
-        <CardHeader>
+        <RankingPanel />
+
+      <CardHeader>
           <CardTitle className="text-base">Join requests</CardTitle>
           <p className="text-xs text-muted-foreground">
             Visibility only — organisation owners decide membership, never the platform.
