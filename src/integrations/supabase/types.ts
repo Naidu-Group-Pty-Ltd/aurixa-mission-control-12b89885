@@ -891,6 +891,13 @@ export type Database = {
             referencedRelation: "clones"
             referencedColumns: ["id"]
           },
+          {
+            foreignKeyName: "cascade_path_approvals_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones_missing_isolated_backend"
+            referencedColumns: ["clone_id"]
+          },
         ]
       }
       cascade_results: {
@@ -1485,6 +1492,66 @@ export type Database = {
         }
         Relationships: []
       }
+      clone_anthropic_identity: {
+        Row: {
+          clone_id: string
+          created_at: string
+          delivered_at: string | null
+          federated_at: string | null
+          federation_issuer_id: string | null
+          federation_rule_id: string | null
+          last_error: string | null
+          service_account_id: string | null
+          updated_at: string
+          verified_at: string | null
+          workspace_id: string
+          workspace_name: string
+        }
+        Insert: {
+          clone_id: string
+          created_at?: string
+          delivered_at?: string | null
+          federated_at?: string | null
+          federation_issuer_id?: string | null
+          federation_rule_id?: string | null
+          last_error?: string | null
+          service_account_id?: string | null
+          updated_at?: string
+          verified_at?: string | null
+          workspace_id: string
+          workspace_name: string
+        }
+        Update: {
+          clone_id?: string
+          created_at?: string
+          delivered_at?: string | null
+          federated_at?: string | null
+          federation_issuer_id?: string | null
+          federation_rule_id?: string | null
+          last_error?: string | null
+          service_account_id?: string | null
+          updated_at?: string
+          verified_at?: string | null
+          workspace_id?: string
+          workspace_name?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clone_anthropic_identity_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: true
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "clone_anthropic_identity_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: true
+            referencedRelation: "clones_missing_isolated_backend"
+            referencedColumns: ["clone_id"]
+          },
+        ]
+      }
       clone_api_keys: {
         Row: {
           clone_id: string | null
@@ -1568,66 +1635,6 @@ export type Database = {
             isOneToOne: false
             referencedRelation: "clone_api_keys"
             referencedColumns: ["id"]
-          },
-        ]
-      }
-      clone_anthropic_identity: {
-        Row: {
-          clone_id: string
-          created_at: string
-          delivered_at: string | null
-          federated_at: string | null
-          federation_issuer_id: string | null
-          federation_rule_id: string | null
-          last_error: string | null
-          service_account_id: string | null
-          updated_at: string
-          verified_at: string | null
-          workspace_id: string
-          workspace_name: string
-        }
-        Insert: {
-          clone_id: string
-          created_at?: string
-          delivered_at?: string | null
-          federated_at?: string | null
-          federation_issuer_id?: string | null
-          federation_rule_id?: string | null
-          last_error?: string | null
-          service_account_id?: string | null
-          updated_at?: string
-          verified_at?: string | null
-          workspace_id: string
-          workspace_name: string
-        }
-        Update: {
-          clone_id?: string
-          created_at?: string
-          delivered_at?: string | null
-          federated_at?: string | null
-          federation_issuer_id?: string | null
-          federation_rule_id?: string | null
-          last_error?: string | null
-          service_account_id?: string | null
-          updated_at?: string
-          verified_at?: string | null
-          workspace_id?: string
-          workspace_name?: string
-        }
-        Relationships: [
-          {
-            foreignKeyName: "clone_anthropic_identity_clone_id_fkey"
-            columns: ["clone_id"]
-            isOneToOne: true
-            referencedRelation: "clones"
-            referencedColumns: ["id"]
-          },
-          {
-            foreignKeyName: "clone_anthropic_identity_clone_id_fkey"
-            columns: ["clone_id"]
-            isOneToOne: true
-            referencedRelation: "clones_missing_isolated_backend"
-            referencedColumns: ["clone_id"]
           },
         ]
       }
@@ -5862,7 +5869,7 @@ export type Database = {
       }
       edge_dns_records: {
         Row: {
-          clone_id: string
+          clone_id: string | null
           created_at: string
           created_by: string | null
           external_record_id: string
@@ -5878,7 +5885,7 @@ export type Database = {
           zone_id: string
         }
         Insert: {
-          clone_id: string
+          clone_id?: string | null
           created_at?: string
           created_by?: string | null
           external_record_id: string
@@ -5894,7 +5901,7 @@ export type Database = {
           zone_id: string
         }
         Update: {
-          clone_id?: string
+          clone_id?: string | null
           created_at?: string
           created_by?: string | null
           external_record_id?: string
@@ -13139,7 +13146,6 @@ export type Database = {
         | "module_installed"
         | "module_removed"
         | "cascade_awaiting_approval"
-        | "cascade_blocked"
         | "cascade_approved"
         | "cascade_rejected"
         | "library_entry_approved"
@@ -13191,6 +13197,7 @@ export type Database = {
         | "clone_gate_locked"
         | "clone_gate_unlocked"
         | "clone_gate_expiring"
+        | "cascade_blocked"
         | "crm_appointment_booked"
         | "clone_announcement_published"
         | "clone_announcement_archived"
@@ -13634,7 +13641,6 @@ export const Constants = {
         "module_installed",
         "module_removed",
         "cascade_awaiting_approval",
-        "cascade_blocked",
         "cascade_approved",
         "cascade_rejected",
         "library_entry_approved",
@@ -13686,6 +13692,7 @@ export const Constants = {
         "clone_gate_locked",
         "clone_gate_unlocked",
         "clone_gate_expiring",
+        "cascade_blocked",
         "crm_appointment_booked",
         "clone_announcement_published",
         "clone_announcement_archived",
