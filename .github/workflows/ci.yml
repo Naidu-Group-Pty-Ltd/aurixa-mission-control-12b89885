@@ -87,6 +87,11 @@ jobs:
       # order, reported by nothing. Both are silent, and both are a rename away.
       - name: Migrations can be applied and recorded
         run: npm run check:migration-pipeline
+      # A version is the ORDER a migration runs in, and nothing read two
+      # migrations together until this gate: a file on the clone side altered a
+      # table a later migration creates and reached a merged pull request.
+      - name: A migration runs after the objects it needs
+        run: npm run check:migration-order
 
       # Two failures with no runtime signal, on the deployment path: a secret
       # given a `VITE_` name is inlined into the client bundle and served to the

@@ -30,7 +30,8 @@
     "format": "prettier --write .",
     "typecheck:strict": "tsc --noEmit",
     "migrations:digests": "node scripts/refresh-applied-digests.mjs",
-    "migrations:digests:check": "node scripts/refresh-applied-digests.mjs --check"
+    "migrations:digests:check": "node scripts/refresh-applied-digests.mjs --check",
+    "check:migration-order": "node --max-old-space-size=4096 scripts/check-migration-dependency-order.mjs"
   },
   "dependencies": {
     "@cloudflare/vite-plugin": "^1.25.5",
