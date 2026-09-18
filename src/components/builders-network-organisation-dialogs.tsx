@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Textarea } from "@/components/ui/textarea";
 import {
   Dialog,
@@ -315,6 +316,38 @@ export function CloseOrganisationDialog({
 }
 
 /**
+ * What the network answered, in the shape the dialog renders.
+ *
+ * `invite_url` is nullable because an ATTACH mints nothing: the person
+ * already had an account, so ownership is granted and there is no credential
+ * to hand over.
+ */
+type InviteResult = {
+  outcome: "invited" | "attached";
+  invite_url: string | null;
+  expires_at: string | null;
+  expires_in_hours: number | null;
+  email_requested: boolean;
+  email_sent: boolean;
+  email_failure: string | null;
+};
+
+/**
+ * Why a send did not happen, in words an operator can act on.
+ *
+ * `not_configured` is this deployment's own setting and `refused` is almost
+ * always an unverified sender domain — two different people fix those, so
+ * they are never collapsed into "the email failed".
+ */
+const EMAIL_FAILURE: Record<string, string> = {
+  not_configured:
+    "No mail is configured on the network, so nothing was sent — pass the link on yourself.",
+  refused:
+    "The mail provider refused the send (usually an unverified sender domain), so pass the link on yourself.",
+  unreachable: "The mail provider could not be reached, so pass the link on yourself.",
+};
+
+/**
  * The first owner's invite link.
  *
  * The network stores only the link's hash, so it comes back exactly once —
@@ -333,29 +366,30 @@ export function InviteOwnerDialog({
   const [email, setEmail] = useState("");
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
-  const [minted, setMinted] = useState<{ url: string; expiresAt: string; hours: number } | null>(
-    null,
-  );
+  const [sendEmail, setSendEmail] = useState(true);
+  const [result, setResult] = useState<InviteResult | null>(null);
 
   useEffect(() => {
     setEmail("");
     setName("");
-    setMinted(null);
+    setSendEmail(true);
+    setResult(null);
   }, [organisation]);
 
   const mint = async () => {
     if (!organisation) return;
     setBusy(true);
     try {
-      const result = await inviteFn({
-        data: { organisationId: organisation.id, email: email.trim(), name: name.trim() },
+      const answer = await inviteFn({
+        data: {
+          organisationId: organisation.id,
+          email: email.trim(),
+          name: name.trim(),
+          sendEmail,
+        },
       });
-      if (!result.ok) throw new Error(result.error);
-      setMinted({
-        url: result.invite_url,
-        expiresAt: result.expires_at,
-        hours: result.expires_in_hours,
-      });
+      if (!answer.ok) throw new Error(answer.error);
+      setResult(answer);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "The invite could not be minted");
     } finally {
@@ -375,35 +409,65 @@ export function InviteOwnerDialog({
           </DialogDescription>
         </DialogHeader>
 
-        {minted ? (
+        {result ? (
           <div className="space-y-3">
-            <p className="text-sm">
-              Send this link to {name.trim() || "them"}. It is shown once — only its fingerprint is
-              stored — so copy it now; if it is lost, mint another.
-            </p>
-            <div className="flex items-center gap-2">
-              <Input
-                readOnly
-                value={minted.url}
-                className="font-mono text-xs"
-                onFocus={(e) => e.currentTarget.select()}
-              />
-              <Button
-                size="icon"
-                variant="outline"
-                aria-label="Copy the invite link"
-                onClick={() => {
-                  void navigator.clipboard.writeText(minted.url);
-                  toast.success("Invite link copied");
-                }}
-              >
-                <Copy className="h-4 w-4" aria-hidden />
-              </Button>
-            </div>
-            <p className="text-xs text-muted-foreground">
-              Expires in {minted.hours} hours
-              {minted.expiresAt ? ` — ${new Date(minted.expiresAt).toLocaleString("en-AU")}` : ""}.
-            </p>
+            {result.outcome === "attached" ? (
+              // No link, because none was minted. They already hold an
+              // account, so ownership is simply theirs now — telling an
+              // operator to "send them the link" would send them nothing.
+              <p className="text-sm">
+                {name.trim() || "They"} already had an account on the network, so no invitation was
+                needed — ownership of {organisation?.legal_name} is theirs now and it appears in
+                their organisation switcher next time they sign in. Their existing password still
+                works and nothing about their account was changed.
+              </p>
+            ) : (
+              <>
+                <p className="text-sm">
+                  Send this link to {name.trim() || "them"}. It is shown once — only its fingerprint
+                  is stored — so copy it now; if it is lost, mint another.
+                </p>
+                <div className="flex items-center gap-2">
+                  <Input
+                    readOnly
+                    value={result.invite_url ?? ""}
+                    className="font-mono text-xs"
+                    onFocus={(e) => e.currentTarget.select()}
+                  />
+                  <Button
+                    size="icon"
+                    variant="outline"
+                    aria-label="Copy the invite link"
+                    onClick={() => {
+                      void navigator.clipboard.writeText(result.invite_url ?? "");
+                      toast.success("Invite link copied");
+                    }}
+                  >
+                    <Copy className="h-4 w-4" aria-hidden />
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Expires in {result.expires_in_hours} hours
+                  {result.expires_at
+                    ? ` — ${new Date(result.expires_at).toLocaleString("en-AU")}`
+                    : ""}
+                  .
+                </p>
+              </>
+            )}
+            {/* Whether the email went is said outright either way. A send
+                that failed and a send nobody asked for are different
+                things to an operator holding a link. */}
+            {result.email_requested ? (
+              result.email_sent ? (
+                <p className="text-xs text-muted-foreground">Emailed to {email.trim()}.</p>
+              ) : (
+                <p className="text-xs text-destructive">
+                  {EMAIL_FAILURE[result.email_failure ?? ""] ??
+                    "The email could not be sent, so pass it on yourself."}
+                </p>
+              )
+            ) : null}
           </div>
         ) : (
           <div className="grid gap-3">
@@ -426,21 +490,35 @@ export function InviteOwnerDialog({
                 placeholder="jane@example.com"
               />
             </div>
+            <div className="flex items-start gap-2 pt-1">
+              <Checkbox
+                id="invite-send-email"
+                checked={sendEmail}
+                onCheckedChange={(next) => setSendEmail(next === true)}
+              />
+              <Label htmlFor="invite-send-email" className="text-sm font-normal leading-snug">
+                Email it to them
+                <span className="block text-xs text-muted-foreground">
+                  Sends the invitation on the Builder Portal&rsquo;s own letterhead. The link is
+                  shown here either way.
+                </span>
+              </Label>
+            </div>
           </div>
         )}
 
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>
-            {minted ? "Done" : "Cancel"}
+            {result ? "Done" : "Cancel"}
           </Button>
-          {!minted && (
+          {!result && (
             <Button onClick={() => void mint()} disabled={busy || !email.trim() || !name.trim()}>
               {busy ? (
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
               ) : (
                 <Mail className="mr-2 h-4 w-4" aria-hidden />
               )}
-              Mint the invite link
+              {sendEmail ? "Mint and send the invite" : "Mint the invite link"}
             </Button>
           )}
         </DialogFooter>
