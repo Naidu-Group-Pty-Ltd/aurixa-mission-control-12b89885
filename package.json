@@ -10,6 +10,7 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "check:supabase-types": "node scripts/check-supabase-types.mjs",
+    "check:route-tree": "node scripts/check-route-tree.mjs",
     "check:ts-nocheck": "node scripts/check-ts-nocheck-budget.mjs",
     "check:rls": "node scripts/check-rls-policies.mjs",
     "check:cron-auth": "node scripts/check-cron-auth.mjs",

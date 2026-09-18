@@ -36,6 +36,7 @@ import { Route as BrandingRouteImport } from './routes/branding'
 import { Route as AuthRouteImport } from './routes/auth'
 import { Route as AuditLogRouteImport } from './routes/audit-log'
 import { Route as ApprovalsRouteImport } from './routes/approvals'
+import { Route as AnnouncementsRouteImport } from './routes/announcements'
 import { Route as AgreementsRouteImport } from './routes/agreements'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as SettingsIndexRouteImport } from './routes/settings.index'
@@ -162,8 +163,6 @@ import { Route as ApiPublicSupportAssistantActivityRouteImport } from './routes/
 import { Route as ApiPublicStripeWebhookRouteImport } from './routes/api.public.stripe.webhook'
 import { Route as ApiPublicStorefrontWalletRouteImport } from './routes/api.public.storefront.wallet'
 import { Route as ApiPublicStorefrontSetupRouteImport } from './routes/api.public.storefront.setup'
-import { Route as AnnouncementsRouteImport } from './routes/announcements'
-import { Route as ApiPublicClonesAnnouncementsRouteImport } from './routes/api.public.clones.announcements'
 import { Route as ApiPublicStorefrontSessionRouteImport } from './routes/api.public.storefront.session'
 import { Route as ApiPublicStorefrontPlanChangeRouteImport } from './routes/api.public.storefront.plan-change'
 import { Route as ApiPublicStorefrontIdentityRouteImport } from './routes/api.public.storefront.identity'
@@ -192,6 +191,7 @@ import { Route as ApiPublicEmailUnsubscribeRouteImport } from './routes/api.publ
 import { Route as ApiPublicEdgeStatusRouteImport } from './routes/api.public.edge.status'
 import { Route as ApiPublicClonesRotateKeyRouteImport } from './routes/api.public.clones.rotate-key'
 import { Route as ApiPublicClonesGateRouteImport } from './routes/api.public.clones.gate'
+import { Route as ApiPublicClonesAnnouncementsRouteImport } from './routes/api.public.clones.announcements'
 import { Route as ApiPublicBuildersJwksRouteImport } from './routes/api.public.builders.jwks'
 import { Route as ApiPublicBuildersIdentityRouteImport } from './routes/api.public.builders.identity'
 import { Route as ApiPublicBillingPaymentMethodsRouteImport } from './routes/api.public.billing.payment-methods'
@@ -340,6 +340,11 @@ const AuditLogRoute = AuditLogRouteImport.update({
 const ApprovalsRoute = ApprovalsRouteImport.update({
   id: '/approvals',
   path: '/approvals',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AnnouncementsRoute = AnnouncementsRouteImport.update({
+  id: '/announcements',
+  path: '/announcements',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AgreementsRoute = AgreementsRouteImport.update({
@@ -1001,17 +1006,6 @@ const ApiPublicStorefrontSetupRoute =
     path: '/api/public/storefront/setup',
     getParentRoute: () => rootRouteImport,
   } as any)
-const AnnouncementsRoute = AnnouncementsRouteImport.update({
-  id: '/announcements',
-  path: '/announcements',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ApiPublicClonesAnnouncementsRoute =
-  ApiPublicClonesAnnouncementsRouteImport.update({
-    id: '/api/public/clones/announcements',
-    path: '/api/public/clones/announcements',
-    getParentRoute: () => rootRouteImport,
-  } as any)
 const ApiPublicStorefrontSessionRoute =
   ApiPublicStorefrontSessionRouteImport.update({
     id: '/api/public/storefront/session',
@@ -1169,6 +1163,12 @@ const ApiPublicClonesGateRoute = ApiPublicClonesGateRouteImport.update({
   path: '/api/public/clones/gate',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiPublicClonesAnnouncementsRoute =
+  ApiPublicClonesAnnouncementsRouteImport.update({
+    id: '/api/public/clones/announcements',
+    path: '/api/public/clones/announcements',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiPublicBuildersJwksRoute = ApiPublicBuildersJwksRouteImport.update({
   id: '/api/public/builders/jwks',
   path: '/api/public/builders/jwks',
@@ -1254,6 +1254,7 @@ const ApiPublicClonesGateCheckoutRoute =
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/agreements': typeof AgreementsRoute
+  '/announcements': typeof AnnouncementsRoute
   '/approvals': typeof ApprovalsRoute
   '/audit-log': typeof AuditLogRoute
   '/auth': typeof AuthRoute
@@ -1395,6 +1396,7 @@ export interface FileRoutesByFullPath {
   '/api/public/billing/payment-methods': typeof ApiPublicBillingPaymentMethodsRoute
   '/api/public/builders/identity': typeof ApiPublicBuildersIdentityRoute
   '/api/public/builders/jwks': typeof ApiPublicBuildersJwksRoute
+  '/api/public/clones/announcements': typeof ApiPublicClonesAnnouncementsRoute
   '/api/public/clones/gate': typeof ApiPublicClonesGateRouteWithChildren
   '/api/public/clones/rotate-key': typeof ApiPublicClonesRotateKeyRoute
   '/api/public/edge/status': typeof ApiPublicEdgeStatusRoute
@@ -1424,8 +1426,6 @@ export interface FileRoutesByFullPath {
   '/api/public/storefront/plan-change': typeof ApiPublicStorefrontPlanChangeRoute
   '/api/public/storefront/session': typeof ApiPublicStorefrontSessionRoute
   '/api/public/storefront/setup': typeof ApiPublicStorefrontSetupRoute
-  '/announcements': typeof AnnouncementsRoute
-  '/api/public/clones/announcements': typeof ApiPublicClonesAnnouncementsRoute
   '/api/public/storefront/wallet': typeof ApiPublicStorefrontWalletRoute
   '/api/public/stripe/webhook': typeof ApiPublicStripeWebhookRouteWithChildren
   '/api/public/support/assistant-activity': typeof ApiPublicSupportAssistantActivityRoute
@@ -1453,6 +1453,7 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/agreements': typeof AgreementsRoute
+  '/announcements': typeof AnnouncementsRoute
   '/approvals': typeof ApprovalsRoute
   '/audit-log': typeof AuditLogRoute
   '/auth': typeof AuthRoute
@@ -1593,6 +1594,7 @@ export interface FileRoutesByTo {
   '/api/public/billing/payment-methods': typeof ApiPublicBillingPaymentMethodsRoute
   '/api/public/builders/identity': typeof ApiPublicBuildersIdentityRoute
   '/api/public/builders/jwks': typeof ApiPublicBuildersJwksRoute
+  '/api/public/clones/announcements': typeof ApiPublicClonesAnnouncementsRoute
   '/api/public/clones/gate': typeof ApiPublicClonesGateRouteWithChildren
   '/api/public/clones/rotate-key': typeof ApiPublicClonesRotateKeyRoute
   '/api/public/edge/status': typeof ApiPublicEdgeStatusRoute
@@ -1622,8 +1624,6 @@ export interface FileRoutesByTo {
   '/api/public/storefront/plan-change': typeof ApiPublicStorefrontPlanChangeRoute
   '/api/public/storefront/session': typeof ApiPublicStorefrontSessionRoute
   '/api/public/storefront/setup': typeof ApiPublicStorefrontSetupRoute
-  '/announcements': typeof AnnouncementsRoute
-  '/api/public/clones/announcements': typeof ApiPublicClonesAnnouncementsRoute
   '/api/public/storefront/wallet': typeof ApiPublicStorefrontWalletRoute
   '/api/public/stripe/webhook': typeof ApiPublicStripeWebhookRouteWithChildren
   '/api/public/support/assistant-activity': typeof ApiPublicSupportAssistantActivityRoute
@@ -1652,6 +1652,7 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/agreements': typeof AgreementsRoute
+  '/announcements': typeof AnnouncementsRoute
   '/approvals': typeof ApprovalsRoute
   '/audit-log': typeof AuditLogRoute
   '/auth': typeof AuthRoute
@@ -1793,6 +1794,7 @@ export interface FileRoutesById {
   '/api/public/billing/payment-methods': typeof ApiPublicBillingPaymentMethodsRoute
   '/api/public/builders/identity': typeof ApiPublicBuildersIdentityRoute
   '/api/public/builders/jwks': typeof ApiPublicBuildersJwksRoute
+  '/api/public/clones/announcements': typeof ApiPublicClonesAnnouncementsRoute
   '/api/public/clones/gate': typeof ApiPublicClonesGateRouteWithChildren
   '/api/public/clones/rotate-key': typeof ApiPublicClonesRotateKeyRoute
   '/api/public/edge/status': typeof ApiPublicEdgeStatusRoute
@@ -1822,8 +1824,6 @@ export interface FileRoutesById {
   '/api/public/storefront/plan-change': typeof ApiPublicStorefrontPlanChangeRoute
   '/api/public/storefront/session': typeof ApiPublicStorefrontSessionRoute
   '/api/public/storefront/setup': typeof ApiPublicStorefrontSetupRoute
-  '/announcements': typeof AnnouncementsRoute
-  '/api/public/clones/announcements': typeof ApiPublicClonesAnnouncementsRoute
   '/api/public/storefront/wallet': typeof ApiPublicStorefrontWalletRoute
   '/api/public/stripe/webhook': typeof ApiPublicStripeWebhookRouteWithChildren
   '/api/public/support/assistant-activity': typeof ApiPublicSupportAssistantActivityRoute
@@ -1853,6 +1853,7 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/agreements'
+    | '/announcements'
     | '/approvals'
     | '/audit-log'
     | '/auth'
@@ -1994,6 +1995,7 @@ export interface FileRouteTypes {
     | '/api/public/billing/payment-methods'
     | '/api/public/builders/identity'
     | '/api/public/builders/jwks'
+    | '/api/public/clones/announcements'
     | '/api/public/clones/gate'
     | '/api/public/clones/rotate-key'
     | '/api/public/edge/status'
@@ -2023,8 +2025,6 @@ export interface FileRouteTypes {
     | '/api/public/storefront/plan-change'
     | '/api/public/storefront/session'
     | '/api/public/storefront/setup'
-    | '/announcements'
-    | '/api/public/clones/announcements'
     | '/api/public/storefront/wallet'
     | '/api/public/stripe/webhook'
     | '/api/public/support/assistant-activity'
@@ -2052,6 +2052,7 @@ export interface FileRouteTypes {
   to:
     | '/'
     | '/agreements'
+    | '/announcements'
     | '/approvals'
     | '/audit-log'
     | '/auth'
@@ -2192,6 +2193,7 @@ export interface FileRouteTypes {
     | '/api/public/billing/payment-methods'
     | '/api/public/builders/identity'
     | '/api/public/builders/jwks'
+    | '/api/public/clones/announcements'
     | '/api/public/clones/gate'
     | '/api/public/clones/rotate-key'
     | '/api/public/edge/status'
@@ -2221,8 +2223,6 @@ export interface FileRouteTypes {
     | '/api/public/storefront/plan-change'
     | '/api/public/storefront/session'
     | '/api/public/storefront/setup'
-    | '/announcements'
-    | '/api/public/clones/announcements'
     | '/api/public/storefront/wallet'
     | '/api/public/stripe/webhook'
     | '/api/public/support/assistant-activity'
@@ -2250,6 +2250,7 @@ export interface FileRouteTypes {
     | '__root__'
     | '/'
     | '/agreements'
+    | '/announcements'
     | '/approvals'
     | '/audit-log'
     | '/auth'
@@ -2391,6 +2392,7 @@ export interface FileRouteTypes {
     | '/api/public/billing/payment-methods'
     | '/api/public/builders/identity'
     | '/api/public/builders/jwks'
+    | '/api/public/clones/announcements'
     | '/api/public/clones/gate'
     | '/api/public/clones/rotate-key'
     | '/api/public/edge/status'
@@ -2420,8 +2422,6 @@ export interface FileRouteTypes {
     | '/api/public/storefront/plan-change'
     | '/api/public/storefront/session'
     | '/api/public/storefront/setup'
-    | '/announcements'
-    | '/api/public/clones/announcements'
     | '/api/public/storefront/wallet'
     | '/api/public/stripe/webhook'
     | '/api/public/support/assistant-activity'
@@ -2450,6 +2450,7 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AgreementsRoute: typeof AgreementsRoute
+  AnnouncementsRoute: typeof AnnouncementsRoute
   ApprovalsRoute: typeof ApprovalsRoute
   AuditLogRoute: typeof AuditLogRoute
   AuthRoute: typeof AuthRoute
@@ -2570,6 +2571,7 @@ export interface RootRouteChildren {
   ApiPublicBillingPaymentMethodsRoute: typeof ApiPublicBillingPaymentMethodsRoute
   ApiPublicBuildersIdentityRoute: typeof ApiPublicBuildersIdentityRoute
   ApiPublicBuildersJwksRoute: typeof ApiPublicBuildersJwksRoute
+  ApiPublicClonesAnnouncementsRoute: typeof ApiPublicClonesAnnouncementsRoute
   ApiPublicClonesGateRoute: typeof ApiPublicClonesGateRouteWithChildren
   ApiPublicClonesRotateKeyRoute: typeof ApiPublicClonesRotateKeyRoute
   ApiPublicEdgeStatusRoute: typeof ApiPublicEdgeStatusRoute
@@ -2599,8 +2601,6 @@ export interface RootRouteChildren {
   ApiPublicStorefrontPlanChangeRoute: typeof ApiPublicStorefrontPlanChangeRoute
   ApiPublicStorefrontSessionRoute: typeof ApiPublicStorefrontSessionRoute
   ApiPublicStorefrontSetupRoute: typeof ApiPublicStorefrontSetupRoute
-  AnnouncementsRoute: typeof AnnouncementsRoute
-  ApiPublicClonesAnnouncementsRoute: typeof ApiPublicClonesAnnouncementsRoute
   ApiPublicStorefrontWalletRoute: typeof ApiPublicStorefrontWalletRoute
   ApiPublicStripeWebhookRoute: typeof ApiPublicStripeWebhookRouteWithChildren
   ApiPublicSupportAssistantActivityRoute: typeof ApiPublicSupportAssistantActivityRoute
@@ -2813,6 +2813,13 @@ declare module '@tanstack/react-router' {
       path: '/approvals'
       fullPath: '/approvals'
       preLoaderRoute: typeof ApprovalsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/announcements': {
+      id: '/announcements'
+      path: '/announcements'
+      fullPath: '/announcements'
+      preLoaderRoute: typeof AnnouncementsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/agreements': {
@@ -3697,20 +3704,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicStorefrontSetupRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/announcements': {
-      id: '/announcements'
-      path: '/announcements'
-      fullPath: '/announcements'
-      preLoaderRoute: typeof AnnouncementsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/clones/announcements': {
-      id: '/api/public/clones/announcements'
-      path: '/api/public/clones/announcements'
-      fullPath: '/api/public/clones/announcements'
-      preLoaderRoute: typeof ApiPublicClonesAnnouncementsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/api/public/storefront/session': {
       id: '/api/public/storefront/session'
       path: '/api/public/storefront/session'
@@ -3905,6 +3898,13 @@ declare module '@tanstack/react-router' {
       path: '/api/public/clones/gate'
       fullPath: '/api/public/clones/gate'
       preLoaderRoute: typeof ApiPublicClonesGateRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/clones/announcements': {
+      id: '/api/public/clones/announcements'
+      path: '/api/public/clones/announcements'
+      fullPath: '/api/public/clones/announcements'
+      preLoaderRoute: typeof ApiPublicClonesAnnouncementsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/public/builders/jwks': {
@@ -4127,6 +4127,7 @@ const ApiPublicStripeWebhookRouteWithChildren =
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AgreementsRoute: AgreementsRoute,
+  AnnouncementsRoute: AnnouncementsRoute,
   ApprovalsRoute: ApprovalsRoute,
   AuditLogRoute: AuditLogRoute,
   AuthRoute: AuthRoute,
@@ -4248,6 +4249,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPublicBillingPaymentMethodsRoute: ApiPublicBillingPaymentMethodsRoute,
   ApiPublicBuildersIdentityRoute: ApiPublicBuildersIdentityRoute,
   ApiPublicBuildersJwksRoute: ApiPublicBuildersJwksRoute,
+  ApiPublicClonesAnnouncementsRoute: ApiPublicClonesAnnouncementsRoute,
   ApiPublicClonesGateRoute: ApiPublicClonesGateRouteWithChildren,
   ApiPublicClonesRotateKeyRoute: ApiPublicClonesRotateKeyRoute,
   ApiPublicEdgeStatusRoute: ApiPublicEdgeStatusRoute,
@@ -4277,8 +4279,6 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPublicStorefrontPlanChangeRoute: ApiPublicStorefrontPlanChangeRoute,
   ApiPublicStorefrontSessionRoute: ApiPublicStorefrontSessionRoute,
   ApiPublicStorefrontSetupRoute: ApiPublicStorefrontSetupRoute,
-  AnnouncementsRoute: AnnouncementsRoute,
-  ApiPublicClonesAnnouncementsRoute: ApiPublicClonesAnnouncementsRoute,
   ApiPublicStorefrontWalletRoute: ApiPublicStorefrontWalletRoute,
   ApiPublicStripeWebhookRoute: ApiPublicStripeWebhookRouteWithChildren,
   ApiPublicSupportAssistantActivityRoute:
