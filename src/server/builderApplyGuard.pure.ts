@@ -23,6 +23,16 @@
  *    are NOT a security boundary and this module says so rather than letting
  *    a reader assume otherwise.
  *
+ *    They answer to one further rule, learned the hard way on the day this
+ *    shipped: **a cost raiser must never be able to refuse a real applicant,
+ *    and must never leave one with no way past.** Both did. The decoy was
+ *    named inside the browser autofill taxonomy, so a password manager filled
+ *    it; the fill clock compared the visitor's wall clock against the
+ *    server's, so a machine running fast failed it. Each is fixed at its
+ *    cause below, and the page now clears the decoy on a refusal so a second
+ *    attempt by a person succeeds where a naive bot's does not — a bot that
+ *    does not read the error never gets there.
+ *
  *  * **Ceilings.** The per-IP and global rate limits, and the network's own
  *    per-address and per-origin windows. These are the ones that hold when
  *    everything above is defeated, because they bound the WORK rather than
@@ -55,33 +65,79 @@ export const MAX_APPLY_BODY_BYTES = 16 * 1024;
 /**
  * The field no person can see and no person fills in.
  *
- * Named for something a form plausibly has, because a bot that skips
- * `honeypot` will happily fill `company_website`. It is rendered visually
- * hidden and `aria-hidden` with `tabIndex={-1}` and `autoComplete="off"` —
- * hidden from assistive technology as well as from sight, because a screen
- * reader user filling in a trap is the one failure mode this control must
- * not have.
+ * It was called `company_website`, labelled "Company website", and hidden by
+ * pushing it off-screen. All three were wrong, and together they refused a
+ * real applicant on 18 Sep 2026 within thirty seconds of the page opening:
+ * `company` and `website` are both tokens in Chrome's autofill taxonomy, the
+ * label is itself a matching signal, `autocomplete="off"` is widely ignored
+ * for profile fields, and an off-screen input is autofilled where a
+ * `display: none` one generally is not.
+ *
+ * A plausible name was chosen deliberately, so a bot skipping a field called
+ * `honeypot` would still fill this one. The flip side went unnoticed: a
+ * plausible name is exactly what a password manager fills. The name is now
+ * outside every autofill category while still not announcing itself as a
+ * trap, and the page hides it with `display: none`.
+ *
+ * It is still not a security boundary. What changed is that it can no longer
+ * be tripped by somebody's browser being helpful.
  */
-export const HONEYPOT_FIELD = "company_website";
+export const HONEYPOT_FIELD = "application_slot";
+
+/**
+ * Tokens a browser matches a profile field on.
+ *
+ * Asserted against `HONEYPOT_FIELD` by a test rather than left as advice,
+ * because the next person to pick a "plausible" name will pick one of these.
+ */
+export const AUTOFILL_TOKENS: readonly string[] = [
+  "address",
+  "city",
+  "company",
+  "country",
+  "email",
+  "name",
+  "organization",
+  "phone",
+  "postal",
+  "postcode",
+  "state",
+  "street",
+  "suburb",
+  "tel",
+  "title",
+  "url",
+  "website",
+  "zip",
+];
 
 /**
  * How quickly a human could conceivably complete this form.
  *
  * Measured against the form itself: four required fields, one of them a
  * select. Three seconds is below anything a person types and above what a
- * script spends. The timestamp is supplied by the page and is therefore
- * FORGEABLE — this raises the cost of naive automation and is not relied on
- * for anything.
+ * script spends.
+ *
+ * **It is measured by the page's own monotonic clock, never by comparing two
+ * wall clocks.** The first version sent `rendered_at` as an ISO timestamp
+ * from the browser and subtracted it from the server's `Date.now()` — two
+ * independent clocks, so a machine running half a minute fast made a form
+ * that had been open for twenty seconds look like one submitted instantly.
+ * That is not a rare configuration, and it refused a real applicant with no
+ * way past it.
+ *
+ * `performance.now()` counts from the page's own load, so both ends of the
+ * subtraction come from one clock and skew cannot exist. The value is still
+ * supplied by the client and still forgeable: this raises the cost of naive
+ * automation and is relied on for nothing.
  */
 export const MIN_FILL_SECONDS = 3;
 
 /**
- * And the other end: a form open for a day is a stale tab, not a session.
+ * And the other end: a form open for half a day is a stale tab, not a session.
  *
- * Refusing it is not about abuse. It is that the page's copy, its option
- * list and the account state behind it have all moved on, and an application
- * submitted from a page nobody has reloaded since yesterday is answered by
- * rules it never showed.
+ * Refusing it is not about abuse. It is that the page's copy, its option list
+ * and the account state behind it have all moved on.
  */
 export const MAX_FILL_HOURS = 12;
 
@@ -139,30 +195,24 @@ export function originIsAllowed(origin: string | null | undefined, extra?: strin
  * telling them what to change, and there is no honest reader of this answer
  * — a real applicant cannot trip any of them.
  */
-export function readApplyHeuristics(
-  body: Record<string, unknown>,
-  now: number = Date.now(),
-): ApplyGuardVerdict {
+export function readApplyHeuristics(body: Record<string, unknown>): ApplyGuardVerdict {
   const decoy = body[HONEYPOT_FIELD];
   if (typeof decoy === "string" && decoy.trim().length > 0) {
     return { ok: false, error: "submission_rejected", status: 422 };
   }
 
-  const rendered = body.rendered_at;
-  if (typeof rendered === "string" && rendered) {
-    const openedAt = Date.parse(rendered);
-    // An unparseable stamp is NOT a refusal. The check is a cost raiser, and
-    // refusing a real applicant because their clock or their browser wrote
-    // something we did not expect trades a defect we would never see for an
-    // attack this does not stop anyway.
-    if (Number.isFinite(openedAt)) {
-      const elapsedSeconds = (now - openedAt) / 1000;
-      if (elapsedSeconds < MIN_FILL_SECONDS) {
-        return { ok: false, error: "submission_rejected", status: 422 };
-      }
-      if (elapsedSeconds > MAX_FILL_HOURS * 3600) {
-        return { ok: false, error: "submission_rejected", status: 422 };
-      }
+  // How long the page says it was open, by its own clock. Anything that is
+  // not a plain finite non-negative number is UNKNOWN and accepted: a cost
+  // raiser must never refuse on data it cannot trust, and this one has
+  // already refused somebody real once.
+  const elapsed = body.elapsed_ms;
+  if (typeof elapsed === "number" && Number.isFinite(elapsed) && elapsed >= 0) {
+    const seconds = elapsed / 1000;
+    if (seconds < MIN_FILL_SECONDS) {
+      return { ok: false, error: "submission_rejected", status: 422 };
+    }
+    if (seconds > MAX_FILL_HOURS * 3600) {
+      return { ok: false, error: "submission_rejected", status: 422 };
     }
   }
 
