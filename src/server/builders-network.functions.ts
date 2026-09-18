@@ -155,6 +155,130 @@ export const approveNetworkOrganisation = createServerFn({ method: "POST" })
     };
   });
 
+/**
+ * The description an operator may write, and nothing else.
+ *
+ * The network refuses `status` and the other lifecycle columns on these two
+ * operations — they move only under approve / suspend / reinstate / close,
+ * each of which sets the whole group three CHECK constraints tie together.
+ * Naming the writable fields once here keeps the create and edit forms from
+ * drifting apart, and keeps a lifecycle key from being sent at all.
+ */
+export const ORGANISATION_FIELDS = [
+  "legal_name",
+  "trading_name",
+  "org_type",
+  "abn",
+  "acn",
+  "contact_email",
+  "contact_phone",
+  "website",
+  "address_line1",
+  "address_line2",
+  "suburb",
+  "state",
+  "postcode",
+  "notes",
+] as const;
+
+export type OrganisationFields = Partial<Record<(typeof ORGANISATION_FIELDS)[number], string>>;
+
+/** Keep only the writable keys, so a stray lifecycle field never travels. */
+function organisationFieldsOnly(input: Record<string, unknown>): OrganisationFields {
+  const out: OrganisationFields = {};
+  for (const key of ORGANISATION_FIELDS) {
+    if (key in input) out[key] = typeof input[key] === "string" ? (input[key] as string) : "";
+  }
+  return out;
+}
+
+export const createNetworkOrganisation = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth, requireAdmin])
+  .inputValidator((data: OrganisationFields & { legal_name: string }) => {
+    if (!data?.legal_name?.trim()) throw new Error("A legal name is required");
+    return data;
+  })
+  .handler(async ({ data }) => {
+    const result = await callBuilderNetworkAdmin(
+      "create_organisation",
+      organisationFieldsOnly(data as Record<string, unknown>),
+    );
+    return result.ok
+      ? { ok: true as const, organisation: result.body.organisation as NetworkOrganisation }
+      : { ok: false as const, error: result.error };
+  });
+
+export const updateNetworkOrganisation = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth, requireAdmin])
+  .inputValidator((data: OrganisationFields & { organisationId: string }) => {
+    if (!data?.organisationId) throw new Error("organisationId required");
+    return data;
+  })
+  .handler(async ({ data }) => {
+    const result = await callBuilderNetworkAdmin("update_organisation", {
+      organisation_id: data.organisationId,
+      ...organisationFieldsOnly(data as Record<string, unknown>),
+    });
+    return result.ok
+      ? { ok: true as const, organisation: result.body.organisation as NetworkOrganisation }
+      : { ok: false as const, error: result.error };
+  });
+
+/**
+ * Closing is terminal and the network says so. Kept a separate call from
+ * suspension rather than a status argument, because the two are not the same
+ * decision and a dropdown that offers both invites the wrong one.
+ */
+export const closeNetworkOrganisation = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth, requireAdmin])
+  .inputValidator((data: { organisationId: string; reason: string }) => {
+    if (!data?.organisationId) throw new Error("organisationId required");
+    if (!data?.reason?.trim()) throw new Error("reason required");
+    return data;
+  })
+  .handler(async ({ data }) => {
+    const result = await callBuilderNetworkAdmin("close_organisation", {
+      organisation_id: data.organisationId,
+      reason: data.reason.trim(),
+    });
+    return result.ok
+      ? { ok: true as const, status: String(result.body.status ?? "closed") }
+      : { ok: false as const, error: result.error };
+  });
+
+/**
+ * Seed the first owner of an organisation that has none.
+ *
+ * The link comes back ONCE — only its hash is stored on the network — so the
+ * caller must show it rather than promise to fetch it again. The network
+ * refuses this for an organisation that already has members: from there on,
+ * its owner invites, not the operator.
+ */
+export const inviteNetworkOrganisationOwner = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth, requireAdmin])
+  .inputValidator((data: { organisationId: string; email: string; name: string }) => {
+    if (!data?.organisationId) throw new Error("organisationId required");
+    if (!data?.email?.trim()) throw new Error("An email address is required");
+    if (!data?.name?.trim()) throw new Error("A name is required");
+    return data;
+  })
+  .handler(async ({ data }) => {
+    const result = await callBuilderNetworkAdmin("invite_organisation_owner", {
+      organisation_id: data.organisationId,
+      email: data.email.trim(),
+      name: data.name.trim(),
+    });
+    return result.ok
+      ? {
+          ok: true as const,
+          invite_url: String(result.body.invite_url ?? ""),
+          expires_at: String(result.body.expires_at ?? ""),
+          expires_in_hours: Number(result.body.expires_in_hours ?? 0),
+          organisation_legal_name: String(result.body.organisation_legal_name ?? ""),
+        }
+      : { ok: false as const, error: result.error };
+  });
+
 export const suspendNetworkOrganisation = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth, requireAdmin])
   .inputValidator((data: { organisationId: string; reason: string }) => {

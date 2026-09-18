@@ -4,8 +4,8 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import {
   Building2, Cable, CheckCircle2, Copy, EyeOff, FileSignature, Inbox, KeyRound, Loader2,
-  ChevronDown, ChevronRight, PauseCircle, Pin, PlayCircle, Plug, RefreshCw,
-  ShieldAlert, Snowflake, Trophy,
+  ChevronDown, ChevronRight, Mail, PauseCircle, Pencil, Pin, PlayCircle, Plug, Plus,
+  RefreshCw, ShieldAlert, Snowflake, Trophy, XCircle,
 } from "lucide-react";
 import { toast } from "sonner";
 import { ProtectedRoute } from "@/components/protected-route";
@@ -44,6 +44,11 @@ import {
   type NetworkSignalReading,
 } from "@/server/builders-network.functions";
 import { readNetworkFailure } from "@/lib/buildersNetworkFailure.pure";
+import {
+  CloseOrganisationDialog,
+  InviteOwnerDialog,
+  OrganisationFormDialog,
+} from "@/components/builders-network-organisation-dialogs";
 
 /**
  * The Builders Network operator console (extraction plan §5).
@@ -119,7 +124,6 @@ function NetworkFailureNotice({ title, code }: { title: string; code: string | n
     />
   );
 }
-
 
 /**
  * THE MARKETPLACE RANKING.
@@ -561,6 +565,21 @@ function BuildersNetworkConsole() {
   const clones = useQuery({ queryKey: ["bn-clones"], queryFn: () => clonesFn() });
 
   const [busyOrg, setBusyOrg] = useState<string | null>(null);
+  // Null means the form is closed; `undefined` subject means "create".
+  const [orgFormOpen, setOrgFormOpen] = useState(false);
+  const [orgBeingEdited, setOrgBeingEdited] = useState<NetworkOrganisation | null>(null);
+  const [orgBeingClosed, setOrgBeingClosed] = useState<NetworkOrganisation | null>(null);
+  const [orgBeingSeeded, setOrgBeingSeeded] = useState<NetworkOrganisation | null>(null);
+  // Hoisted so each button reads as the act it is, and so "create" and "edit"
+  // cannot drift apart: they are the same form on a different subject.
+  const openOrganisationForm = (organisation: NetworkOrganisation | null) => {
+    setOrgBeingEdited(organisation);
+    setOrgFormOpen(true);
+  };
+  const closeOrganisationForm = (next: boolean) => {
+    setOrgFormOpen(next);
+    if (!next) setOrgBeingEdited(null);
+  };
   const [connClone, setConnClone] = useState("");
   const [connOrg, setConnOrg] = useState("");
   const [creatingConn, setCreatingConn] = useState(false);
@@ -640,9 +659,19 @@ function BuildersNetworkConsole() {
         description="Vet organisations, mint workspace connections and watch the sync plane of builders.aurixasystems.com.au."
         icon={<Building2 className="h-5 w-5" aria-hidden />}
         actions={
-          <Button variant="outline" size="sm" onClick={refreshAll}>
-            <RefreshCw className="mr-2 h-4 w-4" aria-hidden /> Refresh
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              onClick={() => openOrganisationForm(null)}
+              disabled={!gate?.enabled}
+              title={gate?.enabled ? undefined : "The operate switch is off"}
+            >
+              <Plus className="mr-2 h-4 w-4" aria-hidden /> New organisation
+            </Button>
+            <Button variant="outline" size="sm" onClick={refreshAll}>
+              <RefreshCw className="mr-2 h-4 w-4" aria-hidden /> Refresh
+            </Button>
+          </div>
         }
       />
 
@@ -829,6 +858,33 @@ function BuildersNetworkConsole() {
                         <PlayCircle className="mr-1 h-4 w-4" aria-hidden /> Reinstate
                       </Button>
                     )}
+                    {/* A closed organisation is terminal: nothing here may act
+                        on one, which is why every control below is withheld. */}
+                    {organisation.status !== "closed" && (
+                      <>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => openOrganisationForm(organisation)}
+                        >
+                          <Pencil className="mr-1 h-4 w-4" aria-hidden /> Edit
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => setOrgBeingSeeded(organisation)}
+                        >
+                          <Mail className="mr-1 h-4 w-4" aria-hidden /> Invite owner
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => setOrgBeingClosed(organisation)}
+                        >
+                          <XCircle className="mr-1 h-4 w-4" aria-hidden /> Close
+                        </Button>
+                      </>
+                    )}
                   </div>
                 </div>
               ))}
@@ -836,6 +892,26 @@ function BuildersNetworkConsole() {
           )}
         </CardContent>
       </Card>
+
+      <OrganisationFormDialog
+        open={orgFormOpen}
+        onOpenChange={closeOrganisationForm}
+        organisation={orgBeingEdited}
+        onSaved={refreshAll}
+      />
+      <CloseOrganisationDialog
+        organisation={orgBeingClosed}
+        onOpenChange={(next) => {
+          if (!next) setOrgBeingClosed(null);
+        }}
+        onClosed={refreshAll}
+      />
+      <InviteOwnerDialog
+        organisation={orgBeingSeeded}
+        onOpenChange={(next) => {
+          if (!next) setOrgBeingSeeded(null);
+        }}
+      />
 
       {/* ----------------------------------------------------- connections */}
       <Card>
