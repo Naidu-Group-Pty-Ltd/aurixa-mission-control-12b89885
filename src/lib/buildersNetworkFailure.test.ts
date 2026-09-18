@@ -185,6 +185,20 @@ describe("the console and the page it links to agree", () => {
     expect(route).not.toMatch(/<Tabs\b[^>]*\bdefaultValue=/);
   });
 
+  it("the module's remedy and the card's literal link cannot drift", () => {
+    // The card writes `<Link to="/settings/billing" search={{ tab: "keys" }}>`
+    // as literals, which TypeScript checks against the route's own search
+    // schema — a probe confirms a wrong tab there fails `tsc`. The notice
+    // builds its link from this module at runtime, where `to` is a string and
+    // that check does not apply. Pinning the two together means the compiler's
+    // guard covers both.
+    const console_ = read("src/routes/builders-network.tsx");
+    const tab = MINT_OPERATE_KEY_REMEDY.search?.tab;
+    expect(console_).toContain(
+      `<Link to="${MINT_OPERATE_KEY_REMEDY.to}" search={{ tab: "${tab}" }}>`,
+    );
+  });
+
   it("there is exactly one place the operate key is minted", () => {
     // Two mint paths is how one of them comes to be wrong. The console links
     // to the existing Keys tab; it must never grow a mint of its own.
