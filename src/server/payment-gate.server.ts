@@ -15,7 +15,7 @@ import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { asJson, asRow } from "@/lib/json-cast";
 import type { Tables, TablesInsert, TablesUpdate } from "@/integrations/supabase/types";
 import { notifyOperators, writeAuditLog } from "@/server/audit.server";
-import { TIERS } from "@/lib/pricing/aurixa-catalog";
+import { TIERS, tierHeadlineCents } from "@/lib/pricing/aurixa-catalog";
 import {
   computeLocksAt,
   GATE_DEFAULT_HOURS,
@@ -79,7 +79,23 @@ export async function resolvePlanPricing(planSlug: string | null | undefined): P
     return {
       planSlug: slug,
       planName: tier.name,
-      amountDueCents: tier.monthlyInclGstCents,
+      // `tierHeadlineCents`, never the raw `monthlyInclGstCents` field.
+      //
+      // The catalogue models a tier as a base plus the AML/CTF module and says
+      // so in its own header: "tierHeadlineCents is what Stripe charges and
+      // what both surfaces lead with; tierBaseCents is the documented
+      // alternative". The raw field is the BASE — $2,015 where Scale bills
+      // $2,210, $504 where Launch bills $699.
+      //
+      // This figure is not decoration. It is stamped onto the gate at arming
+      // and is later handed to `seatPlanForTier` as the quoted price, which
+      // refuses any catalogue row whose `price_cents` disagrees — deliberately,
+      // because that guard is what stops a customer being charged something
+      // other than what they were shown. Quoting the base therefore did not
+      // undercharge anybody; it made the activation checkout answer
+      // `plan_not_purchasable` and the pay button die, for every clone armed
+      // with it.
+      amountDueCents: tierHeadlineCents(tier),
       currency: "AUD",
     };
   }
@@ -596,14 +612,34 @@ export async function settleGatePayment(
     // Worth announcing even though it is the happy path: it is the moment a
     // customer stopped being blocked, and an operator fielding "am I live yet"
     // needs to see it without opening a table.
+    //
+    // But only when they actually did stop being blocked. `after` is already
+    // computed above for the event log, and it is the whole answer: an
+    // operator's standing lock outranks `paid_at`, so a gate under one settles
+    // its payment and stays shut. Announcing "gate unlocked" at severity
+    // `success` over that state tells an operator the customer is working when
+    // they are still looking at a lock screen — and it is not hypothetical, a
+    // clone is in exactly that state today.
+    const opened = after.status === "open";
+    const plan = row.plan_name ?? row.plan_slug ?? "Plan";
+    const via = input.source.replace("stripe_", "Stripe ");
     await notifyOperators({
       kind: "clone_gate_unlocked",
-      severity: "success",
-      title: "Activation payment captured — gate unlocked",
-      body: `${row.plan_name ?? row.plan_slug ?? "Plan"} activated via ${input.source.replace("stripe_", "Stripe ")}.`,
+      severity: opened ? "success" : "warning",
+      title: opened
+        ? "Activation payment captured — gate unlocked"
+        : "Activation payment captured — workspace still locked",
+      body: opened
+        ? `${plan} activated via ${via}.`
+        : `${plan} paid via ${via}, but an operator lock is holding this workspace shut. Clear the override to let them in.`,
       cloneId: input.cloneId,
       url: "/billing/gates",
-      metadata: { source: input.source, amount_paid_cents: input.amountPaidCents ?? null },
+      metadata: {
+        source: input.source,
+        amount_paid_cents: input.amountPaidCents ?? null,
+        status_after: after.status,
+        reason_after: after.reason,
+      },
     });
 
     return { ok: true, settled: true, gate: row };

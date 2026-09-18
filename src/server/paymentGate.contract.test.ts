@@ -173,3 +173,120 @@ describe("Stripe settles the gate on every route money can arrive by", () => {
     expect(fn).not.toMatch(/manual_override/);
   });
 });
+
+describe("the gate quotes what Stripe will charge", () => {
+  const gateServer = readFileSync("src/server/payment-gate.server.ts", "utf8");
+
+  it("resolves a tier's price through the headline accessor, never the raw field", () => {
+    // The catalogue models a tier as a base plus the AML/CTF module, and its
+    // header says which is which: `tierHeadlineCents` is what Stripe charges,
+    // `monthlyInclGstCents` is the base. Quoting the base does not undercharge
+    // anybody — the quote is handed to `seatPlanForTier`, which refuses any
+    // catalogue row whose price disagrees — it kills the pay button with
+    // `plan_not_purchasable` on every clone armed with it.
+    const fn =
+      /export async function resolvePlanPricing[\s\S]*?\n}\n/.exec(gateServer)?.[0] ?? "";
+    expect(fn.length).toBeGreaterThan(0);
+    expect(fn).toMatch(/tierHeadlineCents\(tier\)/);
+    expect(fn).not.toMatch(/tier\.monthlyInclGstCents/);
+  });
+
+  it("the two figures genuinely differ, so the choice is consequential", async () => {
+    // If these ever coincide the assertion above is vacuous and somebody
+    // should be told rather than reassured.
+    const { TIERS, tierHeadlineCents, tierBaseCents } = await import(
+      "@/lib/pricing/aurixa-catalog"
+    );
+    expect(TIERS.length).toBeGreaterThan(0);
+    for (const tier of TIERS) {
+      expect(tierHeadlineCents(tier)).toBeGreaterThan(tierBaseCents(tier));
+      expect(tierHeadlineCents(tier)).not.toBe(tier.monthlyInclGstCents);
+    }
+  });
+});
+
+describe("the activation checkout refuses what paying cannot fix", () => {
+  const text = readFileSync("src/server/gateCheckout.server.ts", "utf8");
+  const route = readFileSync("src/routes/api.public.clones.gate.checkout.ts", "utf8");
+  const resolver = readFileSync("src/lib/clonePaymentGate.pure.ts", "utf8");
+  const gateServer = readFileSync("src/server/payment-gate.server.ts", "utf8");
+
+  it("is minted in exactly one place, by both callers", () => {
+    // Two implementations of a payment is how one of them comes to be wrong —
+    // the shape `PASSPORT_DISTRIBUTION.md` records, with money attached. The
+    // public route authenticates and maps a status; it does not decide.
+    expect(route).toMatch(/mintGateActivationCheckout/);
+    expect(route).not.toMatch(/startCheckoutCore/);
+    expect(route).not.toMatch(/seatPlanForTier/);
+
+    const callers = sources
+      .filter((s) => !s.file.endsWith("gateCheckout.server.ts"))
+      // A spec that names the symbol is not a call site of it.
+      .filter((s) => !/\.(test|spec)\.tsx?$/.test(s.file))
+      .filter((s) => /startCheckoutCore\s*\(/.test(s.text))
+      .map((s) => s.file);
+    // The storefront's own checkout is a different act and keeps its caller;
+    // no GATE surface may mint one directly.
+    expect(callers.filter((f) => /gate/i.test(f))).toEqual([]);
+  });
+
+  it("refuses a gate an operator has locked by hand", () => {
+    // Otherwise the sequence is: customer pays, `paid_at` is stamped, the gate
+    // resolves `operator_locked` exactly as before, and the workspace they
+    // just bought is still shut.
+    expect(text).toMatch(/gateState\.reason === "operator_locked"/);
+  });
+
+  it("asks the resolver rather than reading the override column", () => {
+    // The same rule the "one module decides the status" guard above enforces
+    // fleet-wide: a second reading of `manual_override` here is a second
+    // implementation of "is this locked".
+    expect(text).toMatch(/resolveGateState\(factsOf\(read\.row\)\)/);
+    expect(text).not.toMatch(/manual_override\s*===/);
+  });
+
+  it("refuses BEFORE it resolves a plan or reaches Stripe", () => {
+    // A refusal that happens after the session is minted has already taken
+    // the money. Anchored on the CALL, not the import at the top of the file.
+    const guard = text.indexOf('gateState.reason === "operator_locked"');
+    const plans = text.indexOf('from("seat_plans")');
+    const stripe = text.indexOf("await startCheckoutCore({");
+    expect(guard).toBeGreaterThan(-1);
+    expect(plans).toBeGreaterThan(-1);
+    expect(stripe).toBeGreaterThan(-1);
+    expect(guard).toBeLessThan(plans);
+    expect(guard).toBeLessThan(stripe);
+  });
+
+  it("hands back no pricing URL for that one refusal", () => {
+    // Every other refusal carries one, because a customer must always have
+    // somewhere to pay. This is the case where a checkout is the WRONG
+    // destination — the remedy is a person, and a link to buy would invite a
+    // second subscription that opens nothing.
+    const guard =
+      /if \(gateState\.reason === "operator_locked"\)[\s\S]*?\n {2}\}/.exec(text)?.[0] ?? "";
+    expect(guard).toMatch(/operator_locked/);
+    expect(guard).toMatch(/pricingUrl: null/);
+  });
+
+  it("the guard's premises hold, and are not merely trusted", () => {
+    // If either premise stops being true the guard becomes WRONG rather than
+    // merely redundant — an operator lock would then be payable and refusing
+    // it would strand a customer who could have settled. So both are pinned
+    // here, where a change to the resolver fails this test and sends somebody
+    // back to reconsider the guard.
+
+    // 1. The override is evaluated before the payment.
+    const override = resolver.indexOf('facts.manualOverride === "locked"');
+    const paid = resolver.indexOf("if (paid) return open(");
+    expect(override).toBeGreaterThan(-1);
+    expect(paid).toBeGreaterThan(-1);
+    expect(override).toBeLessThan(paid);
+
+    // 2. Settling a payment never clears the override.
+    const settle =
+      /export async function settleGatePayment[\s\S]*?\n}\n/.exec(gateServer)?.[0] ?? "";
+    expect(settle.length).toBeGreaterThan(0);
+    expect(settle).not.toMatch(/manual_override/);
+  });
+});
