@@ -265,27 +265,39 @@ export const closeNetworkOrganisation = createServerFn({ method: "POST" })
  */
 export const inviteNetworkOrganisationOwner = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth, requireAdmin])
-  .inputValidator((data: { organisationId: string; email: string; name: string }) => {
-    if (!data?.organisationId) throw new Error("organisationId required");
-    if (!data?.email?.trim()) throw new Error("An email address is required");
-    if (!data?.name?.trim()) throw new Error("A name is required");
-    return data;
-  })
+  .inputValidator(
+    (data: { organisationId: string; email: string; name: string; sendEmail?: boolean }) => {
+      if (!data?.organisationId) throw new Error("organisationId required");
+      if (!data?.email?.trim()) throw new Error("An email address is required");
+      if (!data?.name?.trim()) throw new Error("A name is required");
+      return data;
+    },
+  )
   .handler(async ({ data }) => {
     const result = await callBuilderNetworkAdmin("invite_organisation_owner", {
       organisation_id: data.organisationId,
       email: data.email.trim(),
       name: data.name.trim(),
+      send_email: data.sendEmail === true,
     });
-    return result.ok
-      ? {
-          ok: true as const,
-          invite_url: String(result.body.invite_url ?? ""),
-          expires_at: String(result.body.expires_at ?? ""),
-          expires_in_hours: Number(result.body.expires_in_hours ?? 0),
-          organisation_legal_name: String(result.body.organisation_legal_name ?? ""),
-        }
-      : { ok: false as const, error: result.error };
+    if (!result.ok) return { ok: false as const, error: result.error };
+    // TWO OUTCOMES. `attached` is a person who already had a network account
+    // — the owner membership is granted and NO credential is minted, so
+    // there is no link to hand back and none to hand on. Coercing that to
+    // `String(undefined ?? "")` would have drawn an empty copy box, which is
+    // the uncopyable-empty-box defect this codebase has paid for twice.
+    const attached = result.body.outcome === "attached";
+    return {
+      ok: true as const,
+      outcome: attached ? ("attached" as const) : ("invited" as const),
+      invite_url: attached ? null : String(result.body.invite_url ?? ""),
+      expires_at: attached ? null : String(result.body.expires_at ?? ""),
+      expires_in_hours: attached ? null : Number(result.body.expires_in_hours ?? 0),
+      organisation_legal_name: String(result.body.organisation_legal_name ?? ""),
+      email_requested: result.body.email_requested === true,
+      email_sent: result.body.email_sent === true,
+      email_failure: result.body.email_failure ? String(result.body.email_failure) : null,
+    };
   });
 
 export const suspendNetworkOrganisation = createServerFn({ method: "POST" })

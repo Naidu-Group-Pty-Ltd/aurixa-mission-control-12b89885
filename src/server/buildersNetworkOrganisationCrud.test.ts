@@ -147,22 +147,86 @@ describe("the first owner's invite link", () => {
     // `placeholder` is not a value — the uncopyable empty box this codebase
     // has already shipped twice.
     expect(start).toBeGreaterThan(-1);
-    expect(body).toMatch(/<Input\s+readOnly\s+value=\{minted\.url\}/);
-    expect(body).not.toMatch(/placeholder=\{minted/);
+    expect(body).toMatch(/<Input\s+readOnly\s+value=\{result\.invite_url \?\? ""\}/);
+    expect(body).not.toMatch(/placeholder=\{result\.invite_url/);
   });
 
   it("can be copied, and says it cannot be read again", () => {
-    expect(body).toContain("navigator.clipboard.writeText(minted.url)");
+    expect(body).toContain('navigator.clipboard.writeText(result.invite_url ?? "")');
     expect(body).toMatch(/shown once/i);
     expect(body).toMatch(/mint another/i);
   });
 
   it("states when it expires", () => {
-    expect(body).toMatch(/Expires in \{minted\.hours\}/);
+    expect(body).toMatch(/Expires in \{result\.expires_in_hours\}/);
   });
 
   it("explains that the operator stops after the first owner", () => {
     expect(body).toMatch(/its owner invites their own colleagues/i);
+  });
+});
+
+/**
+ * Two outcomes, because the network has two.
+ *
+ * Closing an organisation leaves its members' accounts standing, and there is
+ * no `add_member` on the operator plane — so refusing an established account
+ * meant anyone who had ever used the network could never be made the first
+ * owner of a new one. The network attaches them now, mints nothing, and says
+ * which of the two happened.
+ */
+describe("an account that already exists", () => {
+  const dialogSource = read(DIALOGS);
+
+  it("is handled as its own outcome, not coerced into an empty link box", () => {
+    // `String(undefined ?? "")` would have drawn a copy box with nothing in
+    // it — the uncopyable-empty-box defect this codebase has paid for twice.
+    expect(read(FUNCTIONS)).toMatch(/const attached = result\.body\.outcome === "attached"/);
+    expect(read(FUNCTIONS)).toMatch(/invite_url: attached \? null :/);
+    expect(dialogSource).toMatch(/result\.outcome === "attached"/);
+  });
+
+  it("is told plainly that nothing needs passing on", () => {
+    const at = dialogSource.indexOf('result.outcome === "attached"');
+    const branch = dialogSource.slice(at, at + 900);
+    expect(branch).toMatch(/already had an account/i);
+    expect(branch).toMatch(/no invitation was\s+needed/i);
+    // And no link is offered, because none exists.
+    expect(branch).not.toContain("Copy the invite link");
+  });
+});
+
+describe("sending the invitation", () => {
+  const dialogSource = read(DIALOGS);
+
+  it("is offered, and the link is still shown either way", () => {
+    expect(dialogSource).toContain('id="invite-send-email"');
+    expect(dialogSource).toMatch(/sendEmail/);
+    expect(read(FUNCTIONS)).toMatch(/send_email: data\.sendEmail === true/);
+  });
+
+  it("reports what happened rather than that a key was set", () => {
+    // `!!resendApiKey` reported a send that a 403 from an unverified sender
+    // domain had refused.
+    expect(dialogSource).toMatch(/result\.email_sent/);
+    // USED, not merely declared. A lookup table nothing reads is the
+    // shipped-but-unmounted defect this repo has paid for in three
+    // components and twenty-eight CSS rules.
+    const declaration = dialogSource.indexOf("const EMAIL_FAILURE");
+    const uses = [...dialogSource.matchAll(/EMAIL_FAILURE\[/g)];
+    expect(declaration).toBeGreaterThan(-1);
+    expect(uses.length, "EMAIL_FAILURE is read").toBeGreaterThan(0);
+    expect(uses.some((m) => m.index! > declaration)).toBe(true);
+  });
+
+  it("names the remedy for each kind of failure, which differ", () => {
+    for (const reason of ["not_configured", "refused", "unreachable"]) {
+      expect(dialogSource, reason).toContain(reason);
+    }
+    // Every one tells the operator to pass the link on themselves.
+    const at = dialogSource.indexOf("const EMAIL_FAILURE");
+    const map = dialogSource.slice(at, dialogSource.indexOf("};", at));
+    expect(map.match(/pass the link on yourself/g)?.length).toBe(3);
   });
 });
 
