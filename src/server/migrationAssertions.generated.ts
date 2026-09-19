@@ -626,4 +626,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260919133000",
     assertions: [{ kind: "column", table: "clone_backends", column: "migration_heartbeat_at" }],
   },
+  {
+    migration: "20260919153000_fleet_claim_heartbeat_monotonic.sql",
+    version: "20260919153000",
+    assertions: [{ kind: "rpc", fn: "fleet_claim_heartbeat" }],
+  },
 ];

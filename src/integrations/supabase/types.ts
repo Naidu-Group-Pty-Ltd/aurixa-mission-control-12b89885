@@ -13003,6 +13003,10 @@ export type Database = {
         Returns: Json
       }
       feedback_retry_now: { Args: { _submission_id?: string }; Returns: number }
+      fleet_claim_heartbeat: {
+        Args: { _claimed_at: string; _clone_id: string }
+        Returns: boolean
+      }
       grant_tokens: {
         Args: {
           _expires_at?: string

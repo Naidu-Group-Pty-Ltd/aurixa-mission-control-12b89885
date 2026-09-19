@@ -307,33 +307,28 @@ const EMPTY: FleetMigrationResult = {
  * usual — cannot make a living pass look dead. Thirty seconds against five
  * minutes is ten beats; a pass would have to miss nine in a row.
  *
- * It is cheap at this cadence. A pass with a 45-second budget beats once or
- * twice; one blocked inside `runSqlOnProject` beats until the runtime reclaims
- * the isolate, which is exactly when it should stop.
+ * The two numbers are the whole cadence because beats do not wait for each
+ * other. That was not true of the version that serialised them, where a slow
+ * beat delayed the next one and this ratio described a system with no latency;
+ * `fleet_claim_heartbeat` taking the MAXIMUM at the database is what makes
+ * independence safe and therefore makes this arithmetic honest again.
  */
 const CLAIM_HEARTBEAT_MS = 30_000;
 
 /**
- * How long one beat may take before it is abandoned.
+ * How long a pass will wait for beats still in the air when it stops.
  *
- * Serialising the beats — one at a time, the next scheduled only when the last
- * has settled — closed the reordering that overlapping beats caused, and
- * opened this: a beat that HANGS never settles, so `schedule()` is never
- * reached and the heartbeat stops for ever while the pass is still working.
- * `fetch` here has no timeout of its own, and the wedge is correlated with
- * exactly the case the heartbeat exists for — a `runSqlOnProject` stuck on the
- * same egress — so the beat would fail precisely when it is needed. Raised by
- * review.
+ * `clearInterval` stops the next beat, not one already dispatched, and a beat
+ * landing after the pass has moved on refreshes a claim nobody holds — which
+ * on the path where the RELEASE itself failed is exactly the claim the silence
+ * is counting. So the pass waits.
  *
- * With a bound, a wedged beat is abandoned, logged, and the chain resumes. It
- * also makes the window arithmetic honest: the worst cadence is this plus
- * `CLAIM_HEARTBEAT_MS`, which is a number the ratio test can read, where the
- * unbounded latency it replaces was not.
- *
- * An abort arrives as an ordinary `{ error }` from PostgREST rather than a
- * rejection, which is the branch that already logs and returns.
+ * Bounded, because this is awaited in a `finally`: a beat that never settles
+ * would otherwise hang the whole run, which is a far worse fault than the one
+ * the wait prevents. Two seconds drains the ordinary case and abandons the
+ * pathological one.
  */
-const CLAIM_BEAT_TIMEOUT_MS = 10_000;
+const CLAIM_DRAIN_MS = 2_000;
 
 /**
  * Say, on a clock, that this pass still holds the claim it took.
@@ -348,25 +343,23 @@ const CLAIM_BEAT_TIMEOUT_MS = 10_000;
  * this does not pretend to. What it does is make a living pass VISIBLE, and
  * stop beating the moment the row says the claim is somebody else's.
  *
- * ONE BEAT AT A TIME, AND THAT IS NOT TIDINESS.
+ * BEATS ARE INDEPENDENT, AND THAT IS THE POINT.
  *
- * It was a `setInterval`, which does not wait for its own callback. A beat
- * slower than the interval therefore overlaps the next one, and each captures
- * `new Date()` BEFORE its request goes out — so two independently routed
- * writes can commit in the other order and an older timestamp lands over a
- * newer one. On a claim held past the reclaim window that makes a pass which
- * is beating perfectly look stale, and hands its clone to a second pass: the
- * concurrent application this whole mechanism exists to prevent, caused by
- * the thing meant to prevent it. Raised by review.
+ * Three shapes were tried here and the first two each bought the next defect.
+ * Overlapping beats on a plain interval REORDERED, because each chose its
+ * timestamp before its request went out. Serialising them fixed that and made
+ * a HUNG beat end the heartbeat for ever — on an egress shared with the
+ * migration's own SQL, so the beat fails exactly when it is needed. Bounding
+ * each beat with an abort fixed that and turned a merely SLOW database into
+ * total silence, every beat past the ceiling discarded and the stamp never
+ * moving.
  *
- * So each beat schedules the next only once it has finished. The cadence
- * becomes "thirty seconds after the last beat landed" rather than "every
- * thirty seconds", which is also the more honest reading — a pass whose
- * writes take twenty seconds IS beating every fifty, and saying so beats
- * claiming otherwise. Reordering is then impossible rather than tolerated,
- * which is why this is preferred to having the database take `greatest()` of
- * the two: that would pick the right value and still leave two requests in
- * flight for one fact.
+ * All three were the caller trying to defend an ordering it does not control.
+ * `fleet_claim_heartbeat` takes `greatest(migration_heartbeat_at,
+ * clock_timestamp())`, so whichever write commits last the column ends at the
+ * maximum and commit order stops mattering. Beats can then be independent,
+ * which is what makes a hang harmless, which is what makes an abort
+ * unnecessary. Nothing here is traded against anything else.
  */
 function beatWhileClaimHeld(
   supabase: Db,
@@ -374,76 +367,66 @@ function beatWhileClaimHeld(
   claimedAt: string,
 ): { stop: () => Promise<void> } {
   let stopped = false;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  /**
-   * The beat that is currently out, so `stop` can WAIT for it.
-   *
-   * `clearTimeout` cancels the next beat and does nothing about one already
-   * dispatched — and a beat that lands after the pass has moved on refreshes
-   * a claim nobody holds, which on the path where the release itself failed
-   * delays reclamation by however long that request took. It cannot be
-   * recalled, so the pass waits for it instead: the extra silence a late beat
-   * can buy is bounded by one request rather than by the interval. Also
-   * raised by review.
-   */
-  let inFlight: Promise<void> = Promise.resolve();
+  /** Beats dispatched and not yet settled, so `stop` can drain them. */
+  const outstanding = new Set<Promise<unknown>>();
 
-  const beat = async (): Promise<void> => {
-    const { data: rows, error } = await supabase
-      .from("clone_backends")
-      .update({ migration_heartbeat_at: new Date().toISOString() })
-      .eq("clone_id", cloneId)
-      .eq("worker_started_at", claimedAt)
-      .select("clone_id")
-      .abortSignal(AbortSignal.timeout(CLAIM_BEAT_TIMEOUT_MS));
-    if (error) {
-      // One lost beat is survivable by design — see CLAIM_HEARTBEAT_MS — so
-      // this neither throws nor stops. Silence would hide a database fault
-      // that is about to cost a live pass its claim.
-      console.error("[fleet-migration] heartbeat not recorded", {
-        cloneId,
-        error: error.message,
+  const timer = setInterval(() => {
+    if (stopped) return;
+    const run = (async () => {
+      const { data: held, error } = await supabase.rpc("fleet_claim_heartbeat", {
+        _clone_id: cloneId,
+        _claimed_at: claimedAt,
       });
-      return;
-    }
-    if (!rows || rows.length === 0) {
-      // The claim is gone. Beating on would write into a successor's row and
-      // tell the reclaim that a pass which no longer owns anything is alive.
-      console.warn("[fleet-migration] heartbeat stopped: the claim is no longer this pass's", {
-        cloneId,
-        claimedAt,
-      });
-      stopped = true;
-    }
-  };
-
-  const schedule = (): void => {
-    timer = setTimeout(() => {
-      if (stopped) return;
-      inFlight = beat()
-        .catch((e: unknown) => {
-          // A rejected beat must not become an unhandled rejection: in this
-          // runtime that can take down the whole invocation, which would lose
-          // the replay this exists to protect.
-          console.error("[fleet-migration] heartbeat threw", {
-            cloneId,
-            error: e instanceof Error ? e.message : String(e),
-          });
-        })
-        .then(() => {
-          // Scheduled from INSIDE the completed beat, which is what makes two
-          // of them impossible.
-          if (!stopped) schedule();
+      if (error) {
+        // One lost beat is survivable by design — see CLAIM_HEARTBEAT_MS — so
+        // this neither throws nor stops. Silence would hide a database fault
+        // that is about to cost a live pass its claim.
+        console.error("[fleet-migration] heartbeat not recorded", {
+          cloneId,
+          error: error.message,
         });
-    }, CLAIM_HEARTBEAT_MS);
-  };
-  schedule();
+        return;
+      }
+      if (held === false) {
+        // The claim is gone. Beating on would say a pass that owns nothing is
+        // alive. Told by the function's own answer rather than by a row count,
+        // which could no longer separate "the claim is gone" from "a newer
+        // beat already won".
+        console.warn("[fleet-migration] heartbeat stopped: the claim is no longer this pass's", {
+          cloneId,
+          claimedAt,
+        });
+        stopped = true;
+        clearInterval(timer);
+      }
+    })().catch((e: unknown) => {
+      // A rejected beat must not become an unhandled rejection: in this
+      // runtime that can take down the whole invocation, which would lose the
+      // replay this exists to protect.
+      console.error("[fleet-migration] heartbeat threw", {
+        cloneId,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    });
+    outstanding.add(run);
+    void run.finally(() => outstanding.delete(run));
+  }, CLAIM_HEARTBEAT_MS);
 
   return {
     stop: async () => {
       stopped = true;
-      if (timer !== undefined) clearTimeout(timer);
-      await inFlight;
+      clearInterval(timer);
+      /*
+        Drained, but never indefinitely. `allSettled` cannot reject, so `stop`
+        cannot throw in the `finally` that awaits it — a throw there would
+        replace the error the pass is carrying, or on the success path escape
+        the clone loop and kill the run. The race bounds a beat that never
+        settles, which `allSettled` alone would wait for for ever.
+      */
+      await Promise.race([
+        Promise.allSettled([...outstanding]),
+        new Promise((resolve) => setTimeout(resolve, CLAIM_DRAIN_MS)),
+      ]);
     },
   };
 }

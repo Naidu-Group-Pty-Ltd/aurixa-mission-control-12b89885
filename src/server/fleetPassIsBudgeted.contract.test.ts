@@ -32,6 +32,17 @@ const read = (p: string) => readFileSync(join(process.cwd(), p), "utf8");
 /** Source with comments removed — a comment quoting code is not code. */
 const code = (src: string): string =>
   src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
+/**
+ * The same rule for SQL, and it is not decoration.
+ *
+ * A migration in this repository explains itself at length above the statement
+ * it makes, and those explanations QUOTE the statement. An assertion read off
+ * the raw file is therefore satisfied by the prose describing the code even
+ * when the code is gone — which is exactly what happened: removing `greatest`
+ * from the `update` left the header's copy of it, and the test passed over a
+ * migration that no longer took a maximum at all. Caught by mutation.
+ */
+const sqlCode = (src: string): string => src.replace(/^[ \t]*--.*$/gm, "");
 
 const lane = code(read("src/server/fleet-migration.server.ts"));
 /**
@@ -364,97 +375,110 @@ describe("a pass is bounded", () => {
 
   it("beats on a CLOCK, so a silent stretch is not read as death", () => {
     const body = beatBody();
-    expect(body, "the heartbeat is not on a timer").toContain("setTimeout(");
-    expect(body).toContain("migration_heartbeat_at");
+    expect(body, "the heartbeat is not on a timer").toContain("setInterval(");
+    // The beat no longer names the column: advancing it is the database's job,
+    // so that the maximum is taken where the write commits.
+    expect(body).toContain("fleet_claim_heartbeat");
   });
 
   /*
-    AND ONE BEAT AT A TIME.
+    AND ORDERING IS THE DATABASE'S, NOT THE CALLER'S.
 
-    It was a `setInterval`, which does not wait for its own callback. A beat
-    slower than the interval overlaps the next, and each captures `new Date()`
-    before its request goes out — so two independently routed writes can commit
-    in the other order and an older timestamp lands over a newer one. On a claim
-    held past the window that makes a perfectly healthy pass look stale and
-    hands its clone to a second pass: the concurrent application this mechanism
-    exists to prevent, caused by the thing meant to prevent it. Raised by
-    review.
+    Three shapes were tried here and the first two each bought the next
+    defect. Overlapping beats on an interval REORDERED, because each chose its
+    timestamp before its request went out. Serialising them fixed that and made
+    a HUNG beat end the heartbeat for ever, on an egress shared with the
+    migration's own SQL — so the beat fails exactly when it is needed. Bounding
+    each beat with an abort fixed that and turned a merely SLOW database into
+    total silence, every beat past the ceiling discarded and the stamp never
+    moving. Three rounds of review, one per shape.
+
+    They were one fault: the caller defending an ordering it does not control,
+    because it does not decide when a write commits. `fleet_claim_heartbeat`
+    takes the MAXIMUM at the database, so commit order stops mattering — and
+    then beats may be independent, a hang is harmless, and no abort is needed.
   */
-  it("never has two beats in flight, so an older timestamp cannot land last", () => {
+  it("lets the database decide the value, so commit order cannot matter", () => {
+    const sql = sqlCode(
+      read("supabase/migrations/20260919153000_fleet_claim_heartbeat_monotonic.sql"),
+    );
+    expect(sql, "the stamp is not monotonic").toMatch(
+      /set migration_heartbeat_at = greatest\(migration_heartbeat_at, clock_timestamp\(\)\)/,
+    );
+    // `now()` is the TRANSACTION's start, so two overlapping beats would still
+    // offer values in the order they started rather than the order they ran.
+    expect(sql, "now() is the transaction's start time, not the moment of the write").not.toMatch(
+      /set migration_heartbeat_at = greatest\(migration_heartbeat_at, now\(\)\)/,
+    );
+    // And the fence is the function's own, so a reclaimed pass cannot beat
+    // into its successor's claim however the call is made.
+    expect(sql).toContain("and worker_started_at = _claimed_at");
+  });
+
+  it("does not make one beat wait for another, and abandons none", () => {
     const body = beatBody();
-    expect(body, "an interval does not wait for its own callback").not.toContain("setInterval(");
-    // The next beat is scheduled from inside the completed one. Asserted on
-    // the call rather than on the word `then`, because the ordering is the
-    // property and a reschedule anywhere else reopens the overlap.
-    const done = body.indexOf(".then(()");
-    expect(done, "nothing reschedules after a beat completes").toBeGreaterThan(-1);
-    // Bounded to the `.then` BLOCK, not to a character count after it: a
-    // reschedule moved out beside the request still sits inside a generous
-    // window, and that is exactly the mutation this has to catch.
-    const closes = body.indexOf("});", done);
-    expect(closes, "the .then block does not close").toBeGreaterThan(done);
+    expect(body, "beats are serialised again, so a hang ends the chain").not.toContain(
+      ".then(() =>",
+    );
     expect(
-      body.slice(done, closes),
-      "the next beat is not scheduled from inside the completed one",
-    ).toContain("schedule()");
+      body,
+      "a beat is abandoned on a deadline, which turns a slow database into silence",
+    ).not.toContain("AbortSignal");
+  });
+
+  it("asks the database rather than composing the write itself", () => {
+    const body = beatBody();
+    expect(body, "the beat writes the column directly and can reorder").toContain(
+      'supabase.rpc("fleet_claim_heartbeat"',
+    );
+    // The function's own answer, not a row count: once the write is also
+    // conditional on advancing, "no rows" can no longer mean "claim lost".
+    expect(body, "a lost claim is inferred rather than read").toContain("held === false");
   });
 
   /*
-    AND A STOP THAT DOES NOT WAIT IS NOT A STOP.
+    AND A STOP THAT DOES NOT WAIT IS NOT A STOP — BUT MUST NOT WAIT FOR EVER.
 
-    `clearTimeout` cancels the next beat and does nothing about one already
+    `clearInterval` cancels the next beat and does nothing about one already
     dispatched. A beat landing after the pass has moved on refreshes a claim
     nobody holds — and on the path where the release itself failed, that is
     exactly the claim the five-minute silence is supposed to be counting.
-    Also raised by review.
+    Raised by review.
+
+    The wait is bounded because it happens in a `finally`: a beat that never
+    settles would otherwise hang the whole run, which is worse than the fault
+    the wait prevents. And it is `allSettled`, which cannot reject, so `stop`
+    cannot throw over the error the pass is already carrying.
   */
-  it("waits for the beat that is already out before the pass moves on", () => {
+  it("drains the beats still in the air, on a bound, without throwing", () => {
     const body = beatBody();
-    // The tracked promise must BE the beat. Asserting only that the name
-    // appears is satisfied by a declaration and an await with nothing assigned
-    // between them — caught by mutation.
-    expect(body, "nothing tracks the beat currently in flight").toMatch(/inFlight = beat\(\)/);
-    expect(body, "stop does not wait for it").toMatch(
-      /stop: async \(\) => \{[\s\S]{0,300}?await inFlight;/,
+    expect(body, "nothing tracks the beats in flight").toContain("outstanding.add(run)");
+    expect(body, "the drain can reject and replace the pass's own error").toContain(
+      "Promise.allSettled([...outstanding])",
     );
+    expect(body, "a beat that never settles would hang the run").toContain("Promise.race([");
+    expect(lane).toMatch(/const CLAIM_DRAIN_MS = [\d_]+;/);
     expect(laneBody, "the pass does not wait for the stop").toContain("await heartbeat.stop();");
   });
 
   it("fits several beats inside the reclaim window, so one lost beat is survivable", () => {
     const beat = /const CLAIM_HEARTBEAT_MS = ([\d_]+);/.exec(lane);
     expect(beat, "CLAIM_HEARTBEAT_MS is not declared as a plain number").not.toBeNull();
-    const bound = /const CLAIM_BEAT_TIMEOUT_MS = ([\d_]+);/.exec(lane);
-    expect(bound, "CLAIM_BEAT_TIMEOUT_MS is not declared as a plain number").not.toBeNull();
     const stale = /const STALE_CLAIM_MINUTES = (\d+);/.exec(lane);
     expect(stale).not.toBeNull();
-    const n = (m: RegExpExecArray) => Number(m[1].replace(/_/g, ""));
     /*
-      The WORST cadence, not the best. Serialised beats are spaced by the
-      interval PLUS however long the last one took, so a ratio over the
-      interval alone describes a system with no latency — which is the
-      objection review raised, and the reason the bound exists: it turns
-      latency into a number this can read.
+      Two constants, and that is the WHOLE cadence — which it was not while the
+      beats were serialised, because a slow beat then delayed the next one and
+      this arithmetic described a system with no latency. Review said so, and
+      the answer was not to model the latency but to remove it from the
+      cadence: independent beats fire on the interval whatever the last one is
+      doing, which is safe only because the database takes the maximum.
     */
-    const beats = (n(stale!) * 60_000) / (n(beat!) + n(bound!));
+    const beats = (Number(stale![1]) * 60_000) / Number(beat![1].replace(/_/g, ""));
     expect(
       beats,
       "a window this pass can miss in two beats turns a transient fault into a stolen claim",
     ).toBeGreaterThanOrEqual(4);
-  });
-
-  /*
-    AND A BEAT THAT HANGS MUST NOT STOP THE CHAIN.
-
-    Serialising means the next beat is scheduled only when the last settles, so
-    a beat that never settles stops the heartbeat for ever while the pass keeps
-    working — and `fetch` here has no timeout of its own. The wedge is
-    correlated with the case the heartbeat is FOR: a `runSqlOnProject` stuck on
-    the same egress. Raised by review, against the fix for the previous round.
-  */
-  it("abandons a beat that hangs, so one wedged request cannot end the heartbeat", () => {
-    expect(beatBody(), "the beat has no deadline of its own").toContain(
-      "AbortSignal.timeout(CLAIM_BEAT_TIMEOUT_MS)",
-    );
   });
 
   /*
@@ -470,27 +494,37 @@ describe("a pass is bounded", () => {
     any one site: the claim establishes the stamp, the beat advances it, and a
     third writer anywhere reopens the class.
   */
-  it("has exactly two writers of the heartbeat: the claim, and the beat", () => {
+  it("has exactly one writer of the heartbeat in this file: the claim", () => {
+    /*
+      The claim establishes the stamp; every advance of it now happens inside
+      `fleet_claim_heartbeat`, where the maximum is taken. A second writer HERE
+      is a write that does not go through that maximum, which is the reordering
+      this area has paid for three times — including the cursor write, which
+      carried a heartbeat from before the timer existed.
+
+      Written as a count because the property is exclusivity, not the identity
+      of any one site.
+    */
     const writes = lane.split("migration_heartbeat_at:").length - 1;
-    expect(writes, "a third writer of the heartbeat reopens the reordering").toBe(2);
+    expect(writes, "a second heartbeat writer bypasses the database's maximum").toBe(1);
   });
 
-  it("stops beating when the claim is gone, rather than writing into a successor's row", () => {
+  it("stops beating when the claim is gone, rather than saying a pass owns what it does not", () => {
     const body = beatBody();
-    expect(body, "the beat is unfenced").toContain('.eq("worker_started_at", claimedAt)');
-    expect(body).toContain('.select("clone_id")');
     /*
       Bounded to the MISS BRANCH, not to the function. The stop it sets appears
       a second time in the returned `stop`, so an unbounded search finds that
       one and passes over a branch that no longer stops anything — caught by
       mutation, which is the only reason it is written this way.
     */
-    const miss = body.indexOf("if (!rows || rows.length === 0)");
+    const miss = body.indexOf("if (held === false)");
     const stop = body.indexOf("stop: async ()");
-    expect(miss, "the fence-miss branch was not found").toBeGreaterThan(-1);
+    expect(miss, "the claim-lost branch was not found").toBeGreaterThan(-1);
     expect(stop, "the returned stop was not found").toBeGreaterThan(miss);
-    expect(body.slice(miss, stop), "a beat that missed its fence keeps beating").toContain(
-      "stopped = true",
+    const branch = body.slice(miss, stop);
+    expect(branch, "a beat told the claim is gone keeps beating").toContain("stopped = true");
+    expect(branch, "the timer keeps firing after the claim is gone").toContain(
+      "clearInterval(timer)",
     );
   });
 
