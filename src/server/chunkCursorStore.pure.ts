@@ -76,6 +76,31 @@ export type StoredChunkCursor = {
   migrationId: string;
   statementsDone: number;
   /**
+   * The identity of the BODY this position is into — the migration's git blob
+   * sha, which is content-addressed, so a changed file is always a changed
+   * value.
+   *
+   * WHY THE SHAPE COULD NOT CARRY THIS. `StoredSeedShape` describes the
+   * skeleton: header, ON CONFLICT clause, tail, tuple COUNT. None of those
+   * moves when a tuple's VALUES change — and for the corpus this exists for,
+   * changing values while keeping the count is the ORDINARY edit: the template
+   * seed is 543 rows keyed by slug, and regenerating it after a design change
+   * rewrites `schema` and `design_meta` on rows whose slugs, count and
+   * trailing UPDATE are identical.
+   *
+   * Honouring a cursor across that skips `statementsDone` chunks of the NEW
+   * body, leaves the clone holding the OLD rows for that prefix, sends only
+   * the remainder, and records the migration as applied — a permanently
+   * half-updated catalogue with nothing reporting it. Worse where tuple sizes
+   * changed, because the chunk boundaries are byte-based, so chunk N of the
+   * new body is not the same rows as chunk N of the old one and some rows are
+   * never sent at all. Raised by review.
+   *
+   * Optional because a cursor written before this existed carries none — see
+   * `applyOversizeSeed`, which refuses such a cursor rather than trusting it.
+   */
+  bodySha?: string;
+  /**
    * Absent on a cursor written before this existed, and on one whose shape
    * could not be narrowed. Absent means "read the file again", which is what
    * every pass did until now — so the worst case is exactly today's cost.
@@ -110,16 +135,92 @@ function seedShapeFor(raw: unknown): StoredSeedShape | undefined {
 
 export function chunkCursorFor(raw: unknown): StoredChunkCursor | null {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
-  const { migrationId, statementsDone, shape } = raw as Record<string, unknown>;
+  const { migrationId, statementsDone, shape, bodySha } = raw as Record<string, unknown>;
   if (typeof migrationId !== "string" || migrationId.length === 0) return null;
   // `statementsDone` arrives from JSON, so a float or a negative is possible and
   // neither is a count of statements that landed.
   if (typeof statementsDone !== "number" || !Number.isInteger(statementsDone)) return null;
   if (statementsDone < 0) return null;
   const narrowed = seedShapeFor(shape);
-  return narrowed
-    ? { migrationId, statementsDone, shape: narrowed }
-    : { migrationId, statementsDone };
+  /*
+    An empty string is not an identity. It would compare unequal to every real
+    sha and so refuse every cursor, which is safe but turns a legitimate resume
+    into a restart on every pass — the livelock this cursor exists to end.
+    Dropped to `undefined` instead, which is the "written before this existed"
+    reading and is handled explicitly.
+  */
+  const identity = typeof bodySha === "string" && bodySha.length > 0 ? bodySha : undefined;
+  /*
+    Tested against `undefined` rather than for truthiness, and that is not
+    style. Under a truthiness test the `length > 0` above is dead — an empty
+    string is falsy and would be dropped here anyway — so removing the guard
+    changes nothing today and everything the day this line is rewritten to ask
+    whether the key is PRESENT. Found by mutation: the guard was removable with
+    every test still passing.
+  */
+  const base =
+    identity === undefined
+      ? { migrationId, statementsDone }
+      : { migrationId, statementsDone, bodySha: identity };
+  return narrowed ? { ...base, shape: narrowed } : base;
+}
+
+/**
+ * Whether a stored position may be resumed into the body about to be streamed.
+ *
+ * A position is only a position in the body it was taken in. `statementsDone`
+ * says how many chunks of one file have landed; against a DIFFERENT file it is
+ * a number with no meaning, and skipping that many chunks of the new body
+ * leaves the clone holding the OLD rows for that prefix, sends the remainder,
+ * and records the migration as applied — a permanently half-updated catalogue
+ * with nothing reporting it.
+ *
+ * ## Why the shape could not answer this
+ *
+ * `StoredSeedShape` is the skeleton: header, ON CONFLICT clause, tail, tuple
+ * COUNT. None of those moves when a tuple's VALUES change — and for the corpus
+ * this exists for, that is the ORDINARY edit. The template seed is 543 rows
+ * keyed by slug; regenerating it after a design change rewrites `schema` and
+ * `design_meta` on rows whose slugs, count and trailing UPDATE are identical.
+ * The shape check passes and the resume is wrong.
+ *
+ * It is worse than losing the prefix, because the chunk boundaries are
+ * BYTE-based: chunk N of the new body is not the same rows as chunk N of the
+ * old one, so rows can fall between the skipped prefix and the sent remainder
+ * and never be sent at all.
+ *
+ * ## Three readings, and the third is the one to get right
+ *
+ *   * identity available and EQUAL — resume. This is the case the cursor
+ *     exists for and the one that makes a 41 MB seed land at all.
+ *   * identity available and DIFFERENT — do not. Not a refusal and not a hold:
+ *     nothing has been sent yet, so the caller reads the shape fresh and starts
+ *     from statement 0 in the SAME pass. A re-released file is an ordinary
+ *     event, not a fault.
+ *   * identity UNAVAILABLE — resume on the shape alone, which is exactly the
+ *     behaviour that existed before this. A caller that cannot name the body
+ *     gets what it had. Refusing here instead would restart every pass for
+ *     such a caller for ever, which is the livelock the cursor was built to
+ *     end.
+ *
+ * A cursor written before `bodySha` existed carries none, and where THIS pass
+ * CAN name the body it is refused: a position that cannot prove which body it
+ * is into is not one to skip statements on. That costs one restart per clone,
+ * once — the statements re-send for free under the seed's own ON CONFLICT —
+ * and it cannot loop, because the pass that restarts writes a cursor carrying
+ * the identity and the next pass resumes from it.
+ *
+ * Raised by review on #227.
+ */
+export function cursorAppliesToBody(
+  cursor: { migrationId: string; bodySha?: string } | null | undefined,
+  migrationId: string,
+  bodySha: string | null,
+): boolean {
+  if (!cursor) return false;
+  if (cursor.migrationId !== migrationId) return false;
+  if (bodySha === null) return true;
+  return cursor.bodySha === bodySha;
 }
 
 /**

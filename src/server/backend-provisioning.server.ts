@@ -18,7 +18,11 @@ import type { AdminSeedReport } from "./cloneAdminIdentity.pure";
 import type { PrimeBackendSnapshot } from "./prime-backend.server";
 import type { StageName, StageResult } from "./schema-introspection.server";
 import { resolveMissionControlOrigin } from "./missionControlLink.pure";
-import { cursorRanPastEnd, type StoredSeedShape } from "./chunkCursorStore.pure";
+import {
+  cursorAppliesToBody,
+  cursorRanPastEnd,
+  type StoredSeedShape,
+} from "./chunkCursorStore.pure";
 import {
   frontierFromReplay,
   frontierUnreadable,
@@ -2798,6 +2802,8 @@ export type ChunkCursor = {
   migrationId: string;
   statementsDone: number;
   shape?: StoredSeedShape;
+  /** The body this position is into — see `StoredChunkCursor.bodySha`. */
+  bodySha?: string;
 };
 
 export type OversizeApplyOptions = {
@@ -2812,6 +2818,17 @@ export type OversizeApplyOptions = {
   maxStatementBytes?: number;
   /** Where the previous pass stopped, if it stopped inside this migration. */
   cursor?: ChunkCursor | null;
+  /**
+   * The identity of the body `streamSql` will open, if the caller can say.
+   *
+   * Optional because not every caller has one, and the absence is handled
+   * rather than assumed: with no identity the cursor is honoured on its shape
+   * alone, which is exactly the behaviour that existed before this. What the
+   * presence buys is the ability to REFUSE a cursor into a body that has been
+   * re-released — and, on the pass that refuses it, to say so before a single
+   * statement has been sent.
+   */
+  bodyIdentity?: (m: { id: string; name: string }) => string | null;
   /** Called after every statement lands, so the run's heartbeat carries the cursor. */
   onStatementDone?: (progress: {
     migrationId: string;
@@ -2820,6 +2837,12 @@ export type OversizeApplyOptions = {
     label: string;
     /** Written with the cursor, so a pass resumed from it reads the file once. */
     shape: StoredSeedShape;
+    /**
+     * Written with the cursor so the NEXT pass can tell whether the body it is
+     * about to resume into is the one this position was taken in. Undefined
+     * where the caller could not say, which is the pre-existing behaviour.
+     */
+    bodySha?: string;
   }) => Promise<void>;
 };
 
@@ -2867,7 +2890,26 @@ async function applyChunkedSeed(
   const { readSeedShape, chunkSeedStatements, SeedShapeError } =
     await import("./seedChunking.pure");
   const maxStatementBytes = oversize.maxStatementBytes ?? DEFAULT_SEED_STATEMENT_BYTES;
-  const skip = oversize.cursor?.migrationId === m.id ? oversize.cursor.statementsDone : 0;
+  /*
+    A POSITION IS ONLY A POSITION IN THE BODY IT WAS TAKEN IN, and the shape
+    cannot tell one body from another — rewriting every tuple's VALUES moves
+    neither the header, the ON CONFLICT clause, the tail nor the COUNT, and for
+    this corpus that is the ORDINARY edit. `cursorAppliesToBody` is the one
+    statement of the rule, including what to do when nobody can name the body;
+    its header carries the reasoning and the cost of each reading. Raised by
+    review.
+  */
+  const bodySha = oversize.bodyIdentity?.(m) ?? null;
+  /*
+    Spread rather than assigned, so a caller that cannot name the body writes
+    a cursor with no `bodySha` KEY rather than one with an explicit undefined.
+    The two are the same to TypeScript and different to `JSON.stringify`, and
+    this value goes into a jsonb column where an explicit null would read as
+    "this body has no identity" rather than "nobody said".
+  */
+  const identityOf = () => (bodySha === null ? {} : { bodySha });
+  const cursorIsForThisBody = cursorAppliesToBody(oversize.cursor, m.id, bodySha);
+  const skip = cursorIsForThisBody ? (oversize.cursor?.statementsDone ?? 0) : 0;
   let index = 0;
   let applied = 0;
   let slowestMs = 0;
@@ -2889,8 +2931,7 @@ async function applyChunkedSeed(
 
     `cursorShape` is what tells the catch below WHICH kind of mismatch it was.
   */
-  const cursorShape =
-    oversize.cursor?.migrationId === m.id ? (oversize.cursor.shape ?? null) : null;
+  const cursorShape = cursorIsForThisBody ? (oversize.cursor?.shape ?? null) : null;
   // Declared out here so the refusal branches below can record it: a pass that
   // read the file and then lost the stream still knows the shape, and writing
   // it means the retry does not pay for that reading a second time.
@@ -2910,7 +2951,7 @@ async function applyChunkedSeed(
         return {
           applied,
           stoppedEarly: true,
-          cursor: { migrationId: m.id, statementsDone: index, shape },
+          cursor: { migrationId: m.id, statementsDone: index, shape, ...identityOf() },
           upstreamRefusal: null,
         };
       }
@@ -2925,6 +2966,7 @@ async function applyChunkedSeed(
         statementsDone: index,
         label: stmt.label,
         shape,
+        ...identityOf(),
       });
     }
   } catch (e) {
@@ -2985,7 +3027,23 @@ async function applyChunkedSeed(
         // spelling of absence in a column two readers narrow.
         cursor:
           applied > 0
-            ? { migrationId: m.id, statementsDone: index, shape: shape ?? undefined }
+            ? {
+                migrationId: m.id,
+                statementsDone: index,
+                shape: shape ?? undefined,
+                /*
+                  The identity too, and it was missing here while the other
+                  three sites carried it — found by the test that asserts every
+                  minted cursor has one, not by reading this branch.
+
+                  Without it this branch preserves a position the NEXT pass must
+                  refuse, because a cursor that cannot name its body is not one
+                  to skip statements on. That is the progress this branch exists
+                  to keep, thrown away — and thrown away again on every refusal
+                  after it, since each writes another identity-less cursor.
+                */
+                ...identityOf(),
+              }
             : null,
         upstreamRefusal: e instanceof Error ? e.message : String(e),
       };
@@ -3013,7 +3071,7 @@ async function applyChunkedSeed(
     return {
       applied: 0,
       stoppedEarly: true,
-      cursor: { migrationId: m.id, statementsDone: 0 },
+      cursor: { migrationId: m.id, statementsDone: 0, ...identityOf() },
       upstreamRefusal: null,
     };
   }

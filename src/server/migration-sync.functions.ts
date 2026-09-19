@@ -340,7 +340,14 @@ export const syncCloneMigrations = createServerFn({ method: "POST" })
           // And the same stream. A body past the corpus ceiling used to make
           // this button report "Migration failed at <the 39 MB seed>" — the
           // one migration an operator is most likely to press it FOR.
-          { streamSql: (m) => corpus.openSqlStream(m.id) },
+          {
+            streamSql: (m) => corpus.openSqlStream(m.id),
+            // This route sends in one go and writes no cursor, so the identity
+            // buys nothing here and costs nothing either. Supplied so the two
+            // callers cannot drift into disagreeing about which body a stream
+            // is of.
+            bodyIdentity: (m) => corpus.bodyIdentity(m.id),
+          },
         );
 
         const successes = results.filter((r) => r.success && !r.skipped);

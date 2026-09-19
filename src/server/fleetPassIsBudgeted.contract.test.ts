@@ -900,7 +900,15 @@ describe("what a pass stopped inside is resumable", () => {
   it("writes the cursor on EVERY statement, not at the end of a pass", () => {
     const cb = lane.indexOf("onStatementDone:");
     expect(cb).toBeGreaterThan(-1);
-    const body = lane.slice(cb, cb + 700);
+    /*
+      Sized to the callback's own update rather than to a byte count. A fixed
+      700 went stale the moment a field was added above `console.error`, and the
+      failure was about the window rather than about the rule — the third time
+      that has happened in these files.
+    */
+    const cbEnd = lane.indexOf("if (!beat || beat.length === 0)", cb);
+    expect(cbEnd, "could not find the end of onStatementDone").toBeGreaterThan(cb);
+    const body = lane.slice(cb, cbEnd);
     expect(body).toContain('.from("clone_backends")');
     expect(body).toMatch(/chunk_cursor: \{[\s\S]{0,200}?migrationId: p\.migrationId/);
     expect(body).toMatch(/chunk_cursor: \{[\s\S]{0,200}?statementsDone: p\.statementsDone/);
@@ -925,6 +933,107 @@ describe("what a pass stopped inside is resumable", () => {
     expect(lane).toContain("successes.some((r) => r.id === storedCursor.migrationId)");
     expect(lane).toMatch(/chunkCursor !== null\s*\?\s*\{ chunk_cursor: chunkCursor \}/);
     expect(lane).toMatch(/cursorFileLanded\s*\?\s*\{ chunk_cursor: null \}\s*:\s*\{\}/);
+  });
+
+  it("names the BODY the cursor is into, so a re-released file is not resumed", () => {
+    /*
+      `statementsDone` is a count of chunks of ONE file. The shape check cannot
+      tell a re-released body from the one the position was taken in — the
+      template seed is 543 rows keyed by slug, and regenerating it rewrites
+      `schema` and `design_meta` while the header, ON CONFLICT clause, tail and
+      tuple COUNT all stay put — so without an identity the pass skips the
+      prefix of the NEW body, leaves the OLD rows standing for it, and records
+      the migration as applied. Raised by review on #227.
+
+      Asserted on the lane rather than only on the replay, because the replay's
+      check is inert if nobody hands it a `bodyIdentity`.
+    */
+    expect(lane).toContain("bodyIdentity: (m) => corpus.bodyIdentity(m.id)");
+    // And it has to be WRITTEN, or the next pass has nothing to compare and the
+    // refusal below restarts the seed on every single pass.
+    const cb = lane.indexOf("onStatementDone:");
+    expect(cb).toBeGreaterThan(-1);
+    const write = lane.slice(cb, lane.indexOf('.eq("clone_id", cloneId)', cb));
+    expect(write).toMatch(/chunk_cursor: \{[\s\S]*?bodySha: p\.bodySha/);
+    /*
+      Spread, not assigned. `undefined` and an absent key are the same to
+      TypeScript and different in the jsonb this lands in, where an explicit
+      null would read as "this body HAS no identity" rather than "nobody said" —
+      and those two send the next pass to opposite behaviours.
+    */
+    expect(write).toMatch(/\.\.\.\(p\.bodySha === undefined \? \{\} : \{ bodySha: p\.bodySha \}\)/);
+  });
+
+  it("decides the resume through ONE rule, and both of its readers use it", () => {
+    const replay = code(read("src/server/backend-provisioning.server.ts"));
+    /*
+      `skip` and `cursorShape` both have to answer "is this cursor this body's?",
+      and two spellings of that is how one of them comes to say yes where the
+      other says no — a pass that skips the prefix of a body whose shape it then
+      re-reads from scratch, or the reverse.
+    */
+    expect(replay).toContain(
+      "const cursorIsForThisBody = cursorAppliesToBody(oversize.cursor, m.id, bodySha);",
+    );
+    expect(replay).toMatch(/const skip = cursorIsForThisBody \?/);
+    expect(replay).toMatch(/const cursorShape =\s*cursorIsForThisBody \?/);
+    // The rule itself is pure and behaviourally tested — see
+    // `chunkCursorStore.pure.test.ts`. What is asserted HERE is that the replay
+    // does not grow a second copy of it.
+    expect(replay).not.toMatch(/oversize\.cursor\?\.bodySha === bodySha/);
+    expect(replay).not.toMatch(/oversize\.cursor\?\.migrationId === m\.id/);
+  });
+
+  it("puts the identity on every cursor it produces, not just the one it reads", () => {
+    const replay = code(read("src/server/backend-provisioning.server.ts"));
+    /*
+      A pass that resumes correctly and then writes a cursor with NO identity
+      hands the next pass a position it must refuse — a restart every pass, for
+      ever, which is the livelock the cursor exists to end.
+
+      Enumerated rather than listed, because listing them is how one is missed:
+      this assertion found the upstream-refusal branch, which mints a cursor to
+      preserve the statements that landed before the prime's body went
+      unreadable and was the one site of four without an identity. Judged on
+      comment-stripped source, so a comment naming the helper cannot satisfy it.
+    */
+    const fn = (() => {
+      const at = replay.indexOf("async function applyChunkedSeed");
+      expect(at, "applyChunkedSeed not found").toBeGreaterThan(-1);
+      const to = replay.indexOf("\nasync function ", at + 1);
+      expect(to, "no function after applyChunkedSeed").toBeGreaterThan(at);
+      return replay.slice(at, to);
+    })();
+    const sites: number[] = [];
+    for (
+      let i = fn.indexOf("migrationId: m.id");
+      i > -1;
+      i = fn.indexOf("migrationId: m.id", i + 1)
+    ) {
+      sites.push(i);
+    }
+    // Four: the budget pause, the per-statement progress, the upstream refusal,
+    // and the ran-past-end reset. If a fifth appears this fails and is read.
+    expect(sites, "the cursor-minting sites in applyChunkedSeed").toHaveLength(4);
+    for (const at of sites) {
+      // `identityOf()` before the object it is in closes. The window is the
+      // object, not a byte count — a field added above it must not make this
+      // pass by accident or fail for the wrong reason.
+      const object = fn.slice(at, fn.indexOf("}", fn.indexOf("...identityOf()", at)) + 1);
+      expect(object, `no identity on the cursor at offset ${at}`).toContain("...identityOf()");
+      expect(object.indexOf("...identityOf()")).toBeGreaterThan(-1);
+    }
+    /*
+      And the helper answers "nobody could name it" with an EMPTY object rather
+      than an explicit undefined. Matched on the shape of that decision, not on
+      its spelling: `{ bodySha: undefined }` and `{}` serialise identically
+      through `JSON.stringify`, so no behavioural test can tell them apart here
+      and an assertion on the exact characters would oppose a reformat rather
+      than a regression. What it is worth pinning is that the null branch
+      produces nothing at all — because the day a reader asks `"bodySha" in
+      cursor` instead of comparing it, the two stop being the same.
+    */
+    expect(fn).toMatch(/identityOf = \(\) =>\s*\(?bodySha === null \? \{\} :/);
   });
 
   it("does not count a clone part-way through a seed as already level", () => {

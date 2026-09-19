@@ -1181,6 +1181,17 @@ export async function runFleetMigrationSync(
         {
           streamSql: (m) => corpus.openSqlStream(m.id),
           /*
+            AND WHICH BODY THAT STREAM WILL OPEN.
+
+            The corpus already knows: every entry came from a git tree listing,
+            and a blob sha IS the content. Handing it down is what lets the
+            cursor below be refused when the file it names has been re-released
+            since the position in it was taken — which the shape cannot detect,
+            because rewriting every tuple's VALUES moves neither the header, the
+            ON CONFLICT clause, the tail nor the COUNT.
+          */
+          bodyIdentity: (m) => corpus.bodyIdentity(m.id),
+          /*
             THE CURSOR IS THE DIFFERENCE BETWEEN SLOW AND NEVER.
 
             Read from the clone's own row and written on EVERY statement, not
@@ -1190,9 +1201,10 @@ export async function runFleetMigrationSync(
             what this lane had, and why the seed could not land however many
             times it was tried.
 
-            The stamp is checked against the migration it names before it is
-            believed: a cursor into a DIFFERENT file would make this pass skip
-            statements of the seed it is actually sending.
+            The stamp is checked against the migration it names AND against
+            the body's own sha before it is believed: a cursor into a different
+            file — or into an older release of the same file — would make this
+            pass skip statements of the seed it is actually sending.
           */
           cursor: chunkCursorFor(backend.chunk_cursor),
           onStatementDone: async (p) => {
@@ -1206,6 +1218,14 @@ export async function runFleetMigrationSync(
                   migrationId: p.migrationId,
                   statementsDone: p.statementsDone,
                   shape: p.shape,
+                  /*
+                    Spread rather than assigned. `undefined` and an absent key
+                    are the same to TypeScript and different to the jsonb this
+                    lands in, where an explicit null would read as "this body
+                    has no identity" rather than "nobody said" — and the two
+                    send the next pass to opposite behaviours.
+                  */
+                  ...(p.bodySha === undefined ? {} : { bodySha: p.bodySha }),
                 },
                 status_detail: `Sending ${p.name} — ${p.statementsDone} statement(s) in (${p.label})`,
                 /*
