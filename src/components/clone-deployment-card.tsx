@@ -14,7 +14,7 @@ import {
   resyncCloneDeploymentEnv,
   retryCloneDeployment,
 } from "@/server/deployment-provisioning.functions";
-import { bundleIdentityReading } from "@/server/hosting/deployedBundleIdentity.pure";
+import { bundleIdentityReading } from "@/lib/bundleIdentityReading.pure";
 
 type Reading = {
   reading: string;

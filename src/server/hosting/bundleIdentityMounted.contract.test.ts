@@ -93,6 +93,41 @@ describe("the verdict reaches an operator", () => {
     expect(CARD).toContain("bundle_identity");
   });
 
+  /**
+   * The reading has to live where a component may import it.
+   *
+   * `@tanstack/start-plugin-core`'s import-protection plugin denies every path
+   * under `src/server` to the client environment, and ONLY the bundler can see
+   * that: the first version of this card imported the reading from
+   * `@/server/hosting/deployedBundleIdentity.pure`, which typechecked, linted
+   * and passed 4,225 tests — and failed the production build with
+   * `[import-protection] Import denied in client environment`.
+   *
+   * `provisioningReadinessMounted.test.ts` already records the rule for a
+   * different module: "a component importing the VALUE fails the build; one
+   * keeping its own copy drifts." Stated here as well, because the build is
+   * a 25-second bundle in CI and this is a grep — and because the copy is the
+   * tempting repair.
+   */
+  it("imports the reading from a module the client bundle may reach", () => {
+    const CARD = stripComments(read("src", "components", "clone-deployment-card.tsx"));
+    const importLine = CARD.split("\n").find((l) => l.includes("bundleIdentityReading"));
+    expect(importLine).toBeDefined();
+    expect(importLine).not.toMatch(/from\s+["']@\/server\//);
+    expect(CARD).toContain('from "@/lib/bundleIdentityReading.pure"');
+  });
+
+  it("keeps one implementation of it, re-exported rather than copied", () => {
+    const SERVER = stripComments(read("src", "server", "hosting", "deployedBundleIdentity.pure.ts"));
+    // The server module must not carry its own copy: two readings of one
+    // verdict is how a card and an audit row come to disagree about what a
+    // deployment is doing.
+    expect(SERVER).not.toMatch(/export function bundleIdentityReading/);
+    expect(SERVER).toMatch(
+      /export \{ bundleIdentityReading \} from "@\/lib\/bundleIdentityReading\.pure"/,
+    );
+  });
+
   it("and draws it for a deployment that has never been probed", () => {
     const CARD = stripComments(read("src", "components", "clone-deployment-card.tsx"));
     const at = CARD.indexOf("bundleIdentityReading");
