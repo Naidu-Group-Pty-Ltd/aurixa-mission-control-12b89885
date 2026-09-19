@@ -431,6 +431,33 @@ export async function provisionCloneCore(
     });
     if (!declared.ok) {
       console.error("[provisionClone] backend-deployer variable not written:", declared.error);
+      // Reported, not just logged. `githubAppCapability.pure.ts` was written
+      // for this exact call site and says so in its header: measured 2 Sep
+      // 2026 on `npc-client-dashboard`, Mission Control called this, the
+      // variable was never set, and EVERY ONE of that workflow's 31 runs
+      // failed — "its result was DISCARDED at the call site, so the only
+      // trace was a line in a log nobody reads. A fleet-wide capability gap
+      // looked exactly like nothing happening."
+      //
+      // The consequence is specific and permanent: `deploy-supabase-functions`
+      // requires either a deploy token this clone is deliberately not given or
+      // this variable, so without it the clone's repository shows a red check
+      // on every push, for ever. The workflow's own header names what that
+      // costs — it "trains people to ignore a red check that still matters on
+      // the prime".
+      //
+      // The message is `declared.error` verbatim: it already distinguishes a
+      // refusal GitHub gave from a write that returned cleanly and could not
+      // be read back, and those are different remedies.
+      await warnOnClone(
+        supabase,
+        inserted.id,
+        `Deploy check will fail on every push: ${data.name}`,
+        `Mission Control could not declare itself this repository's backend deployer, so ` +
+          `its "Deploy Supabase functions" workflow has no way to stand down and will fail ` +
+          `on every push to main: ${declared.error}`,
+        "backend_deployer_variable",
+      );
     }
   }
 

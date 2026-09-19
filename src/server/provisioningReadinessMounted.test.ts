@@ -181,6 +181,27 @@ describe("a clone's own credentials are armed by the act that creates it", () =>
     expect(WIZARD.slice(Math.max(0, call - 400), call)).toContain("try {");
   });
 
+  /**
+   * The one `githubAppCapability.pure.ts` was written for, and the one its
+   * header says went unfixed: "its result was DISCARDED at the call site, so
+   * the only trace was a line in a log nobody reads."
+   *
+   * Without `BACKEND_DEPLOYED_BY` the clone's `deploy-supabase-functions`
+   * workflow has no way to stand down — it requires either a deploy token the
+   * clone is deliberately not given, or that variable — so the repository
+   * shows a red check on every push, for ever. Measured 2 Sep 2026 on
+   * `npc-client-dashboard`: 31 of 31 runs failed. Measured again 19 Sep 2026
+   * on `npc-crm-independent-6505dc`: 3 of 3, including the merge that carried
+   * its three CRM edge functions, which is why none of them is deployed.
+   */
+  it("reports a failed backend-deployer declaration instead of logging it", () => {
+    const call = CORE.indexOf("declareMissionControlDeploysBackend(");
+    expect(call, "the declaration must be made").toBeGreaterThan(-1);
+    const after = CORE.slice(call, call + 2000);
+    expect(after).toMatch(/if\s*\(!declared\.ok\)/);
+    expect(after, "a console line is not a report").toContain("warnOnClone(");
+  });
+
   it.each(["enqueueCloneBackendProvisioning", "advanceEmailIdentity"])(
     "does not let %s fail the provisioning run, and says so when it fails",
     (fn) => {
