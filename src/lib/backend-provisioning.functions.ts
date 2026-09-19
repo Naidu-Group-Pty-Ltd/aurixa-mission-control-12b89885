@@ -2,6 +2,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { requireAdmin } from "@/integrations/supabase/role-middleware";
+import { asJson } from "@/lib/json-cast";
 // Type-only: erased at build, so the server module never reaches the client bundle.
 import type { ApplyAllowedOriginsResult } from "@/server/cloneAllowedOrigins.server";
 
@@ -652,6 +653,20 @@ async function runBackendProvisioning(
         status: "ready" as const,
         // The schema build is done; a later re-provision starts from the top.
         resume_stage: null,
+        // Whether anybody can actually sign in, kept rather than narrated.
+        //
+        // `seedAdminUser` verifies its own work against the clone's store — a
+        // real bcrypt check, not "the insert returned no error" — and that
+        // report reached `status_detail` and nowhere else, which the line
+        // below overwrites in the same run. It is the same defect the
+        // replication blocks were given a home for, on the one question that
+        // decides whether the clone is usable at all.
+        //
+        // A pass that did not seed leaves it alone: `adminSeed` is null on a
+        // repair (which must not touch a tenant's credential) and on a resume
+        // that re-entered after this step, and writing null there would erase
+        // a true reading with the absence of a new one.
+        ...(result.adminSeed ? { admin_seed: asJson(result.adminSeed) } : {}),
         // The per-item replication results travel WITH the parity report.
         //
         // `runBackendProvisioning` has always returned `cronJobs` and

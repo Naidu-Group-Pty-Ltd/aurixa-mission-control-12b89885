@@ -606,4 +606,17 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260919061500",
     assertions: [{ kind: "column", table: "clone_backends", column: "schema_verified_at" }],
   },
+  {
+    migration: "20260919100000_clone_deployment_bundle_identity.sql",
+    version: "20260919100000",
+    assertions: [
+      { kind: "column", table: "clone_deployments", column: "bundle_identity" },
+      { kind: "column", table: "clone_deployments", column: "bundle_identity_detail" },
+      { kind: "column", table: "clone_deployments", column: "bundle_checked_at" },
+      { kind: "column", table: "clone_deployments", column: "bundle_artefact" },
+      { kind: "column", table: "clone_deployments", column: "bundle_resync_artefact" },
+      { kind: "column", table: "clone_backends", column: "admin_seed" },
+      { kind: "enum", type: "notification_kind" },
+    ],
+  },
 ];

@@ -264,6 +264,60 @@ export async function provisionCloneCore(
     });
   }
 
+  // ─── Entitlements, for the plan the operator actually picked ─────────────
+  //
+  // The wizard writes `clones.entitled_plan_slug` and the picked
+  // `clone_modules` rows, and until now that was the end of it: nothing
+  // resolved the plan into `entitlement_keys`, and nothing installed the
+  // modules the PLAN entitles as opposed to the ones that were ticked. The
+  // 2-minute entitlement drain claims `plan_change_events` rows, which
+  // provisioning has never written — so a wizard-created clone was the only
+  // route that skipped it. The agreement path (`agreement-provisioning.server`)
+  // has always reconciled at creation; this is the same call, from the other
+  // door.
+  //
+  // Non-fatal on purpose, and loudly recorded. A clone with a repository, a
+  // backend and an unreconciled entitlement set is a clone an operator can
+  // repair in one click; a clone whose creation threw after the repository
+  // existed is one somebody has to unpick by hand.
+  if (data.planSlug) {
+    try {
+      const { reconcileCloneEntitlements } = await import("./entitlement-modules.server");
+      const recon = await reconcileCloneEntitlements({
+        supabase,
+        options: {
+          cloneId: inserted.id,
+          planSlug: data.planSlug,
+          fromPlanSlug: null,
+          direction: "initial",
+          userId,
+        },
+      });
+      if (!recon.ok) {
+        console.error("[provisionCloneCore] initial entitlement reconcile failed", {
+          cloneId: inserted.id,
+          error: recon.error,
+        });
+        await supabase.from("notifications").insert({
+          kind: "clone_created",
+          severity: "warning",
+          title: `Entitlements not applied: ${data.name}`,
+          body:
+            `The clone was created on plan "${data.planSlug}" and its entitlement set could ` +
+            `not be resolved: ${recon.error}. Re-run the reconcile from the clone's page.`,
+          clone_id: inserted.id,
+          url: `/clones/${inserted.id}`,
+          metadata: { stage: "entitlements", plan_slug: data.planSlug },
+        });
+      }
+    } catch (e) {
+      console.error("[provisionCloneCore] initial entitlement reconcile threw", {
+        cloneId: inserted.id,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+
   // Install picked modules
   if (data.moduleIds.length > 0) {
     await supabase.from("clone_modules").insert(
