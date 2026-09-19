@@ -619,8 +619,27 @@ describe("a pass is bounded", () => {
       Written as a count because the property is exclusivity, not the identity
       of any one site.
     */
-    const writes = lane.split("migration_heartbeat_at:").length - 1;
-    expect(writes, "a second heartbeat writer bypasses the database's maximum").toBe(1);
+    /*
+      A WRITE ASSIGNS A VALUE; A TYPE ANNOTATION DOES NOT.
+
+      This counted every occurrence of the token, which was the same number
+      until the ordering gained a row type that has to NAME the column to sort
+      on it. Counting a declaration as a writer would have made adding the
+      fairness key look like reintroducing the reordering — a true property
+      reported by a test that had stopped measuring it.
+
+      So the match requires a value, and the type keywords are excluded by
+      name rather than by a general rule: a new writer whose value happens to
+      begin with one of these three words is a shape this file does not have,
+      and narrowing further would start excluding real writes.
+    */
+    const named = lane.split("\n").filter((l) => l.includes("migration_heartbeat_at:"));
+    const writes = named.filter((l) => !/migration_heartbeat_at:\s*(string|number|Date)\b/.test(l));
+    expect(writes.length, "a second heartbeat writer bypasses the database's maximum").toBe(1);
+    // And the declaration the exclusion covers is a single named type, so it
+    // cannot grow a second copy that hides a write behind the same words.
+    const decls = lane.split("migration_heartbeat_at: string | null").length - 1;
+    expect(decls, "the ordering row's shape is declared more than once").toBe(1);
   });
 
   it("stops beating when the claim is gone, rather than saying a pass owns what it does not", () => {
