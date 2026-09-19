@@ -82,6 +82,21 @@ describe("the boundaries", () => {
     expect(allowedApplyOrigins("")).not.toContain("");
   });
 
+  it("ships no development origin in the production default list", () => {
+    // `allowedApplyOrigins` APPENDS the configured value to the defaults
+    // rather than replacing them, so anything left in here is an origin no
+    // deployment can configure out. That is the whole reason this list is
+    // production-only: a dev server is reached by setting
+    // `BUILDER_APPLY_ALLOWED_ORIGINS`, which is removable.
+    for (const origin of DEFAULT_APPLY_ORIGINS) {
+      expect(origin, origin).toMatch(/^https:\/\//);
+      expect(origin, origin).not.toMatch(/localhost|127\.0\.0\.1|\[::1\]|\.local(?::|$)/i);
+    }
+    // And the rule holds through the accessor, not just the constant.
+    expect(originIsAllowed("http://localhost:3000")).toBe(false);
+    expect(originIsAllowed("http://localhost:3000", "http://localhost:3000")).toBe(true);
+  });
+
   it("never answers a wildcard to an allow-listed endpoint", () => {
     // `Access-Control-Allow-Origin: *` on an endpoint with an allow-list has
     // allowed everything the list refuses.
