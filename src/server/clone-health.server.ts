@@ -29,16 +29,68 @@ async function writeSnapshot(
   supabase: SupabaseLike,
   cloneId: string,
   payload: CloneHealth,
+  probedAt: string,
 ): Promise<void> {
-  await supabase.from("clone_health_snapshots").upsert(
+  const { error } = await supabase.from("clone_health_snapshots").upsert(
     {
       clone_id: cloneId,
       payload: payload as unknown as Json,
-      probed_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
+      probed_at: probedAt,
+      updated_at: probedAt,
     },
     { onConflict: "clone_id" },
   );
+  // Best-effort is not silent. A cache that has been failing to write for a
+  // month serves a stale reading and says nothing, which is the whole class of
+  // defect this area is being repaired for.
+  if (error) console.warn("[clone-health] snapshot write failed:", error.message);
+}
+
+/**
+ * The same probe, appended to the series — but only from the scheduled pass.
+ *
+ * THIS IS THE ONLY MODULE THAT KNOWS THE PAYLOAD'S SHAPE, and that is the
+ * point. Every reader of uptime used to reach into the blob for
+ * `payload.status ?? payload.health` — keys `CloneHealth` has never carried,
+ * because the status is nested under `uptime` — so the SLO page rendered
+ * 0.00% across a fleet that was up on HTTP 200 in under 50 ms. Extracting the
+ * three facts here means nothing downstream can misread a shape it never sees.
+ *
+ * AN UPTIME SLO IS ONLY MEANINGFUL OVER A REGULAR CADENCE. Three of this
+ * function's callers probe on demand: the clone health card's Refresh, the
+ * `/health` dashboard, and a forced fleet walk. Those are real probes, and
+ * they are taken at moments a PERSON chose — which in practice means when
+ * somebody already suspected a problem. Folding them into the series would
+ * make "99.9% over thirty days" depend on how worried people were that month,
+ * and there is no way to read such a number back out afterwards.
+ *
+ * So `recordSample` defaults to FALSE and exactly one caller passes it: the
+ * five-minute cron. That is also why `clone_health_history` carries no INSERT
+ * policy — the only writer is the service role, which makes the cadence an
+ * access control rather than a convention.
+ *
+ * Best-effort, like the cache and separately from it: a probe cannot land in
+ * one and not the other by accident, and a failure in one must not lose the
+ * other. A missing sample is a gap in a series rather than a wrong reading
+ * in it.
+ */
+async function writeHistory(
+  supabase: SupabaseLike,
+  cloneId: string,
+  payload: CloneHealth,
+  probedAt: string,
+): Promise<void> {
+  const { error } = await supabase.from("clone_health_history").insert({
+    clone_id: cloneId,
+    probed_at: probedAt,
+    status: payload.uptime.status,
+    http_status: payload.uptime.httpStatus,
+    latency_ms: payload.uptime.latencyMs,
+  });
+  // Likewise. Every history write failing would leave the SLO page empty with
+  // nothing anywhere saying why — an empty series and a series nobody could
+  // write are the two states this whole change exists to keep apart.
+  if (error) console.warn("[clone-health] history write failed:", error.message);
 }
 
 export type CloneHealth = {
@@ -84,7 +136,16 @@ async function pingDeploy(url: string): Promise<{
 export async function getCloneHealth(
   supabase: SupabaseLike,
   cloneId: string,
-  opts: { skipCache?: boolean } = {},
+  opts: {
+    skipCache?: boolean;
+    /**
+     * Append this probe to the uptime series.
+     *
+     * Default false. Only the five-minute scheduled pass sets it — see
+     * `writeHistory` for why an on-demand probe must not join the series.
+     */
+    recordSample?: boolean;
+  } = {},
 ): Promise<CloneHealth> {
   if (!opts.skipCache) {
     const cached = await readCachedCloneHealth(supabase, cloneId);
@@ -214,11 +275,22 @@ export async function getCloneHealth(
     aiSummary,
   };
 
-  // Best-effort cache write — failure here must not break the dashboard.
+  // Best-effort, and separately so: one probe, two records, neither of which
+  // may break the dashboard and neither of which may take the other down with
+  // it. They share one `probed_at` so the cache and the series can never
+  // disagree about when this reading was taken.
+  const probedAt = new Date().toISOString();
   try {
-    await writeSnapshot(supabase, cloneId, result);
+    await writeSnapshot(supabase, cloneId, result, probedAt);
   } catch {
     // ignore
+  }
+  if (opts.recordSample) {
+    try {
+      await writeHistory(supabase, cloneId, result, probedAt);
+    } catch {
+      // ignore
+    }
   }
 
   return result;

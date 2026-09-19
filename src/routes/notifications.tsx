@@ -54,6 +54,12 @@ import { useBrowserPushSettings } from "@/lib/browser-notifications";
 import { useNotificationPreferences } from "@/lib/notification-preferences";
 import { NotificationListSkeleton } from "@/components/list-skeletons";
 import { EmptyState } from "@/components/empty-state";
+import {
+  INBOX_SCOPE_LABEL,
+  INBOX_SCOPE_NOTE,
+  RECORD_KINDS_FILTER,
+  RECORD_SCOPE_LABEL,
+} from "@/lib/notificationDisposition";
 import { Settings as SettingsIcon, BellMinus } from "lucide-react";
 
 type Notification = Database["public"]["Tables"]["notifications"]["Row"];
@@ -90,6 +96,20 @@ const KIND_VALUES = [
 
 const SEVERITY_VALUES = ["info", "success", "warning", "error"] as const;
 const READ_VALUES = ["all", "unread", "read"] as const;
+
+/*
+  THE INBOX AND THE RECORD ARE THE SAME TABLE, READ TWO WAYS.
+
+  A notification is for something that needs a person; if it needs nobody it is
+  a record. Measured 18 Sep 2026, 79% of 2,459 unread rows were successes or
+  the normal operating state of a working pipeline, which is how the channel
+  that also carries `cascade_blocked` came to be one nobody reads.
+
+  Nothing stopped being written — `CloneActivityHistory` reads this table as a
+  clone's activity feed — so the split is here, and `Everything` is one click
+  away rather than gone.
+*/
+const SCOPE_VALUES = ["attention", "everything"] as const;
 
 const KIND_OPTIONS: { value: Kind | "all"; label: string }[] = [
   { value: "all", label: "All kinds" },
@@ -136,6 +156,7 @@ const searchSchema = z.object({
   severity: fallback(z.enum(["all", ...SEVERITY_VALUES]), "all").default("all"),
   clone: fallback(z.string(), "all").default("all"),
   read: fallback(z.enum(READ_VALUES), "all").default("all"),
+  scope: fallback(z.enum(SCOPE_VALUES), "attention").default("attention"),
   page: fallback(z.number().int().min(0).max(10_000), 0).default(0),
 });
 
@@ -234,7 +255,11 @@ function NotificationsPage() {
       .select("*", { count: "exact" })
       .order("created_at", { ascending: false })
       .range(from, to);
+    // A kind chosen explicitly always wins: an operator who picked "Cascade
+    // completed" has asked for records, and handing them an empty list because
+    // of a default scope would read as a broken page.
     if (search.kind !== "all") q = q.eq("kind", search.kind);
+    else if (search.scope === "attention") q = q.not("kind", "in", RECORD_KINDS_FILTER);
     if (search.severity !== "all") q = q.eq("severity", search.severity);
     if (search.clone !== "all") q = q.eq("clone_id", search.clone);
     if (search.read === "unread") q = q.is("read_at", null);
@@ -273,11 +298,20 @@ function NotificationsPage() {
 
   const unreadOnPage = useMemo(() => items.filter((n) => !n.read_at), [items]);
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  /*
+    SCOPE IS A FILTER, AND THE DEFAULT ONE IS NARROWING.
+
+    `attention` hides the record — 983 of 2,459 unread rows on 18 Sep 2026 —
+    so a confirmation reading "no filters, this will affect every unread
+    notification" would be a false promise on the one control that writes in
+    bulk. It counts as a filter unless the operator has asked for everything.
+  */
   const hasFilters =
     search.kind !== "all" ||
     search.severity !== "all" ||
     search.clone !== "all" ||
-    search.read !== "all";
+    search.read !== "all" ||
+    search.scope !== "everything";
 
   const markAllOnPageRead = async () => {
     const ids = unreadOnPage.map((n) => n.id);
@@ -301,6 +335,10 @@ function NotificationsPage() {
       // Build a query with the same filters PLUS unread, then update.
       let q = supabase.from("notifications").update({ read_at: now }).is("read_at", null);
       if (search.kind !== "all") q = q.eq("kind", search.kind as Kind);
+      // The same scope the page is SHOWING. A bulk mark that reached rows the
+      // operator cannot see would silently clear the record behind their back,
+      // and the confirmation dialog promises "matching the current filters".
+      else if (search.scope === "attention") q = q.not("kind", "in", RECORD_KINDS_FILTER);
       if (search.severity !== "all") q = q.eq("severity", search.severity as Severity);
       if (search.clone !== "all") q = q.eq("clone_id", search.clone);
       // `read === "read"` would zero out the work, so just guard:
@@ -434,7 +472,19 @@ function NotificationsPage() {
             <Filter className="h-3.5 w-3.5 text-muted-foreground" /> Filters
           </CardTitle>
         </CardHeader>
-        <CardContent className="grid gap-3 md:grid-cols-4">
+        <CardContent className="grid gap-3 md:grid-cols-3 lg:grid-cols-5">
+          <Select
+            value={search.scope}
+            onValueChange={(v) => updateFilter({ scope: v as typeof search.scope })}
+          >
+            <SelectTrigger aria-label="Scope">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="attention">{INBOX_SCOPE_LABEL}</SelectItem>
+              <SelectItem value="everything">{RECORD_SCOPE_LABEL}</SelectItem>
+            </SelectContent>
+          </Select>
           <Select
             value={search.kind}
             onValueChange={(v) => updateFilter({ kind: v as typeof search.kind })}
@@ -506,6 +556,11 @@ function NotificationsPage() {
               </Button>
             )}
           </div>
+          {search.scope === "attention" && search.kind === "all" && (
+            <p className="text-xs text-muted-foreground md:col-span-3 lg:col-span-5">
+              {INBOX_SCOPE_NOTE}
+            </p>
+          )}
         </CardContent>
       </Card>
 
@@ -643,8 +698,16 @@ function PushControl({ push }: { push: ReturnType<typeof useBrowserPushSettings>
   );
 }
 
-function filterSummary(s: { kind: string; severity: string; clone: string; read: string }): string {
+function filterSummary(s: {
+  kind: string;
+  severity: string;
+  clone: string;
+  read: string;
+  scope: string;
+}): string {
   const parts: string[] = [];
+  // Named first, because it is the one the operator did not choose.
+  if (s.scope !== "everything") parts.push(`scope=${s.scope}`);
   if (s.kind !== "all") parts.push(`kind=${s.kind}`);
   if (s.severity !== "all") parts.push(`severity=${s.severity}`);
   if (s.clone !== "all") parts.push("clone=specific");

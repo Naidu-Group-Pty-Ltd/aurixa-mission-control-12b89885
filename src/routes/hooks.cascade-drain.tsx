@@ -37,9 +37,10 @@ import {
 import { getAppOctokit } from "@/server/github-app.server";
 import { decideSpend } from "@/server/cascade/githubBudget.pure";
 import { readGitHubRemaining } from "@/server/githubAllowance.server";
+import { MAX_ATTEMPTS, STALL_MINUTES } from "@/server/cascade/drainLimits.pure";
 
 const admin = supabaseAdmin;
-const STALL_MINUTES = 10;
+
 const MAX_JOBS_PER_RUN = 3;
 /**
  * Wall clock one invocation may spend on cascades, out of the 60,000 ms the
@@ -50,7 +51,6 @@ const MAX_JOBS_PER_RUN = 3;
  * and the bookkeeping around the run.
  */
 const INVOCATION_BUDGET_MS = 45_000;
-const MAX_ATTEMPTS = 3;
 
 async function reclaimStalled() {
   const cutoff = new Date(Date.now() - STALL_MINUTES * 60 * 1000).toISOString();
@@ -309,10 +309,7 @@ async function claimOne(
   // Ungated first: an approved gated event is the rare case and waits behind
   // the ordinary queue rather than jumping it.
   const selectCandidate = async (approvedGated: boolean) => {
-    let queue = admin
-      .from("cascade_events")
-      .select("id, attempts")
-      .eq("status", "pending");
+    let queue = admin.from("cascade_events").select("id, attempts").eq("status", "pending");
     queue = approvedGated
       ? queue.eq("requires_approval", true).not("approved_at", "is", null)
       : queue.eq("requires_approval", false);

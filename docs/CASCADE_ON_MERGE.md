@@ -4,6 +4,12 @@ Read this before touching `/hooks/github`, `cascade-trigger.server.ts`,
 `processClone` in `cascade-engine.server.ts`, or
 `server/cascade/syncExclusions.pure.ts`.
 
+> This document is a record of forty defects and the rule each one bought —
+> written incident by incident, after the fact. Its preemptive counterpart is
+> [`CASCADE_PIPELINE_HEALTH.md`](./CASCADE_PIPELINE_HEALTH.md), which asks
+> what every stall has in common rather than what each one was. Read that one
+> before adding another guard here.
+
 ## The pipeline was never broken. It had nowhere to go.
 
 `/hooks/github` has verified an HMAC signature and accepted every push to

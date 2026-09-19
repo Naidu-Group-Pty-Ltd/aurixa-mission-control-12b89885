@@ -2714,6 +2714,44 @@ export type Database = {
           },
         ]
       }
+      clone_health_history: {
+        Row: {
+          clone_id: string
+          created_at: string
+          http_status: number | null
+          id: string
+          latency_ms: number | null
+          probed_at: string
+          status: string
+        }
+        Insert: {
+          clone_id: string
+          created_at?: string
+          http_status?: number | null
+          id?: string
+          latency_ms?: number | null
+          probed_at?: string
+          status: string
+        }
+        Update: {
+          clone_id?: string
+          created_at?: string
+          http_status?: number | null
+          id?: string
+          latency_ms?: number | null
+          probed_at?: string
+          status?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clone_health_history_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       clone_health_snapshots: {
         Row: {
           clone_id: string
@@ -3350,6 +3388,190 @@ export type Database = {
             isOneToOne: true
             referencedRelation: "clones_missing_isolated_backend"
             referencedColumns: ["clone_id"]
+          },
+        ]
+      }
+      clone_custodial_acts: {
+        Row: {
+          act: string
+          blockage_id: string | null
+          class: string
+          clone_id: string
+          created_at: string
+          detail: string
+          dry_run: boolean
+          id: string
+          outcome: string
+          reversal: Json | null
+          rows_affected: number
+        }
+        Insert: {
+          act: string
+          blockage_id?: string | null
+          class: string
+          clone_id: string
+          created_at?: string
+          detail: string
+          dry_run?: boolean
+          id?: string
+          outcome: string
+          reversal?: Json | null
+          rows_affected?: number
+        }
+        Update: {
+          act?: string
+          blockage_id?: string | null
+          class?: string
+          clone_id?: string
+          created_at?: string
+          detail?: string
+          dry_run?: boolean
+          id?: string
+          outcome?: string
+          reversal?: Json | null
+          rows_affected?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clone_custodial_acts_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "clone_custodial_acts_blockage_id_fkey"
+            columns: ["blockage_id"]
+            isOneToOne: false
+            referencedRelation: "clone_sync_blockages"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      clone_convergence_observations: {
+        Row: {
+          clone_id: string
+          clone_sha: string | null
+          compared_count: number
+          created_at: string
+          deletion_candidates: number
+          held_count: number
+          id: string
+          last_converged_at: string | null
+          observed_at: string
+          oversize_held: number
+          owed_count: number
+          owed_fingerprint: string | null
+          owed_sample: string[]
+          prime_sha: string | null
+          scope: string | null
+          slo_minutes: number | null
+          state: string
+          unchanged_since: string | null
+          why: string | null
+        }
+        Insert: {
+          clone_id: string
+          clone_sha?: string | null
+          compared_count?: number
+          created_at?: string
+          deletion_candidates?: number
+          held_count?: number
+          id?: string
+          last_converged_at?: string | null
+          observed_at?: string
+          oversize_held?: number
+          owed_count?: number
+          owed_fingerprint?: string | null
+          owed_sample?: string[]
+          prime_sha?: string | null
+          scope?: string | null
+          slo_minutes?: number | null
+          state: string
+          unchanged_since?: string | null
+          why?: string | null
+        }
+        Update: {
+          clone_id?: string
+          clone_sha?: string | null
+          compared_count?: number
+          created_at?: string
+          deletion_candidates?: number
+          held_count?: number
+          id?: string
+          last_converged_at?: string | null
+          observed_at?: string
+          oversize_held?: number
+          owed_count?: number
+          owed_fingerprint?: string | null
+          owed_sample?: string[]
+          prime_sha?: string | null
+          scope?: string | null
+          slo_minutes?: number | null
+          state?: string
+          unchanged_since?: string | null
+          why?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clone_convergence_observations_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      clone_sync_blockages: {
+        Row: {
+          class: string
+          cleared_at: string | null
+          clone_id: string
+          created_at: string
+          detail: string
+          escalated_at: string | null
+          fingerprint: string
+          first_seen_at: string
+          id: string
+          last_seen_at: string
+          owner: string
+          self_heals: boolean
+        }
+        Insert: {
+          class: string
+          cleared_at?: string | null
+          clone_id: string
+          created_at?: string
+          detail: string
+          escalated_at?: string | null
+          fingerprint: string
+          first_seen_at?: string
+          id?: string
+          last_seen_at?: string
+          owner: string
+          self_heals: boolean
+        }
+        Update: {
+          class?: string
+          cleared_at?: string | null
+          clone_id?: string
+          created_at?: string
+          detail?: string
+          escalated_at?: string | null
+          fingerprint?: string
+          first_seen_at?: string
+          id?: string
+          last_seen_at?: string
+          owner?: string
+          self_heals?: boolean
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clone_sync_blockages_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
           },
         ]
       }
@@ -8978,6 +9200,7 @@ export type Database = {
           clone_gate_default_hours: number
           clone_gate_enabled: boolean
           codex_nightly_cron: string
+          convergence_slo_minutes: number
           codex_nightly_enabled: boolean
           codex_post_merge_revalidate: boolean
           codex_pr_scan_enabled: boolean
@@ -8998,6 +9221,7 @@ export type Database = {
           clone_gate_default_hours?: number
           clone_gate_enabled?: boolean
           codex_nightly_cron?: string
+          convergence_slo_minutes?: number
           codex_nightly_enabled?: boolean
           codex_post_merge_revalidate?: boolean
           codex_pr_scan_enabled?: boolean
@@ -9018,6 +9242,7 @@ export type Database = {
           clone_gate_default_hours?: number
           clone_gate_enabled?: boolean
           codex_nightly_cron?: string
+          convergence_slo_minutes?: number
           codex_nightly_enabled?: boolean
           codex_post_merge_revalidate?: boolean
           codex_pr_scan_enabled?: boolean
@@ -12560,6 +12785,27 @@ export type Database = {
           updated_at?: string | null
         }
         Relationships: []
+      }
+      clone_health_daily: {
+        Row: {
+          clone_id: string | null
+          day: string | null
+          down: number | null
+          first_probed_at: string | null
+          last_probed_at: string | null
+          last_status: string | null
+          unmeasured: number | null
+          up: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clone_health_history_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       clones_missing_isolated_backend: {
         Row: {

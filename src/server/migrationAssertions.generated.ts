@@ -554,4 +554,46 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "check", table: "clone_announcements", column: "severity", value: "critical" },
     ],
   },
+  {
+    migration: "20260918140000_convergence_observations.sql",
+    version: "20260918140000",
+    assertions: [
+      { kind: "table", table: "clone_convergence_observations" },
+      { kind: "column", table: "clone_convergence_observations", column: "state" },
+      { kind: "column", table: "clone_convergence_observations", column: "owed_fingerprint" },
+      { kind: "column", table: "clone_convergence_observations", column: "last_converged_at" },
+      { kind: "column", table: "prime_config", column: "convergence_slo_minutes" },
+    ],
+  },
+  {
+    migration: "20260918160000_clone_sync_blockages.sql",
+    version: "20260918160000",
+    assertions: [
+      { kind: "table", table: "clone_sync_blockages" },
+      { kind: "column", table: "clone_sync_blockages", column: "class" },
+      { kind: "column", table: "clone_sync_blockages", column: "owner" },
+      { kind: "column", table: "clone_sync_blockages", column: "self_heals" },
+      { kind: "column", table: "clone_sync_blockages", column: "cleared_at" },
+    ],
+  },
+  {
+    migration: "20260918180000_clone_custodial_acts.sql",
+    version: "20260918180000",
+    assertions: [
+      { kind: "table", table: "clone_custodial_acts" },
+      { kind: "column", table: "clone_custodial_acts", column: "act" },
+      { kind: "column", table: "clone_custodial_acts", column: "outcome" },
+      { kind: "column", table: "clone_custodial_acts", column: "reversal" },
+    ],
+  },
+  {
+    migration: "20260918200000_clone_health_history.sql",
+    version: "20260918200000",
+    assertions: [
+      { kind: "table", table: "clone_health_history" },
+      { kind: "column", table: "clone_health_history", column: "status" },
+      { kind: "column", table: "clone_health_history", column: "probed_at" },
+      { kind: "table", table: "clone_health_daily" },
+    ],
+  },
 ];

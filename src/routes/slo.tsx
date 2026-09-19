@@ -1,4 +1,16 @@
 // Phase 11 — SLO surface: fleet uptime + per-clone breakdown.
+//
+// The reading behind this page was replaced wholesale. It used to be computed
+// from `clone_health_snapshots` — one row per clone, so the window buttons
+// changed nothing — and from a payload key that has never existed, so it drew
+// 0.00% in destructive red across a fleet answering HTTP 200 in under 50 ms.
+//
+// Two things follow for this page rather than for the function behind it. A
+// window ASKED FOR is not a window MEASURED, so the span the evidence actually
+// covers is stated rather than implied by the button that is lit. And a clone
+// with nothing to ping has no uptime rather than none: it reads "not measured"
+// and sorts below every real reading, because an absence is not the worst
+// clone in the fleet.
 import { createFileRoute } from "@tanstack/react-router";
 import { useState, lazy, Suspense } from "react";
 import { useServerFn } from "@tanstack/react-start";
@@ -37,6 +49,7 @@ function SloPage() {
   });
 
   const fleet = slo.data?.ok ? slo.data : null;
+  const sloFailed = slo.data && !slo.data.ok ? slo.data.error : null;
   const series = drift.data?.ok ? drift.data.series : [];
 
   return (
@@ -49,7 +62,7 @@ function SloPage() {
           <p className="label-mono">reliability</p>
           <h1 className="font-display text-[2.125rem] leading-[1.05]">Fleet SLO</h1>
           <p className="text-sm text-muted-foreground">
-            Uptime over the last {days} days from health snapshots.
+            {fleet ? <ObservedSpan fleet={fleet} /> : `Uptime over the last ${days} days.`}
           </p>
         </div>
         <div className="flex gap-1">
@@ -94,7 +107,15 @@ function SloPage() {
               : "muted"
           }
         />
-        <StatCard label="Health samples" value={(fleet?.samplesTotal ?? 0).toLocaleString()} />
+        <StatCard
+          label="Probes measured"
+          value={(fleet?.samplesTotal ?? 0).toLocaleString()}
+          note={
+            fleet && fleet.unmeasuredTotal > 0
+              ? `${fleet.unmeasuredTotal.toLocaleString()} reached no conclusion`
+              : undefined
+          }
+        />
         <StatCard label="Clones tracked" value={(fleet?.clones.length ?? 0).toString()} />
       </div>
 
@@ -103,12 +124,24 @@ function SloPage() {
           <CardTitle className="text-base flex items-center gap-2">
             <Activity className="h-4 w-4" /> Per-clone uptime
           </CardTitle>
-          <CardDescription>Sorted by lowest uptime first — these need attention.</CardDescription>
+          <CardDescription>
+            Lowest uptime first. A clone nothing has measured sorts last — an absence is not the
+            worst clone in the fleet.
+          </CardDescription>
         </CardHeader>
         <CardContent>
-          {!fleet || fleet.clones.length === 0 ? (
+          {sloFailed ? (
+            <div className="space-y-1 border border-dashed p-6 text-center">
+              <p className="text-sm text-warning">The uptime series could not be read.</p>
+              <p className="font-mono text-xs text-muted-foreground">{sloFailed}</p>
+              <p className="text-xs text-muted-foreground">
+                Nothing is claimed about any clone&rsquo;s uptime — a read that did not happen has
+                measured nothing.
+              </p>
+            </div>
+          ) : !fleet || fleet.clones.length === 0 ? (
             <div className="border border-dashed p-6 text-center text-sm text-muted-foreground">
-              No health snapshots in the window.
+              No probes recorded in the window.
             </div>
           ) : (
             <div className="space-y-2">
@@ -120,7 +153,10 @@ function SloPage() {
                   <div className="flex-1 min-w-0">
                     <div className="font-mono text-sm font-semibold truncate">{c.name}</div>
                     <div className="font-mono text-[10px] text-muted-foreground">
-                      {c.samples} samples · last: {c.last_status}
+                      {c.samples.toLocaleString()} measured
+                      {c.unmeasured > 0 ? ` · ${c.unmeasured.toLocaleString()} inconclusive` : ""}
+                      {" · "}
+                      {c.last_status ? `last: ${c.last_status}` : "never probed"}
                     </div>
                   </div>
                   <UptimeBar pct={c.uptime_pct} />
@@ -136,7 +172,7 @@ function SloPage() {
                             : "border-destructive/40 text-destructive"
                     }
                   >
-                    {c.uptime_pct === null ? "n/a" : `${c.uptime_pct}%`}
+                    {c.uptime_pct === null ? "not measured" : `${c.uptime_pct}%`}
                   </Badge>
                 </div>
               ))}
@@ -175,20 +211,52 @@ function SloPage() {
 function StatCard({
   label,
   value,
+  note,
   tone = "muted",
 }: {
   label: string;
   value: string;
+  note?: string;
   tone?: "success" | "warning" | "destructive" | "muted";
 }) {
   return (
     <MetricCell
       label={label}
       value={value}
+      note={note}
       size="sm"
       tone={tone === "muted" ? "neutral" : tone}
       alarm={tone !== "muted"}
     />
+  );
+}
+
+/**
+ * What the evidence actually spans.
+ *
+ * The window buttons choose a QUESTION. Until the probe series is older than
+ * the window, the answer is drawn from less than that — which was true of
+ * every reading this page had ever produced and said nowhere.
+ */
+function ObservedSpan({
+  fleet,
+}: {
+  fleet: { windowDays: number; observedHours: number | null; coversRequestedWindow: boolean };
+}) {
+  if (fleet.observedHours === null) {
+    return <>No probes recorded in the last {fleet.windowDays} days.</>;
+  }
+  if (fleet.coversRequestedWindow) {
+    return <>Uptime over the last {fleet.windowDays} days of probes.</>;
+  }
+  const span =
+    fleet.observedHours < 48
+      ? `${Math.round(fleet.observedHours)} hours`
+      : `${Math.round(fleet.observedHours / 24)} days`;
+  return (
+    <>
+      Uptime over {span} of probes — the series does not yet reach back {fleet.windowDays} days.
+    </>
   );
 }
 

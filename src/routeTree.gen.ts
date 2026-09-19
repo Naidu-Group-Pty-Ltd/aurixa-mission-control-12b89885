@@ -108,6 +108,7 @@ import { Route as HooksCloneJwtSecretReconcileRouteImport } from './routes/hooks
 import { Route as HooksCloneDeployerDeclarationReconcileRouteImport } from './routes/hooks.clone-deployer-declaration-reconcile'
 import { Route as HooksCascadeMergeDrainRouteImport } from './routes/hooks.cascade-merge-drain'
 import { Route as HooksCascadeDrainRouteImport } from './routes/hooks.cascade-drain'
+import { Route as HooksCascadeAuditRouteImport } from './routes/hooks.cascade-audit'
 import { Route as HooksBrandDriftRouteImport } from './routes/hooks.brand-drift'
 import { Route as HooksBackendProvisioningRetryRouteImport } from './routes/hooks.backend-provisioning-retry'
 import { Route as HooksBackendProvisioningRepairRouteImport } from './routes/hooks.backend-provisioning-repair'
@@ -719,6 +720,11 @@ const HooksCascadeDrainRoute = HooksCascadeDrainRouteImport.update({
   path: '/hooks/cascade-drain',
   getParentRoute: () => rootRouteImport,
 } as any)
+const HooksCascadeAuditRoute = HooksCascadeAuditRouteImport.update({
+  id: '/hooks/cascade-audit',
+  path: '/hooks/cascade-audit',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const HooksBrandDriftRoute = HooksBrandDriftRouteImport.update({
   id: '/hooks/brand-drift',
   path: '/hooks/brand-drift',
@@ -1319,6 +1325,7 @@ export interface FileRoutesByFullPath {
   '/hooks/backend-provisioning-repair': typeof HooksBackendProvisioningRepairRoute
   '/hooks/backend-provisioning-retry': typeof HooksBackendProvisioningRetryRoute
   '/hooks/brand-drift': typeof HooksBrandDriftRoute
+  '/hooks/cascade-audit': typeof HooksCascadeAuditRoute
   '/hooks/cascade-drain': typeof HooksCascadeDrainRoute
   '/hooks/cascade-merge-drain': typeof HooksCascadeMergeDrainRoute
   '/hooks/clone-deployer-declaration-reconcile': typeof HooksCloneDeployerDeclarationReconcileRoute
@@ -1518,6 +1525,7 @@ export interface FileRoutesByTo {
   '/hooks/backend-provisioning-repair': typeof HooksBackendProvisioningRepairRoute
   '/hooks/backend-provisioning-retry': typeof HooksBackendProvisioningRetryRoute
   '/hooks/brand-drift': typeof HooksBrandDriftRoute
+  '/hooks/cascade-audit': typeof HooksCascadeAuditRoute
   '/hooks/cascade-drain': typeof HooksCascadeDrainRoute
   '/hooks/cascade-merge-drain': typeof HooksCascadeMergeDrainRoute
   '/hooks/clone-deployer-declaration-reconcile': typeof HooksCloneDeployerDeclarationReconcileRoute
@@ -1719,6 +1727,7 @@ export interface FileRoutesById {
   '/hooks/backend-provisioning-repair': typeof HooksBackendProvisioningRepairRoute
   '/hooks/backend-provisioning-retry': typeof HooksBackendProvisioningRetryRoute
   '/hooks/brand-drift': typeof HooksBrandDriftRoute
+  '/hooks/cascade-audit': typeof HooksCascadeAuditRoute
   '/hooks/cascade-drain': typeof HooksCascadeDrainRoute
   '/hooks/cascade-merge-drain': typeof HooksCascadeMergeDrainRoute
   '/hooks/clone-deployer-declaration-reconcile': typeof HooksCloneDeployerDeclarationReconcileRoute
@@ -1921,6 +1930,7 @@ export interface FileRouteTypes {
     | '/hooks/backend-provisioning-repair'
     | '/hooks/backend-provisioning-retry'
     | '/hooks/brand-drift'
+    | '/hooks/cascade-audit'
     | '/hooks/cascade-drain'
     | '/hooks/cascade-merge-drain'
     | '/hooks/clone-deployer-declaration-reconcile'
@@ -2120,6 +2130,7 @@ export interface FileRouteTypes {
     | '/hooks/backend-provisioning-repair'
     | '/hooks/backend-provisioning-retry'
     | '/hooks/brand-drift'
+    | '/hooks/cascade-audit'
     | '/hooks/cascade-drain'
     | '/hooks/cascade-merge-drain'
     | '/hooks/clone-deployer-declaration-reconcile'
@@ -2320,6 +2331,7 @@ export interface FileRouteTypes {
     | '/hooks/backend-provisioning-repair'
     | '/hooks/backend-provisioning-retry'
     | '/hooks/brand-drift'
+    | '/hooks/cascade-audit'
     | '/hooks/cascade-drain'
     | '/hooks/cascade-merge-drain'
     | '/hooks/clone-deployer-declaration-reconcile'
@@ -2518,6 +2530,7 @@ export interface RootRouteChildren {
   HooksBackendProvisioningRepairRoute: typeof HooksBackendProvisioningRepairRoute
   HooksBackendProvisioningRetryRoute: typeof HooksBackendProvisioningRetryRoute
   HooksBrandDriftRoute: typeof HooksBrandDriftRoute
+  HooksCascadeAuditRoute: typeof HooksCascadeAuditRoute
   HooksCascadeDrainRoute: typeof HooksCascadeDrainRoute
   HooksCascadeMergeDrainRoute: typeof HooksCascadeMergeDrainRoute
   HooksCloneDeployerDeclarationReconcileRoute: typeof HooksCloneDeployerDeclarationReconcileRoute
@@ -3330,6 +3343,13 @@ declare module '@tanstack/react-router' {
       path: '/hooks/cascade-drain'
       fullPath: '/hooks/cascade-drain'
       preLoaderRoute: typeof HooksCascadeDrainRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/cascade-audit': {
+      id: '/hooks/cascade-audit'
+      path: '/hooks/cascade-audit'
+      fullPath: '/hooks/cascade-audit'
+      preLoaderRoute: typeof HooksCascadeAuditRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/hooks/brand-drift': {
@@ -4203,6 +4223,7 @@ const rootRouteChildren: RootRouteChildren = {
   HooksBackendProvisioningRepairRoute: HooksBackendProvisioningRepairRoute,
   HooksBackendProvisioningRetryRoute: HooksBackendProvisioningRetryRoute,
   HooksBrandDriftRoute: HooksBrandDriftRoute,
+  HooksCascadeAuditRoute: HooksCascadeAuditRoute,
   HooksCascadeDrainRoute: HooksCascadeDrainRoute,
   HooksCascadeMergeDrainRoute: HooksCascadeMergeDrainRoute,
   HooksCloneDeployerDeclarationReconcileRoute:

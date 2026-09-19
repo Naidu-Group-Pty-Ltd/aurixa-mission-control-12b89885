@@ -1,5 +1,10 @@
-// Compact "sync status" card: shows the last synced SHA, sync state,
-// commits behind, last cascade run for this clone, and quick retry links.
+// The per-clone "is this in sync" card, and it now carries TWO answers to that
+// one question: the pointer the engine wrote (sync state, commits behind, last
+// synced SHA) and the measurement taken from the two repositories themselves.
+//
+// They are in one card on purpose. Where they disagree, the disagreement is
+// the finding — it is the shape of the 84-commit lie of 16 Sep — and a second
+// card would let an operator read the green pill and stop there.
 import { useEffect, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { supabase } from "@/integrations/supabase/client";
@@ -8,6 +13,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { CopyButton } from "@/components/copy-button";
 import { StatusPill } from "@/components/status-pill";
+import { CloneConvergencePanel } from "@/components/clone-convergence-panel";
 import {
   GitCommit,
   RefreshCw,
@@ -116,7 +122,7 @@ export function CloneSyncStatusCard({ clone }: { clone: Clone }) {
             <GitCommit className="h-4 w-4 text-info" /> Sync status
           </CardTitle>
           <CardDescription>
-            Latest cascade run, current commit pointer, and retry shortcuts.
+            What the repositories measure, the pointer the engine wrote, and the latest cascade run.
           </CardDescription>
         </div>
         <Button variant="ghost" size="sm" onClick={load} disabled={loading}>
@@ -160,6 +166,17 @@ export function CloneSyncStatusCard({ clone }: { clone: Clone }) {
             )}
           </Tile>
         </div>
+
+        {/*
+          THE MEASUREMENT SITS INSIDE THIS CARD, DIRECTLY UNDER THE POINTER.
+
+          The tile above is what the ENGINE wrote: sync_status <- commits_behind
+          <- last_synced_sha <- the merge drain <- the engine. This is what the
+          two repositories actually hold. A separate card would let an operator
+          read the green pill and never reach the reading that contradicts it,
+          and the contradiction is the entire reason the audit exists.
+        */}
+        <CloneConvergencePanel cloneId={clone.id} />
 
         <div className="border border-border bg-surface p-3">
           <div className="mb-2 flex items-center justify-between">
