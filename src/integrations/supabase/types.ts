@@ -1715,6 +1715,7 @@ export type Database = {
           repair_requested_at: string | null
           repo_retarget: Json | null
           resume_stage: string | null
+          schema_verified_at: string | null
           retry_after: string | null
           secret_shells: Json
           service_role_key: string | null
@@ -1754,6 +1755,7 @@ export type Database = {
           repair_requested_at?: string | null
           repo_retarget?: Json | null
           resume_stage?: string | null
+          schema_verified_at?: string | null
           retry_after?: string | null
           secret_shells?: Json
           service_role_key?: string | null
@@ -1793,6 +1795,7 @@ export type Database = {
           repair_requested_at?: string | null
           repo_retarget?: Json | null
           resume_stage?: string | null
+          schema_verified_at?: string | null
           retry_after?: string | null
           secret_shells?: Json
           service_role_key?: string | null

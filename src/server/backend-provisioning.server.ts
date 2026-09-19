@@ -3964,6 +3964,25 @@ export type ProvisionBackendInput = {
    */
   introspectionResumeStage?: string | null;
   /**
+   * When a previous pass last reconciled the WHOLE schema against the prime
+   * and stamped the migration ledger (`clone_backends.schema_verified_at`).
+   *
+   * Set, on a surviving project, it lets this pass skip the introspection
+   * entirely and spend its budget on the edge functions instead — which is
+   * the difference between deploying seven a minute and deploying two. Null
+   * behaves exactly as before.
+   */
+  schemaVerifiedAt?: string | null;
+  /**
+   * Called once a full introspection pass has reconciled every stage AND the
+   * migration ledger stamp has succeeded. The caller records the moment;
+   * nothing here writes the row.
+   *
+   * Both conditions, in that order, because a pass that died between them and
+   * recorded anyway would teach the next pass to skip a stamp that never ran.
+   */
+  onSchemaVerified?: () => Promise<void>;
+  /**
    * Converge a backend that is already provisioned, rather than build one.
    *
    * Every replication step here checks the target before it writes — that is
@@ -4176,7 +4195,48 @@ export async function provisionCloneBackend(
   let latestApplied: string | null = null;
   let introspection: IntrospectionSummary | null = null;
 
-  if (strategy === "introspection") {
+  /*
+   * A schema verified once must not be re-verified every minute.
+   *
+   * Measured on `npc-crm-independent-6505dc`, 19 Sep 2026: the drain ticks
+   * every minute and `deployEdgeFunctions` manages about seven functions a
+   * pass, so seven a minute is the ceiling — and the frontier moved nineteen
+   * places in eleven minutes. Under two a minute means roughly three ticks in
+   * four bought no functions at all.
+   *
+   * They bought this block. The pass order is introspect → stamp → deploy,
+   * and the edge-function pause carries no `resumeStage`, which the caller
+   * reads as "leave the stored marker alone"; the marker is null by then, so
+   * the next pass restarts the introspection at its first stage — twelve
+   * stages asking the prime and the clone what they each hold, over ~650
+   * tables. The comment at the foot of `replicateSchemaByIntrospection` calls
+   * that pass "cheap … two COUNTs" per stage, and at this size it is not.
+   *
+   * `schema_verified_at` is the fact those passes were re-establishing. It is
+   * written only after a full non-partial pass reconciles every stage AND the
+   * ledger stamp below succeeds, so skipping here skips exactly the two
+   * things it records and never a stamp that has not run.
+   *
+   * Narrow on purpose. It requires a SURVIVING project: a row whose project
+   * was re-created carries no verification of the new one, and the write that
+   * records a fresh project clears the column for that reason. And it only
+   * ever removes work — the edge-function stage recovers its own progress
+   * from the project rather than from a diary, so a wrong skip here cannot
+   * livelock the pipeline the way this pass has twice before.
+   */
+  const schemaAlreadyVerified =
+    strategy === "introspection" &&
+    Boolean(input.existingProjectRef) &&
+    Boolean(input.schemaVerifiedAt);
+
+  if (strategy === "introspection" && schemaAlreadyVerified) {
+    await onStatusUpdate?.(
+      "migrating",
+      "Schema already reconciled against the prime — resuming at the edge functions.",
+    );
+    latestApplied =
+      [...snapshot.migrations].sort((a, b) => a.name.localeCompare(b.name)).at(-1)?.id ?? null;
+  } else if (strategy === "introspection") {
     pauseIfDue("building the schema by introspection");
     await onStatusUpdate?.("migrating", "Introspecting the prime's live catalog...");
     const { replicateSchemaByIntrospection, stampMigrationLedgerFromPrime, verifyCloneIsEmpty } =
@@ -4266,6 +4326,12 @@ export async function provisionCloneBackend(
         ? "Catalog introspection reconciled; migration ledger already stamped"
         : `Catalog introspection reconciled; stamped ${stamp.stamped} migration ID(s)`,
     );
+    // Both halves are now true — a full pass reconciled every stage, and the
+    // ledger is stamped. Recorded HERE and nowhere earlier: a pass that died
+    // between the two would otherwise teach the next one to skip a stamp that
+    // never ran, and an unstamped introspected schema takes no future
+    // migration at all.
+    await input.onSchemaVerified?.();
   } else {
     await onStatusUpdate?.(
       "migrating",
@@ -4669,7 +4735,10 @@ export async function provisionCloneBackend(
   let signingPairValue: string | null = null;
   let signingPair: import("./cloneSigningPair.server").SigningPairOutcome | null = null;
   try {
-    await onStatusUpdate?.("migrating", "Writing this project's internal signing pair (vault + environment)...");
+    await onStatusUpdate?.(
+      "migrating",
+      "Writing this project's internal signing pair (vault + environment)...",
+    );
     const { ensureCloneSigningPair } = await import("./cloneSigningPair.server");
     // The GATEWAY form of the privileged key — `sb_secret_…` where the project
     // has one — because that is what the runtime injects as
@@ -4743,10 +4812,15 @@ export async function provisionCloneBackend(
   // Control's own tables; absent, the sweep links the clone later.
   pauseIfDue("linking to Mission Control");
   let linkValues: Record<string, string> = {};
-  let missionControlLink: import("./cloneMissionControlLink.server").MissionControlLinkOutcome | null = null;
+  let missionControlLink:
+    | import("./cloneMissionControlLink.server").MissionControlLinkOutcome
+    | null = null;
   if (input.linkMissionControl) {
     try {
-      await onStatusUpdate?.("migrating", "Linking this clone to Mission Control (key, URL, webhook)...");
+      await onStatusUpdate?.(
+        "migrating",
+        "Linking this clone to Mission Control (key, URL, webhook)...",
+      );
       const link = await input.linkMissionControl(projectRef);
       if (link.ok) {
         linkValues = link.values;

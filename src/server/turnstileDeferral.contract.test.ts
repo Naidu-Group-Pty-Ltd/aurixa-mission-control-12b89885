@@ -111,3 +111,57 @@ describe("the wizard tells an operator the truth", () => {
     expect(branch.toLowerCase()).toContain("automatically");
   });
 });
+
+/**
+ * THE SITE KEY IS PUBLISHED BEFORE THE SECRET IS WRITTEN.
+ *
+ * A clone's login checks the SECRET, not the `REQUIRE_TURNSTILE` flag:
+ *
+ *     if (turnstileSecret) {
+ *       if (!turnstile_token) return 400 'Security verification required'
+ *
+ * So the moment `TURNSTILE_SECRET_KEY` reaches a clone's project, every
+ * sign-in demands a token — and a bundle carrying no
+ * `VITE_TURNSTILE_SITE_KEY` draws no widget, sends no token, and is refused.
+ * Secret-before-key locks every user out of that clone.
+ *
+ * It was survivable while both writes landed in one call a few lines apart,
+ * and it stopped being survivable when minting was allowed for a clone with
+ * no hosting project: `publishSiteKey` answers "no hosting project — publish
+ * the site key when one exists" instead of throwing, so the secret went in,
+ * the key never did, and the lockout was permanent.
+ *
+ * An ORDER is precisely what a unit test cannot see — both writes happen and
+ * both succeed either way — so it is pinned against the source.
+ */
+describe("a clone is never asked for a CAPTCHA it cannot draw", () => {
+  it("publishes the site key before delivering the secret", () => {
+    const publish = SRC.indexOf("await publishSiteKey(");
+    const deliver = SRC.indexOf("await deliverSecret(");
+    expect(publish, "the publish must exist").toBeGreaterThan(-1);
+    expect(deliver, "the delivery must exist").toBeGreaterThan(-1);
+    expect(
+      publish,
+      "secret-before-key locks every user out of a clone whose key never published",
+    ).toBeLessThan(deliver);
+  });
+
+  it("withholds the secret entirely while the key is unpublished", () => {
+    // Not merely ordered — GATED. An ordering alone still writes the secret
+    // on the pass where publishing failed.
+    expect(SRC).toMatch(/mintedSecret && row\?\.site_key && !row\.site_key_published_at/);
+  });
+
+  it("publishes exactly once — a second block would restore the old order", () => {
+    expect(SRC.split("await publishSiteKey(").length - 1).toBe(1);
+  });
+
+  it("asks one predicate whether the backend can hold a secret", () => {
+    // `status === "ready"` named a fact about the provisioning run; three of
+    // four clones in this fleet ended `failed` and all three work.
+    expect(SRC).toContain("backendHoldsAProject");
+    expect(SRC, "the old inline gate must be gone").not.toMatch(
+      /backendReady:\s*Boolean\([^)]*\)\s*&&\s*backend\?\.status === "ready"/,
+    );
+  });
+});

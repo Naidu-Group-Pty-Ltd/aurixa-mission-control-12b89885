@@ -31,6 +31,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import {
+  backendHoldsAProject,
   canRotateSecret,
   decideTurnstileSweep,
   deriveWidgetDomains,
@@ -371,6 +372,61 @@ export async function provisionTurnstileIdentity(
       }
     }
 
+    /*
+     * THE SITE KEY GOES FIRST, AND THAT ORDER IS THE WHOLE SAFETY PROPERTY.
+     *
+     * A clone's login checks the SECRET, not the flag:
+     *
+     *     if (turnstileSecret) {
+     *       if (!turnstile_token) return 400 'Security verification required'
+     *
+     * So the moment `TURNSTILE_SECRET_KEY` reaches a clone's project, every
+     * sign-in demands a token — and a browser whose bundle carries no
+     * `VITE_TURNSTILE_SITE_KEY` renders no widget, sends no token, and is
+     * refused. Writing the secret while the key is still unpublished locks
+     * every user out of that clone.
+     *
+     * This used to run the other way round, and it was survivable only
+     * because both writes landed in the same call a few lines apart. It
+     * stopped being survivable when minting was allowed for a clone with NO
+     * hosting project: `publishSiteKey` answers "no hosting project — publish
+     * the site key when one exists" rather than throwing, so the secret was
+     * written, the key never was, and the lockout was permanent.
+     *
+     * Reversed, the worst case is a clone that has a widget and no CAPTCHA —
+     * exactly what it had before this ran, with the pending publish named on
+     * its panel. A widget nobody can satisfy is not a stricter control than
+     * no widget; it is an outage.
+     */
+    if (row?.site_key && !row.site_key_published_at) {
+      const published = await publishSiteKey(supabase, cloneId, row.site_key);
+      if (published.ok) {
+        await persist(supabase, cloneId, { site_key_published_at: new Date().toISOString() });
+        advanced.push("site_key_published");
+        row = await readIdentity(supabase, cloneId);
+      } else {
+        await persist(supabase, cloneId, {
+          last_error: `Site key not published: ${published.detail}`,
+        });
+        row = await readIdentity(supabase, cloneId);
+      }
+    }
+
+    // The secret is delivered ONLY behind a published key, for the reason
+    // above. `mintedSecret` is held for one flow and discarded with the
+    // pass, so a clone whose key could not be published simply keeps its
+    // widget unarmed and is minted again — with a fresh secret — once there
+    // is somewhere to publish to.
+    if (mintedSecret && row?.site_key && !row.site_key_published_at) {
+      await persist(supabase, cloneId, {
+        last_error:
+          "Site key not published yet, so the secret was withheld — publishing it first is what " +
+          "stops a clone demanding a CAPTCHA its own login page cannot draw.",
+      });
+      const held = await getTurnstileIdentityState(supabase, cloneId);
+      return held.ok ? { ...held, advanced } : held;
+    }
+
     if (mintedSecret && row?.site_key) {
       const delivered = await deliverSecret(
         supabase,
@@ -404,19 +460,6 @@ export async function provisionTurnstileIdentity(
       }
       advanced.push("secret_written");
       row = await readIdentity(supabase, cloneId);
-    }
-
-    if (row?.site_key && !row.site_key_published_at) {
-      const published = await publishSiteKey(supabase, cloneId, row.site_key);
-      if (published.ok) {
-        await persist(supabase, cloneId, { site_key_published_at: new Date().toISOString() });
-        advanced.push("site_key_published");
-        row = await readIdentity(supabase, cloneId);
-      } else {
-        await persist(supabase, cloneId, {
-          last_error: `Site key not published: ${published.detail}`,
-        });
-      }
     }
 
     const state = await getTurnstileIdentityState(supabase, cloneId);
@@ -654,7 +697,7 @@ export async function reconcileTurnstileIdentities(
     const backend = byBackend.get(clone.id);
     const verdict = decideTurnstileSweep({
       hasProject: Boolean(deployment?.project_id),
-      backendReady: Boolean(backend?.supabase_project_ref) && backend?.status === "ready",
+      backendReady: backendHoldsAProject(backend ?? null),
       identity: byIdentity.get(clone.id) ?? null,
       wantedDomains: deriveWidgetDomains(clone),
       now,
