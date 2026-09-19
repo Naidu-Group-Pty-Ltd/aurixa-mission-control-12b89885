@@ -207,9 +207,23 @@ export function ProvisioningReadinessPanel({
                     <span className="text-sm font-medium">{capability.title}</span>
                     <VerdictPill verdict={capability.verdict} />
                   </div>
-                  {capability.verdict !== "ready" && (
-                    <p className="mt-1 text-xs text-muted-foreground">{capability.consequence}</p>
+                  {/*
+                    `consequence` says what breaks while a capability is
+                    BLOCKED — its own type declares exactly that. Rendering it
+                    for every non-ready verdict told an operator "A clone
+                    cannot get its own Supabase project. Provisioning stops
+                    before anything is created." about a capability whose
+                    required credentials are all present and whose only absence
+                    is an optional soft-limit override that defaults when
+                    unset. `readiness-card.tsx` had this right from the start,
+                    for the reason it gives: "shown only when something is
+                    actually wrong, so a working platform is not a wall of
+                    warnings."
+                  */}
+                  {capability.verdict === "blocked" && (
+                    <p className="mt-1 text-xs text-destructive">{capability.consequence}</p>
                   )}
+
                   {capability.blockers.length > 0 && (
                     <ul className="mt-2 space-y-1">
                       {capability.blockers.map((blocker) => (
@@ -219,14 +233,34 @@ export function ProvisioningReadinessPanel({
                       ))}
                     </ul>
                   )}
+
+                  {/*
+                    A pill reading `degraded` with nothing beside it is its own
+                    small failure — it names a state and not the thing an
+                    operator would act on. These are the optional credentials
+                    that are absent, said plainly, with the reassurance that
+                    the step still runs.
+                  */}
+                  {capability.verdict === "degraded" && (
+                    <ul className="mt-1 space-y-1">
+                      {capability.credentials
+                        .filter((c) => !c.required && c.state === "missing")
+                        .map((c) => (
+                          <li key={c.name} className="text-xs text-muted-foreground">
+                            <span className="font-mono">{c.name}</span> is not set — {c.purpose}
+                          </li>
+                        ))}
+                    </ul>
+                  )}
                 </li>
               ))}
             </ul>
 
             {degraded.length > 0 && (
               <p className="text-xs text-muted-foreground">
-                Degraded means an optional credential is absent — the step runs with something
-                reduced, not skipped.
+                Degraded means an optional credential is absent. The step still runs — on a default,
+                or without the one refinement that credential buys. It is not a failure and it does
+                not stop a clone being created.
               </p>
             )}
 
