@@ -34,6 +34,17 @@ const code = (src: string): string =>
   src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
 
 const lane = code(read("src/server/fleet-migration.server.ts"));
+/**
+ * The cadence, read from the migration that schedules the job rather than
+ * written down here. The reclaim window below is only meaningful in relation
+ * to it, and two copies of a number are how the two come to disagree.
+ */
+const FLEET_CADENCE_MINUTES = (() => {
+  const sql = read("supabase/migrations/20260827070000_schedule_fleet_migration_sync.sql");
+  const m = /cron\.schedule\(\s*'fleet-migration-sync-30min',\s*'\*\/(\d+) \* \* \* \*'/.exec(sql);
+  expect(m, "could not read the fleet sync's cron schedule from its migration").not.toBeNull();
+  return Number(m![1]);
+})();
 
 const entry = lane.indexOf("export async function runFleetMigrationSync");
 const loop = lane.indexOf("for (const backend of backends)");
@@ -47,6 +58,8 @@ describe("the slices this file reads exist", () => {
     expect(loop).toBeGreaterThan(entry);
   });
 });
+
+const CLAIM_GUARD = "if (Date.now() + CLAIM_RESERVE_MS >= deadlineAt)";
 
 describe("a pass is bounded", () => {
   it("takes its deadline at entry, before the first read", () => {
@@ -62,7 +75,7 @@ describe("a pass is bounded", () => {
   });
 
   it("checks the deadline BEFORE claiming, so an out-of-time pass leaks nothing", () => {
-    const check = lane.indexOf("if (Date.now() >= deadlineAt)");
+    const check = lane.indexOf(CLAIM_GUARD);
     const claim = lane.indexOf(".update({ worker_started_at: new Date().toISOString() })");
     expect(check).toBeGreaterThan(loop);
     expect(claim).toBeGreaterThan(-1);
@@ -70,10 +83,64 @@ describe("a pass is bounded", () => {
   });
 
   it("stops rather than skipping, so it does not walk the rest of the fleet for nothing", () => {
-    const check = lane.indexOf("if (Date.now() >= deadlineAt)");
-    const after = lane.slice(check, check + 120);
+    const check = lane.indexOf(CLAIM_GUARD);
+    const after = lane.slice(check, check + 160);
     expect(after).toContain("break;");
     expect(after).not.toContain("continue;");
+  });
+
+  /*
+    BEING BEFORE THE DEADLINE IS NOT HAVING TIME TO DO ANYTHING.
+
+    The guard was a bare `Date.now() >= deadlineAt`, so a claim could be taken
+    with milliseconds left — and was, three times on 19 Sep. The replay's first
+    act is opening a 40 MB seed, which cannot finish in what remained, and the
+    isolate was killed holding the claim.
+
+    The reserve is a floor rather than a measurement and the constant says so.
+    What is pinned here is that there IS one and that it is subtracted from the
+    time remaining, because a guard with no reserve is the shape that leaked.
+  */
+  it("reserves time for the work before taking a claim, not merely the deadline", () => {
+    expect(lane).toMatch(/const CLAIM_RESERVE_MS = [\d_]+;/);
+    expect(lane, "the claim guard spends no reserve").toContain(CLAIM_GUARD);
+  });
+
+  /*
+    A LEAKED CLAIM MUST NOT COST A WHOLE PASS.
+
+    The window was thirty minutes of AGE alone, which is exactly the cadence —
+    the worst possible value, because it guarantees a claim leaked at 12:00:49
+    is still 29.2 minutes old at 12:30 and is freed only at 13:00. Measured
+    three times on 19 Sep; `backends` filters on the claim being free, so the
+    clone is out of the fleet for the whole of that pass.
+
+    Age alone could not be shortened, because age alone cannot tell a run that
+    is working from one that is dead — so the number had to cover the slowest
+    legitimate run. The heartbeat answers that question directly instead.
+  */
+  it("frees a claim before the next pass could have used it", () => {
+    const m = /const STALE_CLAIM_MINUTES = (\d+);/.exec(lane);
+    expect(m, "STALE_CLAIM_MINUTES is not declared as a plain number").not.toBeNull();
+    expect(
+      Number(m![1]),
+      "a reclaim window at or past the cadence makes every leaked claim cost a full pass",
+    ).toBeLessThan(FLEET_CADENCE_MINUTES);
+  });
+
+  it("asks whether the run is ALIVE, not only whether the claim is old", () => {
+    // `onStatementDone` writes the cursor on every statement and the table's
+    // trigger bumps `updated_at` on every write, so a living pass says so in a
+    // column the reclaim can read. Without this the window cannot be short:
+    // a slow-but-working run would be stolen from and two passes would apply
+    // the same migrations at once.
+    const at = lane.indexOf("async function reclaimStale");
+    expect(at, "reclaimStale not found").toBeGreaterThan(-1);
+    const body = lane.slice(at, lane.indexOf("\n}\n", at));
+    expect(body).toContain('.lt("worker_started_at", cutoff)');
+    expect(body, "a claim is reclaimed on age alone, so a live run can be stolen").toContain(
+      '.lt("updated_at", cutoff)',
+    );
   });
 
   it("hands the same deadline to the replay, with the slowest migration reserved", () => {

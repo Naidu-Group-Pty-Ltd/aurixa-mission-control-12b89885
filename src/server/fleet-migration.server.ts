@@ -86,13 +86,52 @@ type Db = SupabaseClient<Database>;
 const DEFAULT_BATCH = 5;
 
 /**
- * A claim older than this is treated as abandoned.
+ * A claim this old AND this quiet is treated as abandoned.
  *
- * Long enough that a slow but living run is not stolen from — a clone hundreds
- * of migrations behind is legitimately slow — and short enough that a worker
- * killed mid-flight does not park a clone forever.
+ * It used to be thirty minutes of age alone, and age alone cannot tell a run
+ * that is working from one that is dead — so the number had to be long enough
+ * for the slowest legitimate run, which made it exactly as long as the cadence.
+ * A leaked claim therefore cost a clone a FULL PASS: claimed 12:00:49, still
+ * held at 12:30 because it was 29.2 minutes old, freed only at 13:00.
+ *
+ * The heartbeat settles it instead. `onStatementDone` writes `chunk_cursor`
+ * and `status_detail` on every statement, and `update_clone_backends_updated_at`
+ * bumps `updated_at` on every update — so a run that is alive and working says
+ * so, several times a minute, in a column the reclaim can read. Asserted by
+ * effect rather than by a guess about how long work takes.
+ *
+ * What the number still has to cover is the longest SILENT stretch of a living
+ * pass, which is the initial download rather than the sending: a 40 MB seed
+ * arrives before the first statement can be recorded. Five minutes is roughly
+ * five times that, and pg_net has given up on the request four minutes earlier.
+ *
+ * Measured 19 Sep 2026: fleet passes ran 49 s, 102 s and 102 s from the cron
+ * fire, and three claims leaked — npc-test 11:31:02.064, npc-client-dashboard
+ * 12:00:49.571, npc-test 13:01:42.513 — each with its last write 19-39 ms
+ * later. That gap is clock skew between the isolate's `new Date()` and the
+ * database's trigger, so the claim was the last thing to touch the row: the
+ * isolate died before the replay's first await returned.
  */
-const STALE_CLAIM_MINUTES = 30;
+const STALE_CLAIM_MINUTES = 5;
+
+/**
+ * A pass will not claim a clone it cannot plausibly do anything for.
+ *
+ * The budget check before the claim asked only whether the deadline had
+ * passed, so a claim could be taken with milliseconds left — and it was, three
+ * times in one morning. The replay's first act is opening a 40 MB seed, which
+ * cannot finish in what remained, and the isolate was killed holding the claim.
+ *
+ * This is a FLOOR rather than a measurement, and it is worth saying so: what a
+ * pass needs is enough time to open the stream and record one statement, and
+ * nothing here measures that. Fifteen seconds is chosen as obviously-too-little
+ * to do it, against passes measured at ~102 s for one clone.
+ *
+ * The reserve reduces how often a claim is wasted; the heartbeat-aware reclaim
+ * above bounds what it costs when one still is. Neither depends on the other
+ * being right, which is the point of having both.
+ */
+const CLAIM_RESERVE_MS = 15_000;
 
 /**
  * How long one pass may spend before it stops handing out work.
@@ -259,7 +298,18 @@ async function reclaimStale(supabase: Db): Promise<void> {
     .update({ worker_started_at: null })
     .in("status", [...MIGRATION_CLAIMABLE_STATUSES])
     .not("worker_started_at", "is", null)
-    .lt("worker_started_at", cutoff);
+    .lt("worker_started_at", cutoff)
+    // AND QUIET SINCE. The claim's age says how long ago a run started; this
+    // says whether it is still doing anything. A pass mid-seed writes the
+    // cursor on every statement and the table's trigger bumps this on every
+    // write, so a living run cannot be stolen from however long it has been
+    // going — which is what lets the age above be short enough to matter.
+    //
+    // Strictly this implies the line above, since `updated_at` is never older
+    // than `worker_started_at`. Both are written because they are two
+    // different questions, and a reader who sees only one of them will
+    // eventually assume the other.
+    .lt("updated_at", cutoff);
   if (error) throw new Error(`Could not reclaim stale migration claims: ${error.message}`);
 }
 
@@ -604,7 +654,7 @@ export async function runFleetMigrationSync(
       served three of five clones and a pass that found five level are the same
       shape in every other field.
     */
-    if (Date.now() >= deadlineAt) {
+    if (Date.now() + CLAIM_RESERVE_MS >= deadlineAt) {
       out.stoppedAtBudget = true;
       break;
     }
