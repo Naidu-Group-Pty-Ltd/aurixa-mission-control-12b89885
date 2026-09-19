@@ -301,9 +301,12 @@ describe("a pass is bounded", () => {
   it("STOPS the replay on a fence miss rather than sending the next statement", () => {
     const cb = lane.indexOf("onStatementDone:");
     expect(cb).toBeGreaterThan(-1);
-    const body = lane.slice(cb, cb + 1400);
+    const body = lane.slice(cb, cb + 1900);
+    // `ClaimLostError` and not a plain `Error`: the replay catches every
+    // exception per migration and records it as one the clone refused, and
+    // that class is the one thing it rethrows.
     expect(body, "a lost claim mid-seed must not continue sending").toMatch(
-      /if \(!beat \|\| beat\.length === 0\) \{\s*throw new Error\(/,
+      /if \(!beat \|\| beat\.length === 0\) \{[\s\S]{0,500}?throw new ClaimLostError\(/,
     );
     // Distinct from a failed write, which is deliberately NOT fatal: the
     // statements landed and re-sending them is free.
@@ -325,6 +328,108 @@ describe("a pass is bounded", () => {
     // Both the throw and the result-write report read the same constant.
     const uses = lane.split("${CLAIM_LOST}").length - 1;
     expect(uses, "a lost claim is worded twice").toBe(2);
+  });
+
+  /*
+    AND LIVENESS IS MEASURED, NOT INFERRED FROM WORK.
+
+    The first heartbeat was written in `onStatementDone`, which belongs to the
+    OVERSIZED-SEED path alone. Every other replay — an ordinary DDL, and above
+    all one blocked inside the timeout-less `runSqlOnProject` — was silent from
+    the claim onwards, so a five-minute window reclaims a pass that is working
+    and a successor starts sending the same migrations into the same schema.
+    The fence stops the reclaimed pass WRITING; it cannot recall SQL already
+    dispatched. Raised by review, and a defect this change creates: at thirty
+    minutes the same hole existed and was very hard to reach.
+  */
+  const beatBody = (): string => {
+    const at = lane.indexOf("function beatWhileClaimHeld");
+    expect(at, "beatWhileClaimHeld not found").toBeGreaterThan(-1);
+    const end = lane.indexOf("\n}\n", at);
+    expect(end, "no closing brace for beatWhileClaimHeld").toBeGreaterThan(at);
+    return lane.slice(at, end);
+  };
+
+  it("beats on a CLOCK, so a silent stretch is not read as death", () => {
+    const body = beatBody();
+    expect(body, "the heartbeat is not on a timer").toContain("setInterval(");
+    expect(body).toContain("migration_heartbeat_at");
+  });
+
+  it("fits several beats inside the reclaim window, so one lost beat is survivable", () => {
+    const beat = /const CLAIM_HEARTBEAT_MS = ([\d_]+);/.exec(lane);
+    expect(beat, "CLAIM_HEARTBEAT_MS is not declared as a plain number").not.toBeNull();
+    const stale = /const STALE_CLAIM_MINUTES = (\d+);/.exec(lane);
+    expect(stale).not.toBeNull();
+    const beats = (Number(stale![1]) * 60_000) / Number(beat![1].replace(/_/g, ""));
+    expect(
+      beats,
+      "a window this pass can miss in two beats turns a transient fault into a stolen claim",
+    ).toBeGreaterThanOrEqual(4);
+  });
+
+  it("stops beating when the claim is gone, rather than writing into a successor's row", () => {
+    const body = beatBody();
+    expect(body, "the beat is unfenced").toContain('.eq("worker_started_at", claimedAt)');
+    expect(body).toContain('.select("clone_id")');
+    /*
+      Bounded to the MISS BRANCH, not to the function. `clearInterval(timer)`
+      appears a second time in the returned `stop`, so an unbounded search
+      finds that one and passes over a branch that no longer stops anything —
+      caught by mutation, which is the only reason it is written this way.
+    */
+    const miss = body.indexOf("if (!beat || beat.length === 0)");
+    const stop = body.indexOf("return { stop:");
+    expect(miss, "the fence-miss branch was not found").toBeGreaterThan(-1);
+    expect(stop, "the returned stop was not found").toBeGreaterThan(miss);
+    expect(body.slice(miss, stop), "a beat that missed its fence keeps beating").toContain(
+      "clearInterval(timer)",
+    );
+  });
+
+  it("covers the WHOLE replay and stops in a finally", () => {
+    const start = laneBody.indexOf("beatWhileClaimHeld(supabase");
+    const replay = laneBody.indexOf("await applyPrimeMigrations(");
+    expect(start, "the heartbeat is never started").toBeGreaterThan(-1);
+    expect(replay).toBeGreaterThan(-1);
+    expect(start, "the replay begins before anything says the pass is alive").toBeLessThan(replay);
+    /*
+      And OUTSIDE the try, not merely before the replay. Declared inside it the
+      `finally` cannot see it — which the compiler catches, but the property
+      this test is for is that the handle outlives the block it guards, and an
+      assertion that only says "before the replay" is satisfied by the version
+      that does not. Caught by mutation.
+    */
+    const tryAt = laneBody.lastIndexOf("try {", replay);
+    expect(tryAt, "the replay is not inside a try").toBeGreaterThan(-1);
+    expect(start, "the heartbeat handle is scoped inside the block it guards").toBeLessThan(tryAt);
+    // Three exits — the result write's `continue`, a throw, and falling off
+    // the end — so the stop cannot sit on any one of them.
+    expect(laneBody, "a timer that outlives its pass holds a dead claim open").toMatch(
+      /\} finally \{[\s\S]{0,400}?heartbeat\.stop\(\);/,
+    );
+  });
+
+  /*
+    AND A LOST CLAIM HAS TO ESCAPE THE REPLAY.
+
+    `applyPrimeMigrations` catches every exception per migration and records it
+    as a migration that FAILED. A plain `Error` thrown by the fence was
+    therefore converted into the clone's verdict: the specific reason replaced
+    by the caller's generic one, and the fenced release never reached. Raised
+    by review.
+  */
+  it("is rethrown by the replay rather than recorded as a migration the clone refused", () => {
+    const replay = code(read("src/server/backend-provisioning.server.ts"));
+    const at = replay.indexOf("export async function applyPrimeMigrations");
+    expect(at, "applyPrimeMigrations not found").toBeGreaterThan(-1);
+    const catchAt = replay.indexOf('error: e instanceof Error ? e.message : "SQL failed"', at);
+    expect(catchAt, "the per-migration catch was not found").toBeGreaterThan(at);
+    // Before the push, or the push has already happened.
+    const before = replay.slice(replay.lastIndexOf("} catch (e) {", catchAt), catchAt);
+    expect(before, "a lost claim is recorded as a failed migration").toContain(
+      "if (e instanceof ClaimLostError) throw e;",
+    );
   });
 
   it("hands the same deadline to the replay, with the slowest migration reserved", () => {

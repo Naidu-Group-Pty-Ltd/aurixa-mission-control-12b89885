@@ -12,7 +12,7 @@ import crypto from "node:crypto";
 import { classifySecret, TENANT_SCOPED_REMEDY } from "./prime-backend.server";
 import { OversizedMigrationError } from "./oversizedMigration.pure";
 import { assessLedgerState, ledgerRepairHint } from "./cloneLedgerState.pure";
-import { BudgetPause, cloneSaidNothing, pastDeadline } from "./provisioningBudget";
+import { BudgetPause, ClaimLostError, cloneSaidNothing, pastDeadline } from "./provisioningBudget";
 import { chooseRoleLabel, describeSeed, sqlCredentialLiteral } from "./cloneAdminIdentity.pure";
 import type { AdminSeedReport } from "./cloneAdminIdentity.pure";
 import type { PrimeBackendSnapshot } from "./prime-backend.server";
@@ -2630,6 +2630,22 @@ export async function applyPrimeMigrations(
       latestApplied = m.id;
       slowestMs = Math.max(slowestMs, Date.now() - startedAt);
     } catch (e) {
+      /*
+        A LOST CLAIM IS NOT A MIGRATION THAT FAILED.
+
+        This catch is unconditional on purpose — anything a clone refuses is
+        that clone's verdict and belongs in `results`. A `ClaimLostError` is
+        not a verdict about anything: it means the caller's claim on the row
+        was reclaimed mid-replay and another pass now owns it, so the only
+        correct act is to stop and let the caller's own handler run, where the
+        release is fenced and therefore takes nothing from the successor.
+
+        Recorded as a failed migration instead, it would name this migration
+        as the thing that went wrong, replace the specific reason with the
+        caller's generic one, and skip the release path entirely. Raised by
+        review on #227.
+      */
+      if (e instanceof ClaimLostError) throw e;
       results.push({
         id: m.id,
         name: m.name,

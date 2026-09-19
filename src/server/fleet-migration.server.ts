@@ -65,6 +65,7 @@ import {
 } from "./fleetMigrationEligibility.pure";
 import { notifyOperators, writeAuditLog } from "./audit.server";
 import { chunkCursorFor } from "./chunkCursorStore.pure";
+import { ClaimLostError } from "./provisioningBudget";
 
 type Db = SupabaseClient<Database>;
 
@@ -296,6 +297,81 @@ const EMPTY: FleetMigrationResult = {
   withheld: 0,
   withheldBreakdown: { neverApplied: 0, skewSuspected: 0 },
 };
+
+/**
+ * How often a pass says it is still alive while it holds a claim.
+ *
+ * Read against `STALE_CLAIM_MINUTES` rather than chosen on its own: what has
+ * to be true is that several beats fit inside the reclaim window, so a single
+ * lost beat — a transient database fault, a request that took longer than
+ * usual — cannot make a living pass look dead. Thirty seconds against five
+ * minutes is ten beats; a pass would have to miss nine in a row.
+ *
+ * It is cheap at this cadence. A pass with a 45-second budget beats once or
+ * twice; one blocked inside `runSqlOnProject` beats until the runtime reclaims
+ * the isolate, which is exactly when it should stop.
+ */
+const CLAIM_HEARTBEAT_MS = 30_000;
+
+/**
+ * Say, on a clock, that this pass still holds the claim it took.
+ *
+ * Separate from the cursor write in `onStatementDone`: that one belongs to the
+ * oversized-seed path and carries progress, and a heartbeat that only exists
+ * where there is progress to report is absent on every other path — an
+ * ordinary DDL, and above all a request blocked inside the timeout-less
+ * `runSqlOnProject`. Those are the stretches the window has to cover.
+ *
+ * Returns its own stop, and takes no callback: nothing here can interrupt a
+ * pass blocked in a fetch, so this does not pretend to. What it does is make
+ * a living pass VISIBLE, and stop beating the moment the row says the claim
+ * is somebody else's.
+ */
+function beatWhileClaimHeld(
+  supabase: Db,
+  cloneId: string,
+  claimedAt: string,
+): { stop: () => void } {
+  const timer = setInterval(() => {
+    void (async () => {
+      const { data: beat, error } = await supabase
+        .from("clone_backends")
+        .update({ migration_heartbeat_at: new Date().toISOString() })
+        .eq("clone_id", cloneId)
+        .eq("worker_started_at", claimedAt)
+        .select("clone_id");
+      if (error) {
+        // One lost beat is survivable by design — see CLAIM_HEARTBEAT_MS — so
+        // this neither throws nor stops. Silence would hide a database fault
+        // that is about to cost a live pass its claim.
+        console.error("[fleet-migration] heartbeat not recorded", {
+          cloneId,
+          error: error.message,
+        });
+        return;
+      }
+      if (!beat || beat.length === 0) {
+        // The claim is gone. Beating on would write into a successor's row and
+        // tell the reclaim that a pass which no longer owns anything is alive.
+        console.warn("[fleet-migration] heartbeat stopped: the claim is no longer this pass's", {
+          cloneId,
+          claimedAt,
+        });
+        clearInterval(timer);
+      }
+    })().catch((e) => {
+      // A rejected beat must not become an unhandled rejection: in this
+      // runtime that can take down the whole invocation, which would lose the
+      // replay this exists to protect.
+      console.error("[fleet-migration] heartbeat threw", {
+        cloneId,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    });
+  }, CLAIM_HEARTBEAT_MS);
+
+  return { stop: () => clearInterval(timer) };
+}
 
 /**
  * Release claims from runs that died holding one.
@@ -785,6 +861,35 @@ export async function runFleetMigrationSync(
     }
     if (!claimed || claimed.length === 0) continue; // another run has it
 
+    /*
+      THE HEARTBEAT IS A CLOCK, NOT A BYPRODUCT OF PROGRESS.
+
+      The first version beat only in `onStatementDone`, which belongs to the
+      OVERSIZED-SEED path alone. Every other replay — an ordinary DDL, and in
+      particular one blocked inside the timeout-less `runSqlOnProject` — was
+      silent from the claim onwards, so a five-minute window would reclaim a
+      pass that is working and a successor would start sending the same
+      migrations into the same schema. The fence stops the reclaimed pass from
+      WRITING; it cannot stop the SQL it has already dispatched, and that is
+      the concurrent application the claim exists to prevent. Raised by review
+      on #227, and it is a defect this PR creates: at thirty minutes the same
+      hole existed and was very hard to reach.
+
+      So liveness is measured by a timer rather than inferred from work. It
+      covers every silent stretch there is, including one nothing in this file
+      can see. Three properties make it safe:
+
+      - It is FENCED, like every other write here. A beat that matches no row
+        means the claim has already gone, and the timer stops rather than
+        resurrecting a claim this pass no longer holds.
+      - It is stopped in a `finally`, so a pass that returns, throws or breaks
+        stops beating at once. A timer outliving its pass would hold a dead
+        claim open for ever, which is worse than the window it replaces.
+      - It dies with the isolate. A killed pass stops beating by construction,
+        which is the case the window is actually for.
+    */
+    const heartbeat = beatWhileClaimHeld(supabase, cloneId, claimedAt);
+
     try {
       const { results, latestApplied, stoppedEarly, chunksApplied, chunkCursor } =
         await applyPrimeMigrations(
@@ -902,7 +1007,12 @@ export async function runFleetMigrationSync(
                 row.
               */
               if (!beat || beat.length === 0) {
-                throw new Error(
+                // `ClaimLostError` rather than a plain `Error`: the replay
+                // catches every exception per migration and records it as a
+                // migration the CLONE refused, which is the wrong sentence and
+                // skips the fenced release below. That class is the one thing
+                // it rethrows.
+                throw new ClaimLostError(
                   `${CLAIM_LOST}: this pass was reclaimed while sending ${p.name} ` +
                     `(statement ${p.statementsDone}); another pass now holds this clone, so ` +
                     `this one stops rather than sending into a database it no longer owns`,
@@ -1257,6 +1367,11 @@ export async function runFleetMigrationSync(
           claimedAt,
         });
       }
+    } finally {
+      // In a `finally` rather than after each exit, because there are three:
+      // the result write's `continue`, a throw, and falling off the end. A
+      // timer that outlives its pass would hold a dead claim open for ever.
+      heartbeat.stop();
     }
   }
 

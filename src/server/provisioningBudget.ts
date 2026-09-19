@@ -183,3 +183,25 @@ export function messageNamesUpstreamRateLimit(message: string): boolean {
 export function cloneSaidNothing(error: unknown): boolean {
   return error instanceof PrimeBodyUnavailableError || isUpstreamRateLimit(error);
 }
+
+/**
+ * A pass discovered, mid-work, that the claim it was fenced against is gone.
+ *
+ * Its own class rather than a plain `Error`, because `applyPrimeMigrations`
+ * catches every exception per migration and records it as a migration that
+ * FAILED — which is the wrong sentence twice over. The clone refused nothing;
+ * the replay was told to stop because another pass now owns the row. Recorded
+ * as a failure it would replace the specific reason with a generic one, and
+ * the caller's own catch — where the release is fenced and therefore safe —
+ * would never run. Raised by review on #227.
+ *
+ * Named as a STOP signal, in the same file as `BudgetPause` and for the same
+ * reason: both are the replay being told to put its tools down, and neither is
+ * a verdict about a schema.
+ */
+export class ClaimLostError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ClaimLostError";
+  }
+}
