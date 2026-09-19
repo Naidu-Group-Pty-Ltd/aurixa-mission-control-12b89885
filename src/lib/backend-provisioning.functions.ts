@@ -458,12 +458,19 @@ async function runBackendProvisioning(
         // Persist the ref the moment the project exists — a death after
         // creation must resume onto it, never orphan it (see the input doc).
         onProjectRef: async (ref: string) => {
+          // `schema_verified_at` is cleared because a NEW project has never
+          // been verified, whatever the row remembers about the one before
+          // it. That is what stops a verification of a dead project being
+          // read as a statement about this one — the single way the skip
+          // above could be wrong.
+          //
+          // The note sits ABOVE the statement rather than inside the chain:
+          // `check-discarded-errors.mjs` blanks comment lines rather than
+          // removing them and reads four lines back from the `.update(` for
+          // the `error` binding, so a comment between the two hides a checked
+          // write from the checker and spends a ratchet slot on nothing.
           const { error } = await supabase
             .from("clone_backends")
-            // A NEW project has never been verified, whatever the row
-            // remembers about the one before it. Clearing here is what stops
-            // a verification of a dead project being read as a statement
-            // about this one — the single way the skip above could be wrong.
             .update({ supabase_project_ref: ref, schema_verified_at: null })
             .eq("clone_id", input.cloneId);
           if (error) {

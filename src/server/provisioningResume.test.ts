@@ -47,6 +47,20 @@ const primeBackend = () => read("src/server/prime-backend.server.ts");
 const pipeline = () => read("src/server/backend-provisioning.server.ts");
 const introspection = () => read("src/server/schema-introspection.server.ts");
 const runner = () => read("src/lib/backend-provisioning.functions.ts");
+
+/**
+ * Source with its commentary removed.
+ *
+ * An assertion about WIRING — "this callback writes this column" — is about
+ * code, and a character window measured over raw source is really measuring
+ * how much prose sits between the two. That window has now been widened twice
+ * for comments that were themselves explaining the wiring, which is a test
+ * teaching the next person to write less down. Stripping first makes the
+ * distance a property of the code, so a comment can neither break the
+ * assertion nor satisfy it.
+ */
+const code = (source: string) =>
+  source.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:])\/\/.*$/gm, "$1 ");
 const drift = () => read("src/server/fleet-drift.functions.ts");
 const retryHook = () => read("src/routes/hooks.backend-provisioning-retry.tsx");
 
@@ -153,10 +167,7 @@ describe("the pipeline is budgeted and resumable", () => {
   });
 
   it("the runner wires onProjectRef to a clone_backends write", () => {
-    // The window is generous because the assertion is about WIRING, not about
-    // how much is written between the two — the callback now also clears
-    // `schema_verified_at`, and the comment explaining why sits in the gap.
-    expect(runner()).toMatch(/onProjectRef[\s\S]{0,900}supabase_project_ref: ref/);
+    expect(code(runner())).toMatch(/onProjectRef[\s\S]{0,400}supabase_project_ref: ref/);
   });
 
   /**
@@ -169,10 +180,10 @@ describe("the pipeline is budgeted and resumable", () => {
    * statement, which is why they must not drift apart.
    */
   it("clears the schema verification when a fresh project is recorded", () => {
-    const src = runner();
+    const src = code(runner());
     const at = src.indexOf("onProjectRef");
     expect(at).toBeGreaterThan(-1);
-    const body = src.slice(at, at + 900);
+    const body = src.slice(at, at + 400);
     expect(body).toContain("supabase_project_ref: ref");
     expect(body, "a new project carries no verification of the old one").toContain(
       "schema_verified_at: null",
