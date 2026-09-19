@@ -121,3 +121,38 @@ export function chunkCursorFor(raw: unknown): StoredChunkCursor | null {
     ? { migrationId, statementsDone, shape: narrowed }
     : { migrationId, statementsDone };
 }
+
+/**
+ * Whether a stored cursor claims more statements than the file actually has.
+ *
+ * `chunkCursorFor` can tell a well-formed cursor from a malformed one; it
+ * cannot tell a cursor of 9,000 from a seed of forty statements, because the
+ * only way to know a stream's length is to walk it. So this is asked AFTER the
+ * walk, with the count it produced.
+ *
+ * ## Why it matters more than it looks
+ *
+ * `applyChunkedSeed` skips while `index < skip`. A cursor past the end skips
+ * every statement, reaches EOF having applied none, and returns
+ * `stoppedEarly: false` — which the replay reads as "the seed went" and
+ * follows by writing the migration's ledger row. The clone then records a
+ * version whose data it does not hold, and every later pass skips it as
+ * applied. The comment beside that call says "the ledger row is written only
+ * once every statement has gone, so a half-sent seed is never applied"; that
+ * was true of the budget-stop path and not of this one.
+ *
+ * Raised by an automated review on #225 after it merged. It needs a corrupted
+ * or hand-edited row, or a cursor surviving onto a different database — which
+ * is exactly what the missing `chunk_cursor: null` on a fresh project ref
+ * allowed, so the two findings are one fault seen from both ends.
+ *
+ * ## Equality is not past the end
+ *
+ * `skip === statementsSeen` is the ordinary shape of a pass that sent the last
+ * statement and died before its ledger row was written. Every statement really
+ * did land, and re-deriving that as an error would stop the seed ever being
+ * recorded. Only `statementsSeen < skip` is a claim the file cannot support.
+ */
+export function cursorRanPastEnd(skip: number, statementsSeen: number): boolean {
+  return skip > 0 && statementsSeen < skip;
+}

@@ -3078,6 +3078,7 @@ export type Database = {
           completed_at: string | null
           cursor: string | null
           detail: string | null
+          notified_detail: string | null
           rows_copied: number
           source_rows: number | null
           started_at: string | null
@@ -3090,6 +3091,7 @@ export type Database = {
           completed_at?: string | null
           cursor?: string | null
           detail?: string | null
+          notified_detail?: string | null
           rows_copied?: number
           source_rows?: number | null
           started_at?: string | null
@@ -3102,6 +3104,7 @@ export type Database = {
           completed_at?: string | null
           cursor?: string | null
           detail?: string | null
+          notified_detail?: string | null
           rows_copied?: number
           source_rows?: number | null
           started_at?: string | null

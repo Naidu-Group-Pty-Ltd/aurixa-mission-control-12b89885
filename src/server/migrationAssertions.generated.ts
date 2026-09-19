@@ -625,6 +625,16 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     assertions: [{ kind: "column", table: "clone_backends", column: "chunk_cursor" }],
   },
   {
+    migration: "20260919113000_reference_sync_cadence.sql",
+    version: "20260919113000",
+    assertions: [{ kind: "cron", jobname: "reference-data-sync-15min" }],
+  },
+  {
+    migration: "20260919124500_reference_sync_notified_detail.sql",
+    version: "20260919124500",
+    assertions: [{ kind: "column", table: "clone_reference_syncs", column: "notified_detail" }],
+  },
+  {
     migration: "20260919130000_prime_ledger_hole_blockage.sql",
     version: "20260919130000",
     assertions: [
