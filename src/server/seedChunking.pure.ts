@@ -284,17 +284,30 @@ export async function* chunkSeedStatements(
     new clause it never writes those rows at all. That is a permanent wrong
     write, where holding the statements costs only memory.
 
-    THE MEMORY IS REAL AND IS NOT BOUNDED BY `maxStatementBytes`.
+    THE MEMORY IS REAL, IS NOT BOUNDED BY `maxStatementBytes`, AND IS 35 MB.
 
-    `ready` grows to the whole file: at the production default of 1 MB a
-    statement, the 41,671,969-byte template seed is ~42 statements, and JS
-    strings are UTF-16, so ~84 MB of a runtime whose ceiling is the stated
-    reason `openPrimeMigrationCorpus` refuses a body at 8 MB. A pass killed for
-    that is indistinguishable in the record from one killed on wall clock,
-    which is the shape already measured on 19 Sep 2026. Named rather than
-    guessed at: fixing it needs `onConflict` and `tail` known BEFORE the
-    streaming pass — a ranged read of the blob's last few kilobytes — which is
-    an API `PrimeMigrationCorpus` does not have.
+    `ready` grows to the whole file, which `maxStatementBytes` bounds one
+    statement of and not the queue. MEASURED rather than reasoned about, on a
+    41,335,822-byte fixture of 543 tuples built to the real seed's shape: 43
+    statements, and the heap grows 34.7 MB between entering this function and
+    the first statement being handed over — about 88% of the body's bytes.
+
+    That corrects a figure I put in this comment and in a commit message. I had
+    said ~84 MB, doubling for UTF-16; V8 stores an ASCII string as a ONE-byte
+    string, so the queue is ~1x the file rather than ~2x. The overstatement
+    mattered, because it turned "a large fraction of the ceiling" into "almost
+    certainly fatal".
+
+    What is left is still worth knowing: ~27% of a 128 MB isolate, held for the
+    whole send, for one migration of one clone, in a runtime whose ceiling is
+    the stated reason `openPrimeMigrationCorpus` refuses a body at 8 MB. A pass
+    killed for it would be indistinguishable in the record from one killed on
+    wall clock, which is the shape measured on 19 Sep 2026 — so it remains a
+    POSSIBLE reading of that symptom and not a demonstrated one.
+
+    Fixing it needs `onConflict` and `tail` known BEFORE the streaming pass — a
+    ranged read of the blob's last few kilobytes — which is an API
+    `PrimeMigrationCorpus` does not have.
 
     `seedChunking.test.ts` pins both halves of this: nothing is yielded before
     EOF, and nothing is yielded before a disagreement throws. Do not
