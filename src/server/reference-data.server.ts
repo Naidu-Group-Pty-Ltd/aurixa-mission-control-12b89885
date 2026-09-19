@@ -237,8 +237,30 @@ export async function runReferenceDataSync(
 
   await reclaimStale(supabase);
 
-  // Pick a clone. `status = 'ready'` is the same gate the migration sync uses:
-  // never seed data into a schema that is mid-migration.
+  /*
+    Pick a clone.
+
+    `status = 'ready'` is this lane's OWN gate, and it is deliberately stricter
+    than the migration sync's — which is the opposite of what this comment used
+    to say ("the same gate the migration sync uses"). That lane's eligibility
+    admits a `failed` row carrying no migration block on purpose, because such
+    a row was failed by the PROVISIONING lane and establishes nothing about the
+    schema; its claim is then a compare-and-swap on whatever status eligibility
+    was decided against, never a requirement of `ready`. Measured 19 Sep 2026:
+    the 11:00 fleet pass claimed `npc-client-dashboard` while it read `failed`.
+
+    Stricter is the right answer HERE — seeding a catalogue into a schema that
+    may be mid-rebuild is not something `on conflict do nothing` makes safe —
+    but the cost has to be stated rather than hidden behind a false equivalence:
+    a clone that goes `failed` stops receiving reference data entirely, with
+    nothing reporting it, and `npc-client-dashboard` sat that way from 14 Sep.
+
+    Widening this gate is NOT the fix for that, and must not be done before
+    `skipped` stops being terminal: a clone admitted while it is still behind on
+    migrations has every table it does not yet hold marked `skipped`, and a
+    skipped table is never retried — so it would trade a visible freeze for a
+    permanent, silent gap.
+  */
   let q = supabase
     .from("clone_backends")
     .select("clone_id, supabase_project_ref")
@@ -449,6 +471,41 @@ export async function runReferenceDataSync(
         rowsCopied: prior?.rows_copied ?? 0,
         sourceRows: null,
         detail,
+      });
+      /*
+        A TABLE THAT STOPPED HAS TO SAY SO.
+
+        The refusal thirty lines above — a live schema this allow-list has not
+        classified — notifies. This did not, and the two are the same kind of
+        event to the tenant: a table that is not going to fill itself.
+
+        Measured 19 Sep 2026. `aml.sanctions_entries` on NPC Test has read
+        `failed` at 21,600 of 24,294 rows since 12 Sep with a 23503 naming the
+        exact key it could not place, and nothing anywhere announced it. Nothing
+        else in this codebase reads `clone_reference_syncs` either — only
+        `migrationAssertions.pure.ts`, which is a static declaration — so the
+        row WAS the whole report, and no one was reading it.
+
+        Worth notifying even though the sync retries: a table whose failure is
+        deterministic retries into the same error every hour for ever, which is
+        indistinguishable from progress in every reading except this one. The
+        status line is the copy an operator acts on, so it carries the table,
+        the count it reached and the source's own words rather than a summary
+        of them.
+      */
+      await notifyOperators({
+        kind: "cascade_failed",
+        severity: "error",
+        title: `Reference sync stopped on ${name} for ${cloneName}`,
+        body:
+          `Copying ${name} into this clone stopped at ${prior?.rows_copied ?? 0} row(s): ${detail}. ` +
+          "The rows already copied are kept and the next pass resumes from the same cursor, so " +
+          "this will repeat until the cause is fixed. Reference data a clone is missing is not " +
+          "tenant data — it is the seeded catalogue the product reads, and a clone without it " +
+          "cannot draw the documents that depend on it.",
+        cloneId,
+        url: `/clones/${cloneId}`,
+        metadata: { table: name, rows_copied: prior?.rows_copied ?? 0 },
       });
     }
   }

@@ -611,4 +611,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260919110000",
     assertions: [{ kind: "column", table: "clone_backends", column: "chunk_cursor" }],
   },
+  {
+    migration: "20260919113000_reference_sync_cadence.sql",
+    version: "20260919113000",
+    assertions: [{ kind: "cron", jobname: "reference-data-sync-15min" }],
+  },
 ];

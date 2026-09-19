@@ -425,3 +425,61 @@ describe("a finished parent is re-walked while its child is unfinished", () => {
     expect(pagesFor("sanctions_list_syncs")).toEqual([]);
   });
 });
+
+/**
+ * A table that stopped announces itself.
+ *
+ * The schema refusal thirty lines above this one in the worker has always
+ * notified; a copy that FAILED did not, and the two are the same kind of event
+ * to the tenant — a table that is not going to fill itself.
+ *
+ * Measured 19 Sep 2026: `aml.sanctions_entries` on NPC Test had read `failed`
+ * at 21,600 of 24,294 rows since the 12th, with a 23503 naming the exact key
+ * it could not place, and nothing anywhere said so. Nothing else in this
+ * codebase reads `clone_reference_syncs`, so the row WAS the report.
+ */
+describe("a failed table is reported, not just recorded", () => {
+  beforeEach(() => {
+    state.respond = (ref, sql) => {
+      if (sql.includes("to_regclass")) return [{ present: true }];
+      if (sql.includes("information_schema.columns")) return [{ column_name: "id" }];
+      if (sql.includes("count(*)")) return [{ n: 1 }];
+      // The clone refuses the write, exactly as Postgres did.
+      if (ref === CLONE && sql.includes("jsonb_populate_recordset")) {
+        throw new Error('violates foreign key constraint "sanctions_entries_sync_id_fkey"');
+      }
+      if (ref === PRIME && sql.includes("__cursor")) {
+        return [{ __cursor: "a", __row: { id: "a" } }];
+      }
+      return [];
+    };
+  });
+
+  it("notifies an operator, naming the table and the clone", async () => {
+    await runReferenceDataSync(fakeSupabase());
+    const n = state.notifications.find((x) => /Reference sync stopped/.test(x.title));
+    expect(n, "no notification was raised for a failed table").toBeDefined();
+    expect(n!.title).toContain("NPC Client Dashboard");
+  });
+
+  it("carries the source's own words rather than a summary of them", async () => {
+    await runReferenceDataSync(fakeSupabase());
+    const n = state.notifications.find((x) => /Reference sync stopped/.test(x.title));
+    expect(n!.body).toContain("sanctions_entries_sync_id_fkey");
+  });
+
+  it("says the rows already copied are kept and that it will repeat", async () => {
+    // The distinction an operator acts on: this is not a transient blip that
+    // the next pass clears, and nothing was lost.
+    await runReferenceDataSync(fakeSupabase());
+    const n = state.notifications.find((x) => /Reference sync stopped/.test(x.title));
+    expect(n!.body).toMatch(/kept/);
+    expect(n!.body).toMatch(/repeat/);
+  });
+
+  it("still records the failure on the row", async () => {
+    await runReferenceDataSync(fakeSupabase());
+    const failed = [...state.syncRows.values()].filter((r) => r.status === "failed");
+    expect(failed.length).toBeGreaterThan(0);
+  });
+});
