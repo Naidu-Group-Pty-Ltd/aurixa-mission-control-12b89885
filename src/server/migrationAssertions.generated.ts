@@ -621,4 +621,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260919124500",
     assertions: [{ kind: "column", table: "clone_reference_syncs", column: "notified_detail" }],
   },
+  {
+    migration: "20260919133000_clone_backend_migration_heartbeat.sql",
+    version: "20260919133000",
+    assertions: [{ kind: "column", table: "clone_backends", column: "migration_heartbeat_at" }],
+  },
 ];

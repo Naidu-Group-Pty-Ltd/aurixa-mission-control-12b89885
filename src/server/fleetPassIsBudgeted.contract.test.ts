@@ -60,6 +60,13 @@ describe("the slices this file reads exist", () => {
 });
 
 const CLAIM_GUARD = "if (Date.now() + CLAIM_RESERVE_MS >= deadlineAt)";
+/**
+ * The claim's own write. Anchored on the FIELD rather than on the whole
+ * `.update({ … })` call: the call gained a second field when the heartbeat was
+ * added, and a one-line anchor silently stopped matching — an assertion that
+ * then tested nothing, which this suite has been caught by before.
+ */
+const CLAIM_WRITE = "worker_started_at: new Date().toISOString()";
 
 describe("a pass is bounded", () => {
   it("takes its deadline at entry, before the first read", () => {
@@ -76,7 +83,7 @@ describe("a pass is bounded", () => {
 
   it("checks the deadline BEFORE claiming, so an out-of-time pass leaks nothing", () => {
     const check = lane.indexOf(CLAIM_GUARD);
-    const claim = lane.indexOf(".update({ worker_started_at: new Date().toISOString() })");
+    const claim = lane.indexOf(CLAIM_WRITE);
     expect(check).toBeGreaterThan(loop);
     expect(claim).toBeGreaterThan(-1);
     expect(check, "the deadline must be read before the claim is taken").toBeLessThan(claim);
@@ -128,19 +135,97 @@ describe("a pass is bounded", () => {
     ).toBeLessThan(FLEET_CADENCE_MINUTES);
   });
 
-  it("asks whether the run is ALIVE, not only whether the claim is old", () => {
-    // `onStatementDone` writes the cursor on every statement and the table's
-    // trigger bumps `updated_at` on every write, so a living pass says so in a
-    // column the reclaim can read. Without this the window cannot be short:
-    // a slow-but-working run would be stolen from and two passes would apply
-    // the same migrations at once.
+  const reclaimBody = (): string => {
     const at = lane.indexOf("async function reclaimStale");
     expect(at, "reclaimStale not found").toBeGreaterThan(-1);
-    const body = lane.slice(at, lane.indexOf("\n}\n", at));
+    const end = lane.indexOf("\n}\n", at);
+    expect(end, "no closing brace for reclaimStale").toBeGreaterThan(at);
+    return lane.slice(at, end);
+  };
+
+  it("asks whether the run is ALIVE, not only whether the claim is old", () => {
+    // Without this the window cannot be short: a slow-but-working run would be
+    // stolen from and two passes would apply the same migrations at once.
+    const body = reclaimBody();
     expect(body).toContain('.lt("worker_started_at", cutoff)');
     expect(body, "a claim is reclaimed on age alone, so a live run can be stolen").toContain(
-      '.lt("updated_at", cutoff)',
+      '.lt("migration_heartbeat_at", cutoff)',
     );
+  });
+
+  /*
+    AND THE HEARTBEAT IS THIS LANE'S OWN COLUMN.
+
+    The first version of this read `updated_at`, reasoning that the replay
+    writes the cursor on every statement and the table's trigger bumps it. The
+    reasoning is wrong in the direction that matters: `updated_at` is ROW-wide,
+    and the reference-data lane claims and releases the same `ready` backend
+    through `reference_sync_started_at` without ever looking at
+    `worker_started_at`. Its cadence writes this row two minutes before every
+    fleet pass, so a dead claim on any clone it touches would read as alive for
+    ever — worse than the window it replaced. Raised by review.
+  */
+  it("never reads a timestamp another lane also writes", () => {
+    expect(
+      reclaimBody(),
+      "updated_at is row-wide; the reference lane refreshes it minutes before every fleet pass",
+    ).not.toContain("updated_at");
+  });
+
+  it("stamps the heartbeat WITH the claim, not only on the first statement", () => {
+    // The longest silent stretch of a living pass is the initial download,
+    // before any statement can be recorded. A heartbeat first written by
+    // statement one is absent for exactly that stretch, which is the stretch
+    // the window has to cover.
+    const at = lane.indexOf(CLAIM_WRITE);
+    expect(at, "the claim write was not found").toBeGreaterThan(-1);
+    expect(
+      lane.slice(at, at + 400),
+      "the claim is taken without a heartbeat, so the download looks like death",
+    ).toContain("migration_heartbeat_at: new Date().toISOString()");
+  });
+
+  it("beats it on every statement the replay sends", () => {
+    const at = lane.indexOf("onStatementDone");
+    expect(at, "onStatementDone not found").toBeGreaterThan(-1);
+    expect(lane.slice(at, at + 700)).toContain("migration_heartbeat_at");
+  });
+
+  /*
+    NEVER A COMPOSED FILTER.
+
+    "old AND (quiet OR never beat)" reads as one `.or(...)`, and an `.or()`
+    here would be a STRING with a timestamp interpolated into it — the filter
+    this platform has already paid for once, where the screening consumer's
+    claim predicate never parsed and had never once succeeded while its code
+    and its test double agreed with each other.
+  */
+  it("composes no filter as a string", () => {
+    expect(reclaimBody()).not.toContain(".or(");
+  });
+
+  /*
+    AND THE TWO SWEEPS CARRY THE SAME GUARD.
+
+    Splitting "old AND (quiet OR never beat)" into two statements repeats the
+    guard that makes either one safe — the claimable status set and the pair
+    that says a claim is actually held. Written twice, one of them can lose a
+    line, and a reclaim missing `.not("worker_started_at", "is", null)` would
+    clear claims nobody holds while a reclaim missing the status filter would
+    reach rows this lane never touches.
+
+    So the repetition is checked rather than trusted. This is what licenses
+    writing it out instead of composing an `.or()`.
+  */
+  it("guards both sweeps identically", () => {
+    const body = reclaimBody();
+    const sweeps = body.split(".update({ worker_started_at: null })").slice(1);
+    expect(sweeps, "expected exactly two reclaim statements").toHaveLength(2);
+    for (const sweep of sweeps) {
+      expect(sweep).toContain('.in("status", claimable)');
+      expect(sweep).toContain('.not("worker_started_at", "is", null)');
+      expect(sweep).toContain('.lt("worker_started_at", cutoff)');
+    }
   });
 
   it("hands the same deadline to the replay, with the slowest migration reserved", () => {

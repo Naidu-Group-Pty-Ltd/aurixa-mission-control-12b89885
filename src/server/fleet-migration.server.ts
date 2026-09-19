@@ -94,11 +94,20 @@ const DEFAULT_BATCH = 5;
  * A leaked claim therefore cost a clone a FULL PASS: claimed 12:00:49, still
  * held at 12:30 because it was 29.2 minutes old, freed only at 13:00.
  *
- * The heartbeat settles it instead. `onStatementDone` writes `chunk_cursor`
- * and `status_detail` on every statement, and `update_clone_backends_updated_at`
- * bumps `updated_at` on every update — so a run that is alive and working says
- * so, several times a minute, in a column the reclaim can read. Asserted by
- * effect rather than by a guess about how long work takes.
+ * The heartbeat settles it instead: this lane stamps
+ * `migration_heartbeat_at` when it takes a claim and again on every statement
+ * the replay sends, so a run that is alive and working says so several times a
+ * minute. Asserted by effect rather than by a guess about how long work takes.
+ *
+ * It must be THIS LANE'S column and not `updated_at`. `updated_at` is
+ * row-wide: every writer of `clone_backends` refreshes it, and one of them is
+ * the reference-data lane, which claims and releases the same `ready` backend
+ * through `reference_sync_started_at` and never looks at `worker_started_at`.
+ * Its cadence is `13,28,43,58` against this lane's half-hourly one, so it
+ * writes two minutes before every fleet pass — a dead claim on any clone it
+ * touches would be permanently "recent" and stick for ever, which is worse
+ * than the window this replaced. Raised by review on the first version of
+ * this change.
  *
  * What the number still has to cover is the longest SILENT stretch of a living
  * pass, which is the initial download rather than the sending: a 40 MB seed
@@ -293,24 +302,69 @@ const EMPTY: FleetMigrationResult = {
  */
 async function reclaimStale(supabase: Db): Promise<void> {
   const cutoff = new Date(Date.now() - STALE_CLAIM_MINUTES * 60_000).toISOString();
-  const { error } = await supabase
+
+  /*
+    TWO STATEMENTS, AND NOT ONE `or`.
+
+    The condition is "old AND (quiet OR never beat at all)", which reads as a
+    single `.or(...)` — and an `.or()` here would be a STRING with a timestamp
+    interpolated into it, which is the filter this platform has already paid
+    for once: the screening consumer's claim predicate was exactly that, it
+    never parsed, and the claim had never once succeeded while the code and
+    its test double agreed with each other. A contract test forbids it.
+
+    So each half is its own statement with typed filters the builder composes.
+    The sweep runs once a pass; a second round-trip is not a cost worth a
+    composed predicate.
+  */
+  const claimable = [...MIGRATION_CLAIMABLE_STATUSES];
+
+  /*
+    QUIET SINCE, on THIS LANE'S OWN heartbeat — the only reason the age above
+    can be short enough to matter.
+
+    `updated_at` cannot serve however tempting: it is ROW-wide, and the
+    reference-data lane claims and releases the same `ready` backend through
+    `reference_sync_started_at` without ever looking at `worker_started_at`.
+    Its cadence writes this row two minutes before every fleet pass, so a dead
+    claim on any clone it touches would read as alive for ever.
+  */
+  const { error: quietErr } = await supabase
     .from("clone_backends")
     .update({ worker_started_at: null })
-    .in("status", [...MIGRATION_CLAIMABLE_STATUSES])
+    .in("status", claimable)
     .not("worker_started_at", "is", null)
     .lt("worker_started_at", cutoff)
-    // AND QUIET SINCE. The claim's age says how long ago a run started; this
-    // says whether it is still doing anything. A pass mid-seed writes the
-    // cursor on every statement and the table's trigger bumps this on every
-    // write, so a living run cannot be stolen from however long it has been
-    // going — which is what lets the age above be short enough to matter.
-    //
-    // Strictly this implies the line above, since `updated_at` is never older
-    // than `worker_started_at`. Both are written because they are two
-    // different questions, and a reader who sees only one of them will
-    // eventually assume the other.
-    .lt("updated_at", cutoff);
-  if (error) throw new Error(`Could not reclaim stale migration claims: ${error.message}`);
+    .lt("migration_heartbeat_at", cutoff);
+  if (quietErr) {
+    throw new Error(`Could not reclaim quiet migration claims: ${quietErr.message}`);
+  }
+
+  /*
+    AND a claim that has never beat at all — taken by a deployment older than
+    the heartbeat column. It carries NULL, a NULL comparison is not true, and
+    the sweep above would therefore leave it held FOR EVER: the exact failure
+    this whole change exists to end, reintroduced for the rows that most need
+    it. Gated by the claim's age, which is how those rows behaved before.
+
+    Two statements rather than one `.or(...)`, and that is not a style
+    preference. An `.or()` here would be a STRING with a timestamp interpolated
+    into it — the filter this platform has already paid for once, where the
+    screening consumer's claim predicate never parsed and had never once
+    succeeded while its code and its test double agreed with each other.
+    `fleetPassIsBudgeted.contract.test.ts` asserts both sweeps carry the same
+    guard, so the repetition below cannot drift into two different rules.
+  */
+  const { error: unbeatenErr } = await supabase
+    .from("clone_backends")
+    .update({ worker_started_at: null })
+    .in("status", claimable)
+    .not("worker_started_at", "is", null)
+    .lt("worker_started_at", cutoff)
+    .is("migration_heartbeat_at", null);
+  if (unbeatenErr) {
+    throw new Error(`Could not reclaim unbeaten migration claims: ${unbeatenErr.message}`);
+  }
 }
 
 /**
@@ -673,7 +727,14 @@ export async function runFleetMigrationSync(
     // which is the correct outcome and costs half an hour at most.
     const { data: claimed, error: claimErr } = await supabase
       .from("clone_backends")
-      .update({ worker_started_at: new Date().toISOString() })
+      .update({
+        worker_started_at: new Date().toISOString(),
+        // Stamped WITH the claim, in the same statement. A claim whose
+        // heartbeat is only written by the first statement would be
+        // indistinguishable from an abandoned one for as long as the seed
+        // takes to download — which is the longest part of a pass.
+        migration_heartbeat_at: new Date().toISOString(),
+      })
       .eq("clone_id", cloneId)
       .eq("status", backend.status)
       .is("worker_started_at", null)
@@ -764,6 +825,10 @@ export async function runFleetMigrationSync(
                 .update({
                   chunk_cursor: { migrationId: p.migrationId, statementsDone: p.statementsDone },
                   status_detail: `Sending ${p.name} — ${p.statementsDone} statement(s) in (${p.label})`,
+                  // The beat. This is what makes the claim above reclaimable in
+                  // minutes rather than in a cadence: a pass that is still
+                  // sending says so here, and nothing else writes this column.
+                  migration_heartbeat_at: new Date().toISOString(),
                 })
                 .eq("clone_id", cloneId);
               if (error) {
