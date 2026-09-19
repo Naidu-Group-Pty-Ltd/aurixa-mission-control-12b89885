@@ -111,21 +111,41 @@ export function holeRelationNames(sql: string): string[] {
   return [...names].sort();
 }
 
-/** Word-boundary mention of any of `names` in `text`. Case-insensitive. */
+const isIdentChar = (c: string) => c !== "" && /[a-z0-9_]/.test(c);
+
+/**
+ * Word-boundary mention of any of `names` in `text`. Case-insensitive.
+ *
+ * ## Every occurrence, not the first one
+ *
+ * This searched with a single `indexOf` per name and gave up on that name when
+ * the boundary check rejected it. So a migration containing
+ * `report_templates_archive` BEFORE its real `report_templates` reference was
+ * judged not to mention `report_templates` at all — and since a mention is
+ * what makes `scopeHoles` withhold a migration, the failure is in the
+ * dangerous direction: the migration is SENT, past a hole it genuinely depends
+ * on, and the replay fails or part-applies against objects that do not exist.
+ *
+ * Raised by an automated review on this branch before it merged. The rejection
+ * was right and the early exit was not: a substring hit is evidence about that
+ * POSITION, never about the rest of the file.
+ */
 export function mentionsAny(text: string, names: readonly string[]): string | null {
   if (names.length === 0) return null;
   const haystack = text.toLowerCase();
   for (const name of names) {
-    const at = haystack.indexOf(name);
-    if (at === -1) continue;
-    // Guard against a name that is a substring of a longer identifier:
-    // `report_templates` must not match `report_templates_archive` in a way
-    // that claims a dependency the name does not have. Either side must be a
-    // non-identifier character.
-    const before = at === 0 ? "" : haystack[at - 1];
-    const after = haystack[at + name.length] ?? "";
-    const isIdent = (c: string) => c !== "" && /[a-z0-9_]/.test(c);
-    if (!isIdent(before) && !isIdent(after)) return name;
+    // Walk every occurrence. A name that appears embedded once and standalone
+    // later mentions the relation, and stopping at the first hit is how that
+    // second one goes unseen.
+    for (let at = haystack.indexOf(name); at !== -1; at = haystack.indexOf(name, at + 1)) {
+      // Guard against a name that is a substring of a longer identifier:
+      // `report_templates` must not match `report_templates_archive` in a way
+      // that claims a dependency the name does not have. Either side must be a
+      // non-identifier character.
+      const before = at === 0 ? "" : haystack[at - 1];
+      const after = haystack[at + name.length] ?? "";
+      if (!isIdentChar(before) && !isIdentChar(after)) return name;
+    }
   }
   return null;
 }

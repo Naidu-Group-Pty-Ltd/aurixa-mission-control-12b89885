@@ -46,14 +46,28 @@ const MAX_BYTES_PER_ASSET = 12_000_000;
 const MAX_ASSETS = 6;
 
 /** The build id a manifest carries, or null. Used as the artefact identity. */
-function buildIdOf(manifest: string | null): string | null {
-  if (!manifest) return null;
-  try {
-    const id = (JSON.parse(manifest) as { buildId?: unknown }).buildId;
-    return typeof id === "string" && id.length > 0 ? `build:${id}` : null;
-  } catch {
-    return null;
-  }
+/**
+ * What a corrective rebuild has to produce a different one of.
+ *
+ * NOT the build id. `shouldRequestResync` stops when the artefact it last
+ * requested a rebuild for comes back unchanged — "we tried that and it did not
+ * help" — and a build id is different on EVERY deployment by construction,
+ * whether or not anything about the fault changed. Keyed on the build id, the
+ * guard could therefore never fire: each corrective rebuild minted a new id,
+ * the next probe read a new artefact, and the sweep queued another rebuild,
+ * indefinitely. Raised by an automated review on this branch before it merged.
+ *
+ * The declaration is the fault. A rebuild that still declares the same wrong
+ * project ref has demonstrated the same thing the guard was written to notice,
+ * however many build ids it burned getting there — and a build that is wrong a
+ * DIFFERENT way is a different fault and legitimately earns one more attempt.
+ *
+ * The hashed-asset path is untouched and needs no equivalent: an asset path
+ * carries a content hash, so an unchanged source already yields an unchanged
+ * artefact there.
+ */
+function declaredFaultOf(declaredRef: string, declaredSource: string | null): string {
+  return `declared:${declaredSource ?? "unknown"}:${declaredRef}`;
 }
 
 async function fetchText(url: string, signal: AbortSignal): Promise<string | null> {
@@ -130,10 +144,10 @@ export async function probeDeployedBundle(input: {
         declaredRef,
         declaredSource,
       });
-      // The artefact is the BUILD, not an asset path: what a re-sync has to
-      // produce a different one of is a different build, and `version.json`
-      // carries the id.
-      return { ...settled, artefact: buildIdOf(manifest) };
+      // The artefact is the DECLARATION, not the build that carried it — see
+      // `declaredFaultOf`. A build id changes on every rebuild, so keying the
+      // re-sync guard on one meant it never fired.
+      return { ...settled, artefact: declaredFaultOf(declaredRef, declaredSource) };
     }
 
     const html = await fetchText(`${base}/`, ctl.signal);

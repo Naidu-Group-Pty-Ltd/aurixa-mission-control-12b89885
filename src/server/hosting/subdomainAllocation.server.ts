@@ -164,6 +164,31 @@ export async function provisionCloneSubdomain(input: {
   /** Set where the name came from a person: a suffix is then a refusal. */
   refuseIfSuffixed?: boolean;
 }): Promise<SubdomainProvisionResult> {
+  /*
+    READ WHAT IS THERE BEFORE OVERWRITING IT.
+
+    `reserveCloneSubdomain` writes its allocation onto the row, so by the time
+    a refusal is decided below the clone's previous name is already gone. The
+    rollback used to write three NULLs — which is correct for a clone that had
+    no name, and data loss for one that did: a rename refused because the new
+    name is taken detached the clone from the perfectly valid hostname it was
+    already serving on. Raised by an automated review on this branch before it
+    merged.
+
+    Read here rather than inside the refusal branch, because by then the
+    overwrite has happened and there is nothing left to read.
+  */
+  const { data: priorRow } = await admin
+    .from("clones")
+    .select("subdomain, subdomain_fqdn, subdomain_status")
+    .eq("id", input.cloneId)
+    .maybeSingle();
+  const prior = (priorRow ?? null) as {
+    subdomain: string | null;
+    subdomain_fqdn: string | null;
+    subdomain_status: string | null;
+  } | null;
+
   const reservation = await reserveCloneSubdomain({
     cloneId: input.cloneId,
     slug: input.slug,
@@ -177,12 +202,34 @@ export async function provisionCloneSubdomain(input: {
     // not discover later that the clone answers to `acme-2`. `subdomain_taken`
     // is the same word `checkSubdomainAvailability` uses, so the surface that
     // checks before submitting and the surface that refuses on submit agree.
-    const { error: undoErr } = await admin
-      .from("clones")
-      .update({ subdomain: null, subdomain_fqdn: null, subdomain_status: null })
-      .eq("id", input.cloneId);
+    //
+    // RESTORED, not cleared. A refused rename must leave the clone exactly as
+    // it found it; on a clone that had no name the restore writes the same
+    // three nulls the clear did, so the first-reservation case is unchanged.
+    // An unreadable prior row falls back to clearing, which is the old
+    // behaviour, and is logged: guessing at a name would be worse than losing
+    // one loudly.
+    const restore = prior
+      ? {
+          subdomain: prior.subdomain,
+          subdomain_fqdn: prior.subdomain_fqdn,
+          subdomain_status: prior.subdomain_status,
+        }
+      : { subdomain: null, subdomain_fqdn: null, subdomain_status: null };
+    const { error: undoErr } = await admin.from("clones").update(restore).eq("id", input.cloneId);
     if (undoErr) {
       return { ok: false, reason: `subdomain_taken_and_rollback_failed:${undoErr.message}` };
+    }
+    if (!prior) {
+      // Recorded rather than returned as a different word: `subdomain_taken`
+      // is what `checkSubdomainAvailability` says, and the surface that checks
+      // before submitting and the one that refuses on submit agreeing is the
+      // property this reason exists for. Which of the two rollbacks ran is a
+      // diagnostic, not a different answer to the caller's question.
+      console.error(
+        "[subdomain] refused a suffixed reservation and could not read the prior name",
+        input.cloneId,
+      );
     }
     return { ok: false, reason: "subdomain_taken" };
   }

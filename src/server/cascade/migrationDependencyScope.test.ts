@@ -69,12 +69,12 @@ describe("holeRelationNames", () => {
 
 describe("mentionsAny", () => {
   it("finds a name on an identifier boundary", () => {
-    expect(mentionsAny("select * from builder_network_stock_items", ["builder_network_stock_items"])).toBe(
-      "builder_network_stock_items",
-    );
-    expect(mentionsAny("FROM Public.Builder_Network_Stock_Items x", ["builder_network_stock_items"])).toBe(
-      "builder_network_stock_items",
-    );
+    expect(
+      mentionsAny("select * from builder_network_stock_items", ["builder_network_stock_items"]),
+    ).toBe("builder_network_stock_items");
+    expect(
+      mentionsAny("FROM Public.Builder_Network_Stock_Items x", ["builder_network_stock_items"]),
+    ).toBe("builder_network_stock_items");
   });
 
   it("does not match a longer identifier that merely contains it", () => {
@@ -157,5 +157,52 @@ describe("scopeHoles", () => {
   it("keeps a ceiling small enough to refuse the 41 MB seeds and pass every DDL file", () => {
     expect(MAX_SCOPING_BYTES).toBeLessThan(41_000_000);
     expect(MAX_SCOPING_BYTES).toBeGreaterThan(100_000);
+  });
+});
+
+describe("an embedded hit does not hide a standalone one", () => {
+  it("finds the real mention after a longer identifier that contains it", () => {
+    /*
+      Raised by an automated review before this merged, and it is the only way
+      this module fails OPEN: `mentionsAny` took one `indexOf` per name and
+      abandoned the name when the boundary check rejected that position. A file
+      naming `report_templates_archive` first and `report_templates` afterwards
+      was therefore judged not to mention `report_templates`, so `scopeHoles`
+      SENT it past a hole it genuinely depends on.
+    */
+    const sql = `
+      -- touches the archive first
+      insert into report_templates_archive select * from something;
+      -- and then the table the hole creates
+      insert into report_templates (id) values (1);
+    `;
+    expect(mentionsAny(sql, ["report_templates"])).toBe("report_templates");
+  });
+
+  it("still refuses a name that ONLY ever appears embedded", () => {
+    // The boundary rule itself is unchanged — the fix is that a rejection is
+    // about a position rather than about the whole file.
+    const sql = "insert into report_templates_archive select 1;";
+    expect(mentionsAny(sql, ["report_templates"])).toBeNull();
+  });
+
+  it("scopeHoles withholds the migration that mention belongs to", () => {
+    // The consequence, asserted where it bites rather than only on the helper.
+    const candidate = `
+      insert into report_templates_archive select * from x;
+      insert into report_templates (id) values (1);
+    `;
+    const decision = scopeHoles(candidate, [
+      { id: "20261202090000", readable: true, creates: ["report_templates"] },
+    ]);
+    expect(decision.act).toBe("blocked");
+    expect(decision.act === "blocked" && decision.blockedBy).toEqual(["20261202090000"]);
+    expect(decision.act === "blocked" && decision.why).toBe("references");
+  });
+
+  it("checks both sides of every occurrence, not just the leading one", () => {
+    // `xreport_templates` is embedded on the LEFT. The trailing-side guard
+    // alone would have passed it.
+    expect(mentionsAny("select xreport_templates from t;", ["report_templates"])).toBeNull();
   });
 });

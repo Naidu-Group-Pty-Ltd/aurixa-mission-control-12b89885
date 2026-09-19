@@ -161,3 +161,49 @@ describe("a name a person typed is not silently changed", () => {
     );
   });
 });
+
+describe("a refused rename leaves the clone on the name it had", () => {
+  const source = readFileSync(new URL("./subdomainAllocation.server.ts", import.meta.url), "utf8");
+  // Line comments only — a block-comment strip deletes real code from any
+  // source carrying `/*` inside one, measured elsewhere in this repo.
+  const bare = source.replace(/\/\/[^\n]*/g, " ");
+
+  it("reads the prior name BEFORE the reservation overwrites it", () => {
+    /*
+      `reserveCloneSubdomain` writes its allocation onto the row, so by the
+      time `refuseIfSuffixed` decides to refuse, the clone's previous name is
+      already gone. Reading it inside the refusal branch would read the
+      allocation, not the name being protected.
+    */
+    const readAt = bare.indexOf("const { data: priorRow }");
+    const reserveAt = bare.indexOf("const reservation = await reserveCloneSubdomain(");
+    expect(readAt, "expected the prior-name read").toBeGreaterThan(-1);
+    expect(reserveAt).toBeGreaterThan(readAt);
+  });
+
+  it("the rollback restores rather than clears", () => {
+    // It wrote three NULLs unconditionally — right for a clone that had no
+    // name, and data loss for one that did: a rename refused because the new
+    // name was taken detached the clone from the valid hostname it was
+    // already serving on.
+    const branch = bare.slice(bare.indexOf("if (input.refuseIfSuffixed"));
+    const undo = branch.slice(0, branch.indexOf('.eq("id", input.cloneId)'));
+    expect(undo).toContain("const restore = prior");
+    expect(undo).toContain("subdomain: prior.subdomain");
+    expect(undo, "the update writes the restore, not a literal").toMatch(/\.update\(restore\)/);
+  });
+
+  it("a clone with no prior name still clears, which is the unchanged case", () => {
+    const branch = bare.slice(bare.indexOf("if (input.refuseIfSuffixed"));
+    expect(branch).toMatch(/\{ subdomain: null, subdomain_fqdn: null, subdomain_status: null \}/);
+  });
+
+  it("and the refusal word is still the one the pre-submit check uses", () => {
+    // Two words for one refusal would break the agreement between the surface
+    // that checks before submitting and the surface that refuses on submit —
+    // which is the property this reason exists for.
+    const branch = bare.slice(bare.indexOf("if (input.refuseIfSuffixed"));
+    const words = [...branch.matchAll(/reason:\s*"(subdomain_taken[a-z_]*)"/g)].map((m) => m[1]);
+    expect(new Set(words)).toEqual(new Set(["subdomain_taken"]));
+  });
+});

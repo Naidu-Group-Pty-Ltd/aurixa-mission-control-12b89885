@@ -7,6 +7,7 @@
  * in `npc-client-dashboard`'s.
  */
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import {
   bundleIdentityReading,
   entryAssetPaths,
@@ -384,5 +385,82 @@ describe("bundleIdentityReading", () => {
     for (const v of verdicts) {
       expect(bundleIdentityReading({ verdict: v }).label).not.toBe("never read");
     }
+  });
+});
+
+describe("the artefact a re-sync is keyed on must survive a rebuild", () => {
+  /*
+    The guard `shouldRequestResync` relies on is "the artefact I last requested
+    a rebuild for came back unchanged" — which reads as "I tried that and it
+    did not help". That only works if an unchanged FAULT yields an unchanged
+    artefact.
+
+    It did not, on the declared path. The artefact was `build:<buildId>` from
+    `version.json`, and a build id is different on every deployment by
+    construction. So each corrective rebuild minted a new id, the next probe
+    read a new artefact, the guard never fired, and the sweep queued another
+    rebuild — indefinitely, spending a deployment every time.
+
+    Raised by an automated review on this branch before it merged. Asserted
+    here as the PROPERTY rather than as the expression, because the expression
+    is what was wrong.
+  */
+  it("a rebuild that does not fix the fault stops after one attempt", () => {
+    const fault = "declared:env:dduzbchuswwbefdunfct";
+    const first = shouldRequestResync({
+      verdict: "carries_prime",
+      artefact: fault,
+      lastResyncArtefact: null,
+    });
+    expect(first.resync, "the first look asks for the rebuild").toBe(true);
+
+    // The rebuild happened. A NEW build was published and it declares the same
+    // wrong ref — so the artefact is the same, and the guard fires.
+    const second = shouldRequestResync({
+      verdict: "carries_prime",
+      artefact: fault,
+      lastResyncArtefact: fault,
+    });
+    expect(second.resync, "and the second look does not ask again").toBe(false);
+  });
+
+  it("a build id would have made that guard unreachable", () => {
+    // The shape of the defect, kept as an executable statement of it: two
+    // readings of the SAME unfixed fault carrying two build ids are two
+    // different artefacts, so the guard is asked a question it can only
+    // answer "no" to.
+    const a = shouldRequestResync({
+      verdict: "carries_prime",
+      artefact: "build:abc123",
+      lastResyncArtefact: "build:def456",
+    });
+    expect(a.resync, "which is exactly the loop").toBe(true);
+  });
+
+  it("a build wrong in a DIFFERENT way earns one more attempt", () => {
+    // Not a loop: a different declared ref is a different fault, and the one
+    // remedy this has may genuinely fix it.
+    const d = shouldRequestResync({
+      verdict: "carries_prime",
+      artefact: "declared:env:otherref",
+      lastResyncArtefact: "declared:env:dduzbchuswwbefdunfct",
+    });
+    expect(d.resync).toBe(true);
+  });
+});
+
+describe("the server keys the declared path on the fault, not the build", () => {
+  const source = readFileSync(
+    new URL("./deployedBundleIdentity.server.ts", import.meta.url),
+    "utf8",
+  );
+  const bare = source.replace(/\/\/[^\n]*/g, " ");
+
+  it("no artefact is derived from version.json's buildId", () => {
+    // Line comments only: this file's own prose names `buildId`, and a
+    // block-comment strip on a source carrying `/**` inside a line comment
+    // deletes real code (measured elsewhere in this repo at 13,438 chars).
+    expect(bare).not.toMatch(/artefact:\s*buildIdOf\(/);
+    expect(bare).toMatch(/artefact:\s*declaredFaultOf\(/);
   });
 });

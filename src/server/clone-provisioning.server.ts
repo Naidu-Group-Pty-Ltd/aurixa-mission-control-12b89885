@@ -39,6 +39,26 @@ export async function provisionCloneCore(
       .eq("idempotency_key", data.idempotencyKey)
       .maybeSingle();
     if (existing) {
+      /*
+        RECONCILE, RATHER THAN BYPASS.
+
+        This returned here, on the existence of the clone row alone. A request
+        terminated after that row was inserted and before the side effects ran
+        therefore left the backend un-enqueued — with the operator's admin
+        password gone, since it exists only in the request — the subdomain
+        unreserved and the sending identity unstarted, while the retry reported
+        a successful idempotent provision and nothing anywhere recorded that
+        any of it had been asked for.
+
+        Every step is safe to run again (see `startRequestedSideEffects`), so
+        the retry starts what the first attempt did not. A clone that already
+        has everything takes three guarded reads and changes nothing, which is
+        the ordinary case and the price of the uncommon one being silent.
+
+        It stays `idempotent: true`: the caller asked for a clone and is
+        getting the same clone, which is what that word answers.
+      */
+      await startRequestedSideEffects(supabase, userId, existing, data);
       return {
         ok: true,
         cloneId: existing.id,
@@ -498,6 +518,184 @@ export async function provisionCloneCore(
     }
   }
 
+  // The reservation travels back because the deployment step below attaches
+  // THIS name — the one fact the extracted block produces that its caller
+  // still needs.
+  const { subdomain: reservedSubdomain, fqdn: reservedFqdn } = await startRequestedSideEffects(
+    supabase,
+    userId,
+    inserted,
+    data,
+  );
+
+  // ─── Enqueue the deployment ───────────────────────────────────────
+  // The step this pipeline never had. Everything above creates a repository
+  // and a backend; nothing built the clone or served it, which is why
+  // `clones.deploy_url` was read in twenty places and written in none.
+  //
+  // Enqueue only — the wizard's submit must never block on a third party, and
+  // a Cloudflare Worker request can be terminated mid-flight. The drain owns
+  // every provider call. Non-fatal for the same reason the API-key cascade is:
+  // the clone exists either way and the operator can retry from the clone
+  // page.
+  try {
+    const { data: hostingCfg } = await supabaseAdmin
+      .from("platform_hosting_config")
+      .select("hosting_provider_slug")
+      .eq("singleton", true)
+      .maybeSingle();
+    // The fleet decision: every clone is staged on Vercel. `manual` used to be
+    // the fallback here, which meant a missing config row silently produced a
+    // clone nothing would ever build — the failure looked like "deployment
+    // declined" rather than like "the platform config is gone".
+    const requested = data.deploymentProvider ?? hostingCfg?.hosting_provider_slug ?? "vercel";
+    const { isVercelConfigured } = await import("@/server/hosting/vercel-client");
+
+    // Three outcomes, and they are three different facts (see
+    // deploymentState.pure): declined, served by hand, and queued. A row is
+    // written for all three so the clone page can tell them apart — an absent
+    // row would make "nobody asked" indistinguishable from "the worker has not
+    // reached it yet".
+    const status =
+      requested === "none"
+        ? "not_requested"
+        : requested === "manual"
+          ? "not_requested"
+          : isVercelConfigured()
+            ? "pending"
+            : "pending_platform";
+
+    const { error: deployErr } = await supabaseAdmin.from("clone_deployments").upsert(
+      {
+        clone_id: inserted.id,
+        provider_slug: requested === "vercel" ? "vercel" : "manual",
+        status,
+        status_detail:
+          requested === "none"
+            ? "Deployment declined during provisioning."
+            : requested === "manual"
+              ? "Served by a manually configured target."
+              : status === "pending_platform"
+                ? "No hosting provider token configured. Nothing has been attempted."
+                : null,
+        requested_by: userId,
+      },
+      { onConflict: "clone_id" },
+    );
+    if (deployErr) {
+      console.error("[provisionClone] deployment enqueue failed:", deployErr.message);
+    }
+  } catch (e) {
+    console.error("[provisionClone] deployment enqueue failed:", e);
+  }
+
+  await supabase.from("audit_log").insert({
+    action: "clone.created",
+    entity_type: "clone",
+    entity_id: inserted.id,
+    actor_user_id: userId,
+    metadata: {
+      method: data.method,
+      cloudflare: data.cloudflareEnabled,
+      modules: data.moduleIds,
+      github_url: githubUrl,
+      subdomain: reservedSubdomain,
+    },
+  });
+
+  await supabase.from("notifications").insert({
+    kind: "clone_created",
+    severity: "success",
+    title: `Clone created: ${data.name}`,
+    body:
+      data.method === "clone"
+        ? `Registered as independent clone (no repo created)`
+        : `Provisioned via ${data.method} → ${githubOwner}/${githubRepo}`,
+    clone_id: inserted.id,
+    url: `/clones/${inserted.id}`,
+    metadata: { method: data.method, cloudflare: data.cloudflareEnabled, github_url: githubUrl },
+  });
+
+  // No "API key issued" notification here any more, and no `new_key_secret`
+  // in its metadata. That notification announced the auto-provisioned key,
+  // whose plaintext it also stored a SECOND copy of — a credential nobody
+  // could use, in a drawer, for ever. The key the clone actually runs on is
+  // minted and delivered by `ensureCloneMissionControlLink`, which reports
+  // its own outcome.
+
+  return { ok: true, cloneId: inserted.id, githubUrl, subdomainFqdn: reservedFqdn };
+}
+
+/**
+ * Tell an operator that a clone was created and something it asked for was not.
+ *
+ * One helper rather than an insert per site, because the rule is the same at
+ * every one of them: nothing here is fatal — the clone exists, and a clone
+ * that exists with a gap is repairable in a click, while a provision that
+ * threw after a GitHub repository existed is not — so the ONLY thing standing
+ * between a silent gap and an operator is this row.
+ *
+ * `kind` is `clone_created` because `notifications.kind` is a PG enum and an
+ * unlisted value fails the insert silently, which is the defect three kinds
+ * already shipped with here. The stage goes in `metadata`, where it costs
+ * nothing to add one.
+ */
+async function warnOnClone(
+  supabase: SupabaseClient<Database>,
+  cloneId: string,
+  title: string,
+  body: string,
+  stage: string,
+): Promise<void> {
+  const { error } = await supabase.from("notifications").insert({
+    kind: "clone_created",
+    severity: "warning",
+    title,
+    body,
+    clone_id: cloneId,
+    url: `/clones/${cloneId}`,
+    metadata: { stage },
+  });
+  if (error) {
+    // The row IS the telling. Losing it leaves the gap and no trace of it.
+    console.error(`[provisionCloneCore] could not warn about ${stage}: ${error.message}`);
+  }
+}
+
+/**
+ * The side effects a provisioning REQUEST asks for, started against a clone
+ * that already exists.
+ *
+ * Extracted so the first submit and an idempotent retry cannot ask for
+ * different things. The short-circuit at the top of `provisionCloneCore`
+ * returns as soon as it finds a clone with the same key — and a request
+ * terminated after the clone row was inserted and before this ran left the
+ * backend un-enqueued, the operator's admin password gone with the tab, the
+ * subdomain unreserved and the sending identity unstarted, while the retry
+ * reported a successful idempotent provision. Raised by an automated review on
+ * this branch before it merged; the three MOVED here by the provisioning work
+ * on this same branch widened the window rather than opening it.
+ *
+ * Every step is safe to run again, which is what makes calling it from the
+ * retry path honest rather than hopeful:
+ *
+ *  - `provisionCloneSubdomain` reads what the clone already holds.
+ *  - `advanceEmailIdentity` "adopts an existing identity rather than creating
+ *    a second one" — its own words, and why the deployment drain already calls
+ *    it a second time.
+ *  - `enqueueCloneBackendProvisioning` refuses outright when a backend is
+ *    already `ready`, and upserts otherwise.
+ *
+ * Every step is also non-fatal and reported on the clone, unchanged: a clone
+ * that exists with a repository and no backend is repairable in one click, and
+ * failing a provision after a GitHub repository exists is not.
+ */
+async function startRequestedSideEffects(
+  supabase: SupabaseClient<Database>,
+  userId: string,
+  inserted: { id: string },
+  data: ProvisionCloneInput,
+): Promise<{ subdomain: string | null; fqdn: string | null }> {
   // ─── Reserve the clone's name in the Aurixa zone ──────────────────
   // Before the deployment, because the deployment attaches THIS name. The
   // drain used to fall back to `clone.slug` when no subdomain was recorded,
@@ -639,137 +837,5 @@ export async function provisionCloneCore(
       );
     }
   }
-
-  // ─── Enqueue the deployment ───────────────────────────────────────
-  // The step this pipeline never had. Everything above creates a repository
-  // and a backend; nothing built the clone or served it, which is why
-  // `clones.deploy_url` was read in twenty places and written in none.
-  //
-  // Enqueue only — the wizard's submit must never block on a third party, and
-  // a Cloudflare Worker request can be terminated mid-flight. The drain owns
-  // every provider call. Non-fatal for the same reason the API-key cascade is:
-  // the clone exists either way and the operator can retry from the clone
-  // page.
-  try {
-    const { data: hostingCfg } = await supabaseAdmin
-      .from("platform_hosting_config")
-      .select("hosting_provider_slug")
-      .eq("singleton", true)
-      .maybeSingle();
-    // The fleet decision: every clone is staged on Vercel. `manual` used to be
-    // the fallback here, which meant a missing config row silently produced a
-    // clone nothing would ever build — the failure looked like "deployment
-    // declined" rather than like "the platform config is gone".
-    const requested = data.deploymentProvider ?? hostingCfg?.hosting_provider_slug ?? "vercel";
-    const { isVercelConfigured } = await import("@/server/hosting/vercel-client");
-
-    // Three outcomes, and they are three different facts (see
-    // deploymentState.pure): declined, served by hand, and queued. A row is
-    // written for all three so the clone page can tell them apart — an absent
-    // row would make "nobody asked" indistinguishable from "the worker has not
-    // reached it yet".
-    const status =
-      requested === "none"
-        ? "not_requested"
-        : requested === "manual"
-          ? "not_requested"
-          : isVercelConfigured()
-            ? "pending"
-            : "pending_platform";
-
-    const { error: deployErr } = await supabaseAdmin.from("clone_deployments").upsert(
-      {
-        clone_id: inserted.id,
-        provider_slug: requested === "vercel" ? "vercel" : "manual",
-        status,
-        status_detail:
-          requested === "none"
-            ? "Deployment declined during provisioning."
-            : requested === "manual"
-              ? "Served by a manually configured target."
-              : status === "pending_platform"
-                ? "No hosting provider token configured. Nothing has been attempted."
-                : null,
-        requested_by: userId,
-      },
-      { onConflict: "clone_id" },
-    );
-    if (deployErr) {
-      console.error("[provisionClone] deployment enqueue failed:", deployErr.message);
-    }
-  } catch (e) {
-    console.error("[provisionClone] deployment enqueue failed:", e);
-  }
-
-  await supabase.from("audit_log").insert({
-    action: "clone.created",
-    entity_type: "clone",
-    entity_id: inserted.id,
-    actor_user_id: userId,
-    metadata: {
-      method: data.method,
-      cloudflare: data.cloudflareEnabled,
-      modules: data.moduleIds,
-      github_url: githubUrl,
-      subdomain: reservedSubdomain,
-    },
-  });
-
-  await supabase.from("notifications").insert({
-    kind: "clone_created",
-    severity: "success",
-    title: `Clone created: ${data.name}`,
-    body:
-      data.method === "clone"
-        ? `Registered as independent clone (no repo created)`
-        : `Provisioned via ${data.method} → ${githubOwner}/${githubRepo}`,
-    clone_id: inserted.id,
-    url: `/clones/${inserted.id}`,
-    metadata: { method: data.method, cloudflare: data.cloudflareEnabled, github_url: githubUrl },
-  });
-
-  // No "API key issued" notification here any more, and no `new_key_secret`
-  // in its metadata. That notification announced the auto-provisioned key,
-  // whose plaintext it also stored a SECOND copy of — a credential nobody
-  // could use, in a drawer, for ever. The key the clone actually runs on is
-  // minted and delivered by `ensureCloneMissionControlLink`, which reports
-  // its own outcome.
-
-  return { ok: true, cloneId: inserted.id, githubUrl, subdomainFqdn: reservedFqdn };
-}
-
-/**
- * Tell an operator that a clone was created and something it asked for was not.
- *
- * One helper rather than an insert per site, because the rule is the same at
- * every one of them: nothing here is fatal — the clone exists, and a clone
- * that exists with a gap is repairable in a click, while a provision that
- * threw after a GitHub repository existed is not — so the ONLY thing standing
- * between a silent gap and an operator is this row.
- *
- * `kind` is `clone_created` because `notifications.kind` is a PG enum and an
- * unlisted value fails the insert silently, which is the defect three kinds
- * already shipped with here. The stage goes in `metadata`, where it costs
- * nothing to add one.
- */
-async function warnOnClone(
-  supabase: SupabaseClient<Database>,
-  cloneId: string,
-  title: string,
-  body: string,
-  stage: string,
-): Promise<void> {
-  const { error } = await supabase.from("notifications").insert({
-    kind: "clone_created",
-    severity: "warning",
-    title,
-    body,
-    clone_id: cloneId,
-    url: `/clones/${cloneId}`,
-    metadata: { stage },
-  });
-  if (error) {
-    // The row IS the telling. Losing it leaves the gap and no trace of it.
-    console.error(`[provisionCloneCore] could not warn about ${stage}: ${error.message}`);
-  }
+  return { subdomain: reservedSubdomain, fqdn: reservedFqdn };
 }
