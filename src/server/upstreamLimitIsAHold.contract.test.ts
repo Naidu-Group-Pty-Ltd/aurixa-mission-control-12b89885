@@ -35,6 +35,31 @@ const replay = readFileSync("src/server/backend-provisioning.server.ts", "utf8")
 const fleet = readFileSync("src/server/fleet-migration.server.ts", "utf8");
 const button = readFileSync("src/server/migration-sync.functions.ts", "utf8");
 
+/**
+ * Source with comments removed.
+ *
+ * An assertion that a call is ABSENT has to read code: this one failed on the
+ * comment explaining why the call is absent, which is the third time in this
+ * area that a test has measured prose. (There are half a dozen private copies
+ * of this two-liner across the contract tests; one shared helper would be
+ * better and is a mechanical change over files this one does not touch.)
+ */
+const code = (src: string): string =>
+  src.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/^[ \t]*\/\/.*$/gm, " ");
+
+/**
+ * Source with template-literal concatenations joined and whitespace collapsed.
+ *
+ * A sentence an operator reads is assembled from three or four backtick pieces
+ * across as many lines, so a literal `toContain` over the raw source asserts
+ * where prettier put the line breaks rather than what the sentence says. Two of
+ * the assertions below were rewritten once for exactly that, which is a test
+ * pinning the formatter.
+ */
+function sentences(src: string): string {
+  return src.replace(/`\s*\+\s*`/g, "").replace(/\s+/g, " ");
+}
+
 function sliceFrom(src: string, anchor: string, length = 6_000): string {
   const at = src.indexOf(anchor);
   expect(at, `anchor not found: ${anchor}`).toBeGreaterThan(-1);
@@ -68,20 +93,29 @@ describe("the classifier recognises what production actually said", () => {
 describe("the replay holds a body a quota refused", () => {
   const loop = sliceFrom(replay, "sql = m.sql ?? (loadSql", 3_000);
 
-  it("asks about the quota BEFORE the oversize rethrow", () => {
+  it("asks whether the clone said anything BEFORE the oversize rethrow", () => {
     // Order is the whole fix. The rethrow on the next line is what sent a
-    // quota refusal to the generic failure path, so anything that must not go
-    // there has to be caught above it.
-    const quotaAt = loop.indexOf("isUpstreamRateLimit(e)");
+    // refusal to the generic failure path, so anything that must not go there
+    // has to be caught above it.
+    const askedAt = loop.indexOf("cloneSaidNothing(e)");
     const rethrowAt = loop.indexOf("if (!(e instanceof OversizedMigrationError)) throw e;");
-    expect(quotaAt, "the quota check is missing").toBeGreaterThan(-1);
+    expect(askedAt, "the fetch-refusal check is missing").toBeGreaterThan(-1);
     expect(rethrowAt).toBeGreaterThan(-1);
-    expect(quotaAt).toBeLessThan(rethrowAt);
+    expect(askedAt).toBeLessThan(rethrowAt);
+  });
+
+  it("asks the structural predicate, not the rate-limit one", () => {
+    // `isUpstreamRateLimit` is deliberately narrow — its own comment explains
+    // that a bare 403 must not buy a free attempt — and a bare 403 is exactly
+    // what the next pass produced. Asking it here failed npc-test-76b3b3 under
+    // the name of a migration it had never received, which is the defect #216
+    // was meant to close.
+    expect(code(replay)).not.toContain("isUpstreamRateLimit");
   });
 
   it("records it as a hold and halts, rather than throwing", () => {
     const branch = loop.slice(
-      loop.indexOf("isUpstreamRateLimit(e)"),
+      loop.indexOf("cloneSaidNothing(e)"),
       loop.indexOf("if (!(e instanceof OversizedMigrationError))"),
     );
     expect(branch).toContain("heldUpstreamLimited: true");
@@ -116,10 +150,19 @@ describe("neither consumer reads a quota refusal as a rejection", () => {
     });
 
     it(`${name} names it as a wait rather than a failure`, () => {
-      expect(src).toContain("upstream API rate limit refused it");
-      // The sentence an operator reads must not send them looking for what
-      // the clone rejected, because nothing was sent to it.
-      expect(src).toContain("the clone is unchanged and still in the");
+      // The sentence an operator reads must not send them looking for what the
+      // clone rejected, because nothing was sent to it.
+      expect(sentences(src)).toContain("the clone is unchanged and still in the");
+      expect(sentences(src)).toContain("could not be read, so nothing was sent for it");
+    });
+
+    it(`${name} states no cause it cannot know`, () => {
+      // It used to read "an upstream API rate limit refused it". The refusal
+      // that produced it on npc-test-76b3b3 was a bare 403 against a window
+      // with 4,300 calls left, so that sentence sent the reader to wait out a
+      // window that was never closed. The upstream's OWN words go in instead.
+      expect(sentences(src)).not.toContain("upstream API rate limit refused it");
+      expect(sentences(src)).toContain("Upstream said: ");
     });
   }
 

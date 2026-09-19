@@ -384,9 +384,17 @@ export const syncCloneMigrations = createServerFn({ method: "POST" })
               failures.length > 0
                 ? `Migration failed at ${failures[0].name}: ${failures[0].error}`
                 : limited.length > 0
-                  ? `Synced to ${newVersion} — ${limited[0].name} could not be fetched because an ` +
-                    `upstream API rate limit refused it; the clone is unchanged and still in the ` +
-                    `fleet, and the next pass carries it once the window reopens`
+                  ? // Names no cause: the refusal that produced this on
+                    // npc-test-76b3b3 was a bare 403 against a window with
+                    // 4,300 calls left in it, and "rate limit" sent the reader
+                    // to wait out a window that was never closed. The
+                    // upstream's own words are quoted instead — they cannot go
+                    // in `error_message` or `migration_blocked_reason`, which
+                    // both mean the clone refused something it was sent.
+                    `Synced to ${newVersion} — the prime's copy of ${limited[0].name} could not be ` +
+                    `read, so nothing was sent for it; the clone is unchanged and still in the ` +
+                    `fleet, and the next pass retries from that migration. Upstream said: ` +
+                    `${(limited[0].error ?? "no detail").slice(0, 300)}`
                   : held.length > 0
                     ? `Synced to ${newVersion} — ${held[0].name} is too large for this pass to carry ` +
                       `and is left for the chunking lane; the clone is unchanged and still in the fleet`

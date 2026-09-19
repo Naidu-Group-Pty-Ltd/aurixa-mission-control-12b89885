@@ -193,7 +193,28 @@ describe("the gate", () => {
   });
 
   it("an unreadable body offends rather than passing unexamined", () => {
-    expect(gate).toMatch(/catch \(e\) \{\s*return \{\s*migration: m\.name/);
+    // Still fails closed — every path out of the judging catch names the
+    // migration as offending, so nothing unread is waved through. Scoped to the
+    // per-migration callback rather than to the whole gate slice, which also
+    // contains `clearStaleMigrationFailure` and its own unrelated catch; and
+    // matched on the RETURN rather than on the statement immediately after
+    // `catch`, because a classification between the two is not a hole.
+    const judge = gate.slice(
+      gate.indexOf("chunk.map(async (m) =>"),
+      gate.indexOf("for (const j of judged)"),
+    );
+    expect(judge, "the judging callback was not found").toContain("catch (e) {");
+    const caught = judge.slice(judge.lastIndexOf("} catch (e) {"));
+    expect(caught).toMatch(/return \{[\s\S]{0,600}migration: m\.name/);
+  });
+
+  it("names an unread body as unread, not as a destructiveness finding", () => {
+    // An operator reading `offending` is being asked to APPROVE something, and
+    // a 403 is not a thing approval can settle. Dressing a fetch refusal as a
+    // destructive statement sends them to the wrong control.
+    expect(gate).toContain("PrimeBodyUnavailableError");
+    expect(gate).toContain("not assessed");
+    expect(gate).toContain("Approval cannot ");
   });
 
   it("still parks the whole batch on the first destructive statement", () => {

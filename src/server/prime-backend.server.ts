@@ -18,7 +18,7 @@ import type { RepoRef } from "./github-app.server";
 import { countGithubCall } from "./githubUsageMeter";
 import { pruneBundleToReachable } from "./functionBundlePrune.pure";
 import { isPrimeOnlySecret } from "./primeOnlySecrets.pure";
-import { OversizedMigrationError } from "./oversizedMigration.pure";
+import { OversizedMigrationError, PrimeBodyUnavailableError } from "./oversizedMigration.pure";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -1146,7 +1146,22 @@ export async function openPrimeMigrationCorpus(
       if (typeof meta.size === "number" && meta.size > maxBytes) {
         throw oversized(meta.name, meta.size, maxBytes);
       }
-      const sql = decodeBase64Utf8(await fetchBlobBase64(octokit, ref, meta.sha));
+      // Wrapped for the same reason the streaming read is: a refusal HERE is
+      // upstream of the clone whatever its status says, and the replay must
+      // hold rather than report a migration the clone never saw. The oversize
+      // refusals above are deliberately outside the wrap — they are this
+      // pipeline's own decision, not a failure to reach the prime.
+      let sql: string;
+      try {
+        sql = decodeBase64Utf8(await fetchBlobBase64(octokit, ref, meta.sha));
+      } catch (e) {
+        const status = (e as { status?: number } | null)?.status;
+        throw new PrimeBodyUnavailableError(
+          meta.name,
+          e instanceof Error ? e.message.slice(0, 400) : String(e).slice(0, 400),
+          typeof status === "number" ? status : undefined,
+        );
+      }
       // And after it when the tree did not.
       const bytes = new TextEncoder().encode(sql).length;
       if (bytes > maxBytes) throw oversized(meta.name, bytes, maxBytes);
@@ -1163,7 +1178,7 @@ export async function openPrimeMigrationCorpus(
   const openSqlStream = async (id: string): Promise<AsyncIterable<string>> => {
     const meta = byId.get(id);
     if (!meta) throw new Error(`Migration ${id} is not in the prime corpus at ${commitSha}`);
-    return fetchBlobTextStream(octokit, ref, meta.sha);
+    return fetchBlobTextStream(octokit, ref, meta.sha, meta.name);
   };
 
   return {
@@ -1192,6 +1207,13 @@ async function fetchBlobTextStream(
   octokit: Octokit,
   ref: RepoRef,
   sha: string,
+  /**
+   * The migration this blob is, for the refusal. A sha means nothing to an
+   * operator reading a clone's status; `Streaming blob b92e5e8 failed` was the
+   * whole of what one said, and answering "which migration is that?" took a
+   * `git rev-parse` against the prime.
+   */
+  migration: string,
 ): Promise<AsyncIterable<string>> {
   const auth = (await octokit.auth({ type: "installation" })) as { token?: string } | null;
   if (!auth?.token) throw new Error("No installation token to stream a blob with");
@@ -1241,15 +1263,10 @@ async function fetchBlobTextStream(
     } catch {
       detail = "(body unreadable)";
     }
-    const err = new Error(
-      `Streaming blob ${sha.slice(0, 7)} failed: HTTP ${res.status}` +
-        (detail ? ` — ${detail}` : ""),
-    );
-    // Carried as a property as well as in the sentence, so a classifier can
-    // read the status without parsing prose. `isUpstreamRateLimit` already
-    // looks here first.
-    (err as Error & { status?: number }).status = res.status;
-    throw err;
+    // Typed, so the replay can hold it without reading the status at all: WHERE
+    // this failed is certain here and WHAT the status meant is not. The status
+    // and the body ride along for whoever has to decide the remedy.
+    throw new PrimeBodyUnavailableError(migration, detail, res.status);
   }
   const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
   return {

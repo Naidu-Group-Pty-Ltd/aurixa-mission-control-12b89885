@@ -83,13 +83,24 @@ describe("a streaming refusal says which kind it was", () => {
   const fn = src.slice(src.indexOf("async function fetchBlobTextStream"));
   const guard = fn.slice(fn.indexOf("if (!res.ok"), fn.indexOf("const reader"));
 
-  it("carries the status as a property, not only in prose", () => {
-    // `isUpstreamRateLimit` reads `.status` first. An error that only says
-    // "HTTP 403" in a sentence is unreadable to it.
-    expect(guard).toMatch(/status\s*=\s*res\.status/);
+  it("throws the typed class, so a consumer need not read the status at all", () => {
+    // The status is the wrong thing to classify on — see the last test in this
+    // block — so what the replay holds on is the TYPE. The status and the body
+    // ride along for whoever has to choose a remedy, and they are constructor
+    // arguments rather than a sentence for the same reason.
+    expect(guard).toContain("throw new PrimeBodyUnavailableError(");
+    expect(guard).toMatch(/PrimeBodyUnavailableError\([\s\S]{0,120}res\.status\)/);
   });
 
-  it("includes GitHub's own body in the message", () => {
+  it("names the migration, not the blob sha", () => {
+    // `Streaming blob b92e5e8 failed` was the whole of what one clone's status
+    // said, and answering "which migration is that?" took a `git rev-parse`
+    // against the prime. A sha means nothing to the person reading it.
+    expect(guard).toContain("migration");
+    expect(guard).not.toMatch(/Streaming blob \$\{sha/);
+  });
+
+  it("includes GitHub's own body", () => {
     expect(guard).toContain("res.text()");
     // Truncated: this is diagnostic text on a path that has already failed.
     expect(guard).toMatch(/slice\(0,\s*\d+\)/);
@@ -99,9 +110,10 @@ describe("a streaming refusal says which kind it was", () => {
     // A body that will not read must not throw a second error that hides the
     // first — the failure would then be reported as whatever went wrong while
     // trying to explain it.
-    const tryBlock = guard.slice(guard.indexOf("try {"), guard.indexOf("throw err"));
+    const thrown = guard.indexOf("throw new PrimeBodyUnavailableError(");
+    const tryBlock = guard.slice(guard.indexOf("try {"), thrown);
+    expect(thrown).toBeGreaterThan(-1);
     expect(tryBlock).toContain("catch");
-    expect(guard).toContain("throw err");
   });
 
   it("does not pre-judge a 403 as a quota refusal", () => {

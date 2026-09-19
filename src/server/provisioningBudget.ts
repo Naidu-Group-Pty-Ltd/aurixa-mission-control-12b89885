@@ -21,6 +21,8 @@
  * `schema-introspection.server.ts` can import it without creating a cycle —
  * the former already dynamic-imports the latter.
  */
+import { PrimeBodyUnavailableError } from "./oversizedMigration.pure";
+
 export class BudgetPause extends Error {
   /** What the pipeline was about to do when the budget ran out. */
   readonly detail: string;
@@ -135,4 +137,27 @@ export function isUpstreamRateLimit(error: unknown): boolean {
     /\brate limit\b/i.test(message) &&
     /\b(exceed|exceeded|hit|reached|too many requests)\b/i.test(message)
   );
+}
+
+/**
+ * Whether a failure means the CLONE said nothing — as opposed to refusing a
+ * migration it was actually sent.
+ *
+ * A different question from `isUpstreamRateLimit` above, which decides whether
+ * an attempt should be handed back for free. That one is deliberately narrow:
+ * its own comment explains why a bare 403 must not count, because requeuing a
+ * permission fault as a quota hides it for three hours. This one is about
+ * BLAME, and on that question a 403 and a 429 are identical — neither of them
+ * is the clone rejecting anything.
+ *
+ * `npc-test-76b3b3` is why both exist. #216 held a quota refusal out of
+ * `failed` by asking the narrow predicate, and the next pass hit
+ * `Streaming blob b92e5e8 failed: HTTP 403` on the 40 MB seed, which the
+ * narrow predicate correctly declines — so the clone was failed under the name
+ * of a migration it had never received, exactly as before. The repair is not a
+ * wider predicate but a second, structural one: the fetch site knows for
+ * certain that it was the fetch that failed, whatever the status meant.
+ */
+export function cloneSaidNothing(error: unknown): boolean {
+  return error instanceof PrimeBodyUnavailableError || isUpstreamRateLimit(error);
 }
