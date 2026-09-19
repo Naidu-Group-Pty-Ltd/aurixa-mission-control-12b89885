@@ -4,7 +4,11 @@
  * Measured on the real run that prompted this (`npc-crm-independent-6505dc`,
  * 19 Sep 2026). Provisioning wrote the clone row at 05:20:23 and returned
  * almost immediately; its Supabase project was still deploying edge functions
- * seven at a time sixteen minutes later. In that window the clone page
+ * seven at a time twenty-seven minutes later, and had reached
+ * `estimate-capital-growth` — roughly the letter E of several hundred
+ * deployed in name order. That measurement is where the duration below comes
+ * from, and it is given as an expectation with its cause rather than as a
+ * promise: the cost is the number of functions, so it moves when that does. In that window the clone page
  * legitimately showed a Vercel deployment parked on
  * "Waiting for the clone's Supabase backend to report its URL and key.", a
  * subdomain reading `awaiting_deployment`, and no Turnstile widget.
@@ -63,10 +67,11 @@ export function ProvisioningSequenceNote({
   if (dedicatedBackend) {
     steps.push({
       what:
-        "Its own Supabase project is created, then the prime's schema, RLS policies, grants and " +
-        "edge functions are replicated into it. This is the slow step: it resumes every minute " +
-        "and pauses at an invocation budget each pass, so a full backend takes roughly 15–30 " +
-        "minutes.",
+        "Its own Supabase project is created, then the prime's schema, RLS policies and grants " +
+        "are replicated into it, and finally its edge functions are deployed. This is by far " +
+        "the slow step, and the edge functions dominate it: there are several hundred, the pass " +
+        "resumes every minute and stops at an invocation budget, and a few land each time. " +
+        "Expect the better part of an hour.",
       by: "backend-provisioning-drain, every minute",
     });
   }
