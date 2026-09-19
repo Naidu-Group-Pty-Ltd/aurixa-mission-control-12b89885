@@ -27,8 +27,18 @@ Three things made it a stall rather than a pause.
 and the refusal it printed read *"Auto-merge across 4 clones (>3) requires a
 second operator."* `approveCascade` is the only writer of `approved_at`
 anywhere in this codebase and it is a UI act; `cascade_approvals` has never
-held a row. A control whose only discharge is an act nobody is positioned to
-perform is an outage.
+held a row.
+
+Stated carefully, because the first version of this paragraph overstated it:
+the gate was **undischarged, not undischargeable**. Three operator accounts
+exist, the `cascade_approvals` INSERT policy is a `NOT EXISTS` form so a NULL
+`initiated_by` passes it, the code guard `ev.initiated_by === context.userId`
+is likewise false against NULL, and `listPendingApprovals` would have listed
+all eight. What actually bound was attendance — last operator sign-in
+7 September, all eight notifications unread. That is a severity argument, not
+an impossibility one, and it is still the argument for the change: a control
+that needs a human per commit at fifty commits a day is one that gets
+rubber-stamped or ignored.
 
 **Three is a growth cliff, not a radius.** Every real deployment passes it in
 its first month, after which every prime commit — around fifty a day — needs a
@@ -243,24 +253,60 @@ reports `rls_enabled: false`.)
 
 Each is small, none needs the chunker, and all are written idempotently
 (`ADD COLUMN IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`, `CREATE OR REPLACE
-VIEW/FUNCTION`). Applying `20261202090000` alone discharges the held-back
-migrations on both clones at the next fleet tick, because
-`partitionByDependency` recomputes the barrier from the prime's ledger on every
-run — nothing needs un-sticking by hand.
+VIEW/FUNCTION`). All four are needed, not one: `20261204020000` and
+`20261204030000` carry `blockedBy: ["20261202090000", "20261204000000",
+"20261204010000"]`, so applying the first alone discharges only
+`20261203000000` and `20261203010000`, and `20261206000000` becomes the next
+barrier the moment the corpus passes it.
 
-Two things must not be done instead. **Do not stamp
-`supabase_migrations.schema_migrations` by hand**: the prime's database
-genuinely lacks these objects, and a stamp would send two tenants a migration
-whose prerequisite state does not exist. And **verify by effect, not by the
-ledger row** — after dispatch, re-read the prime's types and confirm
-`builder_network_stock_ranked` and `rank_item_score` are present.
+**Do not stamp `supabase_migrations.schema_migrations` by hand**: the prime's
+database genuinely lacks these objects, and a stamp would send tenants a
+migration whose prerequisite state does not exist.
 
-## One open contradiction, deliberately not guessed at
+## Correcting this document: the hole is not what holds the frontier
 
-`clone_backends.chunk_cursor` reads `{"migrationId":"20261202000000",
-"statementsDone":1}` on `npc-client-dashboard` and `...2` on
-`preflight-property-group` — the 41 MB seed recorded as part-streamed — while
-both clones' union ledger reports that version applied. One of the two is
-wrong, and only one of them can be right about whether the template schema
-landed. Settling it needs a row count against `template_library_entries` on
-both projects.
+The first version of this page said applying `20261202090000` would discharge
+the held-back migrations "at the next fleet tick". **That is wrong**, and the
+mistake was reading a status line instead of the clone's own cursor.
+
+All three stalled clones carry
+`chunk_cursor = {"migrationId": "20261202000000", "statementsDone": …}` — 6, 12
+and 1 respectively as this was written — at frontier `20261201100000`. Version
+`20261202000000` **is** in the prime's ledger, so `partitionByDependency` puts
+it in `send`, not `orphaned`: it sits *before* the hole. It is the
+41,671,969-byte single-`INSERT` template seed, chunked at
+`DEFAULT_SEED_STATEMENT_BYTES` into dozens of statements, and the three clones
+are a handful of statements into it. Discharging the hole cannot move any of
+them until that seed lands.
+
+**And the sentence that misled is a null fallback.** `fleet-migration.server.ts`
+reads `const syncedTo = latestApplied ?? "the prime's latest recorded
+migration"`, so *"Synced to the prime's latest recorded migration — N
+migration(s) held back behind …"* on all three clones means the pass completed
+**zero** migrations. The held-back clause is true. The clause in front of it
+reads as the opposite of what it means.
+
+The seed's own livelock — no wall-clock budget and no persisted chunk cursor on
+the fleet path, so every pass restarted at statement 1 — was closed by #225
+before this branch merged main, and the cursors are advancing again
+(`npc-client-dashboard` went 1 → 6 between 12:31 and 13:01).
+
+Two things follow for anyone verifying this. **Verification is the clone's
+`chunk_cursor` reaching null and `migration_version` advancing**, not a re-read
+of the prime's types — the latter says the dispatch worked and nothing about
+whether a tenant moved. And **`rescueScopedOrphans` provably does not cover
+this corpus's two largest orphans**: `MAX_SCOPING_BYTES` is 2 MB against 41 MB
+seeds, so `readSql` returns null, the orphan is `indeterminate` and the prefix
+barrier is retained — by design, and worth stating plainly rather than leaving
+to be discovered.
+
+## Still open
+
+`applyChunkedSeed` streams the blob **twice per attempt** — `readSeedShape`
+walks the whole file discarding tuples, then `chunkSeedStatements` walks it
+again — so ~80 MB of blob traffic buys one bounded group of statements. The
+second walk is not redundant: it re-derives the shape and refuses when the two
+disagree (*"the blob changed between reads"*), which is a real control. The
+repair is to cache the shape against the blob's **sha** so a resumed pass reads
+once and validates against the previous pass's shape — the same check, made
+stronger, at half the traffic. Not done here.
