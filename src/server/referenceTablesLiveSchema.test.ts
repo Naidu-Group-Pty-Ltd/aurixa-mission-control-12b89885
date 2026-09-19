@@ -130,3 +130,64 @@ describe("a conflict key names columns the prime has", () => {
     });
   }
 });
+
+/**
+ * Every declared dependency has a column on the child that could carry it.
+ *
+ * `dependsOn` says a child's foreign keys point at a parent, and
+ * `tablesToReopen` re-walks the parent on that word alone. If the edge is
+ * imaginary the re-walk is a no-op and the 23503 it exists to prevent comes
+ * back looking exactly as it did before — a silence, which is the failure this
+ * whole module keeps paying for.
+ *
+ * ## What this asserts, and what it does not
+ *
+ * It asserts the referencing COLUMN is on the prime, against the same
+ * `information_schema.columns` snapshot above. It does NOT assert a foreign
+ * key constraint exists between the two tables, because this repository holds
+ * no constraint snapshot — so a column that was renamed away is caught here
+ * and a constraint that was dropped is not.
+ *
+ * The one edge that is proven rather than believed is
+ * `aml.sanctions_entries.sync_id` → `aml.sanctions_list_syncs`: the clone
+ * named it itself, refusing the copy with
+ * `sanctions_entries_sync_id_fkey`. The other three are read from the module's
+ * own reasons and from the column lists above.
+ *
+ * Snapshot the real thing with:
+ *   select tc.table_schema, tc.table_name, kcu.column_name,
+ *          ccu.table_schema as ref_schema, ccu.table_name as ref_table
+ *     from information_schema.table_constraints tc
+ *     join information_schema.key_column_usage kcu
+ *       on kcu.constraint_name = tc.constraint_name
+ *     join information_schema.constraint_column_usage ccu
+ *       on ccu.constraint_name = tc.constraint_name
+ *    where tc.constraint_type = 'FOREIGN KEY';
+ */
+const EDGE_COLUMN: Record<string, string> = {
+  "checklist_template_sections -> checklist_templates": "template_id",
+  "checklist_template_items -> checklist_template_sections": "section_id",
+  "aml.sanctions_entries -> aml.sanctions_list_syncs": "sync_id",
+  "aml.pep_officeholders -> aml.pep_officeholder_syncs": "sync_id",
+};
+
+describe("a declared dependency has a referencing column on the prime", () => {
+  const edges = REFERENCE_TABLES.flatMap((t) =>
+    (t.dependsOn ?? []).map((parent) => [refName(t), parent] as const),
+  );
+
+  it("every edge in the allow-list is named above", () => {
+    // Otherwise a new edge is added and nothing checks it — which is how the
+    // conflict keys went five days unexamined.
+    expect(edges.map(([c, p]) => `${c} -> ${p}`).sort()).toEqual(Object.keys(EDGE_COLUMN).sort());
+  });
+
+  for (const [child, parent] of edges) {
+    const column = EDGE_COLUMN[`${child} -> ${parent}`];
+    it(`${child}.${column} -> ${parent}`, () => {
+      expect(LIVE[child], `no live snapshot for ${child}`).toBeDefined();
+      expect(LIVE[parent], `no live snapshot for ${parent}`).toBeDefined();
+      expect(LIVE[child], `${child} has no column "${column}"`).toContain(column);
+    });
+  }
+});

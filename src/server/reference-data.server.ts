@@ -46,7 +46,13 @@ import type { Database } from "@/integrations/supabase/types";
 import { resolvePrimeBackendRef } from "./prime-backend.server";
 import { runSqlOnProject } from "./backend-provisioning.server";
 import { notifyOperators, writeAuditLog } from "./audit.server";
-import { REFERENCE_TABLES, planColumns, refName, type ReferenceTable } from "./referenceTables.pure";
+import {
+  REFERENCE_TABLES,
+  planColumns,
+  refName,
+  tablesToReopen,
+  type ReferenceTable,
+} from "./referenceTables.pure";
 import {
   buildPageQuery,
   buildInsertStatement,
@@ -282,6 +288,11 @@ export async function runReferenceDataSync(
     .select("table_name, cursor, rows_copied, status")
     .eq("clone_id", cloneId);
   const stateOf = new Map((stateRows ?? []).map((r) => [r.table_name, r]));
+  // A parent's copy is not finished while a child referencing it is
+  // unfinished: `complete` is terminal, so without this a long child advances
+  // against a parent frozen at an earlier pass and the clone refuses the page
+  // with 23503. See `tablesToReopen` for the measurement.
+  const reopen = tablesToReopen(new Map((stateRows ?? []).map((r) => [r.table_name, r.status])));
 
   const out: ReferenceSyncResult = {
     ...EMPTY,
@@ -293,7 +304,8 @@ export async function runReferenceDataSync(
   for (const entry of REFERENCE_TABLES) {
     const name = refName(entry);
     const prior = stateOf.get(name);
-    if (prior?.status === "complete" || prior?.status === "skipped") {
+    const reopened = reopen.has(name);
+    if (!reopened && (prior?.status === "complete" || prior?.status === "skipped")) {
       out.tables.push({
         table: name,
         status: prior.status,
@@ -386,18 +398,25 @@ export async function runReferenceDataSync(
       const countRows = rowsOf(await runSqlOnProject(primeRef, buildCountQuery(entry)));
       const sourceRows = Number((countRows[0] as { n?: unknown } | undefined)?.n ?? 0) || 0;
 
+      // A re-opened parent re-walks from the start. The page query orders on
+      // `<pageKey>::text` and resumes with `key::text > cursor`, and a new
+      // row's uuid sorts anywhere — so resuming from the stored cursor is
+      // exactly how the rows this re-walk exists to fetch get missed. The
+      // carried count goes with it, because this is one walk of the whole
+      // table rather than a continuation of the last one.
+      const resumeCursor = reopened ? null : (prior?.cursor ?? null);
       await record({
         status: "copying",
         source_rows: sourceRows,
-        started_at: prior?.cursor ? undefined : new Date().toISOString(),
+        started_at: resumeCursor ? undefined : new Date().toISOString(),
       });
 
-      const carried = prior?.rows_copied ?? 0;
+      const carried = reopened ? 0 : (prior?.rows_copied ?? 0);
       const { rowsCopied, complete, cursor } = await copyTable({
         entry,
         primeRef,
         cloneRef,
-        cursor: prior?.cursor ?? null,
+        cursor: resumeCursor,
         deadline,
         now,
         onProgress: async (c, n) => {

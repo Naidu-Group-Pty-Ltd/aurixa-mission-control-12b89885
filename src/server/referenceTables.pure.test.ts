@@ -5,6 +5,7 @@ import {
   isIdentityCandidate,
   planColumns,
   referenceTable,
+  tablesToReopen,
   type ReferenceTable,
   refName,
 } from "./referenceTables.pure";
@@ -333,5 +334,110 @@ describe("a table with a natural unique key conflicts on it", () => {
       expect(entry, `${table} is no longer a reference table`).toBeDefined();
       expect(entry!.conflictKey).toEqual(["id"]);
     }
+  });
+});
+
+/**
+ * The FOREIGN-KEY edges among allow-listed tables, pinned as data.
+ *
+ * Each entry is (child, parent, the child column that creates the edge). The
+ * column is checked against the prime's live snapshot in
+ * `referenceTablesLiveSchema.test.ts`; here the shape of the graph is checked,
+ * which is what `tablesToReopen` walks.
+ *
+ * Written down rather than derived, for the reason the module's own conflict
+ * keys are: this file cannot see constraints, and a graph that quietly loses
+ * an edge re-opens nothing and looks exactly like a graph that works.
+ */
+const EDGES: ReadonlyArray<readonly [child: string, parent: string, column: string]> = [
+  ["checklist_template_sections", "checklist_templates", "template_id"],
+  ["checklist_template_items", "checklist_template_sections", "section_id"],
+  ["aml.sanctions_entries", "aml.sanctions_list_syncs", "sync_id"],
+  ["aml.pep_officeholders", "aml.pep_officeholder_syncs", "sync_id"],
+];
+
+describe("the dependency graph the re-walk reads", () => {
+  it("declares exactly the edges pinned above, and no others", () => {
+    const declared = REFERENCE_TABLES.flatMap((t) =>
+      (t.dependsOn ?? []).map((p) => `${refName(t)} -> ${p}`),
+    ).sort();
+    expect(declared).toEqual(EDGES.map(([c, p]) => `${c} -> ${p}`).sort());
+  });
+
+  it("names only allow-listed parents — an unknown name re-opens nothing, silently", () => {
+    const known = new Set(REFERENCE_TABLES.map(refName));
+    for (const t of REFERENCE_TABLES) {
+      for (const parent of t.dependsOn ?? []) {
+        expect(known, `${refName(t)} depends on an unknown table`).toContain(parent);
+      }
+    }
+  });
+
+  /*
+    The array's ORDER is the within-a-pass half of the same rule, and the
+    module's own comment calls it load-bearing. If the two ever disagree, one
+    of them is wrong and the copy inserts a child before its parent on the
+    FIRST pass — which no amount of re-walking later can repair.
+  */
+  it("agrees with the array order: a parent is always written earlier", () => {
+    const index = new Map(REFERENCE_TABLES.map((t, i) => [refName(t), i]));
+    for (const t of REFERENCE_TABLES) {
+      for (const parent of t.dependsOn ?? []) {
+        const msg = `${parent} must be listed before ${refName(t)}`;
+        expect(index.get(parent)!, msg).toBeLessThan(index.get(refName(t))!);
+      }
+    }
+  });
+});
+
+describe("tablesToReopen", () => {
+  const all = REFERENCE_TABLES.map(refName);
+  /** Every table complete — the steady state a healthy clone sits in. */
+  const allComplete = () => new Map(all.map((n) => [n, "complete"]));
+
+  it("re-opens nothing when everything has finished", () => {
+    expect([...tablesToReopen(allComplete())]).toEqual([]);
+  });
+
+  it("re-opens the parent of a child that has not finished", () => {
+    // The measured case: the register's ledger finished, the register did not.
+    const state = allComplete();
+    state.set("aml.sanctions_entries", "failed");
+    expect([...tablesToReopen(state)]).toEqual(["aml.sanctions_list_syncs"]);
+  });
+
+  it.each(["copying", "in_progress", "failed", undefined])(
+    "treats %s as unfinished — only complete and skipped are finished",
+    (status) => {
+      const state = allComplete();
+      if (status === undefined) state.delete("aml.sanctions_entries");
+      else state.set("aml.sanctions_entries", status);
+      expect([...tablesToReopen(state)]).toContain("aml.sanctions_list_syncs");
+    },
+  );
+
+  it("follows the chain to a fixed point rather than stopping one level up", () => {
+    // items -> sections -> templates. Re-opening sections makes IT unfinished,
+    // which must re-open templates; a single sweep would leave templates
+    // frozen and the same 23503 one link further along.
+    const state = allComplete();
+    state.set("checklist_template_items", "copying");
+    const out = tablesToReopen(state);
+    expect(out).toContain("checklist_template_sections");
+    expect(out).toContain("checklist_templates");
+  });
+
+  it("does not re-open a skipped parent — that is a migration question", () => {
+    const state = allComplete();
+    state.set("aml.sanctions_list_syncs", "skipped");
+    state.set("aml.sanctions_entries", "failed");
+    expect([...tablesToReopen(state)]).toEqual([]);
+  });
+
+  it("a finished child holds nothing open", () => {
+    const state = allComplete();
+    state.set("suburb_directory", "copying");
+    // An unfinished table with no dependants re-opens nothing.
+    expect([...tablesToReopen(state)]).toEqual([]);
   });
 });
