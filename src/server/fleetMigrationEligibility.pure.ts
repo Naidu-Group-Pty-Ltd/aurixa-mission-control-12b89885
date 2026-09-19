@@ -1,4 +1,5 @@
 import { messageNamesUpstreamRateLimit } from "@/server/provisioningBudget";
+import { chunkCursorFor } from "./chunkCursorStore.pure";
 
 /**
  * Whether the fleet migration sync may advance a clone's schema.
@@ -276,4 +277,131 @@ export function blockIsDischarged(
 export function blockIsUpstreamRefusal(reason: string | null | undefined): boolean {
   if (typeof reason !== "string" || reason.length === 0) return false;
   return messageNamesUpstreamRateLimit(reason);
+}
+
+/** What the queue order is decided from. A row of `clone_backends`. */
+export type MigrationQueueRow = {
+  migration_version: string | null;
+  /** Raw JSONB. Narrowed through `chunkCursorFor`, never read field by field. */
+  chunk_cursor?: unknown;
+  /**
+   * When this lane last CLAIMED the clone. Optional because the column arrived
+   * after this comparator did and a caller that does not select it must still
+   * order correctly — see the third key below.
+   */
+  migration_heartbeat_at?: string | null;
+  /** A total order, so the sort can never fall back to the table's layout. */
+  clone_id?: string;
+};
+
+/**
+ * Which eligible clone the pass serves first.
+ *
+ * ## An arbitrary tie-break is not the absence of a policy
+ *
+ * The lane sorts by `migration_version` ascending — furthest behind first —
+ * and takes a batch. That is the right primary key and it decides nothing at
+ * all on the fleet this exists for: a fleet held at ONE frontier ties on every
+ * row, `Array.prototype.sort` is stable, and a comparator returning 0 hands
+ * the order to the table's physical layout and then keeps it there for every
+ * pass.
+ *
+ * Measured 19 September 2026, three clones all recording `20261201100000`
+ * with a ~40 MB template-library seed as their next migration. Scan order was
+ * Preflight, NPC Client Dashboard, NPC Test. Over two hours and forty-five
+ * minutes Preflight advanced eight statements, NPC Client Dashboard advanced
+ * none, and NPC Test was never CLAIMED — its row was not written once. The
+ * pass spends its whole wall-clock budget streaming the seed back to the
+ * leader's cursor, the outer loop breaks on the deadline before it reaches
+ * anyone else, and because the leader's progress does not change its
+ * `migration_version`, it leads again on the next pass. Left alone that is not
+ * a slow fleet, it is one clone draining and two that never will.
+ *
+ * ## Why progress, and not a clock
+ *
+ * The obvious tie-break is least-recently-served, and there is no honest field
+ * for it: `updated_at` is written by the provisioning drain, the secret
+ * reconcilers and the parity sweep as well, so a clone another lane touches
+ * often would read as freshly served by this one and be pushed to the back for
+ * a reason that has nothing to do with migrations. Adding a column for it is a
+ * schema change to carry a fact this lane already has.
+ *
+ * `chunk_cursor` is written by this lane and only this lane, on every
+ * statement it lands. Fewest statements done is furthest behind on the work
+ * actually in flight, which is the thing the order is being asked about — and
+ * it self-rotates: serving the laggard advances it past its peers, which then
+ * lead. Comparing counts across two DIFFERENT seeds would be meaningless, and
+ * this never does: it is reached only when two clones agree on
+ * `migration_version`, so their next migration is the same file.
+ *
+ * A clone with no cursor sorts as zero, which puts a clone that is not
+ * mid-seed ahead of one that is. That is deliberate and cheap — such a pass
+ * either has nothing to do and returns at once, or has an ordinary small
+ * migration to send — and it is the conservative direction: the failure this
+ * function exists to stop is a clone never reached, never a clone reached too
+ * often.
+ *
+ * ## And then two clones with no cursor tie at zero
+ *
+ * Which is the same defect this function exists to close, narrower: the sort
+ * returns 0, `Array.prototype.sort` is stable, and the order is the table's
+ * layout again. The case is not rare — it is every clone that is not mid-seed,
+ * which after the seed lands is the whole fleet. Two things have to be true at
+ * once for it to bite, and both are ordinary: several migrations owed rather
+ * than one, and a budget that runs out before the batch does. Then the clone
+ * the table returns last is never reached, with small migrations instead of one
+ * big seed.
+ *
+ * So there is a third key, and the reason the paragraph above rejected a clock
+ * no longer holds. It rejected one for a good reason — `updated_at` is written
+ * by the provisioning drain, the secret reconcilers and the parity sweep, so a
+ * clone another lane touches often would read as freshly served — and for one
+ * that has since stopped being true: "adding a column for it is a schema
+ * change to carry a fact this lane already has". `migration_heartbeat_at` is
+ * not added for this. It arrived so the reclaim sweep could tell a working pass
+ * from a dead one, it is written by this lane and nothing else, and it survives
+ * the release. Reading it here is free.
+ *
+ * It means "last CLAIMED" rather than "last served", and those are the same
+ * thing now: `CLAIM_RESERVE_MS` means a claim is only taken with time to work
+ * in. Nulls sort first, which is a clone this lane has never held.
+ *
+ * The fourth key is `clone_id`, and it is there so that the answer never
+ * depends on the table's physical layout at all — not because two clones with
+ * the same version, the same progress and the same claim time are expected, but
+ * because "expected" is what the first version of this function assumed.
+ */
+export function compareMigrationQueue(a: MigrationQueueRow, b: MigrationQueueRow): number {
+  // Nulls first: a backend that has never recorded a version is furthest
+  // behind by definition.
+  const av = a.migration_version ?? "";
+  const bv = b.migration_version ?? "";
+  if (av !== bv) {
+    if (av === "") return -1;
+    if (bv === "") return 1;
+    return av < bv ? -1 : 1;
+  }
+  const ap = chunkCursorFor(a.chunk_cursor)?.statementsDone ?? 0;
+  const bp = chunkCursorFor(b.chunk_cursor)?.statementsDone ?? 0;
+  if (ap !== bp) return ap - bp;
+  // Least recently CLAIMED by this lane, nulls first. Compared as strings
+  // because an ISO-8601 UTC timestamp sorts lexicographically, and parsing a
+  // date to compare two of them is a way to turn a malformed value into NaN.
+  const ah = a.migration_heartbeat_at ?? null;
+  const bh = b.migration_heartbeat_at ?? null;
+  if (ah !== bh) {
+    if (ah === null) return -1;
+    if (bh === null) return 1;
+    return ah < bh ? -1 : 1;
+  }
+  // A total order. Undefined on a caller that does not select it, in which case
+  // this contributes nothing and the sort is as stable as it was.
+  const ai = a.clone_id ?? "";
+  const bi = b.clone_id ?? "";
+  return ai < bi ? -1 : ai > bi ? 1 : 0;
+}
+
+/** The eligible rows, in the order the pass should serve them. Never mutates. */
+export function orderMigrationQueue<T extends MigrationQueueRow>(rows: readonly T[]): T[] {
+  return [...rows].sort(compareMigrationQueue);
 }

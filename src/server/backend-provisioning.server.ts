@@ -2388,8 +2388,9 @@ export async function rescueScopedOrphans<T extends { id: string; name: string }
 ): Promise<{ send: T[]; stillBlocked: Array<{ meta: T; blockedBy: string[] }> }> {
   if (orphaned.length === 0) return { send: [], stillBlocked: [] };
 
-  const { scopeHoles, holeRelationNames, MAX_SCOPING_BYTES } =
-    await import("./cascade/migrationDependencyScope.pure");
+  const { scopeHoles, holeRelationNames, MAX_SCOPING_BYTES } = await import(
+    "./cascade/migrationDependencyScope.pure"
+  );
   const byId = new Map(corpus.map((m) => [m.id, m]));
   const sqlOnItem = new Map(materialised.filter((m) => m.sql).map((m) => [m.id, m.sql as string]));
 

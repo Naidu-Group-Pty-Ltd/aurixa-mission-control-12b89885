@@ -796,10 +796,26 @@ describe("a pass is bounded", () => {
     const named = lane.split("\n").filter((l) => l.includes("migration_heartbeat_at:"));
     const writes = named.filter((l) => !/migration_heartbeat_at:\s*(string|number|Date)\b/.test(l));
     expect(writes.length, "a second heartbeat writer bypasses the database's maximum").toBe(1);
-    // And the declaration the exclusion covers is a single named type, so it
-    // cannot grow a second copy that hides a write behind the same words.
-    const decls = lane.split("migration_heartbeat_at: string | null").length - 1;
-    expect(decls, "the ordering row's shape is declared more than once").toBe(1);
+    /*
+      And the shape that has to NAME the column is declared in exactly one
+      place, which is no longer this file.
+
+      This used to assert the lane held that declaration once. The queue order
+      moved into `fleetMigrationEligibility.pure.ts` when #228 merged — the
+      right home, beside the eligibility rules — so the lane has no row type at
+      all now and the count went to zero, which read as "the ordering row's
+      shape is declared more than once". A true property reported by an
+      assertion that had stopped measuring it, for the second time on this one
+      test.
+
+      So it is asked where the shape actually is, and asked of the lane that it
+      does NOT keep a private copy: two declarations of one row is how a write
+      comes to hide behind the same words in the file the exclusion above does
+      not scan.
+    */
+    const order = code(read("src/server/fleetMigrationEligibility.pure.ts"));
+    expect(order.split("migration_heartbeat_at?: string | null").length - 1).toBe(1);
+    expect(lane).not.toMatch(/migration_heartbeat_at\??:\s*(string|number|Date)\b/);
   });
 
   it("stops beating when the claim is gone, rather than saying a pass owns what it does not", () => {

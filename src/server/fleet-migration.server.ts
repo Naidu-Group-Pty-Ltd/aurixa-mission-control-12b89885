@@ -61,6 +61,7 @@ import {
   blockIsDischarged,
   blockIsUpstreamRefusal,
   migrationEligibility,
+  orderMigrationQueue,
   type MigrationSkipReason,
 } from "./fleetMigrationEligibility.pure";
 import { notifyOperators, writeAuditLog } from "./audit.server";
@@ -374,96 +375,6 @@ const CLAIM_HEARTBEAT_MS = 30_000;
  */
 const CLAIM_DRAIN_MS = 2_000;
 
-/**
- * Which clone this pass serves first — and, under a tie, which it serves NEXT.
- *
- * FURTHEST BEHIND FIRST. Unchanged and still the primary key: a backend with
- * no recorded version at all is furthest behind by definition and sorts ahead
- * of every one that has a version.
- *
- * LEAST RECENTLY SERVED SECOND, AND THAT HALF IS NEW.
- *
- * The old comparator answered `0` for a tie and stopped. `Array#sort` is
- * stable, so equal rows kept the order they arrived in — and they arrive from
- * a `.select()` with no `ORDER BY`, which is to say in whatever order the
- * database felt like. That order does not change between passes, so whichever
- * clone it returns LAST is served last on every pass for ever; and because a
- * pass stops at a wall-clock budget rather than when it runs out of clones,
- * "last" and "never" are the same thing once the queue is longer than the
- * budget.
- *
- * Measured 19 Sep 2026, on three clones tied at `20261201100000` and part-way
- * through one 41 MB seed. The statements each had landed descended exactly
- * with the order the database returned them:
- *
- *   1. Preflight Property Group     — 25 statements, served 16:30
- *   2. NPC Client Dashboard         — 17 statements, served 16:30
- *   3. NPC Test                     — 11 statements, served 15:30 and not since
- *
- * Not a correlation: it IS the ordering. The first two advanced on the same
- * pass, 25 ms apart, and the third was not reached at all.
- *
- * So a tie is broken on when this lane last held the clone, oldest first.
- * Serving a clone writes that stamp, which sends it to the back — a rotation
- * rather than a queue, so no clone can be at the end of it twice running.
- *
- * `migration_heartbeat_at` IS THAT STAMP, AND `updated_at` COULD NOT BE.
- * The same reason the column exists at all: `updated_at` is row-wide, and the
- * reference-data lane claims and releases the same rows at `13,28,43,58`. On
- * `updated_at` the fairness of THIS lane would be decided by the passes of
- * ANOTHER one — a clone would go to the back of this queue because a different
- * worker copied a lookup table into it.
- *
- * Not hypothetically. On the same fleet, the same afternoon: Preflight's
- * `updated_at` read 16:30:44 after the fleet pass and 16:43:00 twelve minutes
- * later, written by the reference lane's `:43`. Ordering on it would have put
- * the clone that had just been served TWICE at the front of the 17:00 queue,
- * and the starved one behind it again.
- *
- * The heartbeat is written by this lane and nothing else, and the release
- * deliberately leaves it standing, so it already means "when the fleet lane
- * last had this clone" with no new column and no new write.
- *
- * It reads "last CLAIMED" rather than "last served", and those became the same
- * thing in this change: `CLAIM_RESERVE_MS` means a claim is only taken with
- * time left to work, so a claim now implies work attempted. Before the
- * reserve it did not, and this key would have rewarded a clone for a claim
- * that did nothing.
- *
- * The final tie-break is `clone_id`, which is arbitrary but DEFINED. It is
- * reached only when two clones are level on version and have never been
- * served, which is the state of a fresh fleet; one pass differentiates them
- * and the heartbeat decides every pass after. An arbitrary-but-stable order
- * that lasts one round is a different thing from one that lasts for ever.
- */
-export type FleetOrderRow = {
-  clone_id: string;
-  migration_version: string | null;
-  migration_heartbeat_at: string | null;
-};
-
-export function furthestBehindThenLeastRecentlyServed(a: FleetOrderRow, b: FleetOrderRow): number {
-  const av = a.migration_version ?? "";
-  const bv = b.migration_version ?? "";
-  if (av !== bv) {
-    if (av === "") return -1;
-    if (bv === "") return 1;
-    return av < bv ? -1 : 1;
-  }
-
-  // Never served sorts ahead of served, for the same reason a missing version
-  // does: the absence of a reading is the strongest form of "furthest behind".
-  const ah = a.migration_heartbeat_at;
-  const bh = b.migration_heartbeat_at;
-  if (ah !== bh) {
-    if (ah === null) return -1;
-    if (bh === null) return 1;
-    // ISO-8601 UTC, as the database writes it, so lexical order IS time order.
-    return ah < bh ? -1 : 1;
-  }
-
-  return a.clone_id < b.clone_id ? -1 : a.clone_id > b.clone_id ? 1 : 0;
-}
 
 /**
  * Say, on a clock, that this pass still holds the claim it took.
@@ -951,11 +862,15 @@ export async function runFleetMigrationSync(
   const skipped = verdicts.filter((v) => !v.verdict.eligible);
   const excludedCount = skipped.length;
 
-  const backends = verdicts
-    .filter((v) => v.verdict.eligible)
-    .map((v) => v.row)
-    .sort(furthestBehindThenLeastRecentlyServed)
-    .slice(0, batchSize);
+  // Furthest behind first, ties broken by least progress on the seed in
+  // flight. The order lives in the pure module beside the eligibility rules
+  // because who is served first is the same kind of decision as who is served
+  // at all — and because a comparator that returned 0 on a tie handed this
+  // fleet's whole budget to one clone for as long as it was measured. See
+  // `compareMigrationQueue`.
+  const backends = orderMigrationQueue(
+    verdicts.filter((v) => v.verdict.eligible).map((v) => v.row),
+  ).slice(0, batchSize);
 
   // Names for BOTH sets, read once. A skipped clone is reported by name, so
   // this read has to cover the ones this run will not touch as well as the

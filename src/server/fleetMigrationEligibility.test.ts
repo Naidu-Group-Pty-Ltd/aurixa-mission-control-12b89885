@@ -6,7 +6,9 @@ import {
   blockIsDischarged,
   blockIsUpstreamRefusal,
   blockedVersionFrom,
+  compareMigrationQueue,
   migrationEligibility,
+  orderMigrationQueue,
   type BackendFacts,
 } from "./fleetMigrationEligibility.pure";
 import { isUpstreamRateLimit } from "./provisioningBudget";
@@ -353,5 +355,199 @@ describe("the lane's rehabilitation pass", () => {
   it("reports what it rehabilitated rather than letting a count move quietly", () => {
     expect(lane).toContain("rehabilitated: string[];");
     expect(lane).toContain("rehabilitated,");
+  });
+});
+
+describe("the order the pass serves clones in", () => {
+  const at = (version: string | null, statementsDone?: number, migrationId = "20261202000000") => ({
+    migration_version: version,
+    ...(statementsDone === undefined ? {} : { chunk_cursor: { migrationId, statementsDone } }),
+  });
+
+  it("puts the clone furthest behind first", () => {
+    const order = orderMigrationQueue([at("20261204010000"), at("20261201100000"), at(null)]);
+    expect(order.map((r) => r.migration_version)).toEqual([
+      null,
+      "20261201100000",
+      "20261204010000",
+    ]);
+  });
+
+  it("breaks a tie by least progress on the seed in flight", () => {
+    // The measured fleet: three clones all recording 20261201100000, mid-way
+    // through the same ~40 MB seed. Scan order was Preflight (39 statements),
+    // NPC Client Dashboard (17), NPC Test (11) — and the leader led every pass.
+    const order = orderMigrationQueue([
+      at("20261201100000", 39),
+      at("20261201100000", 17),
+      at("20261201100000", 11),
+    ]);
+    expect(order.map((r) => r.chunk_cursor?.statementsDone)).toEqual([11, 17, 39]);
+  });
+
+  it("rotates: serving the laggard puts it behind its peers next pass", () => {
+    // The property that makes this a queue rather than a different fixed
+    // winner. 11 leads, advances past 17, and 17 leads next.
+    const before = orderMigrationQueue([
+      at("20261201100000", 39),
+      at("20261201100000", 17),
+      at("20261201100000", 11),
+    ]);
+    expect(before[0].chunk_cursor?.statementsDone).toBe(11);
+    const after = orderMigrationQueue([
+      at("20261201100000", 39),
+      at("20261201100000", 17),
+      at("20261201100000", 23),
+    ]);
+    expect(after[0].chunk_cursor?.statementsDone).toBe(17);
+  });
+
+  it("never lets progress outrank being further behind", () => {
+    // A clone deep into a seed is still ahead of one that has not reached the
+    // migration at all. Progress is a TIE-break and may not cross a frontier.
+    const order = orderMigrationQueue([at("20261204010000", 0), at("20261201100000", 39)]);
+    expect(order[0].migration_version).toBe("20261201100000");
+  });
+
+  it("treats a clone with no cursor as furthest behind, not as finished", () => {
+    // Absent is never "done": a row with no cursor is one this lane has not
+    // started, and the failure being closed is a clone never reached.
+    const order = orderMigrationQueue([at("20261201100000", 4), at("20261201100000")]);
+    expect(order[0].chunk_cursor).toBeUndefined();
+  });
+
+  it("reads a malformed cursor as no progress rather than trusting it", () => {
+    // Through `chunkCursorFor`, so a negative, a float or a missing id cannot
+    // become a position in the queue.
+    for (const bad of [
+      { migrationId: "20261202000000", statementsDone: -3 },
+      { migrationId: "20261202000000", statementsDone: 1.5 },
+      { statementsDone: 900 },
+      "nonsense",
+      null,
+    ]) {
+      expect(
+        compareMigrationQueue(
+          { migration_version: "x", chunk_cursor: bad },
+          {
+            migration_version: "x",
+            chunk_cursor: { migrationId: "20261202000000", statementsDone: 1 },
+          },
+        ),
+      ).toBeLessThan(0);
+    }
+  });
+
+  /*
+    THE THIRD AND FOURTH KEYS, AND THE CASE THE SECOND ONE CANNOT SEE.
+
+    Two clones with no cursor both score zero on progress, the comparator
+    returned 0, `Array#sort` is stable — and the order is the table's layout
+    again. That is every clone that is NOT mid-seed, which after the seed lands
+    is the whole fleet, and it bites whenever several migrations are owed and
+    the budget runs out before the batch does: small migrations instead of one
+    big seed, same clone never reached.
+  */
+  describe("and when neither is mid-seed", () => {
+    const row = (id: string, version: string, heartbeat: string | null) => ({
+      clone_id: id,
+      migration_version: version,
+      migration_heartbeat_at: heartbeat,
+    });
+
+    it("serves the one this lane claimed longest ago", () => {
+      const order = orderMigrationQueue([
+        row("recent", "20261201100000", "2026-09-19T18:30:00.000Z"),
+        row("stale", "20261201100000", "2026-09-19T15:00:00.000Z"),
+      ]);
+      expect(order.map((r) => r.clone_id)).toEqual(["stale", "recent"]);
+    });
+
+    it("puts a clone this lane has NEVER held first", () => {
+      const order = orderMigrationQueue([
+        row("held", "20261201100000", "2026-09-19T15:00:00.000Z"),
+        row("never", "20261201100000", null),
+      ]);
+      expect(order.map((r) => r.clone_id)).toEqual(["never", "held"]);
+    });
+
+    it("rotates, so no clone is last twice running", () => {
+      // A budget that reaches exactly one clone a pass — the condition under
+      // which "served last" and "never served" are the same thing.
+      let rows = [
+        row("a", "20261201100000", "2026-09-19T15:00:00.000Z"),
+        row("b", "20261201100000", "2026-09-19T15:30:00.000Z"),
+        row("c", "20261201100000", "2026-09-19T16:00:00.000Z"),
+      ];
+      const served: string[] = [];
+      for (let pass = 0; pass < 6; pass += 1) {
+        const first = orderMigrationQueue(rows)[0];
+        served.push(first.clone_id);
+        const stamp = `2026-09-19T17:0${pass}:00.000Z`;
+        rows = rows.map((r) =>
+          r.clone_id === first.clone_id ? { ...r, migration_heartbeat_at: stamp } : r,
+        );
+      }
+      expect(served).toEqual(["a", "b", "c", "a", "b", "c"]);
+    });
+
+    it("never returns 0 for two DIFFERENT clones, whatever the other keys say", () => {
+      // The property, rather than a case: a 0 is a decision handed to the
+      // table's physical layout, and that is the defect this whole function
+      // exists to close.
+      const versions = ["20261201100000", "20261204010000"];
+      const progress = [undefined, 0, 17];
+      const beats = [null, "2026-09-19T15:00:00.000Z", "2026-09-19T18:00:00.000Z"];
+      for (const av of versions)
+        for (const bv of versions)
+          for (const ap of progress)
+            for (const bp of progress)
+              for (const ah of beats)
+                for (const bh of beats) {
+                  const a = {
+                    clone_id: "aaa",
+                    migration_version: av,
+                    migration_heartbeat_at: ah,
+                    ...(ap === undefined
+                      ? {}
+                      : { chunk_cursor: { migrationId: "m", statementsDone: ap } }),
+                  };
+                  const b = {
+                    clone_id: "bbb",
+                    migration_version: bv,
+                    migration_heartbeat_at: bh,
+                    ...(bp === undefined
+                      ? {}
+                      : { chunk_cursor: { migrationId: "m", statementsDone: bp } }),
+                  };
+                  expect(compareMigrationQueue(a, b)).not.toBe(0);
+                }
+    });
+
+    it("orders correctly for a caller that selects NEITHER new field", () => {
+      // Both are optional, because the column arrived after the comparator did.
+      // Such a caller must still get the first two keys, and must not throw.
+      const order = orderMigrationQueue([
+        { migration_version: "20261204010000" },
+        { migration_version: "20261201100000" },
+      ]);
+      expect(order.map((r) => r.migration_version)).toEqual(["20261201100000", "20261204010000"]);
+    });
+  });
+
+  it("does not mutate what it is given", () => {
+    const rows = [at("20261201100000", 39), at("20261201100000", 11)];
+    const copy = [...rows];
+    orderMigrationQueue(rows);
+    expect(rows).toEqual(copy);
+  });
+
+  it("is what the lane actually uses", () => {
+    // The comparator is only worth testing if the pass calls it. This is the
+    // class `builderPortalUiMounted.spec.ts` exists for: an unused export
+    // typechecks, lints and builds.
+    const lane = readFileSync("src/server/fleet-migration.server.ts", "utf8");
+    expect(lane).toContain("orderMigrationQueue(");
+    expect(lane).not.toMatch(/\.sort\(\(a, b\) => \{[\s\S]*?migration_version/);
   });
 });

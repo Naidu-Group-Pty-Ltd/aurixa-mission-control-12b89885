@@ -15,9 +15,14 @@
  * precedence.
  */
 import { describe, it, expect } from "vitest";
-import { furthestBehindThenLeastRecentlyServed as cmp } from "./fleet-migration.server";
+import { compareMigrationQueue as cmp } from "./fleetMigrationEligibility.pure";
 
-type Row = Parameters<typeof cmp>[0];
+/*
+  `clone_id` is optional on `MigrationQueueRow` — the comparator must order
+  correctly for a caller that does not select it — but every row in these tests
+  has one, because the name is how the assertions read.
+*/
+type Row = Parameters<typeof cmp>[0] & { clone_id: string };
 
 function row(id: string, version: string | null, heartbeat: string | null): Row {
   return { clone_id: id, migration_version: version, migration_heartbeat_at: heartbeat };
