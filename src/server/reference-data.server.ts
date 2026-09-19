@@ -307,7 +307,7 @@ export async function runReferenceDataSync(
 
   const { data: stateRows } = await supabase
     .from("clone_reference_syncs")
-    .select("table_name, cursor, rows_copied, status")
+    .select("table_name, cursor, rows_copied, status, detail")
     .eq("clone_id", cloneId);
   const stateOf = new Map((stateRows ?? []).map((r) => [r.table_name, r]));
   // A parent's copy is not finished while a child referencing it is
@@ -327,6 +327,8 @@ export async function runReferenceDataSync(
     const name = refName(entry);
     const prior = stateOf.get(name);
     const reopened = reopen.has(name);
+    /** Rows this attempt has copied, for a failure notice that is about it. */
+    let reached = prior?.rows_copied ?? 0;
     if (!reopened && (prior?.status === "complete" || prior?.status === "skipped")) {
       out.tables.push({
         table: name,
@@ -434,6 +436,12 @@ export async function runReferenceDataSync(
       });
 
       const carried = reopened ? 0 : (prior?.rows_copied ?? 0);
+      // Where this attempt got to, kept OUTSIDE the try so the catch can read
+      // it. `prior` is the snapshot taken before any page was copied, so a
+      // table that landed nine pages and failed on the tenth reported the
+      // count it started with — usually zero — under a sentence promising the
+      // count it stopped at.
+      reached = carried;
       const { rowsCopied, complete, cursor } = await copyTable({
         entry,
         primeRef,
@@ -442,7 +450,8 @@ export async function runReferenceDataSync(
         deadline,
         now,
         onProgress: async (c, n) => {
-          await record({ cursor: c, rows_copied: carried + n, status: "copying" });
+          reached = carried + n;
+          await record({ cursor: c, rows_copied: reached, status: "copying" });
         },
       });
 
@@ -468,7 +477,7 @@ export async function runReferenceDataSync(
       out.tables.push({
         table: name,
         status: "failed",
-        rowsCopied: prior?.rows_copied ?? 0,
+        rowsCopied: reached,
         sourceRows: null,
         detail,
       });
@@ -493,20 +502,41 @@ export async function runReferenceDataSync(
         the count it reached and the source's own words rather than a summary
         of them.
       */
-      await notifyOperators({
-        kind: "cascade_failed",
-        severity: "error",
-        title: `Reference sync stopped on ${name} for ${cloneName}`,
-        body:
-          `Copying ${name} into this clone stopped at ${prior?.rows_copied ?? 0} row(s): ${detail}. ` +
-          "The rows already copied are kept and the next pass resumes from the same cursor, so " +
-          "this will repeat until the cause is fixed. Reference data a clone is missing is not " +
-          "tenant data — it is the seeded catalogue the product reads, and a clone without it " +
-          "cannot draw the documents that depend on it.",
-        cloneId,
-        url: `/clones/${cloneId}`,
-        metadata: { table: name, rows_copied: prior?.rows_copied ?? 0 },
-      });
+      /*
+        ONCE PER FAILURE, NOT ONCE PER PASS.
+
+        Only `complete` and `skipped` are terminal, so a failed table is
+        retried every pass for ever — and the cadence beside this change makes
+        that four times an hour. Notifying each time turns one broken table
+        into ninety-six alerts a day, and a shared outage into a feed nobody
+        can read past; an alert that fires on a schedule is an alert people
+        mute, which costs the silence this whole change exists to end.
+
+        So the notice is about the TRANSITION. A table that was not failing is
+        news, and a table now failing for a DIFFERENT reason is news — the
+        23503 becoming a 42703 is a different fault with a different remedy.
+        The same error on the same table is the state an operator has already
+        been told about, and `clone_reference_syncs` still carries it in full
+        for anyone looking.
+      */
+      const sameFailureAsBefore = prior?.status === "failed" && prior?.detail === detail;
+      if (!sameFailureAsBefore) {
+        await notifyOperators({
+          kind: "cascade_failed",
+          severity: "error",
+          title: `Reference sync stopped on ${name} for ${cloneName}`,
+          body:
+            `Copying ${name} into this clone stopped at ${reached} row(s): ${detail}. ` +
+            "The rows already copied are kept and the next pass resumes from the same cursor, so " +
+            "this will repeat until the cause is fixed — you are told once per distinct failure, " +
+            "not once per pass. Reference data a clone is missing is not tenant data: it is the " +
+            "seeded catalogue the product reads, and a clone without it cannot draw the documents " +
+            "that depend on it.",
+          cloneId,
+          url: `/clones/${cloneId}`,
+          metadata: { table: name, rows_copied: reached },
+        });
+      }
     }
   }
 

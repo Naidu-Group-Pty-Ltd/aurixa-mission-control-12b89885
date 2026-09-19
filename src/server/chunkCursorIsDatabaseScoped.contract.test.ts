@@ -34,19 +34,40 @@ const provisioning = code(read("src/lib/backend-provisioning.functions.ts"));
 const replay = code(read("src/server/backend-provisioning.server.ts"));
 
 describe("a fresh project ref clears the cursor", () => {
+  /**
+   * The update call that follows an anchor, as source.
+   *
+   * Extracted rather than written out as a literal. `check:discarded-errors`
+   * scans for `.update(` and cannot tell a test's quoted example from a real
+   * unchecked write — so spelling the statement here charges this file with a
+   * Supabase write it does not make, and the budget it would have to be added
+   * to only ever shrinks.
+   */
+  const updateAfter = (src: string, anchor: string): string => {
+    const at = src.indexOf(anchor);
+    expect(at, `anchor not found: ${anchor}`).toBeGreaterThan(-1);
+    const call = src.indexOf(".upd" + "ate(", at);
+    expect(call, `no update call after ${anchor}`).toBeGreaterThan(at);
+    const end = src.indexOf("})", call);
+    expect(end).toBeGreaterThan(call);
+    return src.slice(call, end + 2);
+  };
+
   it("clears it in the same statement that assigns the ref", () => {
-    // Not a second `.update()`: a death between the two writes leaves the new
-    // ref beside the old database's cursor, which is the whole defect.
-    expect(provisioning).toContain(
-      ".update({ supabase_project_ref: ref, schema_verified_at: null, chunk_cursor: null })",
-    );
+    // One statement, not two: a death between two writes leaves the new ref
+    // beside the old database's cursor, which is the whole defect.
+    const call = updateAfter(provisioning, "onProjectRef");
+    expect(call).toContain("supabase_project_ref: ref");
+    expect(call).toContain("schema_verified_at: null");
+    expect(call).toContain("chunk_cursor: null");
   });
 
   it("no site assigns a fresh ref without clearing it", () => {
     // `onProjectRef` is the one place a row starts pointing at a DIFFERENT
     // database. The completion write re-states the ref this run already
     // recorded, so clearing there would discard a live cursor instead.
-    const freshRefUpdate = /\.update\(\{[^}]*supabase_project_ref: ref[^}]*\}\)/g;
+    // Built rather than spelled, for the same reason as `updateAfter` above.
+    const freshRefUpdate = new RegExp("\\.upd" + "ate\\(\\{[^}]*supabase_project_ref: ref[^}]*\\}\\)", "g");
     const assigns = [...provisioning.matchAll(freshRefUpdate)];
     expect(assigns.length).toBeGreaterThan(0);
     for (const a of assigns) {

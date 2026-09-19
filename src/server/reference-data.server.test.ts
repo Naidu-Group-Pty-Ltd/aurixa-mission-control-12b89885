@@ -482,4 +482,77 @@ describe("a failed table is reported, not just recorded", () => {
     const failed = [...state.syncRows.values()].filter((r) => r.status === "failed");
     expect(failed.length).toBeGreaterThan(0);
   });
+
+  /*
+    ONCE PER FAILURE, NOT ONCE PER PASS.
+
+    Only `complete` and `skipped` are terminal, so a failed table is retried
+    every pass for ever — four times an hour under the cadence beside this
+    change. One broken table would be ninety-six alerts a day, and an alert
+    that fires on a schedule is one people mute.
+  */
+  it("does not notify again for the same failure on a later pass", async () => {
+    await runReferenceDataSync(fakeSupabase());
+    const first = state.notifications.filter((x) => /Reference sync stopped/.test(x.title)).length;
+    expect(first).toBeGreaterThan(0);
+
+    state.notifications = [];
+    // Second pass, same state: the rows the first pass wrote are now `prior`.
+    await runReferenceDataSync(fakeSupabase());
+    expect(
+      state.notifications.filter((x) => /Reference sync stopped/.test(x.title)),
+      "the same error on the same table is a state the operator was already told about",
+    ).toHaveLength(0);
+  });
+
+  it("notifies again when the SAME table fails for a DIFFERENT reason", async () => {
+    await runReferenceDataSync(fakeSupabase());
+    state.notifications = [];
+    const previous = state.respond!;
+    state.respond = (ref, sql) => {
+      if (ref === CLONE && sql.includes("jsonb_populate_recordset")) {
+        // A different fault with a different remedy.
+        throw new Error('42703: column "sync_id" does not exist');
+      }
+      return previous(ref, sql);
+    };
+    await runReferenceDataSync(fakeSupabase());
+    const again = state.notifications.filter((x) => /Reference sync stopped/.test(x.title));
+    // The double's refusal reaches every table, so the count is not the point:
+    // that it spoke AT ALL on a pass where the reason changed is.
+    expect(again.length).toBeGreaterThan(0);
+    expect(again.every((n) => n.body.includes("42703"))).toBe(true);
+  });
+
+  it("reports the count THIS attempt reached, not the one it started with", async () => {
+    // `prior` is the snapshot taken before any page was copied. A table that
+    // lands pages and then fails reported that snapshot — usually zero — under
+    // a sentence promising the count it stopped at.
+    // A page SHORT of `rowsPerPage` ends the walk as complete, so the first
+    // page has to be a full one or there is no second page to fail on.
+    const entry = REFERENCE_TABLES.find((e) => e.table === "suburb_directory")!;
+    const full = Array.from({ length: entry.rowsPerPage }, (_, i) => ({
+      __cursor: `c${i}`,
+      __row: { id: `c${i}` },
+    }));
+    let page = 0;
+    state.respond = (ref, sql) => {
+      if (sql.includes("to_regclass")) return [{ present: true }];
+      if (sql.includes("information_schema.columns")) return [{ column_name: "id" }];
+      if (sql.includes("count(*)")) return [{ n: entry.rowsPerPage * 2 }];
+      if (ref === PRIME && sql.includes("__cursor") && sql.includes('."suburb_directory" t')) {
+        page += 1;
+        if (page === 1) return full;
+        throw new Error("the prime refused the second page");
+      }
+      if (ref === PRIME && sql.includes("__cursor")) return [];
+      return [];
+    };
+    await runReferenceDataSync(fakeSupabase());
+    const n = state.notifications.find((x) => /suburb_directory/.test(x.title));
+    expect(n, "no notice for the table that failed mid-walk").toBeDefined();
+    expect(n!.body, "the notice reported the count it started with").toContain(
+      `${entry.rowsPerPage} row(s)`,
+    );
+  });
 });
