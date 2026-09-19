@@ -491,3 +491,86 @@ taken?"* `selfHeals` is a statement about whether a re-run would be a
 judgement, not a promise that anything re-runs. Those four are a backlog, not a
 lie. The rule that does hold, and that produces a dead control when broken, is
 narrower: **an act that is switched on must be an act that exists.**
+
+## 8. An approval offered over a hold no approval can release
+
+The same sweep found a third, and it is the one with a user at the end of it.
+
+`oversizeHold` returned `reason: "manual_reconcile"`. So a file over the
+8 MB cascade ceiling appeared in `needsReconcile`, the dry-run card drew
+**"Approve prime's copy for held path(s)…"** over it, and `approveCascadePaths`
+wrote a fourteen-day approval row. But `decideHoldRelease` filters
+`partition.held` at `cascade-engine.server.ts:1497` and an oversize hold is not
+pushed into that array until `:1919` — some four hundred lines later. **The
+approval could never reach one.** An operator approved, was told it had
+worked, and the next cascade held the same file again. On every cascade, for
+ever.
+
+The two files it holds are
+`20261202000000_seed_template_library_v13_cash_flow_foots.sql` (41,671,969 B)
+and `20261203000000_seed_template_library_v14_tier_separation.sql`
+(41,678,125 B). **All three cascading clones therefore run report template
+library seed v12 against prime's v14** — v14 being the tier-separation seed
+that stops an Investment Compass opening on three pages of financial modelling
+it is defined by not carrying — and every cascade reports success.
+
+**Moving the push above the release block was the other candidate fix and it is
+the wrong one.** Releasing an oversize path sends it into the prepare loop,
+which fetches it and hits the identical ceiling. The approval would have
+started succeeding while the file still did not land: a dead control that had
+learned to say yes.
+
+So an oversize hold gets its own `reason`. **A ceiling is not a decision.**
+`reportableHeld` keeps both kinds, because the file still differs upstream and
+is not travelling and dropping it from the list would restore the silence that
+rule exists to end; `approvableHeld` is `manual_reconcile` alone, and it is
+what both the engine's release filter and the card's offer now read — those two
+being the ends that drifted. The card lists the ceiling's paths with what is
+actually true about them and offers no button.
+
+Three smaller things came with it. **The engine publishes which held paths are
+the ceiling's**, because an approval dialog is drawn over paths and a path
+carries no reason — the card had nothing to exclude them *by*. **The note
+stopped being true and was fixed**: it ended "the migration sync refuses a body
+this size as well", which was right when written and was overtaken by the
+migration lane learning to chunk a seed-shaped INSERT from a stream. The
+database does get these two files; the clone's *repository* does not, and an
+operator told otherwise goes looking in the wrong place. And **the release
+filter reads the shared helper** rather than its own inline
+`=== "manual_reconcile"`.
+
+### What is deliberately not fixed here
+
+The repository cascade still cannot carry a 41 MB file. Doing so means
+committing an oversize blob through the Git Data API rather than the contents
+API — real work, with its own failure modes, and not something to bolt onto a
+change whose point is that a control was lying. What changes here is that the
+product stops offering a button that cannot help and starts saying what is
+actually required.
+
+### A note on the instrument, since it nearly took this section with it
+
+The first version of this section's contract test asserted against a
+comment-stripped copy of `cascade-engine.server.ts` and failed on a rule the
+file obeys. The stripper had deleted **13,438 characters of real code**:
+line 1415 is
+
+```
+  // `src/integrations/**` would otherwise reach the clone's backend identity
+```
+
+and `/**` inside a line comment opens a block comment that the usual
+`replace(/\/\*[\s\S]*?\*\//g, "")` runs past, closing at the next `*/`
+anywhere below. `moduleScopeDiff.contract.test.ts` documents this exact trap
+already — *"Read RAW. The usual comment-stripping regex eats from the first
+`/*` it meets"* — so the repository has paid for it once.
+
+Measured across `src/`: **twelve line comments in eleven files** open a false
+block comment. Two contract tests strip block comments and read one of those
+files, and **neither is currently vacuous** — `oversizeHold.contract.test.ts`
+uses positive assertions guarded by a "the slices this file reads exist" test,
+and `backendSync.contract.test.ts` strips a different file that carries none.
+So this is a live hazard with no current casualty, recorded rather than fixed
+with a repository-wide ratchet for something biting nothing. The local remedy
+is the one used here: strip **line comments only**, which cannot swallow code,
+and write patterns specific enough that prose would not satisfy them.

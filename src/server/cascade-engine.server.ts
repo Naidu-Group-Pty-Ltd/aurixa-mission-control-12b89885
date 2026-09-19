@@ -77,6 +77,7 @@ import {
   backendRefsIn,
   isShippedPath,
   partitionCascadePaths,
+  approvableHeld,
   reportableHeld,
   reconcileSuffixFor,
   summaryOwesReconcile,
@@ -124,6 +125,16 @@ export type ClonePlan = {
   heldTotal: number;
   /** The subset a person is expected to reconcile by hand. */
   needsReconcile: string[];
+  /**
+   * The subset of THAT list held by the byte ceiling rather than by a
+   * divergence, so no surface offers an approval over it.
+   *
+   * Published rather than re-derived: the approval dialog is drawn from paths
+   * alone, and a path carries no reason, so a card asked to exclude oversize
+   * holds had nothing to exclude them by. That is how the offer came to be
+   * drawn over the one kind of hold an approval can never release.
+   */
+  oversizePaths: string[];
   /** Prime deletions NOT delivered, with the reason. */
   deletionKept: Array<{ path: string; reason: string; why: string }>;
   deletionRefusal: string | null;
@@ -1494,7 +1505,10 @@ export async function processClone(args: {
   // `decideHoldRelease` refuses them whatever the evidence or the table says.
   const holdReleases: HoldRelease[] = [];
   {
-    const releasable = partition.held.filter((h) => h.reason === "manual_reconcile");
+    // Through `approvableHeld` rather than an inline filter: this set and the
+    // set the approval dialog is drawn over are the two ends that drifted, and
+    // one name is what stops them drifting again.
+    const releasable = approvableHeld(partition.held);
     if (releasable.length > 0) {
       // Approved paths spend no probe, and neither does a path whose answer
       // an earlier pass settled about the very blob the clone still holds —
@@ -2309,6 +2323,9 @@ export async function processClone(args: {
     deletes: deletionPlan.deletes,
     heldTotal: partition.held.length,
     needsReconcile: needsReconcile.map((h) => h.path),
+    // Named from the holds themselves rather than by re-filtering the path
+    // list, which has no reasons on it.
+    oversizePaths: needsReconcile.filter((h) => h.reason === "oversize").map((h) => h.path),
     deletionKept: deletionPlan.kept,
     deletionRefusal: deletionPlan.refusal,
     refusedDeletionPaths: deletionPlan.refusedPaths,

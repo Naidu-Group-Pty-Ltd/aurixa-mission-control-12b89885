@@ -48,6 +48,12 @@ export type CloneImpact = {
   filesHeld: number;
   /** Held paths a person is expected to reconcile by hand. */
   needsReconcile: string[];
+  /**
+   * The subset held by the byte ceiling. Listed, never offered: an approval
+   * cannot release a ceiling, and offering one over these built a control that
+   * reported success and changed nothing.
+   */
+  oversizePaths: string[];
   /** Held files this cascade would BREAK, and wiring they would be missing. */
   breaks: string[];
   /** Prime deletions this cascade would not deliver, and why. */
@@ -196,6 +202,7 @@ export async function runCascadeDryRun(
         installedModules: modCount,
         filesHeld: 0,
         needsReconcile: [],
+        oversizePaths: [],
         breaks: [],
         deletionsWithheld: [],
         deletionRefusal: null,
@@ -219,6 +226,7 @@ export async function runCascadeDryRun(
         installedModules: modCount,
         filesHeld: 0,
         needsReconcile: [],
+        oversizePaths: [],
         breaks: [],
         deletionsWithheld: [],
         deletionRefusal: null,
@@ -267,6 +275,7 @@ export async function runCascadeDryRun(
       installedModules: modCount,
       filesHeld: settled.heldTotal,
       needsReconcile: settled.needsReconcile,
+      oversizePaths: settled.oversizePaths,
       breaks,
       deletionsWithheld: settled.deletionKept
         .filter((k) => k.reason !== "clone_owns")
