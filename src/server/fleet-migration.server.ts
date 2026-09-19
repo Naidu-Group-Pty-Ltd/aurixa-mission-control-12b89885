@@ -1594,8 +1594,27 @@ export async function runFleetMigrationSync(
         });
       }
     } catch (e) {
+      /*
+        AND THE SAME STOP HERE, BEFORE THIS PATH'S OWN RELEASE.
+
+        Added on the success path and missed on this one, which review caught
+        in the same round it shipped. A throw anywhere above — setup, the
+        replay, the result write — jumps straight here with the timer still
+        running, so the release below was attempted with beats live and the
+        `finally` did not stop them until it had resolved. If that release
+        hangs and then FAILS, beats dispatched during the wait can land
+        afterwards and refresh a claim nobody holds, which is exactly the
+        extension the reordering exists to shrink — and this is the path where
+        a failed release is most likely, because something has already gone
+        wrong.
+
+        Before `out.failed.push` would be wrong: a slow drain must not delay
+        the run's own record of the failure. Before the release is the
+        boundary that matters.
+      */
       const error = e instanceof Error ? e.message : "Unknown error";
       out.failed.push({ cloneId, cloneName, error });
+      await heartbeat.stop();
       // Release the claim so a transient fault does not park the clone for
       // STALE_CLAIM_MINUTES. The status is untouched: this threw before any
       // verdict about the clone's schema was reached, and guessing one is

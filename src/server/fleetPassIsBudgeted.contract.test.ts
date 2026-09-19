@@ -309,51 +309,20 @@ describe("a pass is bounded", () => {
     the obvious answer — an absolute age past which a claim is freed whatever
     its stamp says — was written here and then removed. It is the same shape
     as the `_not_after` deadline removed one round earlier: a rule that can
-    free a claim a LIVE pass is holding, which is how two passes end up in
-    one schema. Only the trigger differs.
+    free a claim a LIVE pass is holding, which is how two passes end up in one
+    schema. Only the trigger differs.
 
-    The trade decides it. The residual costs a delay — a claim held by
-    nobody, a clone skipped until the beats drain — while a ceiling trades
-    that for a chance of concurrent application, which is the wrong way
-    round.
+    The trade decides it. The residual costs a delay — a claim held by nobody,
+    a clone skipped until the beats drain — while a ceiling trades that for a
+    chance of concurrent application, which is the wrong way round.
 
-    Asserted as an absence, on both the constant and the shape of a sweep
-    that reads no stamp, so re-adding it is a deliberate act against a stated
+    Asserted as an absence, on both the constant and the shape of a sweep that
+    reads no stamp, so re-adding it is a deliberate act against a stated
     argument rather than a plausible-looking commit. What would change the
     answer is a MEASURED invocation ceiling for this runtime; that is a fact
     about the platform rather than a guess about latency, and it is not in
     hand.
   */
-  /*
-    THE BEATS STOP BEFORE THE RELEASE, NOT AFTER IT.
-
-    The `finally` still stops the heartbeat and must keep doing so — the
-    throw path has no other exit. What this pins is an EARLIER first call,
-    immediately above the write that sets `worker_started_at: null`.
-
-    Stopped only in the `finally`, every beat dispatched during the replay is
-    still live while the release runs, and one that commits after a FAILED
-    release re-stamps a claim nobody holds. Stopped first, the abort has
-    already dropped everything not yet sent and the drain has given what was
-    sent its two seconds, so only a beat still in flight past that can land
-    late. It costs nothing and cannot backfire, which is why it is what this
-    change does instead of a claim-age ceiling.
-  */
-  it("stops the beats before releasing the claim, and still stops them in the finally", () => {
-    const lane = code(read("src/server/fleet-migration.server.ts"));
-    const stops = [...lane.matchAll(/await heartbeat\.stop\(\)/g)].map((m) => m.index ?? -1);
-    expect(stops.length, "the heartbeat is stopped in only one place").toBe(2);
-    // The release is the write that nulls the claim, and it must come after
-    // the first stop and before the second.
-    const release = lane.indexOf("worker_started_at: null,");
-    expect(release, "the release write was not found").toBeGreaterThan(-1);
-    expect(stops[0], "the beats are still running when the claim is released").toBeLessThan(
-      release,
-    );
-    const finallyAt = lane.lastIndexOf("} finally {");
-    expect(stops[1], "the finally no longer stops the heartbeat").toBeGreaterThan(finallyAt);
-  });
-
   it("frees no claim on age alone, however old", () => {
     const lane = code(read("src/server/fleet-migration.server.ts"));
     expect(lane, "a claim-age ceiling is back").not.toMatch(/const CLAIM_CEILING/);
@@ -369,6 +338,72 @@ describe("a pass is bounded", () => {
         sweep.includes('.is("migration_heartbeat_at"');
       expect(readsTheStamp, "a sweep frees a claim without reading its heartbeat").toBe(true);
     }
+  });
+
+  /*
+    AND NO RELEASE IS ATTEMPTED WITH THE BEATS STILL RUNNING.
+
+    `stop` used to be called only in the `finally`, which runs AFTER the
+    release — so every beat dispatched during the replay was live while the
+    claim was being released, and one committing after a FAILED release
+    re-stamps a claim nobody holds. Stopping first means the abort has dropped
+    everything unsent and the drain has given what was sent its two seconds.
+
+    The first version of this fix put the stop on the success path and missed
+    the catch, whose own release then ran with the timer live — the path where
+    a failed release is MOST likely, because something has already gone wrong.
+    Review caught that in the same round the reordering shipped: the sixth
+    defect on this branch introduced by the previous fix.
+
+    Which is why this is an ORDERING assertion and not a count. "Exactly two
+    stops" was true of the commit that added the first and false of the one
+    that fixed the path it had missed; a count is a fact about today's control
+    flow, and the property is about order. A new exit added later is judged by
+    the same rule without this test being touched.
+  */
+  it("attempts no release with the beats still running", () => {
+    const lane = code(read("src/server/fleet-migration.server.ts"));
+    /*
+      Bounded to the clone loop: `reclaimStale` releases claims too, and it
+      releases claims it does not hold by definition, so it is out of scope.
+    */
+    const loop = lane.slice(lane.indexOf("beatWhileClaimHeld(supabase"));
+    expect(loop.length, "the clone loop was not found").toBeGreaterThan(0);
+
+    type Marker = { at: number; kind: "stop" | "release" };
+    const markers: Marker[] = [
+      ...[...loop.matchAll(/await heartbeat\.stop\(\)/g)].map(
+        (m): Marker => ({ at: m.index ?? -1, kind: "stop" }),
+      ),
+      ...[...loop.matchAll(/worker_started_at: null/g)].map(
+        (m): Marker => ({ at: m.index ?? -1, kind: "release" }),
+      ),
+    ].sort((a, b) => a.at - b.at);
+
+    const releases = markers.filter((m) => m.kind === "release");
+    expect(releases.length, "no release write was found in the clone loop").toBeGreaterThan(1);
+
+    let stopped = false;
+    for (const m of markers) {
+      if (m.kind === "stop") {
+        stopped = true;
+        continue;
+      }
+      expect(stopped, `a release at offset ${m.at} runs with the heartbeat still beating`).toBe(
+        true,
+      );
+      // Each release consumes the stop before it: a second release on another
+      // path needs its own, which is exactly what was missing.
+      stopped = false;
+    }
+
+    // And the `finally` still stops them, because a throw past the last
+    // release has no other exit.
+    const finallyAt = loop.lastIndexOf("} finally {");
+    expect(finallyAt, "the finally was not found").toBeGreaterThan(-1);
+    expect(loop.slice(finallyAt), "the finally no longer stops the heartbeat").toContain(
+      "await heartbeat.stop()",
+    );
   });
 
   /*
