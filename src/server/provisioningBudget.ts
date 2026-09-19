@@ -128,9 +128,31 @@ export function isUpstreamRateLimit(error: unknown): boolean {
   const message = (error as { message?: unknown }).message;
   if (typeof message !== "string") return false;
 
-  // GitHub's two spellings, plus the generic one. Anchored on the phrase
-  // rather than on a vendor, because Supabase's Management API answers the
-  // same way and this pipeline calls both.
+  return messageNamesUpstreamRateLimit(message);
+}
+
+/**
+ * Whether a MESSAGE names a quota refusal.
+ *
+ * Split out of `isUpstreamRateLimit` because the same question gets asked of
+ * text that is no longer attached to an error object. `fleet-migration` stores
+ * a failed migration's reason as `` `${name}: ${error}` `` in
+ * `clone_backends.migration_blocked_reason`, and a block written from a quota
+ * refusal has to be recognisable later, from that column alone, by a sweep
+ * that never saw the throw.
+ *
+ * It is exported rather than re-spelled there for the reason
+ * `upstreamRefusal.pure.ts` already gives about this exact phrase: two
+ * spellings of "is this a quota" is how one of them comes to disagree with
+ * the other. The status check stays above, in the caller, because a stored
+ * string carries no HTTP status — and inventing one would be the shape of
+ * guess this module exists to refuse.
+ *
+ * GitHub's two spellings, plus the generic one. Anchored on the phrase rather
+ * than on a vendor, because Supabase's Management API answers the same way and
+ * this pipeline calls both.
+ */
+export function messageNamesUpstreamRateLimit(message: string): boolean {
   return (
     /\brate limit\b/i.test(message) &&
     /\b(exceed|exceeded|hit|reached|too many requests)\b/i.test(message)
