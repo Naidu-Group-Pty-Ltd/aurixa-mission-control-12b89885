@@ -2368,7 +2368,7 @@ const ORPHAN_BLOCKED_BY_DISPLAY_CAP = 5;
  * fetched at all — the corpus's template-library seeds are ~41 MB each, and
  * the answer is not worth the isolate.
  */
-async function rescueScopedOrphans<T extends { id: string; name: string }>(
+export async function rescueScopedOrphans<T extends { id: string; name: string }>(
   orphaned: ReadonlyArray<{ meta: T; blockedBy: string[] }>,
   corpus: ReadonlyArray<{ id: string; name: string }>,
   materialised: ReadonlyArray<{ id: string; name: string; sql?: string }>,
@@ -2403,24 +2403,41 @@ async function rescueScopedOrphans<T extends { id: string; name: string }>(
     }
   };
 
-  const holeIds = [...new Set(orphaned.flatMap((o) => o.blockedBy))];
   const holes = new Map<string, { id: string; readable: boolean; creates: string[] }>();
-  for (const id of holeIds) {
+  const holeFor = async (id: string) => {
+    const hit = holes.get(id);
+    if (hit) return hit;
     const sql = await readSql(id);
-    holes.set(
-      id,
+    const made =
       sql === null
         ? { id, readable: false, creates: [] }
-        : { id, readable: true, creates: holeRelationNames(sql) },
-    );
-  }
+        : { id, readable: true, creates: holeRelationNames(sql) };
+    holes.set(id, made);
+    return made;
+  };
 
   const send: T[] = [];
   const stillBlocked: Array<{ meta: T; blockedBy: string[] }> = [];
+  /*
+    AN ORPHAN THAT STAYS BLOCKED IS A HOLE FOR THE ONES AFTER IT.
+
+    Found by checking this against the real held set rather than by reading it.
+    On `npc-client-dashboard` the three withheld migrations are, in corpus
+    order, the 41 MB v14 template-library SEED, its 2,616-byte active-master
+    REFRESH, and the v15 seed. Scoping the refresh against the builder-
+    marketplace hole alone sends it — correctly, they share no object — while
+    the seed it refreshes FROM stays blocked for its size. The clone would then
+    refresh its active masters out of a library that never received v14.
+
+    So the holes a candidate is judged against grow as the walk proceeds: the
+    versions the prime never ran, plus every orphan this pass has just decided
+    not to send. `orphaned` arrives in corpus order from
+    `partitionByDependency`, which is what makes one forward pass sufficient.
+  */
   for (const orphan of orphaned) {
-    const evidence = orphan.blockedBy.map(
-      (id) => holes.get(id) ?? { id, readable: false, creates: [] },
-    );
+    const evidence: Array<{ id: string; readable: boolean; creates: string[] }> = [];
+    for (const id of orphan.blockedBy) evidence.push(await holeFor(id));
+    for (const earlier of stillBlocked) evidence.push(await holeFor(earlier.meta.id));
     const decision = scopeHoles(await readSql(orphan.meta.id), evidence);
     if (decision.act === "send") send.push(orphan.meta);
     else stillBlocked.push({ meta: orphan.meta, blockedBy: [...decision.blockedBy] });
