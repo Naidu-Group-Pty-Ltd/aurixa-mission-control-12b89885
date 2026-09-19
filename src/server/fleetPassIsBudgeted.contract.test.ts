@@ -424,10 +424,89 @@ describe("a pass is bounded", () => {
       "security definer",
     );
     expect(sql).toContain("security invoker");
-    expect(sql).toContain("revoke all on function public.fleet_claim_heartbeat");
+    /*
+      AND REVOKING FROM `public` IS NOT REVOKING FROM `anon`.
+
+      `pg_default_acl` on this database grants EXECUTE on every new `public`
+      function to `anon` AND `authenticated` — measured, and written down in
+      `20260828030000_schema_migration_queue.sql`, which records that 77 of 145
+      public functions are anon-executable today and that of 45
+      `REVOKE ALL ON FUNCTION` statements only 13 name `authenticated`. Those
+      are role-specific grants and survive a revoke from the PUBLIC
+      pseudo-role. Raised by review.
+    */
+    for (const role of ["public", "anon", "authenticated"]) {
+      expect(sql, `execute is not revoked from ${role}`).toMatch(
+        new RegExp(`revoke all on function public\\.fleet_claim_heartbeat[^;]*from ${role};`),
+      );
+    }
     expect(sql).toMatch(
       /grant execute on function public\.fleet_claim_heartbeat[^;]*to service_role/,
     );
+  });
+
+  /*
+    AND THE LANE RUNS ON ONE PRIVILEGE SET, NOT TWO.
+
+    `requireAdmin` is built on `requireSupabaseAuth`, whose client is the
+    PUBLISHABLE key carrying the user's JWT — so the operator button ran the
+    whole lane as `authenticated`, reaching `clone_backends` only through the
+    "Admins can write" policy, while the scheduled hook ran the same code as
+    `service_role`. Revoking EXECUTE from `authenticated` is only safe once
+    that is true of both callers, which is why this is asserted rather than
+    assumed.
+  */
+  it("is started on the service role by both of its callers", () => {
+    const hook = code(read("src/routes/hooks.fleet-migration-sync.tsx"));
+    expect(hook).toContain("runFleetMigrationSync(supabaseAdmin");
+    const button = code(read("src/server/migration-sync.functions.ts"));
+    expect(button, "the operator button runs the lane on the caller's own client").not.toContain(
+      "runFleetMigrationSync(context.supabase",
+    );
+    expect(button).toContain("runFleetMigrationSync(supabaseAdmin");
+  });
+
+  /*
+    AND A BEAT CANNOT SPEAK FOR A PASS THAT HAS STOPPED.
+
+    The drain bounds how long the pass WAITS and cannot bound when a dispatched
+    request executes. On the path where the release write failed — the row
+    still held, which is exactly when the silence is load-bearing — a late beat
+    refreshes a dead claim for another five minutes, once per queued beat.
+    Raised by review, against the drain that was itself a review fix.
+
+    Two mechanisms, covering different halves: the abort stops what has not
+    been sent and closes the connection of what has, and the deadline covers a
+    request that reaches the server anyway.
+  */
+  it("cancels the beats that are out, and bounds the ones that run anyway", () => {
+    const body = beatBody();
+    expect(body, "nothing cancels a beat when the pass ends").toContain("new AbortController()");
+    expect(body).toContain("abortSignal(inflightBeats.signal)");
+    expect(body, "stop does not cancel them").toMatch(
+      /stop: async \(\) => \{[\s\S]{0,400}?inflightBeats\.abort\(\);/,
+    );
+    expect(body, "a beat carries no deadline of its own").toContain("_not_after: notAfter");
+    const sql = sqlCode(
+      read("supabase/migrations/20260919153000_fleet_claim_heartbeat_monotonic.sql"),
+    );
+    // Checked BEFORE the write, or an expired beat still touches the row.
+    const guard = sql.indexOf("if clock_timestamp() > _not_after then");
+    const write = sql.indexOf("update public.clone_backends");
+    expect(guard, "the deadline is not enforced at the database").toBeGreaterThan(-1);
+    expect(guard, "an expired beat still reaches the write").toBeLessThan(write);
+  });
+
+  it("does not report a beat that is merely late as a claim that was lost", () => {
+    const sql = sqlCode(
+      read("supabase/migrations/20260919153000_fleet_claim_heartbeat_monotonic.sql"),
+    );
+    // Three answers, because they send the caller three different ways.
+    for (const verdict of ["'expired'", "'held'", "'lost'"]) {
+      expect(sql, `the function cannot answer ${verdict}`).toContain(verdict);
+    }
+    const body = beatBody();
+    expect(body, "the caller stops on anything but a lost claim").toContain('verdict === "lost"');
   });
 
   it("does not make one beat wait for another, and abandons none", () => {
@@ -443,12 +522,16 @@ describe("a pass is bounded", () => {
 
   it("asks the database rather than composing the write itself", () => {
     const body = beatBody();
+    // Anchored on the CALL, not on the receiver: prettier wraps the chain onto
+    // its own line once the argument list grows, and `supabase.rpc(` then
+    // stops matching — an assertion that tests nothing, which this suite has
+    // been caught by before.
     expect(body, "the beat writes the column directly and can reorder").toContain(
-      'supabase.rpc("fleet_claim_heartbeat"',
+      '.rpc("fleet_claim_heartbeat"',
     );
     // The function's own answer, not a row count: once the write is also
     // conditional on advancing, "no rows" can no longer mean "claim lost".
-    expect(body, "a lost claim is inferred rather than read").toContain("held === false");
+    expect(body, "a lost claim is inferred rather than read").toContain('verdict === "lost"');
   });
 
   /*
@@ -532,7 +615,7 @@ describe("a pass is bounded", () => {
       one and passes over a branch that no longer stops anything — caught by
       mutation, which is the only reason it is written this way.
     */
-    const miss = body.indexOf("if (held === false)");
+    const miss = body.indexOf('if (verdict === "lost")');
     const stop = body.indexOf("stop: async ()");
     expect(miss, "the claim-lost branch was not found").toBeGreaterThan(-1);
     expect(stop, "the returned stop was not found").toBeGreaterThan(miss);

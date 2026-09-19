@@ -369,14 +369,39 @@ function beatWhileClaimHeld(
   let stopped = false;
   /** Beats dispatched and not yet settled, so `stop` can drain them. */
   const outstanding = new Set<Promise<unknown>>();
+  /**
+   * Cancels the beats that are out when the pass ends.
+   *
+   * Not belt-and-braces with `_not_after`: the two cover different halves. An
+   * abort stops a request that has not been sent and closes the connection of
+   * one that has, which Postgres answers by cancelling the statement; the
+   * deadline covers the request that reaches the server anyway. Neither alone
+   * makes a late beat harmless, and "we stopped waiting for it" — which is all
+   * the drain ever did — makes it harmless not at all.
+   */
+  const inflightBeats = new AbortController();
 
   const timer = setInterval(() => {
     if (stopped) return;
+    /*
+      The moment past which this beat may no longer speak for the pass.
+
+      Carried to the database rather than enforced here, because the thing
+      that needs bounding is when the request EXECUTES, and by then this
+      isolate may be gone. `stop` cancels what has not been sent and aborts
+      what has; this covers the one it cannot — a request already at the
+      server when the pass ended, which would otherwise refresh a dead claim
+      for another five minutes.
+    */
+    const notAfter = new Date(Date.now() + CLAIM_HEARTBEAT_MS).toISOString();
     const run = (async () => {
-      const { data: held, error } = await supabase.rpc("fleet_claim_heartbeat", {
-        _clone_id: cloneId,
-        _claimed_at: claimedAt,
-      });
+      const { data: verdict, error } = await supabase
+        .rpc("fleet_claim_heartbeat", {
+          _clone_id: cloneId,
+          _claimed_at: claimedAt,
+          _not_after: notAfter,
+        })
+        .abortSignal(inflightBeats.signal);
       if (error) {
         // One lost beat is survivable by design — see CLAIM_HEARTBEAT_MS — so
         // this neither throws nor stops. Silence would hide a database fault
@@ -387,11 +412,13 @@ function beatWhileClaimHeld(
         });
         return;
       }
-      if (held === false) {
+      if (verdict === "lost") {
         // The claim is gone. Beating on would say a pass that owns nothing is
         // alive. Told by the function's own answer rather than by a row count,
         // which could no longer separate "the claim is gone" from "a newer
-        // beat already won".
+        // beat already won" — and, since the deadline, from "this beat is too
+        // late to say anything", which `expired` reports and which must NOT be
+        // read as a lost claim.
         console.warn("[fleet-migration] heartbeat stopped: the claim is no longer this pass's", {
           cloneId,
           claimedAt,
@@ -416,6 +443,7 @@ function beatWhileClaimHeld(
     stop: async () => {
       stopped = true;
       clearInterval(timer);
+      inflightBeats.abort();
       /*
         Drained, but never indefinitely. `allSettled` cannot reject, so `stop`
         cannot throw in the `finally` that awaits it — a throw there would

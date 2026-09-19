@@ -561,7 +561,29 @@ export const fleetMigrationSync = createServerFn({ method: "POST" })
     const { runFleetMigrationSync } = await import(
       /* @vite-ignore */ "@/lib/_server-shims/fleet-migration.server"
     );
-    const result = await runFleetMigrationSync(context.supabase, {
+    /*
+      ON THE SERVICE ROLE, NOT ON THE OPERATOR'S OWN CLIENT.
+
+      `requireAdmin` is built on `requireSupabaseAuth`, whose client is the
+      PUBLISHABLE key carrying the user's JWT — so this handler was running the
+      whole fleet lane as `authenticated`, reaching `clone_backends` only
+      through the "Admins can write" policy. The scheduled hook has always run
+      it on `supabaseAdmin`, so one lane ran under two privilege sets depending
+      on which of two buttons started it.
+
+      That is the wrong half to keep. This lane claims rows, reads project
+      references and drives the Management API; it is a privileged background
+      job that happens to have an operator's finger on it, and an RLS policy
+      that admits it is a coincidence rather than a design. Running it as
+      `service_role` also lets `fleet_claim_heartbeat` revoke EXECUTE from
+      `anon` and `authenticated` outright rather than leaning on a policy.
+
+      Authorisation is unchanged and still happens BEFORE this line, in
+      `requireAdmin`. The actor is passed explicitly, as it always was, so the
+      audit log still names the person rather than the role.
+    */
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const result = await runFleetMigrationSync(supabaseAdmin, {
       actorUserId: context.userId,
     });
     if (result.error) return { ok: false as const, error: result.error };

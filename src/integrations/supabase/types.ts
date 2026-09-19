@@ -13004,8 +13004,8 @@ export type Database = {
       }
       feedback_retry_now: { Args: { _submission_id?: string }; Returns: number }
       fleet_claim_heartbeat: {
-        Args: { _claimed_at: string; _clone_id: string }
-        Returns: boolean
+        Args: { _claimed_at: string; _clone_id: string; _not_after: string }
+        Returns: string
       }
       grant_tokens: {
         Args: {
