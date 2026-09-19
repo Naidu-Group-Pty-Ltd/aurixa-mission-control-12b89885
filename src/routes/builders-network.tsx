@@ -68,6 +68,7 @@ import {
   type NetworkRankedBuilder,
   type NetworkSignalReading,
 } from "@/server/builders-network.functions";
+import { installCloneNetworkTransport } from "@/server/buildersTransportInstall.functions";
 import { readNetworkFailure } from "@/lib/buildersNetworkFailure.pure";
 import { AccessRequestsPanel } from "@/components/builders-network-access-requests";
 import {
@@ -654,6 +655,7 @@ function BuildersNetworkConsole() {
   const createConnFn = useServerFn(createNetworkConnection);
   const revokeConnFn = useServerFn(revokeNetworkConnection);
   const transportFn = useServerFn(setNetworkConnectionTransport);
+  const installFn = useServerFn(installCloneNetworkTransport);
 
   const status = useQuery({ queryKey: ["bn-status"], queryFn: () => statusFn() });
   const organisations = useQuery({ queryKey: ["bn-orgs"], queryFn: () => orgsFn({ data: {} }) });
@@ -686,6 +688,7 @@ function BuildersNetworkConsole() {
   const [creatingConn, setCreatingConn] = useState(false);
   const [mintedInvite, setMintedInvite] = useState<{ code: string; expires: string } | null>(null);
   const [transportDrafts, setTransportDrafts] = useState<Record<string, string>>({});
+  const [installing, setInstalling] = useState<string | null>(null);
 
   const refreshAll = () => {
     void queryClient.invalidateQueries({ queryKey: ["bn-status"] });
@@ -1167,9 +1170,64 @@ function BuildersNetworkConsole() {
                             else toast.error(result.error);
                           }}
                         >
-                          Set transport
+                          Set inbound URL
                         </Button>
                       </div>
+                      {/*
+                       * The act the network has always expected and nothing
+                       * performed: take the one-shot transport grant and write
+                       * it into this workspace's own connection row. Until
+                       * this existed the row was uncreatable, so every
+                       * deployment's Builders Network sat dark behind an empty
+                       * table. The grant never reaches this component — the
+                       * server fetches and installs it in one act and answers
+                       * with a status.
+                       */}
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={installing === connection.network_connection_id}
+                        onClick={async () => {
+                          const id = connection.network_connection_id;
+                          setInstalling(id);
+                          try {
+                            const result = await installFn({ data: { connectionId: id } });
+                            if (result.ok) {
+                              toast.success("Transport installed on the workspace");
+                              refreshAll();
+                              return;
+                            }
+                            /*
+                             * A grant handed out once already. Rotating is the
+                             * only way to a usable one, and it invalidates
+                             * whatever the workspace holds — so it is said
+                             * before it is done, never retried silently.
+                             */
+                            if (result.remedy) {
+                              const go = window.confirm(
+                                `${result.remedy}\n\nRotate now? Any delivery signed with the ` +
+                                  `previous credential stops verifying immediately.`,
+                              );
+                              if (!go) return;
+                              const rotated = await installFn({
+                                data: { connectionId: id, rotate: true },
+                              });
+                              if (rotated.ok) {
+                                toast.success("Transport rotated and installed");
+                                refreshAll();
+                              } else toast.error(rotated.error);
+                              return;
+                            }
+                            toast.error(result.error);
+                          } finally {
+                            setInstalling(null);
+                          }
+                        }}
+                      >
+                        {installing === connection.network_connection_id
+                          ? "Installing…"
+                          : "Install on workspace"}
+                      </Button>
                       <Button
                         size="sm"
                         variant="outline"
