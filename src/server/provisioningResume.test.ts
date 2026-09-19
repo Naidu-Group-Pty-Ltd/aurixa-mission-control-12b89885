@@ -2358,11 +2358,21 @@ describe("a fleet-sync pass that did nothing says nothing", () => {
     return b.slice(at, b.indexOf('.eq("clone_id", cloneId)', at));
   };
 
-  it("writes no fact about the clone when it applied, failed and blocked nothing", () => {
+  it("writes no fact about the clone when it applied, failed, blocked and held nothing", () => {
     const bl = block();
-    expect(bl).toMatch(
-      /const didNothing =\s*successes\.length === 0 && failures\.length === 0 && blocked\.length === 0 && held\.length === 0/,
-    );
+    // Matched as a SET of terms rather than as one line of source: the
+    // expression is five clauses now and prettier breaks it across lines, so a
+    // verbatim regex pins the formatter. `limited` joined the list when a
+    // held-only pass was found writing nothing at all — see
+    // `streamedSeedIsHeld.contract.test.ts` for why that mattered.
+    const at = bl.indexOf("const didNothing =");
+    const expr = bl.slice(at, bl.indexOf(";", at));
+    for (const term of ["successes", "failures", "blocked", "held", "limited"]) {
+      expect(expr, `${term} is not counted`).toContain(`${term}.length === 0`);
+    }
+    // Every clause is an AND: one OR here and a pass that did something would
+    // be treated as a no-op.
+    expect(expr).not.toContain("||");
     expect(bl).toMatch(/\.\.\.\(didNothing\s*\?\s*\{\}/);
   });
 

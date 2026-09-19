@@ -161,6 +161,45 @@ describe("the streaming half reports a refusal instead of throwing it", () => {
   });
 });
 
+describe("a pass whose only outcome is a hold still says so", () => {
+  const fleet = readFileSync("src/server/fleet-migration.server.ts", "utf8");
+
+  it("counts a hold as something that happened", () => {
+    // `didNothing` suppresses the whole status write, so a limited-only pass
+    // was silent: no `status_detail`, and the row left `failed` with whatever
+    // an earlier run had said. The reading written for this case was therefore
+    // unreachable in exactly this case.
+    const at = fleet.indexOf("const didNothing =");
+    expect(at).toBeGreaterThan(-1);
+    const expr = fleet.slice(at, fleet.indexOf(";", at));
+    expect(expr).toContain("limited.length === 0");
+  });
+
+  it("agrees with the up-to-date guard, which already counted it", () => {
+    // The two answer the same question about the same pass — "did this
+    // establish anything?" — and disagreeing is how one of them goes wrong.
+    // Compared as SETS so neither is pinned to the other's order.
+    const partsOf = (expr: string) =>
+      new Set(
+        (expr.match(/\b(successes|failures|blocked|held|limited)\.length === 0/g) ?? []).map(
+          (m) => m.split(".")[0],
+        ),
+      );
+    const upToDateAt = fleet.indexOf("out.upToDate++");
+    const upToDate = partsOf(fleet.slice(fleet.lastIndexOf("if (", upToDateAt), upToDateAt));
+    const nothingAt = fleet.indexOf("const didNothing =");
+    const nothing = partsOf(fleet.slice(nothingAt, fleet.indexOf(";", nothingAt)));
+    // A match that found nothing would make `every` trivially true, which is
+    // the way this kind of assertion usually dies.
+    expect(upToDate.size, "the up-to-date guard was not parsed").toBeGreaterThan(2);
+    expect(nothing.size, "didNothing was not parsed").toBeGreaterThan(2);
+    // `blocked` is deliberately only in `didNothing`: a clone held back behind
+    // a withheld version is NOT up to date, but the pass did establish that.
+    expect([...upToDate].every((p) => nothing.has(p))).toBe(true);
+    expect(nothing.has("limited")).toBe(true);
+  });
+});
+
 describe("the self-healing lane stops calling a hold a failure", () => {
   it("partitions the holds out of failures", () => {
     expect(code(healing)).toMatch(
