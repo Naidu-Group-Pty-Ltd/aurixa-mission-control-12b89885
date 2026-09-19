@@ -30,20 +30,57 @@ export const CASCADE_CLAIM_FLOOR = 250;
 /** Below this, periodic GitHub-reading scans skip their run. */
 export const SCAN_FLOOR = 1_500;
 
+/**
+ * Below this, an actor that is NOT the cascade stands down.
+ *
+ * The same floor as the cascade's claim, and for the same reason rather than
+ * by coincidence: an actor lands work, so it yields only at the reserve that
+ * keeps the next actor able to start. It is deliberately far below
+ * `SCAN_FLOOR` — a measurement postponed costs a stale number, while an
+ * apply postponed costs a clone sitting a migration behind the prime.
+ *
+ * Added 19 Sep 2026, because the floors above were only ever read by the
+ * cascade and the scans. Measured that morning: `backend-provisioning-drain`
+ * (every minute), `support-remediation-drain` (every two), `fleet-migration-
+ * sync` (every thirty) and `handoff-parity-refresh` (hourly) all reached this
+ * installation and none consulted the budget at all — so the policy protected
+ * the window from the lanes that had already been taught to yield, and from
+ * nothing else. The fleet sync exhausted it that night and three clones were
+ * ejected on the strength of what the refusal looked like.
+ *
+ * `cascade-merge-drain` stays unbudgeted deliberately; see the header.
+ */
+export const ACTOR_FLOOR = 250;
+
+export type BudgetRole = "cascade_claim" | "scan" | "actor";
+
 export type BudgetVerdict = { proceed: true } | { proceed: false; why: string };
 
+const FLOOR: Record<BudgetRole, number> = {
+  cascade_claim: CASCADE_CLAIM_FLOOR,
+  scan: SCAN_FLOOR,
+  actor: ACTOR_FLOOR,
+};
+
+/** What the refusal calls each role, so an operator reads a lane and not an enum. */
+const LABEL: Record<BudgetRole, string> = {
+  cascade_claim: "cascade",
+  scan: "scan",
+  actor: "actor",
+};
+
 export function decideSpend(input: {
-  role: "cascade_claim" | "scan";
+  role: BudgetRole;
   /** Calls left in the installation's window, or null when unreadable. */
   remaining: number | null;
 }): BudgetVerdict {
   if (input.remaining === null) return { proceed: true };
-  const floor = input.role === "cascade_claim" ? CASCADE_CLAIM_FLOOR : SCAN_FLOOR;
+  const floor = FLOOR[input.role];
   if (input.remaining >= floor) return { proceed: true };
   return {
     proceed: false,
     why:
       `${input.remaining} call(s) left in the installation's window, below the ` +
-      `${input.role === "cascade_claim" ? "cascade" : "scan"} floor of ${floor}`,
+      `${LABEL[input.role]} floor of ${floor}`,
   };
 }

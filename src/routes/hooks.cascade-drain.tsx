@@ -17,6 +17,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { verifyCronAuth } from "@/server/cron-auth.server";
+import { beginGithubLane } from "@/server/githubUsageMeter";
 import {
   executeCascade,
   terminaliseOrphanedRows,
@@ -685,6 +686,10 @@ export const Route = createFileRoute("/hooks/cascade-drain")({
       POST: async ({ request }) => {
         const auth = verifyCronAuth(request);
         if (!auth.ok) return auth.response;
+        // Attribute this invocation's App-installation calls. See
+        // githubUsageMeter.ts: the count is taken at the one hook every call
+        // already passes through, and named here.
+        beginGithubLane("cascade-drain");
         try {
           const deadlineAt = Date.now() + INVOCATION_BUDGET_MS;
           const budget: CascadeBudget = {

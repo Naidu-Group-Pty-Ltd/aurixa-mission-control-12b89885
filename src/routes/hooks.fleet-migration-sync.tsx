@@ -2,6 +2,9 @@ import { createFileRoute } from "@tanstack/react-router";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { runFleetMigrationSync } from "@/server/fleet-migration.server";
 import { verifyCronAuth } from "@/server/cron-auth.server";
+import { beginGithubLane } from "@/server/githubUsageMeter";
+import { decideSpend } from "@/server/cascade/githubBudget.pure";
+import { readGitHubRemaining } from "@/server/githubAllowance.server";
 
 // Cron-invoked endpoint. pg_cron schedules a POST here every 30 min.
 // Auth: requires the shared CRON_SECRET as a Bearer token.
@@ -25,8 +28,26 @@ export const Route = createFileRoute("/hooks/fleet-migration-sync")({
       POST: async ({ request }) => {
         const auth = verifyCronAuth(request);
         if (!auth.ok) return auth.response;
+        // Attribute this invocation's App-installation calls. See
+        // githubUsageMeter.ts: the count is taken at the one hook every call
+        // already passes through, and named here.
+        beginGithubLane("fleet-migration-sync");
 
         try {
+          // This lane reads the prime's whole migration corpus from GitHub and
+          // then a body per unapplied migration per clone, on an installation
+          // it shares with every other lane. It stood down for nothing until
+          // 19 Sep 2026: it exhausted the window that night, and because a
+          // quota refusal mid-pass looked like a migration the clone had
+          // rejected, three clones were ejected from the fleet on the strength
+          // of it. Both halves of that are fixed — this is the half that stops
+          // it spending the window down in the first place.
+          const spend = decideSpend({ role: "actor", remaining: await readGitHubRemaining() });
+          if (!spend.proceed) {
+            return new Response(JSON.stringify({ success: true, skipped: spend.why }), {
+              headers: { "Content-Type": "application/json" },
+            });
+          }
           const result = await runFleetMigrationSync(supabaseAdmin);
           // 200 with the failures in the body rather than 500: one clone whose
           // migration failed is not a failed run, and a job that reports

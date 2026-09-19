@@ -21,6 +21,9 @@ import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { asJson, asRow } from "@/lib/json-cast";
 import type { TablesUpdate } from "@/integrations/supabase/types";
 import { verifyCronAuth } from "@/server/cron-auth.server";
+import { beginGithubLane } from "@/server/githubUsageMeter";
+import { decideSpend } from "@/server/cascade/githubBudget.pure";
+import { readGitHubRemaining } from "@/server/githubAllowance.server";
 import { getHostingProvider, asHostingSlug } from "@/server/hosting";
 import "@/server/hosting/index"; // ensure providers register
 import {
@@ -1081,7 +1084,19 @@ async function sweepLiveBuilds() {
 }
 
 async function drain() {
+  // The reclaim first and unconditionally: it is database-only, and it is what
+  // releases a row a terminated Worker left held. Yielding it would make a
+  // starved window look like a queue with nothing in it.
   await reclaimStalled();
+
+  // Then the claim, which is what spends. This lane advances a deployment one
+  // state per pass and several of those states are GitHub calls, sixty ticks
+  // an hour — and it consulted nothing until 19 Sep 2026. An actor, so it
+  // stands down only at the reserve floor.
+  const spend = decideSpend({ role: "actor", remaining: await readGitHubRemaining() });
+  if (!spend.proceed) {
+    return { claimed: 0, advanced: 0, waiting: 0, failed: 0, skipped: spend.why };
+  }
   const rows = await claim(MAX_ROWS_PER_RUN);
   let advanced = 0;
   let waiting = 0;
@@ -1107,6 +1122,10 @@ export const Route = createFileRoute("/hooks/deployment-drain")({
       POST: async ({ request }) => {
         const auth = verifyCronAuth(request);
         if (!auth.ok) return auth.response;
+        // Attribute this invocation's App-installation calls. See
+        // githubUsageMeter.ts: the count is taken at the one hook every call
+        // already passes through, and named here.
+        beginGithubLane("deployment-drain");
         try {
           const summary = await drain();
           return new Response(JSON.stringify({ success: true, ...summary }), {

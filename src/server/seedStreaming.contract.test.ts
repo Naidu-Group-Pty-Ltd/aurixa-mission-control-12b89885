@@ -73,7 +73,12 @@ describe("the replay chunks an oversized seed", () => {
     // The whole point of the split: `success: false` alone is what the fleet
     // sync read as "this clone rejected something", and it ejected a healthy
     // clone from the fleet for a day on the strength of it.
-    const held = loop.slice(loop.indexOf("if (!oversize) {"), loop.indexOf("break;"));
+    // Anchored FROM the oversize branch, not from the top of the loop. There
+    // is now an earlier `break;` above it — the upstream-quota hold added 19
+    // Sep 2026 — and an unanchored search found that one, so this slice ran
+    // backwards and silently asserted nothing.
+    const at = loop.indexOf("if (!oversize) {");
+    const held = loop.slice(at, loop.indexOf("break;", at));
     expect(held).toContain("heldOversize: true");
     expect(held).not.toContain("throw ");
   });
