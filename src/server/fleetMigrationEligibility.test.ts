@@ -438,6 +438,103 @@ describe("the order the pass serves clones in", () => {
     }
   });
 
+  /*
+    THE THIRD AND FOURTH KEYS, AND THE CASE THE SECOND ONE CANNOT SEE.
+
+    Two clones with no cursor both score zero on progress, the comparator
+    returned 0, `Array#sort` is stable — and the order is the table's layout
+    again. That is every clone that is NOT mid-seed, which after the seed lands
+    is the whole fleet, and it bites whenever several migrations are owed and
+    the budget runs out before the batch does: small migrations instead of one
+    big seed, same clone never reached.
+  */
+  describe("and when neither is mid-seed", () => {
+    const row = (id: string, version: string, heartbeat: string | null) => ({
+      clone_id: id,
+      migration_version: version,
+      migration_heartbeat_at: heartbeat,
+    });
+
+    it("serves the one this lane claimed longest ago", () => {
+      const order = orderMigrationQueue([
+        row("recent", "20261201100000", "2026-09-19T18:30:00.000Z"),
+        row("stale", "20261201100000", "2026-09-19T15:00:00.000Z"),
+      ]);
+      expect(order.map((r) => r.clone_id)).toEqual(["stale", "recent"]);
+    });
+
+    it("puts a clone this lane has NEVER held first", () => {
+      const order = orderMigrationQueue([
+        row("held", "20261201100000", "2026-09-19T15:00:00.000Z"),
+        row("never", "20261201100000", null),
+      ]);
+      expect(order.map((r) => r.clone_id)).toEqual(["never", "held"]);
+    });
+
+    it("rotates, so no clone is last twice running", () => {
+      // A budget that reaches exactly one clone a pass — the condition under
+      // which "served last" and "never served" are the same thing.
+      let rows = [
+        row("a", "20261201100000", "2026-09-19T15:00:00.000Z"),
+        row("b", "20261201100000", "2026-09-19T15:30:00.000Z"),
+        row("c", "20261201100000", "2026-09-19T16:00:00.000Z"),
+      ];
+      const served: string[] = [];
+      for (let pass = 0; pass < 6; pass += 1) {
+        const first = orderMigrationQueue(rows)[0];
+        served.push(first.clone_id);
+        const stamp = `2026-09-19T17:0${pass}:00.000Z`;
+        rows = rows.map((r) =>
+          r.clone_id === first.clone_id ? { ...r, migration_heartbeat_at: stamp } : r,
+        );
+      }
+      expect(served).toEqual(["a", "b", "c", "a", "b", "c"]);
+    });
+
+    it("never returns 0 for two DIFFERENT clones, whatever the other keys say", () => {
+      // The property, rather than a case: a 0 is a decision handed to the
+      // table's physical layout, and that is the defect this whole function
+      // exists to close.
+      const versions = ["20261201100000", "20261204010000"];
+      const progress = [undefined, 0, 17];
+      const beats = [null, "2026-09-19T15:00:00.000Z", "2026-09-19T18:00:00.000Z"];
+      for (const av of versions)
+        for (const bv of versions)
+          for (const ap of progress)
+            for (const bp of progress)
+              for (const ah of beats)
+                for (const bh of beats) {
+                  const a = {
+                    clone_id: "aaa",
+                    migration_version: av,
+                    migration_heartbeat_at: ah,
+                    ...(ap === undefined
+                      ? {}
+                      : { chunk_cursor: { migrationId: "m", statementsDone: ap } }),
+                  };
+                  const b = {
+                    clone_id: "bbb",
+                    migration_version: bv,
+                    migration_heartbeat_at: bh,
+                    ...(bp === undefined
+                      ? {}
+                      : { chunk_cursor: { migrationId: "m", statementsDone: bp } }),
+                  };
+                  expect(compareMigrationQueue(a, b)).not.toBe(0);
+                }
+    });
+
+    it("orders correctly for a caller that selects NEITHER new field", () => {
+      // Both are optional, because the column arrived after the comparator did.
+      // Such a caller must still get the first two keys, and must not throw.
+      const order = orderMigrationQueue([
+        { migration_version: "20261204010000" },
+        { migration_version: "20261201100000" },
+      ]);
+      expect(order.map((r) => r.migration_version)).toEqual(["20261201100000", "20261204010000"]);
+    });
+  });
+
   it("does not mutate what it is given", () => {
     const rows = [at("20261201100000", 39), at("20261201100000", 11)];
     const copy = [...rows];

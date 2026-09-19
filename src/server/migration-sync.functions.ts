@@ -340,7 +340,14 @@ export const syncCloneMigrations = createServerFn({ method: "POST" })
           // And the same stream. A body past the corpus ceiling used to make
           // this button report "Migration failed at <the 39 MB seed>" — the
           // one migration an operator is most likely to press it FOR.
-          { streamSql: (m) => corpus.openSqlStream(m.id) },
+          {
+            streamSql: (m) => corpus.openSqlStream(m.id),
+            // This route sends in one go and writes no cursor, so the identity
+            // buys nothing here and costs nothing either. Supplied so the two
+            // callers cannot drift into disagreeing about which body a stream
+            // is of.
+            bodyIdentity: (m) => corpus.bodyIdentity(m.id),
+          },
         );
 
         const successes = results.filter((r) => r.success && !r.skipped);
@@ -561,7 +568,29 @@ export const fleetMigrationSync = createServerFn({ method: "POST" })
     const { runFleetMigrationSync } = await import(
       /* @vite-ignore */ "@/lib/_server-shims/fleet-migration.server"
     );
-    const result = await runFleetMigrationSync(context.supabase, {
+    /*
+      ON THE SERVICE ROLE, NOT ON THE OPERATOR'S OWN CLIENT.
+
+      `requireAdmin` is built on `requireSupabaseAuth`, whose client is the
+      PUBLISHABLE key carrying the user's JWT — so this handler was running the
+      whole fleet lane as `authenticated`, reaching `clone_backends` only
+      through the "Admins can write" policy. The scheduled hook has always run
+      it on `supabaseAdmin`, so one lane ran under two privilege sets depending
+      on which of two buttons started it.
+
+      That is the wrong half to keep. This lane claims rows, reads project
+      references and drives the Management API; it is a privileged background
+      job that happens to have an operator's finger on it, and an RLS policy
+      that admits it is a coincidence rather than a design. Running it as
+      `service_role` also lets `fleet_claim_heartbeat` revoke EXECUTE from
+      `anon` and `authenticated` outright rather than leaning on a policy.
+
+      Authorisation is unchanged and still happens BEFORE this line, in
+      `requireAdmin`. The actor is passed explicitly, as it always was, so the
+      audit log still names the person rather than the role.
+    */
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const result = await runFleetMigrationSync(supabaseAdmin, {
       actorUserId: context.userId,
     });
     if (result.error) return { ok: false as const, error: result.error };

@@ -119,12 +119,25 @@ describe("the replay chunks an oversized seed", () => {
   });
 
   it("sends at least one statement a pass and resumes from the cursor", () => {
-    const fn = sliceFrom(replay, "async function applyChunkedSeed", 6_000);
+    const fn = sliceFunction(replay, "async function applyChunkedSeed");
+    /*
+      Gated on `cursorIsForThisBody`, which asks the migration id AND the body's
+      own sha — a position is only a position in the body it was taken in, and
+      the shape cannot tell a re-released body from the one the position came
+      from. The rule itself lives in `chunkCursorStore.pure.ts` and is tested
+      behaviourally there; what matters here is that the skip reads it.
+    */
     expect(fn).toContain(
-      "const skip = oversize.cursor?.migrationId === m.id ? oversize.cursor.statementsDone : 0;",
+      "const skip = cursorIsForThisBody ? (oversize.cursor?.statementsDone ?? 0) : 0;",
     );
+    expect(fn).toContain("cursorAppliesToBody(oversize.cursor, m.id, bodySha)");
     expect(fn).toMatch(/if \(applied > 0 && budget\?\.isPastDeadline\(slowestMs\)\)/);
-    expect(fn).toMatch(/cursor: \{ migrationId: m\.id, statementsDone: index, shape \}/);
+    // The budget pause's cursor, field by field: it also carries the body's own
+    // identity now, so a literal would read as this rule breaking when what
+    // changed is that the cursor says which release it is a position into.
+    expect(fn).toMatch(
+      /cursor: \{ migrationId: m\.id, statementsDone: index, shape, \.\.\.identityOf\(\) \}/,
+    );
   });
 
   it("reads the body ONCE on a pass that already knows the shape", () => {
@@ -142,9 +155,13 @@ describe("the replay chunks an oversized seed", () => {
       would restore the double walk while every other assertion here still
       passed.
     */
-    const fn = sliceFrom(replay, "async function applyChunkedSeed", 6_000);
+    const fn = sliceFunction(replay, "async function applyChunkedSeed");
+    // Read through the same predicate as the skip: two spellings of "is this
+    // cursor this body's?" is how one of them comes to say yes where the other
+    // says no — a pass that skips a prefix whose shape it then re-reads, or the
+    // reverse.
     expect(fn).toMatch(
-      /const cursorShape =\s*oversize\.cursor\?\.migrationId === m\.id \? \(oversize\.cursor\.shape \?\? null\) : null;/,
+      /const cursorShape =\s*cursorIsForThisBody \? \(oversize\.cursor\?\.shape \?\? null\) : null;/,
     );
     expect(fn).toContain("shape ??= await readSeedShape(await oversize.streamSql(m));");
     // Exactly one unconditional stream for the statements, and no second
@@ -154,8 +171,8 @@ describe("the replay chunks an oversized seed", () => {
   });
 
   it("names the manual remedy for a large file that is not the seed shape", () => {
-    const fn = sliceFrom(replay, "async function applyChunkedSeed", 6_000);
-    expect(fn).toMatch(/e instanceof SeedShapeError[\s\S]{0,1600}Apply it to this clone by hand/);
+    const fn = sliceFunction(replay, "async function applyChunkedSeed");
+    expect(fn).toMatch(/e instanceof SeedShapeError[\s\S]*?Apply it to this clone by hand/);
   });
 
   it("does not demand a hand-apply when the seed merely changed upstream", () => {
@@ -165,9 +182,41 @@ describe("the replay chunks an oversized seed", () => {
     // recorded position was cut from a body that no longer exists, and the
     // answer is to drop the cursor and start again rather than to ask a
     // person to apply 41 MB by hand.
-    const fn = sliceFrom(replay, "async function applyChunkedSeed", 6_000);
-    expect(fn).toMatch(/if \(cursorShape\) \{[\s\S]{0,600}?cursor: null/);
+    const fn = sliceFunction(replay, "async function applyChunkedSeed");
+    expect(fn).toMatch(/if \(cursorShape\) \{[\s\S]*?cursor: null/);
     expect(fn).toMatch(/changed on the prime since the last pass/);
+  });
+
+  it("discards the stored cursor on exactly ONE path, and it is that one", () => {
+    /*
+      Audited path by path, because "which refusals leave a cursor that can
+      never match again?" is a question a reader has to be able to answer:
+
+        * budget pause — the cursor it writes is fresh. Nothing to discard.
+        * SeedShapeError WITH a cursor shape — the stored position was cut from
+          a body that no longer exists and the stale shape would make the next
+          pass hit the same mismatch for ever. This is the one that discards.
+        * SeedShapeError WITHOUT one — the file is not seed-shaped and a person
+          has to act. Any stored cursor is inert rather than harmful, because
+          the body identity refuses it and `skip` is 0.
+        * the prime's body went unreadable — the cursor is KEPT deliberately,
+          so the statements that landed are not re-sent.
+        * an unrecognised error — rethrown, cursor untouched, still valid.
+        * a cursor past the end — reset to 0 rather than discarded, because the
+          file is fine and the position is not.
+        * completion — `cursor: null`, and the caller clears it because its own
+          file landed.
+
+      One site, and a second appearing is a finding rather than a refactor.
+    */
+    const fn = sliceFunction(replay, "async function applyChunkedSeed");
+    const sites = fn.match(/cursorDiscarded: true/g) ?? [];
+    expect(sites).toHaveLength(1);
+    const at = fn.indexOf("cursorDiscarded: true");
+    const branch = fn.lastIndexOf("if (cursorShape) {", at);
+    expect(branch, "the discard is not inside the cursor-shape branch").toBeGreaterThan(-1);
+    // And the caller has to carry it out, or the flag is a value nobody reads.
+    expect(replay).toMatch(/chunked\.cursorDiscarded[\s\S]{0,80}?chunkCursorDiscarded = true/);
   });
 
   it("keeps the statement budget in bytes, under the API's limit", () => {

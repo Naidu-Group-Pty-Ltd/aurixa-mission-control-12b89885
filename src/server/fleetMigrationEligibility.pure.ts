@@ -284,6 +284,14 @@ export type MigrationQueueRow = {
   migration_version: string | null;
   /** Raw JSONB. Narrowed through `chunkCursorFor`, never read field by field. */
   chunk_cursor?: unknown;
+  /**
+   * When this lane last CLAIMED the clone. Optional because the column arrived
+   * after this comparator did and a caller that does not select it must still
+   * order correctly — see the third key below.
+   */
+  migration_heartbeat_at?: string | null;
+  /** A total order, so the sort can never fall back to the table's layout. */
+  clone_id?: string;
 };
 
 /**
@@ -332,6 +340,36 @@ export type MigrationQueueRow = {
  * migration to send — and it is the conservative direction: the failure this
  * function exists to stop is a clone never reached, never a clone reached too
  * often.
+ *
+ * ## And then two clones with no cursor tie at zero
+ *
+ * Which is the same defect this function exists to close, narrower: the sort
+ * returns 0, `Array.prototype.sort` is stable, and the order is the table's
+ * layout again. The case is not rare — it is every clone that is not mid-seed,
+ * which after the seed lands is the whole fleet. Two things have to be true at
+ * once for it to bite, and both are ordinary: several migrations owed rather
+ * than one, and a budget that runs out before the batch does. Then the clone
+ * the table returns last is never reached, with small migrations instead of one
+ * big seed.
+ *
+ * So there is a third key, and the reason the paragraph above rejected a clock
+ * no longer holds. It rejected one for a good reason — `updated_at` is written
+ * by the provisioning drain, the secret reconcilers and the parity sweep, so a
+ * clone another lane touches often would read as freshly served — and for one
+ * that has since stopped being true: "adding a column for it is a schema
+ * change to carry a fact this lane already has". `migration_heartbeat_at` is
+ * not added for this. It arrived so the reclaim sweep could tell a working pass
+ * from a dead one, it is written by this lane and nothing else, and it survives
+ * the release. Reading it here is free.
+ *
+ * It means "last CLAIMED" rather than "last served", and those are the same
+ * thing now: `CLAIM_RESERVE_MS` means a claim is only taken with time to work
+ * in. Nulls sort first, which is a clone this lane has never held.
+ *
+ * The fourth key is `clone_id`, and it is there so that the answer never
+ * depends on the table's physical layout at all — not because two clones with
+ * the same version, the same progress and the same claim time are expected, but
+ * because "expected" is what the first version of this function assumed.
  */
 export function compareMigrationQueue(a: MigrationQueueRow, b: MigrationQueueRow): number {
   // Nulls first: a backend that has never recorded a version is furthest
@@ -345,7 +383,22 @@ export function compareMigrationQueue(a: MigrationQueueRow, b: MigrationQueueRow
   }
   const ap = chunkCursorFor(a.chunk_cursor)?.statementsDone ?? 0;
   const bp = chunkCursorFor(b.chunk_cursor)?.statementsDone ?? 0;
-  return ap - bp;
+  if (ap !== bp) return ap - bp;
+  // Least recently CLAIMED by this lane, nulls first. Compared as strings
+  // because an ISO-8601 UTC timestamp sorts lexicographically, and parsing a
+  // date to compare two of them is a way to turn a malformed value into NaN.
+  const ah = a.migration_heartbeat_at ?? null;
+  const bh = b.migration_heartbeat_at ?? null;
+  if (ah !== bh) {
+    if (ah === null) return -1;
+    if (bh === null) return 1;
+    return ah < bh ? -1 : 1;
+  }
+  // A total order. Undefined on a caller that does not select it, in which case
+  // this contributes nothing and the sort is as stable as it was.
+  const ai = a.clone_id ?? "";
+  const bi = b.clone_id ?? "";
+  return ai < bi ? -1 : ai > bi ? 1 : 0;
 }
 
 /** The eligible rows, in the order the pass should serve them. Never mutates. */

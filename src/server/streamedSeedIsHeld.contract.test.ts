@@ -135,9 +135,20 @@ describe("the streaming half reports a refusal instead of throwing it", () => {
     // first or after hundreds. Asserting "the clone is unchanged" in both
     // cases would be a claim that is sometimes false.
     const branch = seed.slice(seed.indexOf("if (cloneSaidNothing(e))"), seed.indexOf("throw e;"));
-    expect(branch).toMatch(
-      /applied > 0[\s\S]{0,200}?\{ migrationId: m\.id, statementsDone: index, shape: shape \?\? undefined \}[\s\S]{0,40}?: null/,
-    );
+    /*
+      Field by field rather than as one literal: the cursor gained the body's
+      own sha (a position is only a position in the body it was taken in) and
+      became multi-line, and a literal match would have read as this rule
+      breaking when what changed was the line breaks.
+    */
+    expect(branch).toMatch(/applied > 0[\s\S]*?migrationId: m\.id/);
+    expect(branch).toMatch(/applied > 0[\s\S]*?statementsDone: index/);
+    expect(branch).toMatch(/applied > 0[\s\S]*?shape: shape \?\? undefined/);
+    // The identity, without which this branch preserves a position the NEXT
+    // pass has to refuse — the progress it exists to keep, thrown away.
+    expect(branch).toMatch(/applied > 0[\s\S]*?\.\.\.identityOf\(\)/);
+    // And nothing at all where no statement landed.
+    expect(branch).toMatch(/\}\s*:\s*null,/);
   });
 
   it("a seed the chunker cannot parse is still a failure, not a hold", () => {

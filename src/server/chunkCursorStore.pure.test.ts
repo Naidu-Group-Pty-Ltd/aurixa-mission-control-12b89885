@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { chunkCursorFor, cursorRanPastEnd } from "./chunkCursorStore.pure";
+import { chunkCursorFor, cursorAppliesToBody, cursorRanPastEnd } from "./chunkCursorStore.pure";
 
 /**
  * Every rejected shape here is a value that a bare
@@ -84,9 +84,9 @@ describe("chunkCursorFor — the remembered shape", () => {
     // sending them on every RESUMED pass — the half of a seed nothing
     // downstream reports missing.
     const withTail = { ...SHAPE, tail: "SELECT public.refresh_active_masters();" };
-    expect(chunkCursorFor({ migrationId: "m", statementsDone: 1, shape: withTail })?.shape?.tail).toBe(
-      "SELECT public.refresh_active_masters();",
-    );
+    expect(
+      chunkCursorFor({ migrationId: "m", statementsDone: 1, shape: withTail })?.shape?.tail,
+    ).toBe("SELECT public.refresh_active_masters();");
   });
 
   it("accepts the empty strings that an ordinary seed actually has", () => {
@@ -94,12 +94,16 @@ describe("chunkCursorFor — the remembered shape", () => {
     // ON CONFLICT clause and nothing after it — and quietly restore the
     // double read for all of them.
     const bare = { ...SHAPE, onConflict: "", tail: "" };
-    expect(chunkCursorFor({ migrationId: "m", statementsDone: 1, shape: bare })?.shape).toEqual(bare);
+    expect(chunkCursorFor({ migrationId: "m", statementsDone: 1, shape: bare })?.shape).toEqual(
+      bare,
+    );
   });
 
   it("accepts a null target, which is how an unparsed table name reads", () => {
     const anon = { ...SHAPE, target: null };
-    expect(chunkCursorFor({ migrationId: "m", statementsDone: 1, shape: anon })?.shape).toEqual(anon);
+    expect(chunkCursorFor({ migrationId: "m", statementsDone: 1, shape: anon })?.shape).toEqual(
+      anon,
+    );
   });
 
   it("reads a cursor written before the shape existed, without a shape", () => {
@@ -129,6 +133,108 @@ describe("chunkCursorFor — the remembered shape", () => {
     // is what the shape rejection must not cause.
     expect(cursor).toEqual({ migrationId: "m", statementsDone: 6 });
     expect(cursor?.shape).toBeUndefined();
+  });
+});
+
+/**
+ * The body's own identity, which is what tells a resumed pass whether the file
+ * it is about to open is the one the position was taken in.
+ */
+describe("chunkCursorFor — the body identity", () => {
+  const sha = "0f4a1c2b3d4e5f60718293a4b5c6d7e8f9001122";
+
+  it("carries a sha through, with and without a shape", () => {
+    expect(chunkCursorFor({ migrationId: "m", statementsDone: 6, bodySha: sha })).toEqual({
+      migrationId: "m",
+      statementsDone: 6,
+      bodySha: sha,
+    });
+    expect(
+      chunkCursorFor({ migrationId: "m", statementsDone: 6, shape: SHAPE, bodySha: sha }),
+    ).toEqual({ migrationId: "m", statementsDone: 6, bodySha: sha, shape: SHAPE });
+  });
+
+  it.each([
+    ["an empty string", ""],
+    ["a number", 7],
+    ["null", null],
+    ["an array", [sha]],
+    ["an object", { sha }],
+  ])("drops %s rather than storing it as an identity", (_what, bodySha) => {
+    // An empty string is the one worth spelling out: it would compare unequal
+    // to every real sha and so refuse every cursor, which is safe and turns a
+    // legitimate resume into a restart on every pass — the livelock the cursor
+    // exists to end. Dropped to undefined, which is the "written before this
+    // existed" reading and is handled explicitly.
+    const cursor = chunkCursorFor({ migrationId: "m", statementsDone: 6, bodySha });
+    expect(cursor).toEqual({ migrationId: "m", statementsDone: 6 });
+    expect(cursor?.bodySha).toBeUndefined();
+  });
+
+  it("keeps the position when the identity is unreadable", () => {
+    // Same rule as the shape: those statements DID land, and refusing the whole
+    // cursor over an unreadable field would re-send them.
+    expect(
+      chunkCursorFor({ migrationId: "m", statementsDone: 6, shape: SHAPE, bodySha: 7 }),
+    ).toEqual({ migrationId: "m", statementsDone: 6, shape: SHAPE });
+  });
+});
+
+/**
+ * A position is only a position in the body it was taken in.
+ *
+ * The template seed is 543 rows keyed by slug. Regenerating it rewrites
+ * `schema` and `design_meta` and moves neither the header, the ON CONFLICT
+ * clause, the tail nor the tuple count — so the shape check passes over a body
+ * whose every value changed, and resuming into it leaves the clone holding the
+ * OLD rows for the skipped prefix while the migration is recorded as applied.
+ * Byte-based chunk boundaries mean rows can also fall between the prefix and
+ * the remainder and never be sent at all.
+ */
+describe("cursorAppliesToBody", () => {
+  const sha = "0f4a1c2b3d4e5f60718293a4b5c6d7e8f9001122";
+  const other = "ffffffffffffffffffffffffffffffffffffffff";
+
+  it("resumes where the body is provably the one the position was taken in", () => {
+    expect(cursorAppliesToBody({ migrationId: "m", bodySha: sha }, "m", sha)).toBe(true);
+  });
+
+  it("REFUSES a position into a body that has been re-released", () => {
+    // The whole finding. Same migration id, same shape, different bytes.
+    expect(cursorAppliesToBody({ migrationId: "m", bodySha: other }, "m", sha)).toBe(false);
+  });
+
+  it("refuses a position taken in a different migration", () => {
+    expect(cursorAppliesToBody({ migrationId: "other", bodySha: sha }, "m", sha)).toBe(false);
+  });
+
+  it("refuses a pre-identity cursor where THIS pass can name the body", () => {
+    // Written before `bodySha` existed, so it cannot prove which release it is
+    // into. One restart per clone, once, and the statements re-send for free
+    // under the seed's own ON CONFLICT.
+    expect(cursorAppliesToBody({ migrationId: "m" }, "m", sha)).toBe(false);
+  });
+
+  it("resumes on the shape alone where NOBODY can name the body", () => {
+    // Exactly the behaviour that existed before this. Refusing here instead
+    // would restart every pass for such a caller for ever — the livelock the
+    // cursor was built to end.
+    expect(cursorAppliesToBody({ migrationId: "m" }, "m", null)).toBe(true);
+    expect(cursorAppliesToBody({ migrationId: "m", bodySha: sha }, "m", null)).toBe(true);
+  });
+
+  it("refuses a different migration even when nobody can name the body", () => {
+    // The pre-existing check survives the unavailable reading; the identity is
+    // an ADDITIONAL proof, never a replacement for the one that was there.
+    expect(cursorAppliesToBody({ migrationId: "other" }, "m", null)).toBe(false);
+  });
+
+  it.each([
+    ["null", null],
+    ["undefined", undefined],
+  ])("refuses when there is no cursor at all (%s)", (_label, cursor) => {
+    expect(cursorAppliesToBody(cursor, "m", sha)).toBe(false);
+    expect(cursorAppliesToBody(cursor, "m", null)).toBe(false);
   });
 });
 

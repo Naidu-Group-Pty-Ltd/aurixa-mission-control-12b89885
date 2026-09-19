@@ -66,6 +66,7 @@ import {
 } from "./fleetMigrationEligibility.pure";
 import { notifyOperators, writeAuditLog } from "./audit.server";
 import { chunkCursorFor } from "./chunkCursorStore.pure";
+import { ClaimLostError } from "./provisioningBudget";
 
 type Db = SupabaseClient<Database>;
 
@@ -87,13 +88,111 @@ type Db = SupabaseClient<Database>;
 const DEFAULT_BATCH = 5;
 
 /**
- * A claim older than this is treated as abandoned.
+ * A claim this old AND this quiet is treated as abandoned.
  *
- * Long enough that a slow but living run is not stolen from — a clone hundreds
- * of migrations behind is legitimately slow — and short enough that a worker
- * killed mid-flight does not park a clone forever.
+ * It used to be thirty minutes of age alone, and age alone cannot tell a run
+ * that is working from one that is dead — so the number had to be long enough
+ * for the slowest legitimate run, which made it exactly as long as the cadence.
+ * A leaked claim therefore cost a clone a FULL PASS: claimed 12:00:49, still
+ * held at 12:30 because it was 29.2 minutes old, freed only at 13:00.
+ *
+ * The heartbeat settles it instead: this lane stamps
+ * `migration_heartbeat_at` when it takes a claim and again on every statement
+ * the replay sends, so a run that is alive and working says so several times a
+ * minute. Asserted by effect rather than by a guess about how long work takes.
+ *
+ * It must be THIS LANE'S column and not `updated_at`. `updated_at` is
+ * row-wide: every writer of `clone_backends` refreshes it, and one of them is
+ * the reference-data lane, which claims and releases the same `ready` backend
+ * through `reference_sync_started_at` and never looks at `worker_started_at`.
+ * Its cadence is `13,28,43,58` against this lane's half-hourly one, so it
+ * writes two minutes before every fleet pass — a dead claim on any clone it
+ * touches would be permanently "recent" and stick for ever, which is worse
+ * than the window this replaced. Raised by review on the first version of
+ * this change.
+ *
+ * What the number still has to cover is the longest SILENT stretch of a living
+ * pass, which is the initial download rather than the sending: a 40 MB seed
+ * arrives before the first statement can be recorded. Five minutes is roughly
+ * five times that, and pg_net has given up on the request four minutes earlier.
+ *
+ * Measured 19 Sep 2026: fleet passes ran 49 s, 102 s and 102 s from the cron
+ * fire, and three claims leaked — npc-test 11:31:02.064, npc-client-dashboard
+ * 12:00:49.571, npc-test 13:01:42.513 — each with its last write 19-39 ms
+ * later. That gap is clock skew between the isolate's `new Date()` and the
+ * database's trigger, so the claim was the last thing to touch the row: the
+ * isolate died before the replay's first await returned.
  */
-const STALE_CLAIM_MINUTES = 30;
+const STALE_CLAIM_MINUTES = 5;
+
+/*
+ * A CEILING ON CLAIM AGE WAS CONSIDERED HERE AND DELIBERATELY NOT ADDED.
+ *
+ * Review is right that the residual below is not "one reclaim window once".
+ * `stop` aborts the outstanding beats — dropping every one not yet sent and
+ * closing the connection of one that has been — but Postgres notices a
+ * vanished client only when it next writes to the socket, which for a short
+ * UPDATE is after it has committed. So on the one path where the pass's own
+ * release ALSO failed, leaving `worker_started_at` still equal to the claim,
+ * each late beat stamps its own `clock_timestamp()` and pushes the silence
+ * window out again. The true bound is one window after the LAST queued beat
+ * commits, and nothing local bounds when that is.
+ *
+ * The obvious answer is an absolute age past which a claim is freed whatever
+ * its stamp says. It was written, and then removed, because it is the SAME
+ * SHAPE as the `_not_after` deadline removed one round earlier: a rule that
+ * can free a claim a LIVE pass is holding, which is how two passes end up
+ * inside one schema. Only the trigger differs — ordinary latency there, an
+ * improbably long pass here — and "improbable" is the reasoning this codebase
+ * keeps paying for.
+ *
+ * The trade decides it. The residual costs a DELAY: a claim held by nobody,
+ * a clone skipped until the beats drain and the window passes, nothing
+ * applied twice and nothing corrupted. A ceiling would trade that for a
+ * chance of concurrent application — which is the wrong way round, and is
+ * the same argument made against the deadline.
+ *
+ * What is done instead costs nothing: the beats are stopped BEFORE the
+ * release is attempted rather than after it, so the set that can outlive a
+ * failed release is only those still in flight after the drain. See the
+ * `heartbeat.stop()` above the result write.
+ *
+ * What would change this: a MEASURED ceiling on how long one invocation can
+ * live in this runtime. A claim ceiling set from that is a fact about the
+ * platform rather than a guess about latency, and could never reach a pass
+ * the platform would not already have killed. That measurement is not in
+ * hand, and guessing it is the thing this comment exists to refuse.
+ */
+
+/**
+ * A pass will not claim a clone it cannot plausibly do anything for.
+ *
+ * The budget check before the claim asked only whether the deadline had
+ * passed, so a claim could be taken with milliseconds left — and it was, three
+ * times in one morning. The replay's first act is opening a 40 MB seed, which
+ * cannot finish in what remained, and the isolate was killed holding the claim.
+ *
+ * This is a FLOOR rather than a measurement, and it is worth saying so: what a
+ * pass needs is enough time to open the stream and record one statement, and
+ * nothing here measures that. Fifteen seconds is chosen as obviously-too-little
+ * to do it, against passes measured at ~102 s for one clone.
+ *
+ * The reserve reduces how often a claim is wasted; the heartbeat-aware reclaim
+ * above bounds what it costs when one still is. Neither depends on the other
+ * being right, which is the point of having both.
+ */
+const CLAIM_RESERVE_MS = 15_000;
+
+/**
+ * What a write says when the claim it was fenced against is gone.
+ *
+ * Named once because two sites raise it — the progress write throws it to stop
+ * the replay, the result write reports it — and they mean the same thing. Two
+ * spellings of one condition is how the two come to disagree, and this is the
+ * string an operator will search for when a pass reports a clone it never
+ * changed.
+ */
+const CLAIM_LOST = "claim lost mid-pass";
 
 /**
  * How long one pass may spend before it stops handing out work.
@@ -240,6 +339,189 @@ const EMPTY: FleetMigrationResult = {
 };
 
 /**
+ * How often a pass says it is still alive while it holds a claim.
+ *
+ * Read against `STALE_CLAIM_MINUTES` rather than chosen on its own: what has
+ * to be true is that several beats fit inside the reclaim window, so a single
+ * lost beat — a transient database fault, a request that took longer than
+ * usual — cannot make a living pass look dead. Thirty seconds against five
+ * minutes is ten beats; a pass would have to miss nine in a row.
+ *
+ * The two numbers are the whole cadence because beats do not wait for each
+ * other. That was not true of the version that serialised them, where a slow
+ * beat delayed the next one and this ratio described a system with no latency;
+ * `fleet_claim_heartbeat` taking the MAXIMUM at the database is what makes
+ * independence safe and therefore makes this arithmetic honest again.
+ */
+const CLAIM_HEARTBEAT_MS = 30_000;
+
+/**
+ * How long a pass will wait for beats still in the air when it stops.
+ *
+ * `clearInterval` stops the next beat, not one already dispatched. The
+ * cancellation is the abort beside it; this only stops the pass from walking
+ * away while that cancellation is still landing, so the beats it aborted have
+ * settled before the release runs rather than racing it.
+ *
+ * It does NOT bound how late a beat can write — nothing in this isolate can,
+ * which is the finding that removed the deadline that used to sit here and is
+ * recorded in full on `fleet_claim_heartbeat`. Claiming otherwise was one of
+ * this mechanism's own defects and is worth not re-acquiring.
+ *
+ * Bounded, because this is awaited in a `finally`: a beat that never settles
+ * would otherwise hang the whole run, which is a far worse fault than the one
+ * the wait addresses. Two seconds drains the ordinary case and abandons the
+ * pathological one.
+ */
+const CLAIM_DRAIN_MS = 2_000;
+
+
+/**
+ * Say, on a clock, that this pass still holds the claim it took.
+ *
+ * Separate from the cursor write in `onStatementDone`: that one belongs to the
+ * oversized-seed path and carries progress, and a heartbeat that only exists
+ * where there is progress to report is absent on every other path — an
+ * ordinary DDL, and above all a request blocked inside the timeout-less
+ * `runSqlOnProject`. Those are the stretches the window has to cover.
+ *
+ * Takes no callback: nothing here can interrupt a pass blocked in a fetch, so
+ * this does not pretend to. What it does is make a living pass VISIBLE, and
+ * stop beating the moment the row says the claim is somebody else's.
+ *
+ * BEATS ARE INDEPENDENT, AND THAT IS THE POINT.
+ *
+ * Three shapes were tried here and the first two each bought the next defect.
+ * Overlapping beats on a plain interval REORDERED, because each chose its
+ * timestamp before its request went out. Serialising them fixed that and made
+ * a HUNG beat end the heartbeat for ever — on an egress shared with the
+ * migration's own SQL, so the beat fails exactly when it is needed. Bounding
+ * each beat with an abort fixed that and turned a merely SLOW database into
+ * total silence, every beat past the ceiling discarded and the stamp never
+ * moving.
+ *
+ * All three were the caller trying to defend an ordering it does not control.
+ * `fleet_claim_heartbeat` takes `greatest(migration_heartbeat_at,
+ * clock_timestamp())`, so whichever write commits last the column ends at the
+ * maximum and commit order stops mattering. Beats can then be independent,
+ * which is what makes a hang harmless, which is what makes an abort
+ * unnecessary. Nothing here is traded against anything else.
+ */
+export function beatWhileClaimHeld(
+  supabase: Db,
+  cloneId: string,
+  claimedAt: string,
+): { stop: () => Promise<void> } {
+  let stopped = false;
+  /** Beats dispatched and not yet settled, so `stop` can drain them. */
+  const outstanding = new Set<Promise<unknown>>();
+  /**
+   * Cancels the beats that are out when the pass ends.
+   *
+   * It removes every beat that had not yet been sent, and closes the
+   * connection of one that had, which Postgres answers by cancelling the
+   * statement where it can still see the socket. What it cannot promise is
+   * the beat already executing at the server; that residual is accepted and
+   * named on `fleet_claim_heartbeat`, along with why a deadline on the beat
+   * is not the way to close it.
+   *
+   * This half cannot backfire, which is why it survived the deadline that
+   * was tried beside it: an aborted beat simply means the next one goes.
+   */
+  const inflightBeats = new AbortController();
+
+  const timer = setInterval(() => {
+    if (stopped) return;
+    const run = (async () => {
+      const { data: held, error } = await supabase
+        .rpc("fleet_claim_heartbeat", {
+          _clone_id: cloneId,
+          _claimed_at: claimedAt,
+        })
+        .abortSignal(inflightBeats.signal);
+      if (error) {
+        // One lost beat is survivable by design — see CLAIM_HEARTBEAT_MS — so
+        // this neither throws nor stops. Silence would hide a database fault
+        // that is about to cost a live pass its claim.
+        console.error("[fleet-migration] heartbeat not recorded", {
+          cloneId,
+          error: error.message,
+        });
+        return;
+      }
+      if (held === false) {
+        // The claim is gone. Beating on would say a pass that owns nothing is
+        // alive. Told by the function's own answer rather than by a row count,
+        // which could not separate "the claim is gone" from "a newer beat
+        // already won" once the write itself became conditional on advancing.
+        //
+        // `=== false` and not falsy: a beat whose transport failed returns
+        // `null` above and has ALREADY returned, so the only way to reach
+        // here with nothing is a shape this lane does not produce. Reading it
+        // as a lost claim would end the heartbeat on a fault that says
+        // nothing about the claim.
+        console.warn("[fleet-migration] heartbeat stopped: the claim is no longer this pass's", {
+          cloneId,
+          claimedAt,
+        });
+        stopped = true;
+        clearInterval(timer);
+      }
+    })().catch((e: unknown) => {
+      // A rejected beat must not become an unhandled rejection: in this
+      // runtime that can take down the whole invocation, which would lose the
+      // replay this exists to protect.
+      console.error("[fleet-migration] heartbeat threw", {
+        cloneId,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    });
+    outstanding.add(run);
+    void run.finally(() => outstanding.delete(run));
+  }, CLAIM_HEARTBEAT_MS);
+
+  /*
+    MEMOISED, BECAUSE "IDEMPOTENT" WAS TRUE OF THE EFFECT AND FALSE OF THE COST.
+
+    There are three call sites now — before the result write, before the catch's
+    release, and the `finally` behind both — and I said in two places that a
+    second call was free because `clearInterval` and `abort` are no-ops on an
+    already-stopped timer. They are. The DRAIN is not: a promise still unsettled
+    after `CLAIM_DRAIN_MS` stays in `outstanding`, so the next call starts a
+    fresh two-second race over the same promise. Every exit therefore spent up
+    to four seconds rather than the two the constant names — and it is spent at
+    the END of a 45-second pass, out of the margin left for the audit write and
+    the response. Raised by review, against my own claim.
+
+    So the first call's promise is the answer to every later one. Later callers
+    await the SAME drain rather than starting another: already settled, they
+    return at once; still running, they join it. `??=` and not a boolean,
+    because two exits can reach this concurrently and a flag would let the
+    second walk away while the first was still draining.
+  */
+  let stopping: Promise<void> | null = null;
+  return {
+    stop: () =>
+      (stopping ??= (async () => {
+        stopped = true;
+        clearInterval(timer);
+        inflightBeats.abort();
+        /*
+          Drained, but never indefinitely. `allSettled` cannot reject, so `stop`
+          cannot throw in the `finally` that awaits it — a throw there would
+          replace the error the pass is carrying, or on the success path escape
+          the clone loop and kill the run. The race bounds a beat that never
+          settles, which `allSettled` alone would wait for for ever.
+        */
+        await Promise.race([
+          Promise.allSettled([...outstanding]),
+          new Promise((resolve) => setTimeout(resolve, CLAIM_DRAIN_MS)),
+        ]);
+      })()),
+  };
+}
+
+/**
  * Release claims from runs that died holding one.
  *
  * `worker_started_at` is reused as the claim, and that is safe rather than
@@ -255,13 +537,69 @@ const EMPTY: FleetMigrationResult = {
  */
 async function reclaimStale(supabase: Db): Promise<void> {
   const cutoff = new Date(Date.now() - STALE_CLAIM_MINUTES * 60_000).toISOString();
-  const { error } = await supabase
+
+  /*
+    TWO STATEMENTS, AND NOT ONE `or`.
+
+    The condition is "old AND (quiet OR never beat at all)", which reads as a
+    single `.or(...)` — and an `.or()` here would be a STRING with a timestamp
+    interpolated into it, which is the filter this platform has already paid
+    for once: the screening consumer's claim predicate was exactly that, it
+    never parsed, and the claim had never once succeeded while the code and
+    its test double agreed with each other. A contract test forbids it.
+
+    So each half is its own statement with typed filters the builder composes.
+    The sweep runs once a pass; a second round-trip is not a cost worth a
+    composed predicate.
+  */
+  const claimable = [...MIGRATION_CLAIMABLE_STATUSES];
+
+  /*
+    QUIET SINCE, on THIS LANE'S OWN heartbeat — the only reason the age above
+    can be short enough to matter.
+
+    `updated_at` cannot serve however tempting: it is ROW-wide, and the
+    reference-data lane claims and releases the same `ready` backend through
+    `reference_sync_started_at` without ever looking at `worker_started_at`.
+    Its cadence writes this row two minutes before every fleet pass, so a dead
+    claim on any clone it touches would read as alive for ever.
+  */
+  const { error: quietErr } = await supabase
     .from("clone_backends")
     .update({ worker_started_at: null })
-    .in("status", [...MIGRATION_CLAIMABLE_STATUSES])
+    .in("status", claimable)
     .not("worker_started_at", "is", null)
-    .lt("worker_started_at", cutoff);
-  if (error) throw new Error(`Could not reclaim stale migration claims: ${error.message}`);
+    .lt("worker_started_at", cutoff)
+    .lt("migration_heartbeat_at", cutoff);
+  if (quietErr) {
+    throw new Error(`Could not reclaim quiet migration claims: ${quietErr.message}`);
+  }
+
+  /*
+    AND a claim that has never beat at all — taken by a deployment older than
+    the heartbeat column. It carries NULL, a NULL comparison is not true, and
+    the sweep above would therefore leave it held FOR EVER: the exact failure
+    this whole change exists to end, reintroduced for the rows that most need
+    it. Gated by the claim's age, which is how those rows behaved before.
+
+    Two statements rather than one `.or(...)`, and that is not a style
+    preference. An `.or()` here would be a STRING with a timestamp interpolated
+    into it — the filter this platform has already paid for once, where the
+    screening consumer's claim predicate never parsed and had never once
+    succeeded while its code and its test double agreed with each other.
+    `fleetPassIsBudgeted.contract.test.ts` asserts both sweeps carry the same
+    guard, so the repetition below cannot drift into two different rules.
+  */
+  const { error: unbeatenErr } = await supabase
+    .from("clone_backends")
+    .update({ worker_started_at: null })
+    .in("status", claimable)
+    .not("worker_started_at", "is", null)
+    .lt("worker_started_at", cutoff)
+    .is("migration_heartbeat_at", null);
+  if (unbeatenErr) {
+    throw new Error(`Could not reclaim unbeaten migration claims: ${unbeatenErr.message}`);
+  }
 }
 
 /**
@@ -408,7 +746,7 @@ export async function runFleetMigrationSync(
   const { data: allBackends, error: excludedErr } = await supabase
     .from("clone_backends")
     .select(
-      "clone_id, supabase_project_ref, migration_version, status, worker_started_at, migration_blocked_at, migration_blocked_reason, chunk_cursor",
+      "clone_id, supabase_project_ref, migration_version, status, worker_started_at, migration_heartbeat_at, migration_blocked_at, migration_blocked_reason, chunk_cursor",
     );
   if (excludedErr) {
     return { ...EMPTY, error: `Could not read clone backends: ${excludedErr.message}` };
@@ -600,7 +938,7 @@ export async function runFleetMigrationSync(
       served three of five clones and a pass that found five level are the same
       shape in every other field.
     */
-    if (Date.now() >= deadlineAt) {
+    if (Date.now() + CLAIM_RESERVE_MS >= deadlineAt) {
       out.stoppedAtBudget = true;
       break;
     }
@@ -617,9 +955,42 @@ export async function runFleetMigrationSync(
     // would put this lane inside a schema somebody else is rebuilding. A
     // changed status returns no row and the clone waits for the next tick,
     // which is the correct outcome and costs half an hour at most.
+    /*
+      THE FENCE.
+
+      One timestamp, held for the rest of this clone's turn and required by
+      every write that follows. `worker_started_at` stops being a flag that a
+      claim exists and becomes the name of WHOSE claim it is.
+
+      Needed because the reclaim window above is now five minutes rather than
+      thirty. A pass parked inside `runSqlOnProject` — which carries no
+      timeout — can be reclaimed, resumed, and then go on writing: its cursor
+      into the successor's claim, and, worse, its release over the successor's
+      `worker_started_at`, which puts two passes inside one clone's schema
+      applying the same migrations at once. That is the exact outcome the
+      claim's own compare-and-swap exists to prevent, arriving a few minutes
+      later through the back door. Raised by review; the shorter window is
+      what makes it reachable.
+
+      A fenced write that matches no row is not an error and must not be
+      treated as one: it is this pass being told the clone is no longer its
+      to write about. Each site below says what it does with that answer.
+
+      It also closes a smaller thing: the two fields were two separate
+      `new Date()` calls and could differ by a tick, so nothing could be
+      compared against the other.
+    */
+    const claimedAt = new Date().toISOString();
     const { data: claimed, error: claimErr } = await supabase
       .from("clone_backends")
-      .update({ worker_started_at: new Date().toISOString() })
+      .update({
+        worker_started_at: claimedAt,
+        // Stamped WITH the claim, in the same statement. A claim whose
+        // heartbeat is only written by the first statement would be
+        // indistinguishable from an abandoned one for as long as the seed
+        // takes to download — which is the longest part of a pass.
+        migration_heartbeat_at: claimedAt,
+      })
       .eq("clone_id", cloneId)
       .eq("status", backend.status)
       .is("worker_started_at", null)
@@ -633,17 +1004,52 @@ export async function runFleetMigrationSync(
     }
     if (!claimed || claimed.length === 0) continue; // another run has it
 
+    /*
+      THE HEARTBEAT IS A CLOCK, NOT A BYPRODUCT OF PROGRESS.
+
+      The first version beat only in `onStatementDone`, which belongs to the
+      OVERSIZED-SEED path alone. Every other replay — an ordinary DDL, and in
+      particular one blocked inside the timeout-less `runSqlOnProject` — was
+      silent from the claim onwards, so a five-minute window would reclaim a
+      pass that is working and a successor would start sending the same
+      migrations into the same schema. The fence stops the reclaimed pass from
+      WRITING; it cannot stop the SQL it has already dispatched, and that is
+      the concurrent application the claim exists to prevent. Raised by review
+      on #227, and it is a defect this PR creates: at thirty minutes the same
+      hole existed and was very hard to reach.
+
+      So liveness is measured by a timer rather than inferred from work. It
+      covers every silent stretch there is, including one nothing in this file
+      can see. Three properties make it safe:
+
+      - It is FENCED, like every other write here. A beat that matches no row
+        means the claim has already gone, and the timer stops rather than
+        resurrecting a claim this pass no longer holds.
+      - It is stopped in a `finally`, so a pass that returns, throws or breaks
+        stops beating at once. A timer outliving its pass would hold a dead
+        claim open for ever, which is worse than the window it replaces.
+      - It dies with the isolate. A killed pass stops beating by construction,
+        which is the case the window is actually for.
+    */
+    const heartbeat = beatWhileClaimHeld(supabase, cloneId, claimedAt);
+
     try {
-      const { results, latestApplied, stoppedEarly, chunksApplied, chunkCursor } =
-        await applyPrimeMigrations(
-          backend.supabase_project_ref!,
-          runnable,
-          undefined,
-          (m) => corpus.loadSql(m.id),
-          // `runnable` alone cannot say whether a cleared version sits behind a
-          // withheld one. The whole corpus can.
-          { corpus: corpus.metas, runnableIds: new Set(runnable.map((m) => m.id)) },
-          /*
+      const {
+        results,
+        latestApplied,
+        stoppedEarly,
+        chunksApplied,
+        chunkCursor,
+        chunkCursorDiscarded,
+      } = await applyPrimeMigrations(
+        backend.supabase_project_ref!,
+        runnable,
+        undefined,
+        (m) => corpus.loadSql(m.id),
+        // `runnable` alone cannot say whether a cleared version sits behind a
+        // withheld one. The whole corpus can.
+        { corpus: corpus.metas, runnableIds: new Set(runnable.map((m) => m.id)) },
+        /*
           A BODY TOO BIG TO HOLD IS STILL SENDABLE.
 
           `openPrimeMigrationCorpus` refuses a body past its ceiling, and the
@@ -683,13 +1089,24 @@ export async function runFleetMigrationSync(
           set — which starves every OTHER clone too, since the loop needs the
           claim free — and no clone's `migration_version` moved.
         */
-          // Stop BETWEEN migrations once this pass's budget is spent, reserving
-          // the slowest migration applied so far — so a pass never STARTS one it
-          // cannot live to finish and then reports the clone level.
-          { isPastDeadline: (reserveMs) => Date.now() + reserveMs >= deadlineAt },
-          {
-            streamSql: (m) => corpus.openSqlStream(m.id),
-            /*
+        // Stop BETWEEN migrations once this pass's budget is spent, reserving
+        // the slowest migration applied so far — so a pass never STARTS one it
+        // cannot live to finish and then reports the clone level.
+        { isPastDeadline: (reserveMs) => Date.now() + reserveMs >= deadlineAt },
+        {
+          streamSql: (m) => corpus.openSqlStream(m.id),
+          /*
+            AND WHICH BODY THAT STREAM WILL OPEN.
+
+            The corpus already knows: every entry came from a git tree listing,
+            and a blob sha IS the content. Handing it down is what lets the
+            cursor below be refused when the file it names has been re-released
+            since the position in it was taken — which the shape cannot detect,
+            because rewriting every tuple's VALUES moves neither the header, the
+            ON CONFLICT clause, the tail nor the COUNT.
+          */
+          bodyIdentity: (m) => corpus.bodyIdentity(m.id),
+          /*
             THE CURSOR IS THE DIFFERENCE BETWEEN SLOW AND NEVER.
 
             Read from the clone's own row and written on EVERY statement, not
@@ -699,41 +1116,100 @@ export async function runFleetMigrationSync(
             what this lane had, and why the seed could not land however many
             times it was tried.
 
-            The stamp is checked against the migration it names before it is
-            believed: a cursor into a DIFFERENT file would make this pass skip
-            statements of the seed it is actually sending.
+            The stamp is checked against the migration it names AND against
+            the body's own sha before it is believed: a cursor into a different
+            file — or into an older release of the same file — would make this
+            pass skip statements of the seed it is actually sending.
           */
-            cursor: chunkCursorFor(backend.chunk_cursor),
-            onStatementDone: async (p) => {
-              const { error } = await supabase
-                .from("clone_backends")
-                .update({
-                  // `shape` rides the cursor so the NEXT pass reads this
-                  // 41 MB body once instead of twice — see
-                  // `chunkCursorStore.pure.ts`.
-                  chunk_cursor: {
-                    migrationId: p.migrationId,
-                    statementsDone: p.statementsDone,
-                    shape: p.shape,
-                  },
-                  status_detail: `Sending ${p.name} — ${p.statementsDone} statement(s) in (${p.label})`,
-                })
-                .eq("clone_id", cloneId);
-              if (error) {
-                // Not fatal: the statements themselves have landed and the seed's
-                // own ON CONFLICT makes re-sending them free. But a cursor that
-                // cannot be written turns a resumable pass back into the livelock
-                // this exists to end, so it must not be silent.
-                console.error("[fleet-migration] chunk cursor not recorded", {
-                  cloneId,
-                  migration: p.name,
+          cursor: chunkCursorFor(backend.chunk_cursor),
+          onStatementDone: async (p) => {
+            const { data: beat, error } = await supabase
+              .from("clone_backends")
+              .update({
+                // `shape` rides the cursor so the NEXT pass reads this
+                // 41 MB body once instead of twice — see
+                // `chunkCursorStore.pure.ts`.
+                chunk_cursor: {
+                  migrationId: p.migrationId,
                   statementsDone: p.statementsDone,
-                  error: error.message,
-                });
-              }
-            },
+                  shape: p.shape,
+                  /*
+                    Spread rather than assigned. `undefined` and an absent key
+                    are the same to TypeScript and different to the jsonb this
+                    lands in, where an explicit null would read as "this body
+                    has no identity" rather than "nobody said" — and the two
+                    send the next pass to opposite behaviours.
+                  */
+                  ...(p.bodySha === undefined ? {} : { bodySha: p.bodySha }),
+                },
+                status_detail: `Sending ${p.name} — ${p.statementsDone} statement(s) in (${p.label})`,
+                /*
+                    AND NOT THE HEARTBEAT.
+
+                    This wrote `migration_heartbeat_at` too, from the days
+                    before the timer existed and liveness had to be inferred
+                    from progress. With the timer it is a SECOND, unserialised
+                    writer of one column: a beat dispatched earlier can land
+                    after this one and move the stamp BACKWARDS, which is the
+                    reordering serialising the timer had just closed, arriving
+                    through the other door. Raised by review.
+
+                    Removing it restores what `reclaimStale` has always claimed
+                    — that one mechanism writes this column — and loses no
+                    coverage, because the timer beats through the download this
+                    callback cannot reach anyway. The fence stays: that is
+                    ownership, which is a different question.
+                  */
+              })
+              .eq("clone_id", cloneId)
+              .eq("worker_started_at", claimedAt)
+              .select("clone_id");
+            if (error) {
+              // Not fatal: the statements themselves have landed and the seed's
+              // own ON CONFLICT makes re-sending them free. But a cursor that
+              // cannot be written turns a resumable pass back into the livelock
+              // this exists to end, so it must not be silent.
+              console.error("[fleet-migration] chunk cursor not recorded", {
+                cloneId,
+                migration: p.name,
+                statementsDone: p.statementsDone,
+                error: error.message,
+              });
+              return;
+            }
+            /*
+                A FENCE MISS IS FATAL, WHERE A FAILED WRITE IS NOT.
+
+                No row matched, so `worker_started_at` is not this pass's any
+                more: the claim was reclaimed and another pass holds it. The
+                write not landing is the least of it — continuing would send
+                the next statement of this seed into a database a second pass
+                is already sending to, which is the concurrent application the
+                claim exists to prevent.
+
+                Thrown rather than returned, because the replay has no way to
+                be told "stop" and nothing below it would ask. It is neither a
+                `SeedShapeError` nor a `cloneSaidNothing`, so it travels
+                through the replay's own catches untouched and lands in this
+                clone's `catch` — where the release is fenced too, and
+                therefore takes nothing away from the pass that now owns the
+                row.
+              */
+            if (!beat || beat.length === 0) {
+              // `ClaimLostError` rather than a plain `Error`: the replay
+              // catches every exception per migration and records it as a
+              // migration the CLONE refused, which is the wrong sentence and
+              // skips the fenced release below. That class is the one thing
+              // it rethrows.
+              throw new ClaimLostError(
+                `${CLAIM_LOST}: this pass was reclaimed while sending ${p.name} ` +
+                  `(statement ${p.statementsDone}); another pass now holds this clone, so ` +
+                  `this one stops rather than sending into a database it no longer owns`,
+              );
+            }
           },
-        );
+        },
+      );
       const successes = results.filter((r) => r.success && !r.skipped);
       /*
         A HOLD IS NOT A FAILURE, AND THE DIFFERENCE IS THE CLONE'S LIFE.
@@ -847,6 +1323,29 @@ export async function runFleetMigrationSync(
         // still moved this clone forward. Counting it as "nothing happened"
         // would leave the previous pass's sentence standing over real progress.
         chunksApplied === 0;
+      /*
+        THE BEATS STOP BEFORE THE RELEASE, NOT AFTER IT.
+
+        The `finally` below still stops the heartbeat — this is not a move,
+        it is an earlier first call, and the later ones await the SAME drain
+        rather than starting another — see the memoisation on `stop`, which is
+        what makes calling it three times cost what calling it once costs.
+        What the order buys is the set of beats that can outlive the release.
+
+        Stopped afterwards, every beat dispatched during the replay is still
+        live while the release runs, and any of them that commits after a
+        FAILED release re-stamps a claim nobody holds. Stopped here, the
+        abort has already dropped everything not yet sent and the drain has
+        given what was sent its two seconds, so only a beat still in flight
+        past that can land late.
+
+        It cannot go the other way round and it cannot backfire: after this
+        line the pass does one small UPDATE, which is far inside
+        `STALE_CLAIM_MINUTES`, and if that write is slow enough to be
+        reclaimed anyway its own fence catches it — which is the case
+        `CLAIM_LOST` already reports.
+      */
+      await heartbeat.stop();
       const syncedTo = latestApplied ?? "the prime's latest recorded migration";
       /*
         A PASS THE BUDGET STOPPED HAS NOT FINISHED LOOKING.
@@ -870,6 +1369,8 @@ export async function runFleetMigrationSync(
         Three states, and the middle one is why this cannot be a plain write of
         whatever `applyPrimeMigrations` returned.
 
+        FOUR states, and the fourth was the one this enumeration missed.
+
         A pass that stopped INSIDE the seed returns a cursor: store it.
         A pass that FINISHED the seed returns null and the migration is among
         `successes`: clear it, because a cursor into a completed file would make
@@ -878,6 +1379,17 @@ export async function runFleetMigrationSync(
         also returns null, and here the stored cursor is still exactly true.
         Writing null for that third case would throw away a resume point and
         put the livelock back for one pass in every chain.
+
+        And a pass that found the FILE changed under a stored cursor returns
+        null meaning DISCARD. It reads like the third case in every field —
+        null cursor, migration not among the successes — so it fell into the
+        "leave it alone" branch, the stale shape stayed on the row, and the
+        next pass read it, hit the same mismatch and held again. Permanently:
+        nothing in that loop ever re-reads the file, which is the livelock
+        this block exists to prevent, arriving through the door the block
+        itself opened. Raised by review; `chunkCursorDiscarded` is the fourth
+        state said out loud rather than inferred from three fields that cannot
+        distinguish it.
       */
       const storedCursor = chunkCursorFor(backend.chunk_cursor);
       const cursorFileLanded =
@@ -885,10 +1397,10 @@ export async function runFleetMigrationSync(
       const cursorWrite =
         chunkCursor !== null
           ? { chunk_cursor: chunkCursor }
-          : cursorFileLanded
+          : chunkCursorDiscarded || cursorFileLanded
             ? { chunk_cursor: null }
             : {};
-      const { error: updErr } = await supabase
+      const { data: recorded, error: updErr } = await supabase
         .from("clone_backends")
         .update({
           // Where the prime is: established by this pass whatever it applied.
@@ -974,9 +1486,35 @@ export async function runFleetMigrationSync(
                 error_message: failures.length > 0 ? failures[0].error : null,
               }),
         })
-        .eq("clone_id", cloneId);
+        .eq("clone_id", cloneId)
+        .eq("worker_started_at", claimedAt)
+        .select("clone_id");
       if (updErr) {
         out.failed.push({ cloneId, cloneName, error: `result not recorded: ${updErr.message}` });
+        continue;
+      }
+      /*
+        THE VERDICT IS ABOUT A CLAIM THIS PASS NO LONGER HOLDS.
+
+        Unfenced, this write is the dangerous one: it sets `worker_started_at`
+        to null, so a reclaimed pass arriving here would RELEASE the successor's
+        claim — and write a status, a version and a `migrations_applied` list
+        for a replay the successor is still running. The fence turns that into
+        no rows and nothing written.
+
+        Reported and skipped rather than swallowed: no notification, because
+        the `failed` status this would have set did not land either, and an
+        alert saying a clone has fallen out of the fleet would be a claim about
+        a row this pass did not write.
+      */
+      if (!recorded || recorded.length === 0) {
+        out.failed.push({
+          cloneId,
+          cloneName,
+          error:
+            `${CLAIM_LOST}: this pass finished its replay after being reclaimed, so its ` +
+            `result was not recorded and the clone's row belongs to the pass that now holds it`,
+        });
         continue;
       }
 
@@ -1014,16 +1552,37 @@ export async function runFleetMigrationSync(
         });
       }
     } catch (e) {
+      /*
+        AND THE SAME STOP HERE, BEFORE THIS PATH'S OWN RELEASE.
+
+        Added on the success path and missed on this one, which review caught
+        in the same round it shipped. A throw anywhere above — setup, the
+        replay, the result write — jumps straight here with the timer still
+        running, so the release below was attempted with beats live and the
+        `finally` did not stop them until it had resolved. If that release
+        hangs and then FAILS, beats dispatched during the wait can land
+        afterwards and refresh a claim nobody holds, which is exactly the
+        extension the reordering exists to shrink — and this is the path where
+        a failed release is most likely, because something has already gone
+        wrong.
+
+        Before `out.failed.push` would be wrong: a slow drain must not delay
+        the run's own record of the failure. Before the release is the
+        boundary that matters.
+      */
       const error = e instanceof Error ? e.message : "Unknown error";
       out.failed.push({ cloneId, cloneName, error });
+      await heartbeat.stop();
       // Release the claim so a transient fault does not park the clone for
       // STALE_CLAIM_MINUTES. The status is untouched: this threw before any
       // verdict about the clone's schema was reached, and guessing one is
       // worse than retrying.
-      const { error: relErr } = await supabase
+      const { data: released, error: relErr } = await supabase
         .from("clone_backends")
         .update({ worker_started_at: null })
-        .eq("clone_id", cloneId);
+        .eq("clone_id", cloneId)
+        .eq("worker_started_at", claimedAt)
+        .select("clone_id");
       if (relErr) {
         // Not fatal — `reclaimStale` will free it on a later run — but silence
         // here would turn a clone that is merely stuck into one that looks
@@ -1032,7 +1591,35 @@ export async function runFleetMigrationSync(
           cloneId,
           error: relErr.message,
         });
+      } else if (!released || released.length === 0) {
+        /*
+          NOT AN ERROR, AND THE REASON THE FENCE IS SAFE HERE.
+
+          Two ways to reach this and both are correct. The claim was reclaimed
+          and a successor holds it — releasing would hand ITS clone to a third
+          pass, which is precisely what the fence stops. Or the result write
+          above already released it and something after that threw, in which
+          case there is nothing left to release.
+
+          Logged because a claim this pass believed it held and does not is
+          worth seeing, and `console.error` is reserved for the branch above,
+          where a release genuinely failed and the clone is stuck until
+          `reclaimStale` reaches it.
+        */
+        console.warn("[fleet-migration] claim was not this pass's to release", {
+          cloneId,
+          claimedAt,
+        });
       }
+    } finally {
+      // In a `finally` rather than after each exit, because there are three:
+      // the result write's `continue`, a throw, and falling off the end. A
+      // timer that outlives its pass would hold a dead claim open for ever.
+      //
+      // AWAITED, so the pass does not move to the next clone while a beat for
+      // this one is still out. A late beat cannot be recalled; what this
+      // bounds is how late it can be.
+      await heartbeat.stop();
     }
   }
 

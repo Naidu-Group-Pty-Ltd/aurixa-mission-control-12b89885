@@ -12,13 +12,17 @@ import crypto from "node:crypto";
 import { classifySecret, TENANT_SCOPED_REMEDY } from "./prime-backend.server";
 import { OversizedMigrationError } from "./oversizedMigration.pure";
 import { assessLedgerState, ledgerRepairHint } from "./cloneLedgerState.pure";
-import { BudgetPause, cloneSaidNothing, pastDeadline } from "./provisioningBudget";
+import { BudgetPause, ClaimLostError, cloneSaidNothing, pastDeadline } from "./provisioningBudget";
 import { chooseRoleLabel, describeSeed, sqlCredentialLiteral } from "./cloneAdminIdentity.pure";
 import type { AdminSeedReport } from "./cloneAdminIdentity.pure";
 import type { PrimeBackendSnapshot } from "./prime-backend.server";
 import type { StageName, StageResult } from "./schema-introspection.server";
 import { resolveMissionControlOrigin } from "./missionControlLink.pure";
-import { cursorRanPastEnd, type StoredSeedShape } from "./chunkCursorStore.pure";
+import {
+  cursorAppliesToBody,
+  cursorRanPastEnd,
+  type StoredSeedShape,
+} from "./chunkCursorStore.pure";
 import {
   frontierFromReplay,
   frontierUnreadable,
@@ -1405,7 +1409,8 @@ const DERIVED_DEPLOYMENT_CONFIG: Record<
   AML_PROVIDER_MODE: () => "live",
 };
 
-export const DERIVED_DEPLOYMENT_CONFIG_NAMES: readonly string[] = Object.keys(DERIVED_DEPLOYMENT_CONFIG);
+export const DERIVED_DEPLOYMENT_CONFIG_NAMES: readonly string[] =
+  Object.keys(DERIVED_DEPLOYMENT_CONFIG);
 
 /** Every derivable name that resolves to a value for this clone. */
 export function deriveDeploymentConfig(
@@ -2529,6 +2534,15 @@ export async function applyPrimeMigrations(
   chunksApplied: number;
   /** Where a chunked migration stopped, when the budget stopped it mid-way. */
   chunkCursor: ChunkCursor | null;
+  /**
+   * The stored cursor is WRONG and must be cleared, not merely left alone.
+   *
+   * `chunkCursor: null` cannot carry this: it already means "nothing to
+   * store" and "this pass never reached the seed", and for both of those the
+   * caller is right to leave the row's cursor exactly as it found it. See
+   * `applyOversizeSeed`'s own field for the livelock this closes.
+   */
+  chunkCursorDiscarded: boolean;
 }> {
   await runSqlOnProject(projectRef, TRACKING_TABLE_SQL);
 
@@ -2604,6 +2618,7 @@ export async function applyPrimeMigrations(
   let attempted = 0;
   let slowestMs = 0;
   let stoppedEarly = false;
+  let chunkCursorDiscarded = false;
   let chunksApplied = 0;
   let chunkCursor: ChunkCursor | null = null;
   for (let i = 0; i < ordered.length; i++) {
@@ -2689,6 +2704,10 @@ export async function applyPrimeMigrations(
           // that retries in silence for ever. "A failure says which kind it
           // was."
           chunkCursor = chunked.cursor;
+          // A discard has to travel: this path returns a null cursor with the
+          // migration NOT among the successes, which is exactly the shape the
+          // caller reads as "leave the row's cursor alone".
+          if (chunked.cursorDiscarded) chunkCursorDiscarded = true;
           results.push({
             id: m.id,
             name: m.name,
@@ -2743,6 +2762,22 @@ export async function applyPrimeMigrations(
       latestApplied = m.id;
       slowestMs = Math.max(slowestMs, Date.now() - startedAt);
     } catch (e) {
+      /*
+        A LOST CLAIM IS NOT A MIGRATION THAT FAILED.
+
+        This catch is unconditional on purpose — anything a clone refuses is
+        that clone's verdict and belongs in `results`. A `ClaimLostError` is
+        not a verdict about anything: it means the caller's claim on the row
+        was reclaimed mid-replay and another pass now owns it, so the only
+        correct act is to stop and let the caller's own handler run, where the
+        release is fenced and therefore takes nothing from the successor.
+
+        Recorded as a failed migration instead, it would name this migration
+        as the thing that went wrong, replace the specific reason with the
+        caller's generic one, and skip the release path entirely. Raised by
+        review on #227.
+      */
+      if (e instanceof ClaimLostError) throw e;
       results.push({
         id: m.id,
         name: m.name,
@@ -2753,7 +2788,7 @@ export async function applyPrimeMigrations(
     }
   }
 
-  return { results, latestApplied, stoppedEarly, chunksApplied, chunkCursor };
+  return { results, latestApplied, stoppedEarly, chunksApplied, chunkCursor, chunkCursorDiscarded };
 }
 
 /**
@@ -2768,6 +2803,8 @@ export type ChunkCursor = {
   migrationId: string;
   statementsDone: number;
   shape?: StoredSeedShape;
+  /** The body this position is into — see `StoredChunkCursor.bodySha`. */
+  bodySha?: string;
 };
 
 export type OversizeApplyOptions = {
@@ -2782,6 +2819,17 @@ export type OversizeApplyOptions = {
   maxStatementBytes?: number;
   /** Where the previous pass stopped, if it stopped inside this migration. */
   cursor?: ChunkCursor | null;
+  /**
+   * The identity of the body `streamSql` will open, if the caller can say.
+   *
+   * Optional because not every caller has one, and the absence is handled
+   * rather than assumed: with no identity the cursor is honoured on its shape
+   * alone, which is exactly the behaviour that existed before this. What the
+   * presence buys is the ability to REFUSE a cursor into a body that has been
+   * re-released — and, on the pass that refuses it, to say so before a single
+   * statement has been sent.
+   */
+  bodyIdentity?: (m: { id: string; name: string }) => string | null;
   /** Called after every statement lands, so the run's heartbeat carries the cursor. */
   onStatementDone?: (progress: {
     migrationId: string;
@@ -2790,6 +2838,12 @@ export type OversizeApplyOptions = {
     label: string;
     /** Written with the cursor, so a pass resumed from it reads the file once. */
     shape: StoredSeedShape;
+    /**
+     * Written with the cursor so the NEXT pass can tell whether the body it is
+     * about to resume into is the one this position was taken in. Undefined
+     * where the caller could not say, which is the pre-existing behaviour.
+     */
+    bodySha?: string;
   }) => Promise<void>;
 };
 
@@ -2817,11 +2871,46 @@ async function applyChunkedSeed(
    * and this says the replay must hold rather than fail the clone.
    */
   upstreamRefusal: string | null;
+  /**
+   * The stored cursor must be CLEARED, not merely left alone.
+   *
+   * `cursor: null` already means two different things — "nothing to store"
+   * and "this pass never reached the seed" — and the caller is right to leave
+   * the row untouched for both. The shape-mismatch path needs a third: the
+   * stored cursor was cut from a body that no longer exists and is actively
+   * wrong, so leaving it standing makes the next pass read the same stale
+   * shape, hit the same mismatch, and hold again — for ever, without ever
+   * re-reading the file from statement zero.
+   *
+   * Raised by review. A boolean rather than a fourth meaning for `cursor`,
+   * because that field already carries two and a third would be read wrong by
+   * whichever caller is written next.
+   */
+  cursorDiscarded?: boolean;
 }> {
   const { readSeedShape, chunkSeedStatements, SeedShapeError } =
     await import("./seedChunking.pure");
   const maxStatementBytes = oversize.maxStatementBytes ?? DEFAULT_SEED_STATEMENT_BYTES;
-  const skip = oversize.cursor?.migrationId === m.id ? oversize.cursor.statementsDone : 0;
+  /*
+    A POSITION IS ONLY A POSITION IN THE BODY IT WAS TAKEN IN, and the shape
+    cannot tell one body from another — rewriting every tuple's VALUES moves
+    neither the header, the ON CONFLICT clause, the tail nor the COUNT, and for
+    this corpus that is the ORDINARY edit. `cursorAppliesToBody` is the one
+    statement of the rule, including what to do when nobody can name the body;
+    its header carries the reasoning and the cost of each reading. Raised by
+    review.
+  */
+  const bodySha = oversize.bodyIdentity?.(m) ?? null;
+  /*
+    Spread rather than assigned, so a caller that cannot name the body writes
+    a cursor with no `bodySha` KEY rather than one with an explicit undefined.
+    The two are the same to TypeScript and different to `JSON.stringify`, and
+    this value goes into a jsonb column where an explicit null would read as
+    "this body has no identity" rather than "nobody said".
+  */
+  const identityOf = () => (bodySha === null ? {} : { bodySha });
+  const cursorIsForThisBody = cursorAppliesToBody(oversize.cursor, m.id, bodySha);
+  const skip = cursorIsForThisBody ? (oversize.cursor?.statementsDone ?? 0) : 0;
   let index = 0;
   let applied = 0;
   let slowestMs = 0;
@@ -2843,8 +2932,7 @@ async function applyChunkedSeed(
 
     `cursorShape` is what tells the catch below WHICH kind of mismatch it was.
   */
-  const cursorShape =
-    oversize.cursor?.migrationId === m.id ? (oversize.cursor.shape ?? null) : null;
+  const cursorShape = cursorIsForThisBody ? (oversize.cursor?.shape ?? null) : null;
   // Declared out here so the refusal branches below can record it: a pass that
   // read the file and then lost the stream still knows the shape, and writing
   // it means the retry does not pay for that reading a second time.
@@ -2864,7 +2952,7 @@ async function applyChunkedSeed(
         return {
           applied,
           stoppedEarly: true,
-          cursor: { migrationId: m.id, statementsDone: index, shape },
+          cursor: { migrationId: m.id, statementsDone: index, shape, ...identityOf() },
           upstreamRefusal: null,
         };
       }
@@ -2879,6 +2967,7 @@ async function applyChunkedSeed(
         statementsDone: index,
         label: stmt.label,
         shape,
+        ...identityOf(),
       });
     }
   } catch (e) {
@@ -2903,6 +2992,10 @@ async function applyChunkedSeed(
           applied,
           stoppedEarly: true,
           cursor: null,
+          // Said explicitly: the sentence below promises the next pass starts
+          // from the beginning, and that promise is only kept if the row's
+          // cursor is actually cleared.
+          cursorDiscarded: true,
           upstreamRefusal:
             `${m.name} changed on the prime since the last pass (${e.message}). The recorded ` +
             "position was cut from a body that no longer exists, so it is discarded and the " +
@@ -2935,7 +3028,23 @@ async function applyChunkedSeed(
         // spelling of absence in a column two readers narrow.
         cursor:
           applied > 0
-            ? { migrationId: m.id, statementsDone: index, shape: shape ?? undefined }
+            ? {
+                migrationId: m.id,
+                statementsDone: index,
+                shape: shape ?? undefined,
+                /*
+                  The identity too, and it was missing here while the other
+                  three sites carried it — found by the test that asserts every
+                  minted cursor has one, not by reading this branch.
+
+                  Without it this branch preserves a position the NEXT pass must
+                  refuse, because a cursor that cannot name its body is not one
+                  to skip statements on. That is the progress this branch exists
+                  to keep, thrown away — and thrown away again on every refusal
+                  after it, since each writes another identity-less cursor.
+                */
+                ...identityOf(),
+              }
             : null,
         upstreamRefusal: e instanceof Error ? e.message : String(e),
       };
@@ -2963,7 +3072,7 @@ async function applyChunkedSeed(
     return {
       applied: 0,
       stoppedEarly: true,
-      cursor: { migrationId: m.id, statementsDone: 0 },
+      cursor: { migrationId: m.id, statementsDone: 0, ...identityOf() },
       upstreamRefusal: null,
     };
   }
@@ -5125,6 +5234,10 @@ export async function provisionCloneBackend(
       "Writing this clone's own secrets (peppers, VAPID pair) — vault then environment...",
     );
     const { ensureCloneOwnedSecrets, readPrimeShape } = await import("./cloneOwnedSecrets.server");
+    // prettier-ignore — kept on one line because `cloneOwnedSecrets.test.ts`
+    // anchors on this exact call to assert the step runs with the prime shape
+    // fed in, and prettier wraps it whenever this file grows.
+    // prettier-ignore
     const owned = await ensureCloneOwnedSecrets(projectRef, await readPrimeShape(input.primeBackendRef));
     if (owned.ok) {
       ownedValues = owned.values;
