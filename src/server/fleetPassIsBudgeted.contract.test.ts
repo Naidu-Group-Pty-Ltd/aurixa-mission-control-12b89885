@@ -187,10 +187,22 @@ describe("a pass is bounded", () => {
     ).toContain("migration_heartbeat_at: claimedAt");
   });
 
-  it("beats it on every statement the replay sends", () => {
+  it("does not beat from the cursor write, which the timer now covers", () => {
+    /*
+      The inverse of what this asserted when the cursor write was the only
+      heartbeat there was. It is kept rather than deleted because the site is
+      the one that regressed, and a test that says "not here" is what stops it
+      being put back for the reason it was there the first time.
+    */
     const at = lane.indexOf("onStatementDone");
     expect(at, "onStatementDone not found").toBeGreaterThan(-1);
-    expect(lane.slice(at, at + 700)).toContain("migration_heartbeat_at");
+    const body = lane.slice(at, at + 900);
+    expect(body, "the cursor write is a second, unserialised heartbeat writer").not.toContain(
+      "migration_heartbeat_at:",
+    );
+    // It still carries the cursor and still requires the claim.
+    expect(body).toContain("chunk_cursor:");
+    expect(body).toContain('.eq("worker_started_at", claimedAt)');
   });
 
   /*
@@ -411,13 +423,56 @@ describe("a pass is bounded", () => {
   it("fits several beats inside the reclaim window, so one lost beat is survivable", () => {
     const beat = /const CLAIM_HEARTBEAT_MS = ([\d_]+);/.exec(lane);
     expect(beat, "CLAIM_HEARTBEAT_MS is not declared as a plain number").not.toBeNull();
+    const bound = /const CLAIM_BEAT_TIMEOUT_MS = ([\d_]+);/.exec(lane);
+    expect(bound, "CLAIM_BEAT_TIMEOUT_MS is not declared as a plain number").not.toBeNull();
     const stale = /const STALE_CLAIM_MINUTES = (\d+);/.exec(lane);
     expect(stale).not.toBeNull();
-    const beats = (Number(stale![1]) * 60_000) / Number(beat![1].replace(/_/g, ""));
+    const n = (m: RegExpExecArray) => Number(m[1].replace(/_/g, ""));
+    /*
+      The WORST cadence, not the best. Serialised beats are spaced by the
+      interval PLUS however long the last one took, so a ratio over the
+      interval alone describes a system with no latency — which is the
+      objection review raised, and the reason the bound exists: it turns
+      latency into a number this can read.
+    */
+    const beats = (n(stale!) * 60_000) / (n(beat!) + n(bound!));
     expect(
       beats,
       "a window this pass can miss in two beats turns a transient fault into a stolen claim",
     ).toBeGreaterThanOrEqual(4);
+  });
+
+  /*
+    AND A BEAT THAT HANGS MUST NOT STOP THE CHAIN.
+
+    Serialising means the next beat is scheduled only when the last settles, so
+    a beat that never settles stops the heartbeat for ever while the pass keeps
+    working — and `fetch` here has no timeout of its own. The wedge is
+    correlated with the case the heartbeat is FOR: a `runSqlOnProject` stuck on
+    the same egress. Raised by review, against the fix for the previous round.
+  */
+  it("abandons a beat that hangs, so one wedged request cannot end the heartbeat", () => {
+    expect(beatBody(), "the beat has no deadline of its own").toContain(
+      "AbortSignal.timeout(CLAIM_BEAT_TIMEOUT_MS)",
+    );
+  });
+
+  /*
+    AND ONE MECHANISM WRITES THE COLUMN.
+
+    The cursor write carried a heartbeat too, from before the timer existed.
+    That is a second, unserialised writer of one column: a beat dispatched
+    earlier can land after it and move the stamp BACKWARDS — the reordering
+    serialising the timer had just closed, arriving through the other door.
+    Also raised by review.
+
+    Written as a count because the property is exclusivity, not the identity of
+    any one site: the claim establishes the stamp, the beat advances it, and a
+    third writer anywhere reopens the class.
+  */
+  it("has exactly two writers of the heartbeat: the claim, and the beat", () => {
+    const writes = lane.split("migration_heartbeat_at:").length - 1;
+    expect(writes, "a third writer of the heartbeat reopens the reordering").toBe(2);
   });
 
   it("stops beating when the claim is gone, rather than writing into a successor's row", () => {

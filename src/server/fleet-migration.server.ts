@@ -314,6 +314,28 @@ const EMPTY: FleetMigrationResult = {
 const CLAIM_HEARTBEAT_MS = 30_000;
 
 /**
+ * How long one beat may take before it is abandoned.
+ *
+ * Serialising the beats — one at a time, the next scheduled only when the last
+ * has settled — closed the reordering that overlapping beats caused, and
+ * opened this: a beat that HANGS never settles, so `schedule()` is never
+ * reached and the heartbeat stops for ever while the pass is still working.
+ * `fetch` here has no timeout of its own, and the wedge is correlated with
+ * exactly the case the heartbeat exists for — a `runSqlOnProject` stuck on the
+ * same egress — so the beat would fail precisely when it is needed. Raised by
+ * review.
+ *
+ * With a bound, a wedged beat is abandoned, logged, and the chain resumes. It
+ * also makes the window arithmetic honest: the worst cadence is this plus
+ * `CLAIM_HEARTBEAT_MS`, which is a number the ratio test can read, where the
+ * unbounded latency it replaces was not.
+ *
+ * An abort arrives as an ordinary `{ error }` from PostgREST rather than a
+ * rejection, which is the branch that already logs and returns.
+ */
+const CLAIM_BEAT_TIMEOUT_MS = 10_000;
+
+/**
  * Say, on a clock, that this pass still holds the claim it took.
  *
  * Separate from the cursor write in `onStatementDone`: that one belongs to the
@@ -372,7 +394,8 @@ function beatWhileClaimHeld(
       .update({ migration_heartbeat_at: new Date().toISOString() })
       .eq("clone_id", cloneId)
       .eq("worker_started_at", claimedAt)
-      .select("clone_id");
+      .select("clone_id")
+      .abortSignal(AbortSignal.timeout(CLAIM_BEAT_TIMEOUT_MS));
     if (error) {
       // One lost beat is survivable by design — see CLAIM_HEARTBEAT_MS — so
       // this neither throws nor stops. Silence would hide a database fault
@@ -1019,10 +1042,23 @@ export async function runFleetMigrationSync(
                 .update({
                   chunk_cursor: { migrationId: p.migrationId, statementsDone: p.statementsDone },
                   status_detail: `Sending ${p.name} — ${p.statementsDone} statement(s) in (${p.label})`,
-                  // The beat. This is what makes the claim above reclaimable in
-                  // minutes rather than in a cadence: a pass that is still
-                  // sending says so here, and nothing else writes this column.
-                  migration_heartbeat_at: new Date().toISOString(),
+                  /*
+                    AND NOT THE HEARTBEAT.
+
+                    This wrote `migration_heartbeat_at` too, from the days
+                    before the timer existed and liveness had to be inferred
+                    from progress. With the timer it is a SECOND, unserialised
+                    writer of one column: a beat dispatched earlier can land
+                    after this one and move the stamp BACKWARDS, which is the
+                    reordering serialising the timer had just closed, arriving
+                    through the other door. Raised by review.
+
+                    Removing it restores what `reclaimStale` has always claimed
+                    — that one mechanism writes this column — and loses no
+                    coverage, because the timer beats through the download this
+                    callback cannot reach anyway. The fence stays: that is
+                    ownership, which is a different question.
+                  */
                 })
                 .eq("clone_id", cloneId)
                 .eq("worker_started_at", claimedAt)
