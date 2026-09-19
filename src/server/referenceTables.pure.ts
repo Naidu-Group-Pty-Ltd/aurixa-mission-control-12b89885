@@ -126,6 +126,16 @@ export type ReferenceTable = {
   columns: Record<string, ColumnClassification>;
   /** Optional SQL predicate selecting only the reference rows. */
   where?: string;
+  /**
+   * Allow-listed tables this one's FOREIGN KEYS point at, qualified as
+   * {@link refName} spells them.
+   *
+   * Declared on the CHILD, because that is where the constraint lives and
+   * where somebody adding a table is already looking. Read by
+   * {@link tablesToReopen}; see its header for what the absence of this field
+   * cost.
+   */
+  dependsOn?: readonly string[];
   /** Why this table is reference data. */
   reason: string;
 };
@@ -244,6 +254,7 @@ export const REFERENCE_TABLES: readonly ReferenceTable[] = [
     conflictKey: ["id"],
     rowsPerPage: 500,
     columns: {},
+    dependsOn: ["checklist_templates"],
     reason: "Sections of the above. `template_id` references checklist_templates, copied before.",
   },
   {
@@ -252,6 +263,7 @@ export const REFERENCE_TABLES: readonly ReferenceTable[] = [
     conflictKey: ["id"],
     rowsPerPage: 500,
     columns: {},
+    dependsOn: ["checklist_template_sections"],
     reason: "Items of the above. `section_id` references sections, copied before.",
   },
   {
@@ -528,6 +540,7 @@ export const REFERENCE_TABLES: readonly ReferenceTable[] = [
     conflictKey: ["list_code", "external_id"],
     rowsPerPage: 400,
     columns: {},
+    dependsOn: ["aml.sanctions_list_syncs"],
     reason:
       "The DFAT/UN/OFAC register itself — published sanctions listings. normalised_names " +
       "travels verbatim: it was written by the same server-side normaliser the screening " +
@@ -551,6 +564,7 @@ export const REFERENCE_TABLES: readonly ReferenceTable[] = [
     conflictKey: ["source_code", "external_id"],
     rowsPerPage: 500,
     columns: {},
+    dependsOn: ["aml.pep_officeholder_syncs"],
     reason:
       "The public office-holder index — published positions from a collaboratively edited " +
       "source, each row carrying its own confirm_url. A lead generator, never an outcome.",
@@ -641,4 +655,87 @@ export function planColumns(entry: ReferenceTable, actualColumns: readonly strin
     else copy.push(c);
   }
   return { ok: true, copy, nulled };
+}
+
+/**
+ * WHICH FINISHED TABLES MUST BE WALKED AGAIN, BECAUSE A CHILD OF THEM IS NOT
+ * FINISHED.
+ *
+ * `REFERENCE_TABLES` is written in dependency order and the copier walks it as
+ * written, so within ONE pass a parent is always copied before its child. That
+ * was the whole of the ordering rule, and it is not enough, because `complete`
+ * is TERMINAL: a table that finished is skipped on every later pass. A child
+ * that needs several passes therefore advances against a parent frozen at the
+ * snapshot of whichever pass finished it, while the prime keeps writing to
+ * both.
+ *
+ * Measured 19 Sep 2026 on `npc-test-76b3b3`. `aml.sanctions_list_syncs`
+ * completed on 12 Sep at 15:44 holding 80 rows. `aml.sanctions_entries` did
+ * not — it stood at 21,600 of 24,294 — and when it resumed seven days later it
+ * read a page of the prime's CURRENT register and was refused by the clone:
+ *
+ *   23503: insert or update on table "sanctions_entries" violates foreign key
+ *   constraint "sanctions_entries_sync_id_fkey"
+ *   DETAIL:  Key (sync_id)=(6df56248-6800-44dc-b107-62f2cc4777c7) is not
+ *            present in table "sanctions_list_syncs".
+ *
+ * The sync that row belongs to was loaded after the parent's copy had been
+ * called finished, so the clone could not have held it. Nothing was wrong with
+ * either table's own copy; what was wrong is that they were copied at
+ * different times and only one of them was allowed to notice.
+ *
+ * ## The rule
+ *
+ * **A parent's copy is not finished while a child that references it is
+ * unfinished.** A finished parent is re-walked whenever anything declaring it
+ * in `dependsOn` has not finished, and it stops being re-walked the moment
+ * that child finishes. This terminates on its own: the only thing that keeps a
+ * parent open is a child still making progress.
+ *
+ * ## Three things that keep it honest
+ *
+ * **It is transitive, to a fixed point.** Re-opening `checklist_template_
+ * sections` makes IT unfinished, which re-opens `checklist_templates` above
+ * it. Stopping at one level would fix the two-table chains and leave the
+ * three-table one carrying the same defect one link up — which is how a class
+ * of bug comes back a month later wearing a different table's name.
+ *
+ * **A re-opened table re-walks from the START, never from its cursor.** The
+ * page query is `order by <pageKey>::text asc` with `key::text > cursor`, and
+ * a new row's uuid sorts anywhere — so resuming from the stored cursor is
+ * precisely the way to miss the new rows this exists to fetch. The caller
+ * clears the cursor and the carried count with it; re-reading rows the clone
+ * already holds costs nothing, because the insert is `on conflict do nothing`.
+ *
+ * **Only `complete` re-opens; `skipped` does not.** A table is skipped because
+ * the CLONE does not have it yet, which is a statement about migrations rather
+ * than about currency, and re-opening it would answer a question nobody asked
+ * here. It stays a separate concern with a separate fix.
+ */
+export function tablesToReopen(
+  statusByTable: ReadonlyMap<string, string | null | undefined>,
+): ReadonlySet<string> {
+  const finished = (name: string): boolean => {
+    const s = statusByTable.get(name);
+    return s === "complete" || s === "skipped";
+  };
+
+  const reopen = new Set<string>();
+  // A fixed point rather than one sweep: re-opening a parent makes it
+  // unfinished, which may re-open ITS parent. Bounded by the allow-list's
+  // length, since each round adds at least one name or stops.
+  for (let round = 0; round <= REFERENCE_TABLES.length; round += 1) {
+    const before = reopen.size;
+    for (const child of REFERENCE_TABLES) {
+      const childName = refName(child);
+      const childUnfinished = !finished(childName) || reopen.has(childName);
+      if (!childUnfinished) continue;
+      for (const parent of child.dependsOn ?? []) {
+        // `skipped` is deliberately not re-opened — see the header.
+        if (statusByTable.get(parent) === "complete") reopen.add(parent);
+      }
+    }
+    if (reopen.size === before) break;
+  }
+  return reopen;
 }
