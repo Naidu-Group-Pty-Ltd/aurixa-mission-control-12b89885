@@ -6,7 +6,9 @@ import {
   blockIsDischarged,
   blockIsUpstreamRefusal,
   blockedVersionFrom,
+  compareMigrationQueue,
   migrationEligibility,
+  orderMigrationQueue,
   type BackendFacts,
 } from "./fleetMigrationEligibility.pure";
 import { isUpstreamRateLimit } from "./provisioningBudget";
@@ -353,5 +355,102 @@ describe("the lane's rehabilitation pass", () => {
   it("reports what it rehabilitated rather than letting a count move quietly", () => {
     expect(lane).toContain("rehabilitated: string[];");
     expect(lane).toContain("rehabilitated,");
+  });
+});
+
+describe("the order the pass serves clones in", () => {
+  const at = (version: string | null, statementsDone?: number, migrationId = "20261202000000") => ({
+    migration_version: version,
+    ...(statementsDone === undefined ? {} : { chunk_cursor: { migrationId, statementsDone } }),
+  });
+
+  it("puts the clone furthest behind first", () => {
+    const order = orderMigrationQueue([at("20261204010000"), at("20261201100000"), at(null)]);
+    expect(order.map((r) => r.migration_version)).toEqual([
+      null,
+      "20261201100000",
+      "20261204010000",
+    ]);
+  });
+
+  it("breaks a tie by least progress on the seed in flight", () => {
+    // The measured fleet: three clones all recording 20261201100000, mid-way
+    // through the same ~40 MB seed. Scan order was Preflight (39 statements),
+    // NPC Client Dashboard (17), NPC Test (11) — and the leader led every pass.
+    const order = orderMigrationQueue([
+      at("20261201100000", 39),
+      at("20261201100000", 17),
+      at("20261201100000", 11),
+    ]);
+    expect(order.map((r) => r.chunk_cursor?.statementsDone)).toEqual([11, 17, 39]);
+  });
+
+  it("rotates: serving the laggard puts it behind its peers next pass", () => {
+    // The property that makes this a queue rather than a different fixed
+    // winner. 11 leads, advances past 17, and 17 leads next.
+    const before = orderMigrationQueue([
+      at("20261201100000", 39),
+      at("20261201100000", 17),
+      at("20261201100000", 11),
+    ]);
+    expect(before[0].chunk_cursor?.statementsDone).toBe(11);
+    const after = orderMigrationQueue([
+      at("20261201100000", 39),
+      at("20261201100000", 17),
+      at("20261201100000", 23),
+    ]);
+    expect(after[0].chunk_cursor?.statementsDone).toBe(17);
+  });
+
+  it("never lets progress outrank being further behind", () => {
+    // A clone deep into a seed is still ahead of one that has not reached the
+    // migration at all. Progress is a TIE-break and may not cross a frontier.
+    const order = orderMigrationQueue([at("20261204010000", 0), at("20261201100000", 39)]);
+    expect(order[0].migration_version).toBe("20261201100000");
+  });
+
+  it("treats a clone with no cursor as furthest behind, not as finished", () => {
+    // Absent is never "done": a row with no cursor is one this lane has not
+    // started, and the failure being closed is a clone never reached.
+    const order = orderMigrationQueue([at("20261201100000", 4), at("20261201100000")]);
+    expect(order[0].chunk_cursor).toBeUndefined();
+  });
+
+  it("reads a malformed cursor as no progress rather than trusting it", () => {
+    // Through `chunkCursorFor`, so a negative, a float or a missing id cannot
+    // become a position in the queue.
+    for (const bad of [
+      { migrationId: "20261202000000", statementsDone: -3 },
+      { migrationId: "20261202000000", statementsDone: 1.5 },
+      { statementsDone: 900 },
+      "nonsense",
+      null,
+    ]) {
+      expect(
+        compareMigrationQueue(
+          { migration_version: "x", chunk_cursor: bad },
+          {
+            migration_version: "x",
+            chunk_cursor: { migrationId: "20261202000000", statementsDone: 1 },
+          },
+        ),
+      ).toBeLessThan(0);
+    }
+  });
+
+  it("does not mutate what it is given", () => {
+    const rows = [at("20261201100000", 39), at("20261201100000", 11)];
+    const copy = [...rows];
+    orderMigrationQueue(rows);
+    expect(rows).toEqual(copy);
+  });
+
+  it("is what the lane actually uses", () => {
+    // The comparator is only worth testing if the pass calls it. This is the
+    // class `builderPortalUiMounted.spec.ts` exists for: an unused export
+    // typechecks, lints and builds.
+    const lane = readFileSync("src/server/fleet-migration.server.ts", "utf8");
+    expect(lane).toContain("orderMigrationQueue(");
+    expect(lane).not.toMatch(/\.sort\(\(a, b\) => \{[\s\S]*?migration_version/);
   });
 });
