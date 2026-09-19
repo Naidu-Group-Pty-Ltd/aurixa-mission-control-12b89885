@@ -53,7 +53,22 @@ export type ProvisionCloneInput = {
 };
 
 export type ProvisionCloneResult =
-  | { ok: true; cloneId: string; githubUrl: string | null; idempotent?: boolean }
+  | {
+      ok: true;
+      cloneId: string;
+      githubUrl: string | null;
+      idempotent?: boolean;
+      /**
+       * The name this clone was actually given in the Aurixa zone, or null
+       * where it was declined or could not be allocated.
+       *
+       * Returned rather than left for the caller to read back, because a
+       * caller that reads it back is a caller that can disagree with it — and
+       * the wizard reading its own guess instead of this answer is exactly the
+       * defect `provisionCloneSubdomain` was written to end.
+       */
+      subdomainFqdn?: string | null;
+    }
   | { ok: false; error: string };
 
 export const provisionClone = createServerFn({ method: "POST" })

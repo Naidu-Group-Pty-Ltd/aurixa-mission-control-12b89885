@@ -480,21 +480,38 @@ export async function provisionCloneCore(
   //
   // Non-fatal: a clone with no name is served on its provider origin, which is
   // a complete outcome rather than a failure (see the `attaching_domain` step).
+  //
+  // `subdomain: null` is a DECISION and not an absent preference — the wizard's
+  // "Reserve a subdomain for this clone" control, which until now reserved one
+  // anyway because this block ran unconditionally. `undefined` still means
+  // "derive one from the slug", which is what the agreement path wants and has
+  // always had.
+  //
+  // One call, because this used to be two: the wizard wrote a SECOND name onto
+  // the row from the browser after this function returned. See
+  // `provisionCloneSubdomain`, which is now the only writer of
+  // `clones.subdomain` on any creation path.
   let reservedSubdomain: string | null = null;
-  try {
-    const { reserveCloneSubdomain } = await import("@/server/hosting/subdomainAllocation.server");
-    const reservation = await reserveCloneSubdomain({
-      cloneId: inserted.id,
-      slug: data.slug,
-      preferred: data.subdomain ?? null,
-    });
-    if (reservation.ok) {
-      reservedSubdomain = reservation.subdomain;
-    } else {
-      console.error("[provisionClone] subdomain reservation failed:", reservation.reason);
+  let reservedFqdn: string | null = null;
+  if (data.subdomain !== null) {
+    try {
+      const { provisionCloneSubdomain } =
+        await import("@/server/hosting/subdomainAllocation.server");
+      const reservation = await provisionCloneSubdomain({
+        cloneId: inserted.id,
+        slug: data.slug,
+        preferred: data.subdomain,
+        createdBy: userId,
+      });
+      if (reservation.ok) {
+        reservedSubdomain = reservation.subdomain;
+        reservedFqdn = reservation.fqdn;
+      } else {
+        console.error("[provisionClone] subdomain reservation failed:", reservation.reason);
+      }
+    } catch (e) {
+      console.error("[provisionClone] subdomain reservation failed:", e);
     }
-  } catch (e) {
-    console.error("[provisionClone] subdomain reservation failed:", e);
   }
 
   // ─── Enqueue the deployment ───────────────────────────────────────
@@ -592,5 +609,5 @@ export async function provisionCloneCore(
   // minted and delivered by `ensureCloneMissionControlLink`, which reports
   // its own outcome.
 
-  return { ok: true, cloneId: inserted.id, githubUrl };
+  return { ok: true, cloneId: inserted.id, githubUrl, subdomainFqdn: reservedFqdn };
 }

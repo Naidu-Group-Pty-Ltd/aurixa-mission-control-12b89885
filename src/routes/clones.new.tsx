@@ -29,7 +29,6 @@ import { useServerFn } from "@tanstack/react-start";
 import { provisionClone } from "@/server/clone-provisioning.functions";
 import { provisionBackend } from "@/lib/backend-provisioning.functions";
 import { enqueueEdgeJob } from "@/server/edge-provisioning.functions";
-import { requestCloneSubdomain } from "@/server/subdomain-hosting.functions";
 // The same server functions the clone page's cards call. Imported rather than
 // reimplemented: `provisionTurnstileIdentity` and `advanceEmailIdentity` are
 // also what the deployment drain calls at `syncing_env`, so all three entry
@@ -117,7 +116,6 @@ function NewClone() {
   const [deploymentProvider, setDeploymentProvider] = useState<
     "platform" | "vercel" | "manual" | "none"
   >("platform");
-  const requestSubdomainFn = useServerFn(requestCloneSubdomain);
   const provisionTurnstileFn = useServerFn(provisionCloneTurnstile);
   const provisionEmailFn = useServerFn(provisionCloneEmailIdentity);
   const [armTurnstile, setArmTurnstile] = useState(true);
@@ -321,6 +319,16 @@ function NewClone() {
           billingUserId: billingUserId.trim() || null,
           billingStripeCustomerId: billingStripeCustomerId.trim() || null,
           deploymentProvider: deploymentProvider === "platform" ? undefined : deploymentProvider,
+          // The clone's `slug` above carries a six-character idempotency
+          // suffix so a retry reuses the same GitHub repo. A HOSTNAME must not
+          // carry a retry token, which is why this field exists — and why the
+          // wizard used to write a second, unsuffixed name onto the row itself
+          // a moment after this call returned, over the one the allocator had
+          // reserved. It is one field and one writer now.
+          //
+          // `null` declines a subdomain outright, so the checkbox finally
+          // controls something: the reservation used to run whatever it said.
+          subdomain: subdomainEnabled ? subdomainSlug.trim() || slug : null,
           idempotencyKey,
         },
       });
@@ -396,27 +404,15 @@ function NewClone() {
         }
       }
 
-      // Enqueue subdomain provisioning (dormant until CF is configured).
-      if (subdomainEnabled) {
-        const desired = (subdomainSlug.trim() || slug)
-          .toLowerCase()
-          .replace(/[^a-z0-9-]/g, "-")
-          .replace(/^-+|-+$/g, "")
-          .slice(0, 63);
-        if (desired) {
-          try {
-            const r = await requestSubdomainFn({
-              data: { cloneId: result.cloneId, slug: desired },
-            });
-            toast.info(
-              r.status === "queued"
-                ? `Subdomain queued — ${r.fqdn}`
-                : `Subdomain reserved (${r.fqdn}) — will provision once Cloudflare is configured`,
-            );
-          } catch (e) {
-            toast.error(`Subdomain request failed: ${e instanceof Error ? e.message : "unknown"}`);
-          }
-        }
+      // The subdomain is NOT requested here. `provisionClone` reserved the name
+      // and asked for the record before it returned, through the one writer
+      // both surfaces use — and this call, which ran a moment later from the
+      // browser, is what used to overwrite that reservation with a different
+      // name. Normalisation went with it: `normaliseLabel` handles accents,
+      // the 63-character limit and the hyphen a truncation exposes, none of
+      // which the four `.replace()` calls that were here did.
+      if (result.subdomainFqdn) {
+        toast.info(`Subdomain reserved — ${result.subdomainFqdn}`);
       }
 
       /*
