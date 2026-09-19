@@ -17,6 +17,9 @@ import { createFileRoute } from "@tanstack/react-router";
 import { asJson } from "@/lib/json-cast";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { verifyCronAuth } from "@/server/cron-auth.server";
+import { beginGithubLane } from "@/server/githubUsageMeter";
+import { decideSpend } from "@/server/cascade/githubBudget.pure";
+import { readGitHubRemaining } from "@/server/githubAllowance.server";
 
 const MAX_PER_RUN = 10;
 const STALE_MS = 6 * 60 * 60 * 1000; // 6 hours
@@ -50,10 +53,26 @@ export const Route = createFileRoute("/hooks/handoff-parity-refresh")({
       POST: async ({ request }) => {
         const auth = verifyCronAuth(request);
         if (!auth.ok) return auth.response;
+        // Attribute this invocation's App-installation calls. See
+        // githubUsageMeter.ts: the count is taken at the one hook every call
+        // already passes through, and named here.
+        beginGithubLane("handoff-parity-refresh");
         const started = Date.now();
 
         // Fetch candidates. We over-select then filter by staleness in memory
         // so we don't need a lateral join.
+        // A parity report refreshed into a starved window is a measurement
+        // taken at the cost of the acts it measures — the same argument the
+        // drift refresh already answered to, on a lane that reads the prime's
+        // edge-function list and migration index from the shared installation.
+        // The next run takes the reading.
+        const spend = decideSpend({ role: "scan", remaining: await readGitHubRemaining() });
+        if (!spend.proceed) {
+          return new Response(JSON.stringify({ success: true, skipped: spend.why }), {
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+
         const { data: handoffs, error: hErr } = await supabaseAdmin
           .from("clone_handoffs")
           .select("id, state, clone_id, backend_id")

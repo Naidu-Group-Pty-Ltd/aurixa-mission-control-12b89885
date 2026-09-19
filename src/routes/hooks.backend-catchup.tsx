@@ -1,6 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { writeAuditLog } from "@/server/audit.server";
 import { verifyCronAuth } from "@/server/cron-auth.server";
+import { beginGithubLane } from "@/server/githubUsageMeter";
 
 // Cron-invoked endpoint. Auth: the shared CRON_SECRET as a Bearer token.
 //
@@ -30,6 +31,10 @@ export const Route = createFileRoute("/hooks/backend-catchup")({
       POST: async ({ request }) => {
         const auth = verifyCronAuth(request);
         if (!auth.ok) return auth.response;
+        // Attribute this invocation's App-installation calls. See
+        // githubUsageMeter.ts: the count is taken at the one hook every call
+        // already passes through, and named here.
+        beginGithubLane("backend-catchup");
 
         try {
           // Yields below the scan floor: the catch-up reads the prime's

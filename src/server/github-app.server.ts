@@ -5,6 +5,7 @@ import { createAppAuth } from "@octokit/auth-app";
 import { Octokit } from "@octokit/rest";
 import forge from "node-forge";
 import { withRetry, isTransientHttpError } from "@/lib/with-retry";
+import { countGithubCall } from "./githubUsageMeter";
 
 const cache = new Map<string, Octokit>();
 
@@ -91,19 +92,30 @@ export function getAppOctokit(installationId?: string | number): Octokit {
       retries: 0, // we handle retry via withRetry hook below
     },
   });
-  // Wrap every request in withRetry for transient 429/5xx/network errors.
+  // Wrap every request in withRetry for transient 429/5xx/network errors —
+  // and count it, here, because this is the one place every App-installation
+  // call already passes through. Metering at the call SITES is metering that
+  // gets forgotten: `API_USAGE_METERING.md` makes that argument for
+  // `meteredFetch`, and it is the same argument. A retry counts again on
+  // purpose; it spends the window again.
   octokit.hook.wrap("request", async (request, options) => {
-    return withRetry(async () => request(options), {
-      attempts: 3,
-      baseMs: 400,
-      shouldRetry: (err) => isTransientHttpError(err),
-      onRetry: (err, attempt, delay) => {
-        const status = (err as { status?: number })?.status;
-        console.warn(
-          `[github] retry ${attempt} after ${Math.round(delay)}ms (status=${status ?? "?"})`,
-        );
+    return withRetry(
+      async () => {
+        countGithubCall();
+        return request(options);
       },
-    });
+      {
+        attempts: 3,
+        baseMs: 400,
+        shouldRetry: (err) => isTransientHttpError(err),
+        onRetry: (err, attempt, delay) => {
+          const status = (err as { status?: number })?.status;
+          console.warn(
+            `[github] retry ${attempt} after ${Math.round(delay)}ms (status=${status ?? "?"})`,
+          );
+        },
+      },
+    );
   });
   cache.set(cacheKey, octokit);
   return octokit;

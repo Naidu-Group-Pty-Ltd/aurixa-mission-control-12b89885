@@ -18,8 +18,11 @@ import { createFileRoute } from "@tanstack/react-router";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { notifyOperators } from "@/server/audit.server";
 import { verifyCronAuth } from "@/server/cron-auth.server";
+import { beginGithubLane } from "@/server/githubUsageMeter";
 import { decryptSecret } from "@/server/crypto.server";
 import { runQueuedBackendProvisioning } from "@/lib/backend-provisioning.functions";
+import { decideSpend } from "@/server/cascade/githubBudget.pure";
+import { readGitHubRemaining } from "@/server/githubAllowance.server";
 
 const admin = supabaseAdmin;
 const STALL_MINUTES = 15;
@@ -545,8 +548,25 @@ export const Route = createFileRoute("/hooks/backend-provisioning-drain")({
       POST: async ({ request }) => {
         const auth = verifyCronAuth(request);
         if (!auth.ok) return auth.response;
+        // Attribute this invocation's App-installation calls. See
+        // githubUsageMeter.ts: the count is taken at the one hook every call
+        // already passes through, and named here.
+        beginGithubLane("backend-provisioning-drain");
         try {
           await reclaimStalled();
+          // Asked AFTER the reclaim, which is database-only and must run
+          // whatever the window holds: it is what terminates a stalled or
+          // exhausted row and tells an operator about a job nothing ever
+          // claimed. What yields here is the CLAIM — provisioning is an actor,
+          // so it stands down only at the reserve floor, and a job already
+          // in flight is untouched because it is parked, not held.
+          const spend = decideSpend({ role: "actor", remaining: await readGitHubRemaining() });
+          if (!spend.proceed) {
+            return new Response(
+              JSON.stringify({ success: true, processed: 0, skipped: spend.why }),
+              { headers: { "Content-Type": "application/json" } },
+            );
+          }
           // One deadline for the whole invocation: job 2 gets whatever job 1
           // left, and a budget pause ends the invocation — starting another
           // job past the deadline would just die mid-claim.

@@ -12,7 +12,7 @@ import crypto from "node:crypto";
 import { classifySecret, TENANT_SCOPED_REMEDY } from "./prime-backend.server";
 import { OversizedMigrationError } from "./oversizedMigration.pure";
 import { assessLedgerState, ledgerRepairHint } from "./cloneLedgerState.pure";
-import { BudgetPause, pastDeadline } from "./provisioningBudget";
+import { BudgetPause, isUpstreamRateLimit, pastDeadline } from "./provisioningBudget";
 import { chooseRoleLabel, describeSeed, sqlCredentialLiteral } from "./cloneAdminIdentity.pure";
 import type { AdminSeedReport } from "./cloneAdminIdentity.pure";
 import type { PrimeBackendSnapshot } from "./prime-backend.server";
@@ -2314,6 +2314,38 @@ export type PrimeMigrationResult = {
    * never move the clone out of `ready`.
    */
   heldOversize?: boolean;
+  /**
+   * Set when the body could not be FETCHED because an upstream quota refused
+   * the request. The prime's migrations are read from GitHub, and the App
+   * installation's hourly window is shared with every other lane that reads a
+   * repository.
+   *
+   * It is the same kind of thing as `heldOversize`, and is kept separate from
+   * an ordinary failure for the same reason: the clone was never sent
+   * anything, so nothing about its schema has been judged. It is separate
+   * from `heldOversize` too, because the remedies differ — one is waited out,
+   * the other is carried by the chunking lane.
+   *
+   * Measured 19 Sep 2026. `NPC Client Dashboard`, `NPC Test` and `Preflight
+   * Property Group` were all moved to `failed` between 02:14 and 03:34 under
+   * `Migration failed at 20261124000000_builder_portal_decommission…`, while
+   * their `error_message` read `API rate limit exceeded for installation ID
+   * 157200201`. Three clones left the fleet, each named after a migration it
+   * had never been sent, because a quota refusal during `loadSql` is not an
+   * `OversizedMigrationError` and so was rethrown into the generic failure
+   * path below.
+   *
+   * `runQueuedBackendProvisioning` already classifies this correctly for the
+   * provisioning lane — it holds the row out of `failed` and backs it off
+   * fifteen minutes. The fleet-migration lane calls this replay DIRECTLY and
+   * never reaches that catch, so the rule has to live where the result is
+   * MADE rather than in one caller's error handler.
+   *
+   * Like both siblings it HALTS the replay: the versions after this one would
+   * run against a schema missing its effect. Unlike a real failure it must
+   * never move the clone out of `ready`.
+   */
+  heldUpstreamLimited?: boolean;
 };
 
 /**
@@ -2489,6 +2521,21 @@ export async function applyPrimeMigrations(
       try {
         sql = m.sql ?? (loadSql ? await loadSql({ id: m.id, name: m.name }) : undefined);
       } catch (e) {
+        // A quota refused the FETCH. Nothing was sent, so this says nothing
+        // about the clone — hold the replay and let the caller leave it where
+        // it is. Asked BEFORE the oversize rethrow because that rethrow is
+        // exactly what sent three healthy clones to `failed` on 19 Sep 2026,
+        // each under the name of a migration it had never received.
+        if (isUpstreamRateLimit(e)) {
+          results.push({
+            id: m.id,
+            name: m.name,
+            success: false,
+            heldUpstreamLimited: true,
+            error: e instanceof Error ? e.message : "Upstream rate limit",
+          });
+          break;
+        }
         if (!(e instanceof OversizedMigrationError)) throw e;
         if (!oversize) {
           // A body this runtime declines to HOLD is not a migration that

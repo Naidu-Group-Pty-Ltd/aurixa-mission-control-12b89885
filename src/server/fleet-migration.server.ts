@@ -150,6 +150,18 @@ export type FleetMigrationResult = {
    */
   heldOversize: Array<{ cloneId: string; cloneName: string; migration: string }>;
   /**
+   * Clones whose pass was cut short because an upstream API quota refused to
+   * serve a migration body. Its own field for the same reason `heldOversize`
+   * is, and counted OUT of `upToDate` for a reason of its own.
+   *
+   * `upToDate` means "already level with the prime". A pass that could not
+   * FETCH what it meant to send has established nothing of the kind — and it
+   * was counted there anyway, so a fleet held up by an exhausted window
+   * reported as a fleet in perfect health. That is the quiet half of the
+   * failure this module exists to end, in the one shape it had left.
+   */
+  rateLimited: Array<{ cloneId: string; cloneName: string; migration: string }>;
+  /**
    * Repo migrations the prime has NOT applied, and which were therefore not
    * offered to any clone. Reported rather than silently filtered — a run that
    * says "962 files, 4 applied" with no account of the rest is how a corpus
@@ -182,6 +194,7 @@ const EMPTY: FleetMigrationResult = {
   rehabilitated: [],
   skipped: [],
   heldOversize: [],
+  rateLimited: [],
   withheld: 0,
   withheldBreakdown: { neverApplied: 0, skewSuspected: 0 },
 };
@@ -468,6 +481,7 @@ export async function runFleetMigrationSync(
     ...EMPTY,
     failed: [],
     heldOversize: [],
+    rateLimited: [],
     excluded: excludedCount,
     rehabilitated,
     skipped: skipped.map((v) => ({
@@ -590,13 +604,30 @@ export async function runFleetMigrationSync(
         imagined.
       */
       const held = results.filter((r) => r.heldOversize);
-      const failures = results.filter((r) => !r.success && !r.heldOversize);
+      // The second kind of hold, and the one this lane was blind to. A body an
+      // upstream quota refused to SERVE never reached the clone either, so it
+      // answers to the rule directly above rather than to the failure branch:
+      // it was the fetch that was refused, not the schema that rejected
+      // anything. Measured 19 Sep 2026, three clones were moved to `failed`
+      // here under the name of a migration not one of them had been sent.
+      const limited = results.filter((r) => r.heldUpstreamLimited);
+      const failures = results.filter(
+        (r) => !r.success && !r.heldOversize && !r.heldUpstreamLimited,
+      );
       // Runnable, but sitting behind a version this clone has not got. Skipped
       // rather than run — see `partitionByDependency`.
       const blocked = results.filter((r) => r.blockedBy && r.blockedBy.length > 0);
 
       out.processed++;
-      if (successes.length === 0 && failures.length === 0 && held.length === 0) {
+      // `limited` joins this guard rather than falling through it: see the
+      // field's own note. A pass that could not FETCH is not a pass that found
+      // nothing to do.
+      if (
+        successes.length === 0 &&
+        failures.length === 0 &&
+        held.length === 0 &&
+        limited.length === 0
+      ) {
         out.upToDate++;
       } else if (failures.length === 0) {
         out.advanced++;
@@ -672,21 +703,29 @@ export async function runFleetMigrationSync(
                 status_detail:
                   failures.length > 0
                     ? `Migration failed at ${failures[0].name}`
-                    : held.length > 0
-                      ? // Named, and named as a HOLD. An operator who reads
-                        // "failed" goes looking for what the clone rejected;
-                        // there is nothing to find, because nothing was sent.
-                        `Synced to ${syncedTo} — ${held[0].name} is too large for this pass to carry ` +
-                        `and is left for the chunking lane; the clone is unchanged and still in the fleet`
-                      : blocked.length > 0
-                        ? // `ready` and NOT level. Saying only "Synced to X" here
-                          // would report a clone holding dozens of migrations back
-                          // as healthy — the exact shape of report this module
-                          // exists to stop. The first hole is named because it is
-                          // the one to reconcile first.
-                          `Synced to ${syncedTo} — ${blocked.length} migration(s) held back behind ` +
-                          `${blocked[0].blockedBy?.[0] ?? "a withheld version"}, which the prime's ledger does not record`
-                        : `Synced to ${syncedTo}`,
+                    : limited.length > 0
+                      ? // Named as a WAIT, and named as ours. An operator who
+                        // reads "failed" goes looking for what the clone
+                        // rejected; there is nothing to find, because the body
+                        // was never fetched. The window reopens on its own.
+                        `Synced to ${syncedTo} — ${limited[0].name} could not be fetched because an ` +
+                        `upstream API rate limit refused it; the clone is unchanged and still in the ` +
+                        `fleet, and the next pass carries it once the window reopens`
+                      : held.length > 0
+                        ? // Named, and named as a HOLD. An operator who reads
+                          // "failed" goes looking for what the clone rejected;
+                          // there is nothing to find, because nothing was sent.
+                          `Synced to ${syncedTo} — ${held[0].name} is too large for this pass to carry ` +
+                          `and is left for the chunking lane; the clone is unchanged and still in the fleet`
+                        : blocked.length > 0
+                          ? // `ready` and NOT level. Saying only "Synced to X" here
+                            // would report a clone holding dozens of migrations back
+                            // as healthy — the exact shape of report this module
+                            // exists to stop. The first hole is named because it is
+                            // the one to reconcile first.
+                            `Synced to ${syncedTo} — ${blocked.length} migration(s) held back behind ` +
+                            `${blocked[0].blockedBy?.[0] ?? "a withheld version"}, which the prime's ledger does not record`
+                          : `Synced to ${syncedTo}`,
                 error_message: failures.length > 0 ? failures[0].error : null,
               }),
         })
@@ -702,6 +741,12 @@ export async function runFleetMigrationSync(
       // would be an alert about a healthy tenant.
       for (const h of held) {
         out.heldOversize.push({ cloneId, cloneName, migration: h.name });
+      }
+
+      // Same treatment, same reasoning: nothing went wrong with this clone, so
+      // this is a line in the run's result rather than an alert.
+      for (const l of limited) {
+        out.rateLimited.push({ cloneId, cloneName, migration: l.name });
       }
 
       if (failures.length > 0) {
@@ -759,6 +804,7 @@ export async function runFleetMigrationSync(
       up_to_date: out.upToDate,
       failed: out.failed.length,
       held_oversize: out.heldOversize.map((h) => `${h.cloneName}: ${h.migration}`),
+      rate_limited: out.rateLimited.map((l) => `${l.cloneName}: ${l.migration}`),
       excluded: out.excluded,
       // WHICH ones, and why. `excluded: 2` is the reading that hid two
       // tenants falling out of the fleet for a day.

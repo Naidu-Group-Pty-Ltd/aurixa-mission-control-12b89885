@@ -348,7 +348,12 @@ export const syncCloneMigrations = createServerFn({ method: "POST" })
         // pass declined to carry is not something the clone rejected, and only
         // one of those may take a healthy clone out of `ready`.
         const held = results.filter((r) => r.heldOversize);
-        const failures = results.filter((r) => !r.success && !r.heldOversize);
+        // And the same for a body an upstream quota refused to SERVE: the
+        // clone was never sent it, so it cannot have rejected it.
+        const limited = results.filter((r) => r.heldUpstreamLimited);
+        const failures = results.filter(
+          (r) => !r.success && !r.heldOversize && !r.heldUpstreamLimited,
+        );
         const newVersion = latestApplied ?? backend.migration_version ?? "none";
 
         /*
@@ -378,10 +383,14 @@ export const syncCloneMigrations = createServerFn({ method: "POST" })
             status_detail:
               failures.length > 0
                 ? `Migration failed at ${failures[0].name}: ${failures[0].error}`
-                : held.length > 0
-                  ? `Synced to ${newVersion} — ${held[0].name} is too large for this pass to carry ` +
-                    `and is left for the chunking lane; the clone is unchanged and still in the fleet`
-                  : `Migrations up to date (${newVersion})`,
+                : limited.length > 0
+                  ? `Synced to ${newVersion} — ${limited[0].name} could not be fetched because an ` +
+                    `upstream API rate limit refused it; the clone is unchanged and still in the ` +
+                    `fleet, and the next pass carries it once the window reopens`
+                  : held.length > 0
+                    ? `Synced to ${newVersion} — ${held[0].name} is too large for this pass to carry ` +
+                      `and is left for the chunking lane; the clone is unchanged and still in the fleet`
+                    : `Migrations up to date (${newVersion})`,
             error_message: failures.length > 0 ? failures[0].error : null,
           })
           .eq("clone_id", data.cloneId);

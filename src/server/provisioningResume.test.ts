@@ -2434,11 +2434,17 @@ describe("a body too big to hold is not a migration that failed", () => {
 
   it("never lets a hold move a clone out of ready, in either caller", () => {
     for (const src of [fleet(), button()]) {
-      // The failure set that decides `status` must exclude holds.
-      expect(src).toMatch(
-        /const failures = results\.filter\(\(r\) => !r\.success && !r\.heldOversize\)/,
+      // The failure set that decides `status` must exclude holds — BOTH kinds
+      // of them since 19 Sep 2026, when a body an upstream quota refused to
+      // serve was still being read as something the clone rejected. Matched
+      // against whitespace-collapsed source because the expression no longer
+      // fits on one line: what is pinned here is the rule, not the wrapping.
+      const flat = src.replace(/\s+/g, " ");
+      expect(flat).toMatch(
+        /const failures = results\.filter\( ?\(r\) => !r\.success && !r\.heldOversize && !r\.heldUpstreamLimited,? ?\)/,
       );
       expect(src).toMatch(/const held = results\.filter\(\(r\) => r\.heldOversize\)/);
+      expect(src).toMatch(/const limited = results\.filter\(\(r\) => r\.heldUpstreamLimited\)/);
       // And `held` must not appear in the status expression itself.
       const at = src.indexOf('status: failures.length > 0 ? ("failed" as const)');
       expect(at).toBeGreaterThan(-1);
