@@ -47,10 +47,13 @@ import {
  *    passes strict validation plus per-IP and global rate limits.
  */
 
+// Production origins only. `allowedOrigins()` APPENDS
+// `LEAD_CAPTURE_ALLOWED_ORIGINS` to this list rather than replacing it, so a
+// development origin left here is one no deployment can configure out. Local
+// work sets that variable; see `.env.example`.
 const DEFAULT_ALLOWED_ORIGINS = [
   "https://www.aurixasystems.com.au",
   "https://aurixasystems.com.au",
-  "http://localhost:3000",
 ];
 
 // Unauthenticated-path rate limits (secret-bearing requests bypass these).

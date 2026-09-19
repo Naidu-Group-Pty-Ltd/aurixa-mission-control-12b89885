@@ -45,11 +45,30 @@
  * discloses, this refuses abuse, and the network decides.
  */
 
-/** Where the application form is allowed to be served from. */
+/**
+ * Where the application form is allowed to be served from.
+ *
+ * Production origins only. `http://localhost:3000` used to sit in this list,
+ * which meant every deployment shipped a development origin it could not be
+ * configured out of: `allowedApplyOrigins` APPENDS to these rather than
+ * replacing them, so no value of `BUILDER_APPLY_ALLOWED_ORIGINS` could ever
+ * remove it. A list that cannot be narrowed is not an allow-list.
+ *
+ * It was never much of a hole, and it is worth being precise about why rather
+ * than overstating the fix. `Origin` is the caller's own claim — a deliberate
+ * attacker sends whatever header they like, with or without this entry. What
+ * an origin allow-list actually stops is somebody ELSE's page posting from a
+ * real browser, and against a caller who is willing to forge the header the
+ * ceilings are the only control that holds. What changes here is narrower: a
+ * development origin is not a production fact, and shipping one invites the
+ * reading that the boundary is stronger than it is.
+ *
+ * Local work sets `BUILDER_APPLY_ALLOWED_ORIGINS`, which is what that variable
+ * is for and what `.env.example` now shows.
+ */
 export const DEFAULT_APPLY_ORIGINS: readonly string[] = [
   "https://www.aurixasystems.com.au",
   "https://aurixasystems.com.au",
-  "http://localhost:3000",
 ];
 
 /**
