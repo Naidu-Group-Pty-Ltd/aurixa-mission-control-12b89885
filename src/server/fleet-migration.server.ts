@@ -496,7 +496,7 @@ export function furthestBehindThenLeastRecentlyServed(a: FleetOrderRow, b: Fleet
  * which is what makes a hang harmless, which is what makes an abort
  * unnecessary. Nothing here is traded against anything else.
  */
-function beatWhileClaimHeld(
+export function beatWhileClaimHeld(
   supabase: Db,
   cloneId: string,
   claimedAt: string,
@@ -569,23 +569,44 @@ function beatWhileClaimHeld(
     void run.finally(() => outstanding.delete(run));
   }, CLAIM_HEARTBEAT_MS);
 
+  /*
+    MEMOISED, BECAUSE "IDEMPOTENT" WAS TRUE OF THE EFFECT AND FALSE OF THE COST.
+
+    There are three call sites now — before the result write, before the catch's
+    release, and the `finally` behind both — and I said in two places that a
+    second call was free because `clearInterval` and `abort` are no-ops on an
+    already-stopped timer. They are. The DRAIN is not: a promise still unsettled
+    after `CLAIM_DRAIN_MS` stays in `outstanding`, so the next call starts a
+    fresh two-second race over the same promise. Every exit therefore spent up
+    to four seconds rather than the two the constant names — and it is spent at
+    the END of a 45-second pass, out of the margin left for the audit write and
+    the response. Raised by review, against my own claim.
+
+    So the first call's promise is the answer to every later one. Later callers
+    await the SAME drain rather than starting another: already settled, they
+    return at once; still running, they join it. `??=` and not a boolean,
+    because two exits can reach this concurrently and a flag would let the
+    second walk away while the first was still draining.
+  */
+  let stopping: Promise<void> | null = null;
   return {
-    stop: async () => {
-      stopped = true;
-      clearInterval(timer);
-      inflightBeats.abort();
-      /*
-        Drained, but never indefinitely. `allSettled` cannot reject, so `stop`
-        cannot throw in the `finally` that awaits it — a throw there would
-        replace the error the pass is carrying, or on the success path escape
-        the clone loop and kill the run. The race bounds a beat that never
-        settles, which `allSettled` alone would wait for for ever.
-      */
-      await Promise.race([
-        Promise.allSettled([...outstanding]),
-        new Promise((resolve) => setTimeout(resolve, CLAIM_DRAIN_MS)),
-      ]);
-    },
+    stop: () =>
+      (stopping ??= (async () => {
+        stopped = true;
+        clearInterval(timer);
+        inflightBeats.abort();
+        /*
+          Drained, but never indefinitely. `allSettled` cannot reject, so `stop`
+          cannot throw in the `finally` that awaits it — a throw there would
+          replace the error the pass is carrying, or on the success path escape
+          the clone loop and kill the run. The race bounds a beat that never
+          settles, which `allSettled` alone would wait for for ever.
+        */
+        await Promise.race([
+          Promise.allSettled([...outstanding]),
+          new Promise((resolve) => setTimeout(resolve, CLAIM_DRAIN_MS)),
+        ]);
+      })()),
   };
 }
 
@@ -1371,8 +1392,10 @@ export async function runFleetMigrationSync(
         THE BEATS STOP BEFORE THE RELEASE, NOT AFTER IT.
 
         The `finally` below still stops the heartbeat — this is not a move,
-        it is an earlier first call, and `stop` is idempotent. What the order
-        buys is the set of beats that can outlive the release.
+        it is an earlier first call, and the later ones await the SAME drain
+        rather than starting another — see the memoisation on `stop`, which is
+        what makes calling it three times cost what calling it once costs.
+        What the order buys is the set of beats that can outlive the release.
 
         Stopped afterwards, every beat dispatched during the replay is still
         live while the release runs, and any of them that commits after a

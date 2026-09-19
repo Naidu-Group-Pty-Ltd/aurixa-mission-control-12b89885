@@ -635,8 +635,15 @@ describe("a pass is bounded", () => {
     const body = beatBody();
     expect(body, "nothing cancels a beat when the pass ends").toContain("new AbortController()");
     expect(body).toContain("abortSignal(inflightBeats.signal)");
+    /*
+      Anchored on the MEMO rather than on `stop`'s syntax, which has now
+      changed twice. `stopping ??=` is the first line of the returned stop's
+      body and is behavioural — it is what makes three calls cost one drain —
+      so an anchor on it cannot be broken by a reformat the way
+      `stop: async () => {` was.
+    */
     expect(body, "stop does not cancel them").toMatch(
-      /stop: async \(\) => \{[\s\S]{0,400}?inflightBeats\.abort\(\);/,
+      /stopping \?\?=[\s\S]{0,400}?inflightBeats\.abort\(\);/,
     );
   });
 
@@ -804,7 +811,9 @@ describe("a pass is bounded", () => {
       mutation, which is the only reason it is written this way.
     */
     const miss = body.indexOf("if (held === false)");
-    const stop = body.indexOf("stop: async ()");
+    // The returned stop, by its memo rather than by its signature — see the
+    // anchor note above.
+    const stop = body.indexOf("stopping ??=");
     expect(miss, "the claim-lost branch was not found").toBeGreaterThan(-1);
     expect(stop, "the returned stop was not found").toBeGreaterThan(miss);
     const branch = body.slice(miss, stop);
