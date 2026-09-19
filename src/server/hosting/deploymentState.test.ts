@@ -9,6 +9,7 @@ import {
   judgeWait,
   isTerminal,
   reading,
+  wakesWhenProviderConfigured,
 } from "./deploymentState.pure";
 
 describe("the four readings", () => {
@@ -182,5 +183,137 @@ describe("the drain measures the wait from the status stamp", () => {
     const args = call.slice(0, call.indexOf("})"));
     expect(args).toContain("statusSince: row.status_since");
     expect(args).not.toContain("created_at");
+  });
+});
+
+/**
+ * Waking a dormant row is narrower than reading one as dormant.
+ *
+ * `isDormant` groups `not_requested` with `pending_platform` because they draw
+ * the same way — nothing is wrong, nothing is happening. Acting on them is the
+ * opposite: one is a decision and the other is a wait.
+ */
+describe("wakesWhenProviderConfigured", () => {
+  it("wakes the row that was asked for and could not be attempted", () => {
+    expect(wakesWhenProviderConfigured("pending_platform")).toBe(true);
+  });
+
+  it("never wakes a deployment somebody declined", () => {
+    // `not_requested` is an operator's decision. Deploying it because a token
+    // appeared is a worse failure than the dormancy this fixes.
+    expect(wakesWhenProviderConfigured("not_requested")).toBe(false);
+    expect(isDormant("not_requested")).toBe(true);
+  });
+
+  it("wakes nothing that is already moving, terminal, or detached", () => {
+    for (const status of DEPLOYMENT_STATUSES) {
+      if (status === "pending_platform") continue;
+      expect(wakesWhenProviderConfigured(status)).toBe(false);
+    }
+  });
+
+  it("is a strict subset of dormant, and not equal to it", () => {
+    const wakeable = DEPLOYMENT_STATUSES.filter(wakesWhenProviderConfigured);
+    const dormant = DEPLOYMENT_STATUSES.filter(isDormant);
+    expect(wakeable.every((s) => dormant.includes(s))).toBe(true);
+    expect(wakeable.length).toBeLessThan(dormant.length);
+  });
+
+  it("the reading no longer sends an operator to a button", () => {
+    const r = reading("pending_platform", { providerConfigured: true });
+    expect(r.detail).not.toMatch(/reconcile action/i);
+    expect(r.detail).toMatch(/drain pass/i);
+  });
+});
+
+/**
+ * A wait that knows WHAT it is waiting on.
+ *
+ * Elapsed time was the only signal, and it is a poor proxy for a stall in both
+ * directions. `syncing_env` waits on the clone's own Supabase project, and a
+ * backend provisioning run is measured in hours — so six hours there is a
+ * healthy clone being built, and failing it turns a wait into a terminal state
+ * nothing retries. The opposite case is worse: a backend that has already
+ * given up cannot produce the URL and key this step wants, whatever the clock
+ * says, so six more hours of silence is six hours of a deployment that could
+ * not possibly proceed reading as though it might.
+ */
+describe("judgeWait, when the step can name its dependency", () => {
+  const HOUR = 3_600_000;
+  const now = Date.parse("2026-09-19T04:00:00Z");
+  const iso = (msAgo: number) => new Date(now - msAgo).toISOString();
+
+  it("waits on a progressing dependency however long it has been", () => {
+    // Nine times the budget. The clock says stuck; the dependency says the
+    // thing this step needs is still being built.
+    const verdict = judgeWait({
+      statusSince: iso(54 * HOUR),
+      now,
+      stuckHours: 6,
+      dependency: { name: "the clone's Supabase backend", state: "progressing" },
+    });
+    expect(verdict).toEqual({ kind: "waiting" });
+  });
+
+  it("is stuck the moment a dependency gives up, with no elapsed time at all", () => {
+    const verdict = judgeWait({
+      statusSince: iso(0),
+      now,
+      stuckHours: 6,
+      dependency: { name: "the clone's Supabase backend", state: "terminal" },
+    });
+    expect(verdict.kind).toBe("stuck");
+  });
+
+  it("reports the hours it has actually been waiting on a terminal dependency", () => {
+    const verdict = judgeWait({
+      statusSince: iso(2 * HOUR),
+      now,
+      stuckHours: 6,
+      dependency: { name: "the clone's Supabase backend", state: "terminal" },
+    });
+    // Two hours, not zero and not the six-hour budget it never reached.
+    expect(verdict).toEqual({ kind: "stuck", hoursInStatus: 2 });
+  });
+
+  it("still reports a number when the stamp is unreadable", () => {
+    // The stamp is the only thing that could be unreadable here; the verdict
+    // is decided by the dependency, so an unparseable value must not become
+    // NaN in the sentence an operator reads.
+    for (const stamp of [null, undefined, "", "not-a-date"]) {
+      const verdict = judgeWait({
+        statusSince: stamp as string | null,
+        now,
+        stuckHours: 6,
+        dependency: { name: "x", state: "terminal" },
+      });
+      expect(verdict.kind).toBe("stuck");
+      expect(Number.isFinite((verdict as { hoursInStatus: number }).hoursInStatus)).toBe(true);
+    }
+  });
+
+  it("never reports negative hours when the clock is skewed forward", () => {
+    const verdict = judgeWait({
+      statusSince: iso(-3 * HOUR),
+      now,
+      stuckHours: 6,
+      dependency: { name: "x", state: "terminal" },
+    });
+    expect(verdict).toEqual({ kind: "stuck", hoursInStatus: 0 });
+  });
+
+  it("leaves the elapsed-time reading exactly as it was when nothing is named", () => {
+    // The whole point of the parameter being optional: every existing caller
+    // keeps the behaviour it had, so this change can only affect the one step
+    // that opted in.
+    for (const dependency of [undefined, null]) {
+      expect(judgeWait({ statusSince: iso(3 * HOUR), now, stuckHours: 6, dependency })).toEqual({
+        kind: "waiting",
+      });
+      expect(judgeWait({ statusSince: iso(7 * HOUR), now, stuckHours: 6, dependency })).toEqual({
+        kind: "stuck",
+        hoursInStatus: 7,
+      });
+    }
   });
 });

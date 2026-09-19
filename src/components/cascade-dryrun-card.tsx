@@ -142,6 +142,12 @@ function Tally({
 }
 
 function ImpactRow({ impact }: { impact: CloneImpact }) {
+  // What an approval can actually release: the held paths minus the ones the
+  // byte ceiling holds. Derived here rather than server-side as a third list,
+  // because the two the server publishes are the two facts — everything held
+  // for a person, and which of those nobody can decide.
+  const oversize = new Set(impact.oversizePaths);
+  const approvable = impact.needsReconcile.filter((p) => !oversize.has(p));
   return (
     <div
       className={cn(
@@ -221,21 +227,41 @@ function ImpactRow({ impact }: { impact: CloneImpact }) {
               {impact.needsReconcile.slice(0, 3).join(", ")}
               {impact.needsReconcile.length > 3 ? "…" : ""}
             </div>
-            <PathApprovalDialog
-              cloneId={impact.cloneId}
-              cloneName={impact.name}
-              kind="overwrite"
-              paths={impact.needsReconcile}
-              triggerLabel="Approve prime's copy for held path(s)…"
-              explainer={
-                "Approving lets the next cascade write PRIME's current copy over the held " +
-                "path(s) below, for 14 days. Do this only where the clone's copy carries no " +
-                "work of its own — a hand-merged file that is really stale prime content. " +
-                "Protected identity paths are refused by the engine whatever is approved here, " +
-                "and delivered files still pass the backend-identity content holds."
-              }
-              perPath
-            />
+            {/*
+              THE OFFER IS DRAWN OVER WHAT AN APPROVAL CAN ACTUALLY RELEASE.
+
+              It used to be drawn over `needsReconcile` whole, which included
+              paths held by the byte ceiling — and `decideHoldRelease` filters
+              the held set some four hundred lines before an oversize hold is
+              pushed into it, so approving one wrote a fourteen-day row and
+              released nothing, on every cascade, for ever. Approving and being
+              told it worked is worse than having no button.
+            */}
+            {approvable.length > 0 && (
+              <PathApprovalDialog
+                cloneId={impact.cloneId}
+                cloneName={impact.name}
+                kind="overwrite"
+                paths={approvable}
+                triggerLabel="Approve prime's copy for held path(s)…"
+                explainer={
+                  "Approving lets the next cascade write PRIME's current copy over the held " +
+                  "path(s) below, for 14 days. Do this only where the clone's copy carries no " +
+                  "work of its own — a hand-merged file that is really stale prime content. " +
+                  "Protected identity paths are refused by the engine whatever is approved here, " +
+                  "and delivered files still pass the backend-identity content holds."
+                }
+                perPath
+              />
+            )}
+            {impact.oversizePaths.length > 0 && (
+              <div className="text-xs text-muted-foreground">
+                {impact.oversizePaths.length} of those are over the size a cascade carries in one
+                file, so no approval can release them — they have to be brought across by hand.
+                Where the file is a migration, the migration sync still delivers it to the clone's
+                database.
+              </div>
+            )}
           </div>
         )}
       </div>

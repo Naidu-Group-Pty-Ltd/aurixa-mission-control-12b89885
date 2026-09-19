@@ -15,6 +15,7 @@ import {
   requireExclusions,
   type SyncExclusion,
   CASCADE_MAX_FILE_BYTES,
+  approvableHeld,
   oversizeHold,
 } from "./syncExclusions.pure";
 
@@ -461,16 +462,31 @@ describe("a file over the cascade ceiling is held, and says so", () => {
       that reports success while the clone is missing a file.
     */
     const held = oversizeHold("supabase/migrations/x.sql", 41_010_000, CASCADE_MAX_FILE_BYTES);
-    expect(held.reason).toBe("manual_reconcile");
+    // `oversize`, not `manual_reconcile`. It is still REPORTED — the file
+    // differs upstream and is not travelling, and dropping it from the list
+    // would restore the silence this test was written about — but it is not a
+    // decision, so it is not in the set an approval is drawn over. Conflating
+    // the two is what made the approval dialog a dead control.
+    expect(held.reason).toBe("oversize");
     expect(reportableHeld([held])).toHaveLength(1);
+    expect(approvableHeld([held])).toHaveLength(0);
     expect(held.note).toMatch(/39\.1 MB/);
     expect(held.note).toMatch(/8\.0 MB/);
     expect(held.path).toBe("supabase/migrations/x.sql");
   });
 
-  it("the ceiling is the migration corpus's own", () => {
-    // A body the migration sync refuses to carry is not one the repository
-    // cascade should carry either.
+  it("names the repository as what does not receive it, and not the database", () => {
+    // The note used to end "the migration sync refuses a body this size as
+    // well". That stopped being true when the migration lane learned to chunk
+    // a seed-shaped INSERT from a stream, and an operator told the database is
+    // also refusing the file goes looking in the wrong place.
+    const held = oversizeHold("supabase/migrations/x.sql", 41_010_000, CASCADE_MAX_FILE_BYTES);
+    expect(held.note).toContain("REPOSITORY");
+    expect(held.note).not.toMatch(/migration sync refuses/i);
+    expect(held.note, "and it says an approval cannot help").toMatch(/No approval/i);
+  });
+
+  it("the ceiling is the contents API's, and is unchanged by this", () => {
     expect(CASCADE_MAX_FILE_BYTES).toBe(8 * 1024 * 1024);
   });
 });

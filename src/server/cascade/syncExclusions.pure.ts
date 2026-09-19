@@ -52,7 +52,31 @@
  */
 import { globToRegex, isSafeRepoPath } from "@/lib/module-globs";
 
-export type ExclusionReason = "protected" | "manual_reconcile";
+/**
+ * Why a path was withheld.
+ *
+ * `protected` is identity the clone owns and the engine refuses to touch
+ * whatever anybody approves. `manual_reconcile` is a DECISION owed to a
+ * person: the clone's copy and prime's have diverged and somebody has to say
+ * which wins. `oversize` is neither — it is a CEILING, and no approval can
+ * discharge it.
+ *
+ * The third one exists because conflating it with the second built a dead
+ * control. `oversizeHold` returned `manual_reconcile`, so the dry-run card
+ * offered "Approve prime's copy for held path(s)…" over it and
+ * `approveCascadePaths` wrote a fourteen-day approval row — while
+ * `decideHoldRelease` filters `partition.held` some four hundred lines BEFORE
+ * an oversize hold is pushed into it, so the approval could never reach one.
+ * An operator could approve, be told it had worked, and watch the next cascade
+ * hold the same file again, for ever.
+ *
+ * Moving the push above the release block was the other candidate fix and it
+ * is the wrong one: releasing an oversize path sends it into the prepare loop,
+ * which fetches it and hits the identical ceiling. The approval would have
+ * started succeeding while the file still did not land — a dead control that
+ * had learned to say yes.
+ */
+export type ExclusionReason = "protected" | "manual_reconcile" | "oversize";
 
 export type SyncExclusion = {
   pattern: string;
@@ -177,8 +201,29 @@ export function partitionCascadePaths(
   return { write, held };
 }
 
-/** The held paths worth telling a human about — see the header. */
+/**
+ * The held paths worth telling a human about — see the header.
+ *
+ * Deliberately BOTH kinds. An oversize file is not a decision anybody can
+ * take, but it is still a file that differs upstream and is not travelling,
+ * and dropping it from this list would return it to the silence this function
+ * was written to end. What separates them is `approvableHeld` below, which is
+ * about what may be OFFERED rather than what must be SAID.
+ */
 export function reportableHeld(held: readonly HeldPath[]): HeldPath[] {
+  return held.filter((h) => h.reason === "manual_reconcile" || h.reason === "oversize");
+}
+
+/**
+ * The held paths an operator may actually decide.
+ *
+ * `manual_reconcile` alone. This is the set `decideHoldRelease` can release,
+ * so it is the only set an approval dialog may be drawn over — an approval
+ * offered anywhere else is a control that reports success and changes nothing.
+ * Named here rather than re-filtered at each surface, because the engine's
+ * release filter and the card's offer are the two ends that drifted.
+ */
+export function approvableHeld(held: readonly HeldPath[]): HeldPath[] {
   return held.filter((h) => h.reason === "manual_reconcile");
 }
 
@@ -531,18 +576,25 @@ const megabytes = (bytes: number): string => `${(bytes / 1_048_576).toFixed(1)} 
 /**
  * Hold a file that is too large to cascade, and say so where a person reads.
  *
- * `manual_reconcile`, so it is counted and listed rather than withheld in
- * silence: the file still differs upstream and somebody has to bring it
- * across — by hand, because the migration sync refuses a body over its own
- * ceiling as well.
+ * `oversize` rather than `manual_reconcile`, so it is counted and listed
+ * without being offered as a decision nobody can take — see `ExclusionReason`.
+ *
+ * The note used to end "the migration sync refuses a body this size as well",
+ * and that stopped being true: the migration lane chunks a seed-shaped INSERT
+ * from a stream and carries these two files to the clone's DATABASE. What does
+ * not travel is the file in the clone's REPOSITORY, which is a different
+ * absence with a different remedy, and telling an operator the database is
+ * also refusing it sends them to the wrong place.
  */
 export function oversizeHold(path: string, bytes: number, maxBytes: number): HeldPath {
   return {
     path,
     pattern: "(size: over the cascade ceiling)",
-    reason: "manual_reconcile",
+    reason: "oversize",
     note:
       `${megabytes(bytes)} upstream, over the ${megabytes(maxBytes)} a cascade will carry in ` +
-      `one file. Bring it across by hand; the migration sync refuses a body this size as well.`,
+      `one file, so the clone's REPOSITORY does not receive it. No approval can release a ` +
+      `ceiling — bring the file across by hand. Where it is a migration, the migration sync ` +
+      `chunks it and the clone's database still gets it.`,
   };
 }

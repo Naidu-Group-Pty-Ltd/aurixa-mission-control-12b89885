@@ -27,15 +27,12 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { useServerFn } from "@tanstack/react-start";
 import { provisionClone } from "@/server/clone-provisioning.functions";
-import { provisionBackend } from "@/lib/backend-provisioning.functions";
 import { enqueueEdgeJob } from "@/server/edge-provisioning.functions";
-import { requestCloneSubdomain } from "@/server/subdomain-hosting.functions";
 // The same server functions the clone page's cards call. Imported rather than
 // reimplemented: `provisionTurnstileIdentity` and `advanceEmailIdentity` are
 // also what the deployment drain calls at `syncing_env`, so all three entry
 // points mint through one implementation and cannot drift.
 import { provisionCloneTurnstile } from "@/lib/turnstile-identity.functions";
-import { provisionCloneEmailIdentity } from "@/lib/email-identity.functions";
 import {
   checkGithubAppPreflight,
   type GithubPreflightResult,
@@ -117,9 +114,7 @@ function NewClone() {
   const [deploymentProvider, setDeploymentProvider] = useState<
     "platform" | "vercel" | "manual" | "none"
   >("platform");
-  const requestSubdomainFn = useServerFn(requestCloneSubdomain);
   const provisionTurnstileFn = useServerFn(provisionCloneTurnstile);
-  const provisionEmailFn = useServerFn(provisionCloneEmailIdentity);
   const [armTurnstile, setArmTurnstile] = useState(true);
   const [armEmail, setArmEmail] = useState(true);
   const [sendingDomain, setSendingDomain] = useState("");
@@ -149,7 +144,6 @@ function NewClone() {
   const [adminEmail, setAdminEmail] = useState("");
   const [adminPassword, setAdminPassword] = useState("");
   const [backendRegion, setBackendRegion] = useState("us-east-1");
-  const provisionBackendFn = useServerFn(provisionBackend);
   const enqueueEdge = useServerFn(enqueueEdgeJob);
   // Issue #13: idempotency key for the whole submit. Generated once per
   // wizard mount so a double-click / retry lands on the same clone row
@@ -321,6 +315,27 @@ function NewClone() {
           billingUserId: billingUserId.trim() || null,
           billingStripeCustomerId: billingStripeCustomerId.trim() || null,
           deploymentProvider: deploymentProvider === "platform" ? undefined : deploymentProvider,
+          // The clone's `slug` above carries a six-character idempotency
+          // suffix so a retry reuses the same GitHub repo. A HOSTNAME must not
+          // carry a retry token, which is why this field exists — and why the
+          // wizard used to write a second, unsuffixed name onto the row itself
+          // a moment after this call returned, over the one the allocator had
+          // reserved. It is one field and one writer now.
+          //
+          // `null` declines a subdomain outright, so the checkbox finally
+          // controls something: the reservation used to run whatever it said.
+          subdomain: subdomainEnabled ? subdomainSlug.trim() || slug : null,
+          // The backend and the sending identity travel WITH the submit now.
+          // Both used to be second calls the browser made after this one had
+          // returned, and nothing else in the platform creates a
+          // `clone_backends` row — so a closed tab, a dropped connection or a
+          // Worker request limit left a clone that would never have a backend,
+          // with the admin password gone and nothing recording that one had
+          // been asked for. `moduleIds` is deliberately NOT repeated here:
+          // provisioning writes the authoritative set to `clone_modules` and
+          // the backend pipeline reads it from there. (Audit finding #12.)
+          backend: dedicatedBackend ? { region: backendRegion, adminEmail, adminPassword } : null,
+          sendingDomain: armEmail ? sendingDomain.trim() || null : null,
           idempotencyKey,
         },
       });
@@ -341,35 +356,13 @@ function NewClone() {
         );
       }
 
-      // Enqueue backend provisioning if enabled. The wizard only awaits the
-      // enqueue (fast); the actual provisioning is executed by the pg_cron
-      // drain worker so it survives navigation and Worker request limits.
+      // Backend provisioning is NOT enqueued here. It travelled with the
+      // submit above, where an interrupted browser cannot lose it.
       if (dedicatedBackend) {
-        try {
-          const backendResult = await provisionBackendFn({
-            data: {
-              cloneId: result.cloneId,
-              cloneName: name,
-              region: backendRegion,
-              adminEmail,
-              adminPassword,
-              // Issue #12: do NOT pass moduleIds here. provisionClone has
-              // already written the authoritative set to `clone_modules`;
-              // the backend server fn reads from there so the two tracks
-              // cannot drift if the picker state changes mid-submit.
-            },
-          });
-
-          if ("ok" in backendResult && backendResult.ok) {
-            toast.info(
-              "Backend queued — the background worker will provision it in ~1–2 minutes. You can watch progress on the clone page.",
-            );
-          } else if ("error" in backendResult) {
-            toast.error(`Backend queue failed: ${backendResult.error}`);
-          }
-        } catch (e) {
-          toast.error(`Backend queue failed: ${e instanceof Error ? e.message : "unknown"}`);
-        }
+        toast.info(
+          "Backend queued — the background worker will provision it in ~1–2 minutes. " +
+            "You can watch progress on the clone page.",
+        );
       }
 
       // Enqueue edge attach if user chose one.
@@ -396,27 +389,15 @@ function NewClone() {
         }
       }
 
-      // Enqueue subdomain provisioning (dormant until CF is configured).
-      if (subdomainEnabled) {
-        const desired = (subdomainSlug.trim() || slug)
-          .toLowerCase()
-          .replace(/[^a-z0-9-]/g, "-")
-          .replace(/^-+|-+$/g, "")
-          .slice(0, 63);
-        if (desired) {
-          try {
-            const r = await requestSubdomainFn({
-              data: { cloneId: result.cloneId, slug: desired },
-            });
-            toast.info(
-              r.status === "queued"
-                ? `Subdomain queued — ${r.fqdn}`
-                : `Subdomain reserved (${r.fqdn}) — will provision once Cloudflare is configured`,
-            );
-          } catch (e) {
-            toast.error(`Subdomain request failed: ${e instanceof Error ? e.message : "unknown"}`);
-          }
-        }
+      // The subdomain is NOT requested here. `provisionClone` reserved the name
+      // and asked for the record before it returned, through the one writer
+      // both surfaces use — and this call, which ran a moment later from the
+      // browser, is what used to overwrite that reservation with a different
+      // name. Normalisation went with it: `normaliseLabel` handles accents,
+      // the 63-character limit and the hyphen a truncation exposes, none of
+      // which the four `.replace()` calls that were here did.
+      if (result.subdomainFqdn) {
+        toast.info(`Subdomain reserved — ${result.subdomainFqdn}`);
       }
 
       /*
@@ -468,22 +449,14 @@ function NewClone() {
         }
       }
 
+      // The sending identity is NOT started here either, for a sharper
+      // reason than the backend's: the operator's typed domain is the thing
+      // that gets lost. `advanceEmailIdentity` derives one when it finds none
+      // recorded, and the deployment drain calls it with no domain at all —
+      // so a browser that never got this far did not fail, it started an
+      // identity on a domain nobody chose.
       if (armEmail) {
-        try {
-          const r = await provisionEmailFn({
-            data: {
-              cloneId: result.cloneId,
-              sendingDomain: sendingDomain.trim() || undefined,
-            },
-          });
-          toast.info(
-            r.ok
-              ? "Sending identity started — its domain verifies once DNS propagates."
-              : `Sending identity not started: ${r.error}. The clone page can retry it.`,
-          );
-        } catch (e) {
-          toast.error(`Sending identity failed: ${e instanceof Error ? e.message : "unknown"}`);
-        }
+        toast.info("Sending identity started — its domain verifies once DNS propagates.");
       }
 
       setBusy(false);

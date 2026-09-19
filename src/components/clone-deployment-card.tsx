@@ -14,6 +14,7 @@ import {
   resyncCloneDeploymentEnv,
   retryCloneDeployment,
 } from "@/server/deployment-provisioning.functions";
+import { bundleIdentityReading } from "@/lib/bundleIdentityReading.pure";
 
 type Reading = {
   reading: string;
@@ -170,6 +171,41 @@ export function CloneDeploymentCard({ cloneId }: { cloneId: string }) {
             </div>
           </div>
         )}
+
+        {/* What the browser actually downloaded.
+            Drawn for every deployment that has one, including the ones that
+            have never been read: three of four clones served a bundle pointed
+            at the prime's database while every other signal on this card was
+            green, and a card that renders nothing for "never checked" cannot
+            be told apart from one that checked and was happy. */}
+        {deployment &&
+          deployment.status !== "not_requested" &&
+          (() => {
+            const bundle = bundleIdentityReading({
+              verdict: deployment.bundle_identity,
+              detail: deployment.bundle_identity_detail,
+              checkedAt: deployment.bundle_checked_at,
+            });
+            return (
+              <div className="glass-inset p-3">
+                <div className="label-mono mb-2">served bundle</div>
+                <div className="flex flex-wrap items-baseline gap-2">
+                  <span className={`text-xs font-medium ${TONE[bundle.tone]}`}>{bundle.label}</span>
+                  {deployment.bundle_checked_at && (
+                    <span className="text-[11px] text-muted-foreground">
+                      read {formatDistanceToNow(deployment.bundle_checked_at)} ago
+                    </span>
+                  )}
+                  {deployment.bundle_artefact && (
+                    <span className="ml-auto font-mono text-[11px] text-muted-foreground">
+                      {deployment.bundle_artefact}
+                    </span>
+                  )}
+                </div>
+                <p className="mt-1 text-xs text-muted-foreground">{bundle.detail}</p>
+              </div>
+            );
+          })()}
 
         {deployment?.status_detail && (
           <p className="text-xs text-muted-foreground">{deployment.status_detail}</p>

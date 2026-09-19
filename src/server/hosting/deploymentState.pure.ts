@@ -73,6 +73,22 @@ export function isDormant(status: DeploymentStatus): boolean {
 }
 
 /**
+ * A dormant row the platform may wake BY ITSELF once a provider token lands.
+ *
+ * Narrower than `isDormant`, and the difference is the whole point.
+ * `not_requested` is a DECISION — an operator declined a deployment for this
+ * clone — and waking it would deploy something nobody asked for.
+ * `pending_platform` is the opposite: it WAS asked for and could not be
+ * attempted, and the reading below has always promised it would "fan out" once
+ * a token lands. Until this existed, only a button did that, so a clone
+ * provisioned before the hosting token sat dormant for ever while its own
+ * status card said it was queued.
+ */
+export function wakesWhenProviderConfigured(status: DeploymentStatus): boolean {
+  return status === "pending_platform";
+}
+
+/**
  * The four readings. `tone` maps onto the design system's status colours, and
  * `neutral` is what carries the point: nobody asked for a deployment here, so
  * there is nothing wrong.
@@ -109,7 +125,7 @@ export function reading(
         reading: "waiting",
         label: "awaiting platform",
         detail: opts?.providerConfigured
-          ? "Queued — the reconcile action will fan this out."
+          ? "Queued — the next drain pass will start it."
           : "No hosting provider token is configured. Nothing has been attempted.",
         tone: "warning",
       };
@@ -194,13 +210,50 @@ export type WaitVerdict =
   /** Has genuinely sat in this one status past the budget. */
   | { kind: "stuck"; hoursInStatus: number };
 
+/**
+ * What a step is waiting ON, when it knows.
+ *
+ * `progressing` — the thing it needs is itself still running. `terminal` — the
+ * thing it needs has given up and will not produce what this step wants
+ * without somebody acting on IT.
+ */
+export type WaitDependency = {
+  /** Named for the operator, e.g. "the clone's Supabase backend". */
+  name: string;
+  state: "progressing" | "terminal";
+};
+
 export function judgeWait(input: {
   /** When the row entered the status it is in now. */
   statusSince: string | null | undefined;
   /** Milliseconds since the epoch. */
   now: number;
   stuckHours: number;
+  /**
+   * What this wait is blocked on, when the step can say.
+   *
+   * Elapsed time is a poor proxy for a stall and it was the only signal here.
+   * `syncing_env` waits for the clone's own Supabase project to publish its
+   * URL and anon key, and a backend provisioning run is measured in HOURS —
+   * `ProvisioningSequenceNote` records ~7 edge functions per pass against 413
+   * declared. Six hours of that is a healthy clone being built, and failing
+   * its deployment for it turns a wait into a terminal state that never
+   * retries itself.
+   *
+   * It cuts the other way too, and harder: when the backend has already given
+   * up, six more hours of waiting is six hours of saying nothing about a
+   * deployment that cannot possibly proceed. A terminal dependency is stuck
+   * NOW.
+   */
+  dependency?: WaitDependency | null;
 }): WaitVerdict {
+  // A dependency that has given up outranks the clock in both directions, so
+  // it is asked first.
+  if (input.dependency?.state === "terminal") {
+    return { kind: "stuck", hoursInStatus: hoursIn(input.statusSince, input.now) };
+  }
+  if (input.dependency?.state === "progressing") return { kind: "waiting" };
+
   if (!input.statusSince) return { kind: "waiting" };
   const since = new Date(input.statusSince).getTime();
   if (!Number.isFinite(since)) return { kind: "waiting" };
@@ -208,4 +261,10 @@ export function judgeWait(input: {
   const hoursInStatus = (input.now - since) / 3_600_000;
   if (!(hoursInStatus > input.stuckHours)) return { kind: "waiting" };
   return { kind: "stuck", hoursInStatus };
+}
+
+function hoursIn(statusSince: string | null | undefined, now: number): number {
+  if (!statusSince) return 0;
+  const since = new Date(statusSince).getTime();
+  return Number.isFinite(since) ? Math.max(0, (now - since) / 3_600_000) : 0;
 }

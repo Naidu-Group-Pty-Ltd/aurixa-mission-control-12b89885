@@ -131,18 +131,34 @@ describe("the streaming half reports a refusal instead of throwing it", () => {
   });
 
   it("keeps the cursor for what did land, and claims none when nothing did", () => {
-    // The seed is read twice and sent as it arrives, so a refusal can land
-    // before the first statement or after hundreds. Asserting "the clone is
-    // unchanged" in both cases would be a claim that is sometimes false.
+    // A statement is sent as it arrives, so a refusal can land before the
+    // first or after hundreds. Asserting "the clone is unchanged" in both
+    // cases would be a claim that is sometimes false.
     const branch = seed.slice(seed.indexOf("if (cloneSaidNothing(e))"), seed.indexOf("throw e;"));
-    expect(branch).toMatch(/applied > 0 \? \{ migrationId: m\.id, statementsDone: index \} : null/);
+    expect(branch).toMatch(
+      /applied > 0[\s\S]{0,200}?\{ migrationId: m\.id, statementsDone: index, shape: shape \?\? undefined \}[\s\S]{0,40}?: null/,
+    );
   });
 
   it("a seed the chunker cannot parse is still a failure, not a hold", () => {
     // `SeedShapeError` means the body WAS read and is not the shape this can
     // send — a person has to act, and holding it would wait for ever.
+    //
+    // Unless the shape came off the CURSOR, which is a different event
+    // entirely: the prime re-released the seed between passes, the file is
+    // fine, and telling an operator to apply 41 MB by hand would be the worst
+    // available answer. That branch holds and drops the cursor; every other
+    // path through here still throws.
     const shape = seed.slice(seed.indexOf("if (e instanceof SeedShapeError)"));
-    expect(shape.slice(0, 500)).toContain("throw new Error(");
+    const window = shape.slice(0, 1_800);
+    expect(window).toContain("throw new Error(");
+    expect(window).toMatch(/if \(cursorShape\) \{[\s\S]{0,600}?cursor: null/);
+    expect(window).toMatch(/if \(cursorShape\) \{[\s\S]{0,600}?changed on the prime/);
+    // The hand-apply sentence must stay UNREACHABLE for that case — it is
+    // after the cursor branch, not before it.
+    expect(window.indexOf("if (cursorShape)")).toBeLessThan(
+      window.indexOf("Apply it to this clone by hand"),
+    );
   });
 
   it("the replay records it as a hold and distinguishes it from a budget pause", () => {

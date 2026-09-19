@@ -3,7 +3,7 @@
 // and by the GitHub webhook receiver when prime is pushed.
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
-import { assessBlastRadius } from "./cascade-approvals.server";
+import { assessBlastRadius, type CascadeOrigin } from "./cascade-approvals.server";
 import { FOLD_MAX_ATTEMPTS } from "./cascade/eventFold.pure";
 
 type CascadeMode = Database["public"]["Enums"]["cascade_mode"];
@@ -152,7 +152,12 @@ export async function createCascadeForAllClones(args: {
     return { eventId: null, cloneCount: 0, requiresApproval: false, error: "No clones registered" };
   }
 
-  const blast = assessBlastRadius(mode, clones.length);
+  // A `commit` cascade is prime's own history arriving, not a proposal: the
+  // webhook minted it, `initiatedBy` is null, and it reads prime's head when
+  // it runs. `assessBlastRadius` is where the reasoning lives, and why the
+  // fleet-size count binds only what a person started.
+  const origin: CascadeOrigin = trigger === "commit" ? "automatic" : "operator";
+  const blast = assessBlastRadius(mode, clones.length, origin);
 
   const { data: event, error: eventErr } = await supabase
     .from("cascade_events")

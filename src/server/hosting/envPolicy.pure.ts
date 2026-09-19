@@ -225,10 +225,27 @@ export type BuildCloneEnvInput = {
   supabaseProjectRef?: string | null;
   /** The PUBLISHABLE (anon) key. Never the service-role key. */
   supabaseAnonKey?: string | null;
-  /** The clone's Mission Control API key, already committed to its private repo. */
-  aurixaApiKey?: string | null;
-  /** The origin the clone will be served from, once it is known. */
-  siteOrigin?: string | null;
+  //
+  // There is deliberately no parameter for the clone's Mission Control API key.
+  // There WAS one — `aurixaApiKey`, pushed as `VITE_AURIXA_API_KEY` — and its
+  // own doc comment called it "the clone's Mission Control API key", which is
+  // a credential, under a prefix this module's header opens by explaining gets
+  // inlined into the JavaScript every visitor downloads. Nothing ever passed
+  // it and nothing in a clone ever read it, so no key was published; but the
+  // parameter is the invitation, and `refuseReason` would not have caught it:
+  // `SECRET_FRAGMENTS` omits bare `KEY` on purpose (`ANON_KEY` and
+  // `PUBLISHABLE_KEY` are publishable by design) and carries no `API_KEY`.
+  //
+  // It is removed rather than guarded, for the reason this module already
+  // gives for the service-role key: a caller cannot pass what the type does
+  // not name, and that is a stronger guarantee than a filter. A clone that
+  // needs to speak to Mission Control does it from its own Supabase project,
+  // where a secret is a secret.
+  //
+  // `siteOrigin` / `VITE_SITE_URL` went with it and for a plainer reason:
+  // nothing supplied it and nothing read it. The clone's own origins are
+  // derived server-side by `applyCloneDerivedConfig` once the deployment is
+  // live, which is the first moment they are actually known.
   /**
    * The prime BACKEND's project ref, when this deployment has one configured
    * (`resolvePrimeBackendRef`). Optional: a deployment that has not configured
@@ -273,8 +290,6 @@ export function buildCloneEnv(input: BuildCloneEnvInput): CloneEnvVar[] {
   // unauthenticated Supabase client rather than at build time.
   push("VITE_SUPABASE_ANON_KEY", input.supabaseAnonKey);
   push("VITE_SUPABASE_PUBLISHABLE_KEY", input.supabaseAnonKey);
-  push("VITE_AURIXA_API_KEY", input.aurixaApiKey);
-  push("VITE_SITE_URL", input.siteOrigin);
 
   for (const [key, value] of Object.entries(input.extra ?? {})) push(key, value);
 
@@ -306,4 +321,72 @@ export function envDigest(vars: CloneEnvVar[]): string {
     h2 = Math.imul(h2 + c + i, 0x85ebca6b) >>> 0;
   }
   return `${h1.toString(16).padStart(8, "0")}${h2.toString(16).padStart(8, "0")}`;
+}
+
+/**
+ * Every variable name this pipeline owns on a clone's hosting project.
+ *
+ * ## Why a declared list and not "everything we just pushed"
+ *
+ * `syncEnv` upserts. It has never removed anything, and its own return type
+ * has carried `removed: 0` as a literal since it was written. So a name this
+ * pipeline stops emitting stays on the project for ever, and the next build
+ * inlines it — which is not a hypothetical: `VITE_AURIXA_API_KEY` and
+ * `VITE_SITE_URL` were emitted by `buildCloneEnv` until today, and a clone
+ * whose operator ever set them by hand still carries them.
+ *
+ * The obvious repair — delete anything not in the set we are pushing — is
+ * wrong, and wrong in the direction this codebase keeps paying for: an
+ * operator's own variable, set on the Vercel project for a reason nobody
+ * recorded, would be destroyed by a sync that knows nothing about it. That is
+ * the correction losing to the document it corrects.
+ *
+ * So removal is bounded by a list of names we have DECLARED, the same
+ * discipline `aml-idv-retention` uses for storage objects: a fixed enumeration,
+ * where a new name is invisible until somebody names it. A variable outside
+ * this list is somebody else's and is never touched.
+ *
+ * Retired names stay in the list. That is the entire point of the list — a
+ * name is removed from a clone BECAUSE it is managed and no longer emitted,
+ * so dropping it from here would strand it on every project that has it.
+ */
+export const MANAGED_ENV_NAMES = [
+  // Emitted by `buildCloneEnv` today.
+  "VITE_SUPABASE_URL",
+  "VITE_SUPABASE_PROJECT_ID",
+  "VITE_SUPABASE_ANON_KEY",
+  "VITE_SUPABASE_PUBLISHABLE_KEY",
+  // Passed through `extra` by the deployment drain. Declared here rather than
+  // inferred, because a clone that stops getting a widget must stop carrying
+  // the site key of one — a stale key renders a CAPTCHA that verifies against
+  // a secret this deployment no longer holds.
+  "VITE_TURNSTILE_SITE_KEY",
+  // Retired. Kept so they are taken OFF the projects that still have them.
+  "VITE_AURIXA_API_KEY",
+  "VITE_SITE_URL",
+] as const;
+
+/**
+ * Managed names present on the project that the environment being pushed does
+ * not contain — the set a sync should remove.
+ *
+ * Pure and given both sides, so the rule is testable without a Vercel project:
+ * the interesting part is which names are in scope, not how they are fetched.
+ * Case-sensitive, because environment variable names are.
+ */
+export function staleManagedNames(input: {
+  /** Names currently on the hosting project. */
+  onProject: Iterable<string>;
+  /** Names in the environment being pushed. */
+  pushing: Iterable<string>;
+}): string[] {
+  const managed = new Set<string>(MANAGED_ENV_NAMES);
+  const pushing = new Set(input.pushing);
+  const out: string[] = [];
+  for (const name of input.onProject) {
+    if (!managed.has(name)) continue; // Somebody else's. Never ours to delete.
+    if (pushing.has(name)) continue;
+    if (!out.includes(name)) out.push(name);
+  }
+  return out;
 }

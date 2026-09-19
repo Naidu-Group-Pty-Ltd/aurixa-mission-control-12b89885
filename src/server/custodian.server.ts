@@ -36,6 +36,8 @@ import {
   type CustodialActName,
 } from "./cascade/custodian.pure";
 import type { BlockageClass, BlockageOwner } from "./cascade/blockageTaxonomy.pure";
+import { planRequeue } from "./cascade/requeueDroppedClone.pure";
+type CascadeModeValue = Database["public"]["Enums"]["cascade_mode"] | null;
 
 type Db = SupabaseClient<Database>;
 
@@ -80,7 +82,11 @@ export async function runCustodian(
 
   const { data, error } = await supabase
     .from("clone_sync_blockages")
-    .select("id, clone_id, class, owner, self_heals, detail, first_seen_at")
+    // `fingerprint` carries WHICH delivery a blockage is about —
+    // `partial_clone_dropped:<eventId>` — which is what a repair for it has
+    // to act on. It was selected by nothing, so no act could ever have been
+    // scoped to the thing it was raised for.
+    .select("id, clone_id, class, owner, self_heals, fingerprint, detail, first_seen_at")
     .is("cleared_at", null)
     .order("first_seen_at", { ascending: true });
   // An open set that could not be READ is not an empty one. Reporting "nothing
@@ -93,6 +99,7 @@ export async function runCustodian(
     class: string;
     owner: string;
     self_heals: boolean;
+    fingerprint: string;
     detail: string;
     first_seen_at: string;
   }>;
@@ -219,6 +226,13 @@ export async function runCustodian(
               : null),
           dryRun,
         });
+      } else if (verdict.act === "requeue_dropped_clone") {
+        result = await requeueDroppedClone(supabase, {
+          cloneId: b.clone_id,
+          label,
+          fingerprint: b.fingerprint,
+          dryRun,
+        });
       } else {
         // Permitted, enabled, and nothing implements it. Reported rather than
         // silently skipped: an act in the catalogue that does nothing is the
@@ -285,6 +299,112 @@ export async function runCustodian(
  * reconciler, which is the one implementation of that question — so this hands
  * the rows back to the machinery rather than doing its job.
  */
+/**
+ * Re-offer a clone's part of a delivery that landed for everybody else.
+ *
+ * The judgement is `planRequeue` in `cascade/requeueDroppedClone.pure.ts`,
+ * which also carries why this mints a NEW scoped delivery rather than reviving
+ * the settled one. This half does the reading, and then the two inserts.
+ *
+ * Still `enabled: false` in `ACT_POLICY`. That is deliberate and it is not the
+ * same as unimplemented: pushing a tenant's code is an outward-facing act and
+ * turning it on is an operator's decision, the way `retarget_proposal_urls`
+ * was turned on by one. What changes here is that the decision is now a
+ * one-line flip against a built, tested act instead of a flip against an else
+ * branch that answers "no implementation in this build" — which is what
+ * `selfHeals: true` had been promising for this class all along.
+ */
+async function requeueDroppedClone(
+  supabase: Db,
+  args: { cloneId: string; label: string; fingerprint: string; dryRun: boolean },
+): Promise<{
+  outcome: CustodianOutcome["outcome"];
+  rows: number;
+  detail: string;
+  reversal?: Json;
+}> {
+  const { cloneId, label, fingerprint, dryRun } = args;
+
+  // The blockage's fingerprint is `partial_clone_dropped:<eventId>` — the
+  // taxonomy composes it so the row discharges itself when that event stops
+  // being partial. Read rather than re-derived: one spelling of the identity.
+  const sourceEventId = fingerprint.includes(":")
+    ? fingerprint.slice(fingerprint.indexOf(":") + 1)
+    : "";
+  if (!sourceEventId) {
+    return {
+      outcome: "refused",
+      rows: 0,
+      detail: `Could not read which delivery dropped ${label} from the blockage fingerprint.`,
+    };
+  }
+
+  const source = await supabase
+    .from("cascade_events")
+    .select("id, mode")
+    .eq("id", sourceEventId)
+    .maybeSingle();
+
+  // A live delivery is any event not yet settled that carries a queued row for
+  // this clone. Asked of the RESULT rows rather than the events, because that
+  // is what decides whether a pass will actually reach this clone.
+  const live = await supabase
+    .from("cascade_results")
+    .select("id, cascade_events!inner(status)")
+    .eq("clone_id", cloneId)
+    .eq("status", "queued")
+    .in("cascade_events.status", ["pending", "running"])
+    .limit(1);
+
+  const prior = await supabase
+    .from("cascade_events")
+    .select("id")
+    .contains("scope_filter", { retry_of: sourceEventId, requeue: true })
+    .limit(1);
+
+  const plan = planRequeue({
+    sourceEventId,
+    sourceMode: source.error ? null : ((source.data?.mode ?? null) as CascadeModeValue),
+    cloneId,
+    hasLiveDelivery: live.error ? null : (live.data ?? []).length > 0,
+    alreadyRequeued: prior.error ? null : (prior.data ?? []).length > 0,
+  });
+
+  if (!plan.mint) return { outcome: "refused", rows: 0, detail: plan.why };
+  if (dryRun) return { outcome: "would_perform", rows: 1, detail: `${plan.why} (dry run)` };
+
+  const { data: ev, error: evError } = await supabase
+    .from("cascade_events")
+    .insert(plan.event)
+    .select("id")
+    .single();
+  if (evError || !ev) {
+    throw new Error(`Could not mint the re-queued delivery: ${evError?.message ?? "no row"}`);
+  }
+
+  // ARMED IN THE SAME ACT.
+  //
+  // An event with no result row is one `executeCascade` holds and re-holds
+  // for want of something to do — the "claimed before any result row was
+  // armed" branch. A delivery that cannot be armed is not a repair.
+  const { error: rowError } = await supabase
+    .from("cascade_results")
+    .insert({ cascade_event_id: ev.id, clone_id: cloneId, status: "queued" });
+  if (rowError) {
+    throw new Error(`Minted ${ev.id} but could not arm it: ${rowError.message}`);
+  }
+
+  return {
+    outcome: "performed",
+    rows: 1,
+    detail: `${plan.why} Delivery ${ev.id.slice(0, 8)} queued for ${label}.`,
+    // Undoing a re-queue is deleting the delivery it minted, and only while
+    // nothing has claimed it. Recorded so the reversal is a fact rather than a
+    // reconstruction.
+    reversal: { act: "requeue_dropped_clone", cascade_event_id: ev.id } as Json,
+  };
+}
+
 async function retargetProposalUrls(
   supabase: Db,
   args: { cloneId: string; label: string; currentRepo: string | null; dryRun: boolean },

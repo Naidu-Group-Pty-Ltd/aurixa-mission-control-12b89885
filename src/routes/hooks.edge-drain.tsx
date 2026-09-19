@@ -255,7 +255,8 @@ async function runJob(job: JobRow): Promise<{ ok: boolean; result?: unknown; err
         });
         // A read that FAILED is not a row that is ABSENT, and here it is a row
         // we must not lose: without it the next run adopts all over again.
-        if (adoptErr) throw new Error(`adopted ${recordId} but could not record it: ${adoptErr.message}`);
+        if (adoptErr)
+          throw new Error(`adopted ${recordId} but could not record it: ${adoptErr.message}`);
       } else if (existing?.external_record_id) {
         const r = await cloudflareApi.updateDnsRecord(zoneId, existing.external_record_id, {
           type: recordType,
@@ -296,14 +297,35 @@ async function runJob(job: JobRow): Promise<{ ok: boolean; result?: unknown; err
           purpose: "clone_subdomain",
         });
       }
-      await admin
-        .from("clones")
-        .update({
-          subdomain: subdomain,
-          subdomain_fqdn: fqdn,
-          subdomain_status: "active",
-        })
-        .eq("id", job.clone_id);
+      // Confirms a name; never assigns one. The value here comes from the JOB
+      // PAYLOAD, which was composed when the record was enqueued, so writing it
+      // back would restore a name the clone may have been detached from or
+      // re-pointed away since — an allocation decision taken by a worker that
+      // has no idea what every other clone holds.
+      //
+      // So the name is the GUARD rather than the value: a row still holding
+      // this name gets the record and the `active` stamp, and one that does not
+      // matches nothing and keeps whatever it was changed to. The DNS record
+      // itself is already in `edge_dns_records` above, which is where a
+      // record for a name nobody uses is visible.
+      if (!subdomain) {
+        // The payload is the only thing that says which name this record was
+        // for. Without it there is no guard, and stamping without a guard is
+        // the assignment this block stopped doing. The record exists and is
+        // logged in `edge_dns_records`; the row is left alone.
+        console.error(
+          `[edge-drain] job ${job.id} created ${fqdn} with no subdomain in its payload`,
+        );
+      } else {
+        const { error: stampErr } = await admin
+          .from("clones")
+          .update({ subdomain_fqdn: fqdn, subdomain_status: "active" })
+          .eq("id", job.clone_id)
+          .eq("subdomain", subdomain);
+        if (stampErr) {
+          console.error(`[edge-drain] could not stamp ${fqdn} active: ${stampErr.message}`);
+        }
+      }
       return { ok: true, result: { recordId, fqdn } };
     }
 

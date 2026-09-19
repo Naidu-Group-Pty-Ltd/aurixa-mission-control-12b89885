@@ -1051,7 +1051,14 @@ export async function runFleetMigrationSync(
               const { data: beat, error } = await supabase
                 .from("clone_backends")
                 .update({
-                  chunk_cursor: { migrationId: p.migrationId, statementsDone: p.statementsDone },
+                  // `shape` rides the cursor so the NEXT pass reads this
+                  // 41 MB body once instead of twice — see
+                  // `chunkCursorStore.pure.ts`.
+                  chunk_cursor: {
+                    migrationId: p.migrationId,
+                    statementsDone: p.statementsDone,
+                    shape: p.shape,
+                  },
                   status_detail: `Sending ${p.name} — ${p.statementsDone} statement(s) in (${p.label})`,
                   /*
                     AND NOT THE HEARTBEAT.
