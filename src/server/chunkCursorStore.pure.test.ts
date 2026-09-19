@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { chunkCursorFor } from "./chunkCursorStore.pure";
+import { chunkCursorFor, cursorRanPastEnd } from "./chunkCursorStore.pure";
 
 /**
  * Every rejected shape here is a value that a bare
@@ -52,5 +52,42 @@ describe("chunkCursorFor", () => {
       migrationId: "some-other-file",
       statementsDone: 9,
     });
+  });
+});
+
+/**
+ * A cursor past the end of the file.
+ *
+ * `applyChunkedSeed` skips while `index < skip`, so a cursor naming more
+ * statements than the seed has skips every one of them, applies nothing, and —
+ * before this — returned `stoppedEarly: false`, which the replay reads as "the
+ * seed went" and answers by writing the ledger row. The clone then records a
+ * version it does not hold and every later pass skips it as applied.
+ */
+describe("cursorRanPastEnd", () => {
+  it("is true when the cursor claims more statements than the file has", () => {
+    expect(cursorRanPastEnd(9000, 40)).toBe(true);
+  });
+
+  it("is FALSE on equality — that is a pass that sent the last statement and died", () => {
+    // The ordinary shape of a run killed between the final statement and its
+    // ledger row. Every statement really did land; calling it an error here
+    // would stop the seed ever being recorded as applied.
+    expect(cursorRanPastEnd(40, 40)).toBe(false);
+  });
+
+  it("is false while there is still more of the file to send", () => {
+    expect(cursorRanPastEnd(2, 40)).toBe(false);
+  });
+
+  it("is false for a cursor of zero, which is not a claim about anything", () => {
+    // A zero cursor is what this very guard hands back, so treating it as past
+    // the end would be a loop that never sends a statement.
+    expect(cursorRanPastEnd(0, 0)).toBe(false);
+    expect(cursorRanPastEnd(0, 40)).toBe(false);
+  });
+
+  it("is true for a non-zero cursor against an empty walk", () => {
+    expect(cursorRanPastEnd(1, 0)).toBe(true);
   });
 });

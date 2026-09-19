@@ -464,6 +464,16 @@ async function runBackendProvisioning(
           // read as a statement about this one — the single way the skip
           // above could be wrong.
           //
+          // `chunk_cursor` goes with it, for the same reason and with a worse
+          // failure. Statement boundaries are a fact about a FILE, but "the
+          // first N landed" is a fact about a DATABASE, and this one holds
+          // none of them. Left behind, the next fleet pass hands that cursor
+          // to `applyChunkedSeed`, which skips the first N statements of the
+          // seed against an empty schema and then records the migration as
+          // applied — a clone carrying a ledger row for data it does not have.
+          // The migration that added the column says it is cleared here; this
+          // is where that stops being only a comment.
+          //
           // The note sits ABOVE the statement rather than inside the chain:
           // `check-discarded-errors.mjs` blanks comment lines rather than
           // removing them and reads four lines back from the `.update(` for
@@ -471,7 +481,7 @@ async function runBackendProvisioning(
           // write from the checker and spends a ratchet slot on nothing.
           const { error } = await supabase
             .from("clone_backends")
-            .update({ supabase_project_ref: ref, schema_verified_at: null })
+            .update({ supabase_project_ref: ref, schema_verified_at: null, chunk_cursor: null })
             .eq("clone_id", input.cloneId);
           if (error) {
             // The one write whose failure can cost a paid project: without
