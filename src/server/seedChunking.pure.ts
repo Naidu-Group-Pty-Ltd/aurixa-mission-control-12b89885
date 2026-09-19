@@ -285,6 +285,28 @@ export async function* chunkSeedStatements(
       "the second read's header or ON CONFLICT clause differs from the first — refusing to send",
     );
   }
+  /*
+    AND THE TAIL, WHICH IS THE ONE THIS CHECK USED TO MISS.
+
+    The three comparisons above guard what the tuples are poured INTO. The
+    tail is different in kind: it is executed verbatim, and it is taken from
+    the REMEMBERED shape rather than the one just derived — so without this a
+    file whose trailing statements changed, while its header, ON CONFLICT and
+    tuple count did not, would run the old tail against the new tuples and
+    then be recorded as applied.
+
+    Not hypothetical on this corpus. The template seed's tail is an `UPDATE …
+    SET status = 'published' … WHERE slug IN (…)` naming every slug one by
+    one, so an edit that swaps one slug for another leaves all three of the
+    other readings identical. Raised by review against the cross-pass shape,
+    where the interval between the two readings stopped being microseconds
+    and became however long a clone sits mid-seed.
+  */
+  if (finalShape.tail !== shape.tail) {
+    throw new SeedShapeError(
+      "the second read's trailing statements differ from the first — refusing to send",
+    );
+  }
 
   for (const s of ready) yield s;
   if (shape.tail) {

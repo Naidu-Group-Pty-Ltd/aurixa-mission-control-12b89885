@@ -212,3 +212,61 @@ describe("assertDollarQuotesBalanced", () => {
     expect(() => assertDollarQuotesBalanced("select $1", 3)).not.toThrow();
   });
 });
+
+/*
+  A REMEMBERED SHAPE IS TRUSTED FOR WHAT IT DESCRIBES AND CHECKED FOR WHAT IT
+  EXECUTES.
+
+  `chunkSeedStatements` re-derives the shape from the second read and refuses
+  on any disagreement — that is what licenses carrying a shape across passes
+  on the cursor rather than paying for a second 41 MB walk. The tail is the
+  one part of a shape that is not a description: it is SQL, taken verbatim
+  from the remembered copy and executed. Compared last and asserted here,
+  because a file whose trailing statements changed while its header, ON
+  CONFLICT and tuple count did not would otherwise run the old tail against
+  the new tuples and be recorded as applied. Raised by review.
+*/
+describe("chunkSeedStatements — the remembered tail", () => {
+  const shapeOf = async (text: string) => await readSeedShape(pieces(text));
+
+  async function drain(text: string, shape: Awaited<ReturnType<typeof shapeOf>>) {
+    const out: ChunkedStatement[] = [];
+    for await (const s of chunkSeedStatements(pieces(text), shape, { maxStatementBytes: 4_000 })) {
+      out.push(s);
+    }
+    return out;
+  }
+
+  it("sends the trailing statements when the file still carries them", async () => {
+    const text = seed(TUPLES);
+    const stmts = await drain(text, await shapeOf(text));
+    expect(stmts.at(-1)?.label).toBe("trailing statements");
+    expect(stmts.at(-1)?.sql).toContain("SET status = 'published'");
+  });
+
+  it("refuses a tail that changed while everything else stayed identical", async () => {
+    const before = seed(TUPLES);
+    const remembered = await shapeOf(before);
+    // Same header, same ON CONFLICT, same tuples — one slug swapped in the
+    // trailing UPDATE, which is the shape of edit this corpus actually makes.
+    const after = before.replace("$tlt$b$tlt$", "$tlt$c$tlt$");
+    expect(after).not.toBe(before);
+    const fresh = await shapeOf(after);
+    expect(fresh.tupleCount, "the fixture changed more than the tail").toBe(remembered.tupleCount);
+    expect(fresh.header).toBe(remembered.header);
+    expect(fresh.onConflict).toBe(remembered.onConflict);
+    await expect(drain(after, remembered)).rejects.toThrow(SeedShapeError);
+  });
+
+  it("refuses a tail that was REMOVED, which is the same class of change", async () => {
+    const before = seed(TUPLES);
+    const remembered = await shapeOf(before);
+    await expect(drain(seed(TUPLES, { tail: false }), remembered)).rejects.toThrow(SeedShapeError);
+  });
+
+  it("refuses a tail that APPEARED where the remembered shape had none", async () => {
+    const before = seed(TUPLES, { tail: false });
+    const remembered = await shapeOf(before);
+    await expect(drain(seed(TUPLES), remembered)).rejects.toThrow(SeedShapeError);
+  });
+});

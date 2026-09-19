@@ -230,14 +230,63 @@ describe("a pass is bounded", () => {
   });
 
   /*
-    AND THE TWO SWEEPS CARRY THE SAME GUARD.
+    A CURSOR THE FILE NO LONGER MATCHES IS CLEARED, NOT LEFT ALONE.
+
+    `chunkCursor: null` carries two meanings the caller is right to treat the
+    same way — "nothing to store" and "this pass never reached the seed" — and
+    for both, leaving the row's cursor standing is correct. The shape-mismatch
+    path needs a third, and reads exactly like the second in every field it
+    has: null cursor, migration not among the successes. So it fell into the
+    "leave it alone" branch, the stale shape stayed on the row, and the next
+    pass read it, hit the same mismatch, and held again. For ever, because
+    nothing in that loop re-reads the file.
+
+    Pinned across all three files rather than in one, because the defect was
+    that the producer's intent and the consumer's reading disagreed and each
+    was locally reasonable. Raised by review.
+  */
+  it("clears a cursor the prime's own file no longer matches", () => {
+    const seedApply = code(read("src/server/backend-provisioning.server.ts"));
+    // The producer says so explicitly, on the branch that means it.
+    const refusal = seedApply.indexOf("changed on the prime since the last pass");
+    expect(refusal, "the shape-mismatch refusal was not found").toBeGreaterThan(-1);
+    const branch = seedApply.slice(Math.max(0, refusal - 500), refusal);
+    expect(branch, "the discard is inferred from a null cursor rather than said").toContain(
+      "cursorDiscarded: true",
+    );
+    /*
+      And it survives the frame between — SET as well as declared.
+
+      This read `toContain("chunkCursorDiscarded")`, which the `let … = false`
+      and the return satisfy between them with nothing ever assigning it. A
+      mutation that deleted the only assigning line passed this test, which is
+      the fifth time on this branch that an assertion has been satisfied by a
+      declaration rather than by behaviour. Both halves are now required: the
+      producer's field is read, and the flag is set from it.
+    */
+    expect(seedApply, "the discard is declared and returned but never set").toMatch(
+      /chunked\.cursorDiscarded[\s\S]{0,80}?chunkCursorDiscarded = true/,
+    );
+    expect(seedApply, "the discard does not leave applyPrimeMigrations").toMatch(
+      /return \{[^}]*chunkCursorDiscarded[^}]*\}/,
+    );
+    // And the consumer acts on it, in the branch that writes null.
+    const lane = code(read("src/server/fleet-migration.server.ts"));
+    expect(lane, "the lane never reads the discard").toContain("chunkCursorDiscarded");
+    expect(lane, "a discarded cursor is not cleared on the row").toMatch(
+      /chunkCursorDiscarded \|\| cursorFileLanded[\s\S]{0,120}?chunk_cursor: null/,
+    );
+  });
+
+  /*
+    AND BOTH SWEEPS CARRY THE SAME GUARD.
 
     Splitting "old AND (quiet OR never beat)" into two statements repeats the
     guard that makes either one safe — the claimable status set and the pair
     that says a claim is actually held. Written twice, one of them can lose a
-    line, and a reclaim missing `.not("worker_started_at", "is", null)` would
-    clear claims nobody holds while a reclaim missing the status filter would
-    reach rows this lane never touches.
+    line: a reclaim missing `.not("worker_started_at", "is", null)` would
+    clear claims nobody holds, and one missing the status filter would reach
+    rows this lane never touches.
 
     So the repetition is checked rather than trusted. This is what licenses
     writing it out instead of composing an `.or()`.
@@ -250,6 +299,75 @@ describe("a pass is bounded", () => {
       expect(sweep).toContain('.in("status", claimable)');
       expect(sweep).toContain('.not("worker_started_at", "is", null)');
       expect(sweep).toContain('.lt("worker_started_at", cutoff)');
+    }
+  });
+
+  /*
+    AND NO SWEEP FREES A CLAIM ON AGE ALONE.
+
+    Review is right that a late beat can extend a claim past one window, and
+    the obvious answer — an absolute age past which a claim is freed whatever
+    its stamp says — was written here and then removed. It is the same shape
+    as the `_not_after` deadline removed one round earlier: a rule that can
+    free a claim a LIVE pass is holding, which is how two passes end up in
+    one schema. Only the trigger differs.
+
+    The trade decides it. The residual costs a delay — a claim held by
+    nobody, a clone skipped until the beats drain — while a ceiling trades
+    that for a chance of concurrent application, which is the wrong way
+    round.
+
+    Asserted as an absence, on both the constant and the shape of a sweep
+    that reads no stamp, so re-adding it is a deliberate act against a stated
+    argument rather than a plausible-looking commit. What would change the
+    answer is a MEASURED invocation ceiling for this runtime; that is a fact
+    about the platform rather than a guess about latency, and it is not in
+    hand.
+  */
+  /*
+    THE BEATS STOP BEFORE THE RELEASE, NOT AFTER IT.
+
+    The `finally` still stops the heartbeat and must keep doing so — the
+    throw path has no other exit. What this pins is an EARLIER first call,
+    immediately above the write that sets `worker_started_at: null`.
+
+    Stopped only in the `finally`, every beat dispatched during the replay is
+    still live while the release runs, and one that commits after a FAILED
+    release re-stamps a claim nobody holds. Stopped first, the abort has
+    already dropped everything not yet sent and the drain has given what was
+    sent its two seconds, so only a beat still in flight past that can land
+    late. It costs nothing and cannot backfire, which is why it is what this
+    change does instead of a claim-age ceiling.
+  */
+  it("stops the beats before releasing the claim, and still stops them in the finally", () => {
+    const lane = code(read("src/server/fleet-migration.server.ts"));
+    const stops = [...lane.matchAll(/await heartbeat\.stop\(\)/g)].map((m) => m.index ?? -1);
+    expect(stops.length, "the heartbeat is stopped in only one place").toBe(2);
+    // The release is the write that nulls the claim, and it must come after
+    // the first stop and before the second.
+    const release = lane.indexOf("worker_started_at: null,");
+    expect(release, "the release write was not found").toBeGreaterThan(-1);
+    expect(stops[0], "the beats are still running when the claim is released").toBeLessThan(
+      release,
+    );
+    const finallyAt = lane.lastIndexOf("} finally {");
+    expect(stops[1], "the finally no longer stops the heartbeat").toBeGreaterThan(finallyAt);
+  });
+
+  it("frees no claim on age alone, however old", () => {
+    const lane = code(read("src/server/fleet-migration.server.ts"));
+    expect(lane, "a claim-age ceiling is back").not.toMatch(/const CLAIM_CEILING/);
+    const sweeps = reclaimBody().split(".update({ worker_started_at: null })").slice(1);
+    for (const sweep of sweeps) {
+      /*
+        Every sweep reads the heartbeat — one for a stale stamp, one for the
+        absence of any. A sweep that reads neither is one that frees a claim
+        purely because it is old, whatever it is called.
+      */
+      const readsTheStamp =
+        sweep.includes('.lt("migration_heartbeat_at"') ||
+        sweep.includes('.is("migration_heartbeat_at"');
+      expect(readsTheStamp, "a sweep frees a claim without reading its heartbeat").toBe(true);
     }
   });
 

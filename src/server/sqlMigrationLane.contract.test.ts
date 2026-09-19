@@ -111,7 +111,12 @@ describe("a pass is bounded", () => {
     expect(send).toBeGreaterThan(check);
     expect(replay).toContain("attempted += 1;");
     expect(replay).toContain(
-      "return { results, latestApplied, stoppedEarly, chunksApplied, chunkCursor };",
+      // `chunkCursorDiscarded` joined this shape so a cursor the prime's file
+      // no longer matches is CLEARED rather than left standing — see
+      // `fleetPassIsBudgeted.contract.test.ts`. Listed in full rather than
+      // matched loosely, because the point of this assertion is that the
+      // replay returns exactly what the caller needs and nothing it invents.
+      "return { results, latestApplied, stoppedEarly, chunksApplied, chunkCursor, chunkCursorDiscarded };",
     );
   });
 

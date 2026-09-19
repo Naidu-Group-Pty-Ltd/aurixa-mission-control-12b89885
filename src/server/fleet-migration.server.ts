@@ -124,6 +124,45 @@ const DEFAULT_BATCH = 5;
  */
 const STALE_CLAIM_MINUTES = 5;
 
+/*
+ * A CEILING ON CLAIM AGE WAS CONSIDERED HERE AND DELIBERATELY NOT ADDED.
+ *
+ * Review is right that the residual below is not "one reclaim window once".
+ * `stop` aborts the outstanding beats — dropping every one not yet sent and
+ * closing the connection of one that has been — but Postgres notices a
+ * vanished client only when it next writes to the socket, which for a short
+ * UPDATE is after it has committed. So on the one path where the pass's own
+ * release ALSO failed, leaving `worker_started_at` still equal to the claim,
+ * each late beat stamps its own `clock_timestamp()` and pushes the silence
+ * window out again. The true bound is one window after the LAST queued beat
+ * commits, and nothing local bounds when that is.
+ *
+ * The obvious answer is an absolute age past which a claim is freed whatever
+ * its stamp says. It was written, and then removed, because it is the SAME
+ * SHAPE as the `_not_after` deadline removed one round earlier: a rule that
+ * can free a claim a LIVE pass is holding, which is how two passes end up
+ * inside one schema. Only the trigger differs — ordinary latency there, an
+ * improbably long pass here — and "improbable" is the reasoning this codebase
+ * keeps paying for.
+ *
+ * The trade decides it. The residual costs a DELAY: a claim held by nobody,
+ * a clone skipped until the beats drain and the window passes, nothing
+ * applied twice and nothing corrupted. A ceiling would trade that for a
+ * chance of concurrent application — which is the wrong way round, and is
+ * the same argument made against the deadline.
+ *
+ * What is done instead costs nothing: the beats are stopped BEFORE the
+ * release is attempted rather than after it, so the set that can outlive a
+ * failed release is only those still in flight after the drain. See the
+ * `heartbeat.stop()` above the result write.
+ *
+ * What would change this: a MEASURED ceiling on how long one invocation can
+ * live in this runtime. A claim ceiling set from that is a fact about the
+ * platform rather than a guess about latency, and could never reach a pass
+ * the platform would not already have killed. That measurement is not in
+ * hand, and guessing it is the thing this comment exists to refuse.
+ */
+
 /**
  * A pass will not claim a clone it cannot plausibly do anything for.
  *
@@ -1059,16 +1098,22 @@ export async function runFleetMigrationSync(
     const heartbeat = beatWhileClaimHeld(supabase, cloneId, claimedAt);
 
     try {
-      const { results, latestApplied, stoppedEarly, chunksApplied, chunkCursor } =
-        await applyPrimeMigrations(
-          backend.supabase_project_ref!,
-          runnable,
-          undefined,
-          (m) => corpus.loadSql(m.id),
-          // `runnable` alone cannot say whether a cleared version sits behind a
-          // withheld one. The whole corpus can.
-          { corpus: corpus.metas, runnableIds: new Set(runnable.map((m) => m.id)) },
-          /*
+      const {
+        results,
+        latestApplied,
+        stoppedEarly,
+        chunksApplied,
+        chunkCursor,
+        chunkCursorDiscarded,
+      } = await applyPrimeMigrations(
+        backend.supabase_project_ref!,
+        runnable,
+        undefined,
+        (m) => corpus.loadSql(m.id),
+        // `runnable` alone cannot say whether a cleared version sits behind a
+        // withheld one. The whole corpus can.
+        { corpus: corpus.metas, runnableIds: new Set(runnable.map((m) => m.id)) },
+        /*
           A BODY TOO BIG TO HOLD IS STILL SENDABLE.
 
           `openPrimeMigrationCorpus` refuses a body past its ceiling, and the
@@ -1108,13 +1153,13 @@ export async function runFleetMigrationSync(
           set — which starves every OTHER clone too, since the loop needs the
           claim free — and no clone's `migration_version` moved.
         */
-          // Stop BETWEEN migrations once this pass's budget is spent, reserving
-          // the slowest migration applied so far — so a pass never STARTS one it
-          // cannot live to finish and then reports the clone level.
-          { isPastDeadline: (reserveMs) => Date.now() + reserveMs >= deadlineAt },
-          {
-            streamSql: (m) => corpus.openSqlStream(m.id),
-            /*
+        // Stop BETWEEN migrations once this pass's budget is spent, reserving
+        // the slowest migration applied so far — so a pass never STARTS one it
+        // cannot live to finish and then reports the clone level.
+        { isPastDeadline: (reserveMs) => Date.now() + reserveMs >= deadlineAt },
+        {
+          streamSql: (m) => corpus.openSqlStream(m.id),
+          /*
             THE CURSOR IS THE DIFFERENCE BETWEEN SLOW AND NEVER.
 
             Read from the clone's own row and written on EVERY statement, not
@@ -1128,21 +1173,21 @@ export async function runFleetMigrationSync(
             believed: a cursor into a DIFFERENT file would make this pass skip
             statements of the seed it is actually sending.
           */
-            cursor: chunkCursorFor(backend.chunk_cursor),
-            onStatementDone: async (p) => {
-              const { data: beat, error } = await supabase
-                .from("clone_backends")
-                .update({
-                  // `shape` rides the cursor so the NEXT pass reads this
-                  // 41 MB body once instead of twice — see
-                  // `chunkCursorStore.pure.ts`.
-                  chunk_cursor: {
-                    migrationId: p.migrationId,
-                    statementsDone: p.statementsDone,
-                    shape: p.shape,
-                  },
-                  status_detail: `Sending ${p.name} — ${p.statementsDone} statement(s) in (${p.label})`,
-                  /*
+          cursor: chunkCursorFor(backend.chunk_cursor),
+          onStatementDone: async (p) => {
+            const { data: beat, error } = await supabase
+              .from("clone_backends")
+              .update({
+                // `shape` rides the cursor so the NEXT pass reads this
+                // 41 MB body once instead of twice — see
+                // `chunkCursorStore.pure.ts`.
+                chunk_cursor: {
+                  migrationId: p.migrationId,
+                  statementsDone: p.statementsDone,
+                  shape: p.shape,
+                },
+                status_detail: `Sending ${p.name} — ${p.statementsDone} statement(s) in (${p.label})`,
+                /*
                     AND NOT THE HEARTBEAT.
 
                     This wrote `migration_heartbeat_at` too, from the days
@@ -1159,24 +1204,24 @@ export async function runFleetMigrationSync(
                     callback cannot reach anyway. The fence stays: that is
                     ownership, which is a different question.
                   */
-                })
-                .eq("clone_id", cloneId)
-                .eq("worker_started_at", claimedAt)
-                .select("clone_id");
-              if (error) {
-                // Not fatal: the statements themselves have landed and the seed's
-                // own ON CONFLICT makes re-sending them free. But a cursor that
-                // cannot be written turns a resumable pass back into the livelock
-                // this exists to end, so it must not be silent.
-                console.error("[fleet-migration] chunk cursor not recorded", {
-                  cloneId,
-                  migration: p.name,
-                  statementsDone: p.statementsDone,
-                  error: error.message,
-                });
-                return;
-              }
-              /*
+              })
+              .eq("clone_id", cloneId)
+              .eq("worker_started_at", claimedAt)
+              .select("clone_id");
+            if (error) {
+              // Not fatal: the statements themselves have landed and the seed's
+              // own ON CONFLICT makes re-sending them free. But a cursor that
+              // cannot be written turns a resumable pass back into the livelock
+              // this exists to end, so it must not be silent.
+              console.error("[fleet-migration] chunk cursor not recorded", {
+                cloneId,
+                migration: p.name,
+                statementsDone: p.statementsDone,
+                error: error.message,
+              });
+              return;
+            }
+            /*
                 A FENCE MISS IS FATAL, WHERE A FAILED WRITE IS NOT.
 
                 No row matched, so `worker_started_at` is not this pass's any
@@ -1194,21 +1239,21 @@ export async function runFleetMigrationSync(
                 therefore takes nothing away from the pass that now owns the
                 row.
               */
-              if (!beat || beat.length === 0) {
-                // `ClaimLostError` rather than a plain `Error`: the replay
-                // catches every exception per migration and records it as a
-                // migration the CLONE refused, which is the wrong sentence and
-                // skips the fenced release below. That class is the one thing
-                // it rethrows.
-                throw new ClaimLostError(
-                  `${CLAIM_LOST}: this pass was reclaimed while sending ${p.name} ` +
-                    `(statement ${p.statementsDone}); another pass now holds this clone, so ` +
-                    `this one stops rather than sending into a database it no longer owns`,
-                );
-              }
-            },
+            if (!beat || beat.length === 0) {
+              // `ClaimLostError` rather than a plain `Error`: the replay
+              // catches every exception per migration and records it as a
+              // migration the CLONE refused, which is the wrong sentence and
+              // skips the fenced release below. That class is the one thing
+              // it rethrows.
+              throw new ClaimLostError(
+                `${CLAIM_LOST}: this pass was reclaimed while sending ${p.name} ` +
+                  `(statement ${p.statementsDone}); another pass now holds this clone, so ` +
+                  `this one stops rather than sending into a database it no longer owns`,
+              );
+            }
           },
-        );
+        },
+      );
       const successes = results.filter((r) => r.success && !r.skipped);
       /*
         A HOLD IS NOT A FAILURE, AND THE DIFFERENCE IS THE CLONE'S LIFE.
@@ -1322,6 +1367,27 @@ export async function runFleetMigrationSync(
         // still moved this clone forward. Counting it as "nothing happened"
         // would leave the previous pass's sentence standing over real progress.
         chunksApplied === 0;
+      /*
+        THE BEATS STOP BEFORE THE RELEASE, NOT AFTER IT.
+
+        The `finally` below still stops the heartbeat — this is not a move,
+        it is an earlier first call, and `stop` is idempotent. What the order
+        buys is the set of beats that can outlive the release.
+
+        Stopped afterwards, every beat dispatched during the replay is still
+        live while the release runs, and any of them that commits after a
+        FAILED release re-stamps a claim nobody holds. Stopped here, the
+        abort has already dropped everything not yet sent and the drain has
+        given what was sent its two seconds, so only a beat still in flight
+        past that can land late.
+
+        It cannot go the other way round and it cannot backfire: after this
+        line the pass does one small UPDATE, which is far inside
+        `STALE_CLAIM_MINUTES`, and if that write is slow enough to be
+        reclaimed anyway its own fence catches it — which is the case
+        `CLAIM_LOST` already reports.
+      */
+      await heartbeat.stop();
       const syncedTo = latestApplied ?? "the prime's latest recorded migration";
       /*
         A PASS THE BUDGET STOPPED HAS NOT FINISHED LOOKING.
@@ -1345,6 +1411,8 @@ export async function runFleetMigrationSync(
         Three states, and the middle one is why this cannot be a plain write of
         whatever `applyPrimeMigrations` returned.
 
+        FOUR states, and the fourth was the one this enumeration missed.
+
         A pass that stopped INSIDE the seed returns a cursor: store it.
         A pass that FINISHED the seed returns null and the migration is among
         `successes`: clear it, because a cursor into a completed file would make
@@ -1353,6 +1421,17 @@ export async function runFleetMigrationSync(
         also returns null, and here the stored cursor is still exactly true.
         Writing null for that third case would throw away a resume point and
         put the livelock back for one pass in every chain.
+
+        And a pass that found the FILE changed under a stored cursor returns
+        null meaning DISCARD. It reads like the third case in every field —
+        null cursor, migration not among the successes — so it fell into the
+        "leave it alone" branch, the stale shape stayed on the row, and the
+        next pass read it, hit the same mismatch and held again. Permanently:
+        nothing in that loop ever re-reads the file, which is the livelock
+        this block exists to prevent, arriving through the door the block
+        itself opened. Raised by review; `chunkCursorDiscarded` is the fourth
+        state said out loud rather than inferred from three fields that cannot
+        distinguish it.
       */
       const storedCursor = chunkCursorFor(backend.chunk_cursor);
       const cursorFileLanded =
@@ -1360,7 +1439,7 @@ export async function runFleetMigrationSync(
       const cursorWrite =
         chunkCursor !== null
           ? { chunk_cursor: chunkCursor }
-          : cursorFileLanded
+          : chunkCursorDiscarded || cursorFileLanded
             ? { chunk_cursor: null }
             : {};
       const { data: recorded, error: updErr } = await supabase

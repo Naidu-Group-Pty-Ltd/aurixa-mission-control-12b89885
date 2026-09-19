@@ -1405,7 +1405,8 @@ const DERIVED_DEPLOYMENT_CONFIG: Record<
   AML_PROVIDER_MODE: () => "live",
 };
 
-export const DERIVED_DEPLOYMENT_CONFIG_NAMES: readonly string[] = Object.keys(DERIVED_DEPLOYMENT_CONFIG);
+export const DERIVED_DEPLOYMENT_CONFIG_NAMES: readonly string[] =
+  Object.keys(DERIVED_DEPLOYMENT_CONFIG);
 
 /** Every derivable name that resolves to a value for this clone. */
 export function deriveDeploymentConfig(
@@ -2383,9 +2384,8 @@ export async function rescueScopedOrphans<T extends { id: string; name: string }
 ): Promise<{ send: T[]; stillBlocked: Array<{ meta: T; blockedBy: string[] }> }> {
   if (orphaned.length === 0) return { send: [], stillBlocked: [] };
 
-  const { scopeHoles, holeRelationNames, MAX_SCOPING_BYTES } = await import(
-    "./cascade/migrationDependencyScope.pure"
-  );
+  const { scopeHoles, holeRelationNames, MAX_SCOPING_BYTES } =
+    await import("./cascade/migrationDependencyScope.pure");
   const byId = new Map(corpus.map((m) => [m.id, m]));
   const sqlOnItem = new Map(materialised.filter((m) => m.sql).map((m) => [m.id, m.sql as string]));
 
@@ -2529,6 +2529,15 @@ export async function applyPrimeMigrations(
   chunksApplied: number;
   /** Where a chunked migration stopped, when the budget stopped it mid-way. */
   chunkCursor: ChunkCursor | null;
+  /**
+   * The stored cursor is WRONG and must be cleared, not merely left alone.
+   *
+   * `chunkCursor: null` cannot carry this: it already means "nothing to
+   * store" and "this pass never reached the seed", and for both of those the
+   * caller is right to leave the row's cursor exactly as it found it. See
+   * `applyOversizeSeed`'s own field for the livelock this closes.
+   */
+  chunkCursorDiscarded: boolean;
 }> {
   await runSqlOnProject(projectRef, TRACKING_TABLE_SQL);
 
@@ -2604,6 +2613,7 @@ export async function applyPrimeMigrations(
   let attempted = 0;
   let slowestMs = 0;
   let stoppedEarly = false;
+  let chunkCursorDiscarded = false;
   let chunksApplied = 0;
   let chunkCursor: ChunkCursor | null = null;
   for (let i = 0; i < ordered.length; i++) {
@@ -2689,6 +2699,10 @@ export async function applyPrimeMigrations(
           // that retries in silence for ever. "A failure says which kind it
           // was."
           chunkCursor = chunked.cursor;
+          // A discard has to travel: this path returns a null cursor with the
+          // migration NOT among the successes, which is exactly the shape the
+          // caller reads as "leave the row's cursor alone".
+          if (chunked.cursorDiscarded) chunkCursorDiscarded = true;
           results.push({
             id: m.id,
             name: m.name,
@@ -2769,7 +2783,7 @@ export async function applyPrimeMigrations(
     }
   }
 
-  return { results, latestApplied, stoppedEarly, chunksApplied, chunkCursor };
+  return { results, latestApplied, stoppedEarly, chunksApplied, chunkCursor, chunkCursorDiscarded };
 }
 
 /**
@@ -2833,6 +2847,22 @@ async function applyChunkedSeed(
    * and this says the replay must hold rather than fail the clone.
    */
   upstreamRefusal: string | null;
+  /**
+   * The stored cursor must be CLEARED, not merely left alone.
+   *
+   * `cursor: null` already means two different things — "nothing to store"
+   * and "this pass never reached the seed" — and the caller is right to leave
+   * the row untouched for both. The shape-mismatch path needs a third: the
+   * stored cursor was cut from a body that no longer exists and is actively
+   * wrong, so leaving it standing makes the next pass read the same stale
+   * shape, hit the same mismatch, and hold again — for ever, without ever
+   * re-reading the file from statement zero.
+   *
+   * Raised by review. A boolean rather than a fourth meaning for `cursor`,
+   * because that field already carries two and a third would be read wrong by
+   * whichever caller is written next.
+   */
+  cursorDiscarded?: boolean;
 }> {
   const { readSeedShape, chunkSeedStatements, SeedShapeError } =
     await import("./seedChunking.pure");
@@ -2919,6 +2949,10 @@ async function applyChunkedSeed(
           applied,
           stoppedEarly: true,
           cursor: null,
+          // Said explicitly: the sentence below promises the next pass starts
+          // from the beginning, and that promise is only kept if the row's
+          // cursor is actually cleared.
+          cursorDiscarded: true,
           upstreamRefusal:
             `${m.name} changed on the prime since the last pass (${e.message}). The recorded ` +
             "position was cut from a body that no longer exists, so it is discarded and the " +
@@ -5141,6 +5175,10 @@ export async function provisionCloneBackend(
       "Writing this clone's own secrets (peppers, VAPID pair) — vault then environment...",
     );
     const { ensureCloneOwnedSecrets, readPrimeShape } = await import("./cloneOwnedSecrets.server");
+    // prettier-ignore — kept on one line because `cloneOwnedSecrets.test.ts`
+    // anchors on this exact call to assert the step runs with the prime shape
+    // fed in, and prettier wraps it whenever this file grows.
+    // prettier-ignore
     const owned = await ensureCloneOwnedSecrets(projectRef, await readPrimeShape(input.primeBackendRef));
     if (owned.ok) {
       ownedValues = owned.values;
