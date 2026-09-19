@@ -1058,7 +1058,11 @@ describe("a pass that built nothing must not spend its budget re-proving it", ()
     const insertAt = body.indexOf("insert into supabase_migrations.schema_migrations");
     expect(askAt).toBeGreaterThan(-1);
     expect(insertAt).toBeGreaterThan(askAt);
-    expect(body).toMatch(/return \{ stamped: 0, reconciled: true \}/);
+    // The rule is "an equal count returns having stamped nothing", not the
+    // exact shape of that return — the object grew a `primeLedgerTop` when the
+    // frontier stopped being read off the prime's file list, and a test that
+    // pins a literal fails for a reason that is not about what it checks.
+    expect(body).toMatch(/return \{\s*stamped: 0,\s*reconciled: true/);
   });
 
   it("still refuses an EMPTY prime ledger, and still stamps a short clone one", () => {

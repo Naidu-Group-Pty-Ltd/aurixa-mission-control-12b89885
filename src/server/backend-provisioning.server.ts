@@ -19,6 +19,12 @@ import type { PrimeBackendSnapshot } from "./prime-backend.server";
 import type { StageName, StageResult } from "./schema-introspection.server";
 import { resolveMissionControlOrigin } from "./missionControlLink.pure";
 import { cursorRanPastEnd, type StoredSeedShape } from "./chunkCursorStore.pure";
+import {
+  frontierFromReplay,
+  frontierUnreadable,
+  resolveMigrationFrontier,
+  type MigrationFrontier,
+} from "./migrationFrontier.pure";
 
 const MGMT_API = "https://api.supabase.com/v1";
 
@@ -4339,7 +4345,12 @@ export type ProvisionBackendResult = {
    */
   adminSeed: AdminSeedReport | null;
   migrationsApplied: PrimeMigrationResult[];
-  latestMigration: string | null;
+  /**
+   * What `clone_backends.migration_version` may be set to, and whether it may
+   * be set at all. A reading, never a corpus position — `migrationFrontier.pure.ts`
+   * records what a frontier taken from the newest migration FILE cost.
+   */
+  latestMigration: MigrationFrontier;
   /** Present when the schema was built by catalog introspection. */
   introspection?: IntrospectionSummary | null;
   edgeFunctions: EdgeFunctionDeployResult[];
@@ -4500,7 +4511,18 @@ export async function provisionCloneBackend(
   // forced with `schemaStrategy: "migration-replay"`.
   const strategy = input.schemaStrategy ?? "introspection";
   let migrationsApplied: PrimeMigrationResult[] = [];
-  let latestApplied: string | null = null;
+  // Unreadable until a branch below establishes it. The default withholds the
+  // write rather than clearing the column, which is the safe direction: a
+  // cleared frontier asks the next sync to replay the whole corpus against a
+  // populated database.
+  // Named apart from `applyPrimeMigrations`'s own local `latestApplied`,
+  // which is a bare version string — a reading of what that replay applied.
+  // Two variables spelled the same while meaning a version and a reading of a
+  // version is the drift this whole module exists to close, and it is also
+  // what stopped a test being able to say which assignments it was judging.
+  let migrationFrontier: MigrationFrontier = frontierUnreadable(
+    "No branch of this pass established a migration frontier.",
+  );
   let introspection: IntrospectionSummary | null = null;
 
   /*
@@ -4542,13 +4564,22 @@ export async function provisionCloneBackend(
       "migrating",
       "Schema already reconciled against the prime — resuming at the edge functions.",
     );
-    latestApplied =
-      [...snapshot.migrations].sort((a, b) => a.name.localeCompare(b.name)).at(-1)?.id ?? null;
+    // Read from the clone, never from `snapshot.migrations`. This branch runs
+    // no stamp, so there is no derivation to fall back on — an unreadable
+    // ledger here leaves the column exactly as the pass that wrote it left it.
+    const { readCloneMigrationFrontier } = await import("./schema-introspection.server");
+    migrationFrontier = resolveMigrationFrontier({
+      clone: await readCloneMigrationFrontier(projectRef),
+    });
   } else if (strategy === "introspection") {
     pauseIfDue("building the schema by introspection");
     await onStatusUpdate?.("migrating", "Introspecting the prime's live catalog...");
-    const { replicateSchemaByIntrospection, stampMigrationLedgerFromPrime, verifyCloneIsEmpty } =
-      await import("./schema-introspection.server");
+    const {
+      replicateSchemaByIntrospection,
+      stampMigrationLedgerFromPrime,
+      verifyCloneIsEmpty,
+      readCloneMigrationFrontier,
+    } = await import("./schema-introspection.server");
     const primeRef = input.primeBackendRef;
     const result = await replicateSchemaByIntrospection(projectRef, {
       primeRef,
@@ -4626,8 +4657,14 @@ export async function provisionCloneBackend(
     // provisioning. A `.catch(() => ({ stamped: 0 }))` here turned that into a
     // success that printed "stamped 0 migration ID(s)" and moved on.
     const stamp = await stampMigrationLedgerFromPrime(projectRef, primeRef);
-    latestApplied =
-      [...snapshot.migrations].sort((a, b) => a.name.localeCompare(b.name)).at(-1)?.id ?? null;
+    // The clone decides. `stamp.primeLedgerTop` is the derivation — what this
+    // pass copied — and is used only where the clone itself cannot be read.
+    // Neither is the newest migration FILE, which is what this used to be and
+    // which sat two versions ahead of the clone on `npc-crm-independent-6505dc`.
+    migrationFrontier = resolveMigrationFrontier({
+      clone: await readCloneMigrationFrontier(projectRef),
+      primeLedgerTop: stamp.primeLedgerTop,
+    });
     await onStatusUpdate?.(
       "migrating",
       stamp.reconciled
@@ -4647,7 +4684,7 @@ export async function provisionCloneBackend(
     );
     const replay = await applyPrimeMigrations(projectRef, snapshot.migrations, onStatusUpdate);
     migrationsApplied = replay.results;
-    latestApplied = replay.latestApplied;
+    migrationFrontier = frontierFromReplay(replay.latestApplied);
     const migrationFailure = migrationsApplied.find((r) => !r.success);
     if (migrationFailure) {
       throw new Error(
@@ -5207,7 +5244,7 @@ export async function provisionCloneBackend(
       adminUserId: null,
       adminSeed: null,
       migrationsApplied,
-      latestMigration: latestApplied,
+      latestMigration: migrationFrontier,
       introspection,
 
       edgeFunctions,
@@ -5259,7 +5296,7 @@ export async function provisionCloneBackend(
     adminUserId,
     adminSeed,
     migrationsApplied,
-    latestMigration: latestApplied,
+    latestMigration: migrationFrontier,
     introspection,
 
     edgeFunctions,

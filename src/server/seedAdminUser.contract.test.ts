@@ -134,9 +134,22 @@ describe("a clone_backends row records which account was seeded", () => {
     ).toBeGreaterThanOrEqual(3);
 
     // Specifically: the direct path's clone_backends update carries it.
-    const directAt = functions.indexOf("migration_version: result.latestMigration");
+    //
+    // Anchored on `source_repo`, which is a plain assignment in that same
+    // update. It used to anchor on `migration_version: result.latestMigration`,
+    // and that stopped existing when the frontier became a reading that may
+    // decline to be written at all — an anchor is not the rule, so it moved.
+    const directAt = functions.indexOf("source_repo: snapshot.sourceRepo");
     expect(directAt).toBeGreaterThan(-1);
-    const window = functions.slice(Math.max(0, directAt - 900), directAt);
-    expect(window, "the direct path's row update must set admin_email").toContain("admin_email:");
+    // Bounded by the payload's own opening brace rather than by a character
+    // count. A fixed-size backward window has to be re-tuned every time a
+    // comment inside the object grows, which is a test that fails for reasons
+    // that are not about the rule — it did exactly that here.
+    const opensAt = functions.lastIndexOf(".update({", directAt);
+    expect(opensAt, "expected the direct path's update payload to open").toBeGreaterThan(-1);
+    const payload = functions.slice(opensAt, directAt);
+    expect(payload, "the direct path's row update must set admin_email").toContain(
+      "admin_email: input.adminEmail",
+    );
   });
 });

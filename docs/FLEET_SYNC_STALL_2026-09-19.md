@@ -352,3 +352,142 @@ seed between passes: the file is fine, the recorded position was cut from a
 body that no longer exists, and asking an operator to apply 41 MB by hand would
 be the worst available answer. That branch drops the cursor and holds; the next
 pass reads fresh and starts from statement 0.
+
+## 6. The recorded frontier was two versions ahead of the clone
+
+Found by a diagnostic sweep that finished after the five above were written,
+and it is a **SQL migration ledger** fault rather than a cascade one — the
+half of this work that was asked for and that the first five causes did not
+touch.
+
+Both introspection branches of `provisionCloneBackend` set the frontier to
+
+```ts
+latestApplied =
+  [...snapshot.migrations].sort((a, b) => a.name.localeCompare(b.name)).at(-1)?.id ?? null;
+```
+
+That is the newest migration **file in the prime's repository**. It is not a
+reading of the clone, and — because of §3–4 above — it is not even a reading of
+the prime: four files sit on the prime's `main` that its ledger has never
+recorded.
+
+Measured on `npc-crm-independent-6505dc`: `clone_backends.migration_version`
+reads `20261204010000` while that clone's own
+`supabase_migrations.schema_migrations` tops out at `20261203010000`. **The
+recorded frontier is two versions ahead of what the clone holds**, and a
+frontier ahead of the truth is the one direction that loses data silently:
+`migration-sync` computes `corpus − frontier`, so both versions are skipped as
+applied and nothing will ever send them again. It is the same shape as
+`cursorRanPastEnd` — a recorded position past the end of what actually
+happened, believed because nothing ever compared it against its subject.
+
+It also explains why that clone looked ahead of the other three. It is not: the
+other three sit at `20261201100000` because a `sql_migration` replay wrote
+theirs from what it applied. Same fleet position, two writers, two numbers.
+
+**A version column is a reading of the thing it names.**
+`migrationFrontier.pure.ts` resolves it, and the structural reason it cannot
+reintroduce the fault is that it is handed readings and never a corpus — there
+is no file list in its input to sort and take the last of. Precedence:
+
+1. **The clone's own ledger** (`max(version)`), because the column names the
+   clone. This also catches a stamp that half-succeeded, which a reading taken
+   from the source never could.
+2. **The prime's ledger**, only where the clone could not be read — what
+   `stampMigrationLedgerFromPrime` copies row for row, so a derivation rather
+   than a guess, and labelled as one.
+3. **Nothing.** Where neither can be read the column is left exactly as it was.
+
+The third is the half that matters. Writing `null` there would mean "this clone
+has applied no migrations", which sends the next sync to replay the whole
+corpus against a populated database — the failure
+`stampMigrationLedgerFromPrime`'s own guard exists to prevent, arriving dressed
+as an ordinary status write. So `resolveMigrationFrontier` can answer *do not
+write*, and the caller spreads rather than assigns.
+
+**`null` is not the same as unreadable.** A clone whose ledger answers with no
+rows genuinely has an empty ledger, and that is worth recording — it is the
+state a full replay is the right answer to. Only "we could not look" withholds.
+
+Two things worth keeping about how this was checked. `supabase` is untyped in
+`runBackendProvisioning`, so `tsc` accepted the whole reading object being
+poured into a `text` column without a word; a spec checks the shape instead.
+And the first source-level assertion **passed vacuously**: it forbade
+`latestApplied = [...snapshot.migrations]`, and a planted
+`latestApplied = { version: [...snapshot.migrations]... }` walked straight past
+it because the corpus was one level deeper than the regex looked. The rule is
+now stated twice over — every assignment is one of three named constructors
+(a literal is not a call), and no assignment's right-hand side may mention the
+corpus at all — and a second plant laundering the corpus through a sanctioned
+constructor is caught by the second half.
+
+## 7. A partial delivery settled as finished, and nothing ever re-offered it
+
+`cascadeEventStatus` maps a run with `failed > 0` and at least one success to
+`partial`, and `executeCascade` writes it with `completed_at` — the event's
+final settle. `partial` is then terminal to every retry path: the drain claims
+`.eq("status", "pending")`, and its only revival rule matches a result row
+still at `pushing` past the stall cutoff, which a `failed` row can never be.
+
+Measured: **15 partial events and 17 failed rows** across all three cascading
+clones — Preflight (8, 4–11 Sep), NPC Client Dashboard (4, 8 Sep), NPC Test
+(1, 16 Sep, still open).
+
+**The harm to date is zero, and that is the finding.** Every one of those drops
+was rescued by coincidence: a later full-tree commit cascade reads prime's head
+when it runs and happened to carry the same paths. That is a property of
+today's traffic rather than a guarantee. It evaporates exactly when deliveries
+stop — which is the fleet's state right now — and it cannot help a SCOPED
+delivery at all, because nothing fleet-wide supersedes one.
+
+The catalogue already named the repair. `requeue_dropped_clone` has carried the
+policy text *"Queue this clone's part again as a NEW scoped delivery, never by
+reviving a settled one"* since it was catalogued, and **nothing implemented
+it**: `runCustodian` dispatched exactly one act and every other fell to an else
+returning *"is enabled and has no implementation in this build"*. So the ledger
+raised the condition, the catalogue named the cure, and there was no cure.
+
+It is built now, and it is **deliberately still `enabled: false`**. Those are
+different states, and the distinction is the point: pushing a tenant's code is
+an outward-facing act, and turning it on is an operator's decision the way
+`retarget_proposal_urls` was turned on by a deliberate step. What changed is
+that the flip is now against a real act rather than against an else branch.
+
+Four rules carry `planRequeue`, and the refusals are most of it — a custodian
+that mints a duplicate delivery every tick is worse than one that mints none.
+**It fails closed on every unreadable fact**, because minting on "I could not
+check" mints on every tick a database hiccups. **It refuses when a delivery is
+already queued for this clone**, since a cascade reads prime's head when it
+runs and one already waiting will carry everything this one would. **It
+inherits the parent's mode** — a repair may re-run a delivery, it may not
+decide that what was offered for review is now merged. And **it names its
+parent in `retry_of`**, which is the key the lineage panel already walks, so
+the repair appears beside what it repairs with no change to any surface.
+
+Two contracts moved, both deliberately. The custodian's write-surface test
+asserted **two** tables and now asserts three, because the catalogued act
+cannot be performed without minting a delivery. What that test was guarding is
+surface creep, and that guard is kept in a stronger form than a list: the
+custodian may only ever **INSERT** a `cascade_events` row, never update or
+delete one. A settled `partial` event is a true record — that delivery did land
+for those clones, on that day, at that SHA — and rewriting its status to re-run
+it would destroy the record in order to reproduce the event. The minted
+delivery is also armed in the same act and asserted to be, because an event
+with no result row is one the engine holds for ever for want of anything to do.
+
+The in-place alternative was considered and rejected on a measurement rather
+than on taste: `decideExhaustedEvent` refunds an attempt whenever the event's
+result rows were written recently, so an in-place retry would rewrite the
+failed row every pass, refund every time, and never reach the ceiling that
+retires it. A fresh event has its own attempts and its own ceiling.
+
+**And one assertion here was wrong and was corrected rather than defended.**
+The first version of the guard demanded that every class stamped
+`selfHeals: true` have an implemented act. Four classes failed it — and the
+field's own documentation settles the question against the test: *"May a
+custodian re-run the work that clears this, without any new decision being
+taken?"* `selfHeals` is a statement about whether a re-run would be a
+judgement, not a promise that anything re-runs. Those four are a backlog, not a
+lie. The rule that does hold, and that produces a dead control when broken, is
+narrower: **an act that is switched on must be an act that exists.**

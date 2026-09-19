@@ -775,7 +775,28 @@ async function runBackendProvisioning(
         // to know which account to seed and grant, and a null here leaves the
         // one question provisioning cannot answer for itself unanswerable.
         admin_email: input.adminEmail,
-        migration_version: result.latestMigration,
+        /*
+          THE FRONTIER IS A READING, AND AN UNREADABLE ONE IS NOT WRITTEN.
+
+          This column used to take the newest migration FILE in the prime's
+          repository, which is neither a reading of the clone nor of the prime
+          — measured on `npc-crm-independent-6505dc`, it sat two versions ahead
+          of that clone's own ledger, and `migration-sync` computes
+          `corpus − frontier`, so both were skipped as applied for good.
+
+          `resolveMigrationFrontier` now decides, and it may answer "do not
+          write". Spreading rather than assigning is what honours that: a
+          `null` here is an instruction to replay the entire corpus against a
+          populated database, so where the ledger could not be read the column
+          keeps whatever the last pass that COULD read it established.
+
+          `supabase` is untyped in this function, so nothing above would have
+          caught an object being poured into a `text` column. The spec beside
+          this file checks the shape instead.
+        */
+        ...(result.latestMigration.write
+          ? { migration_version: result.latestMigration.version }
+          : {}),
         source_repo: snapshot.sourceRepo,
         source_ref: snapshot.sourceRef,
         source_sha: snapshot.sourceSha,

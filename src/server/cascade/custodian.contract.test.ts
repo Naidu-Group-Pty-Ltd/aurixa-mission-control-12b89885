@@ -32,7 +32,9 @@ describe("it may re-run work; it may never change a verdict", () => {
       "git.createTree",
       "createBlob",
     ]) {
-      expect(custodian.includes(forbidden), `the custodian must not reach ${forbidden}`).toBe(false);
+      expect(custodian.includes(forbidden), `the custodian must not reach ${forbidden}`).toBe(
+        false,
+      );
     }
   });
 
@@ -45,7 +47,9 @@ describe("it may re-run work; it may never change a verdict", () => {
       "CASCADE_MAX_FILE_BYTES",
       "MAX_REPAIRS",
     ]) {
-      expect(custodian.includes(forbidden), `the custodian must not reach ${forbidden}`).toBe(false);
+      expect(custodian.includes(forbidden), `the custodian must not reach ${forbidden}`).toBe(
+        false,
+      );
     }
   });
 
@@ -56,7 +60,9 @@ describe("it may re-run work; it may never change a verdict", () => {
       "processClone",
       "approveCascade",
     ]) {
-      expect(custodian.includes(forbidden), `the custodian must not reach ${forbidden}`).toBe(false);
+      expect(custodian.includes(forbidden), `the custodian must not reach ${forbidden}`).toBe(
+        false,
+      );
     }
   });
 
@@ -94,11 +100,81 @@ describe("it may re-run work; it may never change a verdict", () => {
     expect(custodian.includes("cleared_at:")).toBe(false);
   });
 
-  it("writes exactly two tables: its own ledger, and the record it repairs", () => {
+  it("writes three tables: its own ledger, the record it repairs, and a delivery it mints", () => {
+    /*
+      This asserted TWO until `requeue_dropped_clone` was implemented, and the
+      widening is deliberate rather than incidental — the act was catalogued
+      from the start with the policy text "Queue this clone's part again as a
+      NEW scoped delivery, never by reviving a settled one", which cannot be
+      done without minting one. What the original contract was guarding is
+      surface CREEP, and that guard is kept below in a stronger form than a
+      list: minting a delivery is in posture, rewriting or deleting one is not.
+    */
     const written = [
-      ...custodian.matchAll(/from\(\s*["']([a-z_]+)["']\s*\)\s*\n?\s*\.(insert|update|upsert|delete)/g),
+      ...custodian.matchAll(
+        /from\(\s*["']([a-z_]+)["']\s*\)\s*\n?\s*\.(insert|update|upsert|delete)/g,
+      ),
     ].map((m) => m[1]);
-    expect([...new Set(written)].sort()).toEqual(["cascade_results", "clone_custodial_acts"]);
+    expect([...new Set(written)].sort()).toEqual([
+      "cascade_events",
+      "cascade_results",
+      "clone_custodial_acts",
+    ]);
+  });
+
+  it("only ever CREATES a delivery — it never rewrites or deletes one", () => {
+    /*
+      The settled `partial` event a re-queue repairs is a true record: that
+      delivery did land for those clones, on that day, at that SHA. Rewriting
+      its status to re-run it would destroy the record in order to reproduce
+      the event, and deleting it would lose the only evidence the drop ever
+      happened. A repair that cannot be told apart from history is not a
+      repair.
+
+      Stated about the VERB rather than the table, because "writes
+      cascade_events" is exactly the permission that would let a future act
+      settle one.
+    */
+    const verbs = [
+      ...custodian.matchAll(
+        /from\(\s*["']cascade_events["']\s*\)\s*\n?\s*\.(insert|update|upsert|delete)/g,
+      ),
+    ].map((m) => m[1]);
+    expect(verbs.length, "expected exactly the one mint").toBe(1);
+    expect(verbs[0]).toBe("insert");
+  });
+
+  it("arms the delivery it mints, in the same act", () => {
+    /*
+      An event with no result row is one `executeCascade` holds and re-holds
+      for want of anything to do — its "claimed before any result row was
+      armed" branch. A delivery nothing can act on is not a repair, it is a
+      second stuck row beside the one being repaired.
+
+      Checked by ORDER rather than by presence: the file has other
+      `cascade_results` writes, so "a results insert exists somewhere" would
+      have passed with the arming deleted. This one has to come after the mint.
+    */
+    const mintAt = custodian.search(/from\(\s*["']cascade_events["']\s*\)\s*\n?\s*\.insert\(/);
+    expect(mintAt, "expected to find the mint").toBeGreaterThan(-1);
+    const after = custodian.slice(mintAt, mintAt + 900);
+    expect(after, "the mint must be followed by the row that arms it").toMatch(
+      /from\(\s*["']cascade_results["']\s*\)\s*\n?\s*\.insert\(/,
+    );
+    expect(after).toContain("cascade_event_id");
+    expect(after).toMatch(/status:\s*["']queued["']/);
+  });
+
+  it("the delivery it mints carries no settling column", () => {
+    // `completed_at` or a terminal status on a freshly minted event would be a
+    // delivery that is finished before it runs — which is how the condition
+    // this repairs came to exist in the first place.
+    const mint = /from\(\s*["']cascade_events["']\s*\)\s*\n?\s*\.insert\(([\s\S]{0,200}?)\)/.exec(
+      custodian,
+    );
+    expect(mint, "expected to find the mint").not.toBeNull();
+    expect(mint?.[1]).not.toContain("completed_at");
+    expect(mint?.[1]).not.toContain("worker_started_at");
   });
 
   /*
@@ -107,13 +183,18 @@ describe("it may re-run work; it may never change a verdict", () => {
     repairing the pointer into it.
   */
   it("the repair rewrites one column and never a status", () => {
-    const update = /from\(\s*["']cascade_results["']\s*\)\s*\n?\s*\.update\(([\s\S]{0,160}?)\)/.exec(
-      custodian,
-    );
+    const update =
+      /from\(\s*["']cascade_results["']\s*\)\s*\n?\s*\.update\(([\s\S]{0,160}?)\)/.exec(custodian);
     expect(update, "no cascade_results update found").not.toBeNull();
     const payload = update![1];
     expect(payload).toContain("pr_url");
-    for (const forbidden of ["status", "diff_summary", "commit_sha", "delivered_sha", "completed_at"]) {
+    for (const forbidden of [
+      "status",
+      "diff_summary",
+      "commit_sha",
+      "delivered_sha",
+      "completed_at",
+    ]) {
       expect(payload.includes(forbidden), `the repair must not write ${forbidden}`).toBe(false);
     }
   });
