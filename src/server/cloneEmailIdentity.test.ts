@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   canMintKey,
+  decideEmailIdentityStart,
   deriveFromAddress,
   deriveSendingDomain,
   identityReadiness,
@@ -686,5 +687,83 @@ describe("mayAlignSenderAddress", () => {
 
   it("never overrides a tenant's own configured domain", () => {
     expect(mayAlignSenderAddress("hello@tenant-brand.com.au")).toBe(false);
+  });
+});
+
+/**
+ * Beginning a sending identity, for the clone the sweep cannot see.
+ *
+ * `decideEmailIdentitySweep` refuses a clone with no registered domain in as
+ * many words — "Nothing has been registered for this clone … not ours to
+ * start" — and until this existed, nothing else decided it on a schedule. The
+ * deployment drain started one at `syncing_env`, which opens
+ * `if (!row.project_id) return`, so only a clone Vercel is building ever got
+ * there. Provisioning writes `not_requested` for `manual` and `none`, and
+ * `pending_platform` with no Vercel token; every clone in this fleet is served
+ * manually. The result was silent in the way this programme keeps paying for:
+ * clones deployed perfectly and could not send a password reset.
+ */
+describe("decideEmailIdentityStart", () => {
+  const facts = (over: Partial<Parameters<typeof decideEmailIdentityStart>[0]> = {}) => ({
+    hasIdentity: false,
+    backendReady: true,
+    startedThisRun: 0,
+    limit: 5,
+    ...over,
+  });
+
+  it("starts one for a clone that has none", () => {
+    expect(decideEmailIdentityStart(facts())).toEqual({
+      act: true,
+      why: "no sending identity yet",
+    });
+  });
+
+  /**
+   * THE point of this decision. A hosting project is not among its facts at
+   * all — requiring one is what confined the whole feature to Vercel-built
+   * clones, and the key it registers goes to the clone's Supabase project
+   * rather than to its host.
+   */
+  it("does not care whether the clone has a hosting project", () => {
+    expect(Object.keys(facts())).not.toContain("hasProject");
+  });
+
+  it("leaves an existing identity to the sweep", () => {
+    // A revoked or half-finished identity is a ROW, so it lands here as
+    // `hasIdentity` and belongs to the sweep, which knows how to read its
+    // state. Starting a second one would register a second domain.
+    expect(decideEmailIdentityStart(facts({ hasIdentity: true }))).toEqual({
+      act: false,
+      reason: "already_started",
+    });
+  });
+
+  it("waits for somewhere to put the key", () => {
+    // Registering a domain whose key has nowhere to land leaves an identity
+    // that can never finish, and the sweep would then claim it every pass.
+    expect(decideEmailIdentityStart(facts({ backendReady: false }))).toEqual({
+      act: false,
+      reason: "backend_not_ready",
+    });
+  });
+
+  it("is bounded per pass", () => {
+    expect(decideEmailIdentityStart(facts({ startedThisRun: 5, limit: 5 }))).toEqual({
+      act: false,
+      reason: "over_limit",
+    });
+    expect(decideEmailIdentityStart(facts({ startedThisRun: 4, limit: 5 }))).toMatchObject({
+      act: true,
+    });
+  });
+
+  it("refuses an existing identity before it looks at anything else", () => {
+    // Order matters: a clone that already has one must not be reported as
+    // `backend_not_ready`, which reads as work outstanding.
+    expect(decideEmailIdentityStart(facts({ hasIdentity: true, backendReady: false }))).toEqual({
+      act: false,
+      reason: "already_started",
+    });
   });
 });

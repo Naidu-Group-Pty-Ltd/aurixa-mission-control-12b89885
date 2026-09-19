@@ -153,6 +153,50 @@ describe("the catalog", () => {
     }
   });
 
+  /**
+   * `email` was NOT on the clone path, and its own consequence line is why it
+   * had to be: outbound mail for a clone includes "password resets, portal
+   * invites and notifications". `cloneReady` could read true over a clone
+   * whose admin can never sign in — a green light that is true about the check
+   * and false about the world, which is the shape this whole module exists to
+   * refuse.
+   */
+  it("puts outbound email on the clone path", () => {
+    expect(CLONE_PATH).toContain("email");
+    const r = judgeReadiness({ present: without("RESEND_MASTER_API_KEY"), config: {} });
+    expect(r.cloneReady).toBe(false);
+  });
+
+  /**
+   * The things a clone does not need in order to EXIST stay off the path.
+   * Conflating them is how a readiness screen stops being read — an operator
+   * who is told they cannot clone because Stripe is unconfigured learns to
+   * ignore the banner.
+   */
+  it.each(["agreements", "billing", "models"])("keeps %s off the clone path", (key) => {
+    expect(CLONE_PATH as readonly string[]).not.toContain(key);
+    const spec = CAPABILITIES.find((c) => c.key === key);
+    const required = spec?.credentials.find((c) => c.required);
+    if (!required) return;
+    expect(judgeReadiness({ present: without(required.name), config: {} }).cloneReady).toBe(true);
+  });
+
+  /**
+   * Membership travels ON the capability. `CLONE_PATH` lives under
+   * `src/server/**`, which the import-protection plugin denies to the client
+   * bundle, so a renderer that filtered by importing the value would fail the
+   * build — and one that kept its own copy of the list would drift.
+   */
+  it("marks clone-path membership on every capability it returns", () => {
+    const r = judgeReadiness({ present: ALL, config: {} });
+    for (const capability of r.capabilities) {
+      expect(capability.onClonePath).toBe(
+        (CLONE_PATH as readonly string[]).includes(capability.key),
+      );
+    }
+    expect(r.capabilities.filter((c) => c.onClonePath)).toHaveLength(CLONE_PATH.length);
+  });
+
   it("gives every credential a purpose an operator can act on", () => {
     for (const cap of CAPABILITIES) {
       for (const cred of cap.credentials) {

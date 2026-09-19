@@ -33,13 +33,42 @@ export const Route = createFileRoute("/hooks/email-identity-drain")({
         if (!auth.ok) return auth.response;
 
         try {
-          const { sweepEmailIdentities } = await import("@/server/email-identity.server");
-          const report = await sweepEmailIdentities(supabaseAdmin);
+          const { reconcileEmailIdentities, sweepEmailIdentities } =
+            await import("@/server/email-identity.server");
+
+          /*
+           * START before ADVANCE, in that order and in this same job.
+           *
+           * The sweep selects FROM `clone_email_identities`, so a clone with no
+           * row is invisible to it for ever — it advances identities and cannot
+           * begin one. The only thing that ever began one was the deployment
+           * drain at `syncing_env`, whose case opens `if (!row.project_id)
+           * return`; provisioning writes `not_requested` for `manual` and
+           * `none` and `pending_platform` with no Vercel token, and a
+           * deployment in any of those states never advances. Every clone in
+           * this fleet is served manually, so in practice nothing started one.
+           *
+           * Here rather than behind a cron job of its own: THE_CLONING_ENGINE.md
+           * records six pg_cron jobs that were never scheduled at all, each
+           * recorded as applied by a migration that declined to schedule it. A
+           * new job is the likeliest way for this repair never to run.
+           *
+           * Starting first means an identity begun on this pass is advanced on
+           * the next one, not two passes later.
+           */
+          const started = await reconcileEmailIdentities(supabaseAdmin);
+          const report = { ...(await sweepEmailIdentities(supabaseAdmin)), started };
 
           // Only write a breadcrumb when the run did something or refused for
           // a reason worth reading. A drain that files an identical row every
           // five minutes is how an audit log stops being read.
-          if (report.advanced || report.failed || !report.resendConfigured) {
+          if (
+            report.advanced ||
+            report.failed ||
+            started.started ||
+            started.failed ||
+            !report.resendConfigured
+          ) {
             await writeAuditLog({
               action: "email_identity_drain_cron",
               entityType: "cron",

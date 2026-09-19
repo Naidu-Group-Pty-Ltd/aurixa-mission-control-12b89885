@@ -30,12 +30,23 @@ import { provisionClone } from "@/server/clone-provisioning.functions";
 import { provisionBackend } from "@/lib/backend-provisioning.functions";
 import { enqueueEdgeJob } from "@/server/edge-provisioning.functions";
 import { requestCloneSubdomain } from "@/server/subdomain-hosting.functions";
+// The same server functions the clone page's cards call. Imported rather than
+// reimplemented: `provisionTurnstileIdentity` and `advanceEmailIdentity` are
+// also what the deployment drain calls at `syncing_env`, so all three entry
+// points mint through one implementation and cannot drift.
+import { provisionCloneTurnstile } from "@/lib/turnstile-identity.functions";
+import { provisionCloneEmailIdentity } from "@/lib/email-identity.functions";
 import {
   checkGithubAppPreflight,
   type GithubPreflightResult,
 } from "@/lib/github-preflight.functions";
+import {
+  CapabilityNote,
+  ProvisioningReadinessPanel,
+} from "@/components/provisioning-readiness-panel";
+import { useProvisioningReadiness } from "@/lib/useProvisioningReadiness";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { CheckCircle2, AlertTriangle, Image as ImageIcon, Loader2 } from "lucide-react";
+import { CheckCircle2, AlertTriangle, Image as ImageIcon, KeyRound, Loader2 } from "lucide-react";
 
 export const Route = createFileRoute("/clones/new")({
   component: () => (
@@ -106,6 +117,11 @@ function NewClone() {
     "platform" | "vercel" | "manual" | "none"
   >("platform");
   const requestSubdomainFn = useServerFn(requestCloneSubdomain);
+  const provisionTurnstileFn = useServerFn(provisionCloneTurnstile);
+  const provisionEmailFn = useServerFn(provisionCloneEmailIdentity);
+  const [armTurnstile, setArmTurnstile] = useState(true);
+  const [armEmail, setArmEmail] = useState(true);
+  const [sendingDomain, setSendingDomain] = useState("");
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [tierSelection, setTierSelection] = useState<TierSelection>({
     planSlug: null,
@@ -144,6 +160,10 @@ function NewClone() {
       : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
   );
 
+  // Read once for the whole page: the panel renders the full clone path and
+  // each section below renders the one capability it depends on, without
+  // every section firing its own request.
+  const readiness = useProvisioningReadiness();
   const preflightFn = useServerFn(checkGithubAppPreflight);
   const [preflight, setPreflight] = useState<GithubPreflightResult | null>(null);
   const [preflightBusy, setPreflightBusy] = useState(false);
@@ -398,6 +418,55 @@ function NewClone() {
         }
       }
 
+      /*
+       * Arm this clone's OWN credentials.
+       *
+       * Both are minted by the deployment drain at `syncing_env` — but that
+       * case opens with `if (!row.project_id) return ...`, so it is only ever
+       * reached by a clone that Vercel is building. Provisioning writes
+       * `not_requested` for `manual` and `none`, and `pending_platform` when
+       * no Vercel token is configured, and a deployment in any of those three
+       * states never advances. Every clone in this fleet is served manually
+       * today, so in practice NOTHING has minted a Turnstile widget or started
+       * a sending identity except an operator opening the clone page and
+       * clicking two buttons.
+       *
+       * Non-fatal, like every other enqueue above: the clone exists either
+       * way, and both acts are idempotent — they adopt an existing identity
+       * rather than creating a second one — so the Vercel path re-running them
+       * later costs nothing.
+       */
+      if (armTurnstile) {
+        try {
+          const r = await provisionTurnstileFn({ data: { cloneId: result.cloneId } });
+          toast.info(
+            r.ok
+              ? "Turnstile widget minted for this clone."
+              : `Turnstile not minted: ${r.error}. The clone page can retry it.`,
+          );
+        } catch (e) {
+          toast.error(`Turnstile minting failed: ${e instanceof Error ? e.message : "unknown"}`);
+        }
+      }
+
+      if (armEmail) {
+        try {
+          const r = await provisionEmailFn({
+            data: {
+              cloneId: result.cloneId,
+              sendingDomain: sendingDomain.trim() || undefined,
+            },
+          });
+          toast.info(
+            r.ok
+              ? "Sending identity started — its domain verifies once DNS propagates."
+              : `Sending identity not started: ${r.error}. The clone page can retry it.`,
+          );
+        } catch (e) {
+          toast.error(`Sending identity failed: ${e instanceof Error ? e.message : "unknown"}`);
+        }
+      }
+
       setBusy(false);
       nav({ to: "/clones/$cloneId", params: { cloneId: result.cloneId } });
     } catch (e) {
@@ -415,6 +484,8 @@ function NewClone() {
           Spin up a child instance of the prime codebase.
         </p>
       </header>
+
+      <ProvisioningReadinessPanel readiness={readiness} />
 
       <Card>
         <CardHeader>
@@ -701,16 +772,35 @@ function NewClone() {
           {dedicatedBackend && (
             <div className="grid gap-4 md:grid-cols-2 border border-border p-4">
               <div className="space-y-2">
-                <Label>Admin email</Label>
+                {/*
+                  Marked required HERE, not only in the submit handler. The
+                  handler's `toast.error("Admin email is required for dedicated
+                  backend")` fires after a full form has been filled in and
+                  says nothing about which field it means — an operator reads
+                  it, looks at eight sections, and hunts. A required field says
+                  so where it is.
+                */}
+                <Label>
+                  Admin email <span className="text-destructive">*</span>
+                </Label>
                 <Input
                   type="email"
+                  required
+                  aria-required="true"
+                  aria-invalid={adminEmail.trim() === "" ? true : undefined}
                   value={adminEmail}
                   onChange={(e) => setAdminEmail(e.target.value)}
                   placeholder="admin@client.com"
                 />
+                <p className="text-xs text-muted-foreground">
+                  The clone's first sign-in. This account is created with full access when the
+                  backend is provisioned.
+                </p>
               </div>
               <div className="space-y-2">
-                <Label>Admin password</Label>
+                <Label>
+                  Admin password <span className="text-destructive">*</span>
+                </Label>
                 <Input
                   type="password"
                   value={adminPassword}
@@ -734,6 +824,22 @@ function NewClone() {
                   <option value="ap-southeast-2">Asia Pacific (Sydney)</option>
                   <option value="ap-northeast-1">Asia Pacific (Tokyo)</option>
                 </select>
+              </div>
+              <div className="md:col-span-2">
+                {/*
+                  Whether this admin can ever be REACHED is a different
+                  question from whether the account is created, and it is the
+                  reason `email` had to join the readiness clone path: the
+                  capability's own consequence line names "password resets,
+                  portal invites and notifications". An account nobody can
+                  reset the password on is not a usable first sign-in.
+                */}
+                <CapabilityNote
+                  readiness={readiness}
+                  capabilityKey="email"
+                  whenBlocked="Outbound email is not configured, so this clone gets no sending identity of its own — password resets and portal invites for the account above will not send. Create the admin with a password you record now."
+                  whenReady="Outbound email is configured, so this clone will be given its own sending identity for password resets and portal invites."
+                />
               </div>
             </div>
           )}
@@ -807,8 +913,7 @@ function NewClone() {
           <CardDescription>
             Every clone gets an{" "}
             <code className="bg-muted px-1 text-xs">&lt;slug&gt;.aurixasystems.com.au</code>{" "}
-            subdomain via Cloudflare DNS. Dormant if Cloudflare isn't configured yet — the record
-            fans out automatically once{" "}
+            subdomain via Cloudflare DNS. The record fans out automatically once{" "}
             <a href="/settings/domains" className="underline">
               Settings → Domains
             </a>{" "}
@@ -816,6 +921,21 @@ function NewClone() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
+          {/*
+            Cloudflare carries TWO things for a clone and they fail together:
+            the DNS record this section reserves, and the clone's own Turnstile
+            widget, which `CLONE_TURNSTILE_IDENTITY.md` mints in the deployment
+            drain's `syncing_env` step. Vite inlines `VITE_*` at BUILD time, so
+            a site key that arrives after `deploying` is one the bundle does
+            not have — there is no repair after the fact except a rebuild, and
+            nothing on this page used to say so before the run started.
+          */}
+          <CapabilityNote
+            readiness={readiness}
+            capabilityKey="dns"
+            whenBlocked="Cloudflare is not configured, so this subdomain will be recorded and stay dormant — AND this clone gets no Turnstile widget of its own, so its login page ships with no working security check. The widget is minted before the build, so fixing it afterwards needs a rebuild."
+            whenReady="Cloudflare is configured, so the DNS record and this clone's own Turnstile widget will both be created during deployment."
+          />
           <label className="flex cursor-pointer items-center gap-3">
             <Checkbox
               checked={subdomainEnabled}
@@ -912,12 +1032,102 @@ function NewClone() {
               </label>
             ))}
           </div>
+          {/*
+            This used to read "Dormant if no hosting token is configured",
+            which warns that something might be true without ever saying
+            whether it is. The verdict below is the live answer.
+          */}
+          <CapabilityNote
+            readiness={readiness}
+            capabilityKey="hosting"
+            whenBlocked="Hosting is not configured on this deployment, so whatever you pick here is recorded and the deployment parks at pending_platform — the clone is created but never built or served. Fix it in Settings → Domains; the request fans out on its own once a token lands."
+            whenReady="Hosting is configured, so a Vercel selection will be acted on by the deployment drain."
+          />
           <p className="text-xs text-muted-foreground">
-            Dormant if no hosting token is configured: the request is recorded and fans out from{" "}
+            Nothing here blocks the wizard — see{" "}
             <a href="/settings/domains" className="underline">
               Settings → Domains
-            </a>{" "}
-            once it lands. Nothing here blocks the wizard.
+            </a>
+            .
+          </p>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <KeyRound className="h-4 w-4 text-primary" /> 6c · This clone&apos;s own credentials
+          </CardTitle>
+          <CardDescription>
+            A Turnstile widget and a Resend sending identity, both belonging to this clone alone.
+            They are minted during deployment when Vercel builds the clone — so a clone served
+            manually, or one provisioned while no hosting token is configured, has never received
+            either. Arm them here instead.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <label className="flex cursor-pointer items-start gap-3 border border-border/70 p-3">
+            <Checkbox
+              checked={armTurnstile}
+              onCheckedChange={(v) => setArmTurnstile(!!v)}
+              className="mt-0.5"
+            />
+            <div className="min-w-0 space-y-1">
+              <div className="text-sm font-medium">Mint this clone&apos;s Turnstile widget</div>
+              <div className="text-xs text-muted-foreground">
+                A widget is a (site key, secret) pair. Sharing one means a token farmed from any
+                tenant&apos;s login page satisfies the CAPTCHA on every other — so a clone without
+                its own has no security check of its own either.
+              </div>
+              <CapabilityNote
+                readiness={readiness}
+                capabilityKey="dns"
+                whenBlocked="Cloudflare is not configured, so minting will be recorded as refused rather than silently skipped. The clone page can retry it once the token lands."
+                whenReady="Cloudflare is configured, so the widget is minted at submit and its site key published to the build."
+              />
+            </div>
+          </label>
+
+          <label className="flex cursor-pointer items-start gap-3 border border-border/70 p-3">
+            <Checkbox
+              checked={armEmail}
+              onCheckedChange={(v) => setArmEmail(!!v)}
+              className="mt-0.5"
+            />
+            <div className="min-w-0 space-y-1">
+              <div className="text-sm font-medium">Start this clone&apos;s sending identity</div>
+              <div className="text-xs text-muted-foreground">
+                Registers the sending domain now so its DNS can propagate; the email drain mints the
+                scoped key once it verifies. The drain only ADVANCES an identity — nothing else in
+                the platform starts one, so an unstarted clone stays unable to send.
+              </div>
+              <CapabilityNote
+                readiness={readiness}
+                capabilityKey="email"
+                whenBlocked="Outbound email is not configured, so this will be recorded as refused. Password resets and portal invites will not send until it is retried."
+                whenReady="Outbound email is configured, so the sending domain is registered at submit."
+              />
+            </div>
+          </label>
+
+          {armEmail && (
+            <div className="space-y-2">
+              <Label>Sending domain (optional)</Label>
+              <Input
+                value={sendingDomain}
+                onChange={(e) => setSendingDomain(e.target.value)}
+                placeholder="mail.clientdomain.com.au — blank derives it from the clone"
+              />
+              <p className="text-xs text-muted-foreground">
+                Leave blank to use the platform default. Whatever is set here is the domain the
+                clone&apos;s mail is sent as, and it is what has to verify in DNS.
+              </p>
+            </div>
+          )}
+
+          <p className="text-xs text-muted-foreground">
+            Both are idempotent — an existing identity is adopted rather than duplicated — so
+            leaving these on is safe even when the Vercel path would also arm them.
           </p>
         </CardContent>
       </Card>
