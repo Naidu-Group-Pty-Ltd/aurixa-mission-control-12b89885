@@ -172,6 +172,52 @@ describe("the panel keeps readiness honest", () => {
     expect(PANEL).toContain("report.caveat");
   });
 
+  /**
+   * A degraded capability must not wear a blocked capability's words.
+   *
+   * `consequence` is typed and documented as "What breaks while this is
+   * blocked". Rendering it for every non-`ready` verdict told an operator
+   * "A clone cannot get its own Supabase project. Provisioning stops before
+   * anything is created." about `clone_backend` — whose required credentials
+   * (`SB_MGMT_API_TOKEN`, `SB_ORG_ID`) were both PRESENT, which is precisely
+   * what makes the verdict `degraded` rather than `blocked`. The only absence
+   * was `SB_ORG_PROJECT_SOFT_LIMIT`, an optional override that falls back to
+   * `DEFAULT_SOFT_LIMITS[planTier] ?? pro`.
+   *
+   * It was reported as a working pipeline having broken. Nothing had: a
+   * healthy platform was being described in the words of a broken one, which
+   * is the same class of error as a green light that is true about the check
+   * and false about the world — this module's own header warns about the one,
+   * and this is the other.
+   *
+   * `readiness-card.tsx` had it right from the start, for the reason it
+   * states: "shown only when something is actually wrong, so a working
+   * platform is not a wall of warnings."
+   */
+  it("shows the consequence only when a capability is blocked", () => {
+    const at = PANEL.indexOf("capability.consequence");
+    expect(at, "the panel must render a consequence somewhere").toBeGreaterThan(-1);
+    const guard = PANEL.slice(Math.max(0, at - 260), at);
+    expect(guard).toContain('capability.verdict === "blocked"');
+    expect(
+      guard,
+      'a `!== "ready"` guard lets degraded and unknown wear the blocked text',
+    ).not.toContain('capability.verdict !== "ready"');
+  });
+
+  it("says what is actually absent on a degraded capability", () => {
+    // A pill reading `degraded` with nothing beside it names a state rather
+    // than the thing an operator would act on.
+    expect(PANEL).toContain('capability.verdict === "degraded"');
+    expect(PANEL).toContain('!c.required && c.state === "missing"');
+  });
+
+  it("does not describe a defaulting credential as a failure", () => {
+    const foot = PANEL.slice(PANEL.indexOf("Degraded means"));
+    expect(foot.slice(0, 400)).toContain("still runs");
+    expect(foot.slice(0, 400)).toContain("not a failure");
+  });
+
   it("never calls a present credential working", () => {
     for (const word of ["healthy", "all good", "verified", "working"]) {
       expect(PANEL.toLowerCase()).not.toContain(word);
