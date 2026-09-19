@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { runDriftRefresh } from "@/server/drift-refresh.server";
 import { verifyCronAuth } from "@/server/cron-auth.server";
+import { beginGithubLane } from "@/server/githubUsageMeter";
 import { decideSpend } from "@/server/cascade/githubBudget.pure";
 import { readGitHubRemaining } from "@/server/githubAllowance.server";
 
@@ -13,6 +14,10 @@ export const Route = createFileRoute("/hooks/drift-refresh")({
       POST: async ({ request }) => {
         const auth = verifyCronAuth(request);
         if (!auth.ok) return auth.response;
+        // Attribute this invocation's App-installation calls. See
+        // githubUsageMeter.ts: the count is taken at the one hook every call
+        // already passes through, and named here.
+        beginGithubLane("drift-refresh");
 
         try {
           // A drift number refreshed into a starved window is a measurement

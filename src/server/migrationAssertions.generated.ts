@@ -596,4 +596,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "table", table: "clone_health_daily" },
     ],
   },
+  {
+    migration: "20260919060000_github_installation_metered.sql",
+    version: "20260919060000",
+    assertions: [{ kind: "rows", table: "api_provider_rates", atLeast: 30 }],
+  },
 ];

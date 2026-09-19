@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { writeAuditLog } from "@/server/audit.server";
 import { verifyCronAuth } from "@/server/cron-auth.server";
+import { beginGithubLane } from "@/server/githubUsageMeter";
 
 // Cron-invoked endpoint. pg_cron POSTs here every fifteen minutes.
 // Auth: requires the shared CRON_SECRET as a Bearer token.
@@ -54,6 +55,10 @@ export const Route = createFileRoute("/hooks/cascade-audit")({
       POST: async ({ request }) => {
         const auth = verifyCronAuth(request);
         if (!auth.ok) return auth.response;
+        // Attribute this invocation's App-installation calls. See
+        // githubUsageMeter.ts: the count is taken at the one hook every call
+        // already passes through, and named here.
+        beginGithubLane("cascade-audit");
 
         try {
           // Yields below the scan floor. This is observability: a convergence
