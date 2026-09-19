@@ -198,10 +198,21 @@ export const installCloneNetworkTransport = createServerFn({ method: "POST" })
       });
     }
 
-    await supabaseAdmin
+    /*
+     * The shadow ledger is operator visibility and never authority, so a
+     * failure here does not fail the act — the transport IS installed, and
+     * answering `false` would invite a retry the network refuses. It is still
+     * branched on rather than discarded: a stale shadow is what makes an
+     * operator press a button that is already done. Same handling as
+     * `createNetworkConnection`'s own shadow write.
+     */
+    const { error: shadowError } = await supabaseAdmin
       .from("builders_network_connections_shadow")
       .update({ state: "active", reported_at: now })
       .eq("network_connection_id", data.connectionId);
+    if (shadowError) {
+      console.error("[builders-network] shadow state update failed", shadowError);
+    }
 
     await writeAuditLog({
       action: data.rotate
