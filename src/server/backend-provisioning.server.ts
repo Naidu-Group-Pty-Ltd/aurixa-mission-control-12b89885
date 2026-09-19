@@ -12,7 +12,7 @@ import crypto from "node:crypto";
 import { classifySecret, TENANT_SCOPED_REMEDY } from "./prime-backend.server";
 import { OversizedMigrationError } from "./oversizedMigration.pure";
 import { assessLedgerState, ledgerRepairHint } from "./cloneLedgerState.pure";
-import { BudgetPause, isUpstreamRateLimit, pastDeadline } from "./provisioningBudget";
+import { BudgetPause, cloneSaidNothing, pastDeadline } from "./provisioningBudget";
 import { chooseRoleLabel, describeSeed, sqlCredentialLiteral } from "./cloneAdminIdentity.pure";
 import type { AdminSeedReport } from "./cloneAdminIdentity.pure";
 import type { PrimeBackendSnapshot } from "./prime-backend.server";
@@ -2521,12 +2521,16 @@ export async function applyPrimeMigrations(
       try {
         sql = m.sql ?? (loadSql ? await loadSql({ id: m.id, name: m.name }) : undefined);
       } catch (e) {
-        // A quota refused the FETCH. Nothing was sent, so this says nothing
-        // about the clone — hold the replay and let the caller leave it where
-        // it is. Asked BEFORE the oversize rethrow because that rethrow is
-        // exactly what sent three healthy clones to `failed` on 19 Sep 2026,
-        // each under the name of a migration it had never received.
-        if (isUpstreamRateLimit(e)) {
+        // The FETCH failed, so this says nothing about the clone — hold the
+        // replay and let the caller leave it where it is. Asked BEFORE the
+        // oversize rethrow because that rethrow is exactly what sent three
+        // healthy clones to `failed` on 19 Sep 2026, each under the name of a
+        // migration it had never received.
+        //
+        // `cloneSaidNothing` rather than `isUpstreamRateLimit`: the narrow
+        // predicate correctly declines a bare 403, and a bare 403 is what the
+        // very next pass produced.
+        if (cloneSaidNothing(e)) {
           results.push({
             id: m.id,
             name: m.name,
@@ -2563,6 +2567,23 @@ export async function applyPrimeMigrations(
         // statement has gone, so a half-sent seed is never "applied".
         const chunked = await applyChunkedSeed(projectRef, m, oversize, budget);
         chunksApplied += chunked.applied;
+        if (chunked.upstreamRefusal) {
+          // A HOLD, not a pause. Both stop here and both keep the cursor, but
+          // they are reported differently on purpose: a pause is this pass
+          // pacing itself and resumes on its own, while a refusal may be
+          // permanent, and a permanent refusal reported as pacing is a clone
+          // that retries in silence for ever. "A failure says which kind it
+          // was."
+          chunkCursor = chunked.cursor;
+          results.push({
+            id: m.id,
+            name: m.name,
+            success: false,
+            heldUpstreamLimited: true,
+            error: chunked.upstreamRefusal,
+          });
+          break;
+        }
         if (chunked.stoppedEarly) {
           chunkCursor = chunked.cursor;
           stoppedEarly = true;
@@ -2652,7 +2673,19 @@ async function applyChunkedSeed(
   m: { id: string; name: string },
   oversize: OversizeApplyOptions,
   budget?: { isPastDeadline: (reserveMs: number) => boolean },
-): Promise<{ applied: number; stoppedEarly: boolean; cursor: ChunkCursor | null }> {
+): Promise<{
+  applied: number;
+  stoppedEarly: boolean;
+  cursor: ChunkCursor | null;
+  /**
+   * Set when the PRIME's body became unreadable part-way through, rather than
+   * when the clone refused a statement. The seed is read from a stream twice
+   * and every statement is sent as it arrives, so a refusal here can land
+   * before anything was sent or after hundreds were — `applied` says which,
+   * and this says the replay must hold rather than fail the clone.
+   */
+  upstreamRefusal: string | null;
+}> {
   const { readSeedShape, chunkSeedStatements, SeedShapeError } =
     await import("./seedChunking.pure");
   const maxStatementBytes = oversize.maxStatementBytes ?? DEFAULT_SEED_STATEMENT_BYTES;
@@ -2676,6 +2709,7 @@ async function applyChunkedSeed(
           applied,
           stoppedEarly: true,
           cursor: { migrationId: m.id, statementsDone: index },
+          upstreamRefusal: null,
         };
       }
       const startedAt = Date.now();
@@ -2698,9 +2732,27 @@ async function applyChunkedSeed(
           "version in supabase_migrations.schema_migrations, then re-run the sync.",
       );
     }
+    // The prime's body went unreadable mid-seed. Reported rather than thrown,
+    // because throwing lands in the replay's generic catch — which is the
+    // defect this closes: `Streaming blob b92e5e8 failed: HTTP 403` on the
+    // first of the two reads took npc-test-76b3b3 to `failed` under the name
+    // of a migration it had never been sent one statement of.
+    //
+    // The cursor is kept, so the statements that DID land are not re-sent. A
+    // refusal on the first read has `applied: 0` and no cursor at all, which
+    // is the same shape the budget pause already produces and the same
+    // recovery.
+    if (cloneSaidNothing(e)) {
+      return {
+        applied,
+        stoppedEarly: true,
+        cursor: applied > 0 ? { migrationId: m.id, statementsDone: index } : null,
+        upstreamRefusal: e instanceof Error ? e.message : String(e),
+      };
+    }
     throw e;
   }
-  return { applied, stoppedEarly: false, cursor: null };
+  return { applied, stoppedEarly: false, cursor: null, upstreamRefusal: null };
 }
 
 // ─── Module Migrations ───────────────────────────────────────────────

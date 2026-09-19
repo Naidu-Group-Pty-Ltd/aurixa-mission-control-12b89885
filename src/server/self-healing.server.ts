@@ -31,7 +31,10 @@ import type {
 import type { Database, Json, TablesInsert, TablesUpdate } from "@/integrations/supabase/types";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { assessSqlDestructiveness } from "@/lib/destructive-sql";
-import { OversizedMigrationError } from "@/server/oversizedMigration.pure";
+import {
+  OversizedMigrationError,
+  PrimeBodyUnavailableError,
+} from "@/server/oversizedMigration.pure";
 import { decideRemediation } from "@/lib/remediation-policy";
 import {
   severityToPriority,
@@ -685,9 +688,23 @@ async function assessPendingMigrations(
             ? { migration: m.name, reasons: assessment.findings.map((f) => f.reason) }
             : null;
         } catch (e) {
+          // A body that could not be FETCHED is parked, which is right — this
+          // gate fails closed and an unread migration must never be waved
+          // through. But it is parked under its own words, because an operator
+          // reading this list is being asked to APPROVE something, and
+          // approving a 403 is not a thing anybody can do. Naming it as a
+          // destructiveness finding sent them to the wrong control.
+          const unread = e instanceof PrimeBodyUnavailableError;
           return {
             migration: m.name,
-            reasons: [e instanceof Error ? e.message : "could not be read from the prime repo"],
+            reasons: [
+              unread
+                ? `not assessed — ${(e as PrimeBodyUnavailableError).message} Approval cannot ` +
+                  "settle this; the body has to become readable first."
+                : e instanceof Error
+                  ? e.message
+                  : "could not be read from the prime repo",
+            ],
           };
         }
       }),
@@ -917,10 +934,28 @@ async function executeSqlMigration(
           }),
       },
     );
-  const failed = (results ?? []).filter((r) => !r.success);
+  // A HOLD is not a failure, and this lane said it was — the third site of the
+  // same defect. `heldUpstreamLimited` carries `success: false`, so the throw
+  // below wrote `migration 20261202000000_… failed` into `last_error` about a
+  // migration the clone was never sent a statement of. The sentence is what an
+  // operator reads and then goes looking for what the clone rejected.
+  //
+  // It still THROWS, deliberately. `planUpstreamDeferral` above reads the
+  // thrown error, a bounded free retry is the right answer to an upstream
+  // refusal, and reporting the run as succeeded would claim work that did not
+  // happen. What changes is only the claim the sentence makes.
+  const held = (results ?? []).filter((r) => r.heldUpstreamLimited || r.heldOversize);
+  const failed = (results ?? []).filter(
+    (r) => !r.success && !r.heldUpstreamLimited && !r.heldOversize,
+  );
   if (failed.length > 0) {
     throw new Error(
       `migration ${failed[0].id ?? failed[0].name ?? "?"} failed: ${failed[0].error ?? "unknown"}`,
+    );
+  }
+  if (held.length > 0) {
+    throw new Error(
+      `migration ${held[0].name ?? held[0].id ?? "?"} was not sent: ${held[0].error ?? "unknown"}`,
     );
   }
   // A pass that sent part of a chunked seed and nothing else still moved the

@@ -737,11 +737,25 @@ export async function runFleetMigrationSync(
                     : limited.length > 0
                       ? // Named as a WAIT, and named as ours. An operator who
                         // reads "failed" goes looking for what the clone
-                        // rejected; there is nothing to find, because the body
-                        // was never fetched. The window reopens on its own.
-                        `Synced to ${syncedTo} — ${limited[0].name} could not be fetched because an ` +
-                        `upstream API rate limit refused it; the clone is unchanged and still in the ` +
-                        `fleet, and the next pass carries it once the window reopens`
+                        // rejected; there is nothing to find, because the
+                        // prime's own body was never read.
+                        //
+                        // It does not say "rate limit" any more: the refusal
+                        // that produced this on npc-test-76b3b3 was a bare 403
+                        // against a window with 4,300 calls left in it, and
+                        // naming a cause the message cannot know sent the
+                        // reader to wait out a window that was never closed.
+                        //
+                        // So the upstream's OWN words are quoted here instead.
+                        // They cannot go in `error_message` or
+                        // `migration_blocked_reason`: both mean "this clone
+                        // refused something", and this clone was sent nothing.
+                        // This reading is the only place they can land, which
+                        // is why it carries them rather than describing them.
+                        `Synced to ${syncedTo} — the prime's copy of ${limited[0].name} could ` +
+                        `not be read, so nothing was sent for it; the clone is unchanged and still ` +
+                        `in the fleet, and the next pass retries from that migration. Upstream said: ` +
+                        `${(limited[0].error ?? "no detail").slice(0, 300)}`
                       : held.length > 0
                         ? // Named, and named as a HOLD. An operator who reads
                           // "failed" goes looking for what the clone rejected;

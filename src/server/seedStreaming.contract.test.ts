@@ -24,9 +24,28 @@ function sliceFrom(src: string, anchor: string, length = 6_000): string {
   return src.slice(at, at + length);
 }
 
+/**
+ * The whole of a top-level function, ended at its own closing brace rather
+ * than at a byte count.
+ *
+ * A fixed length is a silent measurement: this file already asserted nothing
+ * twice for that reason — once on an unanchored `indexOf("break;")` that found
+ * a later statement's, and once here, where a comment added inside the guard
+ * pushed `pipeThrough` past a 2,500-byte window and turned a passing assertion
+ * into a failing one about the wrong thing. A function that grows is not a
+ * function that changed.
+ */
+function sliceFunction(src: string, anchor: string): string {
+  const at = src.indexOf(anchor);
+  expect(at, `anchor not found: ${anchor}`).toBeGreaterThan(-1);
+  const end = src.indexOf("\n}\n", at);
+  expect(end, `no closing brace for: ${anchor}`).toBeGreaterThan(at);
+  return src.slice(at, end + 3);
+}
+
 describe("the corpus streams a body it will not hold", () => {
   it("opens the blob with the raw media type, not getBlob", () => {
-    const fn = sliceFrom(corpus, "async function fetchBlobTextStream", 2_500);
+    const fn = sliceFunction(corpus, "async function fetchBlobTextStream");
     expect(fn).toContain('Accept: "application/vnd.github.raw+json"');
     expect(fn).toContain("pipeThrough(new TextDecoderStream())");
     expect(fn).not.toContain("git.getBlob");
