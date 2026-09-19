@@ -46,7 +46,12 @@ function sliceFunction(src: string, anchor: string): string {
 describe("the corpus streams a body it will not hold", () => {
   it("opens the blob with the raw media type, not getBlob", () => {
     const fn = sliceFunction(corpus, "async function fetchBlobTextStream");
-    expect(fn).toContain('Accept: "application/vnd.github.raw+json"');
+    // The MEDIA TYPE is the rule — it is what makes the bytes arrive as a
+    // stream rather than base64 inside a JSON document. How the header map is
+    // spelled is not: it moved into `githubApiHeaders` when that call site was
+    // found to be missing `User-Agent`, and an assertion on the old spelling
+    // would have opposed the fix rather than the regression.
+    expect(fn).toContain("application/vnd.github.raw+json");
     expect(fn).toContain("pipeThrough(new TextDecoderStream())");
     expect(fn).not.toContain("git.getBlob");
   });

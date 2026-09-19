@@ -349,3 +349,79 @@ describe("runReferenceDataSync", () => {
     expect((meta.tables as unknown[]).length).toBe(REFERENCE_TABLES.length);
   });
 });
+
+/**
+ * The parent is walked again — from the start — while its child is unfinished.
+ *
+ * `tablesToReopen` decides WHICH tables; these check the copier acts on the
+ * answer, because a set nobody reads is the same as no set. Asserted on the
+ * SQL that reached the prime, since that is the only thing the clone can tell
+ * apart: a re-walk that resumes from the stored cursor issues
+ * `id::text > '<cursor>'` and never sees the rows it was re-opened for.
+ */
+describe("a finished parent is re-walked while its child is unfinished", () => {
+  /** The prime page queries issued against one table, in order. */
+  const pagesFor = (table: string): string[] =>
+    state.ran
+      .filter((r) => r.startsWith(`${PRIME}::`))
+      .map((r) => r.slice(PRIME.length + 2))
+      .filter((sql) => sql.includes("__cursor") && sql.includes(`."${table}" t`));
+
+  beforeEach(() => {
+    // The measured state on npc-test-76b3b3: the ledger finished on 12 Sep at
+    // 80 rows; the register it belongs to stopped at 21,600 of 24,294.
+    state.syncRows.set("aml.sanctions_list_syncs", {
+      table_name: "aml.sanctions_list_syncs",
+      status: "complete",
+      cursor: "ffffffff-ffff-ffff-ffff-ffffffffffff",
+      rows_copied: 80,
+    });
+    state.syncRows.set("aml.sanctions_entries", {
+      table_name: "aml.sanctions_entries",
+      status: "failed",
+      cursor: "e792eb2d-18f2-4f7b-9649-32359c3cf80c",
+      rows_copied: 21600,
+    });
+  });
+
+  it("reads the parent again rather than skipping it as complete", async () => {
+    await runReferenceDataSync(fakeSupabase());
+    expect(pagesFor("sanctions_list_syncs").length).toBeGreaterThan(0);
+  });
+
+  it("reads it from the beginning, not from the cursor it stored", async () => {
+    await runReferenceDataSync(fakeSupabase());
+    const first = pagesFor("sanctions_list_syncs")[0] ?? "";
+    expect(first).not.toContain("ffffffff-ffff-ffff-ffff-ffffffffffff");
+    expect(first).not.toMatch(/id"?::text >/);
+  });
+
+  it("the child still resumes from ITS cursor — only the parent restarts", async () => {
+    await runReferenceDataSync(fakeSupabase());
+    const first = pagesFor("sanctions_entries")[0] ?? "";
+    expect(first).toContain("e792eb2d-18f2-4f7b-9649-32359c3cf80c");
+  });
+
+  it("counts the re-walk rather than adding it to the count it carried", async () => {
+    await runReferenceDataSync(fakeSupabase());
+    // The double serves an empty prime, so a fresh walk writes 0. Carrying the
+    // old 80 forward would report 80 rows this pass never copied.
+    expect(state.syncRows.get("aml.sanctions_list_syncs")?.rows_copied).toBe(0);
+  });
+
+  it("leaves an unrelated finished table alone", async () => {
+    await runReferenceDataSync(fakeSupabase());
+    expect(pagesFor("suburb_directory").length).toBeGreaterThan(0);
+    state.ran = [];
+    // With every table complete and nothing unfinished, nothing re-opens.
+    for (const t of REFERENCE_TABLES) {
+      state.syncRows.set(refName(t), {
+        table_name: refName(t),
+        status: "complete",
+        rows_copied: 1,
+      });
+    }
+    await runReferenceDataSync(fakeSupabase());
+    expect(pagesFor("sanctions_list_syncs")).toEqual([]);
+  });
+});

@@ -619,4 +619,16 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "enum", type: "notification_kind" },
     ],
   },
+  {
+    migration: "20260919110000_clone_backend_chunk_cursor.sql",
+    version: "20260919110000",
+    assertions: [{ kind: "column", table: "clone_backends", column: "chunk_cursor" }],
+  },
+  {
+    migration: "20260919130000_prime_ledger_hole_blockage.sql",
+    version: "20260919130000",
+    assertions: [
+      { kind: "check", table: "clone_sync_blockages", column: "class", value: "prime_ledger_hole" },
+    ],
+  },
 ];

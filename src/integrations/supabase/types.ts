@@ -1696,6 +1696,7 @@ export type Database = {
           anon_key: string | null
           attempts: number
           clone_id: string
+          chunk_cursor: Json | null
           created_at: string
           db_pass: string | null
           edge_functions: Json
@@ -1737,6 +1738,7 @@ export type Database = {
           anon_key?: string | null
           attempts?: number
           clone_id: string
+          chunk_cursor?: Json | null
           created_at?: string
           db_pass?: string | null
           edge_functions?: Json
@@ -1778,6 +1780,7 @@ export type Database = {
           anon_key?: string | null
           attempts?: number
           clone_id?: string
+          chunk_cursor?: Json | null
           created_at?: string
           db_pass?: string | null
           edge_functions?: Json

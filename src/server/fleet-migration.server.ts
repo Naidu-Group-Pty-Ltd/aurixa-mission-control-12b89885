@@ -64,6 +64,7 @@ import {
   type MigrationSkipReason,
 } from "./fleetMigrationEligibility.pure";
 import { notifyOperators, writeAuditLog } from "./audit.server";
+import { chunkCursorFor } from "./chunkCursorStore.pure";
 
 type Db = SupabaseClient<Database>;
 
@@ -93,9 +94,45 @@ const DEFAULT_BATCH = 5;
  */
 const STALE_CLAIM_MINUTES = 30;
 
+/**
+ * How long one pass may spend before it stops handing out work.
+ *
+ * THIS LANE HAD NO BUDGET AT ALL, and its comment beside `applyPrimeMigrations`
+ * said why it needed none: a killed pass is "reclaimed after
+ * `STALE_CLAIM_MINUTES` and re-sends from the first statement, which is
+ * idempotent … Slower, never wrong." Idempotent is true. Slower is not: a seed
+ * the runtime cannot finish inside ONE invocation restarts at statement 1 on
+ * every pass, so it never lands however often it is tried.
+ *
+ * Measured 19 Sep 2026, the day the streaming fetch first worked. Both passes
+ * after it died mid-seed: no `lane:fleet-migration-sync` usage row, both
+ * claims left set, `migration_version` unmoved. Before the fetch was fixed the
+ * same passes returned in about eight seconds, because a 403 arrives quickly —
+ * the lane looked healthiest exactly while it could not do the work.
+ *
+ * Forty-five seconds, the same as the self-healing lane, and for the same
+ * reason: pg_net gives up on the hook at sixty, and a pass has to survive long
+ * enough to WRITE what it did. A budget that is spent is not a failure here —
+ * the chunk cursor makes the next pass carry on from the statement after the
+ * last one sent.
+ */
+const FLEET_PASS_BUDGET_MS = 45_000;
+
 export type FleetMigrationResult = {
   /** Clones eligible and claimed this run. */
   processed: number;
+  /**
+   * True when the pass ran out of its wall-clock budget with eligible clones
+   * it never reached, or stopped inside a chunked seed.
+   *
+   * Reported because the alternative readings are identical: a pass that
+   * served two of five clones and a pass that found five level both say
+   * `processed: 2, failed: []`. It is NOT an error — the chunk cursor and the
+   * free claim mean the next tick carries on — but a fleet that never finishes
+   * a pass is a fleet whose last clones are never served, and that has to be
+   * visible from the outside.
+   */
+  stoppedAtBudget: boolean;
   /** Clones that received at least one migration. */
   advanced: number;
   /** Clones already level with the prime. */
@@ -188,6 +225,7 @@ export type FleetMigrationResult = {
 
 const EMPTY: FleetMigrationResult = {
   processed: 0,
+  stoppedAtBudget: false,
   advanced: 0,
   upToDate: 0,
   failed: [],
@@ -329,9 +367,11 @@ type CorpusMetaOf = Awaited<ReturnType<typeof openPrimeMigrationCorpus>>["metas"
  */
 export async function runFleetMigrationSync(
   supabase: Db,
-  opts?: { batchSize?: number; actorUserId?: string | null },
+  opts?: { batchSize?: number; actorUserId?: string | null; budgetMs?: number },
 ): Promise<FleetMigrationResult> {
   const batchSize = Math.max(1, opts?.batchSize ?? DEFAULT_BATCH);
+  // Taken before the first read, so everything this pass spends is inside it.
+  const deadlineAt = Date.now() + Math.max(5_000, opts?.budgetMs ?? FLEET_PASS_BUDGET_MS);
 
   const source = await resolvePrimeSource(supabase);
   if (!source) {
@@ -367,7 +407,7 @@ export async function runFleetMigrationSync(
   const { data: allBackends, error: excludedErr } = await supabase
     .from("clone_backends")
     .select(
-      "clone_id, supabase_project_ref, migration_version, status, worker_started_at, migration_blocked_at, migration_blocked_reason",
+      "clone_id, supabase_project_ref, migration_version, status, worker_started_at, migration_blocked_at, migration_blocked_reason, chunk_cursor",
     );
   if (excludedErr) {
     return { ...EMPTY, error: `Could not read clone backends: ${excludedErr.message}` };
@@ -551,6 +591,24 @@ export async function runFleetMigrationSync(
     const cloneId = backend.clone_id;
     const cloneName = nameOf.get(cloneId) ?? cloneId;
 
+    /*
+      OUT OF TIME IS NOT A VERDICT ABOUT THIS CLONE.
+
+      Checked BEFORE the claim, so a pass with nothing left to give leaves the
+      row exactly as it found it. Claiming first and dying is what left
+      `worker_started_at` set on two clones on 19 Sep, and a leaked claim does
+      not merely delay that clone: `backends` is filtered on the claim being
+      free, so for the next half hour the whole fleet behind it waits too.
+
+      `stoppedAtBudget` is reported rather than swallowed, because a pass that
+      served three of five clones and a pass that found five level are the same
+      shape in every other field.
+    */
+    if (Date.now() >= deadlineAt) {
+      out.stoppedAtBudget = true;
+      break;
+    }
+
     // Claim. The filter carries `worker_started_at is null` so two overlapping
     // runs cannot both take the same clone — pg_cron does not serialise its own
     // job, and applying one migration twice concurrently is how a clone gets
@@ -580,16 +638,16 @@ export async function runFleetMigrationSync(
     if (!claimed || claimed.length === 0) continue; // another run has it
 
     try {
-      const { results, latestApplied } = await applyPrimeMigrations(
-        backend.supabase_project_ref!,
-        runnable,
-        undefined,
-        (m) => corpus.loadSql(m.id),
-        // `runnable` alone cannot say whether a cleared version sits behind a
-        // withheld one. The whole corpus can.
-        { corpus: corpus.metas, runnableIds: new Set(runnable.map((m) => m.id)) },
-        undefined,
-        /*
+      const { results, latestApplied, stoppedEarly, chunksApplied, chunkCursor } =
+        await applyPrimeMigrations(
+          backend.supabase_project_ref!,
+          runnable,
+          undefined,
+          (m) => corpus.loadSql(m.id),
+          // `runnable` alone cannot say whether a cleared version sits behind a
+          // withheld one. The whole corpus can.
+          { corpus: corpus.metas, runnableIds: new Set(runnable.map((m) => m.id)) },
+          /*
           A BODY TOO BIG TO HOLD IS STILL SENDABLE.
 
           `openPrimeMigrationCorpus` refuses a body past its ceiling, and the
@@ -605,13 +663,74 @@ export async function runFleetMigrationSync(
           next one rather than double-inserting, and the ledger row is written
           only once every statement has landed.
 
-          No cursor is passed. The self-healing lane persists one because it
-          runs inside a hard invocation budget; this job is reclaimed after
-          `STALE_CLAIM_MINUTES` and re-sends from the first statement, which is
-          idempotent by the clause above. Slower, never wrong.
+          A CURSOR IS PASSED NOW, AND THE REASONING THAT SAID IT NEED NOT BE
+          IS KEPT HERE BECAUSE IT WAS NEARLY RIGHT.
+
+          It read: "No cursor is passed. The self-healing lane persists one
+          because it runs inside a hard invocation budget; this job is
+          reclaimed after `STALE_CLAIM_MINUTES` and re-sends from the first
+          statement, which is idempotent by the clause above. Slower, never
+          wrong."
+
+          Idempotent, yes — the ON CONFLICT clause above makes a re-send free.
+          Slower, no. Re-sending from the first statement is only slower if a
+          pass eventually reaches the LAST one, and a ~40 MB seed in this
+          runtime does not: every pass restarts at statement 1 and is killed
+          before the end, so the seed never lands however often it is tried.
+          That is a livelock, and it was hidden for as long as the body could
+          not be fetched at all — a 403 returns in milliseconds, so the lane
+          looked healthy precisely while it was incapable of the work.
+
+          Measured 19 Sep 2026, the day the streaming fetch first worked: the
+          two passes that followed both died mid-seed, neither recorded a
+          `lane:fleet-migration-sync` usage row, both left `worker_started_at`
+          set — which starves every OTHER clone too, since the loop needs the
+          claim free — and no clone's `migration_version` moved.
         */
-        { streamSql: (m) => corpus.openSqlStream(m.id) },
-      );
+          // Stop BETWEEN migrations once this pass's budget is spent, reserving
+          // the slowest migration applied so far — so a pass never STARTS one it
+          // cannot live to finish and then reports the clone level.
+          { isPastDeadline: (reserveMs) => Date.now() + reserveMs >= deadlineAt },
+          {
+            streamSql: (m) => corpus.openSqlStream(m.id),
+            /*
+            THE CURSOR IS THE DIFFERENCE BETWEEN SLOW AND NEVER.
+
+            Read from the clone's own row and written on EVERY statement, not
+            at the end of the pass. A pass that is killed is the ordinary case
+            for a 40 MB seed in this runtime, so a cursor only a surviving pass
+            could write would be worth exactly as much as no cursor — which is
+            what this lane had, and why the seed could not land however many
+            times it was tried.
+
+            The stamp is checked against the migration it names before it is
+            believed: a cursor into a DIFFERENT file would make this pass skip
+            statements of the seed it is actually sending.
+          */
+            cursor: chunkCursorFor(backend.chunk_cursor),
+            onStatementDone: async (p) => {
+              const { error } = await supabase
+                .from("clone_backends")
+                .update({
+                  chunk_cursor: { migrationId: p.migrationId, statementsDone: p.statementsDone },
+                  status_detail: `Sending ${p.name} — ${p.statementsDone} statement(s) in (${p.label})`,
+                })
+                .eq("clone_id", cloneId);
+              if (error) {
+                // Not fatal: the statements themselves have landed and the seed's
+                // own ON CONFLICT makes re-sending them free. But a cursor that
+                // cannot be written turns a resumable pass back into the livelock
+                // this exists to end, so it must not be silent.
+                console.error("[fleet-migration] chunk cursor not recorded", {
+                  cloneId,
+                  migration: p.name,
+                  statementsDone: p.statementsDone,
+                  error: error.message,
+                });
+              }
+            },
+          },
+        );
       const successes = results.filter((r) => r.success && !r.skipped);
       /*
         A HOLD IS NOT A FAILURE, AND THE DIFFERENCE IS THE CLONE'S LIFE.
@@ -657,7 +776,12 @@ export async function runFleetMigrationSync(
         successes.length === 0 &&
         failures.length === 0 &&
         held.length === 0 &&
-        limited.length === 0
+        limited.length === 0 &&
+        // Nor is a pass that sent part of a chunked seed. `upToDate` is read as
+        // "nothing to do on this clone", and a clone forty statements into a
+        // 40 MB seed has a great deal left to do — the same distinction
+        // `didNothing` draws below, in the counter rather than the sentence.
+        chunksApplied === 0
       ) {
         out.upToDate++;
       } else if (failures.length === 0) {
@@ -715,8 +839,52 @@ export async function runFleetMigrationSync(
         failures.length === 0 &&
         blocked.length === 0 &&
         held.length === 0 &&
-        limited.length === 0;
+        limited.length === 0 &&
+        // A pass that sent part of a chunked seed and finished no migration
+        // still moved this clone forward. Counting it as "nothing happened"
+        // would leave the previous pass's sentence standing over real progress.
+        chunksApplied === 0;
       const syncedTo = latestApplied ?? "the prime's latest recorded migration";
+      /*
+        A PASS THE BUDGET STOPPED HAS NOT FINISHED LOOKING.
+
+        `stoppedEarly` means the replay stopped between migrations with more to
+        send, and `chunksApplied > 0` with nothing completed means it stopped
+        inside a seed. Either way this clone is NOT level, and the one thing
+        this lane must never write about it is a bare "Synced to X" — that is
+        the reading which reports a clone dozens of migrations behind as
+        healthy, and the reason `blocked` is named in the sentence below.
+
+        It is not a failure and raises no notice: the cursor is on the row, the
+        claim is released, and the next tick carries on from the statement after
+        the last one sent.
+      */
+      const pausedMidReplay = stoppedEarly || (chunksApplied > 0 && successes.length === 0);
+      if (pausedMidReplay) out.stoppedAtBudget = true;
+      /*
+        THE CURSOR OUTLIVES A PASS, BUT NOT ITS FILE.
+
+        Three states, and the middle one is why this cannot be a plain write of
+        whatever `applyPrimeMigrations` returned.
+
+        A pass that stopped INSIDE the seed returns a cursor: store it.
+        A pass that FINISHED the seed returns null and the migration is among
+        `successes`: clear it, because a cursor into a completed file would make
+        the next oversized seed skip statements that never landed on this clone.
+        A pass that never REACHED the seed — the budget stopped it earlier —
+        also returns null, and here the stored cursor is still exactly true.
+        Writing null for that third case would throw away a resume point and
+        put the livelock back for one pass in every chain.
+      */
+      const storedCursor = chunkCursorFor(backend.chunk_cursor);
+      const cursorFileLanded =
+        storedCursor !== null && successes.some((r) => r.id === storedCursor.migrationId);
+      const cursorWrite =
+        chunkCursor !== null
+          ? { chunk_cursor: chunkCursor }
+          : cursorFileLanded
+            ? { chunk_cursor: null }
+            : {};
       const { error: updErr } = await supabase
         .from("clone_backends")
         .update({
@@ -728,6 +896,7 @@ export async function runFleetMigrationSync(
           // deliberately left `failed`, and a `failed` row is outside this
           // worker's query anyway.
           worker_started_at: null,
+          ...cursorWrite,
           // Facts about the CLONE — written only by a pass that changed one.
           ...(didNothing
             ? {}
@@ -791,7 +960,14 @@ export async function runFleetMigrationSync(
                             // the one to reconcile first.
                             `Synced to ${syncedTo} — ${blocked.length} migration(s) held back behind ` +
                             `${blocked[0].blockedBy?.[0] ?? "a withheld version"}, which the prime's ledger does not record`
-                          : `Synced to ${syncedTo}`,
+                          : pausedMidReplay
+                            ? // Said before the level reading, because it is the
+                              // one case where "Synced to X" would be a claim
+                              // about a clone the pass never finished examining.
+                              `Synced to ${syncedTo} so far — this pass stopped at its time budget ` +
+                              `with more to send${chunksApplied > 0 ? ` (${chunksApplied} statement(s) of a large seed sent)` : ""}; ` +
+                              `it resumes where it stopped on the next pass`
+                            : `Synced to ${syncedTo}`,
                 error_message: failures.length > 0 ? failures[0].error : null,
               }),
         })
