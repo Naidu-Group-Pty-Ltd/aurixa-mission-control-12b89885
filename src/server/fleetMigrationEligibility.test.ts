@@ -4,10 +4,12 @@ import {
   MIGRATION_CLAIMABLE_STATUSES,
   PROVISIONING_IN_FLIGHT,
   blockIsDischarged,
+  blockIsUpstreamRefusal,
   blockedVersionFrom,
   migrationEligibility,
   type BackendFacts,
 } from "./fleetMigrationEligibility.pure";
+import { isUpstreamRateLimit } from "./provisioningBudget";
 
 const HEALTHY: BackendFacts = {
   supabaseProjectRef: "abcdefghijklmnopqrst",
@@ -200,6 +202,87 @@ describe("a block the clone has since discharged", () => {
     expect(blockIsDischarged(REAL_REASON, [])).toBe(false);
   });
 
+  /*
+    A BLOCK WRITTEN FROM A QUOTA REFUSAL CAN NEVER PASS THE TEST ABOVE.
+
+    Verbatim from `clone_backends.migration_blocked_reason` on
+    `npc-client-dashboard` and `preflight-property-group`, written 14 Sep
+    13:30 UTC and still standing on 19 Sep. Nothing was ever sent to those
+    clones — GitHub refused to serve the body — so the version this reason
+    names cannot enter their ledgers, because only a run applies anything and
+    a blocked clone gets no run.
+  */
+  const QUOTA_REASON =
+    "20261124000000_builder_portal_decommission.sql: API rate limit exceeded for " +
+    "installation ID 157200201. If you reach out to GitHub Support for help, please " +
+    "include the request ID BAA6:23251:A3CF0B:9EF25C:6AA7F6E3 and timestamp " +
+    "2026-09-14 13:30:25 UTC.";
+
+  it("recognises the quota refusal the lane actually recorded", () => {
+    expect(blockIsUpstreamRefusal(QUOTA_REASON)).toBe(true);
+  });
+
+  it("is the reason the ledger route could not release those three", () => {
+    // The whole corpus of the prime, and it still answers false: the version
+    // is not there and cannot get there.
+    expect(blockIsDischarged(QUOTA_REASON, ["20261122000000", "20261123000000"])).toBe(false);
+  });
+
+  it("retracts nothing that the clone itself refused", () => {
+    // The evidence rule stays the ONLY route for a real block. A schema
+    // rejection names no quota, so it keeps needing the ledger.
+    expect(blockIsUpstreamRefusal(REAL_REASON)).toBe(false);
+  });
+
+  it("refuses an absent or empty reason", () => {
+    for (const reason of [null, undefined, ""]) {
+      expect(blockIsUpstreamRefusal(reason)).toBe(false);
+    }
+  });
+
+  it("needs the limit NAMED, not merely a refusal", () => {
+    // The same rule `isUpstreamRateLimit` states: a 403 alone is not enough,
+    // because GitHub answers 403 for "you may not read this repository" too,
+    // and retracting that would hide a permission fault behind a quota word.
+    for (const reason of [
+      "20261124000000_x.sql: 403 Forbidden",
+      "20261124000000_x.sql: Resource not accessible by integration",
+      "20261124000000_x.sql: rate limiting is configured on this installation",
+      "20261124000000_x.sql: too many columns in the target table",
+    ]) {
+      expect(blockIsUpstreamRefusal(reason)).toBe(false);
+    }
+  });
+
+  it("reads the phrase through the module that writes it, never a second copy", () => {
+    // Two spellings of "is this a quota" is how the writer and the releaser
+    // come to disagree about one string — so the eligibility module imports
+    // the recognition rather than restating the regex.
+    const pure = readFileSync("src/server/fleetMigrationEligibility.pure.ts", "utf8");
+    expect(pure).toContain(
+      'import { messageNamesUpstreamRateLimit } from "@/server/provisioningBudget"',
+    );
+    // Comment-stripped, because the module's header QUOTES the production
+    // error text it exists to explain — and a test that fires on prose is one
+    // that teaches the next person to delete the explanation. What must not
+    // exist twice is the recognition, which is code.
+    const code = pure.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:])\/\/.*$/gm, "$1 ");
+    // A plain substring, deliberately: a second spelling would be written as
+    // `/\brate limit\b/`, and a word-boundary probe does not match that —
+    // `\b` makes "brate" one word, so the assertion would miss precisely the
+    // thing it is aimed at. Checked by planting one.
+    expect(code, "the phrase must not be spelled twice").not.toMatch(/rate limit/i);
+  });
+
+  it("agrees with the error-object predicate on the same text", () => {
+    // The block was written from a thrown error whose message is this string.
+    // If these two ever disagree, a refusal recorded by one is unrecognisable
+    // to the other, which is precisely the deadlock this closes.
+    expect(isUpstreamRateLimit({ message: QUOTA_REASON })).toBe(
+      blockIsUpstreamRefusal(QUOTA_REASON),
+    );
+  });
+
   it("matches the version only at the start of the reason", () => {
     // The stamp is the filename prefix the lane wrote, not any 14 digits that
     // happen to appear inside a driver's error text.
@@ -219,6 +302,24 @@ describe("the lane's rehabilitation pass", () => {
     expect(lane.indexOf("blockIsDischarged(")).toBeLessThan(
       lane.indexOf("const skipped = verdicts.filter"),
     );
+  });
+
+  it("asks whether the block was ever this clone's BEFORE reading its ledger", () => {
+    // Order is the whole point. `!ledger.ok` keeps the block, which is right
+    // for a block the clone earned and wrong for one it never did — so a
+    // transport failure must not be able to hold a quota refusal in place.
+    const retraction = pass.indexOf("blockIsUpstreamRefusal(");
+    const read = pass.indexOf("await readCloneMigrationLedger(");
+    expect(retraction, "the sweep must test for an upstream refusal").toBeGreaterThan(-1);
+    expect(read, "the sweep must still read the ledger for real blocks").toBeGreaterThan(-1);
+    expect(retraction).toBeLessThan(read);
+  });
+
+  it("still requires the ledger for every block that is not a quota refusal", () => {
+    // The narrow rule: retraction is gated on the signature, and everything
+    // else falls through to the evidence test unchanged.
+    expect(pass).toMatch(/if \(!upstreamRefusal\) \{/);
+    expect(pass).toContain("blockIsDischarged(");
   });
 
   it("clears the block and never the status", () => {

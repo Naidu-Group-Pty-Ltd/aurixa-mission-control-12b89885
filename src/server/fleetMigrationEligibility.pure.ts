@@ -1,3 +1,5 @@
+import { messageNamesUpstreamRateLimit } from "@/server/provisioningBudget";
+
 /**
  * Whether the fleet migration sync may advance a clone's schema.
  *
@@ -223,4 +225,55 @@ export function blockIsDischarged(
   const version = blockedVersionFrom(reason);
   if (!version) return false;
   return appliedVersions.includes(version);
+}
+
+/**
+ * A BLOCK WRITTEN FROM A QUOTA REFUSAL IS NOT A FINDING ABOUT THIS CLONE.
+ *
+ * The evidence rule above is right for what a block MEANS: this clone was sent
+ * a migration and refused it, so the clone's own ledger is what settles it. It
+ * cannot settle a block that was never about the clone at all.
+ *
+ * Measured 19 Sep 2026. `npc-client-dashboard`, `npc-test-76b3b3` and
+ * `preflight-property-group` had read `failed` since 14 Sep 13:30 UTC, each
+ * blocked at `20261124000000_builder_portal_decommission.sql` with the reason
+ *
+ *   API rate limit exceeded for installation ID 157200201
+ *
+ * The bodies were never fetched, so nothing was sent, so nothing was refused
+ * and those three schemas are untouched. #216 stopped new blocks being written
+ * that way. It could not release the three already written, and neither can
+ * `blockIsDischarged`: the version it looks for can only enter a clone's
+ * ledger by being applied, a blocked clone gets no run, and only a run applies
+ * anything. Five days on, the prime held TWENTY-THREE migrations past where
+ * they stopped — a security fix among them — and none could reach them.
+ *
+ * So the block retracts on what the reason SAYS. That is not the timer this
+ * module forbids: nothing here reads a clock, and the retraction is as much a
+ * statement about the evidence as the ledger test is — one reads what the
+ * clone holds, the other reads that there was never anything to hold.
+ *
+ * Three rules keep it narrow.
+ *
+ * **Only this signature retracts.** Every other block still needs the ledger,
+ * so a clone that genuinely rejected a migration stays out of the lane until
+ * it demonstrably holds it. A reason naming no version is still undischarged
+ * by either route, which is the direction a guard may be wrong in.
+ *
+ * **The recognition is imported, never restated** —
+ * `messageNamesUpstreamRateLimit` is the one spelling of this phrase, and the
+ * write path that created these blocks reaches the same function through
+ * `isUpstreamRateLimit`. A second regex here is how the writer and the
+ * releaser come to disagree about the same string.
+ *
+ * **Retracting clears the block and nothing else.** `status` belongs to
+ * whichever lane last ran a migration here, and a `failed` row carrying no
+ * block is already eligible above — deliberately, because such a row was
+ * failed by the provisioning lane and establishes nothing about this schema.
+ * Writing `ready` here would be this lane claiming a result it did not
+ * produce.
+ */
+export function blockIsUpstreamRefusal(reason: string | null | undefined): boolean {
+  if (typeof reason !== "string" || reason.length === 0) return false;
+  return messageNamesUpstreamRateLimit(reason);
 }

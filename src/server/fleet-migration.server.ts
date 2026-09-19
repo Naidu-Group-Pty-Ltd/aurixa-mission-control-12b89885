@@ -59,6 +59,7 @@ import { scopeCorpusToPrime, assertPrimeLedgerUsable } from "./fleetCorpusScope.
 import {
   MIGRATION_CLAIMABLE_STATUSES,
   blockIsDischarged,
+  blockIsUpstreamRefusal,
   migrationEligibility,
   type MigrationSkipReason,
 } from "./fleetMigrationEligibility.pure";
@@ -411,23 +412,43 @@ export async function runFleetMigrationSync(
     const ref = v.row.supabase_project_ref;
     if (!ref) continue;
 
-    const ledger = await readCloneMigrationLedger(ref);
-    // A read that FAILED says nothing, and an empty array is a claim. Keep the
-    // block rather than discharging one on a query that did not answer.
-    if (!ledger.ok) {
-      console.error(
-        `[fleet-migration] could not read ${v.row.clone_id}'s ledger to test its block:`,
-        ledger.error,
-      );
-      continue;
-    }
-    if (
-      !blockIsDischarged(
-        v.row.migration_blocked_reason,
-        ledger.rows.map((r) => r.version),
-      )
-    ) {
-      continue;
+    /*
+      A QUOTA REFUSAL IS RETRACTED WITHOUT ASKING THE LEDGER.
+
+      The ledger test below answers "has this clone since applied what it
+      refused?", and a block written from an upstream refusal can never pass
+      it: nothing was sent, so the version it names cannot enter this clone's
+      ledger except through a run, and a blocked clone gets no run. Three
+      clones sat in that deadlock for five days while the prime moved
+      twenty-three migrations ahead of them.
+
+      Asked FIRST, and deliberately: such a block needs no evidence about the
+      clone's schema, so the ledger read is not merely redundant here, it is a
+      round trip whose FAILURE would keep a block that was never about this
+      clone — the `!ledger.ok` guard below is correct for a real block and
+      would be wrong for this one.
+    */
+    const upstreamRefusal = blockIsUpstreamRefusal(v.row.migration_blocked_reason);
+
+    if (!upstreamRefusal) {
+      const ledger = await readCloneMigrationLedger(ref);
+      // A read that FAILED says nothing, and an empty array is a claim. Keep
+      // the block rather than discharging one on a query that did not answer.
+      if (!ledger.ok) {
+        console.error(
+          `[fleet-migration] could not read ${v.row.clone_id}'s ledger to test its block:`,
+          ledger.error,
+        );
+        continue;
+      }
+      if (
+        !blockIsDischarged(
+          v.row.migration_blocked_reason,
+          ledger.rows.map((r) => r.version),
+        )
+      ) {
+        continue;
+      }
     }
 
     const { error: clearErr } = await supabase
@@ -442,6 +463,16 @@ export async function runFleetMigrationSync(
       );
       continue;
     }
+
+    // Named, because the two routes mean different things: one says the clone
+    // has since applied what it refused, the other says it never refused
+    // anything. An operator reading this later needs to know which.
+    console.log(
+      `[fleet-migration] ${v.row.clone_id} rejoins the lane — ` +
+        (upstreamRefusal
+          ? "its block recorded an upstream quota refusal, not a schema rejection"
+          : "its ledger now records the version the block named"),
+    );
 
     v.row.migration_blocked_at = null;
     v.row.migration_blocked_reason = null;
