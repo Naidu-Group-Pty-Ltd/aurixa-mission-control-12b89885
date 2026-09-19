@@ -351,7 +351,17 @@ export async function runReferenceDataSync(
       continue;
     }
 
-    const record = async (fields: Record<string, unknown>) => {
+    /**
+     * Records progress, and says whether the write LANDED.
+     *
+     * Swallowing the error is right: a page that copied is copied whether or
+     * not this row records it, and throwing here would fail a table over its
+     * own bookkeeping. What was missing is the answer coming back, because
+     * `reached` below is a claim about what this ROW says — and advancing it
+     * on a write that failed is how a notice comes to quote a count nothing
+     * stored.
+     */
+    const record = async (fields: Record<string, unknown>): Promise<boolean> => {
       const { error } = await supabase.from("clone_reference_syncs").upsert(
         {
           clone_id: cloneId,
@@ -367,8 +377,34 @@ export async function runReferenceDataSync(
           table: name,
           error: error.message,
         });
+        return false;
       }
+      return true;
     };
+
+    /**
+     * ONE SPELLING OF "the operator has already been told this".
+     *
+     * Two paths announce a table that will not fill itself — the live-schema
+     * refusal below and the copy's own catch — and both are reached on every
+     * pass for ever, because only `complete` and `skipped` are terminal. The
+     * first version of this change put the comparison inline in the catch and
+     * left the refusal notifying unconditionally, which at the cadence beside
+     * it is up to ninety-six identical alerts a day for one table. Two
+     * spellings of one rule is how the two come to disagree; this is the one.
+     *
+     * A table that was not failing is news. A table now failing for a
+     * DIFFERENT reason is news — a 23503 becoming a 42703 is a different fault
+     * with a different remedy. The same error on the same table is a state the
+     * operator has already been told about, and `clone_reference_syncs` still
+     * carries it in full for anyone looking.
+     *
+     * It reads `prior`, the snapshot taken before this pass touched the row,
+     * which is exactly right: the question is what the operator was told LAST
+     * time, not what this pass has just written.
+     */
+    const isRepeatFailure = (detail: string): boolean =>
+      prior?.status === "failed" && prior?.detail === detail;
 
     try {
       // Does the clone even have the table? A clone behind on migrations does
@@ -406,15 +442,20 @@ export async function runReferenceDataSync(
           sourceRows: null,
           detail: plan.refusal,
         });
-        await notifyOperators({
-          kind: "cascade_failed",
-          severity: "error",
-          title: `Reference sync refused ${name}`,
-          body: plan.refusal,
-          cloneId,
-          url: `/clones/${cloneId}`,
-          metadata: { table: name },
-        });
+        // An unclassified column is stable: it is the same refusal next pass
+        // and the pass after that. Announced on the transition, by the same
+        // rule the catch answers to.
+        if (!isRepeatFailure(plan.refusal)) {
+          await notifyOperators({
+            kind: "cascade_failed",
+            severity: "error",
+            title: `Reference sync refused ${name}`,
+            body: plan.refusal,
+            cloneId,
+            url: `/clones/${cloneId}`,
+            metadata: { table: name },
+          });
+        }
         continue;
       }
       PLANNED_NULLS.set(name, plan.nulled);
@@ -450,8 +491,14 @@ export async function runReferenceDataSync(
         deadline,
         now,
         onProgress: async (c, n) => {
-          reached = carried + n;
-          await record({ cursor: c, rows_copied: reached, status: "copying" });
+          const landed = await record({ cursor: c, rows_copied: carried + n, status: "copying" });
+          // Only a CONFIRMED write moves it. `record` swallows its error, so a
+          // progress write that failed leaves the row holding the older count
+          // and the older cursor — and the catch below upserts `status` and
+          // `detail` alone, which preserves both. Advancing regardless is how
+          // the notice comes to name a count the row does not carry, under a
+          // sentence promising the count it stopped at.
+          if (landed) reached = carried + n;
         },
       });
 
@@ -519,8 +566,7 @@ export async function runReferenceDataSync(
         been told about, and `clone_reference_syncs` still carries it in full
         for anyone looking.
       */
-      const sameFailureAsBefore = prior?.status === "failed" && prior?.detail === detail;
-      if (!sameFailureAsBefore) {
+      if (!isRepeatFailure(detail)) {
         await notifyOperators({
           kind: "cascade_failed",
           severity: "error",

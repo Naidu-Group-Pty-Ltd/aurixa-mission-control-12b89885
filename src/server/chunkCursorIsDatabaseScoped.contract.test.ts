@@ -63,9 +63,7 @@ describe("a fresh project ref clears the cursor", () => {
   });
 
   it("no site assigns a fresh ref without clearing it", () => {
-    // `onProjectRef` is the one place a row starts pointing at a DIFFERENT
-    // database. The completion write re-states the ref this run already
-    // recorded, so clearing there would discard a live cursor instead.
+    // `onProjectRef` is where a row FIRST points at a different database.
     // Built rather than spelled, for the same reason as `updateAfter` above.
     const freshRefUpdate = new RegExp("\\.upd" + "ate\\(\\{[^}]*supabase_project_ref: ref[^}]*\\}\\)", "g");
     const assigns = [...provisioning.matchAll(freshRefUpdate)];
@@ -75,6 +73,66 @@ describe("a fresh project ref clears the cursor", () => {
         "chunk_cursor: null",
       );
     }
+  });
+
+  /**
+   * The whole object literal of the `.update({ … })` call containing an
+   * anchor, by matching braces rather than by counting bytes.
+   *
+   * Neither sibling helper can read the completion write: it nests four
+   * conditional spreads and the parity report, so `updateAfter`'s first `})`
+   * lands inside the first spread, and a fixed window lands wherever this
+   * file's comments happen to leave it. A window that drifts is how an
+   * assertion comes to pass about nothing, which this suite has paid for
+   * twice already. Comments are stripped by `code()` before this runs, so the
+   * only braces it counts are real ones.
+   */
+  const updateObjectContaining = (src: string, anchor: string): string => {
+    const at = src.indexOf(anchor);
+    expect(at, `anchor not found: ${anchor}`).toBeGreaterThan(-1);
+    const open = src.lastIndexOf(".upd" + "ate({", at);
+    expect(open, `no update call around ${anchor}`).toBeGreaterThan(-1);
+    let depth = 0;
+    let i = src.indexOf("{", open);
+    for (; i < src.length; i += 1) {
+      if (src[i] === "{") depth += 1;
+      else if (src[i] === "}") {
+        depth -= 1;
+        if (depth === 0) break;
+      }
+    }
+    expect(depth, `unbalanced braces from ${anchor}`).toBe(0);
+    return src.slice(open, i + 1);
+  };
+
+  /*
+    AND THE SECOND WRITER OF THE REF, WHICH THE FIRST VERSION OF THIS FILE
+    ARGUED DID NOT NEED IT.
+
+    It said the completion write "re-states the ref this run already
+    recorded, so clearing there would discard a live cursor instead". That is
+    true only when `onProjectRef` SUCCEEDED, and its failure is deliberately
+    not fatal — a paid project exists by then, so the run logs and carries on.
+    On that path the completion write is the first to persist the new ref, and
+    it persisted it beside the dead cursor.
+
+    Raised by review on the commit that added the rule above. Worth recording
+    as the shape rather than the instance: a guard placed at "the one place
+    that does X" is only as good as the claim that it is the one place, and
+    that claim is what goes stale.
+  */
+  it("the completion write clears a cursor from a database this run replaced", () => {
+    const call = updateObjectContaining(provisioning, "supabase_project_ref: result.projectRef");
+    expect(call).toContain("chunk_cursor: null");
+  });
+
+  it("and only when the ref actually changed, so a repair keeps its resume point", () => {
+    // Unconditional would be safe for correctness and wrong as a rule: the
+    // cursor dies with the DATABASE, not with a provisioning run. A repair
+    // that keeps the same project keeps a live fleet resume point, and
+    // clearing it re-sends a 40 MB seed from statement 1 for nothing.
+    const call = updateObjectContaining(provisioning, "supabase_project_ref: result.projectRef");
+    expect(call).toContain("result.projectRef !== existingRow?.supabase_project_ref");
   });
 });
 

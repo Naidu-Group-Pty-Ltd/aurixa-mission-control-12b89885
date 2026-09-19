@@ -20,6 +20,14 @@ const state = vi.hoisted(() => ({
   } as Record<string, unknown> | null,
   claimError: null as { message: string } | null,
   pickError: null as { message: string } | null,
+  /**
+   * When set, a `clone_reference_syncs` upsert whose values match is REFUSED
+   * with an error rather than stored — which is what PostgREST does and what
+   * `record` swallows. Without this the double could not express the one
+   * state that separates "the count this isolate counted" from "the count the
+   * row holds", and that gap is a finding this suite exists to have caught.
+   */
+  syncUpsertRefuses: null as null | ((values: Record<string, unknown>) => boolean),
 }));
 
 vi.mock("./prime-backend.server", () => ({
@@ -98,6 +106,9 @@ function fakeSupabase() {
           eq: async () => ({ data: [...state.syncRows.values()], error: null }),
         }),
         upsert: async (values: Record<string, unknown>) => {
+          if (state.syncUpsertRefuses?.(values)) {
+            return { error: { message: "clone_reference_syncs write refused" } };
+          }
           const key = String(values.table_name);
           state.syncRows.set(key, { ...(state.syncRows.get(key) ?? {}), ...values });
           return { error: null };
@@ -135,6 +146,7 @@ beforeEach(() => {
   state.backendRow = { clone_id: CLONE_ID, supabase_project_ref: CLONE };
   state.claimError = null;
   state.pickError = null;
+  state.syncUpsertRefuses = null;
 });
 
 describe("runReferenceDataSync", () => {
@@ -234,6 +246,65 @@ describe("runReferenceDataSync", () => {
         false,
       );
       expect(state.notifications.some((n) => n.title.includes("suburb_directory"))).toBe(true);
+    });
+
+    /*
+      THE SECOND NOTIFIER, AND THE ONE THE FIRST VERSION OF THIS RULE MISSED.
+
+      An unclassified column is stable: the same refusal next pass and the pass
+      after. The transition check went on the copy's catch and this path was
+      left announcing unconditionally, so at four passes an hour one table
+      still meant up to ninety-six identical alerts a day. Raised by review on
+      the commit that introduced the cadence.
+    */
+    const unclassifiedColumn = (ref: string, sql: string): unknown => {
+      if (sql.includes("to_regclass")) return [{ present: true }];
+      if (sql.includes("information_schema.columns")) {
+        if (sql.includes("'suburb_directory'")) {
+          return [{ column_name: "id" }, { column_name: "owner_user_id" }];
+        }
+        const t = REFERENCE_TABLES.find((e) => sql.includes(`'${e.table}'`));
+        return [
+          { column_name: "id" },
+          ...Object.keys(t?.columns ?? {}).map((c) => ({ column_name: c })),
+        ];
+      }
+      if (sql.includes("count(*)")) return [{ n: 0 }];
+      return [];
+    };
+
+    it("does not repeat a schema refusal that has not changed", async () => {
+      state.respond = unclassifiedColumn;
+      await runReferenceDataSync(fakeSupabase());
+      expect(
+        state.notifications.filter((n) => /Reference sync refused/.test(n.title)).length,
+      ).toBeGreaterThan(0);
+
+      state.notifications = [];
+      // Second pass over the rows the first one wrote: same column, same words.
+      await runReferenceDataSync(fakeSupabase());
+      expect(
+        state.notifications.filter((n) => /Reference sync refused/.test(n.title)),
+        "an unclassified column is stable, so announcing it every pass is a feed nobody reads",
+      ).toHaveLength(0);
+    });
+
+    it("but does announce a refusal whose REASON changed", async () => {
+      state.respond = unclassifiedColumn;
+      await runReferenceDataSync(fakeSupabase());
+      state.notifications = [];
+      state.respond = (ref, sql) => {
+        if (sql.includes("information_schema.columns") && sql.includes("'suburb_directory'")) {
+          // A DIFFERENT unclassified column: a different thing to classify and
+          // so a different remedy, which is what makes it news.
+          return [{ column_name: "id" }, { column_name: "client_id" }];
+        }
+        return unclassifiedColumn(ref, sql);
+      };
+      await runReferenceDataSync(fakeSupabase());
+      const again = state.notifications.filter((n) => /Reference sync refused/.test(n.title));
+      expect(again.length).toBeGreaterThan(0);
+      expect(again.some((n) => n.body.includes("client_id"))).toBe(true);
     });
 
     it("one refused table does not stop the rest of the fleet's tables", async () => {
@@ -554,5 +625,55 @@ describe("a failed table is reported, not just recorded", () => {
     expect(n!.body, "the notice reported the count it started with").toContain(
       `${entry.rowsPerPage} row(s)`,
     );
+  });
+
+  /*
+    AND NEVER A COUNT THE ROW DOES NOT CARRY.
+
+    `record` swallows its own write error — correctly, because a page that
+    copied is copied whether or not this row records it, and throwing there
+    would fail a table over its bookkeeping. But `reached` was advanced before
+    the answer came back, so a refused progress write left the row holding the
+    old count while the notice quoted the new one.
+
+    Zero is the honest reading here even though the rows reached the clone:
+    the cursor did not land either, so the next pass re-walks from the start,
+    and `on conflict do nothing` makes that free. The notice describes what
+    the register says and what the next pass will do — not what this isolate
+    happened to count.
+
+    Raised by review on the commit that fixed the stale count, and it is the
+    same finding one layer down.
+  */
+  it("does not report a count whose write was refused", async () => {
+    const entry = REFERENCE_TABLES.find((e) => e.table === "suburb_directory")!;
+    const full = Array.from({ length: entry.rowsPerPage }, (_, i) => ({
+      __cursor: `c${i}`,
+      __row: { id: `c${i}` },
+    }));
+    let page = 0;
+    state.respond = (ref, sql) => {
+      if (sql.includes("to_regclass")) return [{ present: true }];
+      if (sql.includes("information_schema.columns")) return [{ column_name: "id" }];
+      if (sql.includes("count(*)")) return [{ n: entry.rowsPerPage * 2 }];
+      if (ref === PRIME && sql.includes("__cursor") && sql.includes('."suburb_directory" t')) {
+        page += 1;
+        if (page === 1) return full;
+        throw new Error("the prime refused the second page");
+      }
+      if (ref === PRIME && sql.includes("__cursor")) return [];
+      return [];
+    };
+    // The PROGRESS write alone — the opening `copying` row carries no count,
+    // and the catch's failure record has to land or there is nothing to read.
+    state.syncUpsertRefuses = (v) => v.status === "copying" && "rows_copied" in v;
+
+    await runReferenceDataSync(fakeSupabase());
+    const n = state.notifications.find((x) => /suburb_directory/.test(x.title));
+    expect(n, "no notice for the table that failed mid-walk").toBeDefined();
+    expect(n!.body, "quoted a count no write ever stored").not.toContain(
+      `${entry.rowsPerPage} row(s)`,
+    );
+    expect(n!.body).toContain("0 row(s)");
   });
 });

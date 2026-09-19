@@ -654,6 +654,30 @@ async function runBackendProvisioning(
       .from("clone_backends")
       .update({
         supabase_project_ref: result.projectRef,
+        /*
+          THE SECOND WRITER OF THE REF, SO THE SECOND PLACE THE CURSOR DIES.
+
+          `onProjectRef` clears `chunk_cursor` the moment a new project is
+          created, and its own failure is deliberately NOT fatal — a paid
+          project exists by then and aborting strands it. But that failure is
+          only logged, and this update writes the ref again, so on exactly the
+          path where the clear was lost the new database ends up attached
+          beside the old one's cursor.
+
+          `cursorRanPastEnd` does not save it. That catches a cursor past the
+          END of the file; a cursor WITHIN the new seed's statement count skips
+          those statements against an empty schema and then records the
+          migration as applied — a clone carrying a ledger row for data it does
+          not hold, which is the failure the column was added to prevent.
+
+          Conditional, because the rule is about the DATABASE and not about
+          provisioning. A repair that keeps the same project keeps a live fleet
+          resume point, and clearing it there would re-send a 40 MB seed from
+          statement 1 for nothing. `existingRow` is the row as it stood before
+          this run began, so this asks exactly the right question: did this run
+          change which database the clone points at?
+        */
+        ...(result.projectRef !== existingRow?.supabase_project_ref ? { chunk_cursor: null } : {}),
         supabase_url: result.projectUrl,
         anon_key: result.anonKey,
         service_role_key: encryptSecret(result.serviceRoleKey),
