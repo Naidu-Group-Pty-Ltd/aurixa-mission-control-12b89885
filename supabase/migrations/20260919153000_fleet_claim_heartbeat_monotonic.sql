@@ -51,7 +51,19 @@ create or replace function public.fleet_claim_heartbeat(
 )
 returns boolean
 language plpgsql
-security definer
+-- INVOKER, not DEFINER, and that is deliberate.
+--
+-- Its siblings in this schema are `security definer` because `anon` and
+-- `authenticated` call them and need a privilege they do not hold. This one is
+-- called by exactly one caller — the fleet lane, on `supabaseAdmin`, which is
+-- `service_role` — and that role already updates `clone_backends` directly
+-- through PostgREST today. A definer here would therefore hand out a
+-- privilege nobody needs, and a `security definer` function on a table this
+-- sensitive is a standing escalation surface kept for no reason.
+--
+-- The grants below leave `service_role` as the only grantee, so nothing else
+-- can reach it either way. This is the belt as well as the braces.
+security invoker
 set search_path = public
 as $$
 declare

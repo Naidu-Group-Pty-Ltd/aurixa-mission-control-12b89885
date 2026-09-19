@@ -413,6 +413,21 @@ describe("a pass is bounded", () => {
     // And the fence is the function's own, so a reclaimed pass cannot beat
     // into its successor's claim however the call is made.
     expect(sql).toContain("and worker_started_at = _claimed_at");
+    /*
+      And it needs no privilege its caller lacks. The lane runs on
+      `supabaseAdmin`, which is `service_role`, and that role already updates
+      `clone_backends` through PostgREST — so a `security definer` here would
+      be a standing escalation surface on a sensitive table for no benefit at
+      all. The grants leave `service_role` the only grantee either way.
+    */
+    expect(sql, "the function runs with the definer's privileges for no reason").not.toContain(
+      "security definer",
+    );
+    expect(sql).toContain("security invoker");
+    expect(sql).toContain("revoke all on function public.fleet_claim_heartbeat");
+    expect(sql).toMatch(
+      /grant execute on function public\.fleet_claim_heartbeat[^;]*to service_role/,
+    );
   });
 
   it("does not make one beat wait for another, and abandons none", () => {
