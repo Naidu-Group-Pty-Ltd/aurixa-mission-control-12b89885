@@ -105,6 +105,60 @@ describe("the New Clone wizard renders the readiness answer", () => {
   });
 });
 
+/**
+ * A per-clone credential that only a Vercel-built clone receives is a
+ * credential most of this fleet does not have.
+ *
+ * Both halves of a clone's own identity are minted by the deployment drain at
+ * `syncing_env` — and that case opens `if (!row.project_id) return`, so only a
+ * clone Vercel is building ever reaches it. Provisioning writes
+ * `not_requested` for `manual` and `none`, and `pending_platform` when no
+ * Vercel token is configured; a deployment in any of those three states never
+ * advances. Every clone in this fleet is served manually, so in practice
+ * nothing had ever minted a Turnstile widget or started a sending identity
+ * except an operator opening the clone page and clicking two buttons.
+ */
+describe("the wizard arms a clone's own credentials", () => {
+  it.each([
+    ["provisionCloneTurnstile", "@/lib/turnstile-identity.functions"],
+    ["provisionCloneEmailIdentity", "@/lib/email-identity.functions"],
+  ])("calls %s, the same server function the clone page uses", (fn, module) => {
+    expect(WIZARD).toContain(`import { ${fn} } from "${module}"`);
+    expect(WIZARD).toContain(`useServerFn(${fn})`);
+  });
+
+  it("offers each as an explicit choice rather than doing it silently", () => {
+    expect(WIZARD).toContain("armTurnstile");
+    expect(WIZARD).toContain("armEmail");
+  });
+
+  /**
+   * Non-fatal, like every other enqueue in this handler. The clone exists
+   * either way and the clone page can retry — failing the whole submit
+   * because Cloudflare was briefly unreachable would destroy a filled form
+   * over something retryable.
+   */
+  it.each(["provisionTurnstileFn", "provisionEmailFn"])(
+    "does not let %s fail the provisioning run",
+    (fn) => {
+      const call = WIZARD.indexOf(`await ${fn}(`);
+      expect(call, `${fn} must be called`).toBeGreaterThan(-1);
+      const before = WIZARD.slice(Math.max(0, call - 400), call);
+      expect(before, `${fn} must sit inside a try block`).toContain("try {");
+    },
+  );
+
+  /**
+   * `provision` is the only mode that CREATES. `refresh` polls and creates
+   * nothing, so using it here would leave every new clone with no identity at
+   * all while looking like it had been wired up.
+   */
+  it("does not reach for a refresh-only entry point", () => {
+    expect(WIZARD).not.toContain("refreshCloneTurnstile");
+    expect(WIZARD).not.toContain("checkCloneEmailIdentity");
+  });
+});
+
 describe("the panel keeps readiness honest", () => {
   it("scopes itself with the flag the report carries, not a local list", () => {
     expect(PANEL).toContain("onClonePath");
