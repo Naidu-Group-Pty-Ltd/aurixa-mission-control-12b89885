@@ -693,8 +693,29 @@ export async function runFleetMigrationSync(
         about the clone's schema exactly as it found it. And where the pass DID
         do something, a null `latestApplied` is never interpolated into prose.
       */
+      // `limited` belongs in this list for the same reason it joined the
+      // `upToDate` guard twenty lines up, and leaving it out made the reading
+      // written for it unreachable in exactly the case it describes.
+      //
+      // A pass whose ONLY outcome is an upstream hold has `successes`,
+      // `failures`, `blocked` and `held` all empty — so without this it counts
+      // as "nothing happened", writes no `status_detail`, and leaves whatever
+      // the previous pass said standing. Measured on `npc-test-76b3b3`, which
+      // sits at `20261201100000` with the 40 MB seed as its only pending
+      // migration: a held pass left it reading `Migration failed at
+      // 20261202000000_…` from an earlier run, which is the sentence this
+      // whole change exists to stop an operator being shown.
+      //
+      // It also leaves the row `failed`, and a `failed` row is outside the
+      // reference-data lane's query — so the clone stops receiving its
+      // sanctions register too, which is how one quota refusal on 14 Sep came
+      // to freeze `aml.sanctions_entries` at 21,600 of 24,294 for five days.
       const didNothing =
-        successes.length === 0 && failures.length === 0 && blocked.length === 0 && held.length === 0;
+        successes.length === 0 &&
+        failures.length === 0 &&
+        blocked.length === 0 &&
+        held.length === 0 &&
+        limited.length === 0;
       const syncedTo = latestApplied ?? "the prime's latest recorded migration";
       const { error: updErr } = await supabase
         .from("clone_backends")
