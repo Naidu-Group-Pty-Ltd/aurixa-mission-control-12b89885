@@ -42,6 +42,7 @@ import {
   type TicketPriority,
 } from "@/lib/ticket-classification";
 import { asJson, asRow } from "@/lib/json-cast";
+import { chunkCursorFor } from "./chunkCursorStore.pure";
 import {
   countLanded,
   planDeployGeneration,
@@ -924,9 +925,11 @@ async function executeSqlMigration(
       // inside the seed resumes at the statement after the last one sent.
       {
         streamSql: (m) => corpus.openSqlStream(m.id),
-        cursor:
-          (run.result?.chunk_cursor as { migrationId: string; statementsDone: number } | null) ??
-          null,
+        // Narrowed rather than cast. A `jsonb` read is `unknown`, and
+        // `as { … } | null` is a promise to the compiler: a half-written row
+        // satisfied it and was then used as a number of statements to SKIP.
+        // One reader, shared with the fleet sync — see chunkCursorStore.pure.ts.
+        cursor: chunkCursorFor(run.result?.chunk_cursor),
         onStatementDone: (p) =>
           touchRun(run, {
             in_flight: `${p.name} — ${p.statementsDone} statement(s) sent (${p.label})`,

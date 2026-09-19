@@ -606,4 +606,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260919061500",
     assertions: [{ kind: "column", table: "clone_backends", column: "schema_verified_at" }],
   },
+  {
+    migration: "20260919110000_clone_backend_chunk_cursor.sql",
+    version: "20260919110000",
+    assertions: [{ kind: "column", table: "clone_backends", column: "chunk_cursor" }],
+  },
 ];
