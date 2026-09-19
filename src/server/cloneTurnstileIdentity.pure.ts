@@ -263,7 +263,9 @@ export function decideTurnstileSweep(facts: TurnstileSweepFacts): TurnstileSweep
   if (id?.status === "revoked") return { act: false, reason: "revoked" };
 
   // The secret has to land somewhere: it is written to the clone's own
-  // Supabase project, so without a ready backend there is nothing to write to.
+  // Supabase project, so without a usable backend there is nothing to write
+  // to. `backendReady` is computed by `backendHoldsAProject` — see there for
+  // why a backend that ended `failed` still counts.
   if (!facts.backendReady) return { act: false, reason: "backend_not_ready" };
 
   // NOTE what is deliberately NOT required here: a hosting project.
@@ -350,4 +352,45 @@ export function decideTurnstileSweep(facts: TurnstileSweepFacts): TurnstileSweep
   }
 
   return { act: false, reason: "complete" };
+}
+
+/**
+ * Whether a clone's backend can hold a Turnstile secret.
+ *
+ * NOT the same question as "did provisioning succeed", and reading it that
+ * way left three quarters of this fleet unreachable by the sweep. Measured
+ * 19 Sep 2026: of four clones, THREE sit at `clone_backends.status = failed`
+ * — all three stopped at the same late incremental migration
+ * (`20261124000000_builder_portal_decommissi…`) — and all three are live,
+ * serving, with a URL, an anon key and a working Turnstile widget. They were
+ * armed during an earlier `ready` window and then failed afterwards.
+ *
+ * A clone that fails BEFORE it is armed could never be armed at all: the
+ * sweep would answer `backend_not_ready` on every pass, for ever, about a
+ * database that exists and would take the write. The gate named a fact about
+ * the PROVISIONING RUN where what the operation needs is a fact about the
+ * PROJECT.
+ *
+ * So a terminal state with a project ref qualifies, and a state that is still
+ * moving does not. `ready` and `failed` are both terminal — the run is over,
+ * and `resolveCloneSecretTarget` still independently proves the ref is a real
+ * project that is neither the prime nor Mission Control before anything is
+ * written. `provisioning` and `migrating` are excluded because the project
+ * may not yet answer, and because a clone that is not serving yet has nothing
+ * to gain from a CAPTCHA and something to lose from a half-armed one.
+ *
+ * What makes this safe to widen at all is the ORDER in the orchestrator: the
+ * site key is published to the host before the secret is written, so a clone
+ * can never end up demanding a token its own login page cannot draw. Widening
+ * this gate without that order would have turned a dormant widget into a
+ * locked-out tenant.
+ */
+export function backendHoldsAProject(
+  backend: {
+    status?: string | null;
+    supabase_project_ref?: string | null;
+  } | null,
+): boolean {
+  if (!backend?.supabase_project_ref) return false;
+  return backend.status === "ready" || backend.status === "failed";
 }

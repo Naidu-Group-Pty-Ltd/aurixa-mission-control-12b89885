@@ -47,6 +47,20 @@ const primeBackend = () => read("src/server/prime-backend.server.ts");
 const pipeline = () => read("src/server/backend-provisioning.server.ts");
 const introspection = () => read("src/server/schema-introspection.server.ts");
 const runner = () => read("src/lib/backend-provisioning.functions.ts");
+
+/**
+ * Source with its commentary removed.
+ *
+ * An assertion about WIRING — "this callback writes this column" — is about
+ * code, and a character window measured over raw source is really measuring
+ * how much prose sits between the two. That window has now been widened twice
+ * for comments that were themselves explaining the wiring, which is a test
+ * teaching the next person to write less down. Stripping first makes the
+ * distance a property of the code, so a comment can neither break the
+ * assertion nor satisfy it.
+ */
+const code = (source: string) =>
+  source.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:])\/\/.*$/gm, "$1 ");
 const drift = () => read("src/server/fleet-drift.functions.ts");
 const retryHook = () => read("src/routes/hooks.backend-provisioning-retry.tsx");
 
@@ -94,9 +108,7 @@ describe("the snapshot fetches blobs batched, never one round trip each", () => 
        thousand REST calls never did. */
     const src = primeBackend();
     const fn = src.slice(src.indexOf("export async function fetchPrimeBackendSnapshot"));
-    expect(fn).toMatch(
-      /await fetchBlobTextsForCommit\(octokit, ref, commitSha, neededEntries\)/,
-    );
+    expect(fn).toMatch(/await fetchBlobTextsForCommit\(octokit, ref, commitSha, neededEntries\)/);
     /* The snapshot reaches the batch through the commit-keyed cache, so both
        links are asserted: losing either one puts a thousand REST calls back. */
     const cached = src.slice(src.indexOf("async function fetchBlobTextsForCommit"));
@@ -155,7 +167,57 @@ describe("the pipeline is budgeted and resumable", () => {
   });
 
   it("the runner wires onProjectRef to a clone_backends write", () => {
-    expect(runner()).toMatch(/onProjectRef[\s\S]{0,300}supabase_project_ref: ref/);
+    expect(code(runner())).toMatch(/onProjectRef[\s\S]{0,400}supabase_project_ref: ref/);
+  });
+
+  /**
+   * A new project has never been verified, whatever the row remembers.
+   *
+   * `schema_verified_at` lets a pass skip the introspection entirely, so a
+   * value left over from a project that has been replaced is the one way that
+   * skip could be wrong — it would certify a schema on a database that has
+   * never held it. The write that records a fresh ref clears it in the same
+   * statement, which is why they must not drift apart.
+   */
+  it("clears the schema verification when a fresh project is recorded", () => {
+    const src = code(runner());
+    const at = src.indexOf("onProjectRef");
+    expect(at).toBeGreaterThan(-1);
+    const body = src.slice(at, at + 400);
+    expect(body).toContain("supabase_project_ref: ref");
+    expect(body, "a new project carries no verification of the old one").toContain(
+      "schema_verified_at: null",
+    );
+  });
+
+  /**
+   * The optimisation is only sound if it records BOTH facts it stands for.
+   *
+   * `onSchemaVerified` must fire after the migration ledger stamp, never
+   * between the introspection and the stamp: a pass that died in that gap
+   * would teach the next one to skip a stamp that never ran, and an unstamped
+   * introspected schema takes no future migration at all.
+   */
+  it("records the verification only after the ledger stamp", () => {
+    const src = pipeline();
+    const stampAt = src.indexOf("stampMigrationLedgerFromPrime(projectRef");
+    const recordAt = src.indexOf("onSchemaVerified?.()");
+    expect(stampAt, "the stamp must exist").toBeGreaterThan(-1);
+    expect(recordAt, "the verification must be recorded").toBeGreaterThan(-1);
+    expect(
+      recordAt,
+      "recording before the stamp would skip a stamp that never ran",
+    ).toBeGreaterThan(stampAt);
+  });
+
+  /** The skip requires a SURVIVING project, not merely a remembered stamp. */
+  it("skips introspection only on a project that still exists", () => {
+    const src = pipeline();
+    const at = src.indexOf("const schemaAlreadyVerified");
+    expect(at).toBeGreaterThan(-1);
+    const decl = src.slice(at, at + 260);
+    expect(decl).toContain("input.existingProjectRef");
+    expect(decl).toContain("input.schemaVerifiedAt");
   });
 
   it("deployEdgeFunctions checks the budget between deploys and pauses", () => {
@@ -379,7 +441,11 @@ describe("the schema build remembers where it paused", () => {
 
   it("the runner stores the marker on a pause and clears it when done", () => {
     const src = runner();
-    expect(src).toMatch(/select\("supabase_project_ref, resume_stage"\)/);
+    /* The column list grows — `schema_verified_at` joined it so a pass can
+       skip an introspection it has already proved. What these assertions are
+       about is that the row is read ONCE and read EARLY, so they match the
+       read's opening rather than a snapshot of its columns. */
+    expect(src).toMatch(/select\("supabase_project_ref, resume_stage[^"]*"\)/);
     expect(src).toMatch(/introspectionResumeStage: existingRow\?\.resume_stage/);
     /* Undefined means the pause had no stage to name (the health wait, the
        edge deploys) — leave the stored marker alone rather than guessing. */
@@ -485,9 +551,7 @@ describe("a resumed pass does not buy what it cannot use", () => {
     /* The early return must sit BEFORE the bundle fetch, or declining costs
        exactly as much as not declining. */
     const guardAt = src.indexOf("if (!includeFunctionSource)");
-    const fetchAt = src.indexOf(
-      "fetchBlobTextsForCommit(octokit, ref, commitSha, neededEntries)",
-    );
+    const fetchAt = src.indexOf("fetchBlobTextsForCommit(octokit, ref, commitSha, neededEntries)");
     expect(guardAt).toBeGreaterThan(-1);
     expect(fetchAt).toBeGreaterThan(-1);
     expect(guardAt).toBeLessThan(fetchAt);
@@ -498,13 +562,14 @@ describe("a resumed pass does not buy what it cannot use", () => {
 
   it("the runner decides from the marker, and reads it before snapshotting", () => {
     const src = runner();
-    const readAt = src.indexOf('.select("supabase_project_ref, resume_stage")');
+    const SELECT = /\.select\("supabase_project_ref, resume_stage[^"]*"\)/g;
+    const readAt = src.search(SELECT);
     const snapAt = src.indexOf("await fetchPrimeBackendSnapshot(");
     expect(readAt).toBeGreaterThan(-1);
     expect(readAt).toBeLessThan(snapAt);
     expect(src).toMatch(/includeFunctionSource: !resumingSchema/);
     /* Read once. Two reads is how the second one drifts from the first. */
-    expect(src.split('.select("supabase_project_ref, resume_stage")').length - 1).toBe(1);
+    expect(src.match(SELECT)?.length ?? 0).toBe(1);
     /* A failed read is not an absent row — it must not resolve to "not resuming",
        which would silently restore the expensive fetch on every pass. */
     expect(src).toMatch(/existingRowErr[\s\S]{0,220}throw new Error\(/);
@@ -752,9 +817,7 @@ describe("the edge-function fetch is budgeted like everything else", () => {
        calls, is what it exists to save. It deliberately no longer narrows the
        fetch, because the fetch is what the secret scan reads (next test). */
     const skipAt = src.indexOf("const deployable = allBundles.filter((b) => !skip.has(b.slug));");
-    const fetchAt = src.indexOf(
-      "fetchBlobTextsForCommit(octokit, ref, commitSha, neededEntries)",
-    );
+    const fetchAt = src.indexOf("fetchBlobTextsForCommit(octokit, ref, commitSha, neededEntries)");
     expect(skipAt).toBeGreaterThan(-1);
     expect(skipAt).toBeLessThan(fetchAt);
   });
@@ -1907,7 +1970,9 @@ describe("a function the prime's repo deleted is not a shortfall on the tenant",
 
   it("blocks on the narrowed list, so a clean clone can reach an empty verdict", () => {
     const body = readFileSync("src/server/handoff-parity.server.ts", "utf8");
-    expect(body).toContain("blocking.push(`missing_edge_functions:${edgeFns.missing_in_target.length}`)");
+    expect(body).toContain(
+      "blocking.push(`missing_edge_functions:${edgeFns.missing_in_target.length}`)",
+    );
     expect(body).not.toContain("edgeFns.prime_only_undeclared.length)\n    blocking");
   });
 
@@ -2048,10 +2113,7 @@ describe("a fixed cost in front of the first stage is a livelock", () => {
   });
 
   it("keys the cache by commit, never by branch", () => {
-    const sql = readFileSync(
-      "supabase/migrations/20260904060000_prime_snapshot_scans.sql",
-      "utf8",
-    );
+    const sql = readFileSync("supabase/migrations/20260904060000_prime_snapshot_scans.sql", "utf8");
     expect(sql).toContain("primary key (repo, git_sha)");
     expect(sql).not.toMatch(/primary key \([^)]*branch/);
   });
@@ -2095,7 +2157,7 @@ describe("a clone's functions must never be left naming the prime", () => {
 
   it("re-points the prime's definitions before comparing them with the clone's", () => {
     const src = introspectionSrc();
-    const at = src.indexOf('const fnRows = await query(primeRef, Q.functions);');
+    const at = src.indexOf("const fnRows = await query(primeRef, Q.functions);");
     expect(at).toBeGreaterThan(-1);
     const block = src.slice(at, src.indexOf("while (shouldRunAnotherFunctionPass", at));
     // The rewrite happens on the way IN, so both the comparison and the apply
@@ -2140,7 +2202,15 @@ describe("an authorised forward that did not happen is not an unauthorised name"
   });
 
   it("still reads `missing` when nobody authorised it", () => {
-    const { results } = planCloneSecrets(["SOME_VENDOR_KEY"], {}, gen, null, undefined, undefined, new Set());
+    const { results } = planCloneSecrets(
+      ["SOME_VENDOR_KEY"],
+      {},
+      gen,
+      null,
+      undefined,
+      undefined,
+      new Set(),
+    );
     expect(results.get("SOME_VENDOR_KEY")?.status).toBe("missing");
   });
 
@@ -2405,7 +2475,9 @@ describe("a body too big to hold is not a migration that failed", () => {
 
   it("counts a hold in the run's own result, separately from a failure", () => {
     const s = fleet();
-    expect(s).toMatch(/heldOversize: Array<\{ cloneId: string; cloneName: string; migration: string \}>/);
+    expect(s).toMatch(
+      /heldOversize: Array<\{ cloneId: string; cloneName: string; migration: string \}>/,
+    );
     expect(s).toMatch(/out\.heldOversize\.push\(\{ cloneId, cloneName, migration: h\.name \}\)/);
     expect(s).toMatch(/held_oversize: out\.heldOversize\.map/);
   });

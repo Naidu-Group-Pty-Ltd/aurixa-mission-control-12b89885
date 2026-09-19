@@ -125,7 +125,7 @@ async function runBackendProvisioning(
     // (It used to be read after, so every pass paid for the whole thing.)
     const { data: existingRow, error: existingRowErr } = await supabase
       .from("clone_backends")
-      .select("supabase_project_ref, resume_stage")
+      .select("supabase_project_ref, resume_stage, schema_verified_at")
       .eq("clone_id", input.cloneId)
       .maybeSingle();
     if (existingRowErr) {
@@ -434,12 +434,44 @@ async function runBackendProvisioning(
         primeBackendRef,
         deadlineAt: input.deadlineAt ?? null,
         introspectionResumeStage: existingRow?.resume_stage ?? null,
+        schemaVerifiedAt: existingRow?.schema_verified_at ?? null,
+        // A full pass reconciled every stage and the ledger stamp succeeded.
+        // Recording it is what lets the NEXT pass spend its whole budget on
+        // the edge functions instead of re-proving a schema that is already
+        // right — measured at seven functions a minute rather than two.
+        //
+        // Best-effort on purpose: the run is otherwise complete at this
+        // point, and failing it to record an optimisation would trade a
+        // working clone for a faster one. A lost write costs one more
+        // verification pass, which is exactly what happens today.
+        onSchemaVerified: async () => {
+          const { error } = await supabase
+            .from("clone_backends")
+            .update({ schema_verified_at: new Date().toISOString() })
+            .eq("clone_id", input.cloneId);
+          if (error) {
+            console.error(
+              `[backend-provisioning] could not record schema verification for clone ${input.cloneId}: ${error.message}`,
+            );
+          }
+        },
         // Persist the ref the moment the project exists — a death after
         // creation must resume onto it, never orphan it (see the input doc).
         onProjectRef: async (ref: string) => {
+          // `schema_verified_at` is cleared because a NEW project has never
+          // been verified, whatever the row remembers about the one before
+          // it. That is what stops a verification of a dead project being
+          // read as a statement about this one — the single way the skip
+          // above could be wrong.
+          //
+          // The note sits ABOVE the statement rather than inside the chain:
+          // `check-discarded-errors.mjs` blanks comment lines rather than
+          // removing them and reads four lines back from the `.update(` for
+          // the `error` binding, so a comment between the two hides a checked
+          // write from the checker and spends a ratchet slot on nothing.
           const { error } = await supabase
             .from("clone_backends")
-            .update({ supabase_project_ref: ref })
+            .update({ supabase_project_ref: ref, schema_verified_at: null })
             .eq("clone_id", input.cloneId);
           if (error) {
             // The one write whose failure can cost a paid project: without
@@ -517,7 +549,9 @@ async function runBackendProvisioning(
       const { provisionAnthropicWorkspace } = await import(
         /* @vite-ignore */ "@/server/anthropicWorkspace.server"
       );
-      const ws = await provisionAnthropicWorkspace(supabase, input.cloneId, { actorUserId: userId });
+      const ws = await provisionAnthropicWorkspace(supabase, input.cloneId, {
+        actorUserId: userId,
+      });
       await updateStatus(
         "migrating",
         ws.provisioned

@@ -601,4 +601,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260919060000",
     assertions: [{ kind: "rows", table: "api_provider_rates", atLeast: 30 }],
   },
+  {
+    migration: "20260919061500_clone_backend_schema_verified_at.sql",
+    version: "20260919061500",
+    assertions: [{ kind: "column", table: "clone_backends", column: "schema_verified_at" }],
+  },
 ];

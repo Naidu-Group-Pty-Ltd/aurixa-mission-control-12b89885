@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  backendHoldsAProject,
   canRotateSecret,
   decideTurnstileSweep,
   deriveWidgetDomains,
@@ -322,5 +323,44 @@ describe("decideTurnstileSweep", () => {
     // that as drift would retry it every ten minutes for ever.
     const v = decideTurnstileSweep(facts({ identity: complete(), wantedDomains: [] }));
     expect(v).toEqual({ act: false, reason: "complete" });
+  });
+});
+
+/**
+ * Three of this fleet's four clones sit at `failed` and all three work.
+ *
+ * They stopped at the same late incremental migration and were already live,
+ * serving, armed and holding a URL and an anon key. Gating the sweep on
+ * `status === "ready"` therefore named a fact about the provisioning RUN
+ * where the operation needs a fact about the PROJECT — and a clone that
+ * failed before it was armed could never be armed at all.
+ */
+describe("backendHoldsAProject", () => {
+  it("accepts a backend that ended failed but holds a project", () => {
+    // The measured state of NPC Test, Preflight and NPC Client Dashboard.
+    expect(backendHoldsAProject({ status: "failed", supabase_project_ref: "a".repeat(20) })).toBe(
+      true,
+    );
+  });
+
+  it("accepts a ready backend, as before", () => {
+    expect(backendHoldsAProject({ status: "ready", supabase_project_ref: "a".repeat(20) })).toBe(
+      true,
+    );
+  });
+
+  it("refuses a run that is still moving", () => {
+    // The project may not answer yet, and a clone that is not serving has
+    // nothing to gain from a CAPTCHA and something to lose from a half-armed
+    // one.
+    for (const status of ["provisioning", "migrating", "pending", "queued"]) {
+      expect(backendHoldsAProject({ status, supabase_project_ref: "a".repeat(20) })).toBe(false);
+    }
+  });
+
+  it("refuses a backend with no project, whatever it claims", () => {
+    expect(backendHoldsAProject({ status: "ready", supabase_project_ref: null })).toBe(false);
+    expect(backendHoldsAProject({ status: "failed", supabase_project_ref: "" })).toBe(false);
+    expect(backendHoldsAProject(null)).toBe(false);
   });
 });
