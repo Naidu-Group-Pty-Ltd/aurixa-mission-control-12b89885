@@ -45,6 +45,12 @@ export const provisionCloneTurnstile = createServerFn({ method: "POST" })
         ok: res.ok,
         advanced: res.ok ? res.advanced : null,
         error: res.ok ? null : res.error,
+        // A deferral is a wait, not a failure. Recording it as one keeps the
+        // audit trail honest about a clone whose backend was simply still
+        // provisioning — otherwise every new clone leaves a `clone_turnstile
+        // .provision` failure behind it in the log for a run that went
+        // perfectly.
+        deferred: res.ok ? false : Boolean(res.deferred),
       },
     });
     return res;

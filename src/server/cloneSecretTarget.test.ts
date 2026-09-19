@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { decideCloneSecretTarget } from "./cloneSecretTarget.pure";
+import {
+  decideCloneSecretTarget,
+  isTransientCloneSecretRefusal,
+  type CloneSecretRefusal,
+} from "./cloneSecretTarget.pure";
 
 const CLONE = "11111111-2222-3333-4444-555555555555";
 const CLONE_PROJECT = "plisdzywzleljorrphxv";
@@ -268,5 +272,59 @@ describe("the reconciler", () => {
   it("requires cron auth and answers 200 with refusals in the body", () => {
     expect(hook).toMatch(/verifyCronAuth\(request\)/);
     expect(hook).toMatch(/success: true, \.\.\.result/);
+  });
+});
+
+/**
+ * A precondition that is merely not met YET is not a failure.
+ *
+ * Measured on `npc-crm-independent-6505dc`: provisioning armed the clone's
+ * Turnstile widget one second after writing the clone row, while the Supabase
+ * project was still being created — it was replicating RLS policies ten
+ * minutes later. The mint therefore refused with `backend_not_provisioned`,
+ * the widget it had just created was deleted, and the row was stamped
+ * `status: failed` with an alarming `last_error`.
+ *
+ * The expensive part is the third-order effect: `decideTurnstileSweep` reads
+ * `last_error` to hold off on a recent FAILURE for thirty minutes, so trying
+ * too early bought a LONGER wait than never having tried at all — on a fleet
+ * whose recovery sweep runs every ten.
+ */
+describe("isTransientCloneSecretRefusal", () => {
+  it("treats a backend that is still provisioning as a wait", () => {
+    expect(isTransientCloneSecretRefusal("backend_not_provisioned")).toBe(true);
+  });
+
+  it("treats a failed read as a wait — it is a 503, not a fact about the clone", () => {
+    expect(isTransientCloneSecretRefusal("unreadable")).toBe(true);
+  });
+
+  it("never softens a write aimed at the prime or at Mission Control itself", () => {
+    // These are the data faults the whole module exists to refuse. Waiting
+    // changes neither, and a quiet retry against the prime is the one outcome
+    // worth a loud, permanent error.
+    expect(isTransientCloneSecretRefusal("target_is_prime")).toBe(false);
+    expect(isTransientCloneSecretRefusal("target_is_mission_control")).toBe(false);
+  });
+
+  it("never softens a clone that is absent or unnamed", () => {
+    expect(isTransientCloneSecretRefusal("clone_not_found")).toBe(false);
+    expect(isTransientCloneSecretRefusal("no_clone_id")).toBe(false);
+  });
+
+  it("classifies every refusal the union can spell", () => {
+    // The switch is exhaustive by construction, so this fails loudly if a new
+    // reason is added and left unclassified rather than defaulting to one
+    // side — which is how "permanent" quietly becomes the answer for a
+    // condition that clears on its own.
+    const all: CloneSecretRefusal[] = [
+      "no_clone_id",
+      "unreadable",
+      "clone_not_found",
+      "backend_not_provisioned",
+      "target_is_mission_control",
+      "target_is_prime",
+    ];
+    for (const r of all) expect(typeof isTransientCloneSecretRefusal(r)).toBe("boolean");
   });
 });

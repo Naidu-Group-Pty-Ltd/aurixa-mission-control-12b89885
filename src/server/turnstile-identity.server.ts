@@ -41,6 +41,7 @@ import {
   type TurnstileReadiness,
 } from "./cloneTurnstileIdentity.pure";
 import { resolveCloneSecretTarget, CloneSecretTargetError } from "./cloneAllowedOrigins.server";
+import { isTransientCloneSecretRefusal } from "./cloneSecretTarget.pure";
 
 type Db = SupabaseClient<Database>;
 
@@ -48,8 +49,20 @@ export const CLONE_TURNSTILE_SECRET = "TURNSTILE_SECRET_KEY";
 export const CLONE_TURNSTILE_SITE_KEY_ENV = "VITE_TURNSTILE_SITE_KEY";
 export const REQUIRE_TURNSTILE_SECRET = "REQUIRE_TURNSTILE";
 
-type Fail = { ok: false; error: string };
+/**
+ * `deferred` marks a refusal that means NOT YET rather than no.
+ *
+ * It exists so three different things stop happening on a clone whose
+ * Supabase project is simply still being created: a Cloudflare widget is not
+ * minted and immediately deleted, `last_error` is not written (which would
+ * start `decideTurnstileSweep`'s thirty-minute cooling-off against a
+ * condition that clears in ten), and the operator is not told a healthy
+ * provisioning run failed. `isTransientCloneSecretRefusal` is the one place
+ * that decides which refusals qualify.
+ */
+type Fail = { ok: false; error: string; deferred?: true };
 const fail = (error: string): Fail => ({ ok: false, error });
+const defer = (error: string): Fail => ({ ok: false, error, deferred: true });
 const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 export function isCloudflareConfigured(): boolean {
@@ -156,8 +169,15 @@ async function deliverSecret(
   try {
     target = await resolveCloneSecretTarget(supabase, cloneId);
   } catch (e) {
-    const reason = e instanceof CloneSecretTargetError ? ` (${e.reason})` : "";
-    return fail(`Refusing to write the clone's Turnstile secret${reason}: ${msg(e)}`);
+    // The REASON decides whether this is a failure or a wait. Collapsing it
+    // into one string is what made "the backend is still provisioning" and
+    // "this clone's row names the prime's project" the same event to every
+    // caller — and the first is the ordinary state of a clone thirty seconds
+    // old.
+    const known = e instanceof CloneSecretTargetError ? e.reason : null;
+    const suffix = known ? ` (${known})` : "";
+    const text = `Refusing to write the clone's Turnstile secret${suffix}: ${msg(e)}`;
+    return known && isTransientCloneSecretRefusal(known) ? defer(text) : fail(text);
   }
 
   const { setCloneSecretValue } = await import("./backend-provisioning.server");
@@ -278,6 +298,42 @@ export async function provisionTurnstileIdentity(
       );
     }
 
+    /*
+     * Ask where the secret would go BEFORE minting one.
+     *
+     * Cloudflare hands the secret back on create and on rotate and never
+     * again, so a mint whose delivery then fails has to be thrown away: the
+     * widget is deleted and the row is marked failed. On a clone that is
+     * seconds old that is guaranteed — provisioning writes the clone row and
+     * arms its credentials immediately, while the Supabase project takes
+     * minutes (measured: the mint ran one second after the clone row, and the
+     * backend was still replicating RLS policies ten minutes later).
+     *
+     * So the same question the delivery would ask is asked first, when the
+     * answer still costs nothing. A transient refusal returns a DEFERRAL:
+     * no Cloudflare call, no `last_error`, and therefore no thirty-minute
+     * cooling-off in `decideTurnstileSweep` against a condition that clears
+     * on its own. The ten-minute sweep then arms it unattended, which is what
+     * that sweep is for.
+     *
+     * A permanent refusal still falls through to the ordinary path and fails
+     * loudly, because `target_is_prime` must never be quietly retried.
+     */
+    if (!row?.site_key) {
+      try {
+        await resolveCloneSecretTarget(supabase, cloneId);
+      } catch (e) {
+        const known = e instanceof CloneSecretTargetError ? e.reason : null;
+        if (known && isTransientCloneSecretRefusal(known)) {
+          return defer(
+            `This clone's Supabase project is not ready to hold a Turnstile secret yet ` +
+              `(${known}). Nothing was created. It is armed automatically once the backend ` +
+              `finishes provisioning.`,
+          );
+        }
+      }
+    }
+
     const { cloudflareApi } = await import("./cloudflare/client");
     const name = row?.widget_name ?? deriveWidgetName(clone.slug);
     let mintedSecret: string | null = null;
@@ -323,14 +379,26 @@ export async function provisionTurnstileIdentity(
         opts.actorUserId ?? null,
       );
       if (!delivered.ok) {
-        // Undelivered secret, widget nobody can use: remove what this call made.
+        // Undelivered secret, widget nobody can use: remove what this call
+        // made. The widget goes either way — an orphan nobody holds the
+        // secret for is litter, not a retry.
+        //
+        // What differs is the ROW. A deferral reaching here means the target
+        // went away between the pre-flight above and this write — a blip, or
+        // a backend that is still settling — and marking that `failed` with a
+        // `last_error` would hold the ten-minute sweep off for thirty
+        // minutes over a condition that clears on its own. The row is simply
+        // returned to having no widget, which is exactly what the sweep
+        // treats as "no widget yet" and arms on its next pass.
         if (createdHere) {
           await cloudflareApi.deleteTurnstileWidget(accountId, row.site_key).catch(() => {});
-          await persist(supabase, cloneId, {
-            site_key: null,
-            status: "failed",
-            last_error: delivered.error,
-          });
+          await persist(
+            supabase,
+            cloneId,
+            delivered.deferred
+              ? { site_key: null }
+              : { site_key: null, status: "failed", last_error: delivered.error },
+          );
         }
         return delivered;
       }
@@ -366,6 +434,15 @@ export async function provisionTurnstileIdentity(
     // contradict: a widget that exists and merely failed a domain re-sync is
     // not a failed identity, and saying so would send an operator to re-mint
     // something that is fine.
+    //
+    // A transient target refusal reaching here is still NOT a failure, for
+    // the reason `isTransientCloneSecretRefusal` gives: writing `last_error`
+    // would arm a thirty-minute cooling-off against a condition that clears
+    // in ten. The rule holds on every path out of this function, not only on
+    // the two that happen to check it first.
+    if (e instanceof CloneSecretTargetError && isTransientCloneSecretRefusal(e.reason)) {
+      return defer(error);
+    }
     const existing = await readIdentity(supabase, cloneId).catch(() => null);
     await persist(supabase, cloneId, {
       last_error: error,

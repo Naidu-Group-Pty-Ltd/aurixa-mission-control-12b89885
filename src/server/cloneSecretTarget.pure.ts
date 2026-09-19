@@ -160,3 +160,49 @@ export function decideCloneSecretTarget(input: {
 
   return { ok: true, projectRef: ref };
 }
+
+/**
+ * Refusals that mean "not yet" rather than "no".
+ *
+ * A clone's own credentials are armed the moment provisioning writes the
+ * clone row, while its Supabase project is still being created — measured on
+ * `npc-crm-independent-6505dc`, the Turnstile mint ran ONE SECOND after the
+ * clone row and the backend was still replicating RLS policies ten minutes
+ * later. `backend_not_provisioned` there is a statement about the clock, not
+ * about the configuration: the ref appears on its own, unattended, and every
+ * sweep that follows would have succeeded.
+ *
+ * Recording that as a failure costs three separate things, and the third is
+ * the expensive one. It spends a Cloudflare create-then-delete round trip on
+ * a widget nobody can use. It writes an alarming `last_error` onto a clone
+ * whose provisioning is proceeding normally. And because
+ * `decideTurnstileSweep` reads `last_error` to hold off on a recent FAILURE,
+ * it starts a thirty-minute cooling-off period against a condition that
+ * clears in ten — so the penalty for trying too early is a longer wait than
+ * never having tried at all.
+ *
+ * `unreadable` joins it for the reason the module header already gives: a
+ * read that failed is a 503-shaped answer, not a fact about the clone.
+ *
+ * The other four are permanent and must keep their alarm. `no_clone_id` is a
+ * programming fault; `clone_not_found` means the row is gone; and both
+ * `target_is_*` are the data faults this whole module exists to refuse —
+ * waiting changes none of them, and quietly retrying a write aimed at the
+ * prime is the one outcome worth a loud error.
+ *
+ * Exhaustive by construction: the switch names every member of
+ * `CloneSecretRefusal`, so adding a reason without classifying it fails the
+ * typecheck rather than defaulting to one side.
+ */
+export function isTransientCloneSecretRefusal(reason: CloneSecretRefusal): boolean {
+  switch (reason) {
+    case "backend_not_provisioned":
+    case "unreadable":
+      return true;
+    case "no_clone_id":
+    case "clone_not_found":
+    case "target_is_mission_control":
+    case "target_is_prime":
+      return false;
+  }
+}
