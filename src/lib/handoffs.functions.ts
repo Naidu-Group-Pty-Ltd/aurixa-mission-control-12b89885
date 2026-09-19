@@ -532,6 +532,12 @@ export const runParityDryRun = createServerFn({ method: "POST" })
     const parity = await computeParity(primeRef, backend.supabase_project_ref, {
       declaredEdgeFunctions,
       migrationObjectIndex,
+      // A credential this clone is supposed to lack is not a gap in its
+      // parity — see `diffSecrets`.
+      withheldSecretNames: await (async () => {
+        const { readWithheldSecretNames } = await import("@/server/handoff-parity.server");
+        return readWithheldSecretNames(context.supabase, handoff.clone_id);
+      })(),
     });
 
     const { data: row, error: insErr } = await context.supabase

@@ -29,6 +29,7 @@ import {
   type FoldableEvent,
 } from "@/server/cascade/eventFold.pure";
 import { CREATION_ARM_GRACE_MS } from "@/server/cascade/armGrace.pure";
+import { planGateReassessment, type RecordedGate } from "@/server/cascade/gateReassessment.pure";
 import { beaconSummary, decideDriftBeacon } from "@/server/cascade/driftBeacon.pure";
 import { decideExhaustedEvent, retirementSummary } from "@/server/cascade/exhaustedEvents.pure";
 import {
@@ -191,6 +192,87 @@ async function reclaimStalled() {
       }
     }
   }
+}
+
+/**
+ * Re-ask the approval question before anything is claimed or folded.
+ *
+ * `requires_approval` is stamped at insert from a clone count read in that
+ * instant, and until now nothing ever read it again except to refuse. When the
+ * fleet's fourth clone landed on 19 Sep 2026 that froze eight commit cascades
+ * — the whole queue, four tenants, 69 commits — behind an answer that had
+ * stopped being true.
+ *
+ * `gateReassessment.pure.ts` owns the decision and the three rules that make
+ * it safe: it never approves, it only ever relaxes, and it says why on the
+ * row. This is the I/O around it.
+ *
+ * It runs BEFORE the fold on purpose. A discharged commit event becomes
+ * foldable in the same tick, so a backlog that was eight separate stuck rows
+ * settles into one carrier delivering prime's head rather than eight passes of
+ * the same work.
+ */
+async function reassessRecordedGates(): Promise<number> {
+  const { data: events, error } = await admin
+    .from("cascade_events")
+    .select("id, trigger, mode, requires_approval, approved_at")
+    .eq("status", "pending")
+    .eq("requires_approval", true)
+    .is("approved_at", null)
+    .is("worker_started_at", null);
+  if (error) {
+    throw new Error(`cascade-drain gate: could not read the gated queue: ${error.message}`);
+  }
+  if ((events ?? []).length === 0) return 0;
+
+  // The count the rule reads, taken once. `head: true` so this is a count and
+  // not four hundred rows; a failed count is NOT a fleet of zero — reading it
+  // as one would discharge every gate in the queue, which is the opposite of
+  // failing closed.
+  const { count, error: countErr } = await admin
+    .from("clones")
+    .select("id", { count: "exact", head: true });
+  if (countErr || count == null) {
+    throw new Error(
+      `cascade-drain gate: could not count the fleet: ${countErr?.message ?? "no count returned"}`,
+    );
+  }
+
+  const plan = planGateReassessment((events ?? []) as RecordedGate[], count);
+  let discharged = 0;
+  for (const item of plan.discharge) {
+    // Re-checked in the predicate: a concurrent `approveCascade` stamping
+    // `approved_at` between the read and this write must win, because a
+    // person's act outranks a re-derivation of the rule they were asked about.
+    const { data: moved, error: updErr } = await admin
+      .from("cascade_events")
+      .update({ requires_approval: false, summary: item.summary })
+      .eq("id", item.id)
+      .eq("status", "pending")
+      .eq("requires_approval", true)
+      .is("approved_at", null)
+      .is("worker_started_at", null)
+      .select("id");
+    if (updErr) {
+      throw new Error(`cascade-drain gate: could not discharge ${item.id}: ${updErr.message}`);
+    }
+    if ((moved ?? []).length === 0) continue;
+    discharged += 1;
+    // The notification that asked for an approval is answered, not left to
+    // read as an outstanding request against an event that is running.
+    const { error: notifErr } = await admin
+      .from("notifications")
+      .update({ read_at: new Date().toISOString() })
+      .eq("cascade_event_id", item.id)
+      .eq("kind", "cascade_awaiting_approval")
+      .is("read_at", null);
+    if (notifErr) {
+      console.error(
+        `[cascade-drain] discharged ${item.id} but could not clear its approval notification: ${notifErr.message}`,
+      );
+    }
+  }
+  return discharged;
 }
 
 /**
@@ -696,6 +778,9 @@ export const Route = createFileRoute("/hooks/cascade-drain")({
             isPastDeadline: (reserveMs) => Date.now() + reserveMs >= deadlineAt,
           };
           await reclaimStalled();
+          // Before the fold, because a gate this discharges makes its event
+          // foldable in the same tick.
+          const ungated = await reassessRecordedGates();
           const folded = await foldQueuedCommitEvents();
           const exhausted = await judgeExhaustedEvents();
           // One free call before any paid one: a claim into an empty window
@@ -730,6 +815,7 @@ export const Route = createFileRoute("/hooks/cascade-drain")({
             JSON.stringify({
               success: true,
               processed: results.length,
+              ungated,
               folded,
               exhausted,
               starved: spend.proceed ? null : spend.why,

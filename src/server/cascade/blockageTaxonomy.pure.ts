@@ -72,6 +72,7 @@ export type BlockageClass =
   | "invocation_cut"
   | "consecutive_failures"
   | "ci_red"
+  | "prime_ledger_hole"
   | "unclassified";
 
 export type BlockagePolicy = {
@@ -182,6 +183,47 @@ export const BLOCKAGE_POLICY: Record<BlockageClass, BlockagePolicy> = {
     conditionedOnDivergence: true,
     what: "The clone's own checks refuse this delivery, and they will go on refusing it until the code changes.",
   },
+  prime_ledger_hole: {
+    /*
+      THE ONE THE LEDGER COULD NOT SEE AT ALL.
+
+      Rule #71 says a clone never runs a migration the prime itself has not
+      run, and `scopeCorpusToPrime` enforces it against the prime's own
+      `supabase_migrations.schema_migrations`. What nothing enforced is what
+      ENTERS that ledger: the prime's `apply-migration.yml` is
+      `workflow_dispatch` with a required file input, and its own header says
+      "Deciding *which* file is a human judgement made before dispatch". So
+      the ledger records what somebody remembered to dispatch, not what
+      merged.
+
+      Measured 19 September 2026: four migrations sat on prime's `main`
+      unrecorded and — asserted by effect, not by the ledger — genuinely
+      unapplied. Every object `20261202090000_builder_marketplace_ranking.sql`
+      declares is absent from the prime's live catalogue, and
+      `20261206000000` enables RLS on a table the prime reports
+      `rls_enabled: false`. Two tenants had been held at frontier
+      `20261201100000` behind them.
+
+      The condition had no name anywhere. Not a class here, no field on
+      `FleetMigrationResult`, no notification, no row — its only trace was
+      free-text in `clone_backends.status_detail`, while both clones read
+      `status: ready` with `migration_blocked_at` NULL. And
+      `buildPrimeLedgerReconciliation`, the one function that computes
+      object-level evidence for exactly this, had ZERO call sites.
+
+      `operator`, because the act that clears it is on the prime and is a
+      person's: dispatch the migration, or decide it should not exist. Never
+      `selfHeals` — a custodian cannot apply DDL to the prime, and re-running
+      the fleet lane produces this same reading for ever. It is a STANDING
+      fault rather than one conditioned on divergence: it is wrong right now
+      whatever today's convergence says, and it will hold the NEXT migration
+      too.
+    */
+    owner: "operator",
+    selfHeals: false,
+    conditionedOnDivergence: false,
+    what: "The prime has merged a migration it has not run, so this clone is held at the version before it — and so is everything after.",
+  },
   unclassified: {
     /*
       The reason an incomplete taxonomy is still sound. See the header.
@@ -236,6 +278,25 @@ export type CloneBlockageFacts = {
   consecutiveFailures: number;
   /** The drain's own standing-blockage notification, when one is unread. */
   blockedNotice: { title: string; body: string; createdAt: string } | null;
+  /**
+   * Prime versions this clone's last migration pass was held behind.
+   *
+   * Read from `clone_backends.migrations_applied` — the pass already records
+   * `blockedBy` on every migration it skipped, and has since
+   * `partitionByDependency` was written. Nothing had ever read it back.
+   *
+   * It is the clone's OWN record of its last pass, so this costs no GitHub
+   * call and no read of the prime: the condition is reported from the same
+   * evidence that produced it.
+   */
+  primeLedgerHoles: Array<{
+    /** The prime version the clone is held behind. */
+    version: string;
+    /** How many of this clone's migrations that one version is holding. */
+    heldCount: number;
+    /** The first migration it holds, for the sentence an operator reads. */
+    firstHeld: string | null;
+  }>;
   sloMinutes: number;
 };
 
@@ -289,6 +350,32 @@ export function classifyBlockages(facts: CloneBlockageFacts, now: Date): Detecte
     `seedSyncExclusions` gained a caller. It is first because it blocks
     everything behind it.
   */
+  /*
+    A migration the prime merged and never ran.
+
+    First alongside the unseeded policy, for the same reason: it blocks
+    everything behind it, and it is the clone's SCHEMA rather than one
+    delivery. One blockage per hole VERSION, fingerprinted on that version —
+    so the row is stable across passes, and it discharges itself the moment
+    the prime's ledger records the version and the next pass stops reporting
+    `blockedBy`. Nobody has to remember to close it.
+
+    Deliberately NOT one blockage per held migration: three held migrations
+    behind one hole is one condition with one remedy, and three rows would be
+    three findings about the same file.
+  */
+  for (const hole of facts.primeLedgerHoles) {
+    add(
+      "prime_ledger_hole",
+      `prime_ledger_hole:${hole.version}`,
+      `${facts.label} is held at the version before ${hole.version}: the prime has that migration in its repository and has not run it, so this clone may not either. ` +
+        `${hole.heldCount} migration(s) wait behind it` +
+        (hole.firstHeld ? `, starting with ${hole.firstHeld}` : "") +
+        ". It clears when the prime runs that file — nothing here can, and stamping the prime's ledger instead would send this clone a migration whose prerequisite does not exist.",
+      null,
+    );
+  }
+
   if (facts.syncScope === "mirror" && facts.exclusionCount === 0) {
     add(
       "policy_unseeded",

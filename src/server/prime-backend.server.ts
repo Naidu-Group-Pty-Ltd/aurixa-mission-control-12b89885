@@ -16,6 +16,7 @@ import type { Octokit } from "@octokit/rest";
 import type { MigrationObjectIndex } from "./surplusOrigin.pure";
 import type { RepoRef } from "./github-app.server";
 import { countGithubCall } from "./githubUsageMeter";
+import { GITHUB_USER_AGENT } from "./githubUserAgent.pure";
 import { pruneBundleToReachable } from "./functionBundlePrune.pure";
 import { isPrimeOnlySecret } from "./primeOnlySecrets.pure";
 import { OversizedMigrationError, PrimeBodyUnavailableError } from "./oversizedMigration.pure";
@@ -1230,6 +1231,10 @@ async function fetchBlobTextStream(
         Authorization: `Bearer ${auth.token}`,
         Accept: "application/vnd.github.raw+json",
         "X-GitHub-Api-Version": "2022-11-28",
+        // GitHub's REST API REQUIRES a User-Agent and answers 403 without one.
+        // See GITHUB_USER_AGENT for why that sentence is the whole of this
+        // clone's outage.
+        "User-Agent": GITHUB_USER_AGENT,
       },
     },
   );

@@ -616,6 +616,13 @@ async function runBackendProvisioning(
         // tree, so it is complete even on a pass that fetched no bundle
         // source — see `declaredFunctionSlugs`.
         declaredEdgeFunctions: snapshot.declaredFunctionSlugs,
+        // A credential this clone is supposed to lack is not a gap in its
+        // parity — see `diffSecrets`, and the measured reading that sent an
+        // operator to forward an Airtable token fleet-wide.
+        withheldSecretNames: await (async () => {
+          const { readWithheldSecretNames } = await import("@/server/handoff-parity.server");
+          return readWithheldSecretNames(supabase, input.cloneId);
+        })(),
         // Whose each surplus object is. Best effort — a clone that came up
         // short is recorded as short, and an unread index reads
         // `undetermined` rather than making a claim about the tenant.

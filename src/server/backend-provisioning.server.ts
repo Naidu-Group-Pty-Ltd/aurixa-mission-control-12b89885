@@ -2349,6 +2349,86 @@ export type PrimeMigrationResult = {
 };
 
 /**
+ * How many blockers an orphan's row shows. See `partitionByDependency`'s own
+ * `maxBlockedBy`: the number of holes can run to hundreds and this is read by
+ * a person, so the FIRST are kept — those are what an operator investigates.
+ */
+const ORPHAN_BLOCKED_BY_DISPLAY_CAP = 5;
+
+/**
+ * Ask, of each orphan, whether the holes ahead of it actually reach it.
+ *
+ * `partitionByDependency` answers with corpus POSITION, which is the only
+ * thing it has: it is handed metadata, not SQL. This is the second look, taken
+ * where the SQL loader is, and `migrationDependencyScope.pure.ts` owns the
+ * rule — including every way it stays fail-closed.
+ *
+ * Two costs are deliberately not paid. A hole is read once per pass however
+ * many orphans name it. And a candidate past `MAX_SCOPING_BYTES` is never
+ * fetched at all — the corpus's template-library seeds are ~41 MB each, and
+ * the answer is not worth the isolate.
+ */
+async function rescueScopedOrphans<T extends { id: string; name: string }>(
+  orphaned: ReadonlyArray<{ meta: T; blockedBy: string[] }>,
+  corpus: ReadonlyArray<{ id: string; name: string }>,
+  materialised: ReadonlyArray<{ id: string; name: string; sql?: string }>,
+  loadSql?: (m: { id: string; name: string }) => Promise<string>,
+): Promise<{ send: T[]; stillBlocked: Array<{ meta: T; blockedBy: string[] }> }> {
+  if (orphaned.length === 0) return { send: [], stillBlocked: [] };
+
+  const { scopeHoles, holeRelationNames, MAX_SCOPING_BYTES } = await import(
+    "./cascade/migrationDependencyScope.pure"
+  );
+  const byId = new Map(corpus.map((m) => [m.id, m]));
+  const sqlOnItem = new Map(materialised.filter((m) => m.sql).map((m) => [m.id, m.sql as string]));
+
+  /**
+   * A body, or null where none can be established.
+   *
+   * Every throw lands on null and therefore on the prefix barrier: an
+   * oversize refusal, a GitHub 403, a corpus that does not hold the id. That
+   * is the whole safety argument for this function — it can only ever fail
+   * back to what the code did before it existed.
+   */
+  const readSql = async (id: string): Promise<string | null> => {
+    const onItem = sqlOnItem.get(id);
+    if (onItem !== undefined) return onItem;
+    const meta = byId.get(id);
+    if (!meta || !loadSql) return null;
+    try {
+      const sql = await loadSql(meta);
+      return sql.length > MAX_SCOPING_BYTES ? null : sql;
+    } catch {
+      return null;
+    }
+  };
+
+  const holeIds = [...new Set(orphaned.flatMap((o) => o.blockedBy))];
+  const holes = new Map<string, { id: string; readable: boolean; creates: string[] }>();
+  for (const id of holeIds) {
+    const sql = await readSql(id);
+    holes.set(
+      id,
+      sql === null
+        ? { id, readable: false, creates: [] }
+        : { id, readable: true, creates: holeRelationNames(sql) },
+    );
+  }
+
+  const send: T[] = [];
+  const stillBlocked: Array<{ meta: T; blockedBy: string[] }> = [];
+  for (const orphan of orphaned) {
+    const evidence = orphan.blockedBy.map(
+      (id) => holes.get(id) ?? { id, readable: false, creates: [] },
+    );
+    const decision = scopeHoles(await readSql(orphan.meta.id), evidence);
+    if (decision.act === "send") send.push(orphan.meta);
+    else stillBlocked.push({ meta: orphan.meta, blockedBy: [...decision.blockedBy] });
+  }
+  return { send, stillBlocked };
+}
+
+/**
  * Replay the prime's migrations onto a clone project, in order, skipping
  * any version already recorded in the clone's ledger. Stops on the first
  * failure so later migrations never run against a half-applied schema.
@@ -2472,16 +2552,26 @@ export async function applyPrimeMigrations(
   let sendable: ReadonlyArray<{ id: string; name: string; sql?: string }> = migrations;
   if (scope) {
     const { partitionByDependency } = await import("./fleetCorpusScope.pure");
-    const part = partitionByDependency(scope.corpus, scope.runnableIds, applied);
-    const sendableIds = new Set(part.send.map((m) => m.id));
+    // Uncapped on purpose. `maxBlockedBy` exists so a person is not shown four
+    // hundred versions; the RESCUE below has to see every hole that reaches a
+    // candidate, and deciding on a truncated list would step over the ones the
+    // cap dropped. The display cap is applied where the row is written.
+    const part = partitionByDependency(
+      scope.corpus,
+      scope.runnableIds,
+      applied,
+      Number.MAX_SAFE_INTEGER,
+    );
+    const rescue = await rescueScopedOrphans(part.orphaned, scope.corpus, migrations, loadSql);
+    const sendableIds = new Set([...part.send, ...rescue.send].map((m) => m.id));
     sendable = migrations.filter((m) => sendableIds.has(m.id));
-    for (const o of part.orphaned) {
+    for (const o of rescue.stillBlocked) {
       results.push({
         id: o.meta.id,
         name: o.meta.name,
         success: true,
         skipped: true,
-        blockedBy: o.blockedBy,
+        blockedBy: o.blockedBy.slice(0, ORPHAN_BLOCKED_BY_DISPLAY_CAP),
       });
     }
   }

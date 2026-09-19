@@ -9,6 +9,7 @@ export {
   HIGH_RISK_CLONE_COUNT,
   AUTO_MERGE_THRESHOLD,
   type BlastAssessment,
+  type CascadeOrigin,
 } from "@/lib/blast-radius";
 
 type SupabaseLike = SupabaseClient<Database>;

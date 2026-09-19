@@ -145,6 +145,10 @@ export const ACT_POLICY: Record<BlockageClass, ActPolicy> = {
     kind: "never",
     why: "A second operator's approval is the control. A custodian that supplied it would be the gate approving itself.",
   },
+  prime_ledger_hole: {
+    kind: "never",
+    why: "The prime has merged a migration it has not run. Nothing here may apply DDL to the prime, and stamping its ledger instead would send tenants a migration whose prerequisite state does not exist — the exact thing rule #71 forbids. It clears when the prime runs the file, or when somebody decides it should not exist.",
+  },
   unclassified: {
     kind: "never",
     why: "Nothing here can say what is wrong, so nothing here may act on it. Guessing at a repair for an unrecognised condition is how an unknown fault becomes a known one somewhere else.",
