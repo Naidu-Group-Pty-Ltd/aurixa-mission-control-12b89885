@@ -467,46 +467,62 @@ describe("a pass is bounded", () => {
   });
 
   /*
-    AND A BEAT CANNOT SPEAK FOR A PASS THAT HAS STOPPED.
+    AND A BEAT THAT IS OUT WHEN THE PASS ENDS IS CANCELLED — NOT DEADLINED.
 
-    The drain bounds how long the pass WAITS and cannot bound when a dispatched
-    request executes. On the path where the release write failed — the row
-    still held, which is exactly when the silence is load-bearing — a late beat
-    refreshes a dead claim for another five minutes, once per queued beat.
-    Raised by review, against the drain that was itself a review fix.
+    `clearInterval` stops the next beat and does nothing about one already
+    dispatched, so the pass aborts them: every beat not yet sent is dropped,
+    and one already sent has its connection closed, which Postgres answers by
+    cancelling the statement where it can still see the socket.
 
-    Two mechanisms, covering different halves: the abort stops what has not
-    been sent and closes the connection of what has, and the deadline covers a
-    request that reaches the server anyway.
+    That half cannot backfire — an aborted beat means the next one goes — and
+    it is the half that survived. A DEADLINE carried to the database beside it
+    did not, and the test below is what stops it coming back.
   */
-  it("cancels the beats that are out, and bounds the ones that run anyway", () => {
+  it("cancels the beats that are out when the pass ends", () => {
     const body = beatBody();
     expect(body, "nothing cancels a beat when the pass ends").toContain("new AbortController()");
     expect(body).toContain("abortSignal(inflightBeats.signal)");
     expect(body, "stop does not cancel them").toMatch(
       /stop: async \(\) => \{[\s\S]{0,400}?inflightBeats\.abort\(\);/,
     );
-    expect(body, "a beat carries no deadline of its own").toContain("_not_after: notAfter");
-    const sql = sqlCode(
-      read("supabase/migrations/20260919153000_fleet_claim_heartbeat_monotonic.sql"),
-    );
-    // Checked BEFORE the write, or an expired beat still touches the row.
-    const guard = sql.indexOf("if clock_timestamp() > _not_after then");
-    const write = sql.indexOf("update public.clone_backends");
-    expect(guard, "the deadline is not enforced at the database").toBeGreaterThan(-1);
-    expect(guard, "an expired beat still reaches the write").toBeLessThan(write);
   });
 
-  it("does not report a beat that is merely late as a claim that was lost", () => {
+  /*
+    AND NO DEADLINE ON THE BEAT. THIS IS A BAN, NOT AN OVERSIGHT.
+
+    A `_not_after` argument was added so a beat queued behind a pass that had
+    already ended could not refresh its claim. It is the fixed-latency silence
+    fault of two rounds earlier rebuilt out of different parts: whenever the
+    database is slower than the deadline EVERY beat expires, the stamp never
+    moves, and a live pass reads as dead — after which the reclaim hands its
+    clone to a second pass, which is the concurrent application the claim
+    exists to prevent, caused by the guard meant to protect it.
+
+    No number fixes it. Tight enough to bound a queued beat is tight enough to
+    expire a slow live one; loose enough to be safe for a live pass only
+    refuses beats that were about to be reclaimed anyway. The deadline measures
+    TIME SINCE SENDING; the question is WHETHER THE PASS HAS STOPPED.
+
+    So this asserts the absence, on both sides, rather than a tuning. The
+    residual it declines to close — a late beat extending a claim by one
+    reclaim window, only where the release write itself failed — is accepted
+    and written down on the function.
+  */
+  it("gives a beat no deadline, on either side of the wire", () => {
+    const body = beatBody();
+    expect(body, "a beat carries a deadline again").not.toContain("_not_after");
+    expect(body, "a beat is bounded by a timeout again").not.toContain("AbortSignal.timeout");
     const sql = sqlCode(
       read("supabase/migrations/20260919153000_fleet_claim_heartbeat_monotonic.sql"),
     );
-    // Three answers, because they send the caller three different ways.
-    for (const verdict of ["'expired'", "'held'", "'lost'"]) {
-      expect(sql, `the function cannot answer ${verdict}`).toContain(verdict);
-    }
-    const body = beatBody();
-    expect(body, "the caller stops on anything but a lost claim").toContain('verdict === "lost"');
+    expect(sql, "the function takes a deadline again").not.toContain("_not_after");
+    /*
+      `clock_timestamp()` must survive — it is the value the stamp advances TO.
+      What must not is a comparison that can refuse the write, so this matches
+      the shape of a guard rather than the identifier, and would catch it under
+      any parameter name.
+    */
+    expect(sql, "a beat can be refused on time again").not.toMatch(/clock_timestamp\(\)\s*[<>]/);
   });
 
   it("does not make one beat wait for another, and abandons none", () => {
@@ -514,10 +530,6 @@ describe("a pass is bounded", () => {
     expect(body, "beats are serialised again, so a hang ends the chain").not.toContain(
       ".then(() =>",
     );
-    expect(
-      body,
-      "a beat is abandoned on a deadline, which turns a slow database into silence",
-    ).not.toContain("AbortSignal");
   });
 
   it("asks the database rather than composing the write itself", () => {
@@ -531,7 +543,11 @@ describe("a pass is bounded", () => {
     );
     // The function's own answer, not a row count: once the write is also
     // conditional on advancing, "no rows" can no longer mean "claim lost".
-    expect(body, "a lost claim is inferred rather than read").toContain('verdict === "lost"');
+    //
+    // `=== false` and not falsy: a transport failure returns `null` and has
+    // already been handled above, so reading a bare falsy value as a lost
+    // claim would end the heartbeat on a fault that says nothing about it.
+    expect(body, "a lost claim is inferred rather than read").toContain("held === false");
   });
 
   /*
@@ -615,7 +631,7 @@ describe("a pass is bounded", () => {
       one and passes over a branch that no longer stops anything — caught by
       mutation, which is the only reason it is written this way.
     */
-    const miss = body.indexOf('if (verdict === "lost")');
+    const miss = body.indexOf("if (held === false)");
     const stop = body.indexOf("stop: async ()");
     expect(miss, "the claim-lost branch was not found").toBeGreaterThan(-1);
     expect(stop, "the returned stop was not found").toBeGreaterThan(miss);

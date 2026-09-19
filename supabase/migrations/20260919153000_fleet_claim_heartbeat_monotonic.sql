@@ -45,27 +45,41 @@
 -- "the write failed" — two answers that a bare row count could not separate
 -- once the write also became conditional on advancing.
 
+-- AND NO DEADLINE ON THE BEAT ITSELF. THIS WAS TRIED AND IT IS WRONG.
+--
+-- A `_not_after` argument was added here so a beat queued behind a pass that
+-- has already ended could not refresh its claim: past its send time plus one
+-- interval it wrote nothing. Review found the fault immediately and it is the
+-- same one the abort of two rounds earlier had: whenever the database is
+-- slower than the deadline, EVERY beat expires, the stamp never moves, and a
+-- pass that is alive and working reads as dead. The reclaim then hands its
+-- clone to a second pass — the concurrent application this whole mechanism
+-- exists to prevent, caused by the guard meant to protect it.
+--
+-- It cannot be fixed by choosing a better number, and that is the useful part.
+-- Tight enough to bound a queued beat, it is tight enough to expire a slow
+-- live one. Loose enough to be safe for a live pass — of the order of the
+-- reclaim window — it only ever refuses beats that were about to be reclaimed
+-- anyway, and bounds nothing. There is no value that does both, because the
+-- deadline measures TIME SINCE SENDING and the question is WHETHER THE PASS
+-- HAS STOPPED, and those are not the same quantity.
+--
+-- What is left is an accepted residual, stated rather than defended against.
+-- A queued beat only matters when the pass's own release FAILED, because a
+-- successful release nulls `worker_started_at` and every late beat's fence
+-- then misses. On that path a late beat can extend the claim by up to one
+-- reclaim window, once, after which `reclaimStale` frees it: one pass, in a
+-- case that needs a database write to have failed. Trading that for a chance
+-- of two passes inside one schema is the wrong way round.
+--
+-- The caller still ABORTS its outstanding beats when it stops. That half
+-- cannot backfire — an aborted beat means the next one goes — and it removes
+-- every beat that had not yet been sent.
 create or replace function public.fleet_claim_heartbeat(
   _clone_id uuid,
-  _claimed_at timestamptz,
-  -- AND A BEAT CANNOT SPEAK FOR A PASS THAT HAS STOPPED.
-  --
-  -- The caller stops its timer when the pass ends, which stops beats being
-  -- SENT and does nothing about one already dispatched. On the path where the
-  -- release write itself failed — the row still held, which is exactly when
-  -- the five-minute silence is load-bearing — a late beat's fence still
-  -- matches and `GREATEST` refreshes a claim nobody holds, for another five
-  -- minutes, once per queued beat. The caller's drain bounds how long the pass
-  -- WAITS; it cannot bound when a dispatched request executes. Raised by
-  -- review.
-  --
-  -- So the bound travels with the beat. Whenever it actually runs, a beat may
-  -- only speak for the moment it was sent: past `_not_after` it writes nothing
-  -- and says so. The extra life a queued beat can buy is then one interval,
-  -- fixed, instead of however long the request sat in a queue.
-  _not_after timestamptz
+  _claimed_at timestamptz
 )
-returns text
+returns boolean
 language plpgsql
 -- INVOKER, not DEFINER, and that is deliberate.
 --
@@ -85,27 +99,22 @@ as $$
 declare
   _held boolean;
 begin
-  -- Checked BEFORE the write, so an expired beat cannot touch the row at all.
-  if clock_timestamp() > _not_after then
-    return 'expired';
-  end if;
-
   update public.clone_backends
      set migration_heartbeat_at = greatest(migration_heartbeat_at, clock_timestamp())
    where clone_id = _clone_id
      and worker_started_at = _claimed_at
   returning true into _held;
 
-  -- Three answers, because they send the caller three different ways. `held`
-  -- is the ordinary one. `lost` means the claim is somebody else's and the
-  -- caller must stop beating. `expired` above means this beat is simply too
-  -- late to say anything — which is NOT a lost claim, and reporting it as one
-  -- would have the caller log that a pass lost a claim it still holds.
-  return case when coalesce(_held, false) then 'held' else 'lost' end;
+  -- FALSE means the claim is no longer this pass's, and nothing was written.
+  -- NULL — no row matched — is the same statement, said by the absence of a
+  -- row rather than by a value. It is the FUNCTION's answer rather than a row
+  -- count because the write is also conditional on `GREATEST`, and a count
+  -- could not separate "the claim is gone" from "a newer beat already won".
+  return coalesce(_held, false);
 end;
 $$;
 
-comment on function public.fleet_claim_heartbeat(uuid, timestamptz, timestamptz) is
+comment on function public.fleet_claim_heartbeat(uuid, timestamptz) is
   'Advance the fleet migration lane''s liveness stamp on a clone it holds. '
   'Fenced on `worker_started_at` so a reclaimed pass cannot write into its '
   'successor''s claim, and monotonic by GREATEST so two beats committing out '
@@ -127,10 +136,10 @@ comment on function public.fleet_claim_heartbeat(uuid, timestamptz, timestamptz)
 -- have been refused by RLS anyway and learned nothing, but "refused one layer
 -- in" is not the same as "cannot be called", and the layer that refuses it is
 -- a policy somebody may edit for another reason entirely.
-revoke all on function public.fleet_claim_heartbeat(uuid, timestamptz, timestamptz) from public;
-revoke all on function public.fleet_claim_heartbeat(uuid, timestamptz, timestamptz) from anon;
-revoke all on function public.fleet_claim_heartbeat(uuid, timestamptz, timestamptz) from authenticated;
-grant execute on function public.fleet_claim_heartbeat(uuid, timestamptz, timestamptz) to service_role;
+revoke all on function public.fleet_claim_heartbeat(uuid, timestamptz) from public;
+revoke all on function public.fleet_claim_heartbeat(uuid, timestamptz) from anon;
+revoke all on function public.fleet_claim_heartbeat(uuid, timestamptz) from authenticated;
+grant execute on function public.fleet_claim_heartbeat(uuid, timestamptz) to service_role;
 
 -- A new signature, so PostgREST's schema cache has to be told.
 notify pgrst, 'reload schema';

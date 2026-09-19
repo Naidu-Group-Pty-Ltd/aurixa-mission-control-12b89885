@@ -318,14 +318,19 @@ const CLAIM_HEARTBEAT_MS = 30_000;
 /**
  * How long a pass will wait for beats still in the air when it stops.
  *
- * `clearInterval` stops the next beat, not one already dispatched, and a beat
- * landing after the pass has moved on refreshes a claim nobody holds — which
- * on the path where the RELEASE itself failed is exactly the claim the silence
- * is counting. So the pass waits.
+ * `clearInterval` stops the next beat, not one already dispatched. The
+ * cancellation is the abort beside it; this only stops the pass from walking
+ * away while that cancellation is still landing, so the beats it aborted have
+ * settled before the release runs rather than racing it.
+ *
+ * It does NOT bound how late a beat can write — nothing in this isolate can,
+ * which is the finding that removed the deadline that used to sit here and is
+ * recorded in full on `fleet_claim_heartbeat`. Claiming otherwise was one of
+ * this mechanism's own defects and is worth not re-acquiring.
  *
  * Bounded, because this is awaited in a `finally`: a beat that never settles
  * would otherwise hang the whole run, which is a far worse fault than the one
- * the wait prevents. Two seconds drains the ordinary case and abandons the
+ * the wait addresses. Two seconds drains the ordinary case and abandons the
  * pathological one.
  */
 const CLAIM_DRAIN_MS = 2_000;
@@ -372,34 +377,25 @@ function beatWhileClaimHeld(
   /**
    * Cancels the beats that are out when the pass ends.
    *
-   * Not belt-and-braces with `_not_after`: the two cover different halves. An
-   * abort stops a request that has not been sent and closes the connection of
-   * one that has, which Postgres answers by cancelling the statement; the
-   * deadline covers the request that reaches the server anyway. Neither alone
-   * makes a late beat harmless, and "we stopped waiting for it" — which is all
-   * the drain ever did — makes it harmless not at all.
+   * It removes every beat that had not yet been sent, and closes the
+   * connection of one that had, which Postgres answers by cancelling the
+   * statement where it can still see the socket. What it cannot promise is
+   * the beat already executing at the server; that residual is accepted and
+   * named on `fleet_claim_heartbeat`, along with why a deadline on the beat
+   * is not the way to close it.
+   *
+   * This half cannot backfire, which is why it survived the deadline that
+   * was tried beside it: an aborted beat simply means the next one goes.
    */
   const inflightBeats = new AbortController();
 
   const timer = setInterval(() => {
     if (stopped) return;
-    /*
-      The moment past which this beat may no longer speak for the pass.
-
-      Carried to the database rather than enforced here, because the thing
-      that needs bounding is when the request EXECUTES, and by then this
-      isolate may be gone. `stop` cancels what has not been sent and aborts
-      what has; this covers the one it cannot — a request already at the
-      server when the pass ended, which would otherwise refresh a dead claim
-      for another five minutes.
-    */
-    const notAfter = new Date(Date.now() + CLAIM_HEARTBEAT_MS).toISOString();
     const run = (async () => {
-      const { data: verdict, error } = await supabase
+      const { data: held, error } = await supabase
         .rpc("fleet_claim_heartbeat", {
           _clone_id: cloneId,
           _claimed_at: claimedAt,
-          _not_after: notAfter,
         })
         .abortSignal(inflightBeats.signal);
       if (error) {
@@ -412,13 +408,17 @@ function beatWhileClaimHeld(
         });
         return;
       }
-      if (verdict === "lost") {
+      if (held === false) {
         // The claim is gone. Beating on would say a pass that owns nothing is
         // alive. Told by the function's own answer rather than by a row count,
-        // which could no longer separate "the claim is gone" from "a newer
-        // beat already won" — and, since the deadline, from "this beat is too
-        // late to say anything", which `expired` reports and which must NOT be
-        // read as a lost claim.
+        // which could not separate "the claim is gone" from "a newer beat
+        // already won" once the write itself became conditional on advancing.
+        //
+        // `=== false` and not falsy: a beat whose transport failed returns
+        // `null` above and has ALREADY returned, so the only way to reach
+        // here with nothing is a shape this lane does not produce. Reading it
+        // as a lost claim would end the heartbeat on a fault that says
+        // nothing about the claim.
         console.warn("[fleet-migration] heartbeat stopped: the claim is no longer this pass's", {
           cloneId,
           claimedAt,
