@@ -46,6 +46,9 @@ import {
   type MigrationObjectIndex,
   type SurplusClassification,
 } from "./surplusOrigin.pure";
+import { isPrimeOnlySecret } from "./primeOnlySecrets.pure";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import type { Database } from "@/integrations/supabase/types";
 
 type Row = Record<string, unknown>;
 
@@ -580,16 +583,62 @@ function diffEdgeFunctions(
   };
 }
 
-function diffSecrets(prime: Snapshot, target: Snapshot) {
+/**
+ * A credential a clone is SUPPOSED to lack is not a gap in its parity.
+ *
+ * Measured 19 September 2026 on `npc-crm-independent-6505dc`. Its schema
+ * matched the prime exactly — 529 tables, 435 functions, 32 buckets, 66 cron
+ * jobs, 83 enums, 401 triggers, nothing missing, nothing extra — and its
+ * `status_detail` read *"Backend provisioned but DOES NOT MATCH the prime —
+ * missing_secrets:58"*, `risk_level: blocking`.
+ *
+ * Three of those 58 were `AIRTABLE_TOKEN`, `AIRTABLE_BASE_ID` and
+ * `DIDIT_API_KEY`, and a fourth was `SB_MANAGEMENT_ACCESS_TOKEN`. Every one
+ * of them is a credential this platform has decided, in writing and in code,
+ * must never reach a tenant project:
+ *
+ * - an Airtable personal access token carries its whole SCOPE and nothing
+ *   narrows it to one table, so a forwarded one can rewrite the shared intake
+ *   table every other clone reads — `AIRTABLE_KEY_OWNERSHIP.md`;
+ * - a Didit API key is scoped to an APPLICATION and its session list, which
+ *   on one measured key returned eight customers' names and live pre-signed
+ *   URLs to their passport portraits — `VERIFICATION_BROKER.md`;
+ * - a Supabase management token is scoped to an ACCOUNT and reaches every
+ *   project in it — `primeOnlySecrets.pure.ts`, which exists to SWEEP such a
+ *   name off a clone that somehow holds one.
+ *
+ * So parity was reporting the platform's own security posture as a defect,
+ * and pointing an operator at a remedy — "forward the missing secrets" —
+ * that another part of this codebase actively undoes. A control that reads as
+ * a fault teaches people to clear it.
+ *
+ * The rule: **a name policy withholds is reported as withheld, never as
+ * missing, and never blocks.** It is still shown — a clone lacking them is a
+ * fact worth seeing — in a field of its own.
+ *
+ * @param withheld Names this clone's own ledger records as deliberately
+ *                 withheld (`clone_backend_secrets.status = 'withheld'`).
+ *                 Absent where the caller has no clone to read, in which case
+ *                 only the by-CLASS refusals below are excluded — the ones
+ *                 that hold for every clone whatever any row says.
+ */
+export function diffSecrets(prime: Snapshot, target: Snapshot, withheld?: ReadonlySet<string>) {
   // Names only — values are never read.
   const missing: string[] = [];
+  const withheldByPolicy: string[] = [];
   const extra: string[] = [];
-  for (const name of prime.secretSet) if (!target.secretSet.has(name)) missing.push(name);
+  for (const name of prime.secretSet) {
+    if (target.secretSet.has(name)) continue;
+    if (isPrimeOnlySecret(name) || withheld?.has(name)) withheldByPolicy.push(name);
+    else missing.push(name);
+  }
   for (const name of target.secretSet) if (!prime.secretSet.has(name)) extra.push(name);
   return {
     prime_count: prime.secretSet.size,
     target_count: target.secretSet.size,
     missing_in_target: missing.sort(),
+    /** Absent from the clone because policy says so. Never a blocking issue. */
+    withheld_by_policy: withheldByPolicy.sort(),
     extra_in_target: extra.sort(),
   };
 }
@@ -838,7 +887,41 @@ export type ComputeParityOptions = {
    * index must never produce.
    */
   migrationObjectIndex?: MigrationObjectIndex | null;
+  /**
+   * Names this clone's ledger records as deliberately withheld
+   * (`clone_backend_secrets.status = 'withheld'`). See {@link diffSecrets}:
+   * a credential policy keeps off a tenant is not a gap in its parity.
+   */
+  withheldSecretNames?: Iterable<string>;
 };
+
+/**
+ * The names this clone's ledger records as deliberately withheld.
+ *
+ * Returns an EMPTY set on a failed read, and that is deliberate rather than
+ * lazy: an unreadable ledger leaves every name to be judged by class alone, so
+ * the worst case is the reading this fleet already had — a policy withhold
+ * reported as a gap. Failing the parity run instead would take twenty working
+ * sections off an operator's screen to protect one of them from being
+ * pessimistic.
+ */
+export async function readWithheldSecretNames(
+  supabase: SupabaseClient<Database>,
+  cloneId: string,
+): Promise<string[]> {
+  try {
+    const { data } = await supabase
+      .from("clone_backend_secrets")
+      .select("name")
+      .eq("clone_id", cloneId)
+      .eq("status", "withheld");
+    return ((data ?? []) as Array<{ name?: unknown }>)
+      .map((r) => r.name)
+      .filter((n): n is string => typeof n === "string");
+  } catch {
+    return [];
+  }
+}
 
 export async function computeParity(
   primeRef: string,
@@ -878,7 +961,11 @@ export async function computeParity(
     ? new Set<string>(opts.declaredEdgeFunctions)
     : null;
   const edgeFns = diffEdgeFunctions(prime, target, declaredEdgeFns);
-  const secrets = diffSecrets(prime, target);
+  const secrets = diffSecrets(
+    prime,
+    target,
+    opts?.withheldSecretNames ? new Set(opts.withheldSecretNames) : undefined,
+  );
   const authCfg = diffAuthConfig(prime, target);
   const requiredExt = diffRequiredExtensions(target);
   const realtime = diffRealtime(prime, target);

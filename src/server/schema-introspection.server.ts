@@ -1878,7 +1878,7 @@ export async function verifyCloneIsEmpty(
 export async function stampMigrationLedgerFromPrime(
   cloneRef: string,
   primeRef: string,
-): Promise<{ stamped: number; reconciled: boolean }> {
+): Promise<{ stamped: number; reconciled: boolean; primeLedgerTop: string | null }> {
   const ref = primeRef;
   const rows = await query(
     ref,
@@ -1920,8 +1920,16 @@ export async function stampMigrationLedgerFromPrime(
     cloneRef,
     `select count(*)::int as n from supabase_migrations.schema_migrations`,
   ).catch(() => [] as Array<Record<string, unknown>>);
+  // The highest version this pass would copy. Returned on BOTH exits, because
+  // `clone_backends.migration_version` must be derivable from what the stamp
+  // put there rather than from the newest migration FILE — see
+  // `migrationFrontier.pure.ts`. `rows` is ordered by version above, so the
+  // last one is the top; it is the prime's LEDGER and deliberately not its
+  // repository, which carries four versions the prime has never run.
+  const primeLedgerTop = str(rows.at(-1)?.version) || null;
+
   if (reconcile(rows.length, num(cloneLedger[0]?.n))) {
-    return { stamped: 0, reconciled: true };
+    return { stamped: 0, reconciled: true, primeLedgerTop };
   }
 
   let stamped = 0;
@@ -1936,5 +1944,30 @@ export async function stampMigrationLedgerFromPrime(
     );
     stamped += group.length;
   }
-  return { stamped, reconciled: false };
+  return { stamped, reconciled: false, primeLedgerTop };
+}
+
+/**
+ * The clone's own migration frontier, read from the clone.
+ *
+ * The one reading `clone_backends.migration_version` is allowed to be taken
+ * from — see `migrationFrontier.pure.ts` for why the newest migration file is
+ * not an answer to this question.
+ *
+ * A failure is reported as a failure and never as an empty ledger. Those are
+ * opposite instructions to the next sync: an empty ledger asks for the whole
+ * corpus, and "we could not look" asks for nothing to change.
+ */
+export async function readCloneMigrationFrontier(
+  cloneRef: string,
+): Promise<import("./migrationFrontier.pure").LedgerReading> {
+  try {
+    const rows = await query(
+      cloneRef,
+      `select max(version) as version from supabase_migrations.schema_migrations`,
+    );
+    return { read: true, version: str(rows[0]?.version) || null };
+  } catch (e) {
+    return { read: false, reason: e instanceof Error ? e.message : String(e) };
+  }
 }

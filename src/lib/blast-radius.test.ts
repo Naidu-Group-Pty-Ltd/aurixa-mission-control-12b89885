@@ -27,4 +27,29 @@ describe("assessBlastRadius", () => {
   it("echoes the clone count back", () => {
     expect(assessBlastRadius("pr", 7).cloneCount).toBe(7);
   });
+
+  it("defaults to an operator's cascade, so a call site that says nothing keeps the gate", () => {
+    expect(assessBlastRadius("auto_merge", AUTO_MERGE_THRESHOLD + 1).requiresApproval).toBe(true);
+  });
+
+  it("never gates an automatic cascade on a fleet count, at any size", () => {
+    // The 19 Sep 2026 stall: four clones, auto_merge, every prime commit gated.
+    expect(assessBlastRadius("auto_merge", 4, "automatic")).toEqual({
+      cloneCount: 4,
+      requiresApproval: false,
+      reason: null,
+    });
+    // And it must not merely move the cliff — a fleet of a hundred is the
+    // scale this rule exists to survive.
+    expect(assessBlastRadius("auto_merge", 100, "automatic").requiresApproval).toBe(false);
+    expect(assessBlastRadius("pr", HIGH_RISK_CLONE_COUNT + 1, "automatic").requiresApproval).toBe(
+      false,
+    );
+  });
+
+  it("assesses an operator's cascade exactly as it did before the origin existed", () => {
+    for (const count of [1, AUTO_MERGE_THRESHOLD, AUTO_MERGE_THRESHOLD + 1, HIGH_RISK_CLONE_COUNT + 1])
+      for (const mode of ["auto_merge", "pr", "notify"] as const)
+        expect(assessBlastRadius(mode, count, "operator")).toEqual(assessBlastRadius(mode, count));
+  });
 });

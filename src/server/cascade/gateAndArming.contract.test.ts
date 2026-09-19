@@ -42,16 +42,58 @@ describe("the drain backstops an approved gate", () => {
   });
 
   it("still refuses an UNapproved gated event anywhere in the claim", () => {
-    // No third pass, no pass that reads requires_approval=true without
-    // pairing it to a recorded approval.
+    // No third pass, no pass that reads requires_approval=true without saying
+    // which side of the gate it means.
+    //
+    // There are exactly two lawful pairings, and the distinction is the whole
+    // control:
+    //
+    //   `.not("approved_at", "is", null)` — the RESCUE claim. A second
+    //   operator discharged this gate; the drain may run it.
+    //
+    //   `.is("approved_at", null)` — the RE-ASSESSMENT (`reassessRecordedGates`).
+    //   It reads the UNdischarged gated set on purpose, and it never claims
+    //   one: it re-asks the blast-radius question against the fleet as it
+    //   stands and clears `requires_approval` only where the current rule
+    //   imposes nothing. Excluding approved events is what stops a
+    //   computation ever writing over a person's act.
+    //
+    // A bare `requires_approval = true` — neither pairing — is the bypass this
+    // whole block exists to forbid.
     const gatedReads = drain.match(/eq\("requires_approval", true\)/g) ?? [];
-    for (const read of gatedReads) {
-      void read;
-    }
-    const pairings = drain.match(
-      /\.eq\("requires_approval", true\)\.not\("approved_at", "is", null\)/g,
+    const approvedPairings =
+      drain.match(/\.eq\("requires_approval", true\)\s*\.not\("approved_at", "is", null\)/g) ?? [];
+    const unapprovedPairings =
+      drain.match(/\.eq\("requires_approval", true\)\s*\.is\("approved_at", null\)/g) ?? [];
+    expect(gatedReads.length).toBe(approvedPairings.length + unapprovedPairings.length);
+    // Both kinds are present: a run that lost either one would pass the count
+    // above vacuously.
+    expect(approvedPairings.length).toBeGreaterThan(0);
+    expect(unapprovedPairings.length).toBeGreaterThan(0);
+  });
+
+  it("the re-assessment never claims, and never overwrites an approval", () => {
+    const reassess = drain.slice(
+      drain.indexOf("async function reassessRecordedGates"),
+      drain.indexOf("async function foldQueuedCommitEvents"),
     );
-    expect(gatedReads.length).toBe((pairings ?? []).length);
+    expect(reassess.length).toBeGreaterThan(0);
+    // It writes the gate down and nothing else. Claiming is `worker_started_at`,
+    // and approving is `approved_at` / `cascade_approvals` — neither is here.
+    expect(reassess).toContain("requires_approval: false");
+    expect(reassess).not.toContain("worker_started_at: ");
+    expect(reassess).not.toContain("approved_at: ");
+    expect(reassess).not.toContain("cascade_approvals");
+    // The write re-checks the gate it read, so a concurrent `approveCascade`
+    // between the read and the write wins.
+    expect(reassess).toMatch(
+      /\.update\(\{ requires_approval: false[\s\S]{0,200}?\.is\("approved_at", null\)/,
+    );
+    // And it runs before the fold, so a discharged commit event folds in the
+    // same tick rather than staying eight separate passes of one job.
+    expect(drain.indexOf("const ungated = await reassessRecordedGates()")).toBeLessThan(
+      drain.indexOf("const folded = await foldQueuedCommitEvents()"),
+    );
   });
 });
 

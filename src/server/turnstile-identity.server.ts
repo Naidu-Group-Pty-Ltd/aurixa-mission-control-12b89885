@@ -224,6 +224,25 @@ async function deliverSecret(
  * carries a `VITE_` name that the env policy permits. It only takes effect on
  * the clone's next build, and that is said rather than assumed.
  */
+/**
+ * Write this clone's site key onto its hosting project — and invalidate the
+ * claim that says the next build will not need to.
+ *
+ * `clone_deployments.env_digest` is a hash of what `syncing_env` last pushed,
+ * and the drain SKIPS the push when the digest it would produce matches it.
+ * That is a claim about what the next build's environment will hold, and a
+ * write from out here makes the claim false: the project now holds a value the
+ * digest never covered, so the sync skips, `deploying` inherits whatever Vercel
+ * has, and — since Vite inlines `VITE_*` at BUILD time — the bundle can come
+ * out byte-identical with the key nowhere in it. That is not hypothetical; it
+ * is the failure `requestEnvResync`'s own header records, and it happened again
+ * with the Supabase pair on 19 Sep 2026.
+ *
+ * So the rule is: **anything that writes a `VITE_*` to the host outside
+ * `syncing_env` nulls the digest.** The write stays here because minting and
+ * publishing a widget belong together; the claim about the next build does not
+ * survive it.
+ */
 async function publishSiteKey(
   supabase: Db,
   cloneId: string,
@@ -252,6 +271,23 @@ async function publishSiteKey(
       ],
       deployment.team_id,
     );
+    // Not fatal — the key IS on the project, which is the thing that was asked
+    // for, and a failure to invalidate leaves the pre-existing hazard rather
+    // than adding one. Not fatal is not the same as unobserved, though: the
+    // digest still standing means the next `syncing_env` SKIPS its push and
+    // this deployment inherits whatever Vercel happens to hold, which is
+    // exactly the failure `requestEnvResync` documents. So it is said out
+    // loud, and the bundle probe at `onLive` is the backstop either way.
+    const { error: digestErr } = await supabase
+      .from("clone_deployments")
+      .update({ env_digest: null })
+      .eq("clone_id", cloneId);
+    if (digestErr) {
+      console.error(
+        `[turnstile-identity] could not invalidate env_digest for ${cloneId}; ` +
+          `the next env sync may skip its push: ${digestErr.message}`,
+      );
+    }
     return { ok: true, detail: "published — takes effect on the clone's next deployment" };
   } catch (e) {
     return { ok: false, detail: msg(e) };

@@ -607,6 +607,19 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     assertions: [{ kind: "column", table: "clone_backends", column: "schema_verified_at" }],
   },
   {
+    migration: "20260919100000_clone_deployment_bundle_identity.sql",
+    version: "20260919100000",
+    assertions: [
+      { kind: "column", table: "clone_deployments", column: "bundle_identity" },
+      { kind: "column", table: "clone_deployments", column: "bundle_identity_detail" },
+      { kind: "column", table: "clone_deployments", column: "bundle_checked_at" },
+      { kind: "column", table: "clone_deployments", column: "bundle_artefact" },
+      { kind: "column", table: "clone_deployments", column: "bundle_resync_artefact" },
+      { kind: "column", table: "clone_backends", column: "admin_seed" },
+      { kind: "enum", type: "notification_kind" },
+    ],
+  },
+  {
     migration: "20260919110000_clone_backend_chunk_cursor.sql",
     version: "20260919110000",
     assertions: [{ kind: "column", table: "clone_backends", column: "chunk_cursor" }],
@@ -620,5 +633,12 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     migration: "20260919124500_reference_sync_notified_detail.sql",
     version: "20260919124500",
     assertions: [{ kind: "column", table: "clone_reference_syncs", column: "notified_detail" }],
+  },
+  {
+    migration: "20260919130000_prime_ledger_hole_blockage.sql",
+    version: "20260919130000",
+    assertions: [
+      { kind: "check", table: "clone_sync_blockages", column: "class", value: "prime_ledger_hole" },
+    ],
   },
 ];

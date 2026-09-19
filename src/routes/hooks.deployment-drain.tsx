@@ -32,6 +32,9 @@ import {
   backoffSeconds,
   isRetryable,
   judgeWait,
+  wakesWhenProviderConfigured,
+  type WaitDependency,
+  DEPLOYMENT_STATUSES,
   type DeploymentStatus,
 } from "@/server/hosting/deploymentState.pure";
 import { buildCloneEnv, envDigest } from "@/server/hosting/envPolicy.pure";
@@ -71,7 +74,18 @@ type DeploymentRow = {
 
 type StepOutcome =
   | { kind: "advance"; patch?: Record<string, unknown>; result?: unknown }
-  | { kind: "wait"; seconds: number; detail: string; patch?: Record<string, unknown> }
+  | {
+      kind: "wait";
+      seconds: number;
+      detail: string;
+      patch?: Record<string, unknown>;
+      /**
+       * What this wait is blocked on, where the step can say. Elapsed time
+       * alone decides `stuck` otherwise, and it is a poor proxy in both
+       * directions — see `judgeWait`.
+       */
+      dependency?: WaitDependency | null;
+    }
   | { kind: "done"; patch?: Record<string, unknown>; result?: unknown }
   | { kind: "error"; error: string; retryAfterSeconds?: number | null; retryable: boolean };
 
@@ -129,6 +143,86 @@ async function claim(limit: number): Promise<DeploymentRow[]> {
  * `clone_backends` reclaims, and for the same reason: a terminated Worker
  * invocation leaves no error anywhere.
  */
+/**
+ * Start the deployments that were asked for and could not be attempted.
+ *
+ * A clone provisioned before a hosting token existed gets
+ * `status: "pending_platform"`, which `CLAIMABLE` excludes — so no drain ever
+ * touched it. Its own status card said "Queued — the reconcile action will fan
+ * this out", and only an operator pressing a button on /settings/domains ever
+ * did. The New Clone wizard says the same thing in the same words. Nothing made
+ * either statement true.
+ *
+ * `not_requested` is deliberately NOT woken. It is a decision, not a wait, and
+ * deploying a clone whose operator declined a deployment is a worse failure
+ * than the one this fixes — `wakesWhenProviderConfigured` is narrower than
+ * `isDormant` for exactly that reason.
+ *
+ * Keyed on the ROW's own `provider_slug` rather than the platform's current
+ * default: a row queued against one provider must not be started on another
+ * because the fleet setting moved underneath it.
+ */
+async function wakeDormantDeployments(): Promise<{ woken: number; byProvider: string[] }> {
+  const wakeable = DEPLOYMENT_STATUSES.filter(wakesWhenProviderConfigured);
+  if (wakeable.length === 0) return { woken: 0, byProvider: [] };
+
+  const { data: rows, error } = await admin
+    .from("clone_deployments")
+    .select("clone_id, provider_slug, status")
+    .in("status", wakeable)
+    .limit(50);
+  if (error || !rows?.length) return { woken: 0, byProvider: [] };
+
+  const nowIso = new Date().toISOString();
+  const byProvider = new Set<string>();
+  let woken = 0;
+  for (const row of rows) {
+    let configured = false;
+    try {
+      configured = getHostingProvider(asHostingSlug(row.provider_slug)).isConfigured();
+    } catch {
+      // An unknown provider slug is not a reason to start anything. Left
+      // dormant and left visible, which is what it already was.
+      configured = false;
+    }
+    if (!configured) continue;
+
+    const { error: upErr } = await admin
+      .from("clone_deployments")
+      .update(
+        asRow<TablesUpdate<"clone_deployments">>({
+          status: "pending",
+          status_since: nowIso,
+          status_detail: null,
+          error_message: null,
+          attempts: 0,
+          next_attempt_at: nowIso,
+        }),
+      )
+      .eq("clone_id", row.clone_id)
+      .eq("status", row.status);
+    if (upErr) continue;
+    woken++;
+    byProvider.add(row.provider_slug);
+
+    // Checked because this is the only trace that a deployment nobody pressed a
+    // button for started on its own. The status moved either way — the write
+    // above is what did it — so an operator looking at a clone that began
+    // deploying unprompted has nothing else to read.
+    const { error: eventErr } = await admin.from("deployment_events").insert({
+      clone_id: row.clone_id,
+      provider_slug: row.provider_slug,
+      action: "wake_dormant",
+      from_status: row.status,
+      to_status: "pending",
+      success: true,
+      payload: { reason: "hosting provider is now configured" },
+    });
+    if (eventErr) console.error("[deployment-drain] wake not logged:", eventErr.message);
+  }
+  return { woken, byProvider: [...byProvider] };
+}
+
 async function reclaimStalled() {
   const cutoff = new Date(Date.now() - 15 * 60 * 1000).toISOString();
   await admin
@@ -335,10 +429,36 @@ async function step(row: DeploymentRow): Promise<StepOutcome> {
             retryable: false,
           };
         }
+        // Named, so `judgeWait` can tell a clone being built from a clone
+        // nobody is building. A backend provisioning run is measured in hours
+        // — ~7 edge functions a pass against 413 declared — and six of them is
+        // a healthy clone, not a stall; a backend that has FAILED will never
+        // write these columns, and waiting six more hours before saying so
+        // helps nobody.
+        //
+        // A dependency is named only where there IS one. With no
+        // `clone_backends` row at all, nothing is progressing and nothing has
+        // given up: the New Clone wizard enqueues the backend from the BROWSER,
+        // after `provisionClone` has already returned, so a submit interrupted
+        // in between leaves a clone that will never have a backend and nothing
+        // that knows one was asked for. Declaring that "progressing" would wait
+        // for it for ever — a dependency reading has to be earned by observing
+        // something, and an absent row is exactly the case the elapsed-time
+        // rule was already right about.
+        const dependency: WaitDependency | null = backend
+          ? {
+              name: "the clone's Supabase backend",
+              state: backend.status === "failed" ? "terminal" : "progressing",
+            }
+          : null;
         return {
           kind: "wait",
           seconds: 120,
-          detail: "Waiting for the clone's Supabase backend to report its URL and key.",
+          detail: backend
+            ? `Waiting for the clone's Supabase backend to report its URL and key (backend: ${backend.status}).`
+            : "No backend has been requested for this clone. Start one from the clone page, " +
+              "or clear the dedicated-backend flag so this deployment can use the prime's.",
+          dependency,
         };
       }
       // The Mission Control key is deliberately NOT pushed into the HOSTING
@@ -696,7 +816,44 @@ async function onLive(row: DeploymentRow, origin: string | null) {
     });
   }
 
-  await admin.from("notifications").insert({
+  // Then read what the browser will actually download.
+  //
+  // Everything above this line is a statement about what WE did: the variables
+  // were synced, the build reported READY, the domain resolves. Measured 19 Sep
+  // 2026, all three were true of `npc-crm-independent` while its bundle named
+  // the PRIME's Supabase project, so the credentials Mission Control issued for
+  // it could not sign anybody in — and three of the four live clones were doing
+  // it. Nothing in this pipeline had ever fetched the JavaScript and asked.
+  //
+  // Here rather than as a deployment STATUS, on the same judgement the two
+  // blocks above make: the deployment IS live, and demoting it on a probe that
+  // can itself fail would be a worse lie than the one this finds. It records a
+  // verdict, notifies on a wrong backend, and asks for exactly one rebuild.
+  try {
+    const { verifyCloneBundleIdentity } =
+      await import("@/server/hosting/deployedBundleIdentity.server");
+    await verifyCloneBundleIdentity(row.clone_id, { origin });
+  } catch (e) {
+    const { error: logErr } = await admin.from("deployment_events").insert({
+      clone_id: row.clone_id,
+      provider_slug: row.provider_slug,
+      action: "verify_bundle_identity",
+      success: false,
+      error_message: e instanceof Error ? e.message : String(e),
+    });
+    // The row IS the record that the probe was attempted and did not answer.
+    // Losing it silently leaves a deployment with no bundle verdict and no
+    // trace of why, which reads as a probe that was never due.
+    if (logErr)
+      console.error("[deployment-drain] bundle probe failure not logged:", logErr.message);
+  }
+
+  // Checked rather than left to the window above it: `notifications.kind` is a
+  // PG enum, so a kind the type never got is rejected at the column and every
+  // insert of it fails silently — the defect three kinds already shipped with
+  // in this repository. This is the ONE notification that says a clone is
+  // finally reachable, and nobody would miss it until they went looking.
+  const { error: liveErr } = await admin.from("notifications").insert({
     kind: "deployment_live",
     severity: "success",
     title: `Deployment live: ${clone?.name ?? row.clone_id}`,
@@ -705,6 +862,9 @@ async function onLive(row: DeploymentRow, origin: string | null) {
     url: `/clones/${row.clone_id}`,
     metadata: { origin, provider: row.provider_slug, project_id: row.project_id },
   });
+  if (liveErr) {
+    console.error(`[deployment-drain] live notification for ${row.clone_id}:`, liveErr.message);
+  }
 }
 
 async function finalize(row: DeploymentRow, outcome: StepOutcome) {
@@ -742,12 +902,18 @@ async function finalize(row: DeploymentRow, outcome: StepOutcome) {
       statusSince: row.status_since,
       now: Date.now(),
       stuckHours: STUCK_HOURS,
+      dependency: outcome.dependency ?? null,
     });
     if (verdict.kind === "stuck") {
+      const blocked = outcome.dependency?.state === "terminal";
       Object.assign(base, {
         status: "failed",
-        status_detail: `Stuck in ${row.status} for more than ${STUCK_HOURS}h: ${outcome.detail}`,
-        error_message: "stuck",
+        // Two different sentences, because they send an operator to two
+        // different places: one to this deployment, one to what it needs.
+        status_detail: blocked
+          ? `${outcome.dependency?.name} has given up, so this deployment cannot proceed: ${outcome.detail}`
+          : `Stuck in ${row.status} for more than ${STUCK_HOURS}h: ${outcome.detail}`,
+        error_message: blocked ? "blocked_dependency" : "stuck",
         worker_finished_at: nowIso,
       });
       toStatus = "failed";
@@ -1083,11 +1249,74 @@ async function sweepLiveBuilds() {
   return { checked, changed, error: null as string | null };
 }
 
+/**
+ * Re-read every live clone's served bundle, slowly.
+ *
+ * Separate from `sweepLiveBuilds` on purpose, and not folded into it: that one
+ * asks the PROVIDER what it thinks the build did, this one asks the ARTEFACT
+ * what it says. They answer different questions, they were both green while
+ * the fleet was wrong, and a clone whose provider state has not changed can
+ * still need re-reading — a redeploy from another lane, a rolled-back alias, a
+ * hand-edited environment.
+ *
+ * Deliberately slower than the build sweep and capped harder, because a probe
+ * is a multi-megabyte fetch rather than an API call. A bundle changes only when
+ * a build does, and `onLive` already covers the moment one lands, so this is a
+ * correctness net for everything that reaches production some other way.
+ */
+const BUNDLE_SWEEP_ROWS_PER_RUN = 2;
+const BUNDLE_SWEEP_INTERVAL_HOURS = 6;
+
+async function sweepBundleIdentity() {
+  const cutoff = new Date(Date.now() - BUNDLE_SWEEP_INTERVAL_HOURS * 60 * 60 * 1000).toISOString();
+  const { data: rows, error } = await admin
+    .from("clone_deployments")
+    .select("clone_id")
+    .eq("status", "live")
+    .or(`bundle_checked_at.is.null,bundle_checked_at.lt.${cutoff}`)
+    .order("bundle_checked_at", { ascending: true, nullsFirst: true })
+    .limit(BUNDLE_SWEEP_ROWS_PER_RUN);
+
+  // Named rather than swallowed, for the reason the build sweep records: a
+  // discarded error here reports `checked: 0`, which is indistinguishable from
+  // "nothing was due", and the backup for one silent failure becomes a second.
+  if (error) {
+    console.error("deployment-drain bundle sweep: could not read live rows:", error.message);
+    return { checked: 0, wrong: 0, error: error.message };
+  }
+
+  const { verifyCloneBundleIdentity } =
+    await import("@/server/hosting/deployedBundleIdentity.server");
+  const { isWrongBackend } = await import("@/server/hosting/deployedBundleIdentity.pure");
+
+  let checked = 0;
+  let wrong = 0;
+  for (const row of rows ?? []) {
+    try {
+      const out = await verifyCloneBundleIdentity(row.clone_id);
+      if (!out.probed) continue;
+      checked++;
+      if (out.reading && isWrongBackend(out.reading.verdict)) wrong++;
+    } catch (e) {
+      // `verifyCloneBundleIdentity` stamps `bundle_checked_at` itself, so a
+      // throw here cannot starve the cap: the row it was reading is already
+      // stamped and will not be re-selected next run.
+      console.error("deployment-drain bundle sweep failed:", e instanceof Error ? e.message : e);
+    }
+  }
+  return { checked, wrong, error: null as string | null };
+}
+
 async function drain() {
   // The reclaim first and unconditionally: it is database-only, and it is what
   // releases a row a terminated Worker left held. Yielding it would make a
   // starved window look like a queue with nothing in it.
   await reclaimStalled();
+
+  // Then wake anything that was asked for and could not be attempted. Before
+  // the claim, so a row woken this pass is eligible in the same pass rather
+  // than a minute later, and before the spend gate, because it is database-only.
+  const woken = await wakeDormantDeployments();
 
   // Then the claim, which is what spends. This lane advances a deployment one
   // state per pass and several of those states are GitHub calls, sixty ticks
@@ -1095,7 +1324,7 @@ async function drain() {
   // stands down only at the reserve floor.
   const spend = decideSpend({ role: "actor", remaining: await readGitHubRemaining() });
   if (!spend.proceed) {
-    return { claimed: 0, advanced: 0, waiting: 0, failed: 0, skipped: spend.why };
+    return { claimed: 0, advanced: 0, waiting: 0, failed: 0, woken, skipped: spend.why };
   }
   const rows = await claim(MAX_ROWS_PER_RUN);
   let advanced = 0;
@@ -1112,8 +1341,9 @@ async function drain() {
     else failed++;
   }
   const sweep = await sweepLiveBuilds();
+  const bundles = await sweepBundleIdentity();
   const teardown = await processTeardowns();
-  return { claimed: rows.length, advanced, waiting, failed, sweep, teardown };
+  return { claimed: rows.length, advanced, waiting, failed, woken, sweep, bundles, teardown };
 }
 
 export const Route = createFileRoute("/hooks/deployment-drain")({

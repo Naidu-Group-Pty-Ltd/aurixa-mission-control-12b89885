@@ -296,6 +296,59 @@ async function gatherFacts(
     });
   }
 
+  /*
+    THE PRIME VERSIONS EACH CLONE'S LAST PASS WAS HELD BEHIND.
+
+    `partitionByDependency` has recorded `blockedBy` on every migration it
+    skipped since it was written, into `clone_backends.migrations_applied`.
+    Nothing had ever read it back — which is why two tenants sat at frontier
+    `20261201100000` for days reading `status: ready`, with the condition's
+    only trace being prose in `status_detail`.
+
+    Read from the clone's own row, so this costs no GitHub call and no read of
+    the prime: the blockage is reported from the same evidence that produced
+    it. A read that FAILS throws rather than reporting no holes — an
+    unreadable backend is not a fleet with nothing blocking it, and this
+    function's other reads already answer to that rule.
+  */
+  const backends = await supabase
+    .from("clone_backends")
+    .select("clone_id, migrations_applied")
+    .in("clone_id", ids);
+  if (backends.error) {
+    throw new Error(`Could not read clone backends: ${backends.error.message}`);
+  }
+  const holesByClone = new Map<string, CloneBlockageFacts["primeLedgerHoles"]>();
+  for (const row of (backends.data ?? []) as Array<{
+    clone_id: string;
+    migrations_applied: unknown;
+  }>) {
+    const applied = Array.isArray(row.migrations_applied) ? row.migrations_applied : [];
+    // version → the migrations it holds, in the order the pass recorded them.
+    const held = new Map<string, string[]>();
+    for (const entry of applied as Array<Record<string, unknown>>) {
+      const blockedBy = Array.isArray(entry?.blockedBy) ? entry.blockedBy : [];
+      const name = typeof entry?.name === "string" ? entry.name : null;
+      for (const version of blockedBy) {
+        if (typeof version !== "string") continue;
+        const list = held.get(version) ?? [];
+        if (name) list.push(name);
+        held.set(version, list);
+      }
+    }
+    if (held.size === 0) continue;
+    holesByClone.set(
+      row.clone_id,
+      [...held.entries()]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([version, names]) => ({
+          version,
+          heldCount: names.length,
+          firstHeld: names[0] ?? null,
+        })),
+    );
+  }
+
   for (const clone of clones) {
     const rows = resultsByClone.get(clone.id) ?? [];
 
@@ -351,6 +404,7 @@ async function gatherFacts(
       events,
       consecutiveFailures,
       blockedNotice: blockedByClone.get(clone.id) ?? null,
+      primeLedgerHoles: holesByClone.get(clone.id) ?? [],
       sloMinutes,
     });
   }

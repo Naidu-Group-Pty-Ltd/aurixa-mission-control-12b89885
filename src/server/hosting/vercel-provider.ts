@@ -13,6 +13,7 @@
  * and losing that race must not fail the job.
  */
 import type { CloneEnvVar } from "./envPolicy.pure";
+import { staleManagedNames } from "./envPolicy.pure";
 import type {
   CreateProjectInput,
   DeployResult,
@@ -107,7 +108,12 @@ export const vercelProvider: HostingProvider = {
 
   async syncEnv(projectId, vars: CloneEnvVar[], teamId) {
     const team = teamId ?? defaultTeamId();
+    // An empty set is not an instruction to clear the project. It is what a
+    // deployment whose backend has not reported yet produces, and treating it
+    // as "remove everything we manage" would strip a working clone's Supabase
+    // pair on the first pass where the backend was slow.
     if (vars.length === 0) return { written: 0, removed: 0 };
+
     await vercelApi.upsertEnv(
       projectId,
       vars.map((v) => ({
@@ -122,7 +128,41 @@ export const vercelProvider: HostingProvider = {
       })),
       team,
     );
-    return { written: vars.length, removed: 0 };
+
+    // Upsert alone leaves a retired name on the project for ever, and the next
+    // build inlines it. Bounded by `MANAGED_ENV_NAMES`: a variable an operator
+    // set themselves is never in scope, however stale it looks from here.
+    //
+    // After the write, never before. A removal that runs first and then fails
+    // to write leaves the clone with NEITHER value; this order means the worst
+    // case is the state we already had.
+    let removed = 0;
+    try {
+      const pushing = new Set(vars.map((v) => v.key));
+      const { envs } = await vercelApi.listEnv(projectId, team);
+      const stale = staleManagedNames({
+        onProject: envs.map((e) => e.key),
+        pushing,
+      });
+      for (const name of stale) {
+        // Vercel keys an environment variable per target, so one name can be
+        // several rows. All of them go.
+        for (const env of envs.filter((e) => e.key === name)) {
+          await vercelApi.deleteEnv(projectId, env.id, team);
+          removed++;
+        }
+      }
+    } catch (e) {
+      // Non-fatal and said out loud: the environment this deployment needs IS
+      // on the project, which is what the step was for. A stale name left
+      // behind is the state of every clone until today.
+      console.error(
+        `[vercel] could not prune stale variables on ${projectId}: ` +
+          `${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+
+    return { written: vars.length, removed };
   },
 
   async describeProject(projectId, teamId) {

@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import {
+  MANAGED_ENV_NAMES,
+  staleManagedNames,
   EnvPolicyError,
   backendRefusalReason,
   buildCloneEnv,
@@ -152,14 +155,14 @@ describe("envDigest", () => {
   it("changes when a VALUE changes, not just a name", () => {
     // A rotated API key keeps its name. A digest over names alone would skip
     // the re-sync and leave the clone building against the revoked key.
-    const before = buildCloneEnv({ aurixaApiKey: "ak_old" });
-    const after = buildCloneEnv({ aurixaApiKey: "ak_new" });
+    const before = buildCloneEnv({ extra: { VITE_FEATURE_TOKENS: "a" } });
+    const after = buildCloneEnv({ extra: { VITE_FEATURE_TOKENS: "b" } });
     expect(envDigest(before)).not.toBe(envDigest(after));
   });
 
   it("changes when a variable is added", () => {
     const one = buildCloneEnv(cloneBackend);
-    const two = buildCloneEnv({ ...cloneBackend, aurixaApiKey: "ak" });
+    const two = buildCloneEnv({ ...cloneBackend, extra: { VITE_FEATURE_TOKENS: "a" } });
     expect(envDigest(one)).not.toBe(envDigest(two));
   });
 });
@@ -189,5 +192,173 @@ describe("reading which project a value belongs to", () => {
 
   it("says nothing when there is no backend to judge", () => {
     expect(backendRefusalReason({})).toBeNull();
+  });
+});
+
+/**
+ * The names that must not be producible.
+ *
+ * A parameter that nothing passes and nothing reads looks like dead weight and
+ * is actually an invitation: `aurixaApiKey` was documented as "the clone's
+ * Mission Control API key" and pushed under a `VITE_` prefix, which this
+ * module's own header opens by explaining is inlined into the JavaScript every
+ * visitor downloads. `refuseReason` would not have caught it — `SECRET_FRAGMENTS`
+ * omits bare `KEY` deliberately and carries no `API_KEY` — so the only thing
+ * standing between that key and the public bundle was that no caller had got
+ * round to using the parameter.
+ *
+ * Asserted over the BUILT environment rather than over the source, so it stays
+ * true however the value might arrive: the `extra` passthrough is checked with
+ * the same names.
+ */
+describe("a Mission Control credential cannot be given a public name", () => {
+  const namesFrom = (input: Parameters<typeof buildCloneEnv>[0]) =>
+    buildCloneEnv(input).map((v) => v.key);
+
+  it("never emits VITE_AURIXA_API_KEY from any supported input", () => {
+    // Every field this function accepts, all at once. If a parameter for it
+    // comes back, one of these is the shape it will arrive in.
+    const everything = {
+      ...cloneBackend,
+      siteOrigin: "https://acme.aurixasystems.com.au",
+      aurixaApiKey: "ak_live_should_never_be_published",
+    } as Parameters<typeof buildCloneEnv>[0];
+    expect(namesFrom(everything)).not.toContain("VITE_AURIXA_API_KEY");
+  });
+
+  it("does not quietly reintroduce VITE_SITE_URL either", () => {
+    const withOrigin = {
+      ...cloneBackend,
+      siteOrigin: "https://acme.aurixasystems.com.au",
+    } as Parameters<typeof buildCloneEnv>[0];
+    expect(namesFrom(withOrigin)).not.toContain("VITE_SITE_URL");
+  });
+
+  it("emits exactly the four names a clone's bundle needs, plus what is asked for", () => {
+    // Stated as a whole set rather than a prohibition: a new name arriving by
+    // accident is the failure mode, and a list of things-not-to-emit cannot
+    // see one nobody thought of.
+    expect(namesFrom(cloneBackend).sort()).toEqual([
+      "VITE_SUPABASE_ANON_KEY",
+      "VITE_SUPABASE_PROJECT_ID",
+      "VITE_SUPABASE_PUBLISHABLE_KEY",
+      "VITE_SUPABASE_URL",
+    ]);
+  });
+});
+
+/**
+ * Removing what we stopped pushing, and nothing else.
+ *
+ * `syncEnv` upserted and never removed — `removed: 0` was a literal in its
+ * return — so a name this pipeline stopped emitting stayed on the hosting
+ * project for ever and the next build inlined it. The obvious repair is to
+ * delete whatever is not in the set being pushed, and it is wrong in the
+ * direction this codebase keeps paying for: an operator's own variable, set
+ * for a reason nobody wrote down, would go with it.
+ */
+describe("stale managed variables", () => {
+  it("removes a name we used to emit and no longer do", () => {
+    expect(
+      staleManagedNames({
+        onProject: ["VITE_SUPABASE_URL", "VITE_AURIXA_API_KEY", "VITE_SITE_URL"],
+        pushing: ["VITE_SUPABASE_URL"],
+      }),
+    ).toEqual(["VITE_AURIXA_API_KEY", "VITE_SITE_URL"]);
+  });
+
+  it("never touches a variable this pipeline does not manage", () => {
+    // The whole reason the list is declared rather than derived.
+    expect(
+      staleManagedNames({
+        onProject: ["OPERATORS_OWN_FLAG", "VITE_SOMETHING_THEY_ADDED", "SENTRY_DSN"],
+        pushing: ["VITE_SUPABASE_URL"],
+      }),
+    ).toEqual([]);
+  });
+
+  it("keeps a managed name that is being pushed", () => {
+    expect(
+      staleManagedNames({
+        onProject: [...MANAGED_ENV_NAMES],
+        pushing: [...MANAGED_ENV_NAMES],
+      }),
+    ).toEqual([]);
+  });
+
+  it("names a stale Turnstile site key, because a stale one is worse than none", () => {
+    // It verifies against a secret this deployment no longer holds, so the
+    // login page draws a CAPTCHA that cannot be satisfied.
+    expect(
+      staleManagedNames({
+        onProject: ["VITE_TURNSTILE_SITE_KEY", "VITE_SUPABASE_URL"],
+        pushing: ["VITE_SUPABASE_URL"],
+      }),
+    ).toEqual(["VITE_TURNSTILE_SITE_KEY"]);
+  });
+
+  it("keeps every retired name on the list", () => {
+    // Dropping a retired name from the list is how it gets stranded on every
+    // project that already has it — the list is what makes removal possible,
+    // so it is the last place a retired name may be deleted from.
+    expect(MANAGED_ENV_NAMES).toContain("VITE_AURIXA_API_KEY");
+    expect(MANAGED_ENV_NAMES).toContain("VITE_SITE_URL");
+  });
+
+  it("covers every name buildCloneEnv can emit", () => {
+    // The failure this catches: somebody adds a push and forgets the list, so
+    // the new name can never be retired later.
+    const emitted = buildCloneEnv({
+      ...cloneBackend,
+      extra: { VITE_TURNSTILE_SITE_KEY: "0x4AAA" },
+    }).map((v) => v.key);
+    for (const name of emitted) expect(MANAGED_ENV_NAMES).toContain(name);
+  });
+
+  it("is case-sensitive, because environment variable names are", () => {
+    expect(staleManagedNames({ onProject: ["vite_site_url"], pushing: [] })).toEqual([]);
+  });
+});
+
+/**
+ * `staleManagedNames` can be exactly right and nothing ever remove a variable,
+ * because the provider is free not to call it — which is what it did for the
+ * whole life of this pipeline, with `removed: 0` written as a literal. So the
+ * call site is asserted, the same reason `deploymentState.test.ts` asserts
+ * `statusSince: row.status_since` rather than trusting `judgeWait`.
+ */
+describe("the hosting provider actually prunes", () => {
+  const PROVIDER = readFileSync("src/server/hosting/vercel-provider.ts", "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+
+  const syncEnv = PROVIDER.slice(
+    PROVIDER.indexOf("async syncEnv("),
+    PROVIDER.indexOf("async describeProject("),
+  );
+
+  it("asks which names are stale rather than deciding for itself", () => {
+    expect(syncEnv).toMatch(/staleManagedNames\s*\(/);
+  });
+
+  it("deletes them", () => {
+    expect(syncEnv).toMatch(/deleteEnv\s*\(/);
+  });
+
+  it("prunes AFTER writing, never before", () => {
+    // A prune that runs first and then fails to write leaves the clone with
+    // neither value. This order means the worst case is the state we had.
+    expect(syncEnv.indexOf("upsertEnv")).toBeLessThan(syncEnv.indexOf("deleteEnv"));
+  });
+
+  it("treats an empty environment as nothing to do, not as a clear-down", () => {
+    // What a deployment whose backend has not reported yet produces. Removing
+    // the managed set there strips a working clone's Supabase pair.
+    expect(syncEnv).toMatch(/vars\.length === 0\)\s*return \{ written: 0, removed: 0 \}/);
+  });
+
+  it("reports what it removed instead of a literal zero", () => {
+    expect(syncEnv).not.toMatch(/return \{ written: vars\.length, removed: 0 \}/);
+    expect(syncEnv).toMatch(/return \{ written: vars\.length, removed \}/);
   });
 });

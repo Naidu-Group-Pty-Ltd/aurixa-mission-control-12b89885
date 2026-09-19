@@ -110,7 +110,13 @@ describe("what a pass stopped inside is resumable", () => {
     expect(cb).toBeGreaterThan(-1);
     const body = lane.slice(cb, cb + 700);
     expect(body).toContain('.from("clone_backends")');
-    expect(body).toContain("chunk_cursor: { migrationId: p.migrationId, statementsDone:");
+    expect(body).toMatch(/chunk_cursor: \{[\s\S]{0,200}?migrationId: p\.migrationId/);
+    expect(body).toMatch(/chunk_cursor: \{[\s\S]{0,200}?statementsDone: p\.statementsDone/);
+    // And the file's SHAPE, so the next pass reads this 41 MB body once
+    // instead of twice. Without it the cursor resumes correctly and pays the
+    // first walk again on every single pass — which is the livelock this
+    // block already exists to stop, at half speed rather than stopped.
+    expect(body).toMatch(/chunk_cursor: \{[\s\S]{0,200}?shape: p\.shape/);
     // A cursor that cannot be written puts the livelock back, so it is not
     // allowed to fail quietly.
     expect(body).toMatch(/console\.error\(/);

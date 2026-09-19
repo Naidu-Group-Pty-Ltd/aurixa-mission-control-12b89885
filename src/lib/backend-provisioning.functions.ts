@@ -2,6 +2,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { requireAdmin } from "@/integrations/supabase/role-middleware";
+import { asJson } from "@/lib/json-cast";
 // Type-only: erased at build, so the server module never reaches the client bundle.
 import type { ApplyAllowedOriginsResult } from "@/server/cloneAllowedOrigins.server";
 
@@ -625,6 +626,13 @@ async function runBackendProvisioning(
         // tree, so it is complete even on a pass that fetched no bundle
         // source — see `declaredFunctionSlugs`.
         declaredEdgeFunctions: snapshot.declaredFunctionSlugs,
+        // A credential this clone is supposed to lack is not a gap in its
+        // parity — see `diffSecrets`, and the measured reading that sent an
+        // operator to forward an Airtable token fleet-wide.
+        withheldSecretNames: await (async () => {
+          const { readWithheldSecretNames } = await import("@/server/handoff-parity.server");
+          return readWithheldSecretNames(supabase, input.cloneId);
+        })(),
         // Whose each surplus object is. Best effort — a clone that came up
         // short is recorded as short, and an unread index reads
         // `undetermined` rather than making a claim about the tenant.
@@ -686,6 +694,20 @@ async function runBackendProvisioning(
         status: "ready" as const,
         // The schema build is done; a later re-provision starts from the top.
         resume_stage: null,
+        // Whether anybody can actually sign in, kept rather than narrated.
+        //
+        // `seedAdminUser` verifies its own work against the clone's store — a
+        // real bcrypt check, not "the insert returned no error" — and that
+        // report reached `status_detail` and nowhere else, which the line
+        // below overwrites in the same run. It is the same defect the
+        // replication blocks were given a home for, on the one question that
+        // decides whether the clone is usable at all.
+        //
+        // A pass that did not seed leaves it alone: `adminSeed` is null on a
+        // repair (which must not touch a tenant's credential) and on a resume
+        // that re-entered after this step, and writing null there would erase
+        // a true reading with the absence of a new one.
+        ...(result.adminSeed ? { admin_seed: asJson(result.adminSeed) } : {}),
         // The per-item replication results travel WITH the parity report.
         //
         // `runBackendProvisioning` has always returned `cronJobs` and
@@ -753,7 +775,28 @@ async function runBackendProvisioning(
         // to know which account to seed and grant, and a null here leaves the
         // one question provisioning cannot answer for itself unanswerable.
         admin_email: input.adminEmail,
-        migration_version: result.latestMigration,
+        /*
+          THE FRONTIER IS A READING, AND AN UNREADABLE ONE IS NOT WRITTEN.
+
+          This column used to take the newest migration FILE in the prime's
+          repository, which is neither a reading of the clone nor of the prime
+          — measured on `npc-crm-independent-6505dc`, it sat two versions ahead
+          of that clone's own ledger, and `migration-sync` computes
+          `corpus − frontier`, so both were skipped as applied for good.
+
+          `resolveMigrationFrontier` now decides, and it may answer "do not
+          write". Spreading rather than assigning is what honours that: a
+          `null` here is an instruction to replay the entire corpus against a
+          populated database, so where the ledger could not be read the column
+          keeps whatever the last pass that COULD read it established.
+
+          `supabase` is untyped in this function, so nothing above would have
+          caught an object being poured into a `text` column. The spec beside
+          this file checks the shape instead.
+        */
+        ...(result.latestMigration.write
+          ? { migration_version: result.latestMigration.version }
+          : {}),
         source_repo: snapshot.sourceRepo,
         source_ref: snapshot.sourceRef,
         source_sha: snapshot.sourceSha,

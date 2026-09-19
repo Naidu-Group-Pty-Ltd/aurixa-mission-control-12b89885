@@ -18,7 +18,13 @@ import type { AdminSeedReport } from "./cloneAdminIdentity.pure";
 import type { PrimeBackendSnapshot } from "./prime-backend.server";
 import type { StageName, StageResult } from "./schema-introspection.server";
 import { resolveMissionControlOrigin } from "./missionControlLink.pure";
-import { cursorRanPastEnd } from "./chunkCursorStore.pure";
+import { cursorRanPastEnd, type StoredSeedShape } from "./chunkCursorStore.pure";
+import {
+  frontierFromReplay,
+  frontierUnreadable,
+  resolveMigrationFrontier,
+  type MigrationFrontier,
+} from "./migrationFrontier.pure";
 
 const MGMT_API = "https://api.supabase.com/v1";
 
@@ -2350,6 +2356,103 @@ export type PrimeMigrationResult = {
 };
 
 /**
+ * How many blockers an orphan's row shows. See `partitionByDependency`'s own
+ * `maxBlockedBy`: the number of holes can run to hundreds and this is read by
+ * a person, so the FIRST are kept — those are what an operator investigates.
+ */
+const ORPHAN_BLOCKED_BY_DISPLAY_CAP = 5;
+
+/**
+ * Ask, of each orphan, whether the holes ahead of it actually reach it.
+ *
+ * `partitionByDependency` answers with corpus POSITION, which is the only
+ * thing it has: it is handed metadata, not SQL. This is the second look, taken
+ * where the SQL loader is, and `migrationDependencyScope.pure.ts` owns the
+ * rule — including every way it stays fail-closed.
+ *
+ * Two costs are deliberately not paid. A hole is read once per pass however
+ * many orphans name it. And a candidate past `MAX_SCOPING_BYTES` is never
+ * fetched at all — the corpus's template-library seeds are ~41 MB each, and
+ * the answer is not worth the isolate.
+ */
+export async function rescueScopedOrphans<T extends { id: string; name: string }>(
+  orphaned: ReadonlyArray<{ meta: T; blockedBy: string[] }>,
+  corpus: ReadonlyArray<{ id: string; name: string }>,
+  materialised: ReadonlyArray<{ id: string; name: string; sql?: string }>,
+  loadSql?: (m: { id: string; name: string }) => Promise<string>,
+): Promise<{ send: T[]; stillBlocked: Array<{ meta: T; blockedBy: string[] }> }> {
+  if (orphaned.length === 0) return { send: [], stillBlocked: [] };
+
+  const { scopeHoles, holeRelationNames, MAX_SCOPING_BYTES } = await import(
+    "./cascade/migrationDependencyScope.pure"
+  );
+  const byId = new Map(corpus.map((m) => [m.id, m]));
+  const sqlOnItem = new Map(materialised.filter((m) => m.sql).map((m) => [m.id, m.sql as string]));
+
+  /**
+   * A body, or null where none can be established.
+   *
+   * Every throw lands on null and therefore on the prefix barrier: an
+   * oversize refusal, a GitHub 403, a corpus that does not hold the id. That
+   * is the whole safety argument for this function — it can only ever fail
+   * back to what the code did before it existed.
+   */
+  const readSql = async (id: string): Promise<string | null> => {
+    const onItem = sqlOnItem.get(id);
+    if (onItem !== undefined) return onItem;
+    const meta = byId.get(id);
+    if (!meta || !loadSql) return null;
+    try {
+      const sql = await loadSql(meta);
+      return sql.length > MAX_SCOPING_BYTES ? null : sql;
+    } catch {
+      return null;
+    }
+  };
+
+  const holes = new Map<string, { id: string; readable: boolean; creates: string[] }>();
+  const holeFor = async (id: string) => {
+    const hit = holes.get(id);
+    if (hit) return hit;
+    const sql = await readSql(id);
+    const made =
+      sql === null
+        ? { id, readable: false, creates: [] }
+        : { id, readable: true, creates: holeRelationNames(sql) };
+    holes.set(id, made);
+    return made;
+  };
+
+  const send: T[] = [];
+  const stillBlocked: Array<{ meta: T; blockedBy: string[] }> = [];
+  /*
+    AN ORPHAN THAT STAYS BLOCKED IS A HOLE FOR THE ONES AFTER IT.
+
+    Found by checking this against the real held set rather than by reading it.
+    On `npc-client-dashboard` the three withheld migrations are, in corpus
+    order, the 41 MB v14 template-library SEED, its 2,616-byte active-master
+    REFRESH, and the v15 seed. Scoping the refresh against the builder-
+    marketplace hole alone sends it — correctly, they share no object — while
+    the seed it refreshes FROM stays blocked for its size. The clone would then
+    refresh its active masters out of a library that never received v14.
+
+    So the holes a candidate is judged against grow as the walk proceeds: the
+    versions the prime never ran, plus every orphan this pass has just decided
+    not to send. `orphaned` arrives in corpus order from
+    `partitionByDependency`, which is what makes one forward pass sufficient.
+  */
+  for (const orphan of orphaned) {
+    const evidence: Array<{ id: string; readable: boolean; creates: string[] }> = [];
+    for (const id of orphan.blockedBy) evidence.push(await holeFor(id));
+    for (const earlier of stillBlocked) evidence.push(await holeFor(earlier.meta.id));
+    const decision = scopeHoles(await readSql(orphan.meta.id), evidence);
+    if (decision.act === "send") send.push(orphan.meta);
+    else stillBlocked.push({ meta: orphan.meta, blockedBy: [...decision.blockedBy] });
+  }
+  return { send, stillBlocked };
+}
+
+/**
  * Replay the prime's migrations onto a clone project, in order, skipping
  * any version already recorded in the clone's ledger. Stops on the first
  * failure so later migrations never run against a half-applied schema.
@@ -2473,16 +2576,26 @@ export async function applyPrimeMigrations(
   let sendable: ReadonlyArray<{ id: string; name: string; sql?: string }> = migrations;
   if (scope) {
     const { partitionByDependency } = await import("./fleetCorpusScope.pure");
-    const part = partitionByDependency(scope.corpus, scope.runnableIds, applied);
-    const sendableIds = new Set(part.send.map((m) => m.id));
+    // Uncapped on purpose. `maxBlockedBy` exists so a person is not shown four
+    // hundred versions; the RESCUE below has to see every hole that reaches a
+    // candidate, and deciding on a truncated list would step over the ones the
+    // cap dropped. The display cap is applied where the row is written.
+    const part = partitionByDependency(
+      scope.corpus,
+      scope.runnableIds,
+      applied,
+      Number.MAX_SAFE_INTEGER,
+    );
+    const rescue = await rescueScopedOrphans(part.orphaned, scope.corpus, migrations, loadSql);
+    const sendableIds = new Set([...part.send, ...rescue.send].map((m) => m.id));
     sendable = migrations.filter((m) => sendableIds.has(m.id));
-    for (const o of part.orphaned) {
+    for (const o of rescue.stillBlocked) {
       results.push({
         id: o.meta.id,
         name: o.meta.name,
         success: true,
         skipped: true,
-        blockedBy: o.blockedBy,
+        blockedBy: o.blockedBy.slice(0, ORPHAN_BLOCKED_BY_DISPLAY_CAP),
       });
     }
   }
@@ -2643,11 +2756,27 @@ export async function applyPrimeMigrations(
   return { results, latestApplied, stoppedEarly, chunksApplied, chunkCursor };
 }
 
-/** Where a chunked seed stopped: the next pass skips this many statements. */
-export type ChunkCursor = { migrationId: string; statementsDone: number };
+/**
+ * Where a chunked seed stopped: the next pass skips this many statements.
+ *
+ * `shape` is what the file looked like when this pass read it, so the next one
+ * reads it ONCE instead of twice — see `chunkCursorStore.pure.ts` for what
+ * that cost and why the check it supports is stronger rather than weaker for
+ * being carried here.
+ */
+export type ChunkCursor = {
+  migrationId: string;
+  statementsDone: number;
+  shape?: StoredSeedShape;
+};
 
 export type OversizeApplyOptions = {
-  /** Open the migration's body as a stream. Called twice per seed (two passes). */
+  /**
+   * Open the migration's body as a stream.
+   *
+   * Called twice on a pass that has no remembered shape, once on a pass that
+   * has one.
+   */
   streamSql: (m: { id: string; name: string }) => Promise<AsyncIterable<string>>;
   /** Largest statement to send. Default `DEFAULT_SEED_STATEMENT_BYTES`. */
   maxStatementBytes?: number;
@@ -2659,6 +2788,8 @@ export type OversizeApplyOptions = {
     name: string;
     statementsDone: number;
     label: string;
+    /** Written with the cursor, so a pass resumed from it reads the file once. */
+    shape: StoredSeedShape;
   }) => Promise<void>;
 };
 
@@ -2694,8 +2825,32 @@ async function applyChunkedSeed(
   let index = 0;
   let applied = 0;
   let slowestMs = 0;
+  /*
+    ONE READ ON A RESUMED PASS.
+
+    `readSeedShape` is a full walk of the file that discards every tuple, so
+    doing it here as well as inside `chunkSeedStatements` costs ~80 MB on the
+    41 MB seed — for one bounded group of statements, inside a 45-second
+    budget. Measured 19 Sep 2026: `npc-test-76b3b3` completed a pass having
+    advanced ZERO statements, with the whole budget spent reading.
+
+    A cursor that names THIS migration and carries a shape is that first
+    reading, taken by an earlier pass. The check it exists for is untouched —
+    `chunkSeedStatements` still re-derives the shape and refuses on any
+    disagreement — and it now spans passes rather than the microseconds between
+    two reads in one, which is the interval over which a seed can actually be
+    re-released.
+
+    `cursorShape` is what tells the catch below WHICH kind of mismatch it was.
+  */
+  const cursorShape =
+    oversize.cursor?.migrationId === m.id ? (oversize.cursor.shape ?? null) : null;
+  // Declared out here so the refusal branches below can record it: a pass that
+  // read the file and then lost the stream still knows the shape, and writing
+  // it means the retry does not pay for that reading a second time.
+  let shape: StoredSeedShape | null = cursorShape;
   try {
-    const shape = await readSeedShape(await oversize.streamSql(m));
+    shape ??= await readSeedShape(await oversize.streamSql(m));
     for await (const stmt of chunkSeedStatements(await oversize.streamSql(m), shape, {
       maxStatementBytes,
     })) {
@@ -2709,7 +2864,7 @@ async function applyChunkedSeed(
         return {
           applied,
           stoppedEarly: true,
-          cursor: { migrationId: m.id, statementsDone: index },
+          cursor: { migrationId: m.id, statementsDone: index, shape },
           upstreamRefusal: null,
         };
       }
@@ -2723,10 +2878,37 @@ async function applyChunkedSeed(
         name: m.name,
         statementsDone: index,
         label: stmt.label,
+        shape,
       });
     }
   } catch (e) {
     if (e instanceof SeedShapeError) {
+      /*
+        A MISMATCH AGAINST A REMEMBERED SHAPE IS NOT A MALFORMED SEED.
+
+        With the shape read fresh in this same pass, a disagreement means the
+        file is not seed-shaped and a person has to apply it — which is what
+        the sentence below says. With the shape taken off the CURSOR it means
+        something else entirely: the prime re-released this seed between passes.
+        The file is fine, and telling an operator to apply 41 MB by hand would
+        be the worst possible answer to it.
+
+        So the cursor is dropped and the pass holds. The next one reads the
+        file fresh, derives the new shape, and starts from statement 0 —
+        correct, because the statements that landed were cut from a body that
+        no longer exists.
+      */
+      if (cursorShape) {
+        return {
+          applied,
+          stoppedEarly: true,
+          cursor: null,
+          upstreamRefusal:
+            `${m.name} changed on the prime since the last pass (${e.message}). The recorded ` +
+            "position was cut from a body that no longer exists, so it is discarded and the " +
+            "next pass re-reads the file and starts from the beginning.",
+        };
+      }
       throw new Error(
         `${m.name} is past the size ceiling and is not a seed-shaped INSERT this replay can chunk ` +
           `(${e.message}). Apply it to this clone by hand (psql or the SQL editor), record its ` +
@@ -2747,7 +2929,14 @@ async function applyChunkedSeed(
       return {
         applied,
         stoppedEarly: true,
-        cursor: applied > 0 ? { migrationId: m.id, statementsDone: index } : null,
+        // `shape ?? undefined` rather than `shape`: a refusal on the FIRST
+        // read leaves it null, and `undefined` is the cursor's own word for
+        // "nothing remembered — read the file". Writing null would be a third
+        // spelling of absence in a column two readers narrow.
+        cursor:
+          applied > 0
+            ? { migrationId: m.id, statementsDone: index, shape: shape ?? undefined }
+            : null,
         upstreamRefusal: e instanceof Error ? e.message : String(e),
       };
     }
@@ -4156,7 +4345,12 @@ export type ProvisionBackendResult = {
    */
   adminSeed: AdminSeedReport | null;
   migrationsApplied: PrimeMigrationResult[];
-  latestMigration: string | null;
+  /**
+   * What `clone_backends.migration_version` may be set to, and whether it may
+   * be set at all. A reading, never a corpus position — `migrationFrontier.pure.ts`
+   * records what a frontier taken from the newest migration FILE cost.
+   */
+  latestMigration: MigrationFrontier;
   /** Present when the schema was built by catalog introspection. */
   introspection?: IntrospectionSummary | null;
   edgeFunctions: EdgeFunctionDeployResult[];
@@ -4317,7 +4511,18 @@ export async function provisionCloneBackend(
   // forced with `schemaStrategy: "migration-replay"`.
   const strategy = input.schemaStrategy ?? "introspection";
   let migrationsApplied: PrimeMigrationResult[] = [];
-  let latestApplied: string | null = null;
+  // Unreadable until a branch below establishes it. The default withholds the
+  // write rather than clearing the column, which is the safe direction: a
+  // cleared frontier asks the next sync to replay the whole corpus against a
+  // populated database.
+  // Named apart from `applyPrimeMigrations`'s own local `latestApplied`,
+  // which is a bare version string — a reading of what that replay applied.
+  // Two variables spelled the same while meaning a version and a reading of a
+  // version is the drift this whole module exists to close, and it is also
+  // what stopped a test being able to say which assignments it was judging.
+  let migrationFrontier: MigrationFrontier = frontierUnreadable(
+    "No branch of this pass established a migration frontier.",
+  );
   let introspection: IntrospectionSummary | null = null;
 
   /*
@@ -4359,13 +4564,22 @@ export async function provisionCloneBackend(
       "migrating",
       "Schema already reconciled against the prime — resuming at the edge functions.",
     );
-    latestApplied =
-      [...snapshot.migrations].sort((a, b) => a.name.localeCompare(b.name)).at(-1)?.id ?? null;
+    // Read from the clone, never from `snapshot.migrations`. This branch runs
+    // no stamp, so there is no derivation to fall back on — an unreadable
+    // ledger here leaves the column exactly as the pass that wrote it left it.
+    const { readCloneMigrationFrontier } = await import("./schema-introspection.server");
+    migrationFrontier = resolveMigrationFrontier({
+      clone: await readCloneMigrationFrontier(projectRef),
+    });
   } else if (strategy === "introspection") {
     pauseIfDue("building the schema by introspection");
     await onStatusUpdate?.("migrating", "Introspecting the prime's live catalog...");
-    const { replicateSchemaByIntrospection, stampMigrationLedgerFromPrime, verifyCloneIsEmpty } =
-      await import("./schema-introspection.server");
+    const {
+      replicateSchemaByIntrospection,
+      stampMigrationLedgerFromPrime,
+      verifyCloneIsEmpty,
+      readCloneMigrationFrontier,
+    } = await import("./schema-introspection.server");
     const primeRef = input.primeBackendRef;
     const result = await replicateSchemaByIntrospection(projectRef, {
       primeRef,
@@ -4443,8 +4657,14 @@ export async function provisionCloneBackend(
     // provisioning. A `.catch(() => ({ stamped: 0 }))` here turned that into a
     // success that printed "stamped 0 migration ID(s)" and moved on.
     const stamp = await stampMigrationLedgerFromPrime(projectRef, primeRef);
-    latestApplied =
-      [...snapshot.migrations].sort((a, b) => a.name.localeCompare(b.name)).at(-1)?.id ?? null;
+    // The clone decides. `stamp.primeLedgerTop` is the derivation — what this
+    // pass copied — and is used only where the clone itself cannot be read.
+    // Neither is the newest migration FILE, which is what this used to be and
+    // which sat two versions ahead of the clone on `npc-crm-independent-6505dc`.
+    migrationFrontier = resolveMigrationFrontier({
+      clone: await readCloneMigrationFrontier(projectRef),
+      primeLedgerTop: stamp.primeLedgerTop,
+    });
     await onStatusUpdate?.(
       "migrating",
       stamp.reconciled
@@ -4464,7 +4684,7 @@ export async function provisionCloneBackend(
     );
     const replay = await applyPrimeMigrations(projectRef, snapshot.migrations, onStatusUpdate);
     migrationsApplied = replay.results;
-    latestApplied = replay.latestApplied;
+    migrationFrontier = frontierFromReplay(replay.latestApplied);
     const migrationFailure = migrationsApplied.find((r) => !r.success);
     if (migrationFailure) {
       throw new Error(
@@ -5024,7 +5244,7 @@ export async function provisionCloneBackend(
       adminUserId: null,
       adminSeed: null,
       migrationsApplied,
-      latestMigration: latestApplied,
+      latestMigration: migrationFrontier,
       introspection,
 
       edgeFunctions,
@@ -5076,7 +5296,7 @@ export async function provisionCloneBackend(
     adminUserId,
     adminSeed,
     migrationsApplied,
-    latestMigration: latestApplied,
+    latestMigration: migrationFrontier,
     introspection,
 
     edgeFunctions,

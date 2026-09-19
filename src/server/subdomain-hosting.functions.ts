@@ -115,9 +115,20 @@ export const checkSubdomainAvailability = createServerFn({ method: "POST" })
     };
   });
 
-// ── Enqueue subdomain provisioning ──────────────────────────────────────────
-// Idempotent by (clone_id, action, payload_hash). Also stamps the desired
-// subdomain onto the clone row so the UI shows intent even before CF is live.
+// ── Give an EXISTING clone a name, or change the one it has ─────────────────
+//
+// This used to be the second half of clone creation: the New Clone wizard
+// called it from the browser right after `provisionClone` returned, and it
+// wrote a name straight onto the row over the one the allocator had just
+// reserved. It no longer has a part in creation at all — `provisionCloneCore`
+// reserves and enqueues in one place — and what is left is the act this
+// function's name always described: an operator naming a clone that exists.
+//
+// The body is `provisionCloneSubdomain` now rather than its own write, so the
+// two surfaces cannot allocate by different rules. The one difference is
+// `refuseIfSuffixed`: a name typed HERE was chosen by a person, and quietly
+// serving them at `acme-2` when they asked for `acme` is how somebody comes to
+// look for a clone that is running perfectly well.
 export const requestCloneSubdomain = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth, requireAdmin])
   .inputValidator((d: { cloneId: string; slug: string }) =>
@@ -130,68 +141,21 @@ export const requestCloneSubdomain = createServerFn({ method: "POST" })
     if (!cfg) throw new Error("platform_hosting_config_missing");
     if ((cfg.reserved_slugs ?? []).includes(slug)) throw new Error("subdomain_reserved");
 
-    const fqdn = `${slug}.${cfg.primary_domain}`;
-    const ready = Boolean(cfg.cloudflare_zone_id && process.env.CLOUDFLARE_API_TOKEN);
-
-    const { error: upErr } = await admin
-      .from("clones")
-      .update({
-        subdomain: slug,
-        subdomain_fqdn: fqdn,
-        subdomain_status: ready ? "queued" : "pending_platform",
-      })
-      .eq("id", data.cloneId);
-    if (upErr) throw new Error(upErr.message);
-
-    if (!ready) {
-      // Dormant: don't enqueue a job we know will fail; the settings-page
-      // "reconcile" action fans out once the token + zone land.
-      return { ok: true as const, status: "pending_platform" as const, fqdn };
-    }
-
-    // The record content is resolved from the clone's own DEPLOYMENT first,
-    // falling back to the fleet default. `cfg.target_value` is one A record for
-    // the whole fleet, which is only correct where one origin serves every clone
-    // by Host header — see resolveDnsTarget.
-    const { data: deployment } = await admin
-      .from("clone_deployments")
-      .select("dns_target_type, dns_target_value, status")
-      .eq("clone_id", data.cloneId)
-      .maybeSingle();
-
-    const enqueued = await enqueueSubdomainJob({
+    const { provisionCloneSubdomain } = await import("@/server/hosting/subdomainAllocation.server");
+    const result = await provisionCloneSubdomain({
       cloneId: data.cloneId,
       slug,
-      fqdn,
-      zoneId: cfg.cloudflare_zone_id,
-      fleet: cfg,
-      deployment,
+      preferred: slug,
       createdBy: context.userId,
+      refuseIfSuffixed: true,
     });
-    if (!enqueued.ok) {
-      // `no_target` is the ORDINARY path on a provider-managed fleet, not an
-      // error: the name is reserved and the platform is configured, and the
-      // clone's Vercel project simply has not attached the domain yet. The
-      // deployment drain enqueues the record itself at `attaching_domain`, with
-      // the CNAME Vercel issued.
-      //
-      // Throwing here would fail the wizard's submit for a clone that is
-      // progressing exactly as designed.
-      if (enqueued.reason === "no_target") {
-        await admin
-          .from("clones")
-          .update({ subdomain_status: "awaiting_deployment" })
-          .eq("id", data.cloneId);
-        return { ok: true as const, status: "awaiting_deployment" as const, fqdn };
-      }
-      throw new Error(`subdomain_enqueue_failed:${enqueued.reason}`);
-    }
+    if (!result.ok) throw new Error(result.reason);
+
     return {
       ok: true as const,
-      status: "queued" as const,
-      fqdn,
-      jobId: enqueued.jobId,
-      target: enqueued.source,
+      status: result.status,
+      fqdn: result.fqdn ?? `${result.subdomain}.${cfg.primary_domain}`,
+      ...(result.jobId ? { jobId: result.jobId } : {}),
     };
   });
 

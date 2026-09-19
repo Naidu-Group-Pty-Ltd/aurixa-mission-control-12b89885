@@ -39,6 +39,26 @@ export async function provisionCloneCore(
       .eq("idempotency_key", data.idempotencyKey)
       .maybeSingle();
     if (existing) {
+      /*
+        RECONCILE, RATHER THAN BYPASS.
+
+        This returned here, on the existence of the clone row alone. A request
+        terminated after that row was inserted and before the side effects ran
+        therefore left the backend un-enqueued — with the operator's admin
+        password gone, since it exists only in the request — the subdomain
+        unreserved and the sending identity unstarted, while the retry reported
+        a successful idempotent provision and nothing anywhere recorded that
+        any of it had been asked for.
+
+        Every step is safe to run again (see `startRequestedSideEffects`), so
+        the retry starts what the first attempt did not. A clone that already
+        has everything takes three guarded reads and changes nothing, which is
+        the ordinary case and the price of the uncommon one being silent.
+
+        It stays `idempotent: true`: the caller asked for a clone and is
+        getting the same clone, which is what that word answers.
+      */
+      await startRequestedSideEffects(supabase, userId, existing, data);
       return {
         ok: true,
         cloneId: existing.id,
@@ -264,6 +284,60 @@ export async function provisionCloneCore(
     });
   }
 
+  // ─── Entitlements, for the plan the operator actually picked ─────────────
+  //
+  // The wizard writes `clones.entitled_plan_slug` and the picked
+  // `clone_modules` rows, and until now that was the end of it: nothing
+  // resolved the plan into `entitlement_keys`, and nothing installed the
+  // modules the PLAN entitles as opposed to the ones that were ticked. The
+  // 2-minute entitlement drain claims `plan_change_events` rows, which
+  // provisioning has never written — so a wizard-created clone was the only
+  // route that skipped it. The agreement path (`agreement-provisioning.server`)
+  // has always reconciled at creation; this is the same call, from the other
+  // door.
+  //
+  // Non-fatal on purpose, and loudly recorded. A clone with a repository, a
+  // backend and an unreconciled entitlement set is a clone an operator can
+  // repair in one click; a clone whose creation threw after the repository
+  // existed is one somebody has to unpick by hand.
+  if (data.planSlug) {
+    try {
+      const { reconcileCloneEntitlements } = await import("./entitlement-modules.server");
+      const recon = await reconcileCloneEntitlements({
+        supabase,
+        options: {
+          cloneId: inserted.id,
+          planSlug: data.planSlug,
+          fromPlanSlug: null,
+          direction: "initial",
+          userId,
+        },
+      });
+      if (!recon.ok) {
+        console.error("[provisionCloneCore] initial entitlement reconcile failed", {
+          cloneId: inserted.id,
+          error: recon.error,
+        });
+        await supabase.from("notifications").insert({
+          kind: "clone_created",
+          severity: "warning",
+          title: `Entitlements not applied: ${data.name}`,
+          body:
+            `The clone was created on plan "${data.planSlug}" and its entitlement set could ` +
+            `not be resolved: ${recon.error}. Re-run the reconcile from the clone's page.`,
+          clone_id: inserted.id,
+          url: `/clones/${inserted.id}`,
+          metadata: { stage: "entitlements", plan_slug: data.planSlug },
+        });
+      }
+    } catch (e) {
+      console.error("[provisionCloneCore] initial entitlement reconcile threw", {
+        cloneId: inserted.id,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+
   // Install picked modules
   if (data.moduleIds.length > 0) {
     await supabase.from("clone_modules").insert(
@@ -377,6 +451,33 @@ export async function provisionCloneCore(
     });
     if (!declared.ok) {
       console.error("[provisionClone] backend-deployer variable not written:", declared.error);
+      // Reported, not just logged. `githubAppCapability.pure.ts` was written
+      // for this exact call site and says so in its header: measured 2 Sep
+      // 2026 on `npc-client-dashboard`, Mission Control called this, the
+      // variable was never set, and EVERY ONE of that workflow's 31 runs
+      // failed — "its result was DISCARDED at the call site, so the only
+      // trace was a line in a log nobody reads. A fleet-wide capability gap
+      // looked exactly like nothing happening."
+      //
+      // The consequence is specific and permanent: `deploy-supabase-functions`
+      // requires either a deploy token this clone is deliberately not given or
+      // this variable, so without it the clone's repository shows a red check
+      // on every push, for ever. The workflow's own header names what that
+      // costs — it "trains people to ignore a red check that still matters on
+      // the prime".
+      //
+      // The message is `declared.error` verbatim: it already distinguishes a
+      // refusal GitHub gave from a write that returned cleanly and could not
+      // be read back, and those are different remedies.
+      await warnOnClone(
+        supabase,
+        inserted.id,
+        `Deploy check will fail on every push: ${data.name}`,
+        `Mission Control could not declare itself this repository's backend deployer, so ` +
+          `its "Deploy Supabase functions" workflow has no way to stand down and will fail ` +
+          `on every push to main: ${declared.error}`,
+        "backend_deployer_variable",
+      );
     }
   }
 
@@ -417,31 +518,15 @@ export async function provisionCloneCore(
     }
   }
 
-  // ─── Reserve the clone's name in the Aurixa zone ──────────────────
-  // Before the deployment, because the deployment attaches THIS name. The
-  // drain used to fall back to `clone.slug` when no subdomain was recorded,
-  // which silently bypassed `reserved_slugs` — a clone slugged `admin` would
-  // have taken `admin.aurixasystems.com.au` — and pushed collisions down to a
-  // unique index whose error every caller on this path discards.
-  //
-  // Non-fatal: a clone with no name is served on its provider origin, which is
-  // a complete outcome rather than a failure (see the `attaching_domain` step).
-  let reservedSubdomain: string | null = null;
-  try {
-    const { reserveCloneSubdomain } = await import("@/server/hosting/subdomainAllocation.server");
-    const reservation = await reserveCloneSubdomain({
-      cloneId: inserted.id,
-      slug: data.slug,
-      preferred: data.subdomain ?? null,
-    });
-    if (reservation.ok) {
-      reservedSubdomain = reservation.subdomain;
-    } else {
-      console.error("[provisionClone] subdomain reservation failed:", reservation.reason);
-    }
-  } catch (e) {
-    console.error("[provisionClone] subdomain reservation failed:", e);
-  }
+  // The reservation travels back because the deployment step below attaches
+  // THIS name — the one fact the extracted block produces that its caller
+  // still needs.
+  const { subdomain: reservedSubdomain, fqdn: reservedFqdn } = await startRequestedSideEffects(
+    supabase,
+    userId,
+    inserted,
+    data,
+  );
 
   // ─── Enqueue the deployment ───────────────────────────────────────
   // The step this pipeline never had. Everything above creates a repository
@@ -538,5 +623,219 @@ export async function provisionCloneCore(
   // minted and delivered by `ensureCloneMissionControlLink`, which reports
   // its own outcome.
 
-  return { ok: true, cloneId: inserted.id, githubUrl };
+  return { ok: true, cloneId: inserted.id, githubUrl, subdomainFqdn: reservedFqdn };
+}
+
+/**
+ * Tell an operator that a clone was created and something it asked for was not.
+ *
+ * One helper rather than an insert per site, because the rule is the same at
+ * every one of them: nothing here is fatal — the clone exists, and a clone
+ * that exists with a gap is repairable in a click, while a provision that
+ * threw after a GitHub repository existed is not — so the ONLY thing standing
+ * between a silent gap and an operator is this row.
+ *
+ * `kind` is `clone_created` because `notifications.kind` is a PG enum and an
+ * unlisted value fails the insert silently, which is the defect three kinds
+ * already shipped with here. The stage goes in `metadata`, where it costs
+ * nothing to add one.
+ */
+async function warnOnClone(
+  supabase: SupabaseClient<Database>,
+  cloneId: string,
+  title: string,
+  body: string,
+  stage: string,
+): Promise<void> {
+  const { error } = await supabase.from("notifications").insert({
+    kind: "clone_created",
+    severity: "warning",
+    title,
+    body,
+    clone_id: cloneId,
+    url: `/clones/${cloneId}`,
+    metadata: { stage },
+  });
+  if (error) {
+    // The row IS the telling. Losing it leaves the gap and no trace of it.
+    console.error(`[provisionCloneCore] could not warn about ${stage}: ${error.message}`);
+  }
+}
+
+/**
+ * The side effects a provisioning REQUEST asks for, started against a clone
+ * that already exists.
+ *
+ * Extracted so the first submit and an idempotent retry cannot ask for
+ * different things. The short-circuit at the top of `provisionCloneCore`
+ * returns as soon as it finds a clone with the same key — and a request
+ * terminated after the clone row was inserted and before this ran left the
+ * backend un-enqueued, the operator's admin password gone with the tab, the
+ * subdomain unreserved and the sending identity unstarted, while the retry
+ * reported a successful idempotent provision. Raised by an automated review on
+ * this branch before it merged; the three MOVED here by the provisioning work
+ * on this same branch widened the window rather than opening it.
+ *
+ * Every step is safe to run again, which is what makes calling it from the
+ * retry path honest rather than hopeful:
+ *
+ *  - `provisionCloneSubdomain` reads what the clone already holds.
+ *  - `advanceEmailIdentity` "adopts an existing identity rather than creating
+ *    a second one" — its own words, and why the deployment drain already calls
+ *    it a second time.
+ *  - `enqueueCloneBackendProvisioning` refuses outright when a backend is
+ *    already `ready`, and upserts otherwise.
+ *
+ * Every step is also non-fatal and reported on the clone, unchanged: a clone
+ * that exists with a repository and no backend is repairable in one click, and
+ * failing a provision after a GitHub repository exists is not.
+ */
+async function startRequestedSideEffects(
+  supabase: SupabaseClient<Database>,
+  userId: string,
+  inserted: { id: string },
+  data: ProvisionCloneInput,
+): Promise<{ subdomain: string | null; fqdn: string | null }> {
+  // ─── Reserve the clone's name in the Aurixa zone ──────────────────
+  // Before the deployment, because the deployment attaches THIS name. The
+  // drain used to fall back to `clone.slug` when no subdomain was recorded,
+  // which silently bypassed `reserved_slugs` — a clone slugged `admin` would
+  // have taken `admin.aurixasystems.com.au` — and pushed collisions down to a
+  // unique index whose error every caller on this path discards.
+  //
+  // Non-fatal: a clone with no name is served on its provider origin, which is
+  // a complete outcome rather than a failure (see the `attaching_domain` step).
+  //
+  // `subdomain: null` is a DECISION and not an absent preference — the wizard's
+  // "Reserve a subdomain for this clone" control, which until now reserved one
+  // anyway because this block ran unconditionally. `undefined` still means
+  // "derive one from the slug", which is what the agreement path wants and has
+  // always had.
+  //
+  // One call, because this used to be two: the wizard wrote a SECOND name onto
+  // the row from the browser after this function returned. See
+  // `provisionCloneSubdomain`, which is now the only writer of
+  // `clones.subdomain` on any creation path.
+  let reservedSubdomain: string | null = null;
+  let reservedFqdn: string | null = null;
+  if (data.subdomain !== null) {
+    try {
+      const { provisionCloneSubdomain } =
+        await import("@/server/hosting/subdomainAllocation.server");
+      const reservation = await provisionCloneSubdomain({
+        cloneId: inserted.id,
+        slug: data.slug,
+        preferred: data.subdomain,
+        createdBy: userId,
+      });
+      if (reservation.ok) {
+        reservedSubdomain = reservation.subdomain;
+        reservedFqdn = reservation.fqdn;
+      } else {
+        console.error("[provisionClone] subdomain reservation failed:", reservation.reason);
+      }
+    } catch (e) {
+      console.error("[provisionClone] subdomain reservation failed:", e);
+    }
+  }
+
+  // ─── Start the clone's sending identity ───────────────────────────
+  //
+  // Here rather than in the browser for one reason: the operator's typed
+  // domain. `advanceEmailIdentity` falls back to `deriveSendingDomain(clone)`
+  // when it finds none recorded, and the deployment drain calls it with no
+  // domain at all — so a submit that did not reach the browser's second call
+  // did not fail, it quietly started an identity on a domain nobody chose,
+  // which is the harder failure to notice of the two.
+  //
+  // Idempotent: it adopts an existing identity rather than creating a second
+  // one, which is why the drain's own call at `syncing_env` stays exactly as
+  // it is. Non-fatal for the same reason as everything else here.
+  if (data.sendingDomain) {
+    try {
+      const { advanceEmailIdentity } = await import("@/server/email-identity.server");
+      const started = await advanceEmailIdentity(supabase, inserted.id, {
+        mode: "provision",
+        sendingDomain: data.sendingDomain,
+        actorUserId: userId,
+      });
+      if (!started.ok) {
+        console.error("[provisionClone] sending identity refused:", started.error);
+        await warnOnClone(
+          supabase,
+          inserted.id,
+          `Sending identity not started: ${data.name}`,
+          `The sending domain "${data.sendingDomain}" was requested and could not be ` +
+            `started: ${started.error}. Retry it from the clone's page.`,
+          "email_identity",
+        );
+      }
+    } catch (e) {
+      console.error("[provisionClone] sending identity failed:", e);
+      await warnOnClone(
+        supabase,
+        inserted.id,
+        `Sending identity not started: ${data.name}`,
+        `The sending domain "${data.sendingDomain}" was requested and threw: ` +
+          `${e instanceof Error ? e.message : String(e)}. Retry it from the clone's page.`,
+        "email_identity",
+      );
+    }
+  }
+
+  // ─── Enqueue the clone's own backend ──────────────────────────────
+  //
+  // Before the deployment, because `syncing_env` waits on this: a deployment
+  // queued with no backend row sits in a wait whose dependency does not exist.
+  //
+  // It used to be the BROWSER's job, in a second call made after this function
+  // returned. Nothing else in the platform creates a `clone_backends` row —
+  // not the deployment drain, not a sweep — so a submit interrupted in between
+  // left a clone with a repository, a queued deployment, `isolated_tenant`
+  // set, and no backend, for ever, with nothing recording that one had been
+  // asked for; the admin password went with the tab.
+  //
+  // Non-fatal and reported, like every other enqueue here: a clone that exists
+  // with no backend is repairable from the clone page in one click, and
+  // failing the whole provision after a GitHub repository exists is not.
+  if (data.backend) {
+    try {
+      const { enqueueCloneBackendProvisioning } =
+        await import("@/server/backend-provisioning.server");
+      const queued = await enqueueCloneBackendProvisioning(supabase, userId, {
+        cloneId: inserted.id,
+        cloneName: data.name,
+        region: data.backend.region,
+        adminEmail: data.backend.adminEmail,
+        adminPassword: data.backend.adminPassword,
+        // Deliberately not passed. `provisionCloneCore` has already written
+        // the authoritative set to `clone_modules` and the backend pipeline
+        // reads it from there, so the two tracks cannot drift if the picker
+        // changed mid-submit. (Audit finding #12.)
+      });
+      if (!queued.ok) {
+        console.error("[provisionClone] backend enqueue refused:", queued.error);
+        await warnOnClone(
+          supabase,
+          inserted.id,
+          `Backend not queued: ${data.name}`,
+          `A dedicated Supabase backend was requested for this clone and refused: ` +
+            `${queued.error}. Start it from the clone's page.`,
+          "backend",
+        );
+      }
+    } catch (e) {
+      console.error("[provisionClone] backend enqueue failed:", e);
+      await warnOnClone(
+        supabase,
+        inserted.id,
+        `Backend not queued: ${data.name}`,
+        `A dedicated Supabase backend was requested for this clone and could not be ` +
+          `queued: ${e instanceof Error ? e.message : String(e)}. Start it from the ` +
+          `clone's page.`,
+        "backend",
+      );
+    }
+  }
+  return { subdomain: reservedSubdomain, fqdn: reservedFqdn };
 }

@@ -1691,6 +1691,7 @@ export type Database = {
       }
       clone_backends: {
         Row: {
+          admin_seed: Json | null
           admin_email: string | null
           anon_key: string | null
           attempts: number
@@ -1732,6 +1733,7 @@ export type Database = {
           worker_started_at: string | null
         }
         Insert: {
+          admin_seed?: Json | null
           admin_email?: string | null
           anon_key?: string | null
           attempts?: number
@@ -1773,6 +1775,7 @@ export type Database = {
           worker_started_at?: string | null
         }
         Update: {
+          admin_seed?: Json | null
           admin_email?: string | null
           anon_key?: string | null
           attempts?: number
@@ -2092,6 +2095,11 @@ export type Database = {
       }
       clone_deployments: {
         Row: {
+          bundle_artefact: string | null
+          bundle_checked_at: string | null
+          bundle_identity: string | null
+          bundle_identity_detail: string | null
+          bundle_resync_artefact: string | null
           attempts: number
           build_checked_at: string | null
           clone_id: string
@@ -2126,6 +2134,11 @@ export type Database = {
           worker_started_at: string | null
         }
         Insert: {
+          bundle_artefact?: string | null
+          bundle_checked_at?: string | null
+          bundle_identity?: string | null
+          bundle_identity_detail?: string | null
+          bundle_resync_artefact?: string | null
           attempts?: number
           build_checked_at?: string | null
           clone_id: string
@@ -2160,6 +2173,11 @@ export type Database = {
           worker_started_at?: string | null
         }
         Update: {
+          bundle_artefact?: string | null
+          bundle_checked_at?: string | null
+          bundle_identity?: string | null
+          bundle_identity_detail?: string | null
+          bundle_resync_artefact?: string | null
           attempts?: number
           build_checked_at?: string | null
           clone_id?: string
@@ -13436,6 +13454,7 @@ export type Database = {
         | "security_finding_created"
         | "security_retest_requested"
         | "security_assessment_closed"
+        | "deployment_bundle_identity"
         | "deployment_live"
         | "deployment_failed"
         | "deployment_domain_pending"

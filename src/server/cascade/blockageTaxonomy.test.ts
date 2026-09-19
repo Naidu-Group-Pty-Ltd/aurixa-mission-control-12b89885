@@ -25,6 +25,7 @@ const facts = (over: Partial<CloneBlockageFacts> = {}): CloneBlockageFacts => ({
   events: [],
   consecutiveFailures: 0,
   blockedNotice: null,
+  primeLedgerHoles: [],
   sloMinutes: 90,
   ...over,
 });
@@ -473,6 +474,7 @@ describe("the class list and the policy table cannot drift", () => {
       "invocation_cut",
       "consecutive_failures",
       "ci_red",
+      "prime_ledger_hole",
       "unclassified",
     ];
     expect(Object.keys(BLOCKAGE_POLICY).sort()).toEqual([...declared].sort());
@@ -545,11 +547,96 @@ describe("a delivery that went wrong costs nothing once the clone holds everythi
     expect(classes(f)).toEqual(["policy_unseeded", "repo_retargeted"]);
   });
 
-  it("the standing faults are exactly the three that survive convergence", () => {
+  it("the standing faults are exactly the four that survive convergence", () => {
     const standing = Object.entries(BLOCKAGE_POLICY)
       .filter(([, p]) => !p.conditionedOnDivergence)
       .map(([cls]) => cls)
       .sort();
-    expect(standing).toEqual(["policy_unseeded", "repo_retargeted", "unreconciled_proposal"]);
+    // `prime_ledger_hole` joins them for the same reason as the other three:
+    // it is wrong right now whatever today's convergence says, and it will
+    // hold the NEXT migration too. A clone that happens to be level today is
+    // still one the prime cannot advance tomorrow.
+    expect(standing).toEqual([
+      "policy_unseeded",
+      "prime_ledger_hole",
+      "repo_retargeted",
+      "unreconciled_proposal",
+    ]);
+  });
+});
+
+describe("a migration the prime merged and never ran", () => {
+  /** The measured reading on npc-client-dashboard, 19 Sep 2026. */
+  const heldBehindBuilderRanking = facts({
+    syncScope: "scoped",
+    exclusionCount: 22,
+    primeLedgerHoles: [
+      {
+        version: "20261202090000",
+        heldCount: 3,
+        firstHeld: "20261203000000_seed_template_library_v14_tier_separation.sql",
+      },
+    ],
+  });
+
+  it("reports the hole against a clone nothing else says is blocked", () => {
+    // Both affected clones read `status: ready` with `migration_blocked_at`
+    // NULL and a converged auditor reading. That is the state this class
+    // exists to make visible.
+    expect(classes(heldBehindBuilderRanking)).toEqual(["prime_ledger_hole"]);
+  });
+
+  it("names the prime version, the count behind it, and who clears it", () => {
+    const [found] = classifyBlockages(heldBehindBuilderRanking, NOW);
+    expect(found.detail).toContain("20261202090000");
+    expect(found.detail).toContain("3 migration(s) wait behind it");
+    expect(found.detail).toContain("20261203000000_seed_template_library_v14_tier_separation.sql");
+    // The remedy is on the prime and it is a person's. The one thing an
+    // operator must not be invited to do is stamp the ledger instead.
+    expect(found.detail).toContain("prime runs that file");
+    expect(found.owner).toBe("operator");
+    expect(found.selfHeals).toBe(false);
+  });
+
+  it("is one blockage per hole, never one per migration held behind it", () => {
+    // Three held migrations behind one unapplied file is one condition with
+    // one remedy. Three rows would be three findings about the same file.
+    expect(classifyBlockages(heldBehindBuilderRanking, NOW)).toHaveLength(1);
+  });
+
+  it("fingerprints on the version, so it is stable across passes and clears itself", () => {
+    const [found] = classifyBlockages(heldBehindBuilderRanking, NOW);
+    expect(found.fingerprint).toBe("prime_ledger_hole:20261202090000");
+    // Same hole, a later pass, one more migration piled up behind it: the
+    // same row, not a second one.
+    const later = classifyBlockages(
+      facts({
+        syncScope: "scoped",
+        primeLedgerHoles: [{ version: "20261202090000", heldCount: 4, firstHeld: "x.sql" }],
+      }),
+      NOW,
+    );
+    expect(later[0].fingerprint).toBe(found.fingerprint);
+  });
+
+  it("separates two holes, because they are two files to dispatch", () => {
+    const two = classifyBlockages(
+      facts({
+        syncScope: "scoped",
+        primeLedgerHoles: [
+          { version: "20261202090000", heldCount: 3, firstHeld: "a.sql" },
+          { version: "20261204000000", heldCount: 1, firstHeld: "b.sql" },
+        ],
+      }),
+      NOW,
+    );
+    expect(two.map((b) => b.fingerprint)).toEqual([
+      "prime_ledger_hole:20261202090000",
+      "prime_ledger_hole:20261204000000",
+    ]);
+  });
+
+  it("says nothing about a clone whose last pass was held behind nothing", () => {
+    expect(classes(facts({ syncScope: "scoped" }))).toEqual([]);
   });
 });

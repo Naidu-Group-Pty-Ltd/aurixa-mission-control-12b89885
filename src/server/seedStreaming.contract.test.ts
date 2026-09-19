@@ -119,17 +119,55 @@ describe("the replay chunks an oversized seed", () => {
   });
 
   it("sends at least one statement a pass and resumes from the cursor", () => {
-    const fn = sliceFrom(replay, "async function applyChunkedSeed", 3_000);
+    const fn = sliceFrom(replay, "async function applyChunkedSeed", 6_000);
     expect(fn).toContain(
       "const skip = oversize.cursor?.migrationId === m.id ? oversize.cursor.statementsDone : 0;",
     );
     expect(fn).toMatch(/if \(applied > 0 && budget\?\.isPastDeadline\(slowestMs\)\)/);
-    expect(fn).toContain("cursor: { migrationId: m.id, statementsDone: index }");
+    expect(fn).toMatch(/cursor: \{ migrationId: m\.id, statementsDone: index, shape \}/);
+  });
+
+  it("reads the body ONCE on a pass that already knows the shape", () => {
+    /*
+      `readSeedShape` is `walk(chunks, () => {})` — a full walk of the file
+      that discards every tuple — and `chunkSeedStatements` then walks it
+      again. On the 41,671,969-byte template seed that is ~80 MB of blob
+      traffic to buy one bounded group of statements inside a 45-second
+      budget. Measured 19 Sep 2026: `npc-test-76b3b3` completed a pass having
+      advanced ZERO statements.
+
+      A cursor naming THIS migration and carrying a shape is that first
+      reading, taken by an earlier pass. `??=` is what makes the read
+      conditional; spelling it as an unconditional `await readSeedShape(...)`
+      would restore the double walk while every other assertion here still
+      passed.
+    */
+    const fn = sliceFrom(replay, "async function applyChunkedSeed", 6_000);
+    expect(fn).toMatch(
+      /const cursorShape =\s*oversize\.cursor\?\.migrationId === m\.id \? \(oversize\.cursor\.shape \?\? null\) : null;/,
+    );
+    expect(fn).toContain("shape ??= await readSeedShape(await oversize.streamSql(m));");
+    // Exactly one unconditional stream for the statements, and no second
+    // unconditional one for the shape.
+    expect(fn).toContain("chunkSeedStatements(await oversize.streamSql(m), shape, {");
+    expect(fn).not.toMatch(/const shape = await readSeedShape\(/);
   });
 
   it("names the manual remedy for a large file that is not the seed shape", () => {
-    const fn = sliceFrom(replay, "async function applyChunkedSeed", 3_000);
-    expect(fn).toMatch(/e instanceof SeedShapeError[\s\S]{0,400}Apply it to this clone by hand/);
+    const fn = sliceFrom(replay, "async function applyChunkedSeed", 6_000);
+    expect(fn).toMatch(/e instanceof SeedShapeError[\s\S]{0,1600}Apply it to this clone by hand/);
+  });
+
+  it("does not demand a hand-apply when the seed merely changed upstream", () => {
+    // A mismatch against a shape read in THIS pass means the file is not
+    // seed-shaped. A mismatch against one taken off the cursor means the
+    // prime re-released the seed between passes — the file is fine, the
+    // recorded position was cut from a body that no longer exists, and the
+    // answer is to drop the cursor and start again rather than to ask a
+    // person to apply 41 MB by hand.
+    const fn = sliceFrom(replay, "async function applyChunkedSeed", 6_000);
+    expect(fn).toMatch(/if \(cursorShape\) \{[\s\S]{0,600}?cursor: null/);
+    expect(fn).toMatch(/changed on the prime since the last pass/);
   });
 
   it("keeps the statement budget in bytes, under the API's limit", () => {
@@ -156,9 +194,10 @@ describe("the lane", () => {
   it("hands the replay the stream, the cursor and a heartbeat that carries it", () => {
     const call = sliceFrom(lane, "streamSql: (m) => corpus.openSqlStream(m.id),", 900);
     expect(call).toContain("run.result?.chunk_cursor");
-    expect(call).toMatch(
-      /chunk_cursor: \{ migrationId: p\.migrationId, statementsDone: p\.statementsDone \}/,
-    );
+    expect(call).toMatch(/chunk_cursor: \{[\s\S]{0,200}?migrationId: p\.migrationId/);
+    expect(call).toMatch(/chunk_cursor: \{[\s\S]{0,200}?statementsDone: p\.statementsDone/);
+    // And the shape, so the next pass reads the body once rather than twice.
+    expect(call).toMatch(/chunk_cursor: \{[\s\S]{0,200}?shape: p\.shape/);
   });
 
   it("carries the cursor across a requeue, or the next pass re-sends everything", () => {

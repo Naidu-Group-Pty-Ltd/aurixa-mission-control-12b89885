@@ -48,6 +48,12 @@ const PANEL_SOURCE = readFileSync(
   "utf8",
 );
 const WIZARD = rendered(WIZARD_SOURCE);
+// Comment-stripped for the same reason the wizard is: these rules are about
+// what the code DOES, and the prose beside them names every identifier they
+// look for.
+const CORE = rendered(
+  readFileSync(join(ROOT, "src", "server", "clone-provisioning.server.ts"), "utf8"),
+);
 const PANEL = rendered(PANEL_SOURCE);
 
 describe("the New Clone wizard renders the readiness answer", () => {
@@ -118,33 +124,92 @@ describe("the New Clone wizard renders the readiness answer", () => {
  * nothing had ever minted a Turnstile widget or started a sending identity
  * except an operator opening the clone page and clicking two buttons.
  */
-describe("the wizard arms a clone's own credentials", () => {
-  it.each([
-    ["provisionCloneTurnstile", "@/lib/turnstile-identity.functions"],
-    ["provisionCloneEmailIdentity", "@/lib/email-identity.functions"],
-  ])("calls %s, the same server function the clone page uses", (fn, module) => {
-    expect(WIZARD).toContain(`import { ${fn} } from "${module}"`);
-    expect(WIZARD).toContain(`useServerFn(${fn})`);
+describe("a clone's own credentials are armed by the act that creates it", () => {
+  it("mints the Turnstile widget from the wizard, the same server function the clone page uses", () => {
+    expect(WIZARD).toContain(
+      'import { provisionCloneTurnstile } from "@/lib/turnstile-identity.functions"',
+    );
+    expect(WIZARD).toContain("useServerFn(provisionCloneTurnstile)");
+  });
+
+  /**
+   * The sending identity moved OFF the browser, and that is strictly stronger
+   * than what this test used to assert.
+   *
+   * It was a second call the wizard made after `provisionClone` had already
+   * returned, so a closed tab between the two left the clone with no identity
+   * — and worse, the deployment drain's own call passes no domain at all, so a
+   * clone that got one later got it on a domain nobody chose. The operator's
+   * typed domain now travels WITH the submit and `provisionCloneCore` starts
+   * it, where no browser can lose it.
+   */
+  it("starts the sending identity on the server, with the domain the operator typed", () => {
+    expect(WIZARD).toMatch(/sendingDomain:\s*armEmail\s*\?/);
+    expect(CORE).toMatch(/await\s+advanceEmailIdentity\s*\(/);
+    expect(CORE).toMatch(/sendingDomain:\s*data\.sendingDomain/);
+  });
+
+  /**
+   * And the backend with it, for a blunter reason: NOTHING else in the
+   * platform creates a `clone_backends` row. Not the deployment drain, not a
+   * sweep. A submit interrupted after `provisionClone` returned left a clone
+   * that would never have a backend, with the admin password gone and nothing
+   * recording that one had been asked for.
+   */
+  it("enqueues the backend on the server, from the credentials the submit carried", () => {
+    expect(WIZARD).toMatch(/backend:\s*dedicatedBackend/);
+    expect(WIZARD).not.toContain("useServerFn(provisionBackend)");
+    expect(CORE).toMatch(/await\s+enqueueCloneBackendProvisioning\s*\(/);
   });
 
   it("offers each as an explicit choice rather than doing it silently", () => {
     expect(WIZARD).toContain("armTurnstile");
     expect(WIZARD).toContain("armEmail");
+    expect(WIZARD).toContain("dedicatedBackend");
   });
 
   /**
-   * Non-fatal, like every other enqueue in this handler. The clone exists
-   * either way and the clone page can retry — failing the whole submit
-   * because Cloudflare was briefly unreachable would destroy a filled form
-   * over something retryable.
+   * Non-fatal, like every other enqueue on this path. The clone exists either
+   * way and the clone page can retry — failing the whole submit because
+   * Cloudflare was briefly unreachable would destroy a filled form over
+   * something retryable. On the server that means a try AND a notification,
+   * because a console line nobody reads is not a report.
    */
-  it.each(["provisionTurnstileFn", "provisionEmailFn"])(
-    "does not let %s fail the provisioning run",
+  it("does not let the Turnstile mint fail the provisioning run", () => {
+    const call = WIZARD.indexOf("await provisionTurnstileFn(");
+    expect(call, "provisionTurnstileFn must be called").toBeGreaterThan(-1);
+    expect(WIZARD.slice(Math.max(0, call - 400), call)).toContain("try {");
+  });
+
+  /**
+   * The one `githubAppCapability.pure.ts` was written for, and the one its
+   * header says went unfixed: "its result was DISCARDED at the call site, so
+   * the only trace was a line in a log nobody reads."
+   *
+   * Without `BACKEND_DEPLOYED_BY` the clone's `deploy-supabase-functions`
+   * workflow has no way to stand down — it requires either a deploy token the
+   * clone is deliberately not given, or that variable — so the repository
+   * shows a red check on every push, for ever. Measured 2 Sep 2026 on
+   * `npc-client-dashboard`: 31 of 31 runs failed. Measured again 19 Sep 2026
+   * on `npc-crm-independent-6505dc`: 3 of 3, including the merge that carried
+   * its three CRM edge functions, which is why none of them is deployed.
+   */
+  it("reports a failed backend-deployer declaration instead of logging it", () => {
+    const call = CORE.indexOf("declareMissionControlDeploysBackend(");
+    expect(call, "the declaration must be made").toBeGreaterThan(-1);
+    const after = CORE.slice(call, call + 2000);
+    expect(after).toMatch(/if\s*\(!declared\.ok\)/);
+    expect(after, "a console line is not a report").toContain("warnOnClone(");
+  });
+
+  it.each(["enqueueCloneBackendProvisioning", "advanceEmailIdentity"])(
+    "does not let %s fail the provisioning run, and says so when it fails",
     (fn) => {
-      const call = WIZARD.indexOf(`await ${fn}(`);
+      const call = CORE.indexOf(`await ${fn}(`);
       expect(call, `${fn} must be called`).toBeGreaterThan(-1);
-      const before = WIZARD.slice(Math.max(0, call - 400), call);
-      expect(before, `${fn} must sit inside a try block`).toContain("try {");
+      const around = CORE.slice(Math.max(0, call - 600), call + 1800);
+      expect(around, `${fn} must sit inside a try block`).toContain("try {");
+      expect(around, `${fn}'s failure must reach an operator`).toContain("warnOnClone(");
     },
   );
 
@@ -156,6 +221,7 @@ describe("the wizard arms a clone's own credentials", () => {
   it("does not reach for a refresh-only entry point", () => {
     expect(WIZARD).not.toContain("refreshCloneTurnstile");
     expect(WIZARD).not.toContain("checkCloneEmailIdentity");
+    expect(CORE).toMatch(/mode:\s*"provision"/);
   });
 });
 
