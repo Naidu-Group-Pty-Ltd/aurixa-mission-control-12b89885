@@ -264,3 +264,74 @@ describe("planColumns — the guard that reads the live schema", () => {
     expect(plan.copy).toHaveLength(5);
   });
 });
+
+/**
+ * The conflict key is the NATURAL key, never the surrogate id.
+ *
+ * `on conflict (<conflictKey>) do nothing` exists so a row a tenant already
+ * holds is left alone. Naming `id` breaks that in the one case it was written
+ * for: a catalogue row seeded on both sides by the same migration gets a fresh
+ * uuid on each, so the ids differ by construction and the insert conflicts on
+ * the table's OTHER unique constraint instead — which `on conflict (id)` does
+ * not catch, and which fails the whole page.
+ *
+ * Measured 19 Sep 2026 on `npc-client-dashboard`: `aml.retention_schedules`
+ * at 0 of 35, `Key (entity_type)=(manual_screening_check) already exists`.
+ * The same table copied cleanly on two other clones, because whether it works
+ * depends on which of the clone's own migration and this copy reached the row
+ * first.
+ *
+ * Pinned as DATA, read from the prime's own schema, because this file cannot
+ * see that schema: each entry below was checked against the `CREATE TABLE` in
+ * the prime's migrations.
+ */
+describe("a table with a natural unique key conflicts on it", () => {
+  /** schema.table → the unique constraint in the prime's own DDL. */
+  const NATURAL_KEYS: Record<string, string[]> = {
+    "aml.provider_configs": ["tenant_id", "capability", "provider_key"],
+    "aml.risk_factors": ["key"],
+    "aml.mandatory_triggers": ["key"],
+    "aml.retention_schedules": ["entity_type"],
+    "aml.sanctions_entries": ["list_code", "external_id"],
+    "aml.pep_officeholders": ["source_code", "external_id"],
+  };
+
+  for (const [qualified, key] of Object.entries(NATURAL_KEYS)) {
+    it(`${qualified} conflicts on ${key.join(", ")}`, () => {
+      const [schema, table] = qualified.split(".");
+      const entry = REFERENCE_TABLES.find((e) => e.table === table && e.schema === schema);
+      expect(entry, `${qualified} is no longer a reference table`).toBeDefined();
+      expect(entry!.conflictKey).toEqual(key);
+    });
+  }
+
+  it("never names a column the copy nulls", () => {
+    // NULLs are distinct in a unique index, so a nulled column in the conflict
+    // target means the target never matches and every re-run raises 23505
+    // again. `provider_configs.tenant_id` is `keep` for exactly this reason.
+    for (const entry of REFERENCE_TABLES) {
+      for (const col of entry.conflictKey) {
+        expect(
+          entry.columns?.[col]?.policy,
+          `${entry.schema}.${entry.table} conflicts on ${col}, which is nulled on copy`,
+        ).not.toBe("null_on_copy");
+      }
+    }
+  });
+
+  it("leaves the surrogate id where the table has no natural key", () => {
+    // Not every table has one. These four are keyed on `id` correctly, and a
+    // sweep that "fixed" them would be inventing a uniqueness the schema does
+    // not declare.
+    for (const table of [
+      "monitoring_rules",
+      "tipping_off_rules",
+      "sanctions_list_syncs",
+      "pep_officeholder_syncs",
+    ]) {
+      const entry = REFERENCE_TABLES.find((e) => e.table === table);
+      expect(entry, `${table} is no longer a reference table`).toBeDefined();
+      expect(entry!.conflictKey).toEqual(["id"]);
+    }
+  });
+});

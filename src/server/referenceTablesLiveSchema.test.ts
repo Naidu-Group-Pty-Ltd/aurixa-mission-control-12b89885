@@ -104,3 +104,29 @@ describe("the allow-list against the LIVE prime schema", () => {
     });
   });
 });
+
+/**
+ * Every conflict-key column exists on the prime.
+ *
+ * `on conflict (<cols>)` needs a real unique index over exactly those columns.
+ * This file cannot see constraints — it snapshots `information_schema.columns`
+ * — but it can catch the cheaper half of getting one wrong: a column that is
+ * not there at all. A typo in a conflict key is a 42703 at run time, inside a
+ * fire-and-forget copy, on a page that then fails every row.
+ *
+ * Worth having because six of these keys were changed at once on 19 Sep 2026,
+ * from the surrogate `id` to the natural key each table actually declares —
+ * see `referenceTables.pure.test.ts` for what that cost and why.
+ */
+describe("a conflict key names columns the prime has", () => {
+  for (const entry of REFERENCE_TABLES) {
+    const name = refName(entry);
+    const live = LIVE[name];
+    if (!live) continue; // covered by the first test in this file
+    it(`${name}: ${entry.conflictKey.join(", ")}`, () => {
+      for (const col of entry.conflictKey) {
+        expect(live, `${name} has no column "${col}"`).toContain(col);
+      }
+    });
+  }
+});
