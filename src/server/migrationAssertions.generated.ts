@@ -616,4 +616,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260919113000",
     assertions: [{ kind: "cron", jobname: "reference-data-sync-15min" }],
   },
+  {
+    migration: "20260919124500_reference_sync_notified_detail.sql",
+    version: "20260919124500",
+    assertions: [{ kind: "column", table: "clone_reference_syncs", column: "notified_detail" }],
+  },
 ];

@@ -307,7 +307,7 @@ export async function runReferenceDataSync(
 
   const { data: stateRows } = await supabase
     .from("clone_reference_syncs")
-    .select("table_name, cursor, rows_copied, status, detail")
+    .select("table_name, cursor, rows_copied, status, detail, notified_detail")
     .eq("clone_id", cloneId);
   const stateOf = new Map((stateRows ?? []).map((r) => [r.table_name, r]));
   // A parent's copy is not finished while a child referencing it is
@@ -402,9 +402,51 @@ export async function runReferenceDataSync(
      * It reads `prior`, the snapshot taken before this pass touched the row,
      * which is exactly right: the question is what the operator was told LAST
      * time, not what this pass has just written.
+     *
+     * AND IT KEYS ON THE DELIVERY, NOT ON THE STATE.
+     *
+     * The first version compared `status === "failed" && detail === detail`,
+     * and that predicate is wrong in a way invisible until the day it deploys.
+     * This table has carried failures with reasons since long before anything
+     * notified at all — the catch recorded and announced nothing, which is the
+     * silence this whole change exists to end. Every one of those rows would
+     * have answered "the same failure as before" on the first pass after
+     * deployment, and suppressed for ever the alert that was owed. On the two
+     * rows that motivated the work — `aml.sanctions_entries` on NPC Test since
+     * 12 Sep, `aml.retention_schedules` on npc-client-dashboard since 14 Sep —
+     * it would have preserved exactly the silence it was written to break.
+     *
+     * The same hole swallows a notice whose insert FAILED: `notifyOperators`
+     * logs and returns, so the failure row is written either way and the next
+     * pass reads it as proof of a delivery that never happened.
+     *
+     * So `notified_detail` is the key: the reason an operator was last
+     * successfully told about, written only after the insert succeeded and
+     * cleared when the table stops failing, so a recurrence after a repair is
+     * news again. NULL on every historical row, which is the point.
      */
-    const isRepeatFailure = (detail: string): boolean =>
-      prior?.status === "failed" && prior?.detail === detail;
+    const isRepeatFailure = (detail: string): boolean => prior?.notified_detail === detail;
+
+    /**
+     * Announce a failure unless the operator already holds this exact one, and
+     * remember it only if the notice actually went.
+     *
+     * Both notifying paths go through here so they cannot hold different ideas
+     * of what has been reported — the defect that produced this helper's
+     * predecessor was one path fixed and the other left announcing on every
+     * pass.
+     */
+    const announceFailure = async (
+      detail: string,
+      notice: Parameters<typeof notifyOperators>[0],
+    ): Promise<void> => {
+      if (isRepeatFailure(detail)) return;
+      const delivered = await notifyOperators(notice);
+      // Only a delivered notice is remembered. An insert that failed leaves the
+      // marker alone, so the next pass tries again rather than recording a
+      // silence as a report.
+      if (delivered) await record({ notified_detail: detail });
+    };
 
     try {
       // Does the clone even have the table? A clone behind on migrations does
@@ -415,6 +457,9 @@ export async function runReferenceDataSync(
           status: "skipped",
           detail: "the clone does not have this table yet — it is behind on migrations",
           completed_at: new Date().toISOString(),
+          // Stopped failing, so the next failure is news again — including the
+          // same one, which after a repair is a REGRESSION and not a repeat.
+          notified_detail: null,
         });
         out.tables.push({
           table: name,
@@ -444,18 +489,16 @@ export async function runReferenceDataSync(
         });
         // An unclassified column is stable: it is the same refusal next pass
         // and the pass after that. Announced on the transition, by the same
-        // rule the catch answers to.
-        if (!isRepeatFailure(plan.refusal)) {
-          await notifyOperators({
-            kind: "cascade_failed",
-            severity: "error",
-            title: `Reference sync refused ${name}`,
-            body: plan.refusal,
-            cloneId,
-            url: `/clones/${cloneId}`,
-            metadata: { table: name },
-          });
-        }
+        // helper the catch answers to.
+        await announceFailure(plan.refusal, {
+          kind: "cascade_failed",
+          severity: "error",
+          title: `Reference sync refused ${name}`,
+          body: plan.refusal,
+          cloneId,
+          url: `/clones/${cloneId}`,
+          metadata: { table: name },
+        });
         continue;
       }
       PLANNED_NULLS.set(name, plan.nulled);
@@ -510,6 +553,10 @@ export async function runReferenceDataSync(
         source_rows: sourceRows,
         detail: complete ? null : "resumed on the next run",
         completed_at: complete ? new Date().toISOString() : null,
+        // Cleared only where the table FINISHED. A pass that merely got
+        // further is still inside the same failure if it hits one again, and
+        // clearing on `copying` would put the flood back one pass later.
+        ...(complete ? { notified_detail: null } : {}),
       });
       out.tables.push({
         table: name,
@@ -566,23 +613,21 @@ export async function runReferenceDataSync(
         been told about, and `clone_reference_syncs` still carries it in full
         for anyone looking.
       */
-      if (!isRepeatFailure(detail)) {
-        await notifyOperators({
-          kind: "cascade_failed",
-          severity: "error",
-          title: `Reference sync stopped on ${name} for ${cloneName}`,
-          body:
-            `Copying ${name} into this clone stopped at ${reached} row(s): ${detail}. ` +
-            "The rows already copied are kept and the next pass resumes from the same cursor, so " +
-            "this will repeat until the cause is fixed — you are told once per distinct failure, " +
-            "not once per pass. Reference data a clone is missing is not tenant data: it is the " +
-            "seeded catalogue the product reads, and a clone without it cannot draw the documents " +
-            "that depend on it.",
-          cloneId,
-          url: `/clones/${cloneId}`,
-          metadata: { table: name, rows_copied: reached },
-        });
-      }
+      await announceFailure(detail, {
+        kind: "cascade_failed",
+        severity: "error",
+        title: `Reference sync stopped on ${name} for ${cloneName}`,
+        body:
+          `Copying ${name} into this clone stopped at ${reached} row(s): ${detail}. ` +
+          "The rows already copied are kept and the next pass resumes from the same cursor, so " +
+          "this will repeat until the cause is fixed — you are told once per distinct failure, " +
+          "not once per pass. Reference data a clone is missing is not tenant data: it is the " +
+          "seeded catalogue the product reads, and a clone without it cannot draw the documents " +
+          "that depend on it.",
+        cloneId,
+        url: `/clones/${cloneId}`,
+        metadata: { table: name, rows_copied: reached },
+      });
     }
   }
 

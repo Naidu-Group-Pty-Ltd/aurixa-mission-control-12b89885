@@ -28,6 +28,14 @@ const state = vi.hoisted(() => ({
    * row holds", and that gap is a finding this suite exists to have caught.
    */
   syncUpsertRefuses: null as null | ((values: Record<string, unknown>) => boolean),
+  /**
+   * When true, `notifyOperators` behaves as it does when the insert fails:
+   * it logs, returns false and raises nothing. The real one swallows that
+   * error, so a caller that deduplicates cannot tell a delivered notice from
+   * a lost one unless it reads the answer — which is the whole point of the
+   * marker these tests cover.
+   */
+  notifyFails: false,
 }));
 
 vi.mock("./prime-backend.server", () => ({
@@ -46,7 +54,9 @@ vi.mock("./backend-provisioning.server", () => ({
 
 vi.mock("./audit.server", () => ({
   notifyOperators: async (n: { title: string; body: string }) => {
+    if (state.notifyFails) return false;
     state.notifications.push({ title: n.title, body: n.body });
+    return true;
   },
   writeAuditLog: async (a: Record<string, unknown>) => {
     state.audits.push(a);
@@ -147,6 +157,7 @@ beforeEach(() => {
   state.claimError = null;
   state.pickError = null;
   state.syncUpsertRefuses = null;
+  state.notifyFails = false;
 });
 
 describe("runReferenceDataSync", () => {
@@ -574,6 +585,80 @@ describe("a failed table is reported, not just recorded", () => {
       state.notifications.filter((x) => /Reference sync stopped/.test(x.title)),
       "the same error on the same table is a state the operator was already told about",
     ).toHaveLength(0);
+  });
+
+  /*
+    A FAILURE THAT WAS RECORDED IS NOT A FAILURE THAT WAS REPORTED.
+
+    This is the defect the first version of the dedupe shipped with, and it
+    would have been invisible until the day it deployed. `clone_reference_syncs`
+    has carried `status = 'failed'` with a reason since long before anything
+    notified — the catch recorded and announced nothing, which is the silence
+    the whole change exists to end. Keyed on status and detail, every one of
+    those rows answers "the same failure as before" on the first pass after
+    deployment and the alert that was owed is suppressed for ever.
+
+    On the two rows that motivated the work — `aml.sanctions_entries` on NPC
+    Test since 12 Sep, `aml.retention_schedules` on npc-client-dashboard since
+    14 Sep — it would have preserved exactly the silence it was written to
+    break.
+
+    Simulated by stripping the delivery marker rather than by spelling the
+    detail out: the detail is composed by the copier and a literal here would
+    be a second copy of it that goes stale on the next wording change.
+  */
+  it("still announces a failure that was recorded before anything notified", async () => {
+    await runReferenceDataSync(fakeSupabase());
+    expect(
+      state.notifications.filter((x) => /Reference sync stopped/.test(x.title)).length,
+    ).toBeGreaterThan(0);
+
+    // Exactly the historical shape: the failure and its reason, and no record
+    // that anybody was ever told.
+    for (const [k, row] of state.syncRows) {
+      if (row.status === "failed") state.syncRows.set(k, { ...row, notified_detail: null });
+    }
+    state.notifications = [];
+
+    await runReferenceDataSync(fakeSupabase());
+    expect(
+      state.notifications.filter((x) => /Reference sync stopped/.test(x.title)),
+      "a row that records a failure is not a row that reported one",
+    ).not.toHaveLength(0);
+  });
+
+  it("does not remember a notice that never landed", async () => {
+    // `notifyOperators` swallows its insert error, so a caller that cannot
+    // read the answer records a lost message as a delivered one — the same
+    // permanent silence by a different route.
+    state.notifyFails = true;
+    await runReferenceDataSync(fakeSupabase());
+    expect(state.notifications).toHaveLength(0);
+
+    state.notifyFails = false;
+    await runReferenceDataSync(fakeSupabase());
+    expect(
+      state.notifications.filter((x) => /Reference sync stopped/.test(x.title)),
+      "the failed insert was recorded as though an operator had been told",
+    ).not.toHaveLength(0);
+  });
+
+  it("forgets the failure once the table finishes, so a recurrence is news", async () => {
+    await runReferenceDataSync(fakeSupabase());
+    const failed = [...state.syncRows.values()].filter((r) => r.status === "failed");
+    expect(failed.length).toBeGreaterThan(0);
+    expect(failed.every((r) => typeof r.notified_detail === "string")).toBe(true);
+
+    // The cause is repaired: the clone accepts the write and the table lands.
+    // `failed` is not terminal, so the next pass retries it.
+    state.respond = emptyEverywhere;
+    await runReferenceDataSync(fakeSupabase());
+    const done = [...state.syncRows.values()].filter((r) => r.status === "complete");
+    expect(done.length).toBeGreaterThan(0);
+    expect(
+      done.every((r) => r.notified_detail === null),
+      "a repaired table that fails the same way later is a regression, not a repeat",
+    ).toBe(true);
   });
 
   it("notifies again when the SAME table fails for a DIFFERENT reason", async () => {
