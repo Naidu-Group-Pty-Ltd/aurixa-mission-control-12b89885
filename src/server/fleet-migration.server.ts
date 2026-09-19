@@ -61,6 +61,7 @@ import {
   blockIsDischarged,
   blockIsUpstreamRefusal,
   migrationEligibility,
+  orderMigrationQueue,
   type MigrationSkipReason,
 } from "./fleetMigrationEligibility.pure";
 import { notifyOperators, writeAuditLog } from "./audit.server";
@@ -523,20 +524,15 @@ export async function runFleetMigrationSync(
   const skipped = verdicts.filter((v) => !v.verdict.eligible);
   const excludedCount = skipped.length;
 
-  const backends = verdicts
-    .filter((v) => v.verdict.eligible)
-    .map((v) => v.row)
-    // Nulls first: a backend that has never recorded a version is furthest
-    // behind by definition.
-    .sort((a, b) => {
-      const av = a.migration_version ?? "";
-      const bv = b.migration_version ?? "";
-      if (av === bv) return 0;
-      if (av === "") return -1;
-      if (bv === "") return 1;
-      return av < bv ? -1 : 1;
-    })
-    .slice(0, batchSize);
+  // Furthest behind first, ties broken by least progress on the seed in
+  // flight. The order lives in the pure module beside the eligibility rules
+  // because who is served first is the same kind of decision as who is served
+  // at all — and because a comparator that returned 0 on a tie handed this
+  // fleet's whole budget to one clone for as long as it was measured. See
+  // `compareMigrationQueue`.
+  const backends = orderMigrationQueue(
+    verdicts.filter((v) => v.verdict.eligible).map((v) => v.row),
+  ).slice(0, batchSize);
 
   // Names for BOTH sets, read once. A skipped clone is reported by name, so
   // this read has to cover the ones this run will not touch as well as the
