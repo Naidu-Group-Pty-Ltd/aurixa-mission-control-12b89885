@@ -8,6 +8,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { requireAdmin } from "@/integrations/supabase/role-middleware";
+import { countGithubCall } from "@/server/githubUsageMeter";
 
 const InputSchema = z.object({
   targetOwner: z.string().trim().min(1),
@@ -99,8 +100,12 @@ export const checkGithubAppPreflight = createServerFn({ method: "POST" })
       };
     }
 
-    const gh = async (path: string) =>
-      fetch(`https://api.github.com${path}`, {
+    const gh = async (path: string) => {
+      // A raw fetch, so the octokit hook never sees it. This preflight is
+      // operator-invoked rather than scheduled, but it spends the same
+      // installation window as every lane that is.
+      countGithubCall();
+      return fetch(`https://api.github.com${path}`, {
         headers: {
           Authorization: `Bearer ${jwt}`,
           Accept: "application/vnd.github+json",
@@ -108,6 +113,7 @@ export const checkGithubAppPreflight = createServerFn({ method: "POST" })
           "User-Agent": "aurixa-mission-control",
         },
       });
+    };
 
     // Try org first, then user. GitHub returns 404 for the wrong endpoint.
     const owner = data.targetOwner.replace(/^@/, "");

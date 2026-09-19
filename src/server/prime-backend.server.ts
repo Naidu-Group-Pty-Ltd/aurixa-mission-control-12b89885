@@ -15,6 +15,7 @@
 import type { Octokit } from "@octokit/rest";
 import type { MigrationObjectIndex } from "./surplusOrigin.pure";
 import type { RepoRef } from "./github-app.server";
+import { countGithubCall } from "./githubUsageMeter";
 import { pruneBundleToReachable } from "./functionBundlePrune.pure";
 import { isPrimeOnlySecret } from "./primeOnlySecrets.pure";
 import { OversizedMigrationError } from "./oversizedMigration.pure";
@@ -1194,6 +1195,12 @@ async function fetchBlobTextStream(
 ): Promise<AsyncIterable<string>> {
   const auth = (await octokit.auth({ type: "installation" })) as { token?: string } | null;
   if (!auth?.token) throw new Error("No installation token to stream a blob with");
+  // Counted here because this is a RAW fetch: it does not go through
+  // `getAppOctokit`'s hook, where every other App-installation call is counted.
+  // A streaming blob is among the most expensive requests this system makes,
+  // so leaving it out understated the very lane most likely to exhaust a
+  // window.
+  countGithubCall();
   const res = await fetch(
     `https://api.github.com/repos/${ref.owner}/${ref.repo}/git/blobs/${sha}`,
     {
@@ -1205,7 +1212,44 @@ async function fetchBlobTextStream(
     },
   );
   if (!res.ok || !res.body) {
-    throw new Error(`Streaming blob ${sha.slice(0, 7)} failed: HTTP ${res.status}`);
+    /*
+      SAY WHICH KIND OF REFUSAL IT WAS.
+
+      This threw `Streaming blob <sha> failed: HTTP 403` and nothing else — no
+      status on the error, none of GitHub's body — and a 403 from this endpoint
+      is at least three different events with three different remedies: a
+      primary rate limit (wait for the window), a SECONDARY rate limit on an
+      expensive request (back off and retry — a 40 MB blob is exactly the shape
+      that trips one), or a permanent refusal (retrying for ever is the wrong
+      answer). The one thing an operator could not do was tell them apart.
+
+      Measured 19 Sep 2026: `npc-test-76b3b3` blocked on
+      `20261202000000_seed_template_library_v13_cash_flow_foots.sql` (40 MB)
+      with exactly that sentence. The installation was nowhere near its limit —
+      ~750 calls against a 5,000/hour window, every other lane flowing — so
+      reading it as a quota refusal would have parked the clone waiting for a
+      window that was never closed. The evidence needed to say so was in the
+      response body, which this line dropped.
+
+      The body is read defensively and truncated: it is diagnostic text on a
+      path that has already failed, and a body that will not read must not turn
+      a refusal into a second error that hides the first.
+    */
+    let detail = "";
+    try {
+      detail = (await res.text()).slice(0, 400).replace(/\s+/g, " ").trim();
+    } catch {
+      detail = "(body unreadable)";
+    }
+    const err = new Error(
+      `Streaming blob ${sha.slice(0, 7)} failed: HTTP ${res.status}` +
+        (detail ? ` — ${detail}` : ""),
+    );
+    // Carried as a property as well as in the sentence, so a classifier can
+    // read the status without parsing prose. `isUpstreamRateLimit` already
+    // looks here first.
+    (err as Error & { status?: number }).status = res.status;
+    throw err;
   }
   const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
   return {
