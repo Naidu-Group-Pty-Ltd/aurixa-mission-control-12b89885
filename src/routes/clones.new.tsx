@@ -45,6 +45,7 @@ import {
   ProvisioningReadinessPanel,
 } from "@/components/provisioning-readiness-panel";
 import { useProvisioningReadiness } from "@/lib/useProvisioningReadiness";
+import { ProvisioningSequenceNote } from "@/components/provisioning-sequence-note";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { CheckCircle2, AlertTriangle, Image as ImageIcon, KeyRound, Loader2 } from "lucide-react";
 
@@ -439,11 +440,29 @@ function NewClone() {
       if (armTurnstile) {
         try {
           const r = await provisionTurnstileFn({ data: { cloneId: result.cloneId } });
-          toast.info(
-            r.ok
-              ? "Turnstile widget minted for this clone."
-              : `Turnstile not minted: ${r.error}. The clone page can retry it.`,
-          );
+          /*
+           * A clone is seconds old here and its Supabase project takes
+           * minutes, so "the backend is not ready" is the ORDINARY answer on
+           * this screen rather than a fault. Reporting it as "not minted"
+           * sent an operator to a clone page showing a red Turnstile row on a
+           * provisioning run that was proceeding normally — and the widget
+           * does arrive, unattended, on the ten-minute sweep.
+           *
+           * `deferred` is set by the server for exactly the refusals that
+           * clear on their own; everything else still reads as a failure,
+           * because a widget that will never mint must not be described as
+           * one that is on its way.
+           */
+          if (r.ok) {
+            toast.info("Turnstile widget minted for this clone.");
+          } else if (r.deferred) {
+            toast.info(
+              "Turnstile will be armed automatically once this clone's backend finishes. " +
+                "Nothing was created and nothing failed.",
+            );
+          } else {
+            toast.info(`Turnstile not minted: ${r.error}. The clone page can retry it.`);
+          }
         } catch (e) {
           toast.error(`Turnstile minting failed: ${e instanceof Error ? e.message : "unknown"}`);
         }
@@ -1202,6 +1221,21 @@ function NewClone() {
           <Textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={3} />
         </CardContent>
       </Card>
+
+      {/*
+        Directly above the button, because that is where the question is
+        asked. The measured failure this answers is an operator finishing the
+        wizard, landing on a clone page of amber rows, and concluding that
+        Cloudflare, Vercel and DNS had all failed when each was correctly
+        waiting on a backend that was still replicating.
+      */}
+      <ProvisioningSequenceNote
+        dedicatedBackend={dedicatedBackend}
+        subdomainEnabled={subdomainEnabled}
+        armTurnstile={armTurnstile}
+        armEmail={armEmail}
+        deploys={deploymentProvider !== "none" && deploymentProvider !== "manual"}
+      />
 
       <div className="flex justify-end gap-2">
         <Button variant="ghost" onClick={() => nav({ to: "/dashboard" })}>

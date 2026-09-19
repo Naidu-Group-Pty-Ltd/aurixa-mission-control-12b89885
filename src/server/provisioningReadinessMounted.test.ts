@@ -218,6 +218,31 @@ describe("the panel keeps readiness honest", () => {
     expect(foot.slice(0, 400)).toContain("not a failure");
   });
 
+  /**
+   * A component nothing renders is not shipped.
+   *
+   * This repository's sibling product paid for that rule twice — three UI
+   * components and twenty-eight CSS classes written, documented, merged and
+   * deployed with zero call sites, invisible to lint, typecheck and build.
+   * The mount guard above exists for the readiness panel; this is the same
+   * guard for the sequence note, which is the only thing on this page that
+   * explains why a freshly provisioned clone shows waiting rows.
+   */
+  it("mounts the sequence note that explains what happens after the button", () => {
+    expect(WIZARD).toContain("<ProvisioningSequenceNote");
+  });
+
+  it("puts the sequence note where the question is asked — above the button", () => {
+    const note = WIZARD.indexOf("<ProvisioningSequenceNote");
+    // The BUTTON, by its own label expression — a bare "Provision clone"
+    // also matches this route's `<title>`, which sits at the top of the file
+    // and would make any placement pass.
+    const button = WIZARD.indexOf('busy ? "Provisioning');
+    expect(note).toBeGreaterThan(-1);
+    expect(button, "the submit button must be found by its label expression").toBeGreaterThan(-1);
+    expect(note, "an explanation below the button is read after the decision").toBeLessThan(button);
+  });
+
   it("never calls a present credential working", () => {
     for (const word of ["healthy", "all good", "verified", "working"]) {
       expect(PANEL.toLowerCase()).not.toContain(word);
