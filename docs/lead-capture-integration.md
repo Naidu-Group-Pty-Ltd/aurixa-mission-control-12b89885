@@ -67,21 +67,34 @@ Make.com HTTP module can map fields loosely. Responses: `201` stored,
   the `x-lead-capture-secret` header (or as `Authorization: Bearer …`).
   Trusted requests bypass origin checks and rate limits.
 - **Browser dual-write** — no secret (it would be public in the bundle).
-  Instead the request must originate from an allow-listed Origin
-  (`aurixasystems.com.au`, `www.`, `localhost:3000`, plus
-  `LEAD_CAPTURE_ALLOWED_ORIGINS`), passes strict validation, and is subject
-  to per-IP (8/10 min) and global (300/hr) rate limits.
+  Instead the request must originate from an allow-listed Origin, passes
+  strict validation, and is subject to per-IP (8/10 min) and global (300/hr)
+  rate limits. The allow-list is `aurixasystems.com.au` and `www.` **plus
+  whatever `LEAD_CAPTURE_ALLOWED_ORIGINS` names, and nothing else** — a
+  request from any other Origin, and a request carrying no Origin at all,
+  answers `403 forbidden_origin`.
+
+  **`localhost` is not allow-listed by default.** It used to be, which meant
+  every deployment shipped a development origin it could not configure out:
+  the live list is built by APPENDING the variable to the defaults rather
+  than replacing them, so no setting could remove it. Local browser
+  dual-writes therefore need the variable set — see the checklist below.
 
 ## Setup checklist
 
 1. Apply migration `20260713060000_waitlist_lead_capture.sql` (Supabase).
 2. Set `LEAD_CAPTURE_SECRET` in the Mission Control server environment.
-3. *(Recommended)* In the Make.com scenario, after the Airtable step add an
+3. **For local work**, set `LEAD_CAPTURE_ALLOWED_ORIGINS="http://localhost:3000"`
+   (comma-separated for more). Without it the browser dual-write answers
+   `403 forbidden_origin` from a dev server, because the defaults are
+   production origins only. Server-to-server calls carrying the secret are
+   unaffected — they bypass the origin check entirely.
+4. *(Recommended)* In the Make.com scenario, after the Airtable step add an
    HTTP module: `POST https://mission-control.aurixasystems.com.au/api/public/leads/capture`
    with header `x-lead-capture-secret: <LEAD_CAPTURE_SECRET>` and the webhook
    payload passed through as JSON. This guarantees delivery even for browsers
    that block the dual-write.
-4. Deploy the updated landing page (`aurixa-systems`) — it dual-writes
+5. Deploy the updated landing page (`aurixa-systems`) — it dual-writes
    automatically; override the target with `VITE_MISSION_CONTROL_URL` if the
    Mission Control domain ever changes.
 
