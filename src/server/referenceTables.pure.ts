@@ -46,6 +46,41 @@
  * `template_library_entries`, whose `source_template_id` and `agency_id` are
  * both entirely unpopulated, which is what lets the catalogue travel alone.
  *
+ * ## The conflict key is the NATURAL key, never the surrogate id
+ *
+ * Every one of these tables has `id uuid primary key default gen_random_uuid()`,
+ * and the copy writes `on conflict (<conflictKey>) do nothing` — which exists
+ * so a row the tenant already holds is left exactly as it is.
+ *
+ * Naming `id` there breaks that promise in the one case it was written for. A
+ * catalogue row seeded on BOTH sides by the same migration gets a fresh uuid on
+ * each, so the ids differ by construction; the insert then conflicts on the
+ * table's OTHER unique constraint, which `on conflict (id)` does not catch, and
+ * Postgres raises 23505. The page is one statement, so one such row fails all
+ * of them.
+ *
+ * Measured 19 Sep 2026. `aml.retention_schedules` on `npc-client-dashboard`:
+ * 0 of 35 rows, `duplicate key value violates unique constraint
+ * "retention_schedules_entity_type_key" … Key (entity_type)=
+ * (manual_screening_check) already exists`. The same table copied cleanly on
+ * the other two clones, which is the tell — it depends on whether the clone's
+ * own migration seeded the row before the copy reached it, and that ordering is
+ * arbitrary. Five more entries carried the same latent fault:
+ *
+ *   provider_configs     → (tenant_id, capability, provider_key)
+ *   risk_factors         → key
+ *   mandatory_triggers   → key
+ *   retention_schedules  → entity_type
+ *   sanctions_entries    → (list_code, external_id)
+ *   pep_officeholders    → (source_code, external_id)
+ *
+ * `monitoring_rules`, `tipping_off_rules`, `sanctions_list_syncs` and
+ * `pep_officeholder_syncs` genuinely have no natural key, so `id` is right for
+ * them and stays. A column nulled on copy may never appear in a conflict key
+ * either — NULLs are distinct in a unique index, so the target would never
+ * match — which is asserted, and is why `provider_configs.tenant_id` being
+ * `keep` is load-bearing.
+ *
  * `stamp_duty_rates_cache` is a cache, with `fetched_at` and `expires_at` and
  * its own refresh path. A copied cache arrives carrying somebody else's fetch
  * time, and a stale rate that looks fresh is worse than an empty table the
@@ -317,7 +352,7 @@ export const REFERENCE_TABLES: readonly ReferenceTable[] = [
     table: "provider_configs",
     schema: "aml",
     pageKey: "id",
-    conflictKey: ["id"],
+    conflictKey: ["tenant_id", "capability", "provider_key"],
     rowsPerPage: 50,
     columns: {
       tenant_id: {
@@ -352,7 +387,7 @@ export const REFERENCE_TABLES: readonly ReferenceTable[] = [
     table: "risk_factors",
     schema: "aml",
     pageKey: "id",
-    conflictKey: ["id"],
+    conflictKey: ["key"],
     rowsPerPage: 100,
     columns: {
       created_by: {
@@ -366,7 +401,7 @@ export const REFERENCE_TABLES: readonly ReferenceTable[] = [
     table: "mandatory_triggers",
     schema: "aml",
     pageKey: "id",
-    conflictKey: ["id"],
+    conflictKey: ["key"],
     rowsPerPage: 100,
     columns: {
       created_by: {
@@ -410,7 +445,7 @@ export const REFERENCE_TABLES: readonly ReferenceTable[] = [
     table: "retention_schedules",
     schema: "aml",
     pageKey: "id",
-    conflictKey: ["id"],
+    conflictKey: ["entity_type"],
     rowsPerPage: 100,
     columns: {
       created_by: {
@@ -490,7 +525,7 @@ export const REFERENCE_TABLES: readonly ReferenceTable[] = [
     table: "sanctions_entries",
     schema: "aml",
     pageKey: "id",
-    conflictKey: ["id"],
+    conflictKey: ["list_code", "external_id"],
     rowsPerPage: 400,
     columns: {},
     reason:
@@ -513,7 +548,7 @@ export const REFERENCE_TABLES: readonly ReferenceTable[] = [
     table: "pep_officeholders",
     schema: "aml",
     pageKey: "id",
-    conflictKey: ["id"],
+    conflictKey: ["source_code", "external_id"],
     rowsPerPage: 500,
     columns: {},
     reason:
