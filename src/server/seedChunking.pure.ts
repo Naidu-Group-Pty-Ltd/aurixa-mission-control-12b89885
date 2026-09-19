@@ -256,10 +256,50 @@ export async function* chunkSeedStatements(
     groupBytes = overhead;
   };
 
-  // `walk` is pull-based on the stream and push-based on tuples; the
-  // statements it completes are queued and yielded between lines so the
-  // consumer sees each one as soon as it is whole. The queue never holds more
-  // than one finished statement plus the group being filled.
+  /*
+    NOTHING IS HANDED OVER UNTIL THE SECOND READ HAS AGREED WITH THE FIRST, AND
+    THAT IS WHY EVERY STATEMENT IS HELD.
+
+    The comment that stood here said the statements were "queued and yielded
+    between lines so the consumer sees each one as soon as it is whole", and
+    that "the queue never holds more than one finished statement plus the group
+    being filled". Both were false. `ready` is drained only after `await
+    walking`, so the WHOLE file is read before the first statement is handed
+    over — measured by effect on a 400-tuple fixture: 4,101 of 4,101 stream
+    chunks consumed before statement 1 of 101 arrived.
+
+    It is false in the safe direction, and the buffering is load-bearing rather
+    than incidental. Every statement this yields is
+    `remembered header + fresh tuples + remembered onConflict`, and the four
+    comparisons below are what make that safe. Two of them CANNOT be made any
+    earlier:
+
+      * `onConflict` sits after the last tuple, so it is unknown until EOF.
+      * `tail` sits after that.
+
+    Yield a statement before EOF and it goes out under a conflict clause this
+    pass has not yet checked. If the prime changed `DO UPDATE SET` to
+    `DO NOTHING` between the two reads, rows are updated that the new body
+    wanted left alone — and the next pass cannot repair it, because under the
+    new clause it never writes those rows at all. That is a permanent wrong
+    write, where holding the statements costs only memory.
+
+    THE MEMORY IS REAL AND IS NOT BOUNDED BY `maxStatementBytes`.
+
+    `ready` grows to the whole file: at the production default of 1 MB a
+    statement, the 41,671,969-byte template seed is ~42 statements, and JS
+    strings are UTF-16, so ~84 MB of a runtime whose ceiling is the stated
+    reason `openPrimeMigrationCorpus` refuses a body at 8 MB. A pass killed for
+    that is indistinguishable in the record from one killed on wall clock,
+    which is the shape already measured on 19 Sep 2026. Named rather than
+    guessed at: fixing it needs `onConflict` and `tail` known BEFORE the
+    streaming pass — a ranged read of the blob's last few kilobytes — which is
+    an API `PrimeMigrationCorpus` does not have.
+
+    `seedChunking.test.ts` pins both halves of this: nothing is yielded before
+    EOF, and nothing is yielded before a disagreement throws. Do not
+    "optimise" the queue away without reading them.
+  */
   const walking = walk(chunks, (tuple) => {
     rowsSeen += 1;
     const bytes = byteLength(tuple) + 2;
@@ -268,9 +308,8 @@ export async function* chunkSeedStatements(
     groupBytes += bytes;
   });
 
-  // Yield as statements complete. `walk` runs to completion here; the queue
-  // is drained after it, which keeps this simple and still bounded because a
-  // statement is at most `maxStatementBytes` and the group at most one more.
+  // EOF, and only now is anything known about the ON CONFLICT clause or the
+  // tail. Every comparison below therefore runs before `ready` is drained.
   const finalShape = await walking;
   flush();
 

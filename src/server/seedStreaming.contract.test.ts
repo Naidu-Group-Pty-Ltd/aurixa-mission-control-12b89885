@@ -187,6 +187,38 @@ describe("the replay chunks an oversized seed", () => {
     expect(fn).toMatch(/changed on the prime since the last pass/);
   });
 
+  it("discards the stored cursor on exactly ONE path, and it is that one", () => {
+    /*
+      Audited path by path, because "which refusals leave a cursor that can
+      never match again?" is a question a reader has to be able to answer:
+
+        * budget pause — the cursor it writes is fresh. Nothing to discard.
+        * SeedShapeError WITH a cursor shape — the stored position was cut from
+          a body that no longer exists and the stale shape would make the next
+          pass hit the same mismatch for ever. This is the one that discards.
+        * SeedShapeError WITHOUT one — the file is not seed-shaped and a person
+          has to act. Any stored cursor is inert rather than harmful, because
+          the body identity refuses it and `skip` is 0.
+        * the prime's body went unreadable — the cursor is KEPT deliberately,
+          so the statements that landed are not re-sent.
+        * an unrecognised error — rethrown, cursor untouched, still valid.
+        * a cursor past the end — reset to 0 rather than discarded, because the
+          file is fine and the position is not.
+        * completion — `cursor: null`, and the caller clears it because its own
+          file landed.
+
+      One site, and a second appearing is a finding rather than a refactor.
+    */
+    const fn = sliceFunction(replay, "async function applyChunkedSeed");
+    const sites = fn.match(/cursorDiscarded: true/g) ?? [];
+    expect(sites).toHaveLength(1);
+    const at = fn.indexOf("cursorDiscarded: true");
+    const branch = fn.lastIndexOf("if (cursorShape) {", at);
+    expect(branch, "the discard is not inside the cursor-shape branch").toBeGreaterThan(-1);
+    // And the caller has to carry it out, or the flag is a value nobody reads.
+    expect(replay).toMatch(/chunked\.cursorDiscarded[\s\S]{0,80}?chunkCursorDiscarded = true/);
+  });
+
   it("keeps the statement budget in bytes, under the API's limit", () => {
     const m = /export const DEFAULT_SEED_STATEMENT_BYTES = ([\d_]+);/.exec(replay);
     expect(m).not.toBeNull();
