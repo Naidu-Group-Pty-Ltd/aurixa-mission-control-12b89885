@@ -407,6 +407,53 @@ export type EmailSweepFacts = {
   now: number;
 };
 
+export type EmailStartSkip = "already_started" | "backend_not_ready" | "over_limit";
+
+export type EmailStartVerdict = { act: true; why: string } | { act: false; reason: EmailStartSkip };
+
+export type EmailStartFacts = {
+  /** Whether this clone already has an identity row of any kind. */
+  hasIdentity: boolean;
+  /** The scoped key is written INTO the clone's own Supabase project. */
+  backendReady: boolean;
+  /** How many starts this pass has already spent. */
+  startedThisRun: number;
+  limit: number;
+};
+
+/**
+ * Whether to BEGIN a sending identity for a clone that has none.
+ *
+ * `decideEmailIdentitySweep` below refuses exactly this case — "Nothing has
+ * been registered for this clone … not ours to start" — and until now nothing
+ * else decided it on a schedule. The deployment drain started one at
+ * `syncing_env`, a step reached only by a clone Vercel is building; every
+ * manually served clone, which is all of this fleet, was left to an operator
+ * pressing a button on the clone page.
+ *
+ * Three refusals and no more. Note what is NOT among them: a hosting project.
+ * That requirement is what confined the whole feature to Vercel-built clones,
+ * and the key this registers goes to the clone's Supabase project rather than
+ * to its host.
+ */
+export function decideEmailIdentityStart(facts: EmailStartFacts): EmailStartVerdict {
+  // A revoked or half-finished identity is a ROW, so it lands here as
+  // `hasIdentity` and belongs to the sweep. This decides the one case the
+  // sweep cannot see: no row at all.
+  if (facts.hasIdentity) return { act: false, reason: "already_started" };
+
+  // Registering a domain whose key has nowhere to be written leaves an
+  // identity that can never finish, and it would be claimed by the sweep on
+  // every pass thereafter.
+  if (!facts.backendReady) return { act: false, reason: "backend_not_ready" };
+
+  // Bounded per pass: registering a domain is a Resend call, and a fleet-sized
+  // first run must not exhaust a worker's budget before it writes anything.
+  if (facts.startedThisRun >= facts.limit) return { act: false, reason: "over_limit" };
+
+  return { act: true, why: "no sending identity yet" };
+}
+
 export type EmailSweepSkip = "not_started" | "complete" | "cooling_off" | "revoked";
 
 export type EmailSweepVerdict = { act: true; why: string } | { act: false; reason: EmailSweepSkip };

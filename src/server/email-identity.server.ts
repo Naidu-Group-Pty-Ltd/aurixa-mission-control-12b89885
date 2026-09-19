@@ -33,6 +33,7 @@
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database, Json } from "@/integrations/supabase/types";
+import { decideEmailIdentityStart } from "./cloneEmailIdentity.pure";
 import {
   isResendConfigured,
   resendApi,
@@ -600,6 +601,155 @@ export async function advanceEmailIdentity(
       .eq("clone_id", cloneId);
     return fail(error);
   }
+}
+
+export type EmailStartReport = {
+  resendConfigured: boolean;
+  /** Clones with no identity row at all. */
+  missing: number;
+  started: number;
+  failed: number;
+  skipped: Record<string, number>;
+  detail: Array<{ cloneId: string; outcome: string; note?: string }>;
+};
+
+/** Bounded so one pass over a large fleet cannot exhaust a worker's budget. */
+const START_MAX_PER_RUN = 5;
+
+/**
+ * Begin a sending identity for every clone that has none.
+ *
+ * ## The gap this closes
+ *
+ * `sweepEmailIdentities` below selects FROM `clone_email_identities`. A clone
+ * with no row is therefore invisible to it, for ever — the sweep advances
+ * identities and cannot start one, which its own contract test states in the
+ * plainest terms: "nothing else in the platform ever begins a sending
+ * identity".
+ *
+ * The thing that did begin one was the deployment drain at `syncing_env`. That
+ * case opens `if (!row.project_id) return`, and `provisionCloneCore` writes the
+ * deployment row as `not_requested` for `manual` and `none`, and
+ * `pending_platform` when no Vercel token is configured. A deployment in any of
+ * those three states never advances, and `MODULES_TO_CLONES.md` records that
+ * every clone in this fleet is served manually. So for most of the fleet the
+ * only thing that ever started an identity was an operator opening the clone
+ * page and pressing a button.
+ *
+ * The failure was silent in the way this programme keeps paying for: clones
+ * deploy perfectly and simply cannot send mail — password resets, portal
+ * invites and notifications included.
+ *
+ * ## Why it lives in the existing drain
+ *
+ * Called from `/hooks/email-identity-drain`, which is already scheduled, rather
+ * than behind a cron job of its own. `THE_CLONING_ENGINE.md` records six
+ * pg_cron jobs that were never scheduled at all, silently, each one recorded as
+ * applied by a migration that declined to schedule it. A new job is the single
+ * most likely way for this repair never to run.
+ *
+ * ## What it requires, and what it deliberately does not
+ *
+ * A ready backend, because the scoped key is written INTO the clone's own
+ * Supabase project and there has to be somewhere to put it. Not a hosting
+ * project — that is the assumption this whole fix exists to remove.
+ */
+export async function reconcileEmailIdentities(
+  supabase: Db,
+  opts: { limit?: number } = {},
+): Promise<EmailStartReport> {
+  const report: EmailStartReport = {
+    resendConfigured: isResendConfigured(),
+    missing: 0,
+    started: 0,
+    failed: 0,
+    skipped: {},
+    detail: [],
+  };
+  // Dormant, not broken — and named, because "nothing happened" is also what a
+  // healthy fleet looks like.
+  if (!report.resendConfigured) return report;
+
+  const bump = (reason: string) => {
+    report.skipped[reason] = (report.skipped[reason] ?? 0) + 1;
+  };
+
+  const { data: clones, error: cloneErr } = await supabase.from("clones").select("id, slug");
+  if (cloneErr) throw new Error(`Could not list clones: ${cloneErr.message}`);
+  const ids = (clones ?? []).map((c) => (c as { id: string }).id);
+  if (ids.length === 0) return report;
+
+  const [backends, identities] = await Promise.all([
+    supabase
+      .from("clone_backends")
+      .select("clone_id, status, supabase_project_ref")
+      .in("clone_id", ids),
+    supabase.from("clone_email_identities").select("clone_id").in("clone_id", ids),
+  ]);
+  // A read that FAILED is not a fleet with no identities. Treating an
+  // unreadable table as "nobody has one" would start a second identity for
+  // every clone that already had one.
+  for (const [name, res] of [
+    ["clone_backends", backends],
+    ["clone_email_identities", identities],
+  ] as const) {
+    if (res.error) throw new Error(`Could not read ${name}: ${res.error.message}`);
+  }
+
+  const hasIdentity = new Set(
+    (identities.data ?? []).map((r) => (r as { clone_id: string }).clone_id),
+  );
+  const byBackend = new Map(
+    (backends.data ?? []).map((b) => [(b as { clone_id: string }).clone_id, b]),
+  );
+
+  const limit = opts.limit ?? START_MAX_PER_RUN;
+  for (const clone of clones ?? []) {
+    const row = clone as { id: string; slug: string };
+    if (hasIdentity.has(row.id)) continue;
+    report.missing += 1;
+
+    const backend = byBackend.get(row.id) as
+      | { status?: string | null; supabase_project_ref?: string | null }
+      | undefined;
+
+    // Decided by the pure module, so what production runs is what the tests
+    // exercise. Two spellings of one rule is the shape this codebase has paid
+    // for repeatedly.
+    const verdict = decideEmailIdentityStart({
+      hasIdentity: false, // filtered above; kept explicit for the reader
+      backendReady: Boolean(backend?.supabase_project_ref) && backend?.status === "ready",
+      startedThisRun: report.started + report.failed,
+      limit,
+    });
+    if (!verdict.act) {
+      bump(verdict.reason);
+      continue;
+    }
+
+    try {
+      // `provision` is the only mode that registers a domain. `refresh` polls
+      // and creates nothing, so it would leave every clone with no identity at
+      // all while looking as though it had been wired up.
+      const res = await advanceEmailIdentity(supabase, row.id, { mode: "provision" });
+      if (res.ok) {
+        report.started += 1;
+        report.detail.push({ cloneId: row.id, outcome: "started", note: row.slug });
+      } else {
+        report.failed += 1;
+        report.detail.push({ cloneId: row.id, outcome: "failed", note: res.error });
+      }
+    } catch (e) {
+      report.failed += 1;
+      report.detail.push({
+        cloneId: row.id,
+        outcome: "failed",
+        note: e instanceof Error ? e.message : "unknown",
+      });
+    }
+  }
+
+  return report;
 }
 
 export type EmailSweepReport = {

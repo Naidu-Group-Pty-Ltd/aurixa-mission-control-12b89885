@@ -192,14 +192,67 @@ describe("decideTurnstileSweep", () => {
     expect(v).toEqual({ act: false, reason: "revoked" });
   });
 
-  it("waits for somewhere to put each half", () => {
-    expect(decideTurnstileSweep(facts({ hasProject: false }))).toEqual({
-      act: false,
-      reason: "no_hosting_project",
-    });
+  it("waits for somewhere to put the secret", () => {
+    // The secret is written to the clone's own Supabase project, so without a
+    // ready backend there is nothing to write it to.
     expect(decideTurnstileSweep(facts({ backendReady: false }))).toEqual({
       act: false,
       reason: "backend_not_ready",
+    });
+  });
+
+  /**
+   * A clone with no hosting project is NOT mid-pipeline, and treating it as
+   * though it were is what left most of this fleet with no CAPTCHA of its own.
+   *
+   * This rule used to refuse outright, justified as "the drain will mint its
+   * widget when it reaches `syncing_env`". That case opens
+   * `if (!row.project_id) return`, and provisioning writes the deployment row
+   * as `not_requested` for `manual` and `none`, and `pending_platform` when no
+   * Vercel token is configured. A deployment in any of those three states
+   * never advances — so the drain never minted, and this sweep refused the
+   * same clone every ten minutes for ever, naming a step that was never
+   * coming. Every clone in this fleet is served manually.
+   */
+  it("mints for a clone that will never have a hosting project", () => {
+    expect(decideTurnstileSweep(facts({ hasProject: false }))).toMatchObject({
+      act: true,
+      action: "provision",
+    });
+  });
+
+  /**
+   * Publishing is the one step that genuinely needs a project, so it is the
+   * one step that waits for one — and it WAITS rather than retrying, or a
+   * manual clone would re-attempt an impossible publish on every pass and bury
+   * the identities that can still be advanced.
+   */
+  it("holds the site-key publish, and only the publish, for a hosting project", () => {
+    expect(
+      decideTurnstileSweep(
+        facts({ hasProject: false, identity: complete({ site_key_published_at: null }) }),
+      ),
+    ).toEqual({ act: false, reason: "no_hosting_project_to_publish_to" });
+
+    // With a project, the same identity is acted on.
+    expect(
+      decideTurnstileSweep(
+        facts({ hasProject: true, identity: complete({ site_key_published_at: null }) }),
+      ),
+    ).toMatchObject({ act: true, action: "provision" });
+  });
+
+  /**
+   * A widget with no domain issues no token anywhere — `provisionTurnstile-
+   * Identity` refuses it by name — so refusing here saves a Cloudflare round
+   * trip rather than changing the outcome. Asked on the MINT path only: an
+   * already-complete identity whose hostnames went away reads `complete`, not
+   * drift.
+   */
+  it("will not mint a widget scoped to nothing", () => {
+    expect(decideTurnstileSweep(facts({ wantedDomains: [] }))).toEqual({
+      act: false,
+      reason: "no_hostname_yet",
     });
   });
 

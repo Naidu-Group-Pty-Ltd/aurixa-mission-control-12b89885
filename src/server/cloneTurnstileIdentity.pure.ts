@@ -229,7 +229,15 @@ export type TurnstileSweepFacts = {
 export type TurnstileSweepAction = "provision" | "rotate" | "refresh";
 
 export type TurnstileSweepSkip =
-  | "no_hosting_project"
+  /**
+   * Publishing `VITE_TURNSTILE_SITE_KEY` needs a hosting project. MINTING does
+   * not, which is the distinction this union used to collapse: a single
+   * `no_hosting_project` refused the whole act, so a manually served clone —
+   * which is every clone in this fleet — never got a widget at all.
+   */
+  | "no_hosting_project_to_publish_to"
+  /** A widget scoped to no hostname issues no token anywhere. */
+  | "no_hostname_yet"
   | "backend_not_ready"
   | "revoked"
   | "cooling_off"
@@ -254,11 +262,30 @@ export function decideTurnstileSweep(facts: TurnstileSweepFacts): TurnstileSweep
   // to rebuild a `detached` deployment.
   if (id?.status === "revoked") return { act: false, reason: "revoked" };
 
-  // Both halves need somewhere to land. Refusing here is not a failure: a
-  // clone with no hosting project or no backend yet is mid-pipeline, and the
-  // drain will mint its widget when it reaches `syncing_env`.
-  if (!facts.hasProject) return { act: false, reason: "no_hosting_project" };
+  // The secret has to land somewhere: it is written to the clone's own
+  // Supabase project, so without a ready backend there is nothing to write to.
   if (!facts.backendReady) return { act: false, reason: "backend_not_ready" };
+
+  // NOTE what is deliberately NOT required here: a hosting project.
+  //
+  // This used to read `if (!facts.hasProject) return { reason:
+  // "no_hosting_project" }`, justified as "a clone with no hosting project is
+  // mid-pipeline, and the drain will mint its widget when it reaches
+  // `syncing_env`". That is true of a clone Vercel is building and FALSE of
+  // every other kind. `syncing_env` opens `if (!row.project_id) return`, and
+  // provisioning writes the deployment row as `not_requested` for `manual` and
+  // `none`, and `pending_platform` when no Vercel token is configured. A
+  // deployment in any of those three states never advances — so the drain
+  // never mints, and this sweep refused the same clone every ten minutes for
+  // ever, each time naming a step that was never coming. `MODULES_TO_CLONES.md`
+  // records that every clone in this fleet is served manually.
+  //
+  // Minting without a project was already supported: `publishSiteKey` returns
+  // "no hosting project — publish the site key when one exists" rather than
+  // throwing. The widget is created, the secret reaches the clone's backend,
+  // and only the `VITE_TURNSTILE_SITE_KEY` publish waits. A clone with its own
+  // widget and an unpublished site key is strictly better off than one with no
+  // widget at all, because the second has no security check to publish.
 
   if (id?.last_error && id.updated_at) {
     const since = facts.now - Date.parse(id.updated_at);
@@ -268,6 +295,19 @@ export function decideTurnstileSweep(facts: TurnstileSweepFacts): TurnstileSweep
   }
 
   if (!id?.site_key) {
+    // A widget has to be scoped to something. `provisionTurnstileIdentity`
+    // refuses a clone with no resolvable hostname for the reason it states —
+    // "a Turnstile widget with no domain issues no token anywhere" — so
+    // refusing here saves a Cloudflare round trip rather than changing the
+    // outcome.
+    //
+    // Asked HERE and not above, because it is a precondition of MINTING and
+    // not of the identity being healthy. Hoisting it ahead of these branches
+    // made an already-complete identity whose hostnames had gone away report
+    // `no_hostname_yet` instead of `complete` — which the test below had
+    // already pinned, for the reason it gives: reading that as drift retries
+    // it every ten minutes for ever.
+    if (facts.wantedDomains.length === 0) return { act: false, reason: "no_hostname_yet" };
     return { act: true, action: "provision", why: "no widget yet" };
   }
 
@@ -285,6 +325,16 @@ export function decideTurnstileSweep(facts: TurnstileSweepFacts): TurnstileSweep
   }
 
   if (!id.site_key_published_at) {
+    // Publishing is the one step that genuinely needs a hosting project —
+    // `VITE_TURNSTILE_SITE_KEY` is written to it. Acting without one would
+    // re-attempt a publish that cannot succeed on every pass, for ever, and
+    // bury the identities that can still be advanced under a permanent queue
+    // of ones that cannot. The widget is already minted and its secret already
+    // delivered by the time we get here; what is outstanding is a key the
+    // operator can read off the clone page and set on their own host.
+    if (!facts.hasProject) {
+      return { act: false, reason: "no_hosting_project_to_publish_to" };
+    }
     return { act: true, action: "provision", why: "site key not published to the deployment" };
   }
 
