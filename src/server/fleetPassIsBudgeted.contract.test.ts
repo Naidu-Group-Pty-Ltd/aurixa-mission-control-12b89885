@@ -352,8 +352,60 @@ describe("a pass is bounded", () => {
 
   it("beats on a CLOCK, so a silent stretch is not read as death", () => {
     const body = beatBody();
-    expect(body, "the heartbeat is not on a timer").toContain("setInterval(");
+    expect(body, "the heartbeat is not on a timer").toContain("setTimeout(");
     expect(body).toContain("migration_heartbeat_at");
+  });
+
+  /*
+    AND ONE BEAT AT A TIME.
+
+    It was a `setInterval`, which does not wait for its own callback. A beat
+    slower than the interval overlaps the next, and each captures `new Date()`
+    before its request goes out — so two independently routed writes can commit
+    in the other order and an older timestamp lands over a newer one. On a claim
+    held past the window that makes a perfectly healthy pass look stale and
+    hands its clone to a second pass: the concurrent application this mechanism
+    exists to prevent, caused by the thing meant to prevent it. Raised by
+    review.
+  */
+  it("never has two beats in flight, so an older timestamp cannot land last", () => {
+    const body = beatBody();
+    expect(body, "an interval does not wait for its own callback").not.toContain("setInterval(");
+    // The next beat is scheduled from inside the completed one. Asserted on
+    // the call rather than on the word `then`, because the ordering is the
+    // property and a reschedule anywhere else reopens the overlap.
+    const done = body.indexOf(".then(()");
+    expect(done, "nothing reschedules after a beat completes").toBeGreaterThan(-1);
+    // Bounded to the `.then` BLOCK, not to a character count after it: a
+    // reschedule moved out beside the request still sits inside a generous
+    // window, and that is exactly the mutation this has to catch.
+    const closes = body.indexOf("});", done);
+    expect(closes, "the .then block does not close").toBeGreaterThan(done);
+    expect(
+      body.slice(done, closes),
+      "the next beat is not scheduled from inside the completed one",
+    ).toContain("schedule()");
+  });
+
+  /*
+    AND A STOP THAT DOES NOT WAIT IS NOT A STOP.
+
+    `clearTimeout` cancels the next beat and does nothing about one already
+    dispatched. A beat landing after the pass has moved on refreshes a claim
+    nobody holds — and on the path where the release itself failed, that is
+    exactly the claim the five-minute silence is supposed to be counting.
+    Also raised by review.
+  */
+  it("waits for the beat that is already out before the pass moves on", () => {
+    const body = beatBody();
+    // The tracked promise must BE the beat. Asserting only that the name
+    // appears is satisfied by a declaration and an await with nothing assigned
+    // between them — caught by mutation.
+    expect(body, "nothing tracks the beat currently in flight").toMatch(/inFlight = beat\(\)/);
+    expect(body, "stop does not wait for it").toMatch(
+      /stop: async \(\) => \{[\s\S]{0,300}?await inFlight;/,
+    );
+    expect(laneBody, "the pass does not wait for the stop").toContain("await heartbeat.stop();");
   });
 
   it("fits several beats inside the reclaim window, so one lost beat is survivable", () => {
@@ -373,17 +425,17 @@ describe("a pass is bounded", () => {
     expect(body, "the beat is unfenced").toContain('.eq("worker_started_at", claimedAt)');
     expect(body).toContain('.select("clone_id")');
     /*
-      Bounded to the MISS BRANCH, not to the function. `clearInterval(timer)`
-      appears a second time in the returned `stop`, so an unbounded search
-      finds that one and passes over a branch that no longer stops anything —
-      caught by mutation, which is the only reason it is written this way.
+      Bounded to the MISS BRANCH, not to the function. The stop it sets appears
+      a second time in the returned `stop`, so an unbounded search finds that
+      one and passes over a branch that no longer stops anything — caught by
+      mutation, which is the only reason it is written this way.
     */
-    const miss = body.indexOf("if (!beat || beat.length === 0)");
-    const stop = body.indexOf("return { stop:");
+    const miss = body.indexOf("if (!rows || rows.length === 0)");
+    const stop = body.indexOf("stop: async ()");
     expect(miss, "the fence-miss branch was not found").toBeGreaterThan(-1);
     expect(stop, "the returned stop was not found").toBeGreaterThan(miss);
     expect(body.slice(miss, stop), "a beat that missed its fence keeps beating").toContain(
-      "clearInterval(timer)",
+      "stopped = true",
     );
   });
 
@@ -406,7 +458,7 @@ describe("a pass is bounded", () => {
     // Three exits — the result write's `continue`, a throw, and falling off
     // the end — so the stop cannot sit on any one of them.
     expect(laneBody, "a timer that outlives its pass holds a dead claim open").toMatch(
-      /\} finally \{[\s\S]{0,400}?heartbeat\.stop\(\);/,
+      /\} finally \{[\s\S]{0,500}?await heartbeat\.stop\(\);/,
     );
   });
 

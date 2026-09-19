@@ -322,55 +322,107 @@ const CLAIM_HEARTBEAT_MS = 30_000;
  * ordinary DDL, and above all a request blocked inside the timeout-less
  * `runSqlOnProject`. Those are the stretches the window has to cover.
  *
- * Returns its own stop, and takes no callback: nothing here can interrupt a
- * pass blocked in a fetch, so this does not pretend to. What it does is make
- * a living pass VISIBLE, and stop beating the moment the row says the claim
- * is somebody else's.
+ * Takes no callback: nothing here can interrupt a pass blocked in a fetch, so
+ * this does not pretend to. What it does is make a living pass VISIBLE, and
+ * stop beating the moment the row says the claim is somebody else's.
+ *
+ * ONE BEAT AT A TIME, AND THAT IS NOT TIDINESS.
+ *
+ * It was a `setInterval`, which does not wait for its own callback. A beat
+ * slower than the interval therefore overlaps the next one, and each captures
+ * `new Date()` BEFORE its request goes out — so two independently routed
+ * writes can commit in the other order and an older timestamp lands over a
+ * newer one. On a claim held past the reclaim window that makes a pass which
+ * is beating perfectly look stale, and hands its clone to a second pass: the
+ * concurrent application this whole mechanism exists to prevent, caused by
+ * the thing meant to prevent it. Raised by review.
+ *
+ * So each beat schedules the next only once it has finished. The cadence
+ * becomes "thirty seconds after the last beat landed" rather than "every
+ * thirty seconds", which is also the more honest reading — a pass whose
+ * writes take twenty seconds IS beating every fifty, and saying so beats
+ * claiming otherwise. Reordering is then impossible rather than tolerated,
+ * which is why this is preferred to having the database take `greatest()` of
+ * the two: that would pick the right value and still leave two requests in
+ * flight for one fact.
  */
 function beatWhileClaimHeld(
   supabase: Db,
   cloneId: string,
   claimedAt: string,
-): { stop: () => void } {
-  const timer = setInterval(() => {
-    void (async () => {
-      const { data: beat, error } = await supabase
-        .from("clone_backends")
-        .update({ migration_heartbeat_at: new Date().toISOString() })
-        .eq("clone_id", cloneId)
-        .eq("worker_started_at", claimedAt)
-        .select("clone_id");
-      if (error) {
-        // One lost beat is survivable by design — see CLAIM_HEARTBEAT_MS — so
-        // this neither throws nor stops. Silence would hide a database fault
-        // that is about to cost a live pass its claim.
-        console.error("[fleet-migration] heartbeat not recorded", {
-          cloneId,
-          error: error.message,
-        });
-        return;
-      }
-      if (!beat || beat.length === 0) {
-        // The claim is gone. Beating on would write into a successor's row and
-        // tell the reclaim that a pass which no longer owns anything is alive.
-        console.warn("[fleet-migration] heartbeat stopped: the claim is no longer this pass's", {
-          cloneId,
-          claimedAt,
-        });
-        clearInterval(timer);
-      }
-    })().catch((e) => {
-      // A rejected beat must not become an unhandled rejection: in this
-      // runtime that can take down the whole invocation, which would lose the
-      // replay this exists to protect.
-      console.error("[fleet-migration] heartbeat threw", {
-        cloneId,
-        error: e instanceof Error ? e.message : String(e),
-      });
-    });
-  }, CLAIM_HEARTBEAT_MS);
+): { stop: () => Promise<void> } {
+  let stopped = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * The beat that is currently out, so `stop` can WAIT for it.
+   *
+   * `clearTimeout` cancels the next beat and does nothing about one already
+   * dispatched — and a beat that lands after the pass has moved on refreshes
+   * a claim nobody holds, which on the path where the release itself failed
+   * delays reclamation by however long that request took. It cannot be
+   * recalled, so the pass waits for it instead: the extra silence a late beat
+   * can buy is bounded by one request rather than by the interval. Also
+   * raised by review.
+   */
+  let inFlight: Promise<void> = Promise.resolve();
 
-  return { stop: () => clearInterval(timer) };
+  const beat = async (): Promise<void> => {
+    const { data: rows, error } = await supabase
+      .from("clone_backends")
+      .update({ migration_heartbeat_at: new Date().toISOString() })
+      .eq("clone_id", cloneId)
+      .eq("worker_started_at", claimedAt)
+      .select("clone_id");
+    if (error) {
+      // One lost beat is survivable by design — see CLAIM_HEARTBEAT_MS — so
+      // this neither throws nor stops. Silence would hide a database fault
+      // that is about to cost a live pass its claim.
+      console.error("[fleet-migration] heartbeat not recorded", {
+        cloneId,
+        error: error.message,
+      });
+      return;
+    }
+    if (!rows || rows.length === 0) {
+      // The claim is gone. Beating on would write into a successor's row and
+      // tell the reclaim that a pass which no longer owns anything is alive.
+      console.warn("[fleet-migration] heartbeat stopped: the claim is no longer this pass's", {
+        cloneId,
+        claimedAt,
+      });
+      stopped = true;
+    }
+  };
+
+  const schedule = (): void => {
+    timer = setTimeout(() => {
+      if (stopped) return;
+      inFlight = beat()
+        .catch((e: unknown) => {
+          // A rejected beat must not become an unhandled rejection: in this
+          // runtime that can take down the whole invocation, which would lose
+          // the replay this exists to protect.
+          console.error("[fleet-migration] heartbeat threw", {
+            cloneId,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        })
+        .then(() => {
+          // Scheduled from INSIDE the completed beat, which is what makes two
+          // of them impossible.
+          if (!stopped) schedule();
+        });
+    }, CLAIM_HEARTBEAT_MS);
+  };
+  schedule();
+
+  return {
+    stop: async () => {
+      stopped = true;
+      if (timer !== undefined) clearTimeout(timer);
+      await inFlight;
+    },
+  };
 }
 
 /**
@@ -1371,7 +1423,11 @@ export async function runFleetMigrationSync(
       // In a `finally` rather than after each exit, because there are three:
       // the result write's `continue`, a throw, and falling off the end. A
       // timer that outlives its pass would hold a dead claim open for ever.
-      heartbeat.stop();
+      //
+      // AWAITED, so the pass does not move to the next clone while a beat for
+      // this one is still out. A late beat cannot be recalled; what this
+      // bounds is how late it can be.
+      await heartbeat.stop();
     }
   }
 
