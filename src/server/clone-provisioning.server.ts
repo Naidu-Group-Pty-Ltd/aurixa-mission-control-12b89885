@@ -514,6 +514,105 @@ export async function provisionCloneCore(
     }
   }
 
+  // ─── Start the clone's sending identity ───────────────────────────
+  //
+  // Here rather than in the browser for one reason: the operator's typed
+  // domain. `advanceEmailIdentity` falls back to `deriveSendingDomain(clone)`
+  // when it finds none recorded, and the deployment drain calls it with no
+  // domain at all — so a submit that did not reach the browser's second call
+  // did not fail, it quietly started an identity on a domain nobody chose,
+  // which is the harder failure to notice of the two.
+  //
+  // Idempotent: it adopts an existing identity rather than creating a second
+  // one, which is why the drain's own call at `syncing_env` stays exactly as
+  // it is. Non-fatal for the same reason as everything else here.
+  if (data.sendingDomain) {
+    try {
+      const { advanceEmailIdentity } = await import("@/server/email-identity.server");
+      const started = await advanceEmailIdentity(supabase, inserted.id, {
+        mode: "provision",
+        sendingDomain: data.sendingDomain,
+        actorUserId: userId,
+      });
+      if (!started.ok) {
+        console.error("[provisionClone] sending identity refused:", started.error);
+        await warnOnClone(
+          supabase,
+          inserted.id,
+          `Sending identity not started: ${data.name}`,
+          `The sending domain "${data.sendingDomain}" was requested and could not be ` +
+            `started: ${started.error}. Retry it from the clone's page.`,
+          "email_identity",
+        );
+      }
+    } catch (e) {
+      console.error("[provisionClone] sending identity failed:", e);
+      await warnOnClone(
+        supabase,
+        inserted.id,
+        `Sending identity not started: ${data.name}`,
+        `The sending domain "${data.sendingDomain}" was requested and threw: ` +
+          `${e instanceof Error ? e.message : String(e)}. Retry it from the clone's page.`,
+        "email_identity",
+      );
+    }
+  }
+
+  // ─── Enqueue the clone's own backend ──────────────────────────────
+  //
+  // Before the deployment, because `syncing_env` waits on this: a deployment
+  // queued with no backend row sits in a wait whose dependency does not exist.
+  //
+  // It used to be the BROWSER's job, in a second call made after this function
+  // returned. Nothing else in the platform creates a `clone_backends` row —
+  // not the deployment drain, not a sweep — so a submit interrupted in between
+  // left a clone with a repository, a queued deployment, `isolated_tenant`
+  // set, and no backend, for ever, with nothing recording that one had been
+  // asked for; the admin password went with the tab.
+  //
+  // Non-fatal and reported, like every other enqueue here: a clone that exists
+  // with no backend is repairable from the clone page in one click, and
+  // failing the whole provision after a GitHub repository exists is not.
+  if (data.backend) {
+    try {
+      const { enqueueCloneBackendProvisioning } =
+        await import("@/server/backend-provisioning.server");
+      const queued = await enqueueCloneBackendProvisioning(supabase, userId, {
+        cloneId: inserted.id,
+        cloneName: data.name,
+        region: data.backend.region,
+        adminEmail: data.backend.adminEmail,
+        adminPassword: data.backend.adminPassword,
+        // Deliberately not passed. `provisionCloneCore` has already written
+        // the authoritative set to `clone_modules` and the backend pipeline
+        // reads it from there, so the two tracks cannot drift if the picker
+        // changed mid-submit. (Audit finding #12.)
+      });
+      if (!queued.ok) {
+        console.error("[provisionClone] backend enqueue refused:", queued.error);
+        await warnOnClone(
+          supabase,
+          inserted.id,
+          `Backend not queued: ${data.name}`,
+          `A dedicated Supabase backend was requested for this clone and refused: ` +
+            `${queued.error}. Start it from the clone's page.`,
+          "backend",
+        );
+      }
+    } catch (e) {
+      console.error("[provisionClone] backend enqueue failed:", e);
+      await warnOnClone(
+        supabase,
+        inserted.id,
+        `Backend not queued: ${data.name}`,
+        `A dedicated Supabase backend was requested for this clone and could not be ` +
+          `queued: ${e instanceof Error ? e.message : String(e)}. Start it from the ` +
+          `clone's page.`,
+        "backend",
+      );
+    }
+  }
+
   // ─── Enqueue the deployment ───────────────────────────────────────
   // The step this pipeline never had. Everything above creates a repository
   // and a backend; nothing built the clone or served it, which is why
@@ -610,4 +709,40 @@ export async function provisionCloneCore(
   // its own outcome.
 
   return { ok: true, cloneId: inserted.id, githubUrl, subdomainFqdn: reservedFqdn };
+}
+
+/**
+ * Tell an operator that a clone was created and something it asked for was not.
+ *
+ * One helper rather than an insert per site, because the rule is the same at
+ * every one of them: nothing here is fatal — the clone exists, and a clone
+ * that exists with a gap is repairable in a click, while a provision that
+ * threw after a GitHub repository existed is not — so the ONLY thing standing
+ * between a silent gap and an operator is this row.
+ *
+ * `kind` is `clone_created` because `notifications.kind` is a PG enum and an
+ * unlisted value fails the insert silently, which is the defect three kinds
+ * already shipped with here. The stage goes in `metadata`, where it costs
+ * nothing to add one.
+ */
+async function warnOnClone(
+  supabase: SupabaseClient<Database>,
+  cloneId: string,
+  title: string,
+  body: string,
+  stage: string,
+): Promise<void> {
+  const { error } = await supabase.from("notifications").insert({
+    kind: "clone_created",
+    severity: "warning",
+    title,
+    body,
+    clone_id: cloneId,
+    url: `/clones/${cloneId}`,
+    metadata: { stage },
+  });
+  if (error) {
+    // The row IS the telling. Losing it leaves the gap and no trace of it.
+    console.error(`[provisionCloneCore] could not warn about ${stage}: ${error.message}`);
+  }
 }

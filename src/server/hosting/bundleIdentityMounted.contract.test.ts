@@ -206,25 +206,41 @@ describe("whether anybody can sign in is kept", () => {
  * a rule about the shape of the file rather than about this defect.
  */
 describe("the wait on a clone's backend names what it is waiting on", () => {
-  /** The `syncing_env` branch that gives up and waits for the backend. */
+  /**
+   * The whole `syncing_env` branch that gives up and waits: from the line that
+   * decides the dependency to the `};` closing the wait it returns. Sliced as
+   * one region because the decision and the use are the pair being asserted —
+   * reading only the returned object cannot tell a dependency that was earned
+   * from one that was assumed.
+   */
   const backendWait = (() => {
-    const anchor = DRAIN.indexOf("Waiting for the clone's Supabase backend");
+    const open = DRAIN.indexOf("const dependency: WaitDependency | null");
+    expect(open).toBeGreaterThan(-1);
+    const anchor = DRAIN.indexOf("Waiting for the clone's Supabase backend", open);
     expect(anchor).toBeGreaterThan(-1);
-    // From the `return {` that opens that object to the `};` that closes it.
-    const open = DRAIN.lastIndexOf("return {", anchor);
     return DRAIN.slice(open, DRAIN.indexOf("};", anchor) + 2);
   })();
 
   it("passes a dependency, so elapsed time is not the only signal", () => {
-    expect(backendWait).toMatch(/dependency:\s*\{/);
+    expect(backendWait).toMatch(/dependency,?\s*\n?\s*\}/);
+  });
+
+  it("names no dependency at all when there is no backend row", () => {
+    // The case this rule is most dangerous in. The New Clone wizard enqueues
+    // the backend from the BROWSER, after `provisionClone` has returned, so an
+    // interrupted submit leaves a clone that will never have one and nothing
+    // that knows one was asked for. Reading that as "progressing" waits for it
+    // for ever — strictly worse than the six-hour failure the dependency was
+    // added to prevent. A reading has to be earned by observing something.
+    expect(backendWait).toMatch(/=\s*backend\s*\n?\s*\?/);
+    expect(backendWait).toMatch(/:\s*null;/);
   });
 
   it("reads the dependency's state from the backend row, never from a constant", () => {
     // A hard-coded "progressing" would make this wait immortal: a failed
-    // backend would be waited on for ever, which is worse than the six-hour
-    // failure it replaces.
+    // backend would be waited on for ever.
     expect(backendWait).toMatch(
-      /state:\s*backend\?\.status\s*===\s*"failed"\s*\?\s*"terminal"\s*:\s*"progressing"/,
+      /state:\s*backend\.status\s*===\s*"failed"\s*\?\s*"terminal"\s*:\s*"progressing"/,
     );
   });
 

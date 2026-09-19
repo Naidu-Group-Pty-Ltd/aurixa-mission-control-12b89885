@@ -435,14 +435,30 @@ async function step(row: DeploymentRow): Promise<StepOutcome> {
         // a healthy clone, not a stall; a backend that has FAILED will never
         // write these columns, and waiting six more hours before saying so
         // helps nobody.
+        //
+        // A dependency is named only where there IS one. With no
+        // `clone_backends` row at all, nothing is progressing and nothing has
+        // given up: the New Clone wizard enqueues the backend from the BROWSER,
+        // after `provisionClone` has already returned, so a submit interrupted
+        // in between leaves a clone that will never have a backend and nothing
+        // that knows one was asked for. Declaring that "progressing" would wait
+        // for it for ever — a dependency reading has to be earned by observing
+        // something, and an absent row is exactly the case the elapsed-time
+        // rule was already right about.
+        const dependency: WaitDependency | null = backend
+          ? {
+              name: "the clone's Supabase backend",
+              state: backend.status === "failed" ? "terminal" : "progressing",
+            }
+          : null;
         return {
           kind: "wait",
           seconds: 120,
-          detail: `Waiting for the clone's Supabase backend to report its URL and key (backend: ${backend?.status ?? "not started"}).`,
-          dependency: {
-            name: "the clone's Supabase backend",
-            state: backend?.status === "failed" ? "terminal" : "progressing",
-          },
+          detail: backend
+            ? `Waiting for the clone's Supabase backend to report its URL and key (backend: ${backend.status}).`
+            : "No backend has been requested for this clone. Start one from the clone page, " +
+              "or clear the dedicated-backend flag so this deployment can use the prime's.",
+          dependency,
         };
       }
       // The Mission Control key is deliberately NOT pushed into the HOSTING

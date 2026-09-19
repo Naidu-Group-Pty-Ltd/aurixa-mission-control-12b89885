@@ -156,11 +156,79 @@ Three things the order and the guards buy:
 
 ---
 
+## 4. The wizard's submit was a script the browser ran
+
+`provisionClone` returns, and then the browser makes four more calls — the
+backend, the edge attach, the Turnstile widget, the sending identity — each
+`await`ed in sequence, each non-fatal, each with its own toast. Close the tab
+between any two of them and the clone is half-provisioned, with nothing
+anywhere recording what was asked for.
+
+Two of the four could not recover from that, and they fail in different ways.
+
+**The backend cannot recover at all.** *Nothing else in the platform creates a
+`clone_backends` row* — not the deployment drain, not a sweep, not a repair.
+So an interrupted submit leaves a clone with a repository, a queued deployment,
+`isolated_tenant: true` and no backend, for ever. The admin password went with
+the tab.
+
+That is worse now than it was, because of §-the-dependency-wait in
+[`DEPLOYED_BUNDLE_IDENTITY.md`](./DEPLOYED_BUNDLE_IDENTITY.md): `syncing_env`
+waits on the backend, and a wait that names a `progressing` dependency never
+times out. So the fix there had to be paired with a rule of its own —
+**a dependency reading has to be earned by observing something**. With no
+`clone_backends` row, the drain names no dependency and the elapsed-time rule
+applies exactly as it always did, because "nobody is building this" is not
+progress.
+
+**The sending identity recovers, onto the wrong domain.** The drain calls
+`advanceEmailIdentity` at `syncing_env` with no domain at all, and that
+function falls back to `deriveSendingDomain(clone)` when it finds none
+recorded. So a browser that never reached the second call did not *fail* — it
+quietly started an identity on a domain nobody chose, which is the harder of
+the two to notice.
+
+Both now travel **with the submit**. `ProvisionCloneInput` carries `backend`
+(region and the admin credentials, validated as a pair before anything is
+created) and `sendingDomain`, and `provisionCloneCore` performs both, in one
+server call, from one set of inputs.
+
+Three things hold it:
+
+- **The password is on a shorter path, not a new one.** It reaches the same
+  queue it always did, encrypted at rest by `enqueueCloneBackendProvisioning`
+  and cleared once the worker seeds the admin user. What changed is that it no
+  longer has to survive a round trip through a browser to get there.
+- **The backend is enqueued BEFORE the deployment**, because the deployment
+  waits on it: queueing a deployment first means queueing a wait whose
+  dependency does not yet exist.
+- **Non-fatal is not unobserved.** Every one of these is wrapped, because a
+  clone that exists with a gap is repairable in one click while a provision
+  that threw after a GitHub repository existed is not — but each failure
+  reaches an operator through `warnOnClone`, since a console line nobody reads
+  is not a report.
+
+`moduleIds` is deliberately *not* repeated in the backend payload: provisioning
+has already written the authoritative set to `clone_modules` and the backend
+pipeline reads it from there, so the two tracks cannot drift if the picker
+changed mid-submit.
+
+Turnstile stays in the wizard. It is the one of the four the platform already
+recovers correctly — the drain mints it at `syncing_env` and a ten-minute sweep
+mints it unattended — so moving it would change where a working thing happens
+for no gain.
+
+---
+
 ## What is asserted, and how it was checked
 
 Every rule above is stated over the source or over a pure function, and **every
-assertion was planted before it was trusted**. Eighteen violations, eighteen
-caught, each by exactly the test that claims to catch it:
+assertion was planted before it was trusted**. Twenty-eight violations,
+twenty-eight caught, each by exactly the test that claims to catch it — one of
+them only on the second attempt, because the first plant silently replaced
+nothing (a `perl -0pi -e` that reported zero substitutions against text
+prettier had since reflowed). A plant that does not change the file proves
+nothing, so the count of substitutions is part of the check:
 
 | planted violation | caught |
 |---|---|
@@ -182,6 +250,16 @@ caught, each by exactly the test that claims to catch it:
 | the pushing guard is dropped (prune removes what we wrote) | yes |
 | name comparison becomes case-insensitive | yes |
 | the prune is removed / moved before the write / decides for itself | yes |
+| an absent backend row reads as `progressing` again | yes |
+| the dependency state is hard-coded `progressing` | yes |
+| the backend wait stops passing its dependency | yes |
+| the server-side backend enqueue goes away | yes |
+| the server-side email start goes away | yes |
+| the operator's typed domain stops travelling | yes |
+| a failure stops reaching an operator | yes |
+| the wizard stops sending the backend | yes, on the second attempt |
+| `refresh` mode is used where only `provision` creates | yes |
+| the admin credentials are dropped from the payload | yes, by the type |
 
 The suite passed before every one of these fixes and passes after. That is the
 finding worth keeping: 4,225 tests could not see a second writer, a dead
