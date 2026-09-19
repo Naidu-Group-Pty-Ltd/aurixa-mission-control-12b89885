@@ -1,7 +1,7 @@
 # The day the whole fleet stopped, and the six reasons it did
 
 On 19 September 2026 all four clones were **69 commits behind prime**, frozen at
-`d86f485c`, with eight `cascade_events` pending and 32 queued `cascade_results`
+`d86f485c`, with nine `cascade_events` pending and 36 queued `cascade_results`
 that nothing would ever claim. Two of them had been holding at migration
 frontier `20261201100000` for days. All four read `status: ready`.
 
@@ -94,7 +94,7 @@ vacuously.
 
 ## 2. `npc-test-76b3b3` — a missing HTTP header
 
-**`src/server/githubUserAgent.pure.ts`, `prime-backend.server.ts`**
+**`src/server/githubRequestHeaders.pure.ts`, `prime-backend.server.ts`**
 
 The clone's own `status_detail` carried the reason verbatim and nobody read it:
 
@@ -114,12 +114,21 @@ It was **deterministic**: every blob that path was ever asked to stream was
 refused, on every attempt, for ever — a permanent block wearing a rate limit's
 status code.
 
-**The rule now**: every request to GitHub names itself, and
-`githubUserAgent.contract.test.ts` scans the server tree for any
-`api.github.com` fetch without one. The first version of that guard passed a
+**The rule now**: every request to GitHub names itself, assembled in one place
+by `githubApiHeaders`, and `githubRawFetch.contract.test.ts` derives the call
+sites from source and checks that each also counts before it spends.
+
+That helper came from `main`, which landed the same diagnosis independently
+while this branch was in flight. A second module naming the same header was
+written here and then **deleted rather than left beside it** — the helper's own
+comment says why: *"a literal at each call site is how three of them come to
+disagree."*
+
+One thing worth keeping from the discarded version: its first guard passed a
 planted violation because the *comment* above the header said the words
-"User-Agent" — comments are stripped before anything is judged now, and the
-header must be SET (`"User-Agent":` as a key), not merely mentioned.
+"User-Agent". Comments have to be stripped before anything is judged, and the
+header must be SET (`"User-Agent":` as a key) rather than merely mentioned —
+which is what `main`'s version already does.
 
 ---
 
