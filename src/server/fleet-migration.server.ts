@@ -143,6 +143,17 @@ const STALE_CLAIM_MINUTES = 5;
 const CLAIM_RESERVE_MS = 15_000;
 
 /**
+ * What a write says when the claim it was fenced against is gone.
+ *
+ * Named once because two sites raise it — the progress write throws it to stop
+ * the replay, the result write reports it — and they mean the same thing. Two
+ * spellings of one condition is how the two come to disagree, and this is the
+ * string an operator will search for when a pass reports a clone it never
+ * changed.
+ */
+const CLAIM_LOST = "claim lost mid-pass";
+
+/**
  * How long one pass may spend before it stops handing out work.
  *
  * THIS LANE HAD NO BUDGET AT ALL, and its comment beside `applyPrimeMigrations`
@@ -725,15 +736,41 @@ export async function runFleetMigrationSync(
     // would put this lane inside a schema somebody else is rebuilding. A
     // changed status returns no row and the clone waits for the next tick,
     // which is the correct outcome and costs half an hour at most.
+    /*
+      THE FENCE.
+
+      One timestamp, held for the rest of this clone's turn and required by
+      every write that follows. `worker_started_at` stops being a flag that a
+      claim exists and becomes the name of WHOSE claim it is.
+
+      Needed because the reclaim window above is now five minutes rather than
+      thirty. A pass parked inside `runSqlOnProject` — which carries no
+      timeout — can be reclaimed, resumed, and then go on writing: its cursor
+      into the successor's claim, and, worse, its release over the successor's
+      `worker_started_at`, which puts two passes inside one clone's schema
+      applying the same migrations at once. That is the exact outcome the
+      claim's own compare-and-swap exists to prevent, arriving a few minutes
+      later through the back door. Raised by review; the shorter window is
+      what makes it reachable.
+
+      A fenced write that matches no row is not an error and must not be
+      treated as one: it is this pass being told the clone is no longer its
+      to write about. Each site below says what it does with that answer.
+
+      It also closes a smaller thing: the two fields were two separate
+      `new Date()` calls and could differ by a tick, so nothing could be
+      compared against the other.
+    */
+    const claimedAt = new Date().toISOString();
     const { data: claimed, error: claimErr } = await supabase
       .from("clone_backends")
       .update({
-        worker_started_at: new Date().toISOString(),
+        worker_started_at: claimedAt,
         // Stamped WITH the claim, in the same statement. A claim whose
         // heartbeat is only written by the first statement would be
         // indistinguishable from an abandoned one for as long as the seed
         // takes to download — which is the longest part of a pass.
-        migration_heartbeat_at: new Date().toISOString(),
+        migration_heartbeat_at: claimedAt,
       })
       .eq("clone_id", cloneId)
       .eq("status", backend.status)
@@ -820,7 +857,7 @@ export async function runFleetMigrationSync(
           */
             cursor: chunkCursorFor(backend.chunk_cursor),
             onStatementDone: async (p) => {
-              const { error } = await supabase
+              const { data: beat, error } = await supabase
                 .from("clone_backends")
                 .update({
                   chunk_cursor: { migrationId: p.migrationId, statementsDone: p.statementsDone },
@@ -830,7 +867,9 @@ export async function runFleetMigrationSync(
                   // sending says so here, and nothing else writes this column.
                   migration_heartbeat_at: new Date().toISOString(),
                 })
-                .eq("clone_id", cloneId);
+                .eq("clone_id", cloneId)
+                .eq("worker_started_at", claimedAt)
+                .select("clone_id");
               if (error) {
                 // Not fatal: the statements themselves have landed and the seed's
                 // own ON CONFLICT makes re-sending them free. But a cursor that
@@ -842,6 +881,32 @@ export async function runFleetMigrationSync(
                   statementsDone: p.statementsDone,
                   error: error.message,
                 });
+                return;
+              }
+              /*
+                A FENCE MISS IS FATAL, WHERE A FAILED WRITE IS NOT.
+
+                No row matched, so `worker_started_at` is not this pass's any
+                more: the claim was reclaimed and another pass holds it. The
+                write not landing is the least of it — continuing would send
+                the next statement of this seed into a database a second pass
+                is already sending to, which is the concurrent application the
+                claim exists to prevent.
+
+                Thrown rather than returned, because the replay has no way to
+                be told "stop" and nothing below it would ask. It is neither a
+                `SeedShapeError` nor a `cloneSaidNothing`, so it travels
+                through the replay's own catches untouched and lands in this
+                clone's `catch` — where the release is fenced too, and
+                therefore takes nothing away from the pass that now owns the
+                row.
+              */
+              if (!beat || beat.length === 0) {
+                throw new Error(
+                  `${CLAIM_LOST}: this pass was reclaimed while sending ${p.name} ` +
+                    `(statement ${p.statementsDone}); another pass now holds this clone, so ` +
+                    `this one stops rather than sending into a database it no longer owns`,
+                );
               }
             },
           },
@@ -1000,7 +1065,7 @@ export async function runFleetMigrationSync(
           : cursorFileLanded
             ? { chunk_cursor: null }
             : {};
-      const { error: updErr } = await supabase
+      const { data: recorded, error: updErr } = await supabase
         .from("clone_backends")
         .update({
           // Where the prime is: established by this pass whatever it applied.
@@ -1086,9 +1151,35 @@ export async function runFleetMigrationSync(
                 error_message: failures.length > 0 ? failures[0].error : null,
               }),
         })
-        .eq("clone_id", cloneId);
+        .eq("clone_id", cloneId)
+        .eq("worker_started_at", claimedAt)
+        .select("clone_id");
       if (updErr) {
         out.failed.push({ cloneId, cloneName, error: `result not recorded: ${updErr.message}` });
+        continue;
+      }
+      /*
+        THE VERDICT IS ABOUT A CLAIM THIS PASS NO LONGER HOLDS.
+
+        Unfenced, this write is the dangerous one: it sets `worker_started_at`
+        to null, so a reclaimed pass arriving here would RELEASE the successor's
+        claim — and write a status, a version and a `migrations_applied` list
+        for a replay the successor is still running. The fence turns that into
+        no rows and nothing written.
+
+        Reported and skipped rather than swallowed: no notification, because
+        the `failed` status this would have set did not land either, and an
+        alert saying a clone has fallen out of the fleet would be a claim about
+        a row this pass did not write.
+      */
+      if (!recorded || recorded.length === 0) {
+        out.failed.push({
+          cloneId,
+          cloneName,
+          error:
+            `${CLAIM_LOST}: this pass finished its replay after being reclaimed, so its ` +
+            `result was not recorded and the clone's row belongs to the pass that now holds it`,
+        });
         continue;
       }
 
@@ -1132,10 +1223,12 @@ export async function runFleetMigrationSync(
       // STALE_CLAIM_MINUTES. The status is untouched: this threw before any
       // verdict about the clone's schema was reached, and guessing one is
       // worse than retrying.
-      const { error: relErr } = await supabase
+      const { data: released, error: relErr } = await supabase
         .from("clone_backends")
         .update({ worker_started_at: null })
-        .eq("clone_id", cloneId);
+        .eq("clone_id", cloneId)
+        .eq("worker_started_at", claimedAt)
+        .select("clone_id");
       if (relErr) {
         // Not fatal — `reclaimStale` will free it on a later run — but silence
         // here would turn a clone that is merely stuck into one that looks
@@ -1143,6 +1236,25 @@ export async function runFleetMigrationSync(
         console.error("[fleet-migration] could not release claim", {
           cloneId,
           error: relErr.message,
+        });
+      } else if (!released || released.length === 0) {
+        /*
+          NOT AN ERROR, AND THE REASON THE FENCE IS SAFE HERE.
+
+          Two ways to reach this and both are correct. The claim was reclaimed
+          and a successor holds it — releasing would hand ITS clone to a third
+          pass, which is precisely what the fence stops. Or the result write
+          above already released it and something after that threw, in which
+          case there is nothing left to release.
+
+          Logged because a claim this pass believed it held and does not is
+          worth seeing, and `console.error` is reserved for the branch above,
+          where a release genuinely failed and the clone is stuck until
+          `reclaimStale` reaches it.
+        */
+        console.warn("[fleet-migration] claim was not this pass's to release", {
+          cloneId,
+          claimedAt,
         });
       }
     }

@@ -66,7 +66,9 @@ const CLAIM_GUARD = "if (Date.now() + CLAIM_RESERVE_MS >= deadlineAt)";
  * added, and a one-line anchor silently stopped matching — an assertion that
  * then tested nothing, which this suite has been caught by before.
  */
-const CLAIM_WRITE = "worker_started_at: new Date().toISOString()";
+const CLAIM_WRITE = "worker_started_at: claimedAt";
+/** The identifier the lane names a lost claim by, read rather than repeated. */
+const CLAIM_LOST_NAME = "CLAIM_LOST";
 
 describe("a pass is bounded", () => {
   it("takes its deadline at entry, before the first read", () => {
@@ -182,7 +184,7 @@ describe("a pass is bounded", () => {
     expect(
       lane.slice(at, at + 400),
       "the claim is taken without a heartbeat, so the download looks like death",
-    ).toContain("migration_heartbeat_at: new Date().toISOString()");
+    ).toContain("migration_heartbeat_at: claimedAt");
   });
 
   it("beats it on every statement the replay sends", () => {
@@ -226,6 +228,103 @@ describe("a pass is bounded", () => {
       expect(sweep).toContain('.not("worker_started_at", "is", null)');
       expect(sweep).toContain('.lt("worker_started_at", cutoff)');
     }
+  });
+
+  /*
+    A CLAIM IS A NAME, NOT A FLAG.
+
+    `STALE_CLAIM_MINUTES` went from thirty to five, which makes reclaiming a
+    LIVE pass reachable in a way it was not before: `runSqlOnProject` carries
+    no timeout, so a pass parked in one call can be reclaimed, come back, and
+    go on writing. Every write it then makes matches on `clone_id` alone, so
+    it writes into the successor's claim — and its result write sets
+    `worker_started_at` to null, releasing a claim it does not hold and
+    putting two passes inside one clone's schema at once. That is the
+    concurrent application the compare-and-swap exists to stop, arriving a few
+    minutes late through the back door. Raised by review.
+
+    So the claimed timestamp is carried and required. What is pinned here is
+    that it is ONE value (two `new Date()` calls cannot be compared to each
+    other) and that every write after the claim carries it.
+  */
+  const fencedWrites = (): string[] => {
+    const from = laneBody.indexOf(CLAIM_WRITE);
+    expect(from, "the claim write was not found").toBeGreaterThan(-1);
+    // Every `.eq("clone_id", cloneId)` after the claim is a write about a
+    // clone this pass believes it holds. Collected by scanning rather than by
+    // listing them, so a write added later is judged too.
+    const after = laneBody.slice(from);
+    return after
+      .split('.eq("clone_id", cloneId)')
+      .slice(1)
+      .map((tail) => tail.slice(0, 200));
+  };
+
+  it("takes ONE timestamp for the claim and holds it", () => {
+    expect(lane, "the fence is not a single captured value").toMatch(
+      /const claimedAt = new Date\(\)\.toISOString\(\);/,
+    );
+    const at = lane.indexOf("const claimedAt =");
+    const guard = lane.indexOf(CLAIM_GUARD);
+    expect(guard).toBeGreaterThan(-1);
+    expect(at, "the fence must be taken at the claim, after the budget guard").toBeGreaterThan(
+      guard,
+    );
+  });
+
+  it("fences every write that follows the claim on the claim it took", () => {
+    const writes = fencedWrites();
+    // The claim itself, the progress write, the result write, the release.
+    expect(writes.length, "expected the claim and at least three writes after it").toBeGreaterThan(
+      3,
+    );
+    // The first is the claim, which is fenced by `is null` instead: it is what
+    // ESTABLISHES the name the others are fenced on.
+    expect(writes[0]).toContain('.is("worker_started_at", null)');
+    for (const w of writes.slice(1)) {
+      expect(w, "a write after the claim does not require the claim it took").toContain(
+        '.eq("worker_started_at", claimedAt)',
+      );
+    }
+  });
+
+  it("can SEE a fence miss, rather than writing and hoping", () => {
+    // A fenced update that does not ask for rows back returns no error and no
+    // rows on a miss, which is indistinguishable from a write that landed.
+    for (const w of fencedWrites().slice(1)) {
+      expect(w, "a fenced write that returns nothing cannot tell a miss from a hit").toContain(
+        '.select("clone_id")',
+      );
+    }
+  });
+
+  it("STOPS the replay on a fence miss rather than sending the next statement", () => {
+    const cb = lane.indexOf("onStatementDone:");
+    expect(cb).toBeGreaterThan(-1);
+    const body = lane.slice(cb, cb + 1400);
+    expect(body, "a lost claim mid-seed must not continue sending").toMatch(
+      /if \(!beat \|\| beat\.length === 0\) \{\s*throw new Error\(/,
+    );
+    // Distinct from a failed write, which is deliberately NOT fatal: the
+    // statements landed and re-sending them is free.
+    expect(body).toMatch(/console\.error\(/);
+  });
+
+  it("records no verdict about a clone whose row it no longer owns", () => {
+    const at = lane.indexOf("if (!recorded || recorded.length === 0)");
+    expect(at, "the result write does not check its fence").toBeGreaterThan(-1);
+    const body = lane.slice(at, at + 500);
+    expect(body).toContain(CLAIM_LOST_NAME);
+    // Skipped, not fallen through: the `failed` status did not land either, so
+    // the notification below it would be an alert about a row nobody wrote.
+    expect(body).toContain("continue;");
+  });
+
+  it("names a lost claim in ONE place, because two sites report it", () => {
+    expect(lane).toMatch(/const CLAIM_LOST = "[^"]+";/);
+    // Both the throw and the result-write report read the same constant.
+    const uses = lane.split("${CLAIM_LOST}").length - 1;
+    expect(uses, "a lost claim is worded twice").toBe(2);
   });
 
   it("hands the same deadline to the replay, with the slowest migration reserved", () => {
