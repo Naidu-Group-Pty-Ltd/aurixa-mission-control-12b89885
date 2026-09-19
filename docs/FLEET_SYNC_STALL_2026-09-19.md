@@ -300,13 +300,46 @@ seeds, so `readSql` returns null, the orphan is `indeterminate` and the prefix
 barrier is retained — by design, and worth stating plainly rather than leaving
 to be discovered.
 
-## Still open
+## The seed was read twice per attempt, and now is not
 
-`applyChunkedSeed` streams the blob **twice per attempt** — `readSeedShape`
-walks the whole file discarding tuples, then `chunkSeedStatements` walks it
-again — so ~80 MB of blob traffic buys one bounded group of statements. The
-second walk is not redundant: it re-derives the shape and refuses when the two
-disagree (*"the blob changed between reads"*), which is a real control. The
-repair is to cache the shape against the blob's **sha** so a resumed pass reads
-once and validates against the previous pass's shape — the same check, made
-stronger, at half the traffic. Not done here.
+`applyChunkedSeed` called `readSeedShape(streamSql(m))` and then
+`chunkSeedStatements(streamSql(m), shape, …)`. `readSeedShape` is
+`walk(chunks, () => {})` — a full walk of the file that discards every tuple —
+so the 41,671,969-byte seed was read **twice per attempt**: ~80 MB of blob
+traffic to buy one bounded group of statements inside a 45-second budget.
+
+Measured 19 September 2026 at 13:01, `npc-test-76b3b3` completed a pass having
+advanced **zero** statements. The budget went on the reading.
+
+The second walk is not redundant and was not removed. It re-derives the shape
+and `chunkSeedStatements` refuses when the two disagree — *"the blob changed
+between reads"* — which is a real control. What changed is where the FIRST
+reading comes from: a cursor that names this migration and carries a shape is
+that reading, taken by an earlier pass. So the file is read once on a resumed
+pass, and the comparison now spans PASSES rather than the microseconds between
+two reads in one — which is the interval over which a seed can actually be
+re-released.
+
+Three rules carry it.
+
+**A remembered shape is whole or absent.** `StoredSeedShape` carries every
+field of `SeedShape`, `tail` above all: `tail` is the statements that follow
+the `ON CONFLICT` clause and `chunkSeedStatements` emits them as a final group,
+so a shape that dropped it would silently stop sending them on every resumed
+pass — the half of a seed nothing downstream would report missing. The first
+draft of the stored type had three fields; typechecking caught it. Every
+rejection falls back to reading the file, which is exactly what every pass did
+before, so nothing here can make a pass worse than it was.
+
+**Empty is not absent.** `onConflict` and `tail` are checked for TYPE and not
+for length. A seed with no `ON CONFLICT` clause and nothing after it is
+ordinary, and a length check would reject every one of them and quietly
+restore the double read.
+
+**A mismatch against a remembered shape is not a malformed seed.** Read fresh
+in the same pass, a disagreement means the file is not seed-shaped and a person
+must apply it by hand. Taken off the cursor it means the prime re-released the
+seed between passes: the file is fine, the recorded position was cut from a
+body that no longer exists, and asking an operator to apply 41 MB by hand would
+be the worst available answer. That branch drops the cursor and holds; the next
+pass reads fresh and starts from statement 0.

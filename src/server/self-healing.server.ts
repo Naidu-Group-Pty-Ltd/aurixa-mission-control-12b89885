@@ -933,7 +933,13 @@ async function executeSqlMigration(
         onStatementDone: (p) =>
           touchRun(run, {
             in_flight: `${p.name} — ${p.statementsDone} statement(s) sent (${p.label})`,
-            chunk_cursor: { migrationId: p.migrationId, statementsDone: p.statementsDone },
+            // `shape` rides the cursor so the NEXT pass reads the body once
+            // rather than twice — see `chunkCursorStore.pure.ts`.
+            chunk_cursor: {
+              migrationId: p.migrationId,
+              statementsDone: p.statementsDone,
+              shape: p.shape,
+            },
           }),
       },
     );

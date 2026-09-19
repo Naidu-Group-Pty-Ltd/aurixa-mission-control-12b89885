@@ -18,6 +18,7 @@ import type { AdminSeedReport } from "./cloneAdminIdentity.pure";
 import type { PrimeBackendSnapshot } from "./prime-backend.server";
 import type { StageName, StageResult } from "./schema-introspection.server";
 import { resolveMissionControlOrigin } from "./missionControlLink.pure";
+import type { StoredSeedShape } from "./chunkCursorStore.pure";
 
 const MGMT_API = "https://api.supabase.com/v1";
 
@@ -2749,11 +2750,27 @@ export async function applyPrimeMigrations(
   return { results, latestApplied, stoppedEarly, chunksApplied, chunkCursor };
 }
 
-/** Where a chunked seed stopped: the next pass skips this many statements. */
-export type ChunkCursor = { migrationId: string; statementsDone: number };
+/**
+ * Where a chunked seed stopped: the next pass skips this many statements.
+ *
+ * `shape` is what the file looked like when this pass read it, so the next one
+ * reads it ONCE instead of twice — see `chunkCursorStore.pure.ts` for what
+ * that cost and why the check it supports is stronger rather than weaker for
+ * being carried here.
+ */
+export type ChunkCursor = {
+  migrationId: string;
+  statementsDone: number;
+  shape?: StoredSeedShape;
+};
 
 export type OversizeApplyOptions = {
-  /** Open the migration's body as a stream. Called twice per seed (two passes). */
+  /**
+   * Open the migration's body as a stream.
+   *
+   * Called twice on a pass that has no remembered shape, once on a pass that
+   * has one.
+   */
   streamSql: (m: { id: string; name: string }) => Promise<AsyncIterable<string>>;
   /** Largest statement to send. Default `DEFAULT_SEED_STATEMENT_BYTES`. */
   maxStatementBytes?: number;
@@ -2765,6 +2782,8 @@ export type OversizeApplyOptions = {
     name: string;
     statementsDone: number;
     label: string;
+    /** Written with the cursor, so a pass resumed from it reads the file once. */
+    shape: StoredSeedShape;
   }) => Promise<void>;
 };
 
@@ -2800,8 +2819,32 @@ async function applyChunkedSeed(
   let index = 0;
   let applied = 0;
   let slowestMs = 0;
+  /*
+    ONE READ ON A RESUMED PASS.
+
+    `readSeedShape` is a full walk of the file that discards every tuple, so
+    doing it here as well as inside `chunkSeedStatements` costs ~80 MB on the
+    41 MB seed — for one bounded group of statements, inside a 45-second
+    budget. Measured 19 Sep 2026: `npc-test-76b3b3` completed a pass having
+    advanced ZERO statements, with the whole budget spent reading.
+
+    A cursor that names THIS migration and carries a shape is that first
+    reading, taken by an earlier pass. The check it exists for is untouched —
+    `chunkSeedStatements` still re-derives the shape and refuses on any
+    disagreement — and it now spans passes rather than the microseconds between
+    two reads in one, which is the interval over which a seed can actually be
+    re-released.
+
+    `cursorShape` is what tells the catch below WHICH kind of mismatch it was.
+  */
+  const cursorShape =
+    oversize.cursor?.migrationId === m.id ? (oversize.cursor.shape ?? null) : null;
+  // Declared out here so the refusal branches below can record it: a pass that
+  // read the file and then lost the stream still knows the shape, and writing
+  // it means the retry does not pay for that reading a second time.
+  let shape: StoredSeedShape | null = cursorShape;
   try {
-    const shape = await readSeedShape(await oversize.streamSql(m));
+    shape ??= await readSeedShape(await oversize.streamSql(m));
     for await (const stmt of chunkSeedStatements(await oversize.streamSql(m), shape, {
       maxStatementBytes,
     })) {
@@ -2815,7 +2858,7 @@ async function applyChunkedSeed(
         return {
           applied,
           stoppedEarly: true,
-          cursor: { migrationId: m.id, statementsDone: index },
+          cursor: { migrationId: m.id, statementsDone: index, shape },
           upstreamRefusal: null,
         };
       }
@@ -2829,10 +2872,37 @@ async function applyChunkedSeed(
         name: m.name,
         statementsDone: index,
         label: stmt.label,
+        shape,
       });
     }
   } catch (e) {
     if (e instanceof SeedShapeError) {
+      /*
+        A MISMATCH AGAINST A REMEMBERED SHAPE IS NOT A MALFORMED SEED.
+
+        With the shape read fresh in this same pass, a disagreement means the
+        file is not seed-shaped and a person has to apply it — which is what
+        the sentence below says. With the shape taken off the CURSOR it means
+        something else entirely: the prime re-released this seed between passes.
+        The file is fine, and telling an operator to apply 41 MB by hand would
+        be the worst possible answer to it.
+
+        So the cursor is dropped and the pass holds. The next one reads the
+        file fresh, derives the new shape, and starts from statement 0 —
+        correct, because the statements that landed were cut from a body that
+        no longer exists.
+      */
+      if (cursorShape) {
+        return {
+          applied,
+          stoppedEarly: true,
+          cursor: null,
+          upstreamRefusal:
+            `${m.name} changed on the prime since the last pass (${e.message}). The recorded ` +
+            "position was cut from a body that no longer exists, so it is discarded and the " +
+            "next pass re-reads the file and starts from the beginning.",
+        };
+      }
       throw new Error(
         `${m.name} is past the size ceiling and is not a seed-shaped INSERT this replay can chunk ` +
           `(${e.message}). Apply it to this clone by hand (psql or the SQL editor), record its ` +
@@ -2853,7 +2923,14 @@ async function applyChunkedSeed(
       return {
         applied,
         stoppedEarly: true,
-        cursor: applied > 0 ? { migrationId: m.id, statementsDone: index } : null,
+        // `shape ?? undefined` rather than `shape`: a refusal on the FIRST
+        // read leaves it null, and `undefined` is the cursor's own word for
+        // "nothing remembered — read the file". Writing null would be a third
+        // spelling of absence in a column two readers narrow.
+        cursor:
+          applied > 0
+            ? { migrationId: m.id, statementsDone: index, shape: shape ?? undefined }
+            : null,
         upstreamRefusal: e instanceof Error ? e.message : String(e),
       };
     }
