@@ -255,7 +255,7 @@ function DomainsSettings() {
               detail={
                 step1 === "ok"
                   ? "Secret configured"
-                  : "Add via project secrets. Scopes: Zone:Read + DNS:Edit on aurixasystems.com.au"
+                  : "Add via project secrets. Scopes: Zone:Read + DNS:Edit on aurixasystems.com.au, AND Account:Turnstile:Edit — the same token mints each clone's CAPTCHA widget, and a token with only the first two verifies as active while refusing widget creation."
               }
             />
             <StepPip

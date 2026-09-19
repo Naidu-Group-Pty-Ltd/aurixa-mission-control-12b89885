@@ -87,6 +87,18 @@ export type Capability = {
   readonly config: readonly ConfigCheck[];
   /** One line per thing to fix, ready to render. */
   readonly blockers: readonly string[];
+  /**
+   * Whether provisioning a clone depends on this.
+   *
+   * Carried ON the capability for the same reason `caveat` is carried on the
+   * report: `CLONE_PATH` lives under `src/server/**`, which TanStack Start's
+   * import-protection plugin denies to the client bundle, so a component that
+   * filtered by importing the VALUE would fail the build. Answering with the
+   * membership rather than exporting the list keeps the module server-only and
+   * stops a renderer holding a second, drifting copy of which capabilities
+   * matter.
+   */
+  readonly onClonePath: boolean;
 };
 
 type CredentialSpec = { name: string; purpose: string; required: boolean };
@@ -450,8 +462,29 @@ export type ReadinessReport = {
   readonly caveat: string;
 };
 
-/** The capabilities a clone needs end to end, in the order it needs them. */
-export const CLONE_PATH = ["core", "clone_backend", "repository", "hosting", "dns"] as const;
+/**
+ * The capabilities a clone needs end to end, in the order it needs them.
+ *
+ * `email` is on this list and was not. Its own consequence line says what that
+ * omission meant: "a clone cannot be given a sending identity of its own, so
+ * its outbound mail either rides the prime's shared key or does not send at
+ * all — password resets, portal invites and notifications INCLUDED". A clone
+ * whose admin can never reset their password is not a clone that provisioned
+ * successfully, so `cloneReady` could read true over exactly that state.
+ *
+ * `agreements`, `billing` and the model capabilities are deliberately still
+ * off it, for the reason `cloneReady` states below: a blocked Stripe is a real
+ * problem and is not a reason to tell somebody they cannot clone. Conflating
+ * the two is how a readiness screen stops being read.
+ */
+export const CLONE_PATH = [
+  "core",
+  "clone_backend",
+  "repository",
+  "hosting",
+  "dns",
+  "email",
+] as const;
 
 export function judgeReadiness(input: ReadinessInput): ReadinessReport {
   const capabilities: Capability[] = CAPABILITIES.map((spec) => {
@@ -487,6 +520,7 @@ export function judgeReadiness(input: ReadinessInput): ReadinessReport {
       credentials,
       config,
       blockers,
+      onClonePath: (CLONE_PATH as readonly string[]).includes(spec.key),
     };
   });
 

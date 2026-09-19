@@ -34,6 +34,11 @@ import {
   checkGithubAppPreflight,
   type GithubPreflightResult,
 } from "@/lib/github-preflight.functions";
+import {
+  CapabilityNote,
+  ProvisioningReadinessPanel,
+} from "@/components/provisioning-readiness-panel";
+import { useProvisioningReadiness } from "@/lib/useProvisioningReadiness";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { CheckCircle2, AlertTriangle, Image as ImageIcon, Loader2 } from "lucide-react";
 
@@ -144,6 +149,10 @@ function NewClone() {
       : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
   );
 
+  // Read once for the whole page: the panel renders the full clone path and
+  // each section below renders the one capability it depends on, without
+  // every section firing its own request.
+  const readiness = useProvisioningReadiness();
   const preflightFn = useServerFn(checkGithubAppPreflight);
   const [preflight, setPreflight] = useState<GithubPreflightResult | null>(null);
   const [preflightBusy, setPreflightBusy] = useState(false);
@@ -415,6 +424,8 @@ function NewClone() {
           Spin up a child instance of the prime codebase.
         </p>
       </header>
+
+      <ProvisioningReadinessPanel readiness={readiness} />
 
       <Card>
         <CardHeader>
@@ -701,16 +712,35 @@ function NewClone() {
           {dedicatedBackend && (
             <div className="grid gap-4 md:grid-cols-2 border border-border p-4">
               <div className="space-y-2">
-                <Label>Admin email</Label>
+                {/*
+                  Marked required HERE, not only in the submit handler. The
+                  handler's `toast.error("Admin email is required for dedicated
+                  backend")` fires after a full form has been filled in and
+                  says nothing about which field it means — an operator reads
+                  it, looks at eight sections, and hunts. A required field says
+                  so where it is.
+                */}
+                <Label>
+                  Admin email <span className="text-destructive">*</span>
+                </Label>
                 <Input
                   type="email"
+                  required
+                  aria-required="true"
+                  aria-invalid={adminEmail.trim() === "" ? true : undefined}
                   value={adminEmail}
                   onChange={(e) => setAdminEmail(e.target.value)}
                   placeholder="admin@client.com"
                 />
+                <p className="text-xs text-muted-foreground">
+                  The clone's first sign-in. This account is created with full access when the
+                  backend is provisioned.
+                </p>
               </div>
               <div className="space-y-2">
-                <Label>Admin password</Label>
+                <Label>
+                  Admin password <span className="text-destructive">*</span>
+                </Label>
                 <Input
                   type="password"
                   value={adminPassword}
@@ -734,6 +764,22 @@ function NewClone() {
                   <option value="ap-southeast-2">Asia Pacific (Sydney)</option>
                   <option value="ap-northeast-1">Asia Pacific (Tokyo)</option>
                 </select>
+              </div>
+              <div className="md:col-span-2">
+                {/*
+                  Whether this admin can ever be REACHED is a different
+                  question from whether the account is created, and it is the
+                  reason `email` had to join the readiness clone path: the
+                  capability's own consequence line names "password resets,
+                  portal invites and notifications". An account nobody can
+                  reset the password on is not a usable first sign-in.
+                */}
+                <CapabilityNote
+                  readiness={readiness}
+                  capabilityKey="email"
+                  whenBlocked="Outbound email is not configured, so this clone gets no sending identity of its own — password resets and portal invites for the account above will not send. Create the admin with a password you record now."
+                  whenReady="Outbound email is configured, so this clone will be given its own sending identity for password resets and portal invites."
+                />
               </div>
             </div>
           )}
@@ -807,8 +853,7 @@ function NewClone() {
           <CardDescription>
             Every clone gets an{" "}
             <code className="bg-muted px-1 text-xs">&lt;slug&gt;.aurixasystems.com.au</code>{" "}
-            subdomain via Cloudflare DNS. Dormant if Cloudflare isn't configured yet — the record
-            fans out automatically once{" "}
+            subdomain via Cloudflare DNS. The record fans out automatically once{" "}
             <a href="/settings/domains" className="underline">
               Settings → Domains
             </a>{" "}
@@ -816,6 +861,21 @@ function NewClone() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
+          {/*
+            Cloudflare carries TWO things for a clone and they fail together:
+            the DNS record this section reserves, and the clone's own Turnstile
+            widget, which `CLONE_TURNSTILE_IDENTITY.md` mints in the deployment
+            drain's `syncing_env` step. Vite inlines `VITE_*` at BUILD time, so
+            a site key that arrives after `deploying` is one the bundle does
+            not have — there is no repair after the fact except a rebuild, and
+            nothing on this page used to say so before the run started.
+          */}
+          <CapabilityNote
+            readiness={readiness}
+            capabilityKey="dns"
+            whenBlocked="Cloudflare is not configured, so this subdomain will be recorded and stay dormant — AND this clone gets no Turnstile widget of its own, so its login page ships with no working security check. The widget is minted before the build, so fixing it afterwards needs a rebuild."
+            whenReady="Cloudflare is configured, so the DNS record and this clone's own Turnstile widget will both be created during deployment."
+          />
           <label className="flex cursor-pointer items-center gap-3">
             <Checkbox
               checked={subdomainEnabled}
@@ -912,12 +972,23 @@ function NewClone() {
               </label>
             ))}
           </div>
+          {/*
+            This used to read "Dormant if no hosting token is configured",
+            which warns that something might be true without ever saying
+            whether it is. The verdict below is the live answer.
+          */}
+          <CapabilityNote
+            readiness={readiness}
+            capabilityKey="hosting"
+            whenBlocked="Hosting is not configured on this deployment, so whatever you pick here is recorded and the deployment parks at pending_platform — the clone is created but never built or served. Fix it in Settings → Domains; the request fans out on its own once a token lands."
+            whenReady="Hosting is configured, so a Vercel selection will be acted on by the deployment drain."
+          />
           <p className="text-xs text-muted-foreground">
-            Dormant if no hosting token is configured: the request is recorded and fans out from{" "}
+            Nothing here blocks the wizard — see{" "}
             <a href="/settings/domains" className="underline">
               Settings → Domains
-            </a>{" "}
-            once it lands. Nothing here blocks the wizard.
+            </a>
+            .
           </p>
         </CardContent>
       </Card>
