@@ -19,6 +19,7 @@ import { countGithubCall } from "./githubUsageMeter";
 import { pruneBundleToReachable } from "./functionBundlePrune.pure";
 import { isPrimeOnlySecret } from "./primeOnlySecrets.pure";
 import { OversizedMigrationError, PrimeBodyUnavailableError } from "./oversizedMigration.pure";
+import { githubApiHeaders } from "./githubRequestHeaders.pure";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -1225,13 +1226,12 @@ async function fetchBlobTextStream(
   countGithubCall();
   const res = await fetch(
     `https://api.github.com/repos/${ref.owner}/${ref.repo}/git/blobs/${sha}`,
-    {
-      headers: {
-        Authorization: `Bearer ${auth.token}`,
-        Accept: "application/vnd.github.raw+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-      },
-    },
+    // Assembled by the shared helper rather than spelled here. The header set
+    // written inline at this call site was missing `User-Agent`, which GitHub
+    // answers with a 403 — so this function, the only path that can carry a
+    // migration too big to hold, had never once succeeded. See
+    // `githubRequestHeaders.pure.ts`.
+    { headers: githubApiHeaders(auth.token, { accept: "application/vnd.github.raw+json" }) },
   );
   if (!res.ok || !res.body) {
     /*

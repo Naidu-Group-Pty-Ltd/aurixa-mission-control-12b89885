@@ -9,6 +9,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { requireAdmin } from "@/integrations/supabase/role-middleware";
 import { countGithubCall } from "@/server/githubUsageMeter";
+import { githubApiHeaders } from "@/server/githubRequestHeaders.pure";
 
 const InputSchema = z.object({
   targetOwner: z.string().trim().min(1),
@@ -105,14 +106,7 @@ export const checkGithubAppPreflight = createServerFn({ method: "POST" })
       // operator-invoked rather than scheduled, but it spends the same
       // installation window as every lane that is.
       countGithubCall();
-      return fetch(`https://api.github.com${path}`, {
-        headers: {
-          Authorization: `Bearer ${jwt}`,
-          Accept: "application/vnd.github+json",
-          "X-GitHub-Api-Version": "2022-11-28",
-          "User-Agent": "aurixa-mission-control",
-        },
-      });
+      return fetch(`https://api.github.com${path}`, { headers: githubApiHeaders(jwt) });
     };
 
     // Try org first, then user. GitHub returns 404 for the wrong endpoint.
@@ -158,15 +152,7 @@ export const checkGithubAppPreflight = createServerFn({ method: "POST" })
       try {
         const tokRes = await fetch(
           `https://api.github.com/app/installations/${installationId}/access_tokens`,
-          {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${jwt}`,
-              Accept: "application/vnd.github+json",
-              "X-GitHub-Api-Version": "2022-11-28",
-              "User-Agent": "aurixa-mission-control",
-            },
-          },
+          { method: "POST", headers: githubApiHeaders(jwt) },
         );
         if (!tokRes.ok) return null;
         const j = (await tokRes.json()) as { token: string };
@@ -182,13 +168,9 @@ export const checkGithubAppPreflight = createServerFn({ method: "POST" })
       if (!token) return null;
       const res = await fetch(
         `https://api.github.com/repos/${encodeURIComponent(o)}/${encodeURIComponent(r)}`,
-        {
-          headers: {
-            Authorization: `Bearer ${token}`,
-            Accept: "application/vnd.github+json",
-            "User-Agent": "aurixa-mission-control",
-          },
-        },
+        // Was also the one site missing `X-GitHub-Api-Version`; the helper
+        // carries it, which is the point of having one.
+        { headers: githubApiHeaders(token) },
       );
       return { ok: res.ok, status: res.status, body: res.ok ? await res.json() : null };
     };

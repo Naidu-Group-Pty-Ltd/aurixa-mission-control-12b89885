@@ -78,6 +78,46 @@ describe("every raw GitHub fetch is counted", () => {
   }
 });
 
+describe("every raw GitHub fetch identifies itself", () => {
+  /**
+   * GitHub refuses a request with no `User-Agent`, and refuses it with a 403 —
+   * the same status it uses for a permission failure and for a secondary rate
+   * limit. Octokit sets one, so every call through `getAppOctokit` is fine and
+   * only a RAW fetch can get this wrong.
+   *
+   * `fetchBlobTextStream` did, from the day it was written, and the cost was
+   * total: the one path that can carry a migration too big to hold in memory
+   * had NEVER once succeeded. Its error said `Streaming blob b92e5e8 failed:
+   * HTTP 403` and nothing else, so two rounds of work went into deciding
+   * whether the 403 was a quota. What GitHub had been saying the whole time
+   * was "Please make sure your request has a User-Agent header".
+   *
+   * The neighbouring module had it right in all three of its call sites. One
+   * got it and one did not, which is why the headers are assembled in one
+   * place now and why this is derived from source rather than remembered.
+   */
+  for (const { file, src } of withRawGithubFetch) {
+    it(`${file} sends a User-Agent`, () => {
+      // Via the shared helper, not a literal: four spellings of one header set
+      // is how the fourth one comes to be missing a member of it.
+      expect(src, "assembles GitHub headers inline instead of via the helper").toContain(
+        "githubApiHeaders(",
+      );
+      expect(code(src)).not.toMatch(/"User-Agent":/);
+    });
+  }
+
+  it("the helper always sets it, whatever the caller overrides", () => {
+    // `accept` is overridable because the blob endpoint needs its own media
+    // type. Nothing else is, and `User-Agent` least of all.
+    const helper = readFileSync("src/server/githubRequestHeaders.pure.ts", "utf8");
+    const fn = helper.slice(helper.indexOf("export function githubApiHeaders"));
+    expect(fn).toContain('"User-Agent": GITHUB_USER_AGENT');
+    // An override map spread over the return would let a caller drop it.
+    expect(code(fn)).not.toMatch(/\.\.\.overrides/);
+  });
+});
+
 describe("a streaming refusal says which kind it was", () => {
   const src = readFileSync("src/server/prime-backend.server.ts", "utf8");
   const fn = src.slice(src.indexOf("async function fetchBlobTextStream"));
