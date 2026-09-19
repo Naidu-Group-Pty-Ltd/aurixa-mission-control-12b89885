@@ -18,6 +18,7 @@ import type { AdminSeedReport } from "./cloneAdminIdentity.pure";
 import type { PrimeBackendSnapshot } from "./prime-backend.server";
 import type { StageName, StageResult } from "./schema-introspection.server";
 import { resolveMissionControlOrigin } from "./missionControlLink.pure";
+import { cursorRanPastEnd } from "./chunkCursorStore.pure";
 
 const MGMT_API = "https://api.supabase.com/v1";
 
@@ -2751,6 +2752,31 @@ async function applyChunkedSeed(
       };
     }
     throw e;
+  }
+  if (cursorRanPastEnd(skip, index)) {
+    /*
+      A CURSOR THE FILE CANNOT SUPPORT IS NOT A REASON TO CALL THE SEED DONE.
+
+      Every statement was skipped and none was sent, because the cursor named
+      more statements than this seed has. Falling through to the line below
+      would return `stoppedEarly: false`, which the caller reads as "the seed
+      went" and answers by writing the migration's ledger row — recording a
+      version whose rows the clone does not hold, and making every later pass
+      skip it as applied.
+
+      Returned as a PAUSE carrying a zero cursor rather than a failure: the
+      clone is untouched and nothing is wrong with it, and a cursor of zero is
+      an ordinary value the next pass acts on by sending from the first
+      statement. Clearing the cursor instead would leave the caller's "leave it
+      alone" branch holding the bad value for ever, which is the same livelock
+      one layer along.
+    */
+    return {
+      applied: 0,
+      stoppedEarly: true,
+      cursor: { migrationId: m.id, statementsDone: 0 },
+      upstreamRefusal: null,
+    };
   }
   return { applied, stoppedEarly: false, cursor: null, upstreamRefusal: null };
 }

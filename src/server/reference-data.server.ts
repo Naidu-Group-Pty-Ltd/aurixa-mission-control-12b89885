@@ -237,8 +237,30 @@ export async function runReferenceDataSync(
 
   await reclaimStale(supabase);
 
-  // Pick a clone. `status = 'ready'` is the same gate the migration sync uses:
-  // never seed data into a schema that is mid-migration.
+  /*
+    Pick a clone.
+
+    `status = 'ready'` is this lane's OWN gate, and it is deliberately stricter
+    than the migration sync's — which is the opposite of what this comment used
+    to say ("the same gate the migration sync uses"). That lane's eligibility
+    admits a `failed` row carrying no migration block on purpose, because such
+    a row was failed by the PROVISIONING lane and establishes nothing about the
+    schema; its claim is then a compare-and-swap on whatever status eligibility
+    was decided against, never a requirement of `ready`. Measured 19 Sep 2026:
+    the 11:00 fleet pass claimed `npc-client-dashboard` while it read `failed`.
+
+    Stricter is the right answer HERE — seeding a catalogue into a schema that
+    may be mid-rebuild is not something `on conflict do nothing` makes safe —
+    but the cost has to be stated rather than hidden behind a false equivalence:
+    a clone that goes `failed` stops receiving reference data entirely, with
+    nothing reporting it, and `npc-client-dashboard` sat that way from 14 Sep.
+
+    Widening this gate is NOT the fix for that, and must not be done before
+    `skipped` stops being terminal: a clone admitted while it is still behind on
+    migrations has every table it does not yet hold marked `skipped`, and a
+    skipped table is never retried — so it would trade a visible freeze for a
+    permanent, silent gap.
+  */
   let q = supabase
     .from("clone_backends")
     .select("clone_id, supabase_project_ref")
@@ -283,10 +305,54 @@ export async function runReferenceDataSync(
     .maybeSingle();
   const cloneName = cloneRow?.name ?? cloneId;
 
-  const { data: stateRows } = await supabase
+  const { data: stateRows, error: stateErr } = await supabase
     .from("clone_reference_syncs")
-    .select("table_name, cursor, rows_copied, status")
+    .select("table_name, cursor, rows_copied, status, detail, notified_detail")
     .eq("clone_id", cloneId);
+  /*
+    A STATE READ THAT FAILED IS NOT A CLONE WITH NO STATE.
+
+    The `error` here was discarded, and `data` is null on a failure, so
+    `stateOf` came out EMPTY and every table read as never visited: complete
+    tables re-copied from the first page, cursors ignored, and — since this
+    commit — every recorded failure announced again as though it were new. On
+    a clone carrying the 500 Investment Compass masters and a 24,294-row
+    sanctions register that is a full re-walk of twenty-four tables against the
+    prime, on every pass, for as long as the read keeps failing.
+
+    Pre-existing, and reachable from today: adding `notified_detail` to this
+    select means a deployment that lands before its migration reads 42703 here
+    on a column the table does not have yet. `apply-migrations.yml`'s own header
+    states the rule — "a column that exists before its reader is inert, a column
+    that arrives after is a 42703" — and this is the read it lands on.
+
+    So it refuses, exactly as the three reads above it already do: the candidate
+    list that could not be read, the claim that errored, and the prime-ref
+    guard. It is the same rule `readCase()` pays for in the AML module, where a
+    discarded 42703 made twelve handlers report "Case not found" about a case
+    the operator had open.
+
+    The claim is released first. This is the one refusal that happens AFTER the
+    claim, and returning without it parks the clone until the stale-claim sweep.
+  */
+  if (stateErr) {
+    const { error: relErr } = await supabase
+      .from("clone_backends")
+      .update({ reference_sync_started_at: null })
+      .eq("clone_id", cloneId);
+    if (relErr) {
+      console.error("[reference-data] could not release claim after a failed state read", {
+        cloneId,
+        error: relErr.message,
+      });
+    }
+    return {
+      ...EMPTY,
+      cloneId,
+      cloneName,
+      error: `Could not read this clone's reference-sync state: ${stateErr.message}`,
+    };
+  }
   const stateOf = new Map((stateRows ?? []).map((r) => [r.table_name, r]));
   // A parent's copy is not finished while a child referencing it is
   // unfinished: `complete` is terminal, so without this a long child advances
@@ -305,6 +371,8 @@ export async function runReferenceDataSync(
     const name = refName(entry);
     const prior = stateOf.get(name);
     const reopened = reopen.has(name);
+    /** Rows this attempt has copied, for a failure notice that is about it. */
+    let reached = prior?.rows_copied ?? 0;
     if (!reopened && (prior?.status === "complete" || prior?.status === "skipped")) {
       out.tables.push({
         table: name,
@@ -327,7 +395,17 @@ export async function runReferenceDataSync(
       continue;
     }
 
-    const record = async (fields: Record<string, unknown>) => {
+    /**
+     * Records progress, and says whether the write LANDED.
+     *
+     * Swallowing the error is right: a page that copied is copied whether or
+     * not this row records it, and throwing here would fail a table over its
+     * own bookkeeping. What was missing is the answer coming back, because
+     * `reached` below is a claim about what this ROW says — and advancing it
+     * on a write that failed is how a notice comes to quote a count nothing
+     * stored.
+     */
+    const record = async (fields: Record<string, unknown>): Promise<boolean> => {
       const { error } = await supabase.from("clone_reference_syncs").upsert(
         {
           clone_id: cloneId,
@@ -343,7 +421,75 @@ export async function runReferenceDataSync(
           table: name,
           error: error.message,
         });
+        return false;
       }
+      return true;
+    };
+
+    /**
+     * ONE SPELLING OF "the operator has already been told this".
+     *
+     * Two paths announce a table that will not fill itself — the live-schema
+     * refusal below and the copy's own catch — and both are reached on every
+     * pass for ever, because only `complete` and `skipped` are terminal. The
+     * first version of this change put the comparison inline in the catch and
+     * left the refusal notifying unconditionally, which at the cadence beside
+     * it is up to ninety-six identical alerts a day for one table. Two
+     * spellings of one rule is how the two come to disagree; this is the one.
+     *
+     * A table that was not failing is news. A table now failing for a
+     * DIFFERENT reason is news — a 23503 becoming a 42703 is a different fault
+     * with a different remedy. The same error on the same table is a state the
+     * operator has already been told about, and `clone_reference_syncs` still
+     * carries it in full for anyone looking.
+     *
+     * It reads `prior`, the snapshot taken before this pass touched the row,
+     * which is exactly right: the question is what the operator was told LAST
+     * time, not what this pass has just written.
+     *
+     * AND IT KEYS ON THE DELIVERY, NOT ON THE STATE.
+     *
+     * The first version compared `status === "failed" && detail === detail`,
+     * and that predicate is wrong in a way invisible until the day it deploys.
+     * This table has carried failures with reasons since long before anything
+     * notified at all — the catch recorded and announced nothing, which is the
+     * silence this whole change exists to end. Every one of those rows would
+     * have answered "the same failure as before" on the first pass after
+     * deployment, and suppressed for ever the alert that was owed. On the two
+     * rows that motivated the work — `aml.sanctions_entries` on NPC Test since
+     * 12 Sep, `aml.retention_schedules` on npc-client-dashboard since 14 Sep —
+     * it would have preserved exactly the silence it was written to break.
+     *
+     * The same hole swallows a notice whose insert FAILED: `notifyOperators`
+     * logs and returns, so the failure row is written either way and the next
+     * pass reads it as proof of a delivery that never happened.
+     *
+     * So `notified_detail` is the key: the reason an operator was last
+     * successfully told about, written only after the insert succeeded and
+     * cleared when the table stops failing, so a recurrence after a repair is
+     * news again. NULL on every historical row, which is the point.
+     */
+    const isRepeatFailure = (detail: string): boolean => prior?.notified_detail === detail;
+
+    /**
+     * Announce a failure unless the operator already holds this exact one, and
+     * remember it only if the notice actually went.
+     *
+     * Both notifying paths go through here so they cannot hold different ideas
+     * of what has been reported — the defect that produced this helper's
+     * predecessor was one path fixed and the other left announcing on every
+     * pass.
+     */
+    const announceFailure = async (
+      detail: string,
+      notice: Parameters<typeof notifyOperators>[0],
+    ): Promise<void> => {
+      if (isRepeatFailure(detail)) return;
+      const delivered = await notifyOperators(notice);
+      // Only a delivered notice is remembered. An insert that failed leaves the
+      // marker alone, so the next pass tries again rather than recording a
+      // silence as a report.
+      if (delivered) await record({ notified_detail: detail });
     };
 
     try {
@@ -355,6 +501,9 @@ export async function runReferenceDataSync(
           status: "skipped",
           detail: "the clone does not have this table yet — it is behind on migrations",
           completed_at: new Date().toISOString(),
+          // Stopped failing, so the next failure is news again — including the
+          // same one, which after a repair is a REGRESSION and not a repeat.
+          notified_detail: null,
         });
         out.tables.push({
           table: name,
@@ -382,7 +531,10 @@ export async function runReferenceDataSync(
           sourceRows: null,
           detail: plan.refusal,
         });
-        await notifyOperators({
+        // An unclassified column is stable: it is the same refusal next pass
+        // and the pass after that. Announced on the transition, by the same
+        // helper the catch answers to.
+        await announceFailure(plan.refusal, {
           kind: "cascade_failed",
           severity: "error",
           title: `Reference sync refused ${name}`,
@@ -412,6 +564,12 @@ export async function runReferenceDataSync(
       });
 
       const carried = reopened ? 0 : (prior?.rows_copied ?? 0);
+      // Where this attempt got to, kept OUTSIDE the try so the catch can read
+      // it. `prior` is the snapshot taken before any page was copied, so a
+      // table that landed nine pages and failed on the tenth reported the
+      // count it started with — usually zero — under a sentence promising the
+      // count it stopped at.
+      reached = carried;
       const { rowsCopied, complete, cursor } = await copyTable({
         entry,
         primeRef,
@@ -420,7 +578,14 @@ export async function runReferenceDataSync(
         deadline,
         now,
         onProgress: async (c, n) => {
-          await record({ cursor: c, rows_copied: carried + n, status: "copying" });
+          const landed = await record({ cursor: c, rows_copied: carried + n, status: "copying" });
+          // Only a CONFIRMED write moves it. `record` swallows its error, so a
+          // progress write that failed leaves the row holding the older count
+          // and the older cursor — and the catch below upserts `status` and
+          // `detail` alone, which preserves both. Advancing regardless is how
+          // the notice comes to name a count the row does not carry, under a
+          // sentence promising the count it stopped at.
+          if (landed) reached = carried + n;
         },
       });
 
@@ -432,6 +597,10 @@ export async function runReferenceDataSync(
         source_rows: sourceRows,
         detail: complete ? null : "resumed on the next run",
         completed_at: complete ? new Date().toISOString() : null,
+        // Cleared only where the table FINISHED. A pass that merely got
+        // further is still inside the same failure if it hits one again, and
+        // clearing on `copying` would put the flood back one pass later.
+        ...(complete ? { notified_detail: null } : {}),
       });
       out.tables.push({
         table: name,
@@ -446,9 +615,62 @@ export async function runReferenceDataSync(
       out.tables.push({
         table: name,
         status: "failed",
-        rowsCopied: prior?.rows_copied ?? 0,
+        rowsCopied: reached,
         sourceRows: null,
         detail,
+      });
+      /*
+        A TABLE THAT STOPPED HAS TO SAY SO.
+
+        The refusal thirty lines above — a live schema this allow-list has not
+        classified — notifies. This did not, and the two are the same kind of
+        event to the tenant: a table that is not going to fill itself.
+
+        Measured 19 Sep 2026. `aml.sanctions_entries` on NPC Test has read
+        `failed` at 21,600 of 24,294 rows since 12 Sep with a 23503 naming the
+        exact key it could not place, and nothing anywhere announced it. Nothing
+        else in this codebase reads `clone_reference_syncs` either — only
+        `migrationAssertions.pure.ts`, which is a static declaration — so the
+        row WAS the whole report, and no one was reading it.
+
+        Worth notifying even though the sync retries: a table whose failure is
+        deterministic retries into the same error every hour for ever, which is
+        indistinguishable from progress in every reading except this one. The
+        status line is the copy an operator acts on, so it carries the table,
+        the count it reached and the source's own words rather than a summary
+        of them.
+      */
+      /*
+        ONCE PER FAILURE, NOT ONCE PER PASS.
+
+        Only `complete` and `skipped` are terminal, so a failed table is
+        retried every pass for ever — and the cadence beside this change makes
+        that four times an hour. Notifying each time turns one broken table
+        into ninety-six alerts a day, and a shared outage into a feed nobody
+        can read past; an alert that fires on a schedule is an alert people
+        mute, which costs the silence this whole change exists to end.
+
+        So the notice is about the TRANSITION. A table that was not failing is
+        news, and a table now failing for a DIFFERENT reason is news — the
+        23503 becoming a 42703 is a different fault with a different remedy.
+        The same error on the same table is the state an operator has already
+        been told about, and `clone_reference_syncs` still carries it in full
+        for anyone looking.
+      */
+      await announceFailure(detail, {
+        kind: "cascade_failed",
+        severity: "error",
+        title: `Reference sync stopped on ${name} for ${cloneName}`,
+        body:
+          `Copying ${name} into this clone stopped at ${reached} row(s): ${detail}. ` +
+          "The rows already copied are kept and the next pass resumes from the same cursor, so " +
+          "this will repeat until the cause is fixed — you are told once per distinct failure, " +
+          "not once per pass. Reference data a clone is missing is not tenant data: it is the " +
+          "seeded catalogue the product reads, and a clone without it cannot draw the documents " +
+          "that depend on it.",
+        cloneId,
+        url: `/clones/${cloneId}`,
+        metadata: { table: name, rows_copied: reached },
       });
     }
   }

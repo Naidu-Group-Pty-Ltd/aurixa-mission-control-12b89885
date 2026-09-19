@@ -61,7 +61,20 @@ export async function writeAuditLog(entry: AuditEntry): Promise<void> {
 }
 
 /** Raise an operator notification. Never throws; a failed write is logged. */
-export async function notifyOperators(input: OperatorNotification): Promise<void> {
+/**
+ * Raises one operator notification, and says whether it LANDED.
+ *
+ * Swallowing the insert error stays: a notification is best-effort beside the
+ * act it describes, and throwing here would fail the work over its own
+ * reporting. Every existing caller ignores the answer and is unchanged.
+ *
+ * The boolean exists because a caller that DEDUPLICATES needs it. Anything
+ * asking "have we already told them about this?" must key on a delivery, and a
+ * caller that cannot tell a delivered notice from a swallowed one will record
+ * the failed insert as proof that an operator was informed — which is a
+ * permanent silence rather than a lost message.
+ */
+export async function notifyOperators(input: OperatorNotification): Promise<boolean> {
   const { error } = await supabaseAdmin.from("notifications").insert({
     kind: input.kind,
     severity: input.severity ?? "info",
@@ -73,5 +86,7 @@ export async function notifyOperators(input: OperatorNotification): Promise<void
   });
   if (error) {
     console.error(`[notify] failed to raise "${input.kind}" (${input.title}):`, error.message);
+    return false;
   }
+  return true;
 }

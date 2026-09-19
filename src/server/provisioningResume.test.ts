@@ -166,8 +166,28 @@ describe("the pipeline is budgeted and resumable", () => {
     expect(after).toContain("input.onProjectRef?.(projectRef)");
   });
 
+  /**
+   * The `.update({ … })` a named callback performs, as source.
+   *
+   * Anchored to the statement rather than taken as a byte window from the
+   * callback's name. `code()` BLANKS comment lines rather than removing them,
+   * so a window measured in bytes shrinks every time somebody explains
+   * something above the write — which is exactly how this file's two
+   * assertions here came to fail on a change that added no code at all. A
+   * slice that ends at the call it is about cannot be wrong that way.
+   */
+  const updateCallIn = (src: string, anchor: string): string => {
+    const at = src.indexOf(anchor);
+    expect(at, `anchor not found: ${anchor}`).toBeGreaterThan(-1);
+    const update = src.indexOf(".update(", at);
+    expect(update, `no .update( after ${anchor}`).toBeGreaterThan(at);
+    const end = src.indexOf("})", update);
+    expect(end).toBeGreaterThan(update);
+    return src.slice(update, end + 2);
+  };
+
   it("the runner wires onProjectRef to a clone_backends write", () => {
-    expect(code(runner())).toMatch(/onProjectRef[\s\S]{0,400}supabase_project_ref: ref/);
+    expect(updateCallIn(code(runner()), "onProjectRef")).toContain("supabase_project_ref: ref");
   });
 
   /**
@@ -180,13 +200,17 @@ describe("the pipeline is budgeted and resumable", () => {
    * statement, which is why they must not drift apart.
    */
   it("clears the schema verification when a fresh project is recorded", () => {
-    const src = code(runner());
-    const at = src.indexOf("onProjectRef");
-    expect(at).toBeGreaterThan(-1);
-    const body = src.slice(at, at + 400);
+    const body = updateCallIn(code(runner()), "onProjectRef");
     expect(body).toContain("supabase_project_ref: ref");
     expect(body, "a new project carries no verification of the old one").toContain(
       "schema_verified_at: null",
+    );
+    // And the cursor, for the same reason with a worse failure: "the first N
+    // statements landed" is true of the database they landed in and of no
+    // other, so a survivor makes the next fleet pass skip them against an
+    // empty schema and then record the migration as applied.
+    expect(body, "a new project holds none of the statements a cursor counts").toContain(
+      "chunk_cursor: null",
     );
   });
 
