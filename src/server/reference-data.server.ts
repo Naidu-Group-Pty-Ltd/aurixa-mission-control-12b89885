@@ -305,10 +305,54 @@ export async function runReferenceDataSync(
     .maybeSingle();
   const cloneName = cloneRow?.name ?? cloneId;
 
-  const { data: stateRows } = await supabase
+  const { data: stateRows, error: stateErr } = await supabase
     .from("clone_reference_syncs")
     .select("table_name, cursor, rows_copied, status, detail, notified_detail")
     .eq("clone_id", cloneId);
+  /*
+    A STATE READ THAT FAILED IS NOT A CLONE WITH NO STATE.
+
+    The `error` here was discarded, and `data` is null on a failure, so
+    `stateOf` came out EMPTY and every table read as never visited: complete
+    tables re-copied from the first page, cursors ignored, and — since this
+    commit — every recorded failure announced again as though it were new. On
+    a clone carrying the 500 Investment Compass masters and a 24,294-row
+    sanctions register that is a full re-walk of twenty-four tables against the
+    prime, on every pass, for as long as the read keeps failing.
+
+    Pre-existing, and reachable from today: adding `notified_detail` to this
+    select means a deployment that lands before its migration reads 42703 here
+    on a column the table does not have yet. `apply-migrations.yml`'s own header
+    states the rule — "a column that exists before its reader is inert, a column
+    that arrives after is a 42703" — and this is the read it lands on.
+
+    So it refuses, exactly as the three reads above it already do: the candidate
+    list that could not be read, the claim that errored, and the prime-ref
+    guard. It is the same rule `readCase()` pays for in the AML module, where a
+    discarded 42703 made twelve handlers report "Case not found" about a case
+    the operator had open.
+
+    The claim is released first. This is the one refusal that happens AFTER the
+    claim, and returning without it parks the clone until the stale-claim sweep.
+  */
+  if (stateErr) {
+    const { error: relErr } = await supabase
+      .from("clone_backends")
+      .update({ reference_sync_started_at: null })
+      .eq("clone_id", cloneId);
+    if (relErr) {
+      console.error("[reference-data] could not release claim after a failed state read", {
+        cloneId,
+        error: relErr.message,
+      });
+    }
+    return {
+      ...EMPTY,
+      cloneId,
+      cloneName,
+      error: `Could not read this clone's reference-sync state: ${stateErr.message}`,
+    };
+  }
   const stateOf = new Map((stateRows ?? []).map((r) => [r.table_name, r]));
   // A parent's copy is not finished while a child referencing it is
   // unfinished: `complete` is terminal, so without this a long child advances

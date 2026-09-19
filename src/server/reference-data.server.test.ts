@@ -36,6 +36,22 @@ const state = vi.hoisted(() => ({
    * marker these tests cover.
    */
   notifyFails: false,
+  /** When set, reading this clone's per-table state answers an error. */
+  syncStateReadError: null as { message: string } | null,
+  /**
+   * Every `clone_backends` update, with the filters that shaped it.
+   *
+   * The values alone are not enough: the stale-claim RECLAIM at the top of
+   * every pass writes `reference_sync_started_at: null` too, so a test reading
+   * only the payload cannot tell a release from a sweep. One did, and passed
+   * with the release deleted. The filters separate them — the reclaim sweeps by
+   * age (`lt`), a release names one clone (`eq clone_id`).
+   */
+  backendUpdates: [] as Array<{
+    values: Record<string, unknown>;
+    eqClone: boolean;
+    byAge: boolean;
+  }>,
 }));
 
 vi.mock("./prime-backend.server", () => ({
@@ -68,12 +84,20 @@ import { REFERENCE_TABLES, refName } from "./referenceTables.pure";
 
 /** Minimal supabase-js double covering exactly the chains the worker uses. */
 function fakeSupabase() {
-  const backendsUpdateChain = () => {
+  const backendsUpdateChain = (values?: Record<string, unknown>) => {
+    const call = { values: values ?? {}, eqClone: false, byAge: false };
+    state.backendUpdates.push(call);
     const b: Record<string, unknown> = {
-      eq: () => b,
+      eq: (col: string) => {
+        if (col === "clone_id") call.eqClone = true;
+        return b;
+      },
       is: () => b,
       not: () => b,
-      lt: () => b,
+      lt: () => {
+        call.byAge = true;
+        return b;
+      },
       select: async () => ({
         data: state.claimError ? null : [{ clone_id: CLONE_ID }],
         error: state.claimError,
@@ -88,7 +112,7 @@ function fakeSupabase() {
   const from = (table: string): Record<string, unknown> => {
     if (table === "clone_backends") {
       return {
-        update: () => backendsUpdateChain(),
+        update: (values: Record<string, unknown>) => backendsUpdateChain(values),
         select: () => {
           const b: Record<string, unknown> = {
             eq: () => b,
@@ -113,7 +137,10 @@ function fakeSupabase() {
     if (table === "clone_reference_syncs") {
       return {
         select: () => ({
-          eq: async () => ({ data: [...state.syncRows.values()], error: null }),
+          eq: async () =>
+            state.syncStateReadError
+              ? { data: null, error: state.syncStateReadError }
+              : { data: [...state.syncRows.values()], error: null },
         }),
         upsert: async (values: Record<string, unknown>) => {
           if (state.syncUpsertRefuses?.(values)) {
@@ -158,6 +185,8 @@ beforeEach(() => {
   state.pickError = null;
   state.syncUpsertRefuses = null;
   state.notifyFails = false;
+  state.syncStateReadError = null;
+  state.backendUpdates = [];
 });
 
 describe("runReferenceDataSync", () => {
@@ -388,6 +417,45 @@ describe("runReferenceDataSync", () => {
       state.claimError = { message: "deadlock detected" };
       const out = await runReferenceDataSync(fakeSupabase());
       expect(out.error).toMatch(/Could not claim the clone: deadlock detected/);
+    });
+
+    /*
+      A STATE READ THAT FAILED IS NOT A CLONE WITH NO STATE.
+
+      The `error` on this read was discarded and `data` is null on a failure,
+      so every table read as never visited: complete tables re-copied from the
+      first page, cursors ignored, every recorded failure announced again. On a
+      clone holding the 500 Investment Compass masters and a 24,294-row
+      sanctions register that is a full re-walk of twenty-four tables against
+      the prime, on every pass, for as long as the read keeps failing.
+
+      The sibling reads above already refuse — the candidate list, the claim,
+      the prime-ref guard. This one was missed, and it is the same rule
+      `readCase()` pays for in the AML module.
+    */
+    it("a state read that FAILED is not a clone with nothing copied yet", async () => {
+      state.syncStateReadError = { message: '42703: column "notified_detail" does not exist' };
+      const out = await runReferenceDataSync(fakeSupabase());
+      expect(out.error, "a failed state read reported as an ordinary pass").toBeTruthy();
+      expect(out.error).toContain("42703");
+      expect(out.tables, "tables were walked without knowing what had been copied").toHaveLength(0);
+      expect(
+        state.ran.some((r) => r.includes("__cursor")),
+        "a page was read from the prime with no idea what this clone already holds",
+      ).toBe(false);
+    });
+
+    it("and releases the claim it had already taken", async () => {
+      // The one refusal that happens AFTER the claim. Returning without
+      // releasing parks the clone until the stale-claim sweep.
+      state.syncStateReadError = { message: "connection reset" };
+      await runReferenceDataSync(fakeSupabase());
+      expect(
+        state.backendUpdates.some(
+          (u) => u.values.reference_sync_started_at === null && u.eqClone && !u.byAge,
+        ),
+        "the clone was left claimed by a pass that did nothing",
+      ).toBe(true);
     });
 
     it("refuses to advance on a page with no usable cursor", async () => {
