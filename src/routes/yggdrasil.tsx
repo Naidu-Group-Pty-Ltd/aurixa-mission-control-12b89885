@@ -9,9 +9,19 @@ import { useClones, usePrimeConfig } from "@/lib/queries";
 const YggdrasilTree = lazy(() =>
   import("@/components/yggdrasil/yggdrasil-tree").then((m) => ({ default: m.YggdrasilTree })),
 );
+// Lazy for the reason the diagram already is, and more so: the canopy pulls in
+// a WebGL renderer that nothing else on this console needs, so it must not sit
+// in the bundle every other page pays for.
+const YggdrasilCanopy = lazy(() =>
+  import("@/components/yggdrasil/yggdrasil-canopy").then((m) => ({ default: m.YggdrasilCanopy })),
+);
 import { TreeStats } from "@/components/yggdrasil/tree-stats";
 import { BackendIdentityPanel } from "@/components/yggdrasil/backend-identity-panel";
-import { YggdrasilToolbar, type StatusFilter } from "@/components/yggdrasil/yggdrasil-toolbar";
+import {
+  YggdrasilToolbar,
+  type StatusFilter,
+  type TreeView,
+} from "@/components/yggdrasil/yggdrasil-toolbar";
 import { TreePine } from "lucide-react";
 import { useServerFn } from "@tanstack/react-start";
 import { useNavigate } from "@tanstack/react-router";
@@ -27,6 +37,9 @@ const yggdrasilSearchSchema = z.object({
   selected: fallback(z.string(), "").default(""),
   descendants: fallback(z.boolean(), false).default(false),
   compare: fallback(z.array(z.string()), []).default([]),
+  // In the URL with the rest of the view state, so a link to the canopy opens
+  // the canopy. `fallback` keeps an unrecognised value from throwing the route.
+  view: fallback(z.enum(["canopy", "diagram"]), "canopy").default("canopy"),
 });
 
 export const Route = createFileRoute("/yggdrasil")({
@@ -101,6 +114,18 @@ function YggdrasilPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [highlightId, setHighlightId] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  /**
+   * Why the canopy is not on screen, when it is not.
+   *
+   * Set once from the scene and never cleared: a context that would not open
+   * will not open on a re-render either, and a view that flickers back and
+   * forth is worse than one that stays away and says why. The toolbar disables
+   * the button rather than hiding it, so the reason is reachable.
+   */
+  const [canopyUnavailable, setCanopyUnavailable] = useState<string | null>(null);
+  const handleCanopyUnavailable = useCallback((reason: string) => {
+    setCanopyUnavailable(reason);
+  }, []);
 
   // Staged state — only written to URL on Apply
   const [stagedFilters, setStagedFilters] = useState<StatusFilter[]>(committedFilters);
@@ -391,6 +416,9 @@ function YggdrasilPage() {
         onClearFilters={handleClearFilters}
         multiSelectCount={stagedCompare.length}
         onClearSelection={() => setStagedCompare([])}
+        view={search.view}
+        onViewChange={(view) => updateSearch({ view })}
+        canopyUnavailable={canopyUnavailable}
       />
 
       {loading ? (
@@ -410,22 +438,33 @@ function YggdrasilPage() {
             </div>
           }
         >
-          <YggdrasilTree
-            clones={filteredClones}
-            primeName={primeName}
-            highlightId={highlightId}
-            zoom={zoom}
-            pan={pan}
-            onPanChange={setPan}
-            onLayoutReady={(nodes, dims) => {
-              layoutNodesRef.current = nodes;
-              treeDimensionsRef.current = dims;
-            }}
-            onNodeSelect={handleNodeSelect}
-            selectedNodeId={search.selected || null}
-            multiSelectedIds={stagedCompare}
-            onMultiSelectChange={handleMultiSelectChange}
-          />
+          {search.view === "canopy" && !canopyUnavailable ? (
+            <YggdrasilCanopy
+              clones={filteredClones}
+              primeName={primeName}
+              highlightId={highlightId}
+              selectedNodeId={search.selected || null}
+              onNodeSelect={handleNodeSelect}
+              onUnavailable={handleCanopyUnavailable}
+            />
+          ) : (
+            <YggdrasilTree
+              clones={filteredClones}
+              primeName={primeName}
+              highlightId={highlightId}
+              zoom={zoom}
+              pan={pan}
+              onPanChange={setPan}
+              onLayoutReady={(nodes, dims) => {
+                layoutNodesRef.current = nodes;
+                treeDimensionsRef.current = dims;
+              }}
+              onNodeSelect={handleNodeSelect}
+              selectedNodeId={search.selected || null}
+              multiSelectedIds={stagedCompare}
+              onMultiSelectChange={handleMultiSelectChange}
+            />
+          )}
         </Suspense>
       )}
     </div>
