@@ -517,6 +517,21 @@ export function isShippedPath(path: string): boolean {
  * and every ref counts as foreign: the cascade still runs, and the handful of
  * paths that name a project are held and named instead of written blind.
  */
+/**
+ * Do two readings name the same set of foreign projects?
+ *
+ * Order and repetition are not information here — a file may name a ref in a
+ * URL and again in the key's own `ref` claim — so this compares sets. Equal
+ * means nothing is being re-pointed; unequal means something is.
+ */
+function sameRefs(a: string[], b: string[]): boolean {
+  const left = new Set(a);
+  const right = new Set(b);
+  if (left.size !== right.size) return false;
+  for (const ref of left) if (!right.has(ref)) return false;
+  return true;
+}
+
 export function backendIdentityHold(args: {
   path: string;
   primeContent: string;
@@ -546,9 +561,44 @@ export function backendIdentityHold(args: {
     };
   }
 
-  // The clone's copy names one too — nothing is being reverted, so this is
-  // prime moving and the clone following. Not this guard's business.
-  if (foreign(cloneContent).length > 0) return null;
+  const cloneForeign = foreign(cloneContent);
+  if (cloneForeign.length > 0) {
+    // The clone's copy names the SAME foreign project. Nothing is being
+    // re-pointed — this is prime moving and the clone following, and holding
+    // it would be the nuisance the header warns about: three
+    // `supabase/functions/**` files in the mirror name the prime today,
+    // inherited and never fixed, and a "needs a human" section that is never
+    // empty is one nobody reads.
+    if (sameRefs(cloneForeign, primeForeign)) return null;
+
+    // A DIFFERENT foreign project, which is a re-pointing rather than a
+    // follow. This branch used to be part of the stand-down above, and it was
+    // safe for exactly as long as prime was the only thing a cascade could
+    // read from: with one source, "the clone already names somebody else's
+    // project" really did mean "nothing is being reverted here".
+    //
+    // `cascade_follows_lineage` ended that. A clone whose parent is another
+    // clone receives the PARENT'S tree, so a shipped file can go from naming
+    // the prime's project to naming a SIBLING'S — measured 20 Sep 2026 on
+    // `npc-test-76b3b3` and `preflight-property-group`, whose
+    // `public/lead-magnet-embed.html` carried the prime's ref and key and
+    // would have been handed `npc-client-dashboard`'s. Both values are wrong
+    // for those deployments; the incoming one is worse, because their own
+    // `backendIsolation.spec.ts` fails on the PRIME's ref alone, so the write
+    // would have turned a detectable defect into a green one.
+    //
+    // Swapping one foreign tenant for another is never a follow, whoever the
+    // source is.
+    return {
+      path,
+      pattern: "(content: foreign backend ref)",
+      reason: "manual_reconcile",
+      note:
+        `This clone's copy names Supabase project ${cloneForeign.join(", ")} and the incoming ` +
+        `copy names ${primeForeign.join(", ")} — neither is this deployment's. Writing it would ` +
+        `re-point a shipped file from one foreign tenant's database to another's.`,
+    };
+  }
 
   return {
     path,
