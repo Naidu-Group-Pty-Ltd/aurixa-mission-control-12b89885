@@ -256,10 +256,63 @@ export async function* chunkSeedStatements(
     groupBytes = overhead;
   };
 
-  // `walk` is pull-based on the stream and push-based on tuples; the
-  // statements it completes are queued and yielded between lines so the
-  // consumer sees each one as soon as it is whole. The queue never holds more
-  // than one finished statement plus the group being filled.
+  /*
+    NOTHING IS HANDED OVER UNTIL THE SECOND READ HAS AGREED WITH THE FIRST, AND
+    THAT IS WHY EVERY STATEMENT IS HELD.
+
+    The comment that stood here said the statements were "queued and yielded
+    between lines so the consumer sees each one as soon as it is whole", and
+    that "the queue never holds more than one finished statement plus the group
+    being filled". Both were false. `ready` is drained only after `await
+    walking`, so the WHOLE file is read before the first statement is handed
+    over — measured by effect on a 400-tuple fixture: 4,101 of 4,101 stream
+    chunks consumed before statement 1 of 101 arrived.
+
+    It is false in the safe direction, and the buffering is load-bearing rather
+    than incidental. Every statement this yields is
+    `remembered header + fresh tuples + remembered onConflict`, and the four
+    comparisons below are what make that safe. Two of them CANNOT be made any
+    earlier:
+
+      * `onConflict` sits after the last tuple, so it is unknown until EOF.
+      * `tail` sits after that.
+
+    Yield a statement before EOF and it goes out under a conflict clause this
+    pass has not yet checked. If the prime changed `DO UPDATE SET` to
+    `DO NOTHING` between the two reads, rows are updated that the new body
+    wanted left alone — and the next pass cannot repair it, because under the
+    new clause it never writes those rows at all. That is a permanent wrong
+    write, where holding the statements costs only memory.
+
+    THE MEMORY IS REAL, IS NOT BOUNDED BY `maxStatementBytes`, AND IS 35 MB.
+
+    `ready` grows to the whole file, which `maxStatementBytes` bounds one
+    statement of and not the queue. MEASURED rather than reasoned about, on a
+    41,335,822-byte fixture of 543 tuples built to the real seed's shape: 43
+    statements, and the heap grows 34.7 MB between entering this function and
+    the first statement being handed over — about 88% of the body's bytes.
+
+    That corrects a figure I put in this comment and in a commit message. I had
+    said ~84 MB, doubling for UTF-16; V8 stores an ASCII string as a ONE-byte
+    string, so the queue is ~1x the file rather than ~2x. The overstatement
+    mattered, because it turned "a large fraction of the ceiling" into "almost
+    certainly fatal".
+
+    What is left is still worth knowing: ~27% of a 128 MB isolate, held for the
+    whole send, for one migration of one clone, in a runtime whose ceiling is
+    the stated reason `openPrimeMigrationCorpus` refuses a body at 8 MB. A pass
+    killed for it would be indistinguishable in the record from one killed on
+    wall clock, which is the shape measured on 19 Sep 2026 — so it remains a
+    POSSIBLE reading of that symptom and not a demonstrated one.
+
+    Fixing it needs `onConflict` and `tail` known BEFORE the streaming pass — a
+    ranged read of the blob's last few kilobytes — which is an API
+    `PrimeMigrationCorpus` does not have.
+
+    `seedChunking.test.ts` pins both halves of this: nothing is yielded before
+    EOF, and nothing is yielded before a disagreement throws. Do not
+    "optimise" the queue away without reading them.
+  */
   const walking = walk(chunks, (tuple) => {
     rowsSeen += 1;
     const bytes = byteLength(tuple) + 2;
@@ -268,9 +321,8 @@ export async function* chunkSeedStatements(
     groupBytes += bytes;
   });
 
-  // Yield as statements complete. `walk` runs to completion here; the queue
-  // is drained after it, which keeps this simple and still bounded because a
-  // statement is at most `maxStatementBytes` and the group at most one more.
+  // EOF, and only now is anything known about the ON CONFLICT clause or the
+  // tail. Every comparison below therefore runs before `ready` is drained.
   const finalShape = await walking;
   flush();
 
@@ -283,6 +335,28 @@ export async function* chunkSeedStatements(
   if (finalShape.header !== shape.header || finalShape.onConflict !== shape.onConflict) {
     throw new SeedShapeError(
       "the second read's header or ON CONFLICT clause differs from the first — refusing to send",
+    );
+  }
+  /*
+    AND THE TAIL, WHICH IS THE ONE THIS CHECK USED TO MISS.
+
+    The three comparisons above guard what the tuples are poured INTO. The
+    tail is different in kind: it is executed verbatim, and it is taken from
+    the REMEMBERED shape rather than the one just derived — so without this a
+    file whose trailing statements changed, while its header, ON CONFLICT and
+    tuple count did not, would run the old tail against the new tuples and
+    then be recorded as applied.
+
+    Not hypothetical on this corpus. The template seed's tail is an `UPDATE …
+    SET status = 'published' … WHERE slug IN (…)` naming every slug one by
+    one, so an edit that swaps one slug for another leaves all three of the
+    other readings identical. Raised by review against the cross-pass shape,
+    where the interval between the two readings stopped being microseconds
+    and became however long a clone sits mid-seed.
+  */
+  if (finalShape.tail !== shape.tail) {
+    throw new SeedShapeError(
+      "the second read's trailing statements differ from the first — refusing to send",
     );
   }
 

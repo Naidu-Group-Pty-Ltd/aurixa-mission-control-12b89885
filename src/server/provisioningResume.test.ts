@@ -2499,9 +2499,16 @@ describe("a fleet-sync pass that did nothing says nothing", () => {
     expect(guarded, "the blockage record and the sentence must not share a gate").toContain(
       "...(blockage.entries === null ? {} : { migrations_applied: blockage.entries })",
     );
-    // The guard itself, on both spellings — `.eq` never matches NULL.
-    expect(guarded).toContain('write.eq("status_detail", inspected)');
-    expect(guarded).toContain('write.is("status_detail", null)');
+    // The guard itself, on both spellings — `.eq` never matches NULL. Pinned
+    // without the builder's variable name, which has been renamed once.
+    expect(guarded).toContain('.eq("status_detail", inspected)');
+    expect(guarded).toContain('.is("status_detail", null)');
+    // And the CLAIM fences it too, so a pass that was reclaimed mid-run
+    // records no reading about a row it no longer owns. `.select` is what
+    // makes a miss visible at all — a fenced update that asks for nothing
+    // back returns no error and no rows whether it landed or not.
+    expect(guarded).toContain('.eq("worker_started_at", claimedAt)');
+    expect(guarded).toContain('.select("clone_id")');
     // A miss is deference, not a failure: it must not fail the clone or stop
     // the run, because nothing about the clone changed this pass.
     const tail = guarded.slice(0, guarded.indexOf("}\n", guarded.indexOf("noopErr")) + 2);

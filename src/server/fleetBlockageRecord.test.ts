@@ -448,8 +448,12 @@ describe("a pass that stopped early knows nothing about being level", () => {
       to describe one clone's level differently.
     */
     const lane = read("src/server/fleet-migration.server.ts");
+    // The last rung is the other session's wording, arrived at independently
+    // on the same defect and better than mine: it states a fact about the
+    // CLONE ("no migration recorded yet") where mine still named the prime's
+    // frontier. Taken on the merge; what is pinned is the middle rung.
     expect(lane).toContain(
-      'latestApplied ?? backend.migration_version ?? "the prime\'s latest recorded migration"',
+      'latestApplied ?? backend.migration_version ?? "no migration recorded yet"',
     );
     // Handed the const, never a second resolution of its own.
     const call = lane.slice(lane.indexOf("blockageDetailFor({"));
