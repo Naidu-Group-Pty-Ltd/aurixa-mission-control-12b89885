@@ -206,10 +206,36 @@ hazard existed outlives the hazard._
    failure, which is the same class of misleading signal that cost the two days
    above.
 
-   One thing to decide before treating it as merely stale data.
-   `clearStaleMigrationFailure` compare-and-swaps on `status = 'failed'`
-   without reading WHY the clone failed, so a successful migration pass over
-   either clone will clear a PROVISIONING verdict on evidence about
-   MIGRATIONS. That is the outcome this item wants and it is reached by a lane
-   that did not establish it — the inverse of the defect fixed under #232 one
-   file away. Worth an explicit decision rather than being left to happen.
+   **The decision this flagged has been taken, and the measurement changed
+   its shape.** `clearStaleMigrationFailure` compare-and-swaps on
+   `clone_backends.status = 'failed'` without reading WHY, which read like the
+   inverse of the defect #232 fixed one file away. Measured 20 Sep 2026 it is
+   more absolute than that: the migration lane **never writes that column at
+   all** — the only writer of `status: "failed"` there is the provisioning
+   path in `src/lib/backend-provisioning.functions.ts`, and
+   `fleet-migration.server.ts` writes `migration_blocked_at` /
+   `migration_blocked_reason` instead, saying why in its own comment
+   ("`status` is shared with the provisioning drain and says nothing reliable
+   about a schema"). So a provisioning verdict is not one outcome among
+   several; it is the only kind that swap can ever clear.
+
+   **Kept, because it is deliberate and defensible.** The call site says
+   "whatever verdict another lane left, it is not true now", and a pass that
+   carried a clone level with the prime has proved the backend exists, is
+   reachable and accepts DDL. What it lacked was an assertion that the premise
+   holds, so the day the migration lane starts writing `status` the reasoning
+   gets reread instead of quietly becoming false.
+
+   **One real defect was adjacent and is fixed.** `recordAppliedVersion`
+   returned void, so the transition could not tell "just moved to this
+   version" from "the drain already carried it past". In the second case the
+   forward-only WHERE matches nothing, no reading is written, and the swap
+   flips `failed` to `ready` with `Provisioning ceiling exceeded` still in
+   `status_detail` — a healthy status over another lane's failure reason,
+   which is this item's own symptom pointing the other way. The fact write now
+   reports whether the reading landed; where it did not, the transition writes
+   `status_detail: null`, because the only thing it has earned is that the
+   verdict is stale.
+
+   What remains open is the data, not the code: nothing has run for these two
+   clones yet.
