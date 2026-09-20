@@ -514,18 +514,29 @@ async function runBackendProvisioning(
             branch: cloneRow.default_branch ?? undefined,
           },
           result.projectRef,
-          // The shipped pair — `public/lead-magnet-embed.html`,
-          // `src/integrations/supabase/env.ts`, `.env.example` — needs the KEY
-          // as well as the ref, and is never half-written without it.
+          // The shipped pair — the embed under `public/`, `.env.example`
+          // and whichever module DECLARES the built-in fallback — needs the
+          // KEY as well as the ref, and is never half-written without it.
+          // The declaring module is discovered rather than named: it is
+          // `env.ts` on most deployments and `supabaseTarget.pure.ts` where
+          // the reads have been split out, and a named path that has moved
+          // reads as `absent`, which does not fail a retarget.
           result.anonKey,
         );
+        // Each failure carries its own reason, and they are not all the same
+        // kind of thing: "this file still names another project" and "nothing
+        // in this repository will ever check that it does not" send an
+        // operator to opposite remedies. The line used to assert the first
+        // about every one of them, so a missing identity guard would have been
+        // reported as a file naming a foreign project — a true-sounding
+        // sentence about something that did not happen.
         const failedRetarget = repoRetarget.actions.filter((a) => a.status === "failed");
         if (failedRetarget.length > 0) {
           await updateStatus(
             "migrating",
-            `Repository still names another project in ${failedRetarget.length} place(s): ${failedRetarget
-              .map((a) => a.target)
-              .join(", ")}`,
+            `Repository re-target left ${failedRetarget.length} item(s) unresolved: ${failedRetarget
+              .map((a) => (a.detail ? `${a.target} — ${a.detail}` : a.target))
+              .join("; ")}`,
           );
         }
       } catch (err) {

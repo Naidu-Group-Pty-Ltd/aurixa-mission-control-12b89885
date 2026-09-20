@@ -84,9 +84,65 @@ export const DEPENDABOT_CONFIG_PATH = ".github/dependabot.yml";
  */
 export const SHIPPED_BACKEND_PAIR_PATHS = [
   "public/lead-magnet-embed.html",
-  "src/integrations/supabase/env.ts",
   ".env.example",
 ] as const;
+
+/**
+ * The module that declares the built-in fallback pair — DISCOVERED, never named.
+ *
+ * `src/integrations/supabase/env.ts` used to sit in the list above, as a
+ * literal. It is not where the pair lives everywhere: `npc-crm-independent`
+ * has already split the reads out into `supabaseTarget.pure.ts`, because a
+ * Vite config cannot import `env.ts`. On that layout the named path is simply
+ * ABSENT — and `absent` does not fail a retarget, so provisioning would have
+ * reported `ok` over a clone whose app still booted against the prime.
+ *
+ * That is this programme's own defect committed inside its fixer: a check
+ * that names one file passes by finding nothing when the file moves. The
+ * guard shipped to the clones answers to the same rule and searches both
+ * layouts; so does this.
+ *
+ * Ordered newest-first, and the module that actually DECLARES the pair is the
+ * one rewritten — a repository mid-split can hold both, and the one to correct
+ * is the one the app reads rather than the one that still exists.
+ */
+export const RESOLVER_MODULE_CANDIDATES = [
+  "src/integrations/supabase/supabaseTarget.pure.ts",
+  "src/integrations/supabase/env.ts",
+] as const;
+
+/** Whether a module declares the built-in fallback pair at all. */
+export function declaresFallbackPair(text: string): boolean {
+  return /FALLBACK_URL\s*=\s*['"`]/.test(text);
+}
+
+/**
+ * The guard that keeps this step honest after provisioning has finished.
+ *
+ * Retargeting sets the values once. Nothing re-checks them: a later cascade,
+ * a hand edit or a template refresh can put another deployment's project back
+ * into any of these files, and every surface would look healthy — which is
+ * exactly the state all three clones were in on 20 Sep 2026, shipping the
+ * prime's pair from their own domains since their first commit.
+ *
+ * So a correctly retargeted clone is not finished; a correctly retargeted
+ * clone that CHECKS ITSELF is. The spec arrives in the byte copy because the
+ * prime carries it, and it is deployment-agnostic by construction (it reads
+ * its own ref out of `supabase/config.toml`), so it needs no rewrite here —
+ * only confirmation that it arrived and that something runs it.
+ *
+ * Both halves are asked, because either alone is worthless: the spec was
+ * present and wired to nothing on all three clones for the first hour of its
+ * life, and a workflow naming a spec that does not exist fails loudly rather
+ * than quietly only because `passWithNoTests` is unset.
+ */
+export const IDENTITY_GUARD_SPEC_PATH = "src/lib/__tests__/shippedBackendIdentity.spec.ts";
+export const CI_WORKFLOW_PATH = ".github/workflows/ci.yml";
+
+/** Whether CI actually invokes the guard, by the path it would have to name. */
+export function ciRunsIdentityGuard(yaml: string): boolean {
+  return yaml.includes(IDENTITY_GUARD_SPEC_PATH);
+}
 
 /**
  * The secret scan's config, which has to learn the clone's key in the same pass.
@@ -475,7 +531,7 @@ export async function retargetCloneRepo(
   //    authenticates to nothing, so a partial rewrite would turn a deployment
   //    that works against the wrong database into one that works against none.
   if (!cloneAnonKey) {
-    for (const path of SHIPPED_BACKEND_PAIR_PATHS) {
+    for (const path of [...SHIPPED_BACKEND_PAIR_PATHS, RESOLVER_MODULE_CANDIDATES.join(" | ")]) {
       actions.push({
         target: path,
         status: "failed",
@@ -512,6 +568,46 @@ export async function retargetCloneRepo(
       }
     }
 
+    //    The declaring module, found rather than named. A candidate that does
+    //    not exist is not an error — one layout or the other is expected — but
+    //    NONE of them declaring the pair is, because the fallback is then
+    //    somewhere this step cannot see and the clone keeps whatever it
+    //    inherited.
+    try {
+      let resolved: { path: string; text: string; sha: string } | null = null;
+      for (const candidate of RESOLVER_MODULE_CANDIDATES) {
+        const f = await readFile(candidate);
+        if (f && declaresFallbackPair(f.text)) {
+          resolved = { path: candidate, text: f.text, sha: f.sha };
+          break;
+        }
+      }
+      if (!resolved) {
+        actions.push({
+          target: RESOLVER_MODULE_CANDIDATES.join(" | "),
+          status: "failed",
+          detail:
+            "No module declares FALLBACK_URL, so the built-in pair was not rewritten and this deployment still falls back to whichever project it inherited.",
+        });
+      } else if (!backendPairNamesForeignProject(resolved.text, cloneProjectRef)) {
+        actions.push({ target: resolved.path, status: "unchanged" });
+      } else {
+        await writeFile(
+          resolved.path,
+          rewriteBackendPair(resolved.text, cloneProjectRef, cloneAnonKey),
+          resolved.sha,
+          `chore(aurixa): point ${resolved.path} at this deployment's own Supabase project`,
+        );
+        actions.push({ target: resolved.path, status: "rewritten", detail: cloneProjectRef });
+      }
+    } catch (e) {
+      actions.push({
+        target: RESOLVER_MODULE_CANDIDATES.join(" | "),
+        status: "failed",
+        detail: e instanceof Error ? e.message : String(e),
+      });
+    }
+
     // 7. The secret scan, which must learn the key step 6 just wrote.
     //
     //    Last, deliberately. If this fails the repository is left with a scan
@@ -544,6 +640,59 @@ export async function retargetCloneRepo(
         detail: e instanceof Error ? e.message : String(e),
       });
     }
+  }
+
+  // 8. The guard that will keep step 6 true after this run is over.
+  //
+  //    Nothing above re-checks itself. A cascade, a template refresh or a hand
+  //    edit can put another deployment's project back into any of those files,
+  //    and every surface would still read as healthy — which is the state all
+  //    three existing clones were in, shipping the prime's pair from their own
+  //    domains since their first commit.
+  //
+  //    This writes nothing. The spec is deployment-agnostic (it reads its own
+  //    ref out of `supabase/config.toml`) and arrives in the byte copy because
+  //    the prime carries it, so there is nothing here to rewrite — only to
+  //    confirm, and to say so loudly when it is missing.
+  //
+  //    Both halves are asked because either alone is worth nothing: a spec
+  //    nothing invokes cannot fail, and a workflow naming a spec that is not
+  //    there is only loud because `passWithNoTests` is unset.
+  try {
+    const spec = await readFile(IDENTITY_GUARD_SPEC_PATH);
+    const ci = await readFile(CI_WORKFLOW_PATH);
+    if (!spec) {
+      actions.push({
+        target: IDENTITY_GUARD_SPEC_PATH,
+        status: "failed",
+        detail:
+          "This deployment carries no guard over its own backend identity, so nothing will notice if the pair written above is replaced.",
+      });
+    } else if (!ci) {
+      actions.push({
+        target: CI_WORKFLOW_PATH,
+        status: "failed",
+        detail: "No CI workflow, so the backend-identity guard is never run.",
+      });
+    } else if (!ciRunsIdentityGuard(ci.text)) {
+      actions.push({
+        target: CI_WORKFLOW_PATH,
+        status: "failed",
+        detail: `The guard exists but no step names ${IDENTITY_GUARD_SPEC_PATH}, so it never runs. A test nothing invokes cannot fail.`,
+      });
+    } else {
+      actions.push({
+        target: IDENTITY_GUARD_SPEC_PATH,
+        status: "unchanged",
+        detail: "present and run by CI",
+      });
+    }
+  } catch (e) {
+    actions.push({
+      target: IDENTITY_GUARD_SPEC_PATH,
+      status: "failed",
+      detail: e instanceof Error ? e.message : String(e),
+    });
   }
 
   return { ok: actions.every((a) => a.status !== "failed"), actions };
