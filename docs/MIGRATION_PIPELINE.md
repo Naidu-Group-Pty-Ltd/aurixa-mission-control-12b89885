@@ -7,10 +7,10 @@ never saw them.
 
 Measured on 2026-08-27, two examples that had both merged and neither existed:
 
-| migration | what it was for | what its absence cost |
-| --- | --- | --- |
-| `20260826070000_seed_mirror_exclusions` | the mirror cascade's exclusion policy | the cascade could still revert a clone's backend identity — the lead-magnet embed would go back to posting leads into the PRIME's database |
-| `20260827030000_schedule_allowed_origins_reconcile` | the `ALLOWED_ORIGINS` reconciler's cron job | a worker that shipped correctly, deployed correctly, and was never once called |
+| migration                                           | what it was for                             | what its absence cost                                                                                                                      |
+| --------------------------------------------------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `20260826070000_seed_mirror_exclusions`             | the mirror cascade's exclusion policy       | the cascade could still revert a clone's backend identity — the lead-magnet embed would go back to posting leads into the PRIME's database |
+| `20260827030000_schedule_allowed_origins_reconcile` | the `ALLOWED_ORIGINS` reconciler's cron job | a worker that shipped correctly, deployed correctly, and was never once called                                                             |
 
 Nothing reported either. **A migration that never runs looks exactly like one
 that ran and did nothing.**
@@ -23,7 +23,7 @@ it is not obvious from looking at either side alone.
 
 `supabase_migrations.schema_migrations` and `supabase/migrations/` are **two
 different namespaces describing the same history.** Lovable records a migration
-under the timestamp at which *it* applied the file, not the timestamp in the
+under the timestamp at which _it_ applied the file, not the timestamp in the
 filename. Against 207 files:
 
 ```
@@ -63,7 +63,7 @@ database for a `postgres`-owned pg_cron job to apply. Everything else about the
 corpus is left alone.
 
 **The Management API path this replaced could never have worked.** Mission
-Control's database is a Lovable Cloud project in *Lovable's* Supabase
+Control's database is a Lovable Cloud project in _Lovable's_ Supabase
 organisation: `get_project` answers 403, and Supabase's own documentation says
 such a project has no service-role key and no direct database URL. The workflow
 failed on every run and blamed a missing `SUPABASE_ACCESS_TOKEN`; setting it
@@ -99,10 +99,10 @@ this pipeline exists to remove — assert by effect, never by configuration.
 
 ## What it needs
 
-| setting | where | value |
-| --- | --- | --- |
-| `CRON_SECRET` | Settings → Secrets → Actions | the SAME value as `cron_secret` in Mission Control's Supabase Vault |
-| `MISSION_CONTROL_URL` | Settings → Variables → Actions | this deployment's public origin |
+| setting               | where                          | value                                                               |
+| --------------------- | ------------------------------ | ------------------------------------------------------------------- |
+| `CRON_SECRET`         | Settings → Secrets → Actions   | the SAME value as `cron_secret` in Mission Control's Supabase Vault |
+| `MISSION_CONTROL_URL` | Settings → Variables → Actions | this deployment's public origin                                     |
 
 Neither is defaulted, and neither should be guessed. A wrong origin posts
 migration SQL to somebody else's deployment. `cron_secret` is the value 32
@@ -159,10 +159,9 @@ merge and never apply, both silent:
   file applies and is then indistinguishable from the first, and a replay skips
   it entirely. Which file loses is decided by filename sort order.
 
-It is deliberately static. Whether a migration has been *applied* is a question
+It is deliberately static. Whether a migration has been _applied_ is a question
 only the database can answer, and this project's ledger cannot answer it
 honestly — which is the whole reason this document exists.
-
 
 ---
 
@@ -213,12 +212,55 @@ ref for every clone, an idempotent applier (`applyPrimeMigrations`, which unions
 both ledgers on the clone and skips what is applied), and a worker system. The
 scalable answer is to use them.
 
-| | Mission Control's own schema | the fleet |
-| --- | --- | --- |
-| targets | 1 project | N projects |
-| driver | GitHub Actions on merge | `/hooks/fleet-migration-sync`, every 30 min |
-| credential | one repo secret | the token Mission Control already has |
-| failure is visible as | a red check on the commit | an operator notification, per clone |
+|                       | Mission Control's own schema | the fleet                                                                          |
+| --------------------- | ---------------------------- | ---------------------------------------------------------------------------------- |
+| targets               | 1 project                    | N projects                                                                         |
+| driver                | GitHub Actions on merge      | `/hooks/fleet-migration-sync` every 30 min, `/hooks/fleet-migration-drain` every 5 |
+| credential            | one repo secret              | the token Mission Control already has                                              |
+| failure is visible as | a red check on the commit    | an operator notification, per clone                                                |
+
+## Two cadences, because one case is a queue
+
+The sweep runs every thirty minutes, and the migration that schedules it states
+why: _"Nothing here is queue-draining: a clone's schema does not change between
+ticks."_ That was true when it was written, and oversized seeds made it false
+for one case.
+
+Measured 20 Sep 2026, by running this repository's own `readSeedShape` and
+`chunkSeedStatements` over the prime's
+`20261203000000_seed_template_library_v14_tier_separation.sql`:
+
+|                                |                               |
+| ------------------------------ | ----------------------------- |
+| seed                           | 41,678,125 bytes, 543 rows    |
+| statements at the 1 MB ceiling | **45**                        |
+| median statement               | 948,212 bytes                 |
+| parse cost, both passes        | ~1.6 s                        |
+| blob fetch, whole file         | ~2.4 s at ~17 MB/s            |
+| send cost, per statement       | ~1.7 s                        |
+| invocation budget              | 45 s, shared across the batch |
+
+So a pass carries roughly two dozen statements and the rest waited half an
+hour, per clone, with four such seeds outstanding. That is the arithmetic that
+made a drain take days.
+
+**`/hooks/fleet-migration-drain` is the same handler on a five-minute tick**,
+serving only clones that carry a chunk cursor. It narrows an already-eligible
+set (`scopeQueueToMode`, applied after `migrationEligibility`), so it reaches no
+clone the sweep cannot, and it asks the fleet table whether anything is in
+flight _before_ it reads the GitHub allowance — an idle tick is one indexed
+select and no round trip to GitHub at all.
+
+### What it is NOT: the prefix a resumed pass re-reads
+
+A resumed pass streams the whole body and discards the statements it already
+sent, because **GitHub's blob endpoint ignores `Range`** — measured, HTTP 200
+carrying the full `Content-Length` with no `Accept-Ranges`, on both
+`/git/blobs/{sha}` and `/contents/{path}`. That re-read is real, and it costs
+about **2.4 s of a 45 s budget**: roughly 5% of a pass, against the ~1.7 s each
+statement it then sends costs. Parking the body somewhere Range-capable to save
+it would buy that 5% for a bucket, an upload, a lifecycle and a parser that can
+start mid-file. The cadence was the other 95%.
 
 ## What the worker does
 
@@ -272,10 +314,10 @@ The fleet sync's corpus is the prime **repo**, narrowed to what the prime's
 and on this deployment the first honest run reported:
 
 ```json
-{"success":true,"processed":1,"advanced":0,"upToDate":1,"failed":[],"withheld":828}
+{ "success": true, "processed": 1, "advanced": 0, "upToDate": 1, "failed": [], "withheld": 828 }
 ```
 
-828 of 962 files, which is alarming until you look at *why*. The repo filenames
+828 of 962 files, which is alarming until you look at _why_. The repo filenames
 and the ledger versions are offset by **seconds**:
 
 ```
@@ -284,22 +326,22 @@ ledger  20250831091523   20250902092312   20251029030453
 ```
 
 That is this document's own two-namespace problem seen from the other side:
-Lovable stamps the ledger with the moment it *applied* a file, not with the
+Lovable stamps the ledger with the moment it _applied_ a file, not with the
 version in the filename. Measured on the oldest 42 repo versions — **0 exact
 matches, 25 within ten seconds, 17 genuinely never applied.**
 
 So `withheld` is split by reason:
 
-| reason | means | what to do |
-| --- | --- | --- |
+| reason           | means                            | what to do                                              |
+| ---------------- | -------------------------------- | ------------------------------------------------------- |
 | `skew_suspected` | a ledger entry exists within 10s | nothing — the prime ran it, under a different timestamp |
-| `never_applied` | nothing near it | look at these |
+| `never_applied`  | nothing near it                  | look at these                                           |
 
 The window is measured, not picked: observed skews are 2–3 seconds.
 
 **The classification never promotes.** `runnable` is decided by exact ledger
 membership and by nothing else; the skew test runs only over migrations that
-have *already* been withheld, and its output reaches a report and an audit row.
+have _already_ been withheld, and its output reaches a report and an audit row.
 Closing that loop is tempting — if `…091525` is "obviously" `…091523`, why not
 run it? Because "obviously" is a guess about somebody else's timestamping, and a
 tenant's database is on the other side of the guess. This corpus contains two
@@ -310,7 +352,7 @@ withheld.
 
 **A `skew_suspected` count is not a clean bill of health.** It is harmless for a
 clone stamped from the prime's ledger, because the effects are already present.
-It is *not* harmless for a clone built by replaying migrations from scratch —
+It is _not_ harmless for a clone built by replaying migrations from scratch —
 that clone would come up short by exactly these files, and there is no key that
 recovers them: the ledger's `name` column is empty for Lovable-applied rows and
 holds a bare UUID for others.
@@ -323,10 +365,10 @@ Measured on `npc-client-dashboard`, 2026-09-01.
 prime's ledger. That rule is right and stays. But the result is a SET, and a
 set cannot say whether a cleared version sits behind a withheld one:
 
-| version | role | prime ledger | sent to the clone |
-| --- | --- | --- | --- |
-| `20261012000000` | **defines** `ensure_builder_stock_settlement_scheduled()` | absent | withheld |
-| `20261027010000` | **calls** it | present | **yes** |
+| version          | role                                                      | prime ledger | sent to the clone |
+| ---------------- | --------------------------------------------------------- | ------------ | ----------------- |
+| `20261012000000` | **defines** `ensure_builder_stock_settlement_scheduled()` | absent       | withheld          |
+| `20261027010000` | **calls** it                                              | present      | **yes**           |
 
 The clone answered `42883: function … does not exist`, `applyPrimeMigrations`
 halted, and provisioning stopped at step 5 of 7 — four steps short of

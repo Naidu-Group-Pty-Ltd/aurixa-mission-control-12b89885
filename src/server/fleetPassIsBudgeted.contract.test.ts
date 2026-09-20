@@ -44,6 +44,25 @@ const code = (src: string): string =>
  */
 const sqlCode = (src: string): string => src.replace(/^[ \t]*--.*$/gm, "");
 
+/**
+ * The scheduled hook's behaviour, wherever it is written.
+ *
+ * The route file used to hold the handler; it now delegates to one shared with
+ * `/hooks/fleet-migration-drain`, because `check-cron-coverage` refuses two
+ * jobs pointing at one endpoint and a mode carried in a cron body is invisible
+ * in `cron.job`. The shared handler sits in the lane's own module, for the
+ * reason its header gives. The properties asserted through this are about the LANE — that
+ * a failed sweep is reported rather than serialised as a success, that it runs
+ * on the service role — and neither is about which file the line sits in.
+ * Reading both keeps them true under either arrangement.
+ */
+const cronHook = [
+  "src/routes/hooks.fleet-migration-sync.tsx",
+  "src/server/fleet-migration.server.ts",
+]
+  .map((f) => code(read(f)))
+  .join("\n");
+
 const lane = code(read("src/server/fleet-migration.server.ts"));
 /**
  * The cadence, read from the migration that schedules the job rather than
@@ -268,9 +287,8 @@ describe("a pass is bounded", () => {
     */
     const at = lane.indexOf("if (reclaimError)");
     expect(lane.slice(at, lane.indexOf("return { ...EMPTY", at))).toMatch(/console\.error\(/);
-    const hook = code(read("src/routes/hooks.fleet-migration-sync.tsx"));
-    expect(hook).toContain("success: !result.error");
-    expect(hook).toMatch(/status: result\.error \? 500 : 200/);
+    expect(cronHook).toContain("success: !result.error");
+    expect(cronHook).toMatch(/status: result\.error \? 500 : 200/);
   });
 
   /*
@@ -676,8 +694,7 @@ describe("a pass is bounded", () => {
     assumed.
   */
   it("is started on the service role by both of its callers", () => {
-    const hook = code(read("src/routes/hooks.fleet-migration-sync.tsx"));
-    expect(hook).toContain("runFleetMigrationSync(supabaseAdmin");
+    expect(cronHook).toContain("runFleetMigrationSync(supabaseAdmin");
     const button = code(read("src/server/migration-sync.functions.ts"));
     expect(button, "the operator button runs the lane on the caller's own client").not.toContain(
       "runFleetMigrationSync(context.supabase",

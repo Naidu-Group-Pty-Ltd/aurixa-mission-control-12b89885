@@ -661,4 +661,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260920093000",
     assertions: [{ kind: "column", table: "prime_config", column: "cascade_follows_lineage" }],
   },
+  {
+    migration: "20260920100000_schedule_fleet_migration_drain.sql",
+    version: "20260920100000",
+    assertions: [{ kind: "cron", jobname: "fleet-migration-drain-5min" }],
+  },
 ];

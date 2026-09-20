@@ -80,15 +80,43 @@ function importedModules(source: string): string[] {
     .filter((p) => existsSync(p));
 }
 
-function reachesGithub(routeFile: string, source: string): boolean {
-  if (GITHUB_CALLS.test(source)) return true;
-  return importedModules(source).some((m) => GITHUB_CALLS.test(readFileSync(m, "utf8")));
+/**
+ * The route, plus the modules it imports directly.
+ *
+ * ## Detection and judgement must read the same text
+ *
+ * `reachesGithub` has always followed one import hop — a route that reaches
+ * `openPrimeMigrationCorpus` through a server module is a GitHub lane, and it
+ * would be absurd for it not to be. The ASSERTIONS did not: they read the route
+ * file alone. So a lane was DETECTED through its imports and then JUDGED as
+ * though it had none, and the only arrangement satisfying both is one where the
+ * spend lives in a module and the guard lives in the route.
+ *
+ * That asymmetry has no defence, and it has a cost: moving a handler into a
+ * shared module — which `/hooks/fleet-migration-sync` and
+ * `/hooks/fleet-migration-drain` must do, being one lane on two cadences —
+ * reads here as a lane that stopped consulting the budget.
+ *
+ * So both halves read the closure. This is strictly STRONGER than the old
+ * assertion for every lane that kept its guard inline: the route source is part
+ * of its own closure, so nothing that passed before can fail now, while a guard
+ * that moves out of the route no longer moves out of the gate.
+ */
+function closureOf(source: string): string {
+  return [source, ...importedModules(source).map((m) => readFileSync(m, "utf8"))].join("\n");
+}
+
+function reachesGithub(source: string): boolean {
+  return GITHUB_CALLS.test(closureOf(source));
 }
 
 const hooks = readdirSync(ROUTES)
   .filter((f) => f.startsWith("hooks.") && f.endsWith(".tsx"))
-  .map((f) => ({ file: f, source: readFileSync(`${ROUTES}/${f}`, "utf8") }))
-  .filter((h) => reachesGithub(h.file, h.source));
+  .map((f) => {
+    const source = readFileSync(`${ROUTES}/${f}`, "utf8");
+    return { file: f, source, closure: closureOf(source) };
+  })
+  .filter((h) => reachesGithub(h.source));
 
 describe("every scheduled lane that spends the installation's window asks first", () => {
   it("finds the GitHub-reading lanes at all", () => {
@@ -98,14 +126,14 @@ describe("every scheduled lane that spends the installation's window asks first"
     expect(hooks.length).toBeGreaterThan(4);
   });
 
-  for (const { file, source } of hooks) {
+  for (const { file, closure } of hooks) {
     it(`${file} consults the budget, or is exempt for a stated reason`, () => {
       if (EXEMPT.has(file)) {
-        expect(source).not.toContain("decideSpend");
+        expect(closure).not.toContain("decideSpend");
         return;
       }
-      expect(source).toContain("decideSpend(");
-      expect(source).toContain("readGitHubRemaining()");
+      expect(closure).toContain("decideSpend(");
+      expect(closure).toContain("readGitHubRemaining()");
     });
   }
 
@@ -125,7 +153,7 @@ describe("every scheduled lane that spends the installation's window asks first"
     ]) {
       const found = hooks.find((h) => h.file === file);
       expect(found, `${file} no longer detected as a GitHub lane`).toBeTruthy();
-      expect(found!.source).toContain("decideSpend(");
+      expect(found!.closure).toContain("decideSpend(");
     }
   });
 
@@ -134,7 +162,7 @@ describe("every scheduled lane that spends the installation's window asks first"
     // stale number; an apply postponed costs a clone sitting a migration
     // behind the prime.
     const parity = hooks.find((h) => h.file === "hooks.handoff-parity-refresh.tsx")!;
-    expect(parity.source).toMatch(/decideSpend\(\{\s*role: "scan"/);
+    expect(parity.closure).toMatch(/decideSpend\(\{\s*role: "scan"/);
 
     for (const file of [
       "hooks.backend-provisioning-drain.tsx",
@@ -143,7 +171,7 @@ describe("every scheduled lane that spends the installation's window asks first"
       "hooks.deployment-drain.tsx",
     ]) {
       const lane = hooks.find((h) => h.file === file)!;
-      expect(lane.source, file).toMatch(/decideSpend\(\{\s*role: "actor"/);
+      expect(lane.closure, file).toMatch(/decideSpend\(\{\s*role: "actor"/);
     }
   });
 });
