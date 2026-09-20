@@ -213,38 +213,3 @@ hazard existed outlives the hazard._
    MIGRATIONS. That is the outcome this item wants and it is reached by a lane
    that did not establish it — the inverse of the defect fixed under #232 one
    file away. Worth an explicit decision rather than being left to happen.
-
-## Verification
-
-- migration lane green (run 40), `main` CI green
-- queue fully applied: nothing failed, nothing pending
-- `clones.merge_drain_at` and `clone_backends.migration_blocked_at` present with
-  both indexes; `merge_drain_at` observed advancing 09:10:02 → 09:15:02 across
-  all three clones, which is the proof the published build is the new code —
-  nothing else writes that column
-- the two stranded clones back in the fleet migration sync, all three level at
-  migration version `20261111010000`
-- **billing untouched and independently checked**: billable quantity equals the
-  brokered event count (724 = 724, 724 × 50 = 36,200 micros), the three
-  `absorbed` rows are still non-billable, and the 9-value constraint stands. The
-  double-count that was avoided would have read ≈1,448.
-
-## Still open
-
-1. **`resolve_api_key_billability` is still the August version.**
-   `20260908040000`'s rewrite of it never applied and was deliberately not
-   force-applied — metering is demonstrably working, and a live billing path is
-   not something to change on a hunch at the end of a repair. It needs a fresh,
-   reviewed migration.
-2. **A migration applied directly by Lovable _and_ committed as a file gets
-   replayed by the queue, and a replay can regress live schema.** That is the
-   root cause here, and nothing detects it.
-3. **A migration can enter the queue having never existed in the repository.**
-   Three did during this repair. The enqueue guard catches bad SQL at merge
-   time; it cannot see a migration that never passed through a merge.
-4. **The provisioning verdict on the recovered clones is stale.** NPC Test and
-   Preflight Property Group still read `status: failed` with
-   `status_detail: 'Provisioning ceiling exceeded'`. Nothing gates on it any
-   more — that was the fix — but an operator reading the clone page sees a
-   healthy clone reporting failure, which is the same class of misleading
-   signal that cost the two days above.
