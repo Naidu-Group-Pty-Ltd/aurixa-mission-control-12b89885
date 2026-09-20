@@ -421,3 +421,109 @@ test, and one of those must never be stamped.
 
 **Nothing here stamps a ledger.** The report is evidence for an operator, and
 writing the prime's ledger stays an explicit, separate decision.
+
+### Where it is, after a year of being nowhere
+
+That report had **zero call sites** until 20 Sep 2026. It was written,
+documented here, named by `blockageTaxonomy.pure.ts` in the comment defining
+`prime_ledger_hole` — "the one function that computes object-level evidence for
+exactly this" — and named again by `fleetBlockageRecord.test.ts` as this
+repository's live instance of _a module is not shipped until something calls
+it_. Nothing reached it.
+
+It is now **Fleet Manager → Prime Ledger Reconciliation**, directly under the
+sync card, because it answers the question that card raises: `withheld (not
+applied on the prime)` is a count, and a count cannot say which of the two
+states it is counting.
+
+Three rules hold the surface. It **never runs on mount** — the reading is up to
+120 GitHub blob fetches, and the sibling registry card loads eagerly only
+because its reading is one tree listing. It **yields at the scan floor**, not
+the actor floor, because `githubBudget.pure.ts` states the asymmetry: "a
+measurement postponed costs a stale number, while an apply postponed costs a
+clone sitting a migration behind the prime", and an operator's finger does not
+change what the spend is for. And it **offers exactly one control, the
+reading** — a second one would make `satisfied` read as permission.
+
+The `prime_ledger_hole` blockage points at it, and keeps its refusal word for
+word. What that sentence no longer does is assert the half it cannot see: it
+used to open "the prime has that migration in its repository and **has not run
+it**", which is a claim about the prime's schema from a row that has only read
+its ledger.
+
+### A body that was never read is not a body that creates nothing
+
+Measured over the prime's own corpus on 20 Sep 2026, in the window this report
+serves — the **118 migrations after `20260831060152`**:
+
+|                                        |       |
+| -------------------------------------- | ----- |
+| carry a creation the module can verify | 68    |
+| read, and create nothing it can name   | 41    |
+| **never read at all**                  | **9** |
+
+The 68 declare 321 objects: 122 columns, 91 indexes, 64 tables, 32 functions,
+8 triggers, 3 views and 1 sequence.
+
+Every one of the nine is a 41 MB template-library seed, refused by
+`MAX_MIGRATION_BYTES` before the round trip — the largest and most
+consequential bodies in the backlog, and the exact ones the chunked-seed lane
+exists for. They were filed under the same word as the forty-one that _were_
+read, which is `absent is never zero` in the place it costs most: a report
+whose first act is to tell an operator those files "create nothing this module
+can name" is describing files it never opened.
+
+The row carries `unread` now — the reason and the size — and the summary counts
+it. The **verdict stays `indeterminate`**, because it is still true and a
+fourth verdict would have to be handled by every consumer of the three; what
+changes is that `unread` is reported as a **subset** of it, so the three
+verdicts still sum to the row count. Nothing streams those nine bodies to find
+out: at 41 MB each that is ~370 MB on a button press, and all nine are
+`INSERT`-only seeds that would come back `indeterminate` anyway. The honest
+answer is the size and the word "not read".
+
+### The class, ratcheted
+
+A test that names one orphan cannot see the next one — the lesson the drain
+lane paid for a day earlier ("a hand-list cannot see the call it does not
+mention"). `serverExportsHaveCallers.contract.test.ts` derives the set instead:
+every exported `function` in a `*.server.ts` is asked whether anything
+references it.
+
+Scanned over the whole of `src/`: **633 exported server functions, six with no
+reference anywhere.** They are frozen with what each one is — a test seam
+nothing seams, a fleet-wide selftest with no door, a formatter its own comment
+says is "for notifications and the operator UI" while neither calls it — and
+the list can only shrink.
+
+Two things it had to learn by being run.
+
+**A comment is not a caller** — and stripping them is not a regex over the
+file. Two shapes in this codebase break the obvious one, and both produced
+false orphans, which is the failure that gets a gate switched off:
+
+```ts
+redirectSet.add(`${site}/*`); //  a comment opener inside a template literal:
+//                                a file-wide regex runs from here to the next
+//                                closer and eats the declaration below it
+
+const { retargetCloneRepo } = await import(
+  /* @vite-ignore */ "@/lib/_server-shims/clone-repo-retarget.server"
+); //  a comment that CLOSES mid-line: a tracker asking whether the line ENDS
+//     with the closer opens a block and eats the rest of the module
+```
+
+The strip is line-oriented, only opens on a line whose first characters are the
+opener, and looks for the closer anywhere after it. It is deliberately
+conservative — a trailing comment after code survives — because missing an
+orphan costs a name this list does not carry while inventing one costs every
+run.
+
+**A name in a quoted string is not a caller either**: a source contract
+asserting `toContain("someFunction")` is bookkeeping about that function, the
+same way this gate's own freeze list is. Template literals are left alone,
+since `${…}` holds real code. A name inside a regex literal still counts, and
+that limit is stated rather than chased — telling a regex from a division needs
+a tokeniser, and a wrong one invents orphans. Where one function matters that
+much it gets its own mounted contract, which is what
+`primeLedgerReconciliationMounted.test.ts` is.
