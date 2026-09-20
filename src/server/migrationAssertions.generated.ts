@@ -666,4 +666,17 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260920100000",
     assertions: [{ kind: "cron", jobname: "fleet-migration-drain-5min" }],
   },
+  {
+    migration: "20260920130000_mirror_excludes_dependabot_config.sql",
+    version: "20260920130000",
+    assertions: [
+      { kind: "rows", table: "clone_sync_exclusions", atLeast: 23 },
+      {
+        kind: "check",
+        table: "clone_sync_exclusions",
+        column: "pattern",
+        value: ".github/dependabot.yml",
+      },
+    ],
+  },
 ];
