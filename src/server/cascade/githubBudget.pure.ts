@@ -22,6 +22,30 @@
  *  - **An unreadable allowance changes nothing.** Fail-open to yesterday's
  *    behaviour: the deferral machinery still catches a real 403, and a
  *    policy that can be tripped by its own telemetry is a second outage.
+ *
+ * ## Who reads it, and how the list was found
+ *
+ * Two lanes were added on 20 Sep 2026 (#234), and the way they were missed is
+ * the part worth keeping. `everyGithubLaneYields.contract.test.ts` derives the
+ * spenders rather than listing them, which is what caught `deployment-drain`
+ * after a hand audit had been called complete — but it followed ONE import
+ * hop, and these two reach `getAppOctokit` at two:
+ *
+ *     hooks.codex-nightly.tsx / hooks.codex-sweep.tsx
+ *       -> codex-scheduling.server.ts        (no GitHub call here)
+ *         -> codex-security-client.server.ts (getAppOctokit)
+ *
+ * Neither is light. The sweep runs every ten minutes and re-dispatches up to
+ * fifty stranded jobs a run; the nightly fans out one `workflow_dispatch` per
+ * enabled clone, "a 40-clone fleet used to serialize 40 round-trips to
+ * GitHub" in the scheduling module's own words.
+ *
+ * They take different floors, and the split is the one this header already
+ * draws. The **sweep is an ACTOR**: it re-dispatches work somebody decided on,
+ * and a job left stranded keys the dedup window against its target, so every
+ * later scan of that repository is suppressed until the sweep clears it. The
+ * **nightly is a SCAN**: tomorrow's run covers the same ground, and it is the
+ * heaviest single burst here, so it should be the first to stand down.
  */
 
 /** Below this, a drain tick does not claim; it waits for the window. */
