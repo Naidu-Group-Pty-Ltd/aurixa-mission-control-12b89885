@@ -1,5 +1,8 @@
+import { readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
+import { REPOSITORY_INVARIANTS } from "./cascade/repositoryInvariants.pure";
 import {
+  DEPENDABOT_CONFIG_PATH,
   rewriteConfigTomlProjectId,
   configTomlNamesForeignProject,
   stripWorkflowProjectRefDefault,
@@ -103,5 +106,60 @@ describe("workflowHasProjectRefDefault", () => {
 
   it("is false once the job fails closed", () => {
     expect(workflowHasProjectRefDefault("${{ vars.SUPABASE_PROJECT_REF }}")).toBe(false);
+  });
+});
+
+/**
+ * Step 5 — the prime's Dependabot config.
+ *
+ * Read through the source rather than by driving Octokit, which is how the
+ * other imperative steps here are already unverified: they are not unit-tested
+ * at all. What is asserted is the shape (delete, never rewrite; non-fatal like
+ * every other step) and — more importantly — the PREMISE, because the
+ * justification for deleting somebody's config file is entirely borrowed.
+ */
+describe("dropping the prime's Dependabot config from a clone", () => {
+  const source = readFileSync("src/server/clone-repo-retarget.server.ts", "utf8");
+  const step = source.slice(source.indexOf("// 5. The prime's Dependabot config"));
+
+  it("deletes the file rather than rewriting it", () => {
+    // A rewritten config still says somebody decided what it should contain.
+    // The decision here is that the repository has no say in its dependencies,
+    // and the only honest spelling of that is absence.
+    expect(step).toContain("octokit.repos.deleteFile(");
+    expect(step).toContain("path: DEPENDABOT_CONFIG_PATH");
+    expect(step).not.toContain("createOrUpdateFileContents");
+  });
+
+  it("is non-fatal and reports an absent file as absent, like every other step", () => {
+    // "a repository that lacks one of these files is not broken, and a partial
+    // result is more useful than an abort" — this module's own header.
+    expect(step).toMatch(/if \(!f\) \{\s*actions\.push\(\{ target: DEPENDABOT_CONFIG_PATH, status: "absent" \}\)/);
+    expect(step).toMatch(/\}\s*catch\s*\(e\)\s*\{[\s\S]*status: "failed"/);
+  });
+
+  it("names the one path, and names it once", () => {
+    expect(DEPENDABOT_CONFIG_PATH).toBe(".github/dependabot.yml");
+    // A literal at each end is how two ends drift; the constant is exported so
+    // the deletion and anything that later asserts it read the same string.
+    expect(step).not.toContain('".github/dependabot.yml"');
+  });
+
+  it("THE PREMISE: the dependency graph really is cascaded, so a clone cannot own it", () => {
+    /*
+      Everything above rests on a fact about a different module. If
+      package.json and package-lock.json stop being repository invariants, a
+      clone owns its own dependencies, a Dependabot PR there can land, and
+      deleting the config becomes removal of a working control rather than of
+      dead machinery.
+
+      Asserted rather than trusted, for the same reason `cloneStatusRecovery`
+      asserts that the migration lane never writes `clone_backends.status`:
+      the reasoning is only as good as the premise, and the premise lives
+      somewhere this file does not.
+    */
+    const patterns = REPOSITORY_INVARIANTS.map((i) => i.pattern);
+    expect(patterns).toContain("package.json");
+    expect(patterns).toContain("package-lock.json");
   });
 });
