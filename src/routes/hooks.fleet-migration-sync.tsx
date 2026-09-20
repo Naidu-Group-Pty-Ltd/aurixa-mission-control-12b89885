@@ -52,7 +52,16 @@ export const Route = createFileRoute("/hooks/fleet-migration-sync")({
           // 200 with the failures in the body rather than 500: one clone whose
           // migration failed is not a failed run, and a job that reports
           // failure for a state it handled correctly is one people stop reading.
-          return new Response(JSON.stringify({ success: true, ...result }), {
+          //
+          // `result.error` is a different thing from a clone's failure and was
+          // being flattened into the same `success: true`. It is set only where
+          // the PASS could not run at all — the prime unconfigured, the backends
+          // unreadable, the stale-claim sweep refused — and a run that touched
+          // no clone reporting as a healthy one is the reading this whole lane
+          // exists to stop. It was always wrong here; the sweep's early return
+          // is what made it reachable on a path that matters.
+          return new Response(JSON.stringify({ success: !result.error, ...result }), {
+            status: result.error ? 500 : 200,
             headers: { "Content-Type": "application/json" },
           });
         } catch (e) {

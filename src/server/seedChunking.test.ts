@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   type ChunkedStatement,
+  type SeedShape,
   SeedShapeError,
   assertDollarQuotesBalanced,
   chunkSeedStatements,
@@ -210,5 +211,128 @@ describe("assertDollarQuotesBalanced", () => {
     expect(() => assertDollarQuotesBalanced("$a$x$a$ $b$", 2)).toThrow(SeedShapeError);
     // A positional parameter is not a tag.
     expect(() => assertDollarQuotesBalanced("select $1", 3)).not.toThrow();
+  });
+});
+
+/*
+  A REMEMBERED SHAPE IS TRUSTED FOR WHAT IT DESCRIBES AND CHECKED FOR WHAT IT
+  EXECUTES.
+
+  `chunkSeedStatements` re-derives the shape from the second read and refuses
+  on any disagreement — that is what licenses carrying a shape across passes
+  on the cursor rather than paying for a second 41 MB walk. The tail is the
+  one part of a shape that is not a description: it is SQL, taken verbatim
+  from the remembered copy and executed. Compared last and asserted here,
+  because a file whose trailing statements changed while its header, ON
+  CONFLICT and tuple count did not would otherwise run the old tail against
+  the new tuples and be recorded as applied. Raised by review.
+*/
+describe("chunkSeedStatements — the remembered tail", () => {
+  const shapeOf = async (text: string) => await readSeedShape(pieces(text));
+
+  async function drain(text: string, shape: Awaited<ReturnType<typeof shapeOf>>) {
+    const out: ChunkedStatement[] = [];
+    for await (const s of chunkSeedStatements(pieces(text), shape, { maxStatementBytes: 4_000 })) {
+      out.push(s);
+    }
+    return out;
+  }
+
+  it("sends the trailing statements when the file still carries them", async () => {
+    const text = seed(TUPLES);
+    const stmts = await drain(text, await shapeOf(text));
+    expect(stmts.at(-1)?.label).toBe("trailing statements");
+    expect(stmts.at(-1)?.sql).toContain("SET status = 'published'");
+  });
+
+  it("refuses a tail that changed while everything else stayed identical", async () => {
+    const before = seed(TUPLES);
+    const remembered = await shapeOf(before);
+    // Same header, same ON CONFLICT, same tuples — one slug swapped in the
+    // trailing UPDATE, which is the shape of edit this corpus actually makes.
+    const after = before.replace("$tlt$b$tlt$", "$tlt$c$tlt$");
+    expect(after).not.toBe(before);
+    const fresh = await shapeOf(after);
+    expect(fresh.tupleCount, "the fixture changed more than the tail").toBe(remembered.tupleCount);
+    expect(fresh.header).toBe(remembered.header);
+    expect(fresh.onConflict).toBe(remembered.onConflict);
+    await expect(drain(after, remembered)).rejects.toThrow(SeedShapeError);
+  });
+
+  it("refuses a tail that was REMOVED, which is the same class of change", async () => {
+    const before = seed(TUPLES);
+    const remembered = await shapeOf(before);
+    await expect(drain(seed(TUPLES, { tail: false }), remembered)).rejects.toThrow(SeedShapeError);
+  });
+
+  it("refuses a tail that APPEARED where the remembered shape had none", async () => {
+    const before = seed(TUPLES, { tail: false });
+    const remembered = await shapeOf(before);
+    await expect(drain(seed(TUPLES), remembered)).rejects.toThrow(SeedShapeError);
+  });
+
+  /*
+    THE HOLD IS THE GUARANTEE, SO IT IS ASSERTED AND NOT LEFT TO A COMMENT.
+
+    Every statement is `remembered header + fresh tuples + remembered
+    onConflict`, and both the ON CONFLICT clause and the tail sit AFTER the last
+    tuple — so neither can be compared before EOF. Hand a statement over any
+    earlier and it goes out under a clause this pass has not checked: a prime
+    that changed `DO UPDATE SET` to `DO NOTHING` between the two reads gets rows
+    updated that the new body wanted left alone, and the next pass cannot repair
+    it, because under the new clause it never writes those rows at all.
+
+    The comment that used to stand over the queue claimed the opposite — that
+    each statement was yielded "as soon as it is whole" and the queue held at
+    most one. These two are here because that comment was believed, and because
+    the buffer it misdescribes is ~84 MB on the real seed and therefore exactly
+    the thing somebody will try to remove.
+  */
+  describe("nothing is handed over until the second read has agreed", () => {
+    /** Drains, recording how much of the stream had been consumed at each yield. */
+    async function drainWithReadCount(text: string, shape: SeedShape) {
+      let chunksRead = 0;
+      const size = 7;
+      const totalChunks = Math.ceil(text.length / size);
+      async function* counted(): AsyncGenerator<string> {
+        for (let i = 0; i < text.length; i += size) {
+          chunksRead += 1;
+          yield text.slice(i, i + size);
+        }
+      }
+      const readAt: number[] = [];
+      for await (const _s of chunkSeedStatements(counted(), shape, { maxStatementBytes: 400 })) {
+        readAt.push(chunksRead);
+      }
+      return { readAt, totalChunks };
+    }
+
+    it("reads the whole file before the FIRST statement is handed over", async () => {
+      const text = seed(TUPLES);
+      const { readAt, totalChunks } = await drainWithReadCount(text, await shapeOf(text));
+      expect(readAt.length, "the fixture produced no statements").toBeGreaterThan(1);
+      // Every statement, including the first, arrives with the stream exhausted.
+      expect(readAt[0]).toBe(totalChunks);
+      expect(new Set(readAt)).toEqual(new Set([totalChunks]));
+    });
+
+    it("hands over NOTHING when the tail disagrees, rather than all but the tail", async () => {
+      const before = seed(TUPLES);
+      const remembered = await shapeOf(before);
+      const after = before.replace("$tlt$b$tlt$", "$tlt$c$tlt$");
+      const got: string[] = [];
+      await expect(
+        (async () => {
+          for await (const s of chunkSeedStatements(pieces(after), remembered, {
+            maxStatementBytes: 400,
+          })) {
+            got.push(s.label);
+          }
+        })(),
+      ).rejects.toThrow(SeedShapeError);
+      // The rows are not the hazard on their own; the clause they were poured
+      // into is, and it is unknown until the line the tail follows.
+      expect(got, "statements went out before the shape was agreed").toEqual([]);
+    });
   });
 });

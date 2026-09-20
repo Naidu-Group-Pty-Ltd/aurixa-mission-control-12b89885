@@ -1106,6 +1106,20 @@ export const MAX_MIGRATION_BYTES = 8 * 1024 * 1024;
 export type PrimeMigrationCorpus = {
   /** Every migration the prime declares, ordered by filename. No bodies. */
   metas: ReadonlyArray<PrimeMigrationMeta>;
+  /**
+   * The git blob sha of one migration's body, or null if it is not in this
+   * corpus.
+   *
+   * Content-addressed, so it answers "is this the same bytes?" exactly, for
+   * free, and without reading the body. A chunk cursor stores it so a resumed
+   * pass can tell a file that has been re-released from one that has not —
+   * which no reading of the seed's SHAPE can do, because the ordinary edit to
+   * this corpus changes values and leaves the skeleton alone.
+   *
+   * Deliberately NOT added to `metas`: five call sites consume that array and
+   * none of them wants a sha, while exactly one caller wants this.
+   */
+  bodyIdentity: (id: string) => string | null;
   /** Commit the listing was taken at. */
   sourceSha: string;
   /**
@@ -1185,6 +1199,7 @@ export async function openPrimeMigrationCorpus(
   return {
     metas: entries.map(({ id, name, path }) => ({ id, name, path })),
     sourceSha: commitSha,
+    bodyIdentity: (id: string) => byId.get(id)?.sha ?? null,
     loadSql,
     openSqlStream,
   };
