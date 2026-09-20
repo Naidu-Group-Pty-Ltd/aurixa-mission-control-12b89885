@@ -5,6 +5,11 @@ import {
   DEPENDABOT_CONFIG_PATH,
   GITLEAKS_CONFIG_PATH,
   SHIPPED_BACKEND_PAIR_PATHS,
+  RESOLVER_MODULE_CANDIDATES,
+  IDENTITY_GUARD_SPEC_PATH,
+  CI_WORKFLOW_PATH,
+  declaresFallbackPair,
+  ciRunsIdentityGuard,
   appendOwnKeyAllowlist,
   backendPairNamesForeignProject,
   gitleaksAllowsKey,
@@ -365,7 +370,6 @@ describe("writing the shipped pair", () => {
   it("names its paths once, through the exported constants", () => {
     expect([...SHIPPED_BACKEND_PAIR_PATHS]).toEqual([
       "public/lead-magnet-embed.html",
-      "src/integrations/supabase/env.ts",
       ".env.example",
     ]);
     expect(GITLEAKS_CONFIG_PATH).toBe(".gitleaks.toml");
@@ -377,5 +381,93 @@ describe("writing the shipped pair", () => {
     expect(step).toMatch(/\}\s*catch\s*\(e\)\s*\{[\s\S]*status: "failed"/);
     expect(step).toContain('status: "absent"');
     expect(step).toContain('status: "unchanged"');
+  });
+});
+
+describe("the declaring module is discovered, not named", () => {
+  // `env.ts` used to be a literal in SHIPPED_BACKEND_PAIR_PATHS. It is not
+  // where the pair lives everywhere — `npc-crm-independent` split the reads
+  // into `supabaseTarget.pure.ts` — and a named path that has moved reads as
+  // `absent`, which does not fail a retarget. Provisioning would have
+  // reported `ok` over a clone still falling back to the prime.
+  it("no longer hard-codes the resolver module among the fixed paths", () => {
+    expect([...SHIPPED_BACKEND_PAIR_PATHS]).not.toContain("src/integrations/supabase/env.ts");
+    expect([...SHIPPED_BACKEND_PAIR_PATHS]).not.toContain(
+      "src/integrations/supabase/supabaseTarget.pure.ts",
+    );
+  });
+
+  it("searches both layouts", () => {
+    expect([...RESOLVER_MODULE_CANDIDATES]).toEqual([
+      "src/integrations/supabase/supabaseTarget.pure.ts",
+      "src/integrations/supabase/env.ts",
+    ]);
+  });
+
+  it("recognises a declaration in either module's idiom", () => {
+    expect(declaresFallbackPair("const FALLBACK_URL = 'https://x.supabase.co';")).toBe(true);
+    expect(declaresFallbackPair("export const FALLBACK_URL='https://x.supabase.co'")).toBe(true);
+    expect(declaresFallbackPair('const FALLBACK_URL = "https://x.supabase.co";')).toBe(true);
+  });
+
+  it("does not mistake a mention for a declaration", () => {
+    // A module that merely READS the constant is not the one to rewrite.
+    expect(declaresFallbackPair("import { FALLBACK_URL } from './supabaseTarget.pure';")).toBe(
+      false,
+    );
+    expect(declaresFallbackPair("return FALLBACK_URL;")).toBe(false);
+  });
+
+  it("refuses rather than shrugs when nothing declares the pair", () => {
+    // The whole point: absent is not a pass here. A repository where neither
+    // candidate declares it has a fallback this step cannot see, so the clone
+    // keeps whatever it inherited.
+    const src = readFileSync("src/server/clone-repo-retarget.server.ts", "utf8");
+    const step = src.slice(src.indexOf("// 6. The shipped Supabase pair"));
+    const block = step.slice(step.indexOf("RESOLVER_MODULE_CANDIDATES"));
+    expect(block).toContain('status: "failed"');
+    expect(block).toContain("No module declares FALLBACK_URL");
+  });
+});
+
+describe("provisioning confirms the guard arrived and is run", () => {
+  // Retargeting sets the values once and nothing re-checks them. A clone that
+  // is correct today and unguarded is the state all three clones were in on
+  // 20 Sep 2026 — right values, nothing watching them.
+  it("asks for the spec and for a CI step that names it", () => {
+    expect(IDENTITY_GUARD_SPEC_PATH).toBe("src/lib/__tests__/shippedBackendIdentity.spec.ts");
+    expect(CI_WORKFLOW_PATH).toBe(".github/workflows/ci.yml");
+  });
+
+  it("reads the wiring off the workflow, by the path it would have to name", () => {
+    expect(ciRunsIdentityGuard(`      - run: npx vitest run ${IDENTITY_GUARD_SPEC_PATH}`)).toBe(
+      true,
+    );
+  });
+
+  it("is not satisfied by the directory the guard was lost in", () => {
+    // `npx vitest run src/lib/__tests__/builderStock` is the only step that
+    // reaches that directory, and it never ran this spec. A check that
+    // accepted the directory would report the defect as fixed.
+    expect(ciRunsIdentityGuard("      - run: npx vitest run src/lib/__tests__/builderStock")).toBe(
+      false,
+    );
+    expect(ciRunsIdentityGuard("      - run: npx vitest run src/lib/__tests__")).toBe(false);
+  });
+
+  it("fails a retarget when the guard is absent or unwired", () => {
+    const src = readFileSync("src/server/clone-repo-retarget.server.ts", "utf8");
+    const step = src.slice(src.indexOf("// 8. The guard"));
+    expect(step).toContain("carries no guard over its own backend identity");
+    expect(step).toContain("A test nothing invokes cannot fail.");
+    expect(step).toContain('status: "failed"');
+  });
+
+  it("writes nothing", () => {
+    // The spec is deployment-agnostic — it reads its own ref out of
+    // config.toml — so there is nothing here to rewrite, only to confirm.
+    const src = readFileSync("src/server/clone-repo-retarget.server.ts", "utf8");
+    const step = src.slice(src.indexOf("// 8. The guard"));
+    expect(step).not.toContain("writeFile(");
   });
 });
