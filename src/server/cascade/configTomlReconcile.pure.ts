@@ -50,6 +50,28 @@
  * exposed `[api] schemas` list, the storage limit and anything prime adds
  * later, without a per-key policy anybody has to maintain.
  *
+ * ## The reverse direction, which the measurement above could not see
+ *
+ * Both clones measured on 9 Sep are pure mirrors, so "the whole difference is
+ * one line" held and the reconcile could be prime's file with that line put
+ * back. `npc-crm-independent` is not a mirror: it owns `crm-calendar`,
+ * `crm-inbound-message` and `crm-send-message`, which prime does not have, and
+ * all three declare `verify_jwt = false` — one of them is an inbound webhook
+ * whose caller has no Supabase JWT to present.
+ *
+ * Taking prime's file wholesale DROPPED all three blocks. Measured on the open
+ * cascade proposal 20 Sep 2026: 416 function directories on the clone, 413
+ * declarations in the reconciled file. By the same CLI rule this module was
+ * written to honour, that gates three of the clone's own functions closed —
+ * the harm named in the section above, pointing the other way.
+ *
+ * So a block the clone declares and prime does not is the CLONE'S, and it is
+ * carried forward. Prime still wins every name the two share, which is the
+ * whole point of the reconcile; the clone only keeps what prime has no opinion
+ * about. And the composition is READ BACK for it: if any name the clone
+ * declared is missing from the result, the reconcile refuses rather than
+ * writing a file that silently closes a door.
+ *
  * ## Refusing is the default
  *
  * Every rule below returns a refusal rather than a best guess, because the
@@ -79,6 +101,12 @@ export type ConfigTomlReconcile =
       ownRef: string;
       /** False when the clone's copy already equals the reconciled result. */
       changed: boolean;
+      /**
+       * Names the clone declares that prime has no block for, kept from the
+       * clone's own file. Reported on the pull request, because a write to
+       * this file has to be legible as what it did.
+       */
+      carriedForward: string[];
     }
   | { ok: false; reason: string };
 
@@ -164,7 +192,17 @@ export function reconcileConfigToml(args: {
   // Prime's file, with the clone's own line put back exactly as the clone
   // wrote it — its spacing and quoting survive, because the only thing being
   // carried across is prime's content everywhere else.
-  const merged = primeToml.replace(primeId.line, cloneId.line);
+  let merged = primeToml.replace(primeId.line, cloneId.line);
+
+  // Then the clone's own function declarations. Prime wins every name the two
+  // share; this is only the set prime has no block for at all.
+  const primeNames = new Set(functionBlocksIn(primeToml).map((b) => b.name));
+  const cloneBlocks = functionBlocksIn(cloneToml);
+  const cloneOnly = cloneBlocks.filter((b) => !primeNames.has(b.name));
+  if (cloneOnly.length > 0) {
+    const carried = cloneOnly.map((b) => b.text).join("\n\n");
+    merged = `${merged.replace(/\n*$/, "")}\n\n${CLONE_OWNED_MARKER}\n\n${carried}\n`;
+  }
 
   // Read the result back. Not "did the replace work" — what does the output
   // actually say.
@@ -175,6 +213,21 @@ export function reconcileConfigToml(args: {
       reason:
         "the reconciled file does not name this clone's own project. The substitution did not " +
         "take, and writing it would point this deployment at another tenant's database",
+    };
+  }
+  // And the second read-back, for the second thing this file decides. A name
+  // the clone declared and the result does not is a function whose gate just
+  // changed to the CLI's default of `true` — refuse, and let a person see it,
+  // rather than write a file that closes a door nobody asked to close.
+  const lost = declarationsLostBy(cloneToml, merged);
+  if (lost.length > 0) {
+    return {
+      ok: false,
+      reason:
+        `the reconciled file drops this clone's own declaration(s) for ${lost.join(", ")}. An ` +
+        `omitted \`[functions.X]\` block is read as \`verify_jwt = true\`, so writing it would ` +
+        `gate ${lost.length === 1 ? "that function" : "those functions"} behind a JWT their ` +
+        `callers may have no way to present`,
     };
   }
   const foreign = backendRefsIn(merged).filter((r) => r !== cloneId.value);
@@ -188,8 +241,89 @@ export function reconcileConfigToml(args: {
     };
   }
 
-  return { ok: true, merged, ownRef: cloneId.value, changed: merged !== cloneToml };
+  return {
+    ok: true,
+    merged,
+    ownRef: cloneId.value,
+    changed: merged !== cloneToml,
+    carriedForward: cloneOnly.map((b) => b.name),
+  };
 }
+
+/** One `[functions.X]` block: its name, and its text exactly as written. */
+export type FunctionBlock = { name: string; text: string };
+
+const FUNCTION_HEADER = /^\[functions\.([^\]]+)\]\s*$/;
+
+/**
+ * Every `[functions.X]` block in a config.toml, in file order.
+ *
+ * An array rather than a map, because a file carrying the same name twice is
+ * reproduced as it stands rather than silently halved — this reader's job is
+ * to let a clone's own text survive a rewrite, not to normalise it.
+ *
+ * A block runs from its header to the next `[section]` of any kind. Trailing
+ * blank lines are dropped so blocks can be rejoined with one blank line
+ * between them and the output does not grow a line on every cascade.
+ */
+export function functionBlocksIn(toml: string): FunctionBlock[] {
+  const blocks: FunctionBlock[] = [];
+  let current: { name: string; body: string[] } | null = null;
+  const flush = () => {
+    if (!current) return;
+    while (current.body.length > 0 && current.body[current.body.length - 1].trim() === "") {
+      current.body.pop();
+    }
+    blocks.push({ name: current.name, text: current.body.join("\n") });
+    current = null;
+  };
+  for (const line of toml.split(/\r?\n/)) {
+    const header = FUNCTION_HEADER.exec(line);
+    if (header) {
+      flush();
+      current = { name: header[1], body: [line] };
+      continue;
+    }
+    // Any other section header ends the block. A comment or a key belongs to
+    // the block it sits under, which is what makes the carried text faithful.
+    if (/^\s*\[/.test(line)) {
+      flush();
+      continue;
+    }
+    if (current) current.body.push(line);
+  }
+  flush();
+  return blocks;
+}
+
+/**
+ * Names the clone declared that a candidate result does not.
+ *
+ * Its own function because the check inside `reconcileConfigToml` cannot be
+ * reached through that function's own door: with the carry-forward working,
+ * nothing is ever lost, so a test driving the public API can only ever see it
+ * return empty. Exercised directly here instead, and its WIRING proved by
+ * execution — planting the pre-fix composer (no carry-forward at all) makes
+ * the reconcile refuse, naming all three CRM functions. Recorded because a
+ * defensive read-back nobody has fired is indistinguishable from one that
+ * cannot fire.
+ */
+export function declarationsLostBy(cloneToml: string, candidate: string): string[] {
+  const kept = new Set(functionBlocksIn(candidate).map((b) => b.name));
+  return [...new Set(functionBlocksIn(cloneToml).map((b) => b.name))].filter((n) => !kept.has(n));
+}
+
+/**
+ * The line written above the carried blocks.
+ *
+ * It sits under the last block prime owns, so on the next pass it is read as
+ * part of THAT block\u2019s body and dropped with it — the composition is rebuilt
+ * from prime\u2019s file every time, so the marker cannot accumulate. Pinned by an
+ * idempotence test rather than left to be believed.
+ */
+export const CLONE_OWNED_MARKER =
+  "# Declared by this clone for functions the prime does not have. An omitted\n" +
+  "# [functions.X] block is read by the CLI as verify_jwt = true.";
 
 /**
  * How many `[functions.X]` blocks a config.toml declares.

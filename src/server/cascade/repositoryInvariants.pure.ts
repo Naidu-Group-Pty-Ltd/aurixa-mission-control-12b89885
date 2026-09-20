@@ -154,6 +154,16 @@ export const REPOSITORY_INVARIANTS: readonly RepositoryInvariant[] = [
     reason:
       "The security registry the same checks read, on the same terms as SECURITY_INVENTORY.json.",
   },
+  {
+    pattern: "docs/reports/SECTION_OWNERSHIP_MATRIX.md",
+    reason:
+      "`sectionOwnershipMatrix.spec.ts` runs the generator and asserts the committed file did not " +
+      "change. Its inputs are the section registries, which are inside module globs, so they " +
+      "cascade and the document does not — measured 20 Sep 2026 on the open proposal for " +
+      "npc-crm-independent, where the clone's copy still routed five topics the cascaded " +
+      "registries no longer route, and `verify` failed on the difference. Running the generator " +
+      "against that tree reproduces the prime's committed copy exactly.",
+  },
 ];
 
 /** The globs, for a caller that only needs the patterns. */
