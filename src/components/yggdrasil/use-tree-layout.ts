@@ -137,6 +137,46 @@ export function buildHierarchy(clones: Clone[]): Map<string, string[]> {
   return childMap;
 }
 
+/**
+ * How many levels of CLONES the recorded tree has.
+ *
+ * The trunk is not a level. A fleet of five clones that all cascade from
+ * prime is one level deep, not two — the prime is where they come from, not
+ * somewhere in their lineage — so the series reads 0 for no clones, 1 for a
+ * flat fan and 2 for the fleet as recorded on 20 Sep 2026.
+ *
+ * `TreeStats` used to print `new Set(clones.map((c) => c.tags?.[0])).size`
+ * under the label "lineage depth" — the same `tags[0]` inference
+ * `buildHierarchy` was written to replace, left behind in the one place that
+ * puts a NUMBER on it. On the fleet as recorded on 20 Sep 2026 it read 1
+ * (every clone carries the same first tag or none) for a tree that is three
+ * levels deep, and it would have moved when somebody edited a tag.
+ *
+ * Derived from the same `buildHierarchy` the picture is drawn from, so the
+ * number beside the tree and the tree cannot disagree.
+ *
+ * A fleet with no clones is 0 rather than 1: there is no tree, and reporting
+ * a level says a fleet exists.
+ */
+export function lineageDepth(clones: Clone[]): number {
+  if (clones.length === 0) return 0;
+  const childMap = buildHierarchy(clones);
+  const walk = (id: string, seen: Set<string>): number => {
+    const children = childMap.get(id) ?? [];
+    let deepest = 0;
+    for (const child of children) {
+      // The render's own cycle rule, asked again here rather than assumed:
+      // a row reached twice contributes nothing instead of recursing forever.
+      if (seen.has(child)) continue;
+      seen.add(child);
+      deepest = Math.max(deepest, walk(child, seen));
+    }
+    return deepest + 1;
+  };
+  // `walk` counts the node it is given, so the trunk's own level comes off.
+  return walk("__root__", new Set(["__root__"])) - 1;
+}
+
 export function useTreeLayout(
   clones: Clone[],
   containerWidth: number,
