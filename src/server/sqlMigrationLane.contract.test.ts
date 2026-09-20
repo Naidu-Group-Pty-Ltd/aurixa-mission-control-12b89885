@@ -110,9 +110,18 @@ describe("a pass is bounded", () => {
     expect(check).toBeGreaterThan(skip);
     expect(send).toBeGreaterThan(check);
     expect(replay).toContain("attempted += 1;");
-    expect(replay).toContain(
-      "return { results, latestApplied, stoppedEarly, chunksApplied, chunkCursor };",
-    );
+    // The four the budget contract turns on. `primeLedgerHoles` joined them
+    // and is deliberately not pinned here: this test is about what a BUDGETED
+    // pass reports, and a hole is measured before the budget is ever consulted.
+    for (const field of [
+      "results",
+      "latestApplied",
+      "stoppedEarly",
+      "chunksApplied",
+      "chunkCursor",
+    ]) {
+      expect(replay).toMatch(new RegExp(`return \\{[^}]*\\b${field}\\b[^}]*\\};`));
+    }
   });
 
   it("the replay measures what it applied, so the reserve is a measurement", () => {

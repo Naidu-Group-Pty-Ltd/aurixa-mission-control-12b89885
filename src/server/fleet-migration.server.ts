@@ -66,6 +66,12 @@ import {
 } from "./fleetMigrationEligibility.pure";
 import { notifyOperators, writeAuditLog } from "./audit.server";
 import { chunkCursorFor } from "./chunkCursorStore.pure";
+import {
+  PRIME_LEDGER_HOLE_NOTE_CAP,
+  blockageDetailFor,
+  primeLedgerHoleSentence,
+  reconcileBlockageRecord,
+} from "./fleetBlockageRecord.pure";
 
 type Db = SupabaseClient<Database>;
 
@@ -405,10 +411,14 @@ export async function runFleetMigrationSync(
     and has a migration failed here before? Only the last of those is a fact
     about the schema, and only this lane may write it.
   */
+  // `migrations_applied` and `status_detail` join the list for the blockage
+  // reconciliation below — a pass that changed nothing still holds the only
+  // current answer about the prime's holes, and it cannot retract a record it
+  // cannot see. Measured on this fleet the column is five bytes.
   const { data: allBackends, error: excludedErr } = await supabase
     .from("clone_backends")
     .select(
-      "clone_id, supabase_project_ref, migration_version, status, worker_started_at, migration_blocked_at, migration_blocked_reason, chunk_cursor",
+      "clone_id, supabase_project_ref, migration_version, status, worker_started_at, migration_blocked_at, migration_blocked_reason, chunk_cursor, migrations_applied, status_detail",
     );
   if (excludedErr) {
     return { ...EMPTY, error: `Could not read clone backends: ${excludedErr.message}` };
@@ -634,7 +644,7 @@ export async function runFleetMigrationSync(
     if (!claimed || claimed.length === 0) continue; // another run has it
 
     try {
-      const { results, latestApplied, stoppedEarly, chunksApplied, chunkCursor } =
+      const { results, latestApplied, stoppedEarly, chunksApplied, chunkCursor, primeLedgerHoles } =
         await applyPrimeMigrations(
           backend.supabase_project_ref!,
           runnable,
@@ -849,6 +859,52 @@ export async function runFleetMigrationSync(
         chunksApplied === 0;
       const syncedTo = latestApplied ?? "the prime's latest recorded migration";
       /*
+        WHAT THIS PASS MEASURED, AS AGAINST WHAT IT CHANGED.
+
+        `didNothing` asks what the pass CHANGED, and gates the clone-facts on
+        it for good reason. But the blockage record is not one of those facts:
+        `partitionByDependency` and `rescueScopedOrphans` walk the whole corpus
+        BEFORE the replay loop runs, so the holes and the held-back versions
+        are a complete, current reading on every pass — including one the
+        budget stopped, and one that broke on a cursor it could not honour and
+        pushed no result at all.
+
+        So the record of a blockage was written by the pass that found it and
+        by no pass that disproved it. `migrations_applied` kept `blockedBy`
+        entries for a hole the prime had since recorded, `blockageLedger` reads
+        exactly those, and the `prime_ledger_hole` row stayed open for ever
+        with the row's prose still announcing it.
+
+        Reconciled rather than overwritten: entries that are not blockage notes
+        are carried through untouched, because emptying provisioning's record
+        is one of the three things the `didNothing` guard exists to stop, and
+        trading that defect for this one would be no trade at all.
+      */
+      const blockage = reconcileBlockageRecord({
+        stored: (backend as { migrations_applied?: unknown }).migrations_applied,
+        measured: primeLedgerHoles.slice(0, PRIME_LEDGER_HOLE_NOTE_CAP),
+      });
+      /*
+        The version named here is `migration_version` and not `syncedTo`.
+
+        On a pass that applied nothing `latestApplied` is null, so `syncedTo`
+        is the prose fallback — accurate, and it throws away a version the row
+        already holds. `migration_version` is a reading of the CLONE's own
+        ledger (that is what it was made into), which is exactly the thing a
+        retraction wants to name.
+
+        Null when the sentence standing belongs to another writer. A migration
+        pass may retract its own sentence and no one else's: the parity
+        verdict it would otherwise erase cannot be re-derived here, and the
+        blockage reaches an operator through the ledger either way.
+      */
+      const blockageDetail = blockageDetailFor({
+        standing: (backend as { status_detail?: string | null }).status_detail,
+        holes: blockage.holes,
+        total: primeLedgerHoles.length,
+        syncedTo: latestApplied ?? backend.migration_version ?? syncedTo,
+      });
+      /*
         A PASS THE BUDGET STOPPED HAS NOT FINISHED LOOKING.
 
         `stoppedEarly` means the replay stopped between migrations with more to
@@ -901,8 +957,15 @@ export async function runFleetMigrationSync(
           worker_started_at: null,
           ...cursorWrite,
           // Facts about the CLONE — written only by a pass that changed one.
+          // The one exception is the blockage record: see `blockage` above for
+          // why a pass that changed nothing is still the authority on it.
           ...(didNothing
-            ? {}
+            ? blockage.entries === null
+              ? {}
+              : {
+                  migrations_applied: blockage.entries,
+                  ...(blockageDetail === null ? {} : { status_detail: blockageDetail }),
+                }
             : {
                 ...(latestApplied ? { migration_version: latestApplied } : {}),
                 migrations_applied: results,
@@ -970,7 +1033,21 @@ export async function runFleetMigrationSync(
                               `Synced to ${syncedTo} so far — this pass stopped at its time budget ` +
                               `with more to send${chunksApplied > 0 ? ` (${chunksApplied} statement(s) of a large seed sent)` : ""}; ` +
                               `it resumes where it stopped on the next pass`
-                            : `Synced to ${syncedTo}`,
+                            : primeLedgerHoles.length > 0
+                              ? // Level with the prime, and the prime is not
+                                // level with its own repository. Said on the
+                                // rung BELOW the pause because a pass that has
+                                // not finished looking should report that
+                                // first — but said, because until this existed
+                                // a hole with nothing queued behind it
+                                // produced no entry, no blockage row and no
+                                // sentence, and four such versions sat
+                                // unrecorded on the prime for days.
+                                `Synced to ${syncedTo} — ${primeLedgerHoleSentence(
+                                  primeLedgerHoles.slice(0, PRIME_LEDGER_HOLE_NOTE_CAP),
+                                  primeLedgerHoles.length,
+                                )}`
+                              : `Synced to ${syncedTo}`,
                 error_message: failures.length > 0 ? failures[0].error : null,
               }),
         })

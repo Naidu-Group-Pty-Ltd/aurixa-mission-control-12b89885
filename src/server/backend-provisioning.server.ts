@@ -19,6 +19,7 @@ import type { PrimeBackendSnapshot } from "./prime-backend.server";
 import type { StageName, StageResult } from "./schema-introspection.server";
 import { resolveMissionControlOrigin } from "./missionControlLink.pure";
 import { cursorRanPastEnd, type StoredSeedShape } from "./chunkCursorStore.pure";
+import { PRIME_LEDGER_HOLE_NOTE_CAP, primeLedgerHoleNote } from "./fleetBlockageRecord.pure";
 import {
   frontierFromReplay,
   frontierUnreadable,
@@ -2529,6 +2530,19 @@ export async function applyPrimeMigrations(
   chunksApplied: number;
   /** Where a chunked migration stopped, when the budget stopped it mid-way. */
   chunkCursor: ChunkCursor | null;
+  /**
+   * Every corpus version the prime's ledger does not record and this clone
+   * does not have — UNCAPPED, where the notes filed into `results` are capped.
+   *
+   * Returned so a caller can state the true number. The cap bounds how many
+   * blockage rows one pass opens; it must never bound the count an operator
+   * is shown, because on this reading the number is the whole message.
+   *
+   * Empty for an unscoped caller: without a scope there is no ledger to be
+   * short of, and provisioning replays a snapshot in which every predecessor
+   * is present by construction.
+   */
+  primeLedgerHoles: string[];
 }> {
   await runSqlOnProject(projectRef, TRACKING_TABLE_SQL);
 
@@ -2567,6 +2581,7 @@ export async function applyPrimeMigrations(
   if (refusal) throw new Error(refusal);
 
   const results: PrimeMigrationResult[] = [];
+  let primeLedgerHoles: string[] = [];
   let latestApplied: string | null = null;
 
   // A scoped caller's list is a SET of cleared versions; the corpus is a
@@ -2597,6 +2612,34 @@ export async function applyPrimeMigrations(
         skipped: true,
         blockedBy: o.blockedBy.slice(0, ORPHAN_BLOCKED_BY_DISPLAY_CAP),
       });
+    }
+    /*
+      THE HOLE ITSELF, NOT ONLY ITS SHADOW.
+
+      Above this, a hole reaches the record only as the `blockedBy` of an
+      orphan sitting after it — so a hole with nothing after it produced no
+      entry, opened no `prime_ledger_hole` row, and left the fleet reading
+      level while the prime was behind its own repository. That is the state
+      this engagement opened in: four versions unrecorded on the prime,
+      withholding nothing from anybody, found by hand.
+
+      Recorded here, beside the orphans and BEFORE the replay loop, which is
+      what makes it trustworthy: `partitionByDependency` and
+      `rescueScopedOrphans` have both walked the whole corpus by this point,
+      so where the loop stops afterwards changes what was APPLIED and cannot
+      change what was CLASSIFIED. A pass the budget stops — or one that breaks
+      on a cursor it cannot honour, which returns no result entry at all —
+      still carries a complete reading of the holes.
+
+      `skipped` keeps it out of `successes` (filtered `success && !skipped`),
+      so a hole can never read as a migration applied, and it carries no
+      `blockedBy`, so it can never read as a migration withheld. It is a note
+      about the prime, filed on the clone's row because that is where the
+      blockage ledger reads.
+    */
+    primeLedgerHoles = [...part.holes];
+    for (const version of part.holes.slice(0, PRIME_LEDGER_HOLE_NOTE_CAP)) {
+      results.push(primeLedgerHoleNote(version) as PrimeMigrationResult);
     }
   }
 
@@ -2753,7 +2796,7 @@ export async function applyPrimeMigrations(
     }
   }
 
-  return { results, latestApplied, stoppedEarly, chunksApplied, chunkCursor };
+  return { results, latestApplied, stoppedEarly, chunksApplied, chunkCursor, primeLedgerHoles };
 }
 
 /**

@@ -102,7 +102,10 @@ describe("what a pass stopped inside is resumable", () => {
   });
 
   it("reads the stored cursor off the row it claimed", () => {
-    expect(lane).toMatch(/migration_blocked_reason, chunk_cursor"/);
+    // Anchored on the column rather than on the end of the list: two more
+    // joined it for the blockage reconciliation, and pinning the last name in
+    // a select pins the order of a list nothing depends on the order of.
+    expect(lane).toMatch(/migration_blocked_reason, chunk_cursor\b/);
   });
 
   it("writes the cursor on EVERY statement, not at the end of a pass", () => {

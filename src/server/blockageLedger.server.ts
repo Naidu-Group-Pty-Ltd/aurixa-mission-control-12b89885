@@ -327,6 +327,24 @@ async function gatherFacts(
     // version → the migrations it holds, in the order the pass recorded them.
     const held = new Map<string, string[]>();
     for (const entry of applied as Array<Record<string, unknown>>) {
+      /*
+        A HOLE THAT WITHHOLDS NOTHING IS STILL A HOLE.
+
+        `blockedBy` names the holes a WITHHELD migration is sitting behind, so
+        reading it alone reports a hole only while something is queued after
+        it. A hole at the tail of the corpus queues nothing — and still means
+        the prime is behind its own repository, which is the condition that
+        went unreported for days in September 2026. `primeLedgerHole` is the
+        pass's note about the hole itself, filed by `applyPrimeMigrations`
+        before its replay loop runs.
+
+        Both are read into the same map on purpose: a version can arrive by
+        either route or by both, and the existing shape already carries the
+        difference — `heldCount: 0` is a hole withholding nothing.
+      */
+      if (entry?.primeLedgerHole === true && typeof entry?.id === "string" && entry.id !== "") {
+        if (!held.has(entry.id)) held.set(entry.id, []);
+      }
       const blockedBy = Array.isArray(entry?.blockedBy) ? entry.blockedBy : [];
       const name = typeof entry?.name === "string" ? entry.name : null;
       for (const version of blockedBy) {
