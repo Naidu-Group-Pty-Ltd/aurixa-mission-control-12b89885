@@ -474,10 +474,32 @@ describe("a pass is bounded", () => {
     // clone this pass believes it holds. Collected by scanning rather than by
     // listing them, so a write added later is judged too.
     const after = laneBody.slice(from);
-    return after
-      .split('.eq("clone_id", cloneId)')
-      .slice(1)
-      .map((tail) => tail.slice(0, 200));
+    const parts = after.split('.eq("clone_id", cloneId)');
+    const writes: string[] = [];
+    for (let i = 1; i < parts.length; i += 1) {
+      /*
+        ONLY A WRITE IS FENCED.
+
+        A READ after the claim asserts nothing and changes nothing, so it
+        needs no fence — and the blockage reconciliation takes one
+        deliberately, to reconcile against the row as it is at the moment it
+        writes rather than as it was before the claim was taken. Judged on
+        what the statement this filter belongs to DOES rather than on a list
+        of statements, so a write added later is still caught: the nearest
+        `.from("clone_backends")` above it, and whether an `.update(` follows.
+      */
+      // `CLAIM_WRITE` anchors INSIDE the claim's own `.update({ … })`, so the
+      // first filter after it belongs to that update by construction and
+      // there is no `.update(` left above it to find. Every later segment is
+      // judged on its own statement.
+      const isClaim = i === 1;
+      const head = parts.slice(0, i).join('.eq("clone_id", cloneId)');
+      const opens = head.lastIndexOf('.from("clone_backends")');
+      const statement = opens === -1 ? head : head.slice(opens);
+      if (!isClaim && !statement.includes(".update(")) continue;
+      writes.push(parts[i].slice(0, 200));
+    }
+    return writes;
   };
 
   it("takes ONE timestamp for the claim and holds it", () => {
@@ -1001,8 +1023,20 @@ describe("a pass is bounded", () => {
       it is a fact rather than a claim.
     */
     expect(lane).toMatch(
-      /const syncedTo =\s*latestApplied \?\? backend\.migration_version \?\? "no migration recorded yet";/,
+      /const syncedToFor = \(recorded: string \| null \| undefined\) =>\s*latestApplied \?\? recorded \?\? "no migration recorded yet";/,
     );
+    expect(lane).toContain("const syncedTo = syncedToFor(backend.migration_version);");
+    /*
+      AND THE NO-OP PATH APPLIES IT TO A FRESHER READING.
+
+      `backend` predates the claim and up to 45 s of network work. A manual
+      sync that finishes inside that window advances the clone and writes its
+      own accurate sentence; this pass then finds nothing to send, so
+      `latestApplied` is null and the top-of-run rung names the version the
+      sync replaced. The guard on `status_detail` would not catch it — it
+      proves the sentence had not moved, not the version.
+    */
+    expect(lane).toContain("syncedTo: syncedToFor(recorded)");
     expect(lane).not.toContain(`latestApplied ?? "the prime's latest recorded migration"`);
   });
 });

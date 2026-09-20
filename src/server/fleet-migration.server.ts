@@ -795,14 +795,16 @@ export async function runFleetMigrationSync(
     and has a migration failed here before? Only the last of those is a fact
     about the schema, and only this lane may write it.
   */
-  // `migrations_applied` and `status_detail` join the list for the blockage
-  // reconciliation below — a pass that changed nothing still holds the only
-  // current answer about the prime's holes, and it cannot retract a record it
-  // cannot see. Measured on this fleet the column is five bytes.
+  // `migrations_applied` and `status_detail` are deliberately NOT here. They
+  // were, for the blockage reconciliation — and reconciling from a row read
+  // before the claim and before up to 45 seconds of network work is how a
+  // concurrent writer's record gets replaced by a stale one. That pair is
+  // re-read per clone at the moment it is written, so selecting it here would
+  // be a snapshot nothing may use.
   const { data: allBackends, error: excludedErr } = await supabase
     .from("clone_backends")
     .select(
-      "clone_id, supabase_project_ref, migration_version, status, worker_started_at, migration_heartbeat_at, migration_blocked_at, migration_blocked_reason, chunk_cursor, migrations_applied, status_detail",
+      "clone_id, supabase_project_ref, migration_version, status, worker_started_at, migration_heartbeat_at, migration_blocked_at, migration_blocked_reason, chunk_cursor",
     );
   if (excludedErr) {
     return { ...EMPTY, error: `Could not read clone backends: ${excludedErr.message}` };
@@ -1414,10 +1416,35 @@ export async function runFleetMigrationSync(
         migrations behind. Measured on `npc-client-dashboard` at 18:43 on
         19 Sep 2026, beside "4 migration(s) held back".
 
+        Found twice, independently, and the second reading is why the prose at
+        the end is what it is: at 06:21 on 20 Sep all THREE draining clones
+        read `Synced to the prime's latest recorded migration so far — this
+        pass stopped at its time budget`. The opening clause is the strongest
+        claim of synchrony this product can make and the qualification after
+        it does not undo it — so the last rung names the CLONE's own record,
+        or says there is none, and never the prime's frontier.
+
         The clone's own recorded version is on the row this pass just read, and
         it is a fact rather than a claim. A clone that records nothing says so.
+
+        ONE RULE, READ BY EVERY SENTENCE THIS PASS MAY WRITE — the no-op
+        path's reading and the active branch's ladder both take it, so two
+        consecutive passes cannot name one clone's level differently.
+
+        The RULE is shared; the READING it is applied to is each path's own
+        freshest. `backend` was read before the claim and before up to 45 s of
+        network work, and a manual sync can finish inside that window:
+        `applyPrimeMigrations` then finds the clone already level and returns a
+        no-op, so `latestApplied` is null and this ladder falls through to a
+        `migration_version` the sync has since moved. Composing from it writes
+        `Synced to <the version before that sync>` over the accurate sentence
+        the sync had just left — a stale reading passing a guard that only
+        proves the SENTENCE had not moved. The no-op path therefore applies
+        this rule to the version it re-reads with that sentence.
       */
-      const syncedTo = latestApplied ?? backend.migration_version ?? "no migration recorded yet";
+      const syncedToFor = (recorded: string | null | undefined) =>
+        latestApplied ?? recorded ?? "no migration recorded yet";
+      const syncedTo = syncedToFor(backend.migration_version);
       /*
         WHAT THIS PASS MEASURED, AS AGAINST WHAT IT CHANGED.
 
@@ -1440,30 +1467,6 @@ export async function runFleetMigrationSync(
         is one of the three things the `didNothing` guard exists to stop, and
         trading that defect for this one would be no trade at all.
       */
-      const blockage = reconcileBlockageRecord({
-        stored: (backend as { migrations_applied?: unknown }).migrations_applied,
-        measured: primeLedgerHoles.slice(0, PRIME_LEDGER_HOLE_NOTE_CAP),
-      });
-      /*
-        The version named here is `migration_version` and not `syncedTo`.
-
-        On a pass that applied nothing `latestApplied` is null, so `syncedTo`
-        is the prose fallback — accurate, and it throws away a version the row
-        already holds. `migration_version` is a reading of the CLONE's own
-        ledger (that is what it was made into), which is exactly the thing a
-        retraction wants to name.
-
-        Null when the sentence standing belongs to another writer. A migration
-        pass may retract its own sentence and no one else's: the parity
-        verdict it would otherwise erase cannot be re-derived here, and the
-        blockage reaches an operator through the ledger either way.
-      */
-      const blockageDetail = blockageDetailFor({
-        standing: (backend as { status_detail?: string | null }).status_detail,
-        holes: blockage.holes,
-        total: primeLedgerHoles.length,
-        syncedTo: latestApplied ?? backend.migration_version ?? syncedTo,
-      });
       /*
         A PASS THE BUDGET STOPPED HAS NOT FINISHED LOOKING.
 
@@ -1480,6 +1483,156 @@ export async function runFleetMigrationSync(
       */
       const pausedMidReplay = stoppedEarly || (chunksApplied > 0 && successes.length === 0);
       if (pausedMidReplay) out.stoppedAtBudget = true;
+      /*
+        AN OPINION IS READ FRESH, WRITTEN UNDER THE CLAIM, AND GUARDED.
+
+        A pass that changed nothing establishes no fact about the clone. What
+        it has is a READING, and both halves of it — the blockage record and
+        the sentence — are derived from a row someone else may have written
+        since. Three things keep that honest, and each closes a different
+        hole.
+
+        READ FRESH. `backend` comes from the query at the top of the run,
+        before the claim and before up to 45 seconds of GitHub and clone
+        work. Reconciling the ledger from THAT is how a concurrent manual
+        sync's results get replaced by a stale array: the sync cycles
+        `status_detail` from `Migrations up to date (X)` through
+        `Syncing migrations from …` and back to the identical sentence while
+        replacing `migrations_applied`, so a guard on the sentence alone reads
+        as unchanged. Re-reading here means the reconciliation is against what
+        the row holds now, not what it held a minute ago.
+
+        WRITTEN UNDER THE CLAIM, before the update that releases it, so no
+        other FLEET pass can interleave. The lanes that can — the manual sync,
+        provisioning, parity, self-healing — take no claim at all
+        (`worker_started_at` appears in none of them), which is what the guard
+        below is for.
+
+        GUARDED on the sentence, which is a compare-and-set on its own column
+        and therefore sound: a value that cycled away and back is the value
+        that was inspected, and writing over it is what this pass would have
+        done anyway.
+
+        What is NOT closed: the window between this read and this write. A
+        true multi-column compare-and-set would need a jsonb predicate on
+        `migrations_applied`, which is not something to build out of a URL
+        filter over an array of up to fifty notes, or a revision column, which
+        is a schema change. The window is one round trip rather than a whole
+        pass, and the manual sync that would have to complete inside it takes
+        seconds. A miss is deference, not an error — the next pass re-measures.
+      */
+      if (didNothing) {
+        const { data: current, error: readErr } = await supabase
+          .from("clone_backends")
+          .select("migrations_applied, status_detail, migration_version")
+          .eq("clone_id", cloneId)
+          .maybeSingle();
+        if (readErr) {
+          // Nothing about the clone changed this pass, so there is nothing to
+          // salvage and nothing to fail: the reading is re-derived next time.
+          console.error("[fleet-migration] blockage reading not re-read", {
+            cloneId,
+            error: readErr.message,
+          });
+        } else {
+          const blockage = reconcileBlockageRecord({
+            stored: (current as { migrations_applied?: unknown } | null)?.migrations_applied,
+            measured: primeLedgerHoles.slice(0, PRIME_LEDGER_HOLE_NOTE_CAP),
+          });
+          const inspected =
+            (current as { status_detail?: string | null } | null)?.status_detail ?? null;
+          const recorded =
+            (current as { migration_version?: string | null } | null)?.migration_version ?? null;
+          /*
+            THE CLONE MOVED UNDER THIS PASS, SO THIS PASS HAS NOTHING TO SAY
+            ABOUT ITS LEVEL.
+
+            `migration_version` is re-read here, and the manual sync writes it
+            in the same statement as the sentence. If it differs from the one
+            this run started on, another writer advanced — or rebuilt, which
+            erases it — the clone while this pass was working, and everything
+            this pass knows about the clone's level was measured before that.
+
+            Two readings would otherwise be written, and both are wrong:
+
+            - A PAUSE. This pass stopped with more to send, so it composes
+              `stopped at its time budget with more to send` — over a sync
+              that has since finished the work. The sentence guard passes,
+              because `Migrations up to date (…)` is this lane's own prose,
+              and an accurate result is replaced by a stale pause.
+            - A LEVEL READING from a version that moved. `latestApplied` is
+              null on a no-op pass in this lane (`partitionByDependency` drops
+              what the clone already has, so a levelled clone is sent nothing
+              and the replay loop never runs), and the rung under it was the
+              top-of-run snapshot.
+
+            So the sentence is withheld entirely rather than re-derived. The
+            blockage RECORD still stands: it is a reading of the PRIME's
+            ledger, which no clone-side writer can invalidate.
+          */
+          const movedUnderUs = (recorded ?? null) !== (backend.migration_version ?? null);
+          const blockageDetail = movedUnderUs
+            ? null
+            : blockageDetailFor({
+                standing: inspected,
+                holes: blockage.holes,
+                total: primeLedgerHoles.length,
+                // A pass that changed nothing can still have stopped with more to
+                // send, so this is handed over rather than assumed: without it the
+                // retraction writes a bare "Synced to X" over a pause, which is
+                // the one reading this lane must never give about a clone behind.
+                pausedMidReplay,
+                // The same rule the active branch's sentences read, applied to
+                // the version re-read a line above. Past `movedUnderUs` the two
+                // readings are equal, so this is not what stops a stale
+                // sentence — it is what keeps the composition reading the row
+                // it is guarded on, rather than one taken 45 s earlier whose
+                // agreement has to be argued rather than seen.
+                syncedTo: syncedToFor(recorded),
+              });
+          const noopFacts = {
+            ...(blockage.entries === null ? {} : { migrations_applied: blockage.entries }),
+            ...(blockageDetail === null ? {} : { status_detail: blockageDetail }),
+          };
+          if (Object.keys(noopFacts).length > 0) {
+            // `.eq` never matches NULL in SQL, so an absent sentence needs
+            // `.is`. Both branches carry the whole chain rather than sharing a
+            // builder bound above them, so that the write and the `error` that
+            // is read from it are one statement — which is what
+            // `check:discarded-errors` reads, and what every other write in
+            // this file looks like.
+            const { data: wrote, error: noopErr } = await (
+              inspected === null
+                ? supabase.from("clone_backends").update(noopFacts).is("status_detail", null)
+                : supabase.from("clone_backends").update(noopFacts).eq("status_detail", inspected)
+            )
+              .eq("clone_id", cloneId)
+              .eq("worker_started_at", claimedAt)
+              .select("clone_id");
+            if (noopErr) {
+              console.error("[fleet-migration] blockage reading not recorded", {
+                cloneId,
+                error: noopErr.message,
+              });
+            } else if (!wrote || wrote.length === 0) {
+              /*
+                TWO REASONS, AND NEITHER IS THIS PASS'S TO ACT ON.
+
+                Either the sentence moved under the read above, or this pass
+                no longer holds the claim. They are indistinguishable from one
+                answer and do not need distinguishing here: both mean somebody
+                else's facts are fresher, and the next pass re-measures.
+
+                A LOST CLAIM IS STILL REPORTED — by the result write below,
+                which carries the same fence, asks for its rows back and
+                raises `CLAIM_LOST`. Saying it from here as well would turn
+                one reclaim into two entries about one clone.
+              */
+              console.warn("[fleet-migration] blockage reading deferred", { cloneId });
+            }
+          }
+        }
+      }
       /*
         THE CURSOR OUTLIVES A PASS, BUT NOT ITS FILE.
 
@@ -1530,15 +1683,12 @@ export async function runFleetMigrationSync(
           worker_started_at: null,
           ...cursorWrite,
           // Facts about the CLONE — written only by a pass that changed one.
-          // The one exception is the blockage record: see `blockage` above for
-          // why a pass that changed nothing is still the authority on it.
+          //
+          // A pass that changed nothing writes NONE of them here. What it has
+          // to say is an opinion drawn from a snapshot rather than a fact it
+          // established, so it goes in its own guarded write below.
           ...(didNothing
-            ? blockage.entries === null
-              ? {}
-              : {
-                  migrations_applied: blockage.entries,
-                  ...(blockageDetail === null ? {} : { status_detail: blockageDetail }),
-                }
+            ? {}
             : {
                 ...(latestApplied ? { migration_version: latestApplied } : {}),
                 migrations_applied: results,

@@ -244,10 +244,32 @@ export function reconcileBlockageRecord(args: {
   const discharged = named.filter((v) => !measuredSet.has(v));
   const opened = measured.filter((v) => !namedSet.has(v));
 
-  // Nothing about the blockage record changed. Say so by writing nothing:
-  // this is the ordinary healthy pass, and it must stay byte-identical to the
-  // behaviour before this module existed.
-  if (discharged.length === 0 && opened.length === 0) {
+  /*
+    WHAT IS COMPARED IS THE RECORD, NOT THE HOLE SET.
+
+    A first version returned early when no hole id had opened or discharged,
+    which is a weaker test than it looks: the entries carry more than the set
+    of holes. A stored `blockedBy` entry names a migration being WITHHELD, and
+    this function is only ever called from a pass where `blocked` is empty by
+    construction — so every stored `blockedBy` entry is already disproved,
+    whatever the hole set does.
+
+    The case that makes it bite: a clone acquires a formerly withheld
+    migration by another route (the per-clone sync, self-healing, a repair
+    applied by hand) while the hole that withheld it is still a hole. The hole
+    set is unchanged, the old entry survives, and `blockageLedger` goes on
+    reporting a `heldCount` and a `firstHeld` for a migration nothing is
+    holding — for ever, because no later pass changes the hole set either.
+
+    So the test is whether the stored notes ALREADY ARE the notes this pass
+    would write. A legacy `blockedBy` entry never is one, so it is always
+    replaced; an unchanged healthy row still writes nothing.
+  */
+  const storedNotes = stored.filter(isBlockageNote);
+  const settled =
+    storedNotes.length === measured.length &&
+    storedNotes.every((e, i) => e.primeLedgerHole === true && e.id === measured[i]);
+  if (settled) {
     return { entries: null, discharged, opened, holes: measured };
   }
 
@@ -279,12 +301,84 @@ export function blockageDetailFor(args: {
    * is the whole message and must not be the capped one.
    */
   total?: number;
+  /**
+   * True when the replay stopped with more to send.
+   *
+   * A pass that changed nothing can still have stopped early: `applyChunkedSeed`
+   * returns `stoppedEarly` with `applied: 0` when a stored cursor names more
+   * statements than the seed has, and the caller breaks on it having pushed no
+   * result at all. Such a pass measures the holes correctly — the
+   * classification runs before the replay loop — and knows NOTHING about
+   * whether the clone is level, because it never finished looking.
+   *
+   * So it is passed in rather than inferred. Writing `Synced to X` there is a
+   * claim no pass that stopped early is entitled to make, and it is the one
+   * thing this lane must never say about a clone dozens of migrations behind.
+   */
+  pausedMidReplay?: boolean;
   /** What the level reading calls the version, when there are no holes. */
   syncedTo: string;
 }): string | null {
+  /*
+    A SENTENCE THIS LANE DID NOT WRITE IS NOT THIS LANE'S TO REPLACE.
+
+    `null`/empty counts as ours — a row carrying no claim has none to lose —
+    but a parity verdict or a provisioning line does not, and cannot be
+    re-derived here.
+  */
   if (!migrationLaneWroteDetail(args.standing)) return null;
-  if (args.holes.length === 0) return `Synced to ${args.syncedTo}`;
-  return `Synced to ${args.syncedTo} — ${primeLedgerHoleSentence(args.holes, args.total)}`;
+  let composed: string;
+  if (args.pausedMidReplay) {
+    /*
+      COMPOSED, NEVER DELEGATED.
+
+      A first version returned null here when there were no holes, on the
+      assumption that the sentence already standing was the pause one. It need
+      not be. `clearStaleMigrationFailure` (self-healing.server.ts) writes a
+      bare `Synced to X` and does NOT touch `migrations_applied`, so a row can
+      carry hole notes under a level sentence; discharge the last hole on a
+      paused pass and that level claim would be left standing over a clone
+      with more to send — which is the exact invariant this branch exists for.
+
+      An invariant that depends on what another writer happened to leave
+      behind is not an invariant. This composes the qualified reading every
+      time, and the holes, where there are any, ride it.
+    */
+    const andHoles =
+      args.holes.length === 0 ? "" : `, and ${primeLedgerHoleSentence(args.holes, args.total)}`;
+    composed =
+      `Synced to ${args.syncedTo} so far — this pass stopped at its time budget with more ` +
+      `to send${andHoles}`;
+  } else if (args.holes.length === 0) {
+    composed = `Synced to ${args.syncedTo}`;
+  } else {
+    composed = `Synced to ${args.syncedTo} — ${primeLedgerHoleSentence(args.holes, args.total)}`;
+  }
+  /*
+    NOTHING TO SAY IS AN ANSWER, AND IT IS THIS MODULE'S TO GIVE.
+
+    The caller used to gate the write on whether the BLOCKAGE RECORD changed,
+    which is a different question, and wrong in both directions.
+
+    Wrong one way: a paused pass that measured no holes on a row whose notes
+    already matched wrote nothing at all, so the bare `Synced to X` that
+    `clearStaleMigrationFailure` leaves behind stood over a clone with more to
+    send. That is the reading this lane exists never to give, and it survived
+    the fix that composes the sentence — because the composed value was then
+    thrown away by the caller.
+
+    Wrong the other way: once a clone goes level every pass is a no-op with an
+    unchanged record, so the last budgeted pass's `stopped at its time budget
+    with more to send` would stand for ever on a clone with nothing left to
+    send.
+
+    So the question is put to the READING instead. This pass is entitled to
+    give it; the only reading not worth writing is one the row already carries,
+    which is also what keeps a quiet tick quiet — a level clone re-composes the
+    sentence it already has and writes nothing.
+  */
+  if ((args.standing ?? "").trim() === composed) return null;
+  return composed;
 }
 
 /**

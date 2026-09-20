@@ -15,6 +15,25 @@ import { partitionByDependency } from "./fleetCorpusScope.pure";
 
 const read = (p: string) => readFileSync(p, "utf8");
 
+/**
+ * Every call of `marker` in `source`, as the text between its brace and the
+ * `});` that closes it.
+ *
+ * `indexOf` finds the FIRST call, which is how a second call site comes to be
+ * asserted about by nothing: this lane has two composers and they take their
+ * level reading from different rows.
+ */
+const callArgs = (source: string, marker: string): string[] => {
+  const out: string[] = [];
+  for (let at = source.indexOf(marker); at !== -1; at = source.indexOf(marker, at + 1)) {
+    const end = source.indexOf("});", at);
+    expect(end, `unterminated ${marker}`).toBeGreaterThan(-1);
+    out.push(source.slice(at, end));
+  }
+  expect(out.length, `no call of ${marker}`).toBeGreaterThan(0);
+  return out;
+};
+
 /*
   THE HALF THAT PROTECTS THE VERDICT.
 
@@ -289,6 +308,256 @@ describe("what an operator is told", () => {
 });
 
 /*
+  TWO THINGS THE FIRST VERSION OF THIS MODULE GOT WRONG.
+
+  Both were found by review on the merged commit, and both are cases the tests
+  above did not reach — the first is a constraint that was written down for
+  this change and then not implemented, which is the more useful kind of miss
+  to pin.
+*/
+describe("a pass that stopped early knows nothing about being level", () => {
+  /*
+    `didNothing` does not imply the replay finished. `applyChunkedSeed` returns
+    `stoppedEarly` with `applied: 0` when a stored cursor names more statements
+    than the seed has, and the caller breaks on it having pushed no result at
+    all — so a pass can discharge a hole, change nothing else, and still have a
+    runnable migration pending. Writing `Synced to X` there reports a clone
+    dozens of migrations behind as healthy.
+  */
+  /*
+    The invariant is COMPOSED, not delegated. A first fix returned null here,
+    trusting the sentence already on the row to be a pause. It need not be:
+    `clearStaleMigrationFailure` writes a bare `Synced to X` and leaves
+    `migrations_applied` alone, so a row can carry hole notes under a level
+    sentence — and discharging the last hole on a paused pass would then leave
+    that level claim standing over a clone with more to send.
+  */
+  it("never leaves a level reading standing over a pause, whatever was there before", () => {
+    for (const standing of [
+      "Synced to 20261202090000 so far — this pass stopped at its time budget",
+      // The one that breaks a delegated invariant: self-healing's bare level
+      // reading, written without touching `migrations_applied`.
+      "Synced to 20261202090000",
+      "Migrations up to date (20261202090000)",
+      "Sending 20261203000000 — 16 statement(s) in (rows 151-160)",
+      null,
+    ]) {
+      const detail = blockageDetailFor({
+        standing,
+        holes: [],
+        pausedMidReplay: true,
+        syncedTo: "20261202090000",
+      });
+      expect(detail, `standing: ${standing}`).not.toBeNull();
+      expect(detail).toContain("so far");
+      expect(detail).toContain("more to send");
+      expect(detail).not.toBe("Synced to 20261202090000");
+    }
+  });
+
+  it("still names the holes on a paused pass, but never as a level reading", () => {
+    const detail = blockageDetailFor({
+      standing: "Synced to 20261202090000 so far — this pass stopped at its time budget",
+      holes: ["20261207000000"],
+      pausedMidReplay: true,
+      syncedTo: "20261202090000",
+    });
+    expect(detail).toContain("so far");
+    expect(detail).toContain("stopped at its time budget");
+    expect(detail).toContain("the prime's ledger is short of 20261207000000");
+    // The bare level reading is exactly what must not appear.
+    expect(detail).not.toBe("Synced to 20261202090000");
+  });
+
+  it("gives the level reading only when the pass finished looking", () => {
+    expect(
+      blockageDetailFor({
+        standing: "Synced to X — 4 migration(s) held back behind 20261201100000",
+        holes: [],
+        pausedMidReplay: false,
+        syncedTo: "20261206000000",
+      }),
+    ).toBe("Synced to 20261206000000");
+  });
+
+  it("is handed the pause rather than inferring it from the holes", () => {
+    // Same holes, opposite readings — so the flag is load-bearing and cannot
+    // be reconstructed from anything else this function is given.
+    const paused = blockageDetailFor({
+      standing: null,
+      holes: ["h"],
+      pausedMidReplay: true,
+      syncedTo: "v",
+    });
+    const finished = blockageDetailFor({ standing: null, holes: ["h"], syncedTo: "v" });
+    expect(paused).not.toBe(finished);
+  });
+
+  it("retracts a stale pause once the clone is level", () => {
+    /*
+      THE MIRROR OF THE PAUSE THAT COULD NOT BE WRITTEN.
+
+      Once a clone goes level every pass is a no-op with an unchanged blockage
+      record. Under the old caller gate that meant no sentence was ever written
+      again — so the last budgeted pass's `stopped at its time budget with more
+      to send` stood for ever on a clone with nothing left to send.
+
+      Same cause as the reported finding, opposite direction: the sentence was
+      gated on whether the RECORD changed, which is a different question.
+    */
+    expect(
+      blockageDetailFor({
+        standing:
+          "Synced to 20261206000000 so far — this pass stopped at its time budget with more to send",
+        holes: [],
+        pausedMidReplay: false,
+        syncedTo: "20261207010000",
+      }),
+    ).toBe("Synced to 20261207010000");
+  });
+
+  it("says nothing when the row already carries the reading", () => {
+    // A level clone re-composes its own sentence on every tick. Writing it
+    // back each time is churn on a shared column, and the write is what this
+    // lane's `didNothing` guard exists to withhold unless there is something
+    // to say.
+    for (const [standing, args] of [
+      ["Synced to 20261207010000", { holes: [], pausedMidReplay: false }],
+      [
+        "Synced to 20261207010000 so far — this pass stopped at its time budget with more to send",
+        { holes: [], pausedMidReplay: true },
+      ],
+    ] as const) {
+      expect(
+        blockageDetailFor({ standing, syncedTo: "20261207010000", ...args }),
+        `standing: ${standing}`,
+      ).toBeNull();
+    }
+  });
+
+  it("still refuses a sentence another writer put there", () => {
+    // The equality check is an ADDITIONAL reason to say nothing, never a
+    // replacement for the ownership guard: a parity verdict differs from the
+    // composed reading and must still survive.
+    expect(
+      blockageDetailFor({
+        standing:
+          "Backend ready, but parity could not be verified (timeout) — it has not been compared with the prime",
+        holes: [],
+        pausedMidReplay: true,
+        syncedTo: "20261207010000",
+      }),
+    ).toBeNull();
+  });
+
+  it("names the clone's own recorded version rather than prose, in every sentence", () => {
+    /*
+      THE SAME FALSE LEVEL READING, IN THE SIBLING BRANCH.
+
+      `latestApplied` is null on every chunking pass — it finishes no
+      migration — so a `syncedTo` of `latestApplied ?? <prose>` put the prose
+      into the PAUSE sentence. Measured on the live fleet 20 Sep 2026, all
+      three clones read `Synced to the prime's latest recorded migration so
+      far — this pass stopped at its time budget`: the opening clause is the
+      strongest claim of synchrony there is, and it was false on all three.
+
+      `migration_version` is a reading of the clone's own ledger, so it is
+      exactly what such a pass may name. Pinned as ONE resolution both
+      composers read, because two of them is how two consecutive passes come
+      to describe one clone's level differently.
+    */
+    const lane = read("src/server/fleet-migration.server.ts");
+    // The last rung is the other session's wording, arrived at independently
+    // on the same defect and better than mine: it states a fact about the
+    // CLONE ("no migration recorded yet") where mine still named the prime's
+    // frontier. Taken on the merge; what is pinned is the middle rung.
+    expect(lane).toContain(
+      'const syncedToFor = (recorded: string | null | undefined) =>\n        latestApplied ?? recorded ?? "no migration recorded yet";',
+    );
+    /*
+      ONE RULE, NOT ONE VALUE.
+
+      The two composers no longer share a single resolved string, because they
+      do not hold the same reading of the column it resolves: the active branch
+      names the version this pass applied or the row it claimed, and the no-op
+      branch re-reads `migration_version` alongside the sentence it is about to
+      guard on — a manual sync can land between the two and move it.
+
+      What must stay shared is the LADDER, so the pinning moves with it: the
+      fallback prose is stated once, and neither call site re-derives a rung.
+    */
+    expect(
+      (lane.match(/\?\? "no migration recorded yet"/g) ?? []).length,
+      "the last rung belongs to the one rule",
+    ).toBe(1);
+    for (const args of callArgs(lane, "blockageDetailFor({")) {
+      expect(args).toMatch(/syncedTo(,|: syncedToFor\(recorded\),)/);
+      expect(args).not.toContain("latestApplied ??");
+    }
+  });
+
+  it("the fleet lane hands it over", () => {
+    const lane = read("src/server/fleet-migration.server.ts");
+    const call = lane.slice(lane.indexOf("blockageDetailFor({"));
+    expect(call.slice(0, call.indexOf("});"))).toContain("pausedMidReplay");
+    // And reads it only after it is declared — a const in its temporal dead
+    // zone throws at runtime on the one path that reaches it.
+    expect(lane.indexOf("const pausedMidReplay =")).toBeLessThan(
+      lane.indexOf("const blockageDetail ="),
+    );
+  });
+});
+
+describe("a legacy blockedBy entry is replaced even when the holes are unchanged", () => {
+  /*
+    The entries carry more than the set of holes. A `blockedBy` entry names a
+    migration being WITHHELD, and this reconciliation only ever runs on a pass
+    where nothing is blocked — so the entry is disproved whatever the hole set
+    does.
+
+    The case: a clone acquires a formerly withheld migration by another route
+    (the per-clone sync, self-healing, a repair by hand) while the hole that
+    withheld it is still a hole. Comparing hole ids alone, the record never
+    changes again and `blockageLedger` reports a `heldCount` for a migration
+    nothing is holding, for ever.
+  */
+  it("replaces it with the explicit hole note", () => {
+    const out = reconcileBlockageRecord({
+      stored: [
+        { id: "keep", name: "keep", success: true },
+        { id: "m", name: "m", success: true, skipped: true, blockedBy: ["h"] },
+      ],
+      measured: ["h"],
+    });
+    expect(out.discharged).toEqual([]);
+    expect(out.opened).toEqual([]);
+    expect(out.entries).toEqual([
+      { id: "keep", name: "keep", success: true },
+      primeLedgerHoleNote("h"),
+    ]);
+  });
+
+  it("leaves a record that already is the right notes alone", () => {
+    // The healthy steady state, and the one that must stay byte-identical.
+    expect(
+      reconcileBlockageRecord({
+        stored: [{ id: "keep", success: true }, primeLedgerHoleNote("h")],
+        measured: ["h"],
+      }).entries,
+    ).toBeNull();
+  });
+
+  it("rewrites when the notes are the right ids in the wrong order", () => {
+    expect(
+      reconcileBlockageRecord({
+        stored: [primeLedgerHoleNote("b"), primeLedgerHoleNote("a")],
+        measured: ["a", "b"],
+      }).entries,
+    ).toEqual([primeLedgerHoleNote("a"), primeLedgerHoleNote("b")]);
+  });
+});
+
+/*
   THE HOLE THE PARTITION USED TO DISCARD.
 
   `holes` was accumulated for the whole corpus walk and never returned, so a
@@ -354,12 +623,19 @@ describe("the fix is mounted", () => {
     // Read, or there is nothing to reconcile against.
     expect(lane).toContain("migrations_applied, status_detail");
 
-    // The branch that used to be a bare `{}` — a pass that changed nothing
-    // said nothing, including about the one thing it was the authority on.
-    const gate = lane.indexOf("...(didNothing");
-    expect(gate).toBeGreaterThan(-1);
-    const branch = lane.slice(gate, gate + 400);
+    // A pass that changed nothing said nothing at all once, including about
+    // the one thing it was the authority on. It says it in a write of its own
+    // now: the update that releases the claim must land unconditionally, so it
+    // cannot carry an opinion drawn from a snapshot read 45 seconds earlier.
+    const gate = lane.indexOf("const noopFacts = {");
+    expect(gate, "the no-op facts have no write of their own").toBeGreaterThan(-1);
+    const branch = lane.slice(gate);
     expect(branch).toContain("blockage.entries === null");
+    // Written independently of the record: gating the sentence on the record
+    // is what left a paused pass unable to retract a bare `Synced to X`.
+    expect(branch).toContain(
+      "...(blockageDetail === null ? {} : { status_detail: blockageDetail })",
+    );
   });
 
   it("the replay files a note for every hole it measured", () => {

@@ -2383,7 +2383,13 @@ describe("a fleet-sync pass that did nothing says nothing", () => {
   const block = () => {
     const b = src();
     const at = b.indexOf("const didNothing =");
-    return b.slice(at, b.indexOf('.eq("clone_id", cloneId)', at));
+    // The MAIN update — the one that releases the claim. A no-op pass now
+    // makes two smaller calls before it (a fresh read and a guarded write),
+    // each with its own `.eq("clone_id", cloneId)`, so anchoring on the first
+    // one returned a slice that stopped before the update this block is about.
+    const main = b.indexOf("worker_started_at: null,", at);
+    expect(main, "the claim-releasing update moved").toBeGreaterThan(at);
+    return b.slice(at, b.indexOf('.eq("clone_id", cloneId)', main));
   };
 
   it("writes no fact about the clone when it applied, failed, blocked and held nothing", () => {
@@ -2421,7 +2427,7 @@ describe("a fleet-sync pass that did nothing says nothing", () => {
     const gate = bl.indexOf("...(didNothing");
     expect(gate, "the no-op gate is gone").toBeGreaterThan(-1);
     // Ends where the ACTIVE branch begins — the `: {` at the ternary's own
-    // indentation, not the nested one inside the no-op branch.
+    // indentation.
     const noopBranch = bl.slice(gate, bl.indexOf("\n            : {", gate));
     for (const forbidden of [
       "migration_version",
@@ -2429,12 +2435,152 @@ describe("a fleet-sync pass that did nothing says nothing", () => {
       "error_message",
       "migration_blocked_at",
       "migration_blocked_reason",
+      // These two are a no-op pass's OPINION, not a fact it established, and
+      // they no longer ride the update that releases the claim. See below.
+      "migrations_applied",
+      "status_detail",
     ]) {
-      expect(noopBranch, `a no-op pass must not write ${forbidden}`).not.toContain(forbidden);
+      expect(noopBranch, `a no-op pass must not write ${forbidden} here`).not.toContain(forbidden);
     }
-    // And what it MAY write, so the exception cannot quietly widen.
-    expect(noopBranch).toContain("migrations_applied: blockage.entries");
-    expect(noopBranch).toContain("status_detail: blockageDetail");
+
+    /*
+      THE OPINION IS A SEPARATE, GUARDED WRITE.
+
+      `backend` is read at the TOP of the run — before the claim, before up to
+      45 seconds of network work — and `status_detail` is shared with
+      provisioning, parity, self-healing and the manual sync button, none of
+      which takes this lane's claim. So the ownership check can authorise
+      replacing a sentence that is no longer on the row.
+
+      It cannot be guarded in the update above, because that update releases
+      the claim and persists the chunk cursor: a guard that missed would leak
+      the claim for STALE_CLAIM_MINUTES and throw away the seed prefix already
+      sent. So the two clone facts move to their own write, conditioned on the
+      inspected sentence still standing.
+    */
+    // Read from the WHOLE function: `block()` covers the claim-releasing
+    // update alone, and this write is a separate call before it.
+    const whole = src();
+    expect(whole, "the no-op facts must have their own write").toContain("const noopFacts = {");
+    const guarded = whole.slice(whole.indexOf("const noopFacts = {"));
+
+    /*
+      READ FRESH, AND WRITTEN BEFORE THE CLAIM IS RELEASED.
+
+      Guarding on the sentence is a compare-and-set on its own column and is
+      sound. Guarding `migrations_applied` on it is not: a manual sync cycles
+      `status_detail` from `Migrations up to date (X)` through `Syncing
+      migrations from …` and back to the identical sentence while replacing
+      its results, so the guard reads as unchanged and a record reconciled
+      from the older snapshot is restored over it.
+
+      Two things answer that. The pair is re-read at the moment it is written,
+      so the reconciliation is against what the row holds now; and the write
+      happens while this pass still HOLDS the claim, which shuts out every
+      other fleet pass and leaves only the lanes that take no claim — which is
+      what the sentence guard is for.
+    */
+    expect(whole, "the reconciliation must not read the top-of-run snapshot").not.toContain(
+      "(backend as { migrations_applied?: unknown }).migrations_applied",
+    );
+    expect(whole, "the snapshot columns must not be selected at the top either").not.toContain(
+      "chunk_cursor, migrations_applied, status_detail",
+    );
+    const freshRead = whole.indexOf(
+      '.select("migrations_applied, status_detail, migration_version")',
+    );
+    expect(freshRead, "the trio is not re-read before it is written").toBeGreaterThan(-1);
+    expect(freshRead).toBeLessThan(whole.indexOf("const noopFacts = {"));
+    expect(
+      whole.indexOf("const noopFacts = {"),
+      "the opinion must be written before the claim is released",
+    ).toBeLessThan(whole.indexOf("worker_started_at: null,"));
+    expect(guarded).toContain("migrations_applied: blockage.entries");
+    expect(guarded).toContain("status_detail: blockageDetail");
+    // The record and the sentence are still independent of each other.
+    expect(guarded, "the blockage record and the sentence must not share a gate").toContain(
+      "...(blockage.entries === null ? {} : { migrations_applied: blockage.entries })",
+    );
+    // The guard itself, on both spellings — `.eq` never matches NULL. Pinned
+    // without the builder's variable name, which has been renamed once.
+    expect(guarded).toContain('.eq("status_detail", inspected)');
+    expect(guarded).toContain('.is("status_detail", null)');
+
+    /*
+      THE SENTENCE IS COMPOSED FROM THE VERSION IT WAS RE-READ WITH.
+
+      A guard on `status_detail` proves the SENTENCE had not moved. It proves
+      nothing about `migration_version`, and the two move together: a manual
+      sync that completes inside this pass advances the clone and writes its
+      own accurate `Migrations up to date (new)`. `applyPrimeMigrations` then
+      finds nothing to send, so `latestApplied` is null and the top-of-run
+      ladder falls through to the version that sync replaced — composing
+      `Synced to <old>`, passing the guard on the sentence it just read, and
+      putting a stale reading over a fresh one.
+
+      So the version rides the same re-read as the sentence, and the rule that
+      turns it into a reading is the one the active branch uses.
+    */
+    // From the re-read rather than from `noopFacts`: the sentence is composed
+    // between the two, so the narrower window cannot see it.
+    const composed = whole.slice(freshRead, whole.indexOf("const noopFacts = {"));
+    expect(composed, "the no-op sentence must be composed from the re-read version").toContain(
+      "syncedTo: syncedToFor(recorded)",
+    );
+    expect(composed, "`recorded` must come from the re-read row").toContain(
+      "(current as { migration_version?: string | null } | null)?.migration_version ?? null",
+    );
+    expect(
+      composed,
+      "the no-op sentence must not be composed from the top-of-run version",
+    ).not.toContain("syncedTo,");
+    /*
+      AND NOTHING AT ALL WHEN THE CLONE MOVED UNDER THE PASS.
+
+      The sentence guard is a compare-and-set on `status_detail`, so it passes
+      whenever the standing sentence is unchanged — including when a manual
+      sync has since finished the very work this pass stopped short of, and
+      left its own accurate `Migrations up to date (…)`. That sentence is this
+      lane's own prose, so ownership does not withhold it either. Both readings
+      this pass could compose are then wrong: a pause that describes work
+      somebody else has completed, and a level reading built from a version
+      that moved.
+
+      `migration_version` is re-read with the sentence and the manual sync
+      writes the two together, so a difference against the version this run
+      started on is the signal. The RECORD is not withheld by it: it is a
+      reading of the prime's ledger, which no clone-side writer can invalidate.
+    */
+    expect(composed, "the pass must notice the clone moving under it").toContain(
+      "const movedUnderUs = (recorded ?? null) !== (backend.migration_version ?? null);",
+    );
+    expect(composed, "a clone that moved gets no sentence from this pass").toContain(
+      "const blockageDetail = movedUnderUs\n            ? null\n            : blockageDetailFor({",
+    );
+    expect(
+      guarded,
+      "the blockage record is not withheld by it — it is about the prime, not the clone",
+    ).toContain("...(blockage.entries === null ? {} : { migrations_applied: blockage.entries })");
+
+    // One rule, two readings — not two ladders that can drift apart.
+    expect(whole, "the level rule is stated once").toContain(
+      "const syncedToFor = (recorded: string | null | undefined) =>",
+    );
+    expect(
+      (whole.match(/\?\? "no migration recorded yet"/g) ?? []).length,
+      "the fallback prose belongs to the one rule",
+    ).toBe(1);
+    // And the CLAIM fences it too, so a pass that was reclaimed mid-run
+    // records no reading about a row it no longer owns. `.select` is what
+    // makes a miss visible at all — a fenced update that asks for nothing
+    // back returns no error and no rows whether it landed or not.
+    expect(guarded).toContain('.eq("worker_started_at", claimedAt)');
+    expect(guarded).toContain('.select("clone_id")');
+    // A miss is deference, not a failure: it must not fail the clone or stop
+    // the run, because nothing about the clone changed this pass.
+    const tail = guarded.slice(0, guarded.indexOf("}\n", guarded.indexOf("noopErr")) + 2);
+    expect(tail).not.toContain("out.failed.push");
+    expect(tail).not.toContain("continue;");
   });
 
   it("never erases a recorded migration version with a null", () => {
@@ -2447,7 +2593,18 @@ describe("a fleet-sync pass that did nothing says nothing", () => {
     const bl = block();
     expect(bl).not.toMatch(/Synced to \$\{latestApplied\}/);
     expect(bl).toMatch(/Synced to \$\{syncedTo\}/);
-    expect(src()).toMatch(/const syncedTo = latestApplied \?\?/);
+    // Whitespace-insensitive: the resolution grew a rung and prettier split it
+    // over two lines, which a literal `const syncedTo = latestApplied ??` no
+    // longer matches — and the rung is the point, so it is asserted rather
+    // than the layout. It is a named rule now, because the no-op path applies
+    // it to a version re-read later in the pass; both rungs still have to be
+    // there, or a null reaches the sentence.
+    expect(src().replace(/\s+/g, " ")).toContain(
+      'const syncedToFor = (recorded: string | null | undefined) => latestApplied ?? recorded ?? "no migration recorded yet";',
+    );
+    expect(src().replace(/\s+/g, " ")).toContain(
+      "const syncedTo = syncedToFor(backend.migration_version);",
+    );
   });
 
   it("still reports a failure and a held-back migration", () => {
