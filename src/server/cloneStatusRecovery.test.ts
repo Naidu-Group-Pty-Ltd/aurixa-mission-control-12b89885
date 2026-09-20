@@ -1,3 +1,4 @@
+import { stripComments } from "@/server/sourceComments.pure";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
@@ -53,7 +54,9 @@ describe("clearStaleMigrationFailure", () => {
     // Renegotiated for #232: this used to pin the conditional spread inside
     // the single update. The condition is now the call itself, because the
     // version is written by a statement of its own.
-    expect(helper).toContain("if (latestApplied !== null) await recordAppliedVersion(");
+    // The RULE, not its spelling: the fact write is reached only where a
+    // version exists to record, and it is its own statement.
+    expect(helper).toMatch(/latestApplied !== null\s*\?\s*await recordAppliedVersion\(/);
   });
 
   it("writes the version WITHOUT the status compare-and-swap — #232", () => {
@@ -98,7 +101,37 @@ describe("clearStaleMigrationFailure", () => {
     // a refused version write would still leave the clone announcing a level
     // it is not at.
     expect(factWrite).toContain("status_detail: `Synced to ${latestApplied}`");
-    expect(transitionWrite).toContain("latestApplied\n          ? {}");
+    // The transition never states a LEVEL. It may state that it knows none —
+    // see the test below — but `Synced to …` belongs to the write that
+    // established it and to nothing else.
+    expect(transitionWrite).not.toContain("Synced to");
+  });
+
+  it("never leaves the other lane's reason standing under a healthy status", () => {
+    /*
+      The state this closes: the forward-only WHERE matches nothing because the
+      drain already carried the clone to this version, so no reading is
+      written — and the compare-and-swap then flips `failed` to `ready` with
+      `Provisioning ceiling exceeded` still in `status_detail`. Only the
+      PROVISIONING path ever writes that column's `failed`; the migration lane
+      writes `migration_blocked_*` instead and says so in its own comment. So
+      the reason left behind is always another lane's.
+
+      Null rather than a sentence, because the only thing this write has earned
+      is that the verdict is stale. It does not know what level the clone is at
+      — that is precisely the branch where the fact write matched nothing.
+    */
+    expect(transitionWrite).toContain("status_detail: null");
+    expect(transitionWrite).toMatch(/versionRecorded\s*\?\s*\{\}/);
+  });
+
+  it("knows whether the reading landed rather than assuming it did", () => {
+    // `recordAppliedVersion` used to return void, so the transition could not
+    // tell "already at this version" from "just moved to it" — and those need
+    // different readings.
+    expect(helper).toContain("): Promise<boolean> {");
+    expect(factWrite).toContain('.select("clone_id")');
+    expect(factWrite).toContain("if (data && data.length > 0) recorded = true;");
   });
 
   it("clears the other lane's blocked pair rather than leaving it to rot", () => {
@@ -145,5 +178,39 @@ describe("clearStaleMigrationFailure", () => {
     // A clone still holding migrations back is not level, whatever it applied.
     expect(lane).toContain("if (orphaned.length === 0) await clearStaleMigrationFailure(");
     expect(lane).toContain("if (landed > 0 && heldBack === 0) {");
+  });
+});
+
+describe("whose verdict the compare-and-swap is actually clearing", () => {
+  /*
+    `clearFailedVerdict` swaps on `clone_backends.status = 'failed'`, and the
+    migration lane never writes that column. Measured 20 Sep 2026: the only
+    writer of `status: "failed"` on `clone_backends` is the provisioning path
+    in `src/lib/backend-provisioning.functions.ts`. `fleet-migration.server.ts`
+    writes `migration_blocked_at` / `migration_blocked_reason` and says why in
+    its own comment — "`status` is shared with the provisioning drain and says
+    nothing reliable about a schema".
+
+    So this repair clears a PROVISIONING verdict, always, on migration
+    evidence. That is deliberate — the call site says "whatever verdict another
+    lane left, it is not true now", and a pass that carried a clone level with
+    the prime has proved the backend exists, is reachable and accepts DDL.
+
+    It is asserted rather than trusted because the reasoning depends on it. The
+    day the migration lane starts writing `status`, the swap stops being
+    cross-lane and everything above needs rereading.
+  */
+  const migrationLane = stripComments(
+    readFileSync("src/server/fleet-migration.server.ts", "utf8"),
+  );
+
+  it("the migration lane writes the blocked pair, never the shared status", () => {
+    expect(migrationLane).toContain("migration_blocked_at:");
+    expect(migrationLane).not.toMatch(/\bstatus:\s*["'`]failed["'`]/);
+    expect(migrationLane).not.toMatch(/\bstatus:\s*["'`]ready["'`]/);
+  });
+
+  it("and the repair swaps on that shared status, knowingly", () => {
+    expect(transitionWrite).toContain('.eq("status", "failed")');
   });
 });

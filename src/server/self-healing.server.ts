@@ -788,8 +788,8 @@ async function clearStaleMigrationFailure(
   cloneId: string,
   latestApplied: string | null,
 ): Promise<void> {
-  if (latestApplied !== null) await recordAppliedVersion(cloneId, latestApplied);
-  await clearFailedVerdict(cloneId, latestApplied);
+  const recorded = latestApplied !== null ? await recordAppliedVersion(cloneId, latestApplied) : false;
+  await clearFailedVerdict(cloneId, latestApplied, recorded);
 }
 
 /**
@@ -800,7 +800,10 @@ async function clearStaleMigrationFailure(
  * exactly one can match, and neither matches a clone already at or past
  * `latestApplied`.
  */
-async function recordAppliedVersion(cloneId: string, latestApplied: string): Promise<void> {
+async function recordAppliedVersion(
+  cloneId: string,
+  latestApplied: string,
+): Promise<boolean> {
   // A version is a fixed-width 14-digit stamp, so the database's ordinary
   // text comparison IS its chronological order and `.lt` means what it looks
   // like it means. That is a guarantee rather than an observation:
@@ -813,9 +816,14 @@ async function recordAppliedVersion(cloneId: string, latestApplied: string): Pro
     (q: ReturnType<typeof versionUpdate>) => q.is("migration_version", null),
     (q: ReturnType<typeof versionUpdate>) => q.lt("migration_version", latestApplied),
   ];
+  // Whether the READING landed, which the transition below needs and used to
+  // throw away. Exactly one statement can match, and neither matches a clone
+  // the drain has already carried to or past this version.
+  let recorded = false;
   for (const narrow of forward) {
     try {
-      const { error } = await narrow(versionUpdate(cloneId, latestApplied));
+      const { data, error } = await narrow(versionUpdate(cloneId, latestApplied)).select("clone_id");
+      if (data && data.length > 0) recorded = true;
       if (error) {
         console.error(
           `[self-healing] clone ${cloneId} applied migrations up to ${latestApplied} but the version could not be recorded:`,
@@ -829,6 +837,7 @@ async function recordAppliedVersion(cloneId: string, latestApplied: string): Pro
       );
     }
   }
+  return recorded;
 }
 
 /** The update both forward-only statements run, before their own narrowing. */
@@ -853,7 +862,11 @@ function versionUpdate(cloneId: string, latestApplied: string) {
  * reading, and writing it twice would let a refused version write still
  * announce a level this clone is not at.
  */
-async function clearFailedVerdict(cloneId: string, latestApplied: string | null): Promise<void> {
+async function clearFailedVerdict(
+  cloneId: string,
+  latestApplied: string | null,
+  versionRecorded: boolean,
+): Promise<void> {
   try {
     const { error } = await admin
       .from("clone_backends")
@@ -863,7 +876,18 @@ async function clearFailedVerdict(cloneId: string, latestApplied: string | null)
         migration_blocked_at: null,
         migration_blocked_reason: null,
         ...(latestApplied
-          ? {}
+          ? // The fact above owns the reading wherever it landed. Where it did
+            // NOT — the clone was already at or past this version, so the
+            // forward-only WHERE matched nothing — the row would otherwise go
+            // `ready` still carrying the reason the OTHER lane failed it, and
+            // "Provisioning ceiling exceeded" under a healthy status is the
+            // same misleading signal pointing the other way. Null makes no
+            // claim, which is the only thing this write has earned: it knows
+            // the verdict is stale and does not know what level the clone is
+            // at.
+            versionRecorded
+            ? {}
+            : { status_detail: null }
           : { status_detail: "Verified level with the prime's recorded migrations" }),
       })
       .eq("clone_id", cloneId)
