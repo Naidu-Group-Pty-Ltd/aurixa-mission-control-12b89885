@@ -1,11 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import {
+  CLONE_OWNED_MARKER,
+  declarationsLostBy,
   CONFIG_TOML_PATH,
   declaredFunctionCount,
+  functionBlocksIn,
   reconcileConfigToml,
 } from "./configTomlReconcile.pure";
 import { DEFAULT_MIRROR_EXCLUSIONS } from "./syncExclusions.pure";
+import { stripComments } from "../sourceComments.pure";
 
 const PRIME_REF = "dduzbchuswwbefdunfct";
 const CLONE_REF = "umrtusxohxjxzodxorim";
@@ -212,5 +216,174 @@ describe("how it sits beside the exclusion it does not remove", () => {
     const engine = readFileSync("src/server/cascade-engine.server.ts", "utf8");
     expect(engine).toContain("reconcileConfigToml");
     expect(engine).toContain("CONFIG_TOML_PATH");
+  });
+});
+
+/*
+  A clone that is NOT a mirror.
+
+  Every fixture above is one: prime is a superset, so "prime's file with one
+  line put back" loses nothing. `npc-crm-independent` owns three functions
+  prime has never had — measured 20 Sep 2026, 416 declarations against prime's
+  413 — and all three are `verify_jwt = false`, one of them an inbound webhook
+  whose caller holds no Supabase JWT. Taking prime's file wholesale dropped
+  every one of them.
+
+  `[edge_runtime]` sits after the blocks on purpose: a block has to end at the
+  next section of ANY kind, not only at the next `[functions.*]`.
+*/
+const CRM_CLONE = `${preamble(CLONE_REF)}
+[functions.aml-cases]
+verify_jwt = true
+
+[functions.crm-inbound-message]
+verify_jwt = false
+
+[functions.crm-send-message]
+verify_jwt = false
+
+[edge_runtime]
+policy = "oneshot"
+`;
+
+describe("a clone that owns functions the prime does not", () => {
+  const reconciled = () =>
+    reconcileConfigToml({ primeToml: PRIME, cloneToml: CRM_CLONE, ownRef: CLONE_REF });
+
+  it("keeps the clone's own declarations, which prime has no opinion about", () => {
+    const v = reconciled();
+    expect(v.ok).toBe(true);
+    if (!v.ok) return;
+    const names = new Set(functionBlocksIn(v.merged).map((b) => b.name));
+    expect(names.has("crm-inbound-message")).toBe(true);
+    expect(names.has("crm-send-message")).toBe(true);
+  });
+
+  it("keeps what they DECLARE, which is the thing that costs something", () => {
+    // Surviving as a bare header would be no better than being dropped: an
+    // omitted verify_jwt inside a present block still reads as `true`.
+    const v = reconciled();
+    expect(v.ok).toBe(true);
+    if (!v.ok) return;
+    const blocks = functionBlocksIn(v.merged);
+    for (const name of ["crm-inbound-message", "crm-send-message"]) {
+      const block = blocks.find((b) => b.name === name);
+      expect(block?.text, name).toContain("verify_jwt = false");
+    }
+  });
+
+  it("still lets prime win every name the two share", () => {
+    // The clone declares `aml-cases` too. Carrying the clone's copy of a name
+    // prime also declares would freeze exactly what the reconcile exists to
+    // thaw.
+    const v = reconciled();
+    expect(v.ok).toBe(true);
+    if (!v.ok) return;
+    expect(functionBlocksIn(v.merged).filter((b) => b.name === "aml-cases")).toHaveLength(1);
+    // Prime declares `planning-data-service`; the clone has never heard of it.
+    expect(v.merged).toContain("[functions.planning-data-service]");
+  });
+
+  it("names what it carried, so the pull request can say so", () => {
+    const v = reconciled();
+    expect(v.ok).toBe(true);
+    if (!v.ok) return;
+    expect(v.carriedForward.sort()).toEqual(["crm-inbound-message", "crm-send-message"]);
+    expect(declaredFunctionCount(v.merged)).toBe(declaredFunctionCount(PRIME) + 2);
+  });
+
+  it("carries nothing, and says so, for a clone that is a mirror", () => {
+    const v = reconcileConfigToml({ primeToml: PRIME, cloneToml: CLONE, ownRef: CLONE_REF });
+    expect(v.ok).toBe(true);
+    if (!v.ok) return;
+    expect(v.carriedForward).toEqual([]);
+    expect(v.merged).not.toContain(CLONE_OWNED_MARKER);
+  });
+
+  it("is idempotent — a second pass over its own output adds nothing", () => {
+    // The marker is a comment, so on re-read it is absorbed into the body of
+    // the prime-owned block above it and dropped with it. If that stopped
+    // being true the file would grow a marker and a duplicate block on every
+    // cascade, for ever.
+    const first = reconciled();
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const second = reconcileConfigToml({
+      primeToml: PRIME,
+      cloneToml: first.merged,
+      ownRef: CLONE_REF,
+    });
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.merged).toBe(first.merged);
+    expect(second.changed).toBe(false);
+    expect(second.carriedForward.sort()).toEqual(["crm-inbound-message", "crm-send-message"]);
+  });
+
+  it("does not disturb the rest of the clone's file", () => {
+    const v = reconciled();
+    expect(v.ok).toBe(true);
+    if (!v.ok) return;
+    // `[edge_runtime]` is the clone's, sits after its blocks, and is not a
+    // function declaration — it must not be swept up by the carry-forward.
+    expect(functionBlocksIn(v.merged).some((b) => b.text.includes("oneshot"))).toBe(false);
+    expect(v.ownRef).toBe(CLONE_REF);
+  });
+});
+
+describe("reading function blocks", () => {
+  it("ends a block at the next section of any kind", () => {
+    const blocks = functionBlocksIn(
+      ["[functions.a]", "verify_jwt = false", "", "[edge_runtime]", "policy = \"oneshot\""].join(
+        "\n",
+      ),
+    );
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].text).toBe(["[functions.a]", "verify_jwt = false"].join("\n"));
+  });
+
+  it("reproduces a name declared twice rather than silently halving it", () => {
+    // TOML says last wins. This reader is not resolving the file, it is
+    // letting the clone's text survive a rewrite, so both are reported.
+    const blocks = functionBlocksIn(
+      ["[functions.a]", "verify_jwt = false", "", "[functions.a]", "verify_jwt = true"].join("\n"),
+    );
+    expect(blocks.map((b) => b.name)).toEqual(["a", "a"]);
+  });
+});
+
+describe("the read-back on the declarations", () => {
+  /*
+    This is the guard that turns a broken composition into a REFUSAL instead of
+    a file that quietly gates three functions closed. It cannot be reached
+    through `reconcileConfigToml` on valid input — with the carry-forward
+    working, nothing is ever lost — so it is exercised directly, and its wiring
+    was proved by execution rather than asserted: planting the pre-fix composer
+    back made the reconcile refuse and name the clone's own functions.
+  */
+  it("names a declaration the candidate dropped", () => {
+    const candidate = PRIME; // prime's file, exactly what the old composer wrote
+    expect(declarationsLostBy(CRM_CLONE, candidate).sort()).toEqual([
+      "crm-inbound-message",
+      "crm-send-message",
+    ]);
+  });
+
+  it("finds nothing to report on what the reconcile actually produces", () => {
+    const v = reconcileConfigToml({ primeToml: PRIME, cloneToml: CRM_CLONE, ownRef: CLONE_REF });
+    expect(v.ok).toBe(true);
+    if (!v.ok) return;
+    expect(declarationsLostBy(CRM_CLONE, v.merged)).toEqual([]);
+  });
+
+  it("is consulted by the reconcile rather than re-implemented beside it", () => {
+    // The likeliest regression here is somebody simplifying the call away,
+    // which no behavioural test above can see.
+    const src = stripComments(readFileSync("src/server/cascade/configTomlReconcile.pure.ts", "utf8"));
+    const body = src.slice(src.indexOf("export function reconcileConfigToml"));
+    expect(body).toContain("declarationsLostBy(cloneToml, merged)");
+    // And that it refuses on ANY loss. A threshold is the other way this
+    // control goes quiet while still looking present.
+    expect(body).toContain("if (lost.length > 0)");
   });
 });

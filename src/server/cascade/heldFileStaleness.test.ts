@@ -9,6 +9,7 @@ import {
   findStaleHeldReferences,
   namedImportsOf,
   resolveSpecifier,
+  stripNonCode,
 } from "./heldFileStaleness.pure";
 
 const fixture = (name: string) =>
@@ -392,5 +393,53 @@ describe("what the additions guard refuses to claim", () => {
     expect(findMissingHeldReferences({ ...base, heldFilesClone: { "src/App.tsx": "" } })).toEqual([
       { heldPath: "src/App.tsx", cascadedPath: "src/m.ts", missing: ["A", "B"] },
     ]);
+  });
+});
+
+describe("reading a module as code", () => {
+  /*
+    `stripNonCode` had its own character scanner, and twelve source-contract
+    tests read their subject through it. It checked QUOTES before comments and
+    did not track `${…}`, so a backtick in a comment opened a template literal
+    and an interpolated quote closed one early. On an UNMODIFIED
+    `cascade-engine.server.ts` that produced 34 phantom string spans of more
+    than two lines, the longest 74 — and an ordinary edit elsewhere flipped the
+    parity until `deletionPropagation.test.ts` could no longer see a line that
+    had not moved.
+
+    Nothing asserted it stripped anything at all, so returning the source
+    untouched passed every test in the repository.
+  */
+  it("removes a line comment and a block comment", () => {
+    expect(stripNonCode("// gone\nconst a = 1;\n")).not.toContain("gone");
+    expect(stripNonCode("/* gone */ const b = 2;")).not.toContain("gone");
+    expect(stripNonCode("// gone\nconst a = 1;\n")).toContain("const a = 1;");
+  });
+
+  it("a backtick inside a comment swallows nothing after it", () => {
+    // The defect itself. An odd backtick opened a template literal that ran
+    // to the next one anywhere below, taking every line in between with it.
+    const out = stripNonCode(
+      ["// mentions `supabase/functions-registry/**` once", "const kept = 1;"].join("\n"),
+    );
+    expect(out).toContain("const kept = 1;");
+  });
+
+  it("keeps a string's contents, because a path in one is still a reference", () => {
+    expect(stripNonCode('import x from "./a/b";')).toContain("./a/b");
+  });
+
+  it("does not lose a line of the engine it is pointed at", () => {
+    // The regression, at the scale it happened. A unit fixture cannot see a
+    // parity that only goes wrong 2,400 lines in.
+    const engine = readFileSync("src/server/cascade-engine.server.ts", "utf8");
+    const code = stripNonCode(engine);
+    for (const line of [
+      "treeEntries.length === 0 && pendingDeletes.length === 0",
+      "const primeFiles = partition.write;",
+      "reconcileConfigToml({",
+    ]) {
+      expect(code, line).toContain(line);
+    }
   });
 });

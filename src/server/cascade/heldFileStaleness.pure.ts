@@ -47,6 +47,8 @@
  * token, or a network.
  */
 
+import { stripComments } from "../sourceComments.pure";
+
 export type StaleHeldReference = {
   /** The held file that will not compile — e.g. `src/App.tsx`. */
   heldPath: string;
@@ -69,65 +71,33 @@ const EXTENSIONS = [".ts", ".tsx", ".d.ts", "/index.ts", "/index.tsx"];
 /**
  * Comments removed, so a path named in prose never counts as a reference.
  *
- * Quoted strings are stepped over rather than scanned, and that is not a
- * nicety. `"supabase/functions/**"` contains `/*`, so a regex that treats the
- * first `/*` it sees as a comment opens one inside a glob and closes it at the
- * next `*` + `/` anywhere in the file — swallowing every import in between.
- * The engine's own source has eleven such globs; scanning it that way loses
- * two thirds of the file.
+ * ## It used to have its own scanner, and the scanner drifted
+ *
+ * This was a hand-rolled character walk that checked QUOTES before comments
+ * and did not track `${…}`. Both halves bite. A backtick inside a `//` comment
+ * opened a template literal, and an interpolation containing a quote closed
+ * one early — so the scanner's idea of "inside a string" ran on a parity that
+ * nothing maintained. Measured 20 Sep 2026 on `cascade-engine.server.ts`
+ * UNMODIFIED: 34 phantom string spans of more than two lines, the longest
+ * running 74. Its own header called it "deliberately LOSSY in the safe
+ * direction", and losing matches IS the safe direction for a counter — but
+ * twelve call sites are `expect(code).toContain(…)` source contracts, and
+ * there a lost match is a test that fails for a reason nobody can find, or
+ * passes because the string it was looking for happened to survive.
+ *
+ * It was found by an ordinary edit. Adding a reconcile step to the engine
+ * flipped the parity and `deletionPropagation.test.ts` stopped being able to
+ * see `treeEntries.length === 0 && pendingDeletes.length === 0` — a line that
+ * had not moved and was still right there.
+ *
+ * So it delegates to `stripComments`, the one implementation, which declines
+ * on an ambiguous bare `/` rather than guessing and is asserted over the whole
+ * of `src/` to lose no declaration. The export stays because twelve callers
+ * name it and because the NAME is right for what they want: code, without
+ * prose.
  */
 export function stripNonCode(source: string): string {
-  let out = "";
-  let i = 0;
-  while (i < source.length) {
-    const c = source[i];
-    const next = source[i + 1];
-
-    // A string or template literal is copied through verbatim. Anything that
-    // looks like a comment inside it is text.
-    if (c === '"' || c === "'" || c === "`") {
-      const quote = c;
-      out += c;
-      i++;
-      while (i < source.length) {
-        if (source[i] === "\\") {
-          out += source.slice(i, i + 2);
-          i += 2;
-          continue;
-        }
-        out += source[i];
-        if (source[i] === quote) {
-          i++;
-          break;
-        }
-        i++;
-      }
-      continue;
-    }
-
-    if (c === "/" && next === "*") {
-      const end = source.indexOf("*/", i + 2);
-      // An unterminated block comment runs to the end of the file, which is
-      // what a compiler would do with it too.
-      const stop = end === -1 ? source.length : end + 2;
-      // Newlines are kept so line-based readers downstream stay aligned.
-      out += source.slice(i, stop).replace(/[^\n]/g, " ");
-      i = stop;
-      continue;
-    }
-
-    if (c === "/" && next === "/") {
-      const end = source.indexOf("\n", i);
-      const stop = end === -1 ? source.length : end;
-      out += " ".repeat(stop - i);
-      i = stop;
-      continue;
-    }
-
-    out += c;
-    i++;
-  }
-  return out;
+  return stripComments(source);
 }
 
 /** One `import { … } from "…"` in a module, flattened to the local names. */

@@ -206,45 +206,36 @@ hazard existed outlives the hazard._
    failure, which is the same class of misleading signal that cost the two days
    above.
 
-   One thing to decide before treating it as merely stale data.
-   `clearStaleMigrationFailure` compare-and-swaps on `status = 'failed'`
-   without reading WHY the clone failed, so a successful migration pass over
-   either clone will clear a PROVISIONING verdict on evidence about
-   MIGRATIONS. That is the outcome this item wants and it is reached by a lane
-   that did not establish it — the inverse of the defect fixed under #232 one
-   file away. Worth an explicit decision rather than being left to happen.
+   **The decision this flagged has been taken, and the measurement changed
+   its shape.** `clearStaleMigrationFailure` compare-and-swaps on
+   `clone_backends.status = 'failed'` without reading WHY, which read like the
+   inverse of the defect #232 fixed one file away. Measured 20 Sep 2026 it is
+   more absolute than that: the migration lane **never writes that column at
+   all** — the only writer of `status: "failed"` there is the provisioning
+   path in `src/lib/backend-provisioning.functions.ts`, and
+   `fleet-migration.server.ts` writes `migration_blocked_at` /
+   `migration_blocked_reason` instead, saying why in its own comment
+   ("`status` is shared with the provisioning drain and says nothing reliable
+   about a schema"). So a provisioning verdict is not one outcome among
+   several; it is the only kind that swap can ever clear.
 
-## Verification
+   **Kept, because it is deliberate and defensible.** The call site says
+   "whatever verdict another lane left, it is not true now", and a pass that
+   carried a clone level with the prime has proved the backend exists, is
+   reachable and accepts DDL. What it lacked was an assertion that the premise
+   holds, so the day the migration lane starts writing `status` the reasoning
+   gets reread instead of quietly becoming false.
 
-- migration lane green (run 40), `main` CI green
-- queue fully applied: nothing failed, nothing pending
-- `clones.merge_drain_at` and `clone_backends.migration_blocked_at` present with
-  both indexes; `merge_drain_at` observed advancing 09:10:02 → 09:15:02 across
-  all three clones, which is the proof the published build is the new code —
-  nothing else writes that column
-- the two stranded clones back in the fleet migration sync, all three level at
-  migration version `20261111010000`
-- **billing untouched and independently checked**: billable quantity equals the
-  brokered event count (724 = 724, 724 × 50 = 36,200 micros), the three
-  `absorbed` rows are still non-billable, and the 9-value constraint stands. The
-  double-count that was avoided would have read ≈1,448.
+   **One real defect was adjacent and is fixed.** `recordAppliedVersion`
+   returned void, so the transition could not tell "just moved to this
+   version" from "the drain already carried it past". In the second case the
+   forward-only WHERE matches nothing, no reading is written, and the swap
+   flips `failed` to `ready` with `Provisioning ceiling exceeded` still in
+   `status_detail` — a healthy status over another lane's failure reason,
+   which is this item's own symptom pointing the other way. The fact write now
+   reports whether the reading landed; where it did not, the transition writes
+   `status_detail: null`, because the only thing it has earned is that the
+   verdict is stale.
 
-## Still open
-
-1. **`resolve_api_key_billability` is still the August version.**
-   `20260908040000`'s rewrite of it never applied and was deliberately not
-   force-applied — metering is demonstrably working, and a live billing path is
-   not something to change on a hunch at the end of a repair. It needs a fresh,
-   reviewed migration.
-2. **A migration applied directly by Lovable _and_ committed as a file gets
-   replayed by the queue, and a replay can regress live schema.** That is the
-   root cause here, and nothing detects it.
-3. **A migration can enter the queue having never existed in the repository.**
-   Three did during this repair. The enqueue guard catches bad SQL at merge
-   time; it cannot see a migration that never passed through a merge.
-4. **The provisioning verdict on the recovered clones is stale.** NPC Test and
-   Preflight Property Group still read `status: failed` with
-   `status_detail: 'Provisioning ceiling exceeded'`. Nothing gates on it any
-   more — that was the fix — but an operator reading the clone page sees a
-   healthy clone reporting failure, which is the same class of misleading
-   signal that cost the two days above.
+   What remains open is the data, not the code: nothing has run for these two
+   clones yet.

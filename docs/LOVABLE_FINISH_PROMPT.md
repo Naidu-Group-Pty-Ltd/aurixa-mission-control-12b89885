@@ -14,6 +14,28 @@ npm ci && npm run check:supabase-types && npm run check:ts-nocheck \
   && npm run typecheck && npm run lint && npm run test && npm run build
 ```
 
+## Status, re-measured 20 Sep 2026
+
+**Five of the six tasks below are done and this document did not say so.** It
+reads as a to-do list with none of it started, which is the same failure the
+migration incident's "Still open" list committed — a record that outlives the
+work it describes and sends the next reader at something already finished.
+
+Each task keeps its reasoning rather than being deleted: the reason a hazard
+existed outlives the hazard, and the five rules below are still the rules.
+
+| Task | Claim in this document | Measured 20 Sep 2026 |
+| --- | --- | --- |
+| 1 | 30 files carry `@ts-nocheck`, 103 errors | **Done.** Budget file empty, `check:ts-nocheck` passes at 0. The one remaining is `src/routeTree.gen.ts`, which is generated. |
+| 2 | 30 `supabaseAdmin as any` aliases remain | **Done.** 0 occurrences in `src/`, in 0 files. |
+| 3 | 412 discarded errors, 549 fire-and-forget writes | **Partly, and bounded.** `check:discarded-errors` reports **349 across 97 files against a budget of 358**, and the budget only shrinks. The two counts are one measure now. |
+| 4 | A cron delivery card on `/health` | **Done.** `CronDeliveryHealthCard`, mounted at `health.tsx:132`. |
+| 5 | A foreign-key index guard | **Done.** `scripts/check-fk-indexes.mjs`, wired as `check:fk-indexes`, passing. |
+| 6 | Decide on the two stale lockfiles | **Resolved.** One lockfile: `package-lock.json`. |
+
+Task 3 is the only one still owed work, and it is a ratchet rather than a
+backlog item: the number goes down or the gate fails.
+
 ## Five rules that are not negotiable
 
 1. **Never hand-edit `src/integrations/supabase/types.ts`.** Regenerate it:

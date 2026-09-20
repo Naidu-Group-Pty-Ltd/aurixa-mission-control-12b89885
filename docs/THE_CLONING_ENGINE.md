@@ -169,13 +169,15 @@ on everything near it.
 
 ## Still open
 
-_(updated 28 Aug 2026)_
+_(written 28 Aug 2026; re-examined 20 Sep 2026 — see the note on each item. Two
+of the three could NOT be re-measured from here and say so, rather than being
+restated as though they had been.)_
 
 - **Provider credentials — Vercel is live now.** `VERCEL_API_TOKEN`,
   `VERCEL_TEAM_ID` and `VERCEL_WEBHOOK_SECRET` are configured and proven: the
   hand-made clone's deployment ran the full pipeline to `live` on
   2026-08-28 (`npc.aurixasystems.com.au`).
-- **`CLOUDFLARE_API_TOKEN` is set and the scope is wrong.** Measured on
+- **NOT RE-MEASURED — a reading from 28 Aug.** **`CLOUDFLARE_API_TOKEN` is set and the scope is wrong.** Measured on
   2026-08-29 by `/hooks/turnstile-reconcile` against production:
   `cloudflareConfigured: true`, `accountConfigured: true`, and the widget
   creation refused with Cloudflare's `Authentication error`. That is the
@@ -187,18 +189,35 @@ _(updated 28 Aug 2026)_
   its next ten-minute pass with nothing else to do. Until then a clone
   deploys with no site key and its login page says the security check is not
   configured — the prime's widget is never substituted.
-- **No ENGINE-provisioned clone has run end to end.** The one clone in the
-  fleet was built by hand; its backend and deployment exercised the drains,
-  but `provisionClone → backend-provisioning-drain → deployment-drain` has
-  never produced a clone from scratch. The first template-provisioned clone
-  is still the first real test. The signed-agreement path
-  ([`MODULES_TO_CLONES.md`](./MODULES_TO_CLONES.md)) now runs
-  `assessProvisioningPreflight` before spending anything, precisely so that
-  first run cannot start into a half-configured engine.
-- **17 codex scans have been stalled for weeks** (10 `running` since 31 Jul–6
+- ~~**No ENGINE-provisioned clone has run end to end.**~~ **Closed, and the
+  evidence sits outside this repository.** `backend-provisioning.server.ts`
+  names a project `aurixa-clone-${input.cloneName}`, so that name is the
+  drain's own signature. Listed 20 Sep 2026 the account holds four:
+  `aurixa-clone-npc-client-dashboard` (18 Aug — the hand-built one this item
+  was written about), then **Preflight Property Group (31 Aug), NPC Test
+  (1 Sep) and NPC CRM Independent (19 Sep)**, all three created after this
+  was written. The last holds a provisioned Supabase project, a repository
+  GitHub describes as "Aurixa clone of
+  Naidu-Group-Pty-Ltd/npc-property-dashbord", green CI, and is receiving
+  cascades. The first template-provisioned clone stopped being the first real
+  test some weeks ago.
+
+  `assessProvisioningPreflight` stays, and so does the reason for it: it runs
+  before anything is spent, so a run cannot start into a half-configured
+  engine.
+- **NOT RE-MEASURED — a reading from 28 Aug.** **17 codex scans have been stalled for weeks** (10 `running` since 31 Jul–6
   Aug, 7 `queued` since 27 Jul) because `codex-sweep` is the worker that clears
   them. On its first run it marks the hung ones failed and may re-dispatch up
   to seven month-old scans; that is bounded and is what the sweeper is for.
+
+Both items marked NOT RE-MEASURED need Mission Control's own database
+(`fgpvagejkaeqedcwvbte`) or a live Cloudflare call, and neither was reachable
+from where this was re-examined. What would settle them: for the token, one
+`/hooks/turnstile-reconcile` pass and the refusal it records; for the scans, a
+count of `running` and `queued` rows with their ages. Until one of those is
+taken they are a reading from 28 August and not a statement about today —
+which is the distinction this document's own "a clone's migration LEDGER is
+not a record of what ran" exists to make.
 
 ## A clone's token-signing key is its own, and provisioning captures it
 

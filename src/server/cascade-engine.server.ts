@@ -72,6 +72,14 @@ import {
   reconcileConfigToml,
 } from "./cascade/configTomlReconcile.pure";
 import {
+  SECURITY_REGISTRY_PATH,
+  reconcileSecurityRegistry,
+} from "./cascade/securityRegistryReconcile.pure";
+import {
+  SECURITY_INVENTORY_PATH,
+  securityInventoryHold,
+} from "./cascade/securityInventoryHold.pure";
+import {
   DEPLOY_WORKFLOW_PATH,
   readsDeployerDeclaration,
   reconcileDeployWorkflow,
@@ -2174,6 +2182,10 @@ export async function processClone(args: {
   // Its own step rather than part of the write path, because the write path is
   // exactly what must never carry this file.
   let configReconcileNote: string | null = null;
+  // What the two reconciles below kept because prime has no opinion about it.
+  // Read after both, to decide whether prime's security baseline can describe
+  // this repository at all.
+  let cloneOwnedFunctions: string[] = [];
   if (mode !== "notify") {
     try {
       const [primeCfg, cloneCfg] = await Promise.all([
@@ -2186,6 +2198,7 @@ export async function processClone(args: {
           cloneToml: cloneCfg.content,
           ownRef: ownProjectRef,
         });
+        if (verdict.ok) cloneOwnedFunctions = verdict.carriedForward;
         if (!verdict.ok) {
           const held = {
             path: CONFIG_TOML_PATH,
@@ -2198,9 +2211,13 @@ export async function processClone(args: {
         } else if (verdict.changed) {
           const was = declaredFunctionCount(cloneCfg.content);
           const now = declaredFunctionCount(verdict.merged);
+          const kept = verdict.carriedForward.length
+            ? ` · kept ${verdict.carriedForward.length} declaration(s) this clone owns ` +
+              `(${verdict.carriedForward.join(", ")})`
+            : "";
           configReconcileNote =
             `${CONFIG_TOML_PATH} · ${now} function declaration(s), was ${was} · ` +
-            `project ${verdict.ownRef} unchanged`;
+            `project ${verdict.ownRef} unchanged${kept}`;
           if (!dryRun) {
             const { data: cfgBlob } = await octokit.git.createBlob({
               owner: cloneRef.owner,
@@ -2227,6 +2244,96 @@ export async function processClone(args: {
         }`,
       );
     }
+  }
+
+  // ── the security registry: prime's entries, plus the clone's own ─────────
+  //
+  // `supabase/functions-registry/**` is a repository invariant, so prime's
+  // registry travels everywhere — and the clone's own checker asserts that
+  // every function on disk and every function declared in config.toml has an
+  // entry. A clone owning functions prime does not therefore receives a
+  // registry missing its own, and the check refuses the cascade's own
+  // delivery. Excluding the file fails the other way: prime adds a function
+  // and the entry never arrives.
+  //
+  // So it is reconciled, in the same shape as config.toml, and the write
+  // path's copy is REPLACED rather than left to win — the invariant put it in
+  // the tree a few hundred lines above.
+  const dropFromTree = (path: string) => {
+    for (let i = treeEntries.length - 1; i >= 0; i -= 1) {
+      if (treeEntries[i].path === path) treeEntries.splice(i, 1);
+    }
+    delete deliveredSource[path];
+  };
+
+  if (mode !== "notify") {
+    try {
+      const [primeReg, cloneReg] = await Promise.all([
+        getFileContent(octokit, primeRef, SECURITY_REGISTRY_PATH),
+        getFileContent(octokit, cloneRef, SECURITY_REGISTRY_PATH),
+      ]);
+      if (primeReg && cloneReg && !primeReg.binary && !cloneReg.binary) {
+        const verdict = reconcileSecurityRegistry({
+          primeJson: primeReg.content,
+          cloneJson: cloneReg.content,
+        });
+        // Either way prime's copy does not stand: it is replaced by the
+        // reconciled one, or withheld for a person.
+        dropFromTree(SECURITY_REGISTRY_PATH);
+        if (!verdict.ok) {
+          const held = {
+            path: SECURITY_REGISTRY_PATH,
+            pattern: "(content: this clone's own function entries)",
+            reason: "manual_reconcile" as const,
+            note: `The security registry was not brought across: ${verdict.reason}.`,
+          };
+          partition.held.push(held);
+          needsReconcile.push(held);
+        } else {
+          cloneOwnedFunctions = [
+            ...new Set([...cloneOwnedFunctions, ...verdict.carriedForward]),
+          ];
+          if (verdict.changed && !dryRun) {
+            const { data: regBlob } = await octokit.git.createBlob({
+              owner: cloneRef.owner,
+              repo: cloneRef.repo,
+              content: Buffer.from(verdict.merged, "utf8").toString("base64"),
+              encoding: "base64",
+            });
+            treeEntries.push({
+              path: SECURITY_REGISTRY_PATH,
+              mode: "100644",
+              type: "blob",
+              sha: regBlob.sha,
+            });
+            deliveredSource[SECURITY_REGISTRY_PATH] = verdict.merged;
+          }
+        }
+      }
+    } catch (e) {
+      // Never fails the pass, for the same reason the config reconcile does
+      // not: the clone's own registry is the state every cascade before this
+      // one left it in.
+      console.warn(
+        `[cascade] SECURITY_REGISTRY.json reconcile skipped for clone ${clone.id}: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      );
+    }
+  }
+
+  // ── prime's security baseline cannot describe a repository it is not ─────
+  //
+  // Decided AFTER both reconciles, because what they carried forward is the
+  // evidence: a clone that kept declarations or entries of its own owns
+  // functions prime has never analysed, so prime's `SECURITY_INVENTORY.json`
+  // is a static analysis of a different tree. A mirror carries nothing
+  // forward and keeps today's behaviour exactly.
+  const inventoryHold = securityInventoryHold(cloneOwnedFunctions);
+  if (inventoryHold) {
+    dropFromTree(SECURITY_INVENTORY_PATH);
+    partition.held.push(inventoryHold);
+    needsReconcile.push(inventoryHold);
   }
 
   // ── the deploy workflow: the same shape, found the same way ────────────
