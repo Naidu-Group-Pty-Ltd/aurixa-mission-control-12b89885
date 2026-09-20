@@ -374,6 +374,63 @@ describe("a pass that stopped early knows nothing about being level", () => {
     expect(paused).not.toBe(finished);
   });
 
+  it("retracts a stale pause once the clone is level", () => {
+    /*
+      THE MIRROR OF THE PAUSE THAT COULD NOT BE WRITTEN.
+
+      Once a clone goes level every pass is a no-op with an unchanged blockage
+      record. Under the old caller gate that meant no sentence was ever written
+      again — so the last budgeted pass's `stopped at its time budget with more
+      to send` stood for ever on a clone with nothing left to send.
+
+      Same cause as the reported finding, opposite direction: the sentence was
+      gated on whether the RECORD changed, which is a different question.
+    */
+    expect(
+      blockageDetailFor({
+        standing:
+          "Synced to 20261206000000 so far — this pass stopped at its time budget with more to send",
+        holes: [],
+        pausedMidReplay: false,
+        syncedTo: "20261207010000",
+      }),
+    ).toBe("Synced to 20261207010000");
+  });
+
+  it("says nothing when the row already carries the reading", () => {
+    // A level clone re-composes its own sentence on every tick. Writing it
+    // back each time is churn on a shared column, and the write is what this
+    // lane's `didNothing` guard exists to withhold unless there is something
+    // to say.
+    for (const [standing, args] of [
+      ["Synced to 20261207010000", { holes: [], pausedMidReplay: false }],
+      [
+        "Synced to 20261207010000 so far — this pass stopped at its time budget with more to send",
+        { holes: [], pausedMidReplay: true },
+      ],
+    ] as const) {
+      expect(
+        blockageDetailFor({ standing, syncedTo: "20261207010000", ...args }),
+        `standing: ${standing}`,
+      ).toBeNull();
+    }
+  });
+
+  it("still refuses a sentence another writer put there", () => {
+    // The equality check is an ADDITIONAL reason to say nothing, never a
+    // replacement for the ownership guard: a parity verdict differs from the
+    // composed reading and must still survive.
+    expect(
+      blockageDetailFor({
+        standing:
+          "Backend ready, but parity could not be verified (timeout) — it has not been compared with the prime",
+        holes: [],
+        pausedMidReplay: true,
+        syncedTo: "20261207010000",
+      }),
+    ).toBeNull();
+  });
+
   it("the fleet lane hands it over", () => {
     const lane = read("src/server/fleet-migration.server.ts");
     const call = lane.slice(lane.indexOf("blockageDetailFor({"));
@@ -503,10 +560,19 @@ describe("the fix is mounted", () => {
 
     // The branch that used to be a bare `{}` — a pass that changed nothing
     // said nothing, including about the one thing it was the authority on.
+    //
+    // Sliced to where the ACTIVE branch begins rather than to a character
+    // count: a `lane.slice(gate, gate + 400)` here stopped inside the comment
+    // above the code it was checking the moment that comment grew.
     const gate = lane.indexOf("...(didNothing");
     expect(gate).toBeGreaterThan(-1);
-    const branch = lane.slice(gate, gate + 400);
+    const branch = lane.slice(gate, lane.indexOf("\n            : {", gate));
     expect(branch).toContain("blockage.entries === null");
+    // Written independently of the record: gating the sentence on the record
+    // is what left a paused pass unable to retract a bare `Synced to X`.
+    expect(branch).toContain(
+      "...(blockageDetail === null ? {} : { status_detail: blockageDetail })",
+    );
   });
 
   it("the replay files a note for every hole it measured", () => {

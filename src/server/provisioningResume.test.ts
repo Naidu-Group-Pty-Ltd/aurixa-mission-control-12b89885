@@ -2435,6 +2435,21 @@ describe("a fleet-sync pass that did nothing says nothing", () => {
     // And what it MAY write, so the exception cannot quietly widen.
     expect(noopBranch).toContain("migrations_applied: blockage.entries");
     expect(noopBranch).toContain("status_detail: blockageDetail");
+    /*
+      THE RECORD AND THE SENTENCE ARE WRITTEN INDEPENDENTLY.
+
+      They shared a gate once: `blockage.entries === null ? {} : { …both… }`,
+      so a pass whose record was unchanged wrote no sentence either. That left
+      a paused pass unable to retract a bare `Synced to X` — reported as a P2
+      on the commit that composed the sentence, because composing it is no use
+      if the caller throws it away.
+
+      Pinned as the entries spread CLOSING on itself: in the nested form the
+      `}` does not fall here, so this string cannot be written by it.
+    */
+    expect(noopBranch, "the blockage record and the sentence must not share a gate").toContain(
+      "...(blockage.entries === null ? {} : { migrations_applied: blockage.entries })",
+    );
   });
 
   it("never erases a recorded migration version with a null", () => {

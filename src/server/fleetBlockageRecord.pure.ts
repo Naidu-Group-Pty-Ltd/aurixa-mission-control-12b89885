@@ -319,7 +319,15 @@ export function blockageDetailFor(args: {
   /** What the level reading calls the version, when there are no holes. */
   syncedTo: string;
 }): string | null {
+  /*
+    A SENTENCE THIS LANE DID NOT WRITE IS NOT THIS LANE'S TO REPLACE.
+
+    `null`/empty counts as ours — a row carrying no claim has none to lose —
+    but a parity verdict or a provisioning line does not, and cannot be
+    re-derived here.
+  */
   if (!migrationLaneWroteDetail(args.standing)) return null;
+  let composed: string;
   if (args.pausedMidReplay) {
     /*
       COMPOSED, NEVER DELEGATED.
@@ -338,13 +346,39 @@ export function blockageDetailFor(args: {
     */
     const andHoles =
       args.holes.length === 0 ? "" : `, and ${primeLedgerHoleSentence(args.holes, args.total)}`;
-    return (
+    composed =
       `Synced to ${args.syncedTo} so far — this pass stopped at its time budget with more ` +
-      `to send${andHoles}`
-    );
+      `to send${andHoles}`;
+  } else if (args.holes.length === 0) {
+    composed = `Synced to ${args.syncedTo}`;
+  } else {
+    composed = `Synced to ${args.syncedTo} — ${primeLedgerHoleSentence(args.holes, args.total)}`;
   }
-  if (args.holes.length === 0) return `Synced to ${args.syncedTo}`;
-  return `Synced to ${args.syncedTo} — ${primeLedgerHoleSentence(args.holes, args.total)}`;
+  /*
+    NOTHING TO SAY IS AN ANSWER, AND IT IS THIS MODULE'S TO GIVE.
+
+    The caller used to gate the write on whether the BLOCKAGE RECORD changed,
+    which is a different question, and wrong in both directions.
+
+    Wrong one way: a paused pass that measured no holes on a row whose notes
+    already matched wrote nothing at all, so the bare `Synced to X` that
+    `clearStaleMigrationFailure` leaves behind stood over a clone with more to
+    send. That is the reading this lane exists never to give, and it survived
+    the fix that composes the sentence — because the composed value was then
+    thrown away by the caller.
+
+    Wrong the other way: once a clone goes level every pass is a no-op with an
+    unchanged record, so the last budgeted pass's `stopped at its time budget
+    with more to send` would stand for ever on a clone with nothing left to
+    send.
+
+    So the question is put to the READING instead. This pass is entitled to
+    give it; the only reading not worth writing is one the row already carries,
+    which is also what keeps a quiet tick quiet — a level clone re-composes the
+    sentence it already has and writes nothing.
+  */
+  if ((args.standing ?? "").trim() === composed) return null;
+  return composed;
 }
 
 /**

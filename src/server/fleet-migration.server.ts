@@ -965,12 +965,17 @@ export async function runFleetMigrationSync(
           // The one exception is the blockage record: see `blockage` above for
           // why a pass that changed nothing is still the authority on it.
           ...(didNothing
-            ? blockage.entries === null
-              ? {}
-              : {
-                  migrations_applied: blockage.entries,
-                  ...(blockageDetail === null ? {} : { status_detail: blockageDetail }),
-                }
+            ? {
+                // TWO QUESTIONS, ASKED SEPARATELY.
+                //
+                // The record and the sentence used to share one gate: no
+                // sentence was written unless the record had changed. That is
+                // wrong in both directions, and `blockageDetailFor` now owns
+                // the whole of it — it returns null when there is nothing to
+                // say, including when the row already carries the reading.
+                ...(blockage.entries === null ? {} : { migrations_applied: blockage.entries }),
+                ...(blockageDetail === null ? {} : { status_detail: blockageDetail }),
+              }
             : {
                 ...(latestApplied ? { migration_version: latestApplied } : {}),
                 migrations_applied: results,
