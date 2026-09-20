@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+/** Source with comments removed — a comment quoting code is not code. */
+import { stripComments } from "./sourceComments.pure";
 
 import {
   BACKEND_DEPLOYER_MISSION_CONTROL,
@@ -10,9 +12,6 @@ import {
 
 const read = (p: string) => readFileSync(join(process.cwd(), p), "utf8");
 
-/** Source with comments removed — a comment quoting code is not code. */
-const stripComments = (src: string): string =>
-  src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
 
 describe("a variable is not a secret, and this file writes only variables", () => {
   it("never seals, encrypts or names a token", () => {

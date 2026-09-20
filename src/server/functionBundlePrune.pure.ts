@@ -38,6 +38,8 @@
  * clone, which is far worse and much harder to attribute.
  */
 
+import { stripComments } from "./sourceComments.pure";
+
 export type BundleFileRef = {
   readonly path: string;
 };
@@ -71,9 +73,6 @@ function isExternal(spec: string): boolean {
  * that does not exist, which carries one extra file; the alternative is a
  * missing edge, which loses one.
  */
-function stripComments(src: string): string {
-  return src.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:])\/\/[^\n]*/g, "$1 ");
-}
 
 /** Resolve a relative specifier against the directory of the file importing it. */
 export function resolveRelative(fromPath: string, spec: string): string | null {

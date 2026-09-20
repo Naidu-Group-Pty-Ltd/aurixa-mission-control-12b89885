@@ -8,10 +8,9 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { stripComments } from "../sourceComments.pure";
 
 const read = (p: string) => readFileSync(join(process.cwd(), p), "utf8");
-const stripComments = (src: string): string =>
-  src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
 
 const engine = stripComments(read("src/server/cascade-engine.server.ts"));
 const github = stripComments(read("src/server/github-app.server.ts"));

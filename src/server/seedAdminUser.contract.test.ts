@@ -14,6 +14,7 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { stripComments } from "./sourceComments.pure";
 
 const provisioning = readFileSync(join(__dirname, "backend-provisioning.server.ts"), "utf8");
 const functions = readFileSync(
@@ -21,10 +22,6 @@ const functions = readFileSync(
   "utf8",
 );
 
-/** Source with comments removed — a comment quoting old code is not old code. */
-function stripComments(src: string): string {
-  return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
-}
 
 /** The body of `seedAdminUser`, up to the next top-level export. */
 function seedBody(): string {

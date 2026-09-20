@@ -37,13 +37,11 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { stripComments } from "../sourceComments.pure";
 
 const ROOT = join(__dirname, "..", "..", "..");
 const read = (...parts: string[]) => readFileSync(join(ROOT, ...parts), "utf8");
 
-function stripComments(source: string): string {
-  return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/g, "$1");
-}
 
 /**
  * The one module allowed to decide what a clone is called.

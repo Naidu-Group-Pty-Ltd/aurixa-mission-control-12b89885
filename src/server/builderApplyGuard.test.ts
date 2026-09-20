@@ -10,6 +10,7 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { stripComments } from "./sourceComments.pure";
 import {
   APPLY_FIELDS,
   APPLY_GLOBAL_PER_MINUTE,
@@ -29,10 +30,7 @@ import {
 } from "./builderApplyGuard.pure";
 
 const read = (p: string) => readFileSync(join(process.cwd(), p), "utf8");
-const code = (p: string) =>
-  read(p)
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/^\s*\/\/.*$/gm, "");
+const code = (p: string) => stripComments(read(p));
 
 const ROUTE = "src/routes/api.public.builders.apply.ts";
 

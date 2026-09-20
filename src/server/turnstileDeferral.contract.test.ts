@@ -25,16 +25,14 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { stripComments } from "./sourceComments.pure";
 
 const SERVER = readFileSync(join(__dirname, "turnstile-identity.server.ts"), "utf8");
 const WIZARD = readFileSync(join(__dirname, "..", "routes", "clones.new.tsx"), "utf8");
 
 /** Source with commentary removed — these assertions are about CODE. */
 function code(source: string): string {
-  return source
-    .replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}/g, " ")
-    .replace(/\/\*[\s\S]*?\*\//g, " ")
-    .replace(/(^|[^:])\/\/.*$/gm, "$1 ");
+  return stripComments(source);
 }
 
 const SRC = code(SERVER);

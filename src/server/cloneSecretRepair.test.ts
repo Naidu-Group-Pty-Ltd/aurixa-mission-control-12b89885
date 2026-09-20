@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { stripComments } from "./sourceComments.pure";
 import {
   decideJwtSecretRepair,
   JWT_REPAIR_COOLDOWN_MS,
@@ -132,8 +133,7 @@ const src = readFileSync(join(process.cwd(), "src/server/cloneSecretRepair.serve
  * kind people learn to silence. `check-cron-coverage.mjs` strips SQL comments
  * for exactly this reason and says so.
  */
-const code = src
-  .replace(/\/\*[\s\S]*?\*\//g, "")
+const code = stripComments(src)
   .split("\n")
   .filter((l) => !l.trimStart().startsWith("//"))
   .join("\n");

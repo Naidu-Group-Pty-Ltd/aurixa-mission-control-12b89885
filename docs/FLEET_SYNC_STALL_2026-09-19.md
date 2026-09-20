@@ -17,15 +17,15 @@ operation. This is what each was and what now stops it.
 The fourth clone was registered at 05:20:23. The next prime commit cascade —
 06:59:52, PR #2703 — counted four clones against `AUTO_MERGE_THRESHOLD = 3`,
 gated, and so did all seven after it. Among the withheld commits was PR #2702,
-*"Close the one table in this database with RLS switched off"*: the gate was
+_"Close the one table in this database with RLS switched off"_: the gate was
 withholding a security fix from every tenant, which is the clearest possible
 sign it was asking the wrong question.
 
 Three things made it a stall rather than a pause.
 
 **There was no first operator.** A webhook event carries `initiated_by = NULL`,
-and the refusal it printed read *"Auto-merge across 4 clones (>3) requires a
-second operator."* `approveCascade` is the only writer of `approved_at`
+and the refusal it printed read _"Auto-merge across 4 clones (>3) requires a
+second operator."_ `approveCascade` is the only writer of `approved_at`
 anywhere in this codebase and it is a UI act; `cascade_approvals` has never
 held a row.
 
@@ -49,7 +49,7 @@ change; it replays one prime already merged, reading prime's head at run time.
 Holding it does not keep tenants on the reviewed state — it widens the gap
 from it.
 
-**The rule now**: the fleet-size count binds a cascade somebody *started*.
+**The rule now**: the fleet-size count binds a cascade somebody _started_.
 `CascadeOrigin` defaults to `operator`, so every existing call site keeps
 today's gate and only the webhook path opts out. What bounds an automatic
 cascade is content, not arithmetic, and that already runs per file — the path
@@ -72,8 +72,8 @@ with nothing reporting it. So **the gate is re-read where it is enforced**:
 Three rules make that safe.
 
 - **It never approves.** No `cascade_approvals` row, no `approved_at`, no
-  operator impersonated. Those say *a second person looked*. This says
-  something weaker: *the question was answered from inputs that have moved.*
+  operator impersonated. Those say _a second person looked_. This says
+  something weaker: _the question was answered from inputs that have moved._
   An event a person HAS approved is never touched.
 - **It only ever relaxes.** A gate no longer owed is cleared; a gate the
   current rule would impose on an event that never carried one is not added.
@@ -86,7 +86,7 @@ eight passes of the same work.
 
 `gateAndArming.contract.test.ts` now pins the narrower rule: every read of
 `requires_approval = true` in the drain must pair with a recorded approval (the
-rescue claim) *or* with `approved_at IS NULL` (the re-assessment). A bare read
+rescue claim) _or_ with `approved_at IS NULL` (the re-assessment). A bare read
 is the bypass, and both pairings must be present so the count cannot pass
 vacuously.
 
@@ -99,8 +99,8 @@ vacuously.
 The clone's own `status_detail` carried the reason verbatim and nobody read it:
 
 > The prime's copy of `20261202000000_seed_template_library_v13_cash_flow_foots.sql`
-> could not be read (HTTP 403): *Request forbidden by administrative rules.
-> **Please make sure your request has a User-Agent header***
+> could not be read (HTTP 403): \*Request forbidden by administrative rules.
+> **Please make sure your request has a User-Agent header\***
 
 That migration is 41,671,969 bytes, which is why it is the only file on the
 fleet that takes the streaming path, and why the failure looked like a size or
@@ -121,11 +121,11 @@ sites from source and checks that each also counts before it spends.
 That helper came from `main`, which landed the same diagnosis independently
 while this branch was in flight. A second module naming the same header was
 written here and then **deleted rather than left beside it** — the helper's own
-comment says why: *"a literal at each call site is how three of them come to
-disagree."*
+comment says why: _"a literal at each call site is how three of them come to
+disagree."_
 
 One thing worth keeping from the discarded version: its first guard passed a
-planted violation because the *comment* above the header said the words
+planted violation because the _comment_ above the header said the words
 "User-Agent". Comments have to be stripped before anything is judged, and the
 header must be SET (`"User-Agent":` as a key) rather than merely mentioned —
 which is what `main`'s version already does.
@@ -146,7 +146,7 @@ So is `20261206000000`, which enables RLS on a table the prime reports
 
 The upstream cause is that the prime's `apply-migration.yml` is
 `workflow_dispatch` with a required file input, and says so in its own header:
-*"Deciding which file is a human judgement made before dispatch."* The ledger
+_"Deciding which file is a human judgement made before dispatch."_ The ledger
 records what somebody remembered to dispatch, not what merged. Rule #71 is
 then correct to withhold — and `partitionByDependency` amplifies one unrecorded
 version into a permanent fleet-wide barrier, because `holes` is declared once
@@ -176,8 +176,8 @@ where it is blind:
   is a way that keeps today's behaviour.
 
 One thing a test caught in the module's first draft: `stripSqlNoise` removes
-dollar-quoted bodies, which is right for *what does this file create* and
-dangerous for *what does it reference* — a `plpgsql` body calling the hole's
+dollar-quoted bodies, which is right for _what does this file create_ and
+dangerous for _what does it reference_ — a `plpgsql` body calling the hole's
 function is a real dependency, and Postgres will not refuse the CREATE, so
 nothing downstream would catch it either. Comments are stripped; bodies are
 kept.
@@ -196,7 +196,7 @@ prose in `status_detail` while both clones read `status: ready` with
   state does not exist, which is precisely what rule #71 forbids. The custodian
   entry says so in those words.
 - **Standing, not conditioned on divergence** — it is wrong right now whatever
-  today's convergence says, and it will hold the *next* migration too.
+  today's convergence says, and it will hold the _next_ migration too.
 - **One blockage per hole version**, fingerprinted on that version, so the row
   is stable across passes and **discharges itself** the moment the prime's
   ledger records the version and the next pass stops reporting `blockedBy`.
@@ -221,7 +221,7 @@ already cost this programme.
 
 Its schema matched the prime exactly — 529 tables, 435 functions, 32 buckets,
 66 cron jobs, 83 enums, 401 triggers, nothing missing, nothing extra — and it
-read *"Backend provisioned but DOES NOT MATCH the prime — missing_secrets:58"*,
+read _"Backend provisioned but DOES NOT MATCH the prime — missing_secrets:58"_,
 `risk_level: blocking`.
 
 Among those 58: `AIRTABLE_TOKEN`, `AIRTABLE_BASE_ID`, `DIDIT_API_KEY` and
@@ -239,7 +239,7 @@ A control that reads as a fault teaches people to clear it.
 
 **The rule now**: a name policy withholds is reported as `withheld_by_policy`,
 never as missing, and never blocks. It is still shown — a clone lacking them is
-worth seeing. The counts stay describing what each project *holds*, because
+worth seeing. The counts stay describing what each project _holds_, because
 netting the withheld out of them would make two honest numbers disagree with
 the Secrets page beside them.
 
@@ -250,11 +250,11 @@ the Secrets page beside them.
 Three migrations sit on prime's `main`, unrecorded in its ledger and
 **genuinely unapplied**:
 
-| File | Size |
-|---|---|
-| `20261202090000_builder_marketplace_ranking.sql` | 17,324 B |
+| File                                                        | Size     |
+| ----------------------------------------------------------- | -------- |
+| `20261202090000_builder_marketplace_ranking.sql`            | 17,324 B |
 | `20261204000000_client_files_bucket_and_accrual_repair.sql` | 12,502 B |
-| `20261204010000_email_followup_reminders.sql` | 3,246 B |
+| `20261204010000_email_followup_reminders.sql`               | 3,246 B  |
 
 (`20261206000000_extension_migration_status_rls.sql` is a fourth, and the one
 with a security consequence: it enables RLS on a table the prime currently
@@ -282,7 +282,7 @@ All three stalled clones carry
 `chunk_cursor = {"migrationId": "20261202000000", "statementsDone": …}` — 6, 12
 and 1 respectively as this was written — at frontier `20261201100000`. Version
 `20261202000000` **is** in the prime's ledger, so `partitionByDependency` puts
-it in `send`, not `orphaned`: it sits *before* the hole. It is the
+it in `send`, not `orphaned`: it sits _before_ the hole. It is the
 41,671,969-byte single-`INSERT` template seed, chunked at
 `DEFAULT_SEED_STATEMENT_BYTES` into dozens of statements, and the three clones
 are a handful of statements into it. Discharging the hole cannot move any of
@@ -290,8 +290,8 @@ them until that seed lands.
 
 **And the sentence that misled is a null fallback.** `fleet-migration.server.ts`
 reads `const syncedTo = latestApplied ?? "the prime's latest recorded
-migration"`, so *"Synced to the prime's latest recorded migration — N
-migration(s) held back behind …"* on all three clones means the pass completed
+migration"`, so _"Synced to the prime's latest recorded migration — N
+migration(s) held back behind …"_ on all three clones means the pass completed
 **zero** migrations. The held-back clause is true. The clause in front of it
 reads as the opposite of what it means.
 
@@ -321,8 +321,8 @@ Measured 19 September 2026 at 13:01, `npc-test-76b3b3` completed a pass having
 advanced **zero** statements. The budget went on the reading.
 
 The second walk is not redundant and was not removed. It re-derives the shape
-and `chunkSeedStatements` refuses when the two disagree — *"the blob changed
-between reads"* — which is a real control. What changed is where the FIRST
+and `chunkSeedStatements` refuses when the two disagree — _"the blob changed
+between reads"_ — which is a real control. What changed is where the FIRST
 reading comes from: a cursor that names this migration and carries a shape is
 that reading, taken by an earlier pass. So the file is read once on a resumed
 pass, and the comparison now spans PASSES rather than the microseconds between
@@ -403,8 +403,8 @@ The third is the half that matters. Writing `null` there would mean "this clone
 has applied no migrations", which sends the next sync to replay the whole
 corpus against a populated database — the failure
 `stampMigrationLedgerFromPrime`'s own guard exists to prevent, arriving dressed
-as an ordinary status write. So `resolveMigrationFrontier` can answer *do not
-write*, and the caller spreads rather than assigns.
+as an ordinary status write. So `resolveMigrationFrontier` can answer _do not
+write_, and the caller spreads rather than assigns.
 
 **`null` is not the same as unreadable.** A clone whose ledger answers with no
 rows genuinely has an empty ledger, and that is worth recording — it is the
@@ -442,10 +442,10 @@ stop — which is the fleet's state right now — and it cannot help a SCOPED
 delivery at all, because nothing fleet-wide supersedes one.
 
 The catalogue already named the repair. `requeue_dropped_clone` has carried the
-policy text *"Queue this clone's part again as a NEW scoped delivery, never by
-reviving a settled one"* since it was catalogued, and **nothing implemented
+policy text _"Queue this clone's part again as a NEW scoped delivery, never by
+reviving a settled one"_ since it was catalogued, and **nothing implemented
 it**: `runCustodian` dispatched exactly one act and every other fell to an else
-returning *"is enabled and has no implementation in this build"*. So the ledger
+returning _"is enabled and has no implementation in this build"_. So the ledger
 raised the condition, the catalogue named the cure, and there was no cure.
 
 It is built now, and it is **deliberately still `enabled: false`**. Those are
@@ -485,9 +485,9 @@ retires it. A fresh event has its own attempts and its own ceiling.
 **And one assertion here was wrong and was corrected rather than defended.**
 The first version of the guard demanded that every class stamped
 `selfHeals: true` have an implemented act. Four classes failed it — and the
-field's own documentation settles the question against the test: *"May a
+field's own documentation settles the question against the test: _"May a
 custodian re-run the work that clears this, without any new decision being
-taken?"* `selfHeals` is a statement about whether a re-run would be a
+taken?"_ `selfHeals` is a statement about whether a re-run would be a
 judgement, not a promise that anything re-runs. Those four are a backlog, not a
 lie. The rule that does hold, and that produces a dead control when broken, is
 narrower: **an act that is switched on must be an act that exists.**
@@ -530,11 +530,11 @@ actually true about them and offers no button.
 
 Three smaller things came with it. **The engine publishes which held paths are
 the ceiling's**, because an approval dialog is drawn over paths and a path
-carries no reason — the card had nothing to exclude them *by*. **The note
+carries no reason — the card had nothing to exclude them _by_. **The note
 stopped being true and was fixed**: it ended "the migration sync refuses a body
 this size as well", which was right when written and was overtaken by the
 migration lane learning to chunk a seed-shaped INSERT from a stream. The
-database does get these two files; the clone's *repository* does not, and an
+database does get these two files; the clone's _repository_ does not, and an
 operator told otherwise goes looking in the wrong place. And **the release
 filter reads the shared helper** rather than its own inline
 `=== "manual_reconcile"`.
@@ -562,8 +562,8 @@ line 1415 is
 and `/**` inside a line comment opens a block comment that the usual
 `replace(/\/\*[\s\S]*?\*\//g, "")` runs past, closing at the next `*/`
 anywhere below. `moduleScopeDiff.contract.test.ts` documents this exact trap
-already — *"Read RAW. The usual comment-stripping regex eats from the first
-`/*` it meets"* — so the repository has paid for it once.
+already — _"Read RAW. The usual comment-stripping regex eats from the first
+`/_` it meets"\* — so the repository has paid for it once.
 
 Measured across `src/`: **twelve line comments in eleven files** open a false
 block comment. Two contract tests strip block comments and read one of those
@@ -574,3 +574,55 @@ So this is a live hazard with no current casualty, recorded rather than fixed
 with a repository-wide ratchet for something biting nothing. The local remedy
 is the one used here: strip **line comments only**, which cannot swallow code,
 and write patterns specific enough that prose would not satisfy them.
+
+### The ratchet, one month later — and why "biting nothing" was wrong
+
+Closed 20 Sep 2026. The paragraph above declined a repository-wide ratchet
+"for something biting nothing", and that judgement did not survive a
+measurement:
+
+|                                  | 19 Aug (recorded above) | 20 Sep (measured)         |
+| -------------------------------- | ----------------------- | ------------------------- |
+| files carrying a false opener    | 11                      | **15**                    |
+| contract tests reading one       | 2                       | **10**                    |
+| real code a naive strip destroys | not measured            | **1,056 lines, 66 files** |
+
+The two worst readings are `cascade-engine.server.ts`, where the naive
+expression destroys **123 lines beginning at `partitionCascadePaths(…)`** and
+which two contract tests read, and `backend-provisioning.server.ts`, where it
+destroys 20 beginning at ``redirectSet.add(`${site}/*`)`` and which seven
+read. Neither test failed, because a scan that sees less code answers the same
+question with a confident wrong number.
+
+The commonest opener turned out not to be a comment at all. It is **data** — a
+glob in a string (`pattern: "scripts/**"`) or in a template literal. That is
+why the replacement scans with string awareness rather than pattern-matching
+the file, and why its governing rule is **never eat code**: where it cannot
+tell a regex literal from a division it returns the line whole, keeping prose,
+because keeping prose costs a test a name it must tolerate while eating code
+costs it the truth in silence.
+
+Forty-three modules carried a copy. Forty were TypeScript and are now one
+(`sourceComments.pure.ts`); the other three were **SQL**, which is a different
+rule — no `//`, `--` to end of line — and are now one of their own
+(`sqlComments.pure.ts`), with the read-only gate's deliberately stricter
+ordering named rather than hidden. `oneCommentStripper.contract.test.ts` is
+the ratchet, and it forbids the _shape_ (a regex spelling both an opener and a
+closer) rather than one spelling of it, so a line-anchored comment filter —
+which cannot run past the line it tests — stays allowed.
+
+Three things it found on the way, each worth more than the fix:
+
+- **A test anchored its slice on a comment.** `fleetPassIsBudgeted` located a
+  branch by `"? // Said before the level reading"`. With prose removed the
+  slice silently became empty rather than failing to find its landmark, and
+  four assertions passed on `""`. It anchors on code now.
+- **The migration rewrote its own witness.** The script replaced the naive
+  regex inside the test that exists to prove the naive regex is wrong, leaving
+  it comparing the new stripper to itself. Caught only because that assertion
+  is `not.toContain`.
+- **The gate detected itself**, exactly as the orphan ratchet did, and the
+  self-exclusion then hid a second hole: widening it to `.test.ts` left the
+  gate green — there was nothing to catch on the real tree — while disarming
+  it for the 37 of 40 strippers that lived in test files. The scan takes its
+  corpus as a parameter now, so the skip is exercised rather than trusted.

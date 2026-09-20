@@ -19,6 +19,7 @@ import { SEED_ASSET_BUCKETS, planCloneSecrets } from "./backend-provisioning.ser
 import { declaredFunctionSlugsFromPaths } from "./prime-backend.server";
 import { classifyEdgeFunctionShortfall } from "./handoff-parity.server";
 import { scanIsCacheable, shouldSkipFunctionSource } from "./primeScanCache.pure";
+import { stripComments } from "./sourceComments.pure";
 
 /**
  * Provisioning must survive the invocation it runs in.
@@ -60,7 +61,7 @@ const runner = () => read("src/lib/backend-provisioning.functions.ts");
  * assertion nor satisfy it.
  */
 const code = (source: string) =>
-  source.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:])\/\/.*$/gm, "$1 ");
+  stripComments(source);
 const drift = () => read("src/server/fleet-drift.functions.ts");
 const retryHook = () => read("src/routes/hooks.backend-provisioning-retry.tsx");
 

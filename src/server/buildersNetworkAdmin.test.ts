@@ -6,10 +6,9 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { networkAdminUrl } from "./buildersNetworkAdmin.server";
 import { builderOrgTenantRef } from "./builders-network.functions";
+import { stripComments } from "./sourceComments.pure";
 
 const read = (p: string) => readFileSync(join(process.cwd(), p), "utf8");
-const stripComments = (s: string) =>
-  s.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:])\/\/[^\n]*/g, "$1 ");
 
 const ORIGINAL_URL = process.env.BUILDERS_NETWORK_ADMIN_URL;
 afterEach(() => {

@@ -1,13 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+/** Source with comments removed — a comment quoting code is not code. */
+import { stripComments } from "./sourceComments.pure";
 
 const server = readFileSync(join(__dirname, "cloneAccessCredentials.server.ts"), "utf8");
 const fns = readFileSync(join(__dirname, "..", "lib", "clone-access.functions.ts"), "utf8");
 
-/** Source with comments removed — a comment quoting code is not code. */
-const stripComments = (src: string): string =>
-  src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
 
 describe("an issued credential is never written down", () => {
   it("the audit row records THAT it happened, never what was issued", () => {

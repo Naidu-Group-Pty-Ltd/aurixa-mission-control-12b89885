@@ -25,10 +25,11 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { stripComments } from "./sourceComments.pure";
 
 const read = (p: string) => readFileSync(join(process.cwd(), p), "utf8");
 const code = (src: string): string =>
-  src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
+  stripComments(src);
 
 const provisioning = code(read("src/lib/backend-provisioning.functions.ts"));
 const replay = code(read("src/server/backend-provisioning.server.ts"));

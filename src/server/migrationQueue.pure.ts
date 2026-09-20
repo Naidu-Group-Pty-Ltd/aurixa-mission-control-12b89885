@@ -30,6 +30,8 @@
  * run.
  */
 
+import { stripSqlComments } from "./sqlComments.pure";
+
 /** One repository migration, as submitted. */
 export type MigrationSubmission = {
   /** The 14-digit version, the only identity a migration has in the ledger. */
@@ -153,9 +155,7 @@ const NON_TRANSACTIONAL: ReadonlyArray<{ pattern: RegExp; what: string }> = [
  * permissive, never less — and permissive here means the drain reports it
  * instead, which is the pre-existing behaviour rather than a new failure.
  */
-export function stripSqlComments(sql: string): string {
-  return sql.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/--[^\n]*/g, " ");
-}
+export { stripSqlComments };
 
 function reject(name: string, reason: string): Rejection {
   return { name, reason };

@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
+import { stripComments } from "./sourceComments.pure";
 import {
   frontierFromReplay,
   resolveMigrationFrontier,
@@ -83,8 +84,6 @@ describe("frontierFromReplay", () => {
 
 describe("the frontier can never be a corpus position again", () => {
   const source = readFileSync(new URL("./migrationFrontier.pure.ts", import.meta.url), "utf8");
-  const stripComments = (s: string) =>
-    s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
 
   it("the resolver is given readings and never a list of migration files", () => {
     // Structural, not a naming rule: `resolveMigrationFrontier` takes no

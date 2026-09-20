@@ -10,9 +10,6 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-
-const read = (p: string) => readFileSync(join(process.cwd(), p), "utf8");
-
 /**
  * Source with comments removed — a comment quoting code is not code.
  *
@@ -21,8 +18,10 @@ const read = (p: string) => readFileSync(join(process.cwd(), p), "utf8");
  * not cascaded. Judging prose is the same mistake as judging a column name
  * inside a string literal.
  */
-const stripComments = (src: string): string =>
-  src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
+import { stripComments } from "./sourceComments.pure";
+
+const read = (p: string) => readFileSync(join(process.cwd(), p), "utf8");
+
 
 const engine = read("src/server/cascade-engine.server.ts");
 const drain = read("src/server/cascadeMergeDrain.server.ts");

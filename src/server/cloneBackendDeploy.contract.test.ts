@@ -8,12 +8,11 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+/** Source with comments removed — a comment quoting code is not code. */
+import { stripComments } from "./sourceComments.pure";
 
 const read = (p: string) => readFileSync(join(process.cwd(), p), "utf8");
 
-/** Source with comments removed — a comment quoting code is not code. */
-const stripComments = (src: string): string =>
-  src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
 
 const server = read("src/server/cloneBackendDeploy.server.ts");
 const bare = stripComments(server);

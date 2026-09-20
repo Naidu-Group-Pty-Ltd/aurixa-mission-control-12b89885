@@ -16,6 +16,7 @@
 import { describe, expect, it } from "vitest";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { stripComments } from "../server/sourceComments.pure";
 
 import {
   type AnthropicIdentityFacts,
@@ -186,9 +187,7 @@ describe("no surface re-spells the judgement", () => {
    * within a bounded window rather than as lines.
    */
   const normalise = (src: string) =>
-    src
-      .replace(/\/\*[\s\S]*?\*\//g, " ")
-      .replace(/\/\/[^\n]*/g, " ")
+    stripComments(src)
       .replace(/\s+/g, " ");
 
   /** Wide enough for a wrapped predicate, narrow enough not to join neighbours. */

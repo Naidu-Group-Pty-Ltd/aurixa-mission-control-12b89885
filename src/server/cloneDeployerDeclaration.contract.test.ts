@@ -9,10 +9,9 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { stripComments } from "./sourceComments.pure";
 
 const read = (p: string) => readFileSync(join(process.cwd(), p), "utf8");
-const stripComments = (src: string): string =>
-  src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
 
 const server = stripComments(read("src/server/cloneDeployerDeclaration.server.ts"));
 const pure = stripComments(read("src/server/cloneDeployerDeclaration.pure.ts"));

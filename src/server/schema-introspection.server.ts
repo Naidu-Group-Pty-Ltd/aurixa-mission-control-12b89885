@@ -21,6 +21,7 @@
 
 import { runSqlOnProject, sqlLiteral } from "./backend-provisioning.server";
 import { ownProjectRef } from "./prime-backend.server";
+import { stripSqlCommentsFailingClosed } from "./sqlComments.pure";
 import {
   BudgetPause,
   formatResumeMarker,
@@ -113,11 +114,7 @@ export type IntrospectionResult = {
  * begin with `select` or `with` is refused outright.
  */
 export function isReadOnlySourceQuery(sql: string): boolean {
-  const stripped = sql
-    .replace(/--[^\n]*/g, " ")
-    .replace(/\/\*[\s\S]*?\*\//g, " ")
-    .trim()
-    .toLowerCase();
+  const stripped = stripSqlCommentsFailingClosed(sql).trim().toLowerCase();
   if (!/^(select|with)\b/.test(stripped)) return false;
   // `with … as ( … ) insert/update/delete` is a write dressed as a read.
   if (

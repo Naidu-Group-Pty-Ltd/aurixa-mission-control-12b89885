@@ -3,10 +3,11 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fleetDrainHasWork } from "./fleet-migration.server";
 import { isMidSeed, scopeQueueToMode } from "./fleetMigrationEligibility.pure";
+import { stripComments } from "./sourceComments.pure";
 
 const read = (p: string) => readFileSync(join(process.cwd(), p), "utf8");
 /** Comments stripped, so prose describing a rule never satisfies a check for it. */
-const code = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+const code = (src: string) => stripComments(src);
 const sqlCode = (src: string) => src.replace(/^[ \t]*--.*$/gm, "");
 
 const CURSOR = { migrationId: "20261203000000", statementsDone: 25 };
