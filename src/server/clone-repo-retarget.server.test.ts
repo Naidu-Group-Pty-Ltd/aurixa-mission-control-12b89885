@@ -471,3 +471,34 @@ describe("provisioning confirms the guard arrived and is run", () => {
     expect(step).not.toContain("writeFile(");
   });
 });
+
+describe("what provisioning tells the operator when a step fails", () => {
+  // The retarget's failures are not all the same kind of thing. "this file
+  // still names another project" and "nothing here will ever check that it
+  // does not" send an operator to opposite remedies, and step 8 only ever
+  // raises the second kind.
+  const CALLER = "src/lib/backend-provisioning.functions.ts";
+
+  it("does not assert a foreign project about every failure", () => {
+    const src = readFileSync(CALLER, "utf8");
+    expect(src).not.toContain("Repository still names another project in");
+  });
+
+  it("carries each failure's own reason into the status line", () => {
+    const src = readFileSync(CALLER, "utf8");
+    const i = src.indexOf("const failedRetarget");
+    expect(i).toBeGreaterThan(-1);
+    const block = src.slice(i, i + 700);
+    // `detail` is where step 6 and step 8 each say what actually happened.
+    expect(block).toContain("a.detail");
+  });
+
+  it("acts on the failures at all", () => {
+    // A check nothing reads is the defect this whole change is about. The
+    // retarget's verdict has to reach a surface, not just a return value.
+    const src = readFileSync(CALLER, "utf8");
+    const i = src.indexOf("const failedRetarget");
+    const block = src.slice(i, i + 700);
+    expect(block).toContain("updateStatus(");
+  });
+});
