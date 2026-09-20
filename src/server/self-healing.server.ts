@@ -51,10 +51,7 @@ import {
   refreshedSince,
   runWithinBudget,
 } from "@/server/edgeDeployBatch.pure";
-import {
-  planUpstreamDeferral,
-  UPSTREAM_DEFERRAL_KEY,
-} from "@/server/upstreamRefusal.pure";
+import { planUpstreamDeferral, UPSTREAM_DEFERRAL_KEY } from "@/server/upstreamRefusal.pure";
 
 function secretsCleanFromVerification(verification: Json | null | undefined): boolean {
   if (verification && typeof verification === "object" && !Array.isArray(verification)) {
@@ -733,16 +730,48 @@ async function assessPendingMigrations(
  * Mission Control showed two healthy clones reporting a failure at a migration
  * that no longer existed in that form.
  *
- * Three rules keep it safe:
+ * Three rules keep it safe, and the first of them is a SPLIT.
  *
- * It only ever CLEARS. The update is a compare-and-swap on `status = 'failed'`,
- * so it cannot promote a row the provisioning drain owns — `pending`,
- * `provisioning`, `migrating`, `seeding_admin` and `suspended` are untouched,
- * and this lane can never mark a clone failed.
+ * **A fact and a transition are written separately, because they are true of
+ * different clones.** The update used to write five fields under one
+ * compare-and-swap on `status = 'failed'`. That CAS is right for the state
+ * change and wrong for the version: the `sql_migration` lane reaches this
+ * from a REMEDIATION TICKET (a `redeploy` ticket enqueues one), not from a
+ * failed status, so on a `ready` clone `applyPrimeMigrations` moved the
+ * clone's own ledger and this update then matched no row at all.
+ * `migration_version` never moved, and nothing re-derives it — the next fleet
+ * pass finds the clone genuinely level and so writes no version either, while
+ * the pass's status sentence, the operator pages and `currentVersion` all read
+ * a column that is behind the clone for ever. It understated rather than
+ * overstated, which is why it was filed (#232) rather than hot-fixed.
  *
- * It writes only what this pass established. `migration_version` moves only
- * when something was applied; a pass that merely confirmed the clone level
- * clears the stale verdict and leaves the version alone.
+ * So: `migration_version` is a FACT — these versions were applied to this
+ * clone by this run — and lands whatever the status says. `status`,
+ * `error_message` and the `migration_blocked_*` pair are a TRANSITION and keep
+ * the CAS. `status_detail` is a READING, and travels with whichever of the two
+ * it describes.
+ *
+ * The fact is written FIRST. If the transition then fails, the clone reads
+ * `failed` at the right version — visible and recoverable. The other order
+ * leaves it `ready` at a stale one, which is the defect itself.
+ *
+ * **The version can only ever move forward.** The provisioning drain may be
+ * mid-replay on the same clone and may already have recorded a later version;
+ * a repair that applied less would otherwise regress the column. The guard is
+ * in the WHERE clause rather than in a read-then-write, so it is decided by
+ * Postgres at the moment of the update and no interleaving can defeat it.
+ *
+ * It is two statements because `migration_version` is nullable and PostgREST's
+ * `.lt` does not match a NULL column — a clone that has never recorded one is
+ * the commonest case this must handle. The alternative, one `.or()` naming
+ * both, is the shape this repository has already paid for: an interpolated
+ * filter string that never parsed, so the claim in `screeningConsumer` had
+ * never once succeeded. A contract test forbids it now.
+ *
+ * It only ever CLEARS a status. The transition is still a compare-and-swap on
+ * `status = 'failed'`, so it cannot promote a row the provisioning drain owns
+ * — `pending`, `provisioning`, `migrating`, `seeding_admin` and `suspended`
+ * are untouched — and this lane can never mark a clone failed.
  *
  * It never fails the run, and it is never silent. The migrations are applied by
  * the time this is reached, so a status line that could undo that is worse than
@@ -759,6 +788,72 @@ async function clearStaleMigrationFailure(
   cloneId: string,
   latestApplied: string | null,
 ): Promise<void> {
+  if (latestApplied !== null) await recordAppliedVersion(cloneId, latestApplied);
+  await clearFailedVerdict(cloneId, latestApplied);
+}
+
+/**
+ * The FACT: these versions were applied to this clone, by this run.
+ *
+ * Unconditional on status, forward-only by WHERE clause, and split in two
+ * because `.lt` does not match NULL. Both statements are safe to run together:
+ * exactly one can match, and neither matches a clone already at or past
+ * `latestApplied`.
+ */
+async function recordAppliedVersion(cloneId: string, latestApplied: string): Promise<void> {
+  // A version is a fixed-width 14-digit stamp, so the database's ordinary
+  // text comparison IS its chronological order and `.lt` means what it looks
+  // like it means. That is a guarantee rather than an observation:
+  // `migrationQueue.pure.ts` admits a version only on `/^\d{14}$/`, and a
+  // filename only on `/^(\d{14})_(.+)\.sql$/`. Measured against the prime's
+  // corpus the same day: 1,001 of 1,001 migrations, the only other file in
+  // that directory being `TEMPLATE_RLS_POLICY.sql`, which carries no version
+  // and can never be enqueued.
+  const forward = [
+    (q: ReturnType<typeof versionUpdate>) => q.is("migration_version", null),
+    (q: ReturnType<typeof versionUpdate>) => q.lt("migration_version", latestApplied),
+  ];
+  for (const narrow of forward) {
+    try {
+      const { error } = await narrow(versionUpdate(cloneId, latestApplied));
+      if (error) {
+        console.error(
+          `[self-healing] clone ${cloneId} applied migrations up to ${latestApplied} but the version could not be recorded:`,
+          error.message,
+        );
+      }
+    } catch (e) {
+      console.error(
+        `[self-healing] clone ${cloneId} applied migrations up to ${latestApplied} but the version could not be recorded:`,
+        e instanceof Error ? e.message : String(e),
+      );
+    }
+  }
+}
+
+/** The update both forward-only statements run, before their own narrowing. */
+function versionUpdate(cloneId: string, latestApplied: string) {
+  return admin
+    .from("clone_backends")
+    .update({
+      migration_version: latestApplied,
+      // The reading that belongs to the fact. It is withheld wherever the
+      // fact is, so a clone the drain has carried further is never described
+      // by a version this repair did not put there.
+      status_detail: `Synced to ${latestApplied}`,
+    })
+    .eq("clone_id", cloneId);
+}
+
+/**
+ * The TRANSITION: a verdict another lane left, which this pass disproved.
+ *
+ * Compare-and-swap on `failed`, exactly as before. `status_detail` is written
+ * here only where no version was applied — otherwise the fact above owns the
+ * reading, and writing it twice would let a refused version write still
+ * announce a level this clone is not at.
+ */
+async function clearFailedVerdict(cloneId: string, latestApplied: string | null): Promise<void> {
   try {
     const { error } = await admin
       .from("clone_backends")
@@ -767,10 +862,9 @@ async function clearStaleMigrationFailure(
         error_message: null,
         migration_blocked_at: null,
         migration_blocked_reason: null,
-        ...(latestApplied ? { migration_version: latestApplied } : {}),
-        status_detail: latestApplied
-          ? `Synced to ${latestApplied}`
-          : "Verified level with the prime's recorded migrations",
+        ...(latestApplied
+          ? {}
+          : { status_detail: "Verified level with the prime's recorded migrations" }),
       })
       .eq("clone_id", cloneId)
       .eq("status", "failed");
@@ -1115,7 +1209,8 @@ async function executeEdgeFunctionDeploy(run: any): Promise<{ status: string }> 
   const observedSourceSha = await resolvePrimeHeadSha(getAppOctokit(), source);
   const generation = planDeployGeneration({
     runStartedAt: run.started_at,
-    lastGenerationAt: (run.result as { generation_at?: string | null } | null)?.generation_at ?? null,
+    lastGenerationAt:
+      (run.result as { generation_at?: string | null } | null)?.generation_at ?? null,
     lastSourceSha: (run.result as { source_sha?: string | null } | null)?.source_sha ?? null,
     observedSourceSha,
     now: new Date().toISOString(),

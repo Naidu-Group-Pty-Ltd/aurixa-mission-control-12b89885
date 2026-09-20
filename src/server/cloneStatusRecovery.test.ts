@@ -16,6 +16,19 @@ const helper = lane.slice(
   lane.indexOf("async function clearStaleMigrationFailure"),
   lane.indexOf("async function executeSqlMigration("),
 );
+/**
+ * The two halves, sliced apart.
+ *
+ * An assertion about the compare-and-swap must not be satisfiable by the fact
+ * write, and an assertion about the fact must not be satisfiable by the
+ * transition — which is the whole point of #232 and so the whole point of
+ * reading them separately.
+ */
+const factWrite = helper.slice(
+  helper.indexOf("async function recordAppliedVersion"),
+  helper.indexOf("async function clearFailedVerdict"),
+);
+const transitionWrite = helper.slice(helper.indexOf("async function clearFailedVerdict"));
 
 describe("clearStaleMigrationFailure", () => {
   it("exists and is called from the SQL migration lane", () => {
@@ -28,7 +41,7 @@ describe("clearStaleMigrationFailure", () => {
     // The one rule that makes this safe to run beside the provisioning drain:
     // pending / provisioning / migrating / seeding_admin / suspended are the
     // drain's, and this must not touch them.
-    expect(helper).toContain('.eq("status", "failed")');
+    expect(transitionWrite).toContain('.eq("status", "failed")');
   });
 
   it("never marks a clone failed", () => {
@@ -37,7 +50,55 @@ describe("clearStaleMigrationFailure", () => {
 
   it("moves migration_version only when something was applied", () => {
     // A pass that merely confirmed the clone level establishes no new version.
-    expect(helper).toContain("...(latestApplied ? { migration_version: latestApplied } : {})");
+    // Renegotiated for #232: this used to pin the conditional spread inside
+    // the single update. The condition is now the call itself, because the
+    // version is written by a statement of its own.
+    expect(helper).toContain("if (latestApplied !== null) await recordAppliedVersion(");
+  });
+
+  it("writes the version WITHOUT the status compare-and-swap — #232", () => {
+    // THE DEFECT. The `sql_migration` lane reaches this from a remediation
+    // ticket, not a failed status, so on a `ready` clone the CAS matched no
+    // row and the version was silently dropped while the clone's own ledger
+    // had moved. `migration_version` is a fact about what was applied and
+    // cannot be conditional on a state transition succeeding.
+    expect(factWrite).toContain("migration_version: latestApplied");
+    expect(factWrite, "the fact must not be gated on a status").not.toContain('"status"');
+    expect(factWrite).not.toMatch(/status:\s*["']/);
+  });
+
+  it("the version can only ever move forward", () => {
+    // The provisioning drain may be mid-replay on the same clone and may have
+    // recorded a later version already. Decided in the WHERE clause, so no
+    // interleaving between a read and a write can defeat it.
+    expect(factWrite).toContain('.lt("migration_version", latestApplied)');
+    expect(factWrite).toContain('.is("migration_version", null)');
+  });
+
+  it("spells the NULL case separately rather than composing a filter", () => {
+    // `.lt` does not match a NULL column, and a clone that has never recorded
+    // a version is the commonest case here. The one-statement alternative is
+    // an `.or()` naming both — the shape whose interpolated filter string
+    // never parsed, so `screeningConsumer`'s claim had never once succeeded.
+    expect(factWrite).not.toContain(".or(");
+  });
+
+  it("writes the fact BEFORE the transition", () => {
+    // If the transition fails after the fact landed, the clone reads `failed`
+    // at the right version: visible and recoverable. The other order leaves it
+    // `ready` at a stale one, which is the defect itself.
+    const fact = helper.indexOf("await recordAppliedVersion(");
+    const transition = helper.indexOf("await clearFailedVerdict(");
+    expect(fact).toBeGreaterThan(-1);
+    expect(transition).toBeGreaterThan(fact);
+  });
+
+  it("does not write status_detail twice", () => {
+    // The reading travels with whichever write it describes. Written in both,
+    // a refused version write would still leave the clone announcing a level
+    // it is not at.
+    expect(factWrite).toContain("status_detail: `Synced to ${latestApplied}`");
+    expect(transitionWrite).toContain("latestApplied\n          ? {}");
   });
 
   it("clears the other lane's blocked pair rather than leaving it to rot", () => {
@@ -64,8 +125,18 @@ describe("clearStaleMigrationFailure", () => {
     // Not throwing is the point; saying nothing is not. Both the refused write
     // and a transport throw leave a repaired clone reporting a failure for
     // ever, so both are logged with whatever the driver said.
-    const reports = helper.match(/console\.error\(/g) ?? [];
-    expect(reports.length).toBe(2);
+    // Renegotiated for #232: two writes, each with a refusal path and a throw
+    // path, so four rather than two. Counted PER HALF rather than over the
+    // whole helper — a single total is satisfied by both reports living in one
+    // write, which is exactly the half that would then go quiet.
+    for (const [name, half] of [
+      ["the fact", factWrite],
+      ["the transition", transitionWrite],
+    ] as const) {
+      expect((half.match(/console\.error\(/g) ?? []).length, name).toBe(2);
+      expect((half.match(/if \(error\)\s*\{/g) ?? []).length, name).toBe(1);
+      expect((half.match(/\}\s*catch\s*\(/g) ?? []).length, name).toBe(1);
+    }
     expect(helper).toContain("error.message");
     expect(helper).toContain("e instanceof Error ? e.message : String(e)");
   });
