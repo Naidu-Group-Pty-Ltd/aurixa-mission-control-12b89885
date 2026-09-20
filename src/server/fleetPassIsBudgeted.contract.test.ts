@@ -1023,8 +1023,20 @@ describe("a pass is bounded", () => {
       it is a fact rather than a claim.
     */
     expect(lane).toMatch(
-      /const syncedTo =\s*latestApplied \?\? backend\.migration_version \?\? "no migration recorded yet";/,
+      /const syncedToFor = \(recorded: string \| null \| undefined\) =>\s*latestApplied \?\? recorded \?\? "no migration recorded yet";/,
     );
+    expect(lane).toContain("const syncedTo = syncedToFor(backend.migration_version);");
+    /*
+      AND THE NO-OP PATH APPLIES IT TO A FRESHER READING.
+
+      `backend` predates the claim and up to 45 s of network work. A manual
+      sync that finishes inside that window advances the clone and writes its
+      own accurate sentence; this pass then finds nothing to send, so
+      `latestApplied` is null and the top-of-run rung names the version the
+      sync replaced. The guard on `status_detail` would not catch it — it
+      proves the sentence had not moved, not the version.
+    */
+    expect(lane).toContain("syncedTo: syncedToFor(recorded)");
     expect(lane).not.toContain(`latestApplied ?? "the prime's latest recorded migration"`);
   });
 });

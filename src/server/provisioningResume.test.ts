@@ -2486,8 +2486,10 @@ describe("a fleet-sync pass that did nothing says nothing", () => {
     expect(whole, "the snapshot columns must not be selected at the top either").not.toContain(
       "chunk_cursor, migrations_applied, status_detail",
     );
-    const freshRead = whole.indexOf('.select("migrations_applied, status_detail")');
-    expect(freshRead, "the pair is not re-read before it is written").toBeGreaterThan(-1);
+    const freshRead = whole.indexOf(
+      '.select("migrations_applied, status_detail, migration_version")',
+    );
+    expect(freshRead, "the trio is not re-read before it is written").toBeGreaterThan(-1);
     expect(freshRead).toBeLessThan(whole.indexOf("const noopFacts = {"));
     expect(
       whole.indexOf("const noopFacts = {"),
@@ -2503,6 +2505,43 @@ describe("a fleet-sync pass that did nothing says nothing", () => {
     // without the builder's variable name, which has been renamed once.
     expect(guarded).toContain('.eq("status_detail", inspected)');
     expect(guarded).toContain('.is("status_detail", null)');
+
+    /*
+      THE SENTENCE IS COMPOSED FROM THE VERSION IT WAS RE-READ WITH.
+
+      A guard on `status_detail` proves the SENTENCE had not moved. It proves
+      nothing about `migration_version`, and the two move together: a manual
+      sync that completes inside this pass advances the clone and writes its
+      own accurate `Migrations up to date (new)`. `applyPrimeMigrations` then
+      finds nothing to send, so `latestApplied` is null and the top-of-run
+      ladder falls through to the version that sync replaced — composing
+      `Synced to <old>`, passing the guard on the sentence it just read, and
+      putting a stale reading over a fresh one.
+
+      So the version rides the same re-read as the sentence, and the rule that
+      turns it into a reading is the one the active branch uses.
+    */
+    // From the re-read rather than from `noopFacts`: the sentence is composed
+    // between the two, so the narrower window cannot see it.
+    const composed = whole.slice(freshRead, whole.indexOf("const noopFacts = {"));
+    expect(composed, "the no-op sentence must be composed from the re-read version").toContain(
+      "syncedTo: syncedToFor(recorded)",
+    );
+    expect(composed, "`recorded` must come from the re-read row").toContain(
+      "(current as { migration_version?: string | null } | null)?.migration_version ?? null",
+    );
+    expect(
+      composed,
+      "the no-op sentence must not be composed from the top-of-run version",
+    ).not.toContain("syncedTo,");
+    // One rule, two readings — not two ladders that can drift apart.
+    expect(whole, "the level rule is stated once").toContain(
+      "const syncedToFor = (recorded: string | null | undefined) =>",
+    );
+    expect(
+      (whole.match(/\?\? "no migration recorded yet"/g) ?? []).length,
+      "the fallback prose belongs to the one rule",
+    ).toBe(1);
     // And the CLAIM fences it too, so a pass that was reclaimed mid-run
     // records no reading about a row it no longer owns. `.select` is what
     // makes a miss visible at all — a fenced update that asks for nothing
@@ -2529,9 +2568,14 @@ describe("a fleet-sync pass that did nothing says nothing", () => {
     // Whitespace-insensitive: the resolution grew a rung and prettier split it
     // over two lines, which a literal `const syncedTo = latestApplied ??` no
     // longer matches — and the rung is the point, so it is asserted rather
-    // than the layout.
+    // than the layout. It is a named rule now, because the no-op path applies
+    // it to a version re-read later in the pass; both rungs still have to be
+    // there, or a null reaches the sentence.
     expect(src().replace(/\s+/g, " ")).toContain(
-      "const syncedTo = latestApplied ?? backend.migration_version ??",
+      'const syncedToFor = (recorded: string | null | undefined) => latestApplied ?? recorded ?? "no migration recorded yet";',
+    );
+    expect(src().replace(/\s+/g, " ")).toContain(
+      "const syncedTo = syncedToFor(backend.migration_version);",
     );
   });
 

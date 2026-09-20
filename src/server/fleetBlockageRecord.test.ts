@@ -15,6 +15,25 @@ import { partitionByDependency } from "./fleetCorpusScope.pure";
 
 const read = (p: string) => readFileSync(p, "utf8");
 
+/**
+ * Every call of `marker` in `source`, as the text between its brace and the
+ * `});` that closes it.
+ *
+ * `indexOf` finds the FIRST call, which is how a second call site comes to be
+ * asserted about by nothing: this lane has two composers and they take their
+ * level reading from different rows.
+ */
+const callArgs = (source: string, marker: string): string[] => {
+  const out: string[] = [];
+  for (let at = source.indexOf(marker); at !== -1; at = source.indexOf(marker, at + 1)) {
+    const end = source.indexOf("});", at);
+    expect(end, `unterminated ${marker}`).toBeGreaterThan(-1);
+    out.push(source.slice(at, end));
+  }
+  expect(out.length, `no call of ${marker}`).toBeGreaterThan(0);
+  return out;
+};
+
 /*
   THE HALF THAT PROTECTS THE VERDICT.
 
@@ -453,13 +472,28 @@ describe("a pass that stopped early knows nothing about being level", () => {
     // CLONE ("no migration recorded yet") where mine still named the prime's
     // frontier. Taken on the merge; what is pinned is the middle rung.
     expect(lane).toContain(
-      'latestApplied ?? backend.migration_version ?? "no migration recorded yet"',
+      'const syncedToFor = (recorded: string | null | undefined) =>\n        latestApplied ?? recorded ?? "no migration recorded yet";',
     );
-    // Handed the const, never a second resolution of its own.
-    const call = lane.slice(lane.indexOf("blockageDetailFor({"));
-    const args = call.slice(0, call.indexOf("});"));
-    expect(args).toContain("syncedTo,");
-    expect(args).not.toContain("latestApplied ??");
+    /*
+      ONE RULE, NOT ONE VALUE.
+
+      The two composers no longer share a single resolved string, because they
+      do not hold the same reading of the column it resolves: the active branch
+      names the version this pass applied or the row it claimed, and the no-op
+      branch re-reads `migration_version` alongside the sentence it is about to
+      guard on — a manual sync can land between the two and move it.
+
+      What must stay shared is the LADDER, so the pinning moves with it: the
+      fallback prose is stated once, and neither call site re-derives a rung.
+    */
+    expect(
+      (lane.match(/\?\? "no migration recorded yet"/g) ?? []).length,
+      "the last rung belongs to the one rule",
+    ).toBe(1);
+    for (const args of callArgs(lane, "blockageDetailFor({")) {
+      expect(args).toMatch(/syncedTo(,|: syncedToFor\(recorded\),)/);
+      expect(args).not.toContain("latestApplied ??");
+    }
   });
 
   it("the fleet lane hands it over", () => {

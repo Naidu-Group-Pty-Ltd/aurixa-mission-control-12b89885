@@ -1427,11 +1427,24 @@ export async function runFleetMigrationSync(
         The clone's own recorded version is on the row this pass just read, and
         it is a fact rather than a claim. A clone that records nothing says so.
 
-        ONE RESOLUTION, READ BY EVERY SENTENCE THIS PASS MAY WRITE — the
-        no-op path's reading and the active branch's ladder both take this,
-        so two consecutive passes cannot name one clone's level differently.
+        ONE RULE, READ BY EVERY SENTENCE THIS PASS MAY WRITE — the no-op
+        path's reading and the active branch's ladder both take it, so two
+        consecutive passes cannot name one clone's level differently.
+
+        The RULE is shared; the READING it is applied to is each path's own
+        freshest. `backend` was read before the claim and before up to 45 s of
+        network work, and a manual sync can finish inside that window:
+        `applyPrimeMigrations` then finds the clone already level and returns a
+        no-op, so `latestApplied` is null and this ladder falls through to a
+        `migration_version` the sync has since moved. Composing from it writes
+        `Synced to <the version before that sync>` over the accurate sentence
+        the sync had just left — a stale reading passing a guard that only
+        proves the SENTENCE had not moved. The no-op path therefore applies
+        this rule to the version it re-reads with that sentence.
       */
-      const syncedTo = latestApplied ?? backend.migration_version ?? "no migration recorded yet";
+      const syncedToFor = (recorded: string | null | undefined) =>
+        latestApplied ?? recorded ?? "no migration recorded yet";
+      const syncedTo = syncedToFor(backend.migration_version);
       /*
         WHAT THIS PASS MEASURED, AS AGAINST WHAT IT CHANGED.
 
@@ -1511,7 +1524,7 @@ export async function runFleetMigrationSync(
       if (didNothing) {
         const { data: current, error: readErr } = await supabase
           .from("clone_backends")
-          .select("migrations_applied, status_detail")
+          .select("migrations_applied, status_detail, migration_version")
           .eq("clone_id", cloneId)
           .maybeSingle();
         if (readErr) {
@@ -1528,6 +1541,8 @@ export async function runFleetMigrationSync(
           });
           const inspected =
             (current as { status_detail?: string | null } | null)?.status_detail ?? null;
+          const recorded =
+            (current as { migration_version?: string | null } | null)?.migration_version ?? null;
           const blockageDetail = blockageDetailFor({
             standing: inspected,
             holes: blockage.holes,
@@ -1537,26 +1552,29 @@ export async function runFleetMigrationSync(
             // retraction writes a bare "Synced to X" over a pause, which is
             // the one reading this lane must never give about a clone behind.
             pausedMidReplay,
-            // The same resolution the active branch's sentences read, so the
-            // two cannot name the clone's level differently on consecutive
-            // passes.
-            syncedTo,
+            // The same rule the active branch's sentences read, applied to
+            // the version re-read a line above rather than to the one this
+            // run started from: a manual sync that lands inside the pass moves
+            // the column, and a sentence composed from the old value is stale
+            // however sound the guard under it.
+            syncedTo: syncedToFor(recorded),
           });
           const noopFacts = {
             ...(blockage.entries === null ? {} : { migrations_applied: blockage.entries }),
             ...(blockageDetail === null ? {} : { status_detail: blockageDetail }),
           };
           if (Object.keys(noopFacts).length > 0) {
-            const scoped = supabase.from("clone_backends").update(noopFacts);
-            // `.eq` never matches NULL in SQL, so an absent sentence needs `.is`.
-            // Applied before the clone and claim filters purely so those two
-            // and the `.select` stay adjacent; PostgREST does not care in
-            // which order a predicate arrives.
-            const guarded =
+            // `.eq` never matches NULL in SQL, so an absent sentence needs
+            // `.is`. Both branches carry the whole chain rather than sharing a
+            // builder bound above them, so that the write and the `error` that
+            // is read from it are one statement — which is what
+            // `check:discarded-errors` reads, and what every other write in
+            // this file looks like.
+            const { data: wrote, error: noopErr } = await (
               inspected === null
-                ? scoped.is("status_detail", null)
-                : scoped.eq("status_detail", inspected);
-            const { data: wrote, error: noopErr } = await guarded
+                ? supabase.from("clone_backends").update(noopFacts).is("status_detail", null)
+                : supabase.from("clone_backends").update(noopFacts).eq("status_detail", inspected)
+            )
               .eq("clone_id", cloneId)
               .eq("worker_started_at", claimedAt)
               .select("clone_id");
