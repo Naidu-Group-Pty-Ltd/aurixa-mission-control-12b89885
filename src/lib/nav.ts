@@ -26,6 +26,7 @@ import {
   Coins,
   FileSignature,
   Gauge,
+  GitBranch,
   GitFork,
   Handshake,
   KeyRound,
@@ -142,6 +143,18 @@ export const NAV_SECTIONS: NavSection[] = [
   {
     heading: "Observability",
     items: [
+      // First in the section deliberately: every other reading here is
+      // downstream of this repository, and a fleet cannot be healthier than
+      // the tree it is copied from.
+      {
+        to: "/prime",
+        label: "Prime Repo",
+        icon: GitBranch,
+        shortcut: "p",
+        keywords:
+          "prime source upstream repository ci checks verify security green red cascade safety " +
+          "commits pull requests workflow runs head branch",
+      },
       { to: "/health", label: "Health", icon: Activity, shortcut: "h", keywords: "uptime status" },
       { to: "/metrics", label: "Metrics", icon: BarChart3, shortcut: "i" },
       { to: "/slo", label: "SLO", icon: Target, shortcut: "l", keywords: "service level" },
