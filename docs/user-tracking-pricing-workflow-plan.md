@@ -364,6 +364,27 @@ Also in this phase:
 
 ## 7. Risks & open questions
 
+> **Re-measured 20 Sep 2026 — four of these five are not open, and one is open
+> for a different reason than the heading implies.** Each bullet below states
+> its own decision in the sentence that raises it; what the heading has been
+> doing since is making settled policy look like a pending question. The
+> attribution plan shipped — `20260710130000_purchase_attribution.sql` is
+> applied and `origin_source` / `origin_username` are read in eight modules —
+> so PII scope, `intent` validation, the slug-vs-id rule and the renewals rule
+> are all decided **and implemented**.
+>
+> **Abandoned-row retention is the one still open, and it is unimplemented
+> rather than undecided.** `abandoned` is in the `purchases.status` CHECK
+> constraint and `purchase-backfill.server.ts` writes it on an expired Stripe
+> session — but nothing anywhere deletes one: no `.delete()` on `purchases` in
+> `src/server`, no `DELETE FROM public.purchases` in any migration, no pg_cron
+> job naming the table. So the "suggest 90 days, then delete" below has never
+> been enforced and every `initiated`/`abandoned` row since 10 July is still
+> held. That is a retention decision over records of what a customer started to
+> buy and did not, so it wants the owner's word before anything deletes — and a
+> deletion sweep is the kind of worker `THE_CLONING_ENGINE.md` records six of as
+> never scheduled at all, silently, so it must be asserted by its effect.
+
 - **PII:** `origin_username`/emails are PII from clone systems. Keep to username only (no email)
   unless a business need appears; cover in RLS (operator-read) and note in privacy docs.
 - **`intent` item validation:** handoff `intent` references catalog item ids across systems —

@@ -21,12 +21,44 @@
  * There is no safe default for "which project": an unset variable is a
  * question, not a licence to guess. So the workflows are rewritten to fail
  * closed and the ref is supplied as a repository VARIABLE instead.
+ *
+ * ## A fourth artefact, on a different axis (20 Sep 2026)
+ *
+ * `.github/dependabot.yml` arrives the same way and is wrong for the same
+ * shape of reason — not because it names the prime's PROJECT, but because it
+ * describes the prime's DEPENDENCY GRAPH, which a clone does not own.
+ *
+ * `package.json` and `package-lock.json` are `REPOSITORY_INVARIANTS`: the
+ * cascade delivers the prime's copies to every clone. Measured on `origin/main`
+ * that day, all five deployments carried the byte-identical pair — package.json
+ * `4d399496`, package-lock.json `f3d3bd4c`. So a clone cannot act on a
+ * dependency finding at all: merging a bump there puts its lockfile ahead of
+ * the prime's and the next cascade delivers the prime's back over it. The
+ * upgrade appears to land and then silently un-lands.
+ *
+ * The config was nonetheless running on every clone, on the prime's own weekly
+ * schedule and `open-pull-requests-limit: 5` — measured that day at **18 open
+ * PRs across four clones**, none of which could ever merge. It is not even
+ * written for them: its `ignore` list is a set of judgements about this
+ * repository's evidence ("both this repository and its client-facing mirror had
+ * `main` broken by exactly this").
+ *
+ * It arrives in the clone's "Initial commit" — `createUsingTemplate` is a whole
+ * -tree copy, so provisioning is the only place that can decline it. Deleted
+ * rather than emptied: a config that exists says somebody decided what it
+ * should contain, and the decision here is that this repository has no say in
+ * its own dependencies.
  */
 
 import { getAppOctokit } from "./github-app.server";
 
 export const CONFIG_TOML_PATH = "supabase/config.toml";
 export const LINKED_PROJECT_PATH = "supabase/.temp/linked-project.json";
+/**
+ * The prime's Dependabot config. Removed from a clone rather than rewritten —
+ * see the note in this module's header.
+ */
+export const DEPENDABOT_CONFIG_PATH = ".github/dependabot.yml";
 export const RETARGET_WORKFLOWS = [
   ".github/workflows/deploy-supabase-functions.yml",
   ".github/workflows/apply-migration.yml",
@@ -247,6 +279,36 @@ export async function retargetCloneRepo(
   } catch (e) {
     actions.push({
       target: LINKED_PROJECT_PATH,
+      status: "failed",
+      detail: e instanceof Error ? e.message : String(e),
+    });
+  }
+
+  // 5. The prime's Dependabot config, which describes a dependency graph this
+  //    repository does not own — package.json and package-lock.json are
+  //    cascaded repository invariants, so nothing merged here can survive.
+  try {
+    const f = await readFile(DEPENDABOT_CONFIG_PATH);
+    if (!f) {
+      actions.push({ target: DEPENDABOT_CONFIG_PATH, status: "absent" });
+    } else {
+      await octokit.repos.deleteFile({
+        owner: ref.owner,
+        repo: ref.repo,
+        path: DEPENDABOT_CONFIG_PATH,
+        ...(branch ? { branch } : {}),
+        message:
+          "chore(aurixa): drop the prime's Dependabot config\n\n" +
+          "package.json and package-lock.json are cascaded from the prime, so a " +
+          "bump merged here is reverted by the next cascade. The upgrade that " +
+          "reaches this deployment is the one merged on the prime.",
+        sha: f.sha,
+      });
+      actions.push({ target: DEPENDABOT_CONFIG_PATH, status: "deleted" });
+    }
+  } catch (e) {
+    actions.push({
+      target: DEPENDABOT_CONFIG_PATH,
       status: "failed",
       detail: e instanceof Error ? e.message : String(e),
     });

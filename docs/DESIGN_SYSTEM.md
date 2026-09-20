@@ -153,9 +153,34 @@ recipe were folded into these.
 
 ## What is still open
 
-- ~50 pages still hand-roll their header block. `PageHeader` now carries the
-  right recipe, but adopting it is a per-page edit because the surrounding
-  markup varies.
+- **44 pages still hand-roll their header block, and the obstacle is the
+  component rather than per-page patience.** Re-measured 20 Sep 2026: 137 route
+  files, 28 importing `PageHeader`, and of the 109 that do not, 64 draw no
+  header at all (layouts, redirects, sub-panels) and 45 draw a `font-display`
+  `<h1>` — one of them `__root.tsx`'s 404 boundary, so 44 real page headers.
+  The "~50" this bullet used to carry was right; a first re-measurement said
+  109 and was counting every route file rather than every route with a header.
+
+  Two things block adoption, and both are measured on the component:
+
+  - **It offers one title size and the pages use two, and the second is not
+    drift.** 26 of the 44 set `text-[2.125rem] leading-[1.05]` and 18 set
+    `text-[1.75rem] leading-[1.1]` — and 11 of those 18 are `settings.*`
+    sub-pages sitting under the settings tab strip, the rest detail routes
+    (`cascades.$eventId`, `clones.$cloneId.secrets`, `handoffs.$handoffId`, …).
+    That is a second-level tier, consistently applied. `PageHeader` hardcodes
+    `text-[2.125rem]`, so adopting it on those 18 would enlarge a deliberate
+    tier by 21%.
+  - **It is not the visual no-op its own header comment claims.** `PageHeader`
+    draws `mt-2` between eyebrow and title. Of the 44, **23 draw `mt-1`, 21
+    draw no `mt-` at all, and none draws `mt-2`** — so adoption moves the title
+    on every page it lands on.
+
+  A `level` prop would close the first and a decision on the gap would close
+  the second. Neither is written here, because this repository's own rule is
+  that a component is not shipped until something renders it, and an unused
+  prop is that rule's exact shape. What is recorded is the measurement, so the
+  next person starts from it rather than from "the surrounding markup varies".
 - The largest pages (`modules.tsx` at 2,094 lines, `handoffs.$handoffId.tsx` at
   1,617, `branding.tsx`) have had their stat strips and headers restyled but not
   their overall information architecture.

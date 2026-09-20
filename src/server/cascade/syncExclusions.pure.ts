@@ -432,6 +432,11 @@ export const DEFAULT_MIRROR_EXCLUSIONS: readonly SyncExclusion[] = [
     reason: "protected",
     note: "Rotates INTERNAL_EDGE_SECRET, which Mission Control mints and rotates per clone through cloneSigningPair. Guarded at source by EDGE_SECRET_OWNER_REPO; held here so a clone's own divergence is never reverted.",
   },
+  {
+    pattern: ".github/dependabot.yml",
+    reason: "protected",
+    note: "Describes the prime's dependency graph, which a mirror does not own: package.json and package-lock.json are REPOSITORY_INVARIANTS, so a bump merged on a clone is reverted by the next cascade. Measured 20 Sep 2026 — all five deployments carried the byte-identical pair, and prime's config had produced 18 open PRs across four clones that could never merge. Removed from a clone rather than rewritten; this stops the cascade putting it back.",
+  },
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
