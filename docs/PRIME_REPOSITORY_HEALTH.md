@@ -357,7 +357,211 @@ with no way to pick a different clone.
 
 ---
 
-## 9 · What is open
+## 9 · Diagnosing a migration, and fixing it at the source
+
+§7 counts what the prime is holding back. This answers the next question —
+_that one, why is it sitting there, and is it safe to run?_ — and, on one
+verdict out of nine, offers to run it.
+
+It matters to the fleet rather than only to the prime.
+`fleetCorpusScope.pure.ts` sends a clone only what the prime's ledger records,
+and `partitionByDependency` refuses to step over a version the prime has not
+run. So one unrun migration on the prime is a barrier for every clone behind
+it, and everything after it in corpus order queues up behind that barrier. The
+backlog a clone reports is very often not the clone's at all.
+
+### The layers, cheapest first, each failing on its own
+
+|     | layer                                | what it costs                                    |
+| --- | ------------------------------------ | ------------------------------------------------ |
+| 1   | the filename                         | nothing — a `rollback_*` script is an undo       |
+| 2   | the corpus listing                   | one tree walk, cached 60 s — collisions and size |
+| 3   | this file's statements               | one blob, cached by commit                       |
+| 4   | the prime's live catalogue           | one statement                                    |
+| 5   | a rolled-back trial run on the prime | one statement                                    |
+
+None of them is inferred from another's silence. A layer that could not answer
+reaches the verdict as a named absence, which is why `undiagnosed` exists
+beside `would_fail` and is never merged into it.
+
+### The one rule the whole feature rests on
+
+**A body carrying transaction control may never be dry-run.** The trial run is
+`BEGIN; SET LOCAL lock_timeout; SET LOCAL statement_timeout; <body>; ROLLBACK;`,
+and a `COMMIT;` inside the body would end that transaction and make everything
+before it permanent — a "test" that writes to the prime's production database,
+which would look exactly like a success.
+
+So the statement scan gates the run rather than annotating it, and it is
+asserted twice: by source order in `primeMigrationDoctorMounted.test.ts`, and
+behaviourally in `primeMigrationDiagnosis.server.test.ts`, which captures every
+statement the module sends and asserts the transcript is **empty** for such a
+body. A verdict is a thing the module computed; the transcript is a thing the
+database would have seen.
+
+Two more parts of that wrapper are load-bearing. `lock_timeout` is why a
+diagnostic cannot block the prime's own traffic — a trial run waiting on a lock
+held by a live transaction would queue every reader behind it. Both timeouts
+are `SET LOCAL`, so neither outlives the rollback onto the pooled connection
+the next caller gets.
+
+### Why eliding function bodies is safe, and how that is kept true
+
+A PL/pgSQL `BEGIN` is a block opener, not a transaction, so the scanner
+replaces every dollar-quoted body with a placeholder before looking for
+transaction control. Without that, every `create function … $$ begin … end $$`
+in the repository would read as a transaction and the feature would refuse
+nearly everything.
+
+That is safe because **a function cannot commit — only a procedure invoked by
+`CALL` can** — and the prime's corpus contains **0 procedures and 0 `CALL`
+statements**. Because that is a measurement rather than a law, `CREATE
+PROCEDURE` and `CALL` are their own hazard with nothing currently to catch: the
+day the corpus gains one, the scan notices rather than going quietly wrong.
+
+### Two things the trial run will not do
+
+It is bounded by **request size**, at 1 MB. Above that the answer would be
+about the transport rather than the migration —
+`apply-migration.yml` exists partly because a ~19 MB `INSERT` is _"too large
+for one Management API request"_, and a request-size refusal read back as
+`would_fail` would be this console blaming a file for its own plumbing. The
+number costs almost nothing: of the prime's 1,002 files, 986 are under 256 KB
+(p50 is 2.1 KB, p90 is 11 KB), 13 are past `MAX_MIGRATION_BYTES` and never get
+a body at all, and **exactly one** sits between the two ceilings — a 3.76 MB
+template-library seed, which is the shape the chunking route was built for.
+
+And it is never made for a file whose answer the FILE already settles: an undo
+is not sent even inside a transaction that rolls back, and neither is a version
+two files carry. Both are safe to send and both would be pointless, and sending
+an RLS-undo script to a production database "because it rolls back" is an
+exception nobody reading the code would expect.
+
+### Calibration, and the rule the measurement killed
+
+Every threshold here was set by counting over the prime's own **988 readable
+migration files (11,070 statements)** on 20 Sep 2026, because a caution that
+fires on a quarter of the corpus is one operators learn to dismiss — the
+eleven-unreadable-chips failure, committed on the screen that offers to run
+something.
+
+|                                                         | files | share |
+| ------------------------------------------------------- | ----- | ----- |
+| untestable (transaction control or an added enum value) | 48    | 4.9%  |
+| destroys data                                           | 32    | 3.2%  |
+| would duplicate rows if run twice                       | 36    | 3.6%  |
+
+The escape hatch being under 5% is what makes gating on it affordable.
+
+One rule was written, measured and **removed**, and the reasoning is worth more
+than the rule was. A general "could this statement succeed a second time?"
+check produced **2,411 hits — 22% of every statement in the repository** — of
+which `CREATE POLICY` alone was 1,592 across 320 files. What survived the
+narrowing is the distinction that actually matters: a second `CREATE TABLE`,
+`CREATE INDEX` or `ADD CONSTRAINT` fails **loudly**, with `42P07`/`42710`,
+having changed nothing, and the repair is mechanical; a second unguarded
+`INSERT` **succeeds**, and duplicates rows. That is the case
+`apply-migration.yml`'s own header names — _"data mutations … where a second
+application is not a no-op"_ — and it is 62 statements across 36 files.
+
+Three exclusions are recorded for the same reason: `DROP POLICY` (153 files —
+the `DROP POLICY IF EXISTS … CREATE POLICY` idiom loses nothing), `DROP
+FUNCTION`/`DROP TRIGGER` (452 statements across 141 files, almost all
+drop-and-recreate in the same file, and it destroys code rather than data), and
+`UPDATE` (257 statements across 161 files, routinely idempotent by
+construction).
+
+### A finding the survey turned up
+
+**32 versions in the prime's corpus are carried by two files each — 77 files,
+of which 45 can never be recorded.** `schema_migrations.version` is the primary
+key, so one of each pair is permanently absent from the ledger; and a version
+the ledger cannot record is a hole `partitionByDependency` refuses to step
+over, for ever. `20260717000000` is both `add_builder_invoice_current_payment`
+and `restrict_finance_portal_notification_routing` — two unrelated migrations
+that cannot both be stamped.
+
+No amount of running anything clears that. The repair is a rename in the prime
+repository, which is why the survey rides every diagnosis report and is drawn
+as a standing notice rather than as one file's verdict.
+
+### The act, and the four things that bound it
+
+The console does not apply anything itself. It dispatches
+`apply-migration.yml` on the prime, which is the workflow that already exists
+there for this act and which holds the credential to do it — and the credential
+is exactly why. That workflow's header records the reasoning: a Supabase
+personal access token _"carries the whole account … including [projects]
+created after the token was issued"_, while a database URL reaches one database
+and can be rotated for one deployment. The act belongs where the narrow
+credential is.
+
+What this adds is the judgement in front of it. That workflow says the quiet
+part out loud — _"Deciding **which** file is a human judgement made before
+dispatch, not a thing this workflow infers"_ — and until now that judgement was
+a person reading SQL in a browser tab.
+
+1. **`dispatchable` is an ALLOW-list of one verdict.** `ready`, and nothing
+   else. The shape `payingCanUnlock` was rewritten into after a deny-list
+   answered yes to every word the build had never heard of; a verdict added
+   tomorrow is refused by default. `already_applied` is deliberately _not_
+   dispatchable — re-running a migration the prime has already run is the exact
+   danger `apply-migration.yml`'s header names.
+2. **The verdict is re-taken at the moment of the act**, server-side, including
+   the trial run. A reading an operator looked at five minutes ago describes a
+   schema that has since moved — and a request field asserting the server's own
+   conclusion is the pattern IPV 1.1.0 forbids. `dispatchable` travels out to
+   the browser; it never travels back. The page sends a version and nothing
+   else.
+3. **One file, named, and never a set.** There is no "apply all". The prime's
+   ledger under-reports by roughly two orders of magnitude — 133 migrations
+   called pending on 2026-08-13 where all but one family already existed — so a
+   loop over "everything pending" would replay data mutations that are not
+   no-ops.
+4. **One apply at a time.** `apply-migration.yml` declares `concurrency:
+apply-migration, cancel-in-progress: false`, so a second dispatch queues
+   behind the first rather than racing it — and then runs. For an idempotent
+   file that is harmless; for one of the 36 carrying an unguarded `INSERT` it
+   duplicates rows. The window is narrow (once the run lands, the version is in
+   `schema_migrations` and the next diagnosis answers `already_applied`) and it
+   is exactly the minute an operator is most likely to click again, having seen
+   nothing happen. The activation gate paid for this class once already:
+   _"paying twice was one click away."_ So the dispatch asks GitHub whether a
+   run is in flight and refuses while one is — and a probe that FAILED does not
+   refuse, because the conservative side of a disclosure is to say nothing
+   rather than to invent a reason.
+5. **Withholding the shortcut never withholds the act.** Every refusal names
+   what to do instead, and `apply-migration.yml` is still on the prime and
+   still runnable by hand. That is what makes gating on one verdict affordable
+   rather than obstructive.
+
+The page draws the button on the server's `dispatchable` field and never on a
+verdict word — a comparison in JSX would be a second copy of the allow-list
+living where no test reaches it, and a test refuses any `verdict ===` in the
+route. The confirmation restates the **same** `remedy` sentence the card draws,
+because two statements of what is owed is how one screen comes to warn about
+something the other does not.
+
+### Read-only, structurally
+
+The judgement and the gathering are one pair of modules and the act is a
+separate one, so the reader can be asserted incapable of writing by source
+position — no `insert`, `update`, `upsert`, `delete` or `rpc`, no
+`writeAuditLog`, and no `dispatches`. A later edit cannot make the reader the
+writer. On the writing side the order is asserted too: diagnose, refuse,
+request, **then** record. An audit row written first would name an act that may
+not have happened.
+
+### What it is not
+
+- **It cannot repair a file.** It says what is wrong; editing the SQL is a
+  commit to the prime repository like any other.
+- **It cannot close a collision.** That is a rename, and nothing here renames
+  anything.
+- **It is not a queue.** One file at a time, chosen by a person, with the
+  evidence in front of them.
+
+## 10 · What is open
 
 - **The gate itself.** Refusing a cascade from a red prime is the obvious next
   step and is not taken here. The design question it turns on: `in_flight` is
@@ -387,3 +591,19 @@ with no way to pick a different clone.
   page can travel to a clone, and nothing should: it reads `prime_config`,
   `cascade_events` and `clone_sync_blockages`, which are this deployment's own
   tables.
+- **The trial run is a moment, not a guarantee.** It proves the file applies
+  against the schema the prime has _now_. Between the trial and the dispatch
+  another migration can land, and `apply-migration.yml` applies statements one
+  at a time with no enclosing transaction — so a file whose second half fails
+  leaves its first half applied. That is why data loss and duplicate-row
+  statements are disclosed on a `ready` verdict rather than hidden by it.
+- **48 files cannot be tried at all.** Transaction control and added enum
+  values are 4.9% of the corpus, and for those the page explains and offers
+  nothing. Making them testable would mean splitting a body at its own
+  transaction boundaries and trying each piece, which is a different and much
+  larger thing than this.
+- **The panel has not been rendered against production.** Every judgement here
+  is covered by tests, and the scanner was calibrated by executing it over all
+  988 readable files in the prime's corpus — but the page itself needs an
+  authenticated admin session on a deployment, and the layout has been reasoned
+  from the design system rather than measured in a browser.
