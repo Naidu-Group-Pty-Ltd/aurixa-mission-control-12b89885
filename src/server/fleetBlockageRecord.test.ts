@@ -305,14 +305,35 @@ describe("a pass that stopped early knows nothing about being level", () => {
     runnable migration pending. Writing `Synced to X` there reports a clone
     dozens of migrations behind as healthy.
   */
-  it("never writes a level reading over a pause", () => {
-    const detail = blockageDetailFor({
-      standing: "Synced to 20261202090000 so far — this pass stopped at its time budget",
-      holes: [],
-      pausedMidReplay: true,
-      syncedTo: "20261202090000",
-    });
-    expect(detail).toBeNull();
+  /*
+    The invariant is COMPOSED, not delegated. A first fix returned null here,
+    trusting the sentence already on the row to be a pause. It need not be:
+    `clearStaleMigrationFailure` writes a bare `Synced to X` and leaves
+    `migrations_applied` alone, so a row can carry hole notes under a level
+    sentence — and discharging the last hole on a paused pass would then leave
+    that level claim standing over a clone with more to send.
+  */
+  it("never leaves a level reading standing over a pause, whatever was there before", () => {
+    for (const standing of [
+      "Synced to 20261202090000 so far — this pass stopped at its time budget",
+      // The one that breaks a delegated invariant: self-healing's bare level
+      // reading, written without touching `migrations_applied`.
+      "Synced to 20261202090000",
+      "Migrations up to date (20261202090000)",
+      "Sending 20261203000000 — 16 statement(s) in (rows 151-160)",
+      null,
+    ]) {
+      const detail = blockageDetailFor({
+        standing,
+        holes: [],
+        pausedMidReplay: true,
+        syncedTo: "20261202090000",
+      });
+      expect(detail, `standing: ${standing}`).not.toBeNull();
+      expect(detail).toContain("so far");
+      expect(detail).toContain("more to send");
+      expect(detail).not.toBe("Synced to 20261202090000");
+    }
   });
 
   it("still names the holes on a paused pass, but never as a level reading", () => {

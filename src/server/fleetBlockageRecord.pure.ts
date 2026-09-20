@@ -321,15 +321,26 @@ export function blockageDetailFor(args: {
 }): string | null {
   if (!migrationLaneWroteDetail(args.standing)) return null;
   if (args.pausedMidReplay) {
-    // Nothing to add and no standing to overrule the pause sentence already
-    // on the row, which is both true and more informative than anything this
-    // pass could compose.
-    if (args.holes.length === 0) return null;
-    // The holes ARE worth saying — they are what this pass measured — but the
-    // reading is qualified, never a level one.
+    /*
+      COMPOSED, NEVER DELEGATED.
+
+      A first version returned null here when there were no holes, on the
+      assumption that the sentence already standing was the pause one. It need
+      not be. `clearStaleMigrationFailure` (self-healing.server.ts) writes a
+      bare `Synced to X` and does NOT touch `migrations_applied`, so a row can
+      carry hole notes under a level sentence; discharge the last hole on a
+      paused pass and that level claim would be left standing over a clone
+      with more to send — which is the exact invariant this branch exists for.
+
+      An invariant that depends on what another writer happened to leave
+      behind is not an invariant. This composes the qualified reading every
+      time, and the holes, where there are any, ride it.
+    */
+    const andHoles =
+      args.holes.length === 0 ? "" : `, and ${primeLedgerHoleSentence(args.holes, args.total)}`;
     return (
       `Synced to ${args.syncedTo} so far — this pass stopped at its time budget with more ` +
-      `to send, and ${primeLedgerHoleSentence(args.holes, args.total)}`
+      `to send${andHoles}`
     );
   }
   if (args.holes.length === 0) return `Synced to ${args.syncedTo}`;
