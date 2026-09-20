@@ -180,17 +180,34 @@ describe("no surface re-implements what a conclusion means", () => {
    * the server and travels in the payload, and the only import from `@/server`
    * is the server function itself plus types, which are erased before the
    * boundary exists.
+   *
+   * The rule is stated as a PROPERTY and not as a list of permitted names. It
+   * began as `expect(statement).toMatch(/fetchPrimeHealth/)` and broke the day
+   * the page gained a second, equally legitimate server function — which is
+   * the shape of gate somebody widens by adding a name, until the list is what
+   * is being maintained rather than the rule. "A hand-list cannot see the call
+   * it does not mention" is the drain lane's lesson, paid here for the price
+   * of one red test.
    */
   it("imports no server value into the route", () => {
     const page = readFileSync(join(__dirname, "..", "routes", "prime.tsx"), "utf8");
     const serverImports = [
-      ...page.matchAll(/^import\s+(type\s+)?\{[^}]*\}\s+from\s+"@\/server\/[^"]+";/gm),
+      ...page.matchAll(/^import\s+(type\s+)?\{([^}]*)\}\s+from\s+"@\/server\/([^"]+)";/gm),
     ];
     expect(serverImports.length).toBeGreaterThan(0);
-    for (const [statement, isType] of serverImports) {
+    for (const [, isType, bindings, specifier] of serverImports) {
       if (isType) continue;
-      // The one permitted value import: the server function this page calls.
-      expect(statement).toMatch(/\{\s*fetchPrimeHealth\s*\}/);
+      // A value may only come from a `*.functions` module — a `.pure` or
+      // `.server` import is the one the build refuses, and it refuses it late.
+      expect(specifier, `value import from @/server/${specifier}`).toMatch(/\.functions$/);
+      // And it may only be a server function. A constant imported from there
+      // would be a rule living in two places, which is what the block above
+      // exists to stop.
+      for (const raw of bindings.split(",")) {
+        const name = raw.trim();
+        if (!name || name.startsWith("type ")) continue;
+        expect(name, `${name} imported into the route`).toMatch(/^fetch[A-Z]/);
+      }
     }
   });
 });

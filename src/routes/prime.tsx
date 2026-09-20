@@ -22,16 +22,19 @@
  * dead "Approve the gate" button that did nothing when pressed — and the rule
  * it bought applies in both directions.
  */
+import { useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import {
   AlertTriangle,
+  Database,
   ExternalLink,
   GitCommitHorizontal,
   GitPullRequest,
   RefreshCw,
   ShieldQuestion,
+  SplitSquareHorizontal,
   Waves,
 } from "lucide-react";
 import { ProtectedRoute } from "@/components/protected-route";
@@ -43,9 +46,17 @@ import { MetricCell } from "@/components/metric-bar";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import { formatDistanceToNow } from "@/lib/format";
 import { fetchPrimeHealth } from "@/server/prime-health.functions";
+import { fetchCloneComparison, fetchPrimeMigrationLedger } from "@/server/prime-ledger.functions";
 // Types only, and through the server-function module rather than the pure one.
 // A route is bundled for the browser, so importing `src/server/**` for a VALUE
 // is refused by TanStack Start's import protection — correctly. Every
@@ -61,6 +72,13 @@ import type {
   SafetyTone,
   WorkflowSummary,
 } from "@/server/prime-health.functions";
+import type {
+  CloneComparison as CloneComparisonReading,
+  ComparedBlocker,
+  ComparisonVerdict,
+  PrimeLedgerReading,
+  WithheldRow,
+} from "@/server/prime-ledger.functions";
 
 export const Route = createFileRoute("/prime")({
   errorComponent: RouteError,
@@ -186,6 +204,9 @@ function PrimeReading({ data }: { data: Configured }) {
         <WorkflowTrendPanel data={data} />
         <LastDelivery data={data} />
       </div>
+
+      <PrimeSqlLedger />
+      <ClonesHeldAgainstPrime />
 
       <Provenance data={data} />
     </div>
@@ -804,6 +825,449 @@ function Fact({
   );
 }
 
+/* ─────────────────────────── the prime's SQL ledger ───────────────────────── */
+
+const LEDGER_KEY = ["prime-migration-ledger"] as const;
+
+/**
+ * What the prime holds in SQL, and what it has actually run.
+ *
+ * Its own query rather than a field on the health payload, for two reasons.
+ * It touches a different service — the Management API against the prime's own
+ * project — so a Supabase refusal must not blank the six GitHub readings above
+ * it. And it yields at the GitHub scan floor, so on a spent window this panel
+ * says why while the rest of the page is unaffected.
+ */
+function PrimeSqlLedger() {
+  const fetchFn = useServerFn(fetchPrimeMigrationLedger);
+  const query = useQuery({
+    queryKey: LEDGER_KEY,
+    queryFn: () => fetchFn(),
+    refetchOnWindowFocus: false,
+  });
+
+  const result = query.data;
+  const reading = result?.ok ? result.reading : null;
+
+  return (
+    <Card className={cn("spine", SPINE[reading?.tone ?? "idle"])}>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Database className="h-4 w-4 text-muted-foreground" />
+          SQL migration ledger
+        </CardTitle>
+        <CardDescription>
+          The migrations on this branch against the ones the prime&rsquo;s own database records as
+          run. A clone is never sent a migration the prime has not run, so anything missing here
+          holds the whole fleet at the version before it.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {query.isPending ? (
+          <Skeleton className="h-28 w-full" />
+        ) : query.error ? (
+          <Unreadable
+            what="The prime's SQL position"
+            why={query.error instanceof Error ? query.error.message : "The read failed."}
+          />
+        ) : result && !result.ok ? (
+          <Unreadable what="The prime's SQL position" why={result.error} />
+        ) : reading ? (
+          <LedgerBody reading={reading} primeRef={result?.ok ? result.primeRef : null} />
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}
+
+function LedgerBody({
+  reading,
+  primeRef,
+}: {
+  reading: PrimeLedgerReading;
+  primeRef: string | null;
+}) {
+  return (
+    <>
+      <p className={cn("text-sm", TONE_TEXT[reading.tone])}>{reading.headline}</p>
+
+      {reading.standing !== "unreadable" && (
+        <div className="glass grid grid-cols-2 overflow-hidden sm:grid-cols-4">
+          <MetricCell
+            label="on this branch"
+            size="sm"
+            value={reading.corpusCount ?? "—"}
+            note="migration files"
+          />
+          <MetricCell
+            label="deliverable"
+            size="sm"
+            value={reading.runnableCount ?? "—"}
+            note="the prime has run these"
+          />
+          <MetricCell
+            label="held back"
+            size="sm"
+            value={reading.withheldCount ?? "—"}
+            note={
+              reading.skewSuspected
+                ? `${reading.skewSuspected} may be a timestamp skew`
+                : "no clone may run these"
+            }
+            tone="warning"
+            alarm={(reading.withheldCount ?? 0) > 0}
+          />
+          <MetricCell
+            label="ledger rows"
+            size="sm"
+            value={reading.ledgerCount ?? "—"}
+            note={
+              reading.unmatchedLedgerRows === null
+                ? "on the prime"
+                : `${reading.unmatchedLedgerRows} match no file here`
+            }
+          />
+        </div>
+      )}
+
+      {reading.frontier && (
+        <p className="text-xs text-muted-foreground">
+          Every clone is measured against{" "}
+          <span className="font-mono text-foreground">{reading.frontier}</span> — the newest version
+          the prime has both merged and run
+          {primeRef ? (
+            <>
+              {" "}
+              on <span className="font-mono text-foreground">{primeRef}</span>
+            </>
+          ) : null}
+          .
+        </p>
+      )}
+
+      {reading.withheld.length > 0 && (
+        <div className="space-y-2">
+          <p className="label-mono">held back, newest first</p>
+          {reading.withheld.map((row) => (
+            <WithheldMigrationRow key={row.id} row={row} />
+          ))}
+          {reading.withheldCount !== null && reading.withheldCount > reading.withheld.length && (
+            <p className="text-[10px] text-muted-foreground">
+              {reading.withheldCount - reading.withheld.length} older file(s) not listed. The count
+              above is exact; only this list is capped.
+            </p>
+          )}
+        </div>
+      )}
+
+      {reading.remedy && (
+        <div className="glass-inset spine spine-warn p-3">
+          <p className="label-mono">what clears it</p>
+          <p className="mt-1.5 text-xs text-muted-foreground">{reading.remedy}</p>
+        </div>
+      )}
+    </>
+  );
+}
+
+function WithheldMigrationRow({ row }: { row: WithheldRow }) {
+  // A skew suspicion is amber and never green: two migrations authored seconds
+  // apart are indistinguishable to that test, so it is a hypothesis for a
+  // person and not a clearance.
+  const suspected = row.reason === "skew_suspected";
+  return (
+    <RecordRow spine={suspected ? "warn" : "bad"} className="flex flex-wrap gap-x-3 gap-y-1 p-2.5">
+      {/* A basis, not bare `flex-1`: `flex: 1 1 0%` contributes nothing to the
+          hypothetical size, so a filename beside a fixed-width note would be
+          handed whatever is left however small that is. */}
+      <span className="min-w-0 basis-[18rem] truncate font-mono text-[11px] text-foreground">
+        {row.name}
+      </span>
+      <span
+        className={cn(
+          "font-mono text-[10px] tracking-[0.12em] whitespace-nowrap uppercase",
+          suspected ? TONE_TEXT.warn : TONE_TEXT.bad,
+        )}
+      >
+        {suspected ? "skew suspected" : "never applied"}
+      </span>
+      {suspected && row.nearestPrimeVersion && (
+        <span className="font-mono text-[10px] text-muted-foreground">
+          nearest {row.nearestPrimeVersion}
+          {row.skewSeconds === null ? "" : ` (${row.skewSeconds}s)`}
+        </span>
+      )}
+    </RecordRow>
+  );
+}
+
+/* ─────────────────────── one clone, held against the prime ───────────────── */
+
+const COMPARE_KEY = (cloneId: string | null) => ["prime-clone-comparison", cloneId] as const;
+
+/**
+ * Pick a clone and ask what the prime is doing to it.
+ *
+ * The fleet page answers "is this clone healthy". This answers the inverse,
+ * which is the only question this page is entitled to ask: of everything wrong
+ * with that clone, how much did the SOURCE cause?
+ *
+ * `clone_sync_blockages` has carried an owner on every row since the taxonomy
+ * was written — its own header calls it "the field everything else turns
+ * on" — and no surface had ever grouped by it. An operator looking at six open
+ * blockages had six sentences and no way to see which two were theirs to fix
+ * on the prime.
+ */
+function ClonesHeldAgainstPrime() {
+  /*
+    A STRING, never `undefined`.
+
+    Radix reads `value={undefined}` as "uncontrolled" and switches mode the
+    moment a value arrives, which React warns about and which loses the
+    selection on the re-render that follows. The empty string is the
+    unselected value here and `SelectValue` draws its placeholder over it; the
+    conversion to `null` happens once, at the boundary the server validates.
+  */
+  const [cloneId, setCloneId] = useState("");
+  const chosen = cloneId || null;
+  const fetchFn = useServerFn(fetchCloneComparison);
+  const query = useQuery({
+    queryKey: COMPARE_KEY(chosen),
+    queryFn: () => fetchFn({ data: { cloneId: chosen } }),
+    refetchOnWindowFocus: false,
+  });
+
+  const data = query.data;
+  const view = data?.comparison ?? null;
+
+  return (
+    <Card className={cn("spine", SPINE[view?.tone ?? "idle"])}>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <SplitSquareHorizontal className="h-4 w-4 text-muted-foreground" />
+          Hold a clone against the prime
+        </CardTitle>
+        <CardDescription>
+          Where one clone stands on this commit and on the prime&rsquo;s migration frontier, and
+          every open blockage on it — separated by whether the act that clears it happens on the
+          prime or here.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="flex flex-wrap items-center gap-3">
+          <Select
+            value={cloneId}
+            onValueChange={(v) => setCloneId(v)}
+            disabled={query.isPending || (data?.clones.length ?? 0) === 0}
+          >
+            <SelectTrigger className="w-full sm:w-72" aria-label="Choose a clone to compare">
+              <SelectValue placeholder="Choose a clone…" />
+            </SelectTrigger>
+            <SelectContent>
+              {(data?.clones ?? []).map((c) => (
+                <SelectItem key={c.id} value={c.id}>
+                  {c.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {chosen && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => void query.refetch()}
+              disabled={query.isFetching}
+            >
+              <RefreshCw className={cn("mr-1.5 h-3.5 w-3.5", query.isFetching && "animate-spin")} />
+              {query.isFetching ? "Reading…" : "Re-read"}
+            </Button>
+          )}
+        </div>
+
+        {/* A roster that FAILED is said, not drawn as an empty fleet. */}
+        {data?.rosterError && <Unreadable what="The fleet roster" why={data.rosterError} />}
+
+        {query.isPending ? (
+          <Skeleton className="h-24 w-full" />
+        ) : query.error ? (
+          <Unreadable
+            what="The comparison"
+            why={query.error instanceof Error ? query.error.message : "The read failed."}
+          />
+        ) : !chosen ? (
+          <p className="py-4 text-center text-sm text-muted-foreground">
+            {data && data.clones.length === 0 && !data.rosterError
+              ? "This deployment has no clones."
+              : "Choose a clone to see what the prime is holding it at."}
+          </p>
+        ) : view ? (
+          <ComparisonBody view={view} error={data?.comparisonError ?? null} />
+        ) : (
+          <Unreadable what="This clone" why={data?.comparisonError} />
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function ComparisonBody({ view, error }: { view: CloneComparisonReading; error: string | null }) {
+  const blockers = view.blockers;
+  const prime = blockers?.filter((b) => b.side === "prime") ?? [];
+  const clone = blockers?.filter((b) => b.side === "clone") ?? [];
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+        <span className={cn("font-display text-lg leading-none", TONE_TEXT[view.tone])}>
+          {VERDICT_WORD[view.verdict]}
+        </span>
+        {view.repoFullName && (
+          <span className="font-mono text-[11px] text-muted-foreground">{view.repoFullName}</span>
+        )}
+        {view.syncScope && (
+          <span className="font-mono text-[10px] tracking-[0.12em] text-muted-foreground uppercase">
+            {view.syncScope}
+          </span>
+        )}
+      </div>
+      <p className="text-sm text-muted-foreground">{view.headline}</p>
+
+      <div className="grid gap-3 sm:grid-cols-2">
+        <StandingPanel
+          label="code"
+          tone={view.code.tone}
+          sentence={view.code.sentence}
+          foot={
+            view.code.syncedSha
+              ? `last synced ${view.code.syncedSha.slice(0, 7)}`
+              : "no synced commit recorded"
+          }
+        />
+        <StandingPanel
+          label="migrations"
+          tone={view.migrations.tone}
+          sentence={view.migrations.sentence}
+          foot={
+            view.migrations.recordedVersion
+              ? `recorded at ${view.migrations.recordedVersion} — a cursor its last pass wrote, not a reading of the clone`
+              : "no version recorded"
+          }
+        />
+      </div>
+
+      {view.migrations.blockedReason && (
+        <div className="glass-inset spine spine-warn p-3">
+          <p className="label-mono">its last migration pass stopped, and said why</p>
+          <p className="mt-1.5 text-xs break-words text-muted-foreground">
+            {view.migrations.blockedReason}
+          </p>
+        </div>
+      )}
+
+      {error && <Unreadable what="This clone's backend record" why={error} />}
+
+      {blockers === null ? (
+        <Unreadable what="This clone's open blockages" why={view.blockersError} />
+      ) : blockers.length === 0 ? (
+        <p className="glass-inset spine spine-ok p-3 text-xs text-muted-foreground">
+          Nothing is open against this clone in the blockage ledger.
+        </p>
+      ) : (
+        <div className="space-y-3">
+          <BlockerGroup
+            heading="the prime's to clear"
+            note="Nothing in this console can discharge these. The act happens on the source."
+            rows={prime}
+            empty="None — nothing the prime shipped is holding this clone."
+            tone="bad"
+          />
+          <BlockerGroup
+            heading="this clone's to clear"
+            note="A pass to re-run, a record to repair, or a decision owed here."
+            rows={clone}
+            empty="None."
+            tone="warn"
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StandingPanel({
+  label,
+  tone,
+  sentence,
+  foot,
+}: {
+  label: string;
+  tone: SafetyTone;
+  sentence: string;
+  foot: string;
+}) {
+  return (
+    <div className={cn("glass-inset spine p-3", SPINE[tone])}>
+      <p className="label-mono">{label}</p>
+      <p className={cn("mt-1.5 text-xs", TONE_TEXT[tone])}>{sentence}</p>
+      <p className="mt-1 font-mono text-[10px] text-muted-foreground">{foot}</p>
+    </div>
+  );
+}
+
+function BlockerGroup({
+  heading,
+  note,
+  rows,
+  empty,
+  tone,
+}: {
+  heading: string;
+  note: string;
+  rows: ComparedBlocker[];
+  empty: string;
+  tone: SafetyTone;
+}) {
+  return (
+    <div className="space-y-2">
+      <div>
+        <p className="label-mono">
+          {heading} · {rows.length}
+        </p>
+        <p className="mt-0.5 text-[10px] text-muted-foreground">{note}</p>
+      </div>
+      {rows.length === 0 ? (
+        <p className="text-xs text-muted-foreground">{empty}</p>
+      ) : (
+        rows.map((b) => <BlockerRow key={b.id} blocker={b} tone={tone} />)
+      )}
+    </div>
+  );
+}
+
+function BlockerRow({ blocker, tone }: { blocker: ComparedBlocker; tone: SafetyTone }) {
+  return (
+    <RecordRow spine={tone} className="space-y-1.5 p-3">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        {/* `whoWord` translates the taxonomy's own vocabulary. Database words
+            never reach an operator — the roster's test refuses any
+            underscore-cased identifier in a rendered field, and the rule is
+            the same one wherever the vocabulary is drawn. */}
+        <span className={cn("font-mono text-[10px] tracking-[0.12em] uppercase", TONE_TEXT[tone])}>
+          {OWNER_WORD[blocker.owner] ?? "somebody"}
+        </span>
+        <span className="text-[10px] text-muted-foreground">
+          {blocker.selfHeals ? "clears on a re-run" : "needs a decision"}
+        </span>
+        <span className="font-mono text-[10px] text-muted-foreground">
+          open {formatDistanceToNow(blocker.firstSeenAt)}
+        </span>
+      </div>
+      <p className="text-xs text-foreground">{blocker.what}</p>
+      <p className="text-[11px] break-words text-muted-foreground">{blocker.detail}</p>
+    </RecordRow>
+  );
+}
+
 /* ──────────────────────────────── primitives ─────────────────────────────── */
 
 const SPINE: Record<SafetyTone, string> = {
@@ -829,6 +1293,37 @@ const CI_SPINE: Record<PullRequestCi, SafetyTone> = {
   // Not green. A head nothing in the window built is unexamined, and the amber
   // says so rather than letting it pass as healthy.
   unobserved: "warn",
+};
+
+/**
+ * The comparison's verdict as one word.
+ *
+ * Separate from the headline sentence because the two are read at different
+ * distances: the word is scanned, the sentence is read. Keying it on the
+ * verdict rather than the tone means two verdicts that happen to share a
+ * colour still say different things.
+ */
+const VERDICT_WORD: Record<ComparisonVerdict, string> = {
+  converged: "CONVERGED",
+  prime_blocked: "HELD BY PRIME",
+  clone_blocked: "HELD HERE",
+  lagging: "BEHIND",
+  unreadable: "UNREADABLE",
+};
+
+/**
+ * Who has to act, in words an operator uses.
+ *
+ * `database vocabulary never reaches the operator` is the roster's rule and a
+ * test enforces it there by refusing any underscore-cased identifier in a
+ * rendered field. `prime_author` and `account_owner` are exactly that shape,
+ * so they are translated here rather than printed.
+ */
+const OWNER_WORD: Record<string, string> = {
+  machinery: "the machinery",
+  operator: "an operator",
+  prime_author: "whoever wrote it on prime",
+  account_owner: "the account owner",
 };
 
 const RESULT_SPINE: Record<string, SafetyTone> = {

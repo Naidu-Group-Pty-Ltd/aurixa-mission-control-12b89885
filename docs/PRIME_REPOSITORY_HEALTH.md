@@ -245,15 +245,119 @@ them cost: every clone-provisioning path that said "replicate from the prime"
 replicated from Mission Control's own database instead, succeeded, and produced
 confident wrong results.
 
-This page measures the **repo** half only. The backend half
-(`prime_config.supabase_project_ref`) is _named_ in the Provenance strip, and
-reads amber when unset, because a page called "prime" that showed only the
-repository would invite exactly the reading that doc exists to prevent. Nothing
-here probes it.
+The health reading above measures the **repo** half only; the backend half
+(`prime_config.supabase_project_ref`) is _named_ in the Provenance strip and
+reads amber when unset. §7 adds a panel that reads BOTH, and keeps them apart
+for the same reason: two halves, two `LedgerHalf` readings, two independent
+failures, and neither ever produces a number about the other.
 
 ---
 
-## 6 · What is open
+## 7 · The SQL ledger — where good code fails to travel
+
+On the code half a bad commit travels **immediately**: a push fans out to every
+clone with no check-run read anywhere on the path. On the migration half the
+failure is the exact opposite and much quieter — **good SQL does not travel at
+all**, and nothing on the prime says so.
+
+`scopeCorpusToPrime` is the rule, and it is the right rule: a clone is never
+sent a migration the prime's own `supabase_migrations.schema_migrations` does
+not record. It is what stopped two `rollback_*` scripts undoing an RLS fix on a
+tenant. But the prime's `apply-migration.yml` is `workflow_dispatch` on a named
+file, so its ledger records **what somebody remembered to dispatch**, not what
+merged. A migration that lands on `main` and is never dispatched holds every
+clone at the version before it — and everything after it too.
+
+Measured 19 September 2026: four migrations sat on prime's `main` unrecorded,
+and two tenants had been held at `20261201100000` behind them. The condition's
+only trace anywhere was free text in `clone_backends.status_detail`, while both
+clones read `status: ready`.
+
+| Reading        | Where it comes from                                                            | Cost                                                                 |
+| -------------- | ------------------------------------------------------------------------------ | -------------------------------------------------------------------- |
+| the **corpus** | `supabase/migrations/*.sql` at prime's head, over GitHub                       | `repos.getBranch` + one recursive `git.getTree`, held 60s in-process |
+| the **ledger** | `supabase_migrations.schema_migrations` on `prime_config.supabase_project_ref` | one statement over the Management API, no GitHub budget              |
+
+No migration **body** is read. That is the whole difference between this panel
+and `buildPrimeLedgerReconciliation`, which reads up to 120 bodies and is a
+press for exactly that reason. This one loads with the page and yields at the
+scan floor.
+
+Four rules carry it:
+
+- **The frontier is the newest RUNNABLE version, never the newest file.** That
+  expression is the fault [`migrationFrontier.pure.ts`](../src/server/migrationFrontier.pure.ts)
+  exists to make unspellable — a recorded position past the end of what actually
+  happened, believed because nothing compared it against the thing it describes.
+- **An empty ledger is `unreadable`, never `aligned`.** `assertPrimeLedgerUsable`
+  refuses a fleet sync on exactly that reading; a page calling it a clean bill of
+  health would be agreeing with the one state the sync lane will not act on.
+- **A skew suspicion is reported beside the count, never subtracted from it.** A
+  ledger row within ten seconds of a repo version is consistent with Lovable
+  stamping its apply time — but two migrations authored seconds apart are
+  indistinguishable to that test, so it is a hypothesis for a person.
+- **Ledger rows matching no repo file are counted and never listed.** 481 of
+  this prime's 890 rows are that shape; a list of 481 is noise, while the count
+  is exactly why the ledger is a poor witness for the question it is asked.
+
+---
+
+## 8 · One clone, held against the prime
+
+The fleet page answers "is this clone healthy". This panel answers the inverse,
+which is the only question the source of the fleet is entitled to ask: **of
+everything wrong with that clone, how much did the prime cause?**
+
+`clone_sync_blockages` has carried an `owner` on every row since the taxonomy
+was written — [`blockageTaxonomy.pure.ts`](../src/server/cascade/blockageTaxonomy.pure.ts)
+calls it "the field everything else turns on" — and no surface had ever grouped
+by it. An operator looking at six open blockages had six sentences and no way to
+see which two were theirs to fix on the prime.
+
+Three readings, from three places that fail apart:
+
+| Half       | Source                                                     | What it is                                          |
+| ---------- | ---------------------------------------------------------- | --------------------------------------------------- |
+| code       | `clones.last_synced_sha`, `commits_behind`                 | Mission Control's record of a pass, labelled as one |
+| migrations | `clone_backends.migration_version` vs the prime's frontier | a **cursor**, never the clone's own ledger          |
+| blockers   | `clone_sync_blockages` where `cleared_at is null`          | every open reason, split by side                    |
+
+**The side is derived, never listed.** `sideOfBlockage` reads
+`BLOCKAGE_POLICY[cls].owner`; a second hand-written list of prime-side classes
+is how the two come to disagree, and the disagreement would be silent because a
+class missing from such a list simply lands on the other side and looks
+deliberate. The one class named explicitly is `prime_ledger_hole` — its owner is
+`operator` because a person decides, and the person is standing at the **prime**,
+dispatching a migration there.
+
+Four more rules:
+
+- **A read that failed is `null`, never `[]`.** "Nothing is blocking this clone"
+  is a claim a query that did not answer cannot make, so an unread blockage
+  ledger outranks every clean reading beneath it: a clone carrying prime's head
+  at prime's frontier with an unreadable blockage table is not converged, it is
+  a clone we cannot describe.
+- **Every number names its basis.** `cloneMigrationStanding.pure.ts`'s entire
+  header is the bill for treating a cursor as a ledger — it offered "5 PENDING"
+  where two were already applied and one could never be sent.
+- **A cursor ahead of the prime is a finding, not a pass.** It is the direction
+  that loses data silently: the next sync computes what is owed from that number,
+  so every version between the two is skipped as applied and nothing offers them
+  again. And a cursor that is not a `YYYYMMDDHHMMSS` version is `unknown` rather
+  than ordered — lexicographically `"9"` sorts above `"20261204010000"`.
+- **The prime's side is resolved on the server, never accepted from the page.**
+  `primeHeadSha` and `frontier` ride the assessment. A request field asserting
+  what the server is being asked to decide is the pattern IPV 1.1.0 forbids.
+
+The selector itself costs **no GitHub call**: an operator lands on the drop-down
+before asking a question, and buying a tree walk to draw it would spend the
+window on nobody's behalf. It is also read first and returned whatever happens
+after it, so the one state an operator most needs the page in is not the state
+with no way to pick a different clone.
+
+---
+
+## 9 · What is open
 
 - **The gate itself.** Refusing a cascade from a red prime is the obvious next
   step and is not taken here. The design question it turns on: `in_flight` is
@@ -270,3 +374,16 @@ here probes it.
 - **The window's edges.** A repository busier than 100 runs between visits will
   read `unobserved` on older commits. That is honest but it is a ceiling, and
   the fix is pagination rather than a larger page.
+- **The comparison reads records, not the clone.** `commits_behind` and
+  `migration_version` are Mission Control's own columns, and the panel labels
+  them as such rather than pretending otherwise. Reading each clone's live
+  ledger is what `getCloneMigrationStatus` does, at one Management API call per
+  clone; folding that in would make selecting a clone a great deal more
+  expensive than it currently is, and the honest cursor is enough to answer
+  "who is holding this one".
+- **This console is not cascaded.** Mission Control is not in the cascade graph
+  at all — the prime is `Naidu-Group-Pty-Ltd/npc-property-dashbord` and the
+  clones are that product, a different application entirely. Nothing on this
+  page can travel to a clone, and nothing should: it reads `prime_config`,
+  `cascade_events` and `clone_sync_blockages`, which are this deployment's own
+  tables.
