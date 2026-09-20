@@ -585,15 +585,13 @@ describe("the fix is mounted", () => {
     // Read, or there is nothing to reconcile against.
     expect(lane).toContain("migrations_applied, status_detail");
 
-    // The branch that used to be a bare `{}` — a pass that changed nothing
-    // said nothing, including about the one thing it was the authority on.
-    //
-    // Sliced to where the ACTIVE branch begins rather than to a character
-    // count: a `lane.slice(gate, gate + 400)` here stopped inside the comment
-    // above the code it was checking the moment that comment grew.
-    const gate = lane.indexOf("...(didNothing");
-    expect(gate).toBeGreaterThan(-1);
-    const branch = lane.slice(gate, lane.indexOf("\n            : {", gate));
+    // A pass that changed nothing said nothing at all once, including about
+    // the one thing it was the authority on. It says it in a write of its own
+    // now: the update that releases the claim must land unconditionally, so it
+    // cannot carry an opinion drawn from a snapshot read 45 seconds earlier.
+    const gate = lane.indexOf("const noopFacts = {");
+    expect(gate, "the no-op facts have no write of their own").toBeGreaterThan(-1);
+    const branch = lane.slice(gate);
     expect(branch).toContain("blockage.entries === null");
     // Written independently of the record: gating the sentence on the record
     // is what left a paused pass unable to retract a bare `Synced to X`.

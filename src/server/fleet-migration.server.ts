@@ -976,20 +976,12 @@ export async function runFleetMigrationSync(
           worker_started_at: null,
           ...cursorWrite,
           // Facts about the CLONE — written only by a pass that changed one.
-          // The one exception is the blockage record: see `blockage` above for
-          // why a pass that changed nothing is still the authority on it.
+          //
+          // A pass that changed nothing writes NONE of them here. What it has
+          // to say is an opinion drawn from a snapshot rather than a fact it
+          // established, so it goes in its own guarded write below.
           ...(didNothing
-            ? {
-                // TWO QUESTIONS, ASKED SEPARATELY.
-                //
-                // The record and the sentence used to share one gate: no
-                // sentence was written unless the record had changed. That is
-                // wrong in both directions, and `blockageDetailFor` now owns
-                // the whole of it — it returns null when there is nothing to
-                // say, including when the row already carries the reading.
-                ...(blockage.entries === null ? {} : { migrations_applied: blockage.entries }),
-                ...(blockageDetail === null ? {} : { status_detail: blockageDetail }),
-              }
+            ? {}
             : {
                 ...(latestApplied ? { migration_version: latestApplied } : {}),
                 migrations_applied: results,
@@ -1079,6 +1071,54 @@ export async function runFleetMigrationSync(
       if (updErr) {
         out.failed.push({ cloneId, cloneName, error: `result not recorded: ${updErr.message}` });
         continue;
+      }
+
+      /*
+        AN OPINION IS WRITTEN ONLY IF THE ROW HAS NOT MOVED UNDER IT.
+
+        Everything above is this pass's own: where the prime is, the cursor it
+        reached, the claim it is releasing. It must land, so it is written
+        unconditionally — a guard that missed would leak the claim for
+        STALE_CLAIM_MINUTES and throw away the seed prefix already sent.
+
+        These two are different. A pass that changed nothing establishes no
+        fact about the clone; it offers a reading of a row it read at the TOP
+        of the run, before the claim and before up to 45 seconds of network
+        work. `status_detail` is shared — provisioning, parity, self-healing
+        and the manual sync button all write it, and NONE of them takes this
+        lane's claim (`worker_started_at` does not appear in any of them). So
+        `migrationLaneWroteDetail` can authorise replacing a sentence that is
+        no longer there, and a `failed` or `pending` row is left reading
+        `Synced to …`.
+
+        The guard is the snapshot itself: write only while the column still
+        holds what was inspected. A miss is not an error and is not retried —
+        it means somebody with fresher facts wrote after this pass looked, and
+        deferring to them is the correct outcome. The next pass re-measures.
+
+        `migrations_applied` rides the same guard because it was reconciled
+        from the SAME snapshot, and because the one writer that can invalidate
+        it — the manual sync — writes both columns in a single update.
+      */
+      const noopFacts = {
+        ...(blockage.entries === null ? {} : { migrations_applied: blockage.entries }),
+        ...(blockageDetail === null ? {} : { status_detail: blockageDetail }),
+      };
+      if (didNothing && Object.keys(noopFacts).length > 0) {
+        const inspected = (backend as { status_detail?: string | null }).status_detail ?? null;
+        const write = supabase.from("clone_backends").update(noopFacts).eq("clone_id", cloneId);
+        // `.eq` never matches NULL in SQL, so an absent sentence needs `.is`.
+        const { error: noopErr } = await (inspected === null
+          ? write.is("status_detail", null)
+          : write.eq("status_detail", inspected));
+        if (noopErr) {
+          // Not a clone failure and not a reason to stop: nothing about the
+          // clone changed this pass, and the reading is re-derived next time.
+          console.error("[fleet-migration] blockage reading not recorded", {
+            cloneId,
+            error: noopErr.message,
+          });
+        }
       }
 
       // Reported, and reported as what it is. No notification: nothing has

@@ -2421,7 +2421,7 @@ describe("a fleet-sync pass that did nothing says nothing", () => {
     const gate = bl.indexOf("...(didNothing");
     expect(gate, "the no-op gate is gone").toBeGreaterThan(-1);
     // Ends where the ACTIVE branch begins — the `: {` at the ternary's own
-    // indentation, not the nested one inside the no-op branch.
+    // indentation.
     const noopBranch = bl.slice(gate, bl.indexOf("\n            : {", gate));
     for (const forbidden of [
       "migration_version",
@@ -2429,27 +2429,48 @@ describe("a fleet-sync pass that did nothing says nothing", () => {
       "error_message",
       "migration_blocked_at",
       "migration_blocked_reason",
+      // These two are a no-op pass's OPINION, not a fact it established, and
+      // they no longer ride the update that releases the claim. See below.
+      "migrations_applied",
+      "status_detail",
     ]) {
-      expect(noopBranch, `a no-op pass must not write ${forbidden}`).not.toContain(forbidden);
+      expect(noopBranch, `a no-op pass must not write ${forbidden} here`).not.toContain(forbidden);
     }
-    // And what it MAY write, so the exception cannot quietly widen.
-    expect(noopBranch).toContain("migrations_applied: blockage.entries");
-    expect(noopBranch).toContain("status_detail: blockageDetail");
+
     /*
-      THE RECORD AND THE SENTENCE ARE WRITTEN INDEPENDENTLY.
+      THE OPINION IS A SEPARATE, GUARDED WRITE.
 
-      They shared a gate once: `blockage.entries === null ? {} : { …both… }`,
-      so a pass whose record was unchanged wrote no sentence either. That left
-      a paused pass unable to retract a bare `Synced to X` — reported as a P2
-      on the commit that composed the sentence, because composing it is no use
-      if the caller throws it away.
+      `backend` is read at the TOP of the run — before the claim, before up to
+      45 seconds of network work — and `status_detail` is shared with
+      provisioning, parity, self-healing and the manual sync button, none of
+      which takes this lane's claim. So the ownership check can authorise
+      replacing a sentence that is no longer on the row.
 
-      Pinned as the entries spread CLOSING on itself: in the nested form the
-      `}` does not fall here, so this string cannot be written by it.
+      It cannot be guarded in the update above, because that update releases
+      the claim and persists the chunk cursor: a guard that missed would leak
+      the claim for STALE_CLAIM_MINUTES and throw away the seed prefix already
+      sent. So the two clone facts move to their own write, conditioned on the
+      inspected sentence still standing.
     */
-    expect(noopBranch, "the blockage record and the sentence must not share a gate").toContain(
+    // Read from the WHOLE function: `block()` stops at the main update's own
+    // `.eq("clone_id", cloneId)`, and this write comes after it.
+    const whole = src();
+    expect(whole, "the no-op facts must have their own write").toContain("const noopFacts = {");
+    const guarded = whole.slice(whole.indexOf("const noopFacts = {"));
+    expect(guarded).toContain("migrations_applied: blockage.entries");
+    expect(guarded).toContain("status_detail: blockageDetail");
+    // The record and the sentence are still independent of each other.
+    expect(guarded, "the blockage record and the sentence must not share a gate").toContain(
       "...(blockage.entries === null ? {} : { migrations_applied: blockage.entries })",
     );
+    // The guard itself, on both spellings — `.eq` never matches NULL.
+    expect(guarded).toContain('write.eq("status_detail", inspected)');
+    expect(guarded).toContain('write.is("status_detail", null)');
+    // A miss is deference, not a failure: it must not fail the clone or stop
+    // the run, because nothing about the clone changed this pass.
+    const tail = guarded.slice(0, guarded.indexOf("}\n", guarded.indexOf("noopErr")) + 2);
+    expect(tail).not.toContain("out.failed.push");
+    expect(tail).not.toContain("continue;");
   });
 
   it("never erases a recorded migration version with a null", () => {
