@@ -229,6 +229,31 @@ describe("a pass is bounded", () => {
     expect(reclaimBody()).not.toContain(".or(");
   });
 
+  it("reports a sweep that failed rather than throwing past everyone", () => {
+    /*
+      Nothing catches a throw here. `runFleetMigrationSync` has no try around
+      the call, its caller checks `result.error` and would never see one, and
+      the scheduled hook turns it into a 500 — so a failed sweep left no usage
+      row, no error on any clone and nothing an operator reading Mission
+      Control could see. Observable only in `net._http_response.status_code`,
+      which is the "a green cron run is not a delivered request" trap from the
+      other side.
+
+      It matters more since the sweep began naming `migration_heartbeat_at`:
+      between a merge and the moment `20260919133000` is applied the column
+      does not exist and both statements answer 42703.
+
+      Returning it must STOP the pass exactly as the throw did — proceeding
+      with the sweep failed means leaked claims stay held and the candidate
+      list is wrong — so the early return is asserted too, not just the type.
+    */
+    const body = reclaimBody();
+    expect(body).not.toContain("throw new Error(");
+    expect(body.match(/return `Could not reclaim/g) ?? []).toHaveLength(2);
+    expect(lane).toContain("const reclaimError = await reclaimStale(supabase);");
+    expect(lane).toMatch(/if \(reclaimError\) return \{ \.\.\.EMPTY, error: reclaimError \};/);
+  });
+
   /*
     A CURSOR THE FILE NO LONGER MATCHES IS CLEARED, NOT LEFT ALONE.
 

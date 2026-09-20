@@ -534,7 +534,32 @@ export function beatWhileClaimHeld(
  * strand its own claim on a `failed` row for ever, which is worse than the
  * defect it was written to prevent.
  */
-async function reclaimStale(supabase: Db): Promise<void> {
+/**
+ * Frees claims this lane left behind. Returns the reason it could not, rather
+ * than throwing it.
+ *
+ * ## Why not a throw
+ *
+ * It threw, and nothing catches it: `runFleetMigrationSync` has no try around
+ * this call, its caller checks `result.error` and never sees one, and the
+ * scheduled hook turns it into a 500. So a sweep that failed left no usage
+ * row, no error on any clone, and nothing an operator reading Mission Control
+ * could see — observable only to somebody who knew to go and look at
+ * `net._http_response.status_code`, which is the "a green cron run is not a
+ * delivered request" trap from the other side.
+ *
+ * The result type already carries `error`, and returning it stops the pass
+ * exactly as the throw did — which it must, because proceeding with the sweep
+ * failed means leaked claims stay held and the candidate list is wrong. What
+ * changes is only that the failure is written down.
+ *
+ * It matters more than it did: this sweep now names `migration_heartbeat_at`,
+ * so between a merge and the moment `20260919133000` is applied the column
+ * does not exist and both statements answer 42703. Bounded (the queue applies
+ * within the minute) and self-healing (the next pass is thirty minutes later),
+ * but a fleet that stopped should say so rather than 500 quietly.
+ */
+async function reclaimStale(supabase: Db): Promise<string | null> {
   const cutoff = new Date(Date.now() - STALE_CLAIM_MINUTES * 60_000).toISOString();
 
   /*
@@ -571,7 +596,7 @@ async function reclaimStale(supabase: Db): Promise<void> {
     .lt("worker_started_at", cutoff)
     .lt("migration_heartbeat_at", cutoff);
   if (quietErr) {
-    throw new Error(`Could not reclaim quiet migration claims: ${quietErr.message}`);
+    return `Could not reclaim quiet migration claims: ${quietErr.message}`;
   }
 
   /*
@@ -597,8 +622,9 @@ async function reclaimStale(supabase: Db): Promise<void> {
     .lt("worker_started_at", cutoff)
     .is("migration_heartbeat_at", null);
   if (unbeatenErr) {
-    throw new Error(`Could not reclaim unbeaten migration claims: ${unbeatenErr.message}`);
+    return `Could not reclaim unbeaten migration claims: ${unbeatenErr.message}`;
   }
+  return null;
 }
 
 /**
@@ -716,7 +742,10 @@ export async function runFleetMigrationSync(
     return { ...EMPTY, error: "Prime not configured — set the prime repo in Settings first" };
   }
 
-  await reclaimStale(supabase);
+  // Stops the pass exactly as the throw it replaces did, and unlike the throw
+  // it reaches the caller's own `result.error` and the audit row with it.
+  const reclaimError = await reclaimStale(supabase);
+  if (reclaimError) return { ...EMPTY, error: reclaimError };
 
   /*
     EVERY BACKEND, THEN THIS LANE'S OWN VERDICT ON EACH.
