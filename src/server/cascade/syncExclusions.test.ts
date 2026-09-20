@@ -242,6 +242,70 @@ describe("backendIdentityHold", () => {
     ).toBeNull();
   });
 
+  // ── The lineage case, measured 20 Sep 2026. ──────────────────────────────
+  //
+  // The first cascade to run with `cascade_follows_lineage` on.
+  // `npc-test-76b3b3` and `preflight-property-group` receive from
+  // `npc-client-dashboard` rather than from prime, so their
+  // `public/lead-magnet-embed.html` — which carried the PRIME's ref and key,
+  // wrong but caught by their own `backendIsolation.spec.ts` — was handed the
+  // PARENT's. Both values are foreign to those deployments, and the guard
+  // stood down because it read "the clone already names somebody else" as
+  // "nothing is being reverted". With one possible source that was true.
+  const OWN = "qwertyuiopasdfghjklz";
+
+  it("holds a swap from one foreign project to a DIFFERENT foreign project", () => {
+    const hold = backendIdentityHold({
+      path: "public/lead-magnet-embed.html",
+      primeContent: cloneEmbed, // the parent's copy — names CLONE
+      cloneContent: primeEmbed, // this deployment's copy — names PRIME
+      ownRef: OWN,
+    });
+
+    expect(hold).not.toBeNull();
+    expect(hold!.reason).toBe("manual_reconcile");
+    // Both sides are named, because "neither of these is yours" is the fact
+    // the operator has to act on.
+    expect(hold!.note).toContain(PRIME);
+    expect(hold!.note).toContain(CLONE);
+  });
+
+  it("still stands down when both sides name the same foreign project", () => {
+    // The nuisance case the stand-down exists for is untouched: order and
+    // repetition are not information, so this compares sets.
+    expect(
+      backendIdentityHold({
+        path: "public/lead-magnet-embed.html",
+        primeContent: primeEmbed,
+        cloneContent: `${primeEmbed}\n<!-- ${PRIME} again -->`,
+        ownRef: OWN,
+      }),
+    ).toBeNull();
+  });
+
+  it("never stands down while the incoming refs differ from the clone's", () => {
+    // The property, stated once. Whatever the source, a shipped file may not
+    // change which foreign tenant it points at without a person seeing it.
+    const cases = [
+      { clone: `https://${PRIME}.supabase.co`, incoming: `https://${CLONE}.supabase.co` },
+      { clone: `https://${CLONE}.supabase.co`, incoming: `https://${PRIME}.supabase.co` },
+      {
+        clone: `https://${PRIME}.supabase.co`,
+        incoming: `https://${PRIME}.supabase.co https://${CLONE}.supabase.co`,
+      },
+    ];
+
+    for (const c of cases) {
+      const hold = backendIdentityHold({
+        path: "public/embed.html",
+        primeContent: c.incoming,
+        cloneContent: c.clone,
+        ownRef: OWN,
+      });
+      expect(hold, JSON.stringify(c)).not.toBeNull();
+    }
+  });
+
   it("holds a NEW upstream file that would introduce a foreign project", () => {
     const hold = backendIdentityHold({
       path: "public/new-embed.html",
