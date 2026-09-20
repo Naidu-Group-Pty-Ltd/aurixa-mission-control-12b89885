@@ -16,6 +16,8 @@ import {
   GitFork,
   Check,
   RotateCcw,
+  Trees,
+  Network,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -24,6 +26,18 @@ import { cn } from "@/lib/utils";
 import type { TreeNode } from "./use-tree-layout";
 
 export type StatusFilter = "in_sync" | "behind" | "failed";
+
+/**
+ * Which drawing of the fleet is on screen.
+ *
+ * Two views, not a replacement. The canopy is what the fleet LOOKS like — a
+ * limb's girth is what it carries, a bare branch is a clone whose sync failed —
+ * and it answers "how is the fleet" before you have read a word. The diagram is
+ * what you work in: range-select a run of siblings, compare a handful, read a
+ * label without rotating anything. Dropping either would take a capability away
+ * to gain a look.
+ */
+export type TreeView = "canopy" | "diagram";
 
 interface Props {
   activeFilters: StatusFilter[];
@@ -46,6 +60,10 @@ interface Props {
   onClearFilters?: () => void;
   multiSelectCount?: number;
   onClearSelection?: () => void;
+  view?: TreeView;
+  onViewChange?: (view: TreeView) => void;
+  /** Set when WebGL could not start, so the canopy is offered as unavailable. */
+  canopyUnavailable?: string | null;
 }
 
 const STATUS_OPTIONS: {
@@ -111,6 +129,9 @@ export function YggdrasilToolbar({
   onClearFilters,
   multiSelectCount,
   onClearSelection,
+  view = "diagram",
+  onViewChange,
+  canopyUnavailable = null,
 }: Props) {
   const [searchOpen, setSearchOpen] = useState(false);
   const [legendHovered, setLegendHovered] = useState<StatusFilter | null>(null);
@@ -308,27 +329,79 @@ export function YggdrasilToolbar({
 
       <div className="flex-1" />
 
-      {/* Zoom controls */}
-      <div className="flex items-center gap-1 border px-1">
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-7 w-7"
-          onClick={onZoomOut}
-          title="Zoom out"
-        >
-          <ZoomOut className="h-3.5 w-3.5" />
-        </Button>
-        <span className="w-10 text-center font-mono text-[10px] text-muted-foreground">
-          {Math.round(zoom * 100)}%
-        </span>
-        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={onZoomIn} title="Zoom in">
-          <ZoomIn className="h-3.5 w-3.5" />
-        </Button>
-        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={onZoomReset} title="Reset">
-          <Maximize className="h-3.5 w-3.5" />
-        </Button>
-      </div>
+      {/* Which drawing. Disabled rather than hidden when WebGL cannot start:
+          a control that vanishes reads as a feature this build does not have,
+          and the reason is what an operator needs. */}
+      {onViewChange && (
+        <div className="flex items-center border" role="group" aria-label="Tree view">
+          <Button
+            variant="ghost"
+            size="sm"
+            aria-pressed={view === "canopy"}
+            disabled={!!canopyUnavailable}
+            title={canopyUnavailable ?? "The fleet as a tree"}
+            onClick={() => onViewChange("canopy")}
+            className={cn(
+              "h-7 rounded-none px-2 font-mono text-[10px]",
+              view === "canopy" && "bg-primary/15 text-primary",
+            )}
+          >
+            <Trees className="mr-1 h-3.5 w-3.5" />
+            Canopy
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            aria-pressed={view === "diagram"}
+            title="The lineage as a diagram"
+            onClick={() => onViewChange("diagram")}
+            className={cn(
+              "h-7 rounded-none px-2 font-mono text-[10px]",
+              view === "diagram" && "bg-primary/15 text-primary",
+            )}
+          >
+            <Network className="mr-1 h-3.5 w-3.5" />
+            Diagram
+          </Button>
+        </div>
+      )}
+
+      {/* Zoom controls — the canopy has its own camera, so these are the
+          diagram's and are hidden rather than left inert beside it. */}
+      {view === "diagram" && (
+        <div className="flex items-center gap-1 border px-1">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7"
+            onClick={onZoomOut}
+            title="Zoom out"
+          >
+            <ZoomOut className="h-3.5 w-3.5" />
+          </Button>
+          <span className="w-10 text-center font-mono text-[10px] text-muted-foreground">
+            {Math.round(zoom * 100)}%
+          </span>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7"
+            onClick={onZoomIn}
+            title="Zoom in"
+          >
+            <ZoomIn className="h-3.5 w-3.5" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7"
+            onClick={onZoomReset}
+            title="Reset"
+          >
+            <Maximize className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+      )}
 
       {/* Refresh */}
       <Button
