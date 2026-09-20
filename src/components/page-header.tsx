@@ -6,8 +6,23 @@ import { cn } from "@/lib/utils";
  * description + actions" pattern used across the app (dashboard, drift,
  * cascades, settings, …) so every screen renders it identically.
  *
- * This intentionally mirrors the existing markup (see `dashboard.tsx` header)
- * so adopting it on a screen is a visual no-op, not a redesign.
+ * This mirrors `dashboard.tsx`'s header, which is where it was extracted from.
+ *
+ * It is NOT a visual no-op on an arbitrary screen, and the comment that used to
+ * say so was measured wrong on 20 Sep 2026. Two ways, both against the 44 route
+ * files that still hand-roll a `font-display` <h1>:
+ *
+ *  - the gap. This draws `mt-2` between eyebrow and title; 23 of the 44 draw
+ *    `mt-1`, 21 draw no `mt-` at all, and NONE draws `mt-2`. Adoption moves the
+ *    title on every page it lands on.
+ *  - the tier. `text-[2.125rem]` is hardcoded here and the pages use two sizes —
+ *    26 at that, 18 at `text-[1.75rem] leading-[1.1]`, of which 11 are
+ *    `settings.*` sub-pages under the settings tab strip and the rest are detail
+ *    routes. That is a second level, applied consistently, and this component
+ *    cannot express it.
+ *
+ * `docs/DESIGN_SYSTEM.md` carries the measurement. A `level` prop is the obvious
+ * close for the second, and is deliberately not written until a page needs it.
  *
  * Usage:
  *   <PageHeader
