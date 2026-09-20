@@ -13,6 +13,7 @@ import {
   type DeletionCandidate,
   type DeletionVerdict,
 } from "./deletionPropagation.pure";
+import { ENGINE_COMMIT_PREFIX, isEngineOnlyBranch } from "./proposalRepair.pure";
 import { stripNonCode } from "./heldFileStaleness.pure";
 
 /**
@@ -538,8 +539,20 @@ describe("the rules the engine has to keep", () => {
   });
 
   it("keeps the commit subject the repair path recognises", () => {
-    /* `isEngineOnlyBranch` matches this prefix exactly. A subject that grew a
-       deletion count would make every proposal unrepairable. */
-    expect(code).toContain("`chore(aurixa): cascade ${treeEntries.length} file(s) from prime@");
+    /* `isEngineOnlyBranch` matches ENGINE_COMMIT_PREFIX. A subject that grew
+       a deletion count, or lost the prefix, would make every proposal
+       unrepairable.
+
+       Pinned against the constant rather than a transcription of it: this
+       test used to assert the whole opening `… file(s) from prime@`, which
+       is longer than anything the repair path reads, and that over-pin is
+       what made a change to the SOURCE LABEL — `prime@` became the
+       repository the bytes actually came from, once a clone could be
+       cascaded from its parent — look like a break in the repair path. */
+    expect(ENGINE_COMMIT_PREFIX).toBe("chore(aurixa): cascade ");
+    expect(code).toContain("`" + ENGINE_COMMIT_PREFIX + "${treeEntries.length} file(s) from ");
+    expect(isEngineOnlyBranch([{ message: "chore(aurixa): cascade 3 file(s) from x@abc1234" }])).toBe(
+      true,
+    );
   });
 });

@@ -3752,6 +3752,7 @@ export type Database = {
           name: string
           notes: string | null
           owner_user_id: string | null
+          parent_clone_id: string | null
           provisioning_method: Database["public"]["Enums"]["provisioning_method"]
           purchased_addon_slugs: string[]
           repo_full_name: string | null
@@ -3797,6 +3798,7 @@ export type Database = {
           name: string
           notes?: string | null
           owner_user_id?: string | null
+          parent_clone_id?: string | null
           provisioning_method: Database["public"]["Enums"]["provisioning_method"]
           purchased_addon_slugs?: string[]
           repo_full_name?: string | null
@@ -3842,6 +3844,7 @@ export type Database = {
           name?: string
           notes?: string | null
           owner_user_id?: string | null
+          parent_clone_id?: string | null
           provisioning_method?: Database["public"]["Enums"]["provisioning_method"]
           purchased_addon_slugs?: string[]
           repo_full_name?: string | null
@@ -3855,7 +3858,15 @@ export type Database = {
           tags?: string[] | null
           updated_at?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "clones_parent_clone_id_fkey"
+            columns: ["parent_clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       cloudflare_accounts: {
         Row: {
@@ -9229,6 +9240,7 @@ export type Database = {
         Row: {
           clone_gate_default_hours: number
           clone_gate_enabled: boolean
+          cascade_follows_lineage: boolean
           codex_nightly_cron: string
           convergence_slo_minutes: number
           codex_nightly_enabled: boolean
@@ -9250,6 +9262,7 @@ export type Database = {
         Insert: {
           clone_gate_default_hours?: number
           clone_gate_enabled?: boolean
+          cascade_follows_lineage?: boolean
           codex_nightly_cron?: string
           convergence_slo_minutes?: number
           codex_nightly_enabled?: boolean
@@ -9271,6 +9284,7 @@ export type Database = {
         Update: {
           clone_gate_default_hours?: number
           clone_gate_enabled?: boolean
+          cascade_follows_lineage?: boolean
           codex_nightly_cron?: string
           convergence_slo_minutes?: number
           codex_nightly_enabled?: boolean

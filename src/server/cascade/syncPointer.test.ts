@@ -97,8 +97,34 @@ describe("the engine stamps delivery on every terminal claim about a revision", 
        skip, the tree-identical "already proposed" skip, three `pr_opened`
        shapes, and the merged-on-green success. NOT the no-modules skip
        (nothing was compared), the clone-not-found skip, the dry run (never
-       written), or any failure. */
-    expect(engine.match(/delivered_sha: sourceSha,/g)).toHaveLength(7);
+       written), or any failure.
+
+       Spelled `deliveredSha` since lineage routing: `sourceSha` is the head
+       of the ref being READ, which for a clone sourced from its parent is
+       the PARENT's head, while `delivered_sha` is the prime revision being
+       delivered — the thing `advanceClone` walks a clone's pointer to. The
+       two are the same value for every prime-sourced cascade and must never
+       be conflated again for a routed one. */
+    expect(engine.match(/delivered_sha: deliveredSha,/g)).toHaveLength(7);
+    expect(engine).not.toMatch(/delivered_sha: sourceSha\b/);
+  });
+
+  it("the delivered revision is prime's even when the bytes came from a parent", () => {
+    // `last_synced_sha` means "the prime revision this clone carries" to the
+    // merge drain, the drift beacon and the convergence audit — and it is the
+    // readiness test a child's hold is decided on, so it composes to any
+    // depth only while it keeps that one meaning.
+    expect(engine).toContain(
+      "const deliveredSha = args.provenance?.deliveredSha ?? sourceSha;",
+    );
+    expect(engine).toContain("provenance = { label: sourceDecision.label, deliveredSha: sourceSha };");
+  });
+
+  it("a label names the repository the bytes came from, never prime by default", () => {
+    // A routed child's pull request saying `prime@<sha>` would name prime
+    // over content prime never held.
+    expect(engine).toContain('const sourceLabel = args.provenance?.label ?? "prime";');
+    expect(engine).not.toMatch(/`[^`]*\bprime@\$\{shortSha\(sourceSha\)\}/);
   });
 
   it("a verified no-op stamp is guarded by delivery and ungated by any proposal", () => {
@@ -116,7 +142,7 @@ describe("the engine stamps delivery on every terminal claim about a revision", 
     expect(at).toBeGreaterThan(-1);
     const patch = engine.slice(at - 200, at + 1000);
     expect(patch).toContain("pr_url: existing.url");
-    expect(patch).toContain("delivered_sha: sourceSha");
+    expect(patch).toContain("delivered_sha: deliveredSha");
   });
 });
 
