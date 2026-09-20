@@ -2462,7 +2462,13 @@ describe("a fleet-sync pass that did nothing says nothing", () => {
     const bl = block();
     expect(bl).not.toMatch(/Synced to \$\{latestApplied\}/);
     expect(bl).toMatch(/Synced to \$\{syncedTo\}/);
-    expect(src()).toMatch(/const syncedTo = latestApplied \?\?/);
+    // Whitespace-insensitive: the resolution grew a rung and prettier split it
+    // over two lines, which a literal `const syncedTo = latestApplied ??` no
+    // longer matches — and the rung is the point, so it is asserted rather
+    // than the layout.
+    expect(src().replace(/\s+/g, " ")).toContain(
+      "const syncedTo = latestApplied ?? backend.migration_version ??",
+    );
   });
 
   it("still reports a failure and a held-back migration", () => {

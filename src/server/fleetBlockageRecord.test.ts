@@ -431,6 +431,33 @@ describe("a pass that stopped early knows nothing about being level", () => {
     ).toBeNull();
   });
 
+  it("names the clone's own recorded version rather than prose, in every sentence", () => {
+    /*
+      THE SAME FALSE LEVEL READING, IN THE SIBLING BRANCH.
+
+      `latestApplied` is null on every chunking pass — it finishes no
+      migration — so a `syncedTo` of `latestApplied ?? <prose>` put the prose
+      into the PAUSE sentence. Measured on the live fleet 20 Sep 2026, all
+      three clones read `Synced to the prime's latest recorded migration so
+      far — this pass stopped at its time budget`: the opening clause is the
+      strongest claim of synchrony there is, and it was false on all three.
+
+      `migration_version` is a reading of the clone's own ledger, so it is
+      exactly what such a pass may name. Pinned as ONE resolution both
+      composers read, because two of them is how two consecutive passes come
+      to describe one clone's level differently.
+    */
+    const lane = read("src/server/fleet-migration.server.ts");
+    expect(lane).toContain(
+      'latestApplied ?? backend.migration_version ?? "the prime\'s latest recorded migration"',
+    );
+    // Handed the const, never a second resolution of its own.
+    const call = lane.slice(lane.indexOf("blockageDetailFor({"));
+    const args = call.slice(0, call.indexOf("});"));
+    expect(args).toContain("syncedTo,");
+    expect(args).not.toContain("latestApplied ??");
+  });
+
   it("the fleet lane hands it over", () => {
     const lane = read("src/server/fleet-migration.server.ts");
     const call = lane.slice(lane.indexOf("blockageDetailFor({"));

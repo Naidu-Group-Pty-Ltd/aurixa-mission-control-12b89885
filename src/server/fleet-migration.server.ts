@@ -857,7 +857,27 @@ export async function runFleetMigrationSync(
         // still moved this clone forward. Counting it as "nothing happened"
         // would leave the previous pass's sentence standing over real progress.
         chunksApplied === 0;
-      const syncedTo = latestApplied ?? "the prime's latest recorded migration";
+      /*
+        ONE RESOLUTION, READ BY EVERY SENTENCE THIS PASS MAY WRITE.
+
+        `migration_version` sits between the applied version and the prose,
+        and it is the rung that stops a pause reading as level. It is a
+        reading of the CLONE's own ledger — that is what it was made into —
+        so on a pass that finished no migration it is exactly what the row is
+        entitled to name.
+
+        Without it, `latestApplied` is null on every chunking pass and the
+        fallback prose lands in the PAUSE sentence: three live clones read
+        `Synced to the prime's latest recorded migration so far — this pass
+        stopped at its time budget`, whose opening clause is the strongest
+        possible claim of synchrony and was false on all three. The
+        qualification after it does not undo the claim in front of it.
+
+        The prose survives beneath both, for a clone that has no recorded
+        version at all.
+      */
+      const syncedTo =
+        latestApplied ?? backend.migration_version ?? "the prime's latest recorded migration";
       /*
         WHAT THIS PASS MEASURED, AS AGAINST WHAT IT CHANGED.
 
@@ -901,14 +921,6 @@ export async function runFleetMigrationSync(
       const pausedMidReplay = stoppedEarly || (chunksApplied > 0 && successes.length === 0);
       if (pausedMidReplay) out.stoppedAtBudget = true;
       /*
-        The version named here is `migration_version` and not `syncedTo`.
-
-        On a pass that applied nothing `latestApplied` is null, so `syncedTo`
-        is the prose fallback — accurate, and it throws away a version the row
-        already holds. `migration_version` is a reading of the CLONE's own
-        ledger (that is what it was made into), which is exactly the thing a
-        retraction wants to name.
-
         Null when the sentence standing belongs to another writer. A migration
         pass may retract its own sentence and no one else's: the parity
         verdict it would otherwise erase cannot be re-derived here, and the
@@ -923,7 +935,9 @@ export async function runFleetMigrationSync(
         // retraction writes a bare "Synced to X" over a pause, which is the
         // one reading this lane must never give about a clone that is behind.
         pausedMidReplay,
-        syncedTo: latestApplied ?? backend.migration_version ?? syncedTo,
+        // The same resolution the active branch's sentences read, so the two
+        // cannot name the clone's level differently on consecutive passes.
+        syncedTo,
       });
       /*
         THE CURSOR OUTLIVES A PASS, BUT NOT ITS FILE.
