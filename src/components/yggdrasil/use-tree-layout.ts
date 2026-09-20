@@ -54,43 +54,82 @@ function hashStr(str: string): number {
   return Math.abs(h % 10000) / 10000;
 }
 
-/** Group clones into a tree based on tags / naming similarity */
-function inferHierarchy(clones: Clone[]): Map<string, string[]> {
-  // Group by first tag as "branch group"
-  const groups = new Map<string, Clone[]>();
-  const ungrouped: Clone[] = [];
+/**
+ * Read the recorded tree off `clones.parent_clone_id`.
+ *
+ * This used to GUESS: clones sharing a first tag became a group, the oldest of
+ * that group became its root, and everyone else became that root's child. Three
+ * things were wrong with it and all three are why the column exists.
+ *
+ *  - The shape moved on its own. Adding a clone to a tag group re-parented it
+ *    onto whichever member happened to be oldest, and nothing recorded either
+ *    the old shape or the new one.
+ *  - `tags` is a cascade TARGETING field (`scope: 'tagged'` picks clones by
+ *    tag), so reshaping the picture silently changed which clones a tagged
+ *    cascade hit. One field, two authorities.
+ *  - A group root's children were the whole rest of the group, so the deepest
+ *    shape expressible was two levels. A grandchild had nowhere to go.
+ *
+ * `parent_clone_id` is NULL for a clone that cascades from prime, which is
+ * every clone until somebody records otherwise — so an unclassified fleet
+ * draws exactly as a flat fan off the trunk rather than as a guess.
+ *
+ * Two properties this has to hold, both of them about what the operator sees:
+ *
+ *  - **A filtered-out parent must not take its children with it.** The status
+ *    filter runs BEFORE layout, so a visible clone whose parent is not in the
+ *    visible set attaches to the trunk. Filtering to "behind" must never blank
+ *    a clone that IS behind because its in-sync parent was filtered away.
+ *  - **A cycle must not hang the render.** The database refuses one
+ *    (`trg_clones_parent_acyclic`), but a render must not depend on the
+ *    database having been right: a row reached twice is treated as a root, so
+ *    the worst a bad row can do is draw in the wrong place.
+ */
+export function buildHierarchy(clones: Clone[]): Map<string, string[]> {
+  const present = new Set(clones.map((c) => c.id));
 
-  for (const c of clones) {
-    const tag = c.tags?.[0];
-    if (tag) {
-      if (!groups.has(tag)) groups.set(tag, []);
-      groups.get(tag)!.push(c);
-    } else {
-      ungrouped.push(c);
-    }
-  }
+  // Stable order, so the tree does not reshuffle between renders. The query
+  // orders by created_at DESC; siblings read oldest-first, left to right.
+  const ordered = [...clones].sort((a, b) => {
+    const at = new Date(a.created_at).getTime();
+    const bt = new Date(b.created_at).getTime();
+    if (at !== bt) return at - bt;
+    return a.id.localeCompare(b.id);
+  });
 
-  // Build parent→children map
-  // Each tag group becomes a sub-branch
   const childMap = new Map<string, string[]>();
   const rootChildren: string[] = [];
 
-  // Ungrouped clones connect directly to trunk
-  for (const c of ungrouped) {
-    rootChildren.push(c.id);
+  const parentOf = new Map<string, string>();
+  for (const c of ordered) {
+    const parentId = c.parent_clone_id;
+    // A parent nobody can see is no parent here — the child stands on the trunk
+    // rather than vanishing with it.
+    if (parentId && parentId !== c.id && present.has(parentId)) {
+      parentOf.set(c.id, parentId);
+    }
   }
 
-  // For grouped clones, the first clone is the "group root"
-  for (const [, group] of groups) {
-    const sorted = [...group].sort(
-      (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
-    );
-    rootChildren.push(sorted[0].id);
-    if (sorted.length > 1) {
-      childMap.set(
-        sorted[0].id,
-        sorted.slice(1).map((c) => c.id),
-      );
+  /** Walk to the trunk, bounded. False when `id` sits on a cycle. */
+  const reachesRoot = (id: string): boolean => {
+    const seen = new Set<string>([id]);
+    let cursor = parentOf.get(id);
+    while (cursor) {
+      if (seen.has(cursor)) return false;
+      seen.add(cursor);
+      cursor = parentOf.get(cursor);
+    }
+    return true;
+  };
+
+  for (const c of ordered) {
+    const parentId = parentOf.get(c.id);
+    if (parentId && reachesRoot(c.id)) {
+      const siblings = childMap.get(parentId) ?? [];
+      siblings.push(c.id);
+      childMap.set(parentId, siblings);
+    } else {
+      rootChildren.push(c.id);
     }
   }
 
@@ -114,7 +153,7 @@ export function useTreeLayout(
       };
     }
 
-    const childMap = inferHierarchy(clones);
+    const childMap = buildHierarchy(clones);
     const cloneById = new Map(clones.map((c) => [c.id, c]));
 
     const allNodes: TreeNode[] = [];

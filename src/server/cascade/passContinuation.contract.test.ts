@@ -124,7 +124,7 @@ describe("the invocation budget", () => {
 
   it("is asked before each clone, with the slowest pass so far as the reserve", () => {
     expect(loop).toMatch(
-      /for \(const r of queuedRows\) \{\s*if \(attempted > 0 && opts\?\.budget\?\.isPastDeadline\(slowestMs\)\) \{\s*stoppedEarly = true;\s*break;/,
+      /for \(const r of orderedRows\) \{\s*if \(attempted > 0 && opts\?\.budget\?\.isPastDeadline\(slowestMs\)\) \{\s*stoppedEarly = true;\s*break;/,
     );
   });
 
@@ -143,11 +143,14 @@ describe("the invocation budget", () => {
 });
 
 describe("handing the event back", () => {
-  const hold = sliceFrom(engine, "if (deferred || stoppedEarly) {", 2_500);
+  const hold = sliceFrom(engine, "if (deferred || stoppedEarly || lineageHolds.length > 0) {", 3_500);
 
   it("is pending again with the moment it may be claimed, and the claim released", () => {
+    expect(hold).toMatch(/status: "pending",\s*worker_started_at: null,/);
+    // Three paces, one shape: a rate limit waits on GitHub's window, a
+    // lineage hold on a parent's merge, and a budget pause resumes at once.
     expect(hold).toMatch(
-      /status: "pending",\s*worker_started_at: null,\s*next_attempt_at: deferred \? deferred\.until : new Date\(\)\.toISOString\(\)/,
+      /next_attempt_at: deferred\s*\?\s*deferred\.until\s*:\s*\(lineageUntil \?\? new Date\(\)\.toISOString\(\)\)/,
     );
   });
 
@@ -161,11 +164,13 @@ describe("handing the event back", () => {
   it("returns before the final tally is written", () => {
     // `summariseCascade` + `status: finalStatus` come AFTER this block: a
     // partial count must never be recorded as the whole fleet's outcome.
-    const returnAt = hold.indexOf("return deferred");
+    const returnAt = hold.indexOf("if (deferred) return");
     expect(returnAt).toBeGreaterThan(-1);
-    const afterHold = engine.slice(engine.indexOf("if (deferred || stoppedEarly) {"));
+    const afterHold = engine.slice(
+      engine.indexOf("if (deferred || stoppedEarly || lineageHolds.length > 0) {"),
+    );
     expect(afterHold.indexOf("summariseCascade({")).toBeGreaterThan(
-      afterHold.indexOf("return deferred"),
+      afterHold.indexOf("if (deferred) return"),
     );
   });
 
@@ -174,6 +179,50 @@ describe("handing the event back", () => {
       "describeDeferral({ until: deferred.until, detail: deferred.detail, done, total })",
     );
     expect(hold).toContain("describePause({ done, total })");
+    expect(hold).toContain("describeLineageHold({");
+  });
+
+  it("paces a lineage hold rather than retrying it on the next tick", () => {
+    // The drain spends an attempt per claim and refunds only a deferral or a
+    // pass that delivered something, and FOLD_MAX_ATTEMPTS is 3 — so a
+    // `pr`-mode wait on a person's merge, reported as a pause, would fail an
+    // event whose parent proposal was open and healthy inside three minutes.
+    expect(hold).toContain("LINEAGE_HOLD_RETRY_MS");
+    expect(hold).toContain(
+      'if (lineageUntil) return { ok: true, status: "deferred", until: lineageUntil, done, total };',
+    );
+  });
+
+  it("lets a budget pause win where both happened", () => {
+    // That pass has work it can do right now; waiting five minutes to do it
+    // would be slower for no reason.
+    expect(hold).toMatch(/lineageHolds\.length > 0 && !deferred && !stoppedEarly/);
+  });
+});
+
+describe("the order the pass walks", () => {
+  it("is the query's own while lineage is off", () => {
+    // `orderedRows` is a rename only for a fleet that has not switched
+    // routing on: same rows, same order, same pass.
+    const setup = sliceFrom(engine, "const orderedRows = followsLineage", 700);
+    expect(setup).toContain(": queuedRows;");
+  });
+
+  it("puts parents before children once lineage is on", () => {
+    // So a pass can deliver a parent and then its child in the same run
+    // rather than holding the child for a tick that had nothing to wait for.
+    const setup = sliceFrom(engine, "const orderedRows = followsLineage", 700);
+    expect(setup).toContain("orderByLineageDepth(");
+  });
+
+  it("counts the tally against every queued row, not just the walked ones", () => {
+    // `total` is what the event promised, and a held row is still promised.
+    const hold = sliceFrom(
+      engine,
+      "if (deferred || stoppedEarly || lineageHolds.length > 0) {",
+      400,
+    );
+    expect(hold).toContain("const total = queuedRows.length;");
   });
 });
 
@@ -368,7 +417,7 @@ describe("a pass resumes inside a clone", () => {
     // A pass that spent its whole tick settling evidence prepared no blobs;
     // counting only `prepared` made it read as no progress, spend its
     // attempt, and die in three ticks inside a healthy convergence.
-    const loop = sliceFrom(engine, "for (const r of queuedRows) {", 8_000);
+    const loop = sliceFrom(engine, "for (const r of orderedRows) {", 9_500);
     expect(loop).toMatch(
       /const ledgerSize = \(p: CascadeProgress \| null\) =>\s*Object\.keys\(p\?\.prepared \?\? \{\}\)\.length \+ Object\.keys\(p\?\.deletion_evidence \?\? \{\}\)\.length;/,
     );
@@ -396,7 +445,7 @@ describe("a pass resumes inside a clone", () => {
   });
 
   it("the engine supplies the writer, and only from the real pass", () => {
-    const loop = sliceFrom(engine, "for (const r of queuedRows) {", 8_000);
+    const loop = sliceFrom(engine, "for (const r of orderedRows) {", 9_500);
     expect(loop).toContain("resume: {");
     expect(loop).toMatch(
       /onProgress: async \(progress\) => \{[\s\S]{0,400}\.update\(\{ progress: progress as unknown as Json \}\)/,
@@ -407,7 +456,7 @@ describe("a pass resumes inside a clone", () => {
   });
 
   it("a paused clone stops the pass; a finished one KEEPS its list", () => {
-    const loop = sliceFrom(engine, "for (const r of queuedRows) {", 8_000);
+    const loop = sliceFrom(engine, "for (const r of orderedRows) {", 9_500);
     expect(loop).toMatch(
       /if \(patch\.status === "queued"\) \{[\s\S]{0,600}stoppedEarly = true;\s*break;/,
     );
@@ -422,7 +471,7 @@ describe("a pass resumes inside a clone", () => {
   });
 
   it("a pass with no list of its own borrows the clone's newest one", () => {
-    const loop = sliceFrom(engine, "for (const r of queuedRows) {", 8_000);
+    const loop = sliceFrom(engine, "for (const r of orderedRows) {", 9_500);
     expect(loop).toContain(
       "const priorRecord = ownRecord ?? (await borrowLatestProgress(supabase, clone.id, r.id));",
     );
@@ -441,7 +490,7 @@ describe("a pass resumes inside a clone", () => {
   });
 
   it("progress inside a clone is refunded like a finished clone", () => {
-    const loop = sliceFrom(engine, "for (const r of queuedRows) {", 8_000);
+    const loop = sliceFrom(engine, "for (const r of orderedRows) {", 9_500);
     expect(loop).toContain("if (preparedNow > priorPrepared) progressed = true;");
     expect(engine).toContain('{ ok: true, status: "resuming", done, total, progressed }');
   });

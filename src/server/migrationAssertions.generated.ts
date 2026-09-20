@@ -651,4 +651,14 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260919153000",
     assertions: [{ kind: "rpc", fn: "fleet_claim_heartbeat" }],
   },
+  {
+    migration: "20260920090000_clone_parent_lineage.sql",
+    version: "20260920090000",
+    assertions: [{ kind: "column", table: "clones", column: "parent_clone_id" }],
+  },
+  {
+    migration: "20260920093000_cascade_follows_lineage.sql",
+    version: "20260920093000",
+    assertions: [{ kind: "column", table: "prime_config", column: "cascade_follows_lineage" }],
+  },
 ];

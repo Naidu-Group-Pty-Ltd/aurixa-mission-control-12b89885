@@ -37,6 +37,13 @@ import {
   describePause,
 } from "./cascade/rateLimitDeferral.pure";
 import {
+  describeLineageHold,
+  LINEAGE_HOLD_RETRY_MS,
+  orderByLineageDepth,
+  resolveCascadeSource,
+  type ParentCloneRow,
+} from "./cascade/cloneCascadeSource.pure";
+import {
   decideDeletion,
   deletionSuffixFor,
   describeDeletionPlan,
@@ -474,6 +481,55 @@ export async function executeCascade(
     }
   }
 
+  // ── Lineage: which repository each clone reads from ──────────────────────
+  //
+  // Off by default (`prime_config.cascade_follows_lineage`), and while it is
+  // off every decision below resolves to prime and this whole block is inert.
+  //
+  // The parents are read ONCE, before the loop, and then kept current in
+  // memory: a parent delivered earlier in this same pass has moved on from
+  // what the query returned, and re-reading its row per clone would spend a
+  // round trip per clone to learn something this loop already knows. A parent
+  // outside the event (a cascade scoped to the children alone) is fetched here
+  // too — its readiness is a fact about the fleet, not about this event.
+  const followsLineage =
+    (prime as { cascade_follows_lineage?: boolean }).cascade_follows_lineage === true;
+
+  const parentState = new Map<string, ParentCloneRow>();
+  let parentReadFailed = false;
+
+  if (followsLineage) {
+    const parentIds = [
+      ...new Set(
+        queuedRows
+          .map((r) => (r as { clones: { parent_clone_id: string | null } | null }).clones)
+          .map((c) => c?.parent_clone_id)
+          .filter((v): v is string => Boolean(v)),
+      ),
+    ];
+    if (parentIds.length > 0) {
+      const { data: parentRows, error: parentErr } = await supabase
+        .from("clones")
+        .select("id, name, github_owner, github_repo, default_branch, last_synced_sha")
+        .in("id", parentIds);
+      // Checked, never discarded: a failed read here resolves every affected
+      // clone to a HOLD rather than to prime, and a hold that happened because
+      // nobody looked at the error is indistinguishable from one that was
+      // decided.
+      if (parentErr) {
+        parentReadFailed = true;
+        console.error(
+          `[cascade] ${event.id}: could not read parent clones — every clone with a recorded parent is held this pass:`,
+          parentErr.message,
+        );
+      }
+      for (const row of parentRows ?? []) parentState.set(row.id, row as ParentCloneRow);
+    }
+  }
+
+  /** Reasons, in the order the loop met them. Non-empty ⇒ the event is held. */
+  const lineageHolds: string[] = [];
+
   // Bounded in time, and a stop is a pause rather than a death.
   //
   // A fleet event processes every queued clone in this one loop, inside one
@@ -492,7 +548,19 @@ export async function executeCascade(
   let progressed = false;
   let deferred: { until: string; detail: string } | null = null;
 
-  for (const r of queuedRows) {
+  // Parents first, so a pass can deliver a parent and then its child in the
+  // same run rather than holding the child for the next tick. With lineage off
+  // the order is the query's, unchanged.
+  const orderedRows = followsLineage
+    ? orderByLineageDepth(
+        queuedRows.map((r) => {
+          const c = (r as { clones: { id: string; parent_clone_id: string | null } | null }).clones;
+          return { id: c?.id ?? "", parent_clone_id: c?.parent_clone_id ?? null, row: r };
+        }),
+      ).map((entry) => entry.row)
+    : queuedRows;
+
+  for (const r of orderedRows) {
     if (attempted > 0 && opts?.budget?.isPastDeadline(slowestMs)) {
       stoppedEarly = true;
       break;
@@ -512,6 +580,8 @@ export async function executeCascade(
        * the backend catch-up needs the two revisions to diff between.
        */
       last_synced_sha: string | null;
+      /** Which clone this one receives from. NULL ⇒ prime. */
+      parent_clone_id: string | null;
     } | null;
 
     if (!clone) {
@@ -542,6 +612,74 @@ export async function executeCascade(
       continue;
     }
 
+    // Where does this clone read from? Decided BEFORE the row is marked
+    // `pushing`, because a held clone must be left exactly as this pass found
+    // it — `queued`, with its place in the queue and any prepared ledger kept.
+    const sourceDecision = resolveCascadeSource({
+      followsLineage,
+      parentCloneId: clone.parent_clone_id,
+      parent: clone.parent_clone_id ? (parentState.get(clone.parent_clone_id) ?? null) : null,
+      parentReadFailed,
+      primeSha: sourceSha,
+    });
+
+    if (sourceDecision.kind === "hold") {
+      // Not `failed` and not `skipped`. Nothing went wrong and nothing was
+      // decided about this clone's content — its parent simply does not carry
+      // this commit yet. In `pr` mode that wait is a person's merge, so it can
+      // outlive several passes; the event's own attempt ceiling is what
+      // eventually puts it in front of somebody.
+      lineageHolds.push(`${clone.name}: ${sourceDecision.why}`);
+      const { error: holdError } = await supabase
+        .from("cascade_results")
+        .update({ error_message: sourceDecision.why })
+        .eq("id", r.id);
+      if (holdError) {
+        throw new Error(
+          `cascade ${event.id}: could not record ${clone.name}'s lineage hold: ${holdError.message}`,
+        );
+      }
+      continue;
+    }
+
+    // The ref whose tree this clone copies, and its head. For prime this is
+    // what every pass has always used; for a parent it is resolved here, the
+    // same way and with the same failure classification.
+    let readRef: RepoRef = primeRef;
+    let readSha: string = sourceSha;
+    let provenance: { label: string; deliveredSha: string } | undefined;
+
+    if (sourceDecision.kind === "parent") {
+      try {
+        const { data: parentBranch } = await octokit.repos.getBranch({
+          owner: sourceDecision.ref.owner,
+          repo: sourceDecision.ref.repo,
+          branch: sourceDecision.ref.branch,
+        });
+        readRef = sourceDecision.ref;
+        readSha = parentBranch.commit.sha;
+        provenance = { label: sourceDecision.label, deliveredSha: sourceSha };
+      } catch (e) {
+        // A source that cannot be READ is not a source that is empty. Holding
+        // costs a tick; falling through to prime would deliver prime's whole
+        // tree to a clone configured to receive its parent's filtered one.
+        const why =
+          `Could not read parent ${sourceDecision.ref.owner}/${sourceDecision.ref.repo}@` +
+          `${sourceDecision.ref.branch}: ${e instanceof Error ? e.message : "unknown"}`;
+        lineageHolds.push(`${clone.name}: ${why}`);
+        const { error: holdError } = await supabase
+          .from("cascade_results")
+          .update({ error_message: why })
+          .eq("id", r.id);
+        if (holdError) {
+          throw new Error(
+            `cascade ${event.id}: could not record ${clone.name}'s unreadable parent: ${holdError.message}`,
+          );
+        }
+        continue;
+      }
+    }
+
     await supabase
       .from("cascade_results")
       .update({ status: "pushing", started_at: new Date().toISOString() })
@@ -569,8 +707,12 @@ export async function executeCascade(
       let preparedNow = priorPrepared;
       const patch = await processClone({
         octokit,
-        primeRef,
-        sourceSha,
+        // The ref this clone READS. `primeRef`/`sourceSha` unless its recorded
+        // parent supplies it — `provenance` is what keeps the labels naming
+        // the bytes and `delivered_sha` naming prime's commit.
+        primeRef: readRef,
+        sourceSha: readSha,
+        provenance,
         mode: event.mode,
         clone,
         supabase,
@@ -641,11 +783,24 @@ export async function executeCascade(
           .from("clones")
           .update({
             sync_status: patch.status === "succeeded" ? "in_sync" : "cascading",
+            // PRIME's commit, whatever repository the bytes were read from.
+            // `last_synced_sha` means "the prime revision this clone carries"
+            // to the merge drain, the drift beacon and the convergence audit,
+            // and it is the readiness test a child's hold is decided on — so
+            // it composes to any depth only while it keeps that one meaning.
             last_synced_sha: patch.status === "succeeded" ? sourceSha : undefined,
             last_cascade_at: new Date().toISOString(),
             commits_behind: patch.status === "succeeded" ? 0 : undefined,
           })
           .eq("id", clone.id);
+
+        // A parent delivered THIS pass unblocks its children in THIS pass.
+        // Without this the in-memory row still reads its pre-cascade SHA and
+        // every child would hold for a tick that had nothing left to wait for.
+        if (patch.status === "succeeded" && parentState.has(clone.id)) {
+          const stale = parentState.get(clone.id)!;
+          parentState.set(clone.id, { ...stale, last_synced_sha: sourceSha });
+        }
 
         // Code reached the clone's default branch — rebuild what serves it.
         //
@@ -778,25 +933,49 @@ export async function executeCascade(
   // it stopped, so the row is never a silent `running` and never a false
   // `completed`. The counts below are NOT written: a partial tally rendered as
   // a final one is how "1 of 3" comes to read as the whole fleet.
-  if (deferred || stoppedEarly) {
+  if (deferred || stoppedEarly || lineageHolds.length > 0) {
     const done = succeeded + opened + failed + skipped;
     const total = queuedRows.length;
+
+    // A lineage hold is PACED, not retried on the next tick, and it reports as
+    // a deferral rather than a pause. Both halves matter: the drain spends an
+    // attempt per claim and refunds only a deferral or a pass that delivered
+    // something, so a `pr`-mode wait on a person's merge reported as a pause
+    // would exhaust `FOLD_MAX_ATTEMPTS` in three minutes and fail an event
+    // whose parent proposal was open and perfectly healthy.
+    //
+    // A budget pause still wins where both happened: that pass has work it can
+    // do right now, and waiting five minutes to do it would be slower for no
+    // reason.
+    const lineageUntil =
+      lineageHolds.length > 0 && !deferred && !stoppedEarly
+        ? new Date(Date.now() + LINEAGE_HOLD_RETRY_MS).toISOString()
+        : null;
+
     const summary = deferred
       ? describeDeferral({ until: deferred.until, detail: deferred.detail, done, total })
-      : describePause({ done, total });
+      : stoppedEarly
+        ? describePause({ done, total })
+        : describeLineageHold({
+            held: lineageHolds.length,
+            done,
+            total,
+            firstReason: lineageHolds[0],
+            until: lineageUntil!,
+          });
     const held = await updateEvent(
       {
         status: "pending",
         worker_started_at: null,
-        next_attempt_at: deferred ? deferred.until : new Date().toISOString(),
+        next_attempt_at: deferred ? deferred.until : (lineageUntil ?? new Date().toISOString()),
         summary,
       },
       "hold the event for its next pass",
     );
     if (!held) return { ok: false, error: "claim superseded — nothing written" };
-    return deferred
-      ? { ok: true, status: "deferred", until: deferred.until, done, total }
-      : { ok: true, status: "resuming", done, total, progressed };
+    if (deferred) return { ok: true, status: "deferred", until: deferred.until, done, total };
+    if (lineageUntil) return { ok: true, status: "deferred", until: lineageUntil, done, total };
+    return { ok: true, status: "resuming", done, total, progressed };
   }
 
   const totalQueued = (queuedRes.data ?? []).length;
@@ -1016,9 +1195,39 @@ export async function processClone(args: {
     onProgress: (progress: CascadeProgress) => Promise<void>;
     budget?: CascadeBudget;
   };
+  /**
+   * Set ONLY when this clone reads from its recorded parent rather than from
+   * prime (`clones.parent_clone_id`, `prime_config.cascade_follows_lineage`).
+   * Absent — every caller before lineage existed, and every clone that still
+   * reads prime — leaves this function byte-identical to what it was.
+   *
+   * It exists because `sourceSha` does two jobs that only diverge here:
+   *
+   *  - it is the head of the ref being READ, which is what every label should
+   *    name, and which for a routed child is the PARENT'S head; and
+   *  - it is the prime revision being DELIVERED, which is what
+   *    `delivered_sha` means to everything downstream —
+   *    `cascadeMergeDrain.advanceClone` walks a clone's pointer to it and
+   *    compares it against `cascade_events.source_sha`, prime's own.
+   *
+   * Collapsing the two would either label a child's pull request `prime@<a
+   * sha prime never held>` or move its sync pointer onto a commit prime does
+   * not have. So the label follows the bytes and the ledger follows prime.
+   */
+  provenance?: {
+    /** The repository the bytes came from, as a reader should see it named. */
+    label: string;
+    /** The PRIME commit this delivery carries, whatever repo it was read from. */
+    deliveredSha: string;
+  };
 }): Promise<CascadeResultUpdate> {
   const { octokit, primeRef, sourceSha, mode, clone, supabase, scopeFilter } = args;
   const dryRun = args.dryRun === true;
+
+  /** What a label names. `prime` unless this clone read from its parent. */
+  const sourceLabel = args.provenance?.label ?? "prime";
+  /** What the ledger records. Always a PRIME commit. */
+  const deliveredSha = args.provenance?.deliveredSha ?? sourceSha;
 
   const isMirror = clone.sync_scope === "mirror";
 
@@ -1555,7 +1764,7 @@ export async function processClone(args: {
   if (mode === "notify" && !dryRun) {
     const body =
       `### Aurixa cascade — drift notice\n\n` +
-      `Prime \`${primeRef.owner}/${primeRef.repo}@${shortSha(sourceSha)}\` ` +
+      `Source \`${primeRef.owner}/${primeRef.repo}@${shortSha(sourceSha)}\` ` +
       `has **${primeFiles.length}** file(s) in your installed modules that may be behind.\n\n` +
       `_No commits were made. This is notify-only mode._\n\n` +
       `Files in scope:\n${primeFiles
@@ -1566,7 +1775,7 @@ export async function processClone(args: {
     const { data: issue } = await octokit.issues.create({
       owner: cloneRef.owner,
       repo: cloneRef.repo,
-      title: `Aurixa drift notice · prime@${shortSha(sourceSha)} (${primeFiles.length} files)`,
+      title: `Aurixa drift notice · ${sourceLabel}@${shortSha(sourceSha)} (${primeFiles.length} files)`,
       body,
       labels: ["aurixa", "drift-notice"],
     });
@@ -2120,7 +2329,7 @@ export async function processClone(args: {
     const why =
       partition.held.length > 0
         ? `Nothing to cascade: all ${partition.held.length} differing path(s) are withheld by this clone's exclusion policy`
-        : `Already in sync with prime@${shortSha(sourceSha)}`;
+        : `Already in sync with ${sourceLabel}@${shortSha(sourceSha)}`;
     return {
       status: "skipped",
       diff_summary: why,
@@ -2131,7 +2340,7 @@ export async function processClone(args: {
       // may advance on it exactly as on a merge, and this is what carries
       // the revision — provenance cannot, because a folded carrier's
       // `source_sha` predates what its pass actually verified.
-      delivered_sha: sourceSha,
+      delivered_sha: deliveredSha,
     };
   }
 
@@ -2297,7 +2506,7 @@ export async function processClone(args: {
       completed_at: new Date().toISOString(),
       // Withheld-by-policy is still verified: nothing DELIVERABLE from this
       // revision is owed, which is what the pointer measures.
-      delivered_sha: sourceSha,
+      delivered_sha: deliveredSha,
       ...finalProgress,
     };
   }
@@ -2405,7 +2614,7 @@ export async function processClone(args: {
   // unmodified proposal by this exact prefix, and a proposal the repair path
   // stops recognising is one that can never be rebuilt.
   const message =
-    `chore(aurixa): cascade ${treeEntries.length} file(s) from prime@${shortSha(sourceSha)}\n\n` +
+    `chore(aurixa): cascade ${treeEntries.length} file(s) from ${sourceLabel}@${shortSha(sourceSha)}\n\n` +
     treeEntries.map((t) => `- ${t.sha === null ? "DELETE " : ""}${t.path}`).join("\n");
 
   // What the pull request has to say beyond the file list. `manual_reconcile`
@@ -2527,7 +2736,7 @@ export async function processClone(args: {
     mode === "auto_merge"
       ? "Auto-merge: this lands on green and waits otherwise."
       : `Automated cascade from **${primeRef.owner}/${primeRef.repo}@${shortSha(sourceSha)}**.`;
-  const title = `Aurixa cascade · prime@${shortSha(sourceSha)} → ${treeEntries.length} file(s)`;
+  const title = `Aurixa cascade · ${sourceLabel}@${shortSha(sourceSha)} → ${treeEntries.length} file(s)`;
 
   const existing = await findOpenCascadePr(octokit, cloneRef);
   let proposal: { number: number; url: string; nodeId: string | null; headSha: string } | null =
@@ -2563,7 +2772,7 @@ export async function processClone(args: {
         // the newest event's delivered head. That is how a proposal cut
         // for an older head and re-verified against a newer one stamps the
         // newer one.
-        delivered_sha: sourceSha,
+        delivered_sha: deliveredSha,
         ...finalProgress,
       };
     }
@@ -2684,7 +2893,7 @@ export async function processClone(args: {
           status: "pr_opened",
           pr_url: proposal.url,
           commit_sha: newCommit.sha.slice(0, 7),
-          delivered_sha: sourceSha,
+          delivered_sha: deliveredSha,
           diff_summary: durableSummary,
           files_changed: treeEntries.length,
           completed_at: new Date().toISOString(),
@@ -2721,7 +2930,7 @@ export async function processClone(args: {
           status: "pr_opened",
           pr_url: proposal.url,
           commit_sha: newCommit.sha.slice(0, 7),
-          delivered_sha: sourceSha,
+          delivered_sha: deliveredSha,
           diff_summary: durableSummary,
           files_changed: treeEntries.length,
           completed_at: new Date().toISOString(),
@@ -2747,12 +2956,12 @@ export async function processClone(args: {
           repo: cloneRef.repo,
           pull_number: proposal.number,
           merge_method: "merge",
-          commit_title: `Aurixa cascade prime@${shortSha(sourceSha)} (#${proposal.number})`,
+          commit_title: `Aurixa cascade ${sourceLabel}@${shortSha(sourceSha)} (#${proposal.number})`,
         });
         return {
           status: "succeeded",
           commit_sha: merged.sha?.slice(0, 7) ?? null,
-          delivered_sha: sourceSha,
+          delivered_sha: deliveredSha,
           pr_url: proposal.url,
           diff_summary: `Merged as ${merged.sha?.slice(0, 7) ?? "?"}. ${durableSummary}`,
           files_changed: treeEntries.length,
@@ -2773,7 +2982,7 @@ export async function processClone(args: {
     status: "pr_opened",
     pr_url: proposal.url,
     commit_sha: newCommit.sha.slice(0, 7),
-    delivered_sha: sourceSha,
+    delivered_sha: deliveredSha,
     diff_summary: durableSummary,
     files_changed: treeEntries.length,
     completed_at: new Date().toISOString(),
