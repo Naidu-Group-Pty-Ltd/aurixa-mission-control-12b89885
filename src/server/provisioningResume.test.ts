@@ -2383,7 +2383,13 @@ describe("a fleet-sync pass that did nothing says nothing", () => {
   const block = () => {
     const b = src();
     const at = b.indexOf("const didNothing =");
-    return b.slice(at, b.indexOf('.eq("clone_id", cloneId)', at));
+    // The MAIN update — the one that releases the claim. A no-op pass now
+    // makes two smaller calls before it (a fresh read and a guarded write),
+    // each with its own `.eq("clone_id", cloneId)`, so anchoring on the first
+    // one returned a slice that stopped before the update this block is about.
+    const main = b.indexOf("worker_started_at: null,", at);
+    expect(main, "the claim-releasing update moved").toBeGreaterThan(at);
+    return b.slice(at, b.indexOf('.eq("clone_id", cloneId)', main));
   };
 
   it("writes no fact about the clone when it applied, failed, blocked and held nothing", () => {
@@ -2452,11 +2458,41 @@ describe("a fleet-sync pass that did nothing says nothing", () => {
       sent. So the two clone facts move to their own write, conditioned on the
       inspected sentence still standing.
     */
-    // Read from the WHOLE function: `block()` stops at the main update's own
-    // `.eq("clone_id", cloneId)`, and this write comes after it.
+    // Read from the WHOLE function: `block()` covers the claim-releasing
+    // update alone, and this write is a separate call before it.
     const whole = src();
     expect(whole, "the no-op facts must have their own write").toContain("const noopFacts = {");
     const guarded = whole.slice(whole.indexOf("const noopFacts = {"));
+
+    /*
+      READ FRESH, AND WRITTEN BEFORE THE CLAIM IS RELEASED.
+
+      Guarding on the sentence is a compare-and-set on its own column and is
+      sound. Guarding `migrations_applied` on it is not: a manual sync cycles
+      `status_detail` from `Migrations up to date (X)` through `Syncing
+      migrations from …` and back to the identical sentence while replacing
+      its results, so the guard reads as unchanged and a record reconciled
+      from the older snapshot is restored over it.
+
+      Two things answer that. The pair is re-read at the moment it is written,
+      so the reconciliation is against what the row holds now; and the write
+      happens while this pass still HOLDS the claim, which shuts out every
+      other fleet pass and leaves only the lanes that take no claim — which is
+      what the sentence guard is for.
+    */
+    expect(whole, "the reconciliation must not read the top-of-run snapshot").not.toContain(
+      "(backend as { migrations_applied?: unknown }).migrations_applied",
+    );
+    expect(whole, "the snapshot columns must not be selected at the top either").not.toContain(
+      "chunk_cursor, migrations_applied, status_detail",
+    );
+    const freshRead = whole.indexOf('.select("migrations_applied, status_detail")');
+    expect(freshRead, "the pair is not re-read before it is written").toBeGreaterThan(-1);
+    expect(freshRead).toBeLessThan(whole.indexOf("const noopFacts = {"));
+    expect(
+      whole.indexOf("const noopFacts = {"),
+      "the opinion must be written before the claim is released",
+    ).toBeLessThan(whole.indexOf("worker_started_at: null,"));
     expect(guarded).toContain("migrations_applied: blockage.entries");
     expect(guarded).toContain("status_detail: blockageDetail");
     // The record and the sentence are still independent of each other.
