@@ -2534,6 +2534,34 @@ describe("a fleet-sync pass that did nothing says nothing", () => {
       composed,
       "the no-op sentence must not be composed from the top-of-run version",
     ).not.toContain("syncedTo,");
+    /*
+      AND NOTHING AT ALL WHEN THE CLONE MOVED UNDER THE PASS.
+
+      The sentence guard is a compare-and-set on `status_detail`, so it passes
+      whenever the standing sentence is unchanged — including when a manual
+      sync has since finished the very work this pass stopped short of, and
+      left its own accurate `Migrations up to date (…)`. That sentence is this
+      lane's own prose, so ownership does not withhold it either. Both readings
+      this pass could compose are then wrong: a pause that describes work
+      somebody else has completed, and a level reading built from a version
+      that moved.
+
+      `migration_version` is re-read with the sentence and the manual sync
+      writes the two together, so a difference against the version this run
+      started on is the signal. The RECORD is not withheld by it: it is a
+      reading of the prime's ledger, which no clone-side writer can invalidate.
+    */
+    expect(composed, "the pass must notice the clone moving under it").toContain(
+      "const movedUnderUs = (recorded ?? null) !== (backend.migration_version ?? null);",
+    );
+    expect(composed, "a clone that moved gets no sentence from this pass").toContain(
+      "const blockageDetail = movedUnderUs\n            ? null\n            : blockageDetailFor({",
+    );
+    expect(
+      guarded,
+      "the blockage record is not withheld by it — it is about the prime, not the clone",
+    ).toContain("...(blockage.entries === null ? {} : { migrations_applied: blockage.entries })");
+
     // One rule, two readings — not two ladders that can drift apart.
     expect(whole, "the level rule is stated once").toContain(
       "const syncedToFor = (recorded: string | null | undefined) =>",

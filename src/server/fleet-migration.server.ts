@@ -1543,22 +1543,53 @@ export async function runFleetMigrationSync(
             (current as { status_detail?: string | null } | null)?.status_detail ?? null;
           const recorded =
             (current as { migration_version?: string | null } | null)?.migration_version ?? null;
-          const blockageDetail = blockageDetailFor({
-            standing: inspected,
-            holes: blockage.holes,
-            total: primeLedgerHoles.length,
-            // A pass that changed nothing can still have stopped with more to
-            // send, so this is handed over rather than assumed: without it the
-            // retraction writes a bare "Synced to X" over a pause, which is
-            // the one reading this lane must never give about a clone behind.
-            pausedMidReplay,
-            // The same rule the active branch's sentences read, applied to
-            // the version re-read a line above rather than to the one this
-            // run started from: a manual sync that lands inside the pass moves
-            // the column, and a sentence composed from the old value is stale
-            // however sound the guard under it.
-            syncedTo: syncedToFor(recorded),
-          });
+          /*
+            THE CLONE MOVED UNDER THIS PASS, SO THIS PASS HAS NOTHING TO SAY
+            ABOUT ITS LEVEL.
+
+            `migration_version` is re-read here, and the manual sync writes it
+            in the same statement as the sentence. If it differs from the one
+            this run started on, another writer advanced — or rebuilt, which
+            erases it — the clone while this pass was working, and everything
+            this pass knows about the clone's level was measured before that.
+
+            Two readings would otherwise be written, and both are wrong:
+
+            - A PAUSE. This pass stopped with more to send, so it composes
+              `stopped at its time budget with more to send` — over a sync
+              that has since finished the work. The sentence guard passes,
+              because `Migrations up to date (…)` is this lane's own prose,
+              and an accurate result is replaced by a stale pause.
+            - A LEVEL READING from a version that moved. `latestApplied` is
+              null on a no-op pass in this lane (`partitionByDependency` drops
+              what the clone already has, so a levelled clone is sent nothing
+              and the replay loop never runs), and the rung under it was the
+              top-of-run snapshot.
+
+            So the sentence is withheld entirely rather than re-derived. The
+            blockage RECORD still stands: it is a reading of the PRIME's
+            ledger, which no clone-side writer can invalidate.
+          */
+          const movedUnderUs = (recorded ?? null) !== (backend.migration_version ?? null);
+          const blockageDetail = movedUnderUs
+            ? null
+            : blockageDetailFor({
+                standing: inspected,
+                holes: blockage.holes,
+                total: primeLedgerHoles.length,
+                // A pass that changed nothing can still have stopped with more to
+                // send, so this is handed over rather than assumed: without it the
+                // retraction writes a bare "Synced to X" over a pause, which is
+                // the one reading this lane must never give about a clone behind.
+                pausedMidReplay,
+                // The same rule the active branch's sentences read, applied to
+                // the version re-read a line above. Past `movedUnderUs` the two
+                // readings are equal, so this is not what stops a stale
+                // sentence — it is what keeps the composition reading the row
+                // it is guarded on, rather than one taken 45 s earlier whose
+                // agreement has to be argued rather than seen.
+                syncedTo: syncedToFor(recorded),
+              });
           const noopFacts = {
             ...(blockage.entries === null ? {} : { migrations_applied: blockage.entries }),
             ...(blockageDetail === null ? {} : { status_detail: blockageDetail }),
