@@ -686,4 +686,17 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "check", table: "prime_config", column: "cascade_follows_lineage", value: "true" },
     ],
   },
+  {
+    migration: "20260920180000_mirror_excludes_supabase_target_module.sql",
+    version: "20260920180000",
+    assertions: [
+      { kind: "rows", table: "clone_sync_exclusions", atLeast: 24 },
+      {
+        kind: "check",
+        table: "clone_sync_exclusions",
+        column: "pattern",
+        value: "src/integrations/supabase/supabaseTarget.pure.ts",
+      },
+    ],
+  },
 ];
