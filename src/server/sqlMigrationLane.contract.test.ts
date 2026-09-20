@@ -110,14 +110,28 @@ describe("a pass is bounded", () => {
     expect(check).toBeGreaterThan(skip);
     expect(send).toBeGreaterThan(check);
     expect(replay).toContain("attempted += 1;");
-    expect(replay).toContain(
-      // `chunkCursorDiscarded` joined this shape so a cursor the prime's file
-      // no longer matches is CLEARED rather than left standing — see
-      // `fleetPassIsBudgeted.contract.test.ts`. Listed in full rather than
-      // matched loosely, because the point of this assertion is that the
-      // replay returns exactly what the caller needs and nothing it invents.
-      "return { results, latestApplied, stoppedEarly, chunksApplied, chunkCursor, chunkCursorDiscarded };",
-    );
+    // The four the budget contract turns on, plus `chunkCursorDiscarded`,
+    // which is budget business too: it is how a cursor the prime's file no
+    // longer matches is CLEARED rather than left standing for the next pass to
+    // resume from — see `fleetPassIsBudgeted.contract.test.ts`.
+    // `primeLedgerHoles` is deliberately not pinned here: this test is about
+    // what a BUDGETED pass reports, and a hole is measured before the budget is
+    // ever consulted.
+    //
+    // Per FIELD rather than as one literal return statement. The literal is
+    // what this assertion used to be, and adding a sixth field to the replay
+    // broke it while nothing about the contract had changed — a spelling of
+    // the return is not the contract, the presence of each field is.
+    for (const field of [
+      "results",
+      "latestApplied",
+      "stoppedEarly",
+      "chunksApplied",
+      "chunkCursor",
+      "chunkCursorDiscarded",
+    ]) {
+      expect(replay).toMatch(new RegExp(`return \\{[^}]*\\b${field}\\b[^}]*\\};`));
+    }
   });
 
   it("the replay measures what it applied, so the reserve is a measurement", () => {
