@@ -679,4 +679,11 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       },
     ],
   },
+  {
+    migration: "20260920140000_switch_cascade_lineage_on.sql",
+    version: "20260920140000",
+    assertions: [
+      { kind: "check", table: "prime_config", column: "cascade_follows_lineage", value: "true" },
+    ],
+  },
 ];
