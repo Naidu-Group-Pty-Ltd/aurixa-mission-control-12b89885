@@ -356,6 +356,34 @@ export const DEFAULT_MIRROR_EXCLUSIONS: readonly SyncExclusion[] = [
   // These two were overwritten by the 26 Aug mirror cascade of prime@14af87a
   // and are the reason `backendIdentityHold` exists: a list only protects what
   // somebody remembered to add to it, and nobody had added these.
+  //
+  // ## Why they are `manual_reconcile` and not `protected`
+  //
+  // Asked and settled 20 Sep 2026, after the embeds on both children were
+  // found shipping the prime's project and key. `protected` reads like the
+  // stronger word and is the WRONG one here, for three reasons:
+  //
+  //  1. **`protected` is silent.** `reportableHeld` carries
+  //     `manual_reconcile` and `oversize` and deliberately not `protected`, so
+  //     promoting these would take the embed out of every "needs a human"
+  //     count and out of the PR body that names them. The defect this pair
+  //     records went unseen for weeks; muting the one line that would have
+  //     said so is the opposite of the fix.
+  //  2. **Holding is identical either way.** Both reasons withhold the path.
+  //     What `protected` adds is that `decideHoldRelease` refuses it — and an
+  //     approved release does not reach the repository unguarded anyway:
+  //     releases are decided BEFORE the write list is read, so a released path
+  //     still goes through `backendIdentityHold` on content, which now refuses
+  //     a swap between two DIFFERENT foreign projects as well as a revert.
+  //  3. **There is a legitimate reconcile.** Prime genuinely does change this
+  //     embed's markup, and a clone genuinely does want those changes with its
+  //     own pair. That is a decision owed to a person, which is precisely what
+  //     `manual_reconcile` means and `protected` denies.
+  //
+  // The list is append-only by construction (`syncExclusions.test.ts` requires
+  // the seed migrations to project onto this array exactly, and forbids them
+  // to DELETE), so changing a reason in place is not a cheap edit either. It
+  // did not need to be.
   {
     pattern: "public/lead-magnet-embed.html",
     reason: "manual_reconcile",

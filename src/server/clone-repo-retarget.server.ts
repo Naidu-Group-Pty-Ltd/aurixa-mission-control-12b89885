@@ -59,6 +59,54 @@ export const LINKED_PROJECT_PATH = "supabase/.temp/linked-project.json";
  * see the note in this module's header.
  */
 export const DEPENDABOT_CONFIG_PATH = ".github/dependabot.yml";
+/**
+ * The files that carry this deployment's Supabase PAIR — a project URL and the
+ * anon key whose `ref` claim names the same project.
+ *
+ * A fifth artefact, and the one that reaches a customer. Measured 20 Sep 2026
+ * across three clones: all three shipped the PRIME's URL and anon key here,
+ * byte-identical, from their first commit.
+ *
+ *   - `public/lead-magnet-embed.html` is served verbatim from the clone's own
+ *     domain and posts to `/functions/v1/request-lead-magnet`. Every name,
+ *     email and phone number it captured went into the PRIME's database.
+ *   - `src/integrations/supabase/env.ts` holds the built-in fallback the app
+ *     uses when `VITE_SUPABASE_URL` is unset — the ordinary state of a new
+ *     deployment — so an unconfigured build serves the prime's production.
+ *   - `.env.example` documents both as though they were the clone's own.
+ *
+ * There is no safe default for whose database this is, which is the same rule
+ * the workflows above answer to.
+ *
+ * The pair moves TOGETHER and is never half-written. A URL from one project
+ * with a key from another authenticates to nothing, so a rewrite carrying only
+ * one of them would replace a wrong-but-working deployment with a broken one.
+ */
+export const SHIPPED_BACKEND_PAIR_PATHS = [
+  "public/lead-magnet-embed.html",
+  "src/integrations/supabase/env.ts",
+  ".env.example",
+] as const;
+
+/**
+ * The secret scan's config, which has to learn the clone's key in the same pass.
+ *
+ * `.gitleaks.toml` allows the anon key as ONE LITERAL — deliberately, so that a
+ * rotated key, another project's key or a `service_role` key all still fail.
+ * The literal it arrives carrying is the PRIME's, under a header calling it
+ * "THIS project".
+ *
+ * So retargeting the pair above WITHOUT this one hands every new clone a
+ * repository whose first pull request fails its own secret scan: the embed now
+ * carries a key the allowlist does not name. Measured — that is exactly what
+ * happened when these files were fixed by hand on 20 Sep 2026.
+ *
+ * The clone's key is APPENDED rather than written over the prime's, because
+ * the prime's literal is still load-bearing: it appears in the applied
+ * migrations a clone inherits, which cannot be edited without breaking replay.
+ */
+export const GITLEAKS_CONFIG_PATH = ".gitleaks.toml";
+
 export const RETARGET_WORKFLOWS = [
   ".github/workflows/deploy-supabase-functions.yml",
   ".github/workflows/apply-migration.yml",
@@ -102,6 +150,99 @@ export function workflowHasProjectRefDefault(yaml: string): boolean {
   return /\$\{\{\s*vars\.SUPABASE_PROJECT_REF\s*\|\|\s*'[^']*'\s*\}\}/.test(yaml);
 }
 
+/**
+ * A Supabase JWT's `ref` claim, or null when the string is not one.
+ *
+ * This is what decides WHICH tokens to rewrite. A blanket "replace anything
+ * JWT-shaped" would rewrite an unrelated token that happens to share the file;
+ * only a token naming a Supabase project is backend identity.
+ */
+export function supabaseRefOfJwt(token: string): string | null {
+  const payload = token.split(".")[1];
+  if (!payload) return null;
+  try {
+    const json = Buffer.from(payload.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString(
+      "utf8",
+    );
+    const ref = (JSON.parse(json) as { ref?: unknown }).ref;
+    return typeof ref === "string" ? ref : null;
+  } catch {
+    return null;
+  }
+}
+
+const SUPABASE_URL_RE = /https:\/\/([a-z0-9]{16,})\.supabase\.(co|in|net)/g;
+const SUPABASE_JWT_RE = /\bey[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g;
+
+/**
+ * Point a shipped file's Supabase pair at the clone.
+ *
+ * Every project URL becomes the clone's, and every token that decodes to a
+ * Supabase `ref` becomes the clone's anon key. A token that is not a Supabase
+ * JWT is left exactly as it is.
+ */
+export function rewriteBackendPair(text: string, cloneRef: string, cloneAnonKey: string): string {
+  return text
+    .replace(SUPABASE_URL_RE, (whole, ref: string) =>
+      ref === cloneRef ? whole : `https://${cloneRef}.supabase.co`,
+    )
+    .replace(SUPABASE_JWT_RE, (token) => {
+      const ref = supabaseRefOfJwt(token);
+      return ref === null || ref === cloneRef ? token : cloneAnonKey;
+    });
+}
+
+/** Whether a shipped file still names a project other than the clone's. */
+export function backendPairNamesForeignProject(text: string, cloneRef: string): boolean {
+  for (const [, ref] of text.matchAll(SUPABASE_URL_RE)) if (ref !== cloneRef) return true;
+  for (const [token] of text.matchAll(SUPABASE_JWT_RE)) {
+    const ref = supabaseRefOfJwt(token);
+    if (ref !== null && ref !== cloneRef) return true;
+  }
+  return false;
+}
+
+/** Whether the scan config already names this key as allowed. */
+export function gitleaksAllowsKey(toml: string, cloneAnonKey: string): boolean {
+  return toml.includes(cloneAnonKey);
+}
+
+/**
+ * Teach the secret scan this deployment's own anon key.
+ *
+ * Appended rather than substituted: appending cannot corrupt the blocks
+ * already there, where an in-place rewrite of a TOML array can, and the
+ * prime's literal has to stay for the inherited migrations.
+ *
+ * Idempotent — a config that already names the key is returned unchanged, so
+ * re-running provisioning does not stack duplicate blocks.
+ */
+export function appendOwnKeyAllowlist(
+  toml: string,
+  cloneRef: string,
+  cloneAnonKey: string,
+): string {
+  if (gitleaksAllowsKey(toml, cloneAnonKey)) return toml;
+  const description =
+    `This deployment's own Supabase anon (publishable) key, for project ${cloneRef}. ` +
+    "Written by provisioning: the config arrives from the prime naming the PRIME's key as " +
+    "this project's own, which would fail this repository's first pull request the moment a " +
+    "shipped file carried its own. An anon key is publishable and every row it reaches is " +
+    "decided by RLS; it is allowed as ONE literal, so a rotated key, another project's key " +
+    "or a service_role key all still fail.";
+  const q = "'''";
+  const block = [
+    "",
+    "[[allowlists]]",
+    `description = ${JSON.stringify(description)}`,
+    "regexes = [",
+    `  ${q}${cloneAnonKey}${q},`,
+    "]",
+    "",
+  ].join("\n");
+  return `${toml.replace(/\s*$/, "")}\n${block}`;
+}
+
 // ─── Applying it ─────────────────────────────────────────────────────
 
 export type RetargetAction = {
@@ -127,6 +268,14 @@ type RepoRef = { owner: string; repo: string; branch?: string };
 export async function retargetCloneRepo(
   ref: RepoRef,
   cloneProjectRef: string,
+  /**
+   * The clone's own anon (publishable) key. Optional only so that a caller
+   * which genuinely has not minted one yet still retargets the four artefacts
+   * that need no key — the shipped pair is then reported as `failed` rather
+   * than silently skipped, because a clone shipping another tenant's key is
+   * not a partial success.
+   */
+  cloneAnonKey?: string,
 ): Promise<RetargetResult> {
   const octokit = getAppOctokit();
   const actions: RetargetAction[] = [];
@@ -312,6 +461,89 @@ export async function retargetCloneRepo(
       status: "failed",
       detail: e instanceof Error ? e.message : String(e),
     });
+  }
+
+  // 6. The shipped Supabase pair — the artefact that reaches a customer.
+  //
+  //    Each file is independent, and each is written only when it still names
+  //    somewhere else: a clone provisioned twice, or one whose pair was
+  //    already corrected by hand, records `unchanged` rather than churning a
+  //    commit.
+  //
+  //    Skipped entirely, and said so, when no anon key was supplied. The pair
+  //    is never half-written — a URL from one project with a key from another
+  //    authenticates to nothing, so a partial rewrite would turn a deployment
+  //    that works against the wrong database into one that works against none.
+  if (!cloneAnonKey) {
+    for (const path of SHIPPED_BACKEND_PAIR_PATHS) {
+      actions.push({
+        target: path,
+        status: "failed",
+        detail:
+          "No anon key was supplied, and the pair is never half-written. This file still names another project's backend.",
+      });
+    }
+  } else {
+    for (const path of SHIPPED_BACKEND_PAIR_PATHS) {
+      try {
+        const f = await readFile(path);
+        if (!f) {
+          actions.push({ target: path, status: "absent" });
+          continue;
+        }
+        if (!backendPairNamesForeignProject(f.text, cloneProjectRef)) {
+          actions.push({ target: path, status: "unchanged" });
+          continue;
+        }
+        const next = rewriteBackendPair(f.text, cloneProjectRef, cloneAnonKey);
+        await writeFile(
+          path,
+          next,
+          f.sha,
+          `chore(aurixa): point ${path} at this deployment's own Supabase project`,
+        );
+        actions.push({ target: path, status: "rewritten", detail: cloneProjectRef });
+      } catch (e) {
+        actions.push({
+          target: path,
+          status: "failed",
+          detail: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }
+
+    // 7. The secret scan, which must learn the key step 6 just wrote.
+    //
+    //    Last, deliberately. If this fails the repository is left with a scan
+    //    that refuses its own key — loud, and visible on the first pull
+    //    request — which is a better failure than a scan quietly allowing a
+    //    key nothing has written yet.
+    try {
+      const f = await readFile(GITLEAKS_CONFIG_PATH);
+      if (!f) {
+        actions.push({ target: GITLEAKS_CONFIG_PATH, status: "absent" });
+      } else if (gitleaksAllowsKey(f.text, cloneAnonKey)) {
+        actions.push({ target: GITLEAKS_CONFIG_PATH, status: "unchanged" });
+      } else {
+        await writeFile(
+          GITLEAKS_CONFIG_PATH,
+          appendOwnKeyAllowlist(f.text, cloneProjectRef, cloneAnonKey),
+          f.sha,
+          "chore(aurixa): allow this deployment's own Supabase anon key in the secret scan",
+        );
+        actions.push({
+          target: GITLEAKS_CONFIG_PATH,
+          status: "rewritten",
+          detail: cloneProjectRef,
+        });
+      }
+    } catch (e) {
+      actions.push({
+        target: GITLEAKS_CONFIG_PATH,
+        status: "failed",
+        detail: e instanceof Error ? e.message : String(e),
+      });
+    }
   }
 
   return { ok: actions.every((a) => a.status !== "failed"), actions };

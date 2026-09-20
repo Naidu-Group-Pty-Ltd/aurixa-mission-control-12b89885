@@ -10,6 +10,7 @@ const YggdrasilTree = lazy(() =>
   import("@/components/yggdrasil/yggdrasil-tree").then((m) => ({ default: m.YggdrasilTree })),
 );
 import { TreeStats } from "@/components/yggdrasil/tree-stats";
+import { BackendIdentityPanel } from "@/components/yggdrasil/backend-identity-panel";
 import { YggdrasilToolbar, type StatusFilter } from "@/components/yggdrasil/yggdrasil-toolbar";
 import { TreePine } from "lucide-react";
 import { useServerFn } from "@tanstack/react-start";
@@ -366,6 +367,8 @@ function YggdrasilPage() {
       </header>
 
       <TreeStats clones={clones} />
+
+      <BackendIdentityPanel />
 
       <YggdrasilToolbar
         activeFilters={stagedFilters}

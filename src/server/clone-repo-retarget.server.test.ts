@@ -3,9 +3,16 @@ import { describe, it, expect } from "vitest";
 import { REPOSITORY_INVARIANTS } from "./cascade/repositoryInvariants.pure";
 import {
   DEPENDABOT_CONFIG_PATH,
+  GITLEAKS_CONFIG_PATH,
+  SHIPPED_BACKEND_PAIR_PATHS,
+  appendOwnKeyAllowlist,
+  backendPairNamesForeignProject,
+  gitleaksAllowsKey,
+  rewriteBackendPair,
   rewriteConfigTomlProjectId,
   configTomlNamesForeignProject,
   stripWorkflowProjectRefDefault,
+  supabaseRefOfJwt,
   workflowHasProjectRefDefault,
 } from "./clone-repo-retarget.server";
 
@@ -134,7 +141,9 @@ describe("dropping the prime's Dependabot config from a clone", () => {
   it("is non-fatal and reports an absent file as absent, like every other step", () => {
     // "a repository that lacks one of these files is not broken, and a partial
     // result is more useful than an abort" — this module's own header.
-    expect(step).toMatch(/if \(!f\) \{\s*actions\.push\(\{ target: DEPENDABOT_CONFIG_PATH, status: "absent" \}\)/);
+    expect(step).toMatch(
+      /if \(!f\) \{\s*actions\.push\(\{ target: DEPENDABOT_CONFIG_PATH, status: "absent" \}\)/,
+    );
     expect(step).toMatch(/\}\s*catch\s*\(e\)\s*\{[\s\S]*status: "failed"/);
   });
 
@@ -161,5 +170,212 @@ describe("dropping the prime's Dependabot config from a clone", () => {
     const patterns = REPOSITORY_INVARIANTS.map((i) => i.pattern);
     expect(patterns).toContain("package.json");
     expect(patterns).toContain("package-lock.json");
+  });
+});
+
+/**
+ * Step 6/7 — the shipped Supabase pair, and the scan that has to learn it.
+ *
+ * The four artefacts above are build and deploy configuration. These three are
+ * the ones a CUSTOMER reaches: `public/` is copied into `dist/` verbatim and
+ * served from the clone's own domain, and `env.ts` is what the app falls back
+ * to when `VITE_SUPABASE_URL` is unset — the ordinary state of a new
+ * deployment. Measured 20 Sep 2026, all three clones shipped the PRIME's URL
+ * and anon key in all three files, from their first commit.
+ *
+ * The keys below are BUILT rather than pasted. A real anon key in a fixture is
+ * a real credential in a repository, and the thing under test is the decode —
+ * so constructing the token is both safer and a more honest exercise of it.
+ */
+const jwt = (ref: string) => {
+  const b64 = (o: unknown) =>
+    Buffer.from(JSON.stringify(o))
+      .toString("base64")
+      .replace(/=+$/, "")
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_");
+  return `${b64({ alg: "HS256", typ: "JWT" })}.${b64({ iss: "supabase", ref, role: "anon" })}.sig-${ref}`;
+};
+
+const PRIME_KEY = jwt(PRIME);
+const CLONE_KEY = jwt(CLONE);
+
+describe("supabaseRefOfJwt", () => {
+  it("reads the project a Supabase token names", () => {
+    expect(supabaseRefOfJwt(PRIME_KEY)).toBe(PRIME);
+  });
+
+  it("is null for a token that names no project", () => {
+    // Which is what keeps the rewrite from touching an unrelated credential
+    // that happens to share a file. Only a token naming a Supabase project is
+    // backend identity.
+    const b64 = (o: unknown) =>
+      Buffer.from(JSON.stringify(o)).toString("base64").replace(/=+$/, "");
+    expect(supabaseRefOfJwt(`${b64({ alg: "HS256" })}.${b64({ sub: "someone" })}.sig`)).toBeNull();
+  });
+
+  it("is null rather than throwing on a string that is not a JWT at all", () => {
+    expect(supabaseRefOfJwt("eyJnot.a.jwt")).toBeNull();
+    expect(supabaseRefOfJwt("")).toBeNull();
+  });
+});
+
+describe("rewriteBackendPair", () => {
+  const embed = [
+    "<script>",
+    `  var SUPABASE_URL = 'https://${PRIME}.supabase.co';`,
+    `  var ANON_KEY = '${PRIME_KEY}';`,
+    "</script>",
+  ].join("\n");
+
+  it("moves the URL and the key together", () => {
+    // The PAIR is what authenticates. A URL from one project with a key from
+    // another authenticates to nothing, so a rewrite that moved one would
+    // replace a wrong-but-working deployment with a broken one.
+    const out = rewriteBackendPair(embed, CLONE, CLONE_KEY);
+    expect(out).toContain(`https://${CLONE}.supabase.co`);
+    expect(out).toContain(CLONE_KEY);
+    expect(out).not.toContain(PRIME);
+    expect(out).not.toContain(PRIME_KEY);
+  });
+
+  it("rewrites a PARENT's project too, not merely the prime's", () => {
+    // The near-miss of 20 Sep 2026: with lineage routing on, a cascade almost
+    // wrote npc-client-dashboard's ref and key into its two children. That
+    // value is wrong there and is not the prime's — so anything shaped as
+    // "replace the prime" would have gone green over the worse value.
+    //
+    // CLONE above IS npc-client-dashboard, so the child is the target here.
+    const child = "umrtusxohxjxzodxorim"; // npc-test-76b3b3
+    const childKey = jwt(child);
+    const inherited = [`url: https://${CLONE}.supabase.co`, `key: ${CLONE_KEY}`].join("\n");
+    const out = rewriteBackendPair(inherited, child, childKey);
+    expect(out).not.toContain(CLONE);
+    expect(out).not.toContain(CLONE_KEY);
+    expect(out).toContain(`https://${child}.supabase.co`);
+    expect(out).toContain(childKey);
+  });
+
+  it("leaves a token that is not a Supabase JWT exactly as it is", () => {
+    const b64 = (o: unknown) =>
+      Buffer.from(JSON.stringify(o)).toString("base64").replace(/=+$/, "");
+    const foreign = `${b64({ alg: "HS256" })}.${b64({ aud: "stripe" })}.sig`;
+    const text = `supabase: https://${PRIME}.supabase.co\nother: ${foreign}`;
+    const out = rewriteBackendPair(text, CLONE, CLONE_KEY);
+    expect(out).toContain(foreign);
+    expect(out).toContain(`https://${CLONE}.supabase.co`);
+  });
+
+  it("is idempotent — a file already naming the clone is byte-identical", () => {
+    const already = rewriteBackendPair(embed, CLONE, CLONE_KEY);
+    expect(rewriteBackendPair(already, CLONE, CLONE_KEY)).toBe(already);
+  });
+});
+
+describe("backendPairNamesForeignProject", () => {
+  it("is true while either half still names somewhere else", () => {
+    expect(backendPairNamesForeignProject(`https://${PRIME}.supabase.co`, CLONE)).toBe(true);
+    expect(backendPairNamesForeignProject(PRIME_KEY, CLONE)).toBe(true);
+  });
+
+  it("is false once both halves are this deployment's", () => {
+    // Which is what makes step 6 report `unchanged` rather than churning a
+    // commit on a clone provisioned twice, or one corrected by hand.
+    expect(
+      backendPairNamesForeignProject(`https://${CLONE}.supabase.co\n${CLONE_KEY}`, CLONE),
+    ).toBe(false);
+  });
+
+  it("is false for a file that names no Supabase project at all", () => {
+    expect(backendPairNamesForeignProject("# nothing to see", CLONE)).toBe(false);
+  });
+});
+
+describe("appendOwnKeyAllowlist", () => {
+  const config = [
+    "[extend]",
+    "useDefault = true",
+    "",
+    "[[allowlists]]",
+    'description = "The prime\'s anon key, in inherited migrations."',
+    "regexes = [",
+    `  '''${PRIME_KEY}''',`,
+    "]",
+    "",
+  ].join("\n");
+
+  it("teaches the scan this deployment's key", () => {
+    const out = appendOwnKeyAllowlist(config, CLONE, CLONE_KEY);
+    expect(gitleaksAllowsKey(out, CLONE_KEY)).toBe(true);
+  });
+
+  it("KEEPS the prime's literal rather than replacing it", () => {
+    // The prime's key appears in the applied migrations a clone inherits, and
+    // those cannot be edited without breaking replay. Substituting would fix
+    // the shipped file and break the history it arrived with.
+    const out = appendOwnKeyAllowlist(config, CLONE, CLONE_KEY);
+    expect(out).toContain(PRIME_KEY);
+    expect(out).toContain("[extend]");
+  });
+
+  it("is idempotent — provisioning run twice does not stack blocks", () => {
+    const once = appendOwnKeyAllowlist(config, CLONE, CLONE_KEY);
+    expect(appendOwnKeyAllowlist(once, CLONE, CLONE_KEY)).toBe(once);
+    expect(once.match(/\[\[allowlists\]\]/g)).toHaveLength(2);
+  });
+
+  it("allows the key as ONE literal, so a rotated or service_role key still fails", () => {
+    const out = appendOwnKeyAllowlist(config, CLONE, CLONE_KEY);
+    const block = out.slice(out.lastIndexOf("[[allowlists]]"));
+    expect(block).toContain(CLONE_KEY);
+    // No character class, quantifier or wildcard: a pattern would allow a
+    // family of keys, and the family includes service_role.
+    expect(block).not.toMatch(/\[A-Za-z0-9|\\w|\.\*|\.\+/);
+  });
+});
+
+/**
+ * Step 6 and 7, read through the source — the same treatment steps 1–5 get,
+ * for the same reason: they drive Octokit and are not reachable without it.
+ */
+describe("writing the shipped pair", () => {
+  const source = readFileSync("src/server/clone-repo-retarget.server.ts", "utf8");
+  const step = source.slice(source.indexOf("// 6. The shipped Supabase pair"));
+
+  it("refuses to half-write the pair when no key was supplied", () => {
+    // Not a skip. A clone shipping another tenant's key is not a partial
+    // success, so the absent key is reported as `failed` and the caller's
+    // own `failedRetarget` check sees it.
+    expect(step).toMatch(/if \(!cloneAnonKey\)/);
+    const refusal = step.slice(step.indexOf("if (!cloneAnonKey)"), step.indexOf("} else {"));
+    expect(refusal).toContain('status: "failed"');
+    expect(refusal).not.toContain('status: "unchanged"');
+    expect(refusal).not.toContain('status: "absent"');
+  });
+
+  it("teaches the scan LAST, after the files that need it are written", () => {
+    // A scan taught first would allow a key nothing has written yet — quiet,
+    // and wrong in the direction that hides things. Taught last, a failure
+    // leaves a repository whose own first pull request says so.
+    expect(step.indexOf("SHIPPED_BACKEND_PAIR_PATHS")).toBeLessThan(
+      step.indexOf("GITLEAKS_CONFIG_PATH"),
+    );
+  });
+
+  it("names its paths once, through the exported constants", () => {
+    expect([...SHIPPED_BACKEND_PAIR_PATHS]).toEqual([
+      "public/lead-magnet-embed.html",
+      "src/integrations/supabase/env.ts",
+      ".env.example",
+    ]);
+    expect(GITLEAKS_CONFIG_PATH).toBe(".gitleaks.toml");
+    expect(step).not.toContain('"public/lead-magnet-embed.html"');
+    expect(step).not.toContain('".gitleaks.toml"');
+  });
+
+  it("is non-fatal per file, like every other step", () => {
+    expect(step).toMatch(/\}\s*catch\s*\(e\)\s*\{[\s\S]*status: "failed"/);
+    expect(step).toContain('status: "absent"');
+    expect(step).toContain('status: "unchanged"');
   });
 });

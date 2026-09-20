@@ -6,6 +6,7 @@
 import { motion } from "framer-motion";
 import { GitBranch, Zap, AlertTriangle, Shield, TreePine } from "lucide-react";
 import type { Clone } from "@/lib/queries";
+import { lineageDepth } from "./use-tree-layout";
 
 interface Props {
   clones: Clone[];
@@ -17,9 +18,12 @@ export function TreeStats({ clones }: Props) {
   const behind = clones.filter((c) => c.sync_status === "behind").length;
   const failed = clones.filter((c) => c.sync_status === "failed").length;
 
-  // Infer depth: count unique first-tags as "branch groups"
-  const tagGroups = new Set(clones.map((c) => c.tags?.[0]).filter(Boolean));
-  const depth = Math.max(1, tagGroups.size);
+  // Read from the recorded tree, never inferred. This line used to count
+  // distinct first-tags — the same `tags[0]` guess `buildHierarchy` replaced,
+  // left behind in the one place that puts a NUMBER on lineage. `tags` is a
+  // cascade TARGETING field, so the figure moved whenever somebody re-targeted
+  // a cascade, and on the fleet as recorded it read 0 for a tree two deep.
+  const depth = lineageDepth(clones);
 
   const stats = [
     {

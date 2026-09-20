@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { buildHierarchy } from "./use-tree-layout";
+import { buildHierarchy, lineageDepth } from "./use-tree-layout";
 import type { Clone } from "@/lib/queries";
 
 /** Only the fields `buildHierarchy` reads; the rest of `Clone` is irrelevant here. */
@@ -93,5 +93,46 @@ describe("buildHierarchy", () => {
 
       expect(map.get("__root__")).toEqual(["a", "b"]);
     });
+  });
+});
+
+describe("lineageDepth", () => {
+  it("counts the recorded tree, not the tag groups", () => {
+    // Two clones on the trunk, two under one of them: two levels of clones.
+    // The old reading counted distinct first-tags, which on this fleet is 0.
+    expect(lineageDepth(FLEET)).toBe(2);
+  });
+
+  it("is 1 for a flat fan, whatever the tags say", () => {
+    // The state of every fleet before anybody records a parent. The old
+    // reading gave the number of distinct first-tags, which on this input is
+    // 2 — a depth the tree does not have.
+    const flat = [
+      { ...clone("a", null, "2026-01-01T00:00:00Z"), tags: ["alpha"] } as Clone,
+      { ...clone("b", null, "2026-02-01T00:00:00Z"), tags: ["beta"] } as Clone,
+    ];
+    expect(lineageDepth(flat)).toBe(1);
+  });
+
+  it("is 0 for no clones — there is no tree, so there is no trunk to count", () => {
+    expect(lineageDepth([])).toBe(0);
+  });
+
+  it("does not move when somebody edits a tag", () => {
+    // The property the old reading could not hold. `tags` is a cascade
+    // TARGETING field, so a number derived from it changed the picture's
+    // claim about lineage whenever somebody re-targeted a cascade.
+    const retagged = FLEET.map((c) => ({ ...c, tags: ["something-else"] }) as Clone);
+    expect(lineageDepth(retagged)).toBe(lineageDepth(FLEET));
+  });
+
+  it("terminates on a cycle the database would have refused", () => {
+    // `buildHierarchy` already drops a cycle onto the trunk; this asserts the
+    // depth walk cannot recurse forever even if that ever stopped being true.
+    const cyclic = [
+      clone("x", "y", "2026-01-01T00:00:00Z"),
+      clone("y", "x", "2026-01-02T00:00:00Z"),
+    ];
+    expect(lineageDepth(cyclic)).toBe(1);
   });
 });
