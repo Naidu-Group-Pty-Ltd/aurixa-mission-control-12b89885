@@ -95,8 +95,24 @@ export const REQUIRED_CHECKS = ["verify", "security"] as const;
  * including `cancelled`, `timed_out` and `action_required`: none of them is
  * evidence the tree is good, and treating an unfamiliar conclusion as passing
  * is how a gate quietly stops being one.
+ *
+ * Exported because a SECOND reader of the same question now exists. `/prime`
+ * judges the prime repository's own head by this module, and the page under it
+ * draws one row per check run; both were first written with a hand-rolled copy
+ * of this list. Three statements of one rule is how, the day one of them gains
+ * a conclusion the others do not, a page comes to call a commit green that this
+ * gate is refusing. The set IS the rule, so it travels rather than being
+ * retyped.
  */
-const PASSING = new Set(["success", "neutral", "skipped", "stale"]);
+export const PASSING_CONCLUSIONS: ReadonlySet<string> = new Set([
+  "success",
+  "neutral",
+  "skipped",
+  "stale",
+]);
+
+/** Local alias, so the decision functions below read as they always did. */
+const PASSING = PASSING_CONCLUSIONS;
 
 /**
  * A failed job that ended within this long of starting was never run.

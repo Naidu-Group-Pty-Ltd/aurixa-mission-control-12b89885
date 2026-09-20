@@ -17,6 +17,7 @@ import { Route as SchedulesRouteImport } from './routes/schedules'
 import { Route as RouteErrorsRouteImport } from './routes/route-errors'
 import { Route as ResetPasswordRouteImport } from './routes/reset-password'
 import { Route as ReportJobsRouteImport } from './routes/report-jobs'
+import { Route as PrimeRouteImport } from './routes/prime'
 import { Route as PartnerPortalRouteImport } from './routes/partner-portal'
 import { Route as OversightRouteImport } from './routes/oversight'
 import { Route as NotificationsRouteImport } from './routes/notifications'
@@ -248,6 +249,11 @@ const ResetPasswordRoute = ResetPasswordRouteImport.update({
 const ReportJobsRoute = ReportJobsRouteImport.update({
   id: '/report-jobs',
   path: '/report-jobs',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PrimeRoute = PrimeRouteImport.update({
+  id: '/prime',
+  path: '/prime',
   getParentRoute: () => rootRouteImport,
 } as any)
 const PartnerPortalRoute = PartnerPortalRouteImport.update({
@@ -1293,6 +1299,7 @@ export interface FileRoutesByFullPath {
   '/notifications': typeof NotificationsRoute
   '/oversight': typeof OversightRoute
   '/partner-portal': typeof PartnerPortalRoute
+  '/prime': typeof PrimeRoute
   '/report-jobs': typeof ReportJobsRoute
   '/reset-password': typeof ResetPasswordRoute
   '/route-errors': typeof RouteErrorsRoute
@@ -1495,6 +1502,7 @@ export interface FileRoutesByTo {
   '/notifications': typeof NotificationsRoute
   '/oversight': typeof OversightRoute
   '/partner-portal': typeof PartnerPortalRoute
+  '/prime': typeof PrimeRoute
   '/report-jobs': typeof ReportJobsRoute
   '/reset-password': typeof ResetPasswordRoute
   '/route-errors': typeof RouteErrorsRoute
@@ -1697,6 +1705,7 @@ export interface FileRoutesById {
   '/notifications': typeof NotificationsRoute
   '/oversight': typeof OversightRoute
   '/partner-portal': typeof PartnerPortalRoute
+  '/prime': typeof PrimeRoute
   '/report-jobs': typeof ReportJobsRoute
   '/reset-password': typeof ResetPasswordRoute
   '/route-errors': typeof RouteErrorsRoute
@@ -1901,6 +1910,7 @@ export interface FileRouteTypes {
     | '/notifications'
     | '/oversight'
     | '/partner-portal'
+    | '/prime'
     | '/report-jobs'
     | '/reset-password'
     | '/route-errors'
@@ -2103,6 +2113,7 @@ export interface FileRouteTypes {
     | '/notifications'
     | '/oversight'
     | '/partner-portal'
+    | '/prime'
     | '/report-jobs'
     | '/reset-password'
     | '/route-errors'
@@ -2304,6 +2315,7 @@ export interface FileRouteTypes {
     | '/notifications'
     | '/oversight'
     | '/partner-portal'
+    | '/prime'
     | '/report-jobs'
     | '/reset-password'
     | '/route-errors'
@@ -2507,6 +2519,7 @@ export interface RootRouteChildren {
   NotificationsRoute: typeof NotificationsRoute
   OversightRoute: typeof OversightRoute
   PartnerPortalRoute: typeof PartnerPortalRoute
+  PrimeRoute: typeof PrimeRoute
   ReportJobsRoute: typeof ReportJobsRoute
   ResetPasswordRoute: typeof ResetPasswordRoute
   RouteErrorsRoute: typeof RouteErrorsRoute
@@ -2720,6 +2733,13 @@ declare module '@tanstack/react-router' {
       path: '/report-jobs'
       fullPath: '/report-jobs'
       preLoaderRoute: typeof ReportJobsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/prime': {
+      id: '/prime'
+      path: '/prime'
+      fullPath: '/prime'
+      preLoaderRoute: typeof PrimeRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/partner-portal': {
@@ -4208,6 +4228,7 @@ const rootRouteChildren: RootRouteChildren = {
   NotificationsRoute: NotificationsRoute,
   OversightRoute: OversightRoute,
   PartnerPortalRoute: PartnerPortalRoute,
+  PrimeRoute: PrimeRoute,
   ReportJobsRoute: ReportJobsRoute,
   ResetPasswordRoute: ResetPasswordRoute,
   RouteErrorsRoute: RouteErrorsRoute,
