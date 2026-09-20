@@ -21,6 +21,7 @@ import {
   resolvePrimeSource,
 } from "./prime-backend.server";
 import { runSqlOnProject } from "./backend-provisioning.server";
+import { OversizedMigrationError } from "./oversizedMigration.pure";
 import {
   extractCreatedObjects,
   reconcileMigration,
@@ -98,9 +99,36 @@ export async function buildPrimeLedgerReconciliation(
     let sql: string;
     try {
       sql = await corpus.loadSql(m.id);
-    } catch {
-      // A body we cannot read is not a migration we can vouch for.
-      evidence.push({ id: m.id, name: m.name, verdict: "indeterminate", creates: [], missing: [] });
+    } catch (e) {
+      /*
+        A body we cannot read is not a migration we can vouch for — and it is
+        not a migration that creates nothing either. Measured over the prime's
+        corpus, NINE of the fifty indeterminate rows in this window are the
+        41 MB template-library seeds, refused by `MAX_MIGRATION_BYTES` before
+        the round trip. Filing them under the same word as the forty-one that
+        WERE read is the `absent is never zero` conflation, on the largest
+        bodies in the backlog.
+
+        The verdict is still `indeterminate`, because it is still true. What
+        the row now carries is why, and how big — so an operator reads "41.7 MB,
+        not read here" rather than a claim about SQL nobody opened.
+      */
+      const oversize = e instanceof OversizedMigrationError ? e : null;
+      evidence.push({
+        id: m.id,
+        name: m.name,
+        verdict: "indeterminate",
+        creates: [],
+        missing: [],
+        unread: {
+          bytes: oversize?.bytes ?? null,
+          why: oversize
+            ? `past the ${(oversize.maxBytes / 1_048_576).toFixed(0)} MB ceiling for a single read`
+            : e instanceof Error
+              ? e.message
+              : "the prime's copy could not be read",
+        },
+      });
       continue;
     }
     evidence.push(reconcileMigration({ id: m.id, name: m.name }, sql, present));

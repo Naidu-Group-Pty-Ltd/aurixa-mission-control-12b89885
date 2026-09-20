@@ -86,6 +86,7 @@ import { Route as HooksHandoffObservabilityPollRouteImport } from './routes/hook
 import { Route as HooksGithubRouteImport } from './routes/hooks.github'
 import { Route as HooksFleetSecretForwardReconcileRouteImport } from './routes/hooks.fleet-secret-forward-reconcile'
 import { Route as HooksFleetMigrationSyncRouteImport } from './routes/hooks.fleet-migration-sync'
+import { Route as HooksFleetMigrationDrainRouteImport } from './routes/hooks.fleet-migration-drain'
 import { Route as HooksFleetDriftRouteImport } from './routes/hooks.fleet-drift'
 import { Route as HooksFeedbackForwardRetryRouteImport } from './routes/hooks.feedback-forward-retry'
 import { Route as HooksExpireReservationsRouteImport } from './routes/hooks.expire-reservations'
@@ -602,6 +603,12 @@ const HooksFleetMigrationSyncRoute = HooksFleetMigrationSyncRouteImport.update({
   path: '/hooks/fleet-migration-sync',
   getParentRoute: () => rootRouteImport,
 } as any)
+const HooksFleetMigrationDrainRoute =
+  HooksFleetMigrationDrainRouteImport.update({
+    id: '/hooks/fleet-migration-drain',
+    path: '/hooks/fleet-migration-drain',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const HooksFleetDriftRoute = HooksFleetDriftRouteImport.update({
   id: '/hooks/fleet-drift',
   path: '/hooks/fleet-drift',
@@ -1348,6 +1355,7 @@ export interface FileRoutesByFullPath {
   '/hooks/expire-reservations': typeof HooksExpireReservationsRoute
   '/hooks/feedback-forward-retry': typeof HooksFeedbackForwardRetryRoute
   '/hooks/fleet-drift': typeof HooksFleetDriftRoute
+  '/hooks/fleet-migration-drain': typeof HooksFleetMigrationDrainRoute
   '/hooks/fleet-migration-sync': typeof HooksFleetMigrationSyncRoute
   '/hooks/fleet-secret-forward-reconcile': typeof HooksFleetSecretForwardReconcileRoute
   '/hooks/github': typeof HooksGithubRoute
@@ -1548,6 +1556,7 @@ export interface FileRoutesByTo {
   '/hooks/expire-reservations': typeof HooksExpireReservationsRoute
   '/hooks/feedback-forward-retry': typeof HooksFeedbackForwardRetryRoute
   '/hooks/fleet-drift': typeof HooksFleetDriftRoute
+  '/hooks/fleet-migration-drain': typeof HooksFleetMigrationDrainRoute
   '/hooks/fleet-migration-sync': typeof HooksFleetMigrationSyncRoute
   '/hooks/fleet-secret-forward-reconcile': typeof HooksFleetSecretForwardReconcileRoute
   '/hooks/github': typeof HooksGithubRoute
@@ -1750,6 +1759,7 @@ export interface FileRoutesById {
   '/hooks/expire-reservations': typeof HooksExpireReservationsRoute
   '/hooks/feedback-forward-retry': typeof HooksFeedbackForwardRetryRoute
   '/hooks/fleet-drift': typeof HooksFleetDriftRoute
+  '/hooks/fleet-migration-drain': typeof HooksFleetMigrationDrainRoute
   '/hooks/fleet-migration-sync': typeof HooksFleetMigrationSyncRoute
   '/hooks/fleet-secret-forward-reconcile': typeof HooksFleetSecretForwardReconcileRoute
   '/hooks/github': typeof HooksGithubRoute
@@ -1953,6 +1963,7 @@ export interface FileRouteTypes {
     | '/hooks/expire-reservations'
     | '/hooks/feedback-forward-retry'
     | '/hooks/fleet-drift'
+    | '/hooks/fleet-migration-drain'
     | '/hooks/fleet-migration-sync'
     | '/hooks/fleet-secret-forward-reconcile'
     | '/hooks/github'
@@ -2153,6 +2164,7 @@ export interface FileRouteTypes {
     | '/hooks/expire-reservations'
     | '/hooks/feedback-forward-retry'
     | '/hooks/fleet-drift'
+    | '/hooks/fleet-migration-drain'
     | '/hooks/fleet-migration-sync'
     | '/hooks/fleet-secret-forward-reconcile'
     | '/hooks/github'
@@ -2354,6 +2366,7 @@ export interface FileRouteTypes {
     | '/hooks/expire-reservations'
     | '/hooks/feedback-forward-retry'
     | '/hooks/fleet-drift'
+    | '/hooks/fleet-migration-drain'
     | '/hooks/fleet-migration-sync'
     | '/hooks/fleet-secret-forward-reconcile'
     | '/hooks/github'
@@ -2553,6 +2566,7 @@ export interface RootRouteChildren {
   HooksExpireReservationsRoute: typeof HooksExpireReservationsRoute
   HooksFeedbackForwardRetryRoute: typeof HooksFeedbackForwardRetryRoute
   HooksFleetDriftRoute: typeof HooksFleetDriftRoute
+  HooksFleetMigrationDrainRoute: typeof HooksFleetMigrationDrainRoute
   HooksFleetMigrationSyncRoute: typeof HooksFleetMigrationSyncRoute
   HooksFleetSecretForwardReconcileRoute: typeof HooksFleetSecretForwardReconcileRoute
   HooksGithubRoute: typeof HooksGithubRoute
@@ -3189,6 +3203,13 @@ declare module '@tanstack/react-router' {
       path: '/hooks/fleet-migration-sync'
       fullPath: '/hooks/fleet-migration-sync'
       preLoaderRoute: typeof HooksFleetMigrationSyncRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/fleet-migration-drain': {
+      id: '/hooks/fleet-migration-drain'
+      path: '/hooks/fleet-migration-drain'
+      fullPath: '/hooks/fleet-migration-drain'
+      preLoaderRoute: typeof HooksFleetMigrationDrainRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/hooks/fleet-drift': {
@@ -4247,6 +4268,7 @@ const rootRouteChildren: RootRouteChildren = {
   HooksExpireReservationsRoute: HooksExpireReservationsRoute,
   HooksFeedbackForwardRetryRoute: HooksFeedbackForwardRetryRoute,
   HooksFleetDriftRoute: HooksFleetDriftRoute,
+  HooksFleetMigrationDrainRoute: HooksFleetMigrationDrainRoute,
   HooksFleetMigrationSyncRoute: HooksFleetMigrationSyncRoute,
   HooksFleetSecretForwardReconcileRoute: HooksFleetSecretForwardReconcileRoute,
   HooksGithubRoute: HooksGithubRoute,

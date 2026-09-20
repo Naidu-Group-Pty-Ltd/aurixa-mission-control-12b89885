@@ -405,3 +405,73 @@ export function compareMigrationQueue(a: MigrationQueueRow, b: MigrationQueueRow
 export function orderMigrationQueue<T extends MigrationQueueRow>(rows: readonly T[]): T[] {
   return [...rows].sort(compareMigrationQueue);
 }
+
+/**
+ * What this pass was asked to do.
+ *
+ * ## The cadence was chosen on a premise that stopped being true
+ *
+ * `20260827070000_schedule_fleet_migration_sync.sql` says it in its own words:
+ *
+ * > THIRTY MINUTES, not one. Nothing here is queue-draining: a clone's schema
+ * > does not change between ticks, and there is no user waiting on the next one.
+ *
+ * That was correct when it was written, and oversized seeds made it false. A
+ * clone mid-seed is exactly a queue being drained: the template-library seed is
+ * **45 statements** at the 1 MB ceiling (measured 20 Sep 2026 by running
+ * `readSeedShape` + `chunkSeedStatements` over
+ * `20261203000000_seed_template_library_v14_tier_separation.sql`, 41,678,125
+ * bytes, 543 rows), each takes seconds to send, and a 45-second invocation
+ * carries roughly two dozen of them. The rest waits half an hour.
+ *
+ * That is the whole of the drain's slowness, and it is worth saying what is
+ * NOT: the prefix a resumed pass re-reads. GitHub's blob endpoint ignores
+ * `Range` (measured — HTTP 200 with the full `Content-Length` and no
+ * `Accept-Ranges`), so a resumed pass does stream the whole body and discard
+ * the statements it has already sent. That costs **~2.4 s of a 45 s budget**
+ * at the ~17 MB/s this egress measures, against ~1.7 s for each statement it
+ * then sends. It is about 5% of a pass, not the reason a seed takes a day.
+ *
+ * ## Two modes, one lane
+ *
+ * `sweep` is the half-hourly pass over the whole fleet and is unchanged.
+ * `drain` is a short-cadence tick that serves ONLY clones with a seed in
+ * flight, so a tick on a level fleet selects nothing and returns before the
+ * pass opens the prime corpus — no GitHub call, no model call, no write.
+ *
+ * It is a narrowing and never a widening: a drain tick can reach no clone a
+ * sweep would not, so nothing it does is a thing the half-hourly pass was not
+ * already entitled to do more slowly.
+ *
+ * The mode is carried by the ROUTE the scheduler posts to, never by a field in
+ * the body — see `fleetMigrationHook.server.ts` for why, and for the gate that
+ * settles it.
+ */
+export type FleetPassMode = "sweep" | "drain";
+
+/**
+ * Is this clone part-way through a seed?
+ *
+ * Asked through `chunkCursorFor` rather than of the column, for the reason the
+ * type above already gives: `chunk_cursor` is raw jsonb, and a row carrying a
+ * shape this lane cannot narrow is not a row with a position in a seed. A
+ * truthiness check would select such a row on every tick for ever, since
+ * nothing about it changes and no pass can act on it.
+ */
+export function isMidSeed(row: { chunk_cursor?: unknown }): boolean {
+  return chunkCursorFor(row.chunk_cursor) !== null;
+}
+
+/**
+ * The rows this mode may serve, out of the ones already judged eligible.
+ *
+ * Applied AFTER `migrationEligibility` and never instead of it: a drain tick
+ * must not reach a blocked, claimed or unprovisioned clone merely because it
+ * carries a cursor.
+ */
+export function scopeQueueToMode<T extends MigrationQueueRow>(
+  rows: readonly T[],
+  mode: FleetPassMode,
+): T[] {
+  return mode === "drain" ? rows.filter(isMidSeed) : [...rows];
+}

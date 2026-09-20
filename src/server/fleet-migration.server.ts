@@ -43,6 +43,11 @@
  * owed.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { supabaseAdmin } from "@/integrations/supabase/client.server";
+import { verifyCronAuth } from "@/server/cron-auth.server";
+import { beginGithubLane } from "@/server/githubUsageMeter";
+import { decideSpend } from "@/server/cascade/githubBudget.pure";
+import { readGitHubRemaining } from "@/server/githubAllowance.server";
 import type { Database } from "@/integrations/supabase/types";
 import { getAppOctokit } from "./github-app.server";
 import {
@@ -60,8 +65,11 @@ import {
   MIGRATION_CLAIMABLE_STATUSES,
   blockIsDischarged,
   blockIsUpstreamRefusal,
+  isMidSeed,
   migrationEligibility,
   orderMigrationQueue,
+  scopeQueueToMode,
+  type FleetPassMode,
   type MigrationSkipReason,
 } from "./fleetMigrationEligibility.pure";
 import { notifyOperators, writeAuditLog } from "./audit.server";
@@ -730,6 +738,43 @@ export async function openScopedPrimeCorpus(
 type CorpusMetaOf = Awaited<ReturnType<typeof openPrimeMigrationCorpus>>["metas"][number];
 
 /**
+ * Is there a seed in flight anywhere in the fleet?
+ *
+ * The drain tick's own front door, asked BEFORE the hook reads the GitHub
+ * allowance, so a tick on a level fleet costs one indexed select and nothing
+ * else — no round trip to GitHub, not even the free one to `/rate_limit`. That
+ * is what a five-minute cadence has to cost to be worth having.
+ *
+ * ## It may only ever be MORE permissive than the pass
+ *
+ * This asks `isMidSeed` and nothing else. It deliberately does not apply
+ * `migrationEligibility`, though the pass will: a clone whose claim has gone
+ * stale reads as ineligible here and IS served by the pass, because
+ * `reclaimStale` runs inside it. Asking the full question here would skip the
+ * tick that would have recovered that clone, and the stale claim would then
+ * wait for the half-hourly sweep.
+ *
+ * So the two answers are allowed to differ in exactly one direction. A false
+ * yes costs one cheap pass that selects nothing; a false no costs a clone its
+ * place in the drain. The test that pins this pins the direction, not the
+ * predicate.
+ *
+ * An unreadable table answers YES. "We could not check" is not "there is
+ * nothing to do", and the pass is the thing that reports a broken read.
+ */
+export async function fleetDrainHasWork(supabase: Db): Promise<boolean> {
+  const { data, error } = await supabase
+    .from("clone_backends")
+    .select("clone_id, chunk_cursor")
+    .not("chunk_cursor", "is", null);
+  if (error) {
+    console.warn("[fleet-migration] drain pre-check could not read the fleet:", error.message);
+    return true;
+  }
+  return (data ?? []).some((row) => isMidSeed(row));
+}
+
+/**
  * Apply the prime's migrations to a bounded slice of the fleet.
  *
  * `actorUserId` is the operator when a person pressed the button and null when
@@ -737,9 +782,21 @@ type CorpusMetaOf = Awaited<ReturnType<typeof openPrimeMigrationCorpus>>["metas"
  */
 export async function runFleetMigrationSync(
   supabase: Db,
-  opts?: { batchSize?: number; actorUserId?: string | null; budgetMs?: number },
+  opts?: {
+    batchSize?: number;
+    actorUserId?: string | null;
+    budgetMs?: number;
+    /**
+     * `sweep` (the default) is the half-hourly pass over the whole fleet.
+     * `drain` serves only the clones with a seed in flight — see
+     * `FleetPassMode`, which carries the measurement that made a second
+     * cadence necessary.
+     */
+    mode?: FleetPassMode;
+  },
 ): Promise<FleetMigrationResult> {
   const batchSize = Math.max(1, opts?.batchSize ?? DEFAULT_BATCH);
+  const mode: FleetPassMode = opts?.mode ?? "sweep";
   // Taken before the first read, so everything this pass spends is inside it.
   const deadlineAt = Date.now() + Math.max(5_000, opts?.budgetMs ?? FLEET_PASS_BUDGET_MS);
 
@@ -926,8 +983,21 @@ export async function runFleetMigrationSync(
   // at all — and because a comparator that returned 0 on a tie handed this
   // fleet's whole budget to one clone for as long as it was measured. See
   // `compareMigrationQueue`.
+  /*
+    THE MODE NARROWS WHAT IS ALREADY ELIGIBLE, AND NEVER THE OTHER WAY.
+
+    Applied after `migrationEligibility` and before the order, so a drain tick
+    reaches no clone a sweep would not, and the clone it serves first is chosen
+    by the same comparator. A tick that selects nothing falls out at the early
+    return below — which sits ABOVE the corpus open, so an idle drain costs no
+    GitHub call at all. That placement is what makes a five-minute cadence
+    affordable, and `fleetDrainSelectsNothingWithoutTheCorpus` pins it.
+  */
   const backends = orderMigrationQueue(
-    verdicts.filter((v) => v.verdict.eligible).map((v) => v.row),
+    scopeQueueToMode(
+      verdicts.filter((v) => v.verdict.eligible).map((v) => v.row),
+      mode,
+    ),
   ).slice(0, batchSize);
 
   // Names for BOTH sets, read once. A skipped clone is reported by name, so
@@ -1986,4 +2056,114 @@ export async function runFleetMigrationSync(
   });
 
   return out;
+}
+
+/**
+ * The fleet migration lane's cron handler, for both of its cadences.
+ *
+ * ## Why two doors and one implementation
+ *
+ * `/hooks/fleet-migration-sync` is the half-hourly pass over the whole fleet.
+ * `/hooks/fleet-migration-drain` is a five-minute tick that serves only the
+ * clones with a seed in flight.
+ *
+ * They are separate ROUTES rather than one route reading a mode out of the
+ * cron job's body, for two reasons and neither is style. `check-cron-coverage`
+ * refuses two jobs pointing at one hook — correctly, because that is what a
+ * rescheduled job under a new name looks like when nobody retired the old one,
+ * and the gate cannot tell that apart from a deliberate second cadence. And a
+ * mode carried in a body is invisible in `cron.job`: an operator reading the
+ * schedule would see the same URL twice and no way to tell which is which.
+ *
+ * They are one HANDLER because everything either one does — the auth, the
+ * allowance, the lane attribution, the shape of the answer — is the same
+ * question asked at a different rate, and two copies of that is how one of
+ * them comes to be missing a guard the other has.
+ *
+ * It lives in the LANE'S module rather than one of its own, and that is not
+ * filing. `everyGithubLaneYields.contract.test.ts` decides which routes must
+ * consult the GitHub budget by following ONE import hop from the route, so a
+ * route whose work reaches GitHub two hops away is not detected as a lane at
+ * all. Putting the handler in a module of its own would have hidden both of
+ * these doors from that gate. Deepening the gate is a change to every lane
+ * and is filed separately, with the measurement; keeping the handler here
+ * costs nothing and leaves the gate exactly as strong as it was.
+ *
+ * ## What the drain mode changes, and what it cannot
+ *
+ * The mode NARROWS an already-eligible set (`scopeQueueToMode`, applied after
+ * `migrationEligibility`), so a drain tick can reach no clone a sweep would
+ * not. It grants no new authority; it stops a clone already being served from
+ * waiting half an hour between statements.
+ */
+export async function handleFleetMigrationCron(
+  request: Request,
+  mode: FleetPassMode,
+): Promise<Response> {
+  const auth = verifyCronAuth(request);
+  if (!auth.ok) return auth.response;
+
+  // Attribute this invocation's App-installation calls. See githubUsageMeter.ts:
+  // the count is taken at the one hook every call already passes through, and
+  // named here. The two cadences are named apart, because "the fleet lane spent
+  // the window" and "the drain spent the window" send an operator to different
+  // places.
+  beginGithubLane(mode === "drain" ? "fleet-migration-drain" : "fleet-migration-sync");
+
+  try {
+    /*
+      THE CHEAP QUESTION FIRST, AND ONLY THE DRAIN ASKS IT.
+
+      A drain tick exists to move a seed along, and on a level fleet there is
+      none to move. Asking the fleet table before `readGitHubRemaining` keeps an
+      idle tick down to one indexed select: the rate-limit endpoint costs no
+      quota, but it is still a round trip to GitHub, 288 times a day, for
+      nothing.
+
+      It fails OPEN — an unreadable table answers yes and the pass runs, because
+      the pass is the thing that reports a broken read, and a drain that
+      silences itself on a failed read is a drain that stops for a reason
+      nobody is told.
+    */
+    if (mode === "drain" && !(await fleetDrainHasWork(supabaseAdmin))) {
+      return new Response(JSON.stringify({ success: true, mode, skipped: "no seed in flight" }), {
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    // This lane reads the prime's whole migration corpus from GitHub and then a
+    // body per unapplied migration per clone, on an installation it shares with
+    // every other lane. It stood down for nothing until 19 Sep 2026: it
+    // exhausted the window that night, and because a quota refusal mid-pass
+    // looked like a migration the clone had rejected, three clones were ejected
+    // from the fleet on the strength of it. Both halves of that are fixed —
+    // this is the half that stops it spending the window down in the first
+    // place.
+    const spend = decideSpend({ role: "actor", remaining: await readGitHubRemaining() });
+    if (!spend.proceed) {
+      return new Response(JSON.stringify({ success: true, mode, skipped: spend.why }), {
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    const result = await runFleetMigrationSync(supabaseAdmin, { mode });
+    // 200 with the failures in the body rather than 500: one clone whose
+    // migration failed is not a failed run, and a job that reports failure for
+    // a state it handled correctly is one people stop reading.
+    //
+    // `result.error` is a different thing from a clone's failure and was being
+    // flattened into the same `success: true`. It is set only where the PASS
+    // could not run at all — the prime unconfigured, the backends unreadable,
+    // the stale-claim sweep refused — and a run that touched no clone reporting
+    // as a healthy one is the reading this whole lane exists to stop.
+    return new Response(JSON.stringify({ success: !result.error, mode, ...result }), {
+      status: result.error ? 500 : 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Fleet migration sync failed";
+    console.error(`Fleet migration ${mode} failed:`, msg);
+    return new Response(JSON.stringify({ success: false, mode, error: msg }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
 }

@@ -44,6 +44,31 @@
  * everything". A pure-`ALTER` migration and a rollback script are
  * indistinguishable to this test, and one of those must never be stamped.
  *
+ * ## A body that was never read is not a body that creates nothing
+ *
+ * Measured over the prime's own corpus on 20 Sep 2026, in the window this
+ * report exists for — the 118 migrations after `20260831060152`:
+ *
+ *   68  carry a creation this module can verify (321 objects: 122 columns,
+ *       91 indexes, 64 tables, 32 functions, 8 triggers, 3 views, 1 sequence)
+ *   41  were READ and create nothing it can name
+ *    9  were NEVER READ — every one a 41 MB template-library seed, refused by
+ *       `MAX_MIGRATION_BYTES` before the round trip
+ *
+ * Those nine used to be filed under the same word as the forty-one, which is
+ * `absent is never zero` in the one place it costs most: the nine are the
+ * template-library seeds, the largest and most consequential bodies in the
+ * backlog, and a report whose first act is to tell an operator they "create
+ * nothing this module can name" is describing files it never opened.
+ *
+ * So the evidence row carries `unread` and the summary counts it. The VERDICT
+ * stays `indeterminate` — a body nobody read did not create anything this
+ * module named, so the third reading is still the true one, and a fourth
+ * verdict would have to be handled by every consumer of the three. What
+ * changes is that the row says WHY, and `unread` is reported as a subset of
+ * `indeterminate` rather than beside it, so the three verdicts still sum to
+ * the row count.
+ *
  * ## Why the extraction is deliberately narrow
  *
  * Only unambiguous `CREATE` forms are recognised. A parser that guessed at the
@@ -80,6 +105,13 @@ export type MigrationEvidence = {
   creates: CreatedObject[];
   /** The subset the prime does not have. Empty unless `unsatisfied`. */
   missing: CreatedObject[];
+  /**
+   * Set only where the SQL could not be read at all, which is never the same
+   * as reading it and finding no creation. `reconcileMigration` never sets
+   * it — it is handed SQL — so it can only ever be written by the caller that
+   * failed to fetch a body.
+   */
+  unread?: { bytes: number | null; why: string };
 };
 
 /** Strip line and block comments, and the bodies of dollar-quoted strings. */
@@ -224,6 +256,12 @@ export type ReconciliationSummary = {
   satisfied: number;
   unsatisfied: number;
   indeterminate: number;
+  /**
+   * How many of `indeterminate` are a body that was never read. A SUBSET, not
+   * a fourth bucket: the three verdicts still sum to the row count, and this
+   * says how much of the third one is a measurement that did not happen.
+   */
+  unread: number;
 };
 
 export function summarise(rows: readonly MigrationEvidence[]): ReconciliationSummary {
@@ -231,5 +269,6 @@ export function summarise(rows: readonly MigrationEvidence[]): ReconciliationSum
     satisfied: rows.filter((r) => r.verdict === "satisfied").length,
     unsatisfied: rows.filter((r) => r.verdict === "unsatisfied").length,
     indeterminate: rows.filter((r) => r.verdict === "indeterminate").length,
+    unread: rows.filter((r) => r.unread).length,
   };
 }

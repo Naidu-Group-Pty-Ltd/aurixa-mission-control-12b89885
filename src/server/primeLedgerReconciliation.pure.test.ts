@@ -5,6 +5,7 @@ import {
   reconcileMigration,
   stripSqlNoise,
   summarise,
+  type MigrationEvidence,
 } from "./primeLedgerReconciliation.pure";
 
 describe("extractCreatedObjects", () => {
@@ -184,6 +185,73 @@ describe("summarise", () => {
       reconcileMigration({ id: "2", name: "b" }, "CREATE TABLE public.b (id int);", new Set()),
       reconcileMigration({ id: "3", name: "c" }, "GRANT SELECT ON public.a TO anon;", new Set()),
     ];
-    expect(summarise(rows)).toEqual({ satisfied: 1, unsatisfied: 1, indeterminate: 1 });
+    expect(summarise(rows)).toEqual({
+      satisfied: 1,
+      unsatisfied: 1,
+      indeterminate: 1,
+      unread: 0,
+    });
+  });
+
+  /*
+    A BODY THAT WAS NEVER READ IS NOT A BODY THAT CREATES NOTHING.
+
+    Measured over the prime's corpus 20 Sep 2026, in the window this report
+    serves — 118 migrations after `20260831060152` — fifty came back
+    indeterminate and NINE of those were never opened: each a 41 MB
+    template-library seed, refused by `MAX_MIGRATION_BYTES` before the round
+    trip. The largest and most consequential bodies in the backlog were being
+    reported as "creates nothing this module can name".
+  */
+  it("counts an unread body as a SUBSET of indeterminate, never beside it", () => {
+    const read = reconcileMigration(
+      { id: "1", name: "a" },
+      "GRANT SELECT ON public.a TO anon;",
+      new Set(),
+    );
+    const unread: MigrationEvidence = {
+      id: "2",
+      name: "20261203000000_seed_template_library_v14_tier_separation.sql",
+      verdict: "indeterminate",
+      creates: [],
+      missing: [],
+      unread: { bytes: 41_678_125, why: "past the 8 MB ceiling for a single read" },
+    };
+    const sum = summarise([read, unread]);
+
+    // The three verdicts still sum to the rows. `unread` is how much of the
+    // third one is a measurement that did not happen — add it and the
+    // arithmetic stops working, which is exactly why it is not a fourth
+    // bucket.
+    expect(sum.satisfied + sum.unsatisfied + sum.indeterminate).toBe(2);
+    expect(sum.indeterminate).toBe(2);
+    expect(sum.unread).toBe(1);
+  });
+
+  it("never lets `unread` exceed the verdict it is a subset of", () => {
+    const rows: MigrationEvidence[] = [
+      { id: "1", name: "a", verdict: "indeterminate", creates: [], missing: [] },
+      {
+        id: "2",
+        name: "b",
+        verdict: "indeterminate",
+        creates: [],
+        missing: [],
+        unread: { bytes: null, why: "the prime's copy could not be read" },
+      },
+    ];
+    const sum = summarise(rows);
+    expect(sum.unread).toBeLessThanOrEqual(sum.indeterminate);
+  });
+
+  /*
+    The pure module is handed SQL, so it can never be the thing that failed to
+    fetch a body. Setting `unread` here would be a module claiming a failure
+    that happened somewhere it cannot see.
+  */
+  it("reconcileMigration never sets `unread`, because it is handed the SQL", () => {
+    const r = reconcileMigration({ id: "1", name: "a" }, "", new Set());
+    expect(r.verdict).toBe("indeterminate");
+    expect(r.unread).toBeUndefined();
   });
 });

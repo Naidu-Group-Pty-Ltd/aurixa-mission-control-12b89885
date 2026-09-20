@@ -7,10 +7,10 @@ never saw them.
 
 Measured on 2026-08-27, two examples that had both merged and neither existed:
 
-| migration | what it was for | what its absence cost |
-| --- | --- | --- |
-| `20260826070000_seed_mirror_exclusions` | the mirror cascade's exclusion policy | the cascade could still revert a clone's backend identity — the lead-magnet embed would go back to posting leads into the PRIME's database |
-| `20260827030000_schedule_allowed_origins_reconcile` | the `ALLOWED_ORIGINS` reconciler's cron job | a worker that shipped correctly, deployed correctly, and was never once called |
+| migration                                           | what it was for                             | what its absence cost                                                                                                                      |
+| --------------------------------------------------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `20260826070000_seed_mirror_exclusions`             | the mirror cascade's exclusion policy       | the cascade could still revert a clone's backend identity — the lead-magnet embed would go back to posting leads into the PRIME's database |
+| `20260827030000_schedule_allowed_origins_reconcile` | the `ALLOWED_ORIGINS` reconciler's cron job | a worker that shipped correctly, deployed correctly, and was never once called                                                             |
 
 Nothing reported either. **A migration that never runs looks exactly like one
 that ran and did nothing.**
@@ -23,7 +23,7 @@ it is not obvious from looking at either side alone.
 
 `supabase_migrations.schema_migrations` and `supabase/migrations/` are **two
 different namespaces describing the same history.** Lovable records a migration
-under the timestamp at which *it* applied the file, not the timestamp in the
+under the timestamp at which _it_ applied the file, not the timestamp in the
 filename. Against 207 files:
 
 ```
@@ -63,7 +63,7 @@ database for a `postgres`-owned pg_cron job to apply. Everything else about the
 corpus is left alone.
 
 **The Management API path this replaced could never have worked.** Mission
-Control's database is a Lovable Cloud project in *Lovable's* Supabase
+Control's database is a Lovable Cloud project in _Lovable's_ Supabase
 organisation: `get_project` answers 403, and Supabase's own documentation says
 such a project has no service-role key and no direct database URL. The workflow
 failed on every run and blamed a missing `SUPABASE_ACCESS_TOKEN`; setting it
@@ -99,10 +99,10 @@ this pipeline exists to remove — assert by effect, never by configuration.
 
 ## What it needs
 
-| setting | where | value |
-| --- | --- | --- |
-| `CRON_SECRET` | Settings → Secrets → Actions | the SAME value as `cron_secret` in Mission Control's Supabase Vault |
-| `MISSION_CONTROL_URL` | Settings → Variables → Actions | this deployment's public origin |
+| setting               | where                          | value                                                               |
+| --------------------- | ------------------------------ | ------------------------------------------------------------------- |
+| `CRON_SECRET`         | Settings → Secrets → Actions   | the SAME value as `cron_secret` in Mission Control's Supabase Vault |
+| `MISSION_CONTROL_URL` | Settings → Variables → Actions | this deployment's public origin                                     |
 
 Neither is defaulted, and neither should be guessed. A wrong origin posts
 migration SQL to somebody else's deployment. `cron_secret` is the value 32
@@ -159,10 +159,9 @@ merge and never apply, both silent:
   file applies and is then indistinguishable from the first, and a replay skips
   it entirely. Which file loses is decided by filename sort order.
 
-It is deliberately static. Whether a migration has been *applied* is a question
+It is deliberately static. Whether a migration has been _applied_ is a question
 only the database can answer, and this project's ledger cannot answer it
 honestly — which is the whole reason this document exists.
-
 
 ---
 
@@ -213,12 +212,55 @@ ref for every clone, an idempotent applier (`applyPrimeMigrations`, which unions
 both ledgers on the clone and skips what is applied), and a worker system. The
 scalable answer is to use them.
 
-| | Mission Control's own schema | the fleet |
-| --- | --- | --- |
-| targets | 1 project | N projects |
-| driver | GitHub Actions on merge | `/hooks/fleet-migration-sync`, every 30 min |
-| credential | one repo secret | the token Mission Control already has |
-| failure is visible as | a red check on the commit | an operator notification, per clone |
+|                       | Mission Control's own schema | the fleet                                                                          |
+| --------------------- | ---------------------------- | ---------------------------------------------------------------------------------- |
+| targets               | 1 project                    | N projects                                                                         |
+| driver                | GitHub Actions on merge      | `/hooks/fleet-migration-sync` every 30 min, `/hooks/fleet-migration-drain` every 5 |
+| credential            | one repo secret              | the token Mission Control already has                                              |
+| failure is visible as | a red check on the commit    | an operator notification, per clone                                                |
+
+## Two cadences, because one case is a queue
+
+The sweep runs every thirty minutes, and the migration that schedules it states
+why: _"Nothing here is queue-draining: a clone's schema does not change between
+ticks."_ That was true when it was written, and oversized seeds made it false
+for one case.
+
+Measured 20 Sep 2026, by running this repository's own `readSeedShape` and
+`chunkSeedStatements` over the prime's
+`20261203000000_seed_template_library_v14_tier_separation.sql`:
+
+|                                |                               |
+| ------------------------------ | ----------------------------- |
+| seed                           | 41,678,125 bytes, 543 rows    |
+| statements at the 1 MB ceiling | **45**                        |
+| median statement               | 948,212 bytes                 |
+| parse cost, both passes        | ~1.6 s                        |
+| blob fetch, whole file         | ~2.4 s at ~17 MB/s            |
+| send cost, per statement       | ~1.7 s                        |
+| invocation budget              | 45 s, shared across the batch |
+
+So a pass carries roughly two dozen statements and the rest waited half an
+hour, per clone, with four such seeds outstanding. That is the arithmetic that
+made a drain take days.
+
+**`/hooks/fleet-migration-drain` is the same handler on a five-minute tick**,
+serving only clones that carry a chunk cursor. It narrows an already-eligible
+set (`scopeQueueToMode`, applied after `migrationEligibility`), so it reaches no
+clone the sweep cannot, and it asks the fleet table whether anything is in
+flight _before_ it reads the GitHub allowance — an idle tick is one indexed
+select and no round trip to GitHub at all.
+
+### What it is NOT: the prefix a resumed pass re-reads
+
+A resumed pass streams the whole body and discards the statements it already
+sent, because **GitHub's blob endpoint ignores `Range`** — measured, HTTP 200
+carrying the full `Content-Length` with no `Accept-Ranges`, on both
+`/git/blobs/{sha}` and `/contents/{path}`. That re-read is real, and it costs
+about **2.4 s of a 45 s budget**: roughly 5% of a pass, against the ~1.7 s each
+statement it then sends costs. Parking the body somewhere Range-capable to save
+it would buy that 5% for a bucket, an upload, a lifecycle and a parser that can
+start mid-file. The cadence was the other 95%.
 
 ## What the worker does
 
@@ -272,10 +314,10 @@ The fleet sync's corpus is the prime **repo**, narrowed to what the prime's
 and on this deployment the first honest run reported:
 
 ```json
-{"success":true,"processed":1,"advanced":0,"upToDate":1,"failed":[],"withheld":828}
+{ "success": true, "processed": 1, "advanced": 0, "upToDate": 1, "failed": [], "withheld": 828 }
 ```
 
-828 of 962 files, which is alarming until you look at *why*. The repo filenames
+828 of 962 files, which is alarming until you look at _why_. The repo filenames
 and the ledger versions are offset by **seconds**:
 
 ```
@@ -284,22 +326,22 @@ ledger  20250831091523   20250902092312   20251029030453
 ```
 
 That is this document's own two-namespace problem seen from the other side:
-Lovable stamps the ledger with the moment it *applied* a file, not with the
+Lovable stamps the ledger with the moment it _applied_ a file, not with the
 version in the filename. Measured on the oldest 42 repo versions — **0 exact
 matches, 25 within ten seconds, 17 genuinely never applied.**
 
 So `withheld` is split by reason:
 
-| reason | means | what to do |
-| --- | --- | --- |
+| reason           | means                            | what to do                                              |
+| ---------------- | -------------------------------- | ------------------------------------------------------- |
 | `skew_suspected` | a ledger entry exists within 10s | nothing — the prime ran it, under a different timestamp |
-| `never_applied` | nothing near it | look at these |
+| `never_applied`  | nothing near it                  | look at these                                           |
 
 The window is measured, not picked: observed skews are 2–3 seconds.
 
 **The classification never promotes.** `runnable` is decided by exact ledger
 membership and by nothing else; the skew test runs only over migrations that
-have *already* been withheld, and its output reaches a report and an audit row.
+have _already_ been withheld, and its output reaches a report and an audit row.
 Closing that loop is tempting — if `…091525` is "obviously" `…091523`, why not
 run it? Because "obviously" is a guess about somebody else's timestamping, and a
 tenant's database is on the other side of the guess. This corpus contains two
@@ -310,7 +352,7 @@ withheld.
 
 **A `skew_suspected` count is not a clean bill of health.** It is harmless for a
 clone stamped from the prime's ledger, because the effects are already present.
-It is *not* harmless for a clone built by replaying migrations from scratch —
+It is _not_ harmless for a clone built by replaying migrations from scratch —
 that clone would come up short by exactly these files, and there is no key that
 recovers them: the ledger's `name` column is empty for Lovable-applied rows and
 holds a bare UUID for others.
@@ -323,10 +365,10 @@ Measured on `npc-client-dashboard`, 2026-09-01.
 prime's ledger. That rule is right and stays. But the result is a SET, and a
 set cannot say whether a cleared version sits behind a withheld one:
 
-| version | role | prime ledger | sent to the clone |
-| --- | --- | --- | --- |
-| `20261012000000` | **defines** `ensure_builder_stock_settlement_scheduled()` | absent | withheld |
-| `20261027010000` | **calls** it | present | **yes** |
+| version          | role                                                      | prime ledger | sent to the clone |
+| ---------------- | --------------------------------------------------------- | ------------ | ----------------- |
+| `20261012000000` | **defines** `ensure_builder_stock_settlement_scheduled()` | absent       | withheld          |
+| `20261027010000` | **calls** it                                              | present      | **yes**           |
 
 The clone answered `42883: function … does not exist`, `applyPrimeMigrations`
 halted, and provisioning stopped at step 5 of 7 — four steps short of
@@ -379,3 +421,109 @@ test, and one of those must never be stamped.
 
 **Nothing here stamps a ledger.** The report is evidence for an operator, and
 writing the prime's ledger stays an explicit, separate decision.
+
+### Where it is, after a year of being nowhere
+
+That report had **zero call sites** until 20 Sep 2026. It was written,
+documented here, named by `blockageTaxonomy.pure.ts` in the comment defining
+`prime_ledger_hole` — "the one function that computes object-level evidence for
+exactly this" — and named again by `fleetBlockageRecord.test.ts` as this
+repository's live instance of _a module is not shipped until something calls
+it_. Nothing reached it.
+
+It is now **Fleet Manager → Prime Ledger Reconciliation**, directly under the
+sync card, because it answers the question that card raises: `withheld (not
+applied on the prime)` is a count, and a count cannot say which of the two
+states it is counting.
+
+Three rules hold the surface. It **never runs on mount** — the reading is up to
+120 GitHub blob fetches, and the sibling registry card loads eagerly only
+because its reading is one tree listing. It **yields at the scan floor**, not
+the actor floor, because `githubBudget.pure.ts` states the asymmetry: "a
+measurement postponed costs a stale number, while an apply postponed costs a
+clone sitting a migration behind the prime", and an operator's finger does not
+change what the spend is for. And it **offers exactly one control, the
+reading** — a second one would make `satisfied` read as permission.
+
+The `prime_ledger_hole` blockage points at it, and keeps its refusal word for
+word. What that sentence no longer does is assert the half it cannot see: it
+used to open "the prime has that migration in its repository and **has not run
+it**", which is a claim about the prime's schema from a row that has only read
+its ledger.
+
+### A body that was never read is not a body that creates nothing
+
+Measured over the prime's own corpus on 20 Sep 2026, in the window this report
+serves — the **118 migrations after `20260831060152`**:
+
+|                                        |       |
+| -------------------------------------- | ----- |
+| carry a creation the module can verify | 68    |
+| read, and create nothing it can name   | 41    |
+| **never read at all**                  | **9** |
+
+The 68 declare 321 objects: 122 columns, 91 indexes, 64 tables, 32 functions,
+8 triggers, 3 views and 1 sequence.
+
+Every one of the nine is a 41 MB template-library seed, refused by
+`MAX_MIGRATION_BYTES` before the round trip — the largest and most
+consequential bodies in the backlog, and the exact ones the chunked-seed lane
+exists for. They were filed under the same word as the forty-one that _were_
+read, which is `absent is never zero` in the place it costs most: a report
+whose first act is to tell an operator those files "create nothing this module
+can name" is describing files it never opened.
+
+The row carries `unread` now — the reason and the size — and the summary counts
+it. The **verdict stays `indeterminate`**, because it is still true and a
+fourth verdict would have to be handled by every consumer of the three; what
+changes is that `unread` is reported as a **subset** of it, so the three
+verdicts still sum to the row count. Nothing streams those nine bodies to find
+out: at 41 MB each that is ~370 MB on a button press, and all nine are
+`INSERT`-only seeds that would come back `indeterminate` anyway. The honest
+answer is the size and the word "not read".
+
+### The class, ratcheted
+
+A test that names one orphan cannot see the next one — the lesson the drain
+lane paid for a day earlier ("a hand-list cannot see the call it does not
+mention"). `serverExportsHaveCallers.contract.test.ts` derives the set instead:
+every exported `function` in a `*.server.ts` is asked whether anything
+references it.
+
+Scanned over the whole of `src/`: **633 exported server functions, six with no
+reference anywhere.** They are frozen with what each one is — a test seam
+nothing seams, a fleet-wide selftest with no door, a formatter its own comment
+says is "for notifications and the operator UI" while neither calls it — and
+the list can only shrink.
+
+Two things it had to learn by being run.
+
+**A comment is not a caller** — and stripping them is not a regex over the
+file. Two shapes in this codebase break the obvious one, and both produced
+false orphans, which is the failure that gets a gate switched off:
+
+```ts
+redirectSet.add(`${site}/*`); //  a comment opener inside a template literal:
+//                                a file-wide regex runs from here to the next
+//                                closer and eats the declaration below it
+
+const { retargetCloneRepo } = await import(
+  /* @vite-ignore */ "@/lib/_server-shims/clone-repo-retarget.server"
+); //  a comment that CLOSES mid-line: a tracker asking whether the line ENDS
+//     with the closer opens a block and eats the rest of the module
+```
+
+The strip is line-oriented, only opens on a line whose first characters are the
+opener, and looks for the closer anywhere after it. It is deliberately
+conservative — a trailing comment after code survives — because missing an
+orphan costs a name this list does not carry while inventing one costs every
+run.
+
+**A name in a quoted string is not a caller either**: a source contract
+asserting `toContain("someFunction")` is bookkeeping about that function, the
+same way this gate's own freeze list is. Template literals are left alone,
+since `${…}` holds real code. A name inside a regex literal still counts, and
+that limit is stated rather than chased — telling a regex from a division needs
+a tokeniser, and a wrong one invents orphans. Where one function matters that
+much it gets its own mounted contract, which is what
+`primeLedgerReconciliationMounted.test.ts` is.

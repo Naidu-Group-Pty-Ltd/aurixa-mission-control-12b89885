@@ -23,6 +23,7 @@ import { runCascade } from "@/server/cascade-engine.functions";
 import { DriftListSkeleton } from "@/components/list-skeletons";
 import { FleetMigrationSyncCard } from "@/components/fleet-migration-sync-card";
 import { ReferenceDataSyncCard } from "@/components/reference-data-sync-card";
+import { PrimeLedgerReconciliationCard } from "@/components/prime-ledger-reconciliation-card";
 import { BulkLibraryPinsDialog } from "@/components/bulk-library-pins-dialog";
 import { EmptyState } from "@/components/empty-state";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -334,6 +335,14 @@ function FleetManager() {
       </div>
 
       <FleetMigrationSyncCard />
+      {/*
+        Directly under the sync, because it answers the question the sync
+        raises. `withheld (not applied on the prime)` is a count on that card
+        and a count is all it can be: a version absent from the prime's ledger
+        is either one the prime never ran or one it ran untracked, and the two
+        have opposite remedies. This is the reading that tells them apart.
+      */}
+      <PrimeLedgerReconciliationCard />
       <ReferenceDataSyncCard />
 
       <Card>

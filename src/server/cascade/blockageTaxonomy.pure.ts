@@ -368,10 +368,32 @@ export function classifyBlockages(facts: CloneBlockageFacts, now: Date): Detecte
     add(
       "prime_ledger_hole",
       `prime_ledger_hole:${hole.version}`,
-      `${facts.label} is held at the version before ${hole.version}: the prime has that migration in its repository and has not run it, so this clone may not either. ` +
+      /*
+        WHAT THIS ROW KNOWS, AND WHAT IT DOES NOT.
+
+        It used to open "the prime has that migration in its repository and has
+        not run it". The second half is a claim about the prime's SCHEMA, and
+        the only thing behind this row is its LEDGER — `scopeCorpusToPrime`
+        reads `supabase_migrations.schema_migrations` and nothing else.
+
+        On this prime those two disagree, measurably: the database HAS
+        `ensure_builder_stock_settlement_scheduled()` and the ledger does not
+        record the migration that creates it, and 481 of its 890 rows carry an
+        empty name and a version matching no repo file. So "absent from the
+        ledger" covers a file the prime deliberately never ran AND one it ran
+        under an id nothing wrote down, and those have opposite remedies.
+
+        The refusal is UNCHANGED and stays first, because it is the
+        conservative side and this classifier has no evidence to leave it on:
+        nothing here may invite a stamp. What is added is where the evidence
+        lives, so an operator holding this row can find out which of the two
+        they have rather than being told.
+      */
+      `${facts.label} is held at the version before ${hole.version}: the prime's ledger does not record that migration, so this clone may not run it either. ` +
         `${hole.heldCount} migration(s) wait behind it` +
         (hole.firstHeld ? `, starting with ${hole.firstHeld}` : "") +
-        ". It clears when the prime runs that file — nothing here can, and stamping the prime's ledger instead would send this clone a migration whose prerequisite does not exist.",
+        ". It clears when the prime runs that file — nothing here can, and stamping the prime's ledger instead would send this clone a migration whose prerequisite does not exist. " +
+        "Whether this prime ran it untracked is a separate reading, against its catalog rather than its ledger: Fleet Manager → Prime Ledger Reconciliation.",
       null,
     );
   }
