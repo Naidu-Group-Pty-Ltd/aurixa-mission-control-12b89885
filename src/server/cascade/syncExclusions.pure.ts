@@ -465,6 +465,20 @@ export const DEFAULT_MIRROR_EXCLUSIONS: readonly SyncExclusion[] = [
     reason: "protected",
     note: "Describes the prime's dependency graph, which a mirror does not own: package.json and package-lock.json are REPOSITORY_INVARIANTS, so a bump merged on a clone is reverted by the next cascade. Measured 20 Sep 2026 — all five deployments carried the byte-identical pair, and prime's config had produced 18 open PRs across four clones that could never merge. Removed from a clone rather than rewritten; this stops the cascade putting it back.",
   },
+  {
+    pattern: "src/integrations/supabase/supabaseTarget.pure.ts",
+    reason: "protected",
+    note:
+      "The other place a deployment can declare its built-in Supabase pair. " +
+      "`env.ts` beside it has been protected since this list was written; this " +
+      "is the same setting after npc-crm-independent split the reads out so a " +
+      "Vite config could import them. Prime does not carry the file today, so " +
+      "a cascade delivers nothing and the omission is invisible — containment " +
+      "by accident, which ends the day prime adopts the split. The clone's " +
+      "shippedBackendIdentity guard would turn red rather than the swap being " +
+      "silent, but a guard catching it afterwards is not a reason to let the " +
+      "cascade write prime's database into a tenant's resolver.",
+  },
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
