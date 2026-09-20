@@ -514,6 +514,10 @@ async function runBackendProvisioning(
             branch: cloneRow.default_branch ?? undefined,
           },
           result.projectRef,
+          // The shipped pair — `public/lead-magnet-embed.html`,
+          // `src/integrations/supabase/env.ts`, `.env.example` — needs the KEY
+          // as well as the ref, and is never half-written without it.
+          result.anonKey,
         );
         const failedRetarget = repoRetarget.actions.filter((a) => a.status === "failed");
         if (failedRetarget.length > 0) {
