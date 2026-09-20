@@ -1,0 +1,387 @@
+import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import {
+  MIGRATION_LANE_DETAIL_PREFIXES,
+  PRIME_LEDGER_HOLE_NOTE_CAP,
+  blockageDetailFor,
+  holesNamedBy,
+  isBlockageNote,
+  migrationLaneWroteDetail,
+  primeLedgerHoleNote,
+  primeLedgerHoleSentence,
+  reconcileBlockageRecord,
+} from "./fleetBlockageRecord.pure";
+import { partitionByDependency } from "./fleetCorpusScope.pure";
+
+const read = (p: string) => readFileSync(p, "utf8");
+
+/*
+  THE HALF THAT PROTECTS THE VERDICT.
+
+  A prefix that also matches a provisioning or parity sentence hands the
+  migration lane permission to erase a reading it cannot re-derive — which is
+  the defect the `didNothing` guard was built to stop, and the one it would be
+  a poor trade to re-introduce while fixing its opposite. So the recognised
+  set is asserted in BOTH directions, and the negative half is the load-bearing
+  one.
+*/
+describe("whose sentence is standing on the row", () => {
+  const MIGRATION_LANE = [
+    "Synced to 20261206000000",
+    "Synced to the prime's latest recorded migration — 4 migration(s) held back behind 20261201100000",
+    "Synced to 20261202090000 so far — this pass stopped at its time budget with more to send",
+    "Migration failed at 20261204010000_email_followup_reminders.sql",
+    "Sending 20261203000000 — 9 statement(s) in (rows 81-90)",
+    "Syncing migrations from Naidu-Group-Pty-Ltd/npc-property-dashbord...",
+    "Migration sync refused: the prime backend reports no applied migrations",
+    "Migration error: HTTP 403",
+    "Migrations up to date (20261206000000)",
+    "Verified level with the prime's recorded migrations",
+  ];
+
+  const NOT_OURS = [
+    "Backend provisioned but DOES NOT MATCH the prime — missing_secrets:58. Review at /clones/abc",
+    "Backend ready, but parity could not be verified (timeout) — it has not been compared with the prime",
+    "Backend is ready — modules added",
+    "Module add finished with 2 failure(s)",
+    "Paused at the invocation budget — 41 of 78 stages done",
+    "Waiting on an upstream API rate limit",
+    "Provisioning failed",
+    "Requeued — background worker will retry within ~60 seconds",
+    "Adding modules...",
+    // Written by `applyPrimeMigrations`' `onStatusUpdate` — which the fleet
+    // lane passes `undefined` for, so this sentence is only ever
+    // provisioning's, and claiming it would let a fleet pass erase a
+    // provisioning run's progress line.
+    "Applying migration 3/11: 20261203000000_seed.sql",
+    "Worker stalled — requeued",
+    "Provisioning ceiling exceeded",
+    "Live on the provider origin. No subdomain is reserved for this clone.",
+  ];
+
+  for (const detail of MIGRATION_LANE) {
+    it(`recognises its own: ${detail.slice(0, 48)}`, () => {
+      expect(migrationLaneWroteDetail(detail)).toBe(true);
+    });
+  }
+
+  for (const detail of NOT_OURS) {
+    it(`leaves another writer's alone: ${detail.slice(0, 48)}`, () => {
+      expect(migrationLaneWroteDetail(detail)).toBe(false);
+    });
+  }
+
+  it("treats an absent or blank sentence as nobody's, and therefore fillable", () => {
+    expect(migrationLaneWroteDetail(null)).toBe(true);
+    expect(migrationLaneWroteDetail(undefined)).toBe(true);
+    expect(migrationLaneWroteDetail("   ")).toBe(true);
+  });
+
+  it("declares every prefix it matches on, so the two ends cannot drift", () => {
+    for (const detail of MIGRATION_LANE) {
+      expect(MIGRATION_LANE_DETAIL_PREFIXES.some((p) => detail.startsWith(p))).toBe(true);
+    }
+  });
+});
+
+describe("the note a hole is recorded as", () => {
+  it("names the version and says nothing was applied", () => {
+    const note = primeLedgerHoleNote("20261206000000");
+    expect(note.id).toBe("20261206000000");
+    expect(note.primeLedgerHole).toBe(true);
+    expect(note.blockedBy).toBeUndefined();
+  });
+
+  /*
+    `successes` is `results.filter((r) => r.success && !r.skipped)`. A note that
+    missed `skipped` would count as a migration this pass applied — which would
+    move `migration_version`, flip `didNothing`, and report a version the clone
+    does not hold as one it does.
+  */
+  it("can never read as a migration applied", () => {
+    const note = primeLedgerHoleNote("20261206000000") as { success: boolean; skipped?: boolean };
+    expect([note].filter((r) => r.success && !r.skipped)).toHaveLength(0);
+  });
+
+  it("can never read as a migration withheld", () => {
+    const note = primeLedgerHoleNote("20261206000000") as { blockedBy?: string[] };
+    expect([note].filter((r) => r.blockedBy && r.blockedBy.length > 0)).toHaveLength(0);
+  });
+
+  it("is a blockage note, so the reconciliation owns it", () => {
+    expect(isBlockageNote(primeLedgerHoleNote("x"))).toBe(true);
+    expect(isBlockageNote({ id: "a", name: "a", success: true })).toBe(false);
+    expect(isBlockageNote({ id: "a", blockedBy: [] })).toBe(false);
+    expect(isBlockageNote({ id: "a", blockedBy: ["h"] })).toBe(true);
+    expect(isBlockageNote(null)).toBe(false);
+  });
+});
+
+describe("the versions a stored record names as short", () => {
+  it("reads both shapes and keeps corpus order without repeating", () => {
+    expect(
+      holesNamedBy([
+        { id: "a", name: "a", success: true },
+        { id: "b", name: "b", blockedBy: ["h1", "h2"] },
+        primeLedgerHoleNote("h2"),
+        primeLedgerHoleNote("h3"),
+      ]),
+    ).toEqual(["h1", "h2", "h3"]);
+  });
+
+  it("tolerates anything the column can hold", () => {
+    expect(holesNamedBy(null)).toEqual([]);
+    expect(holesNamedBy("not an array")).toEqual([]);
+    expect(holesNamedBy([null, 7, ["nested"], { blockedBy: "not an array" }])).toEqual([]);
+    expect(holesNamedBy([{ blockedBy: [1, "h", null] }])).toEqual(["h"]);
+  });
+});
+
+describe("reconciling the blockage record", () => {
+  /*
+    THE ORDINARY HEALTHY PASS.
+
+    Nothing changed, so nothing is written and the row is left exactly as
+    found — byte-identical to the behaviour before this module existed. Every
+    pass on a level fleet lands here, so a regression here is a regression on
+    every clone.
+  */
+  it("writes nothing when the record already says what the pass measured", () => {
+    expect(reconcileBlockageRecord({ stored: [], measured: [] }).entries).toBeNull();
+    expect(
+      reconcileBlockageRecord({
+        stored: [primeLedgerHoleNote("h1")],
+        measured: ["h1"],
+      }).entries,
+    ).toBeNull();
+    expect(
+      reconcileBlockageRecord({
+        stored: [{ id: "a", name: "a", success: true }],
+        measured: [],
+      }).entries,
+    ).toBeNull();
+  });
+
+  /*
+    THE DEFECT THIS MODULE EXISTS TO CLOSE.
+
+    The record of a blockage was written by the pass that found it and by no
+    pass that disproved it, so `blockageLedger` — which reads exactly these
+    `blockedBy` entries — kept the `prime_ledger_hole` row open for ever.
+  */
+  it("drops a blockage the pass disproved and keeps everything else, in order", () => {
+    const out = reconcileBlockageRecord({
+      stored: [
+        { id: "m1", name: "m1", success: true },
+        { id: "m2", name: "m2", success: true, skipped: true, blockedBy: ["h1"] },
+        { id: "m3", name: "m3", success: true },
+      ],
+      measured: [],
+    });
+    expect(out.discharged).toEqual(["h1"]);
+    expect(out.opened).toEqual([]);
+    expect(out.entries).toEqual([
+      { id: "m1", name: "m1", success: true },
+      { id: "m3", name: "m3", success: true },
+    ]);
+  });
+
+  it("records a hole the previous pass did not name", () => {
+    const out = reconcileBlockageRecord({
+      stored: [{ id: "m1", name: "m1", success: true }],
+      measured: ["h9"],
+    });
+    expect(out.opened).toEqual(["h9"]);
+    expect(out.discharged).toEqual([]);
+    expect(out.entries).toEqual([
+      { id: "m1", name: "m1", success: true },
+      primeLedgerHoleNote("h9"),
+    ]);
+  });
+
+  it("reports a swap as both a discharge and an opening", () => {
+    const out = reconcileBlockageRecord({
+      stored: [{ id: "m2", name: "m2", blockedBy: ["old"] }],
+      measured: ["new"],
+    });
+    expect(out.discharged).toEqual(["old"]);
+    expect(out.opened).toEqual(["new"]);
+    expect(out.holes).toEqual(["new"]);
+  });
+
+  /*
+    A no-op pass that emptied this array is one of the three things the
+    `didNothing` guard exists to stop — provisioning's record of what it
+    applied is not this lane's to destroy.
+  */
+  it("never empties provisioning's record", () => {
+    const provisioning = Array.from({ length: 40 }, (_, i) => ({
+      id: `p${i}`,
+      name: `p${i}`,
+      success: true,
+    }));
+    const out = reconcileBlockageRecord({
+      stored: [...provisioning, { id: "m", name: "m", blockedBy: ["h"] }],
+      measured: [],
+    });
+    expect(out.entries).toEqual(provisioning);
+  });
+
+  it("tolerates a column holding something else entirely", () => {
+    expect(reconcileBlockageRecord({ stored: null, measured: ["h"] }).entries).toEqual([
+      primeLedgerHoleNote("h"),
+    ]);
+    expect(
+      reconcileBlockageRecord({ stored: { not: "an array" }, measured: [] }).entries,
+    ).toBeNull();
+  });
+
+  it("ignores a repeated or empty measurement", () => {
+    const out = reconcileBlockageRecord({ stored: [], measured: ["h", "h", "", "h2"] });
+    expect(out.holes).toEqual(["h", "h2"]);
+  });
+});
+
+describe("what an operator is told", () => {
+  it("retracts to the level reading when the holes are gone", () => {
+    expect(
+      blockageDetailFor({
+        standing: "Synced to X — 4 migration(s) held back behind 20261201100000",
+        holes: [],
+        syncedTo: "20261206000000",
+      }),
+    ).toBe("Synced to 20261206000000");
+  });
+
+  /*
+    The assertion that protects the parity verdict. A migration pass may
+    retract its own sentence and no one else's.
+  */
+  it("says nothing over another writer's sentence", () => {
+    expect(
+      blockageDetailFor({
+        standing: "Backend provisioned but DOES NOT MATCH the prime — missing_secrets:58",
+        holes: [],
+        syncedTo: "20261206000000",
+      }),
+    ).toBeNull();
+  });
+
+  it("names the hole as the prime's to record, never as a fault on the clone", () => {
+    const sentence = primeLedgerHoleSentence(["20261206000000"]);
+    expect(sentence).toContain("the prime's ledger is short of 20261206000000");
+    expect(sentence).toContain("this clone is level without");
+    expect(sentence).not.toMatch(/fail|error|broken|refused/i);
+  });
+
+  /*
+    The cap bounds how many rows one pass opens. It must never bound the count
+    an operator is shown, because on this reading the number is the message.
+  */
+  it("states the true count even where the notes were capped", () => {
+    const filed = Array.from({ length: PRIME_LEDGER_HOLE_NOTE_CAP }, (_, i) => `h${i}`);
+    expect(primeLedgerHoleSentence(filed, 300)).toContain("and 299 other version(s)");
+  });
+
+  it("does not undercount when no total is supplied", () => {
+    expect(primeLedgerHoleSentence(["a", "b", "c"])).toContain("and 2 other version(s)");
+  });
+});
+
+/*
+  THE HOLE THE PARTITION USED TO DISCARD.
+
+  `holes` was accumulated for the whole corpus walk and never returned, so a
+  hole reached the record only as the `blockedBy` of an orphan sitting AFTER
+  it. A hole at the tail of the corpus has no orphan after it.
+*/
+describe("partitionByDependency reports its holes", () => {
+  const meta = (id: string) => ({ id, name: id });
+
+  it("returns a hole that is withholding something", () => {
+    const part = partitionByDependency(
+      [meta("a"), meta("hole"), meta("b")],
+      new Set(["a", "b"]),
+      new Set<string>(),
+    );
+    expect(part.holes).toEqual(["hole"]);
+    expect(part.send.map((m) => m.id)).toEqual(["a"]);
+    expect(part.orphaned.map((o) => o.meta.id)).toEqual(["b"]);
+  });
+
+  it("returns a hole at the tail, which withholds nothing and produces no orphan", () => {
+    const part = partitionByDependency(
+      [meta("a"), meta("b"), meta("hole")],
+      new Set(["a", "b"]),
+      new Set<string>(),
+    );
+    expect(part.orphaned).toEqual([]);
+    expect(part.holes).toEqual(["hole"]);
+  });
+
+  it("is not a hole where the clone already has it", () => {
+    const part = partitionByDependency(
+      [meta("a"), meta("hole")],
+      new Set(["a"]),
+      new Set(["hole"]),
+    );
+    expect(part.holes).toEqual([]);
+  });
+});
+
+/*
+  A MODULE IS NOT SHIPPED UNTIL SOMETHING CALLS IT.
+
+  This repository has paid for that rule twice — three builder-portal
+  components and twenty-eight stylesheet rules merged, deployed and never
+  rendered — and `buildPrimeLedgerReconciliation` is sitting in it right now
+  with zero call sites. An unused export typechecks, lints and builds.
+*/
+describe("the fix is mounted", () => {
+  /*
+    Pinned on the DATA FLOW, not on the mention. A first version of this
+    asserted the source contained `reconcileBlockageRecord(` — which a call
+    whose result is thrown away satisfies just as well, and that is precisely
+    the failure this describe block exists to catch. What is asserted instead
+    is that the `didNothing` branch writes the reconciled array: nothing
+    downstream works if that assignment is not there.
+  */
+  it("the fleet lane writes the reconciled record on a pass that changed nothing", () => {
+    const lane = read("src/server/fleet-migration.server.ts");
+    expect(lane).toContain("reconcileBlockageRecord({");
+    expect(lane).toContain("migrations_applied: blockage.entries");
+    expect(lane).toContain("status_detail: blockageDetail");
+    // Read, or there is nothing to reconcile against.
+    expect(lane).toContain("migrations_applied, status_detail");
+
+    // The branch that used to be a bare `{}` — a pass that changed nothing
+    // said nothing, including about the one thing it was the authority on.
+    const gate = lane.indexOf("...(didNothing");
+    expect(gate).toBeGreaterThan(-1);
+    const branch = lane.slice(gate, gate + 400);
+    expect(branch).toContain("blockage.entries === null");
+  });
+
+  it("the replay files a note for every hole it measured", () => {
+    const replay = read("src/server/backend-provisioning.server.ts");
+    expect(replay).toContain("primeLedgerHoleNote(version)");
+    expect(replay).toContain("PRIME_LEDGER_HOLE_NOTE_CAP");
+    // Filed BEFORE the loop: that is what makes it complete on a pass the
+    // budget stopped, and on one that broke on a cursor it could not honour.
+    const holeNote = replay.indexOf("primeLedgerHoleNote(version)");
+    const loop = replay.indexOf("for (let i = 0; i < ordered.length; i++)");
+    expect(holeNote).toBeGreaterThan(-1);
+    expect(loop).toBeGreaterThan(holeNote);
+  });
+
+  it("the blockage ledger opens a row for a hole that withholds nothing", () => {
+    const ledger = read("src/server/blockageLedger.server.ts");
+    expect(ledger).toContain("primeLedgerHole === true");
+  });
+
+  it("the partition still returns its holes", () => {
+    expect(read("src/server/fleetCorpusScope.pure.ts")).toContain(
+      "return { send, orphaned, holes }",
+    );
+  });
+});

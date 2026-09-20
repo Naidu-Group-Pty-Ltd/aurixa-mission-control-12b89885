@@ -2401,7 +2401,40 @@ describe("a fleet-sync pass that did nothing says nothing", () => {
     // Every clause is an AND: one OR here and a pass that did something would
     // be treated as a no-op.
     expect(expr).not.toContain("||");
-    expect(bl).toMatch(/\.\.\.\(didNothing\s*\?\s*\{\}/);
+
+    /*
+      THE GUARD IS NARROWED, NOT LIFTED.
+
+      This used to pin `...(didNothing ? {}` — the true branch wrote nothing at
+      all. One exception was then carved out of it, and this asserts the carve
+      is exactly that one: the branch may reach the blockage record and NOTHING
+      ELSE. The three facts this test was written to protect are named
+      explicitly below, because "writes nothing" is no longer strong enough to
+      say what it was protecting.
+
+      Why the exception is sound is in `fleetBlockageRecord.pure.ts`:
+      `partitionByDependency` and `rescueScopedOrphans` walk the whole corpus
+      BEFORE the replay loop, so a pass that changed nothing still holds a
+      complete, current reading of the prime's holes — and it was the only pass
+      that could ever disprove one.
+    */
+    const gate = bl.indexOf("...(didNothing");
+    expect(gate, "the no-op gate is gone").toBeGreaterThan(-1);
+    // Ends where the ACTIVE branch begins — the `: {` at the ternary's own
+    // indentation, not the nested one inside the no-op branch.
+    const noopBranch = bl.slice(gate, bl.indexOf("\n            : {", gate));
+    for (const forbidden of [
+      "migration_version",
+      "status:",
+      "error_message",
+      "migration_blocked_at",
+      "migration_blocked_reason",
+    ]) {
+      expect(noopBranch, `a no-op pass must not write ${forbidden}`).not.toContain(forbidden);
+    }
+    // And what it MAY write, so the exception cannot quietly widen.
+    expect(noopBranch).toContain("migrations_applied: blockage.entries");
+    expect(noopBranch).toContain("status_detail: blockageDetail");
   });
 
   it("never erases a recorded migration version with a null", () => {

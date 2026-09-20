@@ -295,6 +295,24 @@ export type DependencyPartition<T> = {
   send: T[];
   /** Runnable, but sitting behind at least one hole. Never sent. */
   orphaned: OrphanedEntry<T>[];
+  /**
+   * Every corpus version the prime's ledger does not record and this clone
+   * does not have, in corpus order.
+   *
+   * Returned because it was not, and a hole that withholds nothing was
+   * therefore invisible everywhere. This array was accumulated and discarded,
+   * so a hole reached an operator only as the `blockedBy` of an orphan sitting
+   * after it — and a hole at the TAIL of the corpus has no orphan after it. It
+   * withholds nothing from the clone, which is exactly why nothing reported
+   * it, and it still means the prime is behind its own repository. Four such
+   * versions sat unrecorded on the prime for days in September 2026 and were
+   * found by a person reading the ledger by hand.
+   *
+   * A hole is a fact about the PRIME. Whether anything is queued behind it is
+   * a separate fact about the corpus, and `orphaned` is where that second one
+   * lives.
+   */
+  holes: string[];
 };
 
 /**
@@ -331,7 +349,7 @@ export function partitionByDependency<T extends CorpusMeta>(
     holes.push(m.id);
   }
 
-  return { send, orphaned };
+  return { send, orphaned, holes };
 }
 
 /**
