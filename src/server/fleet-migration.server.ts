@@ -375,7 +375,6 @@ const CLAIM_HEARTBEAT_MS = 30_000;
  */
 const CLAIM_DRAIN_MS = 2_000;
 
-
 /**
  * Say, on a clock, that this pass still holds the claim it took.
  *
@@ -1346,7 +1345,21 @@ export async function runFleetMigrationSync(
         `CLAIM_LOST` already reports.
       */
       await heartbeat.stop();
-      const syncedTo = latestApplied ?? "the prime's latest recorded migration";
+      /*
+        WHAT THIS CLONE RECORDS, NEVER A PHRASE THAT ASSERTS THE FRONTIER.
+
+        `latestApplied` is what THIS PASS applied, and it is null whenever the
+        pass applied nothing — which is the ordinary outcome of a pass that
+        spent its whole budget inside one seed. The fallback said "the prime's
+        latest recorded migration", so the sentence an operator read was
+        "Synced to the prime's latest recorded migration" about a clone four
+        migrations behind. Measured on `npc-client-dashboard` at 18:43 on
+        19 Sep 2026, beside "4 migration(s) held back".
+
+        The clone's own recorded version is on the row this pass just read, and
+        it is a fact rather than a claim. A clone that records nothing says so.
+      */
+      const syncedTo = latestApplied ?? backend.migration_version ?? "no migration recorded yet";
       /*
         A PASS THE BUDGET STOPPED HAS NOT FINISHED LOOKING.
 
@@ -1479,9 +1492,36 @@ export async function runFleetMigrationSync(
                             ? // Said before the level reading, because it is the
                               // one case where "Synced to X" would be a claim
                               // about a clone the pass never finished examining.
+                              //
+                              // WHERE IT STOPPED DECIDES WHAT THE NEXT PASS DOES,
+                              // and this promised a resume on every one of them.
+                              //
+                              // A pass stops in one of two places. INSIDE a seed,
+                              // where a cursor is written and the next pass really
+                              // does carry on from that statement; or BETWEEN
+                              // migrations, where there is no position at all and
+                              // the next pass starts the following migration from
+                              // its beginning. `chunkCursor` is exactly that fact,
+                              // computed above for the write.
+                              //
+                              // `chunksApplied` cannot stand in for it: it counts
+                              // statements sent THIS pass, so a pass that sent the
+                              // last three statements of a seed, recorded it, and
+                              // then ran out of budget reported "(3 statement(s) of
+                              // a large seed sent) … it resumes where it stopped".
+                              // True about the statements, false about the resume,
+                              // and read as the inverse of what happened — the
+                              // seed had just finished. Measured on `npc-test` at
+                              // 00:00 on 20 Sep 2026, cursor null.
                               `Synced to ${syncedTo} so far — this pass stopped at its time budget ` +
-                              `with more to send${chunksApplied > 0 ? ` (${chunksApplied} statement(s) of a large seed sent)` : ""}; ` +
-                              `it resumes where it stopped on the next pass`
+                              `with more to send` +
+                              (chunkCursor !== null
+                                ? ` (${chunksApplied} statement(s) of a large seed sent); the next ` +
+                                  `pass carries on from statement ${chunkCursor.statementsDone} of it`
+                                : chunksApplied > 0
+                                  ? ` (${chunksApplied} statement(s) sent, finishing a large seed); the ` +
+                                    `next pass starts the migration after it`
+                                  : `; the next pass starts from the one after ${syncedTo}`)
                             : `Synced to ${syncedTo}`,
                 error_message: failures.length > 0 ? failures[0].error : null,
               }),

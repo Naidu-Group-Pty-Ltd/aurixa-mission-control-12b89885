@@ -899,6 +899,52 @@ describe("a pass is bounded", () => {
     const bareSynced = lane.lastIndexOf("`Synced to ${syncedTo}`");
     expect(bareSynced).toBeGreaterThan(paused);
   });
+
+  it("promises a resume only where there is a position to resume from", () => {
+    /*
+      A pass stops in one of two places and the sentence claimed the same thing
+      about both. INSIDE a seed there is a cursor and the next pass really does
+      carry on from that statement; BETWEEN migrations there is no position at
+      all and the next pass starts the following migration from its beginning.
+
+      Measured on `npc-test` at 00:00 on 20 Sep 2026: "3 statement(s) of a
+      large seed sent … it resumes where it stopped", with `chunk_cursor` NULL
+      and `migration_version` already moved to the seed it had just finished.
+      The statements were real; the resume was not, and an operator waiting for
+      that seed to continue was waiting for nothing.
+
+      `chunksApplied` cannot stand in for the distinction — it counts statements
+      sent THIS pass, which is equally true of a pass that finished a seed.
+    */
+    const at = lane.indexOf("pausedMidReplay\n");
+    const branch = lane.slice(lane.indexOf("? // Said before the level reading", at));
+    const sentence = branch.slice(0, branch.indexOf("`Synced to ${syncedTo}`"));
+    // The fact is the cursor the pass is about to WRITE, not a statement count.
+    expect(sentence).toContain("chunkCursor !== null");
+    expect(sentence).toMatch(/carries on from statement \$\{chunkCursor\.statementsDone\}/);
+    // And the other two readings are present and say something different.
+    expect(sentence).toMatch(/finishing a large seed/);
+    expect(sentence).toMatch(/starts from the one after/);
+    // The unconditional promise is gone.
+    expect(sentence).not.toContain("it resumes where it stopped");
+  });
+
+  it("never reports a clone at the frontier on a pass that applied nothing", () => {
+    /*
+      `latestApplied` is what THIS pass applied and is null whenever the pass
+      spent its budget inside one seed — the ordinary outcome. The fallback read
+      "the prime's latest recorded migration", so `npc-client-dashboard` was
+      described as level at 18:43 on 19 Sep 2026 in the same sentence as
+      "4 migration(s) held back".
+
+      The clone's own recorded version is on the row the pass already read, and
+      it is a fact rather than a claim.
+    */
+    expect(lane).toMatch(
+      /const syncedTo =\s*latestApplied \?\? backend\.migration_version \?\? "no migration recorded yet";/,
+    );
+    expect(lane).not.toContain(`latestApplied ?? "the prime's latest recorded migration"`);
+  });
 });
 
 describe("what a pass stopped inside is resumable", () => {
