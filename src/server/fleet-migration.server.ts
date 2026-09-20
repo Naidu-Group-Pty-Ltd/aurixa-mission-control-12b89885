@@ -885,6 +885,22 @@ export async function runFleetMigrationSync(
         measured: primeLedgerHoles.slice(0, PRIME_LEDGER_HOLE_NOTE_CAP),
       });
       /*
+        A PASS THE BUDGET STOPPED HAS NOT FINISHED LOOKING.
+
+        `stoppedEarly` means the replay stopped between migrations with more to
+        send, and `chunksApplied > 0` with nothing completed means it stopped
+        inside a seed. Either way this clone is NOT level, and the one thing
+        this lane must never write about it is a bare "Synced to X" — that is
+        the reading which reports a clone dozens of migrations behind as
+        healthy, and the reason `blocked` is named in the sentence below.
+
+        It is not a failure and raises no notice: the cursor is on the row, the
+        claim is released, and the next tick carries on from the statement after
+        the last one sent.
+      */
+      const pausedMidReplay = stoppedEarly || (chunksApplied > 0 && successes.length === 0);
+      if (pausedMidReplay) out.stoppedAtBudget = true;
+      /*
         The version named here is `migration_version` and not `syncedTo`.
 
         On a pass that applied nothing `latestApplied` is null, so `syncedTo`
@@ -902,24 +918,13 @@ export async function runFleetMigrationSync(
         standing: (backend as { status_detail?: string | null }).status_detail,
         holes: blockage.holes,
         total: primeLedgerHoles.length,
+        // A pass that changed nothing can still have stopped with more to
+        // send, so this is handed over rather than assumed: without it the
+        // retraction writes a bare "Synced to X" over a pause, which is the
+        // one reading this lane must never give about a clone that is behind.
+        pausedMidReplay,
         syncedTo: latestApplied ?? backend.migration_version ?? syncedTo,
       });
-      /*
-        A PASS THE BUDGET STOPPED HAS NOT FINISHED LOOKING.
-
-        `stoppedEarly` means the replay stopped between migrations with more to
-        send, and `chunksApplied > 0` with nothing completed means it stopped
-        inside a seed. Either way this clone is NOT level, and the one thing
-        this lane must never write about it is a bare "Synced to X" — that is
-        the reading which reports a clone dozens of migrations behind as
-        healthy, and the reason `blocked` is named in the sentence below.
-
-        It is not a failure and raises no notice: the cursor is on the row, the
-        claim is released, and the next tick carries on from the statement after
-        the last one sent.
-      */
-      const pausedMidReplay = stoppedEarly || (chunksApplied > 0 && successes.length === 0);
-      if (pausedMidReplay) out.stoppedAtBudget = true;
       /*
         THE CURSOR OUTLIVES A PASS, BUT NOT ITS FILE.
 

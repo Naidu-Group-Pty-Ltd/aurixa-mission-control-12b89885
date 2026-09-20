@@ -289,6 +289,132 @@ describe("what an operator is told", () => {
 });
 
 /*
+  TWO THINGS THE FIRST VERSION OF THIS MODULE GOT WRONG.
+
+  Both were found by review on the merged commit, and both are cases the tests
+  above did not reach — the first is a constraint that was written down for
+  this change and then not implemented, which is the more useful kind of miss
+  to pin.
+*/
+describe("a pass that stopped early knows nothing about being level", () => {
+  /*
+    `didNothing` does not imply the replay finished. `applyChunkedSeed` returns
+    `stoppedEarly` with `applied: 0` when a stored cursor names more statements
+    than the seed has, and the caller breaks on it having pushed no result at
+    all — so a pass can discharge a hole, change nothing else, and still have a
+    runnable migration pending. Writing `Synced to X` there reports a clone
+    dozens of migrations behind as healthy.
+  */
+  it("never writes a level reading over a pause", () => {
+    const detail = blockageDetailFor({
+      standing: "Synced to 20261202090000 so far — this pass stopped at its time budget",
+      holes: [],
+      pausedMidReplay: true,
+      syncedTo: "20261202090000",
+    });
+    expect(detail).toBeNull();
+  });
+
+  it("still names the holes on a paused pass, but never as a level reading", () => {
+    const detail = blockageDetailFor({
+      standing: "Synced to 20261202090000 so far — this pass stopped at its time budget",
+      holes: ["20261207000000"],
+      pausedMidReplay: true,
+      syncedTo: "20261202090000",
+    });
+    expect(detail).toContain("so far");
+    expect(detail).toContain("stopped at its time budget");
+    expect(detail).toContain("the prime's ledger is short of 20261207000000");
+    // The bare level reading is exactly what must not appear.
+    expect(detail).not.toBe("Synced to 20261202090000");
+  });
+
+  it("gives the level reading only when the pass finished looking", () => {
+    expect(
+      blockageDetailFor({
+        standing: "Synced to X — 4 migration(s) held back behind 20261201100000",
+        holes: [],
+        pausedMidReplay: false,
+        syncedTo: "20261206000000",
+      }),
+    ).toBe("Synced to 20261206000000");
+  });
+
+  it("is handed the pause rather than inferring it from the holes", () => {
+    // Same holes, opposite readings — so the flag is load-bearing and cannot
+    // be reconstructed from anything else this function is given.
+    const paused = blockageDetailFor({
+      standing: null,
+      holes: ["h"],
+      pausedMidReplay: true,
+      syncedTo: "v",
+    });
+    const finished = blockageDetailFor({ standing: null, holes: ["h"], syncedTo: "v" });
+    expect(paused).not.toBe(finished);
+  });
+
+  it("the fleet lane hands it over", () => {
+    const lane = read("src/server/fleet-migration.server.ts");
+    const call = lane.slice(lane.indexOf("blockageDetailFor({"));
+    expect(call.slice(0, call.indexOf("});"))).toContain("pausedMidReplay");
+    // And reads it only after it is declared — a const in its temporal dead
+    // zone throws at runtime on the one path that reaches it.
+    expect(lane.indexOf("const pausedMidReplay =")).toBeLessThan(
+      lane.indexOf("const blockageDetail ="),
+    );
+  });
+});
+
+describe("a legacy blockedBy entry is replaced even when the holes are unchanged", () => {
+  /*
+    The entries carry more than the set of holes. A `blockedBy` entry names a
+    migration being WITHHELD, and this reconciliation only ever runs on a pass
+    where nothing is blocked — so the entry is disproved whatever the hole set
+    does.
+
+    The case: a clone acquires a formerly withheld migration by another route
+    (the per-clone sync, self-healing, a repair by hand) while the hole that
+    withheld it is still a hole. Comparing hole ids alone, the record never
+    changes again and `blockageLedger` reports a `heldCount` for a migration
+    nothing is holding, for ever.
+  */
+  it("replaces it with the explicit hole note", () => {
+    const out = reconcileBlockageRecord({
+      stored: [
+        { id: "keep", name: "keep", success: true },
+        { id: "m", name: "m", success: true, skipped: true, blockedBy: ["h"] },
+      ],
+      measured: ["h"],
+    });
+    expect(out.discharged).toEqual([]);
+    expect(out.opened).toEqual([]);
+    expect(out.entries).toEqual([
+      { id: "keep", name: "keep", success: true },
+      primeLedgerHoleNote("h"),
+    ]);
+  });
+
+  it("leaves a record that already is the right notes alone", () => {
+    // The healthy steady state, and the one that must stay byte-identical.
+    expect(
+      reconcileBlockageRecord({
+        stored: [{ id: "keep", success: true }, primeLedgerHoleNote("h")],
+        measured: ["h"],
+      }).entries,
+    ).toBeNull();
+  });
+
+  it("rewrites when the notes are the right ids in the wrong order", () => {
+    expect(
+      reconcileBlockageRecord({
+        stored: [primeLedgerHoleNote("b"), primeLedgerHoleNote("a")],
+        measured: ["a", "b"],
+      }).entries,
+    ).toEqual([primeLedgerHoleNote("a"), primeLedgerHoleNote("b")]);
+  });
+});
+
+/*
   THE HOLE THE PARTITION USED TO DISCARD.
 
   `holes` was accumulated for the whole corpus walk and never returned, so a

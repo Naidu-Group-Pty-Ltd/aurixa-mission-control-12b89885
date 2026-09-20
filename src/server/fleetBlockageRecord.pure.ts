@@ -244,10 +244,32 @@ export function reconcileBlockageRecord(args: {
   const discharged = named.filter((v) => !measuredSet.has(v));
   const opened = measured.filter((v) => !namedSet.has(v));
 
-  // Nothing about the blockage record changed. Say so by writing nothing:
-  // this is the ordinary healthy pass, and it must stay byte-identical to the
-  // behaviour before this module existed.
-  if (discharged.length === 0 && opened.length === 0) {
+  /*
+    WHAT IS COMPARED IS THE RECORD, NOT THE HOLE SET.
+
+    A first version returned early when no hole id had opened or discharged,
+    which is a weaker test than it looks: the entries carry more than the set
+    of holes. A stored `blockedBy` entry names a migration being WITHHELD, and
+    this function is only ever called from a pass where `blocked` is empty by
+    construction — so every stored `blockedBy` entry is already disproved,
+    whatever the hole set does.
+
+    The case that makes it bite: a clone acquires a formerly withheld
+    migration by another route (the per-clone sync, self-healing, a repair
+    applied by hand) while the hole that withheld it is still a hole. The hole
+    set is unchanged, the old entry survives, and `blockageLedger` goes on
+    reporting a `heldCount` and a `firstHeld` for a migration nothing is
+    holding — for ever, because no later pass changes the hole set either.
+
+    So the test is whether the stored notes ALREADY ARE the notes this pass
+    would write. A legacy `blockedBy` entry never is one, so it is always
+    replaced; an unchanged healthy row still writes nothing.
+  */
+  const storedNotes = stored.filter(isBlockageNote);
+  const settled =
+    storedNotes.length === measured.length &&
+    storedNotes.every((e, i) => e.primeLedgerHole === true && e.id === measured[i]);
+  if (settled) {
     return { entries: null, discharged, opened, holes: measured };
   }
 
@@ -279,10 +301,37 @@ export function blockageDetailFor(args: {
    * is the whole message and must not be the capped one.
    */
   total?: number;
+  /**
+   * True when the replay stopped with more to send.
+   *
+   * A pass that changed nothing can still have stopped early: `applyChunkedSeed`
+   * returns `stoppedEarly` with `applied: 0` when a stored cursor names more
+   * statements than the seed has, and the caller breaks on it having pushed no
+   * result at all. Such a pass measures the holes correctly — the
+   * classification runs before the replay loop — and knows NOTHING about
+   * whether the clone is level, because it never finished looking.
+   *
+   * So it is passed in rather than inferred. Writing `Synced to X` there is a
+   * claim no pass that stopped early is entitled to make, and it is the one
+   * thing this lane must never say about a clone dozens of migrations behind.
+   */
+  pausedMidReplay?: boolean;
   /** What the level reading calls the version, when there are no holes. */
   syncedTo: string;
 }): string | null {
   if (!migrationLaneWroteDetail(args.standing)) return null;
+  if (args.pausedMidReplay) {
+    // Nothing to add and no standing to overrule the pause sentence already
+    // on the row, which is both true and more informative than anything this
+    // pass could compose.
+    if (args.holes.length === 0) return null;
+    // The holes ARE worth saying — they are what this pass measured — but the
+    // reading is qualified, never a level one.
+    return (
+      `Synced to ${args.syncedTo} so far — this pass stopped at its time budget with more ` +
+      `to send, and ${primeLedgerHoleSentence(args.holes, args.total)}`
+    );
+  }
   if (args.holes.length === 0) return `Synced to ${args.syncedTo}`;
   return `Synced to ${args.syncedTo} — ${primeLedgerHoleSentence(args.holes, args.total)}`;
 }
