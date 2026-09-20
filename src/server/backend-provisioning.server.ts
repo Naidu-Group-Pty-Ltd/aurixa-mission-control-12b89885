@@ -2388,9 +2388,8 @@ export async function rescueScopedOrphans<T extends { id: string; name: string }
 ): Promise<{ send: T[]; stillBlocked: Array<{ meta: T; blockedBy: string[] }> }> {
   if (orphaned.length === 0) return { send: [], stillBlocked: [] };
 
-  const { scopeHoles, holeRelationNames, MAX_SCOPING_BYTES } = await import(
-    "./cascade/migrationDependencyScope.pure"
-  );
+  const { scopeHoles, holeRelationNames, MAX_SCOPING_BYTES } =
+    await import("./cascade/migrationDependencyScope.pure");
   const byId = new Map(corpus.map((m) => [m.id, m]));
   const sqlOnItem = new Map(materialised.filter((m) => m.sql).map((m) => [m.id, m.sql as string]));
 
@@ -2932,7 +2931,31 @@ async function applyChunkedSeed(
 
     `cursorShape` is what tells the catch below WHICH kind of mismatch it was.
   */
-  const cursorShape = cursorIsForThisBody ? (oversize.cursor?.shape ?? null) : null;
+  /*
+    THE POSITION IS REFUSED; THE SHAPE IS NOT.
+
+    These are two different questions and I collapsed them into one. `skip` must
+    be refused when the body's identity does not match — that is the whole point
+    of the identity. The remembered SHAPE must not be, and keeping it is safe for
+    a reason that already exists: `chunkSeedStatements` re-derives the shape from
+    the bytes it is streaming and compares all four fields, so a shape that is
+    wrong for this body cannot be used, it can only be caught.
+
+    Gating it on `cursorIsForThisBody` cost a second full walk of the file, and
+    this module has already measured what that costs: ~80 MB of blob traffic on
+    the 41 MB seed, which on 19 Sep 2026 consumed a whole 45-second budget with
+    ZERO statements advanced. Every cursor stored before `bodySha` existed lacks
+    one, so the first pass after this ships would have paid it on every mid-seed
+    clone at once — and it does not stop at one pass: a pass that spends its
+    budget reading has `applied === 0`, so the budget-stop never fires, so it
+    writes no new cursor, so the next pass refuses the same identity-less cursor
+    and reads twice again. Permanently. That is the livelock the cursor exists to
+    end, re-opened by the commit that made the cursor safer.
+
+    Found by review of a73b02e..31eccca.
+  */
+  const cursorShape =
+    oversize.cursor?.migrationId === m.id ? (oversize.cursor.shape ?? null) : null;
   // Declared out here so the refusal branches below can record it: a pass that
   // read the file and then lost the stream still knows the shape, and writing
   // it means the retry does not pay for that reading a second time.

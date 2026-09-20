@@ -742,10 +742,28 @@ export async function runFleetMigrationSync(
     return { ...EMPTY, error: "Prime not configured — set the prime repo in Settings first" };
   }
 
-  // Stops the pass exactly as the throw it replaces did, and unlike the throw
-  // it reaches the caller's own `result.error` and the audit row with it.
   const reclaimError = await reclaimStale(supabase);
-  if (reclaimError) return { ...EMPTY, error: reclaimError };
+  if (reclaimError) {
+    /*
+      LOGGED, BECAUSE THE RETURN ALONE IS QUIETER THAN THE THROW WAS.
+
+      The commit that replaced the throw claimed this reached "the caller's own
+      `result.error` and the audit row with it". Only the first half is true,
+      and only for the admin button: this return is ABOVE `writeAuditLog`, so a
+      pass that stops here writes no audit row at all, and the scheduled hook
+      serialises the result as HTTP 200 `{"success":true,…}`. So the change
+      made the failure LESS visible than the throw it replaced — the throw at
+      least reached the hook's catch and a non-200 that
+      `net._http_response.status_code` records.
+
+      The return still stops the pass, which is right. What was missing is that
+      it says so anywhere a person looks. Found by review.
+    */
+    console.error("[fleet-migration] stale-claim sweep failed; pass abandoned", {
+      error: reclaimError,
+    });
+    return { ...EMPTY, error: reclaimError };
+  }
 
   /*
     EVERY BACKEND, THEN THIS LANE'S OWN VERDICT ON EACH.
@@ -1544,13 +1562,27 @@ export async function runFleetMigrationSync(
                               // 00:00 on 20 Sep 2026, cursor null.
                               `Synced to ${syncedTo} so far — this pass stopped at its time budget ` +
                               `with more to send` +
+                              //
+                              // AND THE QUESTION IS WHAT THE ROW WILL HOLD, not
+                              // what this pass did. The third reading said "the
+                              // next pass starts from the one after X" on
+                              // `chunkCursor === null && chunksApplied === 0` —
+                              // which is precisely the case where `cursorWrite`
+                              // resolves to `{}` and a STORED cursor survives
+                              // untouched. A pass that hit the deadline before
+                              // reaching the seed therefore promised a fresh
+                              // start while the next pass resumes mid-seed from
+                              // the cursor already on the row. Found by review.
                               (chunkCursor !== null
                                 ? ` (${chunksApplied} statement(s) of a large seed sent); the next ` +
                                   `pass carries on from statement ${chunkCursor.statementsDone} of it`
-                                : chunksApplied > 0
-                                  ? ` (${chunksApplied} statement(s) sent, finishing a large seed); the ` +
-                                    `next pass starts the migration after it`
-                                  : `; the next pass starts from the one after ${syncedTo}`)
+                                : chunkCursorDiscarded || cursorFileLanded
+                                  ? `${chunksApplied > 0 ? ` (${chunksApplied} statement(s) sent, finishing a large seed)` : ""}; ` +
+                                    `the next pass starts the migration after it`
+                                  : storedCursor !== null
+                                    ? `; this pass did not reach the large seed it is part-way through, so the ` +
+                                      `next pass carries on from statement ${storedCursor.statementsDone} of it`
+                                    : `; the next pass starts from the one after ${syncedTo}`)
                             : `Synced to ${syncedTo}`,
                 error_message: failures.length > 0 ? failures[0].error : null,
               }),

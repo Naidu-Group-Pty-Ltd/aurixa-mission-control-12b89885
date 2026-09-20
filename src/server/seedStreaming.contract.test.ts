@@ -156,12 +156,17 @@ describe("the replay chunks an oversized seed", () => {
       passed.
     */
     const fn = sliceFunction(replay, "async function applyChunkedSeed");
-    // Read through the same predicate as the skip: two spellings of "is this
-    // cursor this body's?" is how one of them comes to say yes where the other
-    // says no — a pass that skips a prefix whose shape it then re-reads, or the
-    // reverse.
+    /*
+      Keyed on the migration id ALONE, and not on the body's identity.
+
+      This is the half of the cursor that survives a refused position: the shape
+      is a hint `chunkSeedStatements` verifies against the bytes it streams, so a
+      stale one can only be caught, never used. Gating it on the identity meant
+      every cursor written before `bodySha` existed forced a second full walk of
+      the 41 MB body — which is the double read this very test exists to stop.
+    */
     expect(fn).toMatch(
-      /const cursorShape =\s*cursorIsForThisBody \? \(oversize\.cursor\?\.shape \?\? null\) : null;/,
+      /const cursorShape =\s*oversize\.cursor\?\.migrationId === m\.id \? \(oversize\.cursor\.shape \?\? null\) : null;/,
     );
     expect(fn).toContain("shape ??= await readSeedShape(await oversize.streamSql(m));");
     // Exactly one unconditional stream for the statements, and no second

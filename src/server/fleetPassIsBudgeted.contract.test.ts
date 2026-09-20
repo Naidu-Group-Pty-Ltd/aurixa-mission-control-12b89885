@@ -251,7 +251,26 @@ describe("a pass is bounded", () => {
     expect(body).not.toContain("throw new Error(");
     expect(body.match(/return `Could not reclaim/g) ?? []).toHaveLength(2);
     expect(lane).toContain("const reclaimError = await reclaimStale(supabase);");
-    expect(lane).toMatch(/if \(reclaimError\) return \{ \.\.\.EMPTY, error: reclaimError \};/);
+    expect(lane).toMatch(
+      /if \(reclaimError\) \{[\s\S]*?return \{ \.\.\.EMPTY, error: reclaimError \};/,
+    );
+    /*
+      AND IT IS LOGGED, because the return alone is QUIETER than the throw was.
+
+      The commit that made this change claimed the return reached "the caller's
+      own `result.error` and the audit row with it". Only the first half is
+      true, and only for the admin button: this return sits ABOVE
+      `writeAuditLog`, so a pass that stops here writes no audit row, and the
+      scheduled hook serialised the result as HTTP 200 `{"success":true,…}` —
+      so the change made the failure LESS visible than the throw it replaced,
+      which at least reached the hook's catch and a non-200 that
+      `net._http_response.status_code` records. Found by review.
+    */
+    const at = lane.indexOf("if (reclaimError)");
+    expect(lane.slice(at, lane.indexOf("return { ...EMPTY", at))).toMatch(/console\.error\(/);
+    const hook = code(read("src/routes/hooks.fleet-migration-sync.tsx"));
+    expect(hook).toContain("success: !result.error");
+    expect(hook).toMatch(/status: result\.error \? 500 : 200/);
   });
 
   /*
@@ -947,9 +966,25 @@ describe("a pass is bounded", () => {
     // The fact is the cursor the pass is about to WRITE, not a statement count.
     expect(sentence).toContain("chunkCursor !== null");
     expect(sentence).toMatch(/carries on from statement \$\{chunkCursor\.statementsDone\}/);
-    // And the other two readings are present and say something different.
+    // And the other readings are present and say something different.
     expect(sentence).toMatch(/finishing a large seed/);
     expect(sentence).toMatch(/starts from the one after/);
+    /*
+      INCLUDING THE ONE THE FIRST VERSION HAD NO BRANCH FOR.
+
+      "The next pass starts from the one after X" was keyed on
+      `chunkCursor === null && chunksApplied === 0` — which is precisely where
+      `cursorWrite` resolves to `{}` and a STORED cursor survives untouched. So
+      a pass that hit its deadline before reaching the seed promised a fresh
+      start while the next pass resumes mid-seed from the cursor already on the
+      row. The question the sentence answers is what the ROW WILL HOLD, not
+      what this pass happened to do. Found by review.
+    */
+    expect(sentence).toMatch(/storedCursor !== null/);
+    expect(sentence).toMatch(/did not reach the large seed it is part-way through/);
+    expect(sentence).toMatch(/statement \$\{storedCursor\.statementsDone\}/);
+    // The cleared-cursor reading is keyed on what clears it, not on a count.
+    expect(sentence).toMatch(/chunkCursorDiscarded \|\| cursorFileLanded/);
     // The unconditional promise is gone.
     expect(sentence).not.toContain("it resumes where it stopped");
   });
@@ -1051,7 +1086,7 @@ describe("what a pass stopped inside is resumable", () => {
     expect(write).toMatch(/\.\.\.\(p\.bodySha === undefined \? \{\} : \{ bodySha: p\.bodySha \}\)/);
   });
 
-  it("decides the resume through ONE rule, and both of its readers use it", () => {
+  it("refuses the POSITION on the body's identity and keeps the SHAPE regardless", () => {
     const replay = code(read("src/server/backend-provisioning.server.ts"));
     /*
       `skip` and `cursorShape` both have to answer "is this cursor this body's?",
@@ -1063,12 +1098,37 @@ describe("what a pass stopped inside is resumable", () => {
       "const cursorIsForThisBody = cursorAppliesToBody(oversize.cursor, m.id, bodySha);",
     );
     expect(replay).toMatch(/const skip = cursorIsForThisBody \?/);
-    expect(replay).toMatch(/const cursorShape =\s*cursorIsForThisBody \?/);
-    // The rule itself is pure and behaviourally tested — see
-    // `chunkCursorStore.pure.test.ts`. What is asserted HERE is that the replay
-    // does not grow a second copy of it.
+    /*
+      AND THE SHAPE IS DELIBERATELY NOT GATED ON IT — two questions, not one.
+
+      The POSITION must be refused when the body's identity does not match;
+      that is what the identity is for. The remembered SHAPE must not be, and
+      keeping it is safe because `chunkSeedStatements` re-derives the shape
+      from the bytes it streams and compares all four fields: a shape that is
+      wrong for this body cannot be used, only caught.
+
+      Gating it cost a second full walk of the 41 MB seed — ~80 MB of blob
+      traffic, a whole 45-second budget, zero statements advanced — and every
+      cursor stored before `bodySha` existed lacks one, so the first pass after
+      deploy would have paid it on every mid-seed clone. Nor does it stop at
+      one pass: a pass that spends its budget reading has `applied === 0`, so
+      the budget-stop never fires, so it writes no cursor, so the next pass
+      refuses the same one and reads twice again. Found by review.
+    */
+    expect(replay).toMatch(/const cursorShape =\s*oversize\.cursor\?\.migrationId === m\.id \?/);
+    expect(replay).not.toMatch(/const cursorShape =\s*cursorIsForThisBody/);
+    /*
+      The identity rule itself is pure and behaviourally tested — see
+      `chunkCursorStore.pure.test.ts`. What is asserted HERE is that the replay
+      does not grow a second copy of IT.
+
+      Narrowed from also forbidding `oversize.cursor?.migrationId === m.id`,
+      which was right while the two readers asked one question and is wrong now
+      that they ask two: the migration-id check is the SHAPE's question, and the
+      shape is deliberately not gated on the body's identity. Forbidding that
+      spelling would have forbidden the fix.
+    */
     expect(replay).not.toMatch(/oversize\.cursor\?\.bodySha === bodySha/);
-    expect(replay).not.toMatch(/oversize\.cursor\?\.migrationId === m\.id/);
   });
 
   it("puts the identity on every cursor it produces, not just the one it reads", () => {
