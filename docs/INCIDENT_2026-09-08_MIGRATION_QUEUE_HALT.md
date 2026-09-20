@@ -30,15 +30,15 @@ Six files carried the same defect: the three from the brokered-billing set
 
 ## Timeline
 
-| run | when (UTC) | outcome |
-| --- | --- | --- |
-| 34 | 7 Sep 15:33 | success — the last migration to apply |
-| 35 | 8 Sep 04:38 | `0A000`; 1 failed, 2 left pending |
-| 36 | 8 Sep 06:03 | 3 pending, never applied |
-| 37 | 9 Sep 00:25 | 2 pending, never applied |
-| 38 | 9 Sep 01:09 | pending |
-| 39 | 9 Sep 07:29 | pending |
-| 40 | 9 Sep 09:00 | **success** — first clean run in 41 hours |
+| run | when (UTC)  | outcome                                   |
+| --- | ----------- | ----------------------------------------- |
+| 34  | 7 Sep 15:33 | success — the last migration to apply     |
+| 35  | 8 Sep 04:38 | `0A000`; 1 failed, 2 left pending         |
+| 36  | 8 Sep 06:03 | 3 pending, never applied                  |
+| 37  | 9 Sep 00:25 | 2 pending, never applied                  |
+| 38  | 9 Sep 01:09 | pending                                   |
+| 39  | 9 Sep 07:29 | pending                                   |
+| 40  | 9 Sep 09:00 | **success** — first clean run in 41 hours |
 
 ## Why nothing reported it
 
@@ -66,7 +66,7 @@ appeared to work — which is what made the gap invisible rather than loud.
 
 By the time the queue was unjammed, **the database was ahead of the queue in
 places and behind it in others**, because the 8 September work had been applied
-directly to the database when it was authored *and* committed as migration
+directly to the database when it was authored _and_ committed as migration
 files, which the queue then tried to replay.
 
 Evidence that settled it — structural fingerprints, not the ledger:
@@ -92,7 +92,7 @@ either sufficient:
    — an **absolute**, not a delta (only the money columns use `new - old`), so
    re-running it would have added the whole brokered count a second time;
 2. its predicate is `call_status = 'success' AND clone_id IS NOT NULL AND
-   (status = 'withheld' OR metadata->'brokered' = 'true')`, which **matches the
+(status = 'withheld' OR metadata->'brokered' = 'true')`, which **matches the
    three `absorbed` rows** — it predates the `absorbed` concept, and would have
    flipped them to `brokered`/`billable`, charging for calls the business had
    decided to absorb.
@@ -163,12 +163,80 @@ where this incident lived.
 
 ## Still open
 
+_Re-measured 20 Sep 2026. Three of the four were closed in the days after this
+was written and the list did not say so — which is this incident's own failure
+mode in miniature, and cost most of a rebuild before anyone checked. Each is
+struck through with the thing that closed it, rather than deleted: the reason a
+hazard existed outlives the hazard._
+
+1. ~~**`resolve_api_key_billability` is still the August version.**~~
+   **Closed 11 Sep** by `20260911070000_federated_anthropic_status.sql`, which
+   does `CREATE OR REPLACE FUNCTION public.resolve_api_key_billability` — the
+   fresh, reviewed migration this asked for. Its header records why the
+   rewrite matters: a name the function does not rate falls to the
+   `ELSE 'no_key'` arm, "which is not billable — Aurixa pays the vendor and
+   recharges nobody, silently, while every ledger reading stays green."
+
+2. ~~**A migration applied directly by Lovable _and_ committed as a file gets
+   replayed by the queue, and a replay can regress live schema. Nothing
+   detects it.**~~ **Closed 12 Sep**, in two halves.
+   `20260912150000_recorded_never_replayed.sql` puts
+   `IF NOT v_row.already_applied THEN` around `EXECUTE v_row.sql;` and gives
+   the two outcomes different statuses — `recorded` where the file was
+   declared already applied, `applied` where this queue ran it — while
+   stamping the ledger on BOTH paths, outside the guard, because the stamp is
+   what stops a later replay seeing the version as new. And the apply workflow
+   now runs every migration gate **in the same job, ahead of the enqueue**; it
+   used to fire concurrently with `ci.yml`, so a red gate had never once
+   stopped a migration executing. `migrationRecordOnly.test.ts` pins all of it.
+
+3. ~~**A migration can enter the queue having never existed in the
+   repository.**~~ **Closed 12 Sep** by `check-applied-digests.mjs`, which
+   reports `N migration(s) ran here but no longer exist in the repo` and names
+   each one. It is a CI gate (`check:applied-digests`). The same work read
+   `schema_migration_queue.sha256`, written from the queue's first version and
+   never read by anything: 2 of 55 settled rows already differed from their
+   repository file.
+
+4. **The provisioning verdict on the recovered clones is stale.** Still open,
+   and the only one of the four that is — it is live database state rather
+   than code. NPC Test and Preflight Property Group read `status: failed` with
+   `status_detail: 'Provisioning ceiling exceeded'`. Nothing gates on it any
+   more, but an operator reading the clone page sees a healthy clone reporting
+   failure, which is the same class of misleading signal that cost the two days
+   above.
+
+   One thing to decide before treating it as merely stale data.
+   `clearStaleMigrationFailure` compare-and-swaps on `status = 'failed'`
+   without reading WHY the clone failed, so a successful migration pass over
+   either clone will clear a PROVISIONING verdict on evidence about
+   MIGRATIONS. That is the outcome this item wants and it is reached by a lane
+   that did not establish it — the inverse of the defect fixed under #232 one
+   file away. Worth an explicit decision rather than being left to happen.
+
+## Verification
+
+- migration lane green (run 40), `main` CI green
+- queue fully applied: nothing failed, nothing pending
+- `clones.merge_drain_at` and `clone_backends.migration_blocked_at` present with
+  both indexes; `merge_drain_at` observed advancing 09:10:02 → 09:15:02 across
+  all three clones, which is the proof the published build is the new code —
+  nothing else writes that column
+- the two stranded clones back in the fleet migration sync, all three level at
+  migration version `20261111010000`
+- **billing untouched and independently checked**: billable quantity equals the
+  brokered event count (724 = 724, 724 × 50 = 36,200 micros), the three
+  `absorbed` rows are still non-billable, and the 9-value constraint stands. The
+  double-count that was avoided would have read ≈1,448.
+
+## Still open
+
 1. **`resolve_api_key_billability` is still the August version.**
    `20260908040000`'s rewrite of it never applied and was deliberately not
    force-applied — metering is demonstrably working, and a live billing path is
    not something to change on a hunch at the end of a repair. It needs a fresh,
    reviewed migration.
-2. **A migration applied directly by Lovable *and* committed as a file gets
+2. **A migration applied directly by Lovable _and_ committed as a file gets
    replayed by the queue, and a replay can regress live schema.** That is the
    root cause here, and nothing detects it.
 3. **A migration can enter the queue having never existed in the repository.**

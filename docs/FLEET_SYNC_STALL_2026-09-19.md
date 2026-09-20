@@ -541,12 +541,43 @@ filter reads the shared helper** rather than its own inline
 
 ### What is deliberately not fixed here
 
-The repository cascade still cannot carry a 41 MB file. Doing so means
-committing an oversize blob through the Git Data API rather than the contents
-API — real work, with its own failure modes, and not something to bolt onto a
-change whose point is that a control was lying. What changes here is that the
-product stops offering a button that cannot help and starts saying what is
-actually required.
+The repository cascade still cannot carry a 41 MB file. What changes here is
+that the product stops offering a button that cannot help and starts saying
+what is actually required.
+
+> **Re-measured 20 Sep 2026 — do not build the fix this paragraph proposed.**
+>
+> The sentence that used to stand here named the remedy as "committing an
+> oversize blob through the Git Data API rather than the contents API". The
+> cascade **already commits that way**: `cascade-engine.server.ts` writes
+> through `git.createBlob` → `git.createTree` → `git.createCommit`. The
+> ceiling is on the READ, and it is invocation memory rather than any API
+> limit — `getFileContent`'s own comment says so: "the blob fetch below is
+> where a 39 MB file used to be read whole into an invocation that could not
+> hold it."
+>
+> Three things settle it, and all three postdate this paragraph:
+>
+> - **The hold is correct, and measured to be.** `convergence.pure.ts`, written
+>   18 Sep against the two live trees, excludes those paths from `owed` and says
+>   why: _"a cascade carries a file whole and the invocation that does it has a
+>   limit the file does not."_ Reported as owed they would sit at `delivering`
+>   for ninety minutes and then escalate as `stalled`, permanently, on a fleet
+>   behaving exactly as designed.
+> - **The clone's DATABASE gets these seeds anyway, by a route built for it.**
+>   `openSqlStream` fetches the raw blob and pipes it through a
+>   `TextDecoderStream` with no size refusal, and `chunkSeedStatements` splits
+>   it; its own comment names a 40 MB seed streamed to `npc-test-76b3b3`. What
+>   the clone's repository lacks is a copy of a generated artefact, not a
+>   schema.
+> - **The product already says so.** The fleet pass's own sentence reads
+>   "_… is too large for this pass to carry and is left for the chunking lane;
+>   the clone is unchanged and still in the fleet_".
+>
+> It is a class rather than one file: 13 of the prime's migrations sit over the
+> ceiling and all 13 are template-library seeds, 35.6-39.8 MB, one per
+> catalogue version, and there will be more. Carrying them would pull 40 MB into an invocation that cannot hold
+> it, to duplicate a delivery that already works.
 
 ### A note on the instrument, since it nearly took this section with it
 
