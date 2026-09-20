@@ -21,6 +21,7 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { stripComments } from "./sourceComments.pure";
 
 const ROOT = join(__dirname, "..", "..");
 
@@ -36,10 +37,7 @@ const ROOT = join(__dirname, "..", "..");
  * component RENDERS, so that is what they read.
  */
 function rendered(source: string): string {
-  return source
-    .replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}/g, " ") // JSX comment expressions
-    .replace(/\/\*[\s\S]*?\*\//g, " ") // block comments, JSDoc included
-    .replace(/(^|[^:])\/\/.*$/gm, "$1 "); // line comments, sparing `https://`
+  return stripComments(source);
 }
 
 const WIZARD_SOURCE = readFileSync(join(ROOT, "src", "routes", "clones.new.tsx"), "utf8");

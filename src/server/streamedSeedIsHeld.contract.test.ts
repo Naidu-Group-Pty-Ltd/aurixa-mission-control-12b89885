@@ -34,6 +34,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { cloneSaidNothing, isUpstreamRateLimit } from "./provisioningBudget";
 import { OversizedMigrationError, PrimeBodyUnavailableError } from "./oversizedMigration.pure";
+import { stripComments } from "./sourceComments.pure";
 
 const replay = readFileSync("src/server/backend-provisioning.server.ts", "utf8");
 const corpus = readFileSync("src/server/prime-backend.server.ts", "utf8");
@@ -41,7 +42,7 @@ const healing = readFileSync("src/server/self-healing.server.ts", "utf8");
 
 /** Comments removed: an absence has to be asserted over code. */
 const code = (src: string): string =>
-  src.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/^[ \t]*\/\/.*$/gm, " ");
+  stripComments(src);
 
 describe("the predicate separates blame from remedy", () => {
   it("holds the refusal that actually took a clone out of the fleet", () => {

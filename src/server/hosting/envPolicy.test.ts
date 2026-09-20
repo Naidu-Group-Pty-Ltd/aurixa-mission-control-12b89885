@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
+import { stripComments } from "../sourceComments.pure";
 import {
   MANAGED_ENV_NAMES,
   staleManagedNames,
@@ -328,9 +329,9 @@ describe("stale managed variables", () => {
  * `statusSince: row.status_since` rather than trusting `judgeWait`.
  */
 describe("the hosting provider actually prunes", () => {
-  const PROVIDER = readFileSync("src/server/hosting/vercel-provider.ts", "utf8")
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+  const PROVIDER = stripComments(
+    readFileSync("src/server/hosting/vercel-provider.ts", "utf8"),
+  );
 
   const syncEnv = PROVIDER.slice(
     PROVIDER.indexOf("async syncEnv("),

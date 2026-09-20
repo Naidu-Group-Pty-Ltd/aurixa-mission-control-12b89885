@@ -91,10 +91,15 @@ const WALKABLE = /\.(?:ts|tsx|js|jsx|mjs)$/;
 const SPECIFIER =
   /(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*)['"](\.{1,2}\/[^'"]+|@\/[^'"]+)['"]/g;
 
-/** Remove line and block comments so prose naming a path is never followed. */
-export function stripComments(source: string): string {
-  return source.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\/\/[^\n]*/g, " ");
-}
+/**
+ * Remove line and block comments so prose naming a path is never followed.
+ *
+ * Re-exported rather than written again: this module's own copy was the naive
+ * file-wide regex, which a glob in a string opens a comment in — and a lost
+ * import here is a payload that does not build.
+ */
+import { stripComments } from "../sourceComments.pure";
+export { stripComments };
 
 /** Every `@/` or relative specifier in a source file, in order, deduplicated. */
 export function importsOf(source: string): string[] {

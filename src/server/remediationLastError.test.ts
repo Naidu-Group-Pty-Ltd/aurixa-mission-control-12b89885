@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
+import { stripComments } from "./sourceComments.pure";
 
 /**
  * `last_error` on a remediation run describes the LAST PASS, not the run's
@@ -24,7 +25,7 @@ import { readFileSync } from "node:fs";
 const src = readFileSync("src/server/self-healing.server.ts", "utf8");
 
 /** Source with comments removed — every assertion here is about code. */
-const code = src.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:])\/\/[^\n]*/g, "$1 ");
+const code = stripComments(src);
 
 /** The body of the `if (resume.kind === "requeue")` block at a given offset. */
 function requeueBlocks(source: string): string[] {

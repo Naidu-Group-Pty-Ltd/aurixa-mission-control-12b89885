@@ -24,12 +24,11 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+/** A comment quoting code is not code — these tests judge the code. */
+import { stripComments } from "./sourceComments.pure";
 
 const read = (p: string) => readFileSync(join(process.cwd(), p), "utf8");
 
-/** A comment quoting code is not code — these tests judge the code. */
-const stripComments = (src: string): string =>
-  src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
 
 const provisioning = stripComments(read("src/server/clone-provisioning.server.ts"));
 const drift = stripComments(read("src/server/drift-refresh.server.ts"));

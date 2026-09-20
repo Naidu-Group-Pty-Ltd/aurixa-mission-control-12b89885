@@ -79,6 +79,8 @@
  * the whole design.
  */
 
+import { stripSqlComments } from "./sqlComments.pure";
+
 export type CreatedObjectKind =
   | "table"
   | "function"
@@ -120,7 +122,7 @@ export function stripSqlNoise(sql: string): string {
   // CREATE, and counting those would attribute a caller's mention to the file
   // as though it were a definition.
   const withoutBodies = sql.replace(/\$([A-Za-z_]\w*)?\$[\s\S]*?\$\1?\$/g, " $BODY$ ");
-  return withoutBodies.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/--[^\n]*/g, " ");
+  return stripSqlComments(withoutBodies);
 }
 
 const PATTERNS: ReadonlyArray<{ kind: CreatedObjectKind; re: RegExp }> = [

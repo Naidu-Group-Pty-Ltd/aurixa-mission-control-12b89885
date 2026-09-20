@@ -21,13 +21,12 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+/** Source with comments removed — a comment quoting code is not code. */
+import { stripComments } from "../server/sourceComments.pure";
 
 const ROUTES = join(__dirname);
 const read = (f: string) => readFileSync(join(ROUTES, f), "utf8");
 
-/** Source with comments removed — a comment quoting code is not code. */
-const stripComments = (src: string): string =>
-  src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
 
 /**
  * The body of a named `async function`, by brace counting.

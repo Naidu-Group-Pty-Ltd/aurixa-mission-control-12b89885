@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
+import { stripComments } from "./sourceComments.pure";
 
 /**
  * A source file with its comments removed.
@@ -10,7 +11,7 @@ import { readFileSync } from "node:fs";
  * its own documentation — which teaches people to delete the documentation.
  */
 const codeOf = (src: string): string =>
-  src.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:])\/\/[^\n]*/g, "$1 ");
+  stripComments(src);
 import {
   AIRTABLE_RECORD_ID,
   brokeredUrl,

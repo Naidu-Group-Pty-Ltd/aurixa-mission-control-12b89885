@@ -30,6 +30,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { isUpstreamRateLimit } from "./provisioningBudget";
+import { stripComments } from "./sourceComments.pure";
 
 const replay = readFileSync("src/server/backend-provisioning.server.ts", "utf8");
 const fleet = readFileSync("src/server/fleet-migration.server.ts", "utf8");
@@ -45,7 +46,7 @@ const button = readFileSync("src/server/migration-sync.functions.ts", "utf8");
  * better and is a mechanical change over files this one does not touch.)
  */
 const code = (src: string): string =>
-  src.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/^[ \t]*\/\/.*$/gm, " ");
+  stripComments(src);
 
 /**
  * Source with template-literal concatenations joined and whitespace collapsed.

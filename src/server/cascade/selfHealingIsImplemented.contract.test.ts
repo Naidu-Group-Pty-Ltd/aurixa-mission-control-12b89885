@@ -3,10 +3,9 @@ import { readFileSync } from "node:fs";
 import { ACT_POLICY } from "./custodian.pure";
 import { BLOCKAGE_POLICY } from "./blockageTaxonomy.pure";
 import type { BlockageClass } from "./blockageTaxonomy.pure";
+import { stripComments } from "../sourceComments.pure";
 
 const custodian = readFileSync(new URL("../custodian.server.ts", import.meta.url), "utf8");
-const stripComments = (s: string) =>
-  s.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\/\/[^\n]*/g, " ");
 
 /** Does the dispatcher actually branch on this act, or would it fall to the else? */
 const dispatched = (act: string) =>

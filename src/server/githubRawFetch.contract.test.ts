@@ -33,6 +33,7 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { stripComments } from "./sourceComments.pure";
 
 /** Every source file under src/, excluding tests. */
 function sources(dir = "src", out: string[] = []): string[] {
@@ -50,7 +51,7 @@ function sources(dir = "src", out: string[] = []): string[] {
  * explain why, and those two readings of the same text are opposites.
  */
 function code(src: string): string {
-  return src.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\/\/[^\n]*/g, " ");
+  return stripComments(src);
 }
 
 const withRawGithubFetch = sources()

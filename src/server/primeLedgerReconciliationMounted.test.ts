@@ -26,6 +26,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
+import { stripComments } from "./sourceComments.pure";
 
 const read = (p: string) => readFileSync(p, "utf8");
 
@@ -39,7 +40,7 @@ const read = (p: string) => readFileSync(p, "utf8");
  * reason.
  */
 const code = (source: string) =>
-  source.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/^\s*\/\/[^\n]*$/gm, " ");
+  stripComments(source);
 
 const PURE = "src/server/primeLedgerReconciliation.pure.ts";
 const BUILDER = "src/server/primeLedgerReconciliation.server.ts";

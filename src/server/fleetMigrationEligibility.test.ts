@@ -12,6 +12,7 @@ import {
   type BackendFacts,
 } from "./fleetMigrationEligibility.pure";
 import { isUpstreamRateLimit } from "./provisioningBudget";
+import { stripComments } from "./sourceComments.pure";
 
 const HEALTHY: BackendFacts = {
   supabaseProjectRef: "abcdefghijklmnopqrst",
@@ -268,7 +269,7 @@ describe("a block the clone has since discharged", () => {
     // error text it exists to explain — and a test that fires on prose is one
     // that teaches the next person to delete the explanation. What must not
     // exist twice is the recognition, which is code.
-    const code = pure.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:])\/\/.*$/gm, "$1 ");
+    const code = stripComments(pure);
     // A plain substring, deliberately: a second spelling would be written as
     // `/\brate limit\b/`, and a word-boundary probe does not match that —
     // `\b` makes "brate" one word, so the assertion would miss precisely the

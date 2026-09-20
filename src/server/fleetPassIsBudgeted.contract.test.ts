@@ -27,11 +27,12 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { stripComments } from "./sourceComments.pure";
 
 const read = (p: string) => readFileSync(join(process.cwd(), p), "utf8");
 /** Source with comments removed — a comment quoting code is not code. */
 const code = (src: string): string =>
-  src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
+  stripComments(src);
 /**
  * The same rule for SQL, and it is not decoration.
  *
@@ -1000,7 +1001,11 @@ describe("a pass is bounded", () => {
       sent THIS pass, which is equally true of a pass that finished a seed.
     */
     const at = lane.indexOf("pausedMidReplay\n");
-    const branch = lane.slice(lane.indexOf("? // Said before the level reading", at));
+    // Anchored on CODE. This slice used to begin at the trailing comment
+    // `? // Said before the level reading`, which the shared strip removes —
+    // a landmark made of prose is one the stripper is entitled to delete, and
+    // the slice then silently became empty rather than failing to find it.
+    const branch = lane.slice(at);
     const sentence = branch.slice(0, branch.indexOf("`Synced to ${syncedTo}`"));
     // The fact is the cursor the pass is about to WRITE, not a statement count.
     expect(sentence).toContain("chunkCursor !== null");

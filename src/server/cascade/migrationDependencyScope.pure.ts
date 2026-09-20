@@ -52,6 +52,7 @@
  * reconciliation already uses.
  */
 import { extractCreatedObjects } from "../primeLedgerReconciliation.pure";
+import { stripSqlComments } from "../sqlComments.pure";
 
 /**
  * Comments out, dollar-quoted bodies KEPT.
@@ -67,9 +68,7 @@ import { extractCreatedObjects } from "../primeLedgerReconciliation.pure";
  * Comments still go, so a version named in a `-- see 20261202090000` note is
  * not read as a reference to it.
  */
-function stripCommentsOnly(sql: string): string {
-  return sql.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/--[^\n]*/g, " ");
-}
+const stripCommentsOnly = stripSqlComments;
 
 /**
  * The largest migration this scoping will read.

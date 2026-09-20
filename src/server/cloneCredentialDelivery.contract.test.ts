@@ -24,12 +24,11 @@ import { describe, expect, it } from "vitest";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { CLONE_API_SCOPES, DEFAULT_SCOPES } from "@/lib/clone-api-scopes";
+/** A comment quoting the deleted path is prose, not a write. */
+import { stripComments } from "./sourceComments.pure";
 
 const read = (p: string) => readFileSync(join(process.cwd(), p), "utf8");
 
-/** A comment quoting the deleted path is prose, not a write. */
-const stripComments = (src: string): string =>
-  src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(join(process.cwd(), dir))) {
