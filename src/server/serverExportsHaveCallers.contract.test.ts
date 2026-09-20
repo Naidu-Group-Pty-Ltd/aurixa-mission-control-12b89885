@@ -58,6 +58,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { stripCommentsAndStrings as code } from "@/server/sourceComments.pure";
 import { join } from "node:path";
 
 /**
@@ -96,101 +97,6 @@ const FROZEN: ReadonlyArray<string> = [
  * fails on its own contents. Found by running it.
  */
 const THIS_FILE = "src/server/serverExportsHaveCallers.contract.test.ts";
-
-/**
- * Source with comment LINES removed.
- *
- * ## Why stripping is necessary
- *
- * A comment is not a caller, and this codebase comments heavily. The orphan
- * this gate was built for is named in the prose of two modules and a test —
- * `blockageTaxonomy.pure.ts`, `MIGRATION_PIPELINE.md`, `fleetBlockageRecord`
- * — so a scan that reads comments would have reported it reached. Proved by
- * planting: with comments counted, un-wiring the report entirely leaves this
- * gate green.
- *
- * ## Why it is LINE-ORIENTED and not a regex over the file
- *
- * The obvious `/\/\*[\s\S]*?\*\//` is not safe here, and that is measured
- * rather than feared. `backend-provisioning.server.ts:1473` is
- * ``redirectSet.add(`${site}/*`)`` — a `/*` inside a template literal. A
- * file-wide strip opens a comment there and runs to the next `*&#47;`,
- * swallowing `applyAuthConfig`'s declaration and `buildAuthConfigPatch`'s own
- * call site, which then reported as an orphan. A gate that invents a failure
- * is a gate somebody turns off.
- *
- * So a line opens a block only when its first non-space characters are the
- * opener, which a `/*` inside an expression never is. That is deliberately
- * CONSERVATIVE: a trailing `// note` after code survives, so a reference
- * hiding there still counts as a caller. Erring toward missing an orphan is
- * the right direction — the cost is a name this list does not carry, against
- * a false failure on every run.
- */
-function code(source: string): string {
-  const out: string[] = [];
-  let inBlock = false;
-  for (const line of source.split("\n")) {
-    const t = line.trim();
-    if (inBlock) {
-      const close = t.indexOf("*/");
-      if (close === -1) {
-        out.push("");
-      } else {
-        inBlock = false;
-        out.push(t.slice(close + 2));
-      }
-      continue;
-    }
-    if (t.startsWith("//")) {
-      out.push("");
-      continue;
-    }
-    if (t.startsWith("/*")) {
-      /*
-        A comment that CLOSES on its own line leaves code behind it, and this
-        codebase writes exactly that shape all over:
-
-            const { retargetCloneRepo } = await import(
-              /* @vite-ignore *&#47; "@/lib/_server-shims/clone-repo-retarget.server"
-            );
-
-        Asking whether the line ENDS with the closer says no here — it ends
-        with the path — so the tracker opened a block and swallowed the rest
-        of the module, reporting `retargetCloneRepo` as uncalled while line
-        510 calls it. Found by running it. The closer is looked for anywhere
-        after the opener, and the tail is kept.
-      */
-      const close = t.indexOf("*/", 2);
-      if (close === -1) {
-        inBlock = true;
-        out.push("");
-      } else {
-        out.push(t.slice(close + 2));
-      }
-      continue;
-    }
-    out.push(line);
-  }
-  /*
-    And a name inside a QUOTED STRING is not a call either.
-
-    A source contract asserting `expect(source).toContain("someFunction")` is
-    bookkeeping about that function, exactly as this file's own freeze list
-    is — and this repository is full of them. Measured: un-wiring the report
-    entirely still left it reading as reached, on the strength of the
-    assertions in `primeLedgerReconciliationMounted.test.ts`.
-
-    Template literals are deliberately LEFT ALONE. A `${…}` holds real code,
-    and stripping it would hide genuine calls — false orphans are the failure
-    that gets a gate switched off, while a missed one costs a name this list
-    does not carry. Measured over the whole of `src/`: stripping quoted
-    strings moves the population by nothing and loses no declaration.
-  */
-  return out
-    .join("\n")
-    .replace(/"(?:[^"\\\n]|\\.)*"/g, '""')
-    .replace(/'(?:[^'\\\n]|\\.)*'/g, "''");
-}
 
 function allSources(): Map<string, string> {
   const out = new Map<string, string>();
