@@ -90,7 +90,7 @@ describe("stripComments", () => {
     // swallowed the rest of the module.
     const out = stripComments('const { f } = await import(/* @vite-ignore */ "@/lib/x");');
     expect(out).not.toContain("@vite-ignore");
-    expect(out).toContain('await import(');
+    expect(out).toContain("await import(");
     expect(out).toContain('"@/lib/x"');
   });
 
@@ -155,7 +155,9 @@ describe("stripComments", () => {
     // and the first version of this test reported four such sentences as lost
     // code. Parsing removes the guess: prose is not in the AST to begin with.
     const declarationsIn = (source: string, file: string) => {
-      const sf = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
+      // `setParentNodes: false`: only the declaration's own name is read, and
+      // building parent links over the whole tree costs 2,430ms against 1,338.
+      const sf = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, false);
       const found: string[] = [];
       const visit = (node: ts.Node) => {
         if (
@@ -197,7 +199,11 @@ describe("stripComments", () => {
     // Measured 20 Sep 2026: 24,273 declarations across 1,098 files, none lost.
     expect(total).toBeGreaterThan(20_000);
     expect(lost, "the strip is eating real code").toEqual([]);
-  });
+    // Two compiler parses of all 1,098 files: ~1.3s here, and it timed out on
+    // vitest's 5s default on a CI runner. Given real headroom rather than
+    // trimmed to fit — the whole point of this guard is that it reads
+    // everything.
+  }, 60_000);
 
   it("removes prose the naive block regex could not reach", () => {
     // Non-vacuity for the guard above: it only means something if the strip
