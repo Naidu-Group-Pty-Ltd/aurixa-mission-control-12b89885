@@ -77,6 +77,7 @@ import {
 } from "./cascade/securityRegistryReconcile.pure";
 import {
   SECURITY_INVENTORY_PATH,
+  cloneOnlyEdgeFunctions,
   securityInventoryHold,
 } from "./cascade/securityInventoryHold.pure";
 import { refreshCarrierRows } from "./cascade/carrierRefresh.server";
@@ -2401,6 +2402,18 @@ export async function processClone(args: {
   // functions prime has never analysed, so prime's `SECURITY_INVENTORY.json`
   // is a static analysis of a different tree. A mirror carries nothing
   // forward and keeps today's behaviour exactly.
+  // The declarations are the weaker evidence and were, on the one clone this
+  // hold was written for, no evidence at all: it owns three function
+  // directories and declares none of them. The generator counts directories,
+  // so that is what decides. A tree that could not be listed answers `null`
+  // rather than "none", and the declarations carry the decision alone.
+  const ownedByTree = cloneOnlyEdgeFunctions({
+    primePaths: primeShaByPath?.keys(),
+    clonePaths: cloneShaByPath?.keys(),
+  });
+  if (ownedByTree !== null) {
+    cloneOwnedFunctions = [...new Set([...cloneOwnedFunctions, ...ownedByTree])];
+  }
   const inventoryHold = securityInventoryHold(cloneOwnedFunctions);
   if (inventoryHold) {
     dropFromTree(SECURITY_INVENTORY_PATH);

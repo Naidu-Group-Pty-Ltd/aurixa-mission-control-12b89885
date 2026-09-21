@@ -1,7 +1,7 @@
 # The carrier that absorbed nine prime commits and could deliver none of them
 
-On 21 September 2026 the fleet was reported stuck: *"all clones are stuck in
-cascading. None are syncing."* It was, and it had been since **18:00 UTC the
+On 21 September 2026 the fleet was reported stuck: _"all clones are stuck in
+cascading. None are syncing."_ It was, and it had been since **18:00 UTC the
 previous evening** — nine prime commits and a little over nine hours, with
 every component of the cascade reporting normal operation.
 
@@ -17,12 +17,12 @@ Measured from GitHub on 21 Sep 2026 (Mission Control's own database sits on
 Lovable Cloud and is not reachable from a Supabase management token, so every
 figure below is read off the repositories rather than the ledger):
 
-| clone | receives from | cascade proposal | state |
-|---|---|---|---|
-| `npc-client-dashboard` | prime | **#228**, opened 18:00:26Z | open, `security` red |
-| `npc-crm-independent-6505dc` | prime | **#13**, updated 18:03:23Z | open, `security` + `verify` red |
-| `preflight-property-group` | npc-client-dashboard | **none** | — |
-| `npc-test-76b3b3` | npc-client-dashboard | **none** | — |
+| clone                        | receives from        | cascade proposal           | state                           |
+| ---------------------------- | -------------------- | -------------------------- | ------------------------------- |
+| `npc-client-dashboard`       | prime                | **#228**, opened 18:00:26Z | open, `security` red            |
+| `npc-crm-independent-6505dc` | prime                | **#13**, updated 18:03:23Z | open, `security` + `verify` red |
+| `preflight-property-group`   | npc-client-dashboard | **none**                   | —                               |
+| `npc-test-76b3b3`            | npc-client-dashboard | **none**                   | —                               |
 
 `npc-client-dashboard`'s `main` had merged four cascades that day on a roughly
 hourly cadence — `prime@f207ca8` at 09:24, `prime@98c068a` at 10:55,
@@ -66,7 +66,7 @@ own merge commit at 14:37:01Z).
 
 `resolveCascadeSource` holds a child until its parent's `last_synced_sha`
 equals the commit the pass is delivering, and a held event goes back to
-`pending` with *"Waiting on lineage until …"*, re-claimed every five minutes.
+`pending` with _"Waiting on lineage until …"_, re-claimed every five minutes.
 In `pr` mode that wait is a person's merge, which is exactly what the hold is
 for.
 
@@ -80,8 +80,8 @@ This is the defect.
 
 `createCascadeForAllClones` stands a push down whenever an unclaimed pending
 commit event already exists, and `eventFold`'s header gives the reason
-exactly: *"that event will deliver this push's content anyway, because it
-reads prime's head when it runs"*. The new push creates nothing and returns
+exactly: _"that event will deliver this push's content anyway, because it
+reads prime's head when it runs"_. The new push creates nothing and returns
 the carrier's id with `cloneCount: 0`.
 
 That promise covers only clones whose result row is still `queued`.
@@ -164,13 +164,13 @@ see two of the four rows. And both finished rows carry status **`pr_opened`**,
 not `succeeded` and not `skipped` — the stamp a freshly opened or updated
 proposal holds until the merge drain reconciles it. Over the whole table:
 
-| status | rows | with `delivered_sha` |
-|---|---|---|
-| `succeeded` | 631 | 107 |
-| `skipped` | 396 | 16 |
-| `failed` | 42 | 0 |
-| **`pr_opened`** | **3** | **3** |
-| `queued` | 2 | 0 |
+| status          | rows  | with `delivered_sha` |
+| --------------- | ----- | -------------------- |
+| `succeeded`     | 631   | 107                  |
+| `skipped`       | 396   | 16                   |
+| `failed`        | 42    | 0                    |
+| **`pr_opened`** | **3** | **3**                |
+| `queued`        | 2     | 0                    |
 
 `pr_opened` is rare only because it is transient, and transient is precisely
 the state a held carrier's rows sit in. The set is anchored to
@@ -188,8 +188,8 @@ fail when the original set is planted back.
 
 The stand-down in `createCascadeForAllClones` is inside
 `if (trigger === "commit" && sourceSha)`, and `decideEventFold` never folds a
-`manual` event — *"an operator's explicit act — a re-run after fixing an
-exclusion"*. So **firing a manual cascade from Mission Control breaks the
+`manual` event — _"an operator's explicit act — a re-run after fixing an
+exclusion"_. So **firing a manual cascade from Mission Control breaks the
 deadlock today**, on the code that is deployed: it creates a fresh event with
 a `queued` row for every clone, the pass reads prime's current head, and both
 standing proposals are updated in place from it.
@@ -208,7 +208,7 @@ failed at 16:54Z, and run 43 failed before it. The failure is
 `scoringMethodology.spec.ts` asserting that
 `docs/reports/SCORING_V2_METHODOLOGY.md` states the version its modules
 declare; the clone holds the spec and the modules, and the document is not in
-its scope (*"installed modules + 13 repository invariant(s)"*, 57 files). That
+its scope (_"installed modules + 13 repository invariant(s)"_, 57 files). That
 is the class this clone's own `CLAUDE.md` already names — **a spec and its
 subject travel together or neither does** — and it needs a person to decide
 whether the document joins that clone's scope or the orphaned spec leaves it.
@@ -251,3 +251,115 @@ carry the re-offer, that no downstream reader still reads the pre-refresh set,
 and that the call sits after prime's head is read, after the claim fence and
 before the pass reads its work. Each of those was proven non-vacuous by
 planting the defect it describes and watching it fail.
+
+---
+
+## The fourth clone, and a control that always answered no
+
+Three of the four clones reached `in_sync @ 7e16541` within ten minutes of the
+carrier settling. `npc-crm-independent` did not, and its reason has nothing to
+do with lineage: its `security` job is red, `auto_merge` lands only on green,
+so its proposal sits open and the clone reads `cascading` for ever.
+
+That job is one line — `npm run security:inventory && git diff --exit-code --
+docs/security/SECURITY_INVENTORY.json` — and it was failing for **two
+independent reasons**, each sufficient on its own.
+
+### The clone's own baseline had never been regenerated
+
+Measured 21 Sep 2026 by running the clone's own generator against its own
+`main`: the committed file says `edge_function_count: 413` and the generator
+says **416**. The three are `crm-calendar`, `crm-inbound-message` and
+`crm-send-message` — functions this clone added and whose baseline nobody
+re-ran. That red predates every cascade in this incident and would survive all
+of them.
+
+### And the cascade was about to destroy the fix
+
+`securityInventoryHold` exists for exactly this clone. Its header says so:
+_"Where the clone owns functions prime has never had, prime's baseline cannot
+describe the clone's repository."_ It shipped, it was wired correctly, it was
+reached on every pass — and it had **never once fired**, because of where it
+read its evidence:
+
+```ts
+const inventoryHold = securityInventoryHold(cloneOwnedFunctions);
+```
+
+`cloneOwnedFunctions` is the union of what the `config.toml` and
+`SECURITY_REGISTRY.json` reconciles **carried forward** — the names the clone
+_declares_ and prime has no opinion about. Measured on this clone:
+
+| function              | directory on disk | declared in `config.toml` | in `SECURITY_REGISTRY.json` |
+| --------------------- | ----------------- | ------------------------- | --------------------------- |
+| `crm-calendar`        | yes               | **no**                    | **no**                      |
+| `crm-inbound-message` | yes               | **no**                    | **no**                      |
+| `crm-send-message`    | yes               | **no**                    | **no**                      |
+
+So both reconciles carried nothing forward, `cloneOwnedFunctions` was `[]`,
+`securityInventoryHold([])` returned `null`, and prime's baseline was written
+straight over the clone's. The pull request's own body is the confession: it
+reports `414 function declaration(s), was 413` with no "kept N declaration(s)
+this clone owns" clause, which is the engine telling you `carriedForward` was
+empty.
+
+**The two questions are not the same question**, and the generator settles
+which one matters:
+
+```js
+const functionNames = readdirSync(functionsDir).filter(
+  (name) => name !== "_shared" && statSync(join(functionsDir, name)).isDirectory(),
+);
+```
+
+It counts **directories**. A clone can own a function it never declared, and
+this one owns three. So `cloneOnlyEdgeFunctions` now asks the generator's own
+question of the two trees the engine has already listed, and the declarations
+stay as the fallback for the case where a tree could not be listed at all —
+because a read that FAILED is not a set that is EMPTY, and falling back to
+yesterday's behaviour is the one answer that cannot be newly wrong.
+
+Three things follow.
+
+**A hold must be derived from the same evidence as the check it protects.**
+This one was derived from configuration while the check it protects reads the
+filesystem, so it was a control that was present, reachable, and constitutively
+incapable of answering yes on the only clone in the fleet it applied to.
+
+**The fix at the clone needs the fix at the prime, or it is destroyed.**
+Regenerating the clone's baseline alone is the correction losing to the
+document it corrects: the next cascade writes prime's copy back over it. The
+hold is what makes the regeneration durable, which is why they ship together.
+
+**A mirror is byte-identical.** `cloneOnlyEdgeFunctions` returns `[]` where the
+two trees hold the same function set, so `npc-test` and
+`preflight-property-group` — whose `security` jobs are green — keep today's
+behaviour exactly.
+
+### What this does NOT fix, named rather than guessed at
+
+Prime's baseline also names functions a **filtered** delivery does not carry.
+The same pull request adds `urban-centre-register-ingest/index.ts` to the
+inventory while the delivery carries only `_shared`,
+`generate-investment-report`, `investment-scoring-service` and
+`location-intelligence-service` — so the baseline asserts a tree the cascade
+itself did not produce. On this clone it is subsumed, because the hold fires
+anyway for the `crm-*` functions. There is **no measured clone** where it is
+the only cause: the other two are mirrors and receive everything. It is
+recorded here rather than built, because the rule that would close it — model
+what the delivery produces, including deletions, and compare the function sets
+— is a larger change than the evidence supports.
+
+### What was asserted
+
+`securityInventoryHold.test.ts` gains 9 tests. The pure half pins the
+generator's rule (a directory, not "a directory with an `index.ts`" — that
+spelling misses `crm-inbound-message`), that `_shared` and loose files are not
+functions, that the three measured functions produce the hold, that a mirror
+produces none, that a prime-only function does not trigger it from this
+direction, and that an unlistable tree answers `null` rather than `[]`. The
+source half pins that the engine derives the set from both tree listings,
+unions rather than replaces, and does it after both reconciles and before the
+hold. Each was proven non-vacuous by planting the defect it describes:
+reverting the engine to declarations alone fails 3, the `index.ts` spelling
+fails 1, and treating an unlistable tree as empty fails 1.
