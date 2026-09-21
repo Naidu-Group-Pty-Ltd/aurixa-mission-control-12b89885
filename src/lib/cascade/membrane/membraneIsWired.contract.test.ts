@@ -116,11 +116,58 @@ describe("the engine asks the membrane", () => {
     ).toBeGreaterThan(stranded);
   });
 
+  it("tries to CARRY the subject before it condemns the spec", () => {
+    // The gate has two lawful resolutions and this is the order between
+    // them: bring both, or leave both. Holding first and carrying never was
+    // the behaviour that left the fleet's 176-file split standing.
+    const carry = engine.indexOf("planSubjectCarry({");
+    const hold = engine.indexOf("orphanSpecHoldAfterCarry({");
+    expect(carry).toBeGreaterThan(-1);
+    expect(hold).toBeGreaterThan(carry);
+  });
+
+  it("puts a carried subject through the SAME judgement as every other write", () => {
+    // The whole safety argument. A subject carried in because a spec names it
+    // must meet the oversize ceiling, the workflow rule, the backend-identity
+    // rule and this edge's channels on identical terms — which it does by
+    // being the same function, not by a second implementation agreeing.
+    const at = engine.indexOf("planSubjectCarry({");
+    const block = engine.slice(at, at + 1400);
+    expect(block).toMatch(/mapWithConcurrencyUntil<[\s\S]{0,120}>\(\s*plan\.carry\s*,\s*8\s*,\s*prepareOne/);
+    // And there is exactly one such judgement to be the same as.
+    expect(engine.match(/const prepareOne = async/g) ?? []).toHaveLength(1);
+  });
+
+  it("absorbs a carried subject the way the main pass absorbs its own", () => {
+    // Two copies of "what a prepared entry becomes" is how one of them comes
+    // to forget `deliveredSource` — the map the spec channel reads — and a
+    // carried spec would then cross having stranded something.
+    const at = engine.indexOf("planSubjectCarry({");
+    const block = engine.slice(at, at + 1400);
+    expect(block).toContain("absorbPrepared(carried)");
+    expect(engine.match(/const absorbPrepared =/g) ?? []).toHaveLength(1);
+    expect(engine).toContain("absorbPrepared(prepared)");
+  });
+
+  it("never releases a subject an existing rule already holds", () => {
+    // `planSubjectCarry` is handed the live partition, and what it refuses it
+    // returns rather than drops, so the spec is held WITH its refusals.
+    const at = engine.indexOf("planSubjectCarry({");
+    const block = engine.slice(at, at + 400);
+    expect(block).toMatch(/held:\s*partition\.held/);
+  });
+
+  it("answers to the pass's own clock, so carrying cannot overrun a budget", () => {
+    const at = engine.indexOf("planSubjectCarry({");
+    const block = engine.slice(at, at + 1400);
+    expect(block).toContain("shouldStop");
+  });
+
   it("holds the spec rather than dropping it silently", () => {
     const at = engine.indexOf("strandedSubjects({");
-    const block = engine.slice(at, at + 1200);
-    expect(block).toContain("stranded.length === 0) continue");
-    expect(block).toContain("orphanSpecHold({ membrane, specPath, stranded })");
+    const block = engine.slice(at, at + 3000);
+    expect(block).toContain("stranded.length > 0");
+    expect(block).toMatch(/orphanSpecHoldAfterCarry\(\{\s*membrane,\s*specPath,\s*stranded,\s*refused,/);
     expect(block).toContain("partition.held.push(held)");
     expect(block).toContain("needsReconcile.push(held)");
   });
@@ -129,7 +176,7 @@ describe("the engine asks the membrane", () => {
     // It was prepared and pushed before this ran. A hold that only records
     // itself would report the file as withheld and ship it anyway.
     const at = engine.indexOf("strandedSubjects({");
-    const block = engine.slice(at, at + 1400);
+    const block = engine.slice(at, at + 3000);
     expect(block).toContain("treeEntries.splice(i, 1)");
     expect(block).toContain("delete deliveredSource[specPath]");
   });
@@ -196,7 +243,7 @@ describe("the engine asks the membrane", () => {
     // And it precedes every reader, so no reader can be reading a stale one.
     const declaredAt = engine.indexOf("const membrane = membraneInto(");
     expect(engine.indexOf("permeate(membrane,")).toBeGreaterThan(declaredAt);
-    expect(engine.indexOf("orphanSpecHold({ membrane,")).toBeGreaterThan(declaredAt);
+    expect(engine.indexOf("orphanSpecHoldAfterCarry({")).toBeGreaterThan(declaredAt);
   });
 });
 

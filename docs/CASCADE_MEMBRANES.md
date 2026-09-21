@@ -476,11 +476,59 @@ looks at, and the band has no such offset because its placement is on a plain
 to `never` — the same disagreement between gates that this whole branch keeps
 turning on.
 
+## The gate resolves by carrying
+
+A spec and its subject travel together or neither does, and there are two ways
+to satisfy that. Holding the spec leaves both. Carrying the subject brings
+both — and on a clone that already HOLDS the subject and is merely behind on
+it, which is every one of the fleet's measured 176, bringing both is what an
+operator wants. Leaving both meant a standing backlog nobody was going to
+clear by hand, one spec at a time, for ever.
+
+So the spec channel now tries to carry before it condemns, and three things
+bound it.
+
+**A carried subject is judged by `prepareOne`** — the same function every
+other write goes through, extracted from the prepare loop's lambda precisely
+so it could be asked twice. It meets the oversize ceiling, the
+judging-workflow rule, the backend-identity rule and this edge's own channels
+on identical terms. Nothing is carried past a rule for having been MENTIONED,
+which is the distinction between a caller naming rows and a caller asking
+questions — the same one `airtableListingsRoute` turns on.
+
+**A subject an existing rule already holds is never released by this.**
+`planSubjectCarry` is handed the live partition and returns its refusals
+rather than dropping them, so a `protected`, `oversize` or unapproved
+`manual_reconcile` path stays held and the spec that named it stays stranded
+*with* it — now saying which rule stopped which subject, in an operator's
+words rather than the column's.
+
+**It answers to the pass's own clock**, through the same `shouldStop` the
+prepare loop uses, and to a ceiling of `MAX_SUBJECTS_CARRIED`. Neither is a
+failure: what fits is carried, what does not leaves its spec held exactly as
+before this existed, and the hold SAYS which of the two stopped it — because
+"we could not" and "we did not get to" send a reader to opposite places, a
+rule to argue with or a pass to run again. A budget-stopped carry deliberately
+does not hand the event back the way a budget-stopped prepare does: that one
+would ship half a module's diff, while this one leaves a delivery that is
+already coherent.
+
+Two corrections worth keeping from writing it. The refusals are read from
+`partition.held` at the moment the specs are held, not from the plan computed
+at the top of the round — where every carried subject met a rule of its own,
+those holds were pushed a few lines earlier and the plan predates all of them,
+so the generic instruction would have printed on exactly the case with a
+specific answer. And both `carryStoppedOnBudget` and `carryHitCeiling` were
+computed and read by nothing for a first draft, which is this repository's own
+signature defect committed inside the feature built to name it; they are on
+the hold an operator reads.
+
 ## What this deliberately does not do
 
-- **It does not widen a clone's scope.** A held spec is reported; nothing
-  pulls its subject across. That decision is 176 files wide and belongs to a
-  person.
+- **It does not widen a clone's scope to a file the clone does not have.**
+  Carrying a subject updates a file this clone already holds and is behind on;
+  adding a path it has never had is a different act with a different blast
+  radius, and `strandedSubjects` refuses to name one.
 - **It does not rewrite source.** The two new organs are channels. A pump that
   synthesises an import is a pump that can ship a file that does not compile.
 - **It does not read the database.** Every membrane is a literal in

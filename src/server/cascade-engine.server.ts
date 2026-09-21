@@ -80,7 +80,13 @@ import {
   cloneOnlyEdgeFunctions,
   securityInventoryHold,
 } from "./cascade/securityInventoryHold.pure";
-import { orphanSpecHold, permeate, strandedSubjects } from "@/lib/cascade/membrane/membrane.pure";
+import {
+  MAX_SUBJECTS_CARRIED,
+  orphanSpecHoldAfterCarry,
+  permeate,
+  planSubjectCarry,
+  strandedSubjects,
+} from "@/lib/cascade/membrane/membrane.pure";
 import { membraneInto } from "@/lib/cascade/membrane/fleetMembranes.pure";
 import { isSpecPath } from "@/lib/cascade/membrane/ionSpecies.pure";
 import { refreshCarrierRows } from "./cascade/carrierRefresh.server";
@@ -103,6 +109,7 @@ import {
   summaryOwesReconcile,
   requireExclusions,
   type HeldPath,
+  type ExclusionReason,
   type SyncExclusion,
 } from "./cascade/syncExclusions.pure";
 import { isBlockedByApproval } from "./cascade-approvals.server";
@@ -2016,219 +2023,230 @@ export async function processClone(args: {
     freshlyPrepared > 0 &&
     resume.budget.isPastDeadline(slowestFileMs);
 
-  const { results: prepared, stopped: preparePaused } = await mapWithConcurrencyUntil<
-    string,
-    Prepared | null
-  >(
-    primeFiles,
-    8,
-    async (path) => {
-      // Reused from the previous pass: no read, no create. The tree
-      // comparison already established the path differs, and the list
-      // established prime's blob is still the one this was made from.
-      //
-      // A SPEC is never reused, and the exception is narrow on purpose. Every
-      // other judgement on this path is a pure function of the file's own
-      // text, so an answer settled in an earlier tick is the same answer now.
-      // The membrane's spec channel is not: whether a spec strands its
-      // subject is a fact about THIS delivery, and a resumed pass carries a
-      // different one. Reuse also sets `content: null`, which takes the file
-      // out of `deliveredSource` — the set that channel reads — so a banked
-      // spec would cross having been judged against a partial delivery and
-      // never re-asked. Specs are a small share of any cascade; the saving
-      // this gives up is a file read, and what it buys is a verdict about the
-      // delivery that is actually being made.
-      const reusable = isSpecPath(path) ? undefined : known.get(path);
-      if (reusable !== undefined) {
-        return {
-          kind: "blob",
-          path,
-          mode: "100644" as const,
-          type: "blob" as const,
-          sha: reusable,
-          content: null,
-        };
+  /**
+   * ONE CANDIDATE, JUDGED. Named rather than inline because it is asked
+   * TWICE: once over the paths this clone's modules put in scope, and again
+   * over the subjects a delivered spec would otherwise strand.
+   *
+   * That second pass is the whole safety argument for carrying a subject.
+   * A subject pulled in because a spec names it is not privileged: it meets
+   * the oversize ceiling, the judging-workflow rule, the backend-identity
+   * rule and this edge's own membrane channels on exactly the terms every
+   * other write does, because it is the same function. Injecting it into
+   * the tree instead would have carried a file past every rule in this
+   * engine on the strength of being MENTIONED, which is the opposite of
+   * what a membrane is for.
+   */
+  const prepareOne = async (path: string): Promise<Prepared | null> => {
+    // Reused from the previous pass: no read, no create. The tree
+    // comparison already established the path differs, and the list
+    // established prime's blob is still the one this was made from.
+    //
+    // A SPEC is never reused, and the exception is narrow on purpose. Every
+    // other judgement on this path is a pure function of the file's own
+    // text, so an answer settled in an earlier tick is the same answer now.
+    // The membrane's spec channel is not: whether a spec strands its
+    // subject is a fact about THIS delivery, and a resumed pass carries a
+    // different one. Reuse also sets `content: null`, which takes the file
+    // out of `deliveredSource` — the set that channel reads — so a banked
+    // spec would cross having been judged against a partial delivery and
+    // never re-asked. Specs are a small share of any cascade; the saving
+    // this gives up is a file read, and what it buys is a verdict about the
+    // delivery that is actually being made.
+    const reusable = isSpecPath(path) ? undefined : known.get(path);
+    if (reusable !== undefined) {
+      return {
+        kind: "blob",
+        path,
+        mode: "100644" as const,
+        type: "blob" as const,
+        sha: reusable,
+        content: null,
+      };
+    }
+    const fileStartedAt = Date.now();
+    let primeFile: Awaited<ReturnType<typeof getFileContent>>;
+    try {
+      primeFile = await getFileContent(octokit, primeRef, path, {
+        maxBytes: CASCADE_MAX_FILE_BYTES,
+      });
+    } catch (e) {
+      // Held, not failed. One file past the ceiling used to kill the whole
+      // pass — and the forty-seven beside it — on every attempt until the
+      // event ran out of claims. See `CASCADE_MAX_FILE_BYTES`.
+      if (e instanceof OversizeFileError) {
+        return { kind: "held", held: oversizeHold(path, e.bytes, e.maxBytes) };
       }
-      const fileStartedAt = Date.now();
-      let primeFile: Awaited<ReturnType<typeof getFileContent>>;
-      try {
-        primeFile = await getFileContent(octokit, primeRef, path, {
-          maxBytes: CASCADE_MAX_FILE_BYTES,
-        });
-      } catch (e) {
-        // Held, not failed. One file past the ceiling used to kill the whole
-        // pass — and the forty-seven beside it — on every attempt until the
-        // event ran out of claims. See `CASCADE_MAX_FILE_BYTES`.
-        if (e instanceof OversizeFileError) {
-          return { kind: "held", held: oversizeHold(path, e.bytes, e.maxBytes) };
-        }
-        throw e;
-      }
-      if (!primeFile) return null;
+      throw e;
+    }
+    if (!primeFile) return null;
 
-      // A mirror already knows this path differs -- the blob SHAs said so -- and
-      // re-reading the clone's copy to confirm it would double the request count
-      // of the one scope that cannot afford it.
-      let cloneFile = null as Awaited<ReturnType<typeof getFileContent>> | null;
-      let cloneFileRead = false;
-      if (cloneShaByPath !== null) {
-        // The tree listing already answered this for every path — a blob SHA
-        // is a hash of the bytes — so reading the clone's copy here is a
-        // request that cannot change the answer. It was made anyway, once per
-        // candidate, on every module-scope pass: 353 of them on the first
-        // cascade to `preflight-property-group`, repeated on each of the
-        // attempts that followed, which is a third of what spent the App's
-        // hourly budget on 2 Sep 2026. The clone's content is still fetched
-        // below, lazily, where the backend-identity hold needs it.
-        if (cloneShaByPath.get(path) === primeFile.sha) return null;
-      } else if (!isMirror) {
+    // A mirror already knows this path differs -- the blob SHAs said so -- and
+    // re-reading the clone's copy to confirm it would double the request count
+    // of the one scope that cannot afford it.
+    let cloneFile = null as Awaited<ReturnType<typeof getFileContent>> | null;
+    let cloneFileRead = false;
+    if (cloneShaByPath !== null) {
+      // The tree listing already answered this for every path — a blob SHA
+      // is a hash of the bytes — so reading the clone's copy here is a
+      // request that cannot change the answer. It was made anyway, once per
+      // candidate, on every module-scope pass: 353 of them on the first
+      // cascade to `preflight-property-group`, repeated on each of the
+      // attempts that followed, which is a third of what spent the App's
+      // hourly budget on 2 Sep 2026. The clone's content is still fetched
+      // below, lazily, where the backend-identity hold needs it.
+      if (cloneShaByPath.get(path) === primeFile.sha) return null;
+    } else if (!isMirror) {
+      cloneFile = await getFileContent(octokit, cloneRef, path);
+      cloneFileRead = true;
+      // Compared by blob SHA, which IS a hash of the bytes, rather than by
+      // the UTF-8 reading. Two different binaries decode to the same string
+      // of replacement characters, so comparing the readings would report a
+      // changed image as unchanged and never deliver it.
+      if (cloneFile && cloneFile.sha === primeFile.sha) return null;
+    }
+
+    // A judge may not travel ahead of the tree it judges.
+    //
+    // The workflows directory is a repository invariant, so a module-scoped
+    // clone receives prime's workflows — including `ci.yml`, which asks
+    // questions about the whole repository while that clone holds a subset of
+    // it. Measured 9 Sep 2026: prime's `builder-stock-pdf-worker` job runs
+    // `deno check cloudflare/builder-stock-pdf-worker/src/index.ts` and
+    // neither module-scoped clone holds that directory, so the check was red
+    // on every pull request with nothing the cascade could ever send to fix
+    // it.
+    //
+    // Decided from the workflow's own `on:` block rather than from a list of
+    // filenames kept in this repository about another one — see
+    // `judgingWorkflow.pure.ts`. Held rather than skipped, so the operator is
+    // told which workflow did not arrive and why.
+    //
+    // Ordered ahead of the backend-identity rule because it is cheaper and
+    // cannot overlap: `isShippedPath` covers `src/` and `public/` only, so no
+    // workflow file ever reaches that branch.
+    if (!primeFile.binary) {
+      const workflowHold = judgingWorkflowHold({
+        path,
+        primeContent: primeFile.content,
+        scope: isMirror ? "mirror" : "modules",
+      });
+      if (workflowHold) return { kind: "held", held: workflowHold };
+    }
+
+    // The content rule. Path exclusions protect what somebody remembered to
+    // list; this protects the property itself.
+    //
+    // Cheap by construction. The clone's copy is only fetched when prime's
+    // content actually names a Supabase project inside a path this clone
+    // ships -- one file out of 71 on the first mirror run -- so the extra
+    // read costs nothing on the paths that are not about identity, which is
+    // nearly all of them.
+    // Text only. `primeFile.content` is a lossy reading of a binary file, so
+    // scanning it for a project reference asks a question of characters that
+    // were never there — and a backend identity cannot be spelled in bytes
+    // that are not text.
+    if (
+      !primeFile.binary &&
+      isShippedPath(path) &&
+      backendRefsIn(primeFile.content).some((r) => r !== ownProjectRef)
+    ) {
+      if (!cloneFileRead) {
         cloneFile = await getFileContent(octokit, cloneRef, path);
         cloneFileRead = true;
-        // Compared by blob SHA, which IS a hash of the bytes, rather than by
-        // the UTF-8 reading. Two different binaries decode to the same string
-        // of replacement characters, so comparing the readings would report a
-        // changed image as unchanged and never deliver it.
-        if (cloneFile && cloneFile.sha === primeFile.sha) return null;
       }
+      const hold = backendIdentityHold({
+        path,
+        primeContent: primeFile.content,
+        cloneContent: cloneFile ? cloneFile.content : null,
+        ownRef: ownProjectRef,
+      });
+      if (hold) return { kind: "held", held: hold };
+    }
 
-      // A judge may not travel ahead of the tree it judges.
-      //
-      // The workflows directory is a repository invariant, so a module-scoped
-      // clone receives prime's workflows — including `ci.yml`, which asks
-      // questions about the whole repository while that clone holds a subset of
-      // it. Measured 9 Sep 2026: prime's `builder-stock-pdf-worker` job runs
-      // `deno check cloudflare/builder-stock-pdf-worker/src/index.ts` and
-      // neither module-scoped clone holds that directory, so the check was red
-      // on every pull request with nothing the cascade could ever send to fix
-      // it.
-      //
-      // Decided from the workflow's own `on:` block rather than from a list of
-      // filenames kept in this repository about another one — see
-      // `judgingWorkflow.pure.ts`. Held rather than skipped, so the operator is
-      // told which workflow did not arrive and why.
-      //
-      // Ordered ahead of the backend-identity rule because it is cheaper and
-      // cannot overlap: `isShippedPath` covers `src/` and `public/` only, so no
-      // workflow file ever reaches that branch.
-      if (!primeFile.binary) {
-        const workflowHold = judgingWorkflowHold({
-          path,
-          primeContent: primeFile.content,
-          scope: isMirror ? "mirror" : "modules",
-        });
-        if (workflowHold) return { kind: "held", held: workflowHold };
-      }
+    // ── The membrane on this edge ──────────────────────────────────────
+    //
+    // Here rather than beside `partitionCascadePaths`, for the reason the
+    // backend-identity hold above is here: these are judgements about what
+    // a file SAYS, and the text is in hand exactly once, at this point,
+    // because the pass is about to write it. Asking earlier would buy a
+    // second read of every candidate.
+    if (!primeFile.binary) {
+      const verdict = permeate(membrane, { path, text: primeFile.content });
+      if (verdict.kind === "blocked") return { kind: "held", held: verdict.held };
+    }
 
-      // The content rule. Path exclusions protect what somebody remembered to
-      // list; this protects the property itself.
-      //
-      // Cheap by construction. The clone's copy is only fetched when prime's
-      // content actually names a Supabase project inside a path this clone
-      // ships -- one file out of 71 on the first mirror run -- so the extra
-      // read costs nothing on the paths that are not about identity, which is
-      // nearly all of them.
-      // Text only. `primeFile.content` is a lossy reading of a binary file, so
-      // scanning it for a project reference asks a question of characters that
-      // were never there — and a backend identity cannot be spelled in bytes
-      // that are not text.
-      if (
-        !primeFile.binary &&
-        isShippedPath(path) &&
-        backendRefsIn(primeFile.content).some((r) => r !== ownProjectRef)
-      ) {
-        if (!cloneFileRead) {
-          cloneFile = await getFileContent(octokit, cloneRef, path);
-          cloneFileRead = true;
-        }
-        const hold = backendIdentityHold({
-          path,
-          primeContent: primeFile.content,
-          cloneContent: cloneFile ? cloneFile.content : null,
-          ownRef: ownProjectRef,
-        });
-        if (hold) return { kind: "held", held: hold };
-      }
+    // The spec channel is NOT asked here. Whether a spec strands its subject
+    // is a fact about what this pass WRITES, and this loop is what decides
+    // that — a candidate reaching this line can still be held by the rules
+    // above it, or be the file this very call is about to hold. It is asked
+    // once, below, over the finished delivery.
 
-      // ── The membrane on this edge ──────────────────────────────────────
-      //
-      // Here rather than beside `partitionCascadePaths`, for the reason the
-      // backend-identity hold above is here: these are judgements about what
-      // a file SAYS, and the text is in hand exactly once, at this point,
-      // because the pass is about to write it. Asking earlier would buy a
-      // second read of every candidate.
-      if (!primeFile.binary) {
-        const verdict = permeate(membrane, { path, text: primeFile.content });
-        if (verdict.kind === "blocked") return { kind: "held", held: verdict.held };
-      }
-
-      // The spec channel is NOT asked here. Whether a spec strands its subject
-      // is a fact about what this pass WRITES, and this loop is what decides
-      // that — a candidate reaching this line can still be held by the rules
-      // above it, or be the file this very call is about to hold. It is asked
-      // once, below, over the finished delivery.
-
-      // Prime's bytes, passed through untouched.
-      //
-      // This used to be `Buffer.from(primeFile.content, "utf8")` — the UTF-8
-      // READING re-encoded — which is a faithful round trip for text and
-      // destruction for anything else. `aurixa-emblem-240.png` arrived on the
-      // clone as 142,140 bytes of replacement characters where prime holds
-      // 78,450 bytes of PNG, and was re-corrupted by every cascade that
-      // carried it. 144 binary files were exposed, including 86 `.docx`
-      // partner agreement templates that both portals hand to partners.
-      //
-      // TEXT costs no call here at all: it travels INLINE in the chunked
-      // `createTree` chain (see `treeDelivery.pure.ts`), where one call
-      // carries ~a hundred files. Per-file `createBlob` on an ~830-file
-      // backfill spent a third of the App's hourly window PER CLONE —
-      // measured 16 Sep 2026, 12:24–13:25, one window synced one clone —
-      // so only binary files, which have no inline lane, still buy a blob,
-      // and only they are worth ledgering for reuse.
-      // A dry run needs to know WHICH paths would be written, not to upload
-      // their bytes. Prime's blob SHA stands in: it is never used for anything
-      // on this path, because the write boundary is never reached.
-      if (!dryRun && !primeFile.binary) {
-        slowestFileMs = Math.max(slowestFileMs, Date.now() - fileStartedAt);
-        return {
-          kind: "blob" as const,
-          path,
-          mode: "100644" as const,
-          type: "blob" as const,
-          sha: undefined,
-          inline: primeFile.content,
-          content: /\.[cm]?tsx?$/.test(path) ? primeFile.content : null,
-        };
-      }
-      const blobSha = dryRun
-        ? primeFile.sha
-        : (
-            await octokit.git.createBlob({
-              owner: cloneRef.owner,
-              repo: cloneRef.repo,
-              content: primeFile.base64,
-              encoding: "base64",
-            })
-          ).data.sha;
-      if (resume && !dryRun) {
-        progress.prepared[path] = { blob: blobSha, prime: primeFile.sha };
-        freshlyPrepared += 1;
-        slowestFileMs = Math.max(slowestFileMs, Date.now() - fileStartedAt);
-        // Written as it goes, so a pass cut by the platform rather than by
-        // its own budget still leaves most of its work on the row.
-        if (freshlyPrepared % PROGRESS_FLUSH_EVERY === 0) await resume.onProgress(progress);
-      }
+    // Prime's bytes, passed through untouched.
+    //
+    // This used to be `Buffer.from(primeFile.content, "utf8")` — the UTF-8
+    // READING re-encoded — which is a faithful round trip for text and
+    // destruction for anything else. `aurixa-emblem-240.png` arrived on the
+    // clone as 142,140 bytes of replacement characters where prime holds
+    // 78,450 bytes of PNG, and was re-corrupted by every cascade that
+    // carried it. 144 binary files were exposed, including 86 `.docx`
+    // partner agreement templates that both portals hand to partners.
+    //
+    // TEXT costs no call here at all: it travels INLINE in the chunked
+    // `createTree` chain (see `treeDelivery.pure.ts`), where one call
+    // carries ~a hundred files. Per-file `createBlob` on an ~830-file
+    // backfill spent a third of the App's hourly window PER CLONE —
+    // measured 16 Sep 2026, 12:24–13:25, one window synced one clone —
+    // so only binary files, which have no inline lane, still buy a blob,
+    // and only they are worth ledgering for reuse.
+    // A dry run needs to know WHICH paths would be written, not to upload
+    // their bytes. Prime's blob SHA stands in: it is never used for anything
+    // on this path, because the write boundary is never reached.
+    if (!dryRun && !primeFile.binary) {
+      slowestFileMs = Math.max(slowestFileMs, Date.now() - fileStartedAt);
       return {
         kind: "blob" as const,
         path,
         mode: "100644" as const,
         type: "blob" as const,
-        sha: blobSha,
-        inline: undefined,
-        content: !primeFile.binary && /\.[cm]?tsx?$/.test(path) ? primeFile.content : null,
+        sha: undefined,
+        inline: primeFile.content,
+        content: /\.[cm]?tsx?$/.test(path) ? primeFile.content : null,
       };
-    },
-    shouldStop,
-  );
+    }
+    const blobSha = dryRun
+      ? primeFile.sha
+      : (
+          await octokit.git.createBlob({
+            owner: cloneRef.owner,
+            repo: cloneRef.repo,
+            content: primeFile.base64,
+            encoding: "base64",
+          })
+        ).data.sha;
+    if (resume && !dryRun) {
+      progress.prepared[path] = { blob: blobSha, prime: primeFile.sha };
+      freshlyPrepared += 1;
+      slowestFileMs = Math.max(slowestFileMs, Date.now() - fileStartedAt);
+      // Written as it goes, so a pass cut by the platform rather than by
+      // its own budget still leaves most of its work on the row.
+      if (freshlyPrepared % PROGRESS_FLUSH_EVERY === 0) await resume.onProgress(progress);
+    }
+    return {
+      kind: "blob" as const,
+      path,
+      mode: "100644" as const,
+      type: "blob" as const,
+      sha: blobSha,
+      inline: undefined,
+      content: !primeFile.binary && /\.[cm]?tsx?$/.test(path) ? primeFile.content : null,
+    };
+  };
+
+  const { results: prepared, stopped: preparePaused } = await mapWithConcurrencyUntil<
+    string,
+    Prepared | null
+  >(primeFiles, 8, prepareOne, shouldStop);
 
   // The budget stopped the pass inside this clone. Everything prepared so far
   // is on the row; the engine hands the event back and the next pass starts
@@ -2254,28 +2272,46 @@ export async function processClone(args: {
       ? { progress: progress as unknown as Json }
       : {};
   const deliveredSource: Record<string, string> = {};
-  for (const entry of prepared) {
-    if (!entry) continue;
-    if (entry.kind === "held") {
-      // Recorded in the same partition the path rules feed, so a content hold
-      // reaches the pull request body, the withheld count and the "nothing to
-      // cascade" reason by exactly the route a listed path does.
-      partition.held.push(entry.held);
-      needsReconcile.push(entry.held);
-      continue;
+
+  /**
+   * Prepared candidates, absorbed into the delivery. Named for the same
+   * reason `prepareOne` is: the subjects a delivered spec carries in behind
+   * it arrive here too, and two copies of "what a prepared entry becomes" is
+   * how one of them comes to forget `deliveredSource` — the very map the spec
+   * channel reads to decide whether anything is still stranded.
+   *
+   * Returns the paths that actually reached the tree, which is what lets the
+   * carry loop tell "something crossed, ask again" from "nothing can".
+   */
+  const absorbPrepared = (entries: ReadonlyArray<Prepared | null>): string[] => {
+    const written: string[] = [];
+    for (const entry of entries) {
+      if (!entry) continue;
+      if (entry.kind === "held") {
+        // Recorded in the same partition the path rules feed, so a content hold
+        // reaches the pull request body, the withheld count and the "nothing to
+        // cascade" reason by exactly the route a listed path does.
+        partition.held.push(entry.held);
+        needsReconcile.push(entry.held);
+        continue;
+      }
+      if (entry.inline !== undefined) {
+        treeEntries.push({
+          path: entry.path,
+          mode: entry.mode,
+          type: entry.type,
+          content: entry.inline,
+        });
+      } else {
+        treeEntries.push({ path: entry.path, mode: entry.mode, type: entry.type, sha: entry.sha });
+      }
+      if (entry.content !== null) deliveredSource[entry.path] = entry.content;
+      written.push(entry.path);
     }
-    if (entry.inline !== undefined) {
-      treeEntries.push({
-        path: entry.path,
-        mode: entry.mode,
-        type: entry.type,
-        content: entry.inline,
-      });
-    } else {
-      treeEntries.push({ path: entry.path, mode: entry.mode, type: entry.type, sha: entry.sha });
-    }
-    if (entry.content !== null) deliveredSource[entry.path] = entry.content;
-  }
+    return written;
+  };
+
+  absorbPrepared(prepared);
 
   // ── supabase/config.toml: one file, two kinds of fact ──────────────────
   //
@@ -2560,13 +2596,48 @@ export async function processClone(args: {
   // It costs no read. `deliveredSource` already holds the text of every
   // `.ts`/`.tsx` this pass carries, which is every spec.
   //
-  // Iterated to a fixed point because removing a spec can in principle strand
-  // another that names it — rare, but a single pass would leave the second one
-  // crossing while asserting about a file that did not. Bounded by the number
-  // of specs in the delivery and terminating because the set only shrinks.
-  for (;;) {
+  // The gate resolves by CARRYING, not by refusing.
+  //
+  // A spec and its subject travel together or neither does, and there are two
+  // ways to satisfy that. Holding the spec leaves both, which is safe and is
+  // what this did first. Carrying the subject brings both, which is what an
+  // operator actually wants on a clone that already HOLDS the subject and is
+  // simply behind on it — and the fleet's split is 176 files wide, so leaving
+  // both meant a standing backlog nobody was going to clear by hand.
+  //
+  // Three things bound it.
+  //
+  // A carried subject is judged by `prepareOne`, the same function every
+  // other write goes through, so it meets the oversize ceiling, the
+  // judging-workflow rule, the backend-identity rule and this edge's own
+  // channels on identical terms. Nothing is carried past a rule for having
+  // been MENTIONED.
+  //
+  // A subject an existing rule already holds is never released by this.
+  // `planSubjectCarry` returns those refusals and the spec stays stranded
+  // with them, now saying which rule stopped which subject.
+  //
+  // And it answers to the same clock. `shouldStop` is the pass's own budget,
+  // so a carry that runs out of window leaves the remaining specs held
+  // exactly as they were before this existed, and the next tick resumes.
+  //
+  // Iterated to a fixed point. Each round either carries at least one subject
+  // that was not carried before — a strictly growing subset of prime's paths —
+  // or holds at least one spec, a strictly shrinking set; `attemptedSubjects`
+  // is what makes the first of those monotone, since a subject that prepared
+  // to a hold must not be re-attempted for ever.
+  const attemptedSubjects = new Set<string>();
+  const carriedSubjects: string[] = [];
+  let carryStoppedOnBudget = false;
+  let carryHitCeiling = false;
+  // Fixed before the loop rather than inside it: `deliveredSource` shrinks as
+  // specs are held, so a bound computed per round would move under its own
+  // guard.
+  const maxCarryRounds = MAX_SUBJECTS_CARRIED + Object.keys(deliveredSource).length + 1;
+
+  for (let round = 0; ; round += 1) {
     const deliveredPaths = new Set(treeEntries.map((t) => t.path));
-    const newlyStranded: Array<{ path: string; held: HeldPath }> = [];
+    const strandedBySpec = new Map<string, string[]>();
     for (const [specPath, specText] of Object.entries(deliveredSource)) {
       const stranded = strandedSubjects({
         specPath,
@@ -2575,14 +2646,69 @@ export async function processClone(args: {
         cloneSha: cloneShaByPath,
         crossing: deliveredPaths,
       });
-      if (stranded.length === 0) continue;
-      newlyStranded.push({
-        path: specPath,
-        held: orphanSpecHold({ membrane, specPath, stranded }),
-      });
+      if (stranded.length > 0) strandedBySpec.set(specPath, stranded);
     }
-    if (newlyStranded.length === 0) break;
-    for (const { path: specPath, held } of newlyStranded) {
+    if (strandedBySpec.size === 0) break;
+
+    // Try to bring the subjects across before deciding the specs cannot go.
+    const plan = planSubjectCarry({
+      stranded: [...strandedBySpec.values()].flat(),
+      held: partition.held,
+      attempted: attemptedSubjects,
+      limit: Math.max(0, MAX_SUBJECTS_CARRIED - carriedSubjects.length),
+    });
+    if (plan.atCeiling) carryHitCeiling = true;
+
+    if (plan.carry.length > 0 && !carryStoppedOnBudget) {
+      for (const subject of plan.carry) attemptedSubjects.add(subject);
+      const { results: carried, stopped } = await mapWithConcurrencyUntil<
+        string,
+        Prepared | null
+      >(plan.carry, 8, prepareOne, shouldStop);
+      // Deliberately NOT the `preparePaused` treatment. That one hands the
+      // event back because half a module's diff is worse than none; this one
+      // leaves a delivery that is already coherent — every spec whose subject
+      // did not arrive is held with it — so it ships, and the next tick
+      // carries the rest. The specs say they were cut short rather than
+      // refused.
+      if (stopped) carryStoppedOnBudget = true;
+      // Through the same absorber the main pass uses, so a carried subject
+      // reaches `deliveredSource` and is itself re-read for stranded
+      // subjects — a spec can carry a spec. A subject that met a rule of its
+      // own is held by it, and the spec that named it strands again next
+      // round, which is correct and now says which rule stopped it.
+      const written = absorbPrepared(carried);
+      carriedSubjects.push(...written);
+      // Something crossed, so re-ask before condemning any spec.
+      if (written.length > 0) continue;
+    }
+
+    // Nothing more can be carried for these specs. Hold them, naming the
+    // refusals rather than repeating the generic instruction.
+    //
+    // Read from `partition.held` HERE rather than from `plan.refused`, which
+    // was computed at the top of this round: where every carried subject met
+    // a rule of its own, those holds were pushed by `absorbPrepared` a few
+    // lines ago and the plan predates all of them. Using the plan would print
+    // the generic instruction on exactly the case that has a specific answer.
+    const refusedBySubject = new Map<string, { subject: string; reason: ExclusionReason }>();
+    for (const r of plan.refused) refusedBySubject.set(r.subject, r);
+    for (const h of partition.held) {
+      if (!refusedBySubject.has(h.path)) refusedBySubject.set(h.path, { subject: h.path, reason: h.reason });
+    }
+    for (const [specPath, stranded] of strandedBySpec) {
+      const refused = stranded
+        .map((s) => refusedBySubject.get(s))
+        .filter((r): r is { subject: string; reason: ExclusionReason } => r !== undefined);
+      const held = orphanSpecHoldAfterCarry({
+        membrane,
+        specPath,
+        stranded,
+        refused,
+        // The two facts this loop was computing and throwing away. "We could
+        // not" and "we did not get to" send an operator to opposite places.
+        cutShort: carryStoppedOnBudget ? "budget" : carryHitCeiling ? "ceiling" : null,
+      });
       partition.held.push(held);
       needsReconcile.push(held);
       delete deliveredSource[specPath];
@@ -2590,6 +2716,10 @@ export async function processClone(args: {
         if (treeEntries[i].path === specPath) treeEntries.splice(i, 1);
       }
     }
+
+    // A belt on top of the monotonicity argument above: a round that neither
+    // carried nor held would loop, and this stops rather than hanging.
+    if (round >= maxCarryRounds) break;
   }
 
   // A cascade whose only work is a removal is still work. Keying this on

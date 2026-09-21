@@ -9,7 +9,14 @@ import {
   readingFor,
   routingRuleReaches,
 } from "./ionSpecies.pure";
-import { orphanSpecHold, permeate, strandedSubjects, subjectsNamedBy } from "./membrane.pure";
+import {
+  orphanSpecHold,
+  orphanSpecHoldAfterCarry,
+  permeate,
+  planSubjectCarry,
+  strandedSubjects,
+  subjectsNamedBy,
+} from "./membrane.pure";
 import type { Membrane } from "./membrane.pure";
 import {
   FLEET_MEMBRANES,
@@ -22,6 +29,8 @@ import {
   reportableHeld,
   approvableHeld,
   backendRefsIn,
+  type ExclusionReason,
+  type HeldPath,
 } from "@/server/cascade/syncExclusions.pure";
 
 /**
@@ -752,5 +761,175 @@ describe("the edge into a repository is decided by that repository", () => {
       expect(seen.has(m.to), `${m.to} is the destination of two membranes`).toBe(false);
       seen.add(m.to);
     }
+  });
+});
+
+describe("planSubjectCarry", () => {
+  const held = (path: string, reason: ExclusionReason): HeldPath => ({
+    path,
+    pattern: "(x)",
+    reason,
+    note: "n",
+  });
+
+  it("carries a stranded subject nothing holds", () => {
+    const plan = planSubjectCarry({
+      stranded: ["src/lib/a.ts", "src/lib/b.ts"],
+      held: [],
+      attempted: new Set(),
+    });
+    expect(plan.carry).toEqual(["src/lib/a.ts", "src/lib/b.ts"]);
+    expect(plan.refused).toEqual([]);
+    expect(plan.atCeiling).toBe(false);
+  });
+
+  it.each<ExclusionReason>(["protected", "manual_reconcile", "oversize"])(
+    "refuses a subject already held as %s, and says so rather than dropping it",
+    (reason) => {
+      const plan = planSubjectCarry({
+        stranded: ["src/lib/a.ts"],
+        held: [held("src/lib/a.ts", reason)],
+        attempted: new Set(),
+      });
+      // The distinction the whole membrane exists for: a file a rule declined
+      // to carry does not become carriable by being mentioned.
+      expect(plan.carry).toEqual([]);
+      expect(plan.refused).toEqual([{ subject: "src/lib/a.ts", reason }]);
+    },
+  );
+
+  it("never re-attempts a subject this pass already tried", () => {
+    // What makes the engine's fixed point terminate: a subject that prepared
+    // to a hold must not come back round for ever.
+    const plan = planSubjectCarry({
+      stranded: ["src/lib/a.ts", "src/lib/b.ts"],
+      held: [],
+      attempted: new Set(["src/lib/a.ts"]),
+    });
+    expect(plan.carry).toEqual(["src/lib/b.ts"]);
+  });
+
+  it("de-duplicates a subject two specs both name", () => {
+    const plan = planSubjectCarry({
+      stranded: ["src/lib/a.ts", "src/lib/a.ts", "src/lib/b.ts"],
+      held: [],
+      attempted: new Set(),
+    });
+    expect(plan.carry).toEqual(["src/lib/a.ts", "src/lib/b.ts"]);
+  });
+
+  it("stops at the ceiling and SAYS it was the ceiling", () => {
+    // A generated spec naming a thousand paths must not turn a scoped cascade
+    // into a whole-repository copy inside one pass, quietly.
+    const many = Array.from({ length: 10 }, (_, i) => `src/lib/f${i}.ts`);
+    const plan = planSubjectCarry({ stranded: many, held: [], attempted: new Set(), limit: 4 });
+    expect(plan.carry).toHaveLength(4);
+    expect(plan.atCeiling).toBe(true);
+  });
+
+  it("carries the same subjects next tick when it hits the ceiling", () => {
+    // Sorted rather than input-ordered, so a resumed pass makes progress on
+    // the same files instead of a different arbitrary slice each time.
+    const shuffled = ["src/z.ts", "src/a.ts", "src/m.ts"];
+    const first = planSubjectCarry({ stranded: shuffled, held: [], attempted: new Set(), limit: 2 });
+    const again = planSubjectCarry({
+      stranded: [...shuffled].reverse(),
+      held: [],
+      attempted: new Set(),
+      limit: 2,
+    });
+    expect(first.carry).toEqual(again.carry);
+    expect(first.carry).toEqual(["src/a.ts", "src/m.ts"]);
+  });
+
+  it("a limit of zero carries nothing and is not an error", () => {
+    // What the engine passes once the pass has already carried its ceiling.
+    const plan = planSubjectCarry({
+      stranded: ["src/a.ts"],
+      held: [],
+      attempted: new Set(),
+      limit: 0,
+    });
+    expect(plan.carry).toEqual([]);
+    expect(plan.atCeiling).toBe(true);
+  });
+});
+
+describe("orphanSpecHoldAfterCarry", () => {
+  const membrane = resolveMembrane(PRIME_REPO, "npc-client-dashboard");
+
+  it("is the plain hold where nothing was refused", () => {
+    const after = orphanSpecHoldAfterCarry({
+      membrane,
+      specPath: "src/x.spec.ts",
+      stranded: ["src/x.ts"],
+      refused: [],
+    });
+    expect(after).toEqual(orphanSpecHold({ membrane, specPath: "src/x.spec.ts", stranded: ["src/x.ts"] }));
+  });
+
+  it("names which rule stopped which subject, in an operator's words", () => {
+    const after = orphanSpecHoldAfterCarry({
+      membrane,
+      specPath: "src/x.spec.ts",
+      stranded: ["src/x.ts", "supabase/config.toml"],
+      refused: [{ subject: "supabase/config.toml", reason: "protected" }],
+    });
+    expect(after.note).toContain("supabase/config.toml");
+    expect(after.note).toContain("protected on this clone");
+    // Database vocabulary never reaches a reader.
+    expect(after.note).not.toContain("manual_reconcile");
+    expect(after.note).not.toMatch(/\b[a-z]+_[a-z]+\b/);
+  });
+
+  it.each([
+    ["budget", "time budget"],
+    ["ceiling", "ceiling"],
+  ] as const)("says when the carry was cut short by %s rather than refused", (cutShort, word) => {
+    // "We could not" and "we did not get to" send an operator to opposite
+    // places: a rule to argue with, or a pass to run again.
+    const after = orphanSpecHoldAfterCarry({
+      membrane,
+      specPath: "src/x.spec.ts",
+      stranded: ["src/x.ts"],
+      refused: [],
+      cutShort,
+    });
+    expect(after.note).toContain(word);
+    expect(after.note).toContain("next one");
+  });
+
+  it("says nothing about being cut short when it was not", () => {
+    const after = orphanSpecHoldAfterCarry({
+      membrane,
+      specPath: "src/x.spec.ts",
+      stranded: ["src/x.ts"],
+      refused: [],
+      cutShort: null,
+    });
+    expect(after.note).not.toContain("next one");
+  });
+
+  it("carries the cut-short sentence alongside the refusals, not instead of them", () => {
+    const after = orphanSpecHoldAfterCarry({
+      membrane,
+      specPath: "src/x.spec.ts",
+      stranded: ["src/x.ts", "src/y.ts"],
+      refused: [{ subject: "src/y.ts", reason: "protected" }],
+      cutShort: "budget",
+    });
+    expect(after.note).toContain("src/y.ts");
+    expect(after.note).toContain("time budget");
+  });
+
+  it("keeps the spec's own path and reason, because it is still that hold", () => {
+    const after = orphanSpecHoldAfterCarry({
+      membrane,
+      specPath: "src/x.spec.ts",
+      stranded: ["src/x.ts"],
+      refused: [{ subject: "src/x.ts", reason: "oversize" }],
+    });
+    expect(after.path).toBe("src/x.spec.ts");
+    expect(after.reason).toBe("manual_reconcile");
   });
 });

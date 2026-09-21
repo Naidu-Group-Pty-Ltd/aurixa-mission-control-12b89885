@@ -15,7 +15,12 @@ const read = (p: string) => readFileSync(join(process.cwd(), p), "utf8");
 const engine = stripComments(read("src/server/cascade-engine.server.ts"));
 const github = stripComments(read("src/server/github-app.server.ts"));
 
-const prepareStart = engine.indexOf("await mapWithConcurrencyUntil<");
+// Anchored on the function that HOLDS the per-file judgement rather than on
+// the call that drives it. The two were the same expression until the body
+// was named so a stranded spec's subject could be put through it a second
+// time; slicing from the call site then began one line after everything this
+// file is about.
+const prepareStart = engine.indexOf("const prepareOne = async (path: string)");
 const prepareEnd = engine.indexOf("const deliveredSource");
 const prepare = engine.slice(prepareStart, prepareEnd);
 

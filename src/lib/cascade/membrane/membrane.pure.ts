@@ -290,3 +290,151 @@ export function orphanSpecHold(args: {
       `or neither does — bring the subject into this clone's scope, or leave both.`,
   };
 }
+
+/**
+ * HOW MANY SUBJECTS ONE PASS MAY CARRY IN.
+ *
+ * The fleet's measured spec/subject split is 176 files wide, so this is not a
+ * limit anybody expects to reach on a healthy delivery — it is the bound on a
+ * pathological one. A generated spec naming a thousand paths would otherwise
+ * turn a scoped cascade into a whole-repository copy inside a single pass,
+ * quietly, on the strength of a string literal.
+ *
+ * Reaching it is not a failure: the subjects that fit are carried, the specs
+ * whose subjects did not are held exactly as before, and the operator is told
+ * the pass hit the ceiling rather than that the specs were unserviceable.
+ */
+export const MAX_SUBJECTS_CARRIED = 200;
+
+export type SubjectCarryPlan = {
+  /** Subjects to fetch and prepare like any other write, in a stable order. */
+  carry: string[];
+  /**
+   * Subjects an existing rule already holds, with that rule's own reason.
+   * The spec that named them stays stranded; nothing here is overridden.
+   */
+  refused: Array<{ subject: string; reason: ExclusionReason }>;
+  /** True where the ceiling, not a rule, is what stopped the rest. */
+  atCeiling: boolean;
+};
+
+/**
+ * WHAT A DELIVERED SPEC IS ALLOWED TO PULL IN BEHIND IT.
+ *
+ * The rule a stranded spec turns on is that a spec and its subject travel
+ * together or neither does. Holding the spec satisfies it by leaving both;
+ * this satisfies it by bringing both, which is the outcome an operator wants
+ * on a clone that already HOLDS the subject and is simply behind on it.
+ *
+ * Two things it deliberately does not do.
+ *
+ * **It never overrides a hold.** A subject already refused by the path rules
+ * — `protected`, `oversize`, or a `manual_reconcile` nobody approved — stays
+ * refused, and the spec that named it stays stranded. A file that a rule
+ * declined to carry does not become carriable by being mentioned; that is the
+ * whole distinction between a caller naming rows and a caller asking
+ * questions, and it is why the refusals are returned rather than dropped.
+ *
+ * **It never conjures a file.** `strandedSubjects` has already established
+ * that every subject here exists on BOTH sides and differs, so carrying one
+ * updates a file this clone holds. Widening scope to a path the clone does
+ * not have is a different act, with a different blast radius, and is not this.
+ *
+ * What the caller must still do is put each carried subject through the same
+ * preparation every other write goes through. This function decides
+ * eligibility from paths alone; it has read no content and cannot.
+ */
+export function planSubjectCarry(args: {
+  stranded: readonly string[];
+  held: readonly HeldPath[];
+  /** Subjects this pass has already attempted, so a fixed point terminates. */
+  attempted: ReadonlySet<string>;
+  limit?: number;
+}): SubjectCarryPlan {
+  const { stranded, held, attempted } = args;
+  const limit = args.limit ?? MAX_SUBJECTS_CARRIED;
+
+  const heldReason = new Map<string, ExclusionReason>();
+  for (const h of held) if (!heldReason.has(h.path)) heldReason.set(h.path, h.reason);
+
+  const carry: string[] = [];
+  const refused: Array<{ subject: string; reason: ExclusionReason }> = [];
+  let atCeiling = false;
+
+  // Sorted so a pass that hits the ceiling carries the same subjects it
+  // carried last tick, rather than a different arbitrary slice each time.
+  for (const subject of [...new Set(stranded)].sort()) {
+    if (attempted.has(subject)) continue;
+    const reason = heldReason.get(subject);
+    if (reason) {
+      refused.push({ subject, reason });
+      continue;
+    }
+    if (carry.length >= limit) {
+      atCeiling = true;
+      continue;
+    }
+    carry.push(subject);
+  }
+
+  return { carry, refused, atCeiling };
+}
+
+/**
+ * The spec is still stranded, and now the record says why its subjects could
+ * not follow it — which is a different sentence from "bring them yourself".
+ */
+export type CarryCutShort = "budget" | "ceiling";
+
+/**
+ * Why the carry stopped before it reached this spec's subjects.
+ *
+ * Present on the hold rather than nowhere, because "we could not" and "we did
+ * not get to" send an operator to opposite places: the first is a rule to
+ * argue with, the second is a pass to run again. Both of these clear by
+ * themselves on the next tick, and saying so is the difference between a
+ * backlog and a queue.
+ */
+const CUT_SHORT_WORDS: Record<CarryCutShort, string> = {
+  budget:
+    " This pass ran out of its time budget before it could carry them; the next one resumes from here.",
+  ceiling:
+    " This pass reached the ceiling on how many files one delivery may carry in this way; the next one continues.",
+};
+
+export function orphanSpecHoldAfterCarry(args: {
+  membrane: Membrane;
+  specPath: string;
+  stranded: readonly string[];
+  refused: ReadonlyArray<{ subject: string; reason: ExclusionReason }>;
+  cutShort?: CarryCutShort | null;
+}): HeldPath {
+  const { membrane, specPath, stranded, refused } = args;
+  const cut = args.cutShort ? CUT_SHORT_WORDS[args.cutShort] : "";
+  const base = orphanSpecHold({ membrane, specPath, stranded });
+  if (refused.length === 0) {
+    return cut ? { ...base, note: base.note + cut } : base;
+  }
+  const named = refused
+    .slice(0, 3)
+    .map((r) => `${r.subject} (${REFUSAL_WORDS[r.reason]})`)
+    .join(", ");
+  const more = refused.length > 3 ? ` (and ${refused.length - 3} more)` : "";
+  return {
+    ...base,
+    note:
+      `This spec asserts about ${stranded.length} file(s) that differ upstream. This pass tried ` +
+      `to carry them in behind it and ${refused.length} could not travel, because a rule of this ` +
+      `cascade already holds them: ${named}${more}. Those rules are not overridden by a spec ` +
+      `naming the file, so the spec is held with them — a spec and its subject travel together ` +
+      `or neither does.` +
+      cut,
+  };
+}
+
+/** Operator words for a refusal. Database vocabulary never reaches a reader. */
+const REFUSAL_WORDS: Record<ExclusionReason, string> = {
+  protected: "protected on this clone",
+  manual_reconcile: "needs a person to reconcile it",
+  oversize: "past the file-size ceiling",
+};

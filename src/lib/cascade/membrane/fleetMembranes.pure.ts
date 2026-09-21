@@ -157,14 +157,29 @@ const STANDING: readonly StandingOrgan[] = [
  * about consistency, not about any one deployment — and `gated` because one
  * file cannot settle it.
  */
+/**
+ * The one channel whose answer is not a property of the file in front of it.
+ *
+ * `permeate` therefore declines to guess on it — a `gated` channel is skipped
+ * there — and the engine settles it once over the FINISHED delivery, where
+ * `strandedSubjects` can compare the two trees.
+ *
+ * It resolves by CARRYING. A spec and its subject travel together or neither
+ * does, and bringing both satisfies that as well as leaving both — better, on
+ * a clone that already holds the subject and is merely behind on it, which is
+ * every one of the fleet's measured 176. Anything carried in is judged by the
+ * same `prepareOne` every other write goes through, and a subject an existing
+ * rule holds is never released by being named.
+ */
 const SPEC_CHANNEL = {
   species: "spec" as const,
   state: "gated" as const,
   within: "**",
   reason: "manual_reconcile" as const,
   note:
-    "A spec crosses only with the subject it asserts about. Settled per delivery by " +
-    "`strandedSubjects`, which compares the two trees.",
+    "A spec crosses only with the subject it asserts about, so this delivery carries the subject " +
+    "in behind it — judged by the same rules as any other file, and never releasing one another " +
+    "rule holds. Where a subject cannot travel, both stay, and the hold names which rule stopped it.",
 };
 
 /** A routed CRM name may be spelled anywhere in the browser layer. */
