@@ -449,10 +449,32 @@ routing a name through the transform pipeline, and neither is visible to
 `tsc`, to eslint or to a source-scanning test. Both are now asserted against
 rendered markup.
 
-The overlap itself is closed by making the labels captions rather than
-targets: nodes paint after bands, so a status line crossing the band was
-silently taking its clicks. Both labels decline pointer events and the node
-carries a stated hit circle of its own, so declining costs it nothing.
+The overlap itself is closed twice over. The labels are captions rather than
+targets — nodes paint after bands, so a status line crossing one was silently
+taking its clicks; both decline pointer events now and the node carries a
+stated hit circle of its own, so declining costs it nothing. And the ink is
+cleared by making the caption say its status ONCE: it read `BEHIND · 12
+BEHIND`, and the second word was most of the width that reached. Measured on
+the fleet's own layout it now clears every band by a margin at any plausible
+monospace advance.
+
+`membraneClearsLabels.test.ts` is the standing form of that measurement, and
+it is the only guard that could have caught the original. It drives the real
+`useTreeLayout` over the recorded fleet, parses each caption's box out of a
+real `TreeNodeCircle` render and each band's ink out of a real `MembraneBand`
+render, maps the band's local coordinates onto the page through
+`placeMembrane`, and asserts no ink falls inside a caption. Nothing in it is
+restated: the one estimate is the monospace advance, which is bounded by
+running the whole check at 0.55, 0.60 and 0.65 em rather than assumed at one.
+Two things it caught while being written are worth keeping. It measures the
+caption at REST, because `renderToStaticMarkup` returns an animation's opening
+frame and the name starts eight units low — a transient crossing during a
+half-second entrance, while both are still fading in, is not what a reader
+looks at, and the band has no such offset because its placement is on a plain
+`<g>` that motion cannot reach. And its first draft passed the suite while
+`tsc` refused it, from a `let` assigned inside the probe component narrowing
+to `never` — the same disagreement between gates that this whole branch keeps
+turning on.
 
 ## What this deliberately does not do
 

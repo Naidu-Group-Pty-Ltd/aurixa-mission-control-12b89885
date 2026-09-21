@@ -204,7 +204,19 @@ export function TreeNodeCircle({
           transition={{ delay: delay + 0.4, duration: 0.5 }}
         >
           {node.syncStatus.replace("_", " ")}
-          {node.commitsBehind > 0 ? ` · ${node.commitsBehind} behind` : ""}
+          {node.commitsBehind > 0
+            ? /**
+               * `behind · 12 behind` said it twice, and the second one is what
+               * made this line wide enough to reach the membrane bands on the
+               * branches below it — measured on the fleet's own layout, the
+               * pump badge of one and a painted leaflet of another. Where the
+               * status IS "behind" the word is already on the line, so the
+               * count carries its own unit; anywhere else it still needs one.
+               */
+              node.syncStatus === "behind"
+              ? ` · ${node.commitsBehind}`
+              : ` · ${node.commitsBehind} behind`
+            : ""}
         </motion.text>
       )}
 
