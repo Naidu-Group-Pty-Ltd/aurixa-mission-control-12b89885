@@ -144,6 +144,46 @@ clone behind it, which is the outage this closes.
 
 ---
 
+## The fix's own defect, caught by reading the ledger
+
+The first version of `DELIVERED_STATUSES` was `succeeded | skipped`, inferred
+from `executeCascade`'s return shapes. **It would have refused to re-offer the
+very carrier this module was written for.**
+
+Read from the live ledger on 21 Sep 2026, carrier `54b00412`, pending since
+2026-09-20 17:49:02Z with `attempts: 0` — refunded on every pass — and
+`next_attempt_at` five minutes out, for ever:
+
+```
+Waiting on lineage until 2026-09-21T04:11:02Z — 2 clones are held until
+their parent carries this commit; 0 of 2 clone(s) done.
+```
+
+**"0 of 2"** is the defect stated in the ledger's own words: the pass can only
+see two of the four rows. And both finished rows carry status **`pr_opened`**,
+not `succeeded` and not `skipped` — the stamp a freshly opened or updated
+proposal holds until the merge drain reconciles it. Over the whole table:
+
+| status | rows | with `delivered_sha` |
+|---|---|---|
+| `succeeded` | 631 | 107 |
+| `skipped` | 396 | 16 |
+| `failed` | 42 | 0 |
+| **`pr_opened`** | **3** | **3** |
+| `queued` | 2 | 0 |
+
+`pr_opened` is rare only because it is transient, and transient is precisely
+the state a held carrier's rows sit in. The set is anchored to
+`prReconcile`'s own `ReconciledStatus` union now, through a
+`Record<ReconciledStatus, true>` that will not compile if a fourth terminal
+status is added without this module being made to have an opinion about it.
+
+The rule is one this fleet has already paid for, on `PGRST205`: **a status is
+observed on the wire, never assumed from the code that writes it.** Six tests
+fail when the original set is planted back.
+
+---
+
 ## The remedy that needs no deploy
 
 The stand-down in `createCascadeForAllClones` is inside

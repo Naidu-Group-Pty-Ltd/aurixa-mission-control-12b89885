@@ -89,6 +89,8 @@
  * Client-safe: pure, no imports.
  */
 
+import type { ReconciledStatus } from "./prReconcile.pure";
+
 /** The result row, as much of it as this decision reads. */
 export type CarrierResultRow = {
   id: string;
@@ -116,13 +118,35 @@ export type CarrierRefreshDecision =
 /**
  * The statuses a delivery can settle a row at.
  *
- * `skipped` is here because it is the engine's OWN stamp for "already
- * proposed — the open pull request carries this exact tree", which is a
- * delivery decision about a specific head and the single most common terminal
- * state on a clone with a standing proposal. `failed` is deliberately absent;
- * see the module header.
+ * **Read off the table, not off the code that writes it.** The first version
+ * of this set was `succeeded | skipped`, inferred from `executeCascade`'s
+ * return shapes — and it would have refused to re-offer the very carrier this
+ * module was written for. Both of its finished rows carry **`pr_opened`**,
+ * which is the stamp a FRESHLY opened or updated proposal holds until the
+ * merge drain reconciles it. Measured over the whole ledger on 21 Sep 2026:
+ *
+ *     succeeded  631   skipped  396   failed  42   pr_opened  3   queued  2
+ *
+ * All three `pr_opened` rows carry a `delivered_sha` and a `pull_request` URL.
+ * It is rare only because it is transient, and transient is exactly the state
+ * a held carrier's rows sit in.
+ *
+ * So the set is anchored to `ReconciledStatus` — the three statuses
+ * `prReconcile` declares a settled row may hold — and the assignment below is
+ * a compile-time exhaustiveness check, so a fourth terminal status cannot be
+ * added to the pipeline without this module being made to have an opinion
+ * about it.
+ *
+ * `failed` is deliberately absent; see the module header. It is not a
+ * `ReconciledStatus` either, which is the same statement from the other side.
  */
-export const DELIVERED_STATUSES: ReadonlySet<string> = new Set(["succeeded", "skipped"]);
+const DELIVERED: Record<ReconciledStatus, true> = {
+  succeeded: true,
+  pr_opened: true,
+  skipped: true,
+};
+
+export const DELIVERED_STATUSES: ReadonlySet<string> = new Set(Object.keys(DELIVERED));
 
 /** Whether a scope filter narrows anything. `{}` and null do not. */
 function scopeIsEmpty(scopeFilter: unknown): boolean {

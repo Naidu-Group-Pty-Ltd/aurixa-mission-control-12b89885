@@ -46,6 +46,31 @@ describe("a delivery behind prime's head is re-offered", () => {
     expect(d.why).toContain("075a088");
   });
 
+  it("re-queues a `pr_opened` row — the state a standing proposal is actually in", () => {
+    /*
+      The defect this test exists for. The first cut of `DELIVERED_STATUSES`
+      was `succeeded | skipped`, inferred from the engine's return shapes, and
+      it would have refused the very carrier this module was written for: both
+      of its finished rows carry `pr_opened`. Measured over the whole ledger on
+      21 Sep 2026 — succeeded 631, skipped 396, failed 42, pr_opened 3,
+      queued 2 — and all three `pr_opened` rows carry a delivered sha and a
+      pull request. Rare because transient, and transient is the state a held
+      carrier's rows sit in.
+    */
+    const d = planCarrierRefresh({
+      event: CARRIER,
+      rows: [row({ status: "pr_opened" })],
+      head: HEAD,
+    });
+    expect(d.kind).toBe("refresh");
+  });
+
+  it("holds an opinion about every status a reconciled row may carry", () => {
+    // Anchored to `prReconcile`'s own union, so a fourth terminal status
+    // cannot enter the pipeline while this module quietly ignores it.
+    expect([...DELIVERED_STATUSES].sort()).toEqual(["pr_opened", "skipped", "succeeded"]);
+  });
+
   it("re-queues a succeeded row as readily as a skipped one", () => {
     // `succeeded` is a clone whose proposal landed; the next prime commit is
     // still owed to it, and before lineage a fresh event is what delivered it.
@@ -196,8 +221,9 @@ describe("the fleet freeze of 20 September 2026", () => {
   */
   const rows: CarrierResultRow[] = [
     // Delivered, red, and never revisited.
-    { id: "ncd", clone_name: "npc-client-dashboard", status: "skipped", delivered_sha: OLD },
-    { id: "crm", clone_name: "npc-crm-independent", status: "skipped", delivered_sha: OLD },
+    // Read from the live ledger, not invented: both carry `pr_opened`.
+    { id: "ncd", clone_name: "npc-client-dashboard", status: "pr_opened", delivered_sha: OLD },
+    { id: "crm", clone_name: "npc-crm-independent", status: "pr_opened", delivered_sha: OLD },
     // Held behind their parent, still queued, seen by every pass.
     { id: "pfl", clone_name: "preflight-property-group", status: "queued", delivered_sha: null },
     { id: "tst", clone_name: "npc-test-76b3b3", status: "queued", delivered_sha: null },
