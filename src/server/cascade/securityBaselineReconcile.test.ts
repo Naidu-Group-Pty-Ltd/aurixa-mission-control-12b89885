@@ -237,6 +237,47 @@ describe("the security baseline, computed from what the pass holds", () => {
     expect(reconcile({ cloneInventoryJson: '{"schema_version":1}' }).ok).toBe(false);
   });
 
+  it("refuses a document that parses but is not an object, rather than throwing", () => {
+    // `JSON.parse("null")` succeeds, and `null` is the one JSON value whose
+    // next property access throws instead of answering `undefined`. The shape
+    // checks read `inv.schema_version` and `root.functions` straight off the
+    // parsed value, so a baseline holding literal `null` used to throw out of
+    // the whole clone's pass — where the contract is that an unusable input
+    // leaves the hold standing and costs the pass the red check it had.
+    //
+    // `.not.toThrow()` is the assertion that matters: it is what the previous
+    // implementation failed, on each of these three inputs.
+    for (const over of [
+      { primeInventoryJson: "null" },
+      { cloneInventoryJson: "null" },
+      { mergedRegistryJson: "null" },
+      { primeInventoryJson: "[]" },
+      { cloneInventoryJson: "[]" },
+      { mergedRegistryJson: "[]" },
+      { primeInventoryJson: "3" },
+      { cloneInventoryJson: '"a string"' },
+    ]) {
+      expect(() => reconcile(over)).not.toThrow();
+      const out = reconcile(over);
+      expect(out.ok).toBe(false);
+      expect((out as { reason: string }).reason).toMatch(/is not a JSON object|not the shape/);
+    }
+  });
+
+  it("names which of the three documents it refused", () => {
+    // A reason that does not say whose file it is sends an operator to read
+    // the wrong repository.
+    expect((reconcile({ primeInventoryJson: "null" }) as { reason: string }).reason).toContain(
+      "prime",
+    );
+    expect((reconcile({ cloneInventoryJson: "null" }) as { reason: string }).reason).toContain(
+      "clone",
+    );
+    expect((reconcile({ mergedRegistryJson: "null" }) as { reason: string }).reason).toContain(
+      "registry",
+    );
+  });
+
   it("serialises the way the generator does, to the trailing newline", () => {
     // The check on the clone is `git diff --exit-code`, so a byte decides it.
     const out = reconcile() as { merged: string };

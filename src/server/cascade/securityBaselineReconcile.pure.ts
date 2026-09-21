@@ -139,15 +139,37 @@ export type SecurityInventory = {
 
 type RegistryEntry = { exposure_class?: unknown; verify_jwt?: unknown };
 
+/**
+ * One of this module's three JSON documents, or a refusal naming it.
+ *
+ * Every document read here — the two baselines and the reconciled registry —
+ * is something the generator emitted as a JSON OBJECT, so that is the rule,
+ * stated once for all three rather than per call site.
+ *
+ * It is stated here because `JSON.parse` succeeds on `null`, and `null` is
+ * the one JSON value that throws on the next property access rather than
+ * answering `undefined`. The shape checks below read `inv.schema_version`
+ * and `root.functions` straight off the parsed value; a baseline holding
+ * literal `null` reached them and threw out of the whole pass, when the
+ * contract this module answers to is that an unusable input leaves the hold
+ * standing and costs the pass exactly the red check it already had. An array
+ * is refused by the same rule: it fails every shape check below anyway, and
+ * naming it here is the difference between a reason and a symptom.
+ */
 function parseJson(
   text: string,
   what: string,
-): { ok: true; value: unknown } | { ok: false; reason: string } {
+): { ok: true; value: Record<string, unknown> } | { ok: false; reason: string } {
+  let value: unknown;
   try {
-    return { ok: true, value: JSON.parse(text) };
+    value = JSON.parse(text);
   } catch {
     return { ok: false, reason: `the ${what} is not readable as JSON` };
   }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return { ok: false, reason: `the ${what} is not a JSON object` };
+  }
+  return { ok: true, value: value as Record<string, unknown> };
 }
 
 /**
@@ -234,11 +256,9 @@ export function reconcileSecurityInventory(args: {
   const clone = cloneParsed.value as Partial<SecurityInventory>;
   const registryRoot = registryParsed.value as { functions?: Record<string, RegistryEntry> };
 
-  if (
-    !registryRoot ||
-    typeof registryRoot.functions !== "object" ||
-    registryRoot.functions === null
-  ) {
+  // `parseJson` has already refused a document that is not an object, so what
+  // is left to ask is only whether this one carries the key.
+  if (typeof registryRoot.functions !== "object" || registryRoot.functions === null) {
     return { ok: false, reason: "the reconciled security registry carries no `functions` object" };
   }
   for (const [label, inv] of [

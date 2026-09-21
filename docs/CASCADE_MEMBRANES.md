@@ -722,6 +722,105 @@ spec down with it. What the carry does NOT do is sweep a clone for specs whose
 subjects a PREVIOUS pass left behind. Nothing here is a backfill, and a pass
 that delivers nothing judges nothing.
 
+## What an acid test against the live fleet found
+
+The work above had been checked against fixtures and against one replayed
+proposal. On 21 September 2026 it was driven instead against **every repository
+in the fleet at its real head**, and against the composed tree the deployed
+cascade had actually written — 218 assertions across six sweeps, over
+`npc-property-dashbord@cbd4f5d` and the four clones.
+
+**The standard applied was the clone's own CI, not this repository's opinion of
+it.** `npm run security:inventory` is one 61-line Node script with no
+dependency beyond `node:fs`, so the composed tree can be materialised and the
+clone's generator run over it. `reconcileSecurityInventory` is then correct
+exactly when its output is byte-identical to what that generator emits — which
+is the question `git diff --exit-code` asks in the `security` job, and the only
+question that decides whether a proposal is green.
+
+### The proposal that is open right now
+
+`npc-crm-independent-6505dc` PR #13 (head `50ca3875`, updated 08:47 UTC) is
+**red**, and both failures are the two this work closed:
+
+- `security` — `config_declared_function_count` 416 → 417,
+  `registry_function_count` 416 → 417, `exposure_class_counts.internal-service`
+  26 → 27, as a byte diff against the clone's committed baseline.
+- `verify` — `AssertionError: expected 418 to be 414` at
+  `src/lib/security/auditRemediation.spec.ts:105`.
+
+The composed `supabase/config.toml` on that head carries
+`# [functions.X] block is read by the CLI as verify_jwt = true`, which is the
+pre-`#251` marker: the spec's unanchored rule reads `functions.X` out of the
+prose and counts a function nobody declared. Measured on that file, the
+generator's line-anchored rule answers **417** and the spec's answers **418**;
+with the merged marker (`[functions.<name>]`) both answer 417. So the deployed
+engine is running code from before that fix — the repository is right and the
+deployment is behind it, which is a fact about a release and not about a tree.
+
+Replayed against that same head, the merged reconcilers produce the file the
+clone's own generator produces, **byte for byte at 27,867 bytes**, and a ratchet
+spec asserting 417 exactly once that is a fixed point under re-reconciliation.
+Composed over all four clones the same way — three of which own no function the
+prime lacks, the shape the fleet's one interesting clone hides — every
+reconciled baseline equals its own generator's output and every ratchet count
+equals its own `config_declared_function_count`.
+
+### Two faults, and what each cost
+
+**A baseline holding literal `null` threw out of the whole pass.**
+`JSON.parse("null")` succeeds, and `null` is the one JSON value whose next
+property access throws rather than answering `undefined`. The shape checks read
+`inv.schema_version` straight off the parsed value, so the module that exists
+to leave a hold standing instead took the clone's entire cascade down with a
+`TypeError`. The registry's own parse was guarded one line below and the two
+baselines' were not, which is the tell: the rule existed once and was missing
+once. It is stated once now, in `parseJson`, for all three documents — every
+one of them is something the generator emitted as a JSON **object**, and an
+array is refused by the same sentence.
+
+**`decideHoldRelease`'s header promised a guarantee its own test contradicted.**
+It said `cloneSha === null` "always holds"; the approval branch above it
+releases, and `heldEvidence.test.ts` has asserted that release since it was
+written. The code is right and the prose was not: the evidence route asks
+whether this clone's copy is unmodified prime content and with no copy cannot
+be asked, while an operator's overwrite approval is a person deciding prime's
+copy should stand here — which on a path the clone lacks reads as "create it"
+and loses nothing of this clone's. What keeps a NEW file's arrival the content
+rules' business is the `protected` guard, which is first and survives any
+approval. The header now says that, and a test names the rule rather than
+exercising it in passing.
+
+### Three things measured and deliberately left alone
+
+- **The graph refusal is honest.** `statically_derivable_inter_function_graph`
+  is attributed to a CALLER, and `_shared` is the one directory the fleet
+  composes from both sides — so a clone-only file under it carrying a
+  `functions/v1/…` string makes the composed graph underdetermined from the two
+  inventories alone. Measured: prime and every clone hold the same 69 edges
+  today, and none of the five clone-only `_shared/crm/*` files names one. When
+  that stops being true the reconcile refuses, and refusing is correct: the
+  check is a byte diff, so a graph that cannot be computed exactly cannot be
+  written green either, and the hold costs the pass the red check it already
+  had.
+- **`.git/…` is not refused by `isSafeRepoPath`, and is unreachable.**
+  Candidates come from a git TREE listing, which cannot contain a `.git` path
+  component. Recorded rather than guarded: a rule added without a measured
+  defect is a rule nobody can retire.
+- **`securityRegistryReconcile` refuses a registry it cannot reproduce byte for
+  byte**, which is why a fixture built with `JSON.stringify` fails it. That is
+  the guard working — a duplicated function key, which `JSON.parse` silently
+  discards, fails in exactly the same way.
+
+Everything else answered as its header said it would: the deletion path keeps on
+every branch but a byte-identical prime version, the cap refuses a partial
+approval and names the overflow, a single entry larger than the byte bound
+becomes its own chunk rather than being dropped, an import cycle terminates, the
+carry reaches its ceiling and resumes rather than losing subjects, and the merge
+gate refuses PR #13 for a failing check rather than the billing note — because
+`security` ran for 23 seconds, past the 20-second never-started ceiling, and
+`verify` for 196.
+
 ## What this deliberately does not do
 
 - **It does not widen a clone's scope to a file the clone does not have.**
