@@ -8,9 +8,24 @@ import {
   functionCountRatchetHold,
   securityInventoryHold,
 } from "./securityInventoryHold.pure";
-import { REPOSITORY_INVARIANTS } from "./repositoryInvariants.pure";
+import { REPOSITORY_INVARIANTS, repositoryInvariantGlobs } from "./repositoryInvariants.pure";
 import { approvableHeld, reportableHeld } from "./syncExclusions.pure";
 import { stripComments } from "../sourceComments.pure";
+import { globToRegex, validateModuleGlobs } from "@/lib/module-globs";
+
+/**
+ * Whether the invariant list offers a PATH, which is the guarantee these two
+ * tests exist for. They used to compare `i.pattern` to the path, which is a
+ * statement about a glob's spelling rather than about what it reaches — so
+ * widening `docs/reports/SECTION_OWNERSHIP_MATRIX.md` to `docs/**` broke them
+ * while strengthening the thing they protect. Matched the same way
+ * repositoryInvariants.test.ts matches, and for the same stated reason:
+ * rewriting a glob keeps the guarantee as long as the file is still covered.
+ */
+const invariantCovers = (path: string): boolean =>
+  validateModuleGlobs(repositoryInvariantGlobs())
+    .valid.map(globToRegex)
+    .some((m) => m.test(path));
 
 describe("whether prime's security baseline may be written over a clone's", () => {
   it("lets it travel to a mirror, exactly as it does today", () => {
@@ -52,7 +67,7 @@ describe("whether prime's security baseline may be written over a clone's", () =
   });
 
   it("holds the path the invariant list carries, so the two cannot drift", () => {
-    expect(REPOSITORY_INVARIANTS.some((i) => i.pattern === SECURITY_INVENTORY_PATH)).toBe(true);
+    expect(invariantCovers(SECURITY_INVENTORY_PATH)).toBe(true);
   });
 });
 
@@ -107,10 +122,14 @@ describe("the generated matrix travels with the registry that generates it", () 
     // They cascade and the document does not, so the clone's committed copy
     // describes routing the cascaded code no longer performs and
     // `sectionOwnershipMatrix.spec.ts` fails on the difference.
-    const entry = REPOSITORY_INVARIANTS.find(
-      (i) => i.pattern === "docs/reports/SECTION_OWNERSHIP_MATRIX.md",
+    const path = "docs/reports/SECTION_OWNERSHIP_MATRIX.md";
+    expect(invariantCovers(path)).toBe(true);
+    // And the entry that reaches it still says which check reads it, so the
+    // widening did not cost the reason — it is now one of three the docs
+    // entry names.
+    const entry = REPOSITORY_INVARIANTS.find((i) =>
+      globToRegex(validateModuleGlobs([i.pattern]).valid[0] ?? "\u0000").test(path),
     );
-    expect(entry).toBeDefined();
     expect(entry?.reason).toContain("sectionOwnershipMatrix.spec.ts");
   });
 });

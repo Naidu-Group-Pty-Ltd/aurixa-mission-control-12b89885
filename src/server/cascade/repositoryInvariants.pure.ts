@@ -61,6 +61,24 @@
  * `.env.example` and the two fail-closed deploy workflows are all in
  * `DEFAULT_MIRROR_EXCLUSIONS` and stay there; this list is applied BEFORE
  * exclusions are, never instead of them.
+ *
+ * That is what lets an entry be a DIRECTORY rather than a list of paths.
+ * `.github/workflows/**` is an invariant and five files below it are
+ * exclusions; `docs/**` is an invariant and `docs/CLIENT_FACING_MODE.md` is an
+ * exclusion, because it describes the clone and not prime. Widening the
+ * invariant never widens what is written — it widens what is OFFERED, and the
+ * exclusion still wins.
+ *
+ * ## Why a directory is safe here and would not be for source
+ *
+ * A document imports nothing and executes nothing, so offering a clone every
+ * document offers it no code it did not install. A spec does import, which is
+ * why `src/lib/openLocation/**` is named as one directory and there is no
+ * entry for specs in general: a spec for a module the clone never installed
+ * would arrive importing code the clone does not have, and turn `verify` red
+ * for the opposite reason. The measurement that justified the one directory
+ * named here is that all eleven of its files are already present on every
+ * clone, so nothing new is imported by carrying it.
  */
 
 export type RepositoryInvariant = {
@@ -143,26 +161,44 @@ export const REPOSITORY_INVARIANTS: readonly RepositoryInvariant[] = [
       "generated file and its source are one artefact and must travel together.",
   },
   {
-    pattern: "docs/security/SECURITY_INVENTORY.json",
-    reason:
-      "`security:inventory` regenerates this from the edge functions and CI `git diff " +
-      "--exit-code`s the result. Its inputs cascade with their modules; without the baseline " +
-      "beside them every module that adds a service call turns the clone's `security` job red.",
-  },
-  {
     pattern: "supabase/functions-registry/**",
     reason:
       "The security registry the same checks read, on the same terms as SECURITY_INVENTORY.json.",
   },
+
+  // ── What a check reads beside what the modules cascade ────────────────────
   {
-    pattern: "docs/reports/SECTION_OWNERSHIP_MATRIX.md",
+    pattern: "docs/**",
     reason:
-      "`sectionOwnershipMatrix.spec.ts` runs the generator and asserts the committed file did not " +
-      "change. Its inputs are the section registries, which are inside module globs, so they " +
-      "cascade and the document does not — measured 20 Sep 2026 on the open proposal for " +
-      "npc-crm-independent, where the clone's copy still routed five topics the cascaded " +
-      "registries no longer route, and `verify` failed on the difference. Running the generator " +
-      "against that tree reproduces the prime's committed copy exactly.",
+      "Three separate checks read a document out of docs/ and diff it against something the " +
+      "modules cascade: `security:inventory` regenerates docs/security/SECURITY_INVENTORY.json " +
+      "from the edge functions and CI `git diff --exit-code`s it; `sectionOwnershipMatrix.spec.ts` " +
+      "runs its generator over the section registries and asserts the committed document did not " +
+      "change; `scoringMethodology.spec.ts` asserts docs/reports/SCORING_V2_METHODOLOGY.md states " +
+      "the version constants the engine exports. In every case the inputs are inside module globs " +
+      "and cascade, and the document is in docs/ and did not — so the clone regenerates from " +
+      "fresh inputs, compares against a stale document, and is red for ever. This is a directory " +
+      "rather than three paths because enumerating it is what failed: the matrix was added on " +
+      "20 Sep 2026 and the methodology was not, and on 21 Sep 2026 (npc-crm-independent PR #13, " +
+      "run 35601703085) `verify` failed on exactly the document nobody had thought to name. " +
+      "Measured the same day: of the 13 documents prime changed in its last 40 commits, 12 had " +
+      "never reached that clone — 6 stale and 6 absent. A document imports nothing and executes " +
+      "nothing, which is what makes the whole directory safe to carry where a whole source " +
+      "directory would not be.",
+  },
+  {
+    pattern: "src/lib/openLocation/**",
+    reason:
+      "`openLocationWiring.spec.ts` asserts that supabase/functions/location-intelligence-service/" +
+      "index.ts calls measureCommuteThroughChain with named arguments. The edge function is " +
+      "inside a module glob and cascades; the spec is not and does not, so prime renaming an " +
+      "argument ships the new subject beside the old assertion — measured 21 Sep 2026, " +
+      "npc-crm-independent run 35601703085, `expected … to contain 'measureCommuteThroughChain" +
+      "(coordinates, cbdCoordinates, apiKey, db)'` against a function that now says `destination`. " +
+      "A spec and its subject are one artefact, the same rule the integrations registry entry " +
+      "above records for a generated file and its source. Scoped to this directory rather than to " +
+      "specs in general because a spec for a module the clone did not install imports code it " +
+      "does not have; all eleven files here are already present on every clone.",
   },
 ];
 

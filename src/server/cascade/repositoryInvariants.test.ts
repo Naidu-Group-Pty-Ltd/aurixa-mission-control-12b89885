@@ -47,6 +47,82 @@ describe("the repository invariants", () => {
     expect(covered("docs/security/SECURITY_INVENTORY.json")).toBe(true);
   });
 
+  it("carries every document a check diffs against, not the ones somebody remembered", () => {
+    // Three checks regenerate something and compare it with a document in
+    // docs/. Their inputs are inside module globs and cascade; for a long time
+    // the documents were named one at a time, and the list was therefore always
+    // one document behind whoever last added a check.
+    //
+    // SECTION_OWNERSHIP_MATRIX.md was added on 20 Sep 2026. SCORING_V2_
+    // METHODOLOGY.md was not, and on 21 Sep 2026 npc-crm-independent PR #13
+    // (run 35601703085) failed `verify` on exactly it:
+    //   "document must state version 1.2.0: expected '# Scoring V2 — …'"
+    // Measured the same day, 12 of the 13 documents prime had changed in its
+    // last 40 commits had never reached that clone. A hand-list cannot see the
+    // document it does not mention.
+    const matchers = validateModuleGlobs(repositoryInvariantGlobs()).valid.map(globToRegex);
+    const covered = (path: string) => matchers.some((m) => m.test(path));
+
+    // `security:inventory` regenerates and git-diffs this.
+    expect(covered("docs/security/SECURITY_INVENTORY.json")).toBe(true);
+    // `sectionOwnershipMatrix.spec.ts` runs its generator and diffs this.
+    expect(covered("docs/reports/SECTION_OWNERSHIP_MATRIX.md")).toBe(true);
+    // `scoringMethodology.spec.ts` asserts this states the engine's versions.
+    expect(covered("docs/reports/SCORING_V2_METHODOLOGY.md")).toBe(true);
+    // And the one nobody has written a check against yet, which is the point.
+    expect(covered("docs/reports/A_PREMIUM_DOCUMENT.md")).toBe(true);
+  });
+
+  it("the clone's own document stays excluded even though docs are invariant", () => {
+    // Same shape as the workflows below: the invariant is a directory and the
+    // exclusion is a path, and the exclusion wins because the engine applies
+    // it to the candidate set after this list has built it.
+    // `docs/CLIENT_FACING_MODE.md` describes the clone, not prime — it differs
+    // on all three mirrors today and must keep differing.
+    const matchers = validateModuleGlobs(repositoryInvariantGlobs()).valid.map(globToRegex);
+    const covered = (p: string) => matchers.some((m) => m.test(p));
+    const excluded = new Set(DEFAULT_MIRROR_EXCLUSIONS.map((e) => e.pattern));
+
+    expect(covered("docs/CLIENT_FACING_MODE.md"), "the docs invariant should reach it").toBe(true);
+    expect(
+      excluded.has("docs/CLIENT_FACING_MODE.md"),
+      "and the exclusion must be there to win",
+    ).toBe(true);
+  });
+
+  it("a spec travels with the subject it asserts about", () => {
+    // `openLocationWiring.spec.ts` asserts the call text inside
+    // location-intelligence-service/index.ts. The edge function is inside a
+    // module glob and cascades; the spec was not, so prime renaming an
+    // argument shipped the new subject beside the old assertion — run
+    // 35601703085, "expected … to contain 'measureCommuteThroughChain(
+    // coordinates, cbdCoordinates, apiKey, db)'" against a function that now
+    // says `destination`.
+    const matchers = validateModuleGlobs(repositoryInvariantGlobs()).valid.map(globToRegex);
+    const covered = (p: string) => matchers.some((m) => m.test(p));
+    expect(covered("src/lib/openLocation/__tests__/openLocationWiring.spec.ts")).toBe(true);
+    expect(covered("src/lib/openLocation/providers.pure.ts")).toBe(true);
+  });
+
+  it("does not carry specs in general, because a spec imports and a document does not", () => {
+    // The reason `docs/**` is a whole directory and `src/lib/openLocation/**`
+    // is one named directory rather than `src/**/__tests__/**`. A spec for a
+    // module the clone never installed arrives importing code the clone does
+    // not have, and turns `verify` red for the opposite reason. If this ever
+    // needs to change, it changes with a measurement, not by widening a glob.
+    const matchers = validateModuleGlobs(repositoryInvariantGlobs()).valid.map(globToRegex);
+    const covered = (p: string) => matchers.some((m) => m.test(p));
+    for (const spec of [
+      "src/components/aml/__tests__/amlLayout.test.tsx",
+      "src/lib/reports/__tests__/scoringMethodology.spec.ts",
+      "src/lib/builderStock/__tests__/marketplaceOrder.spec.ts",
+    ]) {
+      expect(covered(spec), `${spec} would arrive importing code the clone may not hold`).toBe(
+        false,
+      );
+    }
+  });
+
   it("a generated artefact and its source are both covered, or neither is", () => {
     /*
       THE RULE THIS LIST IS FOR.
