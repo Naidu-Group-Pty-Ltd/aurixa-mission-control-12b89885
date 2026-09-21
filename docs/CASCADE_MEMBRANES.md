@@ -701,6 +701,27 @@ fixed 400 to 3,000 characters after `planSubjectCarry({`: each had to be
 widened every time a comment landed inside the loop, which is an assertion
 people learn to edit. They read the loop by its own two code anchors now.
 
+## The boundary the carry does not cross
+
+Worth stating plainly, because none of the six defects above is it and a
+reader who has just been told the gate "resolves by carrying" will assume
+more of it than is true.
+
+**The channel reads `deliveredSource`, which holds only what THIS pass
+writes.** It is filled in one place from `prepareOne`'s `content`, and that is
+set for a `.ts`/`.tsx` the pass prepared — so a path is judged only if it was
+a candidate, which on a mirror means its SHAs differ. A spec sitting on a
+clone whose subject went stale in some earlier pass is therefore never
+re-asked: prime has not touched the spec, so the spec is not delivered, so
+nothing strands and nothing is carried.
+
+That is not the defect it sounds like. A stale subject is itself a path where
+the two trees differ, so the ordinary write path delivers it — the carry is
+for the case where a rule would otherwise have held the subject and taken the
+spec down with it. What the carry does NOT do is sweep a clone for specs whose
+subjects a PREVIOUS pass left behind. Nothing here is a backfill, and a pass
+that delivers nothing judges nothing.
+
 ## What this deliberately does not do
 
 - **It does not widen a clone's scope to a file the clone does not have.**
