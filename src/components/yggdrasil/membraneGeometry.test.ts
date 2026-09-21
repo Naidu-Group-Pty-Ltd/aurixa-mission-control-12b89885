@@ -7,6 +7,7 @@
  */
 
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
 import {
   BAND_HALF_SPAN,
   CONTROL_PULL,
@@ -17,10 +18,30 @@ import {
   type BranchEnds,
 } from "./membraneGeometry.pure";
 
-/** The cubic `TreeBranchPath` composes, evaluated at t. Independent of the module. */
+/**
+ * The pull `TreeBranchPath` ACTUALLY uses, read out of its source.
+ *
+ * Not `CONTROL_PULL`. Importing the constant under test and building the
+ * reference curve from it makes both sides move together: a review agent set
+ * it to 0.42 to see whether this file would notice, and every assertion here
+ * passed — the module and its own restatement agreed while the drawn branch
+ * disagreed with both. That is the defect this file's own header warns
+ * about, committed in the file that warns about it.
+ *
+ * The number that matters is the one in the component. Read it, and assert
+ * the module agrees.
+ */
+const DRAWN_PULL = (() => {
+  const src = readFileSync("src/components/yggdrasil/tree-branch.tsx", "utf8");
+  const m = src.match(/controlOffset\s*=\s*\(to\.x\s*-\s*from\.x\)\s*\*\s*([0-9.]+)/);
+  if (!m) throw new Error("tree-branch.tsx no longer states its control offset as a literal");
+  return Number(m[1]);
+})();
+
+/** The cubic `TreeBranchPath` composes, evaluated at t. Built from ITS number. */
 function branchPointAt(branch: BranchEnds, t: number): { x: number; y: number } {
   const midY = (branch.from.y + branch.to.y) / 2;
-  const k = (branch.to.x - branch.from.x) * CONTROL_PULL;
+  const k = (branch.to.x - branch.from.x) * DRAWN_PULL;
   const p0 = branch.from;
   const p1 = { x: branch.from.x + k, y: midY };
   const p2 = { x: branch.to.x - k, y: midY };
@@ -43,7 +64,27 @@ const BRANCHES: Array<[string, BranchEnds]> = [
   ["a shallow branch", { from: { x: 300, y: 300 }, to: { x: 700, y: 320 } }],
 ];
 
+describe("the module and the component agree about the curve", () => {
+  it("CONTROL_PULL is the number TreeBranchPath draws with", () => {
+    // One assertion, and it is the only place the two are compared. Every
+    // other test in this file builds its reference curve from `DRAWN_PULL`,
+    // so this is what stops the pair drifting silently.
+    expect(CONTROL_PULL).toBe(DRAWN_PULL);
+  });
+});
+
 describe("placeMembrane", () => {
+  /**
+   * These two see the CENTRE, and the centre is blind to the pull.
+   *
+   * B(0.5) is the chord midpoint for any k — the control offsets cancel
+   * exactly — so these assertions pass whatever the pull is, and did pass
+   * while it was 0.42. That is not a reason to drop them: they are what
+   * catches a midpoint computed from the wrong ends, or a curve whose
+   * control points stop being pinned to the vertical midpoint. It is a
+   * reason not to mistake them for the drift guard. The tangent cases below
+   * and the explicit comparison above are what see the pull.
+   */
   it.each(BRANCHES)("sits exactly on the drawn curve for %s", (_name, branch) => {
     const drawn = branchPointAt(branch, 0.5);
     const placed = placeMembrane(branch);

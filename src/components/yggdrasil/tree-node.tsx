@@ -48,6 +48,11 @@ export function TreeNodeCircle({
       onClick={(e) => onSelect?.(node, e)}
       style={{ cursor: isTrunk ? "default" : "pointer" }}
     >
+      {/* The node's own target, stated rather than inherited from whatever
+          happens to be painted. The labels below are captions and decline
+          pointer events, so the circle has to carry the click by itself. */}
+      <circle cx={node.x} cy={node.y} r={radius + 10} fill="transparent" />
+
       {/* Pulse ring for trunk */}
       {isTrunk && (
         <motion.circle
@@ -149,9 +154,25 @@ export function TreeNodeCircle({
         fontFamily="var(--font-mono)"
         fontWeight={isTrunk ? 700 : 500}
         letterSpacing={isTrunk ? "0.15em" : "0.05em"}
-        initial={{ opacity: 0, y: node.y + radius + 24 }}
-        animate={{ opacity: 1, y: node.y + radius + 16 }}
+        /**
+         * `attrY`, not `y`. On an SVG element framer-motion treats `y` as a
+         * TRANSFORM key, so `animate={{ y }}` emits
+         * `style="transform:translateY(...)"` — which ADDS to the `y`
+         * attribute above rather than replacing it. Measured on the rendered
+         * markup for a depth-1 node: `y="448"` beside
+         * `transform:translateY(456px)`, putting the name 456 units below the
+         * node it names, nearly four levels down the tree. `attrY` is the key
+         * that writes the attribute, which is what a baseline is.
+         *
+         * This is the same trap `membrane-band.tsx` documents from the other
+         * side: there an animated `scale` displaced a `transform` PROP; here
+         * an animated `y` displaces a `y` ATTRIBUTE. Both come from motion
+         * routing a name through the transform pipeline.
+         */
+        initial={{ opacity: 0, attrY: node.y + radius + 24 }}
+        animate={{ opacity: 1, attrY: node.y + radius + 16 }}
         transition={{ delay: delay + 0.2, duration: 0.5 }}
+        style={{ pointerEvents: "none" }}
       >
         {isTrunk ? "YGGDRASIL" : node.name}
       </motion.text>
@@ -167,7 +188,17 @@ export function TreeNodeCircle({
           fontFamily="var(--font-mono)"
           fontWeight={400}
           letterSpacing="0.1em"
-          style={{ textTransform: "uppercase" }}
+          /**
+           * A label is a caption, never a target. These two sit inside the
+           * node's own `<g onClick>`, and a status line runs wide enough to
+           * cross the membrane band drawn at the branch midpoint below —
+           * measured, it covers both depth-2 bands' click targets on the
+           * fleet's own layout, and on one of them its last glyph lands on
+           * the painted leaflet. Nodes paint after bands, so without this the
+           * caption silently takes the band's clicks. The hit circle above
+           * keeps the NODE reachable, so nothing is lost by it.
+           */
+          style={{ textTransform: "uppercase", pointerEvents: "none" }}
           initial={{ opacity: 0 }}
           animate={{ opacity: 0.7 }}
           transition={{ delay: delay + 0.4, duration: 0.5 }}

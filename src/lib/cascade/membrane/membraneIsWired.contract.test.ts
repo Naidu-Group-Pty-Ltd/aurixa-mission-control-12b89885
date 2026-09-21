@@ -10,6 +10,13 @@
  */
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
+import {
+  DECLARATION_PATHS,
+  SECURITY_BASELINE_PATH,
+} from "./ionSpecies.pure";
+import { SECURITY_INVENTORY_PATH } from "@/server/cascade/securityInventoryHold.pure";
+import { SECURITY_REGISTRY_PATH } from "@/server/cascade/securityRegistryReconcile.pure";
+import { CONFIG_TOML_PATH } from "@/server/cascade/configTomlReconcile.pure";
 import { stripComments } from "@/server/sourceComments.pure";
 
 const engine = stripComments(readFileSync("src/server/cascade-engine.server.ts", "utf8"));
@@ -43,22 +50,29 @@ describe("the engine asks the membrane", () => {
   });
 
   it("consults it per file, with the text it is about to write", () => {
-    expect(engine).toContain("permeate(membrane, { path, text: primeFile.content })");
+    // Whitespace-tolerant on purpose. Pinning the exact characters made this
+    // file fail on a Prettier reflow of the same call — and Prettier accepts
+    // BOTH forms, so `npm run lint` would have been green while this was red,
+    // which teaches the next person to edit the assertion rather than read
+    // it. The claim is about the arguments, not the line breaks.
+    expect(engine).toMatch(
+      /permeate\(\s*membrane\s*,\s*\{\s*path\s*,\s*text:\s*primeFile\.content\s*,?\s*\}\s*\)/,
+    );
   });
 
   it("acts on a refusal rather than only recording it", () => {
     const at = engine.indexOf("permeate(membrane,");
     const block = engine.slice(at, at + 400);
-    expect(block).toContain('verdict.kind === "blocked"');
-    expect(block).toContain('return { kind: "held", held: verdict.held }');
+    expect(block).toMatch(/verdict\.kind === "blocked"/);
+    expect(block).toMatch(/return\s*\{\s*kind:\s*"held"\s*,\s*held:\s*verdict\.held\s*,?\s*\}/);
   });
 
   it("asks the spec channel with BOTH trees", () => {
     const at = engine.indexOf("strandedSubjects({");
     expect(at).toBeGreaterThan(-1);
     const block = engine.slice(at, at + 400);
-    expect(block).toContain("primeSha: primeShaByPath");
-    expect(block).toContain("cloneSha: cloneShaByPath");
+    expect(block).toMatch(/primeSha:\s*primeShaByPath/);
+    expect(block).toMatch(/cloneSha:\s*cloneShaByPath/);
   });
 
   it("judges a spec against what this pass WRITES, never against the candidates", () => {
@@ -67,10 +81,25 @@ describe("the engine asks the membrane", () => {
     // rule or the membrane's own per-file channels. A spec judged against it
     // crosses beside a subject that was held three lines later, which is the
     // exact shape this channel exists to refuse.
+    //
+    // Read through whatever the local is CALLED. Pinning the name `deliveredPaths`
+    // made this assertion fail on a rename to `crossingPaths` — a two-use local
+    // const, clean under prettier, clean under eslint, clean under tsc, and
+    // behaviourally identical. An assertion that red-lights a rename is one
+    // people learn to edit.
     const at = engine.indexOf("strandedSubjects({");
     const block = engine.slice(at, at + 400);
-    expect(block).toContain("crossing: deliveredPaths");
-    expect(engine).toContain("const deliveredPaths = new Set(treeEntries.map((t) => t.path))");
+
+    const passed = block.match(/crossing:\s*([A-Za-z_$][\w$]*)/);
+    expect(passed).not.toBeNull();
+    const name = passed![1];
+
+    // Whatever it is called, it is the set of paths this pass is WRITING.
+    expect(engine).toMatch(
+      new RegExp(`const ${name} = new Set\\(\\s*treeEntries\\.map\\(`),
+    );
+    // And never the candidate set, which is the distinction the channel exists for.
+    expect(block).not.toMatch(/crossing:\s*partition\.write/);
     expect(engine).not.toContain("new Set(primeFiles)");
   });
 
@@ -142,7 +171,64 @@ describe("the engine asks the membrane", () => {
   it("is resolved once per clone, not once per file", () => {
     // Inside the per-file callback it would recompute for all ~830 files of a
     // backfill, and the answer cannot change between them.
+    //
+    // Counting the call sites does NOT assert this — a review agent moved the
+    // declaration into the per-file callback and the count stayed at one, so
+    // the assertion that carried this name passed over the exact edit it is
+    // named for. `tsc` caught that particular move, because the post-pass
+    // then referenced an out-of-scope name; but an edit that took the
+    // post-pass down with it would satisfy the compiler and still resolve the
+    // membrane ~830 times a backfill.
+    //
+    // What is actually being claimed is a POSITION: the declaration sits in
+    // the body of `processClone`, which in this file is two spaces of
+    // indentation, and both readers sit below it. Indentation is a weak
+    // signal in general and an exact one here — this file is Prettier-formatted
+    // at two spaces, so a statement nested inside anything at all is indented
+    // further, and `npm run lint` is in the gate chain ahead of this test.
     const matches = engine.match(/membraneInto\(/g) ?? [];
     expect(matches).toHaveLength(1);
+
+    const declaration = engine.match(/^([ \t]*)const membrane = membraneInto\(/m);
+    expect(declaration).not.toBeNull();
+    expect(declaration![1]).toBe("  ");
+
+    // And it precedes every reader, so no reader can be reading a stale one.
+    const declaredAt = engine.indexOf("const membrane = membraneInto(");
+    expect(engine.indexOf("permeate(membrane,")).toBeGreaterThan(declaredAt);
+    expect(engine.indexOf("orphanSpecHold({ membrane,")).toBeGreaterThan(declaredAt);
+  });
+});
+
+/**
+ * THE PATHS THIS MODULE RESTATES.
+ *
+ * `ionSpecies.pure.ts` is reached by a route, so it may not import a VALUE
+ * from `src/server/**` — the import-protection plugin refuses it and `tsc`
+ * cannot see the rule, which is how a working commit came to be one `vite
+ * build` refused. The three path constants there are therefore SECOND COPIES
+ * of shipped rules, and the copy is forced rather than chosen.
+ *
+ * What is not forced is the silence. A review agent set `SECURITY_BASELINE_PATH`
+ * to `docs/security/WRONG_NAME.json` and the whole suite passed — 193 of 193 —
+ * because a path constant naming a file that does not exist is invisible in
+ * exactly the way this repository's own rules keep warning about: the channel
+ * would simply never match, a changed security inventory would cross a
+ * membrane that declares itself closed to it, and nothing anywhere would say
+ * so.
+ *
+ * A test may import from both sides. So the copies are pinned to their
+ * originals here, which is the only place that can hold both.
+ */
+describe("the species paths agree with the rules they restate", () => {
+  it("names the security baseline the hold names", () => {
+    expect(SECURITY_BASELINE_PATH).toBe(SECURITY_INVENTORY_PATH);
+  });
+
+  it("names the declaration files the two reconcile pumps name", () => {
+    // Order is the module's own; membership is what the classifier reads.
+    expect([...DECLARATION_PATHS].sort()).toEqual(
+      [CONFIG_TOML_PATH, SECURITY_REGISTRY_PATH].sort(),
+    );
   });
 });

@@ -44,7 +44,7 @@ export type MembranePlacement = {
 };
 
 /** The control-point pull `TreeBranchPath` uses. Kept in one place. */
-export const CONTROL_PULL = 0.42;
+export const CONTROL_PULL = 0.15;
 
 export function placeMembrane(branch: BranchEnds): MembranePlacement {
   const dx = branch.to.x - branch.from.x;

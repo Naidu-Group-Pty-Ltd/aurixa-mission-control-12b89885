@@ -386,6 +386,74 @@ otherwise. It is transcribed from the shipped rule now, and
 `membrane.test.ts` **imports `backendRefsIn` and asserts the two agree** on
 the same inputs rather than restating the regex.
 
+## What a second review found, after the first one passed
+
+Thirty-five adversarial agents were run against the finished feature, each
+asked to DISPROVE one claimed defect by execution. Most claims died — two of
+the loudest were mutation-coverage observations dressed as defects, and both
+verifiers proved the engine's output byte-identical either way. Four survived,
+and three of them were in the guards rather than in the work.
+
+**A test that imported the constant it was testing.** `membraneGeometry.pure.ts`
+restates `TreeBranchPath`'s 0.15 control-point pull, and the geometry test
+built its "independent" reference curve from that restatement. An agent set
+the constant to `0.42` to see whether anything would notice; 112 of 112
+passed, and the number was **committed and pushed**. The band would have sat
+on every branch at a tangent nothing drew. `DRAWN_PULL` is read out of
+`tree-branch.tsx`'s source now and the module is asserted to equal it — and
+the two "sits exactly on the drawn curve" cases are labelled as unable to see
+this parameter at all, because B(0.5) is the chord midpoint for any pull.
+
+**An assertion that could not fail for its own name.** *"is resolved once per
+clone, not once per file"* counted the call sites, and moving the declaration
+into the per-file callback leaves the count at one. `tsc` caught that
+particular move, because the post-pass then read an out-of-scope name — but an
+edit that took the post-pass down with it would satisfy the compiler and
+resolve the membrane ~830 times a backfill. It asserts the POSITION now.
+
+**A path constant naming a file that does not exist.** `SECURITY_BASELINE_PATH`
+was set to `docs/security/WRONG_NAME.json` and 193 of 193 passed. The channel
+would never have matched, a changed security inventory would have crossed a
+membrane that declares itself closed to it, and nothing would have said so —
+this repository's own signature failure, committed inside the feature built to
+prevent it. The three path constants here are second copies, forced by the
+client/server module boundary (`ionSpecies.pure.ts` is reached by a route and
+may not import a value from `src/server/**`). The copy is unavoidable; the
+silence was not. `membraneIsWired.contract.test.ts` can import both sides, and
+now pins each copy to the rule it restates.
+
+**And four assertions that a formatter could turn red.** They pinned exact
+source text, so a Prettier-legal reflow of the `permeate` call and a rename of
+a two-use local both failed the suite with no behaviour change — while
+`npm run lint` stayed green on both, since Prettier accepts either form. A
+test that red-lights a rename teaches people to edit the test. They read the
+property now: whitespace-tolerant on the call, and name-agnostic on the
+crossing set, which is still asserted to be built from `treeEntries` and never
+from `partition.write`.
+
+## The defect the band found in the page it was drawn on
+
+Rendering the real tree to check whether node labels overlapped the new band
+found that they did — and, in the markup rather than the source, something
+larger underneath. The node NAME label animated `y`, which framer-motion
+routes through the transform pipeline on an SVG element, so it shipped
+`y="448"` beside `style="transform:translateY(456px)"`. **Every node on
+Yggdrasil drew its own name 456 units below itself**, nearly four levels down
+the tree, on a page whose whole job is saying which clone is which. It
+animates `attrY` now, which is the key that writes the attribute.
+
+It is the same trap `membrane-band.tsx` documents from the other side: there
+an animated `scale` displaced a `transform` PROP and drew the band at the
+origin; here an animated `y` displaced a `y` ATTRIBUTE. Both are motion
+routing a name through the transform pipeline, and neither is visible to
+`tsc`, to eslint or to a source-scanning test. Both are now asserted against
+rendered markup.
+
+The overlap itself is closed by making the labels captions rather than
+targets: nodes paint after bands, so a status line crossing the band was
+silently taking its clicks. Both labels decline pointer events and the node
+carries a stated hit circle of its own, so declining costs it nothing.
+
 ## What this deliberately does not do
 
 - **It does not widen a clone's scope.** A held spec is reported; nothing

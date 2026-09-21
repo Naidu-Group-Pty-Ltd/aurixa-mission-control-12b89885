@@ -20,6 +20,8 @@ import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MembraneBand } from "./membrane-band";
+import { TreeNodeCircle } from "./tree-node";
+import type { TreeNode } from "./use-tree-layout";
 import { placeMembrane, type BranchEnds } from "./membraneGeometry.pure";
 import { PRIME_REPO, resolveMembrane } from "@/lib/cascade/membrane/fleetMembranes.pure";
 
@@ -96,5 +98,65 @@ describe("where the band actually lands", () => {
   it("draws a selection ring only when selected", () => {
     expect(draw(false)).not.toContain("oklch(0.78 0.16 200 / 0.10)");
     expect(draw(true)).toContain("oklch(0.78 0.16 200 / 0.10)");
+  });
+});
+
+/**
+ * THE NODE'S LABELS, MEASURED FOR THE SAME REASON.
+ *
+ * A review agent rendering the real tree found the fleet's status labels
+ * covering both depth-2 bands' click targets, with one glyph landing on a
+ * painted leaflet — and, looking at the markup rather than the source, a
+ * second and larger fault underneath it: the NAME label carried an animated
+ * `y`, which framer-motion routes through the transform pipeline, so the
+ * element shipped `y="448"` beside `style="transform:translateY(456px)"`.
+ * Every node on Yggdrasil drew its own name 456 units below itself, nearly
+ * four levels down the tree, on a page whose whole job is to say which clone
+ * is which. It was not introduced by the membrane work; it was found by it,
+ * because a band drawn at the branch midpoint is exactly what a displaced
+ * label lands on.
+ *
+ * Source could not see either one. These assertions read the markup.
+ */
+describe("a node's labels", () => {
+  const node = {
+    id: "n1",
+    name: "npc-client-dashboard",
+    depth: 1,
+    x: 600,
+    y: 420,
+    syncStatus: "behind",
+    commitsBehind: 12,
+    githubOwner: "naidu-group-pty-ltd",
+    githubRepo: "npc-client-dashboard",
+    tags: [],
+    children: [],
+  } as unknown as TreeNode;
+
+  const html = renderToStaticMarkup(createElement(TreeNodeCircle, { node, index: 0 }));
+  const texts = [...html.matchAll(/<text[^>]*>[^<]*<\/text>/g)].map((m) => m[0]);
+
+  it("draws both of them", () => {
+    expect(texts).toHaveLength(2);
+  });
+
+  it("puts the name on its baseline and nowhere else", () => {
+    const name = texts.find((t) => t.includes("npc-client-dashboard"));
+    expect(name).toBeDefined();
+    // node.y 420 + radius 12 + the animation's opening offset 24.
+    expect(name).toContain('y="456"');
+    // The defect, stated as the defect: any transform at all on this element
+    // is added to that baseline rather than replacing it.
+    expect(name).not.toMatch(/transform:\s*translate/);
+  });
+
+  it("makes neither label a target, because the band below is one", () => {
+    for (const t of texts) expect(t).toMatch(/pointer-events:\s*none/);
+  });
+
+  it("gives the node a target of its own, so declining costs nothing", () => {
+    // Without this the node's clickability would depend on whatever happens
+    // to be painted — which is how the captions came to be carrying it.
+    expect(html).toMatch(/<circle[^>]*r="22"[^>]*fill="transparent"/);
   });
 });
