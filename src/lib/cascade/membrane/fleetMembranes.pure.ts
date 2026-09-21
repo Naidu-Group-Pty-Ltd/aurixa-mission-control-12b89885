@@ -118,13 +118,13 @@ const STANDING: readonly StandingOrgan[] = [
     kind: "channel",
     name: "securityInventoryHold",
     where: "securityInventoryHold.pure.ts",
-    does: "Refuses the prime's security baseline where this clone holds edge functions the prime does not.",
+    does: "Refuses the prime's security baseline where this clone holds edge functions the prime does not — the gate `reconcileSecurityInventory` runs behind, and the fallback when it cannot compute one.",
   },
   {
     kind: "channel",
     name: "functionCountRatchetHold",
     where: "securityInventoryHold.pure.ts",
-    does: "Refuses the prime's function-count assertion on the same evidence — the baseline's sibling, and the one a person's restoration was reverted through.",
+    does: "Refuses the prime's function-count assertion on the same evidence — the baseline's sibling, and the one a person's restoration was reverted through. Gates `reconcileFunctionCountRatchet` the same way.",
   },
   {
     kind: "channel",
@@ -155,6 +155,18 @@ const STANDING: readonly StandingOrgan[] = [
     name: "reconcileDeployWorkflow",
     where: "deployWorkflowReconcile.pure.ts",
     does: "Delivers the prime's deploy workflow with this clone's own project references kept.",
+  },
+  {
+    kind: "pump",
+    name: "reconcileSecurityInventory",
+    where: "securityBaselineReconcile.pure.ts",
+    does: "Delivers a security baseline counted from the config and registry this same pass reconciled, with each path's imports re-filed to whichever side supplied its content.",
+  },
+  {
+    kind: "pump",
+    name: "reconcileFunctionCountRatchet",
+    where: "securityBaselineReconcile.pure.ts",
+    does: "Delivers the prime's function-count spec carrying this repository's own number, counted with the rule read out of that spec rather than restated.",
   },
 ];
 

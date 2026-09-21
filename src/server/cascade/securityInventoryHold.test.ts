@@ -70,12 +70,29 @@ describe("how the engine uses it", () => {
     expect(hold).toBeGreaterThan(registry);
   });
 
-  it("removes prime's copy from the tree rather than only reporting it", () => {
+  it("removes prime's copy from the tree whatever happens next", () => {
+    // Both baselines now go through `settleBaseline`, which either writes a
+    // computed one or leaves the hold standing. Asserted on that function's
+    // own body rather than on a window of characters after the hold call:
+    // the property is that prime's copy never survives, and a test that
+    // matched the old spelling would pass on a settle that dropped the path
+    // in only one of its two branches.
+    const at = engine.indexOf("const settleBaseline = async (");
+    expect(at).toBeGreaterThan(-1);
+    const body = engine.slice(at, at + 1400);
+    const drop = body.indexOf("dropFromTree(held.path)");
+    const branch = body.indexOf("if (!outcome || !outcome.ok)");
+    expect(drop).toBeGreaterThan(-1);
+    expect(branch).toBeGreaterThan(drop);
+    expect(body).toContain("partition.held.push({ ...held");
+    expect(body).toContain("needsReconcile.push({ ...held");
+  });
+
+  it("offers the hold to both baselines, and to nothing else", () => {
     const at = engine.indexOf("securityInventoryHold(cloneOwnedFunctions)");
-    const block = engine.slice(at, at + 600);
-    expect(block).toContain("dropFromTree(SECURITY_INVENTORY_PATH)");
-    expect(block).toContain("partition.held.push(inventoryHold)");
-    expect(block).toContain("needsReconcile.push(inventoryHold)");
+    const block = engine.slice(at, at + 4200);
+    expect(block).toMatch(/await settleBaseline\(\s*inventoryHold,/);
+    expect(block).toMatch(/await settleBaseline\(\s*ratchetHold,/);
   });
 
   it("names the path in one place", () => {
@@ -274,15 +291,25 @@ describe("how the engine uses the ratchet hold", () => {
     expect(hold).toBeGreaterThan(registry);
   });
 
-  it("removes prime's copy from the tree rather than only reporting it", () => {
+  it("is settled rather than only reported", () => {
     // Reporting alone is what the cascade did for a fortnight: the file was
-    // listed as `modified` and the count was replaced anyway.
+    // listed as `modified` and the count was replaced anyway. It is settled
+    // through the same `settleBaseline` the inventory is, which drops prime's
+    // copy before it decides anything else.
     const at = engine.indexOf("functionCountRatchetHold(cloneOwnedFunctions)");
     expect(at).toBeGreaterThan(-1);
-    const block = engine.slice(at, at + 400);
-    expect(block).toContain("dropFromTree(FUNCTION_COUNT_RATCHET_PATH)");
-    expect(block).toContain("partition.held.push(ratchetHold)");
-    expect(block).toContain("needsReconcile.push(ratchetHold)");
+    expect(engine.slice(at)).toMatch(/await settleBaseline\(\s*ratchetHold,/);
+  });
+
+  it("is computed from the config this same pass will land", () => {
+    // A count taken from prime's config or from the clone's stale one is a
+    // number about a repository this proposal does not create.
+    const at = engine.indexOf("reconcileFunctionCountRatchet({");
+    expect(at).toBeGreaterThan(-1);
+    const call = engine.slice(at, at + 200);
+    expect(call).toContain("primeSpec: primeRatchetSpec");
+    expect(call).toContain("mergedToml,");
+    expect(call).toContain("cloneOwnedFunctions,");
   });
 
   it("reaches an operator, because a silent hold is the defect it replaces", () => {

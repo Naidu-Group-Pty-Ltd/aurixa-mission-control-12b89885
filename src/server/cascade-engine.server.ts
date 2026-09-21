@@ -83,6 +83,10 @@ import {
   securityInventoryHold,
 } from "./cascade/securityInventoryHold.pure";
 import {
+  reconcileFunctionCountRatchet,
+  reconcileSecurityInventory,
+} from "./cascade/securityBaselineReconcile.pure";
+import {
   MAX_SUBJECTS_CARRIED,
   orphanSpecHoldAfterCarry,
   permeate,
@@ -2331,10 +2335,22 @@ export async function processClone(args: {
   // Its own step rather than part of the write path, because the write path is
   // exactly what must never carry this file.
   let configReconcileNote: string | null = null;
+  // One line per baseline this pass computed rather than withheld. Reported
+  // in the pull request body, because a number a machine rewrote in a file a
+  // person is reviewing has to say that it did.
+  const baselineNotes: string[] = [];
   // What the two reconciles below kept because prime has no opinion about it.
   // Read after both, to decide whether prime's security baseline can describe
   // this repository at all.
   let cloneOwnedFunctions: string[] = [];
+  // What this repository's two declaration files will SAY once the pass
+  // lands: prime's reconciled copy where it stands, the clone's own where the
+  // reconcile refused and prime's was withheld. The baselines below count
+  // from these rather than from either side's file, because a count taken
+  // from a document that is not the one that lands is a number about a
+  // repository that will not exist.
+  let mergedToml: string | null = null;
+  let mergedRegistryJson: string | null = null;
   if (mode !== "notify") {
     try {
       const [primeCfg, cloneCfg] = await Promise.all([
@@ -2348,6 +2364,7 @@ export async function processClone(args: {
           ownRef: ownProjectRef,
         });
         if (verdict.ok) cloneOwnedFunctions = verdict.carriedForward;
+        mergedToml = verdict.ok ? verdict.merged : cloneCfg.content;
         if (!verdict.ok) {
           const held = {
             path: CONFIG_TOML_PATH,
@@ -2429,6 +2446,7 @@ export async function processClone(args: {
         // Either way prime's copy does not stand: it is replaced by the
         // reconciled one, or withheld for a person.
         dropFromTree(SECURITY_REGISTRY_PATH);
+        mergedRegistryJson = verdict.ok ? verdict.merged : cloneReg.content;
         if (!verdict.ok) {
           const held = {
             path: SECURITY_REGISTRY_PATH,
@@ -2488,30 +2506,125 @@ export async function processClone(args: {
   if (ownedByTree !== null) {
     cloneOwnedFunctions = [...new Set([...cloneOwnedFunctions, ...ownedByTree])];
   }
+  // ── the two baselines that state this repository's own function set ────
+  //
+  // `securityInventoryHold` and `functionCountRatchetHold` refuse prime's
+  // copies of `SECURITY_INVENTORY.json` and `auditRemediation.spec.ts`, and
+  // refusing is right: prime's numbers describe prime's tree. But a refusal
+  // leaves the clone's numbers describing the tree it had BEFORE this pass,
+  // and this pass changes that tree — so `security` and `verify` go red on
+  // two files the cascade declined to write rather than on any it wrote
+  // wrong. The hold's own note has always named `npm run security:inventory`
+  // as the remedy, and nothing has ever run it, because this engine composes
+  // a git tree over the GitHub API and cannot run npm.
+  //
+  // So the numbers are COMPUTED — from the config and registry this same pass
+  // reconciled a few lines above, and from the two sides' own generator
+  // output re-filed per path (`securityBaselineReconcile.pure.ts`). The hold
+  // is what happens when they cannot be, which costs the pass exactly the red
+  // check it already had.
+  //
+  // Gated on the holds' own trigger and no wider: this reconciles precisely
+  // where today it withholds, and a clone owning nothing prime does not
+  // receives prime's copies exactly as it does now.
   const inventoryHold = securityInventoryHold(cloneOwnedFunctions);
-  if (inventoryHold) {
-    dropFromTree(SECURITY_INVENTORY_PATH);
-    partition.held.push(inventoryHold);
-    needsReconcile.push(inventoryHold);
-  }
-
-  // The baseline's sibling, on the same evidence and for the same reason.
-  //
-  // `auditRemediation.spec.ts` asserts the number of functions `config.toml`
-  // declares, so the prime's copy states the PRIME'S count. Measured on
-  // `npc-crm-independent`: the two files differ by that one integer across
-  // 245 lines, and the cascade was listing it as `modified` — replacing a
-  // person's restoration with a number about a different repository, one pass
-  // after they made it.
-  //
-  // Held rather than merged here deliberately: this is the narrow change, and
-  // it leaves the count one apart from the merged config rather than four.
-  // `reconcileFunctionCountRatchet` is what makes them agree.
   const ratchetHold = functionCountRatchetHold(cloneOwnedFunctions);
-  if (ratchetHold) {
-    dropFromTree(FUNCTION_COUNT_RATCHET_PATH);
-    partition.held.push(ratchetHold);
-    needsReconcile.push(ratchetHold);
+
+  if (inventoryHold || ratchetHold) {
+    // Every path this repository holds once the pass lands, and the subset
+    // the pass writes — the two together are what say which side supplied
+    // each file's content. `treeEntries` is the delivery composed so far; the
+    // only entries gated on `!dryRun` are the config and the registry, and
+    // neither is a file the inventory's walk reads, so this is the same
+    // answer on a dry run as on a real one.
+    const deliveredPaths = treeEntries.filter((e) => e.sha !== null).map((e) => e.path);
+    const mergedTreePaths = new Set([...(cloneShaByPath?.keys() ?? []), ...deliveredPaths]);
+
+    // Read alongside the config and registry pairs above, in the same shape
+    // and under the same rule: a read that fails never fails the pass, it
+    // leaves the hold standing.
+    let primeInventory: string | null = null;
+    let cloneInventory: string | null = null;
+    let primeRatchetSpec: string | null = null;
+    try {
+      const [pi, ci, ps] = await Promise.all([
+        inventoryHold ? getFileContent(octokit, primeRef, SECURITY_INVENTORY_PATH) : null,
+        inventoryHold ? getFileContent(octokit, cloneRef, SECURITY_INVENTORY_PATH) : null,
+        ratchetHold ? getFileContent(octokit, primeRef, FUNCTION_COUNT_RATCHET_PATH) : null,
+      ]);
+      if (pi && !pi.binary) primeInventory = pi.content;
+      if (ci && !ci.binary) cloneInventory = ci.content;
+      if (ps && !ps.binary) primeRatchetSpec = ps.content;
+    } catch (e) {
+      console.warn(
+        `[cascade] security baseline read skipped for clone ${clone.id}: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      );
+    }
+
+    /**
+     * Put a reconciled baseline into the delivery, or leave the hold standing
+     * with the reason on it.
+     *
+     * Prime's copy is dropped either way — it is replaced by the reconciled
+     * one or withheld for a person — which is the same rule the registry
+     * above answers to.
+     */
+    const settleBaseline = async (
+      held: HeldPath,
+      outcome: { ok: true; merged: string; count: number } | { ok: false; reason: string } | null,
+    ) => {
+      dropFromTree(held.path);
+      if (!outcome || !outcome.ok) {
+        const why = outcome ? outcome.reason : "its inputs could not be read on this pass";
+        partition.held.push({ ...held, note: `${held.note} Not reconciled here: ${why}.` });
+        needsReconcile.push({ ...held, note: `${held.note} Not reconciled here: ${why}.` });
+        return;
+      }
+      if (dryRun) {
+        baselineNotes.push(`${held.path} · reconciled to ${outcome.count} function(s)`);
+        return;
+      }
+      const { data: blob } = await octokit.git.createBlob({
+        owner: cloneRef.owner,
+        repo: cloneRef.repo,
+        content: Buffer.from(outcome.merged, "utf8").toString("base64"),
+        encoding: "base64",
+      });
+      treeEntries.push({ path: held.path, mode: "100644", type: "blob", sha: blob.sha });
+      deliveredSource[held.path] = outcome.merged;
+      baselineNotes.push(`${held.path} · reconciled to ${outcome.count} function(s)`);
+    };
+
+    if (inventoryHold) {
+      await settleBaseline(
+        inventoryHold,
+        primeInventory !== null && cloneInventory !== null && mergedToml && mergedRegistryJson
+          ? reconcileSecurityInventory({
+              primeInventoryJson: primeInventory,
+              cloneInventoryJson: cloneInventory,
+              mergedToml,
+              mergedRegistryJson,
+              mergedTreePaths,
+              deliveredPaths,
+            })
+          : null,
+      );
+    }
+
+    if (ratchetHold) {
+      await settleBaseline(
+        ratchetHold,
+        primeRatchetSpec !== null && mergedToml
+          ? reconcileFunctionCountRatchet({
+              primeSpec: primeRatchetSpec,
+              mergedToml,
+              cloneOwnedFunctions,
+            })
+          : null,
+      );
+    }
   }
 
   // ── the deploy workflow: the same shape, found the same way ────────────
@@ -2705,10 +2818,12 @@ export async function processClone(args: {
 
     if (gated.write.length > 0 && !carryStoppedOnBudget) {
       for (const subject of plan.carry) attemptedSubjects.add(subject);
-      const { results: carried, stopped } = await mapWithConcurrencyUntil<
-        string,
-        Prepared | null
-      >(gated.write, 8, prepareOne, shouldStop);
+      const { results: carried, stopped } = await mapWithConcurrencyUntil<string, Prepared | null>(
+        gated.write,
+        8,
+        prepareOne,
+        shouldStop,
+      );
       // Deliberately NOT the `preparePaused` treatment. That one hands the
       // event back because half a module's diff is worse than none; this one
       // leaves a delivery that is already coherent — every spec whose subject
@@ -2738,7 +2853,8 @@ export async function processClone(args: {
     const refusedBySubject = new Map<string, { subject: string; reason: ExclusionReason }>();
     for (const r of carryRefusals) refusedBySubject.set(r.subject, r);
     for (const h of partition.held) {
-      if (!refusedBySubject.has(h.path)) refusedBySubject.set(h.path, { subject: h.path, reason: h.reason });
+      if (!refusedBySubject.has(h.path))
+        refusedBySubject.set(h.path, { subject: h.path, reason: h.reason });
     }
     for (const [specPath, stranded] of strandedBySpec) {
       const refused = stranded
@@ -3124,6 +3240,16 @@ export async function processClone(args: {
         `to does not change. An omitted \`[functions.X]\` block is read by the CLI as ` +
         `\`verify_jwt = true\`, which gates a function prime declares open.\n\n` +
         `- ${configReconcileNote}`
+      : "") +
+    (baselineNotes.length
+      ? `\n\n### The security baselines were recomputed, not copied\n\n` +
+        `\`${SECURITY_INVENTORY_PATH}\` and \`${FUNCTION_COUNT_RATCHET_PATH}\` each state how ` +
+        `many edge functions a repository has, so prime's copies state PRIME'S count. This ` +
+        `deployment owns ${cloneOwnedFunctions.length} function(s) prime does not ` +
+        `(${cloneOwnedFunctions.join(", ")}), so both were computed from the \`config.toml\` and ` +
+        `security registry this same pass reconciled — the numbers describe the tree this ` +
+        `proposal creates rather than either side's.\n\n` +
+        baselineNotes.map((l) => `- ${l}`).join("\n")
       : "") +
     (deployWorkflowNote
       ? `\n\n### The deploy workflow was carried, not copied\n\n` +
