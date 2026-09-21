@@ -1677,8 +1677,25 @@ export async function processClone(args: {
     in two on both clones, and the ceiling inside `closeOverImports` is what
     stops a runaway becoming a whole-repository proposal.
   */
+  /**
+   * The import closure, as a function, because it is asked TWICE.
+   *
+   * Its own comment calls its placement "the whole safety argument": a module
+   * may not cross without what it imports. It ran once, over the paths this
+   * clone's modules put in scope — and a subject the carry brings in behind a
+   * spec is a delivered module that never met it, so it arrived without its
+   * imports and no later round could notice. Null where the trees could not
+   * be listed, which is the same condition the block below already answers to.
+   */
+  let importClosure:
+    | ((seed: readonly string[], alreadyHave: ReadonlySet<string>) => Promise<string[]>)
+    | null = null;
+
   if (primeShaByPath !== null && cloneShaByPath !== null) {
     const { closeOverImports } = await import("@/server/cascade/importClosure.pure");
+    // Captured as consts so the narrowing survives into the closure below.
+    const primeTree = primeShaByPath;
+    const cloneTree = cloneShaByPath;
     const WALKABLE = /\.[cm]?[jt]sx?$/;
     const primeText = new Map<string, string>();
     const readInto = async (paths: readonly string[]) => {
@@ -1702,22 +1719,31 @@ export async function processClone(args: {
       );
     };
 
-    let closureAdded: string[] = [];
-    let frontier = candidatePaths;
-    for (let round = 0; round < 4 && frontier.length > 0; round += 1) {
-      await readInto(frontier);
-      const r = closeOverImports({
-        seed: [...candidatePaths, ...closureAdded],
-        prime: primeShaByPath,
-        clone: cloneShaByPath,
-        readPrime: (path) => primeText.get(path),
-      });
-      const fresh = r.added.filter((path) => !candidatePaths.includes(path));
-      const before = closureAdded.length;
-      closureAdded = [...new Set([...closureAdded, ...fresh])];
-      frontier = closureAdded.slice(before);
-      if (r.truncated) break;
-    }
+    const closeOver = async (
+      seed: readonly string[],
+      alreadyHave: ReadonlySet<string>,
+    ): Promise<string[]> => {
+      let added: string[] = [];
+      let frontier: readonly string[] = seed;
+      for (let round = 0; round < 4 && frontier.length > 0; round += 1) {
+        await readInto([...frontier]);
+        const r = closeOverImports({
+          seed: [...seed, ...added],
+          prime: primeTree,
+          clone: cloneTree,
+          readPrime: (path) => primeText.get(path),
+        });
+        const fresh = r.added.filter((path) => !alreadyHave.has(path));
+        const before = added.length;
+        added = [...new Set([...added, ...fresh])];
+        frontier = added.slice(before);
+        if (r.truncated) break;
+      }
+      return added;
+    };
+    importClosure = closeOver;
+
+    const closureAdded = await closeOver(candidatePaths, new Set(candidatePaths));
     if (closureAdded.length > 0) {
       candidatePaths = [...candidatePaths, ...closureAdded];
       scopeLabel = `${scopeLabel} + ${closureAdded.length} imported module(s)`;
@@ -2020,14 +2046,32 @@ export async function processClone(args: {
   // deletion probes — the probes are the first paid question. Only the
   // prepare loop's own pacing lives here.
   let freshlyPrepared = 0;
+  /** Files this pass has paid a read for. See `shouldStop`. */
+  let filesRead = 0;
   let slowestFileMs = 0;
   // Asked before each file is started, never before the first fresh one: a
   // pass that prepared nothing new would come back next tick exactly where
   // it was. The reserve is the slowest file so far — one more like it.
+  /**
+   * Whether this pass has spent enough of its window to stop.
+   *
+   * Counted in FILES READ, not in blobs uploaded. `freshlyPrepared` is the
+   * resume LEDGER's counter and only a binary file buys a blob — text travels
+   * inline in the chunked `createTree` chain — so on a delivery with no binary
+   * in it that counter stayed at zero and this could never return true. Specs
+   * and their subjects are `.ts`/`.tsx`, which is to say a carry is all text
+   * by construction: the guard that stops the carry running past its window
+   * was the one guard it could never reach, `cutShort: "budget"` was
+   * unreachable, and the pass ran to the platform's own ceiling rather than
+   * handing back a resumable row.
+   *
+   * The `> 0` is the same forward-progress guarantee it always was — a pass
+   * that is already past its deadline still prepares one file rather than
+   * looping having done nothing — measured on the thing that actually costs
+   * the window.
+   */
   const shouldStop = () =>
-    resume?.budget !== undefined &&
-    freshlyPrepared > 0 &&
-    resume.budget.isPastDeadline(slowestFileMs);
+    resume?.budget !== undefined && filesRead > 0 && resume.budget.isPastDeadline(slowestFileMs);
 
   /**
    * ONE CANDIDATE, JUDGED. Named rather than inline because it is asked
@@ -2071,6 +2115,11 @@ export async function processClone(args: {
       };
     }
     const fileStartedAt = Date.now();
+    // Counted here rather than at any exit below: every one of them has
+    // attempted a read by this line, including the oversize refusal, and a
+    // counter that four returns have to remember to touch is one a fifth
+    // return will not.
+    filesRead += 1;
     let primeFile: Awaited<ReturnType<typeof getFileContent>>;
     try {
       primeFile = await getFileContent(octokit, primeRef, path, {
@@ -2351,6 +2400,26 @@ export async function processClone(args: {
   // repository that will not exist.
   let mergedToml: string | null = null;
   let mergedRegistryJson: string | null = null;
+  /**
+   * Paths a reconcile pump DECIDED, whether or not it wrote one.
+   *
+   * Every pump drops prime's copy from the tree and then either writes a
+   * merged one or leaves the clone's file standing — the second case writes
+   * nothing, because the merged result IS the clone's file. A dry run has the
+   * same shape for a different reason: it composes no blob.
+   *
+   * A path in neither `treeEntries` nor `partition.held` is one the subject
+   * carry below reads as STRANDED, and the carry answers a stranded subject
+   * by delivering prime's RAW copy — undoing the reconcile inside its own
+   * pass, in the reconcile's own steady state. `SECURITY_REGISTRY.json` is
+   * the sharp case: it is a repository invariant rather than an exclusion
+   * row, so nothing else in the carry would refuse it.
+   *
+   * So the decision is recorded here and the carry reads it as delivered,
+   * which is what it is — the delivery covers this path. A REFUSAL is not
+   * recorded: a held path is one a spec naming it should still strand on.
+   */
+  const reconciledPaths = new Set<string>();
   if (mode !== "notify") {
     try {
       const [primeCfg, cloneCfg] = await Promise.all([
@@ -2365,6 +2434,9 @@ export async function processClone(args: {
         });
         if (verdict.ok) cloneOwnedFunctions = verdict.carriedForward;
         mergedToml = verdict.ok ? verdict.merged : cloneCfg.content;
+        // Decided wherever it is not refused, INCLUDING the case that writes
+        // nothing because the clone's file already says it.
+        if (verdict.ok) reconciledPaths.add(CONFIG_TOML_PATH);
         if (!verdict.ok) {
           const held = {
             path: CONFIG_TOML_PATH,
@@ -2447,6 +2519,7 @@ export async function processClone(args: {
         // reconciled one, or withheld for a person.
         dropFromTree(SECURITY_REGISTRY_PATH);
         mergedRegistryJson = verdict.ok ? verdict.merged : cloneReg.content;
+        if (verdict.ok) reconciledPaths.add(SECURITY_REGISTRY_PATH);
         if (!verdict.ok) {
           const held = {
             path: SECURITY_REGISTRY_PATH,
@@ -2530,7 +2603,20 @@ export async function processClone(args: {
   const inventoryHold = securityInventoryHold(cloneOwnedFunctions);
   const ratchetHold = functionCountRatchetHold(cloneOwnedFunctions);
 
-  if (inventoryHold || ratchetHold) {
+  if ((inventoryHold || ratchetHold) && mode === "notify") {
+    // A notify pass writes nothing and reconciles nothing, so it reads
+    // nothing either: both holds stand exactly as they did before any of this
+    // existed, rather than gaining a sentence about inputs nobody tried to
+    // read. `mode === "notify" && !dryRun` has already returned far above;
+    // this is the rehearsal of one, and a rehearsal that spends three API
+    // reads to reach a foregone hold is three reads.
+    for (const held of [inventoryHold, ratchetHold]) {
+      if (!held) continue;
+      dropFromTree(held.path);
+      partition.held.push(held);
+      needsReconcile.push(held);
+    }
+  } else if (inventoryHold || ratchetHold) {
     // Every path this repository holds once the pass lands, and the subset
     // the pass writes — the two together are what say which side supplied
     // each file's content. `treeEntries` is the delivery composed so far; the
@@ -2605,6 +2691,7 @@ export async function processClone(args: {
         treeEntries.push({ path: held.path, mode: "100644", type: "blob", sha: blob.sha });
       }
       deliveredSource[held.path] = outcome.merged;
+      reconciledPaths.add(held.path);
       baselineNotes.push(`${held.path} · reconciled to ${outcome.count} function(s)`);
     };
 
@@ -2673,6 +2760,7 @@ export async function processClone(args: {
           cloneYaml: cloneWf.content,
           ownRef: ownProjectRef,
         });
+        if (verdict.ok) reconciledPaths.add(DEPLOY_WORKFLOW_PATH);
         if (!verdict.ok) {
           const held = {
             path: DEPLOY_WORKFLOW_PATH,
@@ -2771,10 +2859,24 @@ export async function processClone(args: {
   // Fixed before the loop rather than inside it: `deliveredSource` shrinks as
   // specs are held, so a bound computed per round would move under its own
   // guard.
-  const maxCarryRounds = MAX_SUBJECTS_CARRIED + Object.keys(deliveredSource).length + 1;
+  //
+  // Both halves of the worst case, and the second one was missing: carry
+  // rounds are bounded by the 200-subject cap, hold rounds by the number of
+  // specs — and a CARRIED subject can itself be a spec, so the set of specs
+  // grows by up to the same cap while the loop runs. Counting only the specs
+  // present at the start bounded the loop below its own worst case.
+  const maxCarryRounds = MAX_SUBJECTS_CARRIED * 2 + Object.keys(deliveredSource).length + 1;
+
+  // Imports owed by a subject the carry already brought across. Fed back in
+  // as stranded paths, so they meet `planSubjectCarry`, the exclusions, the
+  // ceiling and `prepareOne` on the terms every other candidate does.
+  const importsOwed = new Set<string>();
+  // Past the belt the carry stops being ATTEMPTED and the loop keeps going.
+  // See where it is set.
+  let carryingAllowed = true;
 
   for (let round = 0; ; round += 1) {
-    const deliveredPaths = new Set(treeEntries.map((t) => t.path));
+    const deliveredPaths = new Set([...treeEntries.map((t) => t.path), ...reconciledPaths]);
     const strandedBySpec = new Map<string, string[]>();
     for (const [specPath, specText] of Object.entries(deliveredSource)) {
       const stranded = strandedSubjects({
@@ -2786,16 +2888,31 @@ export async function processClone(args: {
       });
       if (stranded.length > 0) strandedBySpec.set(specPath, stranded);
     }
-    if (strandedBySpec.size === 0) break;
+    // An import already delivered, or already put through the rules once, is
+    // settled. Clearing them here is what makes the loop terminate: an owed
+    // import that the exclusions refuse becomes `attempted` on its first
+    // round and stops being asked for.
+    for (const owed of [...importsOwed]) {
+      if (deliveredPaths.has(owed) || attemptedSubjects.has(owed)) importsOwed.delete(owed);
+    }
+    if (strandedBySpec.size === 0 && (!carryingAllowed || importsOwed.size === 0)) break;
 
     // Try to bring the subjects across before deciding the specs cannot go.
     const plan = planSubjectCarry({
-      stranded: [...strandedBySpec.values()].flat(),
+      stranded: [...[...strandedBySpec.values()].flat(), ...importsOwed],
       held: partition.held,
       attempted: attemptedSubjects,
       limit: Math.max(0, MAX_SUBJECTS_CARRIED - carriedSubjects.length),
     });
     if (plan.atCeiling) carryHitCeiling = true;
+    // A round that can plan NOTHING will never mark an owed import attempted,
+    // and `importsOwed` is only cleared of what was delivered or attempted —
+    // so the loop would spin over a set nothing can consume until the belt
+    // fires, re-scanning the whole delivery each time. Nothing more will be
+    // carried this pass; the next tick re-derives what is owed from the
+    // delivery it makes. Keyed on an empty plan rather than on `atCeiling`,
+    // which is also true of a round that truncated and carried the rest.
+    if (plan.carry.length === 0) carryingAllowed = false;
 
     // Through the PATH rules before the content rules, which is the order
     // every other candidate meets them in.
@@ -2822,12 +2939,20 @@ export async function processClone(args: {
       ...plan.refused,
       ...gated.held.map((h) => ({ subject: h.path, reason: h.reason })),
     ];
-    for (const h of gated.held) {
-      partition.held.push(h);
-      needsReconcile.push(h);
-    }
+    for (const h of gated.held) partition.held.push(h);
+    // Through `reportableHeld`, like every other producer of this list.
+    //
+    // `needsReconcile` is `reportableHeld(partition.held)` everywhere else,
+    // and that filter keeps `protected` out on purpose: `decideHoldRelease`
+    // refuses a protected path outright, so an approval drawn over one
+    // reports success and releases nothing, for ever. Pushing `gated.held`
+    // raw put exactly that button on the dry-run card — `partitionCascadePaths`
+    // emits the exclusion row's OWN reason, and on a module-scoped clone a
+    // carried subject outside the installed globs was never partitioned
+    // before, so it has no earlier hold to be recognised by.
+    needsReconcile.push(...reportableHeld(gated.held));
 
-    if (gated.write.length > 0 && !carryStoppedOnBudget) {
+    if (carryingAllowed && gated.write.length > 0 && !carryStoppedOnBudget) {
       for (const subject of plan.carry) attemptedSubjects.add(subject);
       const { results: carried, stopped } = await mapWithConcurrencyUntil<string, Prepared | null>(
         gated.write,
@@ -2841,7 +2966,13 @@ export async function processClone(args: {
       // did not arrive is held with it — so it ships, and the next tick
       // carries the rest. The specs say they were cut short rather than
       // refused.
-      if (stopped) carryStoppedOnBudget = true;
+      // The budget stopped the carry, so stop attempting it — for the same
+      // reason as above, and because "we ran out of window" and "we will try
+      // again in a moment" are the same sentence.
+      if (stopped) {
+        carryStoppedOnBudget = true;
+        carryingAllowed = false;
+      }
       // Through the same absorber the main pass uses, so a carried subject
       // reaches `deliveredSource` and is itself re-read for stranded
       // subjects — a spec can carry a spec. A subject that met a rule of its
@@ -2849,6 +2980,16 @@ export async function processClone(args: {
       // round, which is correct and now says which rule stopped it.
       const written = absorbPrepared(carried);
       carriedSubjects.push(...written);
+      // A carried subject is a delivered module, so it answers to the import
+      // closure like any other. Asking only at the top of the pass is how a
+      // carried module arrives without what it imports, permanently: the
+      // closure runs ~1,100 lines above this loop and nothing feeds back into
+      // it. The answer is owed rather than written — it re-enters as a
+      // stranded path next round and meets every rule on the way.
+      if (written.length > 0 && importClosure) {
+        const have = new Set([...treeEntries.map((t) => t.path), ...reconciledPaths]);
+        for (const owed of await importClosure(written, have)) importsOwed.add(owed);
+      }
       // Something crossed, so re-ask before condemning any spec.
       if (written.length > 0) continue;
     }
@@ -2877,8 +3018,23 @@ export async function processClone(args: {
         stranded,
         refused,
         // The two facts this loop was computing and throwing away. "We could
-        // not" and "we did not get to" send an operator to opposite places.
-        cutShort: carryStoppedOnBudget ? "budget" : carryHitCeiling ? "ceiling" : null,
+        // not" and "we did not get to" send an operator to opposite places —
+        // which is why the word is decided per SPEC rather than per pass.
+        //
+        // `carryStoppedOnBudget` and `carryHitCeiling` are set once for the
+        // whole pass and were then stamped on every spec held in every later
+        // round, including one whose subjects were each permanently refused
+        // by a rule. That note reads "we ran out of time" over a list of
+        // reasons we did not, and the operator waits for a next tick to
+        // finish something no tick can.
+        cutShort:
+          refused.length === stranded.length
+            ? null
+            : carryStoppedOnBudget
+              ? "budget"
+              : carryHitCeiling
+                ? "ceiling"
+                : null,
       });
       partition.held.push(held);
       needsReconcile.push(held);
@@ -2889,8 +3045,16 @@ export async function processClone(args: {
     }
 
     // A belt on top of the monotonicity argument above: a round that neither
-    // carried nor held would loop, and this stops rather than hanging.
-    if (round >= maxCarryRounds) break;
+    // carried nor held would loop, and this stops it.
+    //
+    // It stops the CARRY, not the loop. Holding a spec takes it out of the
+    // delivery, and another spec may name it as a subject — so the round that
+    // holds can strand one it did not see, and a bare `break` here shipped
+    // that spec without its subject, which is the one thing this channel
+    // exists to prevent. With carrying off, every remaining round holds at
+    // least one spec and `deliveredSource` strictly shrinks, so it settles in
+    // at most one round per spec.
+    if (round >= maxCarryRounds) carryingAllowed = false;
   }
 
   // The finished pass's own ledger, carried on the result row so the NEXT

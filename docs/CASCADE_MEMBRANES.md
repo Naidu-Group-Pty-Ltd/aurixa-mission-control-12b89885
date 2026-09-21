@@ -618,6 +618,110 @@ composed file, rather than asserted about the template.
 It is gated on the holds' own trigger and no wider: this reconciles precisely
 where it used to withhold.
 
+## What a second adversarial review found in the carry gate
+
+Nineteen agents read the carry gate on 21 Sep 2026 and confirmed six defects
+BY EXECUTION — replaying the real modules, not reasoning about them. All six
+are in the gate merged a day earlier, and all six had this shape: the carry
+runs LAST, over the finished delivery, so everything it adds is added over a
+decision something else already made.
+
+**A `protected` refusal reached the approval offer.** `needsReconcile` is
+`reportableHeld(partition.held)` everywhere else, and that filter keeps
+`protected` out on purpose — `decideHoldRelease` refuses a protected path
+outright, so an approval drawn over one reports success and releases nothing,
+for ever. The carry pushed its own refusals raw, and `partitionCascadePaths`
+emits the exclusion row's OWN reason. On a module-scoped clone the trigger is
+ordinary: a subject outside the installed globs was never partitioned before,
+so it has no earlier hold to be recognised by, and `supabase/config.toml` —
+which nine of prime's specs name — is `protected`. It is the defect
+`approvalReachesItsHold.contract.test.ts` exists to prevent, one
+reason-category over.
+
+**A carried subject never met the import closure.** That closure's own comment
+calls its placement "the whole safety argument": a module may not cross
+without what it imports. It ran once, ~1,100 lines above the carry, over the
+paths this clone's modules put in scope. A subject the carry brought in behind
+a spec was a delivered module that had never been through it, so it arrived
+without its imports and no later round could notice. It is a function now,
+asked twice, and what it finds is OWED rather than written — fed back as a
+stranded path so it meets `planSubjectCarry`, the exclusions, the ceiling and
+`prepareOne` on the terms every other candidate does.
+
+**The budget guard could not fire on an all-text delivery.** `shouldStop`
+required `freshlyPrepared > 0`, and that counter is the resume LEDGER's: only
+a binary file buys a blob, because text travels inline in the chunked
+`createTree` chain. A carry is all text by construction, so the guard that
+stops it running past its window was the one guard it could never reach, and
+`cutShort: "budget"` was unreachable with it. It predates the carry and is
+wider than it — the MAIN prepare loop had no wall-clock bound either on a text
+pass, so a big one was killed by the platform instead of handing back a
+resumable row. Counted in files read now, at the line where the read is
+attempted rather than at each of the four exits below it.
+
+**The belt shipped what it should have held.** `if (round >= maxCarryRounds)
+break` stopped the loop, and holding a spec takes it out of the delivery —
+which can strand another spec that named it. A bare break shipped that one
+without its subject, the single thing this channel exists to prevent. The belt
+turns CARRYING off now and the loop keeps going; with carrying off every round
+holds at least one spec, so it settles in at most one round per spec. The
+bound itself was also below its own worst case: carry rounds are capped at
+200 and hold rounds at the number of specs, and a carried subject can itself
+be a spec, so that set grows by up to the same cap while the loop runs.
+
+**The carry re-delivered a path a pump had decided.** Every reconcile pump
+drops prime's copy from the tree and then either writes a merged file or
+leaves the clone's standing — the second writes nothing, because the merged
+result IS the clone's file, and a dry run writes nothing for its own reason. A
+path in neither `treeEntries` nor `partition.held` reads to the carry as
+STRANDED, and the carry answers a stranded subject by delivering prime's RAW
+copy. So a reconcile was undone inside its own pass, in its own steady state.
+`SECURITY_REGISTRY.json` is the sharp case: it is a repository invariant
+rather than an exclusion row, so nothing else in the carry would have refused
+it. `reconciledPaths` records the decision and the carry reads it as part of
+the delivery, which is what it is. A REFUSAL is not recorded — a held path is
+one a spec naming it should still strand on.
+
+**And a spec was told the wrong one of two things.** `carryStoppedOnBudget`
+and `carryHitCeiling` are set once for the whole pass and were then stamped on
+every spec held in every later round — so a spec whose subjects were each
+permanently refused by a rule carried a note reading "we ran out of time" over
+a list of reasons we did not, and an operator waited for a next tick to finish
+something no tick can. Decided per spec now, from what refused ITS subjects.
+
+Two things worth recording beyond the six. Closing the last two opened a
+SEVENTH that the review could not have seen, because it did not exist yet:
+`importsOwed` is cleared only of what was delivered or attempted, and a round
+that can plan nothing attempts nothing — so a set of owed imports no plan
+could reach would have spun the loop until the belt fired, thousands of rounds
+later, each re-scanning the whole delivery. Keyed on an empty plan rather than
+on `atCeiling`, which is also true of a round that truncated and carried the
+rest. And eight assertions in `membraneIsWired.contract.test.ts` sliced a
+fixed 400 to 3,000 characters after `planSubjectCarry({`: each had to be
+widened every time a comment landed inside the loop, which is an assertion
+people learn to edit. They read the loop by its own two code anchors now.
+
+## The boundary the carry does not cross
+
+Worth stating plainly, because none of the six defects above is it and a
+reader who has just been told the gate "resolves by carrying" will assume
+more of it than is true.
+
+**The channel reads `deliveredSource`, which holds only what THIS pass
+writes.** It is filled in one place from `prepareOne`'s `content`, and that is
+set for a `.ts`/`.tsx` the pass prepared — so a path is judged only if it was
+a candidate, which on a mirror means its SHAs differ. A spec sitting on a
+clone whose subject went stale in some earlier pass is therefore never
+re-asked: prime has not touched the spec, so the spec is not delivered, so
+nothing strands and nothing is carried.
+
+That is not the defect it sounds like. A stale subject is itself a path where
+the two trees differ, so the ordinary write path delivers it — the carry is
+for the case where a rule would otherwise have held the subject and taken the
+spec down with it. What the carry does NOT do is sweep a clone for specs whose
+subjects a PREVIOUS pass left behind. Nothing here is a backfill, and a pass
+that delivers nothing judges nothing.
+
 ## What this deliberately does not do
 
 - **It does not widen a clone's scope to a file the clone does not have.**

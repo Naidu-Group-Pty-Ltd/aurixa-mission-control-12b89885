@@ -404,6 +404,19 @@ describe("the reconcilers are the engine's, and the engine uses them", () => {
     );
   });
 
+  it("reconciles nothing on a notify pass, and says nothing about it", () => {
+    // Notify writes nothing, so it reads nothing: the holds stand as they did
+    // before any of this existed. A rehearsal that spends three API reads to
+    // reach a foregone hold — and then blames inputs nobody tried to read —
+    // is three reads and a misleading sentence.
+    const at = engine.indexOf('if ((inventoryHold || ratchetHold) && mode === "notify")');
+    expect(at).toBeGreaterThan(-1);
+    const block = engine.slice(at, at + 700);
+    expect(block).toContain("partition.held.push(held);");
+    expect(block).not.toContain("getFileContent");
+    expect(block).not.toContain("Not reconciled here:");
+  });
+
   it("leaves every settled path either in the tree or held, on both runs", () => {
     // `dropFromTree` runs first, so a path that is neither written back nor
     // held is one the subject carry below reads as STRANDED and re-delivers

@@ -10,10 +10,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
-import {
-  DECLARATION_PATHS,
-  SECURITY_BASELINE_PATH,
-} from "./ionSpecies.pure";
+import { DECLARATION_PATHS, SECURITY_BASELINE_PATH } from "./ionSpecies.pure";
 import { SECURITY_INVENTORY_PATH } from "@/server/cascade/securityInventoryHold.pure";
 import { SECURITY_REGISTRY_PATH } from "@/server/cascade/securityRegistryReconcile.pure";
 import { CONFIG_TOML_PATH } from "@/server/cascade/configTomlReconcile.pure";
@@ -75,6 +72,27 @@ describe("the engine asks the membrane", () => {
     expect(block).toMatch(/cloneSha:\s*cloneShaByPath/);
   });
 
+  /**
+   * The subject-carry loop, from its own `for` to the statement after it.
+   *
+   * Both anchors are CODE. `engine` is comment-stripped, so a comment makes a
+   * fine landmark for a reader and none at all for this.
+   *
+   * Every assertion below that used to slice a fixed 400/1400/1800/3000
+   * characters after `planSubjectCarry({` reads this instead. Those windows
+   * were statements about a number: each one had to be widened every time a
+   * comment landed inside the loop, and an assertion people learn to edit is
+   * one that stops asserting. The scope they all meant is "inside the carry
+   * loop", so that is what they say.
+   */
+  const carryLoop = () => {
+    const from = engine.indexOf("for (let round = 0; ; round += 1) {");
+    const to = engine.indexOf("const finalProgress: Partial<CascadeResultUpdate>");
+    expect(from).toBeGreaterThan(-1);
+    expect(to).toBeGreaterThan(from);
+    return engine.slice(from, to);
+  };
+
   it("judges a spec against what this pass WRITES, never against the candidates", () => {
     // `partition.write` is the candidate set and a candidate can still be
     // held — by the oversize rule, the workflow rule, the backend-identity
@@ -94,10 +112,17 @@ describe("the engine asks the membrane", () => {
     expect(passed).not.toBeNull();
     const name = passed![1];
 
-    // Whatever it is called, it is the set of paths this pass is WRITING.
+    // Whatever it is called, it is the set of paths this pass is WRITING —
+    // plus the ones a reconcile pump DECIDED without writing, which is the
+    // same claim. A pump drops prime's copy and then either writes a merged
+    // file or leaves the clone's standing; the second case writes nothing,
+    // and a path in neither the tree nor `partition.held` reads here as
+    // stranded, so the carry answered it by delivering prime's RAW copy and
+    // undid the reconcile inside its own pass.
     expect(engine).toMatch(
-      new RegExp(`const ${name} = new Set\\(\\s*treeEntries\\.map\\(`),
+      new RegExp(`const ${name} = new Set\\(\\[\\.\\.\\.treeEntries\\.map\\(`),
     );
+    expect(engine).toMatch(new RegExp(`const ${name} = new Set\\(\\[[^\\]]*reconciledPaths`));
     // And never the candidate set, which is the distinction the channel exists for.
     expect(block).not.toMatch(/crossing:\s*partition\.write/);
     expect(engine).not.toContain("new Set(primeFiles)");
@@ -131,9 +156,10 @@ describe("the engine asks the membrane", () => {
     // must meet the oversize ceiling, the workflow rule, the backend-identity
     // rule and this edge's channels on identical terms — which it does by
     // being the same function, not by a second implementation agreeing.
-    const at = engine.indexOf("planSubjectCarry({");
-    const block = engine.slice(at, at + 1400);
-    expect(block).toMatch(/mapWithConcurrencyUntil<[\s\S]{0,120}>\(\s*gated\.write\s*,\s*8\s*,\s*prepareOne/);
+    const block = carryLoop();
+    expect(block).toMatch(
+      /mapWithConcurrencyUntil<[\s\S]{0,120}>\(\s*gated\.write\s*,\s*8\s*,\s*prepareOne/,
+    );
     // And there is exactly one such judgement to be the same as.
     expect(engine.match(/const prepareOne = async/g) ?? []).toHaveLength(1);
   });
@@ -142,8 +168,7 @@ describe("the engine asks the membrane", () => {
     // Two copies of "what a prepared entry becomes" is how one of them comes
     // to forget `deliveredSource` — the map the spec channel reads — and a
     // carried spec would then cross having stranded something.
-    const at = engine.indexOf("planSubjectCarry({");
-    const block = engine.slice(at, at + 1400);
+    const block = carryLoop();
     expect(block).toContain("absorbPrepared(carried)");
     expect(engine.match(/const absorbPrepared =/g) ?? []).toHaveLength(1);
     expect(engine).toContain("absorbPrepared(prepared)");
@@ -158,8 +183,7 @@ describe("the engine asks the membrane", () => {
     // the plan to see, and would have been carried with its exclusions never
     // asked. `backendIdentityHold` would have caught the worst of it, which is
     // a different rule catching it by luck.
-    const at = engine.indexOf("planSubjectCarry({");
-    const block = engine.slice(at, at + 1800);
+    const block = carryLoop();
     expect(block).toMatch(/partitionCascadePaths\(\s*plan\.carry\s*,\s*exclusions\s*\)/);
     // And what it carries is the WRITE half, never the whole plan.
     expect(block).toMatch(/mapWithConcurrencyUntil<[\s\S]{0,120}>\(\s*gated\.write\s*,/);
@@ -168,8 +192,7 @@ describe("the engine asks the membrane", () => {
   });
 
   it("reports what the path rules refused, and stops re-planning it", () => {
-    const at = engine.indexOf("planSubjectCarry({");
-    const block = engine.slice(at, at + 1800);
+    const block = carryLoop();
     expect(block).toContain("partition.held.push(h)");
     expect(block).toContain("attemptedSubjects.add(h.path)");
   });
@@ -177,8 +200,7 @@ describe("the engine asks the membrane", () => {
   it("never releases a subject an existing rule already holds", () => {
     // `planSubjectCarry` is handed the live partition, and what it refuses it
     // returns rather than drops, so the spec is held WITH its refusals.
-    const at = engine.indexOf("planSubjectCarry({");
-    const block = engine.slice(at, at + 400);
+    const block = carryLoop();
     expect(block).toMatch(/held:\s*partition\.held/);
   });
 
@@ -194,16 +216,19 @@ describe("the engine asks the membrane", () => {
   });
 
   it("answers to the pass's own clock, so carrying cannot overrun a budget", () => {
-    const at = engine.indexOf("planSubjectCarry({");
-    const block = engine.slice(at, at + 1400);
+    const block = carryLoop();
     expect(block).toContain("shouldStop");
   });
 
   it("holds the spec rather than dropping it silently", () => {
-    const at = engine.indexOf("strandedSubjects({");
-    const block = engine.slice(at, at + 3000);
+    // Scoped to the carry loop rather than to a fixed window after
+    // `strandedSubjects({`. A window that has to be widened every time a
+    // comment lands between the two is an assertion people learn to edit.
+    const block = carryLoop();
     expect(block).toContain("stranded.length > 0");
-    expect(block).toMatch(/orphanSpecHoldAfterCarry\(\{\s*membrane,\s*specPath,\s*stranded,\s*refused,/);
+    expect(block).toMatch(
+      /orphanSpecHoldAfterCarry\(\{\s*membrane,\s*specPath,\s*stranded,\s*refused,/,
+    );
     expect(block).toContain("partition.held.push(held)");
     expect(block).toContain("needsReconcile.push(held)");
   });
@@ -211,8 +236,7 @@ describe("the engine asks the membrane", () => {
   it("takes the held spec back OUT of the delivery it was already in", () => {
     // It was prepared and pushed before this ran. A hold that only records
     // itself would report the file as withheld and ship it anyway.
-    const at = engine.indexOf("strandedSubjects({");
-    const block = engine.slice(at, at + 3000);
+    const block = carryLoop();
     expect(block).toContain("treeEntries.splice(i, 1)");
     expect(block).toContain("delete deliveredSource[specPath]");
   });
