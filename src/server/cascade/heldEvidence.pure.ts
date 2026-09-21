@@ -104,9 +104,24 @@ export type HoldRelease =
  * One held path, one answer.
  *
  * `cloneSha` is the blob the clone holds at this path right now, or null when
- * the clone does not have the file — which always holds: a hold on a file the
- * clone lacks is the content rules' business (`backendIdentityHold` decides
- * whether a NEW file may arrive), not this one's.
+ * the clone does not have the file. That holds on EVIDENCE and releases on an
+ * APPROVAL, and the order below is the statement of it: an approval is read
+ * before the missing copy is, because the two answer different questions.
+ *
+ * The evidence route asks whether this clone's copy is unmodified prime
+ * content, and with no copy there is nothing to ask it of — so it holds.
+ * An operator's overwrite approval is not that question: it is a person who
+ * has read the held path deciding that prime's copy should stand here, and
+ * on a path the clone lacks that decision reads as "create it". Nothing is
+ * overwritten and nothing of this clone's is lost, which is why it is allowed
+ * where the evidence route is not.
+ *
+ * What an approval may never reach is identity: the `protected` guard is
+ * first, so `backendIdentityHold`'s refusal of a file naming another
+ * deployment's Supabase project survives any approval, and it is that guard —
+ * not the missing copy — that keeps a NEW file's arrival the content rules'
+ * business. An earlier version of this header claimed a missing copy "always
+ * holds", which this module's own test has contradicted since it was written.
  */
 export function decideHoldRelease(args: {
   held: HeldPath;

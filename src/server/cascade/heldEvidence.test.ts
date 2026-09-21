@@ -163,6 +163,38 @@ describe("an operator approval releases what evidence cannot", () => {
     });
     expect(verdict.act).toBe("release");
   });
+
+  it("reads the approval before the missing copy, and holds without one", () => {
+    // The two answer different questions, and the order below is the whole
+    // statement of it. The evidence route asks whether this clone's copy is
+    // unmodified prime content and with no copy cannot be asked; an approval
+    // is a person deciding prime's copy should stand here, which on a path
+    // the clone lacks reads as "create it" and loses nothing of this clone's.
+    //
+    // Pinned because the header claimed the opposite — that a missing copy
+    // "always holds" — while this file had asserted a release since it was
+    // written. A rule stated twice is how the two come to disagree.
+    const missing = { held: held(), cloneSha: null, evidence: null };
+    expect(decideHoldRelease({ ...missing, approved: true }).act).toBe("release");
+
+    const unapproved = decideHoldRelease({ ...missing, approved: false });
+    expect(unapproved.act).toBe("hold");
+    if (unapproved.act === "hold") expect(unapproved.why).toContain("no copy at this path");
+  });
+
+  it("still refuses identity on a path the clone does not hold, approval or not", () => {
+    // The guard that actually keeps a NEW file's arrival the content rules'
+    // business is `protected`, not the missing copy — so it is the one that
+    // has to survive an approval.
+    const verdict = decideHoldRelease({
+      held: held({ path: "src/integrations/supabase/env.ts", reason: "protected" }),
+      cloneSha: null,
+      evidence: null,
+      approved: true,
+    });
+    expect(verdict.act).toBe("hold");
+    if (verdict.act === "hold") expect(verdict.why).toContain("identity");
+  });
 });
 
 describe("what a person reads", () => {
