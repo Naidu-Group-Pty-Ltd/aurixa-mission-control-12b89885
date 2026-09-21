@@ -165,7 +165,12 @@ function ImpactRow({ impact }: { impact: CloneImpact }) {
             {impact.installedModules} mod
           </Badge>
         </div>
-        <div className="text-xs text-muted-foreground">{impact.reason}</div>
+        {/* `whitespace-pre-line` because the engine's own words are what this
+            renders (`reason: patchSummary`), and a fully-held pass now answers
+            with a sentence plus one line per file over the cascade's byte
+            ceiling. Flowed into a paragraph those paths run together; every
+            other reason here is a single line and is unaffected. */}
+        <div className="whitespace-pre-line text-xs text-muted-foreground">{impact.reason}</div>
         {/* A rehearsal that hides the two things worth rehearsing for is not
             one. A breakage puts the clone's default branch in a state that
             cannot build, and a removal is irreversible from this screen — so
