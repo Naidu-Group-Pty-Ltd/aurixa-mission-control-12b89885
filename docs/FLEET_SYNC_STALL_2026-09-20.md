@@ -265,16 +265,36 @@ That job is one line — `npm run security:inventory && git diff --exit-code --
 docs/security/SECURITY_INVENTORY.json` — and it was failing for **two
 independent reasons**, each sufficient on its own.
 
-### The clone's own baseline had never been regenerated
+### The cascade had already destroyed the fix once
 
-Measured 21 Sep 2026 by running the clone's own generator against its own
-`main`: the committed file says `edge_function_count: 413` and the generator
-says **416**. The three are `crm-calendar`, `crm-inbound-message` and
-`crm-send-message` — functions this clone added and whose baseline nobody
-re-ran. That red predates every cascade in this incident and would survive all
-of them.
+The first reading of this was wrong and the correction is the point. Running
+the clone's own generator against its own `main` gives `edge_function_count:
+416` against a committed 413, which reads like a baseline nobody had
+regenerated. The repository's history says otherwise:
 
-### And the cascade was about to destroy the fix
+| commit    |                                                                       | count   | `crm-*`     |
+| --------- | --------------------------------------------------------------------- | ------- | ----------- |
+| `1046f93` | initial commit                                                        | 413     | absent      |
+| `39600d3` | _"The cascade brought what asserts and left behind what is asserted"_ | **416** | **present** |
+| `2fc9c46` | _"cascade 48 file(s) from prime@7f20e31"_                             | 413     | absent      |
+
+CI run **41** was green on the commit before that cascade; run **43**, the
+commit that merged it, was red, and every run since has inherited it. So this
+red was **caused by a cascade**, not merely left unfixed by the clone.
+
+`39600d3` is a person restoring exactly these three declarations with their
+reasoning recorded: `crm-inbound-message` is a Twilio webhook whose
+`X-Twilio-Signature` HMAC "is the entire auth boundary", Twilio holds no
+Supabase JWT, and an omitted `[functions.X]` block is read by the CLI as
+`verify_jwt = true` — so shipping without it has the gateway refuse every
+inbound SMS. All three registry entries are stamped `reviewed: true`.
+
+The next cascade overwrote all three files. **That is #2347 — the correction
+losing to the document it corrects — committed against a recorded security
+decision.** It is also why the repair is worth nothing without the fix below:
+a person already made it once, by hand, and it survived seventeen hours.
+
+### And here is why the guard that exists for it never fired
 
 `securityInventoryHold` exists for exactly this clone. Its header says so:
 _"Where the clone owns functions prime has never had, prime's baseline cannot
@@ -327,9 +347,9 @@ filesystem, so it was a control that was present, reachable, and constitutively
 incapable of answering yes on the only clone in the fleet it applied to.
 
 **The fix at the clone needs the fix at the prime, or it is destroyed.**
-Regenerating the clone's baseline alone is the correction losing to the
-document it corrects: the next cascade writes prime's copy back over it. The
-hold is what makes the regeneration durable, which is why they ship together.
+That is not a prediction — it is what happened to `39600d3`, whose repair
+lasted from 20 Sep 09:08 to 20 Sep 13:57. The hold is what makes the
+restoration durable, which is why the two ship together.
 
 **A mirror is byte-identical.** `cloneOnlyEdgeFunctions` returns `[]` where the
 two trees hold the same function set, so `npc-test` and
@@ -349,6 +369,41 @@ the only cause: the other two are mirrors and receive everything. It is
 recorded here rather than built, because the rule that would close it — model
 what the delivery produces, including deletions, and compare the function sets
 — is a larger change than the evidence supports.
+
+### A third defect, and the clone is still red on it
+
+`verify` fails too, for a different reason in the same family. The same
+proposal delivered **21 updated specs** from `src/lib/reports/__tests__/`
+while neither of the two files they assert about travelled:
+
+```
+✗ expected '…' to match /onConflict:\s*CONFLICT/       supabase/functions/market-sales-ingest/index.ts
+✗ expected '…' to match /sales_count !== null/           supabase/functions/market-sales-ingest/index.ts
+✗ document must state version 4.1.0 …                    docs/reports/SCORING_V2_METHODOLOGY.md (clone: 2.1.0)
+✗ expected … to contain `1.1.0`                          docs/reports/SCORING_V2_METHODOLOGY.md
+```
+
+Both subjects EXIST on the clone, at their older versions; both are outside
+its installed-module globs, so the specs arrived and the subjects did not.
+This is the shape `39600d3`'s own title names — _the cascade brought what
+asserts and left behind what is asserted_ — and the clone's `CLAUDE.md`
+already states the rule: **a spec and its subject travel together or neither
+does.** Nothing in the cascade enforces it; the two sweeps that detect it are
+run by hand, after the fact.
+
+It is recorded rather than fixed because the remedy is a choice this evidence
+does not settle, and only one clone in the fleet is module-scoped:
+
+- **Withhold the spec** where its subject is out of scope. Conservative, fails
+  safe, matches the rule as written — the clone keeps a consistent old spec and
+  old subject. Costs: deciding a spec's subject in general, which is only
+  reliably answerable from its imports and its literal path arguments.
+- **Widen the scope** so the subjects travel. Coherent — a clone that RUNS a
+  spec should hold its subject current — but it changes what this deployment
+  receives, which is a configuration decision with its own review.
+
+Hand-copying the two files would make the check green and hide the defect, so
+that is deliberately not done.
 
 ### What was asserted
 
