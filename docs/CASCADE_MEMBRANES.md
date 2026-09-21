@@ -886,6 +886,65 @@ widening the glob broke them while strengthening what they protect. They
 match by path now, the way `repositoryInvariants.test.ts` already did and for
 the reason it already gave.
 
+## A skipped pass had no room to report its ceilings
+
+A cascade whose every differing path was withheld returns `skipped` **before it
+opens a pull request**. That matters more than it sounds, because the PR body is
+the only place `reportableHeld` has ever been rendered: the "Needs a human"
+section is composed some three hundred lines below the skip's `return`. All that
+survives a fully-held pass is one line of `diff_summary`, and that line said a
+count.
+
+A count is the wrong unit for this hold. `protected` differs for ever by design
+and an operator can read past it; `oversize` is a file prime **has**, the clone
+**lacks**, and no cascade will ever deliver, because `CASCADE_MAX_FILE_BYTES` is
+a ceiling rather than a decision. Folded into *"all 23 differing path(s) are
+withheld by this clone's exclusion policy"*, the two are indistinguishable — and
+the one that matters is the one that disappears.
+
+Measured 21 Sep 2026, firing a manual pass at all three mirrors: every one
+returned `skipped` on exactly that sentence, `0 merged · 0 PRs · 0 failed ·
+3 skipped (of 3)`, while `npc-client-dashboard` sat **six template-library seed
+versions behind prime** — v13 through v18, ~39.8 MB each against an 8 MB
+ceiling. The three mirrors are chained (prime → NPC Client Dashboard → NPC Test,
+Preflight), so all three are stuck at v12 together. The only way to learn any of
+it was to query `cascade_results` by hand.
+
+`oversizeHoldNotice` is that sentence's missing clause, and it is in the pure
+module beside `reportableHeld` and `approvableHeld` because it is the third
+question about the same set: what must be SAID, what may be OFFERED, and what
+can never be either.
+
+Four rules carry it.
+
+**It rides on both readings of the skip, including "already in sync."** That is
+the stronger claim of the two, and a clone missing a file prime holds is not in
+sync however little differed — so if a ceiling ever holds a path on a pass that
+reports no differences, the sentence carries the contradiction rather than hides
+it.
+
+**It is silent when nothing hit a ceiling.** Every mirror holds a dozen
+`protected` paths on every pass; a notice that spoke there would be noise on
+every skip for ever, and noise is how a real notice stops being read. A healthy
+skip is byte-identical to before.
+
+**Paths, not notes.** `oversizeHold` writes a ~250-character note per file and
+six of them would bury the sentence they qualify. The note still travels in the
+PR body on every pass that opens one; this is the summary field, and a summary
+nobody finishes reading is the silence again at greater length.
+
+**The lines may not open with a diff mark.** `inline-diff-summary.tsx` treats a
+summary as structured when every trimmed line starts with `+`, `-`, `~`, `M`,
+`A` or `D`, and draws each as a diff mark. A notice listing `- path` would have
+rendered as deletions — the cascade claiming to have removed the very files it
+could not deliver. The paths are indented instead, and a test asserts the
+property rather than the spelling.
+
+One thing this reaches for free: `cascade-dryrun.server.ts` has always forwarded
+the engine's own words on a plan-less pass (`reason: patchSummary`, under a
+comment saying "Its own words are better than a number"), so the impact card an
+operator reads **before** firing now carries the clause too.
+
 ## What this deliberately does not do
 
 - **It does not widen a clone's scope to a file the clone does not have.**
@@ -896,3 +955,13 @@ the reason it already gave.
   synthesises an import is a pump that can ship a file that does not compile.
 - **It does not read the database.** Every membrane is a literal in
   `fleetMembranes.pure.ts` with its measurement in the header beside it.
+- **It does not fix the dry run's STRUCTURED fields on a skipped pass.** The
+  impact card's prose now carries the ceilings, but `cascade-dryrun.server.ts`'s
+  `!plan` branch still publishes `filesHeld: 0`, `oversizePaths: []` and
+  `level: "green"` for a clone with two dozen held paths — a false zero beside a
+  true sentence. Closing it properly means emitting `onPlan` from the skip, and
+  the skip returns *above* where `deletionPlan`, `staleHeld` and `missingHeld`
+  are decided: a plan emitted there would have to invent those three, which is
+  the same class of lie one field along. It wants the skip moved below them, or
+  a narrower published shape, and either is a change to the plan contract rather
+  than to this sentence.

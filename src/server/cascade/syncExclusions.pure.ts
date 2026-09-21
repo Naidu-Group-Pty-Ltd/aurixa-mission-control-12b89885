@@ -228,6 +228,43 @@ export function approvableHeld(held: readonly HeldPath[]): HeldPath[] {
 }
 
 /**
+ * What a pass that wrote NOTHING still owes a person about its oversize holds.
+ *
+ * A cascade whose every differing path was withheld returns `skipped` before
+ * it opens a pull request, so the "Needs a human" section — the only place
+ * `reportableHeld` has ever been rendered — is never composed. All that
+ * survives is one line of `diff_summary`, and that line said a count.
+ *
+ * The count is the wrong unit for this hold. A `protected` path differs for
+ * ever by design and an operator can safely read past it; an `oversize` path
+ * is a file prime HAS, the clone LACKS, and no cascade will ever deliver,
+ * because `CASCADE_MAX_FILE_BYTES` is a ceiling rather than a decision. Folded
+ * into "all 23 differing path(s) are withheld by this clone's exclusion
+ * policy", the two are indistinguishable, and the second one is invisible.
+ *
+ * Measured 21 Sep 2026: all three mirrors skipped on exactly that sentence
+ * while `npc-client-dashboard` sat six template-library seed versions behind
+ * prime — v13 to v18, ~39.8 MB each against an 8 MB ceiling — and the only
+ * way to learn it was to query `cascade_results` by hand.
+ *
+ * Paths and not notes: `oversizeHold` writes a ~250-character note per file
+ * and six of them would bury the sentence they qualify. The note still travels
+ * in the PR body on every pass that opens one; this is the summary field, and
+ * a summary nobody finishes reading is the silence again in a longer form.
+ */
+export function oversizeHoldNotice(held: readonly HeldPath[], maxListed = 4): string {
+  const over = held.filter((h) => h.reason === "oversize");
+  if (over.length === 0) return "";
+  const listed = over.slice(0, maxListed).map((h) => `  ${h.path}`);
+  if (over.length > maxListed) listed.push(`  (+${over.length - maxListed} more)`);
+  return (
+    `\n${over.length} of them exceed the size a cascade carries in one file, so prime holds ` +
+    `them and this clone never will. No approval can release a ceiling — bring these across ` +
+    `by hand:\n${listed.join("\n")}`
+  );
+}
+
+/**
  * The phrase a per-clone result uses to say a human is owed work, defined here
  * so the engine that WRITES it and the summary that COUNTS it cannot drift.
  *

@@ -17,6 +17,7 @@ import {
   CASCADE_MAX_FILE_BYTES,
   approvableHeld,
   oversizeHold,
+  oversizeHoldNotice,
 } from "./syncExclusions.pure";
 
 const BACKEND_IDENTITY = "src/integrations/supabase/env.ts";
@@ -552,5 +553,81 @@ describe("a file over the cascade ceiling is held, and says so", () => {
 
   it("the ceiling is the contents API's, and is unchanged by this", () => {
     expect(CASCADE_MAX_FILE_BYTES).toBe(8 * 1024 * 1024);
+  });
+});
+
+describe("a pass that wrote nothing still reports its ceilings", () => {
+  // A skipped pass opens no pull request, so "Needs a human" — the only place
+  // reportableHeld has ever been rendered — is never composed. The summary
+  // line is the whole report, and it used to be a count.
+  const seed = (v: string) =>
+    oversizeHold(
+      `supabase/migrations/2026120${v}_seed_template_library_v1${v}.sql`,
+      41_671_969,
+      CASCADE_MAX_FILE_BYTES,
+    );
+
+  it("names the files a ceiling will never deliver", () => {
+    // The defect this closes, planted: the old summary was
+    // `all N differing path(s) are withheld…` and a reader could not learn
+    // from it that prime holds six files this clone will never receive.
+    const notice = oversizeHoldNotice([seed("2"), seed("3")]);
+    expect(notice).toContain("supabase/migrations/20261202_seed_template_library_v12.sql");
+    expect(notice).toContain("supabase/migrations/20261203_seed_template_library_v13.sql");
+    expect(notice).toContain("2 of them");
+  });
+
+  it("says a ceiling is not a decision, because an approval can never discharge one", () => {
+    // approvableHeld already refuses to OFFER the approval. This is the other
+    // half: the sentence must not leave an operator waiting for a dialog.
+    expect(oversizeHoldNotice([seed("2")])).toContain("No approval can release a ceiling");
+  });
+
+  it("is silent when nothing hit a ceiling, so a healthy skip is unchanged", () => {
+    // The common case by far. Every mirror in the fleet holds a dozen
+    // protected paths on every pass; if this spoke there it would be noise on
+    // every skip for ever, and noise is how a real notice stops being read.
+    const protectedHold = {
+      path: "vercel.json",
+      pattern: "vercel.json",
+      reason: "protected" as const,
+      note: "Per-deployment hosting config.",
+    };
+    const reconcile = {
+      path: "src/lib/clientFacing.ts",
+      pattern: "src/lib/clientFacing.ts",
+      reason: "manual_reconcile" as const,
+      note: "Clone hides a superset.",
+    };
+    expect(oversizeHoldNotice([protectedHold, reconcile])).toBe("");
+    expect(oversizeHoldNotice([])).toBe("");
+  });
+
+  it("counts every ceiling but lists only the first few", () => {
+    const six = ["2", "3", "4", "5", "6", "7"].map(seed);
+    const notice = oversizeHoldNotice(six);
+    expect(notice).toContain("6 of them");
+    expect(notice).toContain("(+2 more)");
+    // Four listed, and the two it did not list are not smuggled in anyway.
+    expect(notice).not.toContain("_v16.sql");
+    expect(notice).not.toContain("_v17.sql");
+  });
+
+  it("renders as prose, because InlineDiffSummary reads a path list as a diff", () => {
+    // `inline-diff-summary.tsx` treats a summary as structured when EVERY
+    // trimmed line opens with +, -, ~, M, A or D, and then draws each line as
+    // a diff mark. A notice whose lines opened with "- path" would be drawn
+    // as deletions — the cascade claiming to have removed the very files it
+    // could not deliver.
+    const lines = oversizeHoldNotice([seed("2"), seed("3")])
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean);
+    expect(lines.length).toBeGreaterThan(0);
+    for (const line of lines) {
+      expect(/^[+\-~MAD]\s|^[+\-~]/.test(line), `"${line}" would be drawn as a diff mark`).toBe(
+        false,
+      );
+    }
   });
 });

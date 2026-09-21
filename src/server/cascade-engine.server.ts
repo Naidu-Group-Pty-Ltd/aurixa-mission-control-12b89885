@@ -106,6 +106,7 @@ import {
   backendIdentityHold,
   CASCADE_MAX_FILE_BYTES,
   oversizeHold,
+  oversizeHoldNotice,
   backendRefsIn,
   isShippedPath,
   partitionCascadePaths,
@@ -3086,10 +3087,16 @@ export async function processClone(args: {
     // its files as "already in sync". We are inside `treeEntries.length === 0`,
     // so nothing was written by definition; anything withheld therefore
     // accounts for every path that reached a decision.
+    // The oversize clause rides on BOTH readings deliberately. "Already in
+    // sync" is the stronger claim of the two, and a clone that is missing a
+    // file prime holds is not in sync however little differed — so if a
+    // ceiling ever holds a path on a pass that reports no differences, that
+    // sentence has to carry the contradiction rather than hide it.
     const why =
-      partition.held.length > 0
+      (partition.held.length > 0
         ? `Nothing to cascade: all ${partition.held.length} differing path(s) are withheld by this clone's exclusion policy`
-        : `Already in sync with ${sourceLabel}@${shortSha(sourceSha)}`;
+        : `Already in sync with ${sourceLabel}@${shortSha(sourceSha)}`) +
+      oversizeHoldNotice(partition.held);
     return {
       status: "skipped",
       diff_summary: why,
@@ -3261,7 +3268,9 @@ export async function processClone(args: {
     // here would be the original defect wearing a new hat.
     return {
       status: "skipped",
-      diff_summary: `Nothing to cascade: ${deletionPlan.kept.length} prime deletion(s) withheld${deletionSuffixFor(deletionPlan)}`,
+      diff_summary:
+        `Nothing to cascade: ${deletionPlan.kept.length} prime deletion(s) withheld` +
+        `${deletionSuffixFor(deletionPlan)}${oversizeHoldNotice(partition.held)}`,
       files_changed: 0,
       completed_at: new Date().toISOString(),
       // Withheld-by-policy is still verified: nothing DELIVERABLE from this
