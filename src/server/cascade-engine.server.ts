@@ -79,6 +79,7 @@ import {
   SECURITY_INVENTORY_PATH,
   securityInventoryHold,
 } from "./cascade/securityInventoryHold.pure";
+import { refreshCarrierRows } from "./cascade/carrierRefresh.server";
 import {
   DEPLOY_WORKFLOW_PATH,
   readsDeployerDeclaration,
@@ -464,6 +465,70 @@ export async function executeCascade(
   );
   if (!started) return { ok: false, error: "claim superseded — nothing written" };
 
+  // The rows this pass will work. Read once above, and REPLACED by the
+  // refresh below when it re-offers a finished clone — everything downstream
+  // that asks what this pass is doing reads this, never the original query,
+  // so the tally, the loop and the per-clone notifications all describe the
+  // same set.
+  let passRows = queuedRes.data ?? [];
+
+  // ── Re-offer prime's head to the clones this carrier already finished ────
+  //
+  // `createCascadeForAllClones` stands every push down while an unclaimed
+  // pending commit event exists, on the promise that "that event will deliver
+  // this push's content anyway, because it reads prime's head when it runs".
+  // `queuedRes`, read in this function's opening query, is
+  // `.eq("status", "queued")` — so the promise covers only clones this carrier
+  // has NOT finished, and a carrier held on lineage never settles, so no fresh
+  // event is ever created to cover the rest. Nine prime commits reached no clone at all on 20 Sep 2026 through
+  // exactly that gap; `carrierRefresh.pure.ts` carries the measurement.
+  //
+  // After the claim fence, because it writes result rows: a superseded
+  // invocation must not re-arm work a newer pass has taken. Before the
+  // pre-flight below, because those rows are this pass's work.
+  //
+  // It fires only when prime's head has MOVED, so it costs one pass per prime
+  // commit rather than one per five-minute claim — the bound that keeps it
+  // out of the budget multiplication `eventFold`'s header exists to stop.
+  const carrierRefresh = await refreshCarrierRows(supabase, {
+    eventId: event.id,
+    event: {
+      trigger: event.trigger,
+      completed_at: event.completed_at ?? null,
+      scope_filter: event.scope_filter ?? null,
+    },
+    head: sourceSha,
+  });
+  if (carrierRefresh.refreshed > 0) {
+    const reread = await supabase
+      .from("cascade_results")
+      .select("*, clones(*)")
+      .eq("cascade_event_id", event.id)
+      .eq("status", "queued");
+    // A re-read that FAILED is not an event with no work. Keeping the rows
+    // this pass already holds means it delivers to whatever was queued before
+    // the refresh and the next claim re-offers the rest — never that the pass
+    // decides the carrier is finished off a fault.
+    if (reread.error) {
+      console.error(
+        `[cascade] re-offered ${carrierRefresh.refreshed} row(s) on ${event.id} but could not re-read them:`,
+        reread.error.message,
+      );
+    } else {
+      passRows = reread.data ?? passRows;
+    }
+  }
+
+  /**
+   * Every summary this pass writes carries the re-offer, because a clone that
+   * was finished and is being delivered again is the one thing on the row an
+   * operator cannot work out from the counts. One composer rather than a
+   * sentence at each write site: two spellings of the same fact is how the
+   * hold's story and the tally's come to disagree.
+   */
+  const withRefreshNote = (summary: string): string =>
+    carrierRefresh.note ? `${summary} ${carrierRefresh.note}` : summary;
+
   let succeeded = 0;
   let failed = 0;
   let opened = 0;
@@ -474,7 +539,7 @@ export async function executeCascade(
   // Pre-flight: validate clone library pins. If any pin references a missing,
   // unapproved, or empty library entry, fail that clone's queued result early
   // so the cascade can't push partial/wrong file sets.
-  const queuedRows = queuedRes.data ?? [];
+  const queuedRows = passRows;
   const cloneIds = queuedRows
     .map((r) => (r as { clones: { id: string } | null }).clones?.id)
     .filter((v): v is string => Boolean(v));
@@ -773,7 +838,7 @@ export async function executeCascade(
       // re-prepares fresh.
       await supabase.from("cascade_results").update(patch).eq("id", r.id);
 
-      // Read off the patch, not off `queuedRes.data`: those rows were fetched
+      // Read off the patch, not off `passRows`: those rows were fetched
       // before this loop and still carry the pre-run `diff_summary`.
       if (summaryOwesReconcile((patch as { diff_summary?: string | null }).diff_summary)) {
         owedReconcile++;
@@ -976,7 +1041,7 @@ export async function executeCascade(
         status: "pending",
         worker_started_at: null,
         next_attempt_at: deferred ? deferred.until : (lineageUntil ?? new Date().toISOString()),
-        summary,
+        summary: withRefreshNote(summary),
       },
       "hold the event for its next pass",
     );
@@ -986,7 +1051,7 @@ export async function executeCascade(
     return { ok: true, status: "resuming", done, total, progressed };
   }
 
-  const totalQueued = (queuedRes.data ?? []).length;
+  const totalQueued = passRows.length;
   const finalStatus = cascadeEventStatus({ succeeded, opened, failed });
   // A cascade can do everything asked of it and still leave a clone unable to
   // go green, because a `manual_reconcile` path moved upstream and was held
@@ -1009,7 +1074,11 @@ export async function executeCascade(
   });
 
   const finished = await updateEvent(
-    { status: finalStatus, completed_at: new Date().toISOString(), summary },
+    {
+      status: finalStatus,
+      completed_at: new Date().toISOString(),
+      summary: withRefreshNote(summary),
+    },
     "record the final tally",
   );
   // A superseded pass records nothing else either: the notification, the
@@ -1061,7 +1130,7 @@ export async function executeCascade(
 
   type NotifInsert = Database["public"]["Tables"]["notifications"]["Insert"];
   const cloneNotifs: NotifInsert[] = [];
-  for (const r of queuedRes.data ?? []) {
+  for (const r of passRows) {
     const clone = (r as { clones: { id: string; name: string } | null }).clones;
     if (!clone) continue;
     cloneNotifs.push({
@@ -2152,7 +2221,12 @@ export async function processClone(args: {
       continue;
     }
     if (entry.inline !== undefined) {
-      treeEntries.push({ path: entry.path, mode: entry.mode, type: entry.type, content: entry.inline });
+      treeEntries.push({
+        path: entry.path,
+        mode: entry.mode,
+        type: entry.type,
+        content: entry.inline,
+      });
     } else {
       treeEntries.push({ path: entry.path, mode: entry.mode, type: entry.type, sha: entry.sha });
     }
@@ -2290,9 +2364,7 @@ export async function processClone(args: {
           partition.held.push(held);
           needsReconcile.push(held);
         } else {
-          cloneOwnedFunctions = [
-            ...new Set([...cloneOwnedFunctions, ...verdict.carriedForward]),
-          ];
+          cloneOwnedFunctions = [...new Set([...cloneOwnedFunctions, ...verdict.carriedForward])];
           if (verdict.changed && !dryRun) {
             const { data: regBlob } = await octokit.git.createBlob({
               owner: cloneRef.owner,

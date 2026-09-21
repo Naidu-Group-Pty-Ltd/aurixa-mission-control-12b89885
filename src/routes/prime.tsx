@@ -32,7 +32,9 @@ import {
   ExternalLink,
   GitCommitHorizontal,
   GitPullRequest,
+  PlayCircle,
   RefreshCw,
+  Stethoscope,
   ShieldQuestion,
   SplitSquareHorizontal,
   Waves,
@@ -57,6 +59,10 @@ import { cn } from "@/lib/utils";
 import { formatDistanceToNow } from "@/lib/format";
 import { fetchPrimeHealth } from "@/server/prime-health.functions";
 import { fetchCloneComparison, fetchPrimeMigrationLedger } from "@/server/prime-ledger.functions";
+import {
+  applyPrimeMigration,
+  fetchMigrationDiagnosis,
+} from "@/server/prime-migration-fix.functions";
 // Types only, and through the server-function module rather than the pure one.
 // A route is bundled for the browser, so importing `src/server/**` for a VALUE
 // is refused by TanStack Start's import protection — correctly. Every
@@ -79,6 +85,13 @@ import type {
   PrimeLedgerReading,
   WithheldRow,
 } from "@/server/prime-ledger.functions";
+import type {
+  DiagnosisVerdict,
+  Hazard,
+  HazardKind,
+  MigrationDiagnosis,
+  VersionCollision,
+} from "@/server/prime-migration-fix.functions";
 
 export const Route = createFileRoute("/prime")({
   errorComponent: RouteError,
@@ -206,6 +219,7 @@ function PrimeReading({ data }: { data: Configured }) {
       </div>
 
       <PrimeSqlLedger />
+      <MigrationDoctor />
       <ClonesHeldAgainstPrime />
 
       <Provenance data={data} />
@@ -998,6 +1012,459 @@ function WithheldMigrationRow({ row }: { row: WithheldRow }) {
         </span>
       )}
     </RecordRow>
+  );
+}
+
+/* ───────────────────── diagnose one migration, and fix it ────────────────── */
+
+const DIAGNOSIS_KEY = (version: string | null) => ["prime-migration-diagnosis", version] as const;
+
+/**
+ * Open one of the prime's held-back migrations and say what is wrong with it.
+ *
+ * The ledger above says HOW MANY are holding the fleet back. This says why one
+ * of them is, and — on the single verdict that earns it — offers to run it
+ * through the prime's own `apply-migration.yml`.
+ *
+ * ## Why the button is so rarely drawn
+ *
+ * `dispatchable` is set by the server on one verdict out of nine, and this
+ * page reads that field rather than the verdict word. Everything else explains
+ * and offers nothing, because `a dead control is worse than no control` and
+ * a live one here spends the prime's production database.
+ *
+ * Withholding the shortcut never withholds the act: `apply-migration.yml` is
+ * still on the prime and still runnable by hand, which is exactly what the
+ * remedy says to do.
+ */
+function MigrationDoctor() {
+  const ledgerFn = useServerFn(fetchPrimeMigrationLedger);
+  const ledger = useQuery({
+    queryKey: LEDGER_KEY,
+    queryFn: () => ledgerFn(),
+    refetchOnWindowFocus: false,
+  });
+
+  // Controlled from empty rather than from `undefined`: a Select that starts
+  // uncontrolled and gains a value switches mode mid-life and React warns.
+  const [picked, setPicked] = useState("");
+  const version = picked || null;
+
+  const diagnoseFn = useServerFn(fetchMigrationDiagnosis);
+  const diagnosis = useQuery({
+    queryKey: DIAGNOSIS_KEY(version),
+    queryFn: () => diagnoseFn({ data: { version: version! } }),
+    enabled: version !== null,
+    refetchOnWindowFocus: false,
+  });
+
+  /*
+    Three states, not two.
+
+    `withheld` is `[]` while the ledger is in flight, `[]` when the read
+    FAILED, and `[]` when the prime is genuinely level — and only the third of
+    those is "nothing is held back". Collapsing them is the rule this
+    repository has paid for repeatedly (`a read that FAILED is not a row that
+    is ABSENT`), most recently on a builder's own page, where `uploads.length`
+    made a headline statement about a builder with six stock lists.
+  */
+  const ledgerRead = ledger.data?.ok === true;
+  const ledgerWhy = ledger.error
+    ? ledger.error instanceof Error
+      ? ledger.error.message
+      : "The read failed."
+    : ledger.data && !ledger.data.ok
+      ? ledger.data.error
+      : null;
+  const withheld = ledger.data?.ok ? ledger.data.reading.withheld : [];
+  const report = diagnosis.data?.ok ? diagnosis.data : null;
+
+  return (
+    <Card className="spine spine-idle">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Stethoscope className="h-4 w-4 text-muted-foreground" />
+          Diagnose a held-back migration
+        </CardTitle>
+        <CardDescription>
+          Reads the file, asks the prime&rsquo;s own catalogue about it, and tries it inside a
+          transaction that is always rolled back. Nothing is applied by looking.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="flex flex-wrap items-center gap-3">
+          {/* A basis rather than bare `flex-1`: `flex: 1 1 0%` contributes
+              nothing to the hypothetical size, so a select beside a button
+              would be handed the leftovers however narrow. */}
+          <div className="min-w-0 flex-1 basis-[22rem]">
+            <Select value={picked} onValueChange={setPicked} disabled={withheld.length === 0}>
+              <SelectTrigger aria-label="Migration to diagnose">
+                <SelectValue placeholder="Pick a held-back migration…" />
+              </SelectTrigger>
+              <SelectContent>
+                {withheld.map((row) => (
+                  <SelectItem key={row.id} value={row.id}>
+                    {row.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          {version && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void diagnosis.refetch()}
+              disabled={diagnosis.isFetching}
+            >
+              <RefreshCw className={cn("h-3.5 w-3.5", diagnosis.isFetching && "animate-spin")} />
+              Read again
+            </Button>
+          )}
+        </div>
+
+        {ledgerWhy ? (
+          <Unreadable what="The list of held-back migrations" why={ledgerWhy} />
+        ) : ledgerRead && withheld.length === 0 ? (
+          <EmptyState
+            icon={<Database className="h-5 w-5" />}
+            title="Nothing is held back"
+            description="Every migration on this branch is one the prime has run, so there is nothing here to diagnose."
+          />
+        ) : null}
+
+        {version === null ? null : diagnosis.isPending ? (
+          <Skeleton className="h-40 w-full" />
+        ) : diagnosis.error ? (
+          <Unreadable
+            what="This migration"
+            why={diagnosis.error instanceof Error ? diagnosis.error.message : "The read failed."}
+          />
+        ) : diagnosis.data && !diagnosis.data.ok ? (
+          <Unreadable what="This migration" why={diagnosis.data.error} />
+        ) : report ? (
+          <DiagnosisBody report={report} />
+        ) : null}
+
+        {report && report.collisions.length > 0 && <CollisionNotice rows={report.collisions} />}
+      </CardContent>
+    </Card>
+  );
+}
+
+/** Verdict → the colour it is drawn in. Derived once, read everywhere below. */
+const VERDICT_TONE: Record<DiagnosisVerdict, SafetyTone> = {
+  ready: "ok",
+  already_applied: "ok",
+  rollback_script: "bad",
+  version_collision: "bad",
+  would_fail: "bad",
+  blocked_by_prerequisite: "warn",
+  unsafe_to_test: "warn",
+  oversized: "warn",
+  undiagnosed: "idle",
+};
+
+/**
+ * What each verdict is CALLED on the page.
+ *
+ * `database vocabulary never reaches the operator` — the rule a test in the
+ * product repo enforces by refusing any underscore-cased identifier in a
+ * rendered field. These are the same enum values the server decides on,
+ * translated once here rather than at each of the four places they are drawn.
+ */
+const VERDICT_WORDS: Record<DiagnosisVerdict, string> = {
+  ready: "applies cleanly",
+  already_applied: "already run",
+  rollback_script: "an undo — never apply",
+  version_collision: "duplicate version",
+  would_fail: "would fail",
+  blocked_by_prerequisite: "waiting on an earlier one",
+  unsafe_to_test: "cannot be tried safely",
+  oversized: "too large to read here",
+  undiagnosed: "not diagnosed",
+};
+
+const HAZARD_WORDS: Record<HazardKind, string> = {
+  transaction_control: "manages its own transaction",
+  non_transactional: "cannot run in a transaction",
+  enum_value_added: "adds an enum value",
+  procedure: "a procedure, which can commit",
+  destructive: "destroys data",
+  data_rewrite: "duplicates rows if run twice",
+};
+
+const HAZARD_TONE: Record<HazardKind, SafetyTone> = {
+  transaction_control: "warn",
+  non_transactional: "warn",
+  enum_value_added: "warn",
+  procedure: "warn",
+  destructive: "bad",
+  data_rewrite: "warn",
+};
+
+function DiagnosisBody({
+  report,
+}: {
+  report: { diagnosis: MigrationDiagnosis; primeRef: string | null; readAt: string };
+}) {
+  const d = report.diagnosis;
+  const tone = VERDICT_TONE[d.verdict];
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+        <span className="min-w-0 basis-[20rem] truncate font-mono text-[11px] text-foreground">
+          {d.path}
+        </span>
+        <span
+          className={cn(
+            "font-mono text-[10px] tracking-[0.12em] whitespace-nowrap uppercase",
+            TONE_TEXT[tone],
+          )}
+        >
+          {VERDICT_WORDS[d.verdict]}
+        </span>
+      </div>
+
+      <p className={cn("text-sm", TONE_TEXT[tone])}>{d.headline}</p>
+
+      <div className="glass grid grid-cols-2 overflow-hidden sm:grid-cols-4">
+        <MetricCell
+          label="statements"
+          size="sm"
+          value={d.statementCount ?? "—"}
+          note={d.bytes === null ? "not read" : `${Math.max(1, Math.round(d.bytes / 1024))} KB`}
+        />
+        <MetricCell
+          label="destroys data"
+          size="sm"
+          value={d.statementCount === null ? "—" : d.destructiveCount}
+          note="statements"
+          tone="warning"
+          alarm={d.destructiveCount > 0}
+        />
+        <MetricCell
+          label="not re-runnable"
+          size="sm"
+          value={d.statementCount === null ? "—" : d.dataRewriteCount}
+          note="would duplicate rows"
+          tone="warning"
+          alarm={d.dataRewriteCount > 0}
+        />
+        <MetricCell
+          label="trial run"
+          size="sm"
+          value={d.dryRun.ran ? (d.dryRun.ok ? `${d.dryRun.ms} ms` : "failed") : "—"}
+          note={d.dryRun.ran ? (d.dryRun.ok ? "rolled back" : "rolled back") : "not attempted"}
+          tone="warning"
+          alarm={d.dryRun.ran && !d.dryRun.ok}
+        />
+      </div>
+
+      {d.blockedBy !== null && d.blockedBy.length > 0 && (
+        <div className="glass-inset spine spine-warn p-3">
+          <p className="label-mono">the prime has not run these, and they come first</p>
+          <p className="mt-1.5 font-mono text-[11px] break-all text-muted-foreground">
+            {d.blockedBy.slice(0, 8).join("  ·  ")}
+            {d.blockedBy.length > 8 ? `  ·  and ${d.blockedBy.length - 8} more` : ""}
+          </p>
+        </div>
+      )}
+
+      {d.catalogueNote && <p className="text-xs text-muted-foreground">{d.catalogueNote}</p>}
+
+      {d.hazards.length > 0 && (
+        <div className="space-y-2">
+          <p className="label-mono">statements worth reading before it runs</p>
+          {d.hazards.map((h, i) => (
+            <HazardRow key={`${h.line}-${h.kind}-${i}`} hazard={h} />
+          ))}
+          {d.hazardCount > d.hazards.length && (
+            <p className="text-[10px] text-muted-foreground">
+              {d.hazardCount - d.hazards.length} more not listed. The counts above are exact; only
+              this list is capped.
+            </p>
+          )}
+        </div>
+      )}
+
+      {d.remedy && (
+        <div className={cn("glass-inset spine p-3", SPINE[d.dispatchable ? "warn" : tone])}>
+          <p className="label-mono">
+            {d.dispatchable ? "read before dispatching" : "what clears it"}
+          </p>
+          <p className="mt-1.5 text-xs text-muted-foreground">{d.remedy}</p>
+        </div>
+      )}
+
+      {/* Drawn on `dispatchable` and never on the verdict word. One field, set
+          by the server, so a verdict added tomorrow cannot acquire a button
+          by being spelled optimistically. */}
+      {/* Keyed on the migration, so the outcome of dispatching one is never
+          still on screen beside another. React reuses a component at the same
+          position, and "Dispatched" under the wrong filename is the worst
+          sentence this panel could show. */}
+      {d.dispatchable && <ApplyControl key={d.id} diagnosis={d} primeRef={report.primeRef} />}
+    </div>
+  );
+}
+
+function HazardRow({ hazard }: { hazard: Hazard }) {
+  const tone = HAZARD_TONE[hazard.kind];
+  return (
+    <RecordRow spine={tone} className="space-y-1 p-2.5">
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+        <span className="font-mono text-[10px] whitespace-nowrap text-muted-foreground">
+          line {hazard.line}
+        </span>
+        <span
+          className={cn(
+            "font-mono text-[10px] tracking-[0.12em] whitespace-nowrap uppercase",
+            TONE_TEXT[tone],
+          )}
+        >
+          {HAZARD_WORDS[hazard.kind]}
+        </span>
+        <span className="min-w-0 basis-full text-[11px] text-muted-foreground">{hazard.note}</span>
+      </div>
+      <pre className="overflow-x-auto font-mono text-[10px] leading-relaxed text-foreground/70">
+        {hazard.excerpt}
+      </pre>
+    </RecordRow>
+  );
+}
+
+/**
+ * The act, behind a confirmation that names what it will do.
+ *
+ * Two clicks rather than one, and the second one restates the cautions the
+ * diagnosis found — the same `remedy` sentence the card above draws, because
+ * two statements of what is owed is how one screen comes to warn about
+ * something the other does not.
+ */
+function ApplyControl({
+  diagnosis,
+  primeRef,
+}: {
+  diagnosis: MigrationDiagnosis;
+  primeRef: string | null;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const [outcome, setOutcome] = useState<{ ok: boolean; text: string; url?: string } | null>(null);
+  const [sending, setSending] = useState(false);
+  const applyFn = useServerFn(applyPrimeMigration);
+
+  const send = async () => {
+    setSending(true);
+    try {
+      const r = await applyFn({ data: { version: diagnosis.id } });
+      setOutcome(
+        r.ok
+          ? { ok: true, text: `Dispatched ${r.file}.`, url: r.runsUrl }
+          : { ok: false, text: r.error },
+      );
+      setConfirming(false);
+    } catch (e) {
+      setOutcome({
+        ok: false,
+        text: e instanceof Error ? e.message : "The dispatch failed. Nothing was applied.",
+      });
+    } finally {
+      setSending(false);
+    }
+  };
+
+  if (outcome) {
+    return (
+      <div className={cn("glass-inset spine p-3", SPINE[outcome.ok ? "live" : "bad"])}>
+        <p className="label-mono">{outcome.ok ? "dispatched" : "not dispatched"}</p>
+        <p className={cn("mt-1.5 text-xs", TONE_TEXT[outcome.ok ? "live" : "bad"])}>
+          {outcome.text}
+        </p>
+        {outcome.url && (
+          <a
+            className="mt-2 inline-flex items-center gap-1.5 text-xs text-info hover:underline"
+            href={outcome.url}
+            target="_blank"
+            rel="noreferrer"
+          >
+            Watch the run on the prime
+            <ExternalLink className="h-3 w-3" />
+          </a>
+        )}
+      </div>
+    );
+  }
+
+  if (!confirming) {
+    return (
+      <Button size="sm" onClick={() => setConfirming(true)}>
+        <PlayCircle className="h-3.5 w-3.5" />
+        Apply it on the prime
+      </Button>
+    );
+  }
+
+  return (
+    <div className="glass-inset spine spine-warn space-y-2 p-3">
+      <p className="label-mono">this runs on the prime&rsquo;s own database</p>
+      <p className="text-xs text-muted-foreground">
+        <span className="font-mono text-foreground">{diagnosis.name}</span> will be applied by the
+        prime&rsquo;s <span className="font-mono text-foreground">apply-migration.yml</span>
+        {primeRef ? (
+          <>
+            {" "}
+            against <span className="font-mono text-foreground">{primeRef}</span>
+          </>
+        ) : null}
+        , and recorded in its ledger. It is applied one statement at a time and does not roll back
+        part-way.
+        {diagnosis.remedy ? ` ${diagnosis.remedy}` : ""}
+      </p>
+      <div className="flex flex-wrap gap-2">
+        <Button size="sm" onClick={() => void send()} disabled={sending}>
+          {sending ? "Dispatching…" : "Yes — apply it"}
+        </Button>
+        <Button size="sm" variant="ghost" onClick={() => setConfirming(false)} disabled={sending}>
+          Cancel
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Versions the repository carries twice.
+ *
+ * `schema_migrations.version` is the primary key, so one of each pair can
+ * never be recorded — and a version the ledger cannot record is a hole no
+ * amount of running will close. It is drawn here rather than in the ledger
+ * card because the repair is a rename in the prime repository, which is the
+ * act this whole panel is about.
+ */
+function CollisionNotice({ rows }: { rows: VersionCollision[] }) {
+  const files = rows.reduce((n, r) => n + r.names.length, 0);
+  return (
+    <div className="glass-inset spine spine-bad space-y-2 p-3">
+      <p className="label-mono">versions carried by more than one file</p>
+      <p className="text-xs text-muted-foreground">
+        {rows.length} version{rows.length === 1 ? "" : "s"} across {files} files.{" "}
+        <span className="font-mono text-foreground">schema_migrations.version</span> is the primary
+        key, so {files - rows.length} of those files can never be recorded — each one a hole every
+        clone queues behind. Renaming them in the prime repository is the only thing that clears it.
+      </p>
+      <div className="space-y-1">
+        {rows.slice(0, 6).map((r) => (
+          <p key={r.version} className="font-mono text-[10px] break-all text-muted-foreground">
+            <span className="text-foreground">{r.version}</span> — {r.names.join(", ")}
+          </p>
+        ))}
+        {rows.length > 6 && (
+          <p className="text-[10px] text-muted-foreground">and {rows.length - 6} more.</p>
+        )}
+      </div>
+    </div>
   );
 }
 

@@ -188,6 +188,19 @@ describe("no surface re-implements what a conclusion means", () => {
    * is being maintained rather than the rule. "A hand-list cannot see the call
    * it does not mention" is the drain lane's lesson, paid here for the price
    * of one red test.
+   *
+   * It broke a SECOND time, and the way it broke is worth keeping. The
+   * property had been written as "every binding is named `fetch…`", which was
+   * true while every server function on this page was a reading — and then the
+   * page gained one that ACTS, correctly named `applyPrimeMigration`. A naming
+   * convention is a PROXY for the thing being asserted, and a proxy fails at
+   * exactly the moment the vocabulary grows.
+   *
+   * So the property is now the thing itself: a value imported from a
+   * `*.functions` module must be a server function this page INVOKES, which is
+   * checkable (`useServerFn(<name>)`) and is strictly stronger than the prefix
+   * ever was — it also refuses an import nothing calls, which the prefix let
+   * straight through.
    */
   it("imports no server value into the route", () => {
     const page = readFileSync(join(__dirname, "..", "routes", "prime.tsx"), "utf8");
@@ -200,13 +213,16 @@ describe("no surface re-implements what a conclusion means", () => {
       // A value may only come from a `*.functions` module — a `.pure` or
       // `.server` import is the one the build refuses, and it refuses it late.
       expect(specifier, `value import from @/server/${specifier}`).toMatch(/\.functions$/);
-      // And it may only be a server function. A constant imported from there
-      // would be a rule living in two places, which is what the block above
-      // exists to stop.
+      // And it may only be a server function the page actually runs. A
+      // constant imported from there would be a rule living in two places,
+      // which is what the block above exists to stop; an import nothing calls
+      // is the dead export this repository is ratcheted against.
       for (const raw of bindings.split(",")) {
         const name = raw.trim();
         if (!name || name.startsWith("type ")) continue;
-        expect(name, `${name} imported into the route`).toMatch(/^fetch[A-Z]/);
+        expect(page, `${name} is imported into the route but never invoked`).toContain(
+          `useServerFn(${name})`,
+        );
       }
     }
   });
