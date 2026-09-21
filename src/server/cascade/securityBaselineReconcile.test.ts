@@ -404,6 +404,25 @@ describe("the reconcilers are the engine's, and the engine uses them", () => {
     );
   });
 
+  it("leaves every settled path either in the tree or held, on both runs", () => {
+    // `dropFromTree` runs first, so a path that is neither written back nor
+    // held is one the subject carry below reads as STRANDED and re-delivers
+    // prime's raw copy of — undoing the reconcile inside the same pass. That
+    // is a confirmed defect in the registry reconcile beside this one, which
+    // drops its path and pushes nothing when its verdict is `ok` but
+    // unchanged. `settleBaseline` has no such branch: it writes a blob, or an
+    // inline entry on a dry run, or pushes the hold.
+    const at = engine.indexOf("const settleBaseline = async (");
+    const body = engine.slice(at, at + 1800);
+    expect(body.indexOf("dropFromTree(held.path)")).toBeGreaterThan(-1);
+    // Every path out of the function after the drop puts it back or holds it.
+    expect(body).toContain("needsReconcile.push({ ...held");
+    expect(body).toContain("content: outcome.merged");
+    expect(body).toContain(
+      'treeEntries.push({ path: held.path, mode: "100644", type: "blob", sha: blob.sha })',
+    );
+  });
+
   it("still holds both paths where a baseline cannot be computed", () => {
     // The hold is the fallback, not the removed thing. Each path is named in
     // exactly one module and reached through the constant, so a spelling in

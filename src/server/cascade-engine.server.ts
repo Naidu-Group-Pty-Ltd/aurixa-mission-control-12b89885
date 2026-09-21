@@ -2582,17 +2582,28 @@ export async function processClone(args: {
         needsReconcile.push({ ...held, note: `${held.note} Not reconciled here: ${why}.` });
         return;
       }
+      // A dry run composes no blob — it returns before `createTree` — but it
+      // must still put the path back, INLINE. `dropFromTree` took it out, and
+      // a path that is neither in the tree nor in `partition.held` is one the
+      // subject carry below reads as stranded and re-delivers prime's raw
+      // copy of: the rehearsal would then show the very file the real pass
+      // replaces. It is also what `files_changed` counts.
       if (dryRun) {
-        baselineNotes.push(`${held.path} · reconciled to ${outcome.count} function(s)`);
-        return;
+        treeEntries.push({
+          path: held.path,
+          mode: "100644",
+          type: "blob",
+          content: outcome.merged,
+        });
+      } else {
+        const { data: blob } = await octokit.git.createBlob({
+          owner: cloneRef.owner,
+          repo: cloneRef.repo,
+          content: Buffer.from(outcome.merged, "utf8").toString("base64"),
+          encoding: "base64",
+        });
+        treeEntries.push({ path: held.path, mode: "100644", type: "blob", sha: blob.sha });
       }
-      const { data: blob } = await octokit.git.createBlob({
-        owner: cloneRef.owner,
-        repo: cloneRef.repo,
-        content: Buffer.from(outcome.merged, "utf8").toString("base64"),
-        encoding: "base64",
-      });
-      treeEntries.push({ path: held.path, mode: "100644", type: "blob", sha: blob.sha });
       deliveredSource[held.path] = outcome.merged;
       baselineNotes.push(`${held.path} · reconciled to ${outcome.count} function(s)`);
     };
