@@ -95,6 +95,23 @@ import type {
 
 export const Route = createFileRoute("/prime")({
   errorComponent: RouteError,
+  /*
+    One optional search param, so the migration list can hand a file over.
+
+    `/prime-migrations` reads every held-back migration cheaply and cannot say
+    whether any of them APPLIES — only a trial run against the prime does
+    that, and it lives here. A list that could not send you to the answer
+    would be a dead end, so the row carries the version and the doctor below
+    opens on it.
+
+    Validated to the one shape a version is ever written in. Anything else
+    resolves to none rather than throwing, because a mistyped URL must land on
+    the page it names rather than on an error boundary.
+  */
+  validateSearch: (raw: Record<string, unknown>): { migration?: string } => {
+    const v = raw.migration;
+    return typeof v === "string" && /^\d{14}$/.test(v) ? { migration: v } : {};
+  },
   component: () => (
     <ProtectedRoute>
       <PrimeRepositoryPage />
@@ -1038,6 +1055,10 @@ const DIAGNOSIS_KEY = (version: string | null) => ["prime-migration-diagnosis", 
  * remedy says to do.
  */
 function MigrationDoctor() {
+  // The version the migration list handed over, if it did. It seeds the
+  // selection once; everything after that is the operator's choice, so
+  // arriving with a link never fights a click.
+  const handedOver = Route.useSearch().migration;
   const ledgerFn = useServerFn(fetchPrimeMigrationLedger);
   const ledger = useQuery({
     queryKey: LEDGER_KEY,
@@ -1047,7 +1068,7 @@ function MigrationDoctor() {
 
   // Controlled from empty rather than from `undefined`: a Select that starts
   // uncontrolled and gains a value switches mode mid-life and React warns.
-  const [picked, setPicked] = useState("");
+  const [picked, setPicked] = useState(handedOver ?? "");
   const version = picked || null;
 
   const diagnoseFn = useServerFn(fetchMigrationDiagnosis);

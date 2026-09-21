@@ -1120,6 +1120,20 @@ export type PrimeMigrationCorpus = {
    * none of them wants a sha, while exactly one caller wants this.
    */
   bodyIdentity: (id: string) => string | null;
+  /**
+   * One migration's size in bytes as the TREE reported it, or null.
+   *
+   * Null means the listing carried no size — GitHub's `getContent` fallback
+   * does not always report one — and never that the file is empty. A caller
+   * counting what is past the ceiling must therefore count the nulls
+   * separately rather than reading them as small, which is the same rule
+   * `loadSql` applies one line below when it fetches an unsized blob rather
+   * than waving it through.
+   *
+   * Deliberately not added to `metas`, for `bodyIdentity`'s reason: five call
+   * sites consume that array and none of them wants a size.
+   */
+  sizeOf: (id: string) => number | null;
   /** Commit the listing was taken at. */
   sourceSha: string;
   /**
@@ -1146,6 +1160,10 @@ export async function openPrimeMigrationCorpus(
   const entries = migrationMetasFromBlobs(blobs);
   const byId = new Map(entries.map((m) => [m.id, m]));
   const cache = new Map<string, Promise<string>>();
+  const sizeOf = (id: string): number | null => {
+    const size = byId.get(id)?.size;
+    return typeof size === "number" ? size : null;
+  };
 
   const loadSql = (id: string): Promise<string> => {
     const hit = cache.get(id);
@@ -1200,6 +1218,7 @@ export async function openPrimeMigrationCorpus(
     metas: entries.map(({ id, name, path }) => ({ id, name, path })),
     sourceSha: commitSha,
     bodyIdentity: (id: string) => byId.get(id)?.sha ?? null,
+    sizeOf,
     loadSql,
     openSqlStream,
   };

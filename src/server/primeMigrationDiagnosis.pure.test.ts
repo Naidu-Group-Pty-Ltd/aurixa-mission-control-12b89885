@@ -8,6 +8,11 @@
 import { describe, expect, it } from "vitest";
 import {
   DISPATCHABLE_VERDICTS,
+  DIAGNOSIS_VERDICTS,
+  IDEMPOTENCY_ROWS,
+  OWED_STANDINGS,
+  SURVEY_STANDINGS,
+  assessIdempotency,
   diagnoseMigration,
   findVersionCollisions,
   hazardsIn,
@@ -19,7 +24,11 @@ import {
   sqlstateWords,
   type DiagnosisInput,
   type DiagnosisVerdict,
+  surveyMigration,
   type DryRunOutcome,
+  type MigrationSurvey,
+  type SurveyInput,
+  type SurveyStanding,
 } from "./primeMigrationDiagnosis.pure";
 
 const meta = (name = "20260901010000_add_thing.sql") => ({
@@ -432,5 +441,274 @@ describe("a version two files carry is a hole nothing can close", () => {
         { id: "20260719000000", name: "b.sql" },
       ]),
     ).toEqual([]);
+  });
+});
+
+describe("what a second run of the same file would do", () => {
+  const read = (sql: string) => assessIdempotency(scanSqlStatements(sql));
+
+  it("reads a file the repository already wrote to be repeated as re-runnable", () => {
+    const r = read(`
+      create table if not exists public.t (id int);
+      create or replace function public.f() returns int language sql as $$ select 1 $$;
+      alter table public.t add column if not exists c text;
+      grant select on public.t to authenticated;
+      comment on table public.t is 'x';
+      insert into public.t (id) values (1) on conflict do nothing;
+    `);
+    expect(r.reading).toBe("rerunnable");
+    expect(r.collideCount).toBe(0);
+    expect(r.rewriteCount).toBe(0);
+  });
+
+  it("pairs a create with an EARLIER drop of the same object and not a later one", () => {
+    const guarded = read(`
+      drop policy if exists "read" on public.t;
+      create policy "read" on public.t for select using (true);
+    `);
+    expect(guarded.reading).toBe("rerunnable");
+    expect(guarded.guardedByDrop).toBe(1);
+
+    // The same two statements the other way round. The create runs first and
+    // there is nothing above it, so the second run still collides.
+    const after = read(`
+      create policy "read" on public.t for select using (true);
+      drop policy if exists "read" on public.t;
+    `);
+    expect(after.reading).toBe("fails_loudly");
+    expect(after.guardedByDrop).toBe(0);
+  });
+
+  it("refuses to accept a bare DROP as a guard, because its own second run fails", () => {
+    const r = read(`
+      drop policy "read" on public.t;
+      create policy "read" on public.t for select using (true);
+    `);
+    expect(r.reading).toBe("fails_loudly");
+    expect(r.guardedByDrop).toBe(0);
+    // Both statements are named: the drop that would not find its object, and
+    // the create the drop failed to guard.
+    expect(r.collideCount).toBe(2);
+  });
+
+  it("does not pair a drop with a create of a different object", () => {
+    const r = read(`
+      drop policy if exists "old name" on public.t;
+      create policy "new name" on public.t for select using (true);
+    `);
+    expect(r.reading).toBe("fails_loudly");
+    expect(r.guardedByDrop).toBe(0);
+  });
+
+  it("reads through schema and quoting, because one file writes a name both ways", () => {
+    const r = read(`
+      drop index if exists public."idx_t_id";
+      create index idx_t_id on public.t (id);
+    `);
+    expect(r.reading).toBe("rerunnable");
+    expect(r.guardedByDrop).toBe(1);
+  });
+
+  it("separates the loud second run from the silent one", () => {
+    const loud = read("create table public.t (id int);");
+    expect(loud.reading).toBe("fails_loudly");
+    expect(loud.summary).toContain("Nothing would be written twice");
+
+    const silent = read("insert into public.t (id) values (1);");
+    expect(silent.reading).toBe("rewrites_data");
+    expect(silent.summary).toContain("change data rather than stop");
+  });
+
+  it("lets the silent outcome outrank the loud one when a file carries both", () => {
+    const r = read(`
+      create table public.t (id int);
+      insert into public.t (id) values (1);
+    `);
+    expect(r.reading).toBe("rewrites_data");
+    expect(r.collideCount).toBe(1);
+    expect(r.rewriteCount).toBe(1);
+    // …and the loud one is still said, because it is what actually happens first.
+    expect(r.summary).toContain("would fail first");
+  });
+
+  it("never reads a body it was not given as re-runnable", () => {
+    const r = assessIdempotency(null);
+    expect(r.reading).toBe("unreadable");
+    expect(r.summary).toContain("not read here");
+    expect(r.collideCount).toBe(0);
+    expect(r.rewriteCount).toBe(0);
+  });
+
+  it("counts a block it cannot see into rather than judging what is inside it", () => {
+    const r = read(`
+      do $$ begin create table public.t (id int); end $$;
+    `);
+    // The scanner elides a dollar-quoted body on purpose, so the CREATE inside
+    // is invisible here. Reporting `rerunnable` in silence would be a claim
+    // about statements nothing read.
+    expect(r.reading).toBe("rerunnable");
+    expect(r.opaqueBlocks).toBe(1);
+    expect(r.summary).toContain("does not read into");
+  });
+
+  it("caps the notes it draws but never the count it reports", () => {
+    const many = Array.from(
+      { length: IDEMPOTENCY_ROWS + 4 },
+      (_, i) => `create table public.t${i} (id int);`,
+    ).join("\n");
+    const r = read(many);
+    expect(r.collideCount).toBe(IDEMPOTENCY_ROWS + 4);
+    expect(r.collides).toHaveLength(IDEMPOTENCY_ROWS);
+  });
+
+  it("rides every verdict, including the ones that refuse to run the file", () => {
+    // The question "what would a second run do" outlives the verdict that
+    // answered "you may not run it once", which is the state an operator is in
+    // after a half-failed dispatch.
+    const blocked = diagnoseMigration(
+      input({
+        blockedBy: ["20260101000000"],
+        body: { read: true, sql: "insert into public.t (id) values (1);", bytes: 40 },
+      }),
+    );
+    expect(blocked.verdict).toBe("blocked_by_prerequisite");
+    expect(blocked.idempotency.reading).toBe("rewrites_data");
+  });
+
+  it("says unreadable on a verdict that never opened the body", () => {
+    const oversized = diagnoseMigration(
+      input({ body: { read: false, oversized: true, why: "9 MB." } }),
+    );
+    expect(oversized.verdict).toBe("oversized");
+    expect(oversized.idempotency.reading).toBe("unreadable");
+  });
+});
+
+describe("a survey is not a cheaper diagnosis", () => {
+  const survey = (over: Partial<SurveyInput> = {}): MigrationSurvey =>
+    surveyMigration({
+      meta: meta(),
+      collidingNames: [],
+      alreadyApplied: false,
+      blockedBy: [],
+      body: { read: true, sql: "create table if not exists public.t (id int);", bytes: 45 },
+      ...over,
+    });
+
+  it("never spells a word the verdict spells, so a list cannot promise what a trial run did not", () => {
+    // Read from the module, not restated here: a hand-typed copy of either
+    // list cannot see a member the module gains, which is exactly the way
+    // this assertion was vacuous when it was first written.
+    const shared = SURVEY_STANDINGS.filter((s) =>
+      (DIAGNOSIS_VERDICTS as readonly string[]).includes(s),
+    );
+    expect(shared).toEqual([]);
+    expect(SURVEY_STANDINGS.length).toBeGreaterThan(1);
+    expect(DIAGNOSIS_VERDICTS.length).toBeGreaterThan(1);
+  });
+
+  it("reads a healthy file as untested rather than as good", () => {
+    const r = survey();
+    expect(r.standing).toBe("needs_a_trial_run");
+    expect(r.note).toContain("has not been tested");
+    // The word the diagnosis uses for a file it has evidence about.
+    expect(r.note).not.toContain("ready");
+  });
+
+  it("stops at the same layer the diagnosis stops at, on the same inputs", () => {
+    // The two walk one cascade, so a case that settles before the trial run
+    // must settle at the same place on both surfaces. If they ever part, the
+    // list and the page disagree about a file while each is right about itself.
+    const cases: Array<{
+      over: Partial<DiagnosisInput>;
+      verdict: DiagnosisVerdict;
+      standing: SurveyStanding;
+    }> = [
+      {
+        over: { meta: meta("20260101000000_rollback_rls.sql") },
+        verdict: "rollback_script",
+        standing: "must_not_run",
+      },
+      {
+        over: { collidingNames: ["other.sql"] },
+        verdict: "version_collision",
+        standing: "cannot_be_recorded",
+      },
+      { over: { alreadyApplied: true }, verdict: "already_applied", standing: "applied" },
+      {
+        over: { body: { read: false, oversized: true, why: "9 MB." } },
+        verdict: "oversized",
+        standing: "too_large",
+      },
+      {
+        over: { body: { read: false, oversized: false, why: "the read failed." } },
+        verdict: "undiagnosed",
+        standing: "unknown",
+      },
+      { over: { blockedBy: null }, verdict: "undiagnosed", standing: "unknown" },
+      {
+        over: { blockedBy: ["20250101000000"] },
+        verdict: "blocked_by_prerequisite",
+        standing: "blocked",
+      },
+      {
+        over: { body: { read: true, sql: "begin; create table t (id int); commit;", bytes: 40 } },
+        verdict: "unsafe_to_test",
+        standing: "hand_apply",
+      },
+    ];
+    for (const c of cases) {
+      const full = diagnoseMigration(input(c.over));
+      const quick = surveyMigration({
+        meta: c.over.meta ?? meta(),
+        collidingNames: c.over.collidingNames ?? [],
+        alreadyApplied: c.over.alreadyApplied ?? false,
+        blockedBy: "blockedBy" in c.over ? (c.over.blockedBy ?? null) : [],
+        body: c.over.body ?? {
+          read: true,
+          sql: "create table if not exists public.t (id int);",
+          bytes: 45,
+        },
+      });
+      expect([c.over, full.verdict]).toEqual([c.over, c.verdict]);
+      expect([c.over, quick.standing]).toEqual([c.over, c.standing]);
+    }
+  });
+
+  it("carries the re-run reading on every standing, including the ones it refuses", () => {
+    const undo = survey({
+      meta: meta("20260101000000_rollback_rls.sql"),
+      body: { read: true, sql: "insert into public.t (id) values (1);", bytes: 40 },
+    });
+    expect(undo.standing).toBe("must_not_run");
+    expect(undo.idempotency.reading).toBe("rewrites_data");
+  });
+
+  it("separates a file nobody could read from a file that read clean", () => {
+    const unread = survey({ body: { read: false, oversized: false, why: "404 from GitHub." } });
+    expect(unread.standing).toBe("unknown");
+    expect(unread.statementCount).toBeNull();
+    expect(unread.bytes).toBeNull();
+    expect(unread.idempotency.reading).toBe("unreadable");
+    expect(unread.note).toContain("404");
+
+    const clean = survey();
+    expect(clean.statementCount).toBe(1);
+    expect(clean.idempotency.reading).toBe("rerunnable");
+  });
+
+  it("counts what is in front of a file, and says null rather than zero when it cannot", () => {
+    expect(survey({ blockedBy: ["a", "b"] }).blockedByCount).toBe(2);
+    expect(survey({ blockedBy: null }).blockedByCount).toBeNull();
+  });
+
+  it("names as owed exactly the standings an operator can act on", () => {
+    // `applied`, `must_not_run` and `unknown` are not work: one is done, one
+    // is refused on purpose, and one is a read this console could not make.
+    expect(OWED_STANDINGS.has("applied")).toBe(false);
+    expect(OWED_STANDINGS.has("must_not_run")).toBe(false);
+    expect(OWED_STANDINGS.has("unknown")).toBe(false);
+    expect(OWED_STANDINGS.has("needs_a_trial_run")).toBe(true);
+    expect(OWED_STANDINGS.has("blocked")).toBe(true);
   });
 });
