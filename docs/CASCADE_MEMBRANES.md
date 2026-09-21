@@ -821,6 +821,71 @@ gate refuses PR #13 for a failing check rather than the billing note — because
 `security` ran for 23 seconds, past the 20-second never-started ceiling, and
 `verify` for 196.
 
+## The invariant list was one document behind whoever last added a check
+
+The two baselines above stopped being withheld, and the pass that proved it
+went green on both — and then failed one step further on, at a step no
+previous run had ever reached. `verify` had been dying at the ratchet;
+with the ratchet fixed it got to the report-format suite and found two
+assertions that had been failing silently for as long as they had existed
+(npc-crm-independent PR #13, run 35601703085, 21 Sep 2026).
+
+Both are the same rule broken in opposite directions.
+
+**`scoringMethodology.spec.ts` travelled and the document it reads did not.**
+It asserts `docs/reports/SCORING_V2_METHODOLOGY.md` states the version
+constants the engine exports; the spec is inside a module glob, the document
+is in `docs/`, and `docs/` was carried one named path at a time.
+`docs/reports/SECTION_OWNERSHIP_MATRIX.md` was named on 20 Sep for exactly
+this shape and the methodology was not, so the list was one document behind
+the newest check — which is what a hand-list always is.
+
+**`openLocationWiring.spec.ts` did not travel and its subject did.** It pins
+the call text inside `supabase/functions/location-intelligence-service/
+index.ts`, which is inside a module glob and cascades. Prime renamed an
+argument `cbdCoordinates` → `destination` and shipped the new function beside
+the old assertion.
+
+`REPOSITORY_INVARIANTS` now carries `docs/**` and `src/lib/openLocation/**`.
+Three things were measured before widening rather than after.
+
+**Docs do not cascade at all, and the fleet had been hiding it.** Of the 13
+documents prime changed in its last 40 commits, 12 had never reached the one
+module-scoped clone — 6 stale, 6 absent. The other three clones are mirrors
+and receive the whole tree, so `docs/` matching on 1443 of 1444 files there
+is mirror residue and says nothing about delivery. That single clone's `main`
+is one squashed commit whose title reads *"Restore the CRM security
+declarations and deliver the two documents the cascade asserted about"* — the
+same defect, patched by hand, before anyone named it.
+
+**Nothing on any clone is lost by widening.** The one document the fleet
+deliberately diverges on is `docs/CLIENT_FACING_MODE.md`, which differs on all
+three mirrors and is already a `protected` exclusion — so `docs/**` is an
+invariant narrowed by a path exactly as `.github/workflows/**` already is, and
+the exclusion still wins because the engine applies exclusions after this list
+builds the candidate set. On the module-scoped clone the seven differing
+documents are all prime-ahead (18–189 lines behind, at most 13 lines of
+superseded draft ahead) and none carries clone-specific content.
+
+**A directory is safe for documents and would not be for source.** `docs/` is
+64.7 MB and holds a 9.18 MB Airtable extract — over `CASCADE_MAX_FILE_BYTES`.
+It is byte-identical on the clone, so it is never a delivery candidate and the
+oversize hold never fires; what `docs/**` actually delivers is 367 KB of
+markdown the clone lacks and six small updates. The asymmetry that matters is
+that **a document imports nothing and executes nothing**. A spec does — which
+is why `src/lib/openLocation/**` is one named directory and there is no entry
+for specs in general: a spec for a module the clone never installed would
+arrive importing code the clone does not have, and turn `verify` red for the
+opposite reason. All eleven files in that directory are already present on
+every clone, so carrying it introduces no import that was not already there.
+
+Two contract tests were re-pointed rather than renegotiated:
+`securityInventoryHold.test.ts` compared `i.pattern` to a path, which is a
+statement about a glob's spelling rather than about what it reaches, so
+widening the glob broke them while strengthening what they protect. They
+match by path now, the way `repositoryInvariants.test.ts` already did and for
+the reason it already gave.
+
 ## What this deliberately does not do
 
 - **It does not widen a clone's scope to a file the clone does not have.**
