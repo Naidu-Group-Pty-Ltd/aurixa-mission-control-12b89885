@@ -35,6 +35,28 @@ function sliceFrom(src: string, anchor: string, length = 20_000): string {
   return src.slice(at, at + length);
 }
 
+/**
+ * A whole function, from its declaration to its closing brace.
+ *
+ * `sliceFrom(engine, "export async function processClone(", 70_000)` reported
+ * a defect that did not exist the first time anything was ADDED to that
+ * function: the window ended mid-body and `planDeletions(` fell out of it, so
+ * an ordering assertion compared a real index against `-1`. That is this
+ * repository's own recurring lesson — a fixture measured against a magic
+ * number is a statement about the number — and raising 70,000 only moves the
+ * day it happens again.
+ *
+ * The closing brace at column 0 is the end, exactly, and there is nothing to
+ * keep in step.
+ */
+function sliceFunction(src: string, anchor: string): string {
+  const at = src.indexOf(anchor);
+  expect(at, `anchor not found: ${anchor}`).toBeGreaterThan(-1);
+  const end = src.indexOf("\n}\n", at);
+  expect(end, `no closing brace found for: ${anchor}`).toBeGreaterThan(at);
+  return src.slice(at, end + 3);
+}
+
 describe("the column the pacing rests on", () => {
   it("is NOT NULL with a default, so the claim is one comparison", () => {
     // A nullable column needs `.or("next_attempt_at.is.null,…")`, which is a
@@ -143,7 +165,11 @@ describe("the invocation budget", () => {
 });
 
 describe("handing the event back", () => {
-  const hold = sliceFrom(engine, "if (deferred || stoppedEarly || lineageHolds.length > 0) {", 3_500);
+  const hold = sliceFrom(
+    engine,
+    "if (deferred || stoppedEarly || lineageHolds.length > 0) {",
+    3_500,
+  );
 
   it("is pending again with the moment it may be claimed, and the claim released", () => {
     expect(hold).toMatch(/status: "pending",\s*worker_started_at: null,/);
@@ -363,13 +389,24 @@ describe("a pass resumes inside a clone", () => {
      hook was abandoned at 60 s, twice; the invocation budget only stopped
      between clones. The list of prepared blobs now rides on the result row
      and the next pass starts from it. See cascade/passProgress.pure.ts. */
-  const process = sliceFrom(engine, "export async function processClone(", 70_000);
+  const process = sliceFunction(engine, "export async function processClone(");
 
   it("the reuse is consulted before any GitHub call for the path", () => {
-    const worker = sliceFrom(process, "const reusable = known.get(path);", 1_200);
+    const worker = sliceFrom(process, "const reusable =", 1_200);
     expect(worker.indexOf("if (reusable !== undefined)")).toBeLessThan(
       worker.indexOf("getFileContent(octokit, primeRef, path"),
     );
+  });
+
+  it("but a SPEC is never reused, because its verdict is about THIS delivery", () => {
+    // Every other judgement on a path is a pure function of the file's own
+    // text, so an answer settled in an earlier tick stands. The membrane's
+    // spec channel is not: whether a spec strands its subject depends on what
+    // the delivery carries, and a resumed pass carries a different one.
+    // Reuse also sets `content: null`, which takes the file out of
+    // `deliveredSource` — the set that channel reads — so a banked spec would
+    // cross having been judged against a partial delivery and never re-asked.
+    expect(process).toContain("const reusable = isSpecPath(path) ? undefined : known.get(path);");
   });
 
   it("reuses only on the real path, and only against prime's listing", () => {

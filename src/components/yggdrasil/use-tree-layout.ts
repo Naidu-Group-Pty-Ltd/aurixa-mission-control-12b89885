@@ -9,6 +9,8 @@
 import { useMemo } from "react";
 import type { Clone } from "@/lib/queries";
 
+import { PRIME_REPO } from "@/lib/cascade/membrane/fleetMembranes.pure";
+
 export interface TreeNode {
   id: string;
   name: string;
@@ -35,6 +37,18 @@ export interface TreeBranch {
   depth: number;
   hue: number;
   thickness: number;
+  /**
+   * Which two deployments this branch joins.
+   *
+   * A branch used to be pure geometry, which is all a line needs to be drawn
+   * and not enough for anything to be drawn ON it. The membrane that sits at
+   * a cascade boundary belongs to the EDGE, so the edge has to know which one
+   * it is. `fromRepo` is the trunk's repository where the parent is prime.
+   */
+  fromId: string | null;
+  toId: string;
+  fromRepo: string;
+  toRepo: string;
 }
 
 export interface TreeLayout {
@@ -211,7 +225,10 @@ export function useTreeLayout(
       slug: "prime",
       tags: [],
       syncStatus: "in_sync",
-      githubRepo: "",
+      // The trunk IS the prime's repository, and the membrane on every root
+      // edge is keyed on it. Left empty, every root edge resolves to the
+      // default membrane and the fleet's real selectivity is invisible.
+      githubRepo: PRIME_REPO,
       githubOwner: "",
       commitsBehind: 0,
       depth: 0,
@@ -299,6 +316,10 @@ export function useTreeLayout(
         depth,
         hue,
         thickness,
+        fromId: parentNode.id,
+        toId: node.id,
+        fromRepo: parentNode.githubRepo,
+        toRepo: node.githubRepo,
       });
 
       // Layout children

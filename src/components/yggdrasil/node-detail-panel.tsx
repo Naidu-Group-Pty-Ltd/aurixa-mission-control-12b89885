@@ -6,11 +6,13 @@
 import { useMemo } from "react";
 import { motion } from "framer-motion";
 import { Link } from "@tanstack/react-router";
-import { X, GitBranch, ExternalLink, Github, TreePine } from "lucide-react";
+import { X, GitBranch, ExternalLink, Github, TreePine, Ban, CircleDashed } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { StatusPill } from "@/components/status-pill";
 import type { TreeNode } from "./use-tree-layout";
+import { membranesTouching } from "@/lib/cascade/membrane/fleetMembranes.pure";
+import type { Membrane } from "@/lib/cascade/membrane/membrane.pure";
 
 interface Props {
   node: TreeNode;
@@ -45,8 +47,49 @@ function branchColor(hue: number): string {
   return `oklch(0.72 0.16 ${hue})`;
 }
 
+/**
+ * One boundary, in one line.
+ *
+ * It names what is REFUSED and what waits on a person, because that is the
+ * difference between one edge and another — every membrane in this fleet
+ * carries the same nine standing organs, so counting them would print the
+ * same number under every node.
+ */
+function MembraneLine({ label, membrane }: { label: "in" | "out"; membrane: Membrane }) {
+  const closed = membrane.channels.filter((c) => c.state === "closed");
+  const gated = membrane.channels.filter((c) => c.state === "gated");
+  const other = label === "in" ? membrane.from : membrane.to;
+  return (
+    <div className="flex items-start gap-1.5 font-mono text-[11px]">
+      <span className="w-6 shrink-0 text-muted-foreground">{label}</span>
+      <span className="min-w-0 flex-1 truncate text-foreground" title={other}>
+        {other}
+      </span>
+      {closed.length > 0 ? (
+        <span
+          className="flex shrink-0 items-center gap-0.5 text-destructive"
+          title={closed.map((c) => c.note).join(" ")}
+        >
+          <Ban className="h-3 w-3" />
+          {closed.length}
+        </span>
+      ) : null}
+      {gated.length > 0 ? (
+        <span
+          className="flex shrink-0 items-center gap-0.5 text-warning"
+          title={gated.map((c) => c.note).join(" ")}
+        >
+          <CircleDashed className="h-3 w-3" />
+          {gated.length}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
 export function YggdrasilNodePanel({ node, allNodes, onClose }: Props) {
   const lineage = useMemo(() => buildLineage(node, allNodes), [node, allNodes]);
+  const membranes = useMemo(() => membranesTouching(node.githubRepo), [node.githubRepo]);
 
   return (
     <motion.div
@@ -180,6 +223,32 @@ export function YggdrasilNodePanel({ node, allNodes, onClose }: Props) {
           <GitBranch className="h-3 w-3" />
           Depth {node.depth} in tree hierarchy
         </div>
+
+        {/* The boundaries either side of this deployment.
+            Read-only: the band on the diagram is the control, and two ways to
+            open one panel is how the two come to disagree about which is
+            selected. What this adds is the thing a node alone cannot say —
+            that what reaches it was filtered on the way in, and that what
+            leaves it is filtered again. */}
+        {membranes.inbound || membranes.outbound.length > 0 ? (
+          <div className="border-t border-border/30 pt-3">
+            <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
+              Membranes
+            </p>
+            <div className="mt-1.5 flex flex-col gap-1">
+              {membranes.inbound ? (
+                <MembraneLine label="in" membrane={membranes.inbound} />
+              ) : (
+                <p className="font-mono text-[11px] text-muted-foreground">
+                  in — none; this is the fleet's source
+                </p>
+              )}
+              {membranes.outbound.map((m) => (
+                <MembraneLine key={m.to} label="out" membrane={m} />
+              ))}
+            </div>
+          </div>
+        ) : null}
 
         <div className="flex gap-2 pt-2">
           <Link to="/clones/$cloneId" params={{ cloneId: node.id }}>

@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
-import { SECURITY_INVENTORY_PATH, securityInventoryHold } from "./securityInventoryHold.pure";
+import {
+  SECURITY_INVENTORY_PATH,
+  cloneOnlyEdgeFunctions,
+  edgeFunctionNames,
+  securityInventoryHold,
+} from "./securityInventoryHold.pure";
 import { REPOSITORY_INVARIANTS } from "./repositoryInvariants.pure";
 import { approvableHeld, reportableHeld } from "./syncExclusions.pure";
 import { stripComments } from "../sourceComments.pure";
@@ -88,5 +93,121 @@ describe("the generated matrix travels with the registry that generates it", () 
     );
     expect(entry).toBeDefined();
     expect(entry?.reason).toContain("sectionOwnershipMatrix.spec.ts");
+  });
+});
+
+describe("what the clone owns is read off the tree, not off its declarations", () => {
+  // Measured on npc-crm-independent, 21 Sep 2026. The clone holds three
+  // function directories prime does not and declares NONE of them, so every
+  // declaration-derived answer here is the empty set.
+  const CLONE_ONLY = ["crm-calendar", "crm-inbound-message", "crm-send-message"];
+
+  const primePaths = [
+    "supabase/functions/_shared/auth_v2.ts",
+    "supabase/functions/generate-investment-report/index.ts",
+    "supabase/functions/urban-centre-register-ingest/index.ts",
+    "supabase/functions/voice-to-text/index.ts",
+    "src/App.tsx",
+  ];
+  const clonePaths = [
+    "supabase/functions/_shared/auth_v2.ts",
+    "supabase/functions/generate-investment-report/index.ts",
+    "supabase/functions/voice-to-text/index.ts",
+    ...CLONE_ONLY.map((n) => `supabase/functions/${n}/index.ts`),
+    "src/App.tsx",
+  ];
+
+  it("counts a directory, because that is what the generator counts", () => {
+    // scripts/security/security-inventory.mjs:
+    //   readdirSync(functionsDir).filter((n) => n !== '_shared' && …isDirectory())
+    // A rule of "a directory with an index.ts" is merely reasonable, and would
+    // have missed crm-inbound-message — one of the three that caused this.
+    expect([...edgeFunctionNames(["supabase/functions/crm-inbound-message/lib/send.ts"])]).toEqual([
+      "crm-inbound-message",
+    ]);
+  });
+
+  it("is not fooled by the shared library or by a loose file", () => {
+    expect(
+      [
+        ...edgeFunctionNames([
+          "supabase/functions/_shared/auth_v2.ts",
+          "supabase/functions/_shared/tests/auth.test.ts",
+          "supabase/functions/deno.json",
+          "supabase/functions/README.md",
+          "supabase/migrations/0001.sql",
+        ]),
+      ].sort(),
+    ).toEqual([]);
+  });
+
+  it("finds the three functions that made this clone go red", () => {
+    expect(cloneOnlyEdgeFunctions({ primePaths, clonePaths })).toEqual(CLONE_ONLY);
+  });
+
+  it("holds the baseline for that clone, which the declarations never did", () => {
+    const owned = cloneOnlyEdgeFunctions({ primePaths, clonePaths });
+    expect(owned).not.toBeNull();
+    const held = securityInventoryHold(owned!);
+    expect(held?.path).toBe(SECURITY_INVENTORY_PATH);
+    expect(held?.note).toContain("crm-calendar, crm-inbound-message, crm-send-message");
+  });
+
+  it("says nothing about a mirror, so its baseline still travels", () => {
+    expect(cloneOnlyEdgeFunctions({ primePaths, clonePaths: primePaths })).toEqual([]);
+    expect(securityInventoryHold([])).toBeNull();
+  });
+
+  it("does not hold a function prime has that the clone merely lacks", () => {
+    // `urban-centre-register-ingest` is prime-only here. That is a real
+    // problem for the baseline too, but it is NOT this hold's question and
+    // answering it from this direction would hold the file on every
+    // module-scoped clone in the fleet.
+    const primeOnly = cloneOnlyEdgeFunctions({ primePaths, clonePaths: primePaths.slice(1) });
+    expect(primeOnly).toEqual([]);
+  });
+
+  it("answers null when a tree could not be listed, never an empty set", () => {
+    // An empty set means "mirror — let it travel". Saying that because
+    // nothing could be measured writes prime's baseline on no evidence.
+    expect(cloneOnlyEdgeFunctions({ primePaths, clonePaths: null })).toBeNull();
+    expect(cloneOnlyEdgeFunctions({ primePaths: null, clonePaths })).toBeNull();
+    expect(cloneOnlyEdgeFunctions({ primePaths: undefined, clonePaths: undefined })).toBeNull();
+  });
+
+  it("takes a Map's keys, which is what the engine holds", () => {
+    const prime = new Map(primePaths.map((p) => [p, "sha"]));
+    const clone = new Map(clonePaths.map((p) => [p, "sha"]));
+    expect(cloneOnlyEdgeFunctions({ primePaths: prime.keys(), clonePaths: clone.keys() })).toEqual(
+      CLONE_ONLY,
+    );
+  });
+});
+
+describe("the engine reads the tree before it decides", () => {
+  const engine = stripComments(readFileSync("src/server/cascade-engine.server.ts", "utf8"));
+
+  it("derives the owned set from the two tree listings", () => {
+    expect(engine).toContain("cloneOnlyEdgeFunctions({");
+    expect(engine).toContain("primePaths: primeShaByPath?.keys()");
+    expect(engine).toContain("clonePaths: cloneShaByPath?.keys()");
+  });
+
+  it("unions it into the declarations rather than replacing them", () => {
+    // The declarations are still the only evidence where a tree could not be
+    // listed, and dropping them would make this newly blind in that case.
+    const at = engine.indexOf("const ownedByTree = cloneOnlyEdgeFunctions({");
+    expect(at).toBeGreaterThan(-1);
+    const block = engine.slice(at, at + 400);
+    expect(block).toContain("ownedByTree !== null");
+    expect(block).toContain("[...new Set([...cloneOwnedFunctions, ...ownedByTree])]");
+  });
+
+  it("does it after both reconciles and before the hold", () => {
+    const registry = engine.indexOf("reconcileSecurityRegistry({");
+    const tree = engine.indexOf("const ownedByTree = cloneOnlyEdgeFunctions({");
+    const hold = engine.indexOf("securityInventoryHold(cloneOwnedFunctions)");
+    expect(tree).toBeGreaterThan(registry);
+    expect(hold).toBeGreaterThan(tree);
   });
 });

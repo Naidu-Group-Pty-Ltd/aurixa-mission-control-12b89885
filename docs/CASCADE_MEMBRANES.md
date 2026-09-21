@@ -1,0 +1,559 @@
+# The membranes between cascade layers
+
+21 September 2026. What may cross from one deployment to the next, decided per
+**edge** rather than per fleet. Companion to
+[`THE_CLONING_ENGINE.md`](./THE_CLONING_ENGINE.md) (the three engines and their
+drains), [`CASCADE_ON_MERGE.md`](./CASCADE_ON_MERGE.md) (what fires a cascade)
+and [`FLEET_SYNC_STALL_2026-09-20.md`](./FLEET_SYNC_STALL_2026-09-20.md) (the
+incident that made the need obvious).
+
+Read this before touching `src/lib/cascade/membrane/*`, the membrane block
+in `cascade-engine.server.ts`, or the band on the Yggdrasil diagram.
+
+---
+
+## The shape of the problem
+
+A cascade copies the files it was told to copy and knows nothing about what
+depends on them. It fails in exactly two ways and **both report as a healthy
+import**: it brings the half that makes a claim and leaves the half the claim
+is about, and it silently reverts what a downstream deployment had decided.
+
+Both were measured on this fleet in the week before this shipped.
+
+| what happened | where | how it reported |
+| --- | --- | --- |
+| A cascade wrote GoHighLevel function names back over a clone's provider routing, undoing PR #7 | `npc-crm-independent-6505dc`, PR #9, seven files | **green** — nothing failed; replies would simply have gone back out through GoHighLevel |
+| A cascade reverted a person's recorded security decision (three `crm-*` entries, `reviewed: true`) | same clone, `39600d3` → reverted | **green** on the cascade, then 43 consecutive red CI runs on the clone |
+| 21 specs delivered whose subjects did not travel | same clone | four assertion failures naming the half that arrived |
+
+Nothing in the engine was wrong about any individual file. What was missing is
+a statement of **what this particular boundary is for**.
+
+## Ions, channels and pumps
+
+The analogy is load-bearing rather than decorative, and it is worth being exact
+about which parts of it are claimed.
+
+- An **ion species** is a class of code chunk that a boundary may have an
+  opinion about — a GoHighLevel function name, a security baseline, an edge
+  function declaration, a test specification, a backend project reference.
+  `ionSpecies.pure.ts` classifies a file's text into zero or more readings.
+  A file that carries none of them is not a species and crosses untouched.
+- A **channel** lets a species through, or does not. It is `open`, `closed`,
+  or `gated` — gated meaning the answer depends on the *delivery* rather than
+  on the file, and cannot be settled by looking at one chunk.
+- A **pump** moves a chunk across and **changes it on the way**, so the thing
+  that arrives is the thing the downstream deployment needed rather than the
+  thing the upstream one sent.
+
+The distinction that matters: **a channel is a decision about one file; a pump
+is a transformation that needs both sides.** Three pumps already ran here
+before any of this was written — `reconcileConfigToml`,
+`reconcileSecurityRegistry` and `reconcileDeployWorkflow` each deliver the
+prime's file with the clone's own entries carried back into it. Six channels
+already ran too. `fleetMembranes.pure.ts` names all nine on every membrane
+rather than pretending the boundary began with this module.
+
+## Nine organs that already existed
+
+| organ | kind | what it refuses or transforms |
+| --- | --- | --- |
+| `clone_sync_exclusions` | channel | per-path rules recorded against this clone |
+| `REPOSITORY_INVARIANTS` | channel | thirteen fleet-wide patterns a module may not own |
+| `backendIdentityHold` | channel | a shipped file naming somebody else's Supabase project |
+| `securityInventoryHold` | channel | the prime's security baseline where this clone holds functions the prime does not |
+| `judgingWorkflowHold` | channel | a workflow that judges the whole repository, on a clone that receives part of one |
+| `withholdReferencedDeletions` | channel | a deletion while a surviving file still imports what it would remove |
+| `reconcileConfigToml` | **pump** | the prime's config carrying this clone's `project_id` and declarations |
+| `reconcileSecurityRegistry` | **pump** | the prime's registry keeping this clone's own entries |
+| `reconcileDeployWorkflow` | **pump** | the prime's deploy workflow keeping this clone's project references |
+
+## The two new channels
+
+### A routed CRM name, in the browser layer only
+
+The CRM distinction is the one the fleet actually has, and it is **measured
+rather than declared**. Mission Control's `clones` row records nothing that
+could answer it — `tags` is `[]` on both parents and `entitled_module_slugs`
+is `[]` on the CRM-independent one — so the evidence is in the module header,
+taken 21 Sep 2026 by reading the two repositories:
+
+| repository | `crm-*` functions | `ghl-*` functions | routing table |
+| --- | --- | --- | --- |
+| `npc-client-dashboard` | 0 | 37 | none |
+| `npc-crm-independent-6505dc` | 3 | 37 | `src/lib/crm/crmProvider.ts` |
+
+**Both hold all 37 GoHighLevel functions**, and reading that as the difference
+is how this gets built wrong. The CRM-independent deployment calls them when
+`CRM_PROVIDER=ghl`. What it refuses is a ROUTED name spelled outside
+`crmFunction()`, because that function is the whole routing table.
+
+**The channel mirrors that clone's own guard and does not improve on it.**
+`src/lib/crm/__tests__/crmIndependence.spec.ts` is the authority — it is what
+turns the clone's CI red — so `ROUTED_CRM_FUNCTION_NAMES` is transcribed from
+it: six names, **both columns** of the routing table, because spelling
+`crm-send-message` outside `crmFunction()` bypasses the switch exactly as
+spelling `send-ghl-message` does.
+
+| ghl | native |
+| --- | --- |
+| `ghl-calendar` | `crm-calendar` |
+| `send-ghl-message` | `crm-send-message` |
+| `sync-ghl-conversations` | *(vendor step, no native counterpart)* |
+| `update-ghl-opportunity-stage` | *(vendor step, no native counterpart)* |
+
+plus `VITE_CRM_PROVIDER` itself, guarded by the same rule for the same
+reason — a surface that reads the switch has bypassed the module that decides.
+
+Two exemptions, both the authority's own and both stated as **rules rather
+than lists of paths**: the router is exempt because it *is* the routing table,
+and a test is exempt because *a test that names a function is not a surface
+that calls one*.
+
+**The first version of this channel was wider, and that was a defect.** It
+carried 24 GoHighLevel names, exempted nothing, and matched backticks.
+Measured against the live clone, it would have held
+`ClientConversationsTab.tsx` **on every pass** — a file whose CI is green,
+because `'ghl-conversations'` and `'ghl-messages'` there are React Query cache
+keys (`queryKey: ['ghl-messages', …]`) that reach no network at all. It would
+also have held `crmProvider.ts`, which is the one file a provider change has
+to deliver.
+
+Divergence has a direction and **only one direction is cheap**. Narrower than
+the authority lets a file cross that turns the clone's CI red — loudly, on the
+clone, with the path named. Wider holds a file the clone would have accepted,
+on a fleet whose signature failure is stalling for reasons nobody stated.
+
+There is deliberately **no pump** here. Rewriting `'send-ghl-message'` into
+`crmFunction("sendMessage")` means synthesising an import into a file the
+engine has not parsed, and a pump that ships broken source is worse than a
+hold that names what is owed.
+
+### A spec crosses with its subject
+
+`gated`, on every membrane, because it is a statement about consistency rather
+than about any one deployment — and because **one file cannot settle it**.
+`strandedSubjects` compares both trees against the delivery this pass will
+actually make: a spec is held only where the subject it names is absent from
+the clone AND is not among the files crossing in the same pass.
+
+**It is judged against what the pass WRITES, not against what it proposed.**
+`partition.write` is the *candidate* set, and a candidate can still be held —
+by the oversize rule, the workflow rule, the backend-identity rule or the
+membrane's own per-file channels. A spec judged against the candidates crosses
+beside a subject that was held three lines later, which is the exact shape
+this channel exists to refuse. So it runs once, after the prepare loop and
+after the three reconciles, over the finished delivery; a stranded spec is
+taken back out of it rather than merely recorded beside it. It costs no extra
+read, because the pass already holds the text of every `.ts`/`.tsx` it
+carries.
+
+**A subject the clone does not hold at all is out of scope, not stranded.**
+The measured case is the stale one, in the incident's own words: *"Both
+subjects EXIST on the clone, at their older versions."* Extending the rule to
+the absent case would hold a spec **forever**, with no act an operator can
+perform — widening a clone's scope is a configuration decision with its own
+review, and a contract test names repository paths as *data*. Those 21 specs
+name 176 distinct paths between them, so nearly every spec in the fleet would
+become a permanent hold. A channel whose refusals cannot be discharged is the
+stall this module exists to prevent.
+
+There is deliberately **no pump** here either, for the same 176 paths: a
+companion pull would widen a module-scoped clone by that many files chosen by
+a regex, which is a different and larger decision than the one this channel is
+allowed to make.
+
+## The rules that carry it
+
+**A membrane is per EDGE, not per fleet.** An ion that crossed prime → parent
+is asked again at parent → child. `npc-test-76b3b3` and
+`preflight-property-group` descend from the CRM-dependent parent and inherit
+its openness; nothing reaches them that did not first pass the boundary above.
+
+**It is code, not rows.** `CLONE_PROVISIONING_GAPS.md` already paid for this:
+provisioning copies a clone's schema and its migration LEDGER but not the rows
+a migration INSERTs, so anything seeded by one is absent on every clone while
+looking, from the ledger, exactly like it is present. A membrane that silently
+resolved to "admit everything" on a deployment nobody had seeded is the
+failure this module exists to prevent. `canonicalRegistry.generated.ts` and
+`REPOSITORY_INVARIANTS` are both code for the same reason.
+
+**An unknown edge is not a refusal.** `resolveMembrane` falls back to the
+standing organs plus the orphan-spec channel, with no opinion about any
+species this fleet has not measured on that edge. A clone provisioned tomorrow
+must behave exactly as every clone behaved yesterday — a membrane that closed
+on an unknown edge would stop the fleet rather than filter it.
+
+**A hold names what is owed.** Every refusal is an ordinary `HeldPath` in the
+vocabulary `partitionCascadePaths` already speaks, with `reason:
+"manual_reconcile"`, so it reaches `reportableHeld` — the pull request body,
+the withheld count and the "nothing to cascade" reason — by exactly the route
+a listed path does. A hold nothing surfaces is a fleet that stops for no
+stated reason, which is the shape of the 20 September stall.
+
+**An `overwrite` approval does not release it, and that is the established
+contract rather than an oversight.** Approvals are read and applied *before*
+the prepare loop, deliberately: a released path then flows through that loop
+and its content holds still run on it. `backendIdentityHold` and
+`judgingWorkflowHold` have had exactly this property since they were written —
+an approval releases a PATH rule, and a rule about what a file SAYS still gets
+to refuse. So each membrane hold's note names a remedy an operator can
+actually perform (route the change through `crmFunction()`; bring the subject
+into scope or leave both) rather than pointing at a button that would not
+work.
+
+**The membrane is keyed by repository NAME**, not by clone slug, because
+repository names are what `processClone` holds on both sides — `primeRef.repo`
+upstream (already the PARENT'S repository for a lineage-routed child) and
+`clone.github_repo` downstream. A slug would have to be threaded through an
+argument that does not carry one, and a key the engine cannot supply is a
+membrane that never resolves.
+
+## On the diagram
+
+Yggdrasil's diagram view draws a band across each branch: a bilayer with one
+pore per channel the boundary declares. An open pore carries an ion across it,
+a closed one is plugged, a gated one is plugged in outline. The pumps that
+already run there are one count at the band's foot.
+
+Two rules the drawing answers to.
+
+**Colour never carries the state alone.** `--primary` and `--warning` are both
+gold in this product's dark theme. The plug is a SHAPE — present or absent,
+solid or dashed — so a closed channel survives greyscale, and the detail panel
+prints the word beside every channel.
+
+**The band sits on the curve, derived rather than eyeballed.** `TreeBranchPath`
+draws a cubic whose control points are pulled horizontally by 15% of the run
+and pinned to the vertical midpoint. Evaluated at `t = 0.5` the control offsets
+cancel exactly in both axes, so the band's centre is the CHORD midpoint and
+needs no curve-length solver. The tangent does not cancel, and using the
+chord's direction instead would tilt the band visibly on the fleet's widest
+branches:
+
+```
+B′(0.5) = ¾(P1−P0) + 1½(P2−P1) + ¾(P3−P2)
+        = ( 1.5·dx − 1.5·k , 0.75·dy )
+        = ( 1.275·dx , 0.75·dy )            with k = 0.15·dx
+```
+
+`membraneGeometry.pure.ts` is arithmetic on two points — it reads no DOM and
+no clock — so the placement is asserted against an independent evaluation of
+that curve rather than looked at.
+
+**Selecting a clone says which boundaries it sits between.** The node panel
+draws `membranesTouching(node.githubRepo)` — the edge above and the edges
+below, each naming what is refused and what waits on a person. Read-only: the
+band is the control, and two ways to open one panel is how the two come to
+disagree about which is selected. It names refusals rather than counting
+organs, because every membrane in this fleet carries the same nine standing
+ones and a count of them prints the same number under every node. The prime's
+absent inbound edge is stated rather than left blank, since a blank area reads
+as a broken panel.
+
+**A component is not shipped until something renders it.** The fleet has paid
+for that rule twice in a row in the clones' builder portal: three components
+with zero call sites, then 28 unmounted CSS classes. An unused export
+typechecks, lints and builds — and this work committed it once, with
+`membranesTouching` exported into nothing until the node panel drew it.
+`membraneIsDrawn.contract.test.ts` asserts the mounting on the source —
+presence, layer position (after the branches, before the nodes), the selection
+keyed on the EDGE rather than on a branch index that a resize would renumber,
+and that the node panel keys its summary on the repository rather than on a
+clone uuid that would resolve no edge while looking exactly like a fleet with
+no membranes.
+
+## Where the modules live, and why that is load-bearing
+
+The three judgement modules are in **`src/lib/cascade/membrane/`**, not under
+`src/server/`, because the diagram reads the registry. TanStack Start's
+import-protection plugin refuses a route whose chain reaches `src/server/**`
+for a VALUE — rightly, since a module under that root is allowed to grow an
+I/O dependency tomorrow, so the boundary is the PATH rather than the current
+contents.
+
+**`tsc` cannot see that rule.** `npx tsc --noEmit` passed clean on the very
+commit `npx vite build` refused, four frames into a rollup stack trace. So the
+position is stated in `membraneIsDrawn.contract.test.ts` as well: each of the
+three modules may import `@/server/**` only as `import type` (which erases
+before the bundler sees it — this is how `membrane.pure.ts` legitimately
+reaches the engine's `HeldPath` vocabulary), and may otherwise reach only a
+sibling or a module that has declared itself client-safe in its own header.
+`@/lib/module-globs` is the one such dependency, and it does exactly that.
+
+The engine imports the same modules from `@/lib/...`, which is a direction
+this codebase already takes in a dozen places.
+
+## What is asserted
+
+| file | what it pins |
+| --- | --- |
+| `membrane.test.ts` | permeation, the routing rule's reach, the glob scoping, the orphan-spec rule and the project-ref detector — over verbatim breached source from `ClientConversationsTab.tsx`, and against the shipped `backendRefsIn` itself rather than a restatement of it |
+| `membraneIsWired.contract.test.ts` | that the engine resolves a membrane from `primeRef.repo`, asks it per file, ACTS on a refusal, judges specs against the finished delivery rather than the candidates, and takes a held spec back out of it |
+| `membraneGeometry.test.ts` | the band's placement, against an independent evaluation of the drawn cubic |
+| `membraneBandRenders.test.ts` | what the component actually EMITS — the placement survives, and no animated transform shares its element |
+| `membraneIsDrawn.contract.test.ts` | that the band and the panel are rendered, in the right layer, keyed on the edge |
+
+Every assertion in the two contract tests was proven non-vacuous by planting
+the defect it describes and watching it fail.
+
+## What an adversarial review found in this work
+
+Six confirmed findings, each verified by execution against the real modules
+rather than by reading. Recorded because the *classes* recur, not because the
+instances were interesting.
+
+**The band drew at the origin.** `<motion.g transform="translate(…)"
+animate={{ scale: 1 }}>` renders at (0,0), unrotated. `buildSVGAttrs` in
+motion-dom does `state.attrs = state.style` for any non-`<svg>` SVG element
+and then lifts `attrs.transform` back into `style.transform`, so an animated
+`scale` arrives as an inline `style="transform:scale(0.6)"` — and an inline
+declaration beats a presentation attribute in every conforming engine. The
+settled state is `transform: none`, because `buildTransform` returns the
+literal "none" when every value is default. It typechecked, linted, built, and
+the source read exactly as intended. **The lesson is the tool**: every other
+guard here reads source, which is right for "is this mounted" and useless for
+"does the browser honour it". `membraneBandRenders.test.ts` renders the real
+component through the real library and reads the markup — no JSX and no DOM,
+so it lives beside the unit tests. And the attribute's PRESENCE proves
+nothing: both ship, and the assertion that catches it is that the placed
+element carries no `style` at all.
+
+**The membrane was keyed on whatever ref the caller held.** `processClone` has
+three callers and only the live cascade resolves lineage; `cascade-dryrun` and
+`regenerateCloneProposal` both build `primeRef` straight from
+`prime.github_*`. With lineage on, the two grandchildren resolved a prime→child
+edge this fleet does not have and fell through to the default membrane —
+behaviourally identical today, and already printing an edge that does not exist
+into a held row the repair path persists. It is keyed on the DESTINATION now
+(`membraneInto`), which is the only identifier every caller reliably holds.
+
+**The spec channel was blind to how a third of its subjects are written.**
+`subjectsNamedBy` read one quoted literal, so
+`readFileSync(join(ROOT, "docs", "reports", "X.md"))` yielded nothing.
+Measured over the prime's spec corpus: **33 files name their subject only that
+way**, and the live case is the 20 September incident itself —
+`scoringMethodology.spec.ts` against `SCORING_V2_METHODOLOGY.md`, 3.0.0 on
+prime and 2.1.0 on the clone. The channel was blind to an instance of the
+exact failure it exists to refuse.
+
+**A reused blob skipped the membrane.** The resume ledger short-circuits 119
+lines before `permeate` and sets `content: null`, which also takes the file out
+of the set the spec channel reads. Narrower than it looks: every per-file
+judgement is a pure function of the file's own text, so an answer settled in an
+earlier tick is the same answer now. A **spec** is not — its verdict is about
+THIS delivery, and a resumed pass carries a different one — so a spec is never
+reused. One file read given up for a verdict about the delivery being made.
+
+**A hold reaches the operator and the Approve button cannot release it.**
+Confirmed, and **pre-existing**: `cascade_path_approvals` is read and applied
+before the prepare loop, so every content hold has this property —
+`judgingWorkflowHold`, `securityInventoryHold` and the three reconcile holds
+as well as the membrane's two. Only `oversizeHold` carries a different reason.
+Deliberately not changed here: it is the established contract (an approval
+releases a PATH rule; a rule about what a file SAYS still refuses), it reaches
+five holds this work did not introduce, and each membrane hold's note names a
+remedy an operator can actually perform. Recorded as fleet-wide rather than
+papered over.
+
+**And the one that was already closed.** `crossingPaths` was a snapshot of the
+candidate set taken before the three reconcile pumps, so a spec naming
+`supabase/config.toml` — nine of prime's specs do — read it as stranded on all
+four clones while the pump delivered it in the same pass. Closed by moving the
+channel to a post-pass over `treeEntries` after all three pumps, which was done
+for an independent reason before the finding landed.
+
+## Two things the review found in this work itself
+
+Worth recording, because both are the classes this repository keeps paying
+for and both were committed here first.
+
+**An export with no caller.** `membranesTouching` shipped in the first cut
+exported into nothing — the builder portal's defect, in the very feature whose
+test asserts against it. It is drawn on the node panel now, which is where it
+belonged.
+
+**A comment that claimed a correspondence it did not have.** The `backend_ref`
+detector read `\b[a-z]{20}\b` — any twenty-letter lowercase word — under a
+header saying it was "deliberately the same shape `backendRefsIn` already
+looks for". The shipped rule is anchored: `[a-z]{20}.supabase.co` and the
+`"ref"` claim inside an anon key. The species is inert today, since no
+membrane declares a channel on it, so nothing was firing wrongly — and that is
+exactly what made it dangerous: whoever added the first such channel would
+have inherited a detector that matches prose while its own header promised
+otherwise. It is transcribed from the shipped rule now, and
+`membrane.test.ts` **imports `backendRefsIn` and asserts the two agree** on
+the same inputs rather than restating the regex.
+
+## What a second review found, after the first one passed
+
+Thirty-five adversarial agents were run against the finished feature, each
+asked to DISPROVE one claimed defect by execution. Most claims died — two of
+the loudest were mutation-coverage observations dressed as defects, and both
+verifiers proved the engine's output byte-identical either way. Four survived,
+and three of them were in the guards rather than in the work.
+
+**A test that imported the constant it was testing.** `membraneGeometry.pure.ts`
+restates `TreeBranchPath`'s 0.15 control-point pull, and the geometry test
+built its "independent" reference curve from that restatement. An agent set
+the constant to `0.42` to see whether anything would notice; 112 of 112
+passed, and the number was **committed and pushed**. The band would have sat
+on every branch at a tangent nothing drew. `DRAWN_PULL` is read out of
+`tree-branch.tsx`'s source now and the module is asserted to equal it — and
+the two "sits exactly on the drawn curve" cases are labelled as unable to see
+this parameter at all, because B(0.5) is the chord midpoint for any pull.
+
+**An assertion that could not fail for its own name.** *"is resolved once per
+clone, not once per file"* counted the call sites, and moving the declaration
+into the per-file callback leaves the count at one. `tsc` caught that
+particular move, because the post-pass then read an out-of-scope name — but an
+edit that took the post-pass down with it would satisfy the compiler and
+resolve the membrane ~830 times a backfill. It asserts the POSITION now.
+
+**A path constant naming a file that does not exist.** `SECURITY_BASELINE_PATH`
+was set to `docs/security/WRONG_NAME.json` and 193 of 193 passed. The channel
+would never have matched, a changed security inventory would have crossed a
+membrane that declares itself closed to it, and nothing would have said so —
+this repository's own signature failure, committed inside the feature built to
+prevent it. The three path constants here are second copies, forced by the
+client/server module boundary (`ionSpecies.pure.ts` is reached by a route and
+may not import a value from `src/server/**`). The copy is unavoidable; the
+silence was not. `membraneIsWired.contract.test.ts` can import both sides, and
+now pins each copy to the rule it restates.
+
+**And four assertions that a formatter could turn red.** They pinned exact
+source text, so a Prettier-legal reflow of the `permeate` call and a rename of
+a two-use local both failed the suite with no behaviour change — while
+`npm run lint` stayed green on both, since Prettier accepts either form. A
+test that red-lights a rename teaches people to edit the test. They read the
+property now: whitespace-tolerant on the call, and name-agnostic on the
+crossing set, which is still asserted to be built from `treeEntries` and never
+from `partition.write`.
+
+## The defect the band found in the page it was drawn on
+
+Rendering the real tree to check whether node labels overlapped the new band
+found that they did — and, in the markup rather than the source, something
+larger underneath. The node NAME label animated `y`, which framer-motion
+routes through the transform pipeline on an SVG element, so it shipped
+`y="448"` beside `style="transform:translateY(456px)"`. **Every node on
+Yggdrasil drew its own name 456 units below itself**, nearly four levels down
+the tree, on a page whose whole job is saying which clone is which. It
+animates `attrY` now, which is the key that writes the attribute.
+
+It is the same trap `membrane-band.tsx` documents from the other side: there
+an animated `scale` displaced a `transform` PROP and drew the band at the
+origin; here an animated `y` displaced a `y` ATTRIBUTE. Both are motion
+routing a name through the transform pipeline, and neither is visible to
+`tsc`, to eslint or to a source-scanning test. Both are now asserted against
+rendered markup.
+
+The overlap itself is closed twice over. The labels are captions rather than
+targets — nodes paint after bands, so a status line crossing one was silently
+taking its clicks; both decline pointer events now and the node carries a
+stated hit circle of its own, so declining costs it nothing. And the ink is
+cleared by making the caption say its status ONCE: it read `BEHIND · 12
+BEHIND`, and the second word was most of the width that reached. Measured on
+the fleet's own layout it now clears every band by a margin at any plausible
+monospace advance.
+
+`membraneClearsLabels.test.ts` is the standing form of that measurement, and
+it is the only guard that could have caught the original. It drives the real
+`useTreeLayout` over the recorded fleet, parses each caption's box out of a
+real `TreeNodeCircle` render and each band's ink out of a real `MembraneBand`
+render, maps the band's local coordinates onto the page through
+`placeMembrane`, and asserts no ink falls inside a caption. Nothing in it is
+restated: the one estimate is the monospace advance, which is bounded by
+running the whole check at 0.55, 0.60 and 0.65 em rather than assumed at one.
+Two things it caught while being written are worth keeping. It measures the
+caption at REST, because `renderToStaticMarkup` returns an animation's opening
+frame and the name starts eight units low — a transient crossing during a
+half-second entrance, while both are still fading in, is not what a reader
+looks at, and the band has no such offset because its placement is on a plain
+`<g>` that motion cannot reach. And its first draft passed the suite while
+`tsc` refused it, from a `let` assigned inside the probe component narrowing
+to `never` — the same disagreement between gates that this whole branch keeps
+turning on.
+
+## The gate resolves by carrying
+
+A spec and its subject travel together or neither does, and there are two ways
+to satisfy that. Holding the spec leaves both. Carrying the subject brings
+both — and on a clone that already HOLDS the subject and is merely behind on
+it, which is every one of the fleet's measured 176, bringing both is what an
+operator wants. Leaving both meant a standing backlog nobody was going to
+clear by hand, one spec at a time, for ever.
+
+So the spec channel now tries to carry before it condemns, and three things
+bound it.
+
+**A carried subject is judged by `prepareOne`** — the same function every
+other write goes through, extracted from the prepare loop's lambda precisely
+so it could be asked twice. It meets the oversize ceiling, the
+judging-workflow rule, the backend-identity rule and this edge's own channels
+on identical terms. Nothing is carried past a rule for having been MENTIONED,
+which is the distinction between a caller naming rows and a caller asking
+questions — the same one `airtableListingsRoute` turns on.
+
+**A carried subject meets the PATH rules before the content rules**, which is
+the order every other candidate meets them in. `planSubjectCarry` refuses what
+`partition.held` already holds, and on a MIRROR that is enough: `candidatePaths`
+there is every path whose SHAs differ, so a stranded subject — which differs by
+definition — was partitioned and its exclusions applied. On a MODULE-SCOPED
+clone it is not. There `candidatePaths` is the installed globs plus the
+repository invariants, so a subject outside that scope was never put through
+`partitionCascadePaths` at all, has no hold for the plan to see, and would have
+been carried with its exclusions never asked. `backendIdentityHold` inside
+`prepareOne` would still have caught the worst of it — but that is a different
+rule catching it by luck rather than the rule that governs it. The carry is
+partitioned through the same function over the same exclusions, so a protected
+path is protected whether the clone installs the module it lives in or not.
+
+**And a spec may not name a path outside the five top-level directories, or
+one with a `..` segment in it.** The prefix rule was already there and refuses
+`/etc/…`, `../…`, `.github/workflows/…` and root-level lockfiles — measured
+against the real function, not reasoned about. `src/../../etc/passwd.conf`
+satisfies it. Nothing downstream would have carried that, because a git tree
+listing holds no `..` segment so it matches neither side and `strandedSubjects`
+drops it — which is protection by consequence rather than by rule, on the one
+place in the cascade where model-written prose becomes a filesystem path. It is
+refused at the source now.
+
+**A subject an existing rule already holds is never released by this.**
+`planSubjectCarry` is handed the live partition and returns its refusals
+rather than dropping them, so a `protected`, `oversize` or unapproved
+`manual_reconcile` path stays held and the spec that named it stays stranded
+*with* it — now saying which rule stopped which subject, in an operator's
+words rather than the column's.
+
+**It answers to the pass's own clock**, through the same `shouldStop` the
+prepare loop uses, and to a ceiling of `MAX_SUBJECTS_CARRIED`. Neither is a
+failure: what fits is carried, what does not leaves its spec held exactly as
+before this existed, and the hold SAYS which of the two stopped it — because
+"we could not" and "we did not get to" send a reader to opposite places, a
+rule to argue with or a pass to run again. A budget-stopped carry deliberately
+does not hand the event back the way a budget-stopped prepare does: that one
+would ship half a module's diff, while this one leaves a delivery that is
+already coherent.
+
+Two corrections worth keeping from writing it. The refusals are read from
+`partition.held` at the moment the specs are held, not from the plan computed
+at the top of the round — where every carried subject met a rule of its own,
+those holds were pushed a few lines earlier and the plan predates all of them,
+so the generic instruction would have printed on exactly the case with a
+specific answer. And both `carryStoppedOnBudget` and `carryHitCeiling` were
+computed and read by nothing for a first draft, which is this repository's own
+signature defect committed inside the feature built to name it; they are on
+the hold an operator reads.
+
+## What this deliberately does not do
+
+- **It does not widen a clone's scope to a file the clone does not have.**
+  Carrying a subject updates a file this clone already holds and is behind on;
+  adding a path it has never had is a different act with a different blast
+  radius, and `strandedSubjects` refuses to name one.
+- **It does not rewrite source.** The two new organs are channels. A pump that
+  synthesises an import is a pump that can ship a file that does not compile.
+- **It does not read the database.** Every membrane is a literal in
+  `fleetMembranes.pure.ts` with its measurement in the header beside it.
