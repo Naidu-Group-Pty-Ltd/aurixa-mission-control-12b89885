@@ -133,7 +133,7 @@ describe("the engine asks the membrane", () => {
     // being the same function, not by a second implementation agreeing.
     const at = engine.indexOf("planSubjectCarry({");
     const block = engine.slice(at, at + 1400);
-    expect(block).toMatch(/mapWithConcurrencyUntil<[\s\S]{0,120}>\(\s*plan\.carry\s*,\s*8\s*,\s*prepareOne/);
+    expect(block).toMatch(/mapWithConcurrencyUntil<[\s\S]{0,120}>\(\s*gated\.write\s*,\s*8\s*,\s*prepareOne/);
     // And there is exactly one such judgement to be the same as.
     expect(engine.match(/const prepareOne = async/g) ?? []).toHaveLength(1);
   });
@@ -147,6 +147,31 @@ describe("the engine asks the membrane", () => {
     expect(block).toContain("absorbPrepared(carried)");
     expect(engine.match(/const absorbPrepared =/g) ?? []).toHaveLength(1);
     expect(engine).toContain("absorbPrepared(prepared)");
+  });
+
+  it("puts a carried subject through the PATH rules, not only the content rules", () => {
+    // The hole this closes: `planSubjectCarry` refuses what `partition.held`
+    // holds, and on a MIRROR that is sufficient — every differing path was
+    // partitioned. On a MODULE-SCOPED clone `candidatePaths` is the installed
+    // globs plus the repository invariants, so a subject outside that scope
+    // was never put through `partitionCascadePaths` at all, has no hold for
+    // the plan to see, and would have been carried with its exclusions never
+    // asked. `backendIdentityHold` would have caught the worst of it, which is
+    // a different rule catching it by luck.
+    const at = engine.indexOf("planSubjectCarry({");
+    const block = engine.slice(at, at + 1800);
+    expect(block).toMatch(/partitionCascadePaths\(\s*plan\.carry\s*,\s*exclusions\s*\)/);
+    // And what it carries is the WRITE half, never the whole plan.
+    expect(block).toMatch(/mapWithConcurrencyUntil<[\s\S]{0,120}>\(\s*gated\.write\s*,/);
+    // The same exclusions the first partition used, not a second list.
+    expect(engine).toMatch(/partitionCascadePaths\(candidatePaths,\s*exclusions\)/);
+  });
+
+  it("reports what the path rules refused, and stops re-planning it", () => {
+    const at = engine.indexOf("planSubjectCarry({");
+    const block = engine.slice(at, at + 1800);
+    expect(block).toContain("partition.held.push(h)");
+    expect(block).toContain("attemptedSubjects.add(h.path)");
   });
 
   it("never releases a subject an existing rule already holds", () => {

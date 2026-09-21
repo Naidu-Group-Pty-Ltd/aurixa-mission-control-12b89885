@@ -2652,12 +2652,42 @@ export async function processClone(args: {
     });
     if (plan.atCeiling) carryHitCeiling = true;
 
-    if (plan.carry.length > 0 && !carryStoppedOnBudget) {
+    // Through the PATH rules before the content rules, which is the order
+    // every other candidate meets them in.
+    //
+    // `planSubjectCarry` refuses what `partition.held` already holds, and on a
+    // MIRROR that is sufficient: `candidatePaths` there is every path whose
+    // SHAs differ, so a stranded subject — which differs by definition — was
+    // partitioned and its exclusions applied. On a MODULE-SCOPED clone it is
+    // not: `candidatePaths` is the installed globs plus the repository
+    // invariants, so a subject outside that scope was never put through
+    // `partitionCascadePaths` at all, has no hold for the plan to see, and
+    // would have been carried without its exclusions ever being asked.
+    //
+    // `backendIdentityHold` inside `prepareOne` would still have caught the
+    // worst of it, but that is a different rule catching it by luck rather
+    // than the rule that governs it. Partitioning here is the same function
+    // over the same exclusions, so a protected path is protected whether the
+    // clone installs the module it lives in or not.
+    const gated = partitionCascadePaths(plan.carry, exclusions);
+    // Marked attempted whichever way they went: a subject the exclusions hold
+    // is settled, and re-planning it every round would never terminate.
+    for (const h of gated.held) attemptedSubjects.add(h.path);
+    const carryRefusals = [
+      ...plan.refused,
+      ...gated.held.map((h) => ({ subject: h.path, reason: h.reason })),
+    ];
+    for (const h of gated.held) {
+      partition.held.push(h);
+      needsReconcile.push(h);
+    }
+
+    if (gated.write.length > 0 && !carryStoppedOnBudget) {
       for (const subject of plan.carry) attemptedSubjects.add(subject);
       const { results: carried, stopped } = await mapWithConcurrencyUntil<
         string,
         Prepared | null
-      >(plan.carry, 8, prepareOne, shouldStop);
+      >(gated.write, 8, prepareOne, shouldStop);
       // Deliberately NOT the `preparePaused` treatment. That one hands the
       // event back because half a module's diff is worse than none; this one
       // leaves a delivery that is already coherent — every spec whose subject
@@ -2685,7 +2715,7 @@ export async function processClone(args: {
     // lines ago and the plan predates all of them. Using the plan would print
     // the generic instruction on exactly the case that has a specific answer.
     const refusedBySubject = new Map<string, { subject: string; reason: ExclusionReason }>();
-    for (const r of plan.refused) refusedBySubject.set(r.subject, r);
+    for (const r of carryRefusals) refusedBySubject.set(r.subject, r);
     for (const h of partition.held) {
       if (!refusedBySubject.has(h.path)) refusedBySubject.set(h.path, { subject: h.path, reason: h.reason });
     }

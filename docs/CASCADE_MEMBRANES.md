@@ -496,6 +496,20 @@ on identical terms. Nothing is carried past a rule for having been MENTIONED,
 which is the distinction between a caller naming rows and a caller asking
 questions — the same one `airtableListingsRoute` turns on.
 
+**A carried subject meets the PATH rules before the content rules**, which is
+the order every other candidate meets them in. `planSubjectCarry` refuses what
+`partition.held` already holds, and on a MIRROR that is enough: `candidatePaths`
+there is every path whose SHAs differ, so a stranded subject — which differs by
+definition — was partitioned and its exclusions applied. On a MODULE-SCOPED
+clone it is not. There `candidatePaths` is the installed globs plus the
+repository invariants, so a subject outside that scope was never put through
+`partitionCascadePaths` at all, has no hold for the plan to see, and would have
+been carried with its exclusions never asked. `backendIdentityHold` inside
+`prepareOne` would still have caught the worst of it — but that is a different
+rule catching it by luck rather than the rule that governs it. The carry is
+partitioned through the same function over the same exclusions, so a protected
+path is protected whether the clone installs the module it lives in or not.
+
 **A subject an existing rule already holds is never released by this.**
 `planSubjectCarry` is handed the live partition and returns its refusals
 rather than dropping them, so a `protected`, `oversize` or unapproved
