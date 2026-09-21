@@ -463,9 +463,18 @@ describe("a pass resumes inside a clone", () => {
   });
 
   it("asks the budget before each fresh file, never before the first", () => {
+    // Counted in files READ, not blobs uploaded. `freshlyPrepared` is the
+    // resume ledger's counter and only a binary file buys a blob — text
+    // travels inline in the chunked `createTree` chain — so on an all-text
+    // delivery it stayed 0 and this guard could never be satisfied. A carry
+    // is all text by construction, which is how its budget bound came to be
+    // the one bound it could never reach.
     expect(process).toMatch(
-      /const shouldStop = \(\) =>\s*resume\?\.budget !== undefined &&\s*freshlyPrepared > 0 &&\s*resume\.budget\.isPastDeadline\(slowestFileMs\);/,
+      /const shouldStop = \(\) =>\s*resume\?\.budget !== undefined && filesRead > 0 && resume\.budget\.isPastDeadline\(slowestFileMs\);/,
     );
+    // Incremented once, where the read is attempted, rather than at each of
+    // the four exits below it.
+    expect(process.match(/filesRead \+= 1;/g) ?? []).toHaveLength(1);
     expect(process).toContain("await mapWithConcurrencyUntil<");
   });
 
