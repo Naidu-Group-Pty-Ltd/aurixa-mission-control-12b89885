@@ -11,7 +11,11 @@
  * every request the module makes and asserting the transcript is empty.
  */
 import { describe, expect, it, beforeEach, vi } from "vitest";
-import type { MigrationDiagnosis } from "./primeMigrationDiagnosis.pure";
+import {
+  assessIdempotency,
+  scanSqlStatements,
+  type MigrationDiagnosis,
+} from "./primeMigrationDiagnosis.pure";
 
 const state = vi.hoisted(() => ({
   requests: [] as Array<{ route: string; params: Record<string, unknown> }>,
@@ -79,6 +83,9 @@ function diagnosis(over: Partial<MigrationDiagnosis> = {}): MigrationDiagnosis {
     hazardCount: 0,
     destructiveCount: 0,
     dataRewriteCount: 0,
+    // A real reading of a real body rather than a hand-typed shape, so this
+    // fixture cannot claim something the module would never produce.
+    idempotency: assessIdempotency(scanSqlStatements("create table if not exists x (id int);")),
     blockedBy: [],
     dryRun: { ran: true, ok: true, ms: 42 },
     catalogueNote: null,

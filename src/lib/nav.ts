@@ -24,6 +24,7 @@ import {
   Cloud,
   Crown,
   Coins,
+  Database,
   FileSignature,
   Gauge,
   GitBranch,
@@ -154,6 +155,16 @@ export const NAV_SECTIONS: NavSection[] = [
         keywords:
           "prime source upstream repository ci checks verify security green red cascade safety " +
           "commits pull requests workflow runs head branch",
+      },
+      // Directly under the prime, because it is the prime's own SQL and the
+      // page it links back to. An entry is a claim that a page will open.
+      {
+        to: "/prime-migrations",
+        label: "Migration Health",
+        icon: Database,
+        keywords:
+          "sql migrations idempotent idempotency re-run rerun twice safe apply schema " +
+          "held back withheld blocked duplicate version rollback undo prime supabase",
       },
       { to: "/health", label: "Health", icon: Activity, shortcut: "h", keywords: "uptime status" },
       { to: "/metrics", label: "Metrics", icon: BarChart3, shortcut: "i" },

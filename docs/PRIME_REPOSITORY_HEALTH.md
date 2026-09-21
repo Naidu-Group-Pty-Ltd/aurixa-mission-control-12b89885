@@ -561,6 +561,26 @@ not have happened.
 - **It is not a queue.** One file at a time, chosen by a person, with the
   evidence in front of them.
 
+## 9a · The same question, over the whole withheld set
+
+Section 9 diagnoses ONE migration, and the drop-down it is chosen from lists
+filenames and nothing else — so "which of these twenty-five is the problem?"
+could only be answered by opening them one at a time, at two Management API
+statements and a trial run each.
+
+`/prime-migrations` answers it in one bounded read, and adds the question
+nothing in the product answered at all: **is this migration safe to run
+twice?** — which matters here because `apply-migration.yml` runs `psql` with no
+`--single-transaction`, so a half-failed file is fixed and dispatched again over
+statements that already ran.
+
+[`MIGRATION_HEALTH.md`](./MIGRATION_HEALTH.md) carries it: the four readings and
+the measurement that chose them over a boolean, why the survey's vocabulary may
+not share a word with the verdicts above, the one cascade both surfaces walk,
+and the three ways the pass is bounded.
+
+---
+
 ## 10 · What is open
 
 - **The gate itself.** Refusing a cascade from a red prime is the obvious next

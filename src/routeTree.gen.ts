@@ -17,6 +17,7 @@ import { Route as SchedulesRouteImport } from './routes/schedules'
 import { Route as RouteErrorsRouteImport } from './routes/route-errors'
 import { Route as ResetPasswordRouteImport } from './routes/reset-password'
 import { Route as ReportJobsRouteImport } from './routes/report-jobs'
+import { Route as PrimeMigrationsRouteImport } from './routes/prime-migrations'
 import { Route as PrimeRouteImport } from './routes/prime'
 import { Route as PartnerPortalRouteImport } from './routes/partner-portal'
 import { Route as OversightRouteImport } from './routes/oversight'
@@ -249,6 +250,11 @@ const ResetPasswordRoute = ResetPasswordRouteImport.update({
 const ReportJobsRoute = ReportJobsRouteImport.update({
   id: '/report-jobs',
   path: '/report-jobs',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PrimeMigrationsRoute = PrimeMigrationsRouteImport.update({
+  id: '/prime-migrations',
+  path: '/prime-migrations',
   getParentRoute: () => rootRouteImport,
 } as any)
 const PrimeRoute = PrimeRouteImport.update({
@@ -1300,6 +1306,7 @@ export interface FileRoutesByFullPath {
   '/oversight': typeof OversightRoute
   '/partner-portal': typeof PartnerPortalRoute
   '/prime': typeof PrimeRoute
+  '/prime-migrations': typeof PrimeMigrationsRoute
   '/report-jobs': typeof ReportJobsRoute
   '/reset-password': typeof ResetPasswordRoute
   '/route-errors': typeof RouteErrorsRoute
@@ -1503,6 +1510,7 @@ export interface FileRoutesByTo {
   '/oversight': typeof OversightRoute
   '/partner-portal': typeof PartnerPortalRoute
   '/prime': typeof PrimeRoute
+  '/prime-migrations': typeof PrimeMigrationsRoute
   '/report-jobs': typeof ReportJobsRoute
   '/reset-password': typeof ResetPasswordRoute
   '/route-errors': typeof RouteErrorsRoute
@@ -1706,6 +1714,7 @@ export interface FileRoutesById {
   '/oversight': typeof OversightRoute
   '/partner-portal': typeof PartnerPortalRoute
   '/prime': typeof PrimeRoute
+  '/prime-migrations': typeof PrimeMigrationsRoute
   '/report-jobs': typeof ReportJobsRoute
   '/reset-password': typeof ResetPasswordRoute
   '/route-errors': typeof RouteErrorsRoute
@@ -1911,6 +1920,7 @@ export interface FileRouteTypes {
     | '/oversight'
     | '/partner-portal'
     | '/prime'
+    | '/prime-migrations'
     | '/report-jobs'
     | '/reset-password'
     | '/route-errors'
@@ -2114,6 +2124,7 @@ export interface FileRouteTypes {
     | '/oversight'
     | '/partner-portal'
     | '/prime'
+    | '/prime-migrations'
     | '/report-jobs'
     | '/reset-password'
     | '/route-errors'
@@ -2316,6 +2327,7 @@ export interface FileRouteTypes {
     | '/oversight'
     | '/partner-portal'
     | '/prime'
+    | '/prime-migrations'
     | '/report-jobs'
     | '/reset-password'
     | '/route-errors'
@@ -2520,6 +2532,7 @@ export interface RootRouteChildren {
   OversightRoute: typeof OversightRoute
   PartnerPortalRoute: typeof PartnerPortalRoute
   PrimeRoute: typeof PrimeRoute
+  PrimeMigrationsRoute: typeof PrimeMigrationsRoute
   ReportJobsRoute: typeof ReportJobsRoute
   ResetPasswordRoute: typeof ResetPasswordRoute
   RouteErrorsRoute: typeof RouteErrorsRoute
@@ -2733,6 +2746,13 @@ declare module '@tanstack/react-router' {
       path: '/report-jobs'
       fullPath: '/report-jobs'
       preLoaderRoute: typeof ReportJobsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/prime-migrations': {
+      id: '/prime-migrations'
+      path: '/prime-migrations'
+      fullPath: '/prime-migrations'
+      preLoaderRoute: typeof PrimeMigrationsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/prime': {
@@ -4229,6 +4249,7 @@ const rootRouteChildren: RootRouteChildren = {
   OversightRoute: OversightRoute,
   PartnerPortalRoute: PartnerPortalRoute,
   PrimeRoute: PrimeRoute,
+  PrimeMigrationsRoute: PrimeMigrationsRoute,
   ReportJobsRoute: ReportJobsRoute,
   ResetPasswordRoute: ResetPasswordRoute,
   RouteErrorsRoute: RouteErrorsRoute,

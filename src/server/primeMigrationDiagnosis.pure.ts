@@ -423,6 +423,386 @@ export function isSafeToDryRun(hazards: readonly Hazard[]): boolean {
 
 /*
   ───────────────────────────────────────────────────────────────────────────
+  Running the same file twice
+  ───────────────────────────────────────────────────────────────────────────
+
+  `apply-migration.yml` runs `psql -v ON_ERROR_STOP=1 -f "$FILE"` with NO
+  `--single-transaction`. A file that fails half way leaves everything before
+  the failure applied, and the repair is to fix the file and dispatch it
+  again — over statements that already ran. So "what happens on the second
+  run" is not a theoretical property here; it is the question an operator is
+  standing in front of at the moment they most need an answer.
+
+  ## Why this is a READING and not a flag
+
+  `DATA_REWRITE` above records what a general "could this statement succeed
+  twice?" rule measured: 2,411 hits, 22% of every statement in the repository,
+  1,592 of them `CREATE POLICY`. A boolean drawn from that would be red on
+  nearly every file and would say nothing. What makes the number readable is
+  that the three outcomes are not alike:
+
+    - A second `CREATE TABLE`/`INDEX`/`POLICY` **fails loudly** with
+      `42P07`/`42710`, having changed nothing. The file stops; the repair is
+      mechanical; no data is wrong.
+    - A second unguarded `INSERT` **succeeds** and duplicates rows. Nothing
+      reports it. This is the one that costs something.
+    - Most of the corpus is neither, because the repository already writes
+      `IF NOT EXISTS`, `OR REPLACE`, and `DROP … IF EXISTS` before `CREATE`.
+
+  So the reading separates them, and `rewrites_data` outranks `fails_loudly`
+  wherever a file carries both: the silent outcome is the one worth the chip.
+
+  ## The pairing that had to be modelled, and what it was worth
+
+  `DROP POLICY IF EXISTS x ON t; CREATE POLICY x ON t …` is the standard
+  idempotent RLS idiom, and `DESTRUCTIVE` above already excludes it for that
+  reason. A reading that looked at the `CREATE` alone would call every one of
+  those files collision-prone. So the guard is tracked per file, in statement
+  order — an EARLIER `DROP … IF EXISTS` of the same object, never a later one,
+  because a drop below the create does not make the create safe.
+
+  `IF EXISTS` is required on that drop. A bare `DROP x` is itself a statement
+  whose second run fails, so pairing one with a `CREATE` would move a file out
+  of `fails_loudly` on the strength of a statement that puts it back in.
+
+  ## What it reads over the prime's own corpus, 21 Sep 2026
+
+  1,002 files, of which 989 could be read here (13 are past the corpus
+  ceiling) carrying 11,072 statements:
+
+       688  re-runnable throughout      (68.7%)
+       265  a second run FAILS LOUDLY   (26.4%)
+        36  a second run REWRITES DATA   (3.6%)
+        13  unreadable                   (1.3%)
+
+  945 creations are guarded by an earlier `DROP … IF EXISTS` in their own
+  file, and modelling that pairing is what keeps **212 files** out of
+  `fails_loudly`. Without it the indicator is noise; with it, it is the thing
+  it claims to be.
+
+  The 265 are dominated by `CREATE POLICY` (603 of the capped notes) and they
+  are real: `20250124140000_fix_email_communication_rls_policies.sql` drops
+  eight policies by their OLD names and creates nine under new ones, so a
+  second run stops at the first `CREATE POLICY` with `42710`. That is worth
+  saying, and it is worth saying as the mild outcome it is.
+
+  ## The direction this errs, which is the opposite of the dry-run gate's
+
+  The gate above treats what it cannot classify as a hazard, because a missed
+  hazard defeats a ROLLBACK against a production database. This reading is a
+  DISCLOSURE beside a verdict — it gates nothing — and the same asymmetry here
+  would paint the whole corpus. So a statement that names no object it could
+  collide with is read as re-runnable, and the two places this cannot see are
+  NAMED rather than guessed: a body the console never read is `unreadable` and
+  never `rerunnable`, and a `DO $$ … $$` block, whose contents the scanner
+  deliberately elides so a PL/pgSQL `begin` is not read as a transaction, is
+  COUNTED and said out loud beside the reading. 217 files carry one and 179 of
+  those read re-runnable, so this is a caveat on about a fifth of the corpus
+  rather than a footnote nobody meets.
+*/
+
+export type IdempotencyReading = "rerunnable" | "fails_loudly" | "rewrites_data" | "unreadable";
+
+export type IdempotencyNote = {
+  /** What the second run would do, in the operator's words. */
+  what: string;
+  excerpt: string;
+  line: number;
+};
+
+export type Idempotency = {
+  reading: IdempotencyReading;
+  /** One sentence beside the chip. Never database vocabulary. */
+  summary: string;
+  /** Statements whose second run stops the file. Capped. */
+  collides: IdempotencyNote[];
+  collideCount: number;
+  /** Statements whose second run changes data and does not stop. Capped. */
+  rewrites: IdempotencyNote[];
+  rewriteCount: number;
+  /** Creations an earlier `DROP … IF EXISTS` in this same file already guards. */
+  guardedByDrop: number;
+  /** `DO $$ … $$` blocks, whose contents this cannot see into. */
+  opaqueBlocks: number;
+};
+
+/** Notes drawn beside a reading, capped so one file cannot fill the page. */
+export const IDEMPOTENCY_ROWS = 6;
+
+/** A possibly-qualified, possibly-quoted identifier as it appears in `head`. */
+const IDENT = String.raw`(?:"[^"]+"|[a-z_][\w$]*)`;
+const QNAME = `${IDENT}(?:\\.${IDENT})*`;
+/** Every guard this reading accepts on a DROP. A bare one is its own collision. */
+const IFX = String.raw`if\s+exists\s+`;
+
+/** `"public"."Foo"` and `public.foo` are the same key; quoting and schema go. */
+function objectKey(raw: string): string {
+  const last = raw.split(".").pop() ?? raw;
+  return last.replace(/^"|"$/g, "").toLowerCase();
+}
+
+type Named = { kind: string; key: string };
+
+const CREATE_FORMS: ReadonlyArray<{ re: RegExp; kind: string }> = [
+  { re: new RegExp(`^create\\s+table\\s+(${QNAME})`), kind: "table" },
+  {
+    re: new RegExp(`^create\\s+(?:unique\\s+)?index\\s+(?:concurrently\\s+)?(${QNAME})\\s+on\\b`),
+    kind: "index",
+  },
+  { re: new RegExp(`^create\\s+policy\\s+(${IDENT})\\s+on\\s+(${QNAME})`), kind: "policy" },
+  {
+    re: new RegExp(
+      `^create\\s+(?:constraint\\s+)?trigger\\s+(${IDENT})\\b[\\s\\S]*?\\son\\s+(${QNAME})`,
+    ),
+    kind: "trigger",
+  },
+  { re: new RegExp(`^create\\s+type\\s+(${QNAME})`), kind: "type" },
+  { re: new RegExp(`^create\\s+schema\\s+(${QNAME})`), kind: "schema" },
+  { re: new RegExp(`^create\\s+sequence\\s+(${QNAME})`), kind: "sequence" },
+  { re: new RegExp(`^create\\s+materialized\\s+view\\s+(${QNAME})`), kind: "materialized view" },
+  { re: new RegExp(`^create\\s+view\\s+(${QNAME})`), kind: "view" },
+  { re: new RegExp(`^create\\s+extension\\s+(${QNAME})`), kind: "extension" },
+  { re: new RegExp(`^create\\s+publication\\s+(${QNAME})`), kind: "publication" },
+  { re: new RegExp(`^create\\s+(?:role|user)\\s+(${QNAME})`), kind: "role" },
+  {
+    re: new RegExp(`^create\\s+(?:function|procedure)\\s+(${QNAME})`),
+    kind: "function",
+  },
+  {
+    re: new RegExp(
+      `^alter\\s+table\\s+(?:if\\s+exists\\s+)?(?:only\\s+)?(${QNAME})[\\s\\S]*?\\badd\\s+constraint\\s+(${IDENT})`,
+    ),
+    kind: "constraint",
+  },
+  {
+    re: new RegExp(
+      `^alter\\s+table\\s+(?:if\\s+exists\\s+)?(?:only\\s+)?(${QNAME})[\\s\\S]*?\\badd\\s+column\\s+(?!if\\s+not\\s+exists)(${IDENT})`,
+    ),
+    kind: "column",
+  },
+  {
+    re: new RegExp(`^alter\\s+type\\s+(${QNAME})\\s+add\\s+value\\s+'([^']*)'`),
+    kind: "enum value",
+  },
+];
+
+/**
+ * What a statement CREATES that a second run would collide with, or null.
+ *
+ * Null covers three different things and deliberately does not distinguish
+ * them, because all three are re-runnable: the statement is already guarded
+ * (`IF NOT EXISTS`, `OR REPLACE`), it creates nothing, or it creates something
+ * unnamed — `CREATE INDEX ON t (c)` auto-names, so a second run makes a second
+ * index and succeeds. That last one wastes a little disk and loses nothing.
+ */
+function createsObject(head: string): Named | null {
+  if (/^create\s+(or\s+replace|.*\bif\s+not\s+exists)\b/.test(head)) {
+    // `CREATE MATERIALIZED VIEW` has no OR REPLACE, so `or replace` there is
+    // a parse error rather than a guard — but such a file never applied once,
+    // let alone twice, so there is nothing for this reading to say about it.
+    return null;
+  }
+  for (const f of CREATE_FORMS) {
+    const m = f.re.exec(head);
+    if (!m) continue;
+    const parts = m.slice(1).filter(Boolean).map(objectKey);
+    return parts.length > 0 ? { kind: f.kind, key: parts.join(" on ") } : null;
+  }
+  return null;
+}
+
+const DROP_FORMS: ReadonlyArray<{ re: RegExp; kind: string }> = [
+  { re: new RegExp(`^drop\\s+table\\s+${IFX}(${QNAME})`), kind: "table" },
+  { re: new RegExp(`^drop\\s+index\\s+(?:concurrently\\s+)?${IFX}(${QNAME})`), kind: "index" },
+  { re: new RegExp(`^drop\\s+policy\\s+${IFX}(${IDENT})\\s+on\\s+(${QNAME})`), kind: "policy" },
+  { re: new RegExp(`^drop\\s+trigger\\s+${IFX}(${IDENT})\\s+on\\s+(${QNAME})`), kind: "trigger" },
+  { re: new RegExp(`^drop\\s+type\\s+${IFX}(${QNAME})`), kind: "type" },
+  { re: new RegExp(`^drop\\s+schema\\s+${IFX}(${QNAME})`), kind: "schema" },
+  { re: new RegExp(`^drop\\s+sequence\\s+${IFX}(${QNAME})`), kind: "sequence" },
+  {
+    re: new RegExp(`^drop\\s+materialized\\s+view\\s+${IFX}(${QNAME})`),
+    kind: "materialized view",
+  },
+  { re: new RegExp(`^drop\\s+view\\s+${IFX}(${QNAME})`), kind: "view" },
+  { re: new RegExp(`^drop\\s+extension\\s+${IFX}(${QNAME})`), kind: "extension" },
+  { re: new RegExp(`^drop\\s+publication\\s+${IFX}(${QNAME})`), kind: "publication" },
+  { re: new RegExp(`^drop\\s+(?:role|user)\\s+${IFX}(${QNAME})`), kind: "role" },
+  { re: new RegExp(`^drop\\s+(?:function|procedure)\\s+${IFX}(${QNAME})`), kind: "function" },
+  {
+    re: new RegExp(
+      `^alter\\s+table\\s+(?:if\\s+exists\\s+)?(?:only\\s+)?(${QNAME})[\\s\\S]*?\\bdrop\\s+constraint\\s+${IFX}(${IDENT})`,
+    ),
+    kind: "constraint",
+  },
+  {
+    re: new RegExp(
+      `^alter\\s+table\\s+(?:if\\s+exists\\s+)?(?:only\\s+)?(${QNAME})[\\s\\S]*?\\bdrop\\s+column\\s+${IFX}(${IDENT})`,
+    ),
+    kind: "column",
+  },
+];
+
+/**
+ * What a statement REMOVES if it is there, or null.
+ *
+ * `IF EXISTS` is required: a bare `DROP` is itself a statement whose second
+ * run fails, so pairing one with a `CREATE` would move a file out of
+ * `fails_loudly` on the strength of a statement that puts it back in.
+ */
+function dropsObject(head: string): Named | null {
+  for (const f of DROP_FORMS) {
+    const m = f.re.exec(head);
+    if (!m) continue;
+    const parts = m.slice(1).filter(Boolean).map(objectKey);
+    return parts.length > 0 ? { kind: f.kind, key: parts.join(" on ") } : null;
+  }
+  return null;
+}
+
+/** A bare `DROP x` — its own second run fails, so it is a collision too. */
+const UNGUARDED_DROP =
+  /^drop\s+(?!.*\bif\s+exists\b)(table|index|policy|trigger|type|schema|sequence|materialized\s+view|view|extension|publication|function|procedure|role|user)\b/;
+
+const ALTER_DROPS_BARE =
+  /^alter\s+table\b[\s\S]*?\bdrop\s+(?:constraint|column)\s+(?!if\s+exists\b)/;
+
+const OPAQUE_BLOCK = /^do\b/;
+
+const COLLIDE_WORDS: Readonly<Record<string, string>> = {
+  table: "creates a table that would already be there",
+  index: "creates an index that would already be there",
+  policy: "creates a row-level security policy that would already be there",
+  trigger: "creates a trigger that would already be there",
+  type: "creates a type that would already be there",
+  schema: "creates a schema that would already be there",
+  sequence: "creates a sequence that would already be there",
+  view: "creates a view that would already be there",
+  "materialized view": "creates a materialized view that would already be there",
+  extension: "installs an extension that would already be there",
+  publication: "creates a publication that would already be there",
+  role: "creates a role that would already be there",
+  function: "creates a function that would already be there",
+  constraint: "adds a constraint that would already be there",
+  column: "adds a column that would already be there",
+  "enum value": "adds a value to a type that would already have it",
+};
+
+/**
+ * Whether running this file a second time would be a no-op.
+ *
+ * Takes null for a body that was never read, so the one place that decides
+ * also enforces the rule that matters: a file nobody could open reads
+ * `unreadable` and never `rerunnable`. A reading is a claim about a body, and
+ * there is no body to make a claim about.
+ */
+export function assessIdempotency(statements: readonly SqlStatement[] | null): Idempotency {
+  if (!statements) {
+    return {
+      reading: "unreadable",
+      summary: "The file was not read here, so nothing was measured about running it twice.",
+      collides: [],
+      collideCount: 0,
+      rewrites: [],
+      rewriteCount: 0,
+      guardedByDrop: 0,
+      opaqueBlocks: 0,
+    };
+  }
+
+  const dropped = new Set<string>();
+  const collides: IdempotencyNote[] = [];
+  const rewrites: IdempotencyNote[] = [];
+  let collideCount = 0;
+  let rewriteCount = 0;
+  let guardedByDrop = 0;
+  let opaqueBlocks = 0;
+
+  const note = (into: IdempotencyNote[], s: SqlStatement, what: string) => {
+    if (into.length < IDEMPOTENCY_ROWS) into.push({ what, excerpt: excerpt(s.text), line: s.line });
+  };
+
+  for (const s of statements) {
+    const h = s.head;
+
+    if (OPAQUE_BLOCK.test(h)) {
+      opaqueBlocks += 1;
+      continue;
+    }
+
+    const w = DATA_REWRITE.find((x) => x.re.test(h));
+    if (w) {
+      rewriteCount += 1;
+      note(rewrites, s, w.what);
+      continue;
+    }
+
+    const gone = dropsObject(h);
+    if (gone) {
+      dropped.add(`${gone.kind}:${gone.key}`);
+      continue;
+    }
+
+    if (UNGUARDED_DROP.test(h) || ALTER_DROPS_BARE.test(h)) {
+      collideCount += 1;
+      note(collides, s, "removes something that a second run would no longer find");
+      continue;
+    }
+
+    const made = createsObject(h);
+    if (!made) continue;
+    if (dropped.has(`${made.kind}:${made.key}`)) {
+      guardedByDrop += 1;
+      continue;
+    }
+    collideCount += 1;
+    note(collides, s, COLLIDE_WORDS[made.kind] ?? "creates something that would already be there");
+  }
+
+  const reading: IdempotencyReading =
+    rewriteCount > 0 ? "rewrites_data" : collideCount > 0 ? "fails_loudly" : "rerunnable";
+
+  return {
+    reading,
+    summary: idempotencySummary(reading, collideCount, rewriteCount, opaqueBlocks),
+    collides,
+    collideCount,
+    rewrites,
+    rewriteCount,
+    guardedByDrop,
+    opaqueBlocks,
+  };
+}
+
+function idempotencySummary(
+  reading: IdempotencyReading,
+  collideCount: number,
+  rewriteCount: number,
+  opaqueBlocks: number,
+): string {
+  const blocks =
+    opaqueBlocks > 0
+      ? ` ${opaqueBlocks} statement${opaqueBlocks === 1 ? "" : "s"} here run a block this console does not read into, so anything inside is not covered by that.`
+      : "";
+  if (reading === "rewrites_data") {
+    return (
+      `Running this file a second time would change data rather than stop: ${rewriteCount} statement${rewriteCount === 1 ? "" : "s"} would write again and succeed.` +
+      (collideCount > 0
+        ? ` ${collideCount} other${collideCount === 1 ? "" : "s"} would fail first, which may or may not reach them.`
+        : "") +
+      blocks
+    );
+  }
+  if (reading === "fails_loudly") {
+    return (
+      `Running this file a second time would stop at the first of ${collideCount} statement${collideCount === 1 ? "" : "s"} that creates something already there. Nothing would be written twice.` +
+      blocks
+    );
+  }
+  return `Running this file a second time changes nothing: every statement in it is already written to be repeated.${blocks}`;
+}
+
+/*
+  ───────────────────────────────────────────────────────────────────────────
   The trial run's answer
   ───────────────────────────────────────────────────────────────────────────
 */
@@ -497,16 +877,28 @@ export function readSqlFailure(raw: string): { sqlstate: string | null; message:
   ───────────────────────────────────────────────────────────────────────────
 */
 
-export type DiagnosisVerdict =
-  | "rollback_script"
-  | "version_collision"
-  | "already_applied"
-  | "oversized"
-  | "blocked_by_prerequisite"
-  | "unsafe_to_test"
-  | "would_fail"
-  | "ready"
-  | "undiagnosed";
+/**
+ * Every verdict, as a value rather than only as a type.
+ *
+ * The type is DERIVED from this list, so a verdict added tomorrow is in both
+ * or in neither. A union written by hand and a list written beside it is how a
+ * test comes to assert a property of the list rather than of the product —
+ * measured here: with the two written separately, renaming a survey standing
+ * to `ready` left the disjointness test green.
+ */
+export const DIAGNOSIS_VERDICTS = [
+  "rollback_script",
+  "version_collision",
+  "already_applied",
+  "oversized",
+  "blocked_by_prerequisite",
+  "unsafe_to_test",
+  "would_fail",
+  "ready",
+  "undiagnosed",
+] as const;
+
+export type DiagnosisVerdict = (typeof DIAGNOSIS_VERDICTS)[number];
 
 /**
  * The one verdict that may offer to run something.
@@ -568,6 +960,17 @@ export type MigrationDiagnosis = {
   hazardCount: number;
   destructiveCount: number;
   dataRewriteCount: number;
+  /**
+   * What a SECOND run of this file would do — carried on every verdict,
+   * including the ones that refuse to run it at all.
+   *
+   * It belongs beside the verdict rather than inside it because the two answer
+   * different questions. The verdict says whether this console may dispatch
+   * the file now; this says what happens if it is dispatched again, which is
+   * the question an operator arrives with after a half-failed run, when the
+   * verdict has already been spent.
+   */
+  idempotency: Idempotency;
   blockedBy: string[] | null;
   dryRun: DryRunOutcome;
   catalogueNote: string | null;
@@ -619,6 +1022,63 @@ export function isRollbackScript(name: string): boolean {
 const listVersions = (v: readonly string[]) =>
   v.length <= 3 ? v.join(", ") : `${v.slice(0, 3).join(", ")} and ${v.length - 3} more`;
 
+/*
+  ───────────────────────────────────────────────────────────────────────────
+  The one cascade both surfaces walk
+  ───────────────────────────────────────────────────────────────────────────
+
+  Two things ask what stands in a migration's way: the diagnosis, which then
+  goes on to try it against the prime, and the survey, which stops here
+  because it is reading three hundred files and may not spend a database round
+  trip on each. If each walked its own copy of the order, the list and the
+  page would eventually disagree about the same file — and the disagreement
+  would be silent, because each is right about itself.
+
+  So the order lives here once, and both read its answer. `null` means nothing
+  in the FILE objects; it does not mean the file is good, which is exactly the
+  distinction the two callers then part company on.
+*/
+export type PreTrialStop =
+  | { at: "rollback_script" }
+  | { at: "version_collision" }
+  | { at: "already_applied" }
+  | { at: "oversized"; why: string }
+  | { at: "unread"; why: string }
+  | { at: "position_unknown" }
+  | { at: "blocked"; versions: string[] }
+  | { at: "unsafe_to_test"; hazard: Hazard };
+
+/**
+ * What stops this file before anything is asked of the prime's database.
+ *
+ * The order is not arbitrary and is the same one `diagnoseMigration`'s header
+ * argues for: a refusal about the FILE outranks a refusal about the database,
+ * and a cheap certain refusal outranks an expensive uncertain one, so nothing
+ * below is ever attributed to the wrong cause.
+ */
+export function stopBeforeTrialRun(args: {
+  name: string;
+  collidingNames: readonly string[];
+  alreadyApplied: boolean;
+  body: DiagnosisInput["body"];
+  blockedBy: readonly string[] | null;
+  hazards: readonly Hazard[];
+}): PreTrialStop | null {
+  if (isRollbackScript(args.name)) return { at: "rollback_script" };
+  if (args.collidingNames.length > 0) return { at: "version_collision" };
+  if (args.alreadyApplied) return { at: "already_applied" };
+  if (!args.body.read) {
+    return args.body.oversized
+      ? { at: "oversized", why: args.body.why }
+      : { at: "unread", why: args.body.why };
+  }
+  if (args.blockedBy === null) return { at: "position_unknown" };
+  if (args.blockedBy.length > 0) return { at: "blocked", versions: [...args.blockedBy] };
+  const blocking = args.hazards.find((h) => UNTESTABLE_HAZARDS.has(h.kind));
+  if (blocking) return { at: "unsafe_to_test", hazard: blocking };
+  return null;
+}
+
 /**
  * The whole judgement, in one place, in a fixed order.
  *
@@ -651,6 +1111,7 @@ export function diagnoseMigration(input: DiagnosisInput): MigrationDiagnosis {
     hazardCount: all.length,
     destructiveCount: all.filter((h) => h.kind === "destructive").length,
     dataRewriteCount: all.filter((h) => h.kind === "data_rewrite").length,
+    idempotency: assessIdempotency(statements),
     catalogueNote: catalogueNote(input.catalogue),
   };
 
@@ -666,71 +1127,66 @@ export function diagnoseMigration(input: DiagnosisInput): MigrationDiagnosis {
     dispatchable: mayDispatch(verdict),
   });
 
-  // 1. The name. Never runnable from here, whatever anything else says.
-  if (isRollbackScript(meta.name)) {
-    return settle(
-      "rollback_script",
-      "This file is named as an undo. It is withheld on purpose and must never be applied from a console.",
-      "If it genuinely needs to run, do it by hand with the author of the change it reverses.",
-    );
-  }
-
-  // 2. The shape.
-  if (input.collidingNames.length > 0) {
-    return settle(
-      "version_collision",
-      `Version ${meta.id} is carried by more than one file (${listVersions(input.collidingNames)}), and the prime's ledger can record only one of them.`,
-      "Rename one of the files in the prime repository so each version is unique, then read this again.",
-    );
-  }
-
-  if (input.alreadyApplied) {
-    return settle(
-      "already_applied",
-      "The prime's ledger already records this version, so it is not holding anything back.",
-      null,
-    );
-  }
-
-  if (!input.body.read) {
-    return input.body.oversized
-      ? settle(
+  // Layers 1-4, walked by the one cascade the survey walks too.
+  const stop = stopBeforeTrialRun({
+    name: meta.name,
+    collidingNames: input.collidingNames,
+    alreadyApplied: input.alreadyApplied,
+    body: input.body,
+    blockedBy: input.blockedBy,
+    hazards: all,
+  });
+  if (stop) {
+    switch (stop.at) {
+      case "rollback_script":
+        return settle(
+          "rollback_script",
+          "This file is named as an undo. It is withheld on purpose and must never be applied from a console.",
+          "If it genuinely needs to run, do it by hand with the author of the change it reverses.",
+        );
+      case "version_collision":
+        return settle(
+          "version_collision",
+          `Version ${meta.id} is carried by more than one file (${listVersions(input.collidingNames)}), and the prime's ledger can record only one of them.`,
+          "Rename one of the files in the prime repository so each version is unique, then read this again.",
+        );
+      case "already_applied":
+        return settle(
+          "already_applied",
+          "The prime's ledger already records this version, so it is not holding anything back.",
+          null,
+        );
+      case "oversized":
+        return settle(
           "oversized",
-          `The body is past the size this console will hold, so nothing below could be measured. ${input.body.why}`,
+          `The body is past the size this console will hold, so nothing below could be measured. ${stop.why}`,
           "Apply it through the prime's own workflow, which streams a file of this size in one piece.",
-        )
-      : settle(
+        );
+      case "unread":
+        return settle(
           "undiagnosed",
-          `The body could not be read, so nothing about this file was measured. ${input.body.why}`,
+          `The body could not be read, so nothing about this file was measured. ${stop.why}`,
           "Try again once the repository read succeeds; nothing here is a statement about the migration.",
         );
-  }
-
-  // 3. Prerequisites, before anything that would be attributed to this file.
-  if (input.blockedBy === null) {
-    return settle(
-      "undiagnosed",
-      "Which earlier migrations the prime has run could not be established, so this file's position is unknown.",
-      "Read the prime's SQL position again; a failed read is not a clear run.",
-    );
-  }
-  if (input.blockedBy.length > 0) {
-    return settle(
-      "blocked_by_prerequisite",
-      `${input.blockedBy.length} earlier migration${input.blockedBy.length === 1 ? "" : "s"} the prime has not run sits in front of this one (${listVersions(input.blockedBy)}).`,
-      "Diagnose the earliest of those first. Running this one now would fail against a schema missing their effect, and the failure would read as this file's.",
-    );
-  }
-
-  // 4. The statements decide whether there can be a trial run at all.
-  const blocking = shaped.hazards.filter((h) => UNTESTABLE_HAZARDS.has(h.kind));
-  if (!isSafeToDryRun(all)) {
-    const first = blocking[0] ?? all.find((h) => UNTESTABLE_HAZARDS.has(h.kind))!;
-    return settle(
-      "unsafe_to_test",
-      `This file cannot be tried safely from here: line ${first.line} — ${first.note}.`,
-      "Read it, then apply it through the prime's own Apply-a-migration workflow, which is built for exactly this case.",
-    );
+      case "position_unknown":
+        return settle(
+          "undiagnosed",
+          "Which earlier migrations the prime has run could not be established, so this file's position is unknown.",
+          "Read the prime's SQL position again; a failed read is not a clear run.",
+        );
+      case "blocked":
+        return settle(
+          "blocked_by_prerequisite",
+          `${stop.versions.length} earlier migration${stop.versions.length === 1 ? "" : "s"} the prime has not run sits in front of this one (${listVersions(stop.versions)}).`,
+          "Diagnose the earliest of those first. Running this one now would fail against a schema missing their effect, and the failure would read as this file's.",
+        );
+      case "unsafe_to_test":
+        return settle(
+          "unsafe_to_test",
+          `This file cannot be tried safely from here: line ${stop.hazard.line} — ${stop.hazard.note}.`,
+          "Read it, then apply it through the prime's own Apply-a-migration workflow, which is built for exactly this case.",
+        );
+    }
   }
 
   // 5. The trial run.
@@ -774,6 +1230,233 @@ export function diagnoseMigration(input: DiagnosisInput): MigrationDiagnosis {
     `Tried against the prime and rolled back cleanly in ${input.dryRun.ms} ms. It applies against the schema the prime has now.`,
     cautions.length > 0 ? `Read before dispatching: ${cautions.join("; ")}.` : null,
   );
+}
+
+/*
+  ───────────────────────────────────────────────────────────────────────────
+  What the tree listing alone already says
+  ───────────────────────────────────────────────────────────────────────────
+
+  Three facts about the whole corpus cost nothing beyond the listing every
+  other reading here already pays for: no body is read, no statement is
+  scanned and the prime's database is not asked. They are worth drawing
+  precisely because they are the ones a per-file diagnosis cannot show.
+
+  A collision is the sharpest of them. `schema_migrations.version` is the
+  primary key, so a version two files carry can only ever record one of them
+  and no amount of running anything closes the hole — every clone queues behind
+  it for ever. On this prime there are 32, across 77 files.
+*/
+
+export type OversizeFile = { id: string; name: string; bytes: number };
+
+export type CorpusFacts = {
+  /** Migration files on the prime's default branch. */
+  files: number;
+  /** Files named as an undo, which must never be dispatched from a console. */
+  rollbackScripts: string[];
+  /** Versions carried by more than one file. */
+  collisions: VersionCollision[];
+  /** Files the listing reports as past the ceiling this console reads. */
+  oversize: OversizeFile[];
+  /**
+   * Files the listing gave no size for.
+   *
+   * Counted separately and never folded into `oversize`, because an unknown
+   * size is not a small one — the same distinction `loadSql` makes when it
+   * fetches an unsized blob rather than waving it through. Folding them in
+   * either way would state something the listing did not say.
+   */
+  sizeUnknown: number;
+};
+
+/**
+ * Everything the corpus listing already knows, before anything is fetched.
+ *
+ * `sizeOf` answers null for a file the listing carried no size for; this never
+ * reads that as zero.
+ */
+export function corpusFacts(
+  metas: ReadonlyArray<{ id: string; name: string }>,
+  sizeOf: (id: string) => number | null,
+  ceilingBytes: number,
+): CorpusFacts {
+  const oversize: OversizeFile[] = [];
+  let sizeUnknown = 0;
+  for (const m of metas) {
+    const bytes = sizeOf(m.id);
+    if (bytes === null) sizeUnknown += 1;
+    else if (bytes > ceilingBytes) oversize.push({ id: m.id, name: m.name, bytes });
+  }
+  return {
+    files: metas.length,
+    rollbackScripts: metas.filter((m) => isRollbackScript(m.name)).map((m) => m.name),
+    collisions: findVersionCollisions(metas),
+    oversize,
+    sizeUnknown,
+  };
+}
+
+/*
+  ───────────────────────────────────────────────────────────────────────────
+  The survey: three hundred files, no database
+  ───────────────────────────────────────────────────────────────────────────
+
+  `diagnoseMigration` spends two Management API statements and a rolled-back
+  trial run per file. That is the right price for the ONE file an operator has
+  chosen. It is the wrong price for the list they choose it from: the prime
+  withholds enough migrations that asking the database about each would be
+  hundreds of round trips against a production project to draw a table.
+
+  So the survey walks the same cascade and stops where the database begins. It
+  is not a cheaper diagnosis; it answers a different question, and the two
+  vocabularies are kept apart on purpose so neither can be read as the other:
+
+      DiagnosisVerdict   may this console run this file NOW?
+      SurveyStanding     what is standing in this file's way, before
+                         anything was asked of the prime?
+
+  `needs_a_trial_run` is the whole point of the separation. It is what a
+  perfectly healthy file reads in a list, and it is emphatically NOT `ready` —
+  a survey has no evidence that a body applies, only that nothing in the file
+  forbids trying. A test asserts the two vocabularies share no value, the way
+  the AML obligation and outcome vocabularies are held apart, because the day
+  one word appears in both is the day a list starts making a promise no
+  trial run backed.
+*/
+
+export const SURVEY_STANDINGS = [
+  /** Named as an undo. Never dispatched from a console. */
+  "must_not_run",
+  /** Two files carry this version, so the ledger can record only one. */
+  "cannot_be_recorded",
+  /** The prime's ledger already has it; it holds nothing back. */
+  "applied",
+  /** Earlier migrations the prime has not run sit in front of it. */
+  "blocked",
+  /** Its own statements forbid a rolled-back trial run here. */
+  "hand_apply",
+  /** Past the size this console reads. */
+  "too_large",
+  /** The body, or the prime's position, could not be read. */
+  "unknown",
+  /** Nothing in the file objects. Whether it APPLIES is still untested. */
+  "needs_a_trial_run",
+] as const;
+
+export type SurveyStanding = (typeof SURVEY_STANDINGS)[number];
+
+export type MigrationSurvey = {
+  id: string;
+  name: string;
+  path: string;
+  standing: SurveyStanding;
+  /** A table cell's worth of words. Never database vocabulary. */
+  note: string;
+  /** What a SECOND run would do — the whole reason the survey reads bodies. */
+  idempotency: Idempotency;
+  statementCount: number | null;
+  bytes: number | null;
+  hazardCount: number;
+  destructiveCount: number;
+  dataRewriteCount: number;
+  /** How many unrun migrations sit in front of it, or null when unknown. */
+  blockedByCount: number | null;
+};
+
+export type SurveyInput = {
+  meta: { id: string; name: string; path: string };
+  collidingNames: readonly string[];
+  alreadyApplied: boolean;
+  blockedBy: readonly string[] | null;
+  body: DiagnosisInput["body"];
+};
+
+/** The standings that mean an operator owes this file something. */
+export const OWED_STANDINGS: ReadonlySet<SurveyStanding> = new Set<SurveyStanding>([
+  "cannot_be_recorded",
+  "blocked",
+  "hand_apply",
+  "too_large",
+  "needs_a_trial_run",
+]);
+
+/**
+ * One migration, read from its own bytes and the prime's ledger — and nothing
+ * else.
+ *
+ * Every field it carries can be computed without a database, which is what
+ * makes it affordable over a whole withheld set. Where it cannot answer it
+ * says `unknown` and names which read failed, because a survey row that read
+ * clean and a survey row nobody could read look identical in a table.
+ */
+export function surveyMigration(input: SurveyInput): MigrationSurvey {
+  const statements = input.body.read ? scanSqlStatements(input.body.sql) : null;
+  const hazards = statements ? hazardsIn(statements) : [];
+  const stop = stopBeforeTrialRun({
+    name: input.meta.name,
+    collidingNames: input.collidingNames,
+    alreadyApplied: input.alreadyApplied,
+    body: input.body,
+    blockedBy: input.blockedBy,
+    hazards,
+  });
+
+  const shaped = {
+    id: input.meta.id,
+    name: input.meta.name,
+    path: input.meta.path,
+    idempotency: assessIdempotency(statements),
+    statementCount: statements ? statements.length : null,
+    bytes: input.body.read ? input.body.bytes : null,
+    hazardCount: hazards.length,
+    destructiveCount: hazards.filter((h) => h.kind === "destructive").length,
+    dataRewriteCount: hazards.filter((h) => h.kind === "data_rewrite").length,
+    blockedByCount: input.blockedBy === null ? null : input.blockedBy.length,
+  };
+
+  const at = (standing: SurveyStanding, note: string): MigrationSurvey => ({
+    ...shaped,
+    standing,
+    note,
+  });
+
+  if (!stop) {
+    return at(
+      "needs_a_trial_run",
+      "Nothing in the file stands in its way. Whether it applies to the prime's schema has not been tested.",
+    );
+  }
+  switch (stop.at) {
+    case "rollback_script":
+      return at("must_not_run", "Named as an undo. It is withheld on purpose.");
+    case "version_collision":
+      return at(
+        "cannot_be_recorded",
+        `Another file carries version ${input.meta.id}, and only one of them can ever be recorded.`,
+      );
+    case "already_applied":
+      return at("applied", "The prime has already run it.");
+    case "oversized":
+      return at("too_large", `Past the size this console reads. ${stop.why}`);
+    case "unread":
+      return at("unknown", `Its body could not be read. ${stop.why}`);
+    case "position_unknown":
+      return at(
+        "unknown",
+        "What the prime has already run could not be established, so this file's position is unknown.",
+      );
+    case "blocked":
+      return at(
+        "blocked",
+        `${stop.versions.length} earlier migration${stop.versions.length === 1 ? "" : "s"} the prime has not run sits in front of it.`,
+      );
+    case "unsafe_to_test":
+      return at(
+        "hand_apply",
+        `Line ${stop.hazard.line} — ${stop.hazard.note}. It goes through the prime's own workflow.`,
+      );
+  }
 }
 
 function catalogueNote(c: DiagnosisInput["catalogue"]): string | null {
