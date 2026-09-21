@@ -1,10 +1,15 @@
 # The prime's migrations could be diagnosed one at a time, and chosen blind
 
-Read this before touching `assessIdempotency`, `surveyMigration`,
-`stopBeforeTrialRun` or `corpusFacts` in
+Read this before touching `assessIdempotency`, `idempotencyWalk`,
+`surveyMigration`, `stopBeforeTrialRun` or `corpusFacts` in
 [`primeMigrationDiagnosis.pure.ts`](../src/server/primeMigrationDiagnosis.pure.ts),
 [`primeMigrationHealth.server.ts`](../src/server/primeMigrationHealth.server.ts),
 or `/prime-migrations`.
+
+**§10 onwards is the repair** — read it before touching
+[`primeMigrationRemedy.pure.ts`](../src/server/primeMigrationRemedy.pure.ts),
+[`primeMigrationRemedy.server.ts`](../src/server/primeMigrationRemedy.server.ts)
+or the `RerunPanel` on `/prime`.
 
 `/prime` already diagnoses ONE migration properly — it reads the file, asks the
 prime's own catalogue about it and tries it inside a transaction that is always
@@ -246,3 +251,259 @@ door or the pure module, and **no `runSqlOnProject` in this feature at all**.
   the page.
 - **It surveys only the withheld set.** A migration the prime has already run is
   not work, and the whole corpus is 1,002 bodies.
+
+---
+
+# The repair: what a reading is worth once something can act on it
+
+`assessIdempotency` answers whether a second run of one of the prime's
+migrations would be a no-op. Over the corpus it answers **`fails_loudly` for
+265 files and `rewrites_data` for 36**, and until this was built that was where
+the surface stopped: a chip, a list of statements, and a person opening an
+editor.
+
+`primeMigrationRemedy.pure.ts` proposes the smallest edit to the file that
+would move it, and `primeMigrationRemedy.server.ts` carries that edit to the
+prime as a pull request. Neither is a second opinion about what is wrong: the
+planner reads `idempotencyWalk` — the same walk the chip reads, imported rather
+than re-implemented — so a statement the page calls broken and a statement the
+repair leaves alone cannot be different statements.
+
+---
+
+## 10 · It edits the FILE, and the run stays the ordinary run
+
+The shorter route is to patch the body in memory and send *that* to the
+database. It would work, once, and it would manufacture precisely the fault
+`scripts/check-applied-digests.mjs` exists to detect — a version in
+`schema_migrations` whose content is not what the repository holds. That check
+measured **two of fifty-five settled rows already drifted**, with nothing
+reporting it.
+
+So the patched text goes to the repository, and `apply-migration.yml` later
+runs the file the repository holds, exactly as it does today. A pull request
+rather than a push, for the rule `autoMergeGate.pure.ts` states about the
+fleet and which is no weaker here: nothing writes to a default branch except
+through a pull request whose checks somebody has actually read. The prime's own
+CI is what reads them.
+
+The loop is therefore: **diagnose → plan → propose → (a person merges) →
+re-diagnose → apply.** Two of those five are this product's, two are GitHub's,
+and the middle one is a person's.
+
+---
+
+## 11 · The line that decides what is refused
+
+> **A repair may never turn a loud failure into a quiet wrong answer, and may
+> never claim a re-runnability it cannot deliver.**
+
+Two families fail that line, and naming them is most of the module's value.
+
+**An unguarded `INSERT`.** The obvious repair is `ON CONFLICT DO NOTHING`.
+Against a table with no unique constraint covering those rows it is legal, it
+never errors, and it **still inserts the duplicate** — so the chip would move to
+`rerunnable` while the behaviour stayed exactly as it was. The module cannot see
+the constraint set from the file, so it cannot tell the sound case from the
+placebo. 62 statements across 36 files.
+
+**`CREATE TYPE`.** There is no `IF NOT EXISTS`, and `DROP TYPE IF EXISTS`
+cascades to every column declared with it. The idiom that does work —
+`DO $$ BEGIN CREATE TYPE … EXCEPTION WHEN duplicate_object THEN NULL; END $$;`
+— wraps the statement in a block this console's own scanner deliberately does
+not read into, so it would move the chip by making the file **less** legible
+rather than safer. 40 statements across 13 files.
+
+`CREATE PUBLICATION` and `CREATE ROLE` are refused on the same footing. Neither
+appears in the prime's corpus today, and they are named rather than left to fall
+through to "no mechanical repair", because an absence with a reason is worth
+more than a silence.
+
+### The edge that was argued rather than assumed
+
+Constraints. Dropping and re-adding one revalidates the table, and a primary or
+unique key another table references cannot be dropped at all — so on a second
+run the file can still stop. It stops **loudly**, having written nothing, which
+is the same band it was already in; it never goes quiet. So the repair is
+offered, with that cost stated on the row rather than discovered in review.
+
+That is the whole of the line: the INSERT repair can go silent, the constraint
+repair cannot.
+
+---
+
+## 12 · Nothing is offered that was not proved
+
+A plan is not a list of intentions. `proveRepair` re-reads the composed patch
+and the plan is **discarded** unless all three hold:
+
+| check | the bug behind it |
+| --- | --- |
+| the bytes account exactly | every edit is an insertion, so anything else means an offset was wrong and something was overwritten |
+| it parses to the statements it had, plus the ones inserted | a guard dropped in the wrong place can leave valid-looking text that splits differently, and a reading taken over the wrong statements is worse than no reading |
+| the flagged count strictly fell | measured with the same module the chip reads, rather than inferred from the fact that repairs were planned |
+
+A plan that fails any of those answers `unproven` and carries no patch.
+
+`proveRepair` is a separate exported function rather than three lines inside the
+planner, and the reason is worth recording: it is the one step whose whole job
+is to catch a bug in the step before it, and **a check that can only be reached
+through the code it is checking is a check nobody can demonstrate**. Planted
+against the shipped planner, removing the branch broke no test, because every
+family it plans happens to be sound. Extracted, each of the three checks fails a
+test when removed.
+
+What no fixture reaches is the planner ignoring the proof entirely — there is no
+valid input whose patch fails it. That branch is pinned on the source instead,
+in `primeMigrationRemedyMounted.test.ts`, which says so rather than dressing a
+source contract up as execution.
+
+---
+
+## 13 · What it reads over the prime's own corpus, 21 Sep 2026
+
+Over the 301 files `assessIdempotency` does not call re-runnable:
+
+```
+  255  every flagged statement has a sound repair      (healed)
+   31  some do, some are refused                       (improved)
+   15  none do                                         (no_repair)
+    0  composed a patch that did not survive its proof (unproven)
+```
+
+```
+ 1,020 / 234  CREATE POLICY   → prepend DROP POLICY IF EXISTS
+   333 /  91  CREATE INDEX    → IF NOT EXISTS
+   222 /  97  CREATE TABLE    → IF NOT EXISTS
+   180 /  99  CREATE TRIGGER  → prepend DROP TRIGGER IF EXISTS
+    28 /  23  ADD COLUMN      → IF NOT EXISTS
+    20 /  18  ADD CONSTRAINT  → prepend DROP CONSTRAINT IF EXISTS
+    62 /  36  INSERT          → refused
+    40 /  13  CREATE TYPE     → refused
+```
+
+Every `healed` file came from `fails_loudly` and none from `rewrites_data`,
+which falls out of the design rather than being coded: a `rewrites_data` file
+always carries the one statement that is refused, so the best it can reach is
+`improved`.
+
+Three of those numbers are load-bearing beyond their size.
+
+- **0 anchor misses over all 1,913 flagged statements.** Every guard repair
+  found the keywords it attaches to in the original bytes. That is what makes
+  surgery on the file defensible rather than hopeful — and where it does not,
+  the statement is refused as `not_located` rather than patched at a guessed
+  offset.
+- **0 pure-insertion failures.** Over every patch the planner composed, the
+  original is a subsequence of the patched text and the lengths account. Nothing
+  was deleted, reordered or reformatted anywhere in the corpus.
+- **1,904 of 1,913 flagged statements are written with UPPER-CASE keywords.**
+  The inserted text takes the case of the keyword it attaches to. That is not a
+  nicety: a lower-case `if not exists` inside `CREATE TABLE` would be visible on
+  every line of every diff a reviewer reads.
+
+### What was proved by execution rather than by reading
+
+A local PostgreSQL 16 was brought up and every repair family driven through it:
+run the original, snapshot the catalogue, run it again; run the patched file,
+snapshot, run it again.
+
+```
+21 / 21  families: the original fails its second run, the patched file
+         applies twice, and one run of it lands a catalogue byte-identical
+         to one run of the original
+14 / 14  real corpus migrations that were self-contained enough to apply on
+         a bare Supabase-shaped database: same result, 0 disagreements
+```
+
+272 of the corpus files were skipped because the **original** could not apply on
+a bare cluster at all — they depend on earlier migrations, Supabase roles and
+extensions this harness does not have. That is a limit of the harness and is
+recorded rather than papered over: the 14 are real, and they are 14.
+
+---
+
+## 14 · The refusals that are about the repository, not the file
+
+`plan.outcome` says whether a sound edit exists. `report.blocked` says whether
+the repository is in a state where proposing it is right. They are separate
+because they answer different questions, and the second one carries the refusal
+worth reading twice:
+
+**A migration the prime has already RUN is never edited.** The instinct is the
+opposite — the whole point is to make a second run safe. But once a version is
+in `schema_migrations` the file will never be dispatched again (the diagnosis
+answers `already_applied` and the dispatch refuses on it), so the repair buys
+nothing; and changing the file makes the repository disagree with the ledger,
+which is the one thing the digest check forbids in as many words.
+
+What the repair is *for* is the withheld set — the migrations the prime has not
+run, which are the ones a clone is sitting behind, which are the ones
+`/prime-migrations` lists. The prime's ledger under-reports by roughly two
+orders of magnitude, so plenty of those have effectively run without being
+recorded; those are unrecorded, the digest check cannot see them either, and
+they are precisely the population that needs to survive a re-run.
+
+The others:
+
+- **A version two files carry.** A repair has to name one file, and a collision
+  means the version does not. The remedy is a rename, which is a person's
+  decision about which is the real migration — and the ledger is not even asked,
+  because its answer could not matter.
+- **A ledger that could not be read, or that reports nothing applied.** Blocked,
+  not allowed: `a read that FAILED is not a row that is ABSENT`, on the one
+  refusal that protects the repository from disagreeing with the database.
+- **A body past the corpus ceiling.** A repair edits the file, and there is
+  nothing to do without reading it.
+
+---
+
+## 15 · One branch per version, and an operator's "no" is not overridden
+
+The branch is `mission-control/migration-repair/<version>` — a function of the
+version alone. A second click finds the open pull request and returns it rather
+than opening a second one; the cascade engine paid for the other behaviour with
+**eight pull requests carrying the same fifty-seven files**.
+
+A branch that exists with *no* open pull request means somebody closed one. That
+is a decision. The act refuses rather than re-proposing, and says which branch
+to delete to start again.
+
+---
+
+## 16 · What crosses to the browser, and what does not
+
+The patched body is removed from the report at the server boundary —
+`RemedyPlanView` is `Omit<RemedyPlan, "patched">`, and the door destructures the
+patch away before the response type exists. Two reasons:
+
+- it is the whole file, up to the corpus ceiling, and a page cannot do anything
+  with it;
+- once it is in the browser it is one edit away from being sent back, which is a
+  request field asserting the server's own conclusion — the pattern IPV 1.1.0
+  was written to forbid, here on a path that ends in a commit.
+
+What the page draws is the capped rows and the exact counts. A test plans a
+thousand-policy file and asserts the serialised report stays under 4 KB while
+the patch is over 60 KB: **the report does not grow with the file.**
+
+The act re-plans from a fresh read and commits the patch it just composed. Between
+an operator reading a plan and clicking, the file may have been edited, the
+version may have been applied, or the repair may have landed already.
+
+---
+
+## 17 · What the repair deliberately does not do
+
+- **It does not run anything.** The confirmation says so in as many words: it
+  changes a file, and the migration still has to be applied afterwards.
+- **It does not merge.** The prime's checks run on the pull request and a person
+  merges it.
+- **It does not repair a file the prime has run**, for §14's reason.
+- **It does not invent a guard for a statement it cannot guard soundly.** Both
+  refusal lists are drawn on the page, because a surface that showed only what it
+  would change would be answering half the question — on 36 of the prime's files
+  the statement that matters is one it refuses to touch.
+- **It does not read inside a `DO` block**, for the same reason the reading does
+  not: that needs a PL/pgSQL parser, and the honest alternative is to count them
+  and say so.

@@ -90,6 +90,27 @@ export type SqlStatement = {
   line: number;
   /** Lower-cased leading words, for matching. Dollar-quoted bodies elided. */
   head: string;
+  /**
+   * `head` with the author's own casing and quoting kept.
+   *
+   * `head` is lower-cased, which is right for matching keywords and wrong for
+   * anything that has to WRITE the object's name back out: this corpus is full
+   * of policies called `"Users can view their own rows"`, and a `DROP POLICY`
+   * composed from the lower-cased form names a policy that does not exist.
+   * Everything else about it is identical — comments gone, whitespace
+   * collapsed, dollar-quoted bodies elided.
+   */
+  headRaw: string;
+  /**
+   * Offset in the ORIGINAL source of the statement's first real character.
+   *
+   * A leading comment is NOT inside the span, deliberately: a repair that
+   * inserts a statement before this one lands under the comment that explains
+   * it rather than between the comment and what it describes.
+   */
+  start: number;
+  /** Offset just past the terminating `;`, or the end of the source. */
+  end: number;
 };
 
 export type HazardKind =
@@ -158,12 +179,21 @@ export function scanSqlStatements(sql: string): SqlStatement[] {
   let head = "";
   let line = 1;
   let startLine = 1;
+  let startAt = 0;
   let started = false;
 
-  const flush = () => {
+  const flush = (endAt: number) => {
     const text = buf.trim();
     if (text) {
-      out.push({ text, line: startLine, head: head.trim().toLowerCase().replace(/\s+/g, " ") });
+      const raw = head.trim().replace(/\s+/g, " ");
+      out.push({
+        text,
+        line: startLine,
+        head: raw.toLowerCase(),
+        headRaw: raw,
+        start: startAt,
+        end: endAt,
+      });
     }
     buf = "";
     head = "";
@@ -239,12 +269,13 @@ export function scanSqlStatements(sql: string): SqlStatement[] {
       continue;
     }
     if (c === ";") {
-      flush();
+      flush(i + 1);
       continue;
     }
     if (!started && !/\s/.test(c)) {
       started = true;
       startLine = line;
+      startAt = i;
     }
     const opened = dollarTagAt(sql, i);
     if (opened) {
@@ -259,7 +290,7 @@ export function scanSqlStatements(sql: string): SqlStatement[] {
     if (c === "'") state = "single";
     else if (c === '"') state = "double";
   }
-  flush();
+  flush(sql.length);
   return out;
 }
 
@@ -688,6 +719,91 @@ const COLLIDE_WORDS: Readonly<Record<string, string>> = {
 };
 
 /**
+ * One statement this reading has something to say about.
+ *
+ * `index` is into the array handed in, so a caller holding the statements can
+ * go back to the one that was flagged — which is what the repair planner needs
+ * and what the chip above deliberately does not carry.
+ */
+export type IdempotencyFlag = {
+  index: number;
+  /** `collides` stops the second run; `rewrites` lets it through and writes. */
+  band: "collides" | "rewrites";
+  /** What the second run would do, in the operator's words. */
+  what: string;
+};
+
+export type IdempotencyWalk = {
+  flags: IdempotencyFlag[];
+  guardedByDrop: number;
+  opaqueBlocks: number;
+};
+
+/**
+ * The walk, once.
+ *
+ * `assessIdempotency` reads this to draw a chip and `planMigrationRepair`
+ * reads it to decide what to change, and neither has a copy of the rule. That
+ * matters more here than it usually does: a planner working off its own idea
+ * of what counts as a collision would offer repairs for statements the chip
+ * calls fine, and — far worse — would leave alone statements the chip calls
+ * broken while the page said the file was healed.
+ *
+ * The notes are UNCAPPED here and capped where they are drawn. A page cannot
+ * carry 1,020 rows; a repair has to see all of them or it is not a repair.
+ */
+export function idempotencyWalk(statements: readonly SqlStatement[]): IdempotencyWalk {
+  const dropped = new Set<string>();
+  const flags: IdempotencyFlag[] = [];
+  let guardedByDrop = 0;
+  let opaqueBlocks = 0;
+
+  statements.forEach((s, index) => {
+    const h = s.head;
+
+    if (OPAQUE_BLOCK.test(h)) {
+      opaqueBlocks += 1;
+      return;
+    }
+
+    const w = DATA_REWRITE.find((x) => x.re.test(h));
+    if (w) {
+      flags.push({ index, band: "rewrites", what: w.what });
+      return;
+    }
+
+    const gone = dropsObject(h);
+    if (gone) {
+      dropped.add(`${gone.kind}:${gone.key}`);
+      return;
+    }
+
+    if (UNGUARDED_DROP.test(h) || ALTER_DROPS_BARE.test(h)) {
+      flags.push({
+        index,
+        band: "collides",
+        what: "removes something that a second run would no longer find",
+      });
+      return;
+    }
+
+    const made = createsObject(h);
+    if (!made) return;
+    if (dropped.has(`${made.kind}:${made.key}`)) {
+      guardedByDrop += 1;
+      return;
+    }
+    flags.push({
+      index,
+      band: "collides",
+      what: COLLIDE_WORDS[made.kind] ?? "creates something that would already be there",
+    });
+  });
+
+  return { flags, guardedByDrop, opaqueBlocks };
+}
+
+/**
  * Whether running this file a second time would be a no-op.
  *
  * Takes null for a body that was never read, so the one place that decides
@@ -709,53 +825,20 @@ export function assessIdempotency(statements: readonly SqlStatement[] | null): I
     };
   }
 
-  const dropped = new Set<string>();
+  const { flags, guardedByDrop, opaqueBlocks } = idempotencyWalk(statements);
+
   const collides: IdempotencyNote[] = [];
   const rewrites: IdempotencyNote[] = [];
   let collideCount = 0;
   let rewriteCount = 0;
-  let guardedByDrop = 0;
-  let opaqueBlocks = 0;
 
-  const note = (into: IdempotencyNote[], s: SqlStatement, what: string) => {
-    if (into.length < IDEMPOTENCY_ROWS) into.push({ what, excerpt: excerpt(s.text), line: s.line });
-  };
-
-  for (const s of statements) {
-    const h = s.head;
-
-    if (OPAQUE_BLOCK.test(h)) {
-      opaqueBlocks += 1;
-      continue;
-    }
-
-    const w = DATA_REWRITE.find((x) => x.re.test(h));
-    if (w) {
-      rewriteCount += 1;
-      note(rewrites, s, w.what);
-      continue;
-    }
-
-    const gone = dropsObject(h);
-    if (gone) {
-      dropped.add(`${gone.kind}:${gone.key}`);
-      continue;
-    }
-
-    if (UNGUARDED_DROP.test(h) || ALTER_DROPS_BARE.test(h)) {
-      collideCount += 1;
-      note(collides, s, "removes something that a second run would no longer find");
-      continue;
-    }
-
-    const made = createsObject(h);
-    if (!made) continue;
-    if (dropped.has(`${made.kind}:${made.key}`)) {
-      guardedByDrop += 1;
-      continue;
-    }
-    collideCount += 1;
-    note(collides, s, COLLIDE_WORDS[made.kind] ?? "creates something that would already be there");
+  for (const f of flags) {
+    const s = statements[f.index];
+    const into = f.band === "collides" ? collides : rewrites;
+    if (f.band === "collides") collideCount += 1;
+    else rewriteCount += 1;
+    if (into.length < IDEMPOTENCY_ROWS)
+      into.push({ what: f.what, excerpt: excerpt(s.text), line: s.line });
   }
 
   const reading: IdempotencyReading =
