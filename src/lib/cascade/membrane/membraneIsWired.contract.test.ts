@@ -157,6 +157,17 @@ describe("the engine asks the membrane", () => {
     expect(block).toMatch(/held:\s*partition\.held/);
   });
 
+  it("records what the carry paid for, not only what the main loop did", () => {
+    // `finalProgress` is the blob ledger the NEXT pass reuses. Its condition
+    // was evaluated above the carry, so a pass whose main loop prepared
+    // nothing and whose carry prepared several recorded none of them and
+    // bought them again next tick.
+    const carry = engine.indexOf("planSubjectCarry({");
+    const ledger = engine.indexOf("const finalProgress:");
+    expect(carry).toBeGreaterThan(-1);
+    expect(ledger).toBeGreaterThan(carry);
+  });
+
   it("answers to the pass's own clock, so carrying cannot overrun a budget", () => {
     const at = engine.indexOf("planSubjectCarry({");
     const block = engine.slice(at, at + 1400);

@@ -2264,13 +2264,6 @@ export async function processClone(args: {
       progress: progress as unknown as Json,
     };
   }
-  // The finished pass's own ledger, carried on the result row so the NEXT
-  // pass — for whatever prime commit — reuses every blob prime still holds.
-  // Real path only; a rehearsal records nothing.
-  const finalProgress: Partial<CascadeResultUpdate> =
-    resume && Object.keys(progress.prepared).length > 0
-      ? { progress: progress as unknown as Json }
-      : {};
   const deliveredSource: Record<string, string> = {};
 
   /**
@@ -2721,6 +2714,20 @@ export async function processClone(args: {
     // carried nor held would loop, and this stops rather than hanging.
     if (round >= maxCarryRounds) break;
   }
+
+  // The finished pass's own ledger, carried on the result row so the NEXT
+  // pass — for whatever prime commit — reuses every blob prime still holds.
+  // Real path only; a rehearsal records nothing.
+  //
+  // AFTER the carry, not before it. The ledger holds what this pass paid for,
+  // and a subject carried in behind a spec is paid for like any other file —
+  // it buys a blob when it is binary. Evaluating the condition above the
+  // carry meant a pass whose main loop prepared nothing and whose carry
+  // prepared several recorded none of them, and bought them again next tick.
+  const finalProgress: Partial<CascadeResultUpdate> =
+    resume && Object.keys(progress.prepared).length > 0
+      ? { progress: progress as unknown as Json }
+      : {};
 
   // A cascade whose only work is a removal is still work. Keying this on
   // `treeEntries` alone would report "already in sync" while the clone still
