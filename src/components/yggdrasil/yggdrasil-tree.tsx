@@ -4,7 +4,7 @@
  * Supports pan & zoom, single-select, and multi-select with range selection.
  */
 
-import { useRef, useState, useEffect, useCallback } from "react";
+import { useRef, useState, useEffect, useCallback, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import type { Clone } from "@/lib/queries";
 import { useTreeLayout, type TreeNode } from "./use-tree-layout";
@@ -16,6 +16,10 @@ import { YGGDRASIL_FILTER_DEFS } from "./tree-filters";
 import { YggdrasilNodePanel } from "./node-detail-panel";
 import { SubtreeStatsPanel } from "./subtree-stats-panel";
 import { MultiSelectComparisonPanel } from "./multi-select-comparison";
+import { MembraneBand } from "./membrane-band";
+import { MembraneDetailPanel } from "./membrane-detail-panel";
+import { resolveMembrane } from "@/lib/cascade/membrane/fleetMembranes.pure";
+import type { Membrane } from "@/lib/cascade/membrane/membrane.pure";
 
 interface Props {
   clones: Clone[];
@@ -67,6 +71,11 @@ export function YggdrasilTree({
 
   // Track the anchor node for Shift range selection
   const shiftAnchorRef = useRef<string | null>(null);
+
+  // Which membrane the operator has opened. Keyed by the EDGE rather than by
+  // the branch index, so a re-layout (a resize, a clone arriving) cannot move
+  // the selection onto a different boundary while the panel stays open.
+  const [selectedEdge, setSelectedEdge] = useState<string | null>(null);
 
   const multiSelectedSet = new Set(multiSelectedIds);
 
@@ -190,6 +199,31 @@ export function YggdrasilTree({
     e.stopPropagation();
   }, []);
 
+  // One membrane per branch, resolved from the two repositories the branch
+  // joins. `resolveMembrane` never refuses an edge it has not measured, so a
+  // clone provisioned tomorrow still draws a band with the standing organs on
+  // it rather than drawing nothing.
+  const membranes = useMemo(
+    () =>
+      layout.branches.map((branch) => ({
+        branch,
+        edge: `${branch.fromRepo}->${branch.toRepo}`,
+        membrane: resolveMembrane(branch.fromRepo, branch.toRepo),
+      })),
+    [layout.branches],
+  );
+
+  const selectedMembrane = selectedEdge
+    ? (membranes.find((m) => m.edge === selectedEdge)?.membrane ?? null)
+    : null;
+
+  const handleMembraneSelect = useCallback((membrane: Membrane) => {
+    setSelectedEdge((current) => {
+      const edge = `${membrane.from}->${membrane.to}`;
+      return current === edge ? null : edge;
+    });
+  }, []);
+
   const showSinglePanel = selectedNode && multiSelectedIds.length === 0;
   const showComparisonPanel = multiSelectedNodes.length >= 2;
 
@@ -284,6 +318,20 @@ export function YggdrasilTree({
             <TreeBranchPath key={i} branch={branch} index={i} />
           ))}
 
+          {/* The membranes sit ON the branches, so they are drawn after them
+              and before the nodes — a node is the destination, and a band
+              painted over one would hide the thing it filters for. */}
+          {membranes.map(({ branch, edge, membrane }, i) => (
+            <MembraneBand
+              key={edge}
+              branch={branch}
+              membrane={membrane}
+              index={i}
+              selected={selectedEdge === edge}
+              onSelect={handleMembraneSelect}
+            />
+          ))}
+
           {layout.nodes.map((node, i) => (
             <TreeNodeCircle
               key={node.id}
@@ -346,6 +394,12 @@ export function YggdrasilTree({
             allNodes={layout.nodes}
             onClose={() => onNodeSelect?.(null)}
           />
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {selectedMembrane && (
+          <MembraneDetailPanel membrane={selectedMembrane} onClose={() => setSelectedEdge(null)} />
         )}
       </AnimatePresence>
 

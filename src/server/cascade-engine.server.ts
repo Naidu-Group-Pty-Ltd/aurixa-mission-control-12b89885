@@ -80,6 +80,9 @@ import {
   cloneOnlyEdgeFunctions,
   securityInventoryHold,
 } from "./cascade/securityInventoryHold.pure";
+import { orphanSpecHold, permeate, strandedSubjects } from "@/lib/cascade/membrane/membrane.pure";
+import { membraneInto } from "@/lib/cascade/membrane/fleetMembranes.pure";
+import { isSpecPath } from "@/lib/cascade/membrane/ionSpecies.pure";
 import { refreshCarrierRows } from "./cascade/carrierRefresh.server";
 import {
   DEPLOY_WORKFLOW_PATH,
@@ -1309,6 +1312,16 @@ export async function processClone(args: {
 
   const isMirror = clone.sync_scope === "mirror";
 
+  // ── The boundary this delivery crosses ───────────────────────────────────
+  //
+  // Keyed on the two repositories, which is what this function holds on both
+  // sides: `primeRef.repo` is already the PARENT'S repository for a clone
+  // routed by lineage, so a child's membrane is the one on ITS edge rather
+  // than the one prime sits behind. An edge the registry does not name
+  // resolves to the standing organs and no new opinion, so every clone that
+  // existed before this behaves exactly as it did.
+  const membrane = membraneInto(clone.github_repo, primeRef.repo);
+
   // Read what this clone is allowed to receive BEFORE deciding anything else.
   //
   // Fail-closed by construction: `requireExclusions` throws when the query
@@ -2013,7 +2026,19 @@ export async function processClone(args: {
       // Reused from the previous pass: no read, no create. The tree
       // comparison already established the path differs, and the list
       // established prime's blob is still the one this was made from.
-      const reusable = known.get(path);
+      //
+      // A SPEC is never reused, and the exception is narrow on purpose. Every
+      // other judgement on this path is a pure function of the file's own
+      // text, so an answer settled in an earlier tick is the same answer now.
+      // The membrane's spec channel is not: whether a spec strands its
+      // subject is a fact about THIS delivery, and a resumed pass carries a
+      // different one. Reuse also sets `content: null`, which takes the file
+      // out of `deliveredSource` — the set that channel reads — so a banked
+      // spec would cross having been judged against a partial delivery and
+      // never re-asked. Specs are a small share of any cascade; the saving
+      // this gives up is a file read, and what it buys is a verdict about the
+      // delivery that is actually being made.
+      const reusable = isSpecPath(path) ? undefined : known.get(path);
       if (reusable !== undefined) {
         return {
           kind: "blob",
@@ -2123,6 +2148,24 @@ export async function processClone(args: {
         });
         if (hold) return { kind: "held", held: hold };
       }
+
+      // ── The membrane on this edge ──────────────────────────────────────
+      //
+      // Here rather than beside `partitionCascadePaths`, for the reason the
+      // backend-identity hold above is here: these are judgements about what
+      // a file SAYS, and the text is in hand exactly once, at this point,
+      // because the pass is about to write it. Asking earlier would buy a
+      // second read of every candidate.
+      if (!primeFile.binary) {
+        const verdict = permeate(membrane, { path, text: primeFile.content });
+        if (verdict.kind === "blocked") return { kind: "held", held: verdict.held };
+      }
+
+      // The spec channel is NOT asked here. Whether a spec strands its subject
+      // is a fact about what this pass WRITES, and this loop is what decides
+      // that — a candidate reaching this line can still be held by the rules
+      // above it, or be the file this very call is about to hold. It is asked
+      // once, below, over the finished delivery.
 
       // Prime's bytes, passed through untouched.
       //
@@ -2500,6 +2543,52 @@ export async function processClone(args: {
           e instanceof Error ? e.message : String(e)
         }`,
       );
+    }
+  }
+
+  // ── The membrane's spec channel, over the FINISHED delivery ────────────
+  //
+  // Here rather than in the prepare loop, and the difference is a defect
+  // rather than a preference. `partition.write` is the CANDIDATE set: a path
+  // in it can still be held by the oversize rule, the workflow rule, the
+  // backend-identity rule or the membrane's own per-file channels. Judging a
+  // spec against the candidates lets it cross beside a subject that was held
+  // three lines later — which is exactly the shape this channel exists to
+  // refuse. By this point every write is decided, including the three
+  // reconciles, so the set is the truth rather than an intention.
+  //
+  // It costs no read. `deliveredSource` already holds the text of every
+  // `.ts`/`.tsx` this pass carries, which is every spec.
+  //
+  // Iterated to a fixed point because removing a spec can in principle strand
+  // another that names it — rare, but a single pass would leave the second one
+  // crossing while asserting about a file that did not. Bounded by the number
+  // of specs in the delivery and terminating because the set only shrinks.
+  for (;;) {
+    const deliveredPaths = new Set(treeEntries.map((t) => t.path));
+    const newlyStranded: Array<{ path: string; held: HeldPath }> = [];
+    for (const [specPath, specText] of Object.entries(deliveredSource)) {
+      const stranded = strandedSubjects({
+        specPath,
+        specText,
+        primeSha: primeShaByPath,
+        cloneSha: cloneShaByPath,
+        crossing: deliveredPaths,
+      });
+      if (stranded.length === 0) continue;
+      newlyStranded.push({
+        path: specPath,
+        held: orphanSpecHold({ membrane, specPath, stranded }),
+      });
+    }
+    if (newlyStranded.length === 0) break;
+    for (const { path: specPath, held } of newlyStranded) {
+      partition.held.push(held);
+      needsReconcile.push(held);
+      delete deliveredSource[specPath];
+      for (let i = treeEntries.length - 1; i >= 0; i -= 1) {
+        if (treeEntries[i].path === specPath) treeEntries.splice(i, 1);
+      }
     }
   }
 
