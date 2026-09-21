@@ -309,12 +309,17 @@ describe("the registry describes the fleet as it is", () => {
     const m = resolveMembrane(PRIME_REPO, "npc-client-dashboard");
     const pumps = m.standing.filter((o) => o.kind === "pump").map((o) => o.name);
     const channels = m.standing.filter((o) => o.kind === "channel").map((o) => o.name);
-    // The pumps are the three reconcilers: each ADDS something prime's file
-    // did not contain, which is what makes them active rather than filters.
+    // The pumps are the reconcilers: each ADDS something prime's file did
+    // not contain, which is what makes them active rather than filters. The
+    // last two arrived when the two security baselines stopped being merely
+    // withheld — a hold leaves the clone's numbers describing the tree it had
+    // before the pass, which is red on a file the cascade declined to write.
     expect(pumps).toEqual([
       "reconcileConfigToml",
       "reconcileSecurityRegistry",
       "reconcileDeployWorkflow",
+      "reconcileSecurityInventory",
+      "reconcileFunctionCountRatchet",
     ]);
     expect(channels).toContain("backendIdentityHold");
     expect(channels).toContain("securityInventoryHold");
@@ -795,9 +800,7 @@ describe("what a spec is allowed to name at all", () => {
   });
 
   it("still names an ordinary subject", () => {
-    expect(subjectsNamedBy(hostile)).toEqual([
-      "supabase/functions/crm-send-message/index.ts",
-    ]);
+    expect(subjectsNamedBy(hostile)).toEqual(["supabase/functions/crm-send-message/index.ts"]);
   });
 });
 
@@ -868,7 +871,12 @@ describe("planSubjectCarry", () => {
     // Sorted rather than input-ordered, so a resumed pass makes progress on
     // the same files instead of a different arbitrary slice each time.
     const shuffled = ["src/z.ts", "src/a.ts", "src/m.ts"];
-    const first = planSubjectCarry({ stranded: shuffled, held: [], attempted: new Set(), limit: 2 });
+    const first = planSubjectCarry({
+      stranded: shuffled,
+      held: [],
+      attempted: new Set(),
+      limit: 2,
+    });
     const again = planSubjectCarry({
       stranded: [...shuffled].reverse(),
       held: [],
@@ -902,7 +910,9 @@ describe("orphanSpecHoldAfterCarry", () => {
       stranded: ["src/x.ts"],
       refused: [],
     });
-    expect(after).toEqual(orphanSpecHold({ membrane, specPath: "src/x.spec.ts", stranded: ["src/x.ts"] }));
+    expect(after).toEqual(
+      orphanSpecHold({ membrane, specPath: "src/x.spec.ts", stranded: ["src/x.ts"] }),
+    );
   });
 
   it("names which rule stopped which subject, in an operator's words", () => {
