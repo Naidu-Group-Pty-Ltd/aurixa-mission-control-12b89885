@@ -36,7 +36,7 @@ const state = {
 function row(over: Partial<Row> = {}): Row {
   return {
     id: "ncd",
-    status: "skipped",
+    status: "pr_opened",
     delivered_sha: OLD,
     completed_at: "2026-09-20T18:00:40Z",
     progress: { cursor: 41 },
@@ -119,7 +119,7 @@ describe("re-offering a finished clone", () => {
     });
     expect(out.refreshed).toBe(1);
     expect(state.rows.find((r) => r.id === "ncd")!.status).toBe("queued");
-    expect(state.rows.find((r) => r.id === "crm")!.status).toBe("skipped");
+    expect(state.rows.find((r) => r.id === "crm")!.status).toBe("pr_opened");
   });
 });
 
@@ -164,7 +164,7 @@ describe("a fault refreshes nothing and says so", () => {
     expect(state.updates).toBe(0);
     // The pass then behaves exactly as it does today, and the next claim asks
     // again — never a carrier retired over a transient fault.
-    expect(state.rows[0].status).toBe("skipped");
+    expect(state.rows[0].status).toBe("pr_opened");
   });
 
   it("a write that failed reports zero rather than the count it attempted", async () => {
