@@ -1691,12 +1691,12 @@ export type Database = {
       }
       clone_backends: {
         Row: {
-          admin_seed: Json | null
           admin_email: string | null
+          admin_seed: Json | null
           anon_key: string | null
           attempts: number
-          clone_id: string
           chunk_cursor: Json | null
+          clone_id: string
           created_at: string
           db_pass: string | null
           edge_functions: Json
@@ -1718,8 +1718,8 @@ export type Database = {
           repair_requested_at: string | null
           repo_retarget: Json | null
           resume_stage: string | null
-          schema_verified_at: string | null
           retry_after: string | null
+          schema_verified_at: string | null
           secret_shells: Json
           service_role_key: string | null
           source_ref: string | null
@@ -1734,12 +1734,12 @@ export type Database = {
           worker_started_at: string | null
         }
         Insert: {
-          admin_seed?: Json | null
           admin_email?: string | null
+          admin_seed?: Json | null
           anon_key?: string | null
           attempts?: number
-          clone_id: string
           chunk_cursor?: Json | null
+          clone_id: string
           created_at?: string
           db_pass?: string | null
           edge_functions?: Json
@@ -1761,8 +1761,8 @@ export type Database = {
           repair_requested_at?: string | null
           repo_retarget?: Json | null
           resume_stage?: string | null
-          schema_verified_at?: string | null
           retry_after?: string | null
+          schema_verified_at?: string | null
           secret_shells?: Json
           service_role_key?: string | null
           source_ref?: string | null
@@ -1777,12 +1777,12 @@ export type Database = {
           worker_started_at?: string | null
         }
         Update: {
-          admin_seed?: Json | null
           admin_email?: string | null
+          admin_seed?: Json | null
           anon_key?: string | null
           attempts?: number
-          clone_id?: string
           chunk_cursor?: Json | null
+          clone_id?: string
           created_at?: string
           db_pass?: string | null
           edge_functions?: Json
@@ -1804,8 +1804,8 @@ export type Database = {
           repair_requested_at?: string | null
           repo_retarget?: Json | null
           resume_stage?: string | null
-          schema_verified_at?: string | null
           retry_after?: string | null
+          schema_verified_at?: string | null
           secret_shells?: Json
           service_role_key?: string | null
           source_ref?: string | null
@@ -2096,15 +2096,160 @@ export type Database = {
           },
         ]
       }
+      clone_convergence_observations: {
+        Row: {
+          clone_id: string
+          clone_sha: string | null
+          compared_count: number
+          created_at: string
+          deletion_candidates: number
+          held_count: number
+          id: string
+          last_converged_at: string | null
+          observed_at: string
+          oversize_held: number
+          owed_count: number
+          owed_fingerprint: string | null
+          owed_sample: string[]
+          prime_sha: string | null
+          scope: string | null
+          slo_minutes: number | null
+          state: string
+          unchanged_since: string | null
+          why: string | null
+        }
+        Insert: {
+          clone_id: string
+          clone_sha?: string | null
+          compared_count?: number
+          created_at?: string
+          deletion_candidates?: number
+          held_count?: number
+          id?: string
+          last_converged_at?: string | null
+          observed_at?: string
+          oversize_held?: number
+          owed_count?: number
+          owed_fingerprint?: string | null
+          owed_sample?: string[]
+          prime_sha?: string | null
+          scope?: string | null
+          slo_minutes?: number | null
+          state: string
+          unchanged_since?: string | null
+          why?: string | null
+        }
+        Update: {
+          clone_id?: string
+          clone_sha?: string | null
+          compared_count?: number
+          created_at?: string
+          deletion_candidates?: number
+          held_count?: number
+          id?: string
+          last_converged_at?: string | null
+          observed_at?: string
+          oversize_held?: number
+          owed_count?: number
+          owed_fingerprint?: string | null
+          owed_sample?: string[]
+          prime_sha?: string | null
+          scope?: string | null
+          slo_minutes?: number | null
+          state?: string
+          unchanged_since?: string | null
+          why?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clone_convergence_observations_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "clone_convergence_observations_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones_missing_isolated_backend"
+            referencedColumns: ["clone_id"]
+          },
+        ]
+      }
+      clone_custodial_acts: {
+        Row: {
+          act: string
+          blockage_id: string | null
+          class: string
+          clone_id: string
+          created_at: string
+          detail: string
+          dry_run: boolean
+          id: string
+          outcome: string
+          reversal: Json | null
+          rows_affected: number
+        }
+        Insert: {
+          act: string
+          blockage_id?: string | null
+          class: string
+          clone_id: string
+          created_at?: string
+          detail: string
+          dry_run?: boolean
+          id?: string
+          outcome: string
+          reversal?: Json | null
+          rows_affected?: number
+        }
+        Update: {
+          act?: string
+          blockage_id?: string | null
+          class?: string
+          clone_id?: string
+          created_at?: string
+          detail?: string
+          dry_run?: boolean
+          id?: string
+          outcome?: string
+          reversal?: Json | null
+          rows_affected?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clone_custodial_acts_blockage_id_fkey"
+            columns: ["blockage_id"]
+            isOneToOne: false
+            referencedRelation: "clone_sync_blockages"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "clone_custodial_acts_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "clone_custodial_acts_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones_missing_isolated_backend"
+            referencedColumns: ["clone_id"]
+          },
+        ]
+      }
       clone_deployments: {
         Row: {
+          attempts: number
+          build_checked_at: string | null
           bundle_artefact: string | null
           bundle_checked_at: string | null
           bundle_identity: string | null
           bundle_identity_detail: string | null
           bundle_resync_artefact: string | null
-          attempts: number
-          build_checked_at: string | null
           clone_id: string
           created_at: string
           dns_target_type: string | null
@@ -2137,13 +2282,13 @@ export type Database = {
           worker_started_at: string | null
         }
         Insert: {
+          attempts?: number
+          build_checked_at?: string | null
           bundle_artefact?: string | null
           bundle_checked_at?: string | null
           bundle_identity?: string | null
           bundle_identity_detail?: string | null
           bundle_resync_artefact?: string | null
-          attempts?: number
-          build_checked_at?: string | null
           clone_id: string
           created_at?: string
           dns_target_type?: string | null
@@ -2176,13 +2321,13 @@ export type Database = {
           worker_started_at?: string | null
         }
         Update: {
+          attempts?: number
+          build_checked_at?: string | null
           bundle_artefact?: string | null
           bundle_checked_at?: string | null
           bundle_identity?: string | null
           bundle_identity_detail?: string | null
           bundle_resync_artefact?: string | null
-          attempts?: number
-          build_checked_at?: string | null
           clone_id?: string
           created_at?: string
           dns_target_type?: string | null
@@ -2776,6 +2921,13 @@ export type Database = {
             isOneToOne: false
             referencedRelation: "clones"
             referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "clone_health_history_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones_missing_isolated_backend"
+            referencedColumns: ["clone_id"]
           },
         ]
       }
@@ -3421,137 +3573,6 @@ export type Database = {
           },
         ]
       }
-      clone_custodial_acts: {
-        Row: {
-          act: string
-          blockage_id: string | null
-          class: string
-          clone_id: string
-          created_at: string
-          detail: string
-          dry_run: boolean
-          id: string
-          outcome: string
-          reversal: Json | null
-          rows_affected: number
-        }
-        Insert: {
-          act: string
-          blockage_id?: string | null
-          class: string
-          clone_id: string
-          created_at?: string
-          detail: string
-          dry_run?: boolean
-          id?: string
-          outcome: string
-          reversal?: Json | null
-          rows_affected?: number
-        }
-        Update: {
-          act?: string
-          blockage_id?: string | null
-          class?: string
-          clone_id?: string
-          created_at?: string
-          detail?: string
-          dry_run?: boolean
-          id?: string
-          outcome?: string
-          reversal?: Json | null
-          rows_affected?: number
-        }
-        Relationships: [
-          {
-            foreignKeyName: "clone_custodial_acts_clone_id_fkey"
-            columns: ["clone_id"]
-            isOneToOne: false
-            referencedRelation: "clones"
-            referencedColumns: ["id"]
-          },
-          {
-            foreignKeyName: "clone_custodial_acts_blockage_id_fkey"
-            columns: ["blockage_id"]
-            isOneToOne: false
-            referencedRelation: "clone_sync_blockages"
-            referencedColumns: ["id"]
-          },
-        ]
-      }
-      clone_convergence_observations: {
-        Row: {
-          clone_id: string
-          clone_sha: string | null
-          compared_count: number
-          created_at: string
-          deletion_candidates: number
-          held_count: number
-          id: string
-          last_converged_at: string | null
-          observed_at: string
-          oversize_held: number
-          owed_count: number
-          owed_fingerprint: string | null
-          owed_sample: string[]
-          prime_sha: string | null
-          scope: string | null
-          slo_minutes: number | null
-          state: string
-          unchanged_since: string | null
-          why: string | null
-        }
-        Insert: {
-          clone_id: string
-          clone_sha?: string | null
-          compared_count?: number
-          created_at?: string
-          deletion_candidates?: number
-          held_count?: number
-          id?: string
-          last_converged_at?: string | null
-          observed_at?: string
-          oversize_held?: number
-          owed_count?: number
-          owed_fingerprint?: string | null
-          owed_sample?: string[]
-          prime_sha?: string | null
-          scope?: string | null
-          slo_minutes?: number | null
-          state: string
-          unchanged_since?: string | null
-          why?: string | null
-        }
-        Update: {
-          clone_id?: string
-          clone_sha?: string | null
-          compared_count?: number
-          created_at?: string
-          deletion_candidates?: number
-          held_count?: number
-          id?: string
-          last_converged_at?: string | null
-          observed_at?: string
-          oversize_held?: number
-          owed_count?: number
-          owed_fingerprint?: string | null
-          owed_sample?: string[]
-          prime_sha?: string | null
-          scope?: string | null
-          slo_minutes?: number | null
-          state?: string
-          unchanged_since?: string | null
-          why?: string | null
-        }
-        Relationships: [
-          {
-            foreignKeyName: "clone_convergence_observations_clone_id_fkey"
-            columns: ["clone_id"]
-            isOneToOne: false
-            referencedRelation: "clones"
-            referencedColumns: ["id"]
-          },
-        ]
-      }
       clone_sync_blockages: {
         Row: {
           class: string
@@ -3602,6 +3623,13 @@ export type Database = {
             isOneToOne: false
             referencedRelation: "clones"
             referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "clone_sync_blockages_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones_missing_isolated_backend"
+            referencedColumns: ["clone_id"]
           },
         ]
       }
@@ -3865,6 +3893,13 @@ export type Database = {
             isOneToOne: false
             referencedRelation: "clones"
             referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "clones_parent_clone_id_fkey"
+            columns: ["parent_clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones_missing_isolated_backend"
+            referencedColumns: ["clone_id"]
           },
         ]
       }
@@ -9238,15 +9273,15 @@ export type Database = {
       }
       prime_config: {
         Row: {
+          cascade_follows_lineage: boolean
           clone_gate_default_hours: number
           clone_gate_enabled: boolean
-          cascade_follows_lineage: boolean
           codex_nightly_cron: string
-          convergence_slo_minutes: number
           codex_nightly_enabled: boolean
           codex_post_merge_revalidate: boolean
           codex_pr_scan_enabled: boolean
           codex_scan_dedup_hours: number
+          convergence_slo_minutes: number
           created_at: string
           default_branch: string
           default_cascade_mode: Database["public"]["Enums"]["cascade_mode"]
@@ -9260,15 +9295,15 @@ export type Database = {
           updated_at: string
         }
         Insert: {
+          cascade_follows_lineage?: boolean
           clone_gate_default_hours?: number
           clone_gate_enabled?: boolean
-          cascade_follows_lineage?: boolean
           codex_nightly_cron?: string
-          convergence_slo_minutes?: number
           codex_nightly_enabled?: boolean
           codex_post_merge_revalidate?: boolean
           codex_pr_scan_enabled?: boolean
           codex_scan_dedup_hours?: number
+          convergence_slo_minutes?: number
           created_at?: string
           default_branch?: string
           default_cascade_mode?: Database["public"]["Enums"]["cascade_mode"]
@@ -9282,15 +9317,15 @@ export type Database = {
           updated_at?: string
         }
         Update: {
+          cascade_follows_lineage?: boolean
           clone_gate_default_hours?: number
           clone_gate_enabled?: boolean
-          cascade_follows_lineage?: boolean
           codex_nightly_cron?: string
-          convergence_slo_minutes?: number
           codex_nightly_enabled?: boolean
           codex_post_merge_revalidate?: boolean
           codex_pr_scan_enabled?: boolean
           codex_scan_dedup_hours?: number
+          convergence_slo_minutes?: number
           created_at?: string
           default_branch?: string
           default_cascade_mode?: Database["public"]["Enums"]["cascade_mode"]
@@ -12849,6 +12884,13 @@ export type Database = {
             referencedRelation: "clones"
             referencedColumns: ["id"]
           },
+          {
+            foreignKeyName: "clone_health_history_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones_missing_isolated_backend"
+            referencedColumns: ["clone_id"]
+          },
         ]
       }
       clones_missing_isolated_backend: {
@@ -13475,7 +13517,6 @@ export type Database = {
         | "security_finding_created"
         | "security_retest_requested"
         | "security_assessment_closed"
-        | "deployment_bundle_identity"
         | "deployment_live"
         | "deployment_failed"
         | "deployment_domain_pending"
@@ -13496,6 +13537,7 @@ export type Database = {
         | "crm_appointment_booked"
         | "clone_announcement_published"
         | "clone_announcement_archived"
+        | "deployment_bundle_identity"
       notification_severity: "info" | "success" | "warning" | "error"
       overage_policy: "block" | "topup_only" | "pay_as_you_go"
       provisioning_method: "fork" | "template" | "clone"
@@ -13991,6 +14033,7 @@ export const Constants = {
         "crm_appointment_booked",
         "clone_announcement_published",
         "clone_announcement_archived",
+        "deployment_bundle_identity",
       ],
       notification_severity: ["info", "success", "warning", "error"],
       overage_policy: ["block", "topup_only", "pay_as_you_go"],
