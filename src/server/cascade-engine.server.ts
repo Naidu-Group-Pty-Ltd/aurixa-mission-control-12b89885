@@ -2603,7 +2603,20 @@ export async function processClone(args: {
   const inventoryHold = securityInventoryHold(cloneOwnedFunctions);
   const ratchetHold = functionCountRatchetHold(cloneOwnedFunctions);
 
-  if (inventoryHold || ratchetHold) {
+  if ((inventoryHold || ratchetHold) && mode === "notify") {
+    // A notify pass writes nothing and reconciles nothing, so it reads
+    // nothing either: both holds stand exactly as they did before any of this
+    // existed, rather than gaining a sentence about inputs nobody tried to
+    // read. `mode === "notify" && !dryRun` has already returned far above;
+    // this is the rehearsal of one, and a rehearsal that spends three API
+    // reads to reach a foregone hold is three reads.
+    for (const held of [inventoryHold, ratchetHold]) {
+      if (!held) continue;
+      dropFromTree(held.path);
+      partition.held.push(held);
+      needsReconcile.push(held);
+    }
+  } else if (inventoryHold || ratchetHold) {
     // Every path this repository holds once the pass lands, and the subset
     // the pass writes — the two together are what say which side supplied
     // each file's content. `treeEntries` is the delivery composed so far; the
