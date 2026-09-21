@@ -1,6 +1,14 @@
 /**
- * `docs/security/SECURITY_INVENTORY.json` is a repository invariant, and on
- * one kind of clone it must not be written anyway.
+ * TWO FILES STATE THIS REPOSITORY'S OWN EDGE-FUNCTION SET, and on one kind of
+ * clone neither may be written from the prime's copy.
+ *
+ * `docs/security/SECURITY_INVENTORY.json` is a repository invariant, and
+ * `src/lib/security/auditRemediation.spec.ts` asserts how many functions
+ * `config.toml` declares. They are the same species — a static count of the
+ * repository they sit in — and the second was missed when the first was
+ * guarded, which is how a person's restoration came to be reverted by the
+ * very next pass. The reasoning below is written about the baseline and holds
+ * for both; `functionCountRatchetHold` is the sibling it earned.
  *
  * ## Why it travels at all
  *
@@ -61,8 +69,25 @@
 
 import type { HeldPath } from "./syncExclusions.pure";
 
-/** The one path this module has an opinion about. */
+/** The generated baseline: a static analysis of one repository's edge functions. */
 export const SECURITY_INVENTORY_PATH = "docs/security/SECURITY_INVENTORY.json";
+
+/**
+ * The spec that asserts how many functions `config.toml` declares.
+ *
+ * The same species as the baseline above, found the same way and missed for
+ * the same reason. Measured on `npc-crm-independent`, 21 Sep 2026: prime's
+ * copy and this clone's differ by ONE INTEGER across 245 lines —
+ * `expect(declared.length).toBe(413)` against `toBe(416)` — and the cascade
+ * lists the file as `modified`, so every pass replaces a count of THIS
+ * repository's functions with a count of prime's.
+ *
+ * That is what the restoration in PR #15 was undone by once already, under a
+ * commit named "The cascade brought what asserts and left behind what is
+ * asserted". `securityInventoryHold` guards one of the two files that state
+ * this clone's own function set; this guards the other.
+ */
+export const FUNCTION_COUNT_RATCHET_PATH = "src/lib/security/auditRemediation.spec.ts";
 
 /**
  * Whether prime's baseline may be written over this clone's.
@@ -84,6 +109,41 @@ export function securityInventoryHold(cloneOwnedFunctions: readonly string[]): H
       `so the prime's security baseline is a static analysis of a different repository. The ` +
       `clone's own copy is kept. Where it later goes stale, \`npm run security:inventory\` ` +
       `regenerates it from this repository.`,
+  };
+}
+
+/**
+ * Whether prime's function-count ratchet may be written over this clone's.
+ *
+ * The same evidence, deliberately: a clone owning functions prime has never
+ * had declares more of them, so prime's number is a statement about a
+ * different repository. A mirror carries nothing forward and keeps today's
+ * behaviour exactly, which is what makes this safe to add to every edge at
+ * once.
+ *
+ * ## What this does NOT do, stated because it would otherwise be assumed
+ *
+ * It does not make the proposal green. The count the spec asserts has to
+ * match what the MERGED `config.toml` declares, and the merge adds prime's
+ * new declarations to this clone's own — so holding leaves the clone's 416
+ * against a merged 417 and `verify` stays red, one apart instead of four.
+ * What it buys is that the number still describes this repository and a
+ * person's correction is not silently reverted; `reconcileFunctionCountRatchet`
+ * is what closes the remaining gap.
+ */
+export function functionCountRatchetHold(cloneOwnedFunctions: readonly string[]): HeldPath | null {
+  const owned = [...new Set(cloneOwnedFunctions)].sort();
+  if (owned.length === 0) return null;
+  return {
+    path: FUNCTION_COUNT_RATCHET_PATH,
+    pattern: "(content: a count of this repository's own functions)",
+    reason: "manual_reconcile",
+    note:
+      `This spec asserts how many functions \`supabase/config.toml\` declares, and this clone ` +
+      `declares ${owned.length} the prime does not (${owned.join(", ")}). The prime's copy ` +
+      `states the prime's count, so it is not brought across — the two differ by that one ` +
+      `number and nothing else. Where the merged config later declares more, the assertion ` +
+      `is the number to update.`,
   };
 }
 

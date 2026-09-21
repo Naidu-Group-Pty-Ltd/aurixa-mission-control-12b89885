@@ -122,6 +122,12 @@ const STANDING: readonly StandingOrgan[] = [
   },
   {
     kind: "channel",
+    name: "functionCountRatchetHold",
+    where: "securityInventoryHold.pure.ts",
+    does: "Refuses the prime's function-count assertion on the same evidence — the baseline's sibling, and the one a person's restoration was reverted through.",
+  },
+  {
+    kind: "channel",
     name: "judgingWorkflowHold",
     where: "judgingWorkflow.pure.ts",
     does: "Refuses a workflow that judges the whole repository where this clone receives only part of one.",

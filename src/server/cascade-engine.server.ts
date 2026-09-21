@@ -76,8 +76,10 @@ import {
   reconcileSecurityRegistry,
 } from "./cascade/securityRegistryReconcile.pure";
 import {
+  FUNCTION_COUNT_RATCHET_PATH,
   SECURITY_INVENTORY_PATH,
   cloneOnlyEdgeFunctions,
+  functionCountRatchetHold,
   securityInventoryHold,
 } from "./cascade/securityInventoryHold.pure";
 import {
@@ -2491,6 +2493,25 @@ export async function processClone(args: {
     dropFromTree(SECURITY_INVENTORY_PATH);
     partition.held.push(inventoryHold);
     needsReconcile.push(inventoryHold);
+  }
+
+  // The baseline's sibling, on the same evidence and for the same reason.
+  //
+  // `auditRemediation.spec.ts` asserts the number of functions `config.toml`
+  // declares, so the prime's copy states the PRIME'S count. Measured on
+  // `npc-crm-independent`: the two files differ by that one integer across
+  // 245 lines, and the cascade was listing it as `modified` — replacing a
+  // person's restoration with a number about a different repository, one pass
+  // after they made it.
+  //
+  // Held rather than merged here deliberately: this is the narrow change, and
+  // it leaves the count one apart from the merged config rather than four.
+  // `reconcileFunctionCountRatchet` is what makes them agree.
+  const ratchetHold = functionCountRatchetHold(cloneOwnedFunctions);
+  if (ratchetHold) {
+    dropFromTree(FUNCTION_COUNT_RATCHET_PATH);
+    partition.held.push(ratchetHold);
+    needsReconcile.push(ratchetHold);
   }
 
   // ── the deploy workflow: the same shape, found the same way ────────────

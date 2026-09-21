@@ -320,10 +320,30 @@ export function declarationsLostBy(cloneToml: string, candidate: string): string
  * part of THAT block\u2019s body and dropped with it — the composition is rebuilt
  * from prime\u2019s file every time, so the marker cannot accumulate. Pinned by an
  * idempotence test rather than left to be believed.
+ *
+ * ## The placeholder is `<name>` and may never again be `X`
+ *
+ * It read `[functions.X]` until 21 Sep 2026, and that is a DECLARATION to
+ * anything counting them loosely. `auditRemediation.spec.ts` on every clone
+ * counts with
+ *
+ *     /\[functions\.([A-Za-z0-9_-]+)\][^[]*?verify_jwt\s*=\s*(true|false)/gs
+ *
+ * — unanchored, and `[^[]*?` runs happily through prose — so
+ * `[functions.X] block is read by the CLI as verify_jwt = true` matched
+ * ENTIRELY INSIDE THIS COMMENT and counted a function called `X`. Measured on
+ * the open proposal for `npc-crm-independent`: the reconciled file declares
+ * 417 and that spec counted 418, so the ratchet meant to catch a function
+ * slipping in undeclared was itself tripped by this module's prose.
+ *
+ * `<` is outside `[A-Za-z0-9_-]`, so the regex cannot begin a match here at
+ * all. `declaredFunctionCount` below was never fooled — it anchors to the
+ * line — which is exactly why the disagreement showed up as an unexplained
+ * off-by-one rather than as a wrong count anybody could see.
  */
 export const CLONE_OWNED_MARKER =
   "# Declared by this clone for functions the prime does not have. An omitted\n" +
-  "# [functions.X] block is read by the CLI as verify_jwt = true.";
+  "# [functions.<name>] block is read by the CLI as verify_jwt = true.";
 
 /**
  * How many `[functions.X]` blocks a config.toml declares.

@@ -387,3 +387,58 @@ describe("the read-back on the declarations", () => {
     expect(body).toContain("if (lost.length > 0)");
   });
 });
+
+describe("the marker is prose, and prose may not read as a declaration", () => {
+  /**
+   * THE CLONE'S OWN RATCHET, transcribed from
+   * `src/lib/security/auditRemediation.spec.ts` on every clone in this fleet.
+   *
+   * Restated here rather than imported because it lives in a different
+   * repository, and it is the rule that matters: unanchored, and `[^[]*?`
+   * runs through prose, so anything shaped like `[functions.NAME] … verify_jwt
+   * = true` counts — comment or not.
+   */
+  const RATCHET = /\[functions\.([A-Za-z0-9_-]+)\][^[]*?verify_jwt\s*=\s*(true|false)/gs;
+
+  const ratchetCount = (toml: string) => [...toml.matchAll(RATCHET)].length;
+
+  it("counts nothing inside the marker itself", () => {
+    // It read `[functions.X]` until 21 Sep 2026 and this was 1.
+    expect(ratchetCount(CLONE_OWNED_MARKER)).toBe(0);
+  });
+
+  it("makes the two counting rules agree on a reconciled file", () => {
+    // The property that actually matters, asserted end to end rather than on
+    // the string: `declaredFunctionCount` anchors to the line and was never
+    // fooled, so a disagreement here is prose being read as a declaration.
+    // CRM_CLONE, because only a clone that owns functions prime does not
+    // causes the marker to be written at all — on a mirror there is no prose
+    // to be misread and the assertion would pass vacuously.
+    const verdict = reconcileConfigToml({
+      primeToml: PRIME,
+      cloneToml: CRM_CLONE,
+      ownRef: CLONE_REF,
+    });
+    expect(verdict.ok).toBe(true);
+    if (!verdict.ok) return;
+    expect(verdict.merged).toContain(CLONE_OWNED_MARKER);
+    expect(verdict.carriedForward.length).toBeGreaterThan(0);
+    expect(ratchetCount(verdict.merged)).toBe(declaredFunctionCount(verdict.merged));
+  });
+
+  it("still says what an omitted block means, which is why it is written at all", () => {
+    // Narrowing the placeholder must not cost the warning. An omitted block
+    // is read as `verify_jwt = true`, and that is the whole point of the line.
+    expect(CLONE_OWNED_MARKER).toContain("verify_jwt = true");
+    expect(CLONE_OWNED_MARKER).toContain("omitted");
+    expect(CLONE_OWNED_MARKER).toContain("functions.");
+  });
+
+  it("uses a placeholder the ratchet's character class cannot start on", () => {
+    // Stated as the defect rather than as the fix: any placeholder drawn from
+    // [A-Za-z0-9_-] brings the phantom back, whatever it is called.
+    const placeholder = CLONE_OWNED_MARKER.match(/\[functions\.(.{1,20}?)\]/)?.[1];
+    expect(placeholder).toBeDefined();
+    expect(placeholder).not.toMatch(/^[A-Za-z0-9_-]+$/);
+  });
+});

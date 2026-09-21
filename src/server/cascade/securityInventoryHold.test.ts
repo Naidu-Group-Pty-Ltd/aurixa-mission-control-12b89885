@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import {
+  FUNCTION_COUNT_RATCHET_PATH,
   SECURITY_INVENTORY_PATH,
   cloneOnlyEdgeFunctions,
   edgeFunctionNames,
+  functionCountRatchetHold,
   securityInventoryHold,
 } from "./securityInventoryHold.pure";
 import { REPOSITORY_INVARIANTS } from "./repositoryInvariants.pure";
@@ -209,5 +211,84 @@ describe("the engine reads the tree before it decides", () => {
     const hold = engine.indexOf("securityInventoryHold(cloneOwnedFunctions)");
     expect(tree).toBeGreaterThan(registry);
     expect(hold).toBeGreaterThan(tree);
+  });
+});
+
+describe("the baseline's sibling — the function-count ratchet", () => {
+  it("lets it travel to a mirror, exactly as the baseline does", () => {
+    // A mirror declares what prime declares, so prime's number is this
+    // repository's number and withholding it would freeze the spec for no
+    // reason. Same conditional, same evidence, same default.
+    expect(functionCountRatchetHold([])).toBeNull();
+  });
+
+  it("withholds it from a clone that declares functions prime has never had", () => {
+    const held = functionCountRatchetHold(["crm-send-message", "crm-calendar"]);
+    expect(held).not.toBeNull();
+    expect(held?.path).toBe(FUNCTION_COUNT_RATCHET_PATH);
+    expect(held?.reason).toBe("manual_reconcile");
+  });
+
+  it("names the functions that make the two counts differ", () => {
+    const held = functionCountRatchetHold(["crm-send-message", "crm-calendar"]);
+    expect(held?.note).toContain("crm-calendar, crm-send-message");
+    expect(held?.note).toContain("supabase/config.toml");
+  });
+
+  it("fires on exactly the evidence the baseline fires on", () => {
+    // Not a restatement: the whole point is that one file was guarded and its
+    // sibling was not, so a future change that narrows one must narrow both
+    // or be seen to.
+    for (const owned of [[], ["a"], ["a", "b"], ["crm-calendar"]]) {
+      expect(functionCountRatchetHold(owned) === null).toBe(securityInventoryHold(owned) === null);
+    }
+  });
+
+  it("is a different file from the baseline, or it guards nothing new", () => {
+    expect(FUNCTION_COUNT_RATCHET_PATH).not.toBe(SECURITY_INVENTORY_PATH);
+  });
+
+  it("does not claim to make the proposal green", () => {
+    // The merged config adds prime's new declarations to this clone's own, so
+    // a held number is one apart rather than in agreement. Saying otherwise in
+    // the note would send an operator to look for a passing check.
+    const held = functionCountRatchetHold(["crm-calendar"]);
+    expect(held?.note).not.toMatch(/\bgreen\b|will pass|now matches/i);
+    expect(held?.note).toContain("the number to update");
+  });
+
+  it("counts each function once and reports them in a stable order", () => {
+    const a = functionCountRatchetHold(["b", "a", "b"]);
+    const b = functionCountRatchetHold(["a", "b"]);
+    expect(a?.note).toBe(b?.note);
+  });
+});
+
+describe("how the engine uses the ratchet hold", () => {
+  const engine = stripComments(readFileSync("src/server/cascade-engine.server.ts", "utf8"));
+
+  it("decides it from the same reconciled evidence, after both reconciles", () => {
+    const registry = engine.indexOf("reconcileSecurityRegistry({");
+    const hold = engine.indexOf("functionCountRatchetHold(cloneOwnedFunctions)");
+    expect(registry).toBeGreaterThan(-1);
+    expect(hold).toBeGreaterThan(registry);
+  });
+
+  it("removes prime's copy from the tree rather than only reporting it", () => {
+    // Reporting alone is what the cascade did for a fortnight: the file was
+    // listed as `modified` and the count was replaced anyway.
+    const at = engine.indexOf("functionCountRatchetHold(cloneOwnedFunctions)");
+    expect(at).toBeGreaterThan(-1);
+    const block = engine.slice(at, at + 400);
+    expect(block).toContain("dropFromTree(FUNCTION_COUNT_RATCHET_PATH)");
+    expect(block).toContain("partition.held.push(ratchetHold)");
+    expect(block).toContain("needsReconcile.push(ratchetHold)");
+  });
+
+  it("reaches an operator, because a silent hold is the defect it replaces", () => {
+    const held = functionCountRatchetHold(["crm-calendar"]);
+    expect(held).not.toBeNull();
+    expect(reportableHeld([held!])).toHaveLength(1);
+    expect(approvableHeld([held!])).toHaveLength(1);
   });
 });
