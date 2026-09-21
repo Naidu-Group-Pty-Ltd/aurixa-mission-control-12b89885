@@ -510,6 +510,16 @@ rule catching it by luck rather than the rule that governs it. The carry is
 partitioned through the same function over the same exclusions, so a protected
 path is protected whether the clone installs the module it lives in or not.
 
+**And a spec may not name a path outside the five top-level directories, or
+one with a `..` segment in it.** The prefix rule was already there and refuses
+`/etc/…`, `../…`, `.github/workflows/…` and root-level lockfiles — measured
+against the real function, not reasoned about. `src/../../etc/passwd.conf`
+satisfies it. Nothing downstream would have carried that, because a git tree
+listing holds no `..` segment so it matches neither side and `strandedSubjects`
+drops it — which is protection by consequence rather than by rule, on the one
+place in the cascade where model-written prose becomes a filesystem path. It is
+refused at the source now.
+
 **A subject an existing rule already holds is never released by this.**
 `planSubjectCarry` is handed the live partition and returns its refusals
 rather than dropping them, so a `protected`, `oversize` or unapproved

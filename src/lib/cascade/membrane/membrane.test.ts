@@ -764,6 +764,43 @@ describe("the edge into a repository is decided by that repository", () => {
   });
 });
 
+describe("what a spec is allowed to name at all", () => {
+  // The text this reads is model-written, so it is the one place in the
+  // cascade where prose becomes a filesystem path. Measured against the real
+  // function rather than reasoned about.
+  const hostile = [
+    'import x from "src/../../etc/passwd.conf";',
+    'const p = "../../../root/.ssh/id_rsa.pub";',
+    'const q = "/etc/shadow.conf";',
+    'readFileSync(".github/workflows/ci.yml")',
+    'readFileSync("package-lock.json")',
+    'readFileSync("src/a/../b.ts")',
+    'readFileSync("supabase/functions/crm-send-message/index.ts")',
+  ].join("\n");
+
+  it("refuses anything outside the five top-level directories", () => {
+    const named = subjectsNamedBy(hostile);
+    expect(named).not.toContain("/etc/shadow.conf");
+    expect(named).not.toContain("../../../root/.ssh/id_rsa.pub");
+    expect(named).not.toContain(".github/workflows/ci.yml");
+    expect(named).not.toContain("package-lock.json");
+  });
+
+  it("refuses a traversal segment even under an allowed prefix", () => {
+    // `src/../../etc/passwd.conf` satisfies the prefix rule. Nothing
+    // downstream would have carried it — a git tree listing contains no `..`
+    // so it matches neither side — but that is protection by consequence.
+    const named = subjectsNamedBy(hostile);
+    expect(named.filter((p) => p.split("/").includes(".."))).toEqual([]);
+  });
+
+  it("still names an ordinary subject", () => {
+    expect(subjectsNamedBy(hostile)).toEqual([
+      "supabase/functions/crm-send-message/index.ts",
+    ]);
+  });
+});
+
 describe("planSubjectCarry", () => {
   const held = (path: string, reason: ExclusionReason): HeldPath => ({
     path,

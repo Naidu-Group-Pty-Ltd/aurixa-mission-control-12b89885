@@ -178,6 +178,16 @@ export function permeate(
  * directory AND carrying a file extension counts: `scripts/template-library`
  * is a directory the specs also mention, and treating it as a subject would
  * strand a spec on a path no delivery ever carries as one file.
+ *
+ * And no `..` segment, which is the one bound here that is about safety
+ * rather than accuracy. The text this reads is written by a model, so it is
+ * the one place in the cascade where prose becomes a filesystem path; the
+ * prefix rule already refuses `/etc/…`, `../…` and `.github/workflows/…`,
+ * but `src/../../etc/passwd.conf` satisfies it. Nothing downstream would have
+ * carried that — a git tree listing contains no `..` segment, so it matches
+ * neither side and `strandedSubjects` drops it — which is protection by
+ * consequence rather than by rule, and this repository's own habit is to
+ * assert a property rather than inherit it from something nobody stated.
  */
 export function subjectsNamedBy(text: string): string[] {
   const found = new Set<string>();
@@ -209,7 +219,7 @@ export function subjectsNamedBy(text: string): string[] {
     found.add([m[1], ...tail].join("/"));
   }
 
-  return [...found].sort();
+  return [...found].filter((path) => !path.split("/").includes("..")).sort();
 }
 
 /**
