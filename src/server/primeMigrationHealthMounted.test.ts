@@ -161,11 +161,20 @@ describe("a list may not promise what a trial run did not", () => {
       the typecheck rather than rendering as `must_not_run` — but a word can
       still be translated INTO an identifier, which the compiler cannot see.
     */
+    /*
+      `RERUN_WORDS` moved to `src/lib/migrationRepairLabels.ts` when the repair
+      surface started drawing the same chip on `/prime`: two tables of the same
+      words is how two pages come to disagree about one migration. It is looked
+      for in both places rather than in one, so this keeps checking the words
+      wherever they end up living.
+    */
     const page = code(PAGE);
+    const labels = code("src/lib/migrationRepairLabels.ts");
     for (const map of ["STANDING_WORDS", "RERUN_WORDS"]) {
-      const start = page.indexOf(`const ${map}`);
+      const src = page.includes(`const ${map}`) ? page : labels;
+      const start = src.indexOf(`const ${map}`);
       expect(start).toBeGreaterThan(-1);
-      const body = page.slice(start, page.indexOf("};", start));
+      const body = src.slice(start, src.indexOf("};", start));
       const rendered = [...body.matchAll(/:\s*"([^"]+)"/g)].map((m) => m[1]);
       expect(rendered.length).toBeGreaterThan(3);
       expect(rendered.filter((w) => /^[a-z]+(_[a-z]+)+$/.test(w))).toEqual([]);

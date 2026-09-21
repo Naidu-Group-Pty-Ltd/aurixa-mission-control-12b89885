@@ -58,6 +58,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
+import { RERUN_TONE, RERUN_WORDS } from "@/lib/migrationRepairLabels";
 import { fetchPrimeCorpusHealth } from "@/server/prime-migration-health.functions";
 // Types only, through the server-function door. A route is bundled for the
 // browser, so importing `src/server/**` for a VALUE is refused — correctly.
@@ -386,7 +387,9 @@ function SurveyRow({ survey }: { survey: MigrationSurvey }) {
           search={{ migration: survey.id }}
           className="ml-auto text-[10px] whitespace-nowrap text-muted-foreground underline underline-offset-2"
         >
-          Diagnose
+          {rerun.reading === "fails_loudly" || rerun.reading === "rewrites_data"
+            ? "Diagnose & repair"
+            : "Diagnose"}
         </Link>
       </div>
 
@@ -602,20 +605,6 @@ const STANDING_TONE: Record<SurveyStanding, SafetyTone> = {
   // Amber rather than green: nothing has tried it, and a green row on a page
   // that never opened a database would be a promise nobody made.
   needs_a_trial_run: "warn",
-};
-
-const RERUN_WORDS: Record<IdempotencyReading, string> = {
-  rerunnable: "changes nothing",
-  fails_loudly: "stops on its own",
-  rewrites_data: "writes rows again",
-  unreadable: "not measured",
-};
-
-const RERUN_TONE: Record<IdempotencyReading, SafetyTone> = {
-  rerunnable: "ok",
-  fails_loudly: "idle",
-  rewrites_data: "bad",
-  unreadable: "idle",
 };
 
 /** A read that failed, said as one rather than drawn as an empty list. */

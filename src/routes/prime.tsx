@@ -33,6 +33,7 @@ import {
   GitCommitHorizontal,
   GitPullRequest,
   PlayCircle,
+  Wrench,
   RefreshCw,
   Stethoscope,
   ShieldQuestion,
@@ -62,7 +63,17 @@ import { fetchCloneComparison, fetchPrimeMigrationLedger } from "@/server/prime-
 import {
   applyPrimeMigration,
   fetchMigrationDiagnosis,
+  fetchMigrationRepairPlan,
+  proposePrimeMigrationRepair,
 } from "@/server/prime-migration-fix.functions";
+import {
+  REFUSAL_WORDS,
+  REMEDY_TONE,
+  REMEDY_WORDS,
+  REPAIR_WORDS,
+  RERUN_TONE,
+  RERUN_WORDS,
+} from "@/lib/migrationRepairLabels";
 // Types only, and through the server-function module rather than the pure one.
 // A route is bundled for the browser, so importing `src/server/**` for a VALUE
 // is refused by TanStack Start's import protection — correctly. Every
@@ -90,6 +101,9 @@ import type {
   Hazard,
   HazardKind,
   MigrationDiagnosis,
+  Repair,
+  RepairPlanReport,
+  RepairRefusal,
   VersionCollision,
 } from "@/server/prime-migration-fix.functions";
 
@@ -1319,6 +1333,13 @@ function DiagnosisBody({
         </div>
       )}
 
+      {/* Keyed on the migration for the reason `ApplyControl` is: React reuses
+          a component at the same position, and a repair plan for the file an
+          operator was looking at a moment ago, drawn under the filename of the
+          one they are looking at now, is the worst sentence this panel could
+          show. */}
+      <RerunPanel key={`rerun-${d.id}`} diagnosis={d} />
+
       {/* Drawn on `dispatchable` and never on the verdict word. One field, set
           by the server, so a verdict added tomorrow cannot acquire a button
           by being spelled optimistically. */}
@@ -1327,6 +1348,297 @@ function DiagnosisBody({
           position, and "Dispatched" under the wrong filename is the worst
           sentence this panel could show. */}
       {d.dispatchable && <ApplyControl key={d.id} diagnosis={d} primeRef={report.primeRef} />}
+    </div>
+  );
+}
+
+/* ────────────────── running it twice, and mending it if not ───────────────── */
+
+const REPAIR_KEY = (version: string) => ["prime-migration-repair-plan", version] as const;
+
+/**
+ * What a second run of this file would do — and, where that is not "nothing",
+ * what it would take to make it so.
+ *
+ * The chip is the same reading `/prime-migrations` draws on every row of the
+ * withheld set, from the same table of words, so the list and the file cannot
+ * disagree about one migration. What is new here is the second half: a repair
+ * is PLANNED on a click rather than on arrival, because it costs a blob and a
+ * statement against the prime's production project and most people opening
+ * this panel came to read the diagnosis.
+ *
+ * Nothing here decides anything. `proposable` is set by the server, the same
+ * way `dispatchable` is, and this page reads the field rather than the
+ * outcome word.
+ */
+function RerunPanel({ diagnosis }: { diagnosis: MigrationDiagnosis }) {
+  const rerun = diagnosis.idempotency;
+  const tone = RERUN_TONE[rerun.reading];
+  const mendable = rerun.reading === "fails_loudly" || rerun.reading === "rewrites_data";
+
+  const [asked, setAsked] = useState(false);
+  const planFn = useServerFn(fetchMigrationRepairPlan);
+  const plan = useQuery({
+    queryKey: REPAIR_KEY(diagnosis.id),
+    queryFn: () => planFn({ data: { version: diagnosis.id } }),
+    enabled: asked,
+    refetchOnWindowFocus: false,
+  });
+
+  const report = plan.data?.ok ? plan.data : null;
+
+  return (
+    <div className={cn("glass-inset spine space-y-3 p-3", SPINE[tone])}>
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+        <p className="label-mono">running it a second time</p>
+        <span
+          className={cn(
+            "font-mono text-[10px] tracking-[0.12em] whitespace-nowrap uppercase",
+            TONE_TEXT[tone],
+          )}
+        >
+          {RERUN_WORDS[rerun.reading]}
+        </span>
+        {rerun.guardedByDrop > 0 && (
+          <span className="font-mono text-[10px] text-muted-foreground">
+            {rerun.guardedByDrop} already guarded
+          </span>
+        )}
+      </div>
+
+      <p className="text-xs text-muted-foreground">{rerun.summary}</p>
+
+      {!mendable ? null : !asked ? (
+        <Button size="sm" variant="outline" onClick={() => setAsked(true)}>
+          <Wrench className="h-3.5 w-3.5" />
+          Prepare a repair
+        </Button>
+      ) : plan.isPending ? (
+        <Skeleton className="h-24 w-full" />
+      ) : plan.error ? (
+        <Unreadable
+          what="A repair for this migration"
+          why={plan.error instanceof Error ? plan.error.message : "The read failed."}
+        />
+      ) : plan.data && !plan.data.ok ? (
+        <Unreadable what="A repair for this migration" why={plan.data.error} />
+      ) : report ? (
+        <RepairPlanBody report={report} />
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * The plan, its refusals, and — on the server's own say-so — the act.
+ *
+ * Both lists are drawn. A page that showed only what it would change would be
+ * answering half the question: on 36 of the prime's files the statement that
+ * matters is one this refuses to touch, and an operator who merged a repair
+ * believing it made the file safe to re-run would have been misled by an
+ * omission rather than by a sentence.
+ */
+function RepairPlanBody({ report }: { report: RepairPlanReport }) {
+  const { plan } = report;
+  const tone = REMEDY_TONE[plan.outcome];
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+        <span
+          className={cn(
+            "font-mono text-[10px] tracking-[0.12em] whitespace-nowrap uppercase",
+            TONE_TEXT[tone],
+          )}
+        >
+          {REMEDY_WORDS[plan.outcome]}
+        </span>
+        <span className="font-mono text-[10px] text-muted-foreground">
+          {plan.repairCount} guarded · {plan.refusalCount} left alone
+        </span>
+      </div>
+
+      <p className={cn("text-xs", TONE_TEXT[tone])}>{plan.summary}</p>
+
+      {plan.discarded && (
+        <p className="text-[11px] text-muted-foreground">Withdrawn because {plan.discarded}.</p>
+      )}
+
+      {plan.repairs.length > 0 && (
+        <div className="space-y-1.5">
+          <p className="label-mono">what would change</p>
+          {plan.repairs.map((r, i) => (
+            <RepairRow key={`${r.line}-${r.kind}-${i}`} repair={r} />
+          ))}
+          {plan.repairCount > plan.repairs.length && (
+            <p className="text-[10px] text-muted-foreground">
+              {plan.repairCount - plan.repairs.length} more of the same shapes. The counts above are
+              exact; only this list is capped.
+            </p>
+          )}
+        </div>
+      )}
+
+      {plan.refusals.length > 0 && (
+        <div className="space-y-1.5">
+          <p className="label-mono">what would deliberately be left alone</p>
+          {plan.refusals.map((r, i) => (
+            <RefusalRow key={`${r.line}-${r.kind}-${i}`} refusal={r} />
+          ))}
+          {plan.refusalCount > plan.refusals.length && (
+            <p className="text-[10px] text-muted-foreground">
+              {plan.refusalCount - plan.refusals.length} more of the same shapes.
+            </p>
+          )}
+        </div>
+      )}
+
+      {report.blocked && (
+        <div className="glass-inset spine spine-warn p-3">
+          <p className="label-mono">not proposed</p>
+          <p className="mt-1.5 text-xs text-muted-foreground">{report.blocked}</p>
+        </div>
+      )}
+
+      {report.proposable && <ProposeControl key={report.target.version} report={report} />}
+    </div>
+  );
+}
+
+function RepairRow({ repair }: { repair: Repair }) {
+  return (
+    <RecordRow spine="ok" className="space-y-1 p-2.5">
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+        <span className="font-mono text-[10px] whitespace-nowrap text-muted-foreground">
+          line {repair.line}
+        </span>
+        <span className="font-mono text-[10px] tracking-[0.12em] whitespace-nowrap text-ok uppercase">
+          {REPAIR_WORDS[repair.kind]}
+        </span>
+        <code className="min-w-0 truncate font-mono text-[10px] text-foreground">
+          {repair.inserted}
+        </code>
+        <span className="min-w-0 basis-full text-[11px] text-muted-foreground">{repair.what}</span>
+      </div>
+      <pre className="overflow-x-auto font-mono text-[10px] leading-relaxed text-foreground/70">
+        {repair.statement}
+      </pre>
+    </RecordRow>
+  );
+}
+
+function RefusalRow({ refusal }: { refusal: RepairRefusal }) {
+  return (
+    <RecordRow spine="warn" className="space-y-1 p-2.5">
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+        <span className="font-mono text-[10px] whitespace-nowrap text-muted-foreground">
+          line {refusal.line}
+        </span>
+        <span className="font-mono text-[10px] tracking-[0.12em] whitespace-nowrap text-warning uppercase">
+          {REFUSAL_WORDS[refusal.kind]}
+        </span>
+        <span className="min-w-0 basis-full text-[11px] text-muted-foreground">{refusal.why}</span>
+      </div>
+      <pre className="overflow-x-auto font-mono text-[10px] leading-relaxed text-foreground/70">
+        {refusal.excerpt}
+      </pre>
+    </RecordRow>
+  );
+}
+
+/**
+ * Open the repair, behind a confirmation that names where it lands.
+ *
+ * Two clicks, and the second one says the thing that is easy to assume
+ * otherwise: this changes a FILE in the prime repository and runs nothing. The
+ * migration still has to be applied afterwards, by the button above or by the
+ * prime's own workflow.
+ */
+function ProposeControl({ report }: { report: RepairPlanReport }) {
+  const [confirming, setConfirming] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [outcome, setOutcome] = useState<{ ok: boolean; text: string; url?: string } | null>(null);
+  const proposeFn = useServerFn(proposePrimeMigrationRepair);
+
+  const send = async () => {
+    setSending(true);
+    try {
+      const r = await proposeFn({ data: { version: report.target.version } });
+      setOutcome(
+        r.ok
+          ? {
+              ok: true,
+              text:
+                r.state === "already_open"
+                  ? `A repair for this migration is already open as #${r.number}.`
+                  : `Opened #${r.number} on ${report.target.repo.owner}/${report.target.repo.repo}.`,
+              url: r.url,
+            }
+          : { ok: false, text: r.error },
+      );
+      setConfirming(false);
+    } catch (e) {
+      setOutcome({
+        ok: false,
+        text: e instanceof Error ? e.message : "The repair could not be proposed.",
+      });
+    } finally {
+      setSending(false);
+    }
+  };
+
+  if (outcome) {
+    return (
+      <div className={cn("glass-inset spine p-3", SPINE[outcome.ok ? "live" : "bad"])}>
+        <p className="label-mono">{outcome.ok ? "proposed" : "not proposed"}</p>
+        <p className={cn("mt-1.5 text-xs", TONE_TEXT[outcome.ok ? "live" : "bad"])}>
+          {outcome.text}
+        </p>
+        {outcome.url && (
+          <a
+            className="mt-2 inline-flex items-center gap-1.5 text-xs text-info hover:underline"
+            href={outcome.url}
+            target="_blank"
+            rel="noreferrer"
+          >
+            Read the pull request
+            <ExternalLink className="h-3 w-3" />
+          </a>
+        )}
+      </div>
+    );
+  }
+
+  if (!confirming) {
+    return (
+      <Button size="sm" onClick={() => setConfirming(true)}>
+        <GitPullRequest className="h-3.5 w-3.5" />
+        Open a pull request on the prime
+      </Button>
+    );
+  }
+
+  return (
+    <div className="glass-inset spine spine-warn space-y-2 p-3">
+      <p className="label-mono">this changes a file, and runs nothing</p>
+      <p className="text-xs text-muted-foreground">
+        A pull request against{" "}
+        <span className="font-mono text-foreground">
+          {report.target.repo.owner}/{report.target.repo.repo}@{report.target.repo.branch}
+        </span>{" "}
+        will edit <span className="font-mono text-foreground">{report.target.path}</span> and
+        nothing else. No migration is applied, no database is touched, and the prime&rsquo;s own
+        checks run on it before anybody merges it. The patch is composed again from the file as it
+        stands at the moment you click, not from what is drawn above.
+      </p>
+      <div className="flex flex-wrap gap-2">
+        <Button size="sm" onClick={() => void send()} disabled={sending}>
+          {sending ? "Opening…" : "Yes — open it"}
+        </Button>
+        <Button size="sm" variant="ghost" onClick={() => setConfirming(false)} disabled={sending}>
+          Cancel
+        </Button>
+      </div>
     </div>
   );
 }

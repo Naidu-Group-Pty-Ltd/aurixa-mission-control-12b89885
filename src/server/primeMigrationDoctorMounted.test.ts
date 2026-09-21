@@ -200,8 +200,8 @@ describe("the reading cannot write, and the writing asks first", () => {
   });
 });
 
-describe("both lanes are named, budgeted and flushed", () => {
-  it("the measurement yields at the scan floor and the act at the actor floor", () => {
+describe("every lane is named, budgeted and flushed", () => {
+  it("the measurements yield at the scan floor and the acts at the actor floor", () => {
     /*
       Not the same floor, and the difference is the point:
       `githubBudget.pure.ts` says a measurement postponed costs a stale number
@@ -214,7 +214,26 @@ describe("both lanes are named, budgeted and flushed", () => {
     expect(fn).toContain('beginGithubLane("prime-migration-apply")');
     expect(fn).toMatch(/decideSpend\(\{ role: "scan"/);
     expect(fn).toMatch(/decideSpend\(\{ role: "actor"/);
-    expect([...fn.matchAll(/await flushGithubUsage\(\)/g)]).toHaveLength(2);
+  });
+
+  it("each handler opens a lane of its own and flushes it, however many there are", () => {
+    /*
+      DERIVED rather than frozen at two. This door gained a repair plan and a
+      repair proposal after the count was written, and a hand-written number
+      is a gate that fails on the day somebody does the right thing — `a
+      hand-list cannot see the call it does not mention`, in its other form.
+      What matters is the property: one lane, one budget and one flush per
+      handler, so a usage figure can never be attributed to the lane before.
+    */
+    const fn = code(FN);
+    const handlers = [...fn.matchAll(/createServerFn\(/g)].length;
+    expect(handlers).toBeGreaterThanOrEqual(4);
+    expect([...fn.matchAll(/beginGithubLane\("/g)]).toHaveLength(handlers);
+    expect([...fn.matchAll(/decideSpend\(\{ role: "/g)]).toHaveLength(handlers);
+    expect([...fn.matchAll(/await flushGithubUsage\(\)/g)]).toHaveLength(handlers);
+    // And every lane is its own name, so two never share a meter.
+    const lanes = [...fn.matchAll(/beginGithubLane\("([^"]+)"\)/g)].map((m) => m[1]);
+    expect(new Set(lanes).size).toBe(lanes.length);
   });
 
   it("a refused act says nothing was applied", () => {
