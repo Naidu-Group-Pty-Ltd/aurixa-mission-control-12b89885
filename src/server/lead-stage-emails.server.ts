@@ -329,6 +329,17 @@ export async function dispatchStageEmails(limit = DISPATCH_BATCH): Promise<Dispa
         : [];
     const fallback = row.audience === "internal" ? p.internalRecipients : [];
     const recipients = configured.length ? configured : stored.length ? stored : fallback;
+    // Which of the three the send is actually using. Written back on success,
+    // because the row is the record of what HAPPENED and the environment is
+    // only what would happen next.
+    const resolvedSource: RecipientSource =
+      row.audience === "applicant"
+        ? "applicant"
+        : configured.length
+          ? "configured"
+          : stored.length
+            ? (row.recipient_source ?? "configured")
+            : p.internalRecipientSource;
     // A row whose stored list no longer matches the deployment is evidence the
     // configuration changed after it was raised. Say so rather than silently
     // serving the better answer.
@@ -402,6 +413,14 @@ export async function dispatchStageEmails(limit = DISPATCH_BATCH): Promise<Dispa
         subject: composed.subject,
         mailbox,
         to_address: sendable[0],
+        // The row answers one question — was this person told? — so a settled
+        // row describes the send that happened rather than the one that was
+        // raised. Without this the ledger keeps the list the obligation was
+        // raised with, and the Leads page draws "sending mailbox only" over a
+        // send that reached five people: the very defect the re-resolution
+        // above exists to fix, surviving one layer up.
+        recipients: sendable,
+        recipient_source: resolvedSource,
         graph_status: outcome.status,
         graph_request_id: outcome.requestId,
         // The row already carries how its recipient list was resolved. A
@@ -486,6 +505,8 @@ type ClaimedRow = {
   stage: number;
   audience: StageAudience;
   recipients: string[] | null;
+  /** How that list was resolved when the obligation was raised. */
+  recipient_source: RecipientSource | null;
   /** The note the obligation was raised with — preserved, never overwritten. */
   reason: string | null;
   attempts: number;

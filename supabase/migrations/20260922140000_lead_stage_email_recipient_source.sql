@@ -35,6 +35,20 @@
 -- Nullable and unconstrained by default so every row written before this
 -- migration stays valid and reads as "not recorded" rather than as a fallback
 -- that did not happen.
+--
+-- ## It is written twice, and the second write is the one that matters
+--
+-- Enqueue stamps how the list was resolved when the obligation was RAISED. The
+-- settle rewrites it, with `recipients`, to the send that HAPPENED — because
+-- dispatch re-resolves an internal list from the deployment at send time, and
+-- a row that keeps what it was raised with then reads "sending mailbox only"
+-- over a send that reached five people.
+--
+-- `claim_lead_stage_emails` needs no change: it is `RETURNS SETOF
+-- public.lead_stage_emails` with `RETURNING e.*`, so the new column travels
+-- with the composite type. If it ever did not, `recipient_source` would arrive
+-- undefined and the dispatcher would label a stored list `configured` — a
+-- mislabel on the row, never a wrong recipient on the wire.
 
 ALTER TABLE public.lead_stage_emails
   ADD COLUMN IF NOT EXISTS recipient_source TEXT;

@@ -12,6 +12,7 @@ import { ProtectedRoute } from "@/components/protected-route";
 import { RouteError } from "@/components/route-error";
 import { supabase } from "@/integrations/supabase/client";
 import type { Database } from "@/integrations/supabase/types";
+import { recipientReading } from "@/lib/leadStageEmailReading.pure";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -1263,27 +1264,6 @@ function DeliveryPanel({ lead, emails }: { lead: Record<string, unknown>; emails
       ) : null}
     </Panel>
   );
-}
-
-/**
- * Who a stage email actually reached, said in one line.
- *
- * `to_address` holds the FIRST recipient and nothing else, so on an internal
- * notification going to five people it renders one address \u2014 which reads as
- * "one person was told". The count is what the operator needs, and where the
- * list collapsed to the sending mailbox because nobody was configured, that is
- * the fact the whole cutover turns on and it is said in words rather than left
- * to be inferred from an address that happens to look like the mailbox.
- */
-function recipientReading(row: StageEmailRow): string | null {
-  const list = Array.isArray(row.recipients) ? row.recipients.filter(Boolean) : [];
-  const head = list[0] ?? row.to_address;
-  if (!head) return null;
-  const more = list.length > 1 ? ` +${list.length - 1}` : "";
-  // `mailbox_fallback` is the one source worth naming on the row: it means the
-  // team list was not configured and only the sending mailbox was told.
-  const note = row.recipient_source === "mailbox_fallback" ? " \u00b7 sending mailbox only" : "";
-  return `${head}${more}${note}`;
 }
 
 function DetailItem({
