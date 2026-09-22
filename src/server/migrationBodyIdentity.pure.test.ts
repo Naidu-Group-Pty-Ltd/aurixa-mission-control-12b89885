@@ -70,8 +70,31 @@ describe("migrationBodyForms", () => {
     expect(bodyFormLabel(0)).toBe("byte-identical");
   });
 
-  it("dedupes, so a body already in normal form costs one digest", () => {
-    expect(migrationBodyForms("SELECT 1;")).toEqual(["SELECT 1;"]);
+  /**
+   * Identical rungs are KEPT, and this is the test that made the case.
+   *
+   * They were deduped once. A body carrying a leading comment and no trailing
+   * whitespace has rung 1 equal to rung 0, so rung 1 vanished — and a
+   * leading-comment match then reported itself at index 1, which
+   * `bodyFormLabel` reads as "identical but for trailing whitespace" about a
+   * file whose whitespace is identical.
+   *
+   * Measured on the prime the day it was found: 0 files affected, because
+   * every leading-comment match in that corpus also carries trailing
+   * whitespace. Right by coincidence; removed rather than relied on.
+   */
+  it("offers one form per rung, so a match INDEX is the rung that produced it", () => {
+    expect(migrationBodyForms("SELECT 1;")).toEqual(["SELECT 1;", "SELECT 1;", "SELECT 1;"]);
+
+    const ran = "SELECT 1;";
+    const rungOf = (sql: string) => migrationBodyForms(sql).indexOf(ran);
+    expect(rungOf("SELECT 1;")).toBe(0);
+    expect(rungOf("SELECT 1;\n\n")).toBe(1);
+    // The case the dedup got wrong: documented afterwards, no trailing newline.
+    expect(rungOf("-- documented afterwards\n\nSELECT 1;")).toBe(2);
+    expect(bodyFormLabel(rungOf("-- documented afterwards\n\nSELECT 1;"))).toBe(
+      "identical in what executes",
+    );
   });
 
   /**

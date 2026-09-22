@@ -122,31 +122,52 @@ export function executableBody(sql: string): string {
 
 /**
  * Every form of one migration's body that could be what the ledger stored,
- * most literal first.
+ * most literal first — so the INDEX of a match IS the rung that produced it
+ * and {@link bodyFormLabel} can name what actually differs.
  *
- * Three rungs, deduped, and any rung that normalises to nothing is dropped
- * rather than hashed — see the header. Ordered so a caller can report WHICH
- * rung answered, because "byte-identical" and "identical once a comment is
+ * Ordered because "byte-identical" and "identical once a comment is
  * discounted" are different readings and an operator should be told which one
  * they have.
  *
- * Measured on this prime's 596 body-matched files: 537 matched at rung 1
- * (byte-identical), 50 at rung 2 (trailing whitespace only), 9 at rung 3.
+ * Measured on this prime (22 Sep 2026), 690 body-matched files: 619 at rung 0,
+ * 56 at rung 1, 15 at rung 2.
+ *
+ * ## Why identical rungs are kept rather than deduped
+ *
+ * They were deduped once, and that quietly made the index an index into a
+ * SHORTER list. A body carrying a leading comment and no trailing whitespace
+ * has rung 1 equal to rung 0, so rung 1 vanished and a leading-comment match
+ * reported itself at index 1 — "identical but for trailing whitespace", about
+ * a file whose whitespace is identical.
+ *
+ * Measured on the prime the day it was found: **0 files affected**, because
+ * every leading-comment match in that corpus happens also to carry trailing
+ * whitespace. So nothing on the page was wrong — it was right by coincidence,
+ * and a reading that is true by coincidence is what this repository has had to
+ * fix twice already. Keeping the duplicates costs at most two extra sha256
+ * over a body already in memory and buys `index === rung` for every input.
+ *
+ * ## Dropping an empty rung cannot shift a surviving one
+ *
+ * An empty rung can only ever be followed by empty rungs: rung 1 empty means
+ * the whole body is whitespace, and then rung 2 is empty too. So the drop
+ * removes a suffix and never moves an index.
  */
 export function migrationBodyForms(sql: string): string[] {
-  const forms: string[] = [];
-  for (const form of [sql, sql.trimEnd(), executableBody(sql)]) {
-    if (form === "") continue;
-    if (!forms.includes(form)) forms.push(form);
-  }
-  return forms;
+  return [sql, sql.trimEnd(), executableBody(sql)].filter((form) => form !== "");
 }
 
-/** Human name for a rung index, for a reading a person has to act on. */
+/**
+ * Human name for a rung index, for a reading a person has to act on.
+ *
+ * Rung 2 is `executableBody`, which discounts a leading comment block AND
+ * trailing whitespace, so it is named for what it ASSERTS rather than for one
+ * of the two things it ignores.
+ */
 export const BODY_FORM_LABELS = [
   "byte-identical",
   "identical but for trailing whitespace",
-  "identical but for a leading comment",
+  "identical in what executes",
 ] as const;
 
 export function bodyFormLabel(index: number): string {

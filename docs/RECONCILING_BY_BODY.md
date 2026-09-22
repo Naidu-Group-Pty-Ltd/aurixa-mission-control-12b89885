@@ -86,6 +86,53 @@ bytes.** So "which of these files did the prime run" is a question with no
 consequence — and the answer is still recorded (`sharedWith`) rather than
 asserted, because the ledger genuinely cannot say.
 
+## The rung a match reports is the rung that produced it
+
+Found while transcribing this rule into the prime's own guard, by writing the
+test first: `migrationBodyForms` **deduped**, so the index of a match was an
+index into a shorter list rather than a rung.
+
+A body carrying a leading comment and no trailing whitespace has rung 1 equal
+to rung 0. Deduped, rung 1 disappears — and a leading-comment match then lands
+at index 1, which `bodyFormLabel` reads as *"identical but for trailing
+whitespace"* about a file whose whitespace is identical.
+
+Measured on the prime the day it was found: **0 files affected**, because every
+leading-comment match in that corpus happens also to carry trailing whitespace.
+Nothing on `/prime` was ever wrong. It was right by coincidence, which is the
+shape this repository has had to repair twice already, so the coincidence is
+removed rather than relied on: identical rungs are kept, `index === rung` for
+every input, and the cost is at most two extra sha256 over a body already in
+memory.
+
+Dropping an EMPTY rung is still safe and stays, because an empty rung can only
+ever be followed by empty ones — rung 1 empty means the whole body is
+whitespace, and then rung 2 is empty too. The drop removes a suffix; it never
+moves a surviving index.
+
+Rung 2's label changed with it. It is `executableBody`, which discounts a
+leading comment block **and** trailing whitespace, so it is named for what it
+asserts — *identical in what executes* — rather than for one of the two things
+it ignores.
+
+## The prime carries the same rule, and a guard built on it
+
+`npm run check:applied-body-digests` in `npc-property-dashbord` records, for
+each migration file, a sha256 the prime's ledger holds and which that file
+produced — **690 of 1,002 files**, against 83 a version key could reach — and
+fails when one of them changes. That is the other half of this work: Mission
+Control decides what a clone may be sent by these bytes, so editing an applied
+migration silently withholds it from the whole fleet, and everything the
+dependency order puts behind it.
+
+The rule is transcribed there rather than imported, because that check runs on
+every pull request with no network and no dependency on this repository. Two
+copies of one rule is how the two come to disagree, so the properties the rule
+turns on are pinned on both sides — here in `migrationBodyIdentity.pure.test.ts`
+and there in `src/lib/deploy/__tests__/appliedBodyDigests.spec.ts`. If they ever
+drift, the symptom is that this page's reading of the fleet and that manifest
+describe different corpora.
+
 ## A read that failed is not a body that did not match
 
 Three withheld reasons now, not two:
