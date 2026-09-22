@@ -2246,6 +2246,7 @@ export type Database = {
           attempts: number
           build_checked_at: string | null
           bundle_artefact: string | null
+          bundle_billing_uid: string | null
           bundle_checked_at: string | null
           bundle_identity: string | null
           bundle_identity_detail: string | null
@@ -2285,6 +2286,7 @@ export type Database = {
           attempts?: number
           build_checked_at?: string | null
           bundle_artefact?: string | null
+          bundle_billing_uid?: string | null
           bundle_checked_at?: string | null
           bundle_identity?: string | null
           bundle_identity_detail?: string | null
@@ -2324,6 +2326,7 @@ export type Database = {
           attempts?: number
           build_checked_at?: string | null
           bundle_artefact?: string | null
+          bundle_billing_uid?: string | null
           bundle_checked_at?: string | null
           bundle_identity?: string | null
           bundle_identity_detail?: string | null

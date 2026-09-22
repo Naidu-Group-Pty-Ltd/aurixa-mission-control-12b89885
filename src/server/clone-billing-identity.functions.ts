@@ -34,9 +34,20 @@ export type CloneBillingIdentity = {
   /** The tenant this clone's spending is metered against, when it has one. */
   tenantBillingUserId: string | null;
   /** True when the clone's own bundle would carry this id — i.e. the
-   *  environment has been synced since it was set. Unknowable from here
-   *  without a bundle probe, so it reports what was PUSHED. */
+   *  environment has been synced since it was set. A claim about what was
+   *  PUSHED, which is not a claim about what the artefact holds. */
   publishedToHosting: boolean;
+  /**
+   * What the SERVED bundle was measured to carry, from
+   * `deployedBundleIdentity`. This is the one that decides where a purchase
+   * goes, and the reason `publishedToHosting` is not enough: a value published
+   * to a hosting project reaches the artefact only through a build.
+   *
+   * `null` is never probed, which is not a pass.
+   */
+  bundleCarries: "own" | "fallback" | "not_scanned" | "none" | null;
+  /** When that measurement was taken, so a stale reading is not read as current. */
+  bundleCheckedAt: string | null;
 };
 
 export const getCloneBillingIdentity = createServerFn({ method: "GET" })
@@ -58,7 +69,7 @@ export const getCloneBillingIdentity = createServerFn({ method: "GET" })
       supabaseAdmin.from("tenants").select("billing_user_id").eq("clone_id", clone.id),
       supabaseAdmin
         .from("clone_deployments")
-        .select("env_digest")
+        .select("env_digest, bundle_billing_uid, bundle_checked_at")
         .eq("clone_id", clone.id)
         .maybeSingle(),
     ]);
@@ -74,6 +85,9 @@ export const getCloneBillingIdentity = createServerFn({ method: "GET" })
       // been pushed. Neither proves what the live bundle holds, which is why
       // the field is named for what was pushed.
       publishedToHosting: Boolean(clone.billing_user_id) && Boolean(deployment?.env_digest),
+      bundleCarries:
+        (deployment?.bundle_billing_uid as CloneBillingIdentity["bundleCarries"]) ?? null,
+      bundleCheckedAt: deployment?.bundle_checked_at ?? null,
     };
   });
 

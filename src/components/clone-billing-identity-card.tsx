@@ -27,6 +27,20 @@ import {
  * credential-less link, the clone's own bundle falls through to the prime's
  * built-in `npc-prime`, and a customer clicking "buy more tokens" credits the
  * prime's balance instead of their own.
+ *
+ * ## Two claims, drawn apart
+ *
+ * The column and the artefact are different facts. `VITE_AURIXA_BILLING_UID`
+ * is inlined at BUILD time, so an id written here reaches a customer's browser
+ * only through a rebuild — and until it does, that browser is still carrying
+ * whatever it was built with. So the card draws what is RECORDED and, beneath
+ * it, what the served bundle was measured to CARRY.
+ *
+ * Presenting only the first is the shape this whole programme keeps paying
+ * for: every signal was green while three of four clones served a bundle
+ * pointed at the prime's database, because nothing fetched the JavaScript and
+ * asked. `bundleCarries` is that question asked, and `null` renders as its own
+ * line rather than as silence, because never probed is not a pass.
  */
 export function CloneBillingIdentityCard({ cloneId }: { cloneId: string }) {
   const loadFn = useServerFn(getCloneBillingIdentity);
@@ -154,6 +168,8 @@ export function CloneBillingIdentityCard({ cloneId }: { cloneId: string }) {
               ) : null}
             </div>
 
+            {current ? <BundleReading data={data} /> : null}
+
             {data?.tenantBillingUserId && data.tenantBillingUserId !== current ? (
               <p className="text-xs text-muted-foreground">
                 A tenant of this clone carries{" "}
@@ -165,5 +181,69 @@ export function CloneBillingIdentityCard({ cloneId }: { cloneId: string }) {
         )}
       </CardContent>
     </Card>
+  );
+}
+
+/**
+ * What the served bundle actually carries.
+ *
+ * Four readings and they are four different facts, so the raw word is never
+ * drawn — that is the shape that made `not_required` read as `clear` elsewhere
+ * in this codebase. Only `fallback` is a problem, and it is the expensive one:
+ * the artefact was read, the identity in it is the prime's built-in, and every
+ * purchase made from this workspace is crediting the prime right now.
+ *
+ * `not_scanned` is deliberately NOT drawn as a fault. It says the chunk
+ * carrying the identity was not in what the probe read — a statement about the
+ * scan, not about the clone — and colouring it like a problem is what made
+ * eleven chips unreadable on the Passport.
+ */
+function BundleReading({
+  data,
+}: {
+  data:
+    | {
+        bundleCarries: "own" | "fallback" | "not_scanned" | "none" | null;
+        bundleCheckedAt: string | null;
+      }
+    | undefined;
+}) {
+  const carries = data?.bundleCarries ?? null;
+  const when = data?.bundleCheckedAt
+    ? new Date(data.bundleCheckedAt).toLocaleString("en-AU")
+    : null;
+
+  if (carries === "fallback") {
+    return (
+      <p className="flex items-start gap-1.5 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+        <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+        <span>
+          The bundle this clone is serving carries no identity of its own and falls through to the
+          prime&rsquo;s, so purchases made from this workspace credit the prime. A rebuild has been
+          requested{when ? ` — read ${when}` : ""}.
+        </span>
+      </p>
+    );
+  }
+
+  if (carries === "own") {
+    return (
+      <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+        <CheckCircle2 className="h-3.5 w-3.5 text-success" aria-hidden />
+        The served bundle carries this identity{when ? `, read ${when}` : ""}.
+      </p>
+    );
+  }
+
+  // Never probed and could-not-see are both "we do not know", and a card that
+  // draws nothing for them reads the same as one that checked and was happy.
+  return (
+    <p className="text-xs text-muted-foreground">
+      {carries === "not_scanned"
+        ? `The bundle was read and the identity was not in the assets the page names${
+            when ? ` (${when})` : ""
+          } — that says what was searched, not what the browser is carrying.`
+        : "Nothing has fetched this deployment's JavaScript to check which identity it carries. That is not the same as having checked and found it correct."}
+    </p>
   );
 }
