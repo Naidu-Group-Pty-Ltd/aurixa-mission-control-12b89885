@@ -261,11 +261,51 @@ export async function dispatchStageEmails(limit = DISPATCH_BATCH): Promise<Dispa
   // One read of the lead rows for the whole batch: a stage email is composed
   // from the applicant as they now stand, not as they were when the obligation
   // was raised, so a questionnaire that arrived in between is in the email.
+  //
+  // The `error` is read, because an empty answer here has two meanings and only
+  // one of them is about the leads. `leadRows` is null on a failed query too,
+  // and the branch below used to settle every claimed row TERMINAL `failed`
+  // with the reason "the lead this obligation belongs to no longer exists" —
+  // a sentence that cannot be true: `lead_id` is `REFERENCES waitlist_leads(id)
+  // ON DELETE CASCADE`, so a deleted lead takes its ledger rows with it and
+  // there is nothing left to settle. That branch is reachable by a failed read
+  // and essentially nothing else, and `claim_lead_stage_emails` re-claims only
+  // `pending` and stale `claimed` — so one statement timeout permanently
+  // unacknowledged every applicant in the batch, told nobody, and wrote on the
+  // Leads page that the lead had been deleted, beside the lead.
+  //
+  // This is the defect fixed for the suppression register twelve lines below,
+  // in the same tick, on the read immediately before it. Having a rule and
+  // applying it once is how the second instance survives.
   const leadIds = [...new Set(batch.map((row) => row.lead_id))];
-  const { data: leadRows } = await supabaseAdmin
+  const { data: leadRows, error: leadReadError } = await supabaseAdmin
     .from("waitlist_leads")
     .select("*")
     .in("id", leadIds);
+
+  if (leadReadError) {
+    // Nothing in this batch can be composed without its lead, and none of it
+    // is refused — the claim is released and the next tick asks again.
+    console.error("[lead-stage-email] lead read failed — holding the batch:", leadReadError.message);
+    for (const row of batch) {
+      await settle(row.id, {
+        status: "pending",
+        claimed_at: null,
+        last_error: "the lead could not be read — held rather than settled",
+      });
+      out.skipped += 1;
+    }
+    await notifyOperators({
+      kind: "lead_stage_email_failed",
+      severity: "warning",
+      title: "Lead stage emails held: the lead rows could not be read",
+      body: `${batch.length} obligation(s) were returned to pending rather than settled. Nothing was sent and nothing was refused.`,
+      url: "/leads",
+      metadata: { claimed: batch.length, error: leadReadError.message },
+    });
+    return out;
+  }
+
   const leads = new Map((leadRows ?? []).map((row) => [row.id as string, row]));
 
   // Resolve every row's recipients BEFORE the register is asked, because the
@@ -303,9 +343,13 @@ export async function dispatchStageEmails(limit = DISPATCH_BATCH): Promise<Dispa
   for (const row of batch) {
     const lead = leads.get(row.lead_id);
     if (!lead) {
+      // The read SUCCEEDED and this lead was not in it. The cascade makes that
+      // impossible for a deleted lead, so it is an anomaly worth recording
+      // terminally rather than retrying for ever — and the reason says which
+      // of the two it is, because the other one no longer reaches here.
       await settle(row.id, {
         status: "failed",
-        reason: "the lead this obligation belongs to no longer exists",
+        reason: "the lead was read successfully and this obligation's lead was not among the rows",
       });
       out.failed += 1;
       continue;

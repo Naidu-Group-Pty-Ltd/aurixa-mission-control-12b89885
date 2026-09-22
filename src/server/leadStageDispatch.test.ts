@@ -20,6 +20,9 @@ const state = vi.hoisted(() => ({
   suppressionQueries: [] as string[][],
   sweepWindows: {} as Record<string, Record<string, unknown>[]>,
   sweepErrors: {} as Record<string, { message: string } | null>,
+  // The batch lead read can FAIL, and a double that cannot express that
+  // cannot reach the branch where failing is confused with being absent.
+  leadReadError: null as { message: string } | null,
 }));
 
 vi.mock("@/server/graph-client", () => ({
@@ -54,17 +57,21 @@ vi.mock("@/integrations/supabase/client.server", () => ({
               }),
             }),
             in: async () => ({
-              data: [
-                {
-                  id: "lead-1",
-                  email: "applicant@example.com",
-                  first_name: "Ada",
-                  last_name: "Lovelace",
-                  application_id: "AX-0000000001",
-                  created_at: "2026-09-22T00:00:00.000Z",
-                  submitted_at: "2026-09-22T00:00:00.000Z",
-                },
-              ],
+              data: state.leadReadError
+                ? null
+                : [
+                    {
+                      id: "lead-1",
+                      email: "applicant@example.com",
+                      first_name: "Ada",
+                      last_name: "Lovelace",
+                      application_id: "AX-0000000001",
+                      created_at: "2026-09-22T00:00:00.000Z",
+                      submitted_at: "2026-09-22T00:00:00.000Z",
+                      enrichment_synced_at: "2026-09-22T01:00:00.000Z",
+                    },
+                  ],
+              error: state.leadReadError,
             }),
           }),
         };
@@ -149,6 +156,7 @@ const patch = () => state.settles[0]?.patch ?? {};
 beforeEach(() => {
   state.claimed = [];
   state.suppressionRows = [];
+  state.leadReadError = null;
   state.suppressionError = null;
   state.settles = [];
   state.notices = [];
@@ -392,6 +400,39 @@ describe("what the row says afterwards is what the page draws", () => {
     expect(patch().recipients).toHaveLength(4);
     expect(patch().recipients).not.toContain("rugesh@aurixasystems.com.au");
     expect(String(patch().reason)).toContain("1 recipient(s) suppressed");
+  });
+
+  it("holds the batch when the LEAD read fails, rather than calling the lead deleted", async () => {
+    // `leadRows` is null on a failed query exactly as it is on an empty one,
+    // and the branch below it settled TERMINAL `failed` reading "the lead this
+    // obligation belongs to no longer exists". That sentence cannot be true:
+    // `lead_id` is ON DELETE CASCADE, so a deleted lead takes its ledger rows
+    // with it and there is nothing left to settle. One statement timeout
+    // therefore left every applicant in the batch permanently unacknowledged,
+    // notified nobody, and wrote on the Leads page that the lead had been
+    // deleted — beside the lead.
+    state.leadReadError = { message: "canceling statement due to statement timeout" };
+    state.claimed = [row(), row({ id: "row-2" })];
+    await dispatchStageEmails();
+
+    expect(state.sent).toHaveLength(0);
+    for (const settled of state.settles) {
+      const patched = settled.patch;
+      expect(patched.status).toBe("pending");
+      expect(patched.claimed_at).toBeNull();
+      expect(String(patched.last_error)).toContain("could not be read");
+    }
+    expect(state.notices.some((n) => String(n.title).includes("lead rows could not be read"))).toBe(
+      true,
+    );
+  });
+
+  it("is not vacuous — the same batch settles normally when the read succeeds", async () => {
+    // A knob nothing turns proves nothing about the branch it guards.
+    state.claimed = [row(), row({ id: "row-2" })];
+    await dispatchStageEmails();
+    expect(state.sent).toHaveLength(2);
+    expect(state.settles.every((settled) => settled.patch.status === "sent")).toBe(true);
   });
 
   it("leaves an applicant row's own address alone", async () => {

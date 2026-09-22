@@ -87,9 +87,16 @@ why it is step one and not step three.
 LEAD_STAGE_INTERNAL_STAGES = 1,2,3
 ```
 
-The rule: **a stage covered by a FIRING automation is excluded; one that is not
-covered is not.** Until the Stage 1 automation is off, `2,3` avoids two emails
-per lead. After it is off, `1,2,3`.
+The rule reads as **a stage covered by a FIRING automation is excluded**, and
+`2,3` while the Stage 1 automation still emails does avoid two emails per lead.
+Do not do that. Set `1,2,3` now and accept the duplicates until the Airtable
+step is removed.
+
+An excluded stage is written a **terminal** `skipped` row at ingest, which
+nothing can re-raise (see *The order is not interchangeable*, below). Holding
+at `2,3` means every lead that arrives in the gap between removing the Airtable
+step and this setting taking effect is announced by nobody, permanently. A few
+minutes of two emails per lead is the cheaper mistake, by a long way.
 
 An unparseable value silently restores `1,2,3` — `"4"` and `"stage3"` both do —
 so check it after setting it rather than assuming.
@@ -182,9 +189,28 @@ an empty `href` and no applicant can reach the questionnaire. The team would
 stop being double-notified and the funnel would stop working, and only one of
 those is the cutover.
 
-So, in the live base (`apptyShYE0yzL4IGB`), open `wflM9vUhBoHb0ZE8r` and remove
-**only** the `sendEmail` step. Leave the automation deployed. Then set
-`LEAD_STAGE_INTERNAL_STAGES=1,2,3` if it was `2,3`.
+### The order is not interchangeable
+
+**Set `LEAD_STAGE_INTERNAL_STAGES=1,2,3` FIRST, and let it take effect. Then
+remove the step.**
+
+Doing it the other way round opens a window nothing recovers from. A stage
+excluded by that setting is written a **terminal** `skipped` row at ingest —
+`ignoreDuplicates` on `UNIQUE (lead_id, stage, audience)` means no later
+enqueue can replace it, and `claim_lead_stage_emails` takes only `pending` and
+stale `claimed`, so nothing re-raises it either. Any Stage 1 application that
+lands between the automation losing its email step and the new setting taking
+effect is therefore announced by nobody, permanently, and the Leads page shows
+a reason that reads like a decision somebody made rather than a notification
+that was lost.
+
+The two failure modes are not comparable. Setting first costs the team a few
+minutes of two emails per lead, which is what they have now. Removing first
+costs them the leads.
+
+So, in the live base (`apptyShYE0yzL4IGB`), once the setting is live: open
+`wflM9vUhBoHb0ZE8r` and remove **only** the `sendEmail` step. Leave the
+automation deployed.
 
 Leave `wflh1IWRe0okzxeTK` alone or switch it off; it has never fired either way.
 
@@ -207,7 +233,11 @@ Re-add the `sendEmail` step from the export in `npc-property-dashbord` at
 `docs/integrations/airtable/npc-emails/automations/source/aurixa-lead-capture.wflM9vUhBoHb0ZE8r.json`
 — the node's `to`, `subject` and `message` templates are recorded there in
 full. Then set `LEAD_STAGE_INTERNAL_STAGES=2,3` so the two notifiers do not
-both announce Stage 1.
+both announce Stage 1 — in that order, for the reason above, and knowing the
+mirror image of it: a row already at `pending` is dispatched whatever the
+setting says by then, because dispatch settles what was raised rather than
+re-deciding it. Expect a small number of duplicate Stage 1 notifications
+across the rollback, and prefer them to the alternative.
 
 Switching the whole automation off is **not** the rollback, for the reason
 above: it un-double-notifies the team by breaking every applicant's
