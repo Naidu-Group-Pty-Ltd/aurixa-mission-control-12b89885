@@ -59,14 +59,50 @@ vocabulary never reaches the operator.
 
 ---
 
-## 2. Internal emails did not exist anywhere
+## 2. Internal notification: one stage covered, two not
 
-This was checked rather than assumed. All four Make blueprints under
+**This section first said internal emails "did not exist anywhere". That was
+wrong, and the way it was wrong is the point.**
+
+What was measured is still true: all four Make blueprints under
 `aurixa-systems/docs/integrations/make/waitlist/` were read, and **every
-`toRecipients` in the funnel names the applicant and nobody else.** There was
-no internal notification to duplicate, at any stage.
+`toRecipients` in the funnel names the applicant and nobody else**; nothing in
+`aurixa-systems` sends mail at all. What was never searched was **Airtable's
+own automations** — and the live base's automation export does not live in
+either `aurixa-*` repo, it lives in the `npc-*` ones
+(`npc-property-dashbord/docs/integrations/airtable/npc-emails/automations/`,
+baseId `apptyShYE0yzL4IGB`, exported 2026-08-18, 10 automations, 9 deployed).
+A search scoped to the obvious repo found nothing and concluded there was
+nothing. **An absence you did not search for is not an absence.**
 
-So the internal email is owned outright here and is **on by default**.
+Three of those ten automations carry a `sendEmail` node. What each one does is
+decided by the table it triggers on, so that is what to read:
+
+| Stage | Automation | Deployed | Triggers on | Make writes | Fires? |
+| --- | --- | --- | --- | --- | --- |
+| 1 | `wflM9vUhBoHb0ZE8r` *Aurixa Lead Capture* | yes | Aurixa Waitlist `tblHzGiB591W3GpoZ` | `tblHzGiB591W3GpoZ` | **yes** |
+| 2 | `wflh1IWRe0okzxeTK` *Notify Aurixa Team…* | yes | Business Readiness Responses `tblXQx00T3CKEVnvV` | `tblB1t18q6aUTNI0g` | **no** |
+| 3 | — | — | — | `tbljj5XQbC2a4ON1U` | **none exists** |
+
+So the team is told when a lead applies, and is told nothing when that lead
+completes the questionnaire or books a review. Stage 2's notification is
+deployed and bound to the wrong table — *configured* is not *firing*, and the
+two read identically from the automation list.
+
+Two consequences for this feature. Mission Control's internal email is **on by
+default at all three stages**, which duplicates stage 1; `LEAD_STAGE_INTERNAL_STAGES`
+is what settles it, and the rule is that a stage already covered by a FIRING
+automation is excluded and one that is not covered is not. And the default
+falls back to all three stages on any value it cannot parse — `"4"` and
+`"stage3"` both silently restore `1,2,3`, so the value is worth checking after
+it is set rather than assumed.
+
+**Two caveats on the evidence.** The export is a snapshot, not a live read: the
+Airtable credential this repo's tooling holds reaches only the *rebuild* base
+`appFNPL7iYiuQyHAO`, so the live base's state today is inferred from a file.
+One `list_automations(apptyShYE0yzL4IGB)` from the owning account settles it.
+And the rebuild's copies all read `undeployed`, which is an artefact of how
+they were created and **not** evidence about the live base.
 
 ## 3. The applicant's emails already existed — so this is a backstop
 

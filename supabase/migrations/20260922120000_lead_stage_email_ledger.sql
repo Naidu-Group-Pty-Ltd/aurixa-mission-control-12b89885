@@ -13,14 +13,22 @@
 --   * the APPLICANT is acknowledged — sent today by the Make.com scenarios,
 --     through Microsoft Graph, with no record anywhere Mission Control can
 --     read and no signal when it does not go; and
---   * the TEAM is told — sent by nothing, anywhere, at any stage. Measured on
---     all four exported blueprints (`aurixa-waitlist-stage-1/2/3` and
---     `aurixa-stage-3-access`, 2026-08-18): every `toRecipients` block in the
---     funnel names the applicant and only the applicant.
+--   * the TEAM is told — sent by no Make scenario and by no website code.
+--     Measured on all four exported blueprints (`aurixa-waitlist-stage-1/2/3`
+--     and `aurixa-stage-3-access`, 2026-08-18): every `toRecipients` block in
+--     the funnel names the applicant and only the applicant.
 --
--- So an applicant could complete the Business Readiness Questionnaire — the
--- most substantial qualification document the business collects — and the only
--- thing that happened on Aurixa's side was a row changing in Airtable.
+-- That measurement was read too widely when this was first written. Airtable's
+-- OWN automations were never in the search space, and the live base runs one
+-- that does notify the team: `wflM9vUhBoHb0ZE8r` "Aurixa Lead Capture",
+-- deployed, on `recordCreated` in Aurixa Waitlist — the table Make stage 1
+-- writes. Stage 2's equivalent (`wflh1IWRe0okzxeTK`) is deployed but bound to
+-- a table the funnel does not write, and stage 3 has none at all.
+--
+-- So the gap this ledger fills is real but narrower than stated: an applicant
+-- could complete the Business Readiness Questionnaire — the most substantial
+-- qualification document the business collects — or book a strategic review,
+-- and nothing on Aurixa's side would say so.
 --
 -- ## Why a ledger and not a flag on the lead
 --

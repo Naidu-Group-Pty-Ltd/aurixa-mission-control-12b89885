@@ -6,10 +6,30 @@
 //
 // ## The two obligations are independent
 //
-// **Internal.** Aurixa's team is told. Nothing anywhere sent this before —
-// measured on all four Make blueprints, every `toRecipients` in the funnel
-// names the applicant and only the applicant — so Mission Control owns it
-// outright and it is on by default.
+// **Internal.** Aurixa's team is told. The measurement behind this was too
+// narrow when it was written and the conclusion drawn from it was wrong.
+//
+// What was measured, and is still true: across all four Make blueprints every
+// `toRecipients` in the funnel names the applicant and only the applicant, and
+// nothing in `aurixa-systems` sends mail at all. What was NOT searched:
+// Airtable's own automations. The live base runs three `sendEmail` automations
+// (exported 2026-08-18 to `npc-property-dashbord/docs/integrations/airtable/
+// npc-emails/automations/`), and one of them IS the internal notification:
+//
+//   Stage 1  `wflM9vUhBoHb0ZE8r` "Aurixa Lead Capture" — DEPLOYED, triggers on
+//            `recordCreated` in Aurixa Waitlist (`tblHzGiB591W3GpoZ`), which is
+//            the table Make stage 1 writes. Subject "New Lead Received", to
+//            five @aurixasystems.com.au addresses. It fires.
+//   Stage 2  `wflh1IWRe0okzxeTK` "Notify Aurixa Team…" — DEPLOYED, but bound to
+//            Business Readiness Responses (`tblXQx00T3CKEVnvV`) while Make
+//            stage 2 writes BRQ Detailed Responses (`tblB1t18q6aUTNI0g`). Two
+//            different tables, so it does NOT fire.
+//   Stage 3  nothing, anywhere.
+//
+// So this is on by default at every stage and that default DUPLICATES stage 1.
+// `LEAD_STAGE_INTERNAL_STAGES` is what settles it per deployment; the rule is
+// that a stage already covered by a firing automation is excluded, and one
+// that is not covered is not.
 //
 // **Applicant.** The Make.com scenarios ALREADY send this, through Microsoft
 // Graph, at all three stages. So the risk here is not silence, it is sending a
