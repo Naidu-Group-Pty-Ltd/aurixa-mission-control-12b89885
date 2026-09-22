@@ -294,7 +294,8 @@ export function mapRecord(rec: AirtableRecord) {
 type MappedRecord = NonNullable<ReturnType<typeof mapRecord>>;
 
 /** The columns the Airtable mirror owns, in the shape the table stores them. */
-function rowFor(
+/** Exported for `airtable-sync.test.ts`: the child-merge rule is the whole point. */
+export function rowFor(
   mapped: MappedRecord,
   stage2: Stage2Enrichment | null,
   stage3: Stage3Enrichment | null,
@@ -320,8 +321,8 @@ function rowFor(
   // counts as an answer.
   const merged = {
     ...row,
-    ...stated(stage2),
-    ...stated(stage3),
+    ...answered(row, stage2),
+    ...answered(row, stage3),
   };
 
   // Never walk the journey backwards on the strength of a child that has not
@@ -356,15 +357,26 @@ function rowFor(
 }
 
 /**
- * A child enrichment with its unstated cells dropped.
+ * A child enrichment with only the nulls that would ERASE the parent removed.
  *
- * `undefined` is absent from a spread; `null` is an instruction to erase.
- * These objects declare every key, so only the first is ever meant.
+ * Narrow on purpose. For a column only the child writes — `stage2_authority`,
+ * `stage3_confirmation_sent_at` — a null IS the child's answer, and dropping it
+ * would mean a cell cleared in Airtable never clears here. For a column the
+ * PARENT also read, a null is just a cell this child had nothing in, and
+ * letting it through erases a value that was read correctly.
+ *
+ * So the rule is the overlap, and nothing wider: a child's null is kept unless
+ * the parent stated something for that key.
  */
-function stated<T extends Record<string, unknown>>(child: T | null): Partial<T> {
+function answered<T extends Record<string, unknown>>(
+  parent: Record<string, unknown>,
+  child: T | null,
+): Partial<T> {
   if (!child) return {};
   return Object.fromEntries(
-    Object.entries(child).filter(([, value]) => value !== null && value !== undefined),
+    Object.entries(child).filter(
+      ([key, value]) => (value !== null && value !== undefined) || parent[key] == null,
+    ),
   ) as Partial<T>;
 }
 

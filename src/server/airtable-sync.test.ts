@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mapRecord } from "./airtable-sync.server";
+import { mapRecord, rowFor } from "./airtable-sync.server";
 
 /**
  * A row from the Airtable "Aurixa Waitlist" table, in the shape the connector
@@ -137,5 +137,60 @@ describe("mapRecord", () => {
       stage3_status: null,
       primary_areas: [],
     });
+  });
+});
+
+describe("rowFor — merging a child over its parent", () => {
+  const parent = () => mapRecord(waitlistRecord)!;
+
+  it("does not let a child's null erase a value the parent read", () => {
+    // `Stage3Enrichment` declares every key it carries, nulls included, so
+    // spreading one whole wrote NULL over a parent rollup that was correct.
+    // `stage3_booked_at` exists on both and is the one that bites: every
+    // stage-email decision turns on it — `stageOccurredAt` reads it and
+    // `hasReachedStage` gates on it — so erasing it resolves the obligation
+    // to "stage not reached" and it vanishes with nothing reporting it.
+    const base = parent();
+    const withBooking = { ...base, stage3_booked_at: "2026-09-20T02:00:00.000Z" };
+    const silentChild = {
+      stage3_status: "Reached",
+      stage3_booked_at: null,
+      stage3_confirmation_sent_at: null,
+      stage3_airtable_record_id: "recBooking1",
+    } as never;
+
+    const row = rowFor(withBooking, null, silentChild, true);
+    expect(row.stage3_booked_at).toBe("2026-09-20T02:00:00.000Z");
+    // The child still WINS where it answered.
+    expect(row.stage3_status).toBe("Reached");
+  });
+
+  it("still clears a column only the child writes", () => {
+    // Narrow on purpose. For a column the parent never reads, the child's
+    // null IS its answer, and keeping it would mean a cell cleared in
+    // Airtable never clears here.
+    const child = {
+      stage3_status: null,
+      stage3_notes: null,
+      stage3_airtable_record_id: "recBooking1",
+    } as never;
+    const row = rowFor(parent(), null, child, true);
+    expect(row.stage3_notes).toBeNull();
+  });
+
+  it("does not stamp `enrichment_synced_at` when a child walk failed", () => {
+    // That column is the evidence the applicant backstop reads as "the mirror
+    // has looked since". `stage3_confirmation_sent_at` is mapped by the
+    // bookings child and by nothing else, so a failed bookings read leaves it
+    // null — and a stamp beside that null says "we looked and there is no
+    // receipt", which sends a duplicate Stage 3 confirmation on exactly the
+    // tick where the mirror knew least.
+    const answered = rowFor(parent(), null, null, true);
+    const failed = rowFor(parent(), null, null, false);
+    expect(answered.enrichment_synced_at).toEqual(expect.any(String));
+    // Omitted, never nulled: the previous stamp is the honest answer to "when
+    // did we last read all of this", and keeping it holds the backstop rather
+    // than resetting it.
+    expect("enrichment_synced_at" in failed).toBe(false);
   });
 });
