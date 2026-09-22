@@ -24,6 +24,7 @@ import {
   type StoredSeedShape,
 } from "./chunkCursorStore.pure";
 import { PRIME_LEDGER_HOLE_NOTE_CAP, primeLedgerHoleNote } from "./fleetBlockageRecord.pure";
+import type { CorpusMeta } from "./fleetCorpusScope.pure";
 import {
   frontierFromReplay,
   frontierUnreadable,
@@ -2490,8 +2491,16 @@ export async function applyPrimeMigrations(
    * present and there is no hole to step over.
    */
   scope?: {
-    /** The whole corpus, in corpus order — including what was withheld. */
-    corpus: ReadonlyArray<{ id: string; name: string }>;
+    /**
+     * The whole corpus, in corpus order — including what was withheld.
+     *
+     * `CorpusMeta` rather than `{ id, name }`, because the dependency facts
+     * are what let `partitionByDependency` orphan only what depends on a hole
+     * rather than everything behind it. A structural `{ id, name }` carried
+     * them at runtime and denied them in the type, which is how a caller
+     * comes to pass the raw `corpus.metas` and silently get the blanket rule.
+     */
+    corpus: readonly CorpusMeta[];
     /** Ids the scope cleared. */
     runnableIds: ReadonlySet<string>;
   },

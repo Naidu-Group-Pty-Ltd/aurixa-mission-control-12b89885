@@ -954,7 +954,7 @@ async function executeSqlMigration(
   const { openScopedPrimeCorpus } = await import("@/server/fleet-migration.server");
   const scoped = await openScopedPrimeCorpus(admin, source);
   if (!scoped.ok) throw new Error(scoped.error);
-  const { corpus, runnable } = scoped;
+  const { corpus, metas: scopedMetas, runnable } = scoped;
   const runnableIds = new Set(runnable.map((m) => m.id));
 
   const { runSqlOnProject, applyPrimeMigrations } =
@@ -999,7 +999,11 @@ async function executeSqlMigration(
   // What will actually be SENT: runnable, absent from the clone, and not
   // sitting behind a hole. The gate below judges exactly this set — judging
   // an orphan the replay will skip anyway is a body fetched for nothing.
-  const { send: pending, orphaned } = partitionByDependency(corpus.metas, runnableIds, applied);
+  // `scoped.metas` rather than `corpus.metas`: the two are the same sequence,
+  // and only the first carries what each migration creates and requires. With
+  // the raw array there is nothing to intersect, so the first hole orphans
+  // every runnable behind it — which on a thinly-stamped clone is all of them.
+  const { send: pending, orphaned } = partitionByDependency(scopedMetas, runnableIds, applied);
   if (pending.length === 0) {
     // Level with the prime within this scope: whatever verdict another lane
     // left, it is not true now.
@@ -1035,8 +1039,10 @@ async function executeSqlMigration(
       async (_status, detail) => touchRun(run, { in_flight: detail }),
       (m) => corpus.loadSql(m.id),
       // `runnable` alone cannot say whether a cleared version sits behind a
-      // withheld one. The whole corpus can.
-      { corpus: corpus.metas, runnableIds },
+      // withheld one. The whole corpus can — and the same enriched array the
+      // partition above reads, so the replay's refusal and this lane's count
+      // of what is held back cannot disagree.
+      { corpus: scopedMetas, runnableIds },
       { isPastDeadline: (reserveMs) => Date.now() + reserveMs >= deadlineAt },
       // A body the ceiling refuses is streamed and chunked rather than failed.
       // The cursor rides on the run's result, so a pass the budget stops

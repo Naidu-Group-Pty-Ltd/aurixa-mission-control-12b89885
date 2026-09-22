@@ -68,6 +68,22 @@ export type CorpusMeta = {
    *   clear it.
    */
   bodyDigests?: readonly string[];
+  /**
+   * Object names this migration creates, from `dependencyFactsOf`.
+   *
+   * Three states, and they are the three `bodyDigests` has, for the same
+   * reason: **absent** means nobody asked and the barrier falls back to the
+   * blanket rule for this migration; **empty** means asked and it creates
+   * nothing, so nothing can be waiting for it; **non-empty** is what a
+   * candidate's `requires` is intersected against.
+   *
+   * A body that could not be READ must leave this absent rather than empty —
+   * an unread file that creates ten tables would otherwise be declared unable
+   * to block anything.
+   */
+  creates?: readonly string[];
+  /** Object names it resolves at the statement. Same three states as {@link creates}. */
+  requires?: readonly string[];
 };
 
 /**
@@ -427,11 +443,57 @@ export function scopeCorpusToPrime<T extends CorpusMeta>(
  * evidence that they ran was finally read. The twelve-hour case above is
  * exactly one of them, and it is settled by its bytes rather than by a window
  * wide enough to contain it.
+ *
+ * ## And the barrier is per-dependency now, not blanket
+ *
+ * Everything above is about WHICH versions are holes. This is about what a
+ * hole is entitled to stop, and the blanket answer — everything after it —
+ * was wrong by a margin that only a thinly-stamped clone makes visible.
+ *
+ * Measured 22 Sep 2026 on `qvuwrvwzjyigptmnijyb`, the CRM clone, against the
+ * prime's 1,021-file corpus and that clone's live ledger:
+ *
+ *     blanket          would_send    0 | orphaned  35 | holes 212
+ *     per-dependency   would_send   34 | orphaned   1 | holes 212
+ *
+ * Its first hole is at corpus ordinal **1**:
+ * `20250124120000_fix_client_data_rls_policies.sql`, a policy fix from January
+ * 2025 that creates no object any later file can name. Under the blanket rule
+ * that one file had shut that clone's cascade since it was provisioned — not
+ * slowed it, shut it, `would_send 0` on every tick.
+ *
+ * So a hole now stops a candidate only where the hole CREATES an object the
+ * candidate REQUIRES, read from the two files' SQL by
+ * `migrationDependencyFacts.pure.ts` — which is the prime's own extractor,
+ * ported rather than re-decided. The one migration still orphaned above is
+ * `20260921060000`, which needs `market_updates`, `market_ingestion_runs` and
+ * `market_source_fetch_runs`; the holes `20260703000000` and `20260725010000`
+ * create them. That is the `20261027010000` incident class, caught, with the
+ * blast radius it actually has.
+ *
+ * **Unread is never narrowed.** The facts are optional and their absence means
+ * nobody asked, so a hole whose body could not be read blocks everything after
+ * it exactly as before, and a candidate whose body could not be read is
+ * blocked by every hole before it exactly as before. A caller that supplies no
+ * facts at all gets byte-identical behaviour to the blanket rule — which is
+ * what makes this safe to land ahead of the wiring that feeds it.
  */
 export type OrphanedEntry<T> = {
   meta: T;
-  /** Corpus versions before it that this clone has not got and will not be sent. */
+  /**
+   * The holes that actually block it — the ones creating an object it
+   * requires, where both sides' facts were read, and every earlier hole where
+   * either side's were not.
+   */
   blockedBy: string[];
+  /**
+   * The object names it is waiting for, where those could be read.
+   *
+   * Empty when the blocking was decided by the blanket fallback, which is the
+   * honest reading: under that rule an orphan is not waiting for anything in
+   * particular, it is behind a hole nobody could ask about.
+   */
+  blockedOn?: string[];
 };
 
 export type DependencyPartition<T> = {
@@ -479,18 +541,63 @@ export function partitionByDependency<T extends CorpusMeta>(
   const orphaned: OrphanedEntry<T>[] = [];
   const holes: string[] = [];
 
+  /**
+   * Hole id -> the objects it creates, for the holes whose bodies were read.
+   * A hole ABSENT from this map is opaque: nobody could read it, so it blocks
+   * everything after it exactly as every hole used to.
+   */
+  const provides = new Map<string, ReadonlySet<string>>();
+
   for (const m of metas) {
     // Already on this clone. Not a hole, and not ours to send again.
     if (cloneApplied.has(m.id)) continue;
 
     if (runnableIds.has(m.id)) {
-      if (holes.length === 0) send.push(m);
-      else orphaned.push({ meta: m, blockedBy: holes.slice(0, maxBlockedBy) });
+      // Nothing withheld before it: nothing to ask about.
+      if (holes.length === 0) {
+        send.push(m);
+        continue;
+      }
+
+      // Its own requirements could not be read. Every hole before it stands.
+      if (m.requires === undefined) {
+        orphaned.push({ meta: m, blockedBy: holes.slice(0, maxBlockedBy) });
+        continue;
+      }
+
+      const needs = new Set(m.requires);
+      const blockedBy: string[] = [];
+      const blockedOn = new Set<string>();
+      for (const hole of holes) {
+        const creates = provides.get(hole);
+        if (creates === undefined) {
+          // An opaque hole. Conservative, and the blanket rule's behaviour.
+          blockedBy.push(hole);
+          continue;
+        }
+        let hit = false;
+        for (const need of needs) {
+          if (creates.has(need)) {
+            blockedOn.add(need);
+            hit = true;
+          }
+        }
+        if (hit) blockedBy.push(hole);
+      }
+
+      if (blockedBy.length === 0) send.push(m);
+      else
+        orphaned.push({
+          meta: m,
+          blockedBy: blockedBy.slice(0, maxBlockedBy),
+          ...(blockedOn.size > 0 ? { blockedOn: [...blockedOn].slice(0, maxBlockedBy) } : {}),
+        });
       continue;
     }
 
     // Withheld by the scope and absent from this clone: a hole.
     holes.push(m.id);
+    if (m.creates !== undefined) provides.set(m.id, new Set(m.creates));
   }
 
   return { send, orphaned, holes };

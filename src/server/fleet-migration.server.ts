@@ -63,6 +63,7 @@ import {
 import { scopeCorpusToPrime, assertPrimeLedgerUsable } from "./fleetCorpusScope.pure";
 import { LEDGER_BODY_DIGEST_SQL, EMPTY_BODY_SHA256 } from "./migrationBodyIdentity.pure";
 import { digestPrimeBodies } from "./primeBodyDigests.server";
+import type { MigrationDependencyFacts } from "./migrationDependencyFacts.pure";
 import {
   MIGRATION_CLAIMABLE_STATUSES,
   blockIsDischarged,
@@ -671,6 +672,17 @@ export async function openScopedPrimeCorpus(
   | {
       ok: true;
       corpus: Awaited<ReturnType<typeof openPrimeMigrationCorpus>>;
+      /**
+       * The whole corpus in corpus order, carrying what this pass READ —
+       * body digests, and what each migration creates and requires.
+       *
+       * `corpus.metas` is the same sequence WITHOUT them, and passing that to
+       * `partitionByDependency` leaves its barrier blanket: with no `requires`
+       * on a candidate and no `creates` on a hole there is nothing to
+       * intersect, so the first hole orphans everything behind it. Every
+       * caller that partitions reads this field.
+       */
+      metas: readonly CorpusMetaOf[];
       runnable: ReturnType<typeof scopeCorpusToPrime<CorpusMetaOf>>["runnable"];
       runnableBy: ReturnType<typeof scopeCorpusToPrime<CorpusMetaOf>>["runnableBy"];
       withheld: number;
@@ -735,23 +747,47 @@ export async function openScopedPrimeCorpus(
   });
   if (unusable) return { ok: false, error: unusable };
 
-  // Bodies only for what the version test did not already clear, so a level
-  // fleet pays for nothing and the first tick after a prime commit pays for
-  // the ~800 small files the ledger keys differently. Best-effort by
-  // construction: a body this cannot read produces no digest, and no digest
-  // withholds exactly as an absent version always did.
-  const needBody = corpus.metas.filter((m) => !primeApplied.has(m.id)).map((m) => m.path);
+  // The whole corpus is READ, and the size ceiling still decides what is
+  // actually fetched — measured 22 Sep 2026, 986 of 1,002 files are under it
+  // and come to 4.17 MB, and the 16 above it are version-matched anyway. The
+  // cache is keyed on the prime's commit, so this is one extra batch pass per
+  // prime commit rather than per tick.
+  //
+  // Why the whole corpus rather than the unmatched part: `partitionByDependency`
+  // narrows its barrier only where BOTH sides' facts are present, and a hole is
+  // a file the clone has not run while a candidate is one it might. Reading only
+  // the unmatched set would leave every candidate's `requires` absent and the
+  // barrier blanket, which is the defect this exists to close.
+  const needBody = new Set(corpus.metas.filter((m) => !primeApplied.has(m.id)).map((m) => m.path));
   let digested: Map<string, string[]> = new Map();
+  let facts: Map<string, MigrationDependencyFacts> = new Map();
   try {
-    digested = (await digestPrimeBodies(corpus, needBody, getAppOctokit(), source)).byPath;
+    const pass = await digestPrimeBodies(
+      corpus,
+      corpus.metas.map((m) => m.path),
+      getAppOctokit(),
+      source,
+    );
+    digested = pass.byPath;
+    facts = pass.factsByPath;
   } catch {
-    // Nothing is cleared by body this tick. That is the behaviour this
-    // function had before bodies were read at all, which is the only safe
-    // direction for a failure here to fall.
+    // Nothing is cleared by body this tick and nothing is narrowed by
+    // dependency. That is the behaviour this function had before bodies were
+    // read at all, which is the only safe direction for a failure here to fall.
   }
   const metas = corpus.metas.map((m) => {
-    const d = digested.get(m.path);
-    return d === undefined ? m : { ...m, bodyDigests: d };
+    // Digests are attached to exactly the set they always were. A
+    // version-matched file never reaches the digest branch of
+    // `scopeCorpusToPrime`, but it DOES reach `claimants`, so attaching one
+    // here would widen an operator-visible `sharedWith` on the strength of a
+    // read that was widened for a different reason.
+    const d = needBody.has(m.path) ? digested.get(m.path) : undefined;
+    const f = facts.get(m.path);
+    return {
+      ...m,
+      ...(d === undefined ? {} : { bodyDigests: d }),
+      ...(f === undefined ? {} : { creates: f.creates, requires: f.requires }),
+    };
   });
 
   const { runnable, runnableBy, withheld, breakdown } = scopeCorpusToPrime(
@@ -762,6 +798,7 @@ export async function openScopedPrimeCorpus(
   return {
     ok: true,
     corpus,
+    metas,
     runnable,
     runnableBy,
     withheld: withheld.length,
@@ -1084,7 +1121,7 @@ export async function runFleetMigrationSync(
   // per-clone sync button. See openScopedPrimeCorpus for what having two cost.
   const scoped = await openScopedPrimeCorpus(supabase, source);
   if (!scoped.ok) return { ...out, error: scoped.error };
-  const { corpus, runnable, sourceSha } = scoped;
+  const { corpus, metas: scopedMetas, runnable, sourceSha } = scoped;
   out.withheld = scoped.withheld;
   out.withheldBreakdown = scoped.breakdown;
 
@@ -1215,8 +1252,10 @@ export async function runFleetMigrationSync(
         undefined,
         (m) => corpus.loadSql(m.id),
         // `runnable` alone cannot say whether a cleared version sits behind a
-        // withheld one. The whole corpus can.
-        { corpus: corpus.metas, runnableIds: new Set(runnable.map((m) => m.id)) },
+        // withheld one. The whole corpus can — and `scoped.metas` rather than
+        // `corpus.metas`, because only the first carries the dependency facts
+        // that narrow the barrier from blanket to per-dependency.
+        { corpus: scopedMetas, runnableIds: new Set(runnable.map((m) => m.id)) },
         /*
           A BODY TOO BIG TO HOLD IS STILL SENDABLE.
 
