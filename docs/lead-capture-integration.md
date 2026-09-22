@@ -98,6 +98,18 @@ Make.com HTTP module can map fields loosely. Responses: `201` stored,
    automatically; override the target with `VITE_MISSION_CONTROL_URL` if the
    Mission Control domain ever changes.
 
+## After capture: the questionnaire, the booking, and the emails
+
+Capture is Stage 1. What an applicant answers at Stage 2 and books at Stage 3
+reaches Mission Control through `POST /hooks/airtable-sync`, which walks four
+Airtable tables rather than one, and both audiences' stage emails are raised
+from the mirrored row.
+
+See [`lead-stage-emails.md`](./lead-stage-emails.md) — it records the three
+measurements this turned on: the questionnaire table nothing read, the internal
+email that existed nowhere in the funnel, and the Stage 2 scenario that writes
+no delivery receipt (so the applicant backstop cannot guess there, and says so).
+
 ## Data & access
 
 - Table: `public.waitlist_leads` (RLS: operators read/update/delete; inserts

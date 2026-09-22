@@ -40,6 +40,16 @@ import {
   Briefcase,
   Hash,
   Route as RouteIcon,
+  CalendarCheck,
+  Clock,
+  Users,
+  Wallet,
+  ShieldCheck,
+  Send,
+  KeyRound,
+  ListChecks,
+  Gauge,
+  FileText,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { formatDistanceToNow } from "@/lib/format";
@@ -48,8 +58,24 @@ import { RefreshButton } from "@/components/refresh-button";
 import { MetricCell } from "@/components/metric-bar";
 import { toast } from "sonner";
 import { convertLead } from "@/lib/crm.functions";
+import {
+  stage2Sections,
+  type QuestionnaireAnswers,
+  type QuestionnaireSection,
+} from "@/lib/leadQuestionnaire.pure";
 
 type Lead = Database["public"]["Tables"]["waitlist_leads"]["Row"];
+type StageEmailRow = Database["public"]["Tables"]["lead_stage_emails"]["Row"];
+
+/**
+ * What the console knows about a lead's stage emails.
+ *
+ * Three readings, not two. `unavailable` is its own answer because the table
+ * arrives with a migration, and a deployment the migration has not reached
+ * answers `PGRST205` on the wire — rendering that as an empty list would tell
+ * an operator nothing was sent when the truth is we could not look.
+ */
+type StageEmails = { kind: "rows"; rows: StageEmailRow[] } | { kind: "unavailable" };
 type LeadStatus = Database["public"]["Enums"]["lead_status"];
 
 const PAGE_SIZE = 25;
@@ -229,6 +255,7 @@ function LeadsPage() {
   const [loading, setLoading] = useState(true);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [stageEmails, setStageEmails] = useState<Map<string, StageEmailRow[]> | null>(null);
 
   type SearchState = typeof search;
 
@@ -282,6 +309,36 @@ function LeadsPage() {
     });
   }, []);
 
+  /**
+   * The stage-email send record for the leads on screen, in one read.
+   *
+   * A failure sets `null` rather than an empty map: the panel then says the
+   * record could not be read instead of drawing a lead who was emailed as one
+   * who was not.
+   */
+  const loadStageEmails = useCallback(async (ids: string[]) => {
+    if (!ids.length) {
+      setStageEmails(new Map());
+      return;
+    }
+    const { data, error } = await supabase
+      .from("lead_stage_emails")
+      .select("*")
+      .in("lead_id", ids)
+      .order("stage", { ascending: true });
+    if (error) {
+      setStageEmails(null);
+      return;
+    }
+    const byLead = new Map<string, StageEmailRow[]>();
+    for (const row of data ?? []) {
+      const list = byLead.get(row.lead_id);
+      if (list) list.push(row);
+      else byLead.set(row.lead_id, [row]);
+    }
+    setStageEmails(byLead);
+  }, []);
+
   const refresh = useCallback(async () => {
     setLoading(true);
     const from = search.page * PAGE_SIZE;
@@ -308,6 +365,7 @@ function LeadsPage() {
     const { data, count } = await q;
     setLeads(data ?? []);
     setTotal(count ?? 0);
+    void loadStageEmails((data ?? []).map((l) => l.id));
     setLoading(false);
     setLastUpdated(new Date());
     void loadStats();
@@ -319,6 +377,7 @@ function LeadsPage() {
     search.q,
     search.page,
     loadStats,
+    loadStageEmails,
   ]);
 
   useEffect(() => {
@@ -410,12 +469,32 @@ function LeadsPage() {
       "stage",
       "stage2_status",
       "stage2_completed_at",
+      // The qualification signals. An export that carries the funnel position
+      // but not what the applicant answered is the gap this page had.
       "stage2_next_step",
       "stage2_investment",
       "stage2_timeline",
+      "stage2_authority",
+      "stage2_user_count",
+      "stage2_entity_structure",
+      "stage2_admin_time",
+      "stage2_migration",
+      "stage2_regions",
+      "stage2_systems",
+      "stage2_problems",
+      "stage2_capabilities",
+      "stage2_integrations",
+      "stage2_security",
+      "stage2_difficult_workflow",
       "stage3_status",
       "stage3_booked_at",
       "stage3_session_start",
+      "stage3_local_time",
+      "stage3_host_local_time",
+      "stage3_time_zone",
+      "stage3_duration_minutes",
+      "stage3_booking_reference",
+      "stage3_notes",
       "marketing_consent",
       "source",
       "page",
@@ -633,6 +712,11 @@ function LeadsPage() {
                 <LeadRow
                   key={lead.id}
                   lead={lead}
+                  emails={
+                    stageEmails === null
+                      ? { kind: "unavailable" }
+                      : { kind: "rows", rows: stageEmails.get(lead.id) ?? [] }
+                  }
                   expanded={expandedId === lead.id}
                   onToggle={() => setExpandedId((cur) => (cur === lead.id ? null : lead.id))}
                   onStatusChange={(status) => void setStatus(lead, status)}
@@ -667,11 +751,13 @@ function StatTile({
 
 function LeadRow({
   lead,
+  emails,
   expanded,
   onToggle,
   onStatusChange,
 }: {
   lead: Lead;
+  emails: StageEmails;
   expanded: boolean;
   onToggle: () => void;
   onStatusChange: (status: LeadStatus) => void;
@@ -805,6 +891,11 @@ function LeadRow({
 
           <StageTimeline lead={row} stage={stage} />
 
+          <QualificationSignals lead={row} />
+          <QuestionnairePanel lead={row} />
+          <ReviewPanel lead={row} />
+          <DeliveryPanel lead={row} emails={emails} />
+
           {areas.length > 0 && (
             <div>
               <div className="mb-1 font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
@@ -921,6 +1012,256 @@ function StageTimeline({ lead, stage }: { lead: Record<string, unknown>; stage: 
         })}
       </ol>
     </div>
+  );
+}
+
+type Fact = { label: string; value: string | null | undefined };
+
+/** A fact grid. A row the record has nothing for is omitted, never dashed. */
+function Facts({ facts }: { facts: Fact[] }) {
+  const shown = facts.filter((f) => f.value !== null && f.value !== undefined && f.value !== "");
+  if (!shown.length) return null;
+  return (
+    <div className="grid gap-x-6 gap-y-1 text-xs sm:grid-cols-2">
+      {shown.map((f) => (
+        <div key={f.label} className="flex items-baseline gap-2">
+          <span className="shrink-0 font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+            {f.label}
+          </span>
+          <span className="min-w-0 text-foreground/90">{f.value}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function Panel({
+  icon: Icon,
+  heading,
+  count,
+  children,
+}: {
+  icon: typeof Phone;
+  heading: string;
+  count?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section>
+      <div className="mb-1.5 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+        <Icon className="h-3 w-3 shrink-0" />
+        <span>{heading}</span>
+        {count && <span className="text-muted-foreground/60">· {count}</span>}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+const asText = (v: unknown): string | null => (typeof v === "string" && v.trim() ? v.trim() : null);
+
+const asList = (v: unknown): string | null =>
+  Array.isArray(v) && v.length ? v.map(String).filter(Boolean).join(", ") || null : null;
+
+/**
+ * What an operator decides on.
+ *
+ * These are columns rather than reads into `stage2_answers`, because they are
+ * what the register is filtered and exported on — the Airtable mirror lifts
+ * them out of the blob for exactly this. Nothing here is a verdict: every
+ * value is the applicant's own answer, and a signal the record does not hold
+ * is absent rather than assumed.
+ */
+function QualificationSignals({ lead }: { lead: Record<string, unknown> }) {
+  const facts: Fact[] = [
+    { label: "Approved investment", value: asText(lead.stage2_investment) },
+    { label: "Preferred next step", value: asText(lead.stage2_next_step) },
+    { label: "Implementation start", value: asText(lead.stage2_timeline) },
+    { label: "Purchase authority", value: asText(lead.stage2_authority) },
+    { label: "Users needing access", value: asText(lead.stage2_user_count) },
+    { label: "Weekly admin time", value: asText(lead.stage2_admin_time) },
+    { label: "Entity structure", value: asText(lead.stage2_entity_structure) },
+    { label: "Data migration", value: asText(lead.stage2_migration) },
+    { label: "Operating locations", value: asList(lead.stage2_regions) },
+    { label: "Security & procurement", value: asList(lead.stage2_security) },
+  ];
+  if (!facts.some((f) => f.value)) return null;
+  return (
+    <Panel icon={Gauge} heading="Qualification signals">
+      <Facts facts={facts} />
+    </Panel>
+  );
+}
+
+/**
+ * The questionnaire itself, drawn from the same vocabulary the mirror writes
+ * the summary with and the internal email renders — one list, so an applicant
+ * cannot read one way in an inbox and another here.
+ *
+ * It sits behind a disclosure because the signals above are what a decision
+ * turns on and this is the forty-answer transcript behind them.
+ */
+function QuestionnairePanel({ lead }: { lead: Record<string, unknown> }) {
+  const [open, setOpen] = useState(false);
+  const answers = (lead.stage2_answers ?? {}) as QuestionnaireAnswers;
+  const sections: QuestionnaireSection[] = stage2Sections(answers);
+  const answered = sections.reduce((n, section) => n + section.items.length, 0);
+
+  if (!answered) {
+    // Completed with nothing mirrored is a real state, and a page that draws
+    // nothing cannot be told apart from one that failed to load.
+    if (!lead.stage2_completed_at) return null;
+    return (
+      <Panel icon={ListChecks} heading="Business readiness questionnaire">
+        <p className="text-xs text-muted-foreground">
+          Completed, but no answers have reached this console yet — they arrive on the next Airtable
+          sync.
+        </p>
+      </Panel>
+    );
+  }
+
+  return (
+    <Panel
+      icon={ListChecks}
+      heading="Business readiness questionnaire"
+      count={`${answered} answered`}
+    >
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="text-xs text-accent underline-offset-2 hover:underline"
+      >
+        {open ? "Hide the answers" : "Show every answer"}
+      </button>
+      {open && (
+        <div className="mt-2 space-y-2.5">
+          {sections.map((section) => (
+            <div key={section.heading}>
+              <div className="mb-1 font-mono text-[10px] uppercase tracking-wider text-accent/70">
+                {section.heading}
+              </div>
+              <Facts
+                facts={section.items.map((item) => ({ label: item.label, value: item.text }))}
+              />
+            </div>
+          ))}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+/** The booked session, in all three readings the record keeps rather than one. */
+function ReviewPanel({ lead }: { lead: Record<string, unknown> }) {
+  const minutes = lead.stage3_duration_minutes;
+  const access = [asText(lead.stage3_access_state), asText(lead.stage3_access_denied_reason)]
+    .filter(Boolean)
+    .join(" — ");
+  const facts: Fact[] = [
+    { label: "Status", value: asText(lead.stage3_status) },
+    { label: "Booked", value: stamp(lead.stage3_booked_at) },
+    { label: "Session", value: stamp(lead.stage3_session_start) },
+    { label: "Their local time", value: asText(lead.stage3_local_time) },
+    { label: "Aurixa local time", value: asText(lead.stage3_host_local_time) },
+    { label: "Their time zone", value: asText(lead.stage3_time_zone) },
+    { label: "Duration", value: typeof minutes === "number" ? `${minutes} minutes` : null },
+    { label: "Booking reference", value: asText(lead.stage3_booking_reference) },
+    { label: "Access", value: access || null },
+  ];
+  const notes = asText(lead.stage3_notes);
+  if (!facts.some((f) => f.value) && !notes) return null;
+  return (
+    <Panel icon={CalendarCheck} heading="Strategic review">
+      <Facts facts={facts} />
+      {notes && (
+        <div className="mt-1.5">
+          <div className="mb-0.5 font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+            What they want to cover
+          </div>
+          <p className="whitespace-pre-wrap text-sm text-foreground/90">{notes}</p>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function sendTone(status: string): string {
+  if (status === "sent") return "border-success/40 text-success";
+  if (status === "failed" || status === "unconfirmed")
+    return "border-destructive/40 text-destructive";
+  if (status === "pending" || status === "claimed") return "border-warning/40 text-warning";
+  return "text-muted-foreground";
+}
+
+/**
+ * What this applicant has actually been sent, and what is still owed.
+ *
+ * The ledger's three readings are kept apart: rows, no rows, and could-not-be-read.
+ * A lost signal must never render as "nobody was emailed" — the table arrives
+ * with a migration, and a deployment it has not reached answers `PGRST205`.
+ */
+function DeliveryPanel({ lead, emails }: { lead: Record<string, unknown>; emails: StageEmails }) {
+  const invite = (at: unknown, count: unknown): string | null => {
+    const when = stamp(at);
+    if (!when) return null;
+    const n = typeof count === "number" && count > 1 ? ` · ${count} sends` : "";
+    return `${when}${n}`;
+  };
+  const tokenExpiry = stamp(lead.questionnaire_token_expires_at);
+  const facts: Fact[] = [
+    { label: "Stage 1 receipt", value: asText(lead.stage1_email_message_id) ? "delivered" : null },
+    {
+      label: "Questionnaire invite",
+      value: invite(lead.stage2_invite_sent_at, lead.stage2_invite_count),
+    },
+    {
+      label: "Questionnaire link",
+      value:
+        [asText(lead.questionnaire_token_status), tokenExpiry && `expires ${tokenExpiry}`]
+          .filter(Boolean)
+          .join(" · ") || null,
+    },
+    { label: "Review invite", value: invite(lead.stage3_invite_sent_at, lead.stage3_invite_count) },
+    { label: "Booking confirmation", value: stamp(lead.stage3_confirmation_sent_at) },
+    { label: "Last mirrored", value: stamp(lead.enrichment_synced_at) },
+  ];
+
+  const rows = emails.kind === "rows" ? emails.rows : [];
+  if (!facts.some((f) => f.value) && emails.kind === "rows" && !rows.length) return null;
+
+  return (
+    <Panel icon={Send} heading="Email record">
+      <Facts facts={facts} />
+      {emails.kind === "unavailable" ? (
+        <p className="mt-1.5 text-xs text-muted-foreground">
+          The stage-email record could not be read. This is not a statement that nothing was sent.
+        </p>
+      ) : rows.length ? (
+        <ul className="mt-1.5 space-y-1">
+          {rows.map((row) => (
+            <li key={row.id} className="flex flex-wrap items-baseline gap-2 text-xs">
+              <Badge
+                variant="outline"
+                className={cn("text-[10px] uppercase", sendTone(row.status))}
+              >
+                {row.status}
+              </Badge>
+              <span className="text-foreground/90">
+                Stage {row.stage} · {row.audience}
+              </span>
+              {row.sent_at && <span className="text-muted-foreground">{stamp(row.sent_at)}</span>}
+              {row.to_address && (
+                <span className="truncate text-muted-foreground">{row.to_address}</span>
+              )}
+              {(row.reason || row.last_error) && (
+                <span className="text-muted-foreground/80">{row.reason ?? row.last_error}</span>
+              )}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </Panel>
   );
 }
 

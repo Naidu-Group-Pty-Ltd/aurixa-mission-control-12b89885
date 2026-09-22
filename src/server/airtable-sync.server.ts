@@ -14,9 +14,34 @@
 // they change *after* the lead first lands. A sync that only ever inserted saw
 // each applicant once, at Stage 1, and never again.
 //
-// This path deliberately does NOT fan out notifications: only fresh
-// browser/Make-forwarded submissions (/api/public/leads/capture) do that, so a
-// backfill can never spam operators with a hundred stale alerts.
+// ## Why it now reads four tables instead of one
+//
+// The rollups say an applicant REACHED Stage 2. They do not say one word about
+// what the applicant answered — and the answers are the entire point of asking
+// sixteen questions. `BRQ Detailed Responses` carries 40+ columns of exactly
+// the material an operator qualifies on (seats, systems, integrations,
+// migration scope, security and procurement, approved budget, what they want
+// to happen next) and nothing here had ever opened it. Same for the booking
+// table, whose `Context Notes` is the applicant's own agenda for the call.
+//
+// So each tick walks the parent and its three children, indexes the children by
+// the public application reference, and writes the merged applicant. The
+// children are fetched WHOLE and indexed in memory rather than queried per
+// lead: a per-record lookup would be one HTTP round trip per applicant per
+// table, which is how a backfill of two hundred leads becomes six hundred
+// requests against somebody else's rate limit.
+//
+// ## What it deliberately does NOT do
+//
+// It does not fan out notifications: only fresh browser/Make-forwarded
+// submissions (/api/public/leads/capture) do that, so a backfill can never spam
+// operators with a hundred stale alerts.
+//
+// It does not compute a score, a grade or a priority class. Airtable holds
+// `Review Status` and `Needs Conditional Review`, which are an operator's own
+// judgement and travel as facts; everything else on this page is the
+// applicant's own words. The engine that reads them and forms an opinion is
+// `crm.fit`, and it reads `stage2_answers` — which this now fills.
 import crypto from "crypto";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import {
@@ -24,74 +49,48 @@ import {
   normaliseApplicationId,
   LEAD_MAX_TEXT_LENGTH,
 } from "@/server/lead-capture.server";
+import {
+  FIELDS,
+  booleanField,
+  listField,
+  numberField,
+  preferredBooking,
+  readStage2,
+  readStage3,
+  reachedField,
+  textField,
+  timestampField,
+  type AirtableRecord,
+  type Stage2Enrichment,
+  type Stage3Enrichment,
+} from "@/server/airtableLeadMapping.pure";
+import { enqueueStageEmails } from "@/server/lead-stage-emails.server";
 
 const AIRTABLE_BASE_ID = "apptyShYE0yzL4IGB";
-const AIRTABLE_TABLE = "Aurixa Waitlist";
 const GATEWAY_URL = "https://connector-gateway.lovable.dev/airtable";
 const PAGE_SIZE = 100;
 
-type AirtableRecord = {
-  id: string;
-  createdTime: string;
-  fields: Record<string, unknown>;
-};
+/**
+ * A ceiling on how many pages one tick will walk per table, so a table that
+ * grows unexpectedly (or a gateway that never stops answering an offset)
+ * cannot spend the whole invocation. 200 pages is 20,000 records — two orders
+ * of magnitude above the live funnel — and being short is reported rather than
+ * silent, because a truncated walk that looks complete is how a backfill
+ * quietly stops covering the tail.
+ */
+const MAX_PAGES = 200;
+
+const TABLES = {
+  waitlist: "Aurixa Waitlist",
+  brq: "BRQ Detailed Responses",
+  legacyBrq: "Business Readiness Responses",
+  bookings: "Strategic Review Bookings",
+} as const;
 
 type AirtablePage = {
   records: AirtableRecord[];
   offset?: string;
 };
-
-function pickField(fields: Record<string, unknown>, ...names: string[]): unknown {
-  for (const n of names) {
-    const v = fields[n];
-    if (v !== undefined && v !== null && v !== "") return v;
-  }
-  return undefined;
-}
-
-/**
- * Airtable returns multi-selects as arrays and (through some gateways) single
- * selects as `{id, name}` objects. Reduce either to the plain slug list the
- * lead row stores.
- */
-function pickSlugList(fields: Record<string, unknown>, ...names: string[]): string[] {
-  const raw = pickField(fields, ...names);
-  if (!Array.isArray(raw)) return [];
-  return raw
-    .map((item) =>
-      cleanLeadText(
-        typeof item === "object" && item !== null ? (item as { name?: unknown }).name : item,
-        80,
-      ),
-    )
-    .filter(Boolean);
-}
-
-function pickText(fields: Record<string, unknown>, ...names: string[]): string {
-  const raw = pickField(fields, ...names);
-  if (typeof raw === "object" && raw !== null && !Array.isArray(raw)) {
-    return cleanLeadText((raw as { name?: unknown }).name);
-  }
-  return cleanLeadText(raw);
-}
-
-function pickBoolean(fields: Record<string, unknown>, ...names: string[]): boolean | null {
-  const raw = pickField(fields, ...names);
-  return typeof raw === "boolean" ? raw : null;
-}
-
-function pickTimestamp(fields: Record<string, unknown>, ...names: string[]): string | null {
-  const raw = pickText(fields, ...names);
-  if (!raw) return null;
-  const ms = Date.parse(raw);
-  return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
-}
-
-/** Airtable's "Stage N Reached" formulas answer 1 or 0. */
-function reached(fields: Record<string, unknown>, name: string): boolean {
-  const raw = pickField(fields, name);
-  return Number(raw) > 0;
-}
 
 function isEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
@@ -102,7 +101,7 @@ function dedupeKeyFor(email: string, submittedAt: string | null): string | null 
   return crypto.createHash("sha256").update(`${email}|${submittedAt}`).digest("hex");
 }
 
-async function fetchAirtablePage(offset?: string): Promise<AirtablePage> {
+async function fetchAirtablePage(table: string, offset?: string): Promise<AirtablePage> {
   const lovableKey = process.env.LOVABLE_API_KEY;
   const airtableKey = process.env.AIRTABLE_API_KEY;
   if (!lovableKey) throw new Error("LOVABLE_API_KEY not configured");
@@ -110,7 +109,7 @@ async function fetchAirtablePage(offset?: string): Promise<AirtablePage> {
 
   const params = new URLSearchParams({ pageSize: String(PAGE_SIZE) });
   if (offset) params.set("offset", offset);
-  const url = `${GATEWAY_URL}/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(AIRTABLE_TABLE)}?${params}`;
+  const url = `${GATEWAY_URL}/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(table)}?${params}`;
 
   const res = await fetch(url, {
     headers: {
@@ -120,73 +119,174 @@ async function fetchAirtablePage(offset?: string): Promise<AirtablePage> {
   });
   if (!res.ok) {
     const body = await res.text();
-    throw new Error(`Airtable gateway ${res.status}: ${body.slice(0, 300)}`);
+    throw new Error(`Airtable gateway ${res.status} on ${table}: ${body.slice(0, 300)}`);
   }
   return (await res.json()) as AirtablePage;
 }
 
+type TableWalk = { records: AirtableRecord[]; pages: number; truncated: boolean };
+
+/** Every record in one table, paged to the end (or to `MAX_PAGES`). */
+async function walkTable(table: string): Promise<TableWalk> {
+  const records: AirtableRecord[] = [];
+  let offset: string | undefined;
+  let pages = 0;
+  do {
+    const page = await fetchAirtablePage(table, offset);
+    pages += 1;
+    records.push(...page.records);
+    offset = page.offset;
+  } while (offset && pages < MAX_PAGES);
+  return { records, pages, truncated: Boolean(offset) };
+}
+
+/**
+ * A child table walked, or the reason it was not.
+ *
+ * A child table that cannot be read must not fail the whole sync: the parent
+ * rows are still worth mirroring, and a Stage 1 backfill that refuses because
+ * the questionnaire table 404s is a worse outcome than an enrichment that is
+ * one tick stale. The failure is counted and returned, never swallowed.
+ */
+async function walkOptional(table: string): Promise<TableWalk & { error: string | null }> {
+  try {
+    const walk = await walkTable(table);
+    return { ...walk, error: null };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`airtable sync: could not read "${table}"`, message);
+    return { records: [], pages: 0, truncated: false, error: message.slice(0, 300) };
+  }
+}
+
+/**
+ * Indexes child records by the two keys that can identify an applicant.
+ *
+ * The application reference is the real key — the one Airtable's own link
+ * automations match on. Email is the fallback for a response filed before the
+ * reference existed, or one where the applicant mistyped it. Email can be
+ * wrong (shared inboxes), so it is only ever consulted when the reference
+ * missed, which is the same ordering `findLeadForStage` uses on the ingest.
+ */
+type ChildIndex<T> = { byApplication: Map<string, T[]>; byEmail: Map<string, T[]> };
+
+function indexChildren<T>(
+  records: AirtableRecord[],
+  spec: { applicationId: readonly string[]; email: readonly string[] },
+  read: (record: AirtableRecord) => T,
+): ChildIndex<T> {
+  const byApplication = new Map<string, T[]>();
+  const byEmail = new Map<string, T[]>();
+  for (const record of records) {
+    const value = read(record);
+    const reference = normaliseApplicationId(
+      textField(record.fields, spec.applicationId, cleanLeadText),
+    );
+    const email = textField(record.fields, spec.email, cleanLeadText).toLowerCase();
+    if (reference) {
+      const bucket = byApplication.get(reference) ?? [];
+      bucket.push(value);
+      byApplication.set(reference, bucket);
+    }
+    if (email && isEmail(email)) {
+      const bucket = byEmail.get(email) ?? [];
+      bucket.push(value);
+      byEmail.set(email, bucket);
+    }
+  }
+  return { byApplication, byEmail };
+}
+
+function lookup<T>(index: ChildIndex<T>, reference: string | null, email: string): T[] {
+  if (reference) {
+    const hit = index.byApplication.get(reference);
+    if (hit?.length) return hit;
+  }
+  return index.byEmail.get(email) ?? [];
+}
+
+/**
+ * The parent row — Stage 1, the rollups, and the invite/access lifecycle.
+ *
+ * Exported because the test suite drives it directly: the mapping from
+ * Airtable's shapes to the lead row is the part that breaks when somebody
+ * renames a column, and it is worth asserting without a network.
+ */
 export function mapRecord(rec: AirtableRecord) {
   const f = rec.fields;
-  const first_name = cleanLeadText(pickField(f, "First Name"));
-  const last_name = cleanLeadText(pickField(f, "Last Name"));
-  const email = cleanLeadText(pickField(f, "Corporate Email")).toLowerCase();
+  const spec = FIELDS.waitlist;
+  const text = (names: readonly string[], max?: number) => textField(f, names, cleanLeadText, max);
+
+  const first_name = text(spec.firstName);
+  const last_name = text(spec.lastName);
+  const email = text(spec.email).toLowerCase();
   if (!first_name || !last_name || !email || !isEmail(email)) return null;
 
-  const submittedRaw = cleanLeadText(pickField(f, "Date Added"));
+  const submittedRaw = text(spec.dateAdded);
   const submittedMs = submittedRaw ? Date.parse(submittedRaw) : NaN;
   const submitted_at = Number.isFinite(submittedMs)
     ? new Date(submittedMs).toISOString()
     : rec.createdTime;
 
-  const stage2Reached = reached(f, "Stage 2 Reached");
-  const stage3Reached = reached(f, "Stage 3 Reached");
+  const stage2Reached = reachedField(f, spec.stage2Reached);
+  const stage3Reached = reachedField(f, spec.stage3Reached);
 
   return {
-    application_id: normaliseApplicationId(pickField(f, "Application ID")),
+    application_id: normaliseApplicationId(text(spec.applicationId)),
     first_name,
     last_name,
     email,
-    mobile_number:
-      cleanLeadText(pickField(f, "Phone", "Phone Number", "Mobile Number", "Mobile")) || null,
-    entity_name: cleanLeadText(pickField(f, "Entity Name")) || null,
-    entity_classification: pickText(f, "Entity Classification") || null,
-    transaction_volume:
-      pickText(f, "Annual Transactional Value", "Annual Origination Volume") || null,
-    tech_stack_bottlenecks:
-      cleanLeadText(pickField(f, "Current Bottlenecks"), LEAD_MAX_TEXT_LENGTH) || null,
-    notes: cleanLeadText(pickField(f, "Notes"), LEAD_MAX_TEXT_LENGTH) || null,
+    mobile_number: text(spec.phone) || null,
+    entity_name: text(spec.entityName) || null,
+    entity_classification: text(spec.entityClassification) || null,
+    transaction_volume: text(spec.volume) || null,
+    tech_stack_bottlenecks: text(spec.bottlenecks, LEAD_MAX_TEXT_LENGTH) || null,
+    notes: text(spec.notes, LEAD_MAX_TEXT_LENGTH) || null,
 
     // Stage 1 answers the previous mapping ignored entirely.
-    role: pickText(f, "Your Role") || null,
-    primary_areas: pickSlugList(f, "Primary Areas to Improve"),
-    additional_notes: cleanLeadText(pickField(f, "Additional Notes"), LEAD_MAX_TEXT_LENGTH) || null,
-    form_version: cleanLeadText(pickField(f, "Form Version")) || null,
-    privacy_acknowledged: pickBoolean(f, "Privacy Acknowledged"),
-    privacy_notice_version: cleanLeadText(pickField(f, "Privacy Notice Version")) || null,
-    marketing_consent: pickBoolean(f, "Marketing Consent"),
+    role: text(spec.role) || null,
+    primary_areas: listField(f, spec.primaryAreas, cleanLeadText),
+    additional_notes: text(spec.additionalNotes, LEAD_MAX_TEXT_LENGTH) || null,
+    form_version: text(spec.formVersion) || null,
+    privacy_acknowledged: booleanField(f, spec.privacyAcknowledged),
+    privacy_notice_version: text(spec.privacyNoticeVersion) || null,
+    marketing_consent: booleanField(f, spec.marketingConsent),
 
     // Attribution, recorded silently at Stage 1.
-    landing_page: cleanLeadText(pickField(f, "Landing Page"), 500) || null,
-    referrer: cleanLeadText(pickField(f, "Referrer"), 500) || null,
-    utm_source: cleanLeadText(pickField(f, "UTM Source")) || null,
-    utm_medium: cleanLeadText(pickField(f, "UTM Medium")) || null,
-    utm_campaign: cleanLeadText(pickField(f, "UTM Campaign")) || null,
-    utm_term: cleanLeadText(pickField(f, "UTM Term")) || null,
-    utm_content: cleanLeadText(pickField(f, "UTM Content")) || null,
+    landing_page: text(spec.landingPage, 500) || null,
+    referrer: text(spec.referrer, 500) || null,
+    utm_source: text(spec.utmSource) || null,
+    utm_medium: text(spec.utmMedium) || null,
+    utm_campaign: text(spec.utmCampaign) || null,
+    utm_term: text(spec.utmTerm) || null,
+    utm_content: text(spec.utmContent) || null,
 
     // Journey — the whole point of syncing more than once.
     stage: stage3Reached ? 3 : stage2Reached ? 2 : 1,
-    stage2_status: pickText(f, "Stage 2 Completion Status") || (stage2Reached ? "Reached" : null),
+    stage2_status: text(spec.stage2CompletionStatus) || (stage2Reached ? "Reached" : null),
     // Despite its name, "Stage 2 Started At" rolls up the BRQ response's
     // *submitted* time — the questionnaire is written once, on completion.
-    stage2_completed_at: pickTimestamp(f, "Stage 2 Started At"),
-    stage3_status: pickText(f, "Stage 3 Booking Status") || (stage3Reached ? "Reached" : null),
-    stage3_booked_at: pickTimestamp(f, "Stage 3 Booked At"),
-    stage3_session_start: pickTimestamp(f, "Stage 3 Session Start"),
+    stage2_completed_at: timestampField(f, spec.stage2StartedAt, cleanLeadText),
+    stage3_status: text(spec.stage3BookingStatus) || (stage3Reached ? "Reached" : null),
+    stage3_booked_at: timestampField(f, spec.stage3BookedAt, cleanLeadText),
+    stage3_session_start: timestampField(f, spec.stage3SessionStart, cleanLeadText),
+
+    // The invitation and access lifecycle. None of this was read before, and
+    // it is what answers "has anybody actually contacted this applicant".
+    stage1_email_message_id: text(spec.emailMessageId) || null,
+    stage2_invite_sent_at: timestampField(f, spec.stage2InviteSentAt, cleanLeadText),
+    stage2_invite_count: numberField(f, spec.stage2InviteCount),
+    stage3_invite_sent_at: timestampField(f, spec.stage3InviteSentAt, cleanLeadText),
+    stage3_invite_count: numberField(f, spec.stage3InviteCount),
+    questionnaire_token_status: text(spec.tokenStatus) || null,
+    questionnaire_token_expires_at: timestampField(f, spec.tokenExpiresAt, cleanLeadText),
+    stage3_access_state: text(spec.stage3Access) || null,
+    stage3_access_denied_reason: text(spec.stage3AccessDenied, LEAD_MAX_TEXT_LENGTH) || null,
+    stage3_booking_url: text(spec.stage3BookingUrl, 1000) || null,
 
     submitted_at,
     airtable_record_id: rec.id,
-    airtable_status: cleanLeadText(pickField(f, "Status")) || null,
+    airtable_status: text(spec.status) || null,
     airtable_created_time: rec.createdTime,
   };
 }
@@ -194,10 +294,29 @@ export function mapRecord(rec: AirtableRecord) {
 type MappedRecord = NonNullable<ReturnType<typeof mapRecord>>;
 
 /** The columns the Airtable mirror owns, in the shape the table stores them. */
-function rowFor(mapped: MappedRecord) {
+function rowFor(
+  mapped: MappedRecord,
+  stage2: Stage2Enrichment | null,
+  stage3: Stage3Enrichment | null,
+) {
   const { airtable_created_time, ...row } = mapped;
-  return {
+
+  // The child tables are the fuller reading and win where they answered: the
+  // rollup says "Completed", the response says WHAT. Where a child is absent
+  // the parent's rollup stands, so an applicant whose questionnaire row was
+  // deleted still reads as having reached Stage 2.
+  const merged = {
     ...row,
+    ...(stage2 ?? {}),
+    ...(stage3 ?? {}),
+  };
+
+  // Never walk the journey backwards on the strength of a child that has not
+  // been linked yet: a Stage 2 response present with no rollup is still Stage 2.
+  merged.stage = Math.max(row.stage, stage2 ? 2 : 1, stage3 ? 3 : 1) as 1 | 2 | 3;
+
+  return {
+    ...merged,
     source: "airtable_mirror",
     page: null,
     metadata: {
@@ -207,6 +326,7 @@ function rowFor(mapped: MappedRecord) {
       ...(mapped.airtable_status ? { airtable_status: mapped.airtable_status } : {}),
     },
     synced_at: new Date().toISOString(),
+    enrichment_synced_at: new Date().toISOString(),
   };
 }
 
@@ -241,6 +361,14 @@ export type AirtableSyncResult = {
   unchanged: number;
   skipped_invalid: number;
   errors: number;
+  /** Child-table coverage, so a silent enrichment gap is a number on screen. */
+  stage2_enriched: number;
+  stage3_enriched: number;
+  child_records: { brq: number; legacy_brq: number; bookings: number };
+  child_errors: string[];
+  truncated: string[];
+  /** Stage emails this tick found were owed and queued. */
+  emails_queued: number;
 };
 
 export async function syncAirtableWaitlist(): Promise<AirtableSyncResult> {
@@ -252,12 +380,53 @@ export async function syncAirtableWaitlist(): Promise<AirtableSyncResult> {
     unchanged: 0,
     skipped_invalid: 0,
     errors: 0,
+    stage2_enriched: 0,
+    stage3_enriched: 0,
+    child_records: { brq: 0, legacy_brq: 0, bookings: 0 },
+    child_errors: [],
+    truncated: [],
+    emails_queued: 0,
   };
 
+  // The children first, so every parent row can be written complete in one
+  // pass. Three independent reads, so they go together rather than in series.
+  const [brq, legacyBrq, bookings] = await Promise.all([
+    walkOptional(TABLES.brq),
+    walkOptional(TABLES.legacyBrq),
+    walkOptional(TABLES.bookings),
+  ]);
+
+  for (const [walk, table] of [
+    [brq, TABLES.brq],
+    [legacyBrq, TABLES.legacyBrq],
+    [bookings, TABLES.bookings],
+  ] as const) {
+    if (walk.error) out.child_errors.push(`${table}: ${walk.error}`);
+    if (walk.truncated) out.truncated.push(table);
+    out.pages += walk.pages;
+  }
+  out.child_records = {
+    brq: brq.records.length,
+    legacy_brq: legacyBrq.records.length,
+    bookings: bookings.records.length,
+  };
+
+  const brqIndex = indexChildren(brq.records, FIELDS.brq, (record) =>
+    readStage2(record, FIELDS.brq as never, cleanLeadText, LEAD_MAX_TEXT_LENGTH),
+  );
+  const legacyIndex = indexChildren(legacyBrq.records, FIELDS.legacyBrq, (record) =>
+    readStage2(record, FIELDS.legacyBrq as never, cleanLeadText, LEAD_MAX_TEXT_LENGTH),
+  );
+  const bookingIndex = indexChildren(bookings.records, FIELDS.booking, (record) =>
+    readStage3(record, cleanLeadText, LEAD_MAX_TEXT_LENGTH),
+  );
+
   let offset: string | undefined = undefined;
+  let parentPages = 0;
   do {
-    const page = await fetchAirtablePage(offset);
+    const page = await fetchAirtablePage(TABLES.waitlist, offset);
     out.pages += 1;
+    parentPages += 1;
     for (const rec of page.records) {
       out.fetched += 1;
       const mapped = mapRecord(rec);
@@ -266,9 +435,22 @@ export async function syncAirtableWaitlist(): Promise<AirtableSyncResult> {
         continue;
       }
 
+      // The detailed table is the current one; the legacy table is read only
+      // where it has no answer, so an old response still reaches the console.
+      const stage2Candidates = lookup(brqIndex, mapped.application_id, mapped.email);
+      const stage2 =
+        (stage2Candidates.length
+          ? latestStage2(stage2Candidates)
+          : latestStage2(lookup(legacyIndex, mapped.application_id, mapped.email))) ?? null;
+      const stage3 =
+        preferredBooking(lookup(bookingIndex, mapped.application_id, mapped.email)) ?? null;
+
+      if (stage2) out.stage2_enriched += 1;
+      if (stage3) out.stage3_enriched += 1;
+
       const dedupe_key =
         dedupeKeyFor(mapped.email, mapped.submitted_at) ?? `airtable:${mapped.airtable_record_id}`;
-      const row = rowFor(mapped);
+      const row = rowFor(mapped, stage2, stage3);
 
       try {
         const existing = await findExisting(mapped, dedupe_key);
@@ -286,10 +468,15 @@ export async function syncAirtableWaitlist(): Promise<AirtableSyncResult> {
             .eq("id", existing.id);
           if (error) throw error;
           out.updated += 1;
+          out.emails_queued += await queueQuietly(existing.id, row);
           continue;
         }
 
-        const { error } = await supabaseAdmin.from("waitlist_leads").insert({ ...row, dedupe_key });
+        const { data: inserted, error } = await supabaseAdmin
+          .from("waitlist_leads")
+          .insert({ ...row, dedupe_key })
+          .select("id")
+          .single();
         if (error) {
           // Another delivery path won the race between our lookup and this
           // insert. Its row is the same submission, so that is success.
@@ -300,13 +487,58 @@ export async function syncAirtableWaitlist(): Promise<AirtableSyncResult> {
           throw error;
         }
         out.inserted += 1;
+        out.emails_queued += await queueQuietly(inserted.id, row);
       } catch (error) {
         out.errors += 1;
         console.error("airtable sync failed for record", { record: rec.id, error });
       }
     }
     offset = page.offset;
-  } while (offset);
+  } while (offset && parentPages < MAX_PAGES);
+
+  if (offset) out.truncated.push(TABLES.waitlist);
 
   return out;
+}
+
+/**
+ * The most recently submitted of several Stage 2 responses for one applicant.
+ *
+ * A duplicate happens: a resumed questionnaire written twice, or one filed
+ * against a mistyped reference and again against the right one. The latest is
+ * the applicant's current answer, and a record with no submitted time sorts
+ * last rather than first — an undated row is more likely to be an import than
+ * the newest thing the applicant said.
+ */
+function latestStage2(candidates: Stage2Enrichment[]): Stage2Enrichment | null {
+  if (candidates.length === 0) return null;
+  return [...candidates].sort(
+    (a, b) =>
+      (Date.parse(b.stage2_completed_at ?? "") || 0) -
+      (Date.parse(a.stage2_completed_at ?? "") || 0),
+  )[0];
+}
+
+/**
+ * Records the stage emails this applicant is owed, if any.
+ *
+ * Wrapped because the mirror's job is the mirror: a mailer that cannot write
+ * its ledger must not cost the sync the row it just mapped. What it CANNOT do
+ * is send — `enqueueStageEmails` only writes obligations, and the dispatcher
+ * is what puts anything on the wire. That separation is what makes it safe to
+ * call from a backfill: a historical lead gets its obligations suppressed by
+ * the backstop window inside the enqueue, not by this caller remembering to.
+ */
+async function queueQuietly(leadId: string, row: Record<string, unknown>): Promise<number> {
+  try {
+    const result = await enqueueStageEmails({
+      leadId,
+      lead: row,
+      trigger: "airtable_sync",
+    });
+    return result.queued;
+  } catch (error) {
+    console.error("stage email enqueue failed during airtable sync", { leadId, error });
+    return 0;
+  }
 }

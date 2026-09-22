@@ -10,6 +10,7 @@ import {
   type ParsedLead,
   type ParsedStageUpdate,
 } from "@/server/lead-capture.server";
+import { enqueueStageEmails } from "@/server/lead-stage-emails.server";
 
 /**
  * POST /api/public/leads/capture
@@ -320,6 +321,37 @@ export const Route = createFileRoute("/api/public/leads/capture")({
   },
 });
 
+/**
+ * Records the stage emails this applicant is now owed.
+ *
+ * Writes ledger rows and nothing else — `/hooks/lead-stage-emails` is what puts
+ * anything on the wire — so a slow or unreachable mailbox can never delay this
+ * response, and the applicant's own submission never waits on Aurixa's mail.
+ *
+ * Best effort, for the same reason the notification fan-out is: the lead row is
+ * the source of truth, and a mailer that could not write its ledger must not
+ * fail (and so re-trigger) a webhook delivery that already stored the lead.
+ *
+ * `lead` is optional because Stage 2 and Stage 3 arrive as a PATCH: the row on
+ * disk after the update is the applicant, and the payload is only part of them.
+ * Re-reading is what puts a Stage 1 answer in a Stage 3 internal email.
+ */
+async function raiseStageEmails(leadId: string, fallback?: Record<string, unknown>) {
+  try {
+    let lead = fallback;
+    const { data } = await supabaseAdmin
+      .from("waitlist_leads")
+      .select("*")
+      .eq("id", leadId)
+      .maybeSingle();
+    if (data) lead = data as Record<string, unknown>;
+    if (!lead) return;
+    await enqueueStageEmails({ leadId, lead, trigger: "ingest" });
+  } catch (err) {
+    console.error("lead stage email enqueue failed", err);
+  }
+}
+
 async function captureStageOne(
   lead: ParsedLead,
   requestMetadata: JsonRecord,
@@ -344,6 +376,7 @@ async function captureStageOne(
   }
 
   await fanOutLeadCaptured(inserted.id, lead, channel);
+  await raiseStageEmails(inserted.id, { ...lead, stage: 1 });
 
   return json({ ok: true, lead_id: inserted.id, stage: 1, duplicate: false }, 201, origin);
 }
@@ -395,6 +428,7 @@ async function advanceStage(
     }
 
     await fanOutStageAdvanced(existing.id, update, channel, false);
+    await raiseStageEmails(existing.id);
     return json(
       { ok: true, lead_id: existing.id, stage: update.stage, matched: true },
       200,
@@ -429,5 +463,6 @@ async function advanceStage(
   }
 
   await fanOutStageAdvanced(inserted.id, update, channel, true);
+  await raiseStageEmails(inserted.id);
   return json({ ok: true, lead_id: inserted.id, stage: update.stage, matched: false }, 201, origin);
 }

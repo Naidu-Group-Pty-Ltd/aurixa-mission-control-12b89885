@@ -6919,6 +6919,77 @@ export type Database = {
           },
         ]
       }
+      lead_stage_emails: {
+        Row: {
+          attempts: number
+          audience: string
+          claimed_at: string | null
+          created_at: string
+          graph_request_id: string | null
+          graph_status: number | null
+          id: string
+          last_error: string | null
+          lead_id: string
+          mailbox: string | null
+          reason: string | null
+          recipients: string[]
+          sent_at: string | null
+          stage: number
+          status: string
+          subject: string | null
+          to_address: string | null
+          updated_at: string
+        }
+        Insert: {
+          attempts?: number
+          audience: string
+          claimed_at?: string | null
+          created_at?: string
+          graph_request_id?: string | null
+          graph_status?: number | null
+          id?: string
+          last_error?: string | null
+          lead_id: string
+          mailbox?: string | null
+          reason?: string | null
+          recipients?: string[]
+          sent_at?: string | null
+          stage: number
+          status?: string
+          subject?: string | null
+          to_address?: string | null
+          updated_at?: string
+        }
+        Update: {
+          attempts?: number
+          audience?: string
+          claimed_at?: string | null
+          created_at?: string
+          graph_request_id?: string | null
+          graph_status?: number | null
+          id?: string
+          last_error?: string | null
+          lead_id?: string
+          mailbox?: string | null
+          reason?: string | null
+          recipients?: string[]
+          sent_at?: string | null
+          stage?: number
+          status?: string
+          subject?: string | null
+          to_address?: string | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "lead_stage_emails_lead_id_fkey"
+            columns: ["lead_id"]
+            isOneToOne: false
+            referencedRelation: "waitlist_leads"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       feedback_submissions: {
         Row: {
           additional_comments: string | null
@@ -12637,6 +12708,7 @@ export type Database = {
           created_at: string
           dedupe_key: string | null
           email: string
+          enrichment_synced_at: string | null
           entity_classification: string | null
           entity_name: string | null
           first_name: string
@@ -12652,10 +12724,40 @@ export type Database = {
           primary_areas: string[]
           privacy_acknowledged: boolean | null
           privacy_notice_version: string | null
+          questionnaire_token_expires_at: string | null
+          questionnaire_token_status: string | null
           referrer: string | null
           role: string | null
           source: string
           stage: number
+          stage1_email_message_id: string | null
+          stage2_admin_time: string | null
+          stage2_airtable_record_id: string | null
+          stage2_authority: string | null
+          stage2_capabilities: string[]
+          stage2_difficult_workflow: string | null
+          stage2_entity_structure: string | null
+          stage2_integrations: string[]
+          stage2_invite_count: number | null
+          stage2_invite_sent_at: string | null
+          stage2_migration: string | null
+          stage2_problems: string[]
+          stage2_regions: string[]
+          stage2_security: string[]
+          stage2_systems: string[]
+          stage2_user_count: string | null
+          stage3_access_denied_reason: string | null
+          stage3_access_state: string | null
+          stage3_airtable_record_id: string | null
+          stage3_booking_reference: string | null
+          stage3_booking_url: string | null
+          stage3_confirmation_sent_at: string | null
+          stage3_duration_minutes: number | null
+          stage3_host_local_time: string | null
+          stage3_invite_count: number | null
+          stage3_invite_sent_at: string | null
+          stage3_local_time: string | null
+          stage3_notes: string | null
           stage_dedupe_key: string | null
           stage2_access_mode: string | null
           stage2_answers: Json
@@ -12691,6 +12793,7 @@ export type Database = {
           created_at?: string
           dedupe_key?: string | null
           email: string
+          enrichment_synced_at?: string | null
           entity_classification?: string | null
           entity_name?: string | null
           first_name: string
@@ -12706,10 +12809,40 @@ export type Database = {
           primary_areas?: string[]
           privacy_acknowledged?: boolean | null
           privacy_notice_version?: string | null
+          questionnaire_token_expires_at?: string | null
+          questionnaire_token_status?: string | null
           referrer?: string | null
           role?: string | null
           source?: string
           stage?: number
+          stage1_email_message_id?: string | null
+          stage2_admin_time?: string | null
+          stage2_airtable_record_id?: string | null
+          stage2_authority?: string | null
+          stage2_capabilities?: string[]
+          stage2_difficult_workflow?: string | null
+          stage2_entity_structure?: string | null
+          stage2_integrations?: string[]
+          stage2_invite_count?: number | null
+          stage2_invite_sent_at?: string | null
+          stage2_migration?: string | null
+          stage2_problems?: string[]
+          stage2_regions?: string[]
+          stage2_security?: string[]
+          stage2_systems?: string[]
+          stage2_user_count?: string | null
+          stage3_access_denied_reason?: string | null
+          stage3_access_state?: string | null
+          stage3_airtable_record_id?: string | null
+          stage3_booking_reference?: string | null
+          stage3_booking_url?: string | null
+          stage3_confirmation_sent_at?: string | null
+          stage3_duration_minutes?: number | null
+          stage3_host_local_time?: string | null
+          stage3_invite_count?: number | null
+          stage3_invite_sent_at?: string | null
+          stage3_local_time?: string | null
+          stage3_notes?: string | null
           stage_dedupe_key?: string | null
           stage2_access_mode?: string | null
           stage2_answers?: Json
@@ -12745,6 +12878,7 @@ export type Database = {
           created_at?: string
           dedupe_key?: string | null
           email?: string
+          enrichment_synced_at?: string | null
           entity_classification?: string | null
           entity_name?: string | null
           first_name?: string
@@ -12760,10 +12894,40 @@ export type Database = {
           primary_areas?: string[]
           privacy_acknowledged?: boolean | null
           privacy_notice_version?: string | null
+          questionnaire_token_expires_at?: string | null
+          questionnaire_token_status?: string | null
           referrer?: string | null
           role?: string | null
           source?: string
           stage?: number
+          stage1_email_message_id?: string | null
+          stage2_admin_time?: string | null
+          stage2_airtable_record_id?: string | null
+          stage2_authority?: string | null
+          stage2_capabilities?: string[]
+          stage2_difficult_workflow?: string | null
+          stage2_entity_structure?: string | null
+          stage2_integrations?: string[]
+          stage2_invite_count?: number | null
+          stage2_invite_sent_at?: string | null
+          stage2_migration?: string | null
+          stage2_problems?: string[]
+          stage2_regions?: string[]
+          stage2_security?: string[]
+          stage2_systems?: string[]
+          stage2_user_count?: string | null
+          stage3_access_denied_reason?: string | null
+          stage3_access_state?: string | null
+          stage3_airtable_record_id?: string | null
+          stage3_booking_reference?: string | null
+          stage3_booking_url?: string | null
+          stage3_confirmation_sent_at?: string | null
+          stage3_duration_minutes?: number | null
+          stage3_host_local_time?: string | null
+          stage3_invite_count?: number | null
+          stage3_invite_sent_at?: string | null
+          stage3_local_time?: string | null
+          stage3_notes?: string | null
           stage_dedupe_key?: string | null
           stage2_access_mode?: string | null
           stage2_answers?: Json
@@ -12936,6 +13100,10 @@ export type Database = {
           _tenant_id: string
         }
         Returns: Json
+      }
+      claim_lead_stage_emails: {
+        Args: { _lease_seconds?: number; _limit?: number }
+        Returns: Database["public"]["Tables"]["lead_stage_emails"]["Row"][]
       }
       api_usage_fleet_summary: {
         Args: { _period_start?: string }
@@ -13504,6 +13672,7 @@ export type Database = {
         | "crm_task_assigned"
         | "lead_stage_two"
         | "lead_stage_three"
+        | "lead_stage_email_failed"
         | "support_ticket_created"
         | "support_ticket_escalated"
         | "remediation_awaiting_validation"
@@ -14000,6 +14169,7 @@ export const Constants = {
         "crm_task_assigned",
         "lead_stage_two",
         "lead_stage_three",
+        "lead_stage_email_failed",
         "support_ticket_created",
         "support_ticket_escalated",
         "remediation_awaiting_validation",

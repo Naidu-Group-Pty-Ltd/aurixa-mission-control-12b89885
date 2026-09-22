@@ -82,6 +82,7 @@ import { Route as HooksReferenceDataSyncRouteImport } from './routes/hooks.refer
 import { Route as HooksPrimeSecretPairsRouteImport } from './routes/hooks.prime-secret-pairs'
 import { Route as HooksMigrationEnqueueRouteImport } from './routes/hooks.migration-enqueue'
 import { Route as HooksMigrationDriftRouteImport } from './routes/hooks.migration-drift'
+import { Route as HooksLeadStageEmailsRouteImport } from './routes/hooks.lead-stage-emails'
 import { Route as HooksHeldFileDriftRouteImport } from './routes/hooks.held-file-drift'
 import { Route as HooksHandoffParityRefreshRouteImport } from './routes/hooks.handoff-parity-refresh'
 import { Route as HooksHandoffObservabilityPollRouteImport } from './routes/hooks.handoff-observability-poll'
@@ -580,6 +581,11 @@ const HooksMigrationEnqueueRoute = HooksMigrationEnqueueRouteImport.update({
 const HooksMigrationDriftRoute = HooksMigrationDriftRouteImport.update({
   id: '/hooks/migration-drift',
   path: '/hooks/migration-drift',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksLeadStageEmailsRoute = HooksLeadStageEmailsRouteImport.update({
+  id: '/hooks/lead-stage-emails',
+  path: '/hooks/lead-stage-emails',
   getParentRoute: () => rootRouteImport,
 } as any)
 const HooksHeldFileDriftRoute = HooksHeldFileDriftRouteImport.update({
@@ -1376,6 +1382,7 @@ export interface FileRoutesByFullPath {
   '/hooks/handoff-observability-poll': typeof HooksHandoffObservabilityPollRoute
   '/hooks/handoff-parity-refresh': typeof HooksHandoffParityRefreshRoute
   '/hooks/held-file-drift': typeof HooksHeldFileDriftRoute
+  '/hooks/lead-stage-emails': typeof HooksLeadStageEmailsRoute
   '/hooks/migration-drift': typeof HooksMigrationDriftRoute
   '/hooks/migration-enqueue': typeof HooksMigrationEnqueueRoute
   '/hooks/prime-secret-pairs': typeof HooksPrimeSecretPairsRoute
@@ -1579,6 +1586,7 @@ export interface FileRoutesByTo {
   '/hooks/handoff-observability-poll': typeof HooksHandoffObservabilityPollRoute
   '/hooks/handoff-parity-refresh': typeof HooksHandoffParityRefreshRoute
   '/hooks/held-file-drift': typeof HooksHeldFileDriftRoute
+  '/hooks/lead-stage-emails': typeof HooksLeadStageEmailsRoute
   '/hooks/migration-drift': typeof HooksMigrationDriftRoute
   '/hooks/migration-enqueue': typeof HooksMigrationEnqueueRoute
   '/hooks/prime-secret-pairs': typeof HooksPrimeSecretPairsRoute
@@ -1784,6 +1792,7 @@ export interface FileRoutesById {
   '/hooks/handoff-observability-poll': typeof HooksHandoffObservabilityPollRoute
   '/hooks/handoff-parity-refresh': typeof HooksHandoffParityRefreshRoute
   '/hooks/held-file-drift': typeof HooksHeldFileDriftRoute
+  '/hooks/lead-stage-emails': typeof HooksLeadStageEmailsRoute
   '/hooks/migration-drift': typeof HooksMigrationDriftRoute
   '/hooks/migration-enqueue': typeof HooksMigrationEnqueueRoute
   '/hooks/prime-secret-pairs': typeof HooksPrimeSecretPairsRoute
@@ -1990,6 +1999,7 @@ export interface FileRouteTypes {
     | '/hooks/handoff-observability-poll'
     | '/hooks/handoff-parity-refresh'
     | '/hooks/held-file-drift'
+    | '/hooks/lead-stage-emails'
     | '/hooks/migration-drift'
     | '/hooks/migration-enqueue'
     | '/hooks/prime-secret-pairs'
@@ -2193,6 +2203,7 @@ export interface FileRouteTypes {
     | '/hooks/handoff-observability-poll'
     | '/hooks/handoff-parity-refresh'
     | '/hooks/held-file-drift'
+    | '/hooks/lead-stage-emails'
     | '/hooks/migration-drift'
     | '/hooks/migration-enqueue'
     | '/hooks/prime-secret-pairs'
@@ -2397,6 +2408,7 @@ export interface FileRouteTypes {
     | '/hooks/handoff-observability-poll'
     | '/hooks/handoff-parity-refresh'
     | '/hooks/held-file-drift'
+    | '/hooks/lead-stage-emails'
     | '/hooks/migration-drift'
     | '/hooks/migration-enqueue'
     | '/hooks/prime-secret-pairs'
@@ -2599,6 +2611,7 @@ export interface RootRouteChildren {
   HooksHandoffObservabilityPollRoute: typeof HooksHandoffObservabilityPollRoute
   HooksHandoffParityRefreshRoute: typeof HooksHandoffParityRefreshRoute
   HooksHeldFileDriftRoute: typeof HooksHeldFileDriftRoute
+  HooksLeadStageEmailsRoute: typeof HooksLeadStageEmailsRoute
   HooksMigrationDriftRoute: typeof HooksMigrationDriftRoute
   HooksMigrationEnqueueRoute: typeof HooksMigrationEnqueueRoute
   HooksPrimeSecretPairsRoute: typeof HooksPrimeSecretPairsRoute
@@ -3201,6 +3214,13 @@ declare module '@tanstack/react-router' {
       path: '/hooks/migration-drift'
       fullPath: '/hooks/migration-drift'
       preLoaderRoute: typeof HooksMigrationDriftRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/lead-stage-emails': {
+      id: '/hooks/lead-stage-emails'
+      path: '/hooks/lead-stage-emails'
+      fullPath: '/hooks/lead-stage-emails'
+      preLoaderRoute: typeof HooksLeadStageEmailsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/hooks/held-file-drift': {
@@ -4317,6 +4337,7 @@ const rootRouteChildren: RootRouteChildren = {
   HooksHandoffObservabilityPollRoute: HooksHandoffObservabilityPollRoute,
   HooksHandoffParityRefreshRoute: HooksHandoffParityRefreshRoute,
   HooksHeldFileDriftRoute: HooksHeldFileDriftRoute,
+  HooksLeadStageEmailsRoute: HooksLeadStageEmailsRoute,
   HooksMigrationDriftRoute: HooksMigrationDriftRoute,
   HooksMigrationEnqueueRoute: HooksMigrationEnqueueRoute,
   HooksPrimeSecretPairsRoute: HooksPrimeSecretPairsRoute,
