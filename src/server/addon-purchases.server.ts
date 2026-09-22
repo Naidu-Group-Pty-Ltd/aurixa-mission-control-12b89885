@@ -16,7 +16,7 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
-import { MODULES } from "@/lib/pricing/aurixa-catalog";
+import { MODULES, moduleSaleBlock } from "@/lib/pricing/aurixa-catalog";
 
 type Supabase = SupabaseClient<Database>;
 
@@ -116,10 +116,22 @@ export async function grantAddon(args: {
   }
 
   const catalogue = MODULES.find((m) => m.slug === input.addonSlug);
-  if (catalogue?.comingSoon) {
-    // Lenders is on the pricing page so the roadmap is visible, but has no
-    // agreed price. Granting it would entitle code nobody can be billed for.
-    return { ok: false, error: `"${catalogue.name}" is not purchasable yet` };
+  const block = moduleSaleBlock(input.addonSlug);
+  if (block) {
+    // Two reasons a listed module is not for sale here, and they send an
+    // operator to different places. Lenders is on the pricing page so the
+    // roadmap is visible but has no agreed price; the Builder / Developer
+    // Portal has a price and is sold directly, so granting it self-serve
+    // would entitle code against a contract nobody wrote. Either way,
+    // granting it entitles code nobody can be billed for.
+    const name = catalogue?.name ?? input.addonSlug;
+    return {
+      ok: false,
+      error:
+        block === "coming_soon"
+          ? `"${name}" is not purchasable yet`
+          : `"${name}" is sold directly — it cannot be granted from here`,
+    };
   }
 
   const { data: existing } = await supabase

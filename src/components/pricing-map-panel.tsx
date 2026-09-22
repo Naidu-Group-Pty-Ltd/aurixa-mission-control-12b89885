@@ -38,12 +38,17 @@ type MapRow = {
 };
 
 function KindBadge({ kind }: { kind: string }) {
+  // `external` reads neutral, not amber: it is a settled arrangement (the item
+  // is served by another deployment), whereas `unmapped` is an open question
+  // for a person. Colouring them alike is what would bury the open one.
   const tone =
     kind === "installs"
       ? "border-success/40 text-success"
       : kind === "entitlement"
         ? "border-primary/40 text-primary"
-        : "border-warning/50 text-warning";
+        : kind === "external"
+          ? "border-muted-foreground/40 text-muted-foreground"
+          : "border-warning/50 text-warning";
   return (
     <Badge variant="outline" className={cn("font-mono text-[9px] uppercase", tone)}>
       {kind}

@@ -84,30 +84,38 @@ describe("planCatalogSync", () => {
     }
   });
 
-  it("prices the tiers at the sheet's headline (with AML/CTF) figures", () => {
+  it("prices the tiers at the model's headline (with AML/CTF) figures", () => {
     const monthly = (slug: string) =>
       plan.prices.find((p) => p.tierSlug === slug && p.interval === "month")!.unitAmount;
-    expect(monthly("launch")).toBe(69900);
-    expect(monthly("growth")).toBe(105500);
-    expect(monthly("scale")).toBe(221000);
+    expect(monthly("launch")).toBe(99900);
+    expect(monthly("growth")).toBe(139900);
+    expect(monthly("scale")).toBe(269900);
   });
 
   it("carries the without-AML figure alongside, so both can be shown", () => {
     const base = (slug: string) =>
       plan.prices.find((p) => p.tierSlug === slug && p.interval === "month")!.baseAmount;
-    expect(base("launch")).toBe(50400);
-    expect(base("growth")).toBe(86000);
-    expect(base("scale")).toBe(201500);
+    expect(base("launch")).toBe(84900);
+    expect(base("growth")).toBe(124900);
+    expect(base("scale")).toBe(254900);
     expect(plan.prices.every((p) => p.includesAml)).toBe(true);
+  });
+
+  it("keeps the two figures exactly $150 apart on every tier", () => {
+    // The whole AML structure reduced to the one thing Stripe acts on: the
+    // amount charged moves by the net uplift, never by the $400 reference.
+    for (const p of plan.prices.filter((x) => x.interval === "month")) {
+      expect(p.unitAmount - p.baseAmount).toBe(15000);
+    }
   });
 
   it("discounts the annual price by 10% of twelve months", () => {
     const yearly = (slug: string) =>
       plan.prices.find((p) => p.tierSlug === slug && p.interval === "year")!.unitAmount;
-    expect(yearly("launch")).toBe(annualCents(69900));
-    expect(yearly("launch")).toBe(754920);
-    expect(yearly("growth")).toBe(1139400);
-    expect(yearly("scale")).toBe(2386800);
+    expect(yearly("launch")).toBe(annualCents(99900));
+    expect(yearly("launch")).toBe(1078920);
+    expect(yearly("growth")).toBe(1510920);
+    expect(yearly("scale")).toBe(2914920);
   });
 
   it("carries the GST contained in each amount, never added to it", () => {
