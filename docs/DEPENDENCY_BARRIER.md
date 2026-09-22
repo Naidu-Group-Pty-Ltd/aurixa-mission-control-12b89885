@@ -136,6 +136,16 @@ with a backlog can spend the whole 45 s budget several passes running while
 another waits. Correct-but-slow; named here because it is what made the CRM
 clone look untouched for four passes after the narrow was already live.
 
+**Throughput is the open question, and it is not answered here.** With the
+patience fix in, the 14:00 sweep was heard (HTTP 200), wrote a fresh verdict
+and released its claim — and still reported `stoppedAtBudget: true` after
+applying ONE migration to the CRM clone. Another clone applied six in a single
+pass, so the budget is not simply being eaten by setup, and the difference is
+not yet measured. At one per half-hourly pass the remaining 28 converge
+overnight, so this is slow rather than stuck. What it needs is a measurement
+of where the 45 s actually goes on that clone — not another guess, which is
+what the paragraph above this one had to be withdrawn for.
+
 ## What is asserted
 
 - `migrationDependencyFacts.pure.test.ts` — the extractor, including each of
