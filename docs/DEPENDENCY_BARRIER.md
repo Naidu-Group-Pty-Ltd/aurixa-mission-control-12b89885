@@ -104,20 +104,37 @@ The hole it names moved forward by twenty months, which is the narrow's whole
 point: the barrier now stops at the first hole a candidate actually needs
 rather than the first hole in the corpus.
 
-Two things the first live passes taught, neither a defect in this change:
+Two things the first live passes taught, and a correction to the first draft
+of this section.
 
-- **The first pass after a deploy is the expensive one.** The body read is
-  cached per commit in module state, which a warm isolate keeps between
-  requests. Cold, the ~1,004-blob read put the pass past pg_net's
-  `timeout_milliseconds := 60000`, and two CRM passes were killed at ~61 s
-  holding their claim. `reclaimStale` freed each one five minutes later and the
-  next warm pass completed normally — so it self-heals, and the cost is a
-  delayed clone rather than a wrong one. Worth knowing before reading a killed
-  first pass as a failure.
-- **The lane takes clones in physical order with no `ORDER BY`**, so one clone
-  with a backlog can spend the whole 45 s budget several passes running while
-  another waits. Correct-but-slow; named here because it is what made the
-  CRM clone look untouched for four passes after the narrow was already live.
+**The scheduled pass was never being HEARD, and that predates this change.**
+The first version of this paragraph blamed the cold body read for putting the
+pass past pg_net's `timeout_milliseconds := 60000`. That was a guess dressed
+as a cause, and `net._http_response` refutes it: over the six hours the table
+retains, EVERY half-hourly sweep — 08:00, 08:30, 09:00, 09:30, 10:00, 10:30,
+13:00, 13:30 — returned `status_code NULL` with `Timeout of 60000 ms reached`.
+The narrow merged at **10:39**. Six of those eight fires are older than the
+change. The only 200s in the window are hand-fired passes.
+
+What is lost is the RESPONSE, not the request: the pass really runs, claims a
+backend and applies a migration, and is then torn down before it can write its
+verdict or release its claim. So `status_detail` goes stale (the CRM clone
+read "38 held back" for hours after the pass that would have written "6" had
+already run), `worker_started_at` strands until `reclaimStale` frees it, and a
+clone advances one migration per fire instead of as many as its budget allows.
+`20260922140000_fleet_sync_http_patience.sql` raises both fleet jobs to
+150,000 ms — patience, not a bigger budget; the pass still stops itself at
+`FLEET_PASS_BUDGET_MS`.
+
+It is **`SCREENING_EXECUTION.md`'s rule from the other side**: a green cron run
+is not a delivered request. `cron.job_run_details` said `succeeded` on every
+one of those fires, because what pg_cron reports on is the SQL that queued the
+call. The honest signal was `net._http_response.status_code`, and it was NULL.
+
+**The lane takes clones in physical order with no `ORDER BY`**, so one clone
+with a backlog can spend the whole 45 s budget several passes running while
+another waits. Correct-but-slow; named here because it is what made the CRM
+clone look untouched for four passes after the narrow was already live.
 
 ## What is asserted
 
