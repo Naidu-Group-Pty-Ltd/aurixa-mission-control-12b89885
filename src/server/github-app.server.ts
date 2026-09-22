@@ -455,16 +455,26 @@ export async function copyBlobByStream(
     duplex: "half",
   } as RequestInit & { duplex: "half" });
 
+  // The server's own refusal FIRST, and the arithmetic second.
+  //
+  // `fetch` resolves on the response headers, which for an ordinary POST is
+  // after the body has gone — but a server that rejects early (a 413, say)
+  // answers before it. Reading `sent` first would then report a short body as
+  // "the size the contents API gave is wrong" and send somebody to audit an
+  // arithmetic that is correct, when what happened is that GitHub said no.
+  // The counts still travel on the refusal, because a short body is the
+  // likeliest thing to have caused one.
+  const shortBody = sent !== declared ? ` (sent ${sent} of a declared ${declared} body bytes)` : "";
+  if (!write.ok) {
+    throw new Error(
+      `Writing ${path} (${bytes} bytes) into ${to.owner}/${to.repo} failed: ` +
+        `HTTP ${write.status}${shortBody}${await describeFailureBody(write)}`,
+    );
+  }
   if (sent !== declared) {
     throw new Error(
       `Carrying ${path} sent ${sent} body bytes against a declared ${declared} — ` +
         `the ${bytes}-byte size the contents API reported is not this blob's length`,
-    );
-  }
-  if (!write.ok) {
-    throw new Error(
-      `Writing ${path} (${bytes} bytes) into ${to.owner}/${to.repo} failed: ` +
-        `HTTP ${write.status}${await describeFailureBody(write)}`,
     );
   }
   const created = (await write.json()) as { sha?: string };
