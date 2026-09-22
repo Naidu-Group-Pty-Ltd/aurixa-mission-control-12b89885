@@ -181,7 +181,10 @@ function rows(entries: (readonly [string, unknown])[]): Row[] {
   for (const [label, raw] of entries) {
     if (raw === undefined || raw === null || raw === "") continue;
     const value = Array.isArray(raw)
-      ? raw.filter(Boolean).map((item) => humanise(String(item))).join(" · ")
+      ? raw
+          .filter(Boolean)
+          .map((item) => humanise(String(item)))
+          .join(" · ")
       : typeof raw === "boolean"
         ? raw
           ? "Yes"
@@ -301,7 +304,10 @@ function plain(input: { title: string; blocks: Block[]; footnote?: string }): st
     ...input.blocks.map(renderBlockText).filter(Boolean),
   ];
   if (input.footnote) parts.push("", input.footnote);
-  return parts.join("\n\n").replace(/\n{3,}/g, "\n\n").trim();
+  return parts
+    .join("\n\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 // ── The applicant's own identity block, shared by every internal email ──────
@@ -456,7 +462,10 @@ function composeInternal({ lead, stage, consoleUrl }: ComposeInput): ComposedEma
         ["Aurixa local time", lead.stage3_host_local_time ?? auDateTime(lead.stage3_session_start)],
         ["Applicant local time", lead.stage3_local_time],
         ["Applicant time zone", lead.stage3_time_zone],
-        ["Duration", lead.stage3_duration_minutes ? `${lead.stage3_duration_minutes} minutes` : null],
+        [
+          "Duration",
+          lead.stage3_duration_minutes ? `${lead.stage3_duration_minutes} minutes` : null,
+        ],
         ["Booking status", lead.stage3_status],
         ["Booking reference", lead.stage3_booking_reference],
         ["Requested", auDateTime(lead.stage3_booked_at)],
@@ -539,7 +548,8 @@ function composeApplicant({ lead, stage, nextStepUrl }: ComposeInput): ComposedE
   } else if (stage === 2) {
     title = "Your questionnaire has been received";
     subject = "Questionnaire received — Aurixa Systems strategic review";
-    preheader = "Your Business Readiness Questionnaire is in. The next step is your strategic review.";
+    preheader =
+      "Your Business Readiness Questionnaire is in. The next step is your strategic review.";
     blocks.push({ kind: "paragraph", text: greeting });
     blocks.push({
       kind: "paragraph",
@@ -585,7 +595,10 @@ function composeApplicant({ lead, stage, nextStepUrl }: ComposeInput): ComposedE
         ["Your local time", lead.stage3_local_time],
         ["Time zone", lead.stage3_time_zone],
         ["Aurixa local time (Australia/Sydney)", lead.stage3_host_local_time],
-        ["Duration", lead.stage3_duration_minutes ? `${lead.stage3_duration_minutes} minutes` : null],
+        [
+          "Duration",
+          lead.stage3_duration_minutes ? `${lead.stage3_duration_minutes} minutes` : null,
+        ],
         ["Reference", lead.application_id],
       ]),
     });

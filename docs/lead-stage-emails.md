@@ -97,6 +97,20 @@ falls back to all three stages on any value it cannot parse — `"4"` and
 `"stage3"` both silently restore `1,2,3`, so the value is worth checking after
 it is set rather than assumed.
 
+**Mission Control is taking all three over**, and the order that makes that
+safe is [`lead-stage-email-cutover.md`](./lead-stage-email-cutover.md). The
+asymmetry it turns on: switching the Airtable automation off is a click in a
+browser and nothing in this repository can see it, so every step there is
+asserted by EFFECT — a tick that ran and reported what it would do, a
+`cron.job` row, an inbox somebody opened — and never by reading a setting.
+
+Parity is asserted rather than claimed. Every `fld…` the two automation
+templates reference resolves through the export's own
+`migration/id-references.json` to a column this repo already maps, and
+`leadStageEmailParity.test.ts` pins all **12** fields of *New Lead Received*
+and all **9** of the BRQ notification against the composed email. Remove one
+later and the test names the Airtable email that used to carry it.
+
 **Two caveats on the evidence.** The export is a snapshot, not a live read: the
 Airtable credential this repo's tooling holds reaches only the *rebuild* base
 `appFNPL7iYiuQyHAO`, so the live base's state today is inferred from a file.
@@ -168,6 +182,16 @@ is not vacuous.
 A field the record does not hold is **omitted**, never rendered as "N/A" or as
 a dash.
 
+And **a humaniser belongs nowhere near an identifier.** `humanise` turned any
+value with no capital and no space into sentence case, which is true of
+`mortgage_broking` and equally true of `ada@analytical.example` — so the
+applicant's own email address was capitalised on every internal email at every
+stage, and an operator copying it out of one got a string the record does not
+hold. It is bounded to a `lower_snake_case` token now, found by the parity
+check rather than by reading: database vocabulary still becomes words, and an
+address, a phone number, a time zone and a reference are rendered exactly as
+stored.
+
 ### Failure is a notification; success is a record
 
 A send that went needs nobody and lives in the ledger alone. A send that did
@@ -194,12 +218,66 @@ Two rules in the page itself:
   as an empty list would tell an operator nobody was emailed when the truth is
   that we could not look — so `unavailable` is its own state and says so.
 
+## Who the team notification actually reaches
+
+Once this is the SOLE notifier, every way the recipient list can quietly become
+the wrong list is a way the team stops being told with nothing reporting it.
+Four were found by driving the real dispatch path rather than reading it, and
+each reported as normal operation.
+
+**A stale list was served for ever.** The ledger upserts with
+`ignoreDuplicates`, so a row raised before `LEAD_STAGE_INTERNAL_RECIPIENTS` was
+set kept the fallback permanently, and `UNIQUE (lead_id, stage, audience)`
+means it can never be re-raised — the ordinary cutover sequence left every
+queued lead notifying one address while the console read `sent`. **Who an
+internal notification goes to is a property of the deployment now**, the same
+reasoning that composes the body from the current lead row, so it is re-resolved
+at send and the row says so when the two disagreed. The ordering matters in
+both directions: a configured list outranks the row, the row outranks a
+fallback, and letting a `mailbox_fallback` overrule a row that already names
+real recipients would be the same five-to-one collapse from the other side. The
+applicant's own address is never re-resolved — it is a fact about the lead.
+
+**An unreadable register was recorded as a register that said no.**
+`readSuppressions` returned every key on error — failing closed, which is
+right — but the caller could not tell that from a real answer and settled the
+row `suppressed` with the reason *"every recipient is on the do-not-send
+register"*. On a statement timeout that sentence is false, and `suppressed` is
+terminal, so a transient fault dropped a notification permanently and
+misdescribed why. **Fail closed, and say which kind of closed it is**: the
+reading carries `readable`, an unreadable register HOLDS the batch at `pending`
+and raises a notice.
+
+**A suppressed colleague was silent.** A team recipient on the register is
+anomalous — nobody unsubscribes themselves from their own lead alerts — and the
+failure is that one person is never told again while every row reads `sent`. A
+suppressed applicant still raises nothing: that is the register working.
+
+**And there was a second reading of an address.** The resolver carried its own
+shallow regex, which is precisely what lets an address `emailKey` cannot key
+reach the wire while being invisible to the suppression lookup. One reading,
+imported — which also trims the leading space four of the five recipients carry
+in the deployed Stage 1 automation, and drops what cannot be an address before
+Graph refuses the whole message for it.
+
 ## Configuration
 
 Every switch is documented in `.env.example` under *Lead stage emails*. All of
 it is optional: unset, `LEAD_STAGE_INTERNAL_RECIPIENTS` falls back to
 `MICROSOFT_MAILBOX_EMAIL`, and with no Graph credentials at all the dispatcher
 records `skipped` rows saying so rather than failing.
+
+**The tick reports its own readiness.** Three facts decide whether this mailer
+works — Graph configured, a mailbox resolved, who the team list reaches — and
+all three live on the deployment where no test here can see them. The schedule
+they hang off is allowed to fail silently: `20260922130000` wraps its
+`cron.schedule` in `EXCEPTION WHEN OTHERS THEN RAISE WARNING`, so a deployment
+without pg_cron records the migration as applied while no job exists. So an
+authenticated `POST /hooks/lead-stage-emails` answers with a `readiness` block
+naming the recipient count, how it was resolved and anything the list dropped:
+one assertion by effect — the tick ran, and here is what it would have done —
+in place of three readings of configuration, none of which prove anything ran.
+It carries a COUNT and never an address.
 
 ## Files
 
@@ -212,3 +290,4 @@ records `skipped` rows saying so rather than failing.
 | `src/server/leadStageEmailPolicy.pure.ts` | whether one is owed, and to whom |
 | `src/server/lead-stage-emails.server.ts` | enqueue, claim, send, record |
 | `src/routes/hooks.lead-stage-emails.tsx` | the five-minute tick |
+| `docs/lead-stage-email-cutover.md` | retiring the Airtable automation, in order |

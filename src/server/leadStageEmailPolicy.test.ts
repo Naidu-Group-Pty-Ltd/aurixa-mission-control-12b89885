@@ -93,7 +93,9 @@ describe("decideInternal", () => {
     const p = readPolicy({});
     const decision = decideInternal(lead(), 1, p, NOW);
     expect(decision.verdict).toBe("skip");
-    expect(decision).toMatchObject({ reason: expect.stringContaining("LEAD_STAGE_INTERNAL_RECIPIENTS") });
+    expect(decision).toMatchObject({
+      reason: expect.stringContaining("LEAD_STAGE_INTERNAL_RECIPIENTS"),
+    });
   });
 
   it("is switchable off per stage, and says so", () => {
@@ -126,7 +128,11 @@ describe("decideApplicant — the backstop", () => {
   const settled = policy({ LEAD_STAGE_APPLICANT_GRACE_MINUTES: "45" });
 
   it("does not send when the workflow's receipt says it already did", () => {
-    const l = lead({ created_at: hoursAgo(3), submitted_at: hoursAgo(3), stage1_email_message_id: "AAMk..." });
+    const l = lead({
+      created_at: hoursAgo(3),
+      submitted_at: hoursAgo(3),
+      stage1_email_message_id: "AAMk...",
+    });
     expect(decideApplicant(l, 1, settled, NOW)).toMatchObject({
       verdict: "skip",
       reason: expect.stringContaining("already emailed"),

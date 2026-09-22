@@ -233,7 +233,10 @@ export function readPolicy(env: StageEmailEnv): StageEmailPolicy {
   // recipient. That is deliberately a real destination rather than a refusal:
   // a deployment that has configured a mailbox and forgotten the recipients
   // should still be told about its leads, in the inbox it already watches.
-  const internal = resolveInternalRecipients(addressList(env.LEAD_STAGE_INTERNAL_RECIPIENTS), mailbox);
+  const internal = resolveInternalRecipients(
+    addressList(env.LEAD_STAGE_INTERNAL_RECIPIENTS),
+    mailbox,
+  );
   const internalRecipients = internal.recipients;
 
   const rawMode = (env.LEAD_STAGE_APPLICANT_MODE ?? "auto").trim().toLowerCase();

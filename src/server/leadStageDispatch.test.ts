@@ -238,3 +238,55 @@ describe("what reaches Microsoft Graph", () => {
     ]);
   });
 });
+
+describe("the tick answers with its own readiness", () => {
+  // Three facts decide whether this mailer works and all three live on the
+  // deployment, where no test in this repository can see them. The schedule it
+  // hangs off is allowed to fail silently — the migration wraps
+  // `cron.schedule` in `EXCEPTION WHEN OTHERS THEN RAISE WARNING` — so an
+  // authenticated tick that reports what it would have done is the one
+  // assertion by EFFECT available before the Airtable automation is retired.
+  it("names the recipient count and how it was resolved", async () => {
+    state.claimed = [];
+    const result = await dispatchStageEmails();
+    expect(result.readiness).toMatchObject({
+      graph: true,
+      mailbox: true,
+      recipients: 5,
+      recipientSource: "configured",
+      internalStages: [1, 2, 3],
+      applicantMode: "auto",
+    });
+  });
+
+  it("says `mailbox_fallback` out loud, because one told looks like five told", async () => {
+    delete process.env.LEAD_STAGE_INTERNAL_RECIPIENTS;
+    const result = await dispatchStageEmails();
+    expect(result.readiness).toMatchObject({ recipients: 1, recipientSource: "mailbox_fallback" });
+  });
+
+  it("carries what the list dropped, so a typo is visible before it costs a send", async () => {
+    process.env.LEAD_STAGE_INTERNAL_RECIPIENTS = "good@x.com, Rugesh Naidu";
+    const result = await dispatchStageEmails();
+    expect(result.readiness.droppedRecipients).toEqual([
+      { value: "Rugesh Naidu", reason: "not an address this deployment can send to" },
+    ]);
+  });
+
+  it("reports readiness even when it cannot send at all", async () => {
+    // The reading a deployment with no credentials most needs is the one that
+    // says which credential is missing — so it comes BEFORE the early return.
+    delete process.env.LEAD_STAGE_INTERNAL_RECIPIENTS;
+    const result = await dispatchStageEmails();
+    expect(result.readiness.graph).toBe(true);
+    expect(result.readiness.recipientSource).toBe("mailbox_fallback");
+  });
+
+  it("names which stages it would tell the team about", async () => {
+    // The stage already covered by a FIRING Airtable automation is the one to
+    // exclude; this is how an operator checks that landed.
+    process.env.LEAD_STAGE_INTERNAL_STAGES = "2,3";
+    const result = await dispatchStageEmails();
+    expect(result.readiness.internalStages).toEqual([2, 3]);
+  });
+});

@@ -33,7 +33,10 @@ import {
   decideInternal,
   nextStepUrlFor,
   readPolicy,
+  type ApplicantMode,
+  type DroppedRecipient,
   type LeadStage,
+  type RecipientSource,
   type StageAudience,
   type StageEmailPolicy,
 } from "@/server/leadStageEmailPolicy.pure";
@@ -169,6 +172,41 @@ export type DispatchResult = {
   suppressed: number;
   skipped: number;
   note?: string;
+  /** What this deployment is actually configured to do. See `readiness()`. */
+  readiness: DispatchReadiness;
+};
+
+/**
+ * The three facts that decide whether this mailer can do its job, answered in
+ * the one call that already proves the tick is running.
+ *
+ * Every one of them lives on the DEPLOYMENT rather than in this repository, so
+ * no test here can see any of them: whether Microsoft Graph is configured,
+ * which mailbox it sends from, and who the team notification reaches. The
+ * third is the one the cutover turns on — an unset recipient list resolves to
+ * the sending mailbox and quietly tells one person, which looks identical, in
+ * every ledger row and on every screen, to telling five.
+ *
+ * It is reported here because the schedule this hangs off is allowed to fail
+ * silently: `20260922130000` wraps its `cron.schedule` in
+ * `EXCEPTION WHEN OTHERS THEN RAISE WARNING`, so a deployment without pg_cron
+ * records the migration as applied while no job exists. A tick that answers
+ * with its own readiness is a single assertion BY EFFECT — the tick ran, and
+ * here is what it would have done — in place of three separate readings of
+ * configuration, none of which prove anything ran.
+ *
+ * It names no address: `recipients` is a COUNT. An operator who needs the list
+ * has the environment; a response body does not need to carry five mailboxes.
+ */
+export type DispatchReadiness = {
+  graph: boolean;
+  mailbox: boolean;
+  recipients: number;
+  recipientSource: RecipientSource;
+  /** Entries the recipient list carried that are not addresses, and why. */
+  droppedRecipients: DroppedRecipient[];
+  internalStages: LeadStage[];
+  applicantMode: ApplicantMode;
 };
 
 /**
@@ -180,6 +218,10 @@ export type DispatchResult = {
  * caller rather than reporting as "nothing to do".
  */
 export async function dispatchStageEmails(limit = DISPATCH_BATCH): Promise<DispatchResult> {
+  const p = policy();
+  const graph = isGraphConfigured();
+  const mailbox = p.mailbox ?? defaultMailbox();
+
   const out: DispatchResult = {
     claimed: 0,
     sent: 0,
@@ -187,15 +229,21 @@ export async function dispatchStageEmails(limit = DISPATCH_BATCH): Promise<Dispa
     unconfirmed: 0,
     suppressed: 0,
     skipped: 0,
+    readiness: {
+      graph,
+      mailbox: Boolean(mailbox),
+      recipients: p.internalRecipients.length,
+      recipientSource: p.internalRecipientSource,
+      droppedRecipients: p.internalRecipientsDropped,
+      internalStages: [...p.internalStages].sort(),
+      applicantMode: p.applicantMode,
+    },
   };
 
-  if (!isGraphConfigured()) {
+  if (!graph) {
     out.note = "Microsoft Graph is not configured on this deployment";
     return out;
   }
-
-  const p = policy();
-  const mailbox = p.mailbox ?? defaultMailbox();
   if (!mailbox) {
     out.note = "no sending mailbox is configured";
     return out;
