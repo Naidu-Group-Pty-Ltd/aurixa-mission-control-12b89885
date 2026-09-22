@@ -437,6 +437,31 @@ export type ApplicantEmailEvidence =
  * the receipt became mappable" and "`enrichment_synced_at` is null" are the
  * same condition.
  *
+ * ## Holding is never permanent, and that is a property of the INGRESS
+ *
+ * The obvious objection is that this suppresses the backstop exactly where it
+ * is needed: a lead the mirror never reads keeps `enrichment_synced_at` null
+ * for ever, so an applicant nobody emailed would never be acknowledged. It
+ * does not, and the reason is not in this module.
+ *
+ * `waitlist_leads` has two writers, and BOTH are downstream of the Make
+ * scenario having already run. The mirror writes rows it found in Airtable.
+ * The capture route writes rows delivered either by the site's dual-write —
+ * which fires the Make webhook first and posts here only ON SUCCESS — or by
+ * an HTTP module inside the scenario itself. So a row existing at all means
+ * the scenario ran, which means the Airtable record exists, which means the
+ * mirror has something to link and will stamp this row on its next pass.
+ * An unlinked row is a row waiting for the next hourly sync, never a row
+ * waiting for ever, and `maxAgeMs` is 72 hours against that one hour.
+ *
+ * Which also says what the backstop is actually FOR. Not "the scenario never
+ * ran" — that population cannot reach this table. It is "the scenario ran,
+ * created the record, and its email step failed or wrote no receipt back".
+ * That case has an Airtable record by construction, so the mirror reads it,
+ * stamps the row, finds no receipt, and this answers `sent: false` on the
+ * earliest tick that can honestly say so — the sync enqueues with the row it
+ * has just stamped, so the backstop fires from the sync itself.
+ *
  * ## The grace period lives here now
  *
  * The window is the operator's own `LEAD_STAGE_APPLICANT_GRACE_MINUTES`: the
