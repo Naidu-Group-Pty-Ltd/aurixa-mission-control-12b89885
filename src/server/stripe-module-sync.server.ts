@@ -22,9 +22,10 @@
 //     bought outright.
 //   • Nothing is retired. No module supersedes another, and the rows are
 //     already active and on display — linking one only adds a way to buy it.
-//   • `comingSoon` modules are skipped outright. Lenders is on the page so the
-//     roadmap is visible; it has no agreed price, so it must not reach Stripe.
-//     Skipped loudly, in the plan, rather than silently dropped.
+//   • Modules that are not purchasable are skipped outright — Lenders because
+//     it is on the page for the roadmap with no agreed price, the Builder /
+//     Developer Portal because it is priced but sold directly. Neither may
+//     reach Stripe. Skipped loudly, in the plan, rather than silently dropped.
 import Stripe from "stripe";
 import { getStripe } from "@/server/stripe.server";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
@@ -35,6 +36,7 @@ import {
   PURCHASABLE_MODULES,
   TIER_INCLUDES_AML,
   gstComponentCents,
+  isModulePurchasable,
   type PricedModule,
 } from "@/lib/pricing/aurixa-catalog";
 
@@ -159,7 +161,7 @@ export function planModuleSync(rows: readonly ModuleRow[]): ModuleSyncPlan {
 
   return {
     modules,
-    skipped: MODULES.filter((m) => m.comingSoon).map((m) => m.slug),
+    skipped: MODULES.filter((m) => !isModulePurchasable(m.slug)).map((m) => m.slug),
     missing,
     warnings,
   };
@@ -358,11 +360,12 @@ export async function applyModuleSync(
     }
   }
 
-  // Modules listed for the roadmap must not be sellable, and "we never linked
-  // one" is not the same as "it cannot be bought" — a stale link from an
-  // earlier run would still resolve at checkout. Clearing it is cheap and
-  // makes the roadmap flag actually enforceable.
-  for (const mod of MODULES.filter((m) => m.comingSoon)) {
+  // A module the catalogue withholds must not be sellable, and "we never
+  // linked one" is not the same as "it cannot be bought" — a stale link from
+  // an earlier run would still resolve at checkout. Clearing it is cheap and
+  // makes the flag actually enforceable. Keyed on purchasability rather than
+  // on `comingSoon`, so a module withheld for a NEW reason is swept too.
+  for (const mod of MODULES.filter((m) => !isModulePurchasable(m.slug))) {
     const row = bySlug.get(mod.slug);
     if (!row?.stripe_price_id && !row?.stripe_product_id) continue;
     const { error } = await adminAny
@@ -372,7 +375,7 @@ export async function applyModuleSync(
     if (error) {
       result.notes.push(`Could not unlink the roadmap module ${mod.slug}: ${error.message}`);
     } else {
-      result.notes.push(`Unlinked ${mod.slug} — listed for the roadmap, not for sale.`);
+      result.notes.push(`Unlinked ${mod.slug} — listed, but not sold through a checkout.`);
     }
   }
 

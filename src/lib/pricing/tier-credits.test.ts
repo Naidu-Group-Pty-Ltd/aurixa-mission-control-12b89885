@@ -59,9 +59,9 @@ describe("what the allowance is worth", () => {
   });
 
   it("is measured against the price actually charged", () => {
-    // Launch: $699 incl GST for 7,000 credits.
-    expect(tierCreditRateCents(tierBySlug("launch")!)).toBeCloseTo(69900 / 7000, 6);
-    expect(tierCreditRateCents(tierBySlug("scale")!)).toBeCloseTo(221000 / 75000, 6);
+    // Launch: $999 incl GST for 7,000 credits.
+    expect(tierCreditRateCents(tierBySlug("launch")!)).toBeCloseTo(99900 / 7000, 6);
+    expect(tierCreditRateCents(tierBySlug("scale")!)).toBeCloseTo(269900 / 75000, 6);
   });
 
   it("is zero rather than infinite for a tier with no credits", () => {

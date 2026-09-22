@@ -1,28 +1,79 @@
 // The Aurixa price list, as decided — one source of truth for all three repos.
 //
-// Transcribed from the signed-off pricing sheet (Aurixa_Pricing_Tier_1.xlsx).
-// Every figure in that sheet is headed "Incl GST", and that is how they are
-// stored here: these are the amounts a customer actually pays. GST is derived
-// FROM them (÷11), never added to them. Getting that backwards overcharges
-// every customer by 10%, so the direction is asserted in the tests.
+// Transcribed from the final-review pricing model
+// (Aurixa_Systems_Pricing_Model_2026_Final_Review, 10 September 2026), which
+// supersedes Aurixa_Pricing_Tier_1.xlsx in full. Every figure in that model is
+// headed "incl. GST", and that is how they are stored here: these are the
+// amounts a customer actually pays. GST is derived FROM them (÷11), never
+// added to them. Getting that backwards overcharges every customer by 10%, so
+// the direction is asserted in the tests.
 //
-// A tier is modelled as `base + the AML/CTF module`, because the sheet's own
-// numbers say that is what it is: 699−504, 1055−860 and 2210−2015 all equal
-// exactly 195, the listed price of that module. Storing one number per tier
-// and deriving the other means the two can never drift apart.
+// A tier is still modelled as `base + the AML/CTF module`, and the model's own
+// numbers still say that is what it is: 999−849, 1399−1249 and 2699−2549 all
+// equal exactly 150. Storing one number per tier and deriving the other means
+// the two can never drift apart.
 //
-// Which of the two is the HEADLINE is a commercial decision, and the sheet
-// makes it: every tier is titled with its with-AML figure ("Launch / Tier 1
-// (1 To 4 Seats) with AML/CTF Compliance Module - $699.00 Incl GST & $504.00
-// Incl GST without AML/CTF"). So `tierHeadlineCents` is what Stripe charges
-// and what both surfaces lead with; `tierBaseCents` is the documented
-// alternative, shown alongside rather than hidden. See TIER_INCLUDES_AML.
+// ── What that 150 is made of, and why $400 is not a price ────────────────────
+//
+// The model prices AML as a $400 reference component sitting beside a $250
+// Core Platform discount that exists ONLY while AML is selected. Taking AML
+// adds the first and earns the second, so the subscription moves by $150; so
+// does dropping it later, because both end together. Those two figures are
+// exported (AML_REFERENCE_COMPONENT_CENTS, AML_CORE_BUNDLE_DISCOUNT_CENTS)
+// because the approved customer wording states them — but the only amount ever
+// CHARGED is the net one, and the model is explicit about why: "Do not charge
+// an unadjusted $400 on top of the no-AML price", and "a $400 component is not
+// approval to sell a standalone AML-only product". So the module row carries
+// AML_NET_UPLIFT_CENTS, derived from the other two rather than typed, and a
+// $400 price can never reach Stripe, a checkout or an invoice.
+//
+// The model's $599 / $999 / $2,299 figures are deliberately NOT here. They are
+// the discounted core ALLOCATION inside the with-AML bundle, and the previous
+// sheet's habit of reading them as without-AML selling prices is the specific
+// mislabelling this revision was written to end.
+//
+// Which of the two prices is the HEADLINE is a commercial decision, and the
+// model makes it: every tier is titled with its with-AML figure. So
+// `tierHeadlineCents` is what Stripe charges and what both surfaces lead with;
+// `tierBaseCents` is the documented alternative, shown alongside rather than
+// hidden. See TIER_INCLUDES_AML.
 
 /** Australian GST is 10%, so a tax-inclusive total is 11/10 of its base. */
 export const GST_DIVISOR = 11;
 
 /** Annual plans bill 12 months at a 10% discount. */
 export const ANNUAL_DISCOUNT = 0.1;
+
+/**
+ * The AML/CTF reference component, as the pricing model states it.
+ *
+ * A reference value, never a selling price: it is the gross figure the bundle
+ * is described with, and it is always paired with the discount below. Exported
+ * so the approved customer wording ("a $400 AML reference component and a $250
+ * conditional Core Platform bundle discount") can be rendered from the same
+ * numbers the arithmetic uses, instead of being retyped into prose that then
+ * drifts.
+ */
+export const AML_REFERENCE_COMPONENT_CENTS = 40000;
+
+/**
+ * The Core Platform discount that exists only while AML/CTF is selected.
+ *
+ * Conditional, and conditional in both directions — removing AML ends the
+ * discount as well as the component, which is why the subscription moves by
+ * the net figure and not by $400.
+ */
+export const AML_CORE_BUNDLE_DISCOUNT_CENTS = 25000;
+
+/**
+ * What taking or dropping AML/CTF actually costs: $150 a month, every tier.
+ *
+ * Derived rather than typed, because this is the one AML number that is ever
+ * charged — the tier gap, the add-on price and the opt-out saving are all
+ * this, and a literal here could disagree with the two constants above.
+ */
+export const AML_NET_UPLIFT_CENTS =
+  AML_REFERENCE_COMPONENT_CENTS - AML_CORE_BUNDLE_DISCOUNT_CENTS;
 
 /** The GST contained within a tax-inclusive amount. */
 export function gstComponentCents(inclGstCents: number): number {
@@ -90,7 +141,7 @@ export const TIERS: readonly Tier[] = [
     replacesSlug: "launch",
     seatMin: 1,
     seatMax: 4,
-    monthlyInclGstCents: 50400,
+    monthlyInclGstCents: 84900,
     monthlyCredits: 7_000,
     blurb: "For a solo adviser or a small team getting started.",
   },
@@ -100,7 +151,7 @@ export const TIERS: readonly Tier[] = [
     replacesSlug: "professional",
     seatMin: 5,
     seatMax: 15,
-    monthlyInclGstCents: 86000,
+    monthlyInclGstCents: 124900,
     monthlyCredits: 35_000,
     blurb: "For a growing practice running comparisons and a deal pipeline.",
   },
@@ -110,7 +161,7 @@ export const TIERS: readonly Tier[] = [
     replacesSlug: "growth",
     seatMin: 16,
     seatMax: 30,
-    monthlyInclGstCents: 201500,
+    monthlyInclGstCents: 254900,
     monthlyCredits: 75_000,
     blurb: "The full platform, with finance, marketing and agreements.",
   },
@@ -135,6 +186,19 @@ export type PricedModule = {
   includedIn: readonly string[];
   /** Not yet purchasable — listed so the roadmap is visible. */
   comingSoon?: boolean;
+  /**
+   * Priced, built and available — but sold by a person, not by a checkout.
+   *
+   * The pricing model marks the Builder / Developer Portal "Direct sale" on
+   * every tier and says so twice: it "is a direct-sale reference, not an
+   * automatic tier add-on", and its quote builder excludes direct-sale items
+   * from the recurring subtotal. Separate from `comingSoon` because the two
+   * answer different questions — one has no agreed price, this one has a price
+   * and no agreed buyer (decision D05: who is billed, and for what scope).
+   * Both are unsellable through self-serve, which is what PURCHASABLE_MODULES
+   * derives.
+   */
+  directSale?: boolean;
   note?: string;
 };
 
@@ -159,21 +223,21 @@ export const MODULES: readonly PricedModule[] = [
     slug: "market-updates",
     name: "Market Updates",
     category: "Main Dashboard",
-    monthlyInclGstCents: 5900,
+    monthlyInclGstCents: 7900,
     includedIn: ["scale"],
   },
   {
     slug: "commercial-industrial",
     name: "Commercial / Industrial",
     category: "Main Dashboard",
-    monthlyInclGstCents: 16900,
+    monthlyInclGstCents: 24900,
     includedIn: ["scale"],
   },
   {
     slug: "opportunity-marketplace",
     name: "Opportunity Marketplace",
     category: "Main Dashboard",
-    monthlyInclGstCents: 16900,
+    monthlyInclGstCents: 24900,
     includedIn: ["scale"],
   },
 
@@ -182,21 +246,21 @@ export const MODULES: readonly PricedModule[] = [
     slug: "intelligence-hub",
     name: "Aurixa Intelligence Hub",
     category: "Reports & Analysis",
-    monthlyInclGstCents: 7900,
+    monthlyInclGstCents: 12900,
     includedIn: [],
   },
   {
     slug: "report-comparisons",
     name: "Generated Reports — Comparisons",
     category: "Reports & Analysis",
-    monthlyInclGstCents: 9900,
+    monthlyInclGstCents: 12900,
     includedIn: ["growth", "scale"],
   },
   {
     slug: "cashflow-comparisons",
     name: "Cash Flow Analysis — Comparisons",
     category: "Reports & Analysis",
-    monthlyInclGstCents: 9900,
+    monthlyInclGstCents: 12900,
     includedIn: ["growth", "scale"],
   },
 
@@ -205,7 +269,7 @@ export const MODULES: readonly PricedModule[] = [
     slug: "email-copilot",
     name: "Email Copilot",
     category: "Client & CRM",
-    monthlyInclGstCents: 9900,
+    monthlyInclGstCents: 14900,
     includedIn: [],
     note: "Unlocks client Emails, which stay off on every tier without it.",
   },
@@ -213,7 +277,7 @@ export const MODULES: readonly PricedModule[] = [
     slug: "call-logs",
     name: "Call Logs",
     category: "Client & CRM",
-    monthlyInclGstCents: 22500,
+    monthlyInclGstCents: 24900,
     includedIn: [],
     note: "Plus a custom build price if requested.",
   },
@@ -221,14 +285,14 @@ export const MODULES: readonly PricedModule[] = [
     slug: "portfolio-analysis",
     name: "Portfolio Analysis",
     category: "Client & CRM",
-    monthlyInclGstCents: 12500,
+    monthlyInclGstCents: 17900,
     includedIn: ["scale"],
   },
   {
     slug: "send-portfolio",
     name: "Send Portfolio To Client",
     category: "Client & CRM",
-    monthlyInclGstCents: 6900,
+    monthlyInclGstCents: 9900,
     includedIn: ["scale"],
   },
   {
@@ -247,22 +311,26 @@ export const MODULES: readonly PricedModule[] = [
     slug: "borrowing-capacity",
     name: "Borrowing Capacity",
     category: "Client & CRM",
-    monthlyInclGstCents: 22500,
+    monthlyInclGstCents: 29500,
     includedIn: ["scale"],
   },
   {
     slug: "lenders",
     name: "Lenders",
     category: "Client & CRM",
+    // The pricing model retires this figure to price history and records no
+    // active selling price. Kept only so the roadmap row has a shape; nothing
+    // may quote it, which `comingSoon` is what enforces.
     monthlyInclGstCents: 9900,
     includedIn: [],
     comingSoon: true,
+    note: "Not for sale. The listed figure is historical and is not a current price.",
   },
   {
     slug: "client-ai",
     name: "Client AI",
     category: "Client & CRM",
-    monthlyInclGstCents: 7900,
+    monthlyInclGstCents: 12900,
     includedIn: ["scale"],
   },
 
@@ -271,31 +339,37 @@ export const MODULES: readonly PricedModule[] = [
     slug: "agreements",
     name: "Agreements",
     category: "Operations",
-    monthlyInclGstCents: 6900,
+    monthlyInclGstCents: 12900,
     includedIn: ["scale"],
   },
   {
     slug: "marketing",
     name: "Marketing",
     category: "Operations",
-    monthlyInclGstCents: 17900,
+    monthlyInclGstCents: 24900,
     includedIn: ["scale"],
   },
   {
     slug: "deal-pipeline",
     name: "Deal Pipeline",
     category: "Operations",
-    monthlyInclGstCents: 9900,
+    monthlyInclGstCents: 14900,
     includedIn: ["growth", "scale"],
   },
 
-  // AML / CTF Compliance — the $195 that separates the headline tier prices.
+  // AML / CTF Compliance — the $150 that separates the headline tier prices.
+  //
+  // Derived, not typed: this is the $400 reference component net of the $250
+  // conditional Core Platform discount, and it is the only AML figure that is
+  // ever charged — as the gap between a tier's two prices, as the add-on price
+  // for a tier bought without it, and as the saving for dropping it.
   {
     slug: "aml-ctf",
     name: "AML / CTF Compliance",
     category: "AML / CTF Compliance",
-    monthlyInclGstCents: 19500,
+    monthlyInclGstCents: AML_NET_UPLIFT_CENTS,
     includedIn: [],
+    note: "Includes a $400 AML reference component less a $250 conditional Core Platform bundle discount.",
   },
 
   // Administration
@@ -303,14 +377,14 @@ export const MODULES: readonly PricedModule[] = [
     slug: "model-hub",
     name: "Model Hub",
     category: "Administration",
-    monthlyInclGstCents: 19500,
+    monthlyInclGstCents: 24900,
     includedIn: ["scale"],
   },
   {
     slug: "finance-portal",
     name: "Finance Portal",
     category: "Administration",
-    monthlyInclGstCents: 22500,
+    monthlyInclGstCents: 34900,
     includedIn: ["scale"],
     note: "Also unlocks client Send To Finance and Finance Messages.",
   },
@@ -318,7 +392,7 @@ export const MODULES: readonly PricedModule[] = [
     slug: "integrations",
     name: "Integrations",
     category: "Administration",
-    monthlyInclGstCents: 13500,
+    monthlyInclGstCents: 19900,
     includedIn: [],
     note: "Subject to the client integrating their own APIs.",
   },
@@ -326,8 +400,28 @@ export const MODULES: readonly PricedModule[] = [
     slug: "api-usage",
     name: "API Usage",
     category: "Administration",
-    monthlyInclGstCents: 14900,
+    monthlyInclGstCents: 19900,
     includedIn: ["scale"],
+  },
+  {
+    slug: "solicitor-portal",
+    name: "Solicitor Portal",
+    category: "Administration",
+    monthlyInclGstCents: 29900,
+    includedIn: [],
+    note: "Partner hand-off portal. A portal fee buys that portal's own scope and never grants AML/CTF.",
+  },
+  {
+    // Direct sale, on every tier — see `directSale`. Priced here so the price
+    // list is complete and so nothing has to invent a figure at quote time;
+    // excluded from self-serve because D05 has not settled who is billed.
+    slug: "builder-developer-portal",
+    name: "Builder / Developer Portal",
+    category: "Administration",
+    monthlyInclGstCents: 69900,
+    includedIn: [],
+    directSale: true,
+    note: "Sold separately, not as a tier add-on. A portal fee buys that portal's own scope and never grants AML/CTF.",
   },
 
   // AI Assistant
@@ -335,7 +429,7 @@ export const MODULES: readonly PricedModule[] = [
     slug: "aurixa-agent",
     name: "Aurixa Agent",
     category: "AI Assistant",
-    monthlyInclGstCents: 37500,
+    monthlyInclGstCents: 49500,
     includedIn: [],
   },
 ];
@@ -471,17 +565,22 @@ export function packDiscountFraction(pack: TopupPack): number {
   return 1 - packPerCreditCents(pack) / baseline;
 }
 
-/** The module whose price is the gap between a tier's two headline figures. */
+/**
+ * The module whose price is the gap between a tier's two headline figures.
+ *
+ * That gap is AML_NET_UPLIFT_CENTS on every tier, which is what makes the
+ * choice independent of the tier: a Growth customer who declines AML keeps
+ * every other thing Growth includes, and pays $150 less for it.
+ */
 export const AML_MODULE_SLUG = "aml-ctf";
 
 /**
  * Whether a tier is SOLD with the AML/CTF module included.
  *
- * The pricing sheet titles every tier with its with-AML figure — "Launch /
- * Tier 1 (1 To 4 Seats) with AML/CTF Compliance Module - $699.00 Incl GST &
- * $504.00 Incl GST without AML/CTF" — so that is the headline product and the
- * amount Stripe charges. The without-AML figure is the documented alternative,
- * shown alongside it rather than hidden.
+ * The pricing model titles every tier with its with-AML figure — $999 / $1,399
+ * / $2,699 — so that is the headline product and the amount Stripe charges.
+ * The without-AML figure ($849 / $1,249 / $2,549) is the documented
+ * alternative, shown alongside it rather than hidden.
  *
  * Kept as one constant because it is a commercial decision, not an
  * implementation detail: flipping it moves the headline, the Stripe price and
@@ -503,19 +602,44 @@ export const moduleBySlug = (slug: string): PricedModule | undefined =>
   MODULES.find((m) => m.slug === slug);
 
 /**
- * The modules that can actually be sold.
+ * The modules that can actually be sold through a checkout.
  *
- * `comingSoon` is the whole distinction. Those rows exist so the roadmap is
- * visible on the pricing page, but they have no price anyone has agreed to
- * pay — so they must never reach Stripe. Deriving the sellable set here rather
- * than filtering at each call site means a module going on sale is one flag,
- * not a hunt through the sync, the checkout and the storefront.
+ * Two flags take a row out, for two different reasons. `comingSoon` rows are
+ * on the pricing page so the roadmap is visible but have no price anyone has
+ * agreed to pay. `directSale` rows have a price and no agreed buyer — the
+ * model prices the Builder / Developer Portal and in the same breath excludes
+ * it from the recurring subtotal. Neither may reach Stripe or a self-serve
+ * purchase.
+ *
+ * Deriving the sellable set here rather than filtering at each call site means
+ * a module going on sale is one flag, not a hunt through the sync, the
+ * checkout and the storefront. That was already the stated intent, and the
+ * call sites had drifted to testing `comingSoon` by hand — which is precisely
+ * how adding a second reason to withhold a module would have shipped one that
+ * anybody could buy. They go through `isModulePurchasable` now.
  */
-export const PURCHASABLE_MODULES: readonly PricedModule[] = MODULES.filter((m) => !m.comingSoon);
+export const PURCHASABLE_MODULES: readonly PricedModule[] = MODULES.filter(
+  (m) => !m.comingSoon && !m.directSale,
+);
 
-/** Whether a module is listed for the roadmap only, and must not be sold. */
+/** Whether a module may be sold through a checkout. */
 export const isModulePurchasable = (slug: string): boolean =>
   PURCHASABLE_MODULES.some((m) => m.slug === slug);
+
+/**
+ * Why a module cannot be bought here, or null if it can.
+ *
+ * A surface that hides an unsellable module tells a customer it does not
+ * exist; the model wants it listed WITH its price and a reason. Callers that
+ * only need the yes/no use `isModulePurchasable`.
+ */
+export function moduleSaleBlock(slug: string): "coming_soon" | "direct_sale" | null {
+  const mod = moduleBySlug(slug);
+  if (!mod) return null;
+  if (mod.comingSoon) return "coming_soon";
+  if (mod.directSale) return "direct_sale";
+  return null;
+}
 
 export const tierBySlug = (slug: string): Tier | undefined => TIERS.find((t) => t.slug === slug);
 

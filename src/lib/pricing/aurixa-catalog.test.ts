@@ -1,8 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   ANNUAL_DISCOUNT,
+  AML_CORE_BUNDLE_DISCOUNT_CENTS,
   AML_MODULE_SLUG,
+  AML_NET_UPLIFT_CENTS,
+  AML_REFERENCE_COMPONENT_CENTS,
   MODULES,
+  PURCHASABLE_MODULES,
+  isModulePurchasable,
+  moduleSaleBlock,
   TIERS,
   annualCents,
   annualPerMonthCents,
@@ -22,31 +28,49 @@ const $ = (dollars: number) => Math.round(dollars * 100);
 
 describe("GST is derived from the price, never added to it", () => {
   it("splits a tax-inclusive total into base + GST", () => {
-    // $699.00 incl = $635.45 + $63.55. Adding 10% instead would bill $768.90,
-    // which is the mistake this whole direction-of-travel exists to prevent.
-    expect(gstComponentCents($(699))).toBe($(63.55));
-    expect(exGstCents($(699))).toBe($(635.45));
+    // $999.00 incl = $908.18 + $90.82. Adding 10% instead would bill
+    // $1,098.90, which is the mistake this direction-of-travel prevents.
+    expect(gstComponentCents($(999))).toBe($(90.82));
+    expect(exGstCents($(999))).toBe($(908.18));
+  });
+
+  it("reproduces every ex-GST and GST figure the pricing model publishes", () => {
+    // The model's TIER PRICING sheet states all six splits to the cent. If
+    // this table and that sheet ever disagree, one of them is wrong about
+    // what a customer is charged — so it is checked rather than assumed.
+    const published = [
+      { incl: $(999), ex: $(908.18), gst: $(90.82) },
+      { incl: $(849), ex: $(771.82), gst: $(77.18) },
+      { incl: $(1399), ex: $(1271.82), gst: $(127.18) },
+      { incl: $(1249), ex: $(1135.45), gst: $(113.55) },
+      { incl: $(2699), ex: $(2453.64), gst: $(245.36) },
+      { incl: $(2549), ex: $(2317.27), gst: $(231.73) },
+    ];
+    for (const row of published) {
+      expect(exGstCents(row.incl)).toBe(row.ex);
+      expect(gstComponentCents(row.incl)).toBe(row.gst);
+    }
   });
 
   it("always reconciles: base + GST is exactly the price charged", () => {
-    for (const cents of [$(49), $(59), $(504), $(699), $(860), $(1055), $(2015), $(2210), 1, 0]) {
+    for (const cents of [$(49), $(79), $(849), $(999), $(1249), $(1399), $(2549), $(2699), 1, 0]) {
       expect(exGstCents(cents) + gstComponentCents(cents)).toBe(cents);
     }
   });
 
   it("never exceeds one eleventh of the total", () => {
-    for (const cents of [$(504), $(860), $(2015), $(375)]) {
+    for (const cents of [$(849), $(1249), $(2549), $(495)]) {
       expect(gstComponentCents(cents)).toBeLessThanOrEqual(Math.ceil(cents / 11));
     }
   });
 });
 
-describe("headline tier prices match the signed-off sheet", () => {
-  // The sheet publishes two figures per tier. Both must fall out of the model.
+describe("headline tier prices match the signed-off pricing model", () => {
+  // The model publishes two figures per tier. Both must fall out of the code.
   const expected = [
-    { slug: "launch", without: $(504), with: $(699), seats: [1, 4] },
-    { slug: "growth", without: $(860), with: $(1055), seats: [5, 15] },
-    { slug: "scale", without: $(2015), with: $(2210), seats: [16, 30] },
+    { slug: "launch", without: $(849), with: $(999), seats: [1, 4] },
+    { slug: "growth", without: $(1249), with: $(1399), seats: [5, 15] },
+    { slug: "scale", without: $(2549), with: $(2699), seats: [16, 30] },
   ];
 
   for (const e of expected) {
@@ -60,7 +84,7 @@ describe("headline tier prices match the signed-off sheet", () => {
 
   it("the with/without gap is the AML/CTF module price on every tier", () => {
     const aml = moduleBySlug(AML_MODULE_SLUG)!;
-    expect(aml.monthlyInclGstCents).toBe($(195));
+    expect(aml.monthlyInclGstCents).toBe($(150));
     for (const tier of TIERS) {
       expect(tierPriceCents(tier, { withAml: true }) - tierPriceCents(tier)).toBe(
         aml.monthlyInclGstCents,
@@ -82,9 +106,9 @@ describe("annual billing takes 10% off twelve months", () => {
   });
 
   it("lands on exact cents for every tier", () => {
-    expect(annualCents($(504))).toBe($(5443.2));
-    expect(annualCents($(860))).toBe($(9288));
-    expect(annualCents($(2015))).toBe($(21762));
+    expect(annualCents($(849))).toBe($(9169.2));
+    expect(annualCents($(1249))).toBe($(13489.2));
+    expect(annualCents($(2549))).toBe($(27529.2));
   });
 
   it("is cheaper than paying monthly, by exactly a tenth", () => {
@@ -97,22 +121,62 @@ describe("annual billing takes 10% off twelve months", () => {
 
   it("applies to the AML-inclusive price too", () => {
     const launch = tierBySlug("launch")!;
-    expect(tierPriceCents(launch, { period: "annual", withAml: true })).toBe(annualCents($(699)));
+    expect(tierPriceCents(launch, { period: "annual", withAml: true })).toBe(annualCents($(999)));
   });
 
   it("reports a sensible per-month equivalent", () => {
-    expect(annualPerMonthCents($(504))).toBe($(453.6));
+    expect(annualPerMonthCents($(849))).toBe($(764.1));
   });
 
   it("stays tax-inclusive, so GST still divides out of the annual total", () => {
-    const annual = annualCents($(504));
+    const annual = annualCents($(849));
     expect(exGstCents(annual) + gstComponentCents(annual)).toBe(annual);
   });
 });
 
+describe("the AML component, the conditional discount and the net uplift", () => {
+  it("is $400 less $250, which is the $150 that is actually charged", () => {
+    expect(AML_REFERENCE_COMPONENT_CENTS).toBe($(400));
+    expect(AML_CORE_BUNDLE_DISCOUNT_CENTS).toBe($(250));
+    expect(AML_NET_UPLIFT_CENTS).toBe($(150));
+    expect(AML_REFERENCE_COMPONENT_CENTS - AML_CORE_BUNDLE_DISCOUNT_CENTS).toBe(
+      AML_NET_UPLIFT_CENTS,
+    );
+  });
+
+  it("never lets the $400 reference reach a chargeable price", () => {
+    // The model is explicit: "do not charge an unadjusted $400 on top of the
+    // no-AML price", and a $400 component is not approval to sell a
+    // standalone AML product. The only amount that may be billed is the net
+    // one, so nothing in the catalogue may carry the reference figure.
+    for (const m of MODULES) {
+      expect(m.monthlyInclGstCents).not.toBe(AML_REFERENCE_COMPONENT_CENTS);
+    }
+    expect(moduleBySlug(AML_MODULE_SLUG)!.monthlyInclGstCents).toBe(AML_NET_UPLIFT_CENTS);
+  });
+
+  it("costs the same to add later as it did to take from the start", () => {
+    // Opt out, then back in, and the subscription must land exactly where it
+    // began — the component and the discount always end and begin together.
+    for (const tier of TIERS) {
+      const withAml = tierPriceCents(tier, { withAml: true });
+      const without = tierPriceCents(tier, { withAml: false });
+      expect(withAml - without).toBe(AML_NET_UPLIFT_CENTS);
+      expect(without + AML_NET_UPLIFT_CENTS).toBe(withAml);
+    }
+  });
+
+  it("charges one AML component per subscription, whatever the tier", () => {
+    const gaps = TIERS.map(
+      (t) => tierPriceCents(t, { withAml: true }) - tierPriceCents(t, { withAml: false }),
+    );
+    expect(new Set(gaps).size).toBe(1);
+  });
+});
+
 describe("module catalogue", () => {
-  it("carries all 23 priced modules from the sheet", () => {
-    expect(MODULES).toHaveLength(23);
+  it("carries all 25 priced modules from the pricing model", () => {
+    expect(MODULES).toHaveLength(25);
     expect(MODULES.every((m) => m.monthlyInclGstCents > 0)).toBe(true);
   });
 
@@ -120,11 +184,43 @@ describe("module catalogue", () => {
     expect(new Set(MODULES.map((m) => m.slug)).size).toBe(MODULES.length);
   });
 
-  it("spot-checks prices against the sheet", () => {
-    expect(moduleBySlug("market-updates")!.monthlyInclGstCents).toBe($(59));
-    expect(moduleBySlug("aurixa-agent")!.monthlyInclGstCents).toBe($(375));
-    expect(moduleBySlug("client-forms")!.monthlyInclGstCents).toBe($(49));
-    expect(moduleBySlug("finance-portal")!.monthlyInclGstCents).toBe($(225));
+  it("carries every module price the pricing model publishes", () => {
+    // The model's MODULE CATALOGUE, in full. Spot-checking four of twenty-five
+    // is how the other twenty-one drift: each of these moved in this revision
+    // except Advanced Forms Builder, and a partial check would have caught
+    // none of them.
+    const published: Record<string, number> = {
+      "market-updates": $(79),
+      "commercial-industrial": $(249),
+      "opportunity-marketplace": $(249),
+      "intelligence-hub": $(129),
+      "report-comparisons": $(129),
+      "cashflow-comparisons": $(129),
+      "email-copilot": $(149),
+      "call-logs": $(249),
+      "portfolio-analysis": $(179),
+      "send-portfolio": $(99),
+      "agreements": $(129),
+      "deal-pipeline": $(149),
+      "client-forms": $(49),
+      "borrowing-capacity": $(295),
+      "client-ai": $(129),
+      "marketing": $(249),
+      "model-hub": $(249),
+      "finance-portal": $(349),
+      "integrations": $(199),
+      "api-usage": $(199),
+      "solicitor-portal": $(299),
+      "aurixa-agent": $(495),
+      "builder-developer-portal": $(699),
+      "aml-ctf": $(150),
+    };
+    for (const [slug, cents] of Object.entries(published)) {
+      expect(moduleBySlug(slug), slug).toBeDefined();
+      expect(moduleBySlug(slug)!.monthlyInclGstCents, slug).toBe(cents);
+    }
+    // Every module except Lenders, which the model retires to price history.
+    expect(Object.keys(published).length).toBe(MODULES.length - 1);
   });
 
   it("only ever references tiers that exist", () => {
@@ -157,6 +253,36 @@ describe("module catalogue", () => {
   it("offers fewer upgrades the higher the tier", () => {
     expect(upgradesFor("launch").length).toBeGreaterThan(upgradesFor("growth").length);
     expect(upgradesFor("growth").length).toBeGreaterThan(upgradesFor("scale").length);
+  });
+});
+
+describe("what may be sold through a checkout", () => {
+  it("withholds Lenders and the Builder / Developer Portal, and nothing else", () => {
+    const withheld = MODULES.filter((m) => !isModulePurchasable(m.slug)).map((m) => m.slug);
+    expect(withheld.sort()).toEqual(["builder-developer-portal", "lenders"]);
+    expect(PURCHASABLE_MODULES).toHaveLength(MODULES.length - 2);
+  });
+
+  it("says WHICH reason, because the two send an operator elsewhere", () => {
+    // No agreed price is a roadmap problem; a price with no agreed buyer is a
+    // contract problem. Collapsing them loses the difference.
+    expect(moduleSaleBlock("lenders")).toBe("coming_soon");
+    expect(moduleSaleBlock("builder-developer-portal")).toBe("direct_sale");
+    expect(moduleSaleBlock("finance-portal")).toBeNull();
+  });
+
+  it("keeps a withheld module priced and listed rather than hidden", () => {
+    // The model lists both with a figure. A surface that drops them tells a
+    // customer they do not exist.
+    expect(moduleBySlug("builder-developer-portal")!.monthlyInclGstCents).toBe($(699));
+    expect(moduleBySlug("lenders")).toBeDefined();
+  });
+
+  it("never bundles a withheld module into a tier", () => {
+    for (const m of MODULES) {
+      if (isModulePurchasable(m.slug)) continue;
+      expect(m.includedIn, m.slug).toEqual([]);
+    }
   });
 });
 
@@ -205,9 +331,9 @@ describe("the headline price is the one the sheet titles each tier with", () => 
   // customers see and the number Stripe charges. The without-AML figure is the
   // documented alternative, not the headline.
   const headline = [
-    { slug: "launch", monthly: $(699), annual: $(7549.2) },
-    { slug: "growth", monthly: $(1055), annual: $(11394) },
-    { slug: "scale", monthly: $(2210), annual: $(23868) },
+    { slug: "launch", monthly: $(999), annual: $(10789.2) },
+    { slug: "growth", monthly: $(1399), annual: $(15109.2) },
+    { slug: "scale", monthly: $(2699), annual: $(29149.2) },
   ];
 
   for (const h of headline) {
@@ -219,9 +345,9 @@ describe("the headline price is the one the sheet titles each tier with", () => 
   }
 
   it("still exposes the without-AML figure the sheet also publishes", () => {
-    expect(tierBaseCents(tierBySlug("launch")!)).toBe($(504));
-    expect(tierBaseCents(tierBySlug("growth")!)).toBe($(860));
-    expect(tierBaseCents(tierBySlug("scale")!)).toBe($(2015));
+    expect(tierBaseCents(tierBySlug("launch")!)).toBe($(849));
+    expect(tierBaseCents(tierBySlug("growth")!)).toBe($(1249));
+    expect(tierBaseCents(tierBySlug("scale")!)).toBe($(2549));
   });
 
   it("keeps headline and base exactly one AML module apart", () => {

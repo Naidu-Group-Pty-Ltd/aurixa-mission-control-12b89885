@@ -53,6 +53,11 @@ const KNOWN = new Set([
   "lenders",
   "agent",
   "integrations",
+  // Detected on the prime, which builds `src/pages/solicitor/` alongside
+  // `src/components/solicitor-portal/` and canonicalises the pair onto the
+  // portal spelling. Present here for the reason the note below gives: a
+  // fixture that omits a real module lets an unresolved price look resolved.
+  "solicitor-portal",
   // A real approved module in production. Its absence here is what let the
   // `intelligence-hub` alias look unresolved while the test still passed.
   "report-qa",
@@ -157,6 +162,22 @@ describe("mapPricedModule", () => {
       (m) => `${m.slug} (${m.name})`,
     );
     expect(unresolved).toEqual([]);
+  });
+
+  it("resolves a separately-deployed portal to that deployment, not to nothing", () => {
+    // "Nothing installs here" and "we could not work out what this installs"
+    // read identically in an unmapped index, and only one of them is a
+    // question for a human. The Builder / Developer Portal is the settled one.
+    const m = mapPricedModule(priced("builder-developer-portal"), KNOWN);
+    expect(m.kind).toBe("external");
+    expect(m.moduleSlugs).toEqual([]);
+    expect(m.reason).toContain("aurixa-builders");
+  });
+
+  it("maps the Solicitor Portal onto the module the prime actually builds", () => {
+    const m = mapPricedModule(priced("solicitor-portal"), KNOWN);
+    expect(m.kind).toBe("installs");
+    expect(m.moduleSlugs).toEqual(["solicitor-portal"]);
   });
 });
 
