@@ -6,6 +6,7 @@ import { Octokit } from "@octokit/rest";
 import forge from "node-forge";
 import { withRetry, isTransientHttpError } from "@/lib/with-retry";
 import { countGithubCall } from "./githubUsageMeter";
+import { githubApiHeaders } from "./githubRequestHeaders.pure";
 
 const cache = new Map<string, Octokit>();
 
@@ -292,6 +293,16 @@ export class OversizeFileError extends Error {
     readonly path: string,
     readonly bytes: number,
     readonly maxBytes: number,
+    /**
+     * The blob this read refused, which the metadata already named.
+     *
+     * A refusal that says only "too big" leaves its caller with nothing to
+     * act on. This one is thrown while holding the file's sha, and the
+     * streaming lane needs exactly that and nothing else — a blob is
+     * content-addressed, so the sha IS the file, and a copy made from it can
+     * prove itself against it (`blobStreamCarry.pure.ts`).
+     */
+    readonly sha?: string,
   ) {
     super(`${path} is ${bytes} bytes, over the ${maxBytes}-byte ceiling this read was given`);
     this.name = "OversizeFileError";
@@ -333,7 +344,7 @@ export async function getFileContent(
       typeof data.size === "number" &&
       data.size > opts.maxBytes
     ) {
-      throw new OversizeFileError(path, data.size, opts.maxBytes);
+      throw new OversizeFileError(path, data.size, opts.maxBytes, data.sha);
     }
 
     let base64 = data.encoding === "base64" ? (data.content ?? "") : "";
@@ -361,5 +372,112 @@ export async function getFileContent(
   } catch (e: unknown) {
     if ((e as { status?: number })?.status === 404) return null;
     throw e;
+  }
+}
+
+/**
+ * Copy one blob from prime into a clone WITHOUT reading it.
+ *
+ * The counterpart to `getFileContent`'s ceiling. That function refuses a file
+ * it cannot hold, and the refusal is right — but "cannot hold" and "cannot
+ * carry" are different statements, and this is the second one's answer. Prime
+ * serves the blob raw, the bytes are base64-encoded in flight, and the result
+ * is streamed into the clone's create-blob endpoint as the body of one
+ * request. Nothing larger than a chunk is ever in this isolate.
+ *
+ * `blobStreamCarry.pure.ts` holds every decision in it: the transform, the
+ * body framing, the exact `Content-Length` (so the request never goes out
+ * chunked) and the sha equality that proves a transfer nobody watched.
+ *
+ * Failures are named rather than propagated raw, because there are four of
+ * them and they send an operator to four different places: prime would not
+ * serve the blob, the clone would not take it, the body was not the length it
+ * was declared to be, or the bytes arrived and were not the file. Every one
+ * of them ends in the same place for the caller — the file stays held,
+ * exactly as it is today — so this can only add deliveries, never lose one.
+ */
+export async function copyBlobByStream(
+  octokit: Octokit,
+  from: RepoRef,
+  to: RepoRef,
+  path: string,
+  sha: string,
+  bytes: number,
+): Promise<string> {
+  const { assertCarriedBlobMatches, blobRequestBody, blobRequestContentLength } =
+    await import("@/server/cascade/blobStreamCarry.pure");
+  const auth = (await octokit.auth({ type: "installation" })) as { token?: string } | null;
+  if (!auth?.token) throw new Error(`No installation token to carry ${path} with`);
+
+  // Both are RAW fetches, outside `getAppOctokit`'s counting hook. A carried
+  // blob is the most expensive pair of requests this system makes, so leaving
+  // them out would understate exactly the lane most likely to exhaust a
+  // window — the same reason `fetchBlobTextStream` counts its own.
+  countGithubCall();
+  const read = await fetch(
+    `https://api.github.com/repos/${from.owner}/${from.repo}/git/blobs/${sha}`,
+    {
+      headers: githubApiHeaders(auth.token, { accept: "application/vnd.github.raw+json" }),
+    },
+  );
+  if (!read.ok || !read.body) {
+    throw new Error(
+      `Reading ${path} (${sha}) from ${from.owner}/${from.repo} to carry it failed: ` +
+        `HTTP ${read.status}${await describeFailureBody(read)}`,
+    );
+  }
+
+  // What was actually sent, against what the header promised. A disagreement
+  // here means the size the contents API reported is not the blob's length,
+  // and the request would otherwise fail on the wire with nothing saying why.
+  let sent = 0;
+  const declared = blobRequestContentLength(bytes);
+  const body = blobRequestBody(read.body).pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        sent += chunk.length;
+        controller.enqueue(chunk);
+      },
+    }),
+  );
+
+  countGithubCall();
+  const write = await fetch(`https://api.github.com/repos/${to.owner}/${to.repo}/git/blobs`, {
+    method: "POST",
+    headers: {
+      ...githubApiHeaders(auth.token),
+      "Content-Type": "application/json",
+      "Content-Length": String(declared),
+    },
+    body,
+    // Required by undici whenever a request body is a stream, and harmless
+    // where the runtime does not ask for it. Not in the DOM `RequestInit`.
+    duplex: "half",
+  } as RequestInit & { duplex: "half" });
+
+  if (sent !== declared) {
+    throw new Error(
+      `Carrying ${path} sent ${sent} body bytes against a declared ${declared} — ` +
+        `the ${bytes}-byte size the contents API reported is not this blob's length`,
+    );
+  }
+  if (!write.ok) {
+    throw new Error(
+      `Writing ${path} (${bytes} bytes) into ${to.owner}/${to.repo} failed: ` +
+        `HTTP ${write.status}${await describeFailureBody(write)}`,
+    );
+  }
+  const created = (await write.json()) as { sha?: string };
+  assertCarriedBlobMatches(path, sha, created.sha ?? "(no sha in the response)");
+  return sha;
+}
+
+/** A failed response's body, read defensively — it is diagnostic text on a path that already failed. */
+async function describeFailureBody(res: Response): Promise<string> {
+  try {
+    const detail = (await res.text()).slice(0, 300).replace(/\s+/g, " ").trim();
+    return detail ? ` — ${detail}` : "";
+  } catch {
+    return " — (body unreadable)";
   }
 }

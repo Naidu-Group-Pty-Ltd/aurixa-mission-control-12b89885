@@ -7,11 +7,8 @@ import {
   owedSample,
   type PriorObservation,
 } from "./convergence.pure";
-import {
-  CASCADE_MAX_FILE_BYTES,
-  DEFAULT_MIRROR_EXCLUSIONS,
-  type SyncExclusion,
-} from "./syncExclusions.pure";
+import { DEFAULT_MIRROR_EXCLUSIONS, type SyncExclusion } from "./syncExclusions.pure";
+import { CASCADE_STREAM_MAX_FILE_BYTES } from "./blobStreamCarry.pure";
 
 const tree = (entries: Record<string, string>) => new Map(Object.entries(entries));
 const NONE: SyncExclusion[] = [];
@@ -103,8 +100,17 @@ describe("measureConvergence", () => {
     seeds against an 8 MB ceiling — held by the engine on every pass, for ever,
     and correctly. Reported as owed they would have escalated as `stalled`
     permanently on a fleet behaving exactly as designed.
+
+    The ceiling then moved, and the direction of the danger moved with it.
+    While the engine refused at 8 MB, an auditor that refused later would have
+    reported debt nobody could discharge. Now that the engine STREAMS a file
+    it cannot read, an auditor still refusing at 8 MB would do the opposite
+    and worse: a 41.7 MB seed that has not crossed would be scored "not owed",
+    and a clone genuinely missing fourteen files would measure as converged.
+    So the refusal here is the one the engine actually makes — GitHub's own
+    blob ceiling — and the seed below is owed, because it is deliverable.
   */
-  it("never owes a path the cascade refuses on size", () => {
+  it("owes a path the cascade can stream, however large the read would be", () => {
     const m = measureConvergence({
       prime: tree({ "supabase/migrations/huge_seed.sql": "PRIME", "src/a.ts": "PRIME" }),
       clone: tree({ "src/a.ts": "CLONE" }),
@@ -113,6 +119,25 @@ describe("measureConvergence", () => {
       cloneTruncated: false,
       primeSizes: new Map([
         ["supabase/migrations/huge_seed.sql", 41_671_969],
+        ["src/a.ts", 400],
+      ]),
+    });
+    expect(m.kind === "measured" && m.owed).toEqual([
+      "src/a.ts",
+      "supabase/migrations/huge_seed.sql",
+    ]);
+    expect(m.kind === "measured" && m.oversizeHeld).toBe(0);
+  });
+
+  it("never owes a path past the ceiling the engine really refuses at", () => {
+    const m = measureConvergence({
+      prime: tree({ "enormous.bin": "PRIME", "src/a.ts": "PRIME" }),
+      clone: tree({ "src/a.ts": "CLONE" }),
+      exclusions: NONE,
+      primeTruncated: false,
+      cloneTruncated: false,
+      primeSizes: new Map([
+        ["enormous.bin", CASCADE_STREAM_MAX_FILE_BYTES + 1],
         ["src/a.ts", 400],
       ]),
     });
@@ -127,7 +152,7 @@ describe("measureConvergence", () => {
       exclusions: NONE,
       primeTruncated: false,
       cloneTruncated: false,
-      primeSizes: new Map([["big.sql", CASCADE_MAX_FILE_BYTES]]),
+      primeSizes: new Map([["big.sql", CASCADE_STREAM_MAX_FILE_BYTES]]),
     });
     expect(m.kind === "measured" && m.owed).toEqual(["big.sql"]);
     expect(m.kind === "measured" && m.oversizeHeld).toBe(0);

@@ -28,7 +28,15 @@ const WRITES = [
 ];
 
 describe("the dry run stops before the write boundary", () => {
-  const boundary = code.indexOf("if (dryRun) {");
+  /* The RETURN, not the first `if (dryRun)` in the file.
+
+     This used to be `code.indexOf("if (dryRun) {")`, which was the same
+     position only while nothing guarded a dry run earlier in the source. The
+     streaming carry lane added a guard of its own above the prepare loop, and
+     the anchor silently moved to it — so the assertions below started
+     comparing writes against a boundary that is not the boundary. Anchored on
+     the return itself, there is exactly one match and it cannot drift. */
+  const boundary = code.indexOf('if (dryRun) {\n    return {\n      status: "skipped"');
 
   it("returns before anything is created", () => {
     expect(boundary).toBeGreaterThan(-1);
@@ -38,12 +46,27 @@ describe("the dry run stops before the write boundary", () => {
     }
   });
 
-  it("uploads no blob — the one write that happens per file, before the boundary", () => {
-    /* `createBlob` runs inside the prepare loop, which a dry run still needs
-       for the content holds and the held-file guards. It is the one write that
-       cannot be handled by returning early, so it is guarded at the call. */
+  it("uploads no blob — the writes that happen per file, before the boundary", () => {
+    /* Both run inside the prepare loop, which a dry run still needs for the
+       content holds and the held-file guards, so neither can be handled by
+       returning early: each is guarded at its own call.
+
+       `createBlob` carries a binary file. `copyBlobByStream` carries one too
+       large to read, and it is the more dangerous of the two to leave
+       unguarded — a rehearsal that streamed a 40 MB seed into a clone would
+       write an object into a repository nobody had approved a change to. */
     expect(code).toContain("const blobSha = dryRun");
     expect(code.indexOf("octokit.git.createBlob(")).toBeLessThan(boundary);
+    expect(code.indexOf("copyBlobByStream(")).toBeLessThan(boundary);
+
+    /* The stream carry's guard, asserted where it is: `dryRun` returns
+       prime's own sha as the stand-in and never reaches the copy. */
+    const carry = code.slice(
+      code.indexOf("const carryOversizeByStream = async"),
+      code.indexOf("const prepareOne = async"),
+    );
+    expect(carry.length).toBeGreaterThan(200);
+    expect(carry.indexOf("if (dryRun) {")).toBeLessThan(carry.indexOf("copyBlobByStream("));
   });
 
   it("opens no drift issue in notify mode", () => {
