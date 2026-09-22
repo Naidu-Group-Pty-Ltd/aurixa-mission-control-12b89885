@@ -6,7 +6,11 @@
 // server-to-server under a clone API key; the browser only ever sees the
 // opaque `?h=<uuid>` — never the identity fields themselves.
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
-import { DEFAULT_STOREFRONT_PRICING_URL } from "@/lib/storefront";
+import {
+  DEFAULT_STOREFRONT_PRICING_URL,
+  normaliseStorefrontBase,
+  storefrontPurchaseUrl,
+} from "@/lib/storefront";
 import type { BillingContact } from "@/server/billing-contact.server";
 
 const adminAny = supabaseAdmin;
@@ -72,13 +76,18 @@ export function intentAllows(
  */
 export function storefrontPricingBase(): string {
   const site = process.env.PUBLIC_PRICING_SITE_URL;
-  if (site && /^https?:\/\//.test(site)) return site.replace(/\/+$/, "");
+  if (site && /^https?:\/\//.test(site)) return normaliseStorefrontBase(site);
   return DEFAULT_STOREFRONT_PRICING_URL;
 }
 
-/** Attributed deep link into the pricing page: `<pricingBase>?h=<token>`. */
+/**
+ * Attributed deep link into the pricing page: `<pricingBase>?h=<token>`.
+ * One implementation with the unattributed `?uid=` form it sits beside —
+ * they are the same act (send a buyer to the storefront to purchase) and two
+ * copies is how they come to disagree about a trailing slash.
+ */
 export function handoffUrl(pricingBase: string, handoffId: string): string {
-  return `${pricingBase.replace(/\/+$/, "")}?h=${encodeURIComponent(handoffId)}`;
+  return storefrontPurchaseUrl(pricingBase, { h: handoffId });
 }
 
 /**
