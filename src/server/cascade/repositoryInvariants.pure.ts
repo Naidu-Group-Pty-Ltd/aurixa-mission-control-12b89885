@@ -200,6 +200,48 @@ export const REPOSITORY_INVARIANTS: readonly RepositoryInvariant[] = [
       "specs in general because a spec for a module the clone did not install imports code it " +
       "does not have; all eleven files here are already present on every clone.",
   },
+  // ── Three more specs whose subjects cascade without them ──────────────────
+  //
+  // The same defect as `openLocation` above, found by measuring rather than by
+  // widening: on `npc-crm-independent-6505dc` — the fleet's only clone whose
+  // `sync_scope` is `modules` — each of these three is RUN by that clone's CI,
+  // asserts about a subject that IS inside a module glob and cascades, and was
+  // already behind prime's copy when this was measured (22 Sep 2026, against
+  // prime@2cda273). Prime edits the subject, the clone receives it beside the
+  // old assertion, and `verify` goes red with nothing the cascade can send.
+  //
+  // Named as exact paths rather than as `src/lib/reportTemplate/__tests__/**`
+  // for the reason the test below pins: a directory would also carry the specs
+  // in it whose subjects are NOT present, which is the opposite failure. Every
+  // import and every `readFileSync` target of these three was checked present
+  // on that clone, so carrying them imports nothing new.
+  {
+    pattern: "src/lib/reportTemplate/__tests__/printFontPolicy.spec.ts",
+    reason:
+      "Asserts the font and network-boundary rules implemented in " +
+      "supabase/functions/_shared/reportDesign/printFontPolicy.pure.ts and " +
+      "renderResourcePolicy.pure.ts. Both are inside module globs and cascade; this spec is " +
+      "inside none and does not, so a change to either ships the new subject beside the old " +
+      "assertion. The clone runs it — `npx vitest run src/lib/reportTemplate` in its own ci.yml.",
+  },
+  {
+    pattern: "src/lib/reportDesign/__tests__/fieldAccentFloor.spec.ts",
+    reason:
+      "Asserts the contrast floor over supabase/functions/_shared/templateColourways.generated.ts " +
+      "and templateColourways.pure.ts, both of which cascade inside module globs. The generated " +
+      "colourways are regenerated from the design source, so a palette change reaches the clone " +
+      "while the assertion about it does not. The clone runs it — `npx vitest run " +
+      "src/lib/reportDesign`.",
+  },
+  {
+    pattern: "src/lib/reportTemplate/__tests__/unassessedRiskColour.spec.ts",
+    reason:
+      "Asserts how an unassessed risk row is coloured, over " +
+      "supabase/functions/_shared/reports/investment/riskRegister.pure.ts, which cascades inside " +
+      "a module glob. `An absence may not be rated` is a rule the prime keeps tightening, so the " +
+      "subject moves often and the assertion about it never follows. The clone runs it — " +
+      "`npx vitest run src/lib/reportTemplate`.",
+  },
 ];
 
 /** The globs, for a caller that only needs the patterns. */

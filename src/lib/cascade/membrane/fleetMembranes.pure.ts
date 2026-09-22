@@ -106,7 +106,10 @@ const STANDING: readonly StandingOrgan[] = [
     kind: "channel",
     name: "REPOSITORY_INVARIANTS",
     where: "repositoryInvariants.pure.ts",
-    does: "Thirteen fleet-wide patterns a module may not own, because the repository's own CI reads them.",
+    does:
+      "The fleet-wide patterns a module may not own, because the repository's own CI reads " +
+      "them. Counted from the list rather than stated here, because a number in prose goes stale " +
+      "the first time the list grows.",
   },
   {
     kind: "channel",
