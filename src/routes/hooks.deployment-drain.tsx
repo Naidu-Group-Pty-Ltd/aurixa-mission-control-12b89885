@@ -1302,7 +1302,7 @@ async function sweepBundleIdentity() {
   // "nothing was due", and the backup for one silent failure becomes a second.
   if (error) {
     console.error("deployment-drain bundle sweep: could not read live rows:", error.message);
-    return { checked: 0, wrong: 0, error: error.message };
+    return { checked: 0, wrong: 0, billingFallback: 0, error: error.message };
   }
 
   const { verifyCloneBundleIdentity } =
@@ -1311,12 +1311,20 @@ async function sweepBundleIdentity() {
 
   let checked = 0;
   let wrong = 0;
+  // Counted apart from `wrong`, because the two faults fail apart: a clone can
+  // serve its own database perfectly while every purchase made on it credits
+  // the prime. Folded into one number, a sweep that queued two rebuilds for a
+  // billing fault would report `wrong: 0` — a summary green while being true
+  // of nothing, which is the defect this whole probe exists to end, one layer
+  // out from where it was found.
+  let billingFallback = 0;
   for (const row of rows ?? []) {
     try {
       const out = await verifyCloneBundleIdentity(row.clone_id);
       if (!out.probed) continue;
       checked++;
       if (out.reading && isWrongBackend(out.reading.verdict)) wrong++;
+      if (out.reading?.billingUid === "fallback") billingFallback++;
     } catch (e) {
       // `verifyCloneBundleIdentity` stamps `bundle_checked_at` itself, so a
       // throw here cannot starve the cap: the row it was reading is already
@@ -1324,7 +1332,7 @@ async function sweepBundleIdentity() {
       console.error("deployment-drain bundle sweep failed:", e instanceof Error ? e.message : e);
     }
   }
-  return { checked, wrong, error: null as string | null };
+  return { checked, wrong, billingFallback, error: null as string | null };
 }
 
 async function drain() {
