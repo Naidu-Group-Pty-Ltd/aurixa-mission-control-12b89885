@@ -265,3 +265,36 @@ widened to accommodate it: a 60-second window is a guess, and a guess that
 clears 91 files is worse than one that clears three. The remedy is to re-stamp
 that ledger from the bodies it does not have, which is an operator act on that
 project, not a matching rule.
+
+### The nine were applied, and the prediction held
+
+Dispatched through the prime's own `apply-migration.yml` on 22 Sep 2026, all
+nine in one run, in corpus order. The run succeeded, and every one was then
+confirmed **by effect rather than by the workflow's report**: the loose
+`resolve_report_template` grants went 3 → 0 with `service_role` retained, the
+all-full finance permissions row went 1 → 0, `render_jobs_select_auth` was
+replaced by `render_jobs_select_self`, `template_finalize_v2` now preserves
+`v_created_by`, `template_components.created_by` carries a default, the
+reminder cron carries `x-cron-secret`, and the builder-invoice column and its
+partial index exist.
+
+Re-measured immediately afterwards against each clone's own ledger:
+
+| clone | already there | holes | would send | orphaned |
+| --- | --- | --- | --- | --- |
+| `plisdzywzleljorrphxv` | 986 | 7 | **19** | 9 |
+| `umrtusxohxjxzodxorim` | 986 | 7 | **19** | 9 |
+| `egrmsulhtmqnmhvuccxr` | 986 | 7 | **19** | 9 |
+
+**Zero files sendable became nineteen**, on all three, to the row. The seven
+remaining holes are the five `urban_centre` migrations and one `approvals` one
+added to the repository that morning, plus the non-migration sentinel — the
+team applied the seventh while this was running, which is what ordinary churn
+draining looks like. No security migration remains among them.
+
+One correction worth keeping: the first effect probe reported the builder
+invoice column absent, and the probe was wrong, not the migration. The column
+is `builder_invoice_current_payment_id`; the probe asked for `current_payment`.
+A probe that names the wrong column answers exactly like a migration that did
+not run, which is `check-edge-column-names.mjs`'s lesson arriving from the
+other direction.
