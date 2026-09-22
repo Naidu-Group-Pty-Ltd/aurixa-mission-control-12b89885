@@ -743,4 +743,12 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260922140000",
     assertions: [{ kind: "column", table: "lead_stage_emails", column: "recipient_source" }],
   },
+  {
+    migration: "20260922150000_fleet_sync_http_patience.sql",
+    version: "20260922150000",
+    assertions: [
+      { kind: "cron", jobname: "fleet-migration-sync-30min" },
+      { kind: "cron", jobname: "fleet-migration-drain-5min" },
+    ],
+  },
 ];
