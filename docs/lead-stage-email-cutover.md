@@ -162,27 +162,64 @@ records what Graph accepted, not what arrived.
 
 ## Then, and only then
 
-Open the live base (`apptyShYE0yzL4IGB`) and switch **`wflM9vUhBoHb0ZE8r`** off.
-Set `LEAD_STAGE_INTERNAL_STAGES=1,2,3` if it was `2,3`. Send one more lead
-through and confirm the team receives exactly one email.
+### Retire the EMAIL STEP, never the automation
+
+**Do not switch `wflM9vUhBoHb0ZE8r` off.** It is not an email automation with
+an email step in it; it is three steps, and only one of them is the email:
+
+| Node | Type | What it does |
+| --- | --- | --- |
+| `wacfxv48iUshxlP8V` | `sendEmail` | "New Lead Received" to the five addresses. **This is the one Mission Control replaces.** |
+| `wac6IfuZM2bkLGqk2` | `customScript` | Mints the questionnaire token and writes `Token` + `Bypass URL` onto the Waitlist record. |
+| `wac0NVTbcAAOXQsdM` | `customScript` | A ten-second busy-wait. |
+
+The middle one is load-bearing and has nothing to do with notification. The
+Stage 1 Make scenario builds the applicant's questionnaire button straight from
+that field — `<a href="" + 6.`Bypass URL` + "">`, four times in the one
+template, including the Outlook `v:roundrect` fallback. Switch the automation
+off and the field is never written, so every Stage 1 acknowledgement ships with
+an empty `href` and no applicant can reach the questionnaire. The team would
+stop being double-notified and the funnel would stop working, and only one of
+those is the cutover.
+
+So, in the live base (`apptyShYE0yzL4IGB`), open `wflM9vUhBoHb0ZE8r` and remove
+**only** the `sendEmail` step. Leave the automation deployed. Then set
+`LEAD_STAGE_INTERNAL_STAGES=1,2,3` if it was `2,3`.
 
 Leave `wflh1IWRe0okzxeTK` alone or switch it off; it has never fired either way.
 
-**Do not delete either automation.** Switching off is reversible in a click and
-is the rollback below; deleting is not, and the export in the repo is a
-2026-08-18 snapshot rather than a backup.
+### Confirm it by its effect, not by the screen
+
+Send one more lead through and check **both** halves, because the failure this
+step can cause is invisible from the notification side:
+
+- the team receives exactly **one** email, Mission Control's
+- the new `Aurixa Waitlist` record has **`Token` and `Bypass URL` populated**,
+  and the applicant's own Stage 1 email has a questionnaire button that opens
+
+A green first check over a failed second one is the whole hazard here.
 
 ---
 
 ## Rollback
 
-Switch `wflM9vUhBoHb0ZE8r` back on. It fires on `recordCreated` in
-`Aurixa Waitlist`, so it resumes with the next lead and needs nothing else.
-Then set `LEAD_STAGE_INTERNAL_STAGES=2,3` so the two notifiers do not both
-announce Stage 1.
+Re-add the `sendEmail` step from the export in `npc-property-dashbord` at
+`docs/integrations/airtable/npc-emails/automations/source/aurixa-lead-capture.wflM9vUhBoHb0ZE8r.json`
+— the node's `to`, `subject` and `message` templates are recorded there in
+full. Then set `LEAD_STAGE_INTERNAL_STAGES=2,3` so the two notifiers do not
+both announce Stage 1.
+
+Switching the whole automation off is **not** the rollback, for the reason
+above: it un-double-notifies the team by breaking every applicant's
+questionnaire link.
 
 Nothing needs to be undone in Mission Control. A ledger row is a record that an
 obligation was discharged; leaving it is correct.
+
+**Do not delete the automation.** The export in the repo is a 2026-08-18
+snapshot rather than a backup, and it records the two script bodies as text
+that has to be pasted back by hand — the Airtable API cannot author a script
+node.
 
 ---
 

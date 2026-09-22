@@ -112,18 +112,6 @@ export function escapeHtml(value: string): string {
 }
 
 /**
- * A slug rendered for a human. Labels are Airtable's; slugs are the form's.
- *
- * **Underscores only.** A hyphen is a real character in real values here —
- * `AX-C94B1D8EC9` is an application reference an operator retypes off this
- * email, and `11 - 25` and `$2,000 - $3,000 per month` are option labels the
- * form wrote. De-slugging on `[_-]` turned the reference into `AX C94B1D8EC9`,
- * which is not the reference.
- *
- * Anything already carrying a capital or a space is an author's own wording
- * and is returned untouched.
- */
-/**
  * A database token, rendered as words. Anything that is not one is untouched.
  *
  * The bound is `DATABASE_TOKEN` and it is the whole of the rule. An earlier
@@ -137,6 +125,13 @@ export function escapeHtml(value: string): string {
  * 150" and "Disconnected systems": database vocabulary never reaches the
  * operator. `+61400111222`, `Australia/Perth`, `AX-C94B1D8EC9` and any address
  * are not tokens and are rendered exactly as the record holds them.
+ *
+ * The separator is the underscore and only the underscore, for the same
+ * reason. A hyphen is a real character in real values: `AX-C94B1D8EC9` is the
+ * reference an operator retypes off this email, and `11 - 25` and
+ * `$2,000 - $3,000 per month` are option labels the form itself wrote.
+ * De-slugging on `[_-]` made the reference `AX C94B1D8EC9`, which is not the
+ * reference.
  */
 const DATABASE_TOKEN = /^[a-z0-9]+(?:_[a-z0-9]+)*$/;
 
