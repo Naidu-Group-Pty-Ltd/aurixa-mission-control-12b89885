@@ -198,3 +198,70 @@ provisioning: `plisdzywzleljorrphxv` holds both `20250831091523` and
 `…091525`. What it changes is the reading, which was under-reporting the prime's
 own position by 605 migrations, and the barrier, which a genuinely-behind clone
 now meets 217 times instead of 822.
+
+## What the fleet actually carries, measured after the change
+
+Measured 22 Sep 2026 against the live prime (`dduzbchuswwbefdunfct`, 1,019
+ledger rows, 906 with a body, 904 distinct) and the prime repository at
+`05808a3d` (1,021 files), by driving `scopeCorpusToPrime` itself rather than
+re-deriving its arithmetic:
+
+| | runnable | withheld | never applied | skew suspected | body unread |
+| --- | --- | --- | --- | --- | --- |
+| version key alone | **192** | 829 | 382 | 447 | 0 |
+| body key as well | **798** | 223 | 220 | **3** | 0 |
+
+606 files are cleared by body — 539 byte-identical, 52 identical but for
+trailing whitespace, 15 identical in what executes. Nine share a digest with
+another corpus file and are reported rather than acted on.
+
+The second column is the one worth reading twice. **The skew window went from
+deciding 447 files to deciding three**, which is the whole of §"Why the window
+stays at ten seconds": it is a diagnostic sentence now, not a load-bearing
+guess.
+
+### The barrier is nine files, and they are the same nine everywhere
+
+`partitionByDependency` run over the same corpus against each clone's own
+ledger, same day:
+
+| clone | already there | holes | would send | orphaned |
+| --- | --- | --- | --- | --- |
+| `plisdzywzleljorrphxv` | 986 | 17 | 0 | 18 |
+| `umrtusxohxjxzodxorim` | 986 | 17 | 0 | 18 |
+| `egrmsulhtmqnmhvuccxr` | 986 | 17 | 0 | 18 |
+
+Identical, to the row. Of the seventeen holes, seven are migrations added to
+the repository the same morning and one is `TEMPLATE_RLS_POLICY.sql`, which is
+not a migration and sits last, so it withholds nothing. The other **nine are
+migrations the prime has never run**, and they sit at corpus position 542 —
+early enough that every runnable file after them is orphaned, which is why
+`would send` is zero on all three.
+
+Flipping exactly those nine to runnable, and changing nothing else, moves every
+clone to **19 sent, 8 holes, 8 orphaned** — the eight being that morning's work
+and the sentinel. So the nine are the barrier this programme can lift; the
+remainder is ordinary in-flight churn that clears itself as the prime applies
+it.
+
+### The fourth deployment cannot be reconciled by either key
+
+`qvuwrvwzjyigptmnijyb` (CRM) answers 166 already there, 216 holes, 620
+orphaned, first hole at corpus position **1** — a different condition, and
+older than this work. Its ledger holds 980 rows of which **980 have no
+statements at all**, so the body key has nothing to read; and its versions are
+not the repository's. Sampling 118 parseable corpus versions across the whole
+corpus and asking that ledger how close it comes:
+
+| exact version | within 60s | within 12h ± 60s | neither |
+| --- | --- | --- | --- |
+| 19 | **91** | 2 | 25 |
+
+Ninety-one of 118 are present under a stamp a few seconds off the repository's,
+which is the same apply-time stamping §"Why a version is not the identity"
+describes, at a scale that makes version matching useless rather than merely
+imperfect. **It is not a clone missing 836 migrations.** Nothing here should be
+widened to accommodate it: a 60-second window is a guess, and a guess that
+clears 91 files is worse than one that clears three. The remedy is to re-stamp
+that ledger from the bodies it does not have, which is an operator act on that
+project, not a matching rule.
