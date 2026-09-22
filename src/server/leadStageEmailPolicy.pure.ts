@@ -220,8 +220,24 @@ export function resolveInternalRecipients(
   return { recipients: [], source: "none", dropped };
 }
 
+/**
+ * A number from the environment, or the fallback — and blank is not a number.
+ *
+ * `Number("")` is `0`, and an empty environment variable is an ordinary
+ * deployment state: a name declared in a template and never filled in. Read as
+ * zero, `LEAD_STAGE_EMAIL_MAX_AGE_HOURS=""` removes the 72-hour window that is
+ * the only thing standing between the first tick and every historical
+ * applicant in the table, and `LEAD_STAGE_APPLICANT_GRACE_MINUTES=""` removes
+ * the backstop's wait entirely. Both are the failure the constants exist to
+ * prevent, reached by leaving a box empty.
+ *
+ * `"0"` typed deliberately still means zero. Absent, blank and whitespace mean
+ * "not configured", which is what the fallback is for.
+ */
 function positiveNumber(value: string | undefined, fallback: number): number {
-  const parsed = Number(value);
+  const trimmed = (value ?? "").trim();
+  if (!trimmed) return fallback;
+  const parsed = Number(trimmed);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 

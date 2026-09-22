@@ -298,6 +298,7 @@ function rowFor(
   mapped: MappedRecord,
   stage2: Stage2Enrichment | null,
   stage3: Stage3Enrichment | null,
+  childWalksAnswered: boolean,
 ) {
   const { airtable_created_time, ...row } = mapped;
 
@@ -305,10 +306,22 @@ function rowFor(
   // rollup says "Completed", the response says WHAT. Where a child is absent
   // the parent's rollup stands, so an applicant whose questionnaire row was
   // deleted still reads as having reached Stage 2.
+  // A child's NULL is not a statement about the parent.
+  //
+  // `Stage2Enrichment` and `Stage3Enrichment` carry every key they declare,
+  // nulls included, so spreading one whole writes NULL over a parent rollup
+  // that was read correctly whenever the child is present but one cell is
+  // empty. `stage3_booked_at` is the one that bites: it exists on both, and
+  // every stage-email decision turns on it — `stageOccurredAt` reads it,
+  // `hasReachedStage` gates on it, so erasing it makes the obligation resolve
+  // to "stage not reached" and vanish with nothing reporting it.
+  //
+  // The child still WINS where it answered. It is only silence that no longer
+  // counts as an answer.
   const merged = {
     ...row,
-    ...(stage2 ?? {}),
-    ...(stage3 ?? {}),
+    ...stated(stage2),
+    ...stated(stage3),
   };
 
   // Never walk the journey backwards on the strength of a child that has not
@@ -326,8 +339,33 @@ function rowFor(
       ...(mapped.airtable_status ? { airtable_status: mapped.airtable_status } : {}),
     },
     synced_at: new Date().toISOString(),
-    enrichment_synced_at: new Date().toISOString(),
+    // `enrichment_synced_at` records that we LOOKED at everything this row's
+    // evidence comes from, and the applicant backstop reads it as exactly
+    // that: an absent receipt counts as "the workflow did not send" only
+    // where the mirror has read the record since. So a tick whose child walk
+    // FAILED must not stamp it. `stage3_confirmation_sent_at` is mapped by
+    // the bookings child and by nothing else, so a failed bookings read
+    // leaves it null — and a stamp beside that null says "we looked and
+    // there is no receipt", which sends a duplicate Stage 3 confirmation.
+    //
+    // Omitted rather than nulled: the previous stamp is the honest answer to
+    // "when did we last read all of this", and keeping it holds the backstop
+    // rather than resetting it.
+    ...(childWalksAnswered ? { enrichment_synced_at: new Date().toISOString() } : {}),
   };
+}
+
+/**
+ * A child enrichment with its unstated cells dropped.
+ *
+ * `undefined` is absent from a spread; `null` is an instruction to erase.
+ * These objects declare every key, so only the first is ever meant.
+ */
+function stated<T extends Record<string, unknown>>(child: T | null): Partial<T> {
+  if (!child) return {};
+  return Object.fromEntries(
+    Object.entries(child).filter(([, value]) => value !== null && value !== undefined),
+  ) as Partial<T>;
 }
 
 /**
@@ -411,6 +449,12 @@ export async function syncAirtableWaitlist(): Promise<AirtableSyncResult> {
     bookings: bookings.records.length,
   };
 
+  // Whether this tick READ everything a row's evidence comes from. Coarse on
+  // purpose: a failed BRQ walk does not touch Stage 3's receipt, but the
+  // conservative side of not knowing is the one that does not send, and one
+  // boolean cannot drift from the three walks it summarises.
+  const childWalksAnswered = !brq.error && !legacyBrq.error && !bookings.error;
+
   const brqIndex = indexChildren(brq.records, FIELDS.brq, (record) =>
     readStage2(record, FIELDS.brq as never, cleanLeadText, LEAD_MAX_TEXT_LENGTH),
   );
@@ -450,7 +494,7 @@ export async function syncAirtableWaitlist(): Promise<AirtableSyncResult> {
 
       const dedupe_key =
         dedupeKeyFor(mapped.email, mapped.submitted_at) ?? `airtable:${mapped.airtable_record_id}`;
-      const row = rowFor(mapped, stage2, stage3);
+      const row = rowFor(mapped, stage2, stage3, childWalksAnswered);
 
       try {
         const existing = await findExisting(mapped, dedupe_key);

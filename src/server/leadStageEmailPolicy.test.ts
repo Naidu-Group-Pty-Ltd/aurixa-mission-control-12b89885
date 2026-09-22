@@ -111,6 +111,36 @@ describe("decideInternal", () => {
   });
 });
 
+describe("numbers read from the environment", () => {
+  it("treats a blank variable as unset, never as zero", () => {
+    // `Number("")` is 0, and a declared-but-empty variable is an ordinary
+    // deployment state. Read as zero, the 72-hour window disappears and the
+    // first tick mails every historical applicant in the table.
+    const blank = policy({
+      LEAD_STAGE_EMAIL_MAX_AGE_HOURS: "",
+      LEAD_STAGE_APPLICANT_GRACE_MINUTES: "   ",
+    });
+    expect(blank.maxAgeMs).toBe(72 * 3_600_000);
+    expect(blank.applicantGraceMs).toBe(45 * 60_000);
+  });
+
+  it("still honours a zero somebody typed", () => {
+    const explicit = policy({ LEAD_STAGE_EMAIL_MAX_AGE_HOURS: "0" });
+    expect(explicit.maxAgeMs).toBe(0);
+  });
+
+  it("holds the historical funnel back on a blank window", () => {
+    // The effect, not the field: an applicant from last year must not be
+    // mailed because a variable was left empty.
+    const ancient = lead({ created_at: hoursAgo(5_000), submitted_at: hoursAgo(5_000) });
+    const blank = policy({
+      LEAD_STAGE_EMAIL_MAX_AGE_HOURS: "",
+      LEAD_STAGE_APPLICANT_MODE: "always",
+    });
+    expect(decideApplicant(ancient, 1, blank, NOW)).toMatchObject({ verdict: "none" });
+  });
+});
+
 describe("applicantEmailEvidence", () => {
   const GRACE = 45 * 60_000;
 
