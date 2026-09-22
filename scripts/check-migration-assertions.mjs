@@ -49,6 +49,7 @@ try {
 
 const MIGRATIONS = "supabase/migrations";
 const BASELINE = "scripts/migration-assertions-baseline.txt";
+const GENERATED = "src/server/migrationAssertions.generated.ts";
 
 const baseline = new Set(
   existsSync(BASELINE)
@@ -63,8 +64,27 @@ const files = readdirSync(MIGRATIONS)
   .filter((f) => f.endsWith(".sql"))
   .sort();
 
+// The claims a migration makes reach the runtime drift alarm as CODE, not as
+// SQL: the alarm runs in a Worker with no filesystem, so it reads the
+// generated module and nothing else. A migration whose claims never reached
+// that module is therefore not half-covered, it is UNCOVERED — and it reports
+// clean, because the alarm judges production against the previous migration's
+// declarations and finds them all satisfied.
+//
+// `npm run migrations:assertions:check` compares the file byte for byte, and
+// is the right check, but it formats with prettier and so needs node_modules.
+// This guard runs in `apply-migrations.yml`, which deliberately installs
+// nothing so that a registry outage cannot stop a migration applying — and
+// that job is the one every path into the queue passes, including the direct
+// pushes to `main` that are how BOTH migrations this queue has ever replayed
+// arrived. So the dependency-free half of the question is asked here: is this
+// migration in the module at all. Formatting drift is CI's business; a
+// missing migration is production's.
+const generated = existsSync(GENERATED) ? readFileSync(GENERATED, "utf8") : "";
+
 const missing = [];
 const malformed = [];
+const unpublished = [];
 let checked = 0;
 let claims = 0;
 
@@ -87,6 +107,7 @@ for (const file of files) {
   }
   checked += 1;
   claims += parsed.assertions.length;
+  if (!generated.includes(`migration: "${file}"`)) unpublished.push(file);
 }
 
 // A baseline entry naming a file that no longer exists is how a frozen list
@@ -118,6 +139,27 @@ if (malformed.length > 0) {
       malformed.map((m) => `  ${m}`).join("\n") +
       `\n\n  A claim nobody can parse looks like coverage in a listing and checks\n` +
       `  nothing at run time. Fix the syntax rather than removing the line.`,
+  );
+}
+
+if (generated === "") {
+  problems.push(
+    `${GENERATED} is missing.\n\n` +
+      `  The runtime drift alarm reads this module and nothing else, so with it\n` +
+      `  absent every migration's claims are unchecked in production while the\n` +
+      `  alarm reports clean. Run \`npm run migrations:assertions\`.`,
+  );
+} else if (unpublished.length > 0) {
+  problems.push(
+    `${unpublished.length} migration(s) carry @asserts claims that never reached ${GENERATED}:\n` +
+      unpublished.map((f) => `  ${f}`).join("\n") +
+      `\n\n  That module is generated, and it is what the runtime drift alarm\n` +
+      `  reads — it runs in a Worker with no filesystem and cannot see the SQL.\n` +
+      `  A migration missing from it is not partly covered; it is uncovered,\n` +
+      `  and the alarm still reports clean because it judges production against\n` +
+      `  the claims it does hold.\n\n` +
+      `  Run \`npm run migrations:assertions\` and commit the result. Never edit\n` +
+      `  the module by hand.`,
   );
 }
 
