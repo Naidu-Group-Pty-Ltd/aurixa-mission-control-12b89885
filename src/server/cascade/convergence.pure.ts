@@ -56,11 +56,8 @@
  * is exactly how the auditor and the actor would come to disagree, and this
  * module's whole job is to be the independent check on the other one.
  */
-import {
-  CASCADE_MAX_FILE_BYTES,
-  partitionCascadePaths,
-  type SyncExclusion,
-} from "./syncExclusions.pure";
+import { partitionCascadePaths, type SyncExclusion } from "./syncExclusions.pure";
+import { CASCADE_STREAM_MAX_FILE_BYTES } from "./blobStreamCarry.pure";
 
 /**
  * How many SLO windows a clone may go without ever reaching `converged`
@@ -136,10 +133,10 @@ export function measureConvergence(input: {
   cloneTruncated: boolean;
   /**
    * Prime's blob size per path, as `listTreeEntries` returns it. A path prime
-   * holds that is over `CASCADE_MAX_FILE_BYTES` can never be delivered, so it
-   * is never owed — see the rule below. Absent sizes are treated as
-   * deliverable, which is the conservative direction: it reports a real gap
-   * rather than hiding one.
+   * holds that is over `CASCADE_STREAM_MAX_FILE_BYTES` can never be
+   * delivered, so it is never owed — see the rule below. Absent sizes are
+   * treated as deliverable, which is the conservative direction: it reports a
+   * real gap rather than hiding one.
    */
   primeSizes?: ReadonlyMap<string, number> | null;
   /**
@@ -190,6 +187,14 @@ export function measureConvergence(input: {
     the engine refuses, or it reports debt on files that will never be
     delivered. The ceiling is IMPORTED rather than restated for the same reason
     the partition is.
+
+    WHICH ceiling matters, and it changed. The engine stopped refusing at 8 MB
+    the day it learned to stream a blob instead of reading it
+    (`blobStreamCarry.pure.ts`), so an auditor still refusing there would read
+    the far more dangerous way round: a 39 MB seed that has NOT crossed would
+    be scored "not owed", and a clone genuinely missing fourteen files would
+    measure as converged. The number here is now the one the engine actually
+    refuses at, which is GitHub's own blob ceiling and nothing of ours.
   */
   const sizes = input.primeSizes ?? null;
   const owedWritable: string[] = [];
@@ -198,7 +203,7 @@ export function measureConvergence(input: {
     const bytes = sizes?.get(path);
     // An absent size reads as deliverable: reporting a real gap is the safe
     // direction, and inventing a refusal from missing data is not.
-    if (typeof bytes === "number" && bytes > CASCADE_MAX_FILE_BYTES) {
+    if (typeof bytes === "number" && bytes > CASCADE_STREAM_MAX_FILE_BYTES) {
       oversizeHeld += 1;
       continue;
     }

@@ -305,7 +305,8 @@ decides whether the custodian may touch it at all.
 | `invocation_cut` — pass larger than one tick | machinery | yes | yes, pass ledger |
 | `policy_unseeded` — mirror with no exclusions | machinery | **yes — seed it** | refuses, correctly, for ever |
 | `tree_truncated` | machinery | yes | refuses |
-| `oversize_file` | **person** | no | held + named |
+| `oversize_file` — past GitHub's 100 MB blob ceiling | **person** | no | held + named |
+| `oversize_file` — 8 MB to 100 MB | machinery | **yes — streamed** | carried, no longer held |
 | `backend_identity_hold` | **person** | no | held + named |
 | `bulk_deletion_over_cap` | **person** | no | held, `cascade_path_approvals` |
 
@@ -498,6 +499,14 @@ holds them on every pass, for ever, and correctly — a cascade carries a file
 whole and the invocation that does it has a limit the file does not. Reported
 as owed they would have read `delivering` for ninety minutes and then escalated
 as `stalled`, permanently, on a fleet behaving exactly as designed.
+
+> **Corrected 22 Sep 2026 — the rule stands, the ceiling moved.** A file too
+> large to HOLD is no longer too large to CARRY: the engine streams a blob it
+> cannot read, so the two seeds above now travel and the auditor refuses at
+> GitHub's own 100 MB instead. The direction of the danger reverses with it —
+> an auditor still refusing at 8 MB would score an undelivered 41.7 MB seed as
+> *not owed* and call a clone missing fourteen files converged. See
+> [`CASCADE_LARGE_FILES.md`](./CASCADE_LARGE_FILES.md).
 
 That is `drift_high` in a new costume, and it would have discredited this
 reading the same way. **The rule it bought generalises past the constant: the

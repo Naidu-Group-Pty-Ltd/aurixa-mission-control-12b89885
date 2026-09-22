@@ -50,7 +50,7 @@ const ROUTES = "src/routes";
 
 /** Helpers whose presence means a module reaches the App installation. */
 const GITHUB_CALLS =
-  /getAppOctokit|listTreeEntries|listFilesMatchingGlobs|getFileContent|openPrimeMigrationCorpus/;
+  /getAppOctokit|listTreeEntries|listFilesMatchingGlobs|getFileContent|openPrimeMigrationCorpus|copyBlobByStream/;
 
 /**
  * Lanes that reach GitHub and deliberately never yield, each with the reason

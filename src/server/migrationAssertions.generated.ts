@@ -707,4 +707,40 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "check", table: "pricing_module_map", column: "mapping_kind", value: "external" },
     ],
   },
+  {
+    migration: "20260922100000_lead_stage_email_kinds.sql",
+    version: "20260922100000",
+    assertions: [{ kind: "enum", type: "notification_kind" }],
+  },
+  {
+    migration: "20260922110000_lead_enrichment_from_airtable.sql",
+    version: "20260922110000",
+    assertions: [
+      { kind: "column", table: "waitlist_leads", column: "stage2_user_count" },
+      { kind: "column", table: "waitlist_leads", column: "stage2_capabilities" },
+      { kind: "column", table: "waitlist_leads", column: "stage3_notes" },
+      { kind: "column", table: "waitlist_leads", column: "stage1_email_message_id" },
+      { kind: "column", table: "waitlist_leads", column: "stage2_invite_count" },
+      { kind: "column", table: "waitlist_leads", column: "enrichment_synced_at" },
+    ],
+  },
+  {
+    migration: "20260922120000_lead_stage_email_ledger.sql",
+    version: "20260922120000",
+    assertions: [
+      { kind: "table", table: "lead_stage_emails" },
+      { kind: "rpc", fn: "claim_lead_stage_emails" },
+      { kind: "column", table: "lead_stage_emails", column: "audience" },
+    ],
+  },
+  {
+    migration: "20260922130000_schedule_lead_stage_emails.sql",
+    version: "20260922130000",
+    assertions: [{ kind: "cron", jobname: "lead-stage-emails" }],
+  },
+  {
+    migration: "20260922140000_lead_stage_email_recipient_source.sql",
+    version: "20260922140000",
+    assertions: [{ kind: "column", table: "lead_stage_emails", column: "recipient_source" }],
+  },
 ];

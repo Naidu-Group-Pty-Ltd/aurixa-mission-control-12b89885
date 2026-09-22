@@ -258,9 +258,9 @@ export function oversizeHoldNotice(held: readonly HeldPath[], maxListed = 4): st
   const listed = over.slice(0, maxListed).map((h) => `  ${h.path}`);
   if (over.length > maxListed) listed.push(`  (+${over.length - maxListed} more)`);
   return (
-    `\n${over.length} of them exceed the size a cascade carries in one file, so prime holds ` +
-    `them and this clone never will. No approval can release a ceiling — bring these across ` +
-    `by hand:\n${listed.join("\n")}`
+    `\n${over.length} of them were not carried in one file, so prime holds them and this ` +
+    `clone does not. No approval can release a ceiling or repair a transfer — the note on ` +
+    `each says which it was:\n${listed.join("\n")}`
   );
 }
 
@@ -691,44 +691,88 @@ export function backendIdentityHold(args: {
 }
 
 /**
- * The most a cascade will carry in one file.
+ * The most a cascade will READ into one invocation.
  *
- * A cascade reads a file whole from prime, base64-encodes it and posts it as
- * one blob, and the invocation doing that has a ceiling the file does not.
- * Measured 2 Sep 2026: the pending cascade to `npc-client-dashboard` was 48
- * files, one of them a 39 MB migration seed, and the pass died on that one
- * file on every attempt — three events exhausted their claims on it while a
- * 55-file cascade with nothing large in it landed first time. Eight megabytes
- * is the migration corpus's own `MAX_MIGRATION_BYTES`: a body the migration
- * sync refuses to carry is not one the repository cascade should carry
- * either.
+ * A read through `getFileContent` takes the blob whole — base64 in a JSON
+ * envelope, decoded to a buffer, decoded again to a string — and the
+ * invocation doing that has a ceiling the file does not. Measured 2 Sep 2026:
+ * the pending cascade to `npc-client-dashboard` was 48 files, one of them a
+ * 39 MB migration seed, and the pass died on that one file on every attempt —
+ * three events exhausted their claims on it while a 55-file cascade with
+ * nothing large in it landed first time. Eight megabytes is the migration
+ * corpus's own `MAX_MIGRATION_BYTES`: a body the migration sync refuses to
+ * hold is not one the repository cascade should hold either.
+ *
+ * This used to be called "the most a cascade will CARRY in one file", and
+ * that was one sentence answering two questions. What an invocation can HOLD
+ * and what a cascade can MOVE are different numbers, and reading them as one
+ * left fifteen files at prime — measured 22 Sep 2026, fourteen seeds of
+ * 35.6-39.8 MB and one 8.8 MB fixture under `docs/**` — with no remedy but a
+ * person copying each into every clone by hand. A file past this ceiling now
+ * takes the streaming lane, where it is never read and its size is not a
+ * memory question at all; only `CASCADE_STREAM_MAX_FILE_BYTES`, which is
+ * GitHub's own, refuses anything. See `blobStreamCarry.pure.ts`.
+ *
+ * What still answers to THIS number is every judgement made on a file's
+ * TEXT — the spec membrane, the import closure, the stale-export sweep. A
+ * streamed file crosses as bytes and is judged by none of them, which is
+ * right for the shapes that reach that lane and is why it is not the default.
  */
 export const CASCADE_MAX_FILE_BYTES = 8 * 1024 * 1024;
 
 const megabytes = (bytes: number): string => `${(bytes / 1_048_576).toFixed(1)} MB`;
 
 /**
- * Hold a file that is too large to cascade, and say so where a person reads.
+ * Hold a file the cascade could not carry, and say so where a person reads.
  *
  * `oversize` rather than `manual_reconcile`, so it is counted and listed
  * without being offered as a decision nobody can take — see `ExclusionReason`.
  *
+ * TWO states end here now and they send an operator to opposite places, so
+ * the note says which. A file past the STREAM ceiling is past what GitHub
+ * will accept as one blob: nothing retries that, and every remedy is outside
+ * this system. A file that was streamed and did not arrive is a transfer that
+ * failed — the next pass tries again by itself, and telling somebody to copy
+ * it by hand would have them race the engine.
+ *
  * The note used to end "the migration sync refuses a body this size as well",
  * and that stopped being true: the migration lane chunks a seed-shaped INSERT
- * from a stream and carries these two files to the clone's DATABASE. What does
+ * from a stream and carries these files to the clone's DATABASE. What does
  * not travel is the file in the clone's REPOSITORY, which is a different
  * absence with a different remedy, and telling an operator the database is
  * also refusing it sends them to the wrong place.
  */
-export function oversizeHold(path: string, bytes: number, maxBytes: number): HeldPath {
+export function oversizeHold(
+  path: string,
+  bytes: number,
+  maxBytes: number,
+  /**
+   * Why the streaming lane did not carry it, where it was tried and did not
+   * complete. Absent means it was never eligible — it is past the ceiling.
+   */
+  carryFailure?: string,
+): HeldPath {
+  if (carryFailure) {
+    return {
+      path,
+      pattern: "(size: carried as a stream, and the carry failed)",
+      reason: "oversize",
+      note:
+        `${megabytes(bytes)} upstream — too large to read into one invocation, so it is ` +
+        `carried as a stream, and this carry did not complete: ${carryFailure}. The next ` +
+        `pass tries again on its own; there is nothing to approve and nothing to copy by ` +
+        `hand.`,
+    };
+  }
   return {
     path,
     pattern: "(size: over the cascade ceiling)",
     reason: "oversize",
     note:
-      `${megabytes(bytes)} upstream, over the ${megabytes(maxBytes)} a cascade will carry in ` +
-      `one file, so the clone's REPOSITORY does not receive it. No approval can release a ` +
-      `ceiling — bring the file across by hand. Where it is a migration, the migration sync ` +
-      `chunks it and the clone's database still gets it.`,
+      `${megabytes(bytes)} upstream, over the ${megabytes(maxBytes)} GitHub will accept as ` +
+      `one blob, so the clone's REPOSITORY does not receive it. No approval can release a ` +
+      `ceiling and no pass will carry it — the file has to become smaller, or stay out of ` +
+      `the tree. Where it is a migration, the migration sync chunks it and the clone's ` +
+      `database still gets it.`,
   };
 }
