@@ -21,6 +21,7 @@ import {
   mayDispatch,
   readSqlFailure,
   scanSqlStatements,
+  spansCode,
   sqlstateWords,
   type DiagnosisInput,
   type DiagnosisVerdict,
@@ -710,5 +711,119 @@ describe("a survey is not a cheaper diagnosis", () => {
     expect(OWED_STANDINGS.has("unknown")).toBe(false);
     expect(OWED_STANDINGS.has("needs_a_trial_run")).toBe(true);
     expect(OWED_STANDINGS.has("blocked")).toBe(true);
+  });
+});
+
+/**
+ * Which stretches of a statement are SQL, and which are the author talking.
+ *
+ * The walk has always had to know — it strips comments from `text` and elides
+ * dollar bodies from `head` — but it did not SAY, so anything working on the
+ * source had to guess. `planMigrationRepair` guessed, matched an `ADD COLUMN`
+ * anchor inside `-- add column for tracking`, and wrote a guard into the
+ * comment; on another shape it wrote one into a column default and reported
+ * the file healed while a second run still failed. Proved against PostgreSQL
+ * 16 by diffing the catalogue either side.
+ */
+describe("the walk says which stretches are SQL", () => {
+  const codeOf = (sql: string) =>
+    scanSqlStatements(sql).map((s) => s.codeSpans.map(([a, b]) => sql.slice(a, b)).join("⟦⟧"));
+
+  it("leaves out line comments, block comments, literals, quoted names and bodies", () => {
+    expect(codeOf(`ALTER TABLE p ADD COLUMN a int, -- add column x\n  ADD COLUMN b int;`)).toEqual([
+      "ALTER TABLE p ADD COLUMN a int, ⟦⟧  ADD COLUMN b int;",
+    ]);
+    expect(codeOf(`CREATE /* note */ TABLE t (n text DEFAULT 'create table zz');`)).toEqual([
+      "CREATE ⟦⟧ TABLE t (n text DEFAULT ⟦⟧);",
+    ]);
+    expect(codeOf(`ALTER TABLE t ADD COLUMN n text DEFAULT $tag$add column$tag$;`)).toEqual([
+      "ALTER TABLE t ADD COLUMN n text DEFAULT ⟦⟧;",
+    ]);
+    expect(
+      codeOf(`CREATE POLICY "can view; x" ON public."Odd Tbl" FOR SELECT USING (true);`),
+    ).toEqual(["CREATE POLICY ⟦⟧ ON public.⟦⟧ FOR SELECT USING (true);"]);
+    expect(codeOf(`INSERT INTO t (a) VALUES ('it''s; fine');`)).toEqual([
+      "INSERT INTO t (a) VALUES (⟦⟧);",
+    ]);
+  });
+
+  it("keeps every span inside its own statement, ordered and disjoint", () => {
+    const sql = [
+      `-- a leading comment`,
+      `CREATE TABLE t (n text DEFAULT 'x');`,
+      `/* between */`,
+      `CREATE FUNCTION f() RETURNS void AS $$ BEGIN END $$;`,
+    ].join("\n");
+    for (const s of scanSqlStatements(sql)) {
+      let prev = s.start;
+      for (const [a, b] of s.codeSpans) {
+        expect(a).toBeGreaterThanOrEqual(s.start);
+        expect(b).toBeLessThanOrEqual(s.end);
+        expect(b).toBeGreaterThan(a);
+        expect(a).toBeGreaterThanOrEqual(prev);
+        prev = b;
+      }
+    }
+  });
+
+  it("calls nothing code after a literal or body the file never closes", () => {
+    /*
+      A truncated file, or one cut at the corpus ceiling, leaves the walk
+      inside a literal at EOF. Without a flag saying so, the final close
+      pushed a run from wherever code last began straight through the
+      unterminated text — calling it SQL, and overlapping the run already
+      recorded: spans [0,31] and [0,44] on the first of these.
+    */
+    expect(codeOf(`CREATE TABLE t (n text DEFAULT 'unterminated`)).toEqual([
+      "CREATE TABLE t (n text DEFAULT ",
+    ]);
+    expect(codeOf(`CREATE FUNCTION f() AS $$ unterminated body`)).toEqual([
+      "CREATE FUNCTION f() AS ",
+    ]);
+    expect(codeOf(`CREATE TABLE t (n text); -- trailing comment, no newline`)).toEqual([
+      "CREATE TABLE t (n text);",
+    ]);
+  });
+
+  it("does not hand a statement the comment that introduces it", () => {
+    const sql = `-- add column for tracking\nALTER TABLE t ADD COLUMN a int;`;
+    expect(codeOf(sql)).toEqual(["ALTER TABLE t ADD COLUMN a int;"]);
+  });
+
+  it("answers spansCode only for a range wholly inside one span", () => {
+    const [s] = scanSqlStatements(`CREATE TABLE t (n text DEFAULT 'zz');`);
+    const [first] = s.codeSpans;
+    expect(spansCode(s.codeSpans, first[0], first[1])).toBe(true);
+    expect(spansCode(s.codeSpans, first[0], first[1] + 1)).toBe(false);
+    // The literal sits between two spans, so nothing overlapping it is code.
+    expect(spansCode(s.codeSpans, first[1], first[1] + 2)).toBe(false);
+  });
+});
+
+describe("a guard has to be written in SQL, not quoted inside a value", () => {
+  /*
+    `head` keeps string literals — the enum form reads one as its object key —
+    so the guard test used `.*`, which walks straight into a default. A file
+    that WILL stop on its second run then read `rerunnable`, which is the one
+    direction that matters: re-runnable is the reading that lets a file be
+    dispatched again. Measured over the prime's 11,110 statements: this
+    changes none of them.
+  */
+  const read = (sql: string) => assessIdempotency(scanSqlStatements(sql)).reading;
+
+  it("does not read a quoted IF NOT EXISTS as a guard", () => {
+    expect(read(`CREATE TABLE t (n text DEFAULT 'create table if not exists z');`)).toBe(
+      "fails_loudly",
+    );
+  });
+
+  it("still reads a real guard as one", () => {
+    expect(
+      read(`CREATE TABLE IF NOT EXISTS t (n text DEFAULT 'create table if not exists z');`),
+    ).toBe("rerunnable");
+    expect(read(`CREATE UNIQUE INDEX IF NOT EXISTS i ON t (a);`)).toBe("rerunnable");
+    expect(
+      read(`CREATE OR REPLACE FUNCTION f() RETURNS void LANGUAGE sql AS $$ SELECT 1 $$;`),
+    ).toBe("rerunnable");
   });
 });

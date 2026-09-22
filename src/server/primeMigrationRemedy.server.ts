@@ -396,7 +396,16 @@ export async function openPrimeMigrationRepair(
     }
   }
 
+  /*
+    The commit the branch points at, and separately the TREE that commit
+    carries. `createTree` documents `base_tree` as a tree object, and every
+    other writer in this repository resolves the commit first
+    (`cascadeConflictMerge.server.ts`) — handing it a commit sha relies on the
+    service resolving something it does not promise to, on the one call that
+    decides which files the proposal carries. `parents` is the commit.
+  */
   let baseSha: string;
+  let baseTreeSha: string;
   try {
     const ref = await octokit.request("GET /repos/{owner}/{repo}/git/ref/{ref}", {
       owner,
@@ -404,6 +413,8 @@ export async function openPrimeMigrationRepair(
       ref: `heads/${branch}`,
     });
     baseSha = ref.data.object.sha;
+    const baseCommit = await octokit.git.getCommit({ owner, repo, commit_sha: baseSha });
+    baseTreeSha = baseCommit.data.tree.sha;
   } catch (e) {
     return {
       ok: false,
@@ -428,7 +439,7 @@ export async function openPrimeMigrationRepair(
     const tree = await octokit.git.createTree({
       owner,
       repo,
-      base_tree: baseSha,
+      base_tree: baseTreeSha,
       tree: [{ path: target.path, mode: "100644", type: "blob", sha: blob.data.sha }],
     });
     const commit = await octokit.git.createCommit({
@@ -489,7 +500,7 @@ export async function openPrimeMigrationRepair(
 
 function commitMessage(report: RepairPlanReport): string {
   const { plan, target } = report;
-  const kinds = [...new Set(plan.repairs.map((r) => r.kind))].join(", ");
+  const kinds = plan.repairKinds.map((k) => REPAIR_WORDS[k]).join(", ");
   return (
     `Guard ${plan.repairCount} statement${plan.repairCount === 1 ? "" : "s"} in ${target.name}\n\n` +
     `Running this migration a second time would ${plan.before === "rewrites_data" ? "change data" : "stop at a statement that creates something already there"}. ` +
@@ -550,8 +561,8 @@ export function repairProposalBody(report: RepairPlanReport): string {
     ``,
     more > 0
       ? more === 1
-        ? `_1 further repair of the same shape is in the diff._`
-        : `_${more} further repairs of the same shapes are in the diff._`
+        ? `_1 further repair is in the diff._`
+        : `_${more} further repairs are in the diff._`
       : null,
     more > 0 ? `` : null,
     `After this the file reads **${reads}**` +
@@ -573,8 +584,8 @@ export function repairProposalBody(report: RepairPlanReport): string {
           ]),
           moreRefused > 0
             ? moreRefused === 1
-              ? `_1 further statement of the same shape was left alone._`
-              : `_${moreRefused} further statements of the same shapes were left alone._`
+              ? `_1 further statement was left alone._`
+              : `_${moreRefused} further statements were left alone._`
             : null,
           moreRefused > 0 ? `` : null,
         ]
@@ -582,7 +593,7 @@ export function repairProposalBody(report: RepairPlanReport): string {
     `### What to check`,
     ``,
     `- The inserted guards name the same objects the statements below them create.`,
-    plan.repairs.some((r) => r.kind === "constraint")
+    plan.repairKinds.includes("constraint")
       ? `- A dropped constraint is re-added, which revalidates the table; a key another table ` +
         `references cannot be dropped at all, so a second run can still stop there.`
       : null,

@@ -45,6 +45,85 @@ function isSubsequence(a: string, b: string): boolean {
 }
 
 /**
+ * Every literal and comment in a file, in order — a reader written HERE, from
+ * nothing the module exports.
+ *
+ * Pure insertion is not enough on its own, and that gap is what a sweep
+ * against a real PostgreSQL found: inserting `IF NOT EXISTS ` into the middle
+ * of `DEFAULT 'add column b int'` keeps the original a subsequence, keeps the
+ * bytes accounting, keeps the statement count, and moves the reading — so
+ * every check the module and this file already had said yes, while the column
+ * a migration creates had silently acquired a different default. A comment
+ * reading `-- add column for tracking` goes the same way.
+ *
+ * So: what the author wrote as prose or as a value has to come out the other
+ * side untouched. A prepended `DROP POLICY IF EXISTS "name"` legitimately ADDS
+ * quoted identifiers, which is why this is a subsequence rather than equality.
+ */
+function inert(sql: string): string[] {
+  const out: string[] = [];
+  let i = 0;
+  const closeAt = (from: number, end: string) => {
+    const at = sql.indexOf(end, from);
+    return at === -1 ? sql.length : at + end.length;
+  };
+  while (i < sql.length) {
+    const two = sql.slice(i, i + 2);
+    if (two === "--") {
+      const nl = sql.indexOf("\n", i);
+      out.push(sql.slice(i, nl === -1 ? sql.length : nl));
+      i = nl === -1 ? sql.length : nl;
+      continue;
+    }
+    if (two === "/*") {
+      const j = closeAt(i + 2, "*/");
+      out.push(sql.slice(i, j));
+      i = j;
+      continue;
+    }
+    if (sql[i] === "'" || sql[i] === '"') {
+      const q = sql[i];
+      let j = i + 1;
+      while (j < sql.length) {
+        if (sql[j] === q && sql[j + 1] === q) {
+          j += 2;
+          continue;
+        }
+        if (sql[j] === q) {
+          j += 1;
+          break;
+        }
+        j += 1;
+      }
+      out.push(sql.slice(i, j));
+      i = j;
+      continue;
+    }
+    const tag = /^\$[A-Za-z_]*\$/.exec(sql.slice(i, i + 64));
+    if (tag) {
+      out.push(sql.slice(i, closeAt(i + tag[0].length, tag[0])));
+      i = closeAt(i + tag[0].length, tag[0]);
+      continue;
+    }
+    i += 1;
+  }
+  return out;
+}
+
+/** Every literal and comment the author wrote still appears, in order. */
+function keepsProseAndValues(original: string, patched: string): boolean {
+  const a = inert(original);
+  const b = inert(patched);
+  let j = 0;
+  for (const token of a) {
+    const at = b.indexOf(token, j);
+    if (at === -1) return false;
+    j = at + 1;
+  }
+  return true;
+}
+
+/**
  * Every property a patch must have, checked against the bytes rather than
  * against the plan's own word for it.
  */
@@ -55,6 +134,9 @@ function assertSoundPatch(original: string, p: RemedyPlan) {
   // Nothing was removed, reordered or reformatted.
   expect(isSubsequence(original, patched)).toBe(true);
   expect(patched.length).toBeGreaterThan(original.length);
+
+  // And nothing was written into the author's prose or into a stored value.
+  expect(keepsProseAndValues(original, patched)).toBe(true);
 
   // The patched file still parses, into the statements it had plus what was
   // inserted as whole statements.
@@ -364,5 +446,135 @@ describe("a bigger file, read the way a real one is", () => {
   it("names the cost of re-adding a constraint rather than leaving it to review", () => {
     const row = plan(sql).repairs.find((r) => r.kind === "constraint");
     expect(row?.what).toMatch(/revalidat/i);
+  });
+});
+
+/**
+ * Found by driving the planner over shapes the prime's corpus does not
+ * contain, then applying both files to a real PostgreSQL 16 and diffing the
+ * catalogues. Every one of these passed every check the module and this file
+ * had: the patch was a pure insertion, the bytes accounted, the statement
+ * count held, and the reading moved. What moved with it was a column default
+ * or a comment.
+ *
+ * The cause was one line: the anchor was matched against the statement's raw
+ * SOURCE, which carries comments, string literals and dollar-quoted bodies.
+ * The walk knows which stretches are SQL, so it now says (`codeSpans`), and a
+ * hit outside them is not an anchor.
+ *
+ * Measured over the prime's 1,002 migrations before and after: the outcome of
+ * every file is unchanged (701 nothing_to_do, 255 healed, 31 improved, 15
+ * no_repair). This corrects shapes the corpus has not yet produced.
+ */
+describe("an anchor is SQL, never a comment or a stored value", () => {
+  it("leaves a comment that happens to read like the keywords alone", () => {
+    const sql = `ALTER TABLE public.profiles\n  ADD COLUMN a int,  -- add column for tracking\n  ADD COLUMN b int;\n`;
+    const p = plan(sql);
+    expect(p.outcome).toBe("healed");
+    assertSoundPatch(sql, p);
+    expect(p.patched).toContain("-- add column for tracking");
+    // Both real columns are guarded; the comment's match is not one of them.
+    expect(p.patched!.match(/ADD COLUMN IF NOT EXISTS/g)).toHaveLength(2);
+  });
+
+  it("takes its casing from the statement's keyword, not from a comment above it", () => {
+    /*
+      The comment came first in the bytes, so the first match used to be its
+      lower-case one — and the guard written into an upper-case statement was
+      `ADD COLUMN if not exists a int`, which is the diff noise this module's
+      header says the case-matching exists to avoid.
+    */
+    const sql = `ALTER TABLE public.profiles\n  -- add column for tracking\n  ADD COLUMN a int;\n`;
+    const p = plan(sql);
+    assertSoundPatch(sql, p);
+    expect(p.patched).toContain("ADD COLUMN IF NOT EXISTS a int");
+    expect(p.patched).toContain("-- add column for tracking");
+  });
+
+  it("refuses a statement whose only match sits inside a quoted value", () => {
+    /*
+      The block comment breaks up CREATE and TABLE, so the only text matching
+      the anchor is in the default. Patched there the file read `healed` while
+      a second run still failed `relation "t" already exists` — proved against
+      PostgreSQL 16 — and the stored default had changed. Refused now.
+    */
+    const sql = `CREATE /* note */ TABLE t (n text DEFAULT 'create table zz');\n`;
+    const p = plan(sql);
+    expect(p.outcome).toBe("no_repair");
+    expect(p.patched).toBeNull();
+    expect(refusedAs(p)).toEqual(["not_located"]);
+  });
+
+  it("leaves a dollar-quoted value alone", () => {
+    const sql = `ALTER TABLE t ADD COLUMN note text DEFAULT $tag$add column nope$tag$;\n`;
+    const p = plan(sql);
+    assertSoundPatch(sql, p);
+    expect(p.patched).toContain("$tag$add column nope$tag$");
+  });
+
+  it("leaves a comment alone on the drop side too", () => {
+    const sql = `ALTER TABLE t\n  DROP COLUMN a,  -- drop column b as well\n  DROP COLUMN b;\n`;
+    const p = plan(sql);
+    assertSoundPatch(sql, p);
+    expect(p.patched).toContain("-- drop column b as well");
+  });
+});
+
+describe("what the file already is, the repair keeps being", () => {
+  it("writes a prepended statement with the file's own line ending", () => {
+    const crlf = `CREATE POLICY p ON t FOR SELECT USING (true);\r\nCREATE POLICY q ON t FOR SELECT USING (true);\r\n`;
+    const p = plan(crlf);
+    assertSoundPatch(crlf, p);
+    expect(p.patched).toContain("DROP POLICY IF EXISTS p ON t;\r\n");
+    expect(p.patched).not.toMatch(/;\n(?!\r)/);
+  });
+
+  it("still writes LF into a file that uses LF", () => {
+    const lf = `CREATE POLICY p ON t FOR SELECT USING (true);\n`;
+    const p = plan(lf);
+    expect(p.patched).toContain("DROP POLICY IF EXISTS p ON t;\n");
+    expect(p.patched).not.toContain("\r");
+  });
+});
+
+describe("the shapes a plan reports are every shape, not the ones that fit", () => {
+  /*
+    `repairs` and `refusals` stop at REMEDY_ROWS so one file cannot fill a
+    page, and 65 of the prime's migrations plan more repairs than that. The
+    commit message names the shapes and the pull request warns about
+    constraints specifically — both read the kind set, so it has to be the
+    whole file's, not the first eight rows'.
+  */
+  const many = [
+    ...Array.from({ length: 9 }, (_, i) => `CREATE POLICY p${i} ON t FOR SELECT USING (true);`),
+    `ALTER TABLE t ADD CONSTRAINT t_chk CHECK (x > 0);`,
+  ].join("\n");
+
+  it("names a shape that falls past the row cap", () => {
+    const p = plan(many);
+    expect(p.repairCount).toBe(10);
+    expect(p.repairs).toHaveLength(8);
+    // The constraint is the tenth repair, so no row shows it.
+    expect(kinds(p)).not.toContain("constraint");
+    expect(p.repairKinds).toContain("constraint");
+    expect(p.repairKinds).toContain("policy");
+  });
+
+  it("lists each shape once, in the order the kinds are declared", () => {
+    const p = plan(many);
+    expect(p.repairKinds).toEqual([...new Set(p.repairKinds)]);
+    const order = p.repairKinds.map((k) => REPAIR_KINDS.indexOf(k));
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+  });
+
+  it("says nothing about shapes where there is nothing to repair", () => {
+    const p = plan(`CREATE TABLE IF NOT EXISTS t (id int);`);
+    expect(p.repairKinds).toEqual([]);
+    expect(p.refusalKinds).toEqual([]);
+  });
+
+  it("names the shapes it refused as well", () => {
+    const p = plan(`INSERT INTO t (id) VALUES (1);\nCREATE TYPE mood AS ENUM ('a');`);
+    expect(p.refusalKinds).toEqual(["insert", "type"]);
   });
 });

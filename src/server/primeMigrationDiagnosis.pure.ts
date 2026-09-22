@@ -111,7 +111,34 @@ export type SqlStatement = {
   start: number;
   /** Offset just past the terminating `;`, or the end of the source. */
   end: number;
+  /**
+   * The parts of `[start, end)` that are SQL rather than prose — absolute
+   * offsets into the original source, in order, non-overlapping.
+   *
+   * `text` has comments removed and `head` has dollar-quoted bodies elided,
+   * but the SOURCE still holds all of it, and anything that edits the file
+   * works on the source. A comment reading `-- add column for tracking` sits
+   * inside its statement's span and matches an `ADD COLUMN` anchor exactly as
+   * the statement's own keywords do; so does a `DEFAULT 'create table x'`.
+   * Writing there rewrites the author's comment, or a stored value, silently —
+   * and the byte count still balances, so nothing downstream can see it.
+   *
+   * This walk is the one place that knows which is which, so it says. The
+   * quote, comment marker and dollar tag that OPEN an inert run are outside
+   * the span with the run they open: no keyword anchor ends on one, and
+   * excluding them is the conservative direction.
+   */
+  codeSpans: ReadonlyArray<readonly [number, number]>;
 };
+
+/** Whether `[from, to)` lies wholly inside one of a statement's code spans. */
+export function spansCode(
+  codeSpans: ReadonlyArray<readonly [number, number]>,
+  from: number,
+  to: number,
+): boolean {
+  return codeSpans.some(([a, b]) => from >= a && to <= b);
+}
 
 export type HazardKind =
   | "transaction_control"
@@ -181,8 +208,31 @@ export function scanSqlStatements(sql: string): SqlStatement[] {
   let startLine = 1;
   let startAt = 0;
   let started = false;
+  /*
+    Where the code run we are inside began, whether we are inside one at all,
+    and the runs closed so far.
+
+    `inCode` is not redundant. A literal, comment or body that is never closed
+    — a truncated file, a file cut at the corpus ceiling — leaves the walk in
+    that state at EOF, and without the flag the final close would push a run
+    from wherever code last began right through the unterminated text, calling
+    it SQL and overlapping the run already recorded. Measured on
+    `CREATE TABLE t (n text DEFAULT 'unterminated`: spans [0,31] and [0,44].
+  */
+  let codeFrom = 0;
+  let inCode = true;
+  let spans: Array<readonly [number, number]> = [];
+  const closeCode = (at: number) => {
+    if (inCode && at > codeFrom) spans.push([codeFrom, at] as const);
+    inCode = false;
+  };
+  const openCode = (at: number) => {
+    codeFrom = at;
+    inCode = true;
+  };
 
   const flush = (endAt: number) => {
+    closeCode(endAt);
     const text = buf.trim();
     if (text) {
       const raw = head.trim().replace(/\s+/g, " ");
@@ -193,11 +243,18 @@ export function scanSqlStatements(sql: string): SqlStatement[] {
         headRaw: raw,
         start: startAt,
         end: endAt,
+        // Whitespace and comments before the first real character belong to no
+        // statement, so the opening run is clipped to where this one begins.
+        codeSpans: spans
+          .map(([a, b]) => [Math.max(a, startAt), b] as const)
+          .filter(([a, b]) => b > a),
       });
     }
     buf = "";
     head = "";
     started = false;
+    spans = [];
+    openCode(endAt);
   };
 
   for (let i = 0; i < sql.length; i++) {
@@ -206,7 +263,10 @@ export function scanSqlStatements(sql: string): SqlStatement[] {
     if (c === "\n") line += 1;
 
     if (state === "line_comment") {
-      if (c === "\n") state = "code";
+      if (c === "\n") {
+        state = "code";
+        openCode(i + 1);
+      }
       continue;
     }
 
@@ -219,7 +279,10 @@ export function scanSqlStatements(sql: string): SqlStatement[] {
       if (c === "*" && d === "/") {
         blockDepth -= 1;
         i += 1;
-        if (blockDepth === 0) state = "code";
+        if (blockDepth === 0) {
+          state = "code";
+          openCode(i + 1);
+        }
         continue;
       }
       continue;
@@ -237,6 +300,7 @@ export function scanSqlStatements(sql: string): SqlStatement[] {
           i += 1;
         } else {
           state = "code";
+          openCode(i + 1);
         }
       }
       continue;
@@ -249,6 +313,7 @@ export function scanSqlStatements(sql: string): SqlStatement[] {
         for (const ch of tag.slice(1)) if (ch === "\n") line += 1;
         i += tag.length - 1;
         state = "code";
+        openCode(i + 1);
         // The body never reaches `head`: a PL/pgSQL `begin` is a block opener,
         // not a transaction, and counting it would refuse most of the corpus.
         head += " $BODY$ ";
@@ -258,11 +323,13 @@ export function scanSqlStatements(sql: string): SqlStatement[] {
 
     // state === "code"
     if (c === "-" && d === "-") {
+      closeCode(i);
       state = "line_comment";
       i += 1;
       continue;
     }
     if (c === "/" && d === "*") {
+      closeCode(i);
       state = "block_comment";
       blockDepth = 1;
       i += 1;
@@ -279,6 +346,7 @@ export function scanSqlStatements(sql: string): SqlStatement[] {
     }
     const opened = dollarTagAt(sql, i);
     if (opened) {
+      closeCode(i);
       state = "dollar";
       tag = opened;
       buf += opened;
@@ -287,8 +355,10 @@ export function scanSqlStatements(sql: string): SqlStatement[] {
     }
     buf += c;
     head += c;
-    if (c === "'") state = "single";
-    else if (c === '"') state = "double";
+    if (c === "'" || c === '"') {
+      closeCode(i);
+      state = c === "'" ? "single" : "double";
+    }
   }
   flush(sql.length);
   return out;
@@ -627,7 +697,18 @@ const CREATE_FORMS: ReadonlyArray<{ re: RegExp; kind: string }> = [
  * index and succeeds. That last one wastes a little disk and loses nothing.
  */
 function createsObject(head: string): Named | null {
-  if (/^create\s+(or\s+replace|.*\bif\s+not\s+exists)\b/.test(head)) {
+  /*
+    `[^']*` rather than `.*`: the guard has to be written in SQL, not quoted
+    inside a value. `head` keeps string literals — it has to, because the enum
+    form below reads one as its object key — so `.*` would walk into
+    `CREATE TABLE t (n text DEFAULT 'create table if not exists z')` and call
+    an unguarded statement guarded, which is this module's worst direction:
+    re-runnable is the reading that lets a file be dispatched again. No
+    identifier can be single-quoted and `IF NOT EXISTS` always precedes the
+    name, so nothing legitimate is lost. Measured across the prime's 11,110
+    statements: 0 change either way.
+  */
+  if (/^create\s+(?:or\s+replace|[^']*\bif\s+not\s+exists)\b/.test(head)) {
     // `CREATE MATERIALIZED VIEW` has no OR REPLACE, so `or replace` there is
     // a parse error rather than a guard — but such a file never applied once,
     // let alone twice, so there is nothing for this reading to say about it.

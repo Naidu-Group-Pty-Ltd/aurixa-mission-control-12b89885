@@ -64,6 +64,8 @@ vi.mock("./github-app.server", () => ({
       return { data: {} };
     },
     git: {
+      // A read, so it does not join `state.calls` — that list is the writes.
+      getCommit: async () => ({ data: { tree: { sha: "basetreesha" } } }),
       createBlob: async (a: Record<string, unknown>) => {
         state.calls.push({ name: "createBlob", args: a });
         return { data: { sha: "blobsha" } };
@@ -252,7 +254,13 @@ describe("the proposal itself", () => {
       base_tree: string;
       tree: Array<{ path: string }>;
     };
-    expect(tree.base_tree).toBe("basesha");
+    /*
+      The TREE the base commit carries, never the commit sha. `createTree`
+      documents `base_tree` as a tree object; handing it a commit relies on
+      the service resolving something it does not promise to, on the one call
+      that decides which files the proposal carries.
+    */
+    expect(tree.base_tree).toBe("basetreesha");
     expect(tree.tree).toHaveLength(1);
     expect(tree.tree[0].path).toBe(`supabase/migrations/${V}_x.sql`);
 
@@ -382,13 +390,19 @@ describe("the document a reviewer opens", () => {
       { length: 12 },
       (_, i) => `CREATE POLICY p${i} ON t FOR SELECT USING (true);`,
     ).join("\n");
-    expect(await bodyFor(many)).toContain("further repairs of the same shapes are in the diff");
+    /*
+      Renegotiated. This read `of the same shapes`, which was a claim the body
+      could not support: `plan.repairs` stops at `REMEDY_ROWS`, so the shapes
+      it can see are the first eight, and 65 of the prime's migrations plan
+      more repairs than that. The count is the part that is known.
+    */
+    expect(await bodyFor(many)).toContain("further repairs are in the diff");
 
     const nine = Array.from(
       { length: 9 },
       (_, i) => `CREATE POLICY q${i} ON t FOR SELECT USING (true);`,
     ).join("\n");
-    expect(await bodyFor(nine)).toContain("1 further repair of the same shape is in the diff");
+    expect(await bodyFor(nine)).toContain("1 further repair is in the diff");
   });
 
   it("carries no placeholder anywhere", async () => {

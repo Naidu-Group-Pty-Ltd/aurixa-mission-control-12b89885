@@ -507,3 +507,123 @@ version may have been applied, or the repair may have landed already.
 - **It does not read inside a `DO` block**, for the same reason the reading does
   not: that needs a PL/pgSQL parser, and the honest alternative is to count them
   and say so.
+
+## 18 · An anchor is SQL, never a comment or a stored value
+
+§13 recorded **0 anchor misses over 1,913 flagged statements** and called that
+what makes surgery on somebody else's file defensible. It was true, and it was
+the wrong measurement to stop at: it counted the anchors that were *found*, not
+the anchors that were found **in the wrong place**.
+
+The planner matched its anchor against the statement's raw SOURCE. `text` has
+comments stripped and `head` has dollar-quoted bodies elided, but the source
+still holds all of it — and a comment reading `-- add column for tracking`
+matches an `ADD COLUMN` anchor exactly as the statement's own keywords do. So
+does `DEFAULT 'create table zz'`. So does `DEFAULT $tag$add column$tag$`.
+
+Four things followed, each found by driving the shipped planner over shapes the
+prime's corpus does not contain and then applying both files to a real
+PostgreSQL 16 and diffing the catalogue either side:
+
+| written | became | harm |
+| --- | --- | --- |
+| `-- add column for tracking` | `-- add column IF NOT EXISTS for tracking` | the author's comment, rewritten in a pull request somebody merges |
+| `DEFAULT 'add column b int'` | `DEFAULT 'add column IF NOT EXISTS b int'` | **a stored column default, silently changed** |
+| `DEFAULT $tag$add column nope$tag$` | `…IF NOT EXISTS nope$tag$` | the same, through a dollar quote |
+| `CREATE /* note */ TABLE t (n text DEFAULT 'create table zz')` | the guard went **inside the literal** | the plan read `healed` while the second run still failed `relation "t" already exists` |
+
+The last row is the one that matters most, because it is the module's own
+governing line broken in both directions at once: a quiet wrong answer, *and* a
+re-runnability claimed that could not be delivered. Every gate said yes. The
+patch was a pure insertion, the bytes accounted, the statement count held, and
+`assessIdempotency` read the patched file as `rerunnable` — because the
+`if not exists` it now found was the one inside the string.
+
+There was a second, smaller harm in the same family. Where a comment came
+*before* the statement it describes, the comment's lower-case match was the
+first one, so `cased()` took its case from the comment and wrote
+`ADD COLUMN if not exists a int` into an upper-case file — the diff noise §13
+says the case-matching exists to prevent.
+
+### The fix is at the one walk
+
+`scanSqlStatements` has always known which stretches are SQL; it simply did not
+say. It says now: every `SqlStatement` carries `codeSpans`, the parts of
+`[start, end)` the state machine was in code for, recorded by the same single
+pass that already strips comments and elides bodies. No second scanner, and
+nothing that could drift from the reading.
+
+The planner filters its anchor hits through `spansCode` and a hit outside them
+is not an anchor. Where none survive the statement is refused `not_located` —
+the refusal that already existed for a comment splitting the keywords, which is
+the same fact one step along. It now collects **every** occurrence even for the
+single-guard families, because the first occurrence in the bytes is not always
+the statement's own keywords.
+
+One hole in the first cut of that walk is worth recording, because it was
+found by adversarial reading rather than by any of the sweeps. `closeCode`
+pushed the run it had just ended but did not record that a run had ended, so a
+literal, comment or body the file never CLOSES — a truncated file, or one cut
+at the corpus ceiling — left the final close pushing a run from wherever code
+last began straight through the unterminated text. On
+`CREATE TABLE t (n text DEFAULT 'unterminated` the spans came out `[0,31]` and
+`[0,44]`: overlapping, with the second calling the unterminated literal SQL.
+An `inCode` flag closes it.
+
+Two consequences worth stating. A dollar-quoted body is excluded by
+construction, so the note on `ADD COLUMN` claiming an `ALTER` "carries no body a
+`CREATE` could be hiding in" is no longer load-bearing — it was also wrong, since
+an `ALTER` can carry a dollar-quoted `DEFAULT`. And the guard now takes its case
+from the surviving SQL keyword, so a comment cannot decide how the file is
+written.
+
+**Measured over the prime's 1,002 migrations, before and after: every file's
+outcome is unchanged** — 701 `nothing_to_do`, 255 `healed`, 31 `improved`, 15
+`no_repair`, 0 `unproven`. This corrects shapes the corpus has not yet produced.
+It is a latent defect closed, not a live one repaired, and the distinction is
+the honest one: nothing the prime holds today would have been damaged.
+
+### The same root, one module up
+
+`createsObject`'s guard test read `/^create\s+(or\s+replace|.*\bif\s+not\s+exists)\b/`,
+and `.*` walks into a literal for the same reason. A file containing
+`CREATE TABLE t (n text DEFAULT 'create table if not exists z')` read
+`rerunnable` — the one direction that matters, because `rerunnable` is the
+reading that lets a file be dispatched again. It is `[^']*` now: no identifier
+can be single-quoted and `IF NOT EXISTS` always precedes the name, so nothing
+legitimate is lost. Measured across the prime's **11,110 statements: 0 change
+either way**, in both the per-statement verdict and the whole-file reading.
+
+### Three smaller things the same sweep found
+
+- **`base_tree` was handed a commit sha.** GitHub documents it as a tree object,
+  and every other writer here resolves the commit first
+  (`cascadeConflictMerge.server.ts`). It is resolved now. This one could not be
+  probed from the session that found it — no low-level git API is reachable —
+  so it was fixed by matching the path this repository already proves works,
+  rather than by assuming the service would resolve it.
+- **A prepend wrote a bare `\n` into whatever the file used.** 0 of the prime's
+  1,002 migrations are CRLF, so nothing is affected today; a repair that travels
+  as a pull request should not be the thing that mixes line endings.
+- **The kind set was read off the capped rows.** `repairs` stops at
+  `REMEDY_ROWS`, and **65 of the prime's migrations plan more repairs than that**
+  — so the commit message's list of shapes, and the pull request's warning that a
+  re-added constraint revalidates the table, were both drawn from the first eight
+  rows. A file whose only constraint repair sat at row nine would have carried
+  that warning nowhere. `repairKinds` and `refusalKinds` are the whole file's,
+  and the two places that claimed the unlisted repairs were "of the same shapes"
+  stopped claiming it — the capped list cannot know.
+
+### What the gates are now
+
+`assertSoundPatch` gained the invariant that was missing: **every literal and
+comment the author wrote still appears, in order, in the patched file.** It is a
+subsequence rather than an equality because a prepended
+`DROP POLICY IF EXISTS "name"` legitimately adds quoted identifiers, and it is
+written in the test file from nothing the module exports. Because it sits in
+the shared helper, every existing patch assertion gained it too.
+
+Each of the seven fixes was planted back and fails a test: the code-span
+filter, the guard bound, the `base_tree` resolution, the uncapped kind set, the
+line ending, the walk's own transition at a line comment, and the flag that
+stops an unterminated literal being read as code.

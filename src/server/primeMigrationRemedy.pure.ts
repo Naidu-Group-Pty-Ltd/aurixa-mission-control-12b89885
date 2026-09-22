@@ -120,6 +120,7 @@ import {
   assessIdempotency,
   idempotencyWalk,
   scanSqlStatements,
+  spansCode,
   EXCERPT_CHARS,
   type IdempotencyReading,
   type SqlStatement,
@@ -211,8 +212,22 @@ export type RemedyPlan = {
   patched: string | null;
   repairs: Repair[];
   repairCount: number;
+  /**
+   * Every distinct shape repaired — including the ones past `REMEDY_ROWS`.
+   *
+   * `repairs` is capped so one file cannot fill a page, and anything that
+   * reads the KINDS off that capped list is reading a sample: 65 of the
+   * prime's migrations plan more repairs than the cap shows. The commit
+   * message names the shapes, and the pull request warns about constraints
+   * specifically — both would have been drawn from the first eight rows, so a
+   * file whose only constraint repair sat at row nine would have carried the
+   * revalidation warning nowhere.
+   */
+  repairKinds: RepairKind[];
   refusals: RepairRefusal[];
   refusalCount: number;
+  /** Every distinct shape left alone, including past `REMEDY_ROWS`. */
+  refusalKinds: RefusalKind[];
   /** One sentence for the operator. */
   summary: string;
   /** Why a composed patch was thrown away, where one was. */
@@ -532,6 +547,22 @@ function renderDrop(parts: readonly DropPart[], upper: boolean): string {
   return `${parts.map((p) => ("kw" in p ? (upper ? p.kw.toUpperCase() : p.kw) : p.name)).join(" ")};`;
 }
 
+/**
+ * The line ending this file uses, read where the statement sits.
+ *
+ * A prepended statement is a line of somebody else's repository, and a lone
+ * LF written into a CRLF file shows up as a changed line in every diff tool
+ * that is strict about it. Measured at 0 CRLF files across the prime's 1,002
+ * migrations, and kept because a repair that travels as a pull request should
+ * not be the thing that mixes them.
+ */
+function lineBreakFor(sql: string, at: number): string {
+  const nl = sql.lastIndexOf("\n", at - 1);
+  if (nl > 0) return sql[nl - 1] === "\r" ? "\r\n" : "\n";
+  const first = sql.indexOf("\n");
+  return first > 0 && sql[first - 1] === "\r" ? "\r\n" : "\n";
+}
+
 /** The whitespace at the start of the line `at` sits on, where it is all whitespace. */
 function indentAt(sql: string, at: number): string {
   const nl = sql.lastIndexOf("\n", at - 1);
@@ -644,15 +675,21 @@ export function planMigrationRepair(sql: string | null): RemedyPlan {
   let refusalCount = 0;
   let prepends = 0;
 
+  const repairKinds = new Set<RepairKind>();
+  const refusalKinds = new Set<RefusalKind>();
   const refuse = (s: SqlStatement, kind: RefusalKind, why: string) => {
     refusalCount += 1;
+    refusalKinds.add(kind);
     if (refusals.length < REMEDY_ROWS)
       refusals.push({ kind, line: s.line, excerpt: excerpt(s.text), why });
   };
   const repair = (r: Repair) => {
     repairCount += 1;
+    repairKinds.add(r.kind);
     if (repairs.length < REMEDY_ROWS) repairs.push(r);
   };
+  /** Declaration order, so the same file always names its shapes the same way. */
+  const kindsOf = <T>(all: readonly T[], seen: ReadonlySet<T>) => all.filter((k) => seen.has(k));
 
   for (const flag of flags) {
     const s = statements[flag.index];
@@ -699,7 +736,7 @@ export function planMigrationRepair(sql: string | null): RemedyPlan {
       const upper = lead.length > 0 && lead === lead.toUpperCase();
       const drop = renderDrop(parts, upper);
       const indent = indentAt(sql, s.start);
-      edits.push({ at: s.start, text: `${drop}\n${indent}` });
+      edits.push({ at: s.start, text: `${drop}${lineBreakFor(sql, s.start)}${indent}` });
       prepends += 1;
       repair({
         kind: family.kind,
@@ -711,26 +748,41 @@ export function planMigrationRepair(sql: string | null): RemedyPlan {
       continue;
     }
 
-    // family.act === "guard"
-    const re = new RegExp(family.anchor.source, family.every ? "gi" : "i");
-    const hits: RegExpExecArray[] = [];
+    /*
+      Every occurrence is collected even where only the first is wanted,
+      because the first occurrence in the BYTES is not always the statement's
+      own keywords. A block comment sitting between CREATE and TABLE breaks
+      them up, and a column default holding the words "create table z" then
+      offers the only literal match there is — inside a string. The hits are
+      filtered to the ones the walk calls code, and the survivors decide.
+    */
+    const re = new RegExp(family.anchor.source, "gi");
+    const all: RegExpExecArray[] = [];
     let m: RegExpExecArray | null;
     while ((m = re.exec(slice)) !== null) {
-      hits.push(m);
-      if (!family.every) break;
+      all.push(m);
       if (m.index === re.lastIndex) re.lastIndex += 1;
     }
+    const inCode = all.filter((h) =>
+      spansCode(s.codeSpans, s.start + h.index, s.start + h.index + h[0].length),
+    );
+    const hits = family.every ? inCode : inCode.slice(0, 1);
 
     if (hits.length === 0) {
-      // The shape was recognised in the collapsed head and could not be found
-      // in the bytes — a comment between the keywords, most likely. Refused
-      // rather than patched at a guessed offset. Measured at 0 over the whole
-      // prime corpus, and kept because "measured 0" is not "cannot happen".
+      /*
+        The shape was recognised in the collapsed head and the keywords are
+        nowhere in the SOURCE that is SQL — either they are broken up by a
+        comment, or the only text that looks like them sits inside a string
+        literal or a comment. Refused rather than patched at a guessed offset:
+        writing into either would change what the file MEANS while the byte
+        count still balanced, which is the one thing this module may not do.
+      */
       refuse(
         s,
         "not_located",
-        "The statement's keywords could not be found in the file exactly as written — a comment " +
-          "between them, most likely — so there is nowhere to put the guard without guessing.",
+        "The statement's keywords are not in the file as SQL where a guard could go — broken up " +
+          "by a comment, or matched only inside a comment or a quoted value — so there is " +
+          "nowhere to put the guard without guessing.",
       );
       continue;
     }
@@ -754,8 +806,10 @@ export function planMigrationRepair(sql: string | null): RemedyPlan {
       patched: null,
       repairs,
       repairCount,
+      repairKinds: kindsOf(REPAIR_KINDS, repairKinds),
       refusals,
       refusalCount,
+      refusalKinds: kindsOf(REFUSAL_KINDS, refusalKinds),
       summary:
         refusalCount > 0
           ? `Nothing here can be repaired mechanically: all ${refusalCount} statement${refusalCount === 1 ? "" : "s"} that would stop or rewrite on a second run need a person.`
@@ -779,8 +833,10 @@ export function planMigrationRepair(sql: string | null): RemedyPlan {
       patched: null,
       repairs,
       repairCount,
+      repairKinds: kindsOf(REPAIR_KINDS, repairKinds),
       refusals,
       refusalCount,
+      refusalKinds: kindsOf(REFUSAL_KINDS, refusalKinds),
       summary:
         "A repair was composed for this file and then thrown away, because re-reading it did not " +
         "show the change it promised. Nothing is offered.",
@@ -797,8 +853,10 @@ export function planMigrationRepair(sql: string | null): RemedyPlan {
     patched,
     repairs,
     repairCount,
+    repairKinds: kindsOf(REPAIR_KINDS, repairKinds),
     refusals,
     refusalCount,
+    refusalKinds: kindsOf(REFUSAL_KINDS, refusalKinds),
     summary: healed
       ? `${repairCount} statement${repairCount === 1 ? "" : "s"} would be guarded, after which running this file a second time changes nothing.`
       : `${repairCount} statement${repairCount === 1 ? "" : "s"} would be guarded, and ${refusalCount} need${refusalCount === 1 ? "s" : ""} a person. This file would still not be safe to run twice.`,
@@ -827,8 +885,10 @@ function blank(
     patched: null,
     repairs: [],
     repairCount: 0,
+    repairKinds: [],
     refusals: [],
     refusalCount: 0,
+    refusalKinds: [],
     summary,
     discarded: null,
   };

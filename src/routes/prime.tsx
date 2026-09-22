@@ -1472,8 +1472,8 @@ function RepairPlanBody({ report }: { report: RepairPlanReport }) {
           ))}
           {plan.repairCount > plan.repairs.length && (
             <p className="text-[10px] text-muted-foreground">
-              {plan.repairCount - plan.repairs.length} more of the same shapes. The counts above are
-              exact; only this list is capped.
+              {plan.repairCount - plan.repairs.length} more, not listed. The counts above are exact;
+              only this list is capped.
             </p>
           )}
         </div>
@@ -1487,7 +1487,7 @@ function RepairPlanBody({ report }: { report: RepairPlanReport }) {
           ))}
           {plan.refusalCount > plan.refusals.length && (
             <p className="text-[10px] text-muted-foreground">
-              {plan.refusalCount - plan.refusals.length} more of the same shapes.
+              {plan.refusalCount - plan.refusals.length} more, not listed.
             </p>
           )}
         </div>
