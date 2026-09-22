@@ -27,6 +27,7 @@ import {
   listTreeEntries,
   getFileContent,
   OversizeFileError,
+  copyBlobByStream,
   type RepoRef,
 } from "./github-app.server";
 import { cascadeEventStatus, summariseCascade } from "./cascade/prReconcile.pure";
@@ -2049,6 +2050,17 @@ export async function processClone(args: {
   let freshlyPrepared = 0;
   /** Files this pass has paid a read for. See `shouldStop`. */
   let filesRead = 0;
+  /**
+   * Bytes this pass has carried as a stream.
+   *
+   * `shouldStop` already paces the pass on the slowest file it has seen, and
+   * a 40 MB carry makes itself the slowest file, so the budget stops the pass
+   * by construction after the first one. This is the guard for the FIRST one:
+   * a pass that has not yet read anything has no measurement to reserve
+   * against, and a fresh pass that began with four seeds would spend its whole
+   * invocation on them before the budget had a number to work with.
+   */
+  let streamedBytes = 0;
   let slowestFileMs = 0;
   // Asked before each file is started, never before the first fresh one: a
   // pass that prepared nothing new would come back next tick exactly where
@@ -2073,6 +2085,118 @@ export async function processClone(args: {
    */
   const shouldStop = () =>
     resume?.budget !== undefined && filesRead > 0 && resume.budget.isPastDeadline(slowestFileMs);
+
+  /**
+   * The lane for a file too large to read: carry it without ever holding it.
+   *
+   * Reached only from the refusal that used to end in a hold, so the floor is
+   * yesterday's behaviour — every way this can decline returns to that same
+   * hold, and the file is reported exactly as it was. What it adds is the
+   * fifteen files at prime that no pass had ever delivered.
+   *
+   * Three declines, and each says which it was rather than reporting one
+   * shape of failure for three different remedies:
+   *
+   * - past `CASCADE_STREAM_MAX_FILE_BYTES`, which is GitHub's own blob
+   *   ceiling. Nothing retries it and nothing here can release it.
+   * - this pass's streaming allowance is spent. Not a failure at all — the
+   *   next pass continues, and saying "bring it across by hand" here would
+   *   have an operator race the engine.
+   * - the carry was attempted and did not complete. The next pass retries.
+   *
+   * A streamed blob is LEDGERED like a binary one, and that matters more than
+   * it looks: a 39 MB seed is then carried once per EVENT rather than once
+   * per tick, because `resumableBlobs` matches on prime's sha and a streamed
+   * blob's sha IS prime's sha — a git blob is a hash of its own bytes.
+   */
+  const carryOversizeByStream = async (
+    e: OversizeFileError,
+    path: string,
+    fileStartedAt: number,
+  ): Promise<Prepared> => {
+    const { carryLaneFor, CASCADE_STREAM_BYTES_PER_PASS, CASCADE_STREAM_MAX_FILE_BYTES } =
+      await import("@/server/cascade/blobStreamCarry.pure");
+    if (carryLaneFor(e.bytes, e.maxBytes) !== "stream") {
+      return {
+        kind: "held",
+        held: oversizeHold(path, e.bytes, CASCADE_STREAM_MAX_FILE_BYTES),
+      };
+    }
+    // The tree listing already answered this, and the refusal carries it too.
+    // Without it there is nothing to copy FROM, which is a fact about the read
+    // rather than about the file.
+    const primeSha = e.sha ?? primeShaByPath?.get(path);
+    if (!primeSha) {
+      return {
+        kind: "held",
+        held: oversizeHold(path, e.bytes, e.maxBytes, "prime's blob sha could not be read"),
+      };
+    }
+    // A dry run composes no blob anywhere — the write boundary is never
+    // reached — so prime's sha stands in, exactly as it does for a binary file.
+    if (dryRun) {
+      return {
+        kind: "blob",
+        path,
+        mode: "100644" as const,
+        type: "blob" as const,
+        sha: primeSha,
+        inline: undefined,
+        content: null,
+      };
+    }
+    // Below the dry run deliberately. The allowance is PACING, not policy —
+    // what it holds back this pass the next one carries — so a rehearsal that
+    // reported a file as withheld because of it would describe a cascade that
+    // never happens. A dry run answers what the cascade will do in the end.
+    if (streamedBytes + e.bytes > CASCADE_STREAM_BYTES_PER_PASS) {
+      return {
+        kind: "held",
+        held: oversizeHold(
+          path,
+          e.bytes,
+          e.maxBytes,
+          `this pass had already carried ${(streamedBytes / 1_048_576).toFixed(1)} MB, which ` +
+            `is its allowance`,
+        ),
+      };
+    }
+    try {
+      const blobSha = await copyBlobByStream(octokit, primeRef, cloneRef, path, primeSha, e.bytes);
+      streamedBytes += e.bytes;
+      if (resume) {
+        progress.prepared[path] = { blob: blobSha, prime: primeSha };
+        freshlyPrepared += 1;
+        if (freshlyPrepared % PROGRESS_FLUSH_EVERY === 0) await resume.onProgress(progress);
+      }
+      slowestFileMs = Math.max(slowestFileMs, Date.now() - fileStartedAt);
+      return {
+        kind: "blob",
+        path,
+        mode: "100644" as const,
+        type: "blob" as const,
+        sha: blobSha,
+        inline: undefined,
+        // Never judged on its text — it was never read. See the note on
+        // `CASCADE_MAX_FILE_BYTES` for why that is right for this lane.
+        content: null,
+      };
+    } catch (carryError) {
+      // Held, never thrown. A carry that failed must not take the other
+      // forty-seven files in the pass with it — which is the same rule the
+      // ceiling itself was written for.
+      slowestFileMs = Math.max(slowestFileMs, Date.now() - fileStartedAt);
+      return {
+        kind: "held",
+        held: oversizeHold(
+          path,
+          e.bytes,
+          e.maxBytes,
+          carryError instanceof Error ? carryError.message : String(carryError),
+        ),
+      };
+    }
+  };
 
   /**
    * ONE CANDIDATE, JUDGED. Named rather than inline because it is asked
@@ -2127,11 +2251,17 @@ export async function processClone(args: {
         maxBytes: CASCADE_MAX_FILE_BYTES,
       });
     } catch (e) {
-      // Held, not failed. One file past the ceiling used to kill the whole
+      // NOT held first. One file past the read ceiling used to kill the whole
       // pass — and the forty-seven beside it — on every attempt until the
-      // event ran out of claims. See `CASCADE_MAX_FILE_BYTES`.
+      // event ran out of claims, and holding it was the fix. But "cannot be
+      // held" is not "cannot be carried": the bytes never have to enter this
+      // isolate, and a file too large to read is streamed from prime's blob
+      // straight into the clone's, base64-encoded in flight. The hold below
+      // is what is left when that cannot be done — which is a file past
+      // GitHub's own ceiling, or a carry that failed. See
+      // `blobStreamCarry.pure.ts` and `CASCADE_MAX_FILE_BYTES`.
       if (e instanceof OversizeFileError) {
-        return { kind: "held", held: oversizeHold(path, e.bytes, e.maxBytes) };
+        return await carryOversizeByStream(e, path, fileStartedAt);
       }
       throw e;
     }

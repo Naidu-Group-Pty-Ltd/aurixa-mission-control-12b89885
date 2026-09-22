@@ -19,6 +19,7 @@ import {
   oversizeHold,
   oversizeHoldNotice,
 } from "./syncExclusions.pure";
+import { CASCADE_STREAM_MAX_FILE_BYTES } from "./blobStreamCarry.pure";
 
 const BACKEND_IDENTITY = "src/integrations/supabase/env.ts";
 
@@ -518,26 +519,44 @@ describe("the reconcile marker round-trips", () => {
   });
 });
 
-describe("a file over the cascade ceiling is held, and says so", () => {
+describe("a file the cascade could not carry is held, and says which it was", () => {
+  /*
+    These fixtures changed on 22 Sep 2026 and the reason is the point. They
+    used to be a 39 MB seed against an 8 MB ceiling, which was the live case;
+    a 39 MB seed is now STREAMED, so that fixture describes a state the engine
+    cannot reach and a test asserting it would be pinning a fixture rather
+    than the product. What is left here are the two states that do reach it.
+  */
+  const PAST_CEILING = oversizeHold(
+    "supabase/migrations/x.sql",
+    210_000_000,
+    CASCADE_STREAM_MAX_FILE_BYTES,
+  );
+  const CARRY_FAILED = oversizeHold(
+    "supabase/migrations/x.sql",
+    41_010_000,
+    CASCADE_MAX_FILE_BYTES,
+    "HTTP 502 — Bad gateway",
+  );
+
   it("is reportable, so a person is told rather than the file vanishing", () => {
     /*
       Measured 2 Sep 2026: one 39 MB migration seed among 48 files killed the
-      pass on every attempt. Held as `manual_reconcile` it is counted in the
-      proposal and listed with its size; held silently it would be a cascade
+      pass on every attempt. Counted in the proposal and listed with its size
+      it is a fact an operator can act on; held silently it would be a cascade
       that reports success while the clone is missing a file.
     */
-    const held = oversizeHold("supabase/migrations/x.sql", 41_010_000, CASCADE_MAX_FILE_BYTES);
-    // `oversize`, not `manual_reconcile`. It is still REPORTED — the file
-    // differs upstream and is not travelling, and dropping it from the list
-    // would restore the silence this test was written about — but it is not a
-    // decision, so it is not in the set an approval is drawn over. Conflating
-    // the two is what made the approval dialog a dead control.
-    expect(held.reason).toBe("oversize");
-    expect(reportableHeld([held])).toHaveLength(1);
-    expect(approvableHeld([held])).toHaveLength(0);
-    expect(held.note).toMatch(/39\.1 MB/);
-    expect(held.note).toMatch(/8\.0 MB/);
-    expect(held.path).toBe("supabase/migrations/x.sql");
+    for (const held of [PAST_CEILING, CARRY_FAILED]) {
+      // `oversize`, not `manual_reconcile`. It is still REPORTED — the file
+      // differs upstream and is not travelling, and dropping it from the list
+      // would restore the silence this test was written about — but it is not
+      // a decision, so it is not in the set an approval is drawn over.
+      // Conflating the two is what made the approval dialog a dead control.
+      expect(held.reason).toBe("oversize");
+      expect(reportableHeld([held])).toHaveLength(1);
+      expect(approvableHeld([held])).toHaveLength(0);
+      expect(held.path).toBe("supabase/migrations/x.sql");
+    }
   });
 
   it("names the repository as what does not receive it, and not the database", () => {
@@ -545,14 +564,31 @@ describe("a file over the cascade ceiling is held, and says so", () => {
     // well". That stopped being true when the migration lane learned to chunk
     // a seed-shaped INSERT from a stream, and an operator told the database is
     // also refusing the file goes looking in the wrong place.
-    const held = oversizeHold("supabase/migrations/x.sql", 41_010_000, CASCADE_MAX_FILE_BYTES);
-    expect(held.note).toContain("REPOSITORY");
-    expect(held.note).not.toMatch(/migration sync refuses/i);
-    expect(held.note, "and it says an approval cannot help").toMatch(/No approval/i);
+    expect(PAST_CEILING.note).toContain("REPOSITORY");
+    expect(PAST_CEILING.note).not.toMatch(/migration sync refuses/i);
+    expect(PAST_CEILING.note, "and it says an approval cannot help").toMatch(/No approval/i);
+    expect(PAST_CEILING.note).toMatch(/200\.3 MB/);
+    expect(PAST_CEILING.note).toMatch(/100\.0 MB/);
   });
 
-  it("the ceiling is the contents API's, and is unchanged by this", () => {
+  it("does not send a failed carry to a person, because the next pass retries", () => {
+    /*
+      The two states are one word apart and send an operator opposite ways. A
+      file past GitHub's ceiling needs a human and no pass will ever take it;
+      a carry that failed needs nobody, and "bring it across by hand" there
+      would have an operator racing the engine for the same path.
+    */
+    expect(CARRY_FAILED.note).toContain("HTTP 502 — Bad gateway");
+    expect(CARRY_FAILED.note).toMatch(/next pass/i);
+    expect(CARRY_FAILED.note).not.toMatch(/No approval can release a ceiling/);
+    expect(CARRY_FAILED.note).toMatch(/nothing to copy by hand/i);
+    expect(CARRY_FAILED.note).toMatch(/39\.1 MB/);
+  });
+
+  it("the READ ceiling is the contents API's, and is unchanged by this", () => {
+    // What moved is what a cascade CARRIES, not what an invocation HOLDS.
     expect(CASCADE_MAX_FILE_BYTES).toBe(8 * 1024 * 1024);
+    expect(CASCADE_STREAM_MAX_FILE_BYTES).toBeGreaterThan(CASCADE_MAX_FILE_BYTES);
   });
 });
 
