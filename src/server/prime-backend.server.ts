@@ -1134,6 +1134,28 @@ export type PrimeMigrationCorpus = {
    * sites consume that array and none of them wants a size.
    */
   sizeOf: (id: string) => number | null;
+  /**
+   * Every migration FILE, with the blob identity a body read needs.
+   *
+   * Keyed by path rather than id because ids are not unique in this corpus:
+   * `MIGRATION_VERSION_COLLISIONS.json` records 32 groups covering 77 files
+   * that share a version string, and `migrationIdFromFilename` returns that
+   * version. `byId` below keeps whichever of a pair sorts last, so anything
+   * asking `loadSql(id)` about a collision group gets one member's bytes with
+   * nothing saying which — fine for a replay that only needs the version
+   * applied once, and wrong for a reader that wants to know what each FILE
+   * contains.
+   *
+   * `size` is null where the tree reported none, which is "unknown" and never
+   * "empty" — the rule `loadSql` applies before it fetches.
+   */
+  files: ReadonlyArray<{
+    id: string;
+    name: string;
+    path: string;
+    sha: string;
+    size: number | null;
+  }>;
   /** Commit the listing was taken at. */
   sourceSha: string;
   /**
@@ -1216,6 +1238,13 @@ export async function openPrimeMigrationCorpus(
 
   return {
     metas: entries.map(({ id, name, path }) => ({ id, name, path })),
+    files: entries.map(({ id, name, path, sha, size }) => ({
+      id,
+      name,
+      path,
+      sha,
+      size: typeof size === "number" ? size : null,
+    })),
     sourceSha: commitSha,
     bodyIdentity: (id: string) => byId.get(id)?.sha ?? null,
     sizeOf,

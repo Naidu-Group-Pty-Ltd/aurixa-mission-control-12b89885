@@ -130,6 +130,14 @@ exists before its reader is inert, a column that arrives after is a `42703`.
 A migration that REMOVES something a live deployment still reads has to be
 staged by hand, across two merges.
 
+> **Since 2026-09-22 the two namespaces ARE reconciled — by body, never by
+> timestamp.** The ledger stores the SQL it ran, so a matching body is proof the
+> prime ran those exact bytes, which is strictly stronger than a version match.
+> That took the prime's deliverable set from 180 of 1,002 to 785. See
+> [RECONCILING_BY_BODY.md](./RECONCILING_BY_BODY.md). The refusal below still
+> stands for everything it names: reconciling by PROXIMITY remains a guess, and
+> the residue is the set that has no body in the ledger at all.
+
 ## The 67, and what was done about them
 
 They are not reconciled, and deliberately so. "Not in the ledger" does not mean

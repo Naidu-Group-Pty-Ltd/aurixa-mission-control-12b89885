@@ -9,6 +9,21 @@ import {
 
 const meta = (id: string, name = `${id}_m.sql`) => ({ id, name });
 
+/**
+ * A migration named the way Lovable names them.
+ *
+ * The skew phenomenon is Lovable's — it stamps the ledger with its apply time
+ * — so a fixture that exercises the skew test must wear Lovable's filename.
+ * A hand-named `<digits>_words.sql` is not a lesser example of the same
+ * thing; it is the case the test below asserts the skew test stays silent
+ * about, and using it here would have measured that silence and called it a
+ * classification.
+ */
+const stamped = (id: string) => ({
+  id,
+  name: `${id}_eafc9d31-fc67-474b-8924-c82e64771733.sql`,
+});
+
 describe("scopeCorpusToPrime", () => {
   it("offers a clone only what the prime has applied", () => {
     const corpus = [meta("20250101000000"), meta("20250102000000"), meta("20250103000000")];
@@ -83,6 +98,158 @@ describe("scopeCorpusToPrime", () => {
       const { runnable } = scopeCorpusToPrime([FUTURE_DATED], primeApplied);
       expect(runnable).toEqual([]);
     });
+  });
+});
+
+/**
+ * The change that unblocked the fleet, and the reason it is not a loosening.
+ *
+ * Measured on the prime 22 Sep 2026: 1,002 corpus files, 1,012 ledger rows,
+ * 180 versions in common. On the body as well, 785 clear — because the ledger
+ * stores the SQL it ran and nothing had ever read it.
+ */
+describe("what the prime RAN, not what it wrote down", () => {
+  const withBody = (id: string, digests: string[]) => ({
+    id,
+    name: `${id}_eafc9d31-fc67-474b-8924-c82e64771733.sql`,
+    bodyDigests: digests,
+  });
+
+  it("clears a migration whose body the prime's ledger holds under another version", () => {
+    // The real pair: 20250831091525 in the repo, …091523 in the ledger, the
+    // same 151 bytes. The version test cannot see it; the body test settles it.
+    const { runnable, runnableBy, withheld } = scopeCorpusToPrime(
+      [withBody("20250831091525", ["sha-of-those-151-bytes"])],
+      new Set(["20250831091523"]),
+      new Set(["sha-of-those-151-bytes"]),
+    );
+    expect(runnable.map((m) => m.id)).toEqual(["20250831091525"]);
+    expect(withheld).toEqual([]);
+    expect(runnableBy[0]).toMatchObject({ via: "body", formIndex: 0, digest: "sha-of-those-151-bytes" });
+  });
+
+  it("says which rung answered, because 'byte-identical' is a different reading", () => {
+    const { runnableBy } = scopeCorpusToPrime(
+      [withBody("20260101000000", ["raw", "trimmed", "executable"])],
+      new Set(),
+      new Set(["executable"]),
+    );
+    expect(runnableBy[0]).toMatchObject({ via: "body", formIndex: 2 });
+  });
+
+  /**
+   * The objection the old module raised, answered. A rule elastic enough to
+   * bridge a three-second skew is elastic enough to bridge onto a rollback
+   * script — which is true of TIMESTAMPS and false of bodies. A body can only
+   * clear a migration the prime's ledger proves it ran.
+   */
+  it("cannot bridge onto a rollback script the prime never ran", () => {
+    const rollback = {
+      id: "20250124120001",
+      name: "20250124120001_rollback_client_data_rls_policies.sql",
+      bodyDigests: ["sha-of-the-rollback"],
+    };
+    const { runnable, withheld } = scopeCorpusToPrime(
+      [rollback],
+      new Set(["20250124120000"]), // one second away
+      new Set(["sha-of-something-else-entirely"]),
+    );
+    expect(runnable).toEqual([]);
+    expect(withheld[0].reason).toBe("never_applied");
+  });
+
+  it("clears nothing by body when no digests were supplied, which is how it behaved before", () => {
+    const { runnable, withheld } = scopeCorpusToPrime(
+      [meta("20260101000000")],
+      new Set(["20250101000000"]),
+    );
+    expect(runnable).toEqual([]);
+    expect(withheld[0].reason).toBe("never_applied");
+  });
+
+  /**
+   * "We could not read the body" is not "the body did not match". A file past
+   * the digest ceiling, or one GitHub would not serve this tick, is withheld
+   * exactly as before and says which silence it is.
+   */
+  it("distinguishes a body it could not read from one that did not match", () => {
+    const { withheld, breakdown } = scopeCorpusToPrime(
+      [
+        { id: "20260101000000", name: "20260101000000_seed.sql", bodyDigests: [] },
+        withBody("20260102000000", ["unmatched"]),
+      ],
+      new Set(),
+      new Set(["something-else"]),
+    );
+    expect(withheld.map((w) => w.reason)).toEqual(["body_unread", "never_applied"]);
+    expect(breakdown).toEqual({ neverApplied: 1, skewSuspected: 0, bodyUnread: 1 });
+  });
+
+  /**
+   * Recorded, never acted on. Every rung removes only bytes that cannot
+   * execute, so files sharing a digest have identical executable bytes and
+   * running either runs what the prime ran — measured at 11 collisions on this
+   * prime, 0 with differing executable bytes. What the collision costs is the
+   * ability to say WHICH file the ledger row was.
+   */
+  it("names the other corpus files carrying the same digest, and still clears them", () => {
+    const { runnable, runnableBy } = scopeCorpusToPrime(
+      [
+        { id: "20260730190000", name: "20260730190000_phase3.sql", bodyDigests: ["same"] },
+        { id: "20260730212254", name: "20260730212254_uuid.sql", bodyDigests: ["same"] },
+      ],
+      new Set(),
+      new Set(["same"]),
+    );
+    expect(runnable).toHaveLength(2);
+    expect(runnableBy[0].sharedWith).toEqual(["20260730212254_uuid.sql"]);
+    expect(runnableBy[1].sharedWith).toEqual(["20260730190000_phase3.sql"]);
+  });
+
+  it("prefers the version, so provenance is the strongest thing that is true", () => {
+    const { runnableBy } = scopeCorpusToPrime(
+      [withBody("20260101000000", ["d"])],
+      new Set(["20260101000000"]),
+      new Set(["d"]),
+    );
+    expect(runnableBy[0]).toEqual({ id: "20260101000000", via: "version" });
+  });
+});
+
+/**
+ * The skew test is a TIME test, so it may only speak where there is a time.
+ *
+ * Measured on the prime: of the hand-named files it HAS run, every one sat
+ * outside the ten-second window, because `20260730190000_…phase3.sql` carries
+ * a sequence number rather than an instant — and this corpus holds versions
+ * at minute 96 of an hour, which are not instants at all.
+ */
+describe("the skew diagnostic only speaks about real timestamps", () => {
+  const REPO = "20250831091525";
+  const LEDGER = "20250831091523";
+
+  it("suspects skew on a Lovable-stamped file", () => {
+    const { withheld } = scopeCorpusToPrime([stamped(REPO)], new Set([LEDGER]));
+    expect(withheld[0].reason).toBe("skew_suspected");
+    expect(withheld[0].nearestPrimeVersion).toBe(LEDGER);
+  });
+
+  it("stays silent on a hand-named file two seconds from a ledger row", () => {
+    const hand = { id: REPO, name: `${REPO}_solicitor_governance_contracts_phase3.sql` };
+    const { withheld } = scopeCorpusToPrime([hand], new Set([LEDGER]));
+    expect(withheld[0].reason).toBe("never_applied");
+    expect(withheld[0].nearestPrimeVersion).toBeUndefined();
+    expect(withheld[0].skewSeconds).toBeUndefined();
+  });
+
+  it("stays silent on a version that is not an instant at all", () => {
+    // Minute 96. Ten of the prime's own files look like this.
+    const bad = {
+      id: "20260725096000",
+      name: "20260725096000_rls_w5_secdef_execute_revoke_public_fix.sql",
+    };
+    const { withheld } = scopeCorpusToPrime([bad], new Set(["20260725095959"]));
+    expect(withheld[0].reason).toBe("never_applied");
   });
 });
 
@@ -174,10 +341,10 @@ describe("the withheld breakdown", () => {
 
   it("calls a near-miss skew_suspected and names the entry it is near", () => {
     const { withheld, breakdown } = scopeCorpusToPrime(
-      SKEWED.map((p) => meta(p.repo)),
+      SKEWED.map((p) => stamped(p.repo)),
       new Set(SKEWED.map((p) => p.ledger)),
     );
-    expect(breakdown).toEqual({ neverApplied: 0, skewSuspected: 3 });
+    expect(breakdown).toEqual({ neverApplied: 0, skewSuspected: 3, bodyUnread: 0 });
     expect(withheld.map((w) => w.nearestPrimeVersion)).toEqual(SKEWED.map((p) => p.ledger));
     expect(withheld.map((w) => w.skewSeconds)).toEqual([-2, -2, -3]);
   });
@@ -186,10 +353,10 @@ describe("the withheld breakdown", () => {
     // The nine January 2025 files: the prime's earliest ledger entry is
     // August 2025, so nothing is remotely near them.
     const { withheld, breakdown } = scopeCorpusToPrime(
-      [meta("20250124120001"), meta("20250124130001")],
+      [stamped("20250124120001"), stamped("20250124130001")],
       new Set(["20250827053832", "20260820000000"]),
     );
-    expect(breakdown).toEqual({ neverApplied: 2, skewSuspected: 0 });
+    expect(breakdown).toEqual({ neverApplied: 2, skewSuspected: 0, bodyUnread: 0 });
     expect(withheld.every((w) => w.reason === "never_applied")).toBe(true);
     expect(withheld.every((w) => w.nearestPrimeVersion === undefined)).toBe(true);
   });
@@ -203,7 +370,7 @@ describe("the withheld breakdown", () => {
    */
   it("NEVER promotes a skew_suspected migration to runnable", () => {
     const { runnable, withheld } = scopeCorpusToPrime(
-      [meta("20250831091525")],
+      [stamped("20250831091525")],
       new Set(["20250831091524"]), // one second away
     );
     expect(runnable).toEqual([]);
@@ -215,19 +382,19 @@ describe("the withheld breakdown", () => {
   it("holds the window exactly — inside is suspected, outside is never_applied", () => {
     const base = "20250831091500";
     const at = scopeCorpusToPrime(
-      [meta(base)],
+      [stamped(base)],
       new Set(["20250831091510"]), // exactly SKEW_WINDOW_SECONDS away
     );
     expect(SKEW_WINDOW_SECONDS).toBe(10);
     expect(at.withheld[0].reason).toBe("skew_suspected");
 
-    const past = scopeCorpusToPrime([meta(base)], new Set(["20250831091511"]));
+    const past = scopeCorpusToPrime([stamped(base)], new Set(["20250831091511"]));
     expect(past.withheld[0].reason).toBe("never_applied");
   });
 
   it("picks the nearest entry when the ledger has one on each side", () => {
     const { withheld } = scopeCorpusToPrime(
-      [meta("20250831091510")],
+      [stamped("20250831091510")],
       new Set(["20250831091505", "20250831091512"]),
     );
     expect(withheld[0].nearestPrimeVersion).toBe("20250831091512");
@@ -236,23 +403,25 @@ describe("the withheld breakdown", () => {
 
   it("counts the breakdown to exactly the withheld total", () => {
     const corpus = [
-      meta("20250831091525"), // skew
-      meta("20250124120001"), // never
-      meta("20260820000000"), // runnable
-      meta("20260901000000"), // never (future-dated)
+      stamped("20250831091525"), // skew
+      stamped("20250124120001"), // never
+      stamped("20260820000000"), // runnable
+      stamped("20260901000000"), // never (future-dated)
     ];
     const { runnable, withheld, breakdown } = scopeCorpusToPrime(
       corpus,
       new Set(["20250831091523", "20260820000000"]),
     );
     expect(runnable).toHaveLength(1);
-    expect(breakdown.neverApplied + breakdown.skewSuspected).toBe(withheld.length);
-    expect(breakdown).toEqual({ neverApplied: 2, skewSuspected: 1 });
+    expect(breakdown.neverApplied + breakdown.skewSuspected + breakdown.bodyUnread).toBe(
+      withheld.length,
+    );
+    expect(breakdown).toEqual({ neverApplied: 2, skewSuspected: 1, bodyUnread: 0 });
   });
 
   it("does not crash on a ledger holding versions it cannot parse", () => {
     const { withheld, breakdown } = scopeCorpusToPrime(
-      [meta("20250831091525")],
+      [stamped("20250831091525")],
       new Set(["not-a-version", "20250831091523"]),
     );
     expect(breakdown.skewSuspected).toBe(1);
@@ -264,7 +433,7 @@ describe("the withheld breakdown", () => {
       [{ id: "weird-id", name: "weird-id_m.sql" }],
       new Set(["20250831091523"]),
     );
-    expect(breakdown).toEqual({ neverApplied: 1, skewSuspected: 0 });
+    expect(breakdown).toEqual({ neverApplied: 1, skewSuspected: 0, bodyUnread: 0 });
     expect(withheld[0].reason).toBe("never_applied");
   });
 });

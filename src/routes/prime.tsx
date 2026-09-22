@@ -948,17 +948,17 @@ function LedgerBody({
             label="deliverable"
             size="sm"
             value={reading.runnableCount ?? "—"}
-            note="the prime has run these"
+            note={
+              reading.runnableByBody
+                ? `${reading.runnableByBody} matched by their SQL`
+                : "the prime has run these"
+            }
           />
           <MetricCell
             label="held back"
             size="sm"
             value={reading.withheldCount ?? "—"}
-            note={
-              reading.skewSuspected
-                ? `${reading.skewSuspected} may be a timestamp skew`
-                : "no clone may run these"
-            }
+            note={heldBackNote(reading)}
             tone="warning"
             alarm={(reading.withheldCount ?? 0) > 0}
           />
@@ -973,6 +973,17 @@ function LedgerBody({
             }
           />
         </div>
+      )}
+
+      {reading.runnableByBody !== null && reading.runnableByBody > 0 && (
+        <p className="text-xs text-muted-foreground">
+          <span className="text-foreground">{reading.runnableByBody}</span> of these are deliverable
+          because the prime&rsquo;s ledger holds their SQL under a different version string, not
+          because the version matches. The prime stores the statements it ran, so that is a
+          stronger reading than the filename: Lovable stamps the moment it applied a file rather
+          than the version in its name, and this corpus also has files that share a version with
+          another.
+        </p>
       )}
 
       {reading.frontier && (
@@ -1015,13 +1026,35 @@ function LedgerBody({
   );
 }
 
+/**
+ * What the held-back note says under the count.
+ *
+ * `body_unread` earns a sentence of its own because it is not a reading about
+ * the prime at all — it is this console saying it could not look, and an
+ * operator who reads it as "the prime never ran these" would go and dispatch
+ * files that may already be applied.
+ */
+function heldBackNote(reading: PrimeLedgerReading): string {
+  if (reading.bodyUnread) {
+    return `${reading.bodyUnread} could not be read to compare`;
+  }
+  if (reading.skewSuspected) return `${reading.skewSuspected} may be a timestamp skew`;
+  return "no clone may run these";
+}
+
 function WithheldMigrationRow({ row }: { row: WithheldRow }) {
   // A skew suspicion is amber and never green: two migrations authored seconds
   // apart are indistinguishable to that test, so it is a hypothesis for a
   // person and not a clearance.
   const suspected = row.reason === "skew_suspected";
+  // "We could not read the body" is neither. It is amber because it is a gap
+  // in the evidence rather than a finding about the prime.
+  const unread = row.reason === "body_unread";
   return (
-    <RecordRow spine={suspected ? "warn" : "bad"} className="flex flex-wrap gap-x-3 gap-y-1 p-2.5">
+    <RecordRow
+      spine={suspected || unread ? "warn" : "bad"}
+      className="flex flex-wrap gap-x-3 gap-y-1 p-2.5"
+    >
       {/* A basis, not bare `flex-1`: `flex: 1 1 0%` contributes nothing to the
           hypothetical size, so a filename beside a fixed-width note would be
           handed whatever is left however small that is. */}
@@ -1031,11 +1064,16 @@ function WithheldMigrationRow({ row }: { row: WithheldRow }) {
       <span
         className={cn(
           "font-mono text-[10px] tracking-[0.12em] whitespace-nowrap uppercase",
-          suspected ? TONE_TEXT.warn : TONE_TEXT.bad,
+          suspected || unread ? TONE_TEXT.warn : TONE_TEXT.bad,
         )}
       >
-        {suspected ? "skew suspected" : "never applied"}
+        {unread ? "body not read" : suspected ? "skew suspected" : "never applied"}
       </span>
+      {unread && (
+        <span className="text-[10px] text-muted-foreground">
+          too large to compare, or GitHub would not serve it — not a statement about the prime
+        </span>
+      )}
       {suspected && row.nearestPrimeVersion && (
         <span className="font-mono text-[10px] text-muted-foreground">
           nearest {row.nearestPrimeVersion}
