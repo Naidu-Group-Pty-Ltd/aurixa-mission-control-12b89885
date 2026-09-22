@@ -16,6 +16,7 @@ import {
   frontierIsEstablished,
   WITHHELD_ROWS,
   type LedgerHalf,
+  type PrimeLedgerRow,
 } from "./primeMigrationLedger.pure";
 import type { CorpusMeta } from "./fleetCorpusScope.pure";
 
@@ -26,7 +27,25 @@ const corpus = (...ids: string[]): LedgerHalf<CorpusMeta> => ({
   entries: ids.map((id) => file(id)),
 });
 
-const ledger = (...versions: string[]): LedgerHalf<string> => ({ read: true, entries: versions });
+/**
+ * A corpus of Lovable-stamped files.
+ *
+ * The skew reading is a statement about Lovable's apply timestamps, so a
+ * fixture that exercises it has to carry a Lovable filename — see the note on
+ * `stamped` in `fleetCorpusScope.pure.test.ts`.
+ */
+const stampedCorpus = (...ids: string[]): LedgerHalf<CorpusMeta> => ({
+  read: true,
+  entries: ids.map((id) => ({
+    id,
+    name: `${id}_eafc9d31-fc67-474b-8924-c82e64771733.sql`,
+  })),
+});
+
+const ledger = (...versions: string[]): LedgerHalf<PrimeLedgerRow> => ({
+  read: true,
+  entries: versions.map((version) => ({ version, bodyDigest: null })),
+});
 
 const A = "20260901010000";
 const B = "20260902010000";
@@ -159,7 +178,7 @@ describe("what is held back, and how much of it might be bookkeeping", () => {
     const repoVersion = "20260905091525";
     const ledgerVersion = "20260905091522";
     const out = assessPrimeMigrationLedger({
-      corpus: corpus(A, repoVersion),
+      corpus: stampedCorpus(A, repoVersion),
       ledger: ledger(A, ledgerVersion),
     });
     expect(out.reading.withheldCount).toBe(1);

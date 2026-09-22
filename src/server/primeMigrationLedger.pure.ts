@@ -54,6 +54,7 @@
  */
 
 import { scopeCorpusToPrime, type CorpusMeta, type WithheldEntry } from "./fleetCorpusScope.pure";
+import { EMPTY_BODY_SHA256 } from "./migrationBodyIdentity.pure";
 import type { SafetyTone } from "./primeHealth.pure";
 
 /**
@@ -65,6 +66,17 @@ import type { SafetyTone } from "./primeHealth.pure";
  * is the one mistake this shape exists to make impossible to write.
  */
 export type LedgerHalf<T> = { read: true; entries: T[] } | { read: false; why: string };
+
+/**
+ * One row of the prime's own ledger: what it recorded, and what it ran.
+ *
+ * `bodyDigest` is `LEDGER_BODY_DIGEST_SQL` over the row's stored `statements`,
+ * or null where the row stored no SQL — 91 rows on this prime store NULL and
+ * 15 an empty array. Null here means the row cannot testify about any body,
+ * which is a different statement from a body that matched nothing, and the
+ * two are never collapsed.
+ */
+export type PrimeLedgerRow = { version: string; bodyDigest: string | null };
 
 export type PrimeLedgerStanding =
   /** Every migration on `main` is recorded as run. Nothing is held back. */
@@ -78,7 +90,7 @@ export type PrimeLedgerStanding =
 export type WithheldRow = {
   id: string;
   name: string;
-  /** `never_applied` or `skew_suspected` — the scope's own vocabulary. */
+  /** The scope's own vocabulary: never_applied / skew_suspected / body_unread. */
   reason: WithheldEntry<CorpusMeta>["reason"];
   /** The nearest ledger version inside the skew window, when there is one. */
   nearestPrimeVersion: string | null;
@@ -109,6 +121,19 @@ export type PrimeLedgerReading = {
   withheldCount: number | null;
   neverApplied: number | null;
   skewSuspected: number | null;
+  bodyUnread: number | null;
+
+  /**
+   * Of `runnableCount`, how many the prime's ledger clears by BODY rather than
+   * by version string.
+   *
+   * Drawn because it is the whole difference between this reading and the one
+   * that preceded it, and because an operator looking at "785 runnable" over a
+   * ledger with 180 matching versions is owed the sentence that explains it.
+   */
+  runnableByBody: number | null;
+  /** Distinct migration bodies the prime's ledger holds. Null when unread. */
+  ledgerBodyCount: number | null;
 
   /**
    * The newest runnable version: the frontier every clone is measured against.
@@ -161,6 +186,9 @@ function unreadable(why: string): PrimeLedgerReading {
     withheldCount: null,
     neverApplied: null,
     skewSuspected: null,
+    bodyUnread: null,
+    runnableByBody: null,
+    ledgerBodyCount: null,
     frontier: null,
     unmatchedLedgerRows: null,
     withheld: [],
@@ -198,7 +226,7 @@ export type PrimeLedgerAssessment = {
  */
 export function assessPrimeMigrationLedger(args: {
   corpus: LedgerHalf<CorpusMeta>;
-  ledger: LedgerHalf<string>;
+  ledger: LedgerHalf<PrimeLedgerRow>;
 }): PrimeLedgerAssessment {
   if (!args.corpus.read) {
     return {
@@ -214,7 +242,12 @@ export function assessPrimeMigrationLedger(args: {
   }
 
   const corpus = args.corpus.entries;
-  const applied = new Set(args.ledger.entries);
+  const applied = new Set(args.ledger.entries.map((r) => r.version));
+  const appliedBodies = new Set(
+    args.ledger.entries
+      .map((r) => r.bodyDigest)
+      .filter((d): d is string => typeof d === "string" && d !== EMPTY_BODY_SHA256),
+  );
 
   /*
     An empty ledger is unreadable rather than aligned.
@@ -237,7 +270,7 @@ export function assessPrimeMigrationLedger(args: {
     };
   }
 
-  const scope = scopeCorpusToPrime(corpus, applied);
+  const scope = scopeCorpusToPrime(corpus, applied, appliedBodies);
 
   const corpusVersions = new Set(corpus.map((m) => m.id));
   const unmatchedLedgerRows = [...applied].filter((v) => !corpusVersions.has(v)).length;
@@ -264,6 +297,9 @@ export function assessPrimeMigrationLedger(args: {
     withheldCount: scope.withheld.length,
     neverApplied: scope.breakdown.neverApplied,
     skewSuspected: scope.breakdown.skewSuspected,
+    bodyUnread: scope.breakdown.bodyUnread,
+    runnableByBody: scope.runnableBy.filter((r) => r.via === "body").length,
+    ledgerBodyCount: appliedBodies.size,
     frontier,
     unmatchedLedgerRows,
   };

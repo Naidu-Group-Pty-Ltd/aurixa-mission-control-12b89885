@@ -61,6 +61,8 @@ import {
   runSqlOnProject,
 } from "./backend-provisioning.server";
 import { scopeCorpusToPrime, assertPrimeLedgerUsable } from "./fleetCorpusScope.pure";
+import { LEDGER_BODY_DIGEST_SQL, EMPTY_BODY_SHA256 } from "./migrationBodyIdentity.pure";
+import { digestPrimeBodies } from "./primeBodyDigests.server";
 import {
   MIGRATION_CLAIMABLE_STATUSES,
   blockIsDischarged,
@@ -332,7 +334,7 @@ export type FleetMigrationResult = {
    *
    * Diagnostic only. Neither number can move a migration into `runnable`.
    */
-  withheldBreakdown: { neverApplied: number; skewSuspected: number };
+  withheldBreakdown: { neverApplied: number; skewSuspected: number; bodyUnread: number };
   /** Set when the run could not start at all. */
   error?: string;
 };
@@ -349,7 +351,7 @@ const EMPTY: FleetMigrationResult = {
   heldOversize: [],
   rateLimited: [],
   withheld: 0,
-  withheldBreakdown: { neverApplied: 0, skewSuspected: 0 },
+  withheldBreakdown: { neverApplied: 0, skewSuspected: 0, bodyUnread: 0 },
 };
 
 /**
@@ -670,10 +672,13 @@ export async function openScopedPrimeCorpus(
       ok: true;
       corpus: Awaited<ReturnType<typeof openPrimeMigrationCorpus>>;
       runnable: ReturnType<typeof scopeCorpusToPrime<CorpusMetaOf>>["runnable"];
+      runnableBy: ReturnType<typeof scopeCorpusToPrime<CorpusMetaOf>>["runnableBy"];
       withheld: number;
       breakdown: ReturnType<typeof scopeCorpusToPrime<CorpusMetaOf>>["breakdown"];
       sourceSha: string;
       primeAppliedCount: number;
+      /** Distinct migration BODIES the prime's ledger holds. */
+      primeBodyCount: number;
       withheldEntries: ReturnType<typeof scopeCorpusToPrime<CorpusMetaOf>>["withheld"];
       primeRef: string;
     }
@@ -690,17 +695,26 @@ export async function openScopedPrimeCorpus(
   }
 
   let primeApplied: Set<string>;
+  let primeBodyDigests: Set<string>;
   let primeRef: string;
   try {
     primeRef = await resolvePrimeBackendRef(supabase);
+    // Both halves of the ledger in one read: what the prime recorded, and what
+    // it actually ran. The digest is computed by the one expression named in
+    // `migrationBodyIdentity.pure.ts` so the two sides of the comparison
+    // cannot drift into two rules.
     const rows = (await runSqlOnProject(
       primeRef,
-      `select version from supabase_migrations.schema_migrations`,
-    )) as Array<{ version?: unknown }>;
+      `select version, ${LEDGER_BODY_DIGEST_SQL} as body_digest from supabase_migrations.schema_migrations`,
+    )) as Array<{ version?: unknown; body_digest?: unknown }>;
+    const safe = Array.isArray(rows) ? rows : [];
     primeApplied = new Set(
-      (Array.isArray(rows) ? rows : [])
-        .map((r) => r?.version)
-        .filter((v): v is string => typeof v === "string"),
+      safe.map((r) => r?.version).filter((v): v is string => typeof v === "string"),
+    );
+    primeBodyDigests = new Set(
+      safe
+        .map((r) => r?.body_digest)
+        .filter((d): d is string => typeof d === "string" && d !== EMPTY_BODY_SHA256),
     );
   } catch (e) {
     return {
@@ -721,16 +735,41 @@ export async function openScopedPrimeCorpus(
   });
   if (unusable) return { ok: false, error: unusable };
 
-  const { runnable, withheld, breakdown } = scopeCorpusToPrime(corpus.metas, primeApplied);
+  // Bodies only for what the version test did not already clear, so a level
+  // fleet pays for nothing and the first tick after a prime commit pays for
+  // the ~800 small files the ledger keys differently. Best-effort by
+  // construction: a body this cannot read produces no digest, and no digest
+  // withholds exactly as an absent version always did.
+  const needBody = corpus.metas.filter((m) => !primeApplied.has(m.id)).map((m) => m.path);
+  let digested: Map<string, string[]> = new Map();
+  try {
+    digested = (await digestPrimeBodies(corpus, needBody, getAppOctokit(), source)).byPath;
+  } catch {
+    // Nothing is cleared by body this tick. That is the behaviour this
+    // function had before bodies were read at all, which is the only safe
+    // direction for a failure here to fall.
+  }
+  const metas = corpus.metas.map((m) => {
+    const d = digested.get(m.path);
+    return d === undefined ? m : { ...m, bodyDigests: d };
+  });
+
+  const { runnable, runnableBy, withheld, breakdown } = scopeCorpusToPrime(
+    metas,
+    primeApplied,
+    primeBodyDigests,
+  );
   return {
     ok: true,
     corpus,
     runnable,
+    runnableBy,
     withheld: withheld.length,
     withheldEntries: withheld,
     breakdown,
     sourceSha: corpus.sourceSha,
     primeAppliedCount: primeApplied.size,
+    primeBodyCount: primeBodyDigests.size,
     primeRef,
   };
 }

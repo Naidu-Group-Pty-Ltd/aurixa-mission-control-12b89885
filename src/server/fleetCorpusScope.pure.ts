@@ -47,7 +47,28 @@
  * tree that production never took.
  */
 
-export type CorpusMeta = { id: string; name: string };
+import { isMachineStampedMigration } from "./migrationBodyIdentity.pure";
+
+export type CorpusMeta = {
+  id: string;
+  name: string;
+  /**
+   * Digests of this file's body, most literal form first, as
+   * `migrationBodyForms` orders them. See `migrationBodyIdentity.pure.ts`.
+   *
+   * Optional, and its three states are three different facts:
+   *
+   * - **absent** — nobody asked. Every caller that does not read bodies is
+   *   unchanged by this field's existence, and scopes exactly as it did when
+   *   only the version could clear a migration.
+   * - **empty array** — asked, and the body could not be read: past the size
+   *   ceiling, or the fetch failed. Withheld as `body_unread`, because a read
+   *   that FAILED is not a body that matched nothing.
+   * - **non-empty** — asked and answered. These are the digests that may
+   *   clear it.
+   */
+  bodyDigests?: readonly string[];
+};
 
 /**
  * Why a migration was withheld.
@@ -56,19 +77,40 @@ export type CorpusMeta = { id: string; name: string };
  * {@link scopeCorpusToPrime} for why that separation is the whole point.
  */
 export type WithheldReason =
-  /** No prime ledger entry anywhere near this version. The prime never ran it. */
+  /**
+   * The prime's ledger holds neither this version nor these bytes.
+   *
+   * Since the body test exists this is a strong reading rather than a
+   * default: the prime stores the SQL of everything it ran, and none of it
+   * is this.
+   */
   | "never_applied"
   /**
-   * A prime ledger entry exists within {@link SKEW_WINDOW_SECONDS}.
+   * The bodies disagree, and a MACHINE-STAMPED ledger entry sits within
+   * {@link SKEW_WINDOW_SECONDS}.
    *
-   * Consistent with the apply-timestamp skew `docs/MIGRATION_PIPELINE.md`
-   * records — Lovable stamps the ledger with the moment it applied a file, not
+   * This used to be the interesting half of the withheld set and is now the
+   * residue. Lovable stamps the ledger with the moment it APPLIED a file, not
    * with the version in the filename, so `…091525` in the repo appears as
-   * `…091523` in the ledger. It is a HYPOTHESIS for a person to confirm, not a
-   * fact: two genuinely different migrations authored seconds apart look
-   * identical to this test.
+   * `…091523` in the ledger — and that pair is now settled by its body
+   * (byte-identical, 151 bytes) rather than by its clock. What is left here is
+   * a near-in-time row whose SQL is NOT this file's, which is a weaker signal
+   * than it was before anything could check: two different migrations authored
+   * seconds apart look identical to a clock and always did.
+   *
+   * It is a hypothesis for a person, and it is offered only where the version
+   * is a real instant — see {@link isMachineStampedMigration}.
    */
-  | "skew_suspected";
+  | "skew_suspected"
+  /**
+   * The body could not be read, so the body test never ran.
+   *
+   * Its own reason because "we could not check" is not "it does not match".
+   * A file past the digest ceiling, or one GitHub would not serve this tick,
+   * lands here and is withheld exactly as it was before bodies were read —
+   * fail-closed, and saying which kind of silence it is.
+   */
+  | "body_unread";
 
 export type WithheldEntry<T> = {
   meta: T;
@@ -82,6 +124,40 @@ export type WithheldEntry<T> = {
 export type WithheldBreakdown = {
   neverApplied: number;
   skewSuspected: number;
+  bodyUnread: number;
+};
+
+/**
+ * How a migration came to be runnable.
+ *
+ * Returned beside `runnable` rather than folded into it: five call sites
+ * consume that array as plain metas and none of them wants provenance, while
+ * the reading an operator has to act on wants nothing else.
+ */
+export type RunnableVia =
+  /** The prime's ledger records this exact version string. */
+  | "version"
+  /** The prime's ledger holds a body whose executable bytes are this file's. */
+  | "body";
+
+export type RunnableEntry = {
+  id: string;
+  via: RunnableVia;
+  /** Which form matched — index into `migrationBodyForms`. Body clearances only. */
+  formIndex?: number;
+  /** The matching digest. Body clearances only. */
+  digest?: string;
+  /**
+   * Other corpus files carrying the same digest, if any.
+   *
+   * Recorded, never acted on. Every rung of the ladder removes only bytes
+   * that cannot execute, so files that collide here have identical executable
+   * bytes and running any of them runs what the prime ran — measured at 11
+   * collisions on this prime, 0 with differing executable bytes. What the
+   * collision costs is the ability to say WHICH file the ledger row was, and
+   * a surface that claimed that anyway would be inventing it.
+   */
+  sharedWith?: string[];
 };
 
 export type CorpusScope<T extends CorpusMeta> = {
@@ -95,20 +171,31 @@ export type CorpusScope<T extends CorpusMeta> = {
   withheld: WithheldEntry<T>[];
   /** The same set, counted by reason, for a surface that shows one number. */
   breakdown: WithheldBreakdown;
+  /** Why each runnable migration is runnable, in `runnable` order. */
+  runnableBy: RunnableEntry[];
 };
 
 /**
- * How far apart two versions can be and still be suspected of being the same
- * migration under two timestamps.
+ * How far apart two MACHINE-STAMPED versions can be and still be suspected of
+ * being the same migration under two timestamps.
  *
- * Measured rather than picked: the observed skews on this prime are 2-3
- * seconds (`20250831091525` → `20250831091523`, `20251029030456` →
- * `20251029030453`). Ten seconds covers them with room to spare and is still
- * far tighter than the gap between migrations anybody authors deliberately.
+ * Measured, and the measurement is the reason it was not simply widened. Of
+ * the 617 machine-stamped files whose bodies the prime's ledger holds, 524
+ * were stamped within this window, **86 between 11 and 60 seconds**, and 7
+ * about twelve hours out (`20250912170521` in the repo, `20250912050519` in
+ * the ledger). Ten seconds therefore explains 85% of a real phenomenon and
+ * the obvious repair — widen it to 120 — would have explained 99% of it while
+ * still being a guess about somebody else's clock.
  *
- * Widening it costs nothing in safety — the classification cannot promote a
- * migration — and costs precision in the report, which is the only thing it
- * feeds.
+ * It is left at ten because it no longer decides anything worth widening for.
+ * Every one of those 617 is now cleared by its BODY, which is not a guess at
+ * all; what remains is a diagnostic sentence beside a withheld file, and a
+ * tight window makes that sentence mean something. A 120-second window over a
+ * corpus where 300 files were authored in one afternoon would attach a
+ * "nearest prime version" to almost everything and inform nobody.
+ *
+ * It never promotes, it is asked only where the version is a real instant,
+ * and it is asked only after the body test has already said no.
  */
 export const SKEW_WINDOW_SECONDS = 10;
 
@@ -155,36 +242,49 @@ function nearest(sorted: readonly number[], target: number): number | null {
 /**
  * Split the corpus, and say WHY each withheld migration was withheld.
  *
- * ## The classification never promotes
+ * ## What decides `runnable`
  *
- * `runnable` is decided by exact membership of the prime's ledger and by
- * nothing else. The skew test runs only over migrations that have ALREADY been
- * withheld, and its output reaches a report and an audit row — never the set
- * that is sent to a tenant.
+ * Two facts, and only these two: the prime's ledger records this exact
+ * VERSION, or it holds a BODY whose executable bytes are this file's.
  *
- * That separation is deliberate and load-bearing. It is tempting to close the
- * loop: if `…091525` is "obviously" the same migration as `…091523`, why not
- * run it? Because "obviously" is a guess about somebody else's timestamping,
- * and the thing on the other side of the guess is a tenant's database. The
- * corpus already contained two `rollback_*` scripts whose stated purpose is to
- * undo a security fix; a matching rule loose enough to bridge a three-second
- * skew is loose enough to bridge onto one of those.
+ * The second is new, and it is what this module's own header has asked for
+ * since it was written — "it is the argument for reconciling the ledger, not
+ * a reason to keep stepping over holes". Measured 22 Sep 2026: on the version
+ * alone, 180 of 1,002 files cleared and the rest became barriers that
+ * orphaned everything behind them. On the version OR the body, 785 clear.
  *
- * ## Why the breakdown exists at all
+ * It is not a loosening. The objection the old header raised — that a rule
+ * elastic enough to bridge a three-second skew is elastic enough to bridge
+ * onto `rollback_client_data_rls_policies.sql` — is exactly right about
+ * TIMESTAMPS and does not touch bodies. A rollback script can only clear here
+ * if the prime's ledger holds its SQL, which is the same as saying the prime
+ * ran it. The body test cannot bridge anywhere; it can only confirm.
  *
- * `withheld: 828` on its own is unreadable, and unreadable in BOTH directions —
- * it can be waved away as "just the backlog" or panicked over as "the sync is
- * doing nothing". Neither reading is available once the number is split: on
- * this prime the great majority are `skew_suspected`, which is the known
- * two-namespace problem and harmless for a clone stamped from the prime's
- * ledger, and the remainder are `never_applied`, which is the set an operator
- * should actually look at.
+ * It is also strictly stronger than the version test, which this corpus can
+ * fool: 32 groups covering 77 files share a version string.
+ *
+ * ## The skew test is a TIME test and only speaks about times
+ *
+ * It runs over migrations that have already been withheld, it reaches a
+ * report and never the set sent to a tenant, and it is now asked only where
+ * the version is a real instant. A hand-named `20260730190000_…phase3.sql`
+ * carries a sequence number, not a clock; of the hand-named files this prime
+ * HAS run, every one sat outside the window. Answering `never_applied` there
+ * is the right answer for no reason at all, and `skew_suspected` would be a
+ * confident statement derived from a number that is not a time.
+ *
+ * @param primeBodyDigests Digests of every body the prime's ledger holds, by
+ *   {@link LEDGER_BODY_DIGEST_SQL}. Omitted — or empty — and nothing clears by
+ *   body, which is precisely the behaviour before bodies were read. The empty
+ *   digest is never admitted; the caller strips it.
  */
 export function scopeCorpusToPrime<T extends CorpusMeta>(
   metas: readonly T[],
   primeApplied: ReadonlySet<string>,
+  primeBodyDigests: ReadonlySet<string> = new Set(),
 ): CorpusScope<T> {
   const runnable: T[] = [];
+  const runnableBy: RunnableEntry[] = [];
   const withheld: WithheldEntry<T>[] = [];
 
   // Built once for the whole corpus rather than per withheld migration.
@@ -198,14 +298,48 @@ export function scopeCorpusToPrime<T extends CorpusMeta>(
   }
   ledgerEpochs.sort((a, b) => a - b);
 
+  // Which corpus files claim each digest. Reported, never acted on — see
+  // RunnableEntry.sharedWith.
+  const claimants = new Map<string, string[]>();
   for (const m of metas) {
-    // The ONLY thing that decides runnable.
+    for (const d of m.bodyDigests ?? []) {
+      const seen = claimants.get(d);
+      if (seen) seen.push(m.name);
+      else claimants.set(d, [m.name]);
+    }
+  }
+
+  for (const m of metas) {
     if (primeApplied.has(m.id)) {
       runnable.push(m);
+      runnableBy.push({ id: m.id, via: "version" });
       continue;
     }
 
-    const own = migrationEpochSeconds(m.id);
+    const forms = m.bodyDigests;
+    const formIndex = forms?.findIndex((d) => primeBodyDigests.has(d)) ?? -1;
+    if (forms && formIndex >= 0) {
+      const digest = forms[formIndex];
+      const shared = (claimants.get(digest) ?? []).filter((n) => n !== m.name);
+      runnable.push(m);
+      runnableBy.push({
+        id: m.id,
+        via: "body",
+        formIndex,
+        digest,
+        ...(shared.length > 0 ? { sharedWith: shared } : {}),
+      });
+      continue;
+    }
+
+    // Asked, and the body could not be read. Not the same as a body that
+    // failed to match, and not counted as one.
+    if (forms && forms.length === 0) {
+      withheld.push({ meta: m, reason: "body_unread" });
+      continue;
+    }
+
+    const own = isMachineStampedMigration(m.name) ? migrationEpochSeconds(m.id) : null;
     const near = own === null ? null : nearest(ledgerEpochs, own);
     if (own !== null && near !== null && Math.abs(near - own) <= SKEW_WINDOW_SECONDS) {
       withheld.push({
@@ -221,10 +355,12 @@ export function scopeCorpusToPrime<T extends CorpusMeta>(
 
   return {
     runnable,
+    runnableBy,
     withheld,
     breakdown: {
       neverApplied: withheld.filter((w) => w.reason === "never_applied").length,
       skewSuspected: withheld.filter((w) => w.reason === "skew_suspected").length,
+      bodyUnread: withheld.filter((w) => w.reason === "body_unread").length,
     },
   };
 }
@@ -283,6 +419,14 @@ export function scopeCorpusToPrime<T extends CorpusMeta>(
  * and this function says so, loudly, in `blockedBy`. That is the honest
  * reading of the fleet's real state — and it is the argument for reconciling
  * the ledger, not a reason to keep stepping over holes.
+ *
+ * That reconciliation has since been done, and in the only way that does not
+ * weaken the barrier: `scopeCorpusToPrime` now clears a migration whose BODY
+ * the prime's ledger holds, so 605 of the versions that used to be holes are
+ * holes no longer — not because the barrier was relaxed, but because the
+ * evidence that they ran was finally read. The twelve-hour case above is
+ * exactly one of them, and it is settled by its bytes rather than by a window
+ * wide enough to contain it.
  */
 export type OrphanedEntry<T> = {
   meta: T;

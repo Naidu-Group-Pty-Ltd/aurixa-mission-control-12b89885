@@ -207,8 +207,10 @@ export function FleetMigrationSyncCard() {
                 Split, because the total is unreadable in both directions. The
                 skew-suspected half is the apply-timestamp mismatch between a
                 repo filename and what Lovable stamped when it applied the
-                file — harmless for a clone stamped from the prime's ledger.
-                The never-applied half is the set worth looking at, so it is the
+                file — and since the sync compares SQL bodies as well, what is
+                left there is a near-in-time row whose statements are NOT this
+                file's, which is weaker evidence than it used to be. The
+                never-applied half is the set worth looking at, so it is the
                 one drawn in warning ink.
               */}
               {lastResult.withheldBreakdown.neverApplied > 0 && (
@@ -219,6 +221,18 @@ export function FleetMigrationSyncCard() {
               {lastResult.withheldBreakdown.skewSuspected > 0 && (
                 <Badge variant="outline" className="text-muted-foreground text-[10px]">
                   {lastResult.withheldBreakdown.skewSuspected} likely apply-timestamp skew
+                </Badge>
+              )}
+              {/*
+                Its own badge because it is not a reading about the prime: the
+                body was past the digest ceiling or GitHub would not serve it,
+                so the SQL comparison never ran. Folding it into "never applied"
+                would send an operator to dispatch files that may already be on
+                the prime.
+              */}
+              {lastResult.withheldBreakdown.bodyUnread > 0 && (
+                <Badge variant="outline" className="bg-warning/10 text-warning text-[10px]">
+                  {lastResult.withheldBreakdown.bodyUnread} could not be compared
                 </Badge>
               )}
             </div>
