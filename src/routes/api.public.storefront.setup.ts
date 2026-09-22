@@ -3,6 +3,7 @@ import { z } from "zod";
 import { startHandoffCardSetup, startUidCardSetup } from "@/server/checkout.server";
 import { normalizeBillingContact } from "@/server/billing-contact.server";
 import { storefrontPricingBase } from "@/server/billing-handoffs.server";
+import { storefrontReturnUrl } from "@/lib/storefront";
 import { storefrontJson, storefrontPreflight } from "@/server/storefront-cors.server";
 import { checkPublicRateLimit } from "@/server/token-rate-limit.server";
 
@@ -21,7 +22,8 @@ const STOREFRONT_CHECKOUT_LIMIT = 12;
  * (primary / secondary / backup).
  *
  * Credentials are identical to checkout: exactly one of `h` (single-use
- * handoff) or `uid` (stable billing_user_id).
+ * handoff) or `uid` (stable billing_user_id), and so are the return pages —
+ * the storefront's own, never Mission Control's (see lib/storefront.ts).
  */
 const Schema = z
   .object({
@@ -90,22 +92,19 @@ export const Route = createFileRoute("/api/public/storefront/setup")({
           );
         }
 
-        const url = new URL(request.url);
-        const mcOrigin = process.env.PUBLIC_APP_URL ?? `${url.protocol}//${url.host}`;
-        const cred = data.h
-          ? `h=${encodeURIComponent(data.h)}`
-          : `uid=${encodeURIComponent(data.uid as string)}`;
-        const site = process.env.PUBLIC_PRICING_SITE_URL;
-        const onStorefront = !!site && /^https?:\/\//.test(site);
-        const pricingBase = storefrontPricingBase();
         // The storefront's card-saved page polls the wallet endpoint with the
-        // same (session_id, credential) pair the receipt flow uses.
-        const successUrl = onStorefront
-          ? `${pricingBase}/card-saved?${cred}&session_id={CHECKOUT_SESSION_ID}`
-          : `${mcOrigin}/billing/success?${cred}&session_id={CHECKOUT_SESSION_ID}`;
-        const cancelUrl = onStorefront
-          ? `${pricingBase}/cancel?${cred}`
-          : `${mcOrigin}/billing/cancel?${cred}`;
+        // same (session_id, credential) pair the receipt flow uses. Always the
+        // storefront: a buyer saving a card on the website has no Mission
+        // Control account to land in.
+        const cred = data.h ? { h: data.h } : { uid: data.uid as string };
+        const pricingBase = storefrontPricingBase();
+        const successUrl = storefrontReturnUrl(
+          pricingBase,
+          "cardSaved",
+          cred,
+          "session_id={CHECKOUT_SESSION_ID}",
+        );
+        const cancelUrl = storefrontReturnUrl(pricingBase, "cancel", cred);
 
         try {
           const result = data.h

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { startHandoffCheckout, startUidCheckout } from "@/server/checkout.server";
 import { normalizeBillingContact } from "@/server/billing-contact.server";
 import { storefrontPricingBase } from "@/server/billing-handoffs.server";
+import { storefrontReturnUrl } from "@/lib/storefront";
 import { storefrontJson, storefrontPreflight } from "@/server/storefront-cors.server";
 import { checkPublicRateLimit } from "@/server/token-rate-limit.server";
 
@@ -22,7 +23,8 @@ const STOREFRONT_CHECKOUT_LIMIT = 12;
  *             in Mission Control.
  * Exactly one must be supplied. Success/cancel redirect back to the
  * STOREFRONT's own receipt pages (never Mission Control's UI), carrying the
- * (session_id, credential) pair the receipt endpoint requires.
+ * (session_id, credential) pair the receipt endpoint requires — see
+ * lib/storefront.ts for why that is structural rather than configured.
  */
 const Schema = z
   .object({
@@ -101,27 +103,22 @@ export const Route = createFileRoute("/api/public/storefront/checkout")({
           );
         }
 
-        const url = new URL(request.url);
-        const mcOrigin = process.env.PUBLIC_APP_URL ?? `${url.protocol}//${url.host}`;
-        // Receipt credential travels back in the redirect: the same `h` or
-        // `uid` the checkout was scoped to. The receipt endpoint re-checks it
-        // against the session before returning any purchase data.
-        const cred = data.h
-          ? `h=${encodeURIComponent(data.h)}`
-          : `uid=${encodeURIComponent(data.uid as string)}`;
-        // When the storefront is configured, receipts render on its own
-        // /pricing/success|cancel pages. The unconfigured fallback keeps the
-        // flow working end-to-end via Mission Control's receipt pages (which
-        // also accept the (session_id, credential) pair).
-        const site = process.env.PUBLIC_PRICING_SITE_URL;
-        const onStorefront = !!site && /^https?:\/\//.test(site);
+        // Receipts render on the storefront's own /pricing/success|cancel
+        // pages, always. The receipt credential travels back in the redirect:
+        // the same `h` or `uid` the checkout was scoped to, which the receipt
+        // endpoint re-checks against the session before returning any
+        // purchase data. There is deliberately no Mission Control fallback —
+        // this buyer has no operator account and the thank-you page for a
+        // purchase made on the website belongs to the website.
+        const cred = data.h ? { h: data.h } : { uid: data.uid as string };
         const pricingBase = storefrontPricingBase();
-        const successUrl = onStorefront
-          ? `${pricingBase}/success?${cred}&session_id={CHECKOUT_SESSION_ID}`
-          : `${mcOrigin}/billing/success?${cred}&session_id={CHECKOUT_SESSION_ID}`;
-        const cancelUrl = onStorefront
-          ? `${pricingBase}/cancel?${cred}`
-          : `${mcOrigin}/billing/cancel?${cred}`;
+        const successUrl = storefrontReturnUrl(
+          pricingBase,
+          "success",
+          cred,
+          "session_id={CHECKOUT_SESSION_ID}",
+        );
+        const cancelUrl = storefrontReturnUrl(pricingBase, "cancel", cred);
 
         try {
           const result = data.h

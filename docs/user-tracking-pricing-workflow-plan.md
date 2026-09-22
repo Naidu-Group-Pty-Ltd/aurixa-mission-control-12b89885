@@ -55,8 +55,17 @@ customer-facing pricing page. The corrected topology separates the three surface
    and they are filterable in `/billing/purchases`.
 
 ### Deployment addendum
-- Set `PUBLIC_PRICING_SITE_URL` once the aurixa-systems storefront is live; until then the
-  legacy Mission Control landing keeps working.
+- `PUBLIC_PRICING_SITE_URL` is an **override**, not a switch. The storefront is live, and
+  `storefrontPricingBase()` answers the public pricing URL whether or not the variable is
+  set — so every customer redirect lands on the Aurixa Systems website either way. Set it
+  only to point a deployment at a different storefront (staging, a rebrand).
+- **There is no "legacy Mission Control landing" any more, and there must not be one.**
+  Three public routes used to fall back to Mission Control's own `/billing/success`,
+  `/billing/cancel` and `/billing/topup` when the variable was unset — the last of those is
+  behind an operator sign-in a customer cannot pass. `storefrontReturnPaths.test.ts` now
+  fails on any `api.public.*` route that builds a Mission Control origin. Mission Control's
+  own `/billing/*` receipt pages stay, because the OPERATOR purchase console
+  (`createStripeCheckout`, `requireOperator`) is their reader and always was.
 - The origin repo's static fallback CTAs point at the storefront constant
   (`AURIXA_PRICING_URL` in `src/lib/missionControl.ts`) — set the production domain there too.
 
