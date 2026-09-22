@@ -17,6 +17,9 @@ const state = vi.hoisted(() => ({
   outcome: { kind: "sent", status: 202, requestId: "rq" } as Record<string, unknown>,
   upserts: [] as Record<string, unknown>[][],
   existingKeys: new Set<string>(),
+  suppressionQueries: [] as string[][],
+  sweepWindows: {} as Record<string, Record<string, unknown>[]>,
+  sweepErrors: {} as Record<string, { message: string } | null>,
 }));
 
 vi.mock("@/server/graph-client", () => ({
@@ -41,6 +44,15 @@ vi.mock("@/integrations/supabase/client.server", () => ({
       if (table === "waitlist_leads") {
         return {
           select: () => ({
+            // The sweep reads one window per column: .gte(col, since).order().limit()
+            gte: (column: string) => ({
+              order: () => ({
+                limit: async () => ({
+                  data: state.sweepWindows[column] ?? [],
+                  error: state.sweepErrors[column] ?? null,
+                }),
+              }),
+            }),
             in: async () => ({
               data: [
                 {
@@ -60,7 +72,20 @@ vi.mock("@/integrations/supabase/client.server", () => ({
       if (table === "email_suppressions") {
         return {
           select: () => ({
-            in: async () => ({ data: state.suppressionRows, error: state.suppressionError }),
+            // The double HONOURS its own `in` list, and that is not a detail.
+            // A version that ignored the keys returned every suppression row
+            // whatever was asked about, so a bug where the register is asked
+            // about one set of addresses and enforced on another was invisible
+            // to every test here — code and double agreeing while only the
+            // server would have disagreed. That is the `.or()`-regex-double
+            // failure this platform has already paid for twice.
+            in: async (_column: string, keys: string[]) => {
+              state.suppressionQueries.push(keys);
+              return {
+                data: state.suppressionRows.filter((r) => keys.includes(r.email_key)),
+                error: state.suppressionError,
+              };
+            },
           }),
         };
       }
@@ -93,7 +118,11 @@ vi.mock("@/integrations/supabase/client.server", () => ({
   },
 }));
 
-import { dispatchStageEmails, enqueueStageEmails } from "./lead-stage-emails.server";
+import {
+  dispatchStageEmails,
+  enqueueStageEmails,
+  sweepMissingStageEmails,
+} from "./lead-stage-emails.server";
 import { recipientReading } from "@/lib/leadStageEmailReading.pure";
 
 const TEAM = ["admin", "rugesh", "lavan", "arvinraj", "mithrubanbupathy"].map(
@@ -127,6 +156,9 @@ beforeEach(() => {
   state.outcome = { kind: "sent", status: 202, requestId: "rq" };
   state.upserts = [];
   state.existingKeys = new Set();
+  state.suppressionQueries = [];
+  state.sweepWindows = {};
+  state.sweepErrors = {};
   process.env.MICROSOFT_MAILBOX_EMAIL = "hello@aurixasystems.com.au";
   process.env.LEAD_STAGE_INTERNAL_RECIPIENTS = TEAM.join(",");
   delete process.env.LEAD_STAGE_INTERNAL_STAGES;
@@ -379,11 +411,18 @@ describe("the applicant backstop survives being enqueued too early", () => {
   const applicantStage1 = (batch: Record<string, unknown>[]) =>
     batch.find((r) => r.audience === "applicant" && r.stage === 1);
 
-  const lead = (agoMs: number) => ({
+  // `syncedMsAgo` is when the Airtable mirror last read this lead's record,
+  // which is what turns a missing receipt into evidence about the WORKFLOW
+  // rather than about the mirror. Defaulting it to "just now" is the ordinary
+  // state of a row: the mirror is the only writer of `waitlist_leads`, so a
+  // row exists because it ran.
+  const lead = (agoMs: number, syncedMsAgo: number | null = 0) => ({
     id: "lead-1",
     email: "applicant@example.com",
     created_at: new Date(Date.now() - agoMs).toISOString(),
     submitted_at: new Date(Date.now() - agoMs).toISOString(),
+    enrichment_synced_at:
+      syncedMsAgo === null ? null : new Date(Date.now() - syncedMsAgo).toISOString(),
   });
 
   it("writes NO obligation while the grace period is still running", async () => {
@@ -391,14 +430,28 @@ describe("the applicant backstop survives being enqueued too early", () => {
     expect(applicantStage1(state.upserts[0] ?? [])).toBeUndefined();
   });
 
-  it("raises it on a later tick, once the grace period has elapsed", async () => {
-    // t=0 from the website, then the sweep six hours later with no receipt.
+  it("raises it on a later tick, once the mirror has looked and found nothing", async () => {
+    // t=0 from the website, then the sweep six hours later — by which time the
+    // hourly mirror has read the record and it still carries no receipt.
     await enqueueStageEmails({ leadId: "lead-1", lead: lead(60_000), trigger: "ingest" });
     await enqueueStageEmails({ leadId: "lead-1", lead: lead(6 * 3_600_000), trigger: "manual" });
 
     const raised = applicantStage1(state.upserts[1] ?? []);
     expect(raised).toBeDefined();
     expect(raised?.status).toBe("pending");
+  });
+
+  it("raises NOTHING on that tick while the mirror is still behind", async () => {
+    // The same six-hour-old lead, on a row nothing has read since the receipt
+    // column began to be mapped. An absent receipt there is a statement about
+    // the mirror, and acting on it sends a duplicate of an email the workflow
+    // already sent. `none` — so the tick after the sync can still decide.
+    await enqueueStageEmails({
+      leadId: "lead-1",
+      lead: lead(6 * 3_600_000, null),
+      trigger: "manual",
+    });
+    expect(applicantStage1(state.upserts[0] ?? [])).toBeUndefined();
   });
 
   it("still never raises one where the workflow's own receipt exists", async () => {
@@ -413,5 +466,97 @@ describe("the applicant backstop survives being enqueued too early", () => {
     const raised = applicantStage1(state.upserts[0] ?? []);
     expect(raised?.status).toBe("skipped");
     expect(String(raised?.reason)).toContain("already emailed");
+  });
+});
+
+describe("the sweep asks three windows and merges them", () => {
+  // It is the only path that raises an applicant's acknowledgement once the
+  // grace period has elapsed, so losing a window here is silent and total for
+  // that stage.
+  const lead = (id: string, over: Record<string, unknown> = {}) => ({
+    id,
+    email: `${id}@example.com`,
+    created_at: new Date(Date.now() - 6 * 3_600_000).toISOString(),
+    submitted_at: new Date(Date.now() - 6 * 3_600_000).toISOString(),
+    ...over,
+  });
+
+  it("reads every stage's own column, not just the first", async () => {
+    state.sweepWindows = {
+      created_at: [lead("a")],
+      stage2_completed_at: [lead("b", { stage2_completed_at: new Date().toISOString() })],
+      stage3_booked_at: [lead("c", { stage3_booked_at: new Date().toISOString() })],
+    };
+    await sweepMissingStageEmails();
+    const seen = state.upserts.flat().map((r) => r.lead_id);
+    expect(new Set(seen)).toEqual(new Set(["a", "b", "c"]));
+  });
+
+  it("enqueues a lead once when two windows both return it", async () => {
+    const both = lead("a", { stage2_completed_at: new Date().toISOString() });
+    state.sweepWindows = { created_at: [both], stage2_completed_at: [both] };
+    await sweepMissingStageEmails();
+    expect(state.upserts).toHaveLength(1);
+  });
+
+  it("keeps the windows that answered when one read fails", async () => {
+    // A failed read is about us, not about the applicants — losing one window
+    // must not lose the other two.
+    state.sweepErrors = { stage2_completed_at: { message: "57014 statement timeout" } };
+    state.sweepWindows = { created_at: [lead("a")], stage3_booked_at: [lead("c")] };
+    await sweepMissingStageEmails();
+    const seen = state.upserts.flat().map((r) => r.lead_id);
+    expect(new Set(seen)).toEqual(new Set(["a", "c"]));
+  });
+});
+
+describe("the register is asked about the addresses that will be sent to", () => {
+  // Found by audit, and it was introduced by the re-resolution fix itself.
+  // `readSuppressions` used to build its query from `row.recipients` — the
+  // STORED list — while the send used the re-resolved one. Any address the
+  // re-resolution added was therefore never asked about, and so could never
+  // be blocked.
+  const STALE_ROW = {
+    id: "row-1",
+    lead_id: "lead-1",
+    stage: 1,
+    audience: "internal",
+    recipients: ["hello@aurixasystems.com.au"],
+    recipient_source: "mailbox_fallback",
+    to_address: "hello@aurixasystems.com.au",
+    reason: null,
+    attempts: 1,
+  };
+
+  it("asks about every address it is about to mail, not the ones it was raised with", async () => {
+    state.claimed = [{ ...STALE_ROW }];
+    await dispatchStageEmails();
+    const asked = state.suppressionQueries.flat();
+    for (const address of TEAM) expect(asked).toContain(address);
+  });
+
+  it("blocks a suppressed colleague the row was never raised with", async () => {
+    // The cutover sequence exactly: the row predates the recipient list, and
+    // one of the people that list adds is on the register. Before the fix all
+    // five were mailed, the register was asked about one, nothing was blocked
+    // and nothing was notified.
+    state.claimed = [{ ...STALE_ROW }];
+    state.suppressionRows = [{ email_key: "rugesh@aurixasystems.com.au" }];
+    await dispatchStageEmails();
+
+    expect(wire()).not.toContain("rugesh@aurixasystems.com.au");
+    expect(wire()).toHaveLength(4);
+    expect(String(patch().reason)).toContain("1 recipient(s) suppressed");
+    expect(state.notices).toHaveLength(1);
+  });
+
+  it("the double is not vacuous — it filters, so an unasked key cannot match", async () => {
+    // Proof the guard above can fail: a register row for somebody outside the
+    // query must not come back.
+    state.claimed = [{ ...STALE_ROW }];
+    state.suppressionRows = [{ email_key: "nobody@elsewhere.example" }];
+    await dispatchStageEmails();
+    expect(wire()).toEqual(TEAM);
+    expect(state.notices).toHaveLength(0);
   });
 });

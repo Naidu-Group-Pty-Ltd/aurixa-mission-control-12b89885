@@ -268,7 +268,23 @@ export async function dispatchStageEmails(limit = DISPATCH_BATCH): Promise<Dispa
     .in("id", leadIds);
   const leads = new Map((leadRows ?? []).map((row) => [row.id as string, row]));
 
-  const register = await readSuppressions(batch);
+  // Resolve every row's recipients BEFORE the register is asked, because the
+  // register must be asked about the addresses that will actually be SENT to.
+  //
+  // This was wrong and it was wrong in the direction that matters. The
+  // re-resolution below can ADD addresses the row was never raised with — that
+  // is its whole purpose — and `readSuppressions` used to build its query from
+  // `row.recipients`, the stored list. So on precisely the cutover sequence
+  // this feature exists for (rows raised under the fallback, the list set
+  // afterwards), five people were mailed while the register was asked about
+  // one, and a colleague on the do-not-send register received the mail with
+  // nothing blocked, nothing notified and nothing in the ledger reason.
+  //
+  // Ask about what you are going to send to.
+  const resolved = new Map<string, ResolvedRecipients>();
+  for (const row of batch) resolved.set(row.id, resolveRecipientsFor(row, p));
+
+  const register = await readSuppressions([...resolved.values()].flatMap((r) => r.recipients));
   const suppressed = register.keys;
   if (!register.readable) {
     // A notifier that cannot verify its own do-not-send register is an outage,
@@ -295,58 +311,7 @@ export async function dispatchStageEmails(limit = DISPATCH_BATCH): Promise<Dispa
       continue;
     }
 
-    // WHO an internal notification goes to is a property of the deployment as
-    // it now stands, not of the moment the obligation was raised \u2014 the same
-    // reasoning that composes the body from the current lead row.
-    //
-    // Measured: the ledger upserts with `ignoreDuplicates`, so a row raised
-    // while `LEAD_STAGE_INTERNAL_RECIPIENTS` was unset keeps
-    // `["<the sending mailbox>"]` for ever, and `UNIQUE (lead_id, stage,
-    // audience)` means it can never be raised again. Reading `row.recipients`
-    // here meant the ordinary cutover sequence \u2014 deploy, notice the list is
-    // not set, set it \u2014 left every already-queued lead notifying one address,
-    // permanently, with the console showing a healthy `sent` row.
-    //
-    // The applicant's own address is NOT this: it is a fact about the lead, it
-    // was resolved from the lead row, and it stays on the row.
-    const stored = (row.recipients ?? []).filter(Boolean);
-    //
-    // For an internal notification, in this order:
-    //
-    //   1. the list this deployment has CONFIGURED \u2014 it is the live answer
-    //   2. else the list the row was raised with \u2014 it knew something
-    //   3. else the deployment's fallback \u2014 better one person than nobody
-    //
-    // Step 1 outranks step 2 and step 2 outranks step 3, and the middle
-    // ordering is the one worth stating: a `mailbox_fallback` is not an answer
-    // about who should be told, it is an admission that nobody is configured.
-    // Letting it overrule a row that already names real recipients would be
-    // the same silent collapse from five addresses to one, arrived at from the
-    // other direction.
-    const configured =
-      row.audience === "internal" && p.internalRecipientSource === "configured"
-        ? p.internalRecipients
-        : [];
-    const fallback = row.audience === "internal" ? p.internalRecipients : [];
-    const recipients = configured.length ? configured : stored.length ? stored : fallback;
-    // Which of the three the send is actually using. Written back on success,
-    // because the row is the record of what HAPPENED and the environment is
-    // only what would happen next.
-    const resolvedSource: RecipientSource =
-      row.audience === "applicant"
-        ? "applicant"
-        : configured.length
-          ? "configured"
-          : stored.length
-            ? (row.recipient_source ?? "configured")
-            : p.internalRecipientSource;
-    // A row whose stored list no longer matches the deployment is evidence the
-    // configuration changed after it was raised. Say so rather than silently
-    // serving the better answer.
-    const rewritten =
-      configured.length && !sameAddresses(configured, stored)
-        ? `recipients re-resolved at send: ${stored.length} \u2192 ${configured.length}`
-        : null;
+    const { recipients, rewritten, resolvedSource } = resolved.get(row.id)!;
 
     if (recipients.length === 0) {
       await settle(row.id, { status: "skipped", reason: "no recipient address" });
@@ -512,6 +477,71 @@ type ClaimedRow = {
   attempts: number;
 };
 
+type ResolvedRecipients = {
+  recipients: string[];
+  resolvedSource: RecipientSource;
+  /** A note for the ledger when the deployment disagreed with the row. */
+  rewritten: string | null;
+};
+
+/**
+ * Who this obligation is actually going to, decided now rather than when it
+ * was raised.
+ *
+ * WHO an internal notification goes to is a property of the deployment as it
+ * now stands — the same reasoning that composes the body from the current
+ * lead row. The ledger upserts with `ignoreDuplicates`, so a row raised while
+ * `LEAD_STAGE_INTERNAL_RECIPIENTS` was unset keeps `["<the sending mailbox>"]`
+ * for ever and `UNIQUE (lead_id, stage, audience)` means it can never be
+ * raised again. Reading `row.recipients` at send time meant the ordinary
+ * cutover sequence — deploy, notice the list is not set, set it — left every
+ * already-queued lead notifying one address, permanently, with the console
+ * showing a healthy `sent` row.
+ *
+ * In this order, and the middle rung is the one worth stating:
+ *
+ *   1. the list this deployment has CONFIGURED — it is the live answer
+ *   2. else the list the row was raised with — it knew something
+ *   3. else the deployment's fallback — better one person than nobody
+ *
+ * A `mailbox_fallback` is not an answer about who should be told, it is an
+ * admission that nobody is configured, so it never overrules a row that
+ * already names real recipients — that would be the same silent collapse from
+ * five addresses to one, arrived at from the other direction.
+ *
+ * The applicant's own address is NOT this: it is a fact about the lead, it was
+ * resolved from the lead row, and it stays on the row.
+ *
+ * It is a separate function because the SUPPRESSION REGISTER has to be asked
+ * about these addresses rather than the stored ones, which means they must be
+ * known before the send loop begins.
+ */
+function resolveRecipientsFor(row: ClaimedRow, p: StageEmailPolicy): ResolvedRecipients {
+  const stored = (row.recipients ?? []).filter(Boolean);
+  const configured =
+    row.audience === "internal" && p.internalRecipientSource === "configured"
+      ? p.internalRecipients
+      : [];
+  const fallback = row.audience === "internal" ? p.internalRecipients : [];
+  const recipients = configured.length ? configured : stored.length ? stored : fallback;
+
+  const resolvedSource: RecipientSource =
+    row.audience === "applicant"
+      ? "applicant"
+      : configured.length
+        ? "configured"
+        : stored.length
+          ? (row.recipient_source ?? "configured")
+          : p.internalRecipientSource;
+
+  const rewritten =
+    configured.length && !sameAddresses(configured, stored)
+      ? `recipients re-resolved at send: ${stored.length} → ${configured.length}`
+      : null;
+
+  return { recipients, resolvedSource, rewritten };
+}
+
 /** Same people, in any order and any case. Identity is `emailKey`, always. */
 function sameAddresses(a: string[], b: string[]): boolean {
   if (a.length !== b.length) return false;
@@ -551,13 +581,10 @@ async function settle(id: string, patch: LedgerUpdate): Promise<void> {
  */
 type SuppressionReading = { keys: Set<string>; readable: boolean };
 
-async function readSuppressions(batch: ClaimedRow[]): Promise<SuppressionReading> {
+async function readSuppressions(addresses: string[]): Promise<SuppressionReading> {
   const keys = [
     ...new Set(
-      batch
-        .flatMap((row) => row.recipients ?? [])
-        .map((address) => emailKey(address))
-        .filter((key): key is string => Boolean(key)),
+      addresses.map((address) => emailKey(address)).filter((key): key is string => Boolean(key)),
     ),
   ];
   if (keys.length === 0) return { keys: new Set(), readable: true };
@@ -625,25 +652,61 @@ export async function sweepMissingStageEmails(limit = 100): Promise<EnqueueResul
   if (p.maxAgeMs <= 0) return out;
 
   const since = new Date(Date.now() - p.maxAgeMs).toISOString();
-  const { data, error } = await supabaseAdmin
-    .from("waitlist_leads")
-    .select("*")
-    .or(
-      [
-        `created_at.gte.${since}`,
-        `stage2_completed_at.gte.${since}`,
-        `stage3_booked_at.gte.${since}`,
-      ].join(","),
-    )
-    .order("created_at", { ascending: false })
-    .limit(limit);
 
-  if (error) {
-    console.error("[lead-stage-email] sweep read failed", error.message);
-    return out;
+  /*
+    THREE STATEMENTS, AND NOT ONE `or`.
+
+    The condition is "applied recently OR completed the questionnaire recently
+    OR booked a review recently", which reads as a single
+    `.or("created_at.gte.<ts>,stage2_completed_at.gte.<ts>,…")` — and that is a
+    STRING with a timestamp interpolated into it, the filter this platform has
+    already paid for once. The screening consumer's claim predicate was exactly
+    that shape: it never parsed, the claim had NEVER ONCE succeeded, and the
+    code and its test double agreed with each other the whole time while only
+    the server disagreed. `fleet-migration.server.ts` refuses the same
+    construction for the same reason, in as many words.
+
+    Nothing here can prove the string would have parsed — there is no PostgREST
+    to ask from a unit test, which is the entire trap — so the question is
+    removed rather than answered. Each half is its own typed filter the builder
+    composes, and the three id sets are merged here.
+
+    It matters more than it looks. This sweep is the ONLY path that raises the
+    applicant's acknowledgement once the grace period has elapsed: enqueue at
+    t=0 deliberately writes nothing while the clock is still running. A filter
+    that silently returned no rows would mean no applicant is ever
+    acknowledged, with an empty result and a `queued: 0` that reads exactly
+    like a quiet week.
+  */
+  const windows = [
+    { column: "created_at" as const, what: "applied" },
+    { column: "stage2_completed_at" as const, what: "completed the questionnaire" },
+    { column: "stage3_booked_at" as const, what: "booked a review" },
+  ];
+
+  const byId = new Map<string, Record<string, unknown>>();
+  for (const window of windows) {
+    const { data, error } = await supabaseAdmin
+      .from("waitlist_leads")
+      .select("*")
+      .gte(window.column, since)
+      .order(window.column, { ascending: false })
+      .limit(limit);
+
+    if (error) {
+      // Named, because "the sweep found nobody who applied" and "the sweep
+      // could not ask who applied" are different facts and only one of them is
+      // about the applicants.
+      console.error(
+        `[lead-stage-email] sweep read failed for leads that ${window.what}`,
+        error.message,
+      );
+      continue;
+    }
+    for (const lead of data ?? []) byId.set(lead.id as string, lead);
   }
 
-  for (const lead of data ?? []) {
+  for (const lead of byId.values()) {
     try {
       const result = await enqueueStageEmails({
         leadId: lead.id as string,
