@@ -1,0 +1,14 @@
+-- Notification kinds for the priority-access stage mailer.
+--
+-- @asserts enum:notification_kind
+--
+-- Kept in its own migration for the same reason 20260731115000 was: a new enum
+-- value cannot be USED in the transaction that adds it, and the migration that
+-- follows this one creates the ledger whose failures these describe.
+--
+-- Only the failure is a notification. A stage email that went is recorded in
+-- `lead_stage_emails` and nowhere else — `notificationDisposition.ts`'s rule is
+-- that a notification is for something that needs a person, and a delivery that
+-- worked needs nobody. A delivery that did NOT work is the whole reason this
+-- feature exists, so it is loud.
+ALTER TYPE public.notification_kind ADD VALUE IF NOT EXISTS 'lead_stage_email_failed';

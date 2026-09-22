@@ -31,3 +31,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Agent scratch probes — never committed.
+src/server/__*.test.ts
+src/server/zz*.test.ts
