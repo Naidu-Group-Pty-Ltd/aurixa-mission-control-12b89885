@@ -187,6 +187,43 @@ export const REPOSITORY_INVARIANTS: readonly RepositoryInvariant[] = [
       "directory would not be.",
   },
   {
+    pattern: "supabase/migrations/**",
+    reason:
+      "The migration directory is read as a CORPUS by things that already travel, and it was the " +
+      "only one of them that did not. `src/lib/testSupport/migrationCorpus.ts` enumerates the " +
+      "whole directory; `check-applied-body-digests.mjs` and `check-migration-version-collisions." +
+      "mjs` are in scripts/**; `supabase/migration-object-index.json` describes prime's entire " +
+      "corpus and cascades as part of a module. So a module-scoped clone receives every reader of " +
+      "the directory and never the directory — the same shape as src/lib/integrations/**, one " +
+      "level up. Measured 22 Sep 2026 on npc-crm-independent, the fleet's only `modules` clone: " +
+      "1,000 migration paths against prime's 1,026, the 36 missing being 9 collision renames " +
+      "prime had already made, 5 seed files over the per-file ceiling, and 22 that were simply " +
+      "new. That gap only ever grows, because nothing in the module globs can reach the " +
+      "directory. PR #16 failed `verify` on it in the same pass that delivered the spec: " +
+      "`ENOENT … 20261213000000_market_building_approvals.sql`, 4,870 bytes, in no glob. It is " +
+      "the whole directory rather than named files for `docs/**`'s reason — a migration file " +
+      "imports nothing and executes nothing in CI, so carrying all of it is safe where a whole " +
+      "source directory would not be. And it applies nothing: no clone runs migrations from its " +
+      "repository (npc-crm-independent's own apply-migration.yml opens by explaining why it is " +
+      "not `db push`), so this changes which files a clone HOLDS and never which SQL has run " +
+      "against it. The per-file ceiling still binds afterwards, which is correct — an oversized " +
+      "seed then reaches the held-back list and is named, instead of being invisible.",
+  },
+  {
+    pattern: "supabase/migration-object-index.json",
+    reason:
+      "Generated from supabase/migrations/ by scripts/build-migration-object-index.mjs, and it " +
+      "travels for the reason src/lib/integrations/** does: a generated file and its source are " +
+      "one artefact. It is not under the directory, so the glob above does not reach it. On a " +
+      "clone the index is CARRIED rather than authored — `indexIsCarriedNotAuthored` says so and " +
+      "both the spec and the CI check read that one implementation, so a clone is never asked to " +
+      "regenerate it — which makes prime's copy the only correct copy and a stale one purely " +
+      "wrong. It matters because a consumer reads a name the index does not carry as \"never " +
+      "ours\", which is the reading that lets one of this repository's own leftovers pass as a " +
+      "tenant's data. Measured 22 Sep 2026: npc-crm-independent held a copy predating its fork " +
+      "while receiving neither the directory nor the index.",
+  },
+  {
     pattern: "src/lib/openLocation/**",
     reason:
       "`openLocationWiring.spec.ts` asserts that supabase/functions/location-intelligence-service/" +
