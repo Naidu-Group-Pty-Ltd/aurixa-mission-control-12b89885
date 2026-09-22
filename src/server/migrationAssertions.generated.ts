@@ -699,4 +699,12 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       },
     ],
   },
+  {
+    migration: "20260922090000_pricing_model_2026_final_review.sql",
+    version: "20260922090000",
+    assertions: [
+      { kind: "rows", table: "addon_modules", atLeast: 25 },
+      { kind: "check", table: "pricing_module_map", column: "mapping_kind", value: "external" },
+    ],
+  },
 ];
