@@ -15,6 +15,8 @@ const state = vi.hoisted(() => ({
   notices: [] as Record<string, unknown>[],
   sent: [] as { mailbox: string; message: Record<string, unknown> }[],
   outcome: { kind: "sent", status: 202, requestId: "rq" } as Record<string, unknown>,
+  upserts: [] as Record<string, unknown>[][],
+  existingKeys: new Set<string>(),
 }));
 
 vi.mock("@/server/graph-client", () => ({
@@ -69,12 +71,29 @@ vi.mock("@/integrations/supabase/client.server", () => ({
             return { error: null };
           },
         }),
+        upsert: (batch: Record<string, unknown>[]) => {
+          state.upserts.push(batch);
+          return {
+            // The real upsert carries `ignoreDuplicates`, so a row that exists
+            // is NOT returned. Modelled here, because that is the mechanism
+            // that made a terminal row permanent.
+            select: async () => ({
+              data: batch.filter((r) => {
+                const key = `${r.lead_id}/${r.stage}/${r.audience}`;
+                if (state.existingKeys.has(key)) return false;
+                state.existingKeys.add(key);
+                return true;
+              }),
+              error: null,
+            }),
+          };
+        },
       };
     },
   },
 }));
 
-import { dispatchStageEmails } from "./lead-stage-emails.server";
+import { dispatchStageEmails, enqueueStageEmails } from "./lead-stage-emails.server";
 import { recipientReading } from "@/lib/leadStageEmailReading.pure";
 
 const TEAM = ["admin", "rugesh", "lavan", "arvinraj", "mithrubanbupathy"].map(
@@ -106,6 +125,8 @@ beforeEach(() => {
   state.notices = [];
   state.sent = [];
   state.outcome = { kind: "sent", status: 202, requestId: "rq" };
+  state.upserts = [];
+  state.existingKeys = new Set();
   process.env.MICROSOFT_MAILBOX_EMAIL = "hello@aurixasystems.com.au";
   process.env.LEAD_STAGE_INTERNAL_RECIPIENTS = TEAM.join(",");
   delete process.env.LEAD_STAGE_INTERNAL_STAGES;
@@ -346,5 +367,51 @@ describe("what the row says afterwards is what the page draws", () => {
     await dispatchStageEmails();
     expect(patch().recipients).toEqual(["applicant@example.com"]);
     expect(patch().recipient_source).toBe("applicant");
+  });
+});
+
+describe("the applicant backstop survives being enqueued too early", () => {
+  // The ingest endpoint enqueues the moment the form is submitted — t=0, always
+  // inside the grace period — and the sweep re-enqueues every five minutes.
+  // The unique index keeps whatever the FIRST call wrote, so if t=0 records a
+  // terminal verdict the backstop is dead for every lead that ever came
+  // through the website.
+  const applicantStage1 = (batch: Record<string, unknown>[]) =>
+    batch.find((r) => r.audience === "applicant" && r.stage === 1);
+
+  const lead = (agoMs: number) => ({
+    id: "lead-1",
+    email: "applicant@example.com",
+    created_at: new Date(Date.now() - agoMs).toISOString(),
+    submitted_at: new Date(Date.now() - agoMs).toISOString(),
+  });
+
+  it("writes NO obligation while the grace period is still running", async () => {
+    await enqueueStageEmails({ leadId: "lead-1", lead: lead(60_000), trigger: "ingest" });
+    expect(applicantStage1(state.upserts[0] ?? [])).toBeUndefined();
+  });
+
+  it("raises it on a later tick, once the grace period has elapsed", async () => {
+    // t=0 from the website, then the sweep six hours later with no receipt.
+    await enqueueStageEmails({ leadId: "lead-1", lead: lead(60_000), trigger: "ingest" });
+    await enqueueStageEmails({ leadId: "lead-1", lead: lead(6 * 3_600_000), trigger: "manual" });
+
+    const raised = applicantStage1(state.upserts[1] ?? []);
+    expect(raised).toBeDefined();
+    expect(raised?.status).toBe("pending");
+  });
+
+  it("still never raises one where the workflow's own receipt exists", async () => {
+    // The backstop is a backstop. A receipt is the evidence that settles it,
+    // and it must keep settling it — this is the guard against two
+    // "Application received" emails four minutes apart.
+    await enqueueStageEmails({
+      leadId: "lead-1",
+      lead: { ...lead(6 * 3_600_000), stage1_email_message_id: "AAMk..." },
+      trigger: "manual",
+    });
+    const raised = applicantStage1(state.upserts[0] ?? []);
+    expect(raised?.status).toBe("skipped");
+    expect(String(raised?.reason)).toContain("already emailed");
   });
 });

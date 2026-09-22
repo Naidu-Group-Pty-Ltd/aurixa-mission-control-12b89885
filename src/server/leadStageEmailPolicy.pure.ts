@@ -362,9 +362,23 @@ export function decideApplicant(
   }
   // Known NOT sent. Wait out the grace period so a delivery still in flight,
   // or a sync that has not run since it, is not overtaken by this.
+  //
+  // `none`, not `skip`, and the difference is the whole backstop. A `skip`
+  // writes a TERMINAL ledger row, and the upsert that writes it carries
+  // `ignoreDuplicates` on (lead_id, stage, audience) — so the row can never be
+  // replaced by a later, better-informed decision. The ingest endpoint
+  // enqueues at t=0, which is always inside the grace period, so every
+  // applicant took a terminal `skipped` row for their Stage 1 acknowledgement
+  // and the five-minute sweep that would later have said `send` was discarded
+  // by the unique index. The backstop could not fire for any lead that came
+  // through the website, and it failed exactly where it was needed: only where
+  // the Make scenario had NOT sent, because a receipt settles it otherwise.
+  //
+  // A verdict that turns only on a clock is not a decision, it is the absence
+  // of one yet. `none` writes nothing and lets the next tick ask again.
   const since = occurred ? now - Date.parse(occurred) : Number.POSITIVE_INFINITY;
   if (Number.isFinite(since) && since < policy.applicantGraceMs) {
-    return { verdict: "skip", reason: "waiting for the workflow's own acknowledgement" };
+    return { verdict: "none", reason: "waiting for the workflow's own acknowledgement" };
   }
   return { verdict: "send" };
 }

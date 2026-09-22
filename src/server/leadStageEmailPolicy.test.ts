@@ -144,12 +144,30 @@ describe("decideApplicant — the backstop", () => {
     expect(decideApplicant(l, 1, settled, NOW)).toEqual({ verdict: "send" });
   });
 
-  it("waits out the grace period before overtaking a delivery still in flight", () => {
+  it("waits out the grace period WITHOUT recording a decision", () => {
+    // `none`, not `skip`, and the difference is the whole backstop.
+    //
+    // A `skip` writes a TERMINAL ledger row, and the upsert has
+    // `ignoreDuplicates` on (lead_id, stage, audience), so that row can never
+    // be replaced. The ingest endpoint enqueues at t=0 — always inside the
+    // 45-minute grace — so every applicant got a terminal `skipped` row for
+    // their Stage 1 acknowledgement, and the five-minute sweep that would
+    // later have said `send` was discarded by the unique index. The backstop
+    // could not fire for any lead that came through the website, which is
+    // every lead, and it failed exactly when it was needed: only when the Make
+    // scenario had NOT sent, because otherwise the receipt settles it anyway.
+    //
+    // A verdict that turns only on a clock must never be recorded as final.
     const l = lead({ created_at: minutesAgo(5), submitted_at: minutesAgo(5) });
-    expect(decideApplicant(l, 1, settled, NOW)).toMatchObject({
-      verdict: "skip",
-      reason: expect.stringContaining("waiting"),
-    });
+    expect(decideApplicant(l, 1, settled, NOW)).toMatchObject({ verdict: "none" });
+  });
+
+  it("sends once the same lead ages past the grace period", () => {
+    // The pair that proves the row, not the policy, was cancelling it.
+    const young = lead({ created_at: minutesAgo(5), submitted_at: minutesAgo(5) });
+    const older = lead({ created_at: hoursAgo(6), submitted_at: hoursAgo(6) });
+    expect(decideApplicant(young, 1, settled, NOW).verdict).toBe("none");
+    expect(decideApplicant(older, 1, settled, NOW).verdict).toBe("send");
   });
 
   it("will not guess at Stage 2, and names the switch that settles it", () => {
