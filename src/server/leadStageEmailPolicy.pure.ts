@@ -275,6 +275,15 @@ export type StageEmailSubject = {
   stage1_email_message_id?: string | null;
   /** Proof the Stage 3 confirmation went. */
   stage3_confirmation_sent_at?: string | null;
+  /**
+   * When the Airtable mirror last read this lead's record.
+   *
+   * `airtable-sync` is the ONLY writer of `waitlist_leads` and it stamps this
+   * on every row it writes, so the column is not "when we last enriched" — it
+   * is *when we last looked*, which is the only thing that turns a missing
+   * receipt into evidence about the workflow rather than about the mirror.
+   */
+  enrichment_synced_at?: string | null;
 };
 
 export type StageDecision =
@@ -348,54 +357,138 @@ export function decideApplicant(
   }
   if (policy.applicantMode === "always") return { verdict: "send" };
 
-  // ── auto: the backstop ───────────────────────────────────────────────────
-  const alreadySent = applicantAlreadyEmailed(lead, stage);
-  if (alreadySent === true) {
+  // ── auto: the backstop ──────────────────────────────────────────────────
+  const evidence = applicantEmailEvidence(lead, stage, policy.applicantGraceMs, now);
+  if (evidence.sent === true) {
     return { verdict: "skip", reason: "the workflow already emailed the applicant" };
   }
-  if (alreadySent === null) {
+  if (evidence.sent === null) {
+    // The two ways of not knowing want OPPOSITE handling, and collapsing them
+    // is how this branch has already failed once.
+    //
+    // A `skip` writes a TERMINAL ledger row: the upsert carries
+    // `ignoreDuplicates` on (lead_id, stage, audience), so nothing can ever
+    // replace it with a later, better-informed decision. That is right where
+    // the not-knowing is PERMANENT — Stage 2's scenario writes no receipt
+    // anywhere, so no tick will ever know more than this one does, and the
+    // operator's lever is named in the reason. It is wrong where the
+    // not-knowing is merely CURRENT: a terminal row there freezes the wrong
+    // answer for a lead the very next sync would have settled, which is
+    // exactly the defect this branch shipped against the grace clock.
+    if (evidence.why === "mirror_has_not_read_since") {
+      return {
+        verdict: "none",
+        reason: "the mirror has not read this lead's record since the stage happened",
+      };
+    }
     return {
       verdict: "skip",
       reason:
         "cannot tell whether the workflow emailed the applicant at this stage — set LEAD_STAGE_APPLICANT_MODE=always to have Mission Control own this send",
     };
   }
-  // Known NOT sent. Wait out the grace period so a delivery still in flight,
-  // or a sync that has not run since it, is not overtaken by this.
-  //
-  // `none`, not `skip`, and the difference is the whole backstop. A `skip`
-  // writes a TERMINAL ledger row, and the upsert that writes it carries
-  // `ignoreDuplicates` on (lead_id, stage, audience) — so the row can never be
-  // replaced by a later, better-informed decision. The ingest endpoint
-  // enqueues at t=0, which is always inside the grace period, so every
-  // applicant took a terminal `skipped` row for their Stage 1 acknowledgement
-  // and the five-minute sweep that would later have said `send` was discarded
-  // by the unique index. The backstop could not fire for any lead that came
-  // through the website, and it failed exactly where it was needed: only where
-  // the Make scenario had NOT sent, because a receipt settles it otherwise.
-  //
-  // A verdict that turns only on a clock is not a decision, it is the absence
-  // of one yet. `none` writes nothing and lets the next tick ask again.
-  const since = occurred ? now - Date.parse(occurred) : Number.POSITIVE_INFINITY;
-  if (Number.isFinite(since) && since < policy.applicantGraceMs) {
-    return { verdict: "none", reason: "waiting for the workflow's own acknowledgement" };
-  }
+  // Established: the mirror looked, after the workflow's own window closed,
+  // and found no receipt. Nobody has emailed this applicant.
   return { verdict: "send" };
 }
 
 /**
- * Whether the funnel's own scenario already emailed this applicant.
+ * What is established about the funnel's own acknowledgement.
  *
- * `true` it did, `false` it did not, `null` there is no evidence either way —
- * and the third value is the whole point. Collapsing `null` into `false` sends
- * a duplicate; collapsing it into `true` leaves an applicant unacknowledged.
- * Neither is acceptable, so the caller decides what to do with not knowing.
+ * `sent: true` it went, `sent: false` it did not, `sent: null` we do not know —
+ * and the third reading is the whole point. Collapsing it into `false` sends a
+ * duplicate; collapsing it into `true` leaves an applicant unacknowledged. It
+ * also carries WHY, because the two ways of not knowing are not alike and the
+ * caller must treat them differently (see `decideApplicant`).
  */
-export function applicantAlreadyEmailed(lead: StageEmailSubject, stage: LeadStage): boolean | null {
-  if (stage === 1) return Boolean(lead.stage1_email_message_id);
-  if (stage === 3) return Boolean(lead.stage3_confirmation_sent_at);
-  // Stage 2's scenario writes no receipt anywhere this deployment can read.
-  return null;
+export type ApplicantEmailEvidence =
+  | { sent: true }
+  | { sent: false }
+  | { sent: null; why: "no_receipt_is_written" | "mirror_has_not_read_since" };
+
+/**
+ * Read the evidence, never guess at it.
+ *
+ * ## An absent receipt is a fact about the MIRROR until it is one about the
+ * ## WORKFLOW
+ *
+ * `Boolean(lead.stage1_email_message_id)` reads a null receipt as "the workflow
+ * did not send", and that is only true once somebody has actually looked.
+ * `airtable-sync` is the only writer of `waitlist_leads` and runs hourly, so a
+ * row can hold a null receipt for either of two reasons and the column cannot
+ * tell them apart:
+ *
+ *   - the workflow did not send, or
+ *   - the mirror has not read the record since it did.
+ *
+ * The second is not hypothetical. `stage1_email_message_id` and
+ * `enrichment_synced_at` were added by the SAME migration, so on the first tick
+ * after that ships every row in the table reads null — not because nobody was
+ * emailed, but because nothing had yet mapped the column. Read as "not sent",
+ * every in-window applicant of the last 72 hours takes a second copy of an
+ * email they already have, on one tick, with no undo.
+ *
+ * So the absence counts as evidence only where the mirror READ the record after
+ * the workflow's own window closed. The instrument is `enrichment_synced_at`,
+ * which the mirror stamps on every row it writes whether or not the receipt was
+ * populated — it records that we LOOKED, which is the question being asked.
+ * That it arrived alongside the receipt columns is what makes the guard exactly
+ * right rather than merely cautious: "the mirror has not read this row since
+ * the receipt became mappable" and "`enrichment_synced_at` is null" are the
+ * same condition.
+ *
+ * ## The grace period lives here now
+ *
+ * The window is the operator's own `LEAD_STAGE_APPLICANT_GRACE_MINUTES`: the
+ * declared answer to "how long after a stage event does an absence start to
+ * mean something". Requiring the mirror's read to land at or after the end of
+ * that window also closes the race where the mirror catches an Airtable record
+ * between the module that creates it and the module that writes the receipt
+ * back — seconds apart in one scenario run, but enough.
+ *
+ * It SUBSUMES the clock-only check it replaces. A mirror cannot read the
+ * future, so `looked >= occurred + grace` implies `now >= occurred + grace`:
+ * every lead the old check held, this holds, and it holds several the old one
+ * let through. Two checks where one implies the other is one check and a piece
+ * of dead code, so there is one.
+ */
+export function applicantEmailEvidence(
+  lead: StageEmailSubject,
+  stage: LeadStage,
+  graceMs: number,
+  now: number,
+): ApplicantEmailEvidence {
+  // Stage 2's scenario is four modules — webhook, create, compose, send — and
+  // writes nothing back. No amount of waiting makes that absence mean anything,
+  // so this reading is permanent and the caller may act on it.
+  if (stage === 2) return { sent: null, why: "no_receipt_is_written" };
+
+  const receipt = stage === 1 ? lead.stage1_email_message_id : lead.stage3_confirmation_sent_at;
+  if (receipt) return { sent: true };
+
+  return mirrorLookedAfterGrace(lead, stage, graceMs, now)
+    ? { sent: false }
+    : { sent: null, why: "mirror_has_not_read_since" };
+}
+
+/** Did the mirror read this record at or after the end of the grace window? */
+function mirrorLookedAfterGrace(
+  lead: StageEmailSubject,
+  stage: LeadStage,
+  graceMs: number,
+  now: number,
+): boolean {
+  const occurred = Date.parse(stageOccurredAt(lead, stage) ?? "");
+  // An event with no readable time cannot have been looked at "since" — and
+  // the conservative side of not knowing is the one that does not send.
+  if (!Number.isFinite(occurred)) return false;
+
+  const looked = Date.parse(lead.enrichment_synced_at ?? "");
+  if (!Number.isFinite(looked)) return false;
+
+  // A stamp from the future is a clock disagreement, not a reading: trust the
+  // earlier of the two rather than letting a skewed mirror satisfy the window.
+  return Math.min(looked, now) >= occurred + Math.max(0, graceMs);
 }
 
 function isTooOld(occurred: string | null, maxAgeMs: number, now: number): boolean {

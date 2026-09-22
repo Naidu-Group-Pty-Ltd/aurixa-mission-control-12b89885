@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { emailKey } from "@/lib/email/emailAddress.pure";
 import {
-  applicantAlreadyEmailed,
+  applicantEmailEvidence,
   decideApplicant,
   decideInternal,
   hasReachedStage,
@@ -21,10 +21,14 @@ function policy(env: StageEmailEnv = {}) {
   return readPolicy({ MICROSOFT_MAILBOX_EMAIL: "hello@aurixasystems.com.au", ...env });
 }
 
+// Every row in `waitlist_leads` was written by the Airtable mirror — it is the
+// only writer — so every row carries a read stamp. A fixture without one is a
+// row that cannot exist, and testing against it measures the fixture.
 const lead = (over: Partial<StageEmailSubject> = {}): StageEmailSubject => ({
   email: "applicant@firm.com.au",
   created_at: minutesAgo(5),
   submitted_at: minutesAgo(5),
+  enrichment_synced_at: minutesAgo(1),
   ...over,
 });
 
@@ -107,20 +111,83 @@ describe("decideInternal", () => {
   });
 });
 
-describe("applicantAlreadyEmailed", () => {
+describe("applicantEmailEvidence", () => {
+  const GRACE = 45 * 60_000;
+
   it("reads the workflow's own receipt at the two stages that leave one", () => {
-    expect(applicantAlreadyEmailed(lead({ stage1_email_message_id: "AAMk..." }), 1)).toBe(true);
-    expect(applicantAlreadyEmailed(lead(), 1)).toBe(false);
-    expect(applicantAlreadyEmailed(lead({ stage3_confirmation_sent_at: hoursAgo(1) }), 3)).toBe(
-      true,
-    );
-    expect(applicantAlreadyEmailed(lead(), 3)).toBe(false);
+    expect(applicantEmailEvidence(lead({ stage1_email_message_id: "AAMk..." }), 1, GRACE, NOW))
+      .toEqual({ sent: true });
+    expect(
+      applicantEmailEvidence(lead({ stage3_confirmation_sent_at: hoursAgo(1) }), 3, GRACE, NOW),
+    ).toEqual({ sent: true });
   });
 
   it("answers `null` at Stage 2, because the scenario writes no receipt", () => {
     // Not `false`. Collapsing "we cannot tell" into "nobody sent" is what
-    // produces two `Questionnaire Received` emails four minutes apart.
-    expect(applicantAlreadyEmailed(lead({ stage2_completed_at: hoursAgo(1) }), 2)).toBeNull();
+    // produces two `Questionnaire Received` emails four minutes apart. And the
+    // reason matters as much as the value: this not-knowing is PERMANENT, so
+    // the caller is entitled to record it and stop asking.
+    expect(applicantEmailEvidence(lead({ stage2_completed_at: hoursAgo(1) }), 2, GRACE, NOW))
+      .toEqual({ sent: null, why: "no_receipt_is_written" });
+  });
+
+  it("calls a missing receipt `false` only once the mirror has looked since", () => {
+    const l = lead({
+      created_at: hoursAgo(3),
+      submitted_at: hoursAgo(3),
+      enrichment_synced_at: minutesAgo(10),
+    });
+    expect(applicantEmailEvidence(l, 1, GRACE, NOW)).toEqual({ sent: false });
+  });
+
+  it("will not call a missing receipt `false` when nothing has read the row", () => {
+    // THE defect. `stage1_email_message_id` and `enrichment_synced_at` arrived
+    // in one migration, so on the first tick after it ships every row in the
+    // table reads null — and `Boolean(null)` is `false`. Read as "the workflow
+    // did not send", every applicant of the last 72 hours takes a second copy
+    // of an email they already have, on one tick, with no undo.
+    const l = lead({
+      created_at: hoursAgo(3),
+      submitted_at: hoursAgo(3),
+      enrichment_synced_at: null,
+    });
+    expect(applicantEmailEvidence(l, 1, GRACE, NOW)).toEqual({
+      sent: null,
+      why: "mirror_has_not_read_since",
+    });
+  });
+
+  it("will not count a read that landed before the workflow's window closed", () => {
+    // The mirror can catch an Airtable record between the module that creates
+    // it and the module that writes the receipt back — seconds apart in one
+    // scenario run. A read from inside that window saw a record mid-flight,
+    // so its silence about the receipt says nothing.
+    const l = lead({
+      created_at: hoursAgo(3),
+      submitted_at: hoursAgo(3),
+      enrichment_synced_at: new Date(NOW - 3 * 3_600_000 + 5_000).toISOString(),
+    });
+    expect(applicantEmailEvidence(l, 1, GRACE, NOW)).toMatchObject({
+      why: "mirror_has_not_read_since",
+    });
+  });
+
+  it("does not let a clock-skewed stamp from the future satisfy the window", () => {
+    const l = lead({
+      created_at: minutesAgo(5),
+      submitted_at: minutesAgo(5),
+      enrichment_synced_at: new Date(NOW + 6 * 3_600_000).toISOString(),
+    });
+    expect(applicantEmailEvidence(l, 1, GRACE, NOW)).toMatchObject({
+      why: "mirror_has_not_read_since",
+    });
+  });
+
+  it("holds rather than sends when the stage's own time is unreadable", () => {
+    const l = lead({ created_at: "not a date", submitted_at: null });
+    expect(applicantEmailEvidence(l, 1, GRACE, NOW)).toMatchObject({
+      why: "mirror_has_not_read_since",
+    });
   });
 });
 
@@ -202,6 +269,65 @@ describe("decideApplicant — the backstop", () => {
     const ancient = lead({ created_at: hoursAgo(500), submitted_at: hoursAgo(500) });
     const p = policy({ LEAD_STAGE_APPLICANT_MODE: "always" });
     expect(decideApplicant(ancient, 1, p, NOW)).toMatchObject({ verdict: "none" });
+  });
+
+  it("does not fire off a missing receipt that nothing has read yet", () => {
+    // The launch-day shape, end to end: an in-window applicant the Make
+    // scenario DID acknowledge, on a row the mirror has not re-read since the
+    // receipt column began to be mapped. `send` here is a duplicate.
+    const l = lead({
+      created_at: hoursAgo(6),
+      submitted_at: hoursAgo(6),
+      enrichment_synced_at: null,
+    });
+    expect(decideApplicant(l, 1, settled, NOW)).toMatchObject({
+      verdict: "none",
+      reason: expect.stringContaining("has not read"),
+    });
+  });
+
+  it("holds that lead WITHOUT recording a decision, and sends once the mirror looks", () => {
+    // `none`, never `skip`. The upsert carries `ignoreDuplicates`, so a
+    // terminal row written while the mirror was behind could never be replaced
+    // by the better-informed tick that follows it — the same defect the grace
+    // clock already shipped once, one instrument along.
+    const behind = lead({
+      created_at: hoursAgo(6),
+      submitted_at: hoursAgo(6),
+      enrichment_synced_at: null,
+    });
+    const looked = lead({
+      created_at: hoursAgo(6),
+      submitted_at: hoursAgo(6),
+      enrichment_synced_at: minutesAgo(2),
+    });
+    expect(decideApplicant(behind, 1, settled, NOW).verdict).toBe("none");
+    expect(decideApplicant(looked, 1, settled, NOW)).toEqual({ verdict: "send" });
+  });
+
+  it("owns the send outright in `always` mode, whatever the mirror knows", () => {
+    // `always` is not a backstop and asks the mirror nothing: an operator who
+    // has switched the workflow's own email off must not have their
+    // acknowledgement held back by a sync that has not run.
+    const p = policy({ LEAD_STAGE_APPLICANT_MODE: "always" });
+    const l = lead({
+      created_at: hoursAgo(6),
+      submitted_at: hoursAgo(6),
+      enrichment_synced_at: null,
+    });
+    expect(decideApplicant(l, 1, p, NOW)).toEqual({ verdict: "send" });
+  });
+
+  it("backstops Stage 3 on the same evidence rule", () => {
+    const acknowledged = lead({
+      stage3_booked_at: hoursAgo(6),
+      stage3_confirmation_sent_at: hoursAgo(6),
+    });
+    const unacknowledged = lead({ stage3_booked_at: hoursAgo(6) });
+    const unread = lead({ stage3_booked_at: hoursAgo(6), enrichment_synced_at: null });
+    expect(decideApplicant(acknowledged, 3, settled, NOW).verdict).toBe("skip");
+    expect(decideApplicant(unacknowledged, 3, settled, NOW).verdict).toBe("send");
+    expect(decideApplicant(unread, 3, settled, NOW).verdict).toBe("none");
   });
 });
 
