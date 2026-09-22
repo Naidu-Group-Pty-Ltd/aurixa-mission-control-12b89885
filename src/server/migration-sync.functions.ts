@@ -326,7 +326,7 @@ export const syncCloneMigrations = createServerFn({ method: "POST" })
           }
           return { ok: false, error: scoped.error };
         }
-        const { corpus, runnable } = scoped;
+        const { corpus, metas: scopedMetas, runnable } = scoped;
         const sourceSha = scoped.sourceSha;
         const { results, latestApplied } = await applyPrimeMigrations(
           backend.supabase_project_ref,
@@ -334,8 +334,10 @@ export const syncCloneMigrations = createServerFn({ method: "POST" })
           undefined,
           (m) => corpus.loadSql(m.id),
           // Same rule as the fleet sync: this button is the other scoped
-          // caller, so it gets the same refusal to step over a hole.
-          { corpus: corpus.metas, runnableIds: new Set(runnable.map((m) => m.id)) },
+          // caller, so it gets the same refusal to step over a hole — and the
+          // same `scoped.metas`, which carries the dependency facts that
+          // narrow that refusal to what actually depends on the hole.
+          { corpus: scopedMetas, runnableIds: new Set(runnable.map((m) => m.id)) },
           undefined,
           // And the same stream. A body past the corpus ceiling used to make
           // this button report "Migration failed at <the 39 MB seed>" — the

@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
 import { migrationBodyForms } from "./migrationBodyIdentity.pure";
+import {
+  dependencyFactsOf,
+  type MigrationDependencyFacts,
+} from "./migrationDependencyFacts.pure";
 import { fetchBlobTextsBatched, decodeBase64Utf8 } from "./prime-backend.server";
 import type { RepoRef } from "./github-app.server";
 import type { Octokit } from "@octokit/rest";
@@ -60,7 +64,16 @@ export function bodyDigests(sql: string): string[] {
   return migrationBodyForms(sql).map(sha256Hex);
 }
 
-type CacheEntry = { sourceSha: string; digests: Map<string, string[]> };
+type CacheEntry = {
+  sourceSha: string;
+  digests: Map<string, string[]>;
+  /**
+   * Only for bodies actually decoded. A path ABSENT here is a body nobody
+   * read, which is a different fact from a body that names nothing — and the
+   * one the barrier must not narrow on.
+   */
+  facts: Map<string, MigrationDependencyFacts>;
+};
 let cache: CacheEntry | null = null;
 
 // No reset hook. The cache is keyed on the commit and a different commit
@@ -84,6 +97,19 @@ export type PrimeBodyDigestPass = {
   fetched: number;
   /** Paths whose body was past {@link MAX_DIGEST_BYTES} or would not fetch. */
   unread: string[];
+  /**
+   * Repo path → what that migration creates and requires, for the bodies this
+   * pass decoded.
+   *
+   * A path MISSING from this map is one nobody read. That is deliberate and
+   * load-bearing: `partitionByDependency` narrows the barrier only where both
+   * sides' facts are present, so an absent entry keeps the blanket rule for
+   * that file rather than declaring it to create and need nothing.
+   *
+   * Free to compute — the decoded text is already in hand for the digest, and
+   * the extraction is one pass of regexes over it.
+   */
+  factsByPath: Map<string, MigrationDependencyFacts>;
 };
 
 /**
@@ -104,9 +130,10 @@ export async function digestPrimeBodies(
   const maxBytes = opts?.maxBytes ?? MAX_DIGEST_BYTES;
 
   if (!cache || cache.sourceSha !== corpus.sourceSha) {
-    cache = { sourceSha: corpus.sourceSha, digests: new Map() };
+    cache = { sourceSha: corpus.sourceSha, digests: new Map(), facts: new Map() };
   }
   const warm = cache.digests;
+  const warmFacts = cache.facts;
   const byPathMeta = new Map(corpus.files.map((f) => [f.path, f]));
 
   const wanted = [...new Set(paths)].slice(0, MAX_DIGEST_FILES);
@@ -129,7 +156,10 @@ export async function digestPrimeBodies(
     try {
       const bodies = await fetchBlobTextsBatched(octokit, ref, todo);
       for (const [path, b64] of bodies) {
-        warm.set(path, bodyDigests(decodeBase64Utf8(b64)));
+        const sql = decodeBase64Utf8(b64);
+        warm.set(path, bodyDigests(sql));
+        // The text is decoded either way; the facts are the cheap half.
+        warmFacts.set(path, dependencyFactsOf(sql));
         fetched += 1;
       }
     } catch {
@@ -140,11 +170,14 @@ export async function digestPrimeBodies(
   }
 
   const byPath = new Map<string, string[]>();
+  const factsByPath = new Map<string, MigrationDependencyFacts>();
   const unread: string[] = [];
   for (const path of wanted) {
     const d = warm.get(path) ?? [];
     byPath.set(path, d);
     if (d.length === 0) unread.push(path);
+    const f = warmFacts.get(path);
+    if (f !== undefined) factsByPath.set(path, f);
   }
-  return { byPath, fetched, unread };
+  return { byPath, fetched, unread, factsByPath };
 }

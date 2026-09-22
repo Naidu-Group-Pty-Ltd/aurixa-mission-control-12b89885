@@ -65,7 +65,19 @@ describe("pending is what the fleet sync would send, never the raw corpus", () =
 
   it("hands the replay the runnable set and the scope, so it can refuse a hole", () => {
     expect(lane).toMatch(/applyPrimeMigrations\(\s*backend\.supabase_project_ref,\s*runnable,/);
-    expect(lane).toContain("{ corpus: corpus.metas, runnableIds }");
+    // The IDENTIFIER, not a literal. This used to pin `corpus.metas` by name,
+    // which asserted a spelling rather than the property — and the spelling
+    // was the wrong one: `corpus.metas` carries no dependency facts, so the
+    // replay's refusal was blanket while the partition's could be narrow.
+    //
+    // What has to hold is that the two read the SAME array. If the partition
+    // clears a candidate on facts the replay cannot see, the replay refuses
+    // to send what this lane just counted as pending.
+    const partitioned = /partitionByDependency\(\s*([A-Za-z_$][\w$.]*)\s*,/.exec(lane);
+    expect(partitioned).not.toBeNull();
+    const handed = /\{\s*corpus:\s*([A-Za-z_$][\w$.]*)\s*,\s*runnableIds\s*\}/.exec(lane);
+    expect(handed).not.toBeNull();
+    expect(handed![1]).toBe(partitioned![1]);
   });
 
   it("a scope that could not be built is retried, not handed to a person", () => {

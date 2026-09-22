@@ -574,3 +574,135 @@ describe("the self-healing sql_migration lane is the third replay path", () => {
     expect(lane).toMatch(/applyPrimeMigrations\(\s*backend\.supabase_project_ref,\s*runnable,/);
   });
 });
+
+/**
+ * The barrier is per-dependency.
+ *
+ * Every case here is written against the shape that made it necessary: a
+ * corpus whose FIRST entry is a hole, which is the CRM clone's real state and
+ * the one the blanket rule reduces to `would_send 0`.
+ */
+describe("partitionByDependency — a hole stops only what depends on it", () => {
+  const withFacts = (
+    id: string,
+    facts?: { creates?: string[]; requires?: string[] },
+  ): { id: string; name: string; creates?: string[]; requires?: string[] } => ({
+    id,
+    name: `${id}_m.sql`,
+    ...(facts?.creates !== undefined ? { creates: facts.creates } : {}),
+    ...(facts?.requires !== undefined ? { requires: facts.requires } : {}),
+  });
+
+  it("sends past a hole that creates nothing the candidate needs", () => {
+    const metas = [
+      withFacts("20250124120000", { creates: [] }), // a policy fix: creates nothing
+      withFacts("20260101000000", { requires: ["clients"] }),
+      withFacts("20260102000000", { requires: [] }),
+    ];
+    const { send, orphaned, holes } = partitionByDependency(
+      metas,
+      new Set(["20260101000000", "20260102000000"]),
+      new Set(),
+    );
+    expect(holes).toEqual(["20250124120000"]);
+    expect(send.map((m) => m.id)).toEqual(["20260101000000", "20260102000000"]);
+    expect(orphaned).toEqual([]);
+  });
+
+  it("still orphans the candidate that needs what the hole creates, and names it", () => {
+    const metas = [
+      withFacts("20250124120000", { creates: [] }),
+      withFacts("20260703000000", { creates: ["market_updates"] }),
+      withFacts("20260921060000", { requires: ["market_updates", "clients"] }),
+      withFacts("20260922000000", { requires: ["clients"] }),
+    ];
+    const { send, orphaned } = partitionByDependency(
+      metas,
+      new Set(["20260921060000", "20260922000000"]),
+      new Set(),
+    );
+    expect(send.map((m) => m.id)).toEqual(["20260922000000"]);
+    expect(orphaned).toHaveLength(1);
+    expect(orphaned[0].meta.id).toBe("20260921060000");
+    expect(orphaned[0].blockedBy).toEqual(["20260703000000"]);
+    expect(orphaned[0].blockedOn).toEqual(["market_updates"]);
+  });
+
+  it("blames only the holes that actually provide, not the first five by position", () => {
+    const metas = [
+      withFacts("20260101000000", { creates: ["irrelevant_a"] }),
+      withFacts("20260102000000", { creates: ["irrelevant_b"] }),
+      withFacts("20260103000000", { creates: ["wanted"] }),
+      withFacts("20260201000000", { requires: ["wanted"] }),
+    ];
+    const { orphaned } = partitionByDependency(metas, new Set(["20260201000000"]), new Set());
+    expect(orphaned[0].blockedBy).toEqual(["20260103000000"]);
+  });
+
+  /**
+   * The direction this must fail in. A body nobody could read is a body that
+   * might create or need anything, so it is never narrowed.
+   */
+  it("a hole whose creations could not be read blocks everything after it", () => {
+    const metas = [
+      withFacts("20260101000000"), // no facts: unread
+      withFacts("20260201000000", { requires: [] }),
+    ];
+    const { send, orphaned } = partitionByDependency(metas, new Set(["20260201000000"]), new Set());
+    expect(send).toEqual([]);
+    expect(orphaned[0].blockedBy).toEqual(["20260101000000"]);
+    expect(orphaned[0].blockedOn).toBeUndefined();
+  });
+
+  it("a candidate whose requirements could not be read is blocked by every hole before it", () => {
+    const metas = [
+      withFacts("20260101000000", { creates: [] }),
+      withFacts("20260201000000"), // no facts: unread
+    ];
+    const { send, orphaned } = partitionByDependency(metas, new Set(["20260201000000"]), new Set());
+    expect(send).toEqual([]);
+    expect(orphaned[0].blockedBy).toEqual(["20260101000000"]);
+  });
+
+  it("is byte-identical to the blanket rule when no facts are supplied at all", () => {
+    const metas = [meta("20260101000000"), meta("20260201000000"), meta("20260301000000")];
+    const runnable = new Set(["20260201000000", "20260301000000"]);
+    const { send, orphaned, holes } = partitionByDependency(metas, runnable, new Set());
+    expect(holes).toEqual(["20260101000000"]);
+    expect(send).toEqual([]);
+    expect(orphaned.map((o) => o.meta.id)).toEqual(["20260201000000", "20260301000000"]);
+    expect(orphaned.every((o) => o.blockedBy[0] === "20260101000000")).toBe(true);
+  });
+
+  it("a version this clone already holds is neither a hole nor a blocker", () => {
+    const metas = [
+      withFacts("20260101000000", { creates: ["wanted"] }),
+      withFacts("20260201000000", { requires: ["wanted"] }),
+    ];
+    const { send, orphaned, holes } = partitionByDependency(
+      metas,
+      new Set(["20260201000000"]),
+      new Set(["20260101000000"]),
+    );
+    expect(holes).toEqual([]);
+    expect(orphaned).toEqual([]);
+    expect(send.map((m) => m.id)).toEqual(["20260201000000"]);
+  });
+
+  it("caps blockedBy and blockedOn at maxBlockedBy", () => {
+    const metas = [
+      ...Array.from({ length: 8 }, (_, i) =>
+        withFacts(`2026010${i}000000`, { creates: [`obj_${i}`] }),
+      ),
+      withFacts("20260201000000", { requires: Array.from({ length: 8 }, (_, i) => `obj_${i}`) }),
+    ];
+    const { orphaned } = partitionByDependency(
+      metas,
+      new Set(["20260201000000"]),
+      new Set(),
+      3,
+    );
+    expect(orphaned[0].blockedBy).toHaveLength(3);
+    expect(orphaned[0].blockedOn).toHaveLength(3);
+  });
+});
