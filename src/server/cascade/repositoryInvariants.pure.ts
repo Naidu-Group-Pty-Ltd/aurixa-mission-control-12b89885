@@ -242,6 +242,46 @@ export const REPOSITORY_INVARIANTS: readonly RepositoryInvariant[] = [
       "subject moves often and the assertion about it never follows. The clone runs it — " +
       "`npx vitest run src/lib/reportTemplate`.",
   },
+
+  // The next two were found the way this file prefers: by a cascade doing it,
+  // not by a sweep predicting it. Proposal #16 on that same clone
+  // (prime@05808a3, 22 Sep 2026) delivered
+  // `supabase/functions/_shared/reportDesign/tokens.pure.ts` with
+  // `CONTRAST_FLOOR.body` and `.micro` corrected from 4.5 to the 7
+  // `REPORT_RULES.md` §2 has always specified. The resolver then darkens the
+  // semantic four and the muted ink for the stock they print on — `#D31212`
+  // becomes `#9B0D0D` — and prime RENEGOTIATED both specs in the same commit,
+  // saying so in their own headers: *"the bytes move while the guarantee does
+  // not"*. The subject arrived byte-identical and the renegotiation did not, so
+  // `verify` failed four assertions the clone could do nothing about.
+  //
+  // The precondition this file sets was measured on that branch rather than
+  // assumed. All five modules the two specs reach — `tokens`, `brandResolve`,
+  // `roles`, `charts`, `color` — are byte-identical to prime's there, and the
+  // four symbols prime's newer copies newly import (`mixHex`,
+  // `heatmapAlphaCeiling`, `HEATMAP_ALPHA_FLOOR`, `tileWithItsFigure`) are all
+  // exported by the clone's own tree already. Both specs RAN on that CI — they
+  // failed on a value, never on an import — which is the same fact from the
+  // wire instead of from a glob table.
+  {
+    pattern: "src/lib/reportDesign/__tests__/printContrast.spec.ts",
+    reason:
+      "Asserts the print contrast floors over " +
+      "supabase/functions/_shared/reportDesign/tokens.pure.ts, brandResolve.pure.ts and " +
+      "roles.pure.ts, all three inside module globs. It is the file that decides what a " +
+      "correction to a floor is ALLOWED to move — lightness and not hue — so a floor that " +
+      "cascades without it leaves the clone asserting the pre-correction colours. The clone " +
+      "runs it — `npx vitest run src/lib/reportDesign` in its own ci.yml.",
+  },
+  {
+    pattern: "src/lib/reportDesign/__tests__/reportCharts.spec.ts",
+    reason:
+      "Asserts that a chart takes its ink from the resolved palette and can never be the place " +
+      "risk becomes green, over supabase/functions/_shared/reportDesign/charts.pure.ts and the " +
+      "same tokens module. It reads the semantic inks back out of the rendered SVG, so it moves " +
+      "in the same commit as printContrast and fails for the same reason. The clone runs it — " +
+      "`npx vitest run src/lib/reportDesign`.",
+  },
 ];
 
 /** The globs, for a caller that only needs the patterns. */
