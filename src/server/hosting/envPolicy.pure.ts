@@ -44,6 +44,8 @@
  * it can never publish the prime's.
  */
 
+import { CLONE_BILLING_ID_ENV } from "@/server/cloneBillingIdentity.pure";
+
 /** Prefixes a bundler inlines into client-side code. */
 export const PUBLIC_PREFIXES = ["VITE_", "NEXT_PUBLIC_", "PUBLIC_", "REACT_APP_"] as const;
 
@@ -253,6 +255,24 @@ export type BuildCloneEnvInput = {
    * Never defaulted — a guessed prime ref would refuse the wrong deployments.
    */
   primeProjectRef?: string | null;
+  /**
+   * This clone's own billing identity — `clones.billing_user_id`, published
+   * as `VITE_AURIXA_BILLING_UID`.
+   *
+   * A first-class field rather than an `extra` entry, for the same reason the
+   * Supabase pair is: it is a statement about WHOSE account this deployment
+   * spends against. The prime's bundle compiles in `npc-prime` as its own
+   * last-resort fallback, so a clone that is published nothing here builds a
+   * bundle whose "buy more tokens" link credits the prime's tenant. Named in
+   * `cloneBillingIdentity.pure.ts`, which also refuses to let a clone hold
+   * the prime's id at all.
+   *
+   * Null publishes nothing, which is correct: on the clone's side the
+   * built-in is pair-gated to the prime's Supabase project, so a clone with
+   * no id of its own resolves to NO credential and browses rather than
+   * buying against somebody else's account.
+   */
+  billingUserId?: string | null;
   /** Anything else the operator has configured. Classified by the same rule. */
   extra?: Record<string, string | null | undefined>;
 };
@@ -290,6 +310,7 @@ export function buildCloneEnv(input: BuildCloneEnvInput): CloneEnvVar[] {
   // unauthenticated Supabase client rather than at build time.
   push("VITE_SUPABASE_ANON_KEY", input.supabaseAnonKey);
   push("VITE_SUPABASE_PUBLISHABLE_KEY", input.supabaseAnonKey);
+  push(CLONE_BILLING_ID_ENV, input.billingUserId);
 
   for (const [key, value] of Object.entries(input.extra ?? {})) push(key, value);
 
@@ -356,6 +377,7 @@ export const MANAGED_ENV_NAMES = [
   "VITE_SUPABASE_PROJECT_ID",
   "VITE_SUPABASE_ANON_KEY",
   "VITE_SUPABASE_PUBLISHABLE_KEY",
+  CLONE_BILLING_ID_ENV,
   // Passed through `extra` by the deployment drain. Declared here rather than
   // inferred, because a clone that stops getting a widget must stop carrying
   // the site key of one — a stale key renders a CAPTCHA that verifies against

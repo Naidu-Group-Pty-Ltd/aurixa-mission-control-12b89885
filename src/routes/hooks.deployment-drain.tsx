@@ -237,7 +237,7 @@ async function loadContext(cloneId: string) {
     admin
       .from("clones")
       .select(
-        "id, name, slug, github_owner, github_repo, default_branch, subdomain, subdomain_fqdn",
+        "id, name, slug, github_owner, github_repo, default_branch, subdomain, subdomain_fqdn, billing_user_id",
       )
       .eq("id", cloneId)
       .maybeSingle(),
@@ -553,11 +553,30 @@ async function step(row: DeploymentRow): Promise<StepOutcome> {
         emailNote = e instanceof Error ? e.message : String(e);
       }
 
+      // This clone's OWN billing identity, published here for the same reason
+      // the widget above is: Vite inlines `VITE_*` at BUILD time, so an id
+      // that arrives after `deploying` is an id the bundle does not have.
+      //
+      // Read rather than derived. `clones.billing_user_id` is what every
+      // server-side resolution already uses — `startUidCheckout` looks a
+      // `?uid=` up against this exact column — so deriving a second answer
+      // here is how the bundle's fallback and the server's link come to name
+      // different workspaces. Null publishes nothing, and the clone's own
+      // resolver then declines to spend the prime's built-in identity.
+      const billingUserId = clone.billing_user_id ?? null;
+      if (!billingUserId) {
+        console.warn("[drain] clone has no billing identity; its bundle will carry none", {
+          clone_id: row.clone_id,
+          slug: clone.slug,
+        });
+      }
+
       const vars = buildCloneEnv({
         supabaseUrl: backend.supabase_url,
         supabaseProjectRef: backend.supabase_project_ref,
         supabaseAnonKey: backend.anon_key,
         primeProjectRef,
+        billingUserId,
         extra: { VITE_TURNSTILE_SITE_KEY: turnstileSiteKey },
       });
       const digest = envDigest(vars);
@@ -572,6 +591,7 @@ async function step(row: DeploymentRow): Promise<StepOutcome> {
           ...(synced as Record<string, unknown>),
           turnstile: turnstileNote,
           email: emailNote,
+          billing_uid: billingUserId ?? "none — this clone has no billing identity",
         },
       };
     }

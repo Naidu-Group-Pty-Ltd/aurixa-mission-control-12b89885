@@ -25,6 +25,7 @@ import { useConfirm } from "@/components/confirm-dialog";
 import { CloneActivityHistory } from "@/components/clone-activity-history";
 import { CloneBackendCard } from "@/components/clone-backend-card";
 import { CloneAddonsCard } from "@/components/clone-addons-card";
+import { CloneBillingIdentityCard } from "@/components/clone-billing-identity-card";
 import { ClonePaymentGateCard } from "@/components/clone-payment-gate-card";
 import { CloneDriftPolicyCard } from "@/components/clone-drift-policy-card";
 import { CloneDriftSuggestionsCard } from "@/components/clone-drift-suggestions-card";
@@ -359,6 +360,12 @@ function CloneDetail() {
       >
         <CloneHealthTimeline cloneId={cloneId} />
       </Suspense>
+      {/*
+        Above the gate, because it is the thing the gate's own pay button and
+        every top-up link resolve through: an unset identity is what makes a
+        clone's checkout credit the prime.
+      */}
+      <CloneBillingIdentityCard cloneId={cloneId} />
       <ClonePaymentGateCard cloneId={cloneId} cloneName={clone.name} />
       <CloneAddonsCard cloneId={cloneId} />
 

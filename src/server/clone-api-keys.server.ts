@@ -113,21 +113,56 @@ export async function ensureTenant(
     const patch: Record<string, unknown> = {};
     if (displayName && displayName.length > 0) patch.display_name = displayName;
     // Backfill the tracking id if the clone has one and the tenant does not.
-    if (cloneBillingUserId && !existing.data.billing_user_id) {
+    const backfillingBillingId = Boolean(cloneBillingUserId && !existing.data.billing_user_id);
+    if (backfillingBillingId) {
       patch.billing_user_id = cloneBillingUserId;
       if (cloneBillingStripeCustomerId) {
         patch.billing_stripe_customer_id = cloneBillingStripeCustomerId;
       }
     }
     if (Object.keys(patch).length > 0) {
-      await dbAny
+      const { error: patchErr } = await dbAny
         .from("tenants")
         .update(asRow<TablesUpdate<"tenants">>(patch))
         .eq("id", existing.data.id);
+      /*
+        The error used to be discarded, and this write has a failure that is
+        both EXPECTED and worth telling apart from a fault.
+
+        `tenants_billing_user_id_uidx` is unique across the whole table, while
+        a clone can legitimately have several tenants — `npc-client-dashboard`
+        has two, one carrying 47 ledger rows. So the first call here claims the
+        id and the second gets 23505. That is the healthy state reached from
+        both directions, not a problem: the id is a RANKING HINT
+        (`rankTenantCandidates`, +8) and the decisive signals are ledger
+        activity and the `prime:` external_ref, which already pick the same row.
+
+        Anything else is a real database fault on a write that decides which
+        workspace a purchase credits, and it must not read as success.
+      */
+      if (patchErr) {
+        if (patchErr.code === "23505") {
+          console.info(
+            `[ensureTenant] billing id "${cloneBillingUserId}" already belongs to another ` +
+              `tenant of this clone; tenant ${existing.data.id} keeps none. This is the ` +
+              `expected outcome for a clone with more than one tenant.`,
+          );
+        } else {
+          console.error(
+            `[ensureTenant] could not update tenant ${existing.data.id}: ${patchErr.message}`,
+          );
+        }
+      }
     }
     return {
       ok: true,
       tenantId: existing.data.id,
+      // Unchanged by the outcome above, deliberately. The caller turns this
+      // into a `?uid=` purchase link, and `startUidCheckout` resolves a uid
+      // against `clones` BEFORE `tenants` — so the clone's own id routes
+      // through `resolveCloneBillingTenant`, which picks this clone's metering
+      // tenant by ledger activity whatever any single tenant row carries. A
+      // stamp this row could not take does not make the clone's id less true.
       billingUserId: existing.data.billing_user_id ?? cloneBillingUserId ?? null,
     };
   }
