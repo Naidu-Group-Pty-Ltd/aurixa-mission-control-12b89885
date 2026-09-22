@@ -92,6 +92,21 @@ export const ENTITLEMENT_ONLY_MODULES: Readonly<Record<string, string>> = {
 };
 
 /**
+ * Priced items delivered by a SEPARATE deployment, not by this clone.
+ *
+ * Value is the deployment that serves it. These resolve to nothing here and
+ * that is the correct answer, not a gap: the Builder / Developer Portal was
+ * extracted from the per-clone build to the builders network, and the prime
+ * keeps only `BuilderPortalMoved.tsx` where it used to live. Mapping one onto
+ * a local module would install something the customer did not buy; leaving it
+ * `unmapped` would report a real, settled arrangement as an unanswered
+ * question, which is the signal the unmapped index exists to carry.
+ */
+export const EXTERNAL_DEPLOYMENT_MODULES: Readonly<Record<string, string>> = {
+  "builder-developer-portal": "aurixa-builders",
+};
+
+/**
  * Technical modules every clone needs regardless of tier: the shell the app
  * cannot boot without. Detection names them, but no pricing line ever will,
  * because a customer does not buy "auth" or "platform-core".
@@ -112,7 +127,7 @@ export const ALWAYS_INSTALLED = [
 
 // ─── Mapping ─────────────────────────────────────────────────────────
 
-export type MappingKind = "installs" | "entitlement" | "unmapped";
+export type MappingKind = "installs" | "entitlement" | "external" | "unmapped";
 export type MappingConfidence = "exact" | "alias" | "suggested" | "manual";
 
 export type ModuleMapping = {
@@ -147,6 +162,17 @@ export function mapPricedModule(
     sourceSlug: pm.slug,
     sourceName: pm.name,
   };
+
+  const deployment = EXTERNAL_DEPLOYMENT_MODULES[pm.slug];
+  if (deployment) {
+    return {
+      ...base,
+      kind: "external",
+      moduleSlugs: [],
+      confidence: "exact",
+      reason: `Served by the ${deployment} deployment — nothing installs on this clone.`,
+    };
+  }
 
   const entitlementKey = ENTITLEMENT_ONLY_MODULES[pm.slug];
   if (entitlementKey) {

@@ -8,6 +8,7 @@ import {
   MODULES,
   PURCHASABLE_MODULES,
   gstComponentCents,
+  isModulePurchasable,
   moduleBySlug,
 } from "@/lib/pricing/aurixa-catalog";
 
@@ -35,17 +36,20 @@ describe("planModuleSync", () => {
     expect(plan.missing).toEqual([]);
   });
 
-  it("never plans a roadmap module, and says which it skipped", () => {
+  it("never plans an unsellable module, and says which it skipped", () => {
     const plan = planModuleSync(allRows());
-    const comingSoon = MODULES.filter((m) => m.comingSoon).map((m) => m.slug);
+    const withheld = MODULES.filter((m) => !isModulePurchasable(m.slug)).map((m) => m.slug);
 
-    // The guard that matters: Lenders is on the pricing page so the roadmap is
-    // visible, and it has no price anyone agreed to pay. It must never reach
-    // Stripe — and it must be REPORTED as skipped rather than quietly dropped,
-    // or "18 of 23" reads as a bug.
-    expect(comingSoon).toContain("lenders");
-    expect(plan.skipped).toEqual(comingSoon);
-    for (const slug of comingSoon) {
+    // The guard that matters, now for two reasons rather than one. Lenders is
+    // on the pricing page so the roadmap is visible and has no price anyone
+    // agreed to pay; the Builder / Developer Portal has a price and is sold
+    // directly, on another deployment. Neither may reach Stripe — and both
+    // must be REPORTED as skipped rather than quietly dropped, or "21 of 25"
+    // reads as a bug.
+    expect(withheld).toContain("lenders");
+    expect(withheld).toContain("builder-developer-portal");
+    expect(plan.skipped).toEqual(withheld);
+    for (const slug of withheld) {
       expect(plan.modules.map((m) => m.slug)).not.toContain(slug);
     }
   });
@@ -65,13 +69,18 @@ describe("planModuleSync", () => {
   });
 
   it("pins the AML/CTF module to the gap between the tier headline prices", () => {
-    // Not an arbitrary figure: 699−504, 1055−860 and 2210−2015 all equal 195,
+    // Not an arbitrary figure: 999−849, 1399−1249 and 2699−2549 all equal 150,
     // and the pricing page states it in as many words. If this module's price
     // moves without the tiers moving, the two published figures stop
     // reconciling.
+    //
+    // It is also the figure the model forbids replacing with the $400
+    // reference component — that one is a bundle description, and Stripe is
+    // where charging it would actually take somebody's money.
     const plan = planModuleSync(allRows());
     const aml = plan.modules.find((m) => m.slug === "aml-ctf");
-    expect(aml?.unitAmount).toBe(19_500);
+    expect(aml?.unitAmount).toBe(15_000);
+    expect(aml?.unitAmount).not.toBe(40_000);
   });
 
   it("treats a row as live only when price and link agree", () => {
