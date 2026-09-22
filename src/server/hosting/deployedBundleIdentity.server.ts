@@ -98,6 +98,7 @@ export async function probeDeployedBundle(input: {
   ownRef: string | null | undefined;
   primeRef: string | null | undefined;
   siteKey?: string | null;
+  billingUid?: string | null;
 }): Promise<BundleProbe> {
   const base = input.origin.replace(/\/+$/, "");
   const ctl = new AbortController();
@@ -141,6 +142,7 @@ export async function probeDeployedBundle(input: {
         ownRef: input.ownRef,
         primeRef: input.primeRef,
         siteKey: input.siteKey,
+        billingUid: input.billingUid,
         declaredRef,
         declaredSource,
       });
@@ -159,6 +161,7 @@ export async function probeDeployedBundle(input: {
           ownRef: input.ownRef,
           primeRef: input.primeRef,
           siteKey: input.siteKey,
+          billingUid: input.billingUid,
           declaredRef,
           declaredSource,
         }),
@@ -187,6 +190,7 @@ export async function probeDeployedBundle(input: {
         ownRef: input.ownRef,
         primeRef: input.primeRef,
         siteKey: input.siteKey,
+        billingUid: input.billingUid,
         declaredRef,
         declaredSource,
       });
@@ -254,7 +258,7 @@ export async function verifyCloneBundleIdentity(
 
   const { data: clone } = await admin
     .from("clones")
-    .select("id, name, deploy_url")
+    .select("id, name, deploy_url, billing_user_id")
     .eq("id", cloneId)
     .maybeSingle();
 
@@ -280,10 +284,16 @@ export async function verifyCloneBundleIdentity(
     ownRef: backend?.supabase_project_ref ?? null,
     primeRef: opts.primeRef ?? (await resolvePrimeRef()),
     siteKey: turnstile?.status === "provisioned" ? turnstile.site_key : null,
+    // Asked of the bytes rather than of the column. The column is what the
+    // clone SHOULD be spending against; whether the artefact its customers
+    // downloaded carries it is a different fact, and the only one that decides
+    // where a purchase goes.
+    billingUid: clone?.billing_user_id ?? null,
   });
 
   const decision = shouldRequestResync({
     verdict: reading.verdict,
+    billingUid: reading.billingUid,
     artefact: reading.artefact,
     lastResyncArtefact: row.bundle_resync_artefact,
   });
@@ -293,6 +303,10 @@ export async function verifyCloneBundleIdentity(
     bundle_identity_detail: reading.detail,
     bundle_checked_at: new Date().toISOString(),
     bundle_artefact: reading.artefact,
+    // Beside the backend verdict because it is the same KIND of fact — what
+    // the artefact carries, not what was published to the project — and it is
+    // the one an operator asking "is this clone billing correctly?" needs.
+    bundle_billing_uid: reading.billingUid,
   };
   // Stamped BEFORE the re-sync is requested and whether or not it succeeds —
   // the guard is the attempt, never its outcome.
@@ -319,14 +333,22 @@ export async function verifyCloneBundleIdentity(
     clone_id: cloneId,
     provider_slug: row.provider_slug ?? "vercel",
     action: "verify_bundle_identity",
-    success: !isWrongBackend(reading.verdict),
-    error_message: isWrongBackend(reading.verdict) ? reading.detail : null,
+    // A bundle that serves the right database while crediting the prime for
+    // every purchase made on it is not a successful probe.
+    success: !isWrongBackend(reading.verdict) && reading.billingUid !== "fallback",
+    error_message: isWrongBackend(reading.verdict)
+      ? reading.detail
+      : reading.billingUid === "fallback"
+        ? "The artefact carries no billing identity of its own and falls through to the prime's, " +
+          "so purchases made from this workspace credit the prime."
+        : null,
     payload: {
       verdict: reading.verdict,
       artefact: reading.artefact,
       scanned: reading.scanned,
       bytes_scanned: reading.bytesScanned,
       site_key: reading.siteKey,
+      billing_uid: reading.billingUid,
       resync: decision.resync,
       resync_reason: decision.reason,
     },

@@ -5,6 +5,7 @@
 // import-protection gate refuses `./github-app.server` there, correctly.
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
+import { resolveCloneBillingIdForProvisioning } from "./clone-billing-identity.server";
 import { getAppOctokit } from "./github-app.server";
 import { generateApiKey } from "./clone-api-keys.server";
 import { fireTokenWebhook } from "./token-webhooks.server";
@@ -159,6 +160,29 @@ export async function provisionCloneCore(
     }
   }
 
+  // ─── Which billing identity this clone spends against ────────────────
+  //
+  // Resolved before the insert so the column is never written NULL, and
+  // through the same module that will judge an operator's later change:
+  // what provisioning accepts and what the clone's own page accepts cannot
+  // become two standards.
+  //
+  // It reads the control plane through the admin client rather than through
+  // `supabase`: finding the row that WOULD be shadowed is the whole point, and
+  // a read the caller cannot see answers "nobody holds it".
+  const billingIdentity = await resolveCloneBillingIdForProvisioning({
+    requested: data.billingUserId,
+    slug: data.slug,
+    cloneId: null,
+  });
+  if (billingIdentity.note) {
+    console.warn("[provisionCloneCore] billing identity", {
+      slug: data.slug,
+      source: billingIdentity.source,
+      note: billingIdentity.note,
+    });
+  }
+
   // Insert the clone row
   const { data: inserted, error: insertErr } = await supabase
     .from("clones")
@@ -180,7 +204,7 @@ export async function provisionCloneCore(
       last_synced_sha: lastSyncedSha,
       last_cascade_at: lastSyncedSha ? new Date().toISOString() : null,
       owner_user_id: userId,
-      billing_user_id: data.billingUserId ?? null,
+      billing_user_id: billingIdentity.billingId,
       billing_stripe_customer_id: data.billingStripeCustomerId ?? null,
       notes: data.notes || null,
       isolated_tenant: data.isolatedTenant === true,

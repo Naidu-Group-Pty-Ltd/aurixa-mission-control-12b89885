@@ -195,6 +195,89 @@ describe("readBundleIdentity", () => {
     });
   });
 
+  // `VITE_AURIXA_BILLING_UID` is inlined at BUILD time, so "published to the
+  // hosting project" and "in the artefact the customer downloaded" are
+  // different claims — and only the second decides where a purchase goes.
+  describe("the billing identity", () => {
+    const UID = "preflight-property-group";
+
+    it("is OWN when the artefact carries this clone's own identity", () => {
+      const r = readBundleIdentity({
+        source: `${OWN_BACKEND_SOURCE};const b="${UID}"`,
+        scanned,
+        ownRef: DASHBOARD_CLONE,
+        primeRef: PRIME,
+        billingUid: UID,
+      });
+      expect(r.billingUid).toBe("own");
+    });
+
+    // The one that matters. This is not "we could not find it" — it is "we
+    // found the built-in instead", which means the chunk carrying the identity
+    // WAS read and the identity in it is the prime's.
+    it("is FALLBACK when the built-in is there and the clone's own is not", () => {
+      const r = readBundleIdentity({
+        source: `${OWN_BACKEND_SOURCE};const b="npc-prime"`,
+        scanned,
+        ownRef: DASHBOARD_CLONE,
+        primeRef: PRIME,
+        billingUid: UID,
+      });
+      expect(r.billingUid).toBe("fallback");
+      // And it says nothing about the backend, because they fail apart: this
+      // clone is serving its own database and crediting the prime.
+      expect(r.verdict).toBe("carries_own");
+    });
+
+    // The built-in is compiled into EVERY build as the fallback constant, so a
+    // correctly configured clone's artefact contains both. Reading "the
+    // prime's is present" as the fault would condemn every healthy clone —
+    // the same trap `carries_both` records for the backend ref.
+    it("is OWN even though the built-in is in the same artefact", () => {
+      const r = readBundleIdentity({
+        source: `${OWN_BACKEND_SOURCE};const f="npc-prime",b="${UID}"`,
+        scanned,
+        ownRef: DASHBOARD_CLONE,
+        primeRef: PRIME,
+        billingUid: UID,
+      });
+      expect(r.billingUid).toBe("own");
+    });
+
+    it("is NOT_SCANNED — a statement about the scan — when neither is in what we read", () => {
+      const r = readBundleIdentity({
+        source: OWN_BACKEND_SOURCE,
+        scanned,
+        ownRef: DASHBOARD_CLONE,
+        primeRef: PRIME,
+        billingUid: UID,
+      });
+      expect(r.billingUid).toBe("not_scanned");
+    });
+
+    it("is NONE when the clone has no identity recorded", () => {
+      const r = readBundleIdentity({
+        source: `${OWN_BACKEND_SOURCE};const f="npc-prime"`,
+        scanned,
+        ownRef: DASHBOARD_CLONE,
+        primeRef: PRIME,
+        billingUid: null,
+      });
+      expect(r.billingUid).toBe("none");
+    });
+
+    it("the prime's own build reads OWN rather than condemning itself", () => {
+      const r = readBundleIdentity({
+        source: `${OWN_BACKEND_SOURCE};const b="npc-prime"`,
+        scanned,
+        ownRef: DASHBOARD_CLONE,
+        primeRef: PRIME,
+        billingUid: "npc-prime",
+      });
+      expect(r.billingUid).toBe("own");
+    });
+  });
+
   it("a deployment with no prime configured still gets the own-ref check", () => {
     const r = readBundleIdentity({
       source: OWN_BACKEND_SOURCE,
@@ -446,6 +529,57 @@ describe("the artefact a re-sync is keyed on must survive a rebuild", () => {
       lastResyncArtefact: "declared:env:dduzbchuswwbefdunfct",
     });
     expect(d.resync).toBe(true);
+  });
+});
+
+describe("a bundle carrying the prime's billing identity is its own reason to rebuild", () => {
+  const artefact = "own:dduzbchuswwbefdunfct";
+
+  it("re-syncs on a HEALTHY backend whose artefact falls back to the prime's uid", () => {
+    // They fail apart. A clone can serve its own database perfectly while
+    // every purchase made on it credits the prime.
+    const d = shouldRequestResync({
+      verdict: "carries_own",
+      billingUid: "fallback",
+      artefact,
+      lastResyncArtefact: null,
+    });
+    expect(d.resync).toBe(true);
+    expect(d.reason).toMatch(/credit the prime/);
+  });
+
+  it("does not re-sync on own, not_scanned or none", () => {
+    for (const billingUid of ["own", "not_scanned", "none"] as const) {
+      expect(
+        shouldRequestResync({
+          verdict: "carries_own",
+          billingUid,
+          artefact,
+          lastResyncArtefact: null,
+        }).resync,
+      ).toBe(false);
+    }
+  });
+
+  it("obeys the same once-per-artefact guard", () => {
+    // A rebuild that produced the same artefact did not help, and grinding at
+    // it is what the guard exists to stop — whichever fault drove it.
+    const d = shouldRequestResync({
+      verdict: "carries_own",
+      billingUid: "fallback",
+      artefact,
+      lastResyncArtefact: artefact,
+    });
+    expect(d.resync).toBe(false);
+  });
+
+  it("a caller that did not read it is unchanged", () => {
+    expect(
+      shouldRequestResync({ verdict: "carries_own", artefact, lastResyncArtefact: null }).resync,
+    ).toBe(false);
+    expect(
+      shouldRequestResync({ verdict: "carries_prime", artefact, lastResyncArtefact: null }).resync,
+    ).toBe(true);
   });
 });
 

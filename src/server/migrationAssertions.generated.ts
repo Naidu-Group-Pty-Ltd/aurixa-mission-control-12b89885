@@ -751,4 +751,14 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "cron", jobname: "fleet-migration-drain-5min" },
     ],
   },
+  {
+    migration: "20260922160000_backfill_clone_billing_identity.sql",
+    version: "20260922160000",
+    assertions: [{ kind: "rows", table: "clones", atLeast: 4 }],
+  },
+  {
+    migration: "20260922170000_clone_deployment_bundle_billing_uid.sql",
+    version: "20260922170000",
+    assertions: [{ kind: "column", table: "clone_deployments", column: "bundle_billing_uid" }],
+  },
 ];

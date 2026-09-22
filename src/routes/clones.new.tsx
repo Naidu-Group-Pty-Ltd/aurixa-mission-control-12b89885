@@ -1130,7 +1130,9 @@ function NewClone() {
           <CardDescription>
             The tracking user ID ties this clone's Stripe payments, purchased products and token
             usage together. It also becomes the <span className="font-mono">?uid=</span> key the
-            Aurixa Systems pricing page uses to send this client straight into checkout.
+            Aurixa Systems pricing page uses to send this client straight into checkout, and is
+            published into the clone's own build as{" "}
+            <span className="font-mono">VITE_AURIXA_BILLING_UID</span>.
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4 md:grid-cols-2">
@@ -1142,7 +1144,9 @@ function NewClone() {
               placeholder="e.g. acme-corp or a CRM user id"
             />
             <p className="text-xs text-muted-foreground">
-              Unique per clone. Leave blank to assign later.
+              Unique per clone. Leave blank and the slug is used — a clone with none has no way for
+              its customers to pay, so this is never left unset. Changeable afterwards on the
+              clone's own page.
             </p>
           </div>
           <div className="space-y-2">

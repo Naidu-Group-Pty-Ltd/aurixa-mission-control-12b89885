@@ -112,14 +112,114 @@ if (PUBLIC_PREFIXES.length === 0) throw new Error("unreachable");
         `worker was restructured, update this check with it — a check that cannot ` +
         `find its subject silently stops checking.`,
     );
-  } else if (!/\bprimeProjectRef\b/.test(call[1])) {
+  } else {
+    if (!/\bprimeProjectRef\b/.test(call[1])) {
+      failures.push(
+        `${DRAIN}  builds a clone environment without passing primeProjectRef. ` +
+          `buildCloneEnv can only refuse an environment that names the prime's ` +
+          `backend when it is told which project that is, so dropping this argument ` +
+          `turns the rule off with nothing failing. Resolve it with ` +
+          `resolvePrimeBackendRef() and pass it in.`,
+      );
+    }
+    // 4. A CLONE WHOSE BUNDLE SPENDS SOMEBODY ELSE'S ACCOUNT.
+    //
+    // `VITE_AURIXA_BILLING_UID` is the same shape of omission with money on
+    // it. The prime's bundle compiles in `npc-prime` as its own fallback, and
+    // a clone built without one of its own falls through to exactly that —
+    // so a customer's "buy more tokens" credits the PRIME's balance. Nothing
+    // fails: the build is green, the link works, the money moves.
+    //
+    // The field is optional on `buildCloneEnv` (a clone that has no identity
+    // yet must still deploy), so only the call site can assert it is offered.
+    if (!/\bbillingUserId\b/.test(call[1])) {
+      failures.push(
+        `${DRAIN}  builds a clone environment without passing billingUserId. ` +
+          `Vite inlines VITE_* at BUILD time, so an identity that is not in the ` +
+          `environment here is one the bundle does not have — and the clone then ` +
+          `falls back to the prime's built-in uid, crediting the prime for its own ` +
+          `customers' purchases. Read clones.billing_user_id and pass it in.`,
+      );
+    }
+  }
+}
+
+// ── 5. Provisioning must not write a clone with no billing identity ────────
+//
+// `billing_user_id: data.billingUserId ?? null` is what this was, and it is
+// why every clone in the fleet carried NULL: the wizard's field defaults
+// blank. The insert goes through `resolveCloneBillingIdForProvisioning`, which
+// derives one from the slug when nobody named one and refuses an id a tenant
+// already holds.
+{
+  const PROV = "src/server/clone-provisioning.server.ts";
+  const src = readFileSync(PROV, "utf8");
+  const line = src.match(/^\s*billing_user_id:.*$/m);
+  if (!line) {
     failures.push(
-      `${DRAIN}  builds a clone environment without passing primeProjectRef. ` +
-        `buildCloneEnv can only refuse an environment that names the prime's ` +
-        `backend when it is told which project that is, so dropping this argument ` +
-        `turns the rule off with nothing failing. Resolve it with ` +
-        `resolvePrimeBackendRef() and pass it in.`,
+      `${PROV}  no billing_user_id written on the clone insert. A clone with no ` +
+        `billing identity has no way for its customers to pay — see ` +
+        `src/server/cloneBillingIdentity.pure.ts.`,
     );
+  } else if (/data\.billingUserId/.test(line[0])) {
+    failures.push(
+      `${PROV}  writes the operator's billingUserId straight onto the clone. It ` +
+        `must go through resolveCloneBillingIdForProvisioning(), which derives one ` +
+        `from the slug when the field is blank (which it is by default) and refuses ` +
+        `an id a tenant already holds — a clone holding a tenant's id SHADOWS it, ` +
+        `because startUidCheckout resolves a uid against clones before tenants.`,
+    );
+  }
+}
+
+// ── 6. The shadow check never reads through the caller's client ────────────
+//
+// Finding the row that WOULD be shadowed is the whole job, and RLS FILTERS
+// rather than erroring — so a read the caller cannot see answers `{ data:
+// null, error: null }`, which reads as "nobody holds it": exactly the answer
+// that lets a shadowing id through. `supabaseAdmin` is the default on every
+// function in the module and the `db` parameter is the test double's; a
+// production call site that passes its own client has quietly narrowed a
+// safety check to whatever that session can see.
+{
+  const IDENT = "src/server/clone-billing-identity.server.ts";
+  const src = readFileSync(IDENT, "utf8");
+  for (const fn of [
+    "billingIdHolders",
+    "checkCloneBillingId",
+    "resolveCloneBillingIdForProvisioning",
+    "setCloneBillingId",
+  ]) {
+    const sig = src.match(new RegExp(`export async function ${fn}\\(([\\s\\S]*?)\\):`));
+    if (!sig) {
+      failures.push(`${IDENT}  ${fn} not found. If it was renamed, update this check with it.`);
+    } else if (!/db:\s*Db\s*=\s*supabaseAdmin/.test(sig[1])) {
+      failures.push(
+        `${IDENT}  ${fn} does not default its client to supabaseAdmin. The holder lookup ` +
+          `is a safety check and RLS filters rather than erroring, so a read the caller ` +
+          `cannot see reports "nobody holds it" — the one answer that lets a clone be ` +
+          `given an id a tenant already holds.`,
+      );
+    }
+  }
+  for (const CALLER of [
+    "src/server/clone-provisioning.server.ts",
+    "src/server/clone-billing-identity.functions.ts",
+  ]) {
+    const caller = readFileSync(CALLER, "utf8");
+    const passing = caller.match(
+      /\b(?:billingIdHolders|checkCloneBillingId|resolveCloneBillingIdForProvisioning)\([\s\S]{0,400}?\)/g,
+    );
+    for (const call of passing ?? []) {
+      if (/\b(?:supabase|supabaseAdmin|db)\b\s*(?:,|\))/.test(call)) {
+        failures.push(
+          `${CALLER}  passes a client into the billing-identity lookup:\n    ` +
+            `${call.split("\n")[0].trim()}\n  Leave it off. The default is supabaseAdmin and ` +
+            `the parameter is the test double's — a caller-scoped read cannot see the row ` +
+            `it exists to find.`,
+        );
+      }
+    }
   }
 }
 

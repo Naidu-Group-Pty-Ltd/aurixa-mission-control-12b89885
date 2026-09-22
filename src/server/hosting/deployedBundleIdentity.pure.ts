@@ -50,6 +50,8 @@
  */
 
 /** The Supabase project ref pattern, as it appears in a URL or a JWT claim. */
+import { PRIME_BUILT_IN_BILLING_ID } from "@/server/cloneBillingIdentity.pure";
+
 const REF = /^[a-z0-9]{16,32}$/;
 
 export type BundleIdentityVerdict =
@@ -70,6 +72,33 @@ export type BundleIdentityVerdict =
 export type SiteKeyReading = "present" | "not_scanned" | "no_widget";
 
 /**
+ * Which billing identity the bundle is actually carrying.
+ *
+ * The same shape of question as `SiteKeyReading` and for the same reason —
+ * `VITE_AURIXA_BILLING_UID` is inlined at BUILD time, so a value published to
+ * the hosting project and a value in the artefact are different claims — but
+ * with one extra state, because this one has a wrong answer and not merely an
+ * absent one. A clone whose bundle carries no identity of its own falls
+ * through to the prime's built-in, and its customers' purchases credit the
+ * PRIME's balance. Nothing fails: the build is green and the link works.
+ *
+ * `fallback` and `not_scanned` are kept apart for `names_neither`'s reason.
+ * Seeing the built-in and not the clone's own means we read the chunk that
+ * carries the identity and the identity there is wrong — a statement about the
+ * CLONE. Seeing neither means we did not reach that chunk — a statement about
+ * the SCAN. Only the first is worth a rebuild.
+ */
+export type BillingUidReading =
+  /** The artefact carries this clone's own identity. */
+  | "own"
+  /** It does not, and the prime's built-in is there instead: purchases credit the prime. */
+  | "fallback"
+  /** It has one and neither it nor the built-in was in what we read. */
+  | "not_scanned"
+  /** The clone has no identity recorded, so there is nothing to look for. */
+  | "none";
+
+/**
  * How the verdict was reached.
  *
  * `manifest` is the build stating what it resolved, through the same pure
@@ -88,6 +117,7 @@ export type BundleIdentityReading = {
   ownRefSeen: boolean;
   primeRefSeen: boolean;
   siteKey: SiteKeyReading;
+  billingUid: BillingUidReading;
   /** Which asset paths were read, so "not found" can be judged against what was searched. */
   scanned: string[];
   bytesScanned: number;
@@ -145,6 +175,8 @@ export type BundleIdentityInput = {
   primeRef: string | null | undefined;
   /** The site key this clone's widget was minted with, when it has one. */
   siteKey?: string | null;
+  /** The billing identity this clone is recorded as spending against, when it has one. */
+  billingUid?: string | null;
   /**
    * The project ref this build DECLARED in `/version.json`, when it publishes
    * one. Authoritative: it comes from the same resolver the client runs, so
@@ -174,11 +206,27 @@ export function readBundleIdentity(input: BundleIdentityInput): BundleIdentityRe
       ? "present"
       : "not_scanned";
 
+  // Asked of the bytes, never of the configuration — the whole reason this
+  // module exists. `own` is checked FIRST and wins outright: the built-in is
+  // compiled into every build by construction, so a correctly configured
+  // clone's artefact contains both, exactly as `carries_both` records for the
+  // backend ref. Reading "the prime's is present" as a fault would condemn
+  // every healthy clone in the fleet.
+  const ownUid = (input.billingUid ?? "").trim().toLowerCase();
+  const billingUid: BillingUidReading = !ownUid
+    ? "none"
+    : input.source.includes(ownUid)
+      ? "own"
+      : input.source.includes(PRIME_BUILT_IN_BILLING_ID)
+        ? "fallback"
+        : "not_scanned";
+
   const base = {
     via: "scan" as BundleIdentitySource,
     ownRefSeen: false,
     primeRefSeen: false,
     siteKey,
+    billingUid,
     scanned,
     bytesScanned,
   };
@@ -303,13 +351,26 @@ export function readBundleIdentity(input: BundleIdentityInput): BundleIdentityRe
  */
 export function shouldRequestResync(input: {
   verdict: BundleIdentityVerdict;
+  /**
+   * What the artefact says about the clone's billing identity, when that was
+   * read. `fallback` is a second, independent reason to rebuild and is kept
+   * separate from the backend verdict because they fail apart: a clone can
+   * serve its own database perfectly while every purchase from it credits the
+   * prime. Optional so that a caller which did not read it is unchanged.
+   */
+  billingUid?: BillingUidReading;
   /** The artefact this reading was taken from, e.g. the entry asset path. */
   artefact: string | null;
   /** The artefact a resync was last requested for, if any. */
   lastResyncArtefact: string | null | undefined;
 }): { resync: boolean; reason: string } {
-  if (!isWrongBackend(input.verdict)) {
-    return { resync: false, reason: "the bundle is not naming the wrong backend" };
+  const wrongBackend = isWrongBackend(input.verdict);
+  const wrongBilling = input.billingUid === "fallback";
+  if (!wrongBackend && !wrongBilling) {
+    return {
+      resync: false,
+      reason: "the bundle names neither the wrong backend nor the wrong billing identity",
+    };
   }
   if (!input.artefact) {
     return { resync: false, reason: "no artefact to attribute the reading to" };
@@ -322,10 +383,14 @@ export function shouldRequestResync(input: {
         "That is a fault in the clone's own source, not in what was published to it.",
     };
   }
+  const fault = wrongBackend
+    ? wrongBilling
+      ? "the bundle names the wrong backend AND carries the prime's billing identity"
+      : "the bundle names the wrong backend"
+    : "the bundle carries the prime's billing identity, so this clone's customers' purchases credit the prime";
   return {
     resync: true,
-    reason:
-      "the published environment may not have reached the build; rebuilding with it is the one remedy that can",
+    reason: `${fault}; the published environment may not have reached the build, and rebuilding with it is the one remedy that can`,
   };
 }
 

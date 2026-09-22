@@ -309,8 +309,12 @@ describe("stale managed variables", () => {
   it("covers every name buildCloneEnv can emit", () => {
     // The failure this catches: somebody adds a push and forgets the list, so
     // the new name can never be retired later.
+    // Every input the function takes, because a fixture that omits one is a
+    // fixture that cannot see the name it would have emitted — which is the
+    // exact shape of the failure this test exists to catch.
     const emitted = buildCloneEnv({
       ...cloneBackend,
+      billingUserId: "acme-corp",
       extra: { VITE_TURNSTILE_SITE_KEY: "0x4AAA" },
     }).map((v) => v.key);
     for (const name of emitted) expect(MANAGED_ENV_NAMES).toContain(name);
@@ -329,9 +333,7 @@ describe("stale managed variables", () => {
  * `statusSince: row.status_since` rather than trusting `judgeWait`.
  */
 describe("the hosting provider actually prunes", () => {
-  const PROVIDER = stripComments(
-    readFileSync("src/server/hosting/vercel-provider.ts", "utf8"),
-  );
+  const PROVIDER = stripComments(readFileSync("src/server/hosting/vercel-provider.ts", "utf8"));
 
   const syncEnv = PROVIDER.slice(
     PROVIDER.indexOf("async syncEnv("),
