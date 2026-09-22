@@ -1251,8 +1251,8 @@ function DeliveryPanel({ lead, emails }: { lead: Record<string, unknown>; emails
                 Stage {row.stage} · {row.audience}
               </span>
               {row.sent_at && <span className="text-muted-foreground">{stamp(row.sent_at)}</span>}
-              {row.to_address && (
-                <span className="truncate text-muted-foreground">{row.to_address}</span>
+              {recipientReading(row) && (
+                <span className="truncate text-muted-foreground">{recipientReading(row)}</span>
               )}
               {(row.reason || row.last_error) && (
                 <span className="text-muted-foreground/80">{row.reason ?? row.last_error}</span>
@@ -1263,6 +1263,27 @@ function DeliveryPanel({ lead, emails }: { lead: Record<string, unknown>; emails
       ) : null}
     </Panel>
   );
+}
+
+/**
+ * Who a stage email actually reached, said in one line.
+ *
+ * `to_address` holds the FIRST recipient and nothing else, so on an internal
+ * notification going to five people it renders one address \u2014 which reads as
+ * "one person was told". The count is what the operator needs, and where the
+ * list collapsed to the sending mailbox because nobody was configured, that is
+ * the fact the whole cutover turns on and it is said in words rather than left
+ * to be inferred from an address that happens to look like the mailbox.
+ */
+function recipientReading(row: StageEmailRow): string | null {
+  const list = Array.isArray(row.recipients) ? row.recipients.filter(Boolean) : [];
+  const head = list[0] ?? row.to_address;
+  if (!head) return null;
+  const more = list.length > 1 ? ` +${list.length - 1}` : "";
+  // `mailbox_fallback` is the one source worth naming on the row: it means the
+  // team list was not configured and only the sending mailbox was told.
+  const note = row.recipient_source === "mailbox_fallback" ? " \u00b7 sending mailbox only" : "";
+  return `${head}${more}${note}`;
 }
 
 function DetailItem({

@@ -6932,6 +6932,7 @@ export type Database = {
           lead_id: string
           mailbox: string | null
           reason: string | null
+          recipient_source: string | null
           recipients: string[]
           sent_at: string | null
           stage: number
@@ -6952,6 +6953,7 @@ export type Database = {
           lead_id: string
           mailbox?: string | null
           reason?: string | null
+          recipient_source?: string | null
           recipients?: string[]
           sent_at?: string | null
           stage: number
@@ -6972,6 +6974,7 @@ export type Database = {
           lead_id?: string
           mailbox?: string | null
           reason?: string | null
+          recipient_source?: string | null
           recipients?: string[]
           sent_at?: string | null
           stage?: number

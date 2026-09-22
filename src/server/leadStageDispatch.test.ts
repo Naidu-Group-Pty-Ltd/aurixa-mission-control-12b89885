@@ -1,0 +1,240 @@
+// The dispatcher's recipient path, driven with real code and a fake transport.
+//
+// Every case here was found by execution rather than by reading, and each one
+// reported as normal operation before it was fixed: a suppressed colleague
+// looked like a healthy `sent`, an unreadable register looked like a register
+// that said no, and a stale recipient list looked like a delivery to five
+// people that reached one.
+import { describe, it, expect, beforeEach, vi } from "vitest";
+
+const state = vi.hoisted(() => ({
+  claimed: [] as Record<string, unknown>[],
+  suppressionRows: [] as { email_key: string }[],
+  suppressionError: null as { message: string } | null,
+  settles: [] as { id: string; patch: Record<string, unknown> }[],
+  notices: [] as Record<string, unknown>[],
+  sent: [] as { mailbox: string; message: Record<string, unknown> }[],
+  outcome: { kind: "sent", status: 202, requestId: "rq" } as Record<string, unknown>,
+}));
+
+vi.mock("@/server/graph-client", () => ({
+  isGraphConfigured: () => true,
+  defaultMailbox: () => "hello@aurixasystems.com.au",
+  sendMail: async (mailbox: string, message: Record<string, unknown>) => {
+    state.sent.push({ mailbox, message });
+    return state.outcome;
+  },
+}));
+
+vi.mock("@/server/audit.server", () => ({
+  notifyOperators: async (notice: Record<string, unknown>) => {
+    state.notices.push(notice);
+  },
+}));
+
+vi.mock("@/integrations/supabase/client.server", () => ({
+  supabaseAdmin: {
+    rpc: async () => ({ data: state.claimed, error: null }),
+    from(table: string) {
+      if (table === "waitlist_leads") {
+        return {
+          select: () => ({
+            in: async () => ({
+              data: [
+                {
+                  id: "lead-1",
+                  email: "applicant@example.com",
+                  first_name: "Ada",
+                  last_name: "Lovelace",
+                  application_id: "AX-0000000001",
+                  created_at: "2026-09-22T00:00:00.000Z",
+                  submitted_at: "2026-09-22T00:00:00.000Z",
+                },
+              ],
+            }),
+          }),
+        };
+      }
+      if (table === "email_suppressions") {
+        return {
+          select: () => ({
+            in: async () => ({ data: state.suppressionRows, error: state.suppressionError }),
+          }),
+        };
+      }
+      return {
+        update: (patch: Record<string, unknown>) => ({
+          eq: async (_column: string, id: string) => {
+            state.settles.push({ id, patch });
+            return { error: null };
+          },
+        }),
+      };
+    },
+  },
+}));
+
+import { dispatchStageEmails } from "./lead-stage-emails.server";
+
+const TEAM = ["admin", "rugesh", "lavan", "arvinraj", "mithrubanbupathy"].map(
+  (name) => `${name}@aurixasystems.com.au`,
+);
+
+const row = (over: Record<string, unknown> = {}) => ({
+  id: "row-1",
+  lead_id: "lead-1",
+  stage: 1,
+  audience: "internal",
+  recipients: TEAM,
+  reason: null,
+  attempts: 1,
+  ...over,
+});
+
+const wire = () =>
+  ((state.sent[0]?.message.toRecipients as { emailAddress: { address: string } }[]) ?? []).map(
+    (r) => r.emailAddress.address,
+  );
+const patch = () => state.settles[0]?.patch ?? {};
+
+beforeEach(() => {
+  state.claimed = [];
+  state.suppressionRows = [];
+  state.suppressionError = null;
+  state.settles = [];
+  state.notices = [];
+  state.sent = [];
+  state.outcome = { kind: "sent", status: 202, requestId: "rq" };
+  process.env.MICROSOFT_MAILBOX_EMAIL = "hello@aurixasystems.com.au";
+  process.env.LEAD_STAGE_INTERNAL_RECIPIENTS = TEAM.join(",");
+  delete process.env.LEAD_STAGE_INTERNAL_STAGES;
+});
+
+describe("the whole team is on the wire", () => {
+  it("puts every configured recipient on the message, not just the first", async () => {
+    state.claimed = [row()];
+    const result = await dispatchStageEmails();
+    expect(wire()).toEqual(TEAM);
+    expect(result).toMatchObject({ claimed: 1, sent: 1 });
+  });
+});
+
+describe("a recipient list that has gone stale", () => {
+  it("re-resolves an internal send from the CURRENT deployment, not from the row", async () => {
+    // Measured: the ledger upserts with `ignoreDuplicates`, so a row raised
+    // while the recipient list was unset keeps the fallback FOR EVER, and the
+    // unique index means it can never be raised again. The ordinary cutover
+    // sequence — deploy, notice the list is not set, set it — left every
+    // queued lead notifying one address while the console read `sent`.
+    state.claimed = [row({ recipients: ["hello@aurixasystems.com.au"] })];
+    await dispatchStageEmails();
+    expect(wire()).toEqual(TEAM);
+    expect(String(patch().reason)).toContain("re-resolved at send");
+  });
+
+  it("says nothing extra when the row already agrees with the deployment", async () => {
+    state.claimed = [row()];
+    await dispatchStageEmails();
+    expect(patch().reason).toBeNull();
+  });
+
+  it("keeps the row's own recipients when the deployment has only a fallback", async () => {
+    // A `mailbox_fallback` is not an answer about who should be told, it is an
+    // admission that nobody is configured. Letting it overrule a row that
+    // already names real recipients would be the same five-to-one collapse
+    // this re-resolution exists to prevent, arrived at from the other side.
+    delete process.env.LEAD_STAGE_INTERNAL_RECIPIENTS;
+    state.claimed = [row({ recipients: ["standing@aurixasystems.com.au"] })];
+    await dispatchStageEmails();
+    expect(wire()).toEqual(["standing@aurixasystems.com.au"]);
+    expect(patch().reason).toBeNull();
+  });
+
+  it("leaves an APPLICANT row alone — their address is a fact about the lead", async () => {
+    state.claimed = [row({ audience: "applicant", recipients: ["applicant@example.com"] })];
+    await dispatchStageEmails();
+    expect(wire()).toEqual(["applicant@example.com"]);
+  });
+});
+
+describe("the do-not-send register", () => {
+  it("holds the batch rather than burning it when the register cannot be read", async () => {
+    // `suppressed` is terminal. Recording it on a statement timeout drops the
+    // notification permanently and records a reason that says the opposite of
+    // what happened — nobody was on the register, the register was not read.
+    state.suppressionError = { message: "57014 statement timeout" };
+    state.claimed = [row()];
+    const result = await dispatchStageEmails();
+
+    expect(state.sent).toHaveLength(0);
+    expect(patch().status).toBe("pending");
+    expect(patch().claimed_at).toBeNull();
+    expect(String(patch().last_error)).toContain("could not be read");
+    expect(patch().reason).toBeUndefined();
+    expect(result.suppressed).toBe(0);
+  });
+
+  it("raises the unreadable register to an operator, because nothing else would", async () => {
+    state.suppressionError = { message: "57014 statement timeout" };
+    state.claimed = [row()];
+    await dispatchStageEmails();
+    expect(state.notices).toHaveLength(1);
+    expect(String(state.notices[0].title)).toContain("could not be read");
+  });
+
+  it("still refuses when the register ANSWERED and named everybody", async () => {
+    state.suppressionRows = TEAM.map((email_key) => ({ email_key }));
+    state.claimed = [row()];
+    const result = await dispatchStageEmails();
+    expect(state.sent).toHaveLength(0);
+    expect(patch().status).toBe("suppressed");
+    expect(result.suppressed).toBe(1);
+  });
+
+  it("raises a suppressed COLLEAGUE, who otherwise stops being told in silence", async () => {
+    // A team recipient on the register is anomalous — nobody unsubscribes
+    // themselves from their own lead alerts. Once this is the sole notifier,
+    // the failure is that one person is never told again while every ledger
+    // row reads `sent`.
+    state.suppressionRows = [{ email_key: "rugesh@aurixasystems.com.au" }];
+    state.claimed = [row()];
+    await dispatchStageEmails();
+
+    expect(wire()).toHaveLength(4);
+    expect(patch().status).toBe("sent");
+    expect(String(patch().reason)).toContain("1 recipient(s) suppressed");
+    expect(state.notices).toHaveLength(1);
+    expect(String(state.notices[0].body)).toContain("rugesh@aurixasystems.com.au");
+  });
+
+  it("raises nothing for a suppressed APPLICANT — that is the register working", async () => {
+    state.suppressionRows = [{ email_key: "applicant@example.com" }];
+    state.claimed = [
+      row({ audience: "applicant", recipients: ["applicant@example.com", "cc@example.com"] }),
+    ];
+    await dispatchStageEmails();
+    expect(state.notices).toHaveLength(0);
+  });
+});
+
+describe("what reaches Microsoft Graph", () => {
+  it("never carries an address the register cannot key", async () => {
+    // Graph refuses the WHOLE message for one bad recipient, and an address
+    // `emailKey` cannot read is invisible to the suppression lookup — so one
+    // malformed entry either silences the notification for everybody or mails
+    // somebody who asked us to stop.
+    process.env.LEAD_STAGE_INTERNAL_RECIPIENTS = `${TEAM[0]}, Rugesh Naidu, ${TEAM[1]}\\`;
+    state.claimed = [row()];
+    await dispatchStageEmails();
+    expect(wire()).toEqual([TEAM[0]]);
+    expect(state.sent).toHaveLength(1);
+  });
+
+  it("answers the applicant on an internal send, because reply is the act", async () => {
+    state.claimed = [row()];
+    await dispatchStageEmails();
+    expect(state.sent[0].message.replyTo).toEqual([
+      { emailAddress: { address: "applicant@example.com" } },
+    ]);
+  });
+});

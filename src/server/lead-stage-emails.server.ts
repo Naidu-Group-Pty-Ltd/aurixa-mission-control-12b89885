@@ -100,14 +100,33 @@ export async function enqueueStageEmails(input: EnqueueInput): Promise<EnqueueRe
       const recipients =
         audience === "internal" ? p.internalRecipients : [String(lead.email ?? "")].filter(Boolean);
 
+      // The resolution travels with the obligation. `mailbox_fallback` on an
+      // internal row is the reading that means fewer people were told than
+      // whoever set this up believes — it must survive to the sent row rather
+      // than being recomputed later against an environment that has changed.
+      const recipientSource = audience === "internal" ? p.internalRecipientSource : "applicant";
+      const droppedNote =
+        audience === "internal" && p.internalRecipientsDropped.length
+          ? p.internalRecipientsDropped.map((d) => `${d.value} (${d.reason})`).join(", ")
+          : null;
+      const note = [
+        recipientSource === "mailbox_fallback"
+          ? "no LEAD_STAGE_INTERNAL_RECIPIENTS set — only the sending mailbox was told"
+          : null,
+        droppedNote ? `dropped from the recipient list: ${droppedNote}` : null,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+
       rows.push({
         lead_id: input.leadId,
         stage,
         audience,
         status: decision.verdict === "send" ? "pending" : "skipped",
-        reason: decision.verdict === "skip" ? decision.reason : null,
+        reason: decision.verdict === "skip" ? decision.reason : note || null,
         to_address: recipients[0] ?? null,
         recipients,
+        recipient_source: recipientSource === "none" ? null : recipientSource,
         mailbox: p.mailbox,
       });
       if (decision.verdict === "send") out.queued += 1;
@@ -201,7 +220,21 @@ export async function dispatchStageEmails(limit = DISPATCH_BATCH): Promise<Dispa
     .in("id", leadIds);
   const leads = new Map((leadRows ?? []).map((row) => [row.id as string, row]));
 
-  const suppressed = await readSuppressions(batch);
+  const register = await readSuppressions(batch);
+  const suppressed = register.keys;
+  if (!register.readable) {
+    // A notifier that cannot verify its own do-not-send register is an outage,
+    // not a quiet skip \u2014 and this is the one fault in the path that leaves
+    // every obligation in the batch undelivered at once.
+    await notifyOperators({
+      kind: "lead_stage_email_failed",
+      severity: "warning",
+      title: "Lead stage emails held: the do-not-send register could not be read",
+      body: `${batch.length} obligation(s) were returned to pending rather than sent. Nobody is being emailed until the register answers.`,
+      url: "/leads",
+      metadata: { claimed: batch.length },
+    });
+  }
 
   for (const row of batch) {
     const lead = leads.get(row.lead_id);
@@ -214,7 +247,48 @@ export async function dispatchStageEmails(limit = DISPATCH_BATCH): Promise<Dispa
       continue;
     }
 
-    const recipients = (row.recipients ?? []).filter(Boolean);
+    // WHO an internal notification goes to is a property of the deployment as
+    // it now stands, not of the moment the obligation was raised \u2014 the same
+    // reasoning that composes the body from the current lead row.
+    //
+    // Measured: the ledger upserts with `ignoreDuplicates`, so a row raised
+    // while `LEAD_STAGE_INTERNAL_RECIPIENTS` was unset keeps
+    // `["<the sending mailbox>"]` for ever, and `UNIQUE (lead_id, stage,
+    // audience)` means it can never be raised again. Reading `row.recipients`
+    // here meant the ordinary cutover sequence \u2014 deploy, notice the list is
+    // not set, set it \u2014 left every already-queued lead notifying one address,
+    // permanently, with the console showing a healthy `sent` row.
+    //
+    // The applicant's own address is NOT this: it is a fact about the lead, it
+    // was resolved from the lead row, and it stays on the row.
+    const stored = (row.recipients ?? []).filter(Boolean);
+    //
+    // For an internal notification, in this order:
+    //
+    //   1. the list this deployment has CONFIGURED \u2014 it is the live answer
+    //   2. else the list the row was raised with \u2014 it knew something
+    //   3. else the deployment's fallback \u2014 better one person than nobody
+    //
+    // Step 1 outranks step 2 and step 2 outranks step 3, and the middle
+    // ordering is the one worth stating: a `mailbox_fallback` is not an answer
+    // about who should be told, it is an admission that nobody is configured.
+    // Letting it overrule a row that already names real recipients would be
+    // the same silent collapse from five addresses to one, arrived at from the
+    // other direction.
+    const configured =
+      row.audience === "internal" && p.internalRecipientSource === "configured"
+        ? p.internalRecipients
+        : [];
+    const fallback = row.audience === "internal" ? p.internalRecipients : [];
+    const recipients = configured.length ? configured : stored.length ? stored : fallback;
+    // A row whose stored list no longer matches the deployment is evidence the
+    // configuration changed after it was raised. Say so rather than silently
+    // serving the better answer.
+    const rewritten =
+      configured.length && !sameAddresses(configured, stored)
+        ? `recipients re-resolved at send: ${stored.length} \u2192 ${configured.length}`
+        : null;
+
     if (recipients.length === 0) {
       await settle(row.id, { status: "skipped", reason: "no recipient address" });
       out.skipped += 1;
@@ -226,6 +300,20 @@ export async function dispatchStageEmails(limit = DISPATCH_BATCH): Promise<Dispa
     // not to hear from us is never mailed by a backstop.
     const blocked = recipients.filter((address) => suppressed.has(emailKey(address) ?? address));
     const sendable = recipients.filter((address) => !blocked.includes(address));
+
+    if (!register.readable) {
+      // Held, not refused. The register could not be read, so we do not know
+      // whether anybody is on it \u2014 and "we could not look" is not "everybody
+      // is on it". Back to pending, where the next tick tries again.
+      await settle(row.id, {
+        status: "pending",
+        claimed_at: null,
+        last_error: "the do-not-send register could not be read \u2014 held rather than sent",
+      });
+      out.skipped += 1;
+      continue;
+    }
+
     if (sendable.length === 0) {
       await settle(row.id, {
         status: "suppressed",
@@ -268,9 +356,40 @@ export async function dispatchStageEmails(limit = DISPATCH_BATCH): Promise<Dispa
         to_address: sendable[0],
         graph_status: outcome.status,
         graph_request_id: outcome.requestId,
-        reason: blocked.length ? `${blocked.length} recipient(s) suppressed` : null,
+        // The row already carries how its recipient list was resolved. A
+        // successful send must not erase that: "sent" and "sent to one person
+        // because nobody configured the list" are different facts.
+        reason:
+          [
+            row.reason,
+            rewritten,
+            blocked.length ? `${blocked.length} recipient(s) suppressed` : null,
+          ]
+            .filter(Boolean)
+            .join(" · ") || null,
       });
       out.sent += 1;
+      // An INTERNAL recipient on the do-not-send register is anomalous: it is
+      // a colleague, not a subscriber, and nobody unsubscribes themselves from
+      // their own lead alerts. Once this is the sole notifier, the failure it
+      // produces is that one person silently stops being told, for ever, while
+      // every ledger row reads `sent`. Applicant suppression is the register
+      // working as intended and raises nothing.
+      if (row.audience === "internal" && blocked.length) {
+        await notifyOperators({
+          kind: "lead_stage_email_failed",
+          severity: "warning",
+          title: `A team recipient is on the do-not-send register`,
+          body: `Stage ${row.stage} went to ${sendable.length} of ${recipients.length} recipients. Suppressed: ${blocked.join(", ")}. They will not receive lead alerts until the register entry is removed.`,
+          url: "/leads",
+          metadata: {
+            lead_id: row.lead_id,
+            stage: row.stage,
+            suppressed: blocked,
+            delivered: sendable.length,
+          },
+        });
+      }
       continue;
     }
 
@@ -319,8 +438,17 @@ type ClaimedRow = {
   stage: number;
   audience: StageAudience;
   recipients: string[] | null;
+  /** The note the obligation was raised with — preserved, never overwritten. */
+  reason: string | null;
   attempts: number;
 };
+
+/** Same people, in any order and any case. Identity is `emailKey`, always. */
+function sameAddresses(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  const keys = new Set(a.map((value) => emailKey(value) ?? value));
+  return b.every((value) => keys.has(emailKey(value) ?? value));
+}
 
 function clampStage(value: number): LeadStage {
   return (value >= 3 ? 3 : value <= 1 ? 1 : 2) as LeadStage;
@@ -336,7 +464,25 @@ async function settle(id: string, patch: LedgerUpdate): Promise<void> {
   }
 }
 
-async function readSuppressions(batch: ClaimedRow[]): Promise<Set<string>> {
+/**
+ * The do-not-send register, as a reading rather than a set.
+ *
+ * The distinction `readable` carries is the whole point. An earlier version
+ * returned a bare `Set` and, when the read FAILED, returned every key in the
+ * batch — failing closed, which is right, because sending to somebody who
+ * asked us not to is the unrecoverable direction. But the caller could then
+ * not tell the two apart, and settled the row `suppressed` with the reason
+ * "every recipient is on the do-not-send register". On a statement timeout
+ * that sentence is FALSE: nobody was on the register, the register was not
+ * read. `suppressed` is terminal, so a transient database fault permanently
+ * dropped a notification and recorded a reason that said the opposite of what
+ * happened, with nothing raised to anybody.
+ *
+ * Fail closed, and say which kind of closed it is.
+ */
+type SuppressionReading = { keys: Set<string>; readable: boolean };
+
+async function readSuppressions(batch: ClaimedRow[]): Promise<SuppressionReading> {
   const keys = [
     ...new Set(
       batch
@@ -345,18 +491,19 @@ async function readSuppressions(batch: ClaimedRow[]): Promise<Set<string>> {
         .filter((key): key is string => Boolean(key)),
     ),
   ];
-  if (keys.length === 0) return new Set();
+  if (keys.length === 0) return { keys: new Set(), readable: true };
   const { data, error } = await supabaseAdmin
     .from("email_suppressions")
     .select("email_key")
     .in("email_key", keys);
   if (error) {
-    // Failing closed here means sending to somebody who asked us not to.
-    // Refusing the batch is recoverable; the send is not.
-    console.error("[lead-stage-email] suppression read failed — treating all as blocked");
-    return new Set(keys);
+    console.error(
+      "[lead-stage-email] suppression read failed \u2014 holding the batch:",
+      error.message,
+    );
+    return { keys: new Set(keys), readable: false };
   }
-  return new Set((data ?? []).map((row) => row.email_key as string));
+  return { keys: new Set((data ?? []).map((row) => row.email_key as string)), readable: true };
 }
 
 /**

@@ -123,10 +123,27 @@ export function escapeHtml(value: string): string {
  * Anything already carrying a capital or a space is an author's own wording
  * and is returned untouched.
  */
+/**
+ * A database token, rendered as words. Anything that is not one is untouched.
+ *
+ * The bound is `DATABASE_TOKEN` and it is the whole of the rule. An earlier
+ * version transformed any value with no capital and no space, which is true of
+ * `mortgage_broking` and equally true of `ada@analytical.example` — so the
+ * applicant's own email address was CAPITALISED on every internal email at
+ * every stage, and an operator copying it out of one got `Ada@…`. An address
+ * is an identifier, not prose, and a humaniser has no business in that slot.
+ *
+ * `76_to_150` and `disconnected_systems` are tokens and still become "76 to
+ * 150" and "Disconnected systems": database vocabulary never reaches the
+ * operator. `+61400111222`, `Australia/Perth`, `AX-C94B1D8EC9` and any address
+ * are not tokens and are rendered exactly as the record holds them.
+ */
+const DATABASE_TOKEN = /^[a-z0-9]+(?:_[a-z0-9]+)*$/;
+
 export function humanise(value: string): string {
   const trimmed = value.trim();
   if (!trimmed) return "";
-  if (/[A-Z]/.test(trimmed) || /\s/.test(trimmed)) return trimmed;
+  if (!DATABASE_TOKEN.test(trimmed)) return trimmed;
   const spaced = trimmed.replace(/_+/g, " ").trim();
   if (!spaced) return trimmed;
   return spaced.charAt(0).toUpperCase() + spaced.slice(1);
