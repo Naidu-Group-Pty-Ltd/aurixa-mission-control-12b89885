@@ -38,6 +38,7 @@ import {
   sharedVersionNote,
   versionUnits,
 } from "./sharedVersionDelivery.pure";
+import { ledgerWriteRefusal } from "./migrationLedgerWrites.pure";
 
 const MGMT_API = "https://api.supabase.com/v1";
 
@@ -2379,10 +2380,14 @@ export type PrimeMigrationResult = {
    * record the version after the first, and nothing would ever send the rest.
    * See `sharedVersionDelivery.pure.ts`.
    *
+   * `ledger_write`: the file writes a migration ledger — Supabase's, or one of
+   * the two Mission Control keeps beside it — and would edit, on this clone,
+   * the rows that record what reached it. See `migrationLedgerWrites.pure.ts`.
+   *
    * Like the other holds it HALTS the replay, and like them it must never
    * move the clone out of `ready`.
    */
-  heldByRule?: { rule: "shared_version"; detail: string };
+  heldByRule?: { rule: "shared_version" | "ledger_write"; detail: string };
   /**
    * Every file this entry's version was sent with, where more than one file
    * carries it. Absent for a version one file carries — which is every
@@ -2891,6 +2896,27 @@ export async function applyPrimeMigrations(
           }
           bodies.push(body);
         }
+        // Each file is read for a ledger write before anything at the version
+        // travels: one such file holds the whole version, as any hold does.
+        const writes = unit.members
+          .map((f, i) =>
+            ledgerWriteRefusal(f.name, bodies[i], {
+              version: unit.version,
+              files: unit.members.map((x) => x.name),
+            }),
+          )
+          .filter((r): r is string => r !== null);
+        if (writes.length > 0) {
+          results.push({
+            id: m.id,
+            name: m.name,
+            success: false,
+            heldByRule: { rule: "ledger_write", detail: writes[0] },
+            error: writes[0],
+            ...together,
+          });
+          break;
+        }
         sql = joinSharedVersionSql(bodies);
         if (Buffer.byteLength(sql, "utf8") > MAX_MIGRATION_BYTES) {
           // No one file is past the ceiling — the loader refuses those — but
@@ -3033,6 +3059,18 @@ export async function applyPrimeMigrations(
         // statement has gone, so a half-sent seed is never "applied".
         const chunked = await applyChunkedSeed(projectRef, m, oversize, budget);
         chunksApplied += chunked.applied;
+        if (chunked.ledgerWrite) {
+          // Refused before its first statement went: the seed's executable
+          // parts write a ledger. See `applyChunkedSeed`.
+          results.push({
+            id: m.id,
+            name: m.name,
+            success: false,
+            heldByRule: { rule: "ledger_write", detail: chunked.ledgerWrite },
+            error: chunked.ledgerWrite,
+          });
+          break;
+        }
         if (chunked.upstreamRefusal) {
           // A HOLD, not a pause. Both stop here and both keep the cursor, but
           // they are reported differently on purpose: a pause is this pass
@@ -3064,6 +3102,20 @@ export async function applyPrimeMigrations(
       if (!sentInChunks) {
         if (sql === undefined) {
           throw new Error(`No SQL available for migration ${m.name} and no loader was provided`);
+        }
+        // Read for a ledger write where the body is in hand and nothing has
+        // gone: a file that would edit this clone's record of what reached it
+        // is held, not sent. See `migrationLedgerWrites.pure.ts`.
+        const ledgerWrite = ledgerWriteRefusal(m.name, sql);
+        if (ledgerWrite) {
+          results.push({
+            id: m.id,
+            name: m.name,
+            success: false,
+            heldByRule: { rule: "ledger_write", detail: ledgerWrite },
+            error: ledgerWrite,
+          });
+          break;
         }
         await runSqlOnProject(projectRef, sql);
       }
@@ -3205,8 +3257,14 @@ async function applyChunkedSeed(
    * whichever caller is written next.
    */
   cursorDiscarded?: boolean;
+  /**
+   * Set when the seed's EXECUTABLE parts write a migration ledger: the replay
+   * holds by rule, and nothing of this seed was sent by this pass. See
+   * `migrationLedgerWrites.pure.ts`.
+   */
+  ledgerWrite?: string;
 }> {
-  const { readSeedShape, chunkSeedStatements, SeedShapeError } =
+  const { readSeedShape, chunkSeedStatements, SeedShapeError, seedSkeleton } =
     await import("./seedChunking.pure");
   const maxStatementBytes = oversize.maxStatementBytes ?? DEFAULT_SEED_STATEMENT_BYTES;
   /*
@@ -3281,6 +3339,20 @@ async function applyChunkedSeed(
   let shape: StoredSeedShape | null = cursorShape;
   try {
     shape ??= await readSeedShape(await oversize.streamSql(m));
+    /*
+      THE ROWS ARE DATA; THE REST IS SENT AS IT STANDS.
+
+      The INSERT header, its ON CONFLICT clause and the statements after them
+      are executed verbatim — the template seed's tail is an UPDATE — so they
+      are read for a ledger write before the first statement goes, exactly as
+      a body the replay holds whole is. The rows are never read for it: a
+      tuple that SPELLS a ledger write is a value being inserted, not a
+      statement being run.
+    */
+    const ledgerWrite = ledgerWriteRefusal(m.name, seedSkeleton(shape));
+    if (ledgerWrite) {
+      return { applied: 0, stoppedEarly: false, cursor: null, upstreamRefusal: null, ledgerWrite };
+    }
     for await (const stmt of chunkSeedStatements(await oversize.streamSql(m), shape, {
       maxStatementBytes,
     })) {

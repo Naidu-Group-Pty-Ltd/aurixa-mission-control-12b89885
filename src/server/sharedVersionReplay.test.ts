@@ -14,6 +14,7 @@ import { readCloneMigrationStanding } from "./cloneMigrationStanding.pure";
 import { OversizedMigrationError, PrimeBodyUnavailableError } from "./oversizedMigration.pure";
 import { MAX_MIGRATION_BYTES } from "./prime-backend.server";
 import { SHARED_VERSION_SEPARATOR } from "./sharedVersionDelivery.pure";
+import { LEDGER_RECORD, recordingManagementApi } from "./managementApiRecorder.test-support";
 
 const REF = "abcdefghijklmnopqrst";
 
@@ -47,53 +48,11 @@ const SHARED_SQL = `${B1.sql}${SHARED_VERSION_SEPARATOR}${B2.sql}`;
 /** Metadata alone, as the scoped callers hand the corpus. */
 const meta = (f: File) => ({ id: f.id, name: f.name });
 
-const LEDGER_READ = /select version from supabase_migrations\.schema_migrations\s+union/i;
-const TABLE_COUNT = /from pg_tables/i;
-const TRACKING = /create schema if not exists supabase_migrations/i;
-const RECORD = /insert into supabase_migrations\.schema_migrations/i;
-
-/**
- * A Management API that answers the replay's reads and records the rest.
- *
- * `refuse` answers a query with the 400 a clone's schema gives a statement it
- * rejects, so a failure is the replay's own path rather than a thrown stub.
- */
-function managementApi(
-  opts: { applied?: string[]; tables?: number; refuse?: (query: string) => boolean } = {},
-) {
-  const sent: string[] = [];
-  const answer = (body: unknown) =>
-    new Response(JSON.stringify(body), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    });
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async (_url: unknown, init?: { body?: unknown }) => {
-      const { query } = JSON.parse(String(init?.body)) as { query: string };
-      sent.push(query);
-      if (opts.refuse?.(query)) return new Response("ERROR: 42P07", { status: 400 });
-      if (LEDGER_READ.test(query))
-        return answer((opts.applied ?? []).map((version) => ({ version })));
-      if (TABLE_COUNT.test(query)) return answer([{ n: opts.tables ?? 0 }]);
-      return answer([]);
-    }),
-  );
-  const bookkeeping = (q: string) =>
-    TRACKING.test(q) || LEDGER_READ.test(q) || TABLE_COUNT.test(q) || RECORD.test(q);
-  return {
-    sent,
-    /** Every migration body the clone was sent, in order. */
-    bodies: () => sent.filter((q) => !bookkeeping(q)),
-    /** Every version the ledger was told, and the name it was told it under. */
-    recorded: () =>
-      sent
-        .filter((q) => RECORD.test(q))
-        .map((q) => {
-          const m = /values \('(\d{14})', '([^']*)', ARRAY/.exec(q);
-          return { version: m?.[1], name: m?.[2] };
-        }),
-  };
+/** The recording API, installed as `fetch` for this test. */
+function managementApi(opts?: Parameters<typeof recordingManagementApi>[0]) {
+  const api = recordingManagementApi(opts);
+  vi.stubGlobal("fetch", vi.fn(api.fetch));
+  return api;
 }
 
 beforeEach(() => {
@@ -119,7 +78,7 @@ describe("applyPrimeMigrations — a shared version travels whole", () => {
     ]);
     // Recorded AFTER the request that ran both — never after the first file.
     expect(api.sent.indexOf(SHARED_SQL)).toBeLessThan(
-      api.sent.findIndex((q) => RECORD.test(q) && q.includes(`'${B1.id}'`)),
+      api.sent.findIndex((q) => LEDGER_RECORD.test(q) && q.includes(`'${B1.id}'`)),
     );
     // Neither file ever travelled alone.
     expect(api.sent).not.toContain(B1.sql);
@@ -141,7 +100,7 @@ describe("applyPrimeMigrations — a shared version travels whole", () => {
 
     await applyPrimeMigrations(REF, [B1, B2]);
 
-    const record = api.sent.find((q) => RECORD.test(q)) ?? "";
+    const record = api.sent.find((q) => LEDGER_RECORD.test(q)) ?? "";
     expect(record).toMatch(/insert into aurixa\.schema_migrations/);
     expect(record).toMatch(/insert into aurixa\.migration_provenance/);
     expect(record.split(`'${SHARED_NAME}'`).length - 1).toBe(3);
