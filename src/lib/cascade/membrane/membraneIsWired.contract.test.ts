@@ -57,6 +57,19 @@ describe("the engine asks the membrane", () => {
     );
   });
 
+  it("reads project refs only in their anchored shapes, as it always has", () => {
+    // `knownRefs` widens `backend_ref` to the fleet's own refs written bare.
+    // That reading is the LATERAL lane's: across that boundary a project named
+    // anywhere is another tenant's database. Vertically a prime file naming
+    // the prime's own project is ordinary — the pumps rewrite those refs per
+    // clone and `backendIdentityHold` judges the rest — and no vertical
+    // membrane was written expecting the wider reading. So the lateral work
+    // changed nothing the prime's cascade reads, and `docs/LATERAL_MEMBRANE.md`
+    // says so; this is where that is held rather than assumed.
+    expect(engine).not.toMatch(/knownRefs/);
+    expect(dryrun).not.toMatch(/knownRefs/);
+  });
+
   it("acts on a refusal rather than only recording it", () => {
     const at = engine.indexOf("permeate(membrane,");
     const block = engine.slice(at, at + 400);

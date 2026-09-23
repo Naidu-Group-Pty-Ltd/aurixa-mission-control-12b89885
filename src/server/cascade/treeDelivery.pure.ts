@@ -31,9 +31,18 @@
  *   than being refused.
  */
 
+/**
+ * A regular file or an executable one — the two modes a delivery writes.
+ *
+ * The vertical engine writes every file `100644`, as it always has. The
+ * lateral lane carries the origin's own mode, because a script that crosses
+ * without its executable bit is a script that no longer runs.
+ */
+export type DeliveryMode = "100644" | "100755";
+
 export type DeliveryTreeEntry = {
   path: string;
-  mode: "100644";
+  mode: DeliveryMode;
   type: "blob";
   /** An uploaded blob to reuse, or null to DELETE the path. Absent for inline text. */
   sha?: string | null;
@@ -60,7 +69,8 @@ export function chunkTreeEntries(
   for (const entry of entries) {
     const bytes = contentBytes(entry);
     const wouldOverflow =
-      current.length > 0 && (current.length + 1 > maxEntries || currentBytes + bytes > maxContentBytes);
+      current.length > 0 &&
+      (current.length + 1 > maxEntries || currentBytes + bytes > maxContentBytes);
     if (wouldOverflow) {
       chunks.push(current);
       current = [];
@@ -77,14 +87,14 @@ export function chunkTreeEntries(
  * The API-shaped entry: never both `sha` and `content`, and `sha` present
  * only when it means something (a reuse or a deletion).
  */
-export function toGitTreeParam(
-  entry: DeliveryTreeEntry,
-): { path: string; mode: "100644"; type: "blob"; sha: string | null } | {
-  path: string;
-  mode: "100644";
-  type: "blob";
-  content: string;
-} {
+export function toGitTreeParam(entry: DeliveryTreeEntry):
+  | { path: string; mode: DeliveryMode; type: "blob"; sha: string | null }
+  | {
+      path: string;
+      mode: DeliveryMode;
+      type: "blob";
+      content: string;
+    } {
   if (entry.content !== undefined) {
     return { path: entry.path, mode: entry.mode, type: entry.type, content: entry.content };
   }

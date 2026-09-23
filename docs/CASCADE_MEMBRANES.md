@@ -8,7 +8,10 @@ and [`FLEET_SYNC_STALL_2026-09-20.md`](./FLEET_SYNC_STALL_2026-09-20.md) (the
 incident that made the need obvious).
 
 Read this before touching `src/lib/cascade/membrane/*`, the membrane block
-in `cascade-engine.server.ts`, or the band on the Yggdrasil diagram.
+in `cascade-engine.server.ts`, or the band on the Yggdrasil diagram. The
+boundary BETWEEN the two parents — the one membrane here that is crossed both
+ways — has its own document,
+[`LATERAL_MEMBRANE.md`](./LATERAL_MEMBRANE.md).
 
 ---
 
@@ -211,6 +214,20 @@ upstream (already the PARENT'S repository for a lineage-routed child) and
 `clone.github_repo` downstream. A slug would have to be threaded through an
 argument that does not carry one, and a key the engine cannot supply is a
 membrane that never resolves.
+
+## The boundary between the parents
+
+Every membrane above faces one way, down a line of descent. The two parents
+(`npc-client-dashboard` and `npc-crm-independent-6505dc`) now have a boundary
+between them as well, crossed both ways by their own parent-level work — a
+file the prime's history has never held — under this same vocabulary, declared
+once per direction so the CRM line runs opposite ways across it.
+`lateralMembranes.pure.ts` declares it, a lane of its own in
+`lateral-exchange.server.ts` runs it on the drain's idle ticks, and the diagram
+draws it as an arch between the two parents with the band at its apex.
+[`LATERAL_MEMBRANE.md`](./LATERAL_MEMBRANE.md) is the whole account, including
+the day-one dry run: 31 files of parent-level work, and none of them crosses
+under the rules the fleet already had.
 
 ## On the diagram
 

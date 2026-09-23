@@ -143,7 +143,7 @@ export type PermeationVerdict =
  */
 export function permeate(
   membrane: Membrane,
-  chunk: { path: string; text: string | null },
+  chunk: { path: string; text: string | null; knownRefs?: readonly string[] },
 ): PermeationVerdict {
   const readings = classify(chunk);
 

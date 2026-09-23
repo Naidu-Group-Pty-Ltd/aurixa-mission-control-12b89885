@@ -33,6 +33,8 @@
  * without also being asked "should it be here".
  */
 
+import { globToRegex } from "@/lib/module-globs";
+
 /** The kinds of thing this fleet has been broken by, at a boundary. */
 export type IonSpeciesName =
   /**
@@ -48,7 +50,39 @@ export type IonSpeciesName =
   /** A spec/test file: it asserts things about a subject that may not be crossing. */
   | "spec"
   /** A Supabase project reference. */
-  | "backend_ref";
+  | "backend_ref"
+  /**
+   * A file of the CRM routing layer itself: the provider switch, its adapters,
+   * the native `crm-*` edge functions and the layer's own documentation.
+   *
+   * A property of the PATH, because the layer is a place rather than a word:
+   * `crmProvider.ts` spells every routed name by design and `routed_crm_name`
+   * exempts it for exactly that reason, so the one species that could have
+   * named the layer is the one that must stay blind to it. Measured 23 Sep
+   * 2026 on `npc-crm-independent-6505dc`: 16 of the 21 files that repository
+   * holds and no other deployment does sit under these four roots.
+   */
+  | "crm_routing_layer"
+  /**
+   * A file inside one edge function's own directory.
+   *
+   * A deployment DECLARES its functions (`supabase/config.toml`, the security
+   * registry) and deploys each against its own project, so a function's source
+   * travelling without its declaration is a function that exists in the tree
+   * and nowhere else. `_shared/` is not a function and is not this species.
+   */
+  | "edge_function"
+  /** A schema migration: applied by each deployment's own pipeline to its own database. */
+  | "migration"
+  /**
+   * A hosting project or team identifier — Vercel's `prj_…` / `team_…`.
+   *
+   * `backend_ref`'s sibling one layer out: a Supabase ref names the database a
+   * deployment talks to, and one of these names the project that builds and
+   * serves it. A workflow that prunes or promotes deployments by id does it to
+   * whichever project it names, so a copy of it acts on the original's.
+   */
+  | "hosting_ref";
 
 /** One reading: a species was found, and this is where. */
 export type IonReading = {
@@ -129,6 +163,66 @@ export const DECLARATION_PATHS: readonly string[] = [
 ];
 
 /**
+ * The CRM routing layer's four roots, as globs.
+ *
+ * Read off `npc-crm-independent-6505dc` on 23 Sep 2026 rather than composed:
+ * the router and its tests (`src/lib/crm/**`), the provider adapters the
+ * native functions share (`supabase/functions/_shared/crm/**`), the three
+ * native functions themselves (`crm-calendar`, `crm-inbound-message`,
+ * `crm-send-message`) and `docs/crm/CRM_INDEPENDENCE.md`. A function named
+ * `crm-*` is the layer's by construction — the naming is the routing table's
+ * own column — so the glob takes the prefix rather than the three names.
+ */
+export const CRM_ROUTING_LAYER_GLOBS: readonly string[] = [
+  "src/lib/crm/**",
+  "supabase/functions/_shared/crm/**",
+  "supabase/functions/crm-*/**",
+  "docs/crm/**",
+];
+
+/** Compiled once, by the one glob implementation every cascade path decision uses. */
+const CRM_ROUTING_LAYER_MATCHERS: readonly RegExp[] = CRM_ROUTING_LAYER_GLOBS.map(globToRegex);
+
+/** Whether a path belongs to the CRM routing layer. */
+export function isCrmRoutingLayerPath(path: string): boolean {
+  return CRM_ROUTING_LAYER_MATCHERS.some((rx) => rx.test(path));
+}
+
+/**
+ * The edge function a path belongs to, or null.
+ *
+ * `supabase/functions/<name>/…` where `<name>` does not begin with `_` — the
+ * Supabase CLI's own rule for a shared directory, which is how `_shared/` and
+ * any `_template/` stay out of the deploy list. A file directly under
+ * `supabase/functions/` (an import map, a deno.json) belongs to no function.
+ */
+export function edgeFunctionOf(path: string): string | null {
+  const m = /^supabase\/functions\/([^/]+)\/.+/.exec(path);
+  if (!m) return null;
+  return m[1].startsWith("_") ? null : m[1];
+}
+
+/** Whether a path is a schema migration. */
+export function isMigrationPath(path: string): boolean {
+  return path.startsWith("supabase/migrations/");
+}
+
+/**
+ * Vercel's project and team identifiers.
+ *
+ * Anchored on the prefix and a bounded run of the alphabet Vercel issues,
+ * for the reason `PROJECT_REF_SHAPES` gives about its own first version: a
+ * detector that matched any long word under a comment claiming otherwise is
+ * worse than none. `prj_` ids measured on this fleet are 28 characters after
+ * the prefix and team ids 24; the bounds leave room either side without
+ * reaching prose.
+ */
+const HOSTING_REF_SHAPES: readonly RegExp[] = [
+  /\b(prj_[A-Za-z0-9]{20,40})\b/g,
+  /\b(team_[A-Za-z0-9]{20,40})\b/g,
+];
+
+/**
  * A Supabase project ref, in the two shapes that carry one into a shipped file.
  *
  * Transcribed from `backendRefsIn` in `syncExclusions.pure.ts`, which is the
@@ -203,14 +297,47 @@ export function isSpecPath(path: string): boolean {
 }
 
 /**
+ * Every KNOWN project ref this text names, in any form.
+ *
+ * The two anchored shapes above are what a SHIPPED file carries a project in,
+ * and they are the right test for a detector that knows nothing about the
+ * fleet. They are the wrong test for a script. Measured 23 Sep 2026 on
+ * `npc-client-dashboard`: `scripts/clone-backend/02-deploy-functions.py`
+ * names its own project and the prime's as bare strings handed to the
+ * Management API — neither shape matches, and run from any other repository
+ * that script deploys that repository's functions into this one's database.
+ *
+ * A bare twenty-letter word cannot be matched in general (the first version
+ * of `PROJECT_REF_SHAPES` did exactly that and fired on prose). A ref this
+ * fleet is KNOWN to own can: it is an exact token, so a word of ordinary
+ * English is never one. The caller supplies the list, because which refs
+ * exist is a fact about the fleet rather than about the text.
+ */
+function knownRefsIn(text: string, knownRefs: readonly string[]): string[] {
+  const found: string[] = [];
+  for (const ref of knownRefs) {
+    if (!/^[a-z]{20}$/.test(ref)) continue;
+    if (new RegExp(`(?<![A-Za-z0-9])${ref}(?![A-Za-z0-9])`).test(text)) found.push(ref);
+  }
+  return found;
+}
+
+/**
  * Read a crossing chunk and report every species in it.
  *
  * `text` is null for a binary file. Nothing here reads bytes that are not
  * text: a species is a statement about source, and asking a PNG whether it
  * names an edge function is asking a question of characters that were never
  * there — the rule `backendIdentityHold`'s own call site already records.
+ *
+ * `knownRefs` widens `backend_ref` to the fleet's own project refs written
+ * bare — see `knownRefsIn`. Omitted, the reading is exactly the anchored one.
  */
-export function classify(args: { path: string; text: string | null }): IonReading[] {
+export function classify(args: {
+  path: string;
+  text: string | null;
+  knownRefs?: readonly string[];
+}): IonReading[] {
   const { path, text } = args;
   const readings: IonReading[] = [];
 
@@ -238,6 +365,35 @@ export function classify(args: { path: string; text: string | null }): IonReadin
     });
   }
 
+  if (isCrmRoutingLayerPath(path)) {
+    readings.push({
+      species: "crm_routing_layer",
+      tokens: [],
+      evidence:
+        "belongs to the CRM routing layer: the provider switch, its adapters or its native functions",
+    });
+  }
+
+  const fn = edgeFunctionOf(path);
+  if (fn !== null) {
+    // The function's name is evidence, not a token: tokens are what the TEXT
+    // says, and this is a fact about where the file sits.
+    readings.push({
+      species: "edge_function",
+      tokens: [],
+      evidence: `is source of the edge function ${fn}, which each deployment declares and deploys for itself`,
+    });
+  }
+
+  if (isMigrationPath(path)) {
+    readings.push({
+      species: "migration",
+      tokens: [],
+      evidence:
+        "is a schema migration, applied by each deployment's own pipeline to its own database",
+    });
+  }
+
   if (text !== null) {
     // Gated on the authority's own reach: the router and every test are
     // outside the rule, so they are not this species at all rather than a
@@ -257,12 +413,27 @@ export function classify(args: { path: string; text: string | null }): IonReadin
       rx.lastIndex = 0;
       for (const m of text.matchAll(rx)) seen.add(m[1]);
     }
+    for (const ref of knownRefsIn(text, args.knownRefs ?? [])) seen.add(ref);
     const refs = [...seen].sort();
     if (refs.length > 0) {
       readings.push({
         species: "backend_ref",
         tokens: refs,
         evidence: `names ${refs.length} Supabase project ref(s)`,
+      });
+    }
+
+    const hosting = new Set<string>();
+    for (const rx of HOSTING_REF_SHAPES) {
+      rx.lastIndex = 0;
+      for (const m of text.matchAll(rx)) hosting.add(m[1]);
+    }
+    const hostingIds = [...hosting].sort();
+    if (hostingIds.length > 0) {
+      readings.push({
+        species: "hosting_ref",
+        tokens: hostingIds,
+        evidence: `names ${hostingIds.length} hosting project/team id(s)`,
       });
     }
   }

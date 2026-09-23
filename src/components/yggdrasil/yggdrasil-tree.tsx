@@ -18,8 +18,11 @@ import { SubtreeStatsPanel } from "./subtree-stats-panel";
 import { MultiSelectComparisonPanel } from "./multi-select-comparison";
 import { MembraneBand } from "./membrane-band";
 import { MembraneDetailPanel } from "./membrane-detail-panel";
+import { LateralBand } from "./lateral-band";
+import { LateralDetailPanel } from "./lateral-detail-panel";
 import { resolveMembrane } from "@/lib/cascade/membrane/fleetMembranes.pure";
 import type { Membrane } from "@/lib/cascade/membrane/membrane.pure";
+import type { LateralBoundary } from "@/lib/cascade/membrane/lateralMembranes.pure";
 
 interface Props {
   clones: Clone[];
@@ -76,6 +79,12 @@ export function YggdrasilTree({
   // the branch index, so a re-layout (a resize, a clone arriving) cannot move
   // the selection onto a different boundary while the panel stays open.
   const [selectedEdge, setSelectedEdge] = useState<string | null>(null);
+
+  // Which LATERAL boundary is open, keyed on the boundary's own id for the
+  // same reason: it names the two parents, not a position in a list. The two
+  // selections are one panel slot between them — each clears the other, so a
+  // vertical membrane's panel never opens on top of the lateral one's.
+  const [selectedLateral, setSelectedLateral] = useState<string | null>(null);
 
   const multiSelectedSet = new Set(multiSelectedIds);
 
@@ -218,10 +227,20 @@ export function YggdrasilTree({
     : null;
 
   const handleMembraneSelect = useCallback((membrane: Membrane) => {
+    setSelectedLateral(null);
     setSelectedEdge((current) => {
       const edge = `${membrane.from}->${membrane.to}`;
       return current === edge ? null : edge;
     });
+  }, []);
+
+  const selectedLateralBoundary = selectedLateral
+    ? (layout.laterals.find((l) => l.boundary.id === selectedLateral)?.boundary ?? null)
+    : null;
+
+  const handleLateralSelect = useCallback((boundary: LateralBoundary) => {
+    setSelectedEdge(null);
+    setSelectedLateral((current) => (current === boundary.id ? null : boundary.id));
   }, []);
 
   const showSinglePanel = selectedNode && multiSelectedIds.length === 0;
@@ -332,6 +351,23 @@ export function YggdrasilTree({
             />
           ))}
 
+          {/* The lateral boundaries: an arch between two siblings, with its band
+              at the apex. Drawn in the same layer as the vertical bands — after
+              every branch, before every node — so the arch runs INTO the two
+              nodes it joins rather than over them. */}
+          {layout.laterals.map((lateral, i) => (
+            <LateralBand
+              key={lateral.boundary.id}
+              boundary={lateral.boundary}
+              a={lateral.a}
+              b={lateral.b}
+              toward={layout.trunkNode}
+              index={membranes.length + i}
+              selected={selectedLateral === lateral.boundary.id}
+              onSelect={handleLateralSelect}
+            />
+          ))}
+
           {layout.nodes.map((node, i) => (
             <TreeNodeCircle
               key={node.id}
@@ -400,6 +436,16 @@ export function YggdrasilTree({
       <AnimatePresence>
         {selectedMembrane && (
           <MembraneDetailPanel membrane={selectedMembrane} onClose={() => setSelectedEdge(null)} />
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {selectedLateralBoundary && (
+          <LateralDetailPanel
+            key={selectedLateralBoundary.id}
+            boundary={selectedLateralBoundary}
+            onClose={() => setSelectedLateral(null)}
+          />
         )}
       </AnimatePresence>
 

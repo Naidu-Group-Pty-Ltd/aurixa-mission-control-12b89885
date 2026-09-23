@@ -10,6 +10,7 @@ import { useMemo } from "react";
 import type { Clone } from "@/lib/queries";
 
 import { PRIME_REPO } from "@/lib/cascade/membrane/fleetMembranes.pure";
+import { FLEET_LATERALS, type LateralBoundary } from "@/lib/cascade/membrane/lateralMembranes.pure";
 
 export interface TreeNode {
   id: string;
@@ -51,9 +52,25 @@ export interface TreeBranch {
   toRepo: string;
 }
 
+/**
+ * A boundary between two deployments that are NOT a line of descent.
+ *
+ * A branch joins a parent to its child; this joins two siblings, so it is not
+ * a branch and is never drawn as one. It carries the boundary it stands for
+ * and the two nodes it spans — `a` on `boundary.sides[0]`, `b` on
+ * `boundary.sides[1]`, whichever of them the layout drew on the left.
+ */
+export interface TreeLateral {
+  boundary: LateralBoundary;
+  a: { id: string; repo: string; x: number; y: number };
+  b: { id: string; repo: string; x: number; y: number };
+}
+
 export interface TreeLayout {
   nodes: TreeNode[];
   branches: TreeBranch[];
+  /** The lateral boundaries both of whose sides are on screen. */
+  laterals: TreeLateral[];
   width: number;
   height: number;
   trunkNode: TreeNode | null;
@@ -191,6 +208,39 @@ export function lineageDepth(clones: Clone[]): number {
   return walk("__root__", new Set(["__root__"])) - 1;
 }
 
+/**
+ * The lateral boundaries this layout can draw, keyed on REPOSITORY.
+ *
+ * A boundary is declared by repository, exactly as a membrane is, so a node is
+ * matched on `githubRepo` — never on its id or its display name, either of
+ * which would resolve nothing and draw an empty diagram that looks exactly
+ * like a fleet with no lateral boundary.
+ *
+ * A boundary with a side the view does not show is not drawn at all. The
+ * status filter runs before layout, and an arch to a node that is not there
+ * has nowhere to land; half a boundary would read as a boundary with one side.
+ */
+export function lateralsFor(nodes: readonly TreeNode[]): TreeLateral[] {
+  const byRepo = new Map<string, TreeNode>();
+  for (const node of nodes) {
+    if (node.id === "__trunk__" || byRepo.has(node.githubRepo)) continue;
+    byRepo.set(node.githubRepo, node);
+  }
+  const out: TreeLateral[] = [];
+  for (const boundary of FLEET_LATERALS) {
+    const [repoA, repoB] = boundary.sides;
+    const nodeA = byRepo.get(repoA);
+    const nodeB = byRepo.get(repoB);
+    if (!nodeA || !nodeB) continue;
+    out.push({
+      boundary,
+      a: { id: nodeA.id, repo: repoA, x: nodeA.x, y: nodeA.y },
+      b: { id: nodeB.id, repo: repoB, x: nodeB.x, y: nodeB.y },
+    });
+  }
+  return out;
+}
+
 export function useTreeLayout(
   clones: Clone[],
   containerWidth: number,
@@ -201,6 +251,7 @@ export function useTreeLayout(
       return {
         nodes: [],
         branches: [],
+        laterals: [],
         width: containerWidth,
         height: containerHeight,
         trunkNode: null,
@@ -337,6 +388,13 @@ export function useTreeLayout(
     const maxY = allNodes.reduce((m, n) => Math.max(m, n.y), 0) + 100;
     const height = Math.max(containerHeight, maxY);
 
-    return { nodes: allNodes, branches: allBranches, width: containerWidth, height, trunkNode };
+    return {
+      nodes: allNodes,
+      branches: allBranches,
+      laterals: lateralsFor(allNodes),
+      width: containerWidth,
+      height,
+      trunkNode,
+    };
   }, [clones, containerWidth, containerHeight]);
 }

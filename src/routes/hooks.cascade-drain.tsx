@@ -40,6 +40,8 @@ import { getAppOctokit } from "@/server/github-app.server";
 import { decideSpend } from "@/server/cascade/githubBudget.pure";
 import { readGitHubRemaining } from "@/server/githubAllowance.server";
 import { MAX_ATTEMPTS, STALL_MINUTES } from "@/server/cascade/drainLimits.pure";
+import { isLateralSlot } from "@/server/cascade/lateralExchange.pure";
+import { runLateralExchange } from "@/server/lateral-exchange.server";
 
 const admin = supabaseAdmin;
 
@@ -772,6 +774,9 @@ export const Route = createFileRoute("/hooks/cascade-drain")({
         // githubUsageMeter.ts: the count is taken at the one hook every call
         // already passes through, and named here.
         beginGithubLane("cascade-drain");
+        // The tick's own minute, taken before any work: a slot is decided by
+        // when pg_cron fired, not by how long the fold and the claim took.
+        const tickAt = Date.now();
         try {
           const deadlineAt = Date.now() + INVOCATION_BUDGET_MS;
           const budget: CascadeBudget = {
@@ -811,6 +816,16 @@ export const Route = createFileRoute("/hooks/cascade-drain")({
           // waiting out a rate-limit window counts as claimed-later, and a
           // starved tick must not spend its last calls on a branch read.
           const beacon = results.length === 0 && spend.proceed ? await raiseDriftBeacon() : null;
+          // The lateral lane — parent-level work moving between the two
+          // parent clones — takes an idle tick that falls in its slot, and
+          // only one: a tick that claimed, beaconed or is starved belongs to
+          // the prime's cascade, which is always the more urgent of the two.
+          // It asks the budget itself, at the scan floor, from the reading
+          // this tick already took. See lateral-exchange.server.ts.
+          const lateral =
+            results.length === 0 && spend.proceed && beacon === null && isLateralSlot(tickAt)
+              ? await runLateralExchange({ trigger: "slot", deadlineAt, remaining })
+              : null;
           return new Response(
             JSON.stringify({
               success: true,
@@ -820,6 +835,18 @@ export const Route = createFileRoute("/hooks/cascade-drain")({
               exhausted,
               starved: spend.proceed ? null : spend.why,
               beacon,
+              lateral: lateral
+                ? {
+                    ran: lateral.ran,
+                    why: lateral.why,
+                    boundaries: lateral.boundaries.map((b) => ({
+                      boundary: b.boundary,
+                      outcome: b.outcome,
+                      why: b.why,
+                      directions: b.directions.map((d) => `${d.from} → ${d.to}: ${d.outcome}`),
+                    })),
+                  }
+                : null,
               results,
             }),
             { headers: { "Content-Type": "application/json" } },

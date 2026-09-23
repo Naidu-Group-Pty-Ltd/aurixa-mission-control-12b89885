@@ -108,12 +108,33 @@ export const PORE_HALF_HEIGHT = 5;
  * than in the component so it can be asserted without a renderer.
  */
 export function leafletRuns(slots: readonly number[]): Array<[number, number]> {
+  return leafletRunsAround(
+    slots.map((y) => [y, PORE_HALF_HEIGHT] as const),
+    -BAND_HALF_SPAN,
+    BAND_HALF_SPAN,
+  );
+}
+
+/**
+ * The same rule for any band: the leaflet runs from `top` to `bottom` and
+ * stops at every mouth, given as its centre and how far it reaches either
+ * side, in order along the band.
+ *
+ * The lateral band between the two parents needs it general — it is taller,
+ * its passage is wider than its pores, and its ends are not symmetric — and
+ * shares this rather than keeping a second copy of where a leaflet stops.
+ */
+export function leafletRunsAround(
+  mouths: ReadonlyArray<readonly [centre: number, half: number]>,
+  top: number,
+  bottom: number,
+): Array<[number, number]> {
   const runs: Array<[number, number]> = [];
-  let cursor = -BAND_HALF_SPAN;
-  for (const y of slots) {
-    if (y - PORE_HALF_HEIGHT > cursor) runs.push([cursor, y - PORE_HALF_HEIGHT]);
-    cursor = y + PORE_HALF_HEIGHT;
+  let cursor = top;
+  for (const [y, half] of mouths) {
+    if (y - half > cursor) runs.push([cursor, y - half]);
+    cursor = y + half;
   }
-  if (BAND_HALF_SPAN > cursor) runs.push([cursor, BAND_HALF_SPAN]);
+  if (bottom > cursor) runs.push([cursor, bottom]);
   return runs;
 }
