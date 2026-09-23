@@ -142,6 +142,19 @@ jobs:
       - name: Applied migrations still match what ran
         run: npm run check:applied-digests
 
+      # The voice fleet's knowledge base and its twelve prompts are generated
+      # files that are uploaded by hand, and until this step nothing compared
+      # either with its generator. The KB check also fails on any claim the
+      # corpus must never make - the property-data provider the business has
+      # ruled out by name among them - and when the committed corpus is not the
+      # copy recorded as uploaded to VAPI, because then the live agents are
+      # still answering from the old one.
+      - name: Voice knowledge base is current and makes no denied claim
+        run: npm run check:voice-kb
+
+      - name: Voice fleet prompts match their generator
+        run: npm run check:voice-prompts
+
       - name: Typecheck
         run: npm run typecheck
 

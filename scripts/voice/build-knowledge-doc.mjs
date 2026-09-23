@@ -22,6 +22,7 @@
 //
 // Word output is kept behind `--docx` for anyone who wants it, and needs the
 // `docx` package, which this repository does not depend on.
+import { createHash } from "node:crypto";
 import { writeFileSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,6 +30,7 @@ import { INTRO, SECTIONS, TITLE } from "./knowledge-base/content.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MD_PATH = join(HERE, "knowledge-base", "aurixa-voice-knowledge-base.md");
+const VAPI_FILE_PATH = join(HERE, "knowledge-base", "vapi-file.json");
 
 // The corpus is rendered ASCII-only.
 //
@@ -60,6 +62,48 @@ function toAscii(text) {
     process.exit(1);
   }
   return out;
+}
+
+// Claims this corpus must never make, checked on the RENDERED output.
+//
+// The first entry is a standing instruction from the business: one property-
+// data provider is not to be mentioned at all, under its old name, its new
+// name or its product name. It used to appear once, in the integrations
+// answer, and a rule that lives only in a reviewer's memory is one a future
+// edit reintroduces with nothing noticing. The others are claims found on the
+// public website that nothing verifies - an unfiled patent, certifications
+// held by infrastructure providers rather than by Aurixa, and outcome figures
+// no customer has measured - and a voice agent repeating any of them to a
+// prospect is making the claim itself.
+//
+// The check reads the rendered Markdown rather than the content module, so it
+// sees exactly what is uploaded, including everything generated from the
+// catalog. A match refuses to write, and refuses --check, naming the rule.
+const DENYLIST = [
+  [/core\s*logic/i, "a property-data provider the business has said is never to be mentioned"],
+  [/cotality/i, "the same provider under its current name"],
+  [/\brp\s*data\b/i, "the same provider's property product"],
+  [/proptrack|pricefinder/i, "a named property-data provider - no data provider is named"],
+  [/\bpatent(ed|[- ]pending)\b/i, "a patent claim - no application has been filed"],
+  [/\bsoc\s*2\b|\biso(\/iec)?\s*27001\b/i, "a certification claim - held by infrastructure providers, not by Aurixa"],
+  [/\b10x\b|\bten times\b|conversion lift/i, "an outcome figure no customer has measured"],
+];
+
+function assertNoDeniedClaims(text) {
+  const hits = [];
+  text.split("\n").forEach((line, i) => {
+    for (const [re, why] of DENYLIST) {
+      const m = line.match(re);
+      if (m) hits.push(`  line ${i + 1}: "${m[0]}" - ${why}`);
+    }
+  });
+  if (hits.length) {
+    console.error(
+      `the knowledge base makes a claim it must not make:\n${hits.join("\n")}\n\n` +
+        "Remove it from knowledge-base/content.mjs, or from the catalog it was generated from.",
+    );
+    process.exit(1);
+  }
 }
 
 function renderMarkdown() {
@@ -137,6 +181,7 @@ async function renderDocx() {
 }
 
 const md = renderMarkdown();
+assertNoDeniedClaims(md);
 
 if (process.argv.includes("--check")) {
   let onDisk;
@@ -157,9 +202,29 @@ if (process.argv.includes("--check")) {
     );
     process.exit(1);
   }
+  // The committed file matching its content module says nothing about the
+  // copy the live agents read. vapi-file.json records the SHA-256 of what was
+  // uploaded; when it differs, the corpus was edited and never re-uploaded,
+  // and every agent is still answering from the old one.
+  const uploaded = JSON.parse(readFileSync(VAPI_FILE_PATH, "utf8"));
+  const sha256 = createHash("sha256").update(md, "utf8").digest("hex");
+  if (uploaded.file_id && uploaded.sha256 !== sha256) {
+    console.error(
+      `the committed knowledge base is not the one the live agents read:\n` +
+        `  committed          sha256 ${sha256}\n` +
+        `  uploaded to VAPI   sha256 ${uploaded.sha256} (file ${uploaded.file_id})\n\n` +
+        `Upload the committed file to VAPI as text/plain (see vapi-file.json), check the\n` +
+        `store reports status=done, record its file id, bytes and SHA-256 there, and\n` +
+        `re-point the fleet with apply-fleet-upgrade.py.`,
+    );
+    process.exit(1);
+  }
   const h1 = SECTIONS.filter((s) => s.kind === "h1").length;
   const h2 = SECTIONS.filter((s) => s.kind === "h2").length;
-  console.log(`knowledge base matches its content module (${md.length} characters, ${h1} sections, ${h2} questions)`);
+  console.log(
+    `knowledge base matches its content module and the uploaded copy ` +
+      `(${md.length} characters, ${h1} sections, ${h2} questions, VAPI file ${uploaded.file_id})`,
+  );
   process.exit(0);
 }
 

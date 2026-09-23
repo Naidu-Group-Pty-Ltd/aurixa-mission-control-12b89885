@@ -28,6 +28,7 @@ import {
   tierBaseCents,
   tierHeadlineCents,
 } from "../../../src/lib/pricing/aurixa-catalog.ts";
+import { TIER_FEATURES } from "../../../src/lib/pricing/tier-features.ts";
 
 /** "A$999", or "A$20.90" where there are cents. Spoken aloud as written. */
 export function money(cents) {
@@ -71,6 +72,50 @@ export function amlSentence() {
     `whether it is added to a plan or dropped from one. Never quote the ` +
     `${money(AML_REFERENCE_COMPONENT_CENTS)} figure as a price.`
   );
+}
+
+/** The AML/CTF module's monthly charge, spoken as a figure. */
+export function amlUplift() {
+  return money(AML_NET_UPLIFT_CENTS);
+}
+
+/**
+ * "Which plan fits a firm like ours?" - the seat band and the catalog's own
+ * one-line blurb for each tier. The blurb is the price list's statement of who
+ * the tier is for, so it is read from there rather than paraphrased here.
+ */
+export function tierFitLines() {
+  return TIERS.map((t) => `${t.name}, for ${t.seatMin} to ${t.seatMax} seats — ${t.blurb}`);
+}
+
+/**
+ * What each plan includes, GENERATED from tier-features.ts - the signed-off
+ * pricing sheet's own per-tier matrices, the same data the storefront's plan
+ * cards read.
+ *
+ * One rule decides what is spoken. A higher tier lists only what it ADDS, and
+ * the add is the whole point of the sentence, so a delta tier's sub-items are
+ * always named. The base tier's client record carries eighteen sub-views
+ * ("Portal Access", "View As Client", ...) that are a page map rather than a
+ * sentence anyone could say, so on the base tier an item's sub-items are named
+ * only when there are a handful of them.
+ */
+export function tierInclusionLines() {
+  return TIERS.map((t) => {
+    const f = TIER_FEATURES[t.slug];
+    if (!f) return null;
+    const isDelta = Boolean(f.inherits);
+    const items = f.groups.flatMap((g) =>
+      g.items.map((it) => {
+        const subs = it.subs ?? [];
+        if (!subs.length) return it.name;
+        if (isDelta || subs.length <= 4) return `${it.name} (${listOf(subs)})`;
+        return it.name;
+      }),
+    );
+    const lead = isDelta ? `${t.name} includes everything in ${f.inherits}, plus` : `${t.name} includes`;
+    return `${lead} ${listOf(items)}.`;
+  }).filter(Boolean);
 }
 
 export function annualSentence() {

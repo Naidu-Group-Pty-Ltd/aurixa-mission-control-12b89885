@@ -165,22 +165,31 @@ editing the builder; never hand-edit a prompt in the dashboard.
 ## The knowledge base every agent carries
 
 Each of the twelve assistants has a VAPI `query` tool named
-`aurixa_knowledge`, backed by one uploaded document — **Aurixa Systems —
-Voice Agent Knowledge Base** — built by
-`scripts/voice/build-knowledge-doc.mjs` (run it with the `docx` npm package
-available; it emits the `.docx` to upload via `POST /file`). The document is
-reference only: company background, the three access stages with their real
-timings, the capability list, the pricing shape (never negotiation ammunition),
-security posture, support tiers, and ten quick answers. The system prompts
-gained one closing KNOWLEDGE BASE paragraph telling the agent to consult the
-tool for factual questions, answer in its own spoken words, never read the
-document aloud or mention it, and defer to a team follow-up for anything
-uncovered — the paragraph explicitly cannot override the agent's role or
-rules, so the never-claim-approval posture stands.
+`aurixa_knowledge`, backed by one uploaded document - **Aurixa Systems - Voice
+Agent Knowledge Base**. Its content is `scripts/voice/knowledge-base/content.mjs`,
+rendered by `scripts/voice/build-knowledge-doc.mjs` to a Markdown file that is
+checked in beside it; every price in it is generated from the pricing catalog.
+It holds two kinds of material: why firms choose Aurixa (the problem, what it
+does for each kind of firm, how it differs, answers to hesitations, discovery
+questions, illustrative walk-throughs) and the facts (capabilities, plans,
+credits, access pathway, onboarding, security, support, billing). It never
+overrides an agent's own rules, names no customer, result or property-data
+provider, and a denylist in the builder fails on any claim it must not make.
 
-To revise the knowledge base: edit the script, rebuild, upload the new file,
-and repoint the query tool's `fileIds` on each assistant (PATCH merges the
-whole `model` object — always GET and merge, never send a partial model).
+Each prompt's knowledge-base section tells the agent to query for factual
+questions **and** whenever the conversation turns to value - the caller names
+their kind of business, asks why or how it differs, or hesitates - then to make
+one point and ask a question back, in its own words, without mentioning the
+document.
+
+To revise it: edit `content.mjs`, run the builder, upload the Markdown **as
+`text/plain` with a `.txt` name** (a `text/markdown` upload is stored and never
+parsed - see `docs/voice-fleet-capabilities.md`), confirm the store reports
+`status: done`, record the id, bytes and SHA-256 in
+`knowledge-base/vapi-file.json`, and re-point the fleet with
+`apply-fleet-upgrade.py`, which writes both places VAPI stores the id and
+verifies them by read-back. CI fails until `vapi-file.json` names the corpus
+that is committed.
 
 ## Booking window change
 
