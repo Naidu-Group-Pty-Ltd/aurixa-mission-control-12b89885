@@ -497,7 +497,9 @@ async function succeedRun(run: any, result: Record<string, unknown>): Promise<{ 
  *
  * Written only HERE, on the one path that can honestly claim it: a run
  * reaches `succeedRun` with `sourceMoved` false, so every bundle it counted
- * came from this single revision.
+ * came from this single revision — and only where every bundle its last
+ * pass tried landed, because a stamp over a failed bundle tells the next
+ * catch-up that function is current and it is never planned again.
  *
  * Best-effort, and never the reason a completed deploy reports as failed —
  * but never silent either. A stamp that cannot be written leaves the next
@@ -1404,15 +1406,28 @@ async function executeEdgeFunctionDeploy(run: any): Promise<{ status: string }> 
 
   // The catch-up's from-baseline for FUNCTIONS. See `recordBackendRevision`
   // for why the repository's own baseline could not serve as one.
-  await recordBackendRevision(run.clone_id, snapshot.sourceSha ?? null);
+  //
+  // Only where every bundle this pass tried LANDED. A pass that ends the run
+  // with some bundles failed still completes it, and stamping then would say
+  // the failed functions are at this revision too: the next catch-up diffs
+  // from here, the failed functions have not changed since, and nothing ever
+  // plans them again. Left unstamped, the next catch-up plans from the older
+  // revision and owes them again — a redeploy, never a skip, which is the
+  // direction `recordBackendRevision` already takes when its write fails.
+  const revisionRecorded = failedDetail.length === 0;
+  if (revisionRecorded) {
+    await recordBackendRevision(run.clone_id, snapshot.sourceSha ?? null);
+  }
 
   return succeedRun(run, {
     deployed: refreshed.length + landed,
     failed: failedDetail,
-    // The revision the clone's functions are now at. A run reaches here only
-    // with `sourceMoved` false, so every bundle it counts came from this one
-    // revision — which is the whole claim `succeeded` is making.
+    // The revision this run deployed FROM. A run reaches here only with
+    // `sourceMoved` false, so every bundle it counts came from this one
+    // revision. Whether the clone's functions are all at it is
+    // `revision_recorded`: false when a bundle it owed did not land.
     source_sha: snapshot.sourceSha ?? null,
+    revision_recorded: revisionRecorded,
     generation_at: generation.baselineAt,
   });
 }
