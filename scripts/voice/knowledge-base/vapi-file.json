@@ -1,0 +1,24 @@
+{
+  "_comment": [
+    "Which VAPI file the voice fleet's knowledge base actually IS.",
+    "",
+    "The corpus is built by build-knowledge-doc.mjs and uploaded to VAPI, where",
+    "every assistant's inline `query` tool points at it by file id. Before this",
+    "file existed that id was recorded nowhere: the document the live agents",
+    "answered from could not be compared with the repository, and re-pointing",
+    "twelve assistants was a hand step with no record that it had been done.",
+    "",
+    "`sha256` is of the committed Markdown AS UPLOADED. When it stops matching",
+    "the committed file, the live agents are answering from an older corpus -",
+    "which is a different failure from the file id being wrong, and sends you",
+    "to a different remedy, so both are recorded.",
+    "",
+    "A null file_id means the fleet's knowledge base is not managed from here",
+    "and apply-fleet-upgrade.py leaves every query tool exactly as it found it."
+  ],
+  "file_id": null,
+  "uploaded_at": null,
+  "bytes": 27591,
+  "sha256": "ea6ee7478c625eeca495ad9c0545e4df9e6b46fb3343314309731cf694470e89",
+  "source": "scripts/voice/knowledge-base/aurixa-voice-knowledge-base.md"
+}

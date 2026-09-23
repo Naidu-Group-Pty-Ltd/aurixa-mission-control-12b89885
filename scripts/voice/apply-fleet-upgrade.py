@@ -2,9 +2,23 @@
 """Apply the comprehensive prompts + org-level toolIds to the 12 MC assistants.
 
 Per assistant: GET fresh -> replace the system message with the generated
-prompt, set model.toolIds to the role's org tools, keep ONLY the inline
-query KB tool (function tools move to org level) -> PATCH -> verify.
+prompt, bind the role's org tools from the manifest, leave every inline tool
+alone -> PATCH -> verify.
 Model (gpt-5.6-luna), voice, firstMessage, server, transcriber untouched.
+
+A VAPI PATCH replaces a whole top-level key, so `model` is always read fresh
+and sent back entire. Inline tools are never filtered: an earlier version kept
+only the knowledge-base query tool and deleted everything else, which is how
+the end-call tool came to be missing from all twelve assistants.
+
+The knowledge base travels too: knowledge-base/vapi-file.json records which
+VAPI file the corpus was uploaded as, and every inline `query` tool is pointed
+at it and verified by read-back. A null file id there means the corpus is not
+managed from here and every query tool is left exactly as found.
+
+  --prune-unmanaged   make the manifest exclusive: drop bound toolIds it does
+                      not name. Off by default, because dropping a binding
+                      silently is the defect this script already shipped.
 """
 import json
 import os
@@ -17,8 +31,37 @@ KEY = os.environ["VAPI_KEY"]
 BASE = "https://api.vapi.ai"
 S = os.path.dirname(os.path.abspath(__file__))
 
+PRUNE_UNMANAGED = "--prune-unmanaged" in sys.argv
+
 TOOL_IDS = json.load(open(os.path.join(S, "fleet-prompts", "mc_org_tool_ids.json")))
 MANIFEST = json.load(open(os.path.join(S, "fleet-prompts", "manifest.json")))
+KB = json.load(open(os.path.join(S, "knowledge-base", "vapi-file.json")))
+KB_FILE_ID = KB.get("file_id")
+
+
+def repoint_knowledge_base(tools):
+    """Point every inline `query` tool at the recorded knowledge-base file.
+
+    The knowledge base used to reach the fleet by hand: build the document,
+    upload it to VAPI, then edit twelve assistants to name the new file id.
+    Nothing recorded which id was live, so nobody could tell a fleet answering
+    from last month's corpus from one answering from this month's.
+
+    A null `file_id` means the corpus is not managed here, and then this does
+    nothing at all rather than guessing - unbinding a knowledge base leaves
+    every assistant answering from nothing, which is worse than a stale one.
+    """
+    if not KB_FILE_ID:
+        return 0
+    changed = 0
+    for t in tools:
+        if t.get("type") != "query":
+            continue
+        for kb in t.get("knowledgeBases") or []:
+            if kb.get("fileIds") != [KB_FILE_ID]:
+                kb["fileIds"] = [KB_FILE_ID]
+                changed += 1
+    return changed
 
 
 def api(method, path, body=None, retries=5):
@@ -50,7 +93,8 @@ def api(method, path, body=None, retries=5):
 
 
 def main():
-    only = sys.argv[1] if len(sys.argv) > 1 else None
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    only = args[0] if args else None
     for key, m in MANIFEST.items():
         if only and key != only:
             continue
@@ -60,13 +104,35 @@ def main():
         a = api("GET", f"/assistant/{aid}")
         model = a["model"]
 
-        # keep only the KB query tool inline
-        kb_tools = [
-            t for t in (model.get("tools") or [])
-            if t.get("type") == "query"
-        ]
-        model["tools"] = kb_tools
-        model["toolIds"] = [TOOL_IDS[t] for t in m["tools"]]
+        # Inline tools are PRESERVED, never filtered.
+        #
+        # This block used to keep only `type == "query"` and the verify step
+        # below then asserted that result -- so the script reported "applied"
+        # at precisely the moment it had removed a capability. VAPI's own
+        # end-call and transfer tools are inline entries, so every run stripped
+        # anything of that shape from all twelve assistants, and the check
+        # agreed with the script while only the server disagreed.
+        #
+        # Nothing inline is ours to delete. The manifest governs `toolIds`; it
+        # says nothing about what VAPI or an operator attached inline.
+        model["tools"] = list(model.get("tools") or [])
+        repointed = repoint_knowledge_base(model["tools"])
+
+        # toolIds are declarative from the manifest, but an id the manifest
+        # does not name is KEPT rather than dropped: losing a binding silently
+        # is the failure this script already caused once. Unmanaged ids are
+        # reported on every run, and --prune-unmanaged is the explicit opt-in
+        # for making the manifest exclusive.
+        want_ids = [TOOL_IDS[t] for t in m["tools"]]
+        known = set(TOOL_IDS.values())
+        unmanaged = [i for i in (model.get("toolIds") or []) if i not in known]
+        if unmanaged and not PRUNE_UNMANAGED:
+            print(
+                f"UNMANAGED     {m['name']:32s} keeping {len(unmanaged)} toolId(s) "
+                f"the manifest does not name: {','.join(unmanaged)}",
+                file=sys.stderr,
+            )
+        model["toolIds"] = want_ids + ([] if PRUNE_UNMANAGED else unmanaged)
 
         msgs = model.get("messages") or []
         sys_idx = next((i for i, x in enumerate(msgs) if x.get("role") == "system"), None)
@@ -82,15 +148,36 @@ def main():
         vm = v["model"]
         got_ids = vm.get("toolIds") or []
         got_inline = [(t.get("type"), (t.get("function") or {}).get("name")) for t in vm.get("tools") or []]
+        # Asserted by effect: read back which file the query tool is actually
+        # bound to, rather than trusting that the PATCH carried it.
+        got_kb_files = sorted(
+            {
+                f
+                for t in vm.get("tools") or []
+                if t.get("type") == "query"
+                for kb in t.get("knowledgeBases") or []
+                for f in kb.get("fileIds") or []
+            }
+        )
         got_sys = next(x for x in vm["messages"] if x["role"] == "system")["content"]
+        # Assert what this script is responsible for, and nothing more. The old
+        # check demanded the inline set be EXACTLY the KB tool, which made the
+        # loss of the end-call tool a passing condition. Every manifest tool
+        # must be bound; the KB query tool must have survived; anything else
+        # inline is somebody else's and is not judged here.
         ok = (
-            set(got_ids) == set(TOOL_IDS[t] for t in m["tools"])
-            and got_inline == [("query", "aurixa_knowledge")]
+            set(want_ids) <= set(got_ids)
+            and any(kind == "query" for kind, _ in got_inline)
+            and (not KB_FILE_ID or got_kb_files == [KB_FILE_ID])
             and len(got_sys) == len(prompt)
             and vm.get("model") == "gpt-5.6-luna"
         )
         status = "applied" if ok else "VERIFY-FAILED"
-        print(f"{status:14s} {m['name']:32s} prompt={len(got_sys)} toolIds={len(got_ids)} inline={got_inline} model={vm.get('model')}")
+        kb_note = f" kb={','.join(got_kb_files) or 'none'}" + (f" (repointed {repointed})" if repointed else "")
+        print(
+            f"{status:14s} {m['name']:32s} prompt={len(got_sys)} toolIds={len(got_ids)} "
+            f"inline={got_inline}{kb_note} model={vm.get('model')}"
+        )
 
 
 if __name__ == "__main__":

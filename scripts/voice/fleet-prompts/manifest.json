@@ -6,9 +6,11 @@
     "tools": [
       "resolve_contact",
       "get_call_context",
-      "phoneNumber_inject"
+      "phoneNumber_inject",
+      "transfer_to_human_mc",
+      "end_call_tool"
     ],
-    "chars": 23180,
+    "chars": 26005,
     "file": "front_desk.md"
   },
   "review_booking": {
@@ -19,9 +21,11 @@
       "resolve_contact",
       "get_call_context",
       "check_availability",
-      "book_appointment"
+      "book_appointment",
+      "transfer_to_human_mc",
+      "end_call_tool"
     ],
-    "chars": 21475,
+    "chars": 24300,
     "file": "review_booking.md"
   },
   "solutions": {
@@ -32,9 +36,11 @@
       "resolve_contact",
       "get_call_context",
       "check_availability",
-      "book_appointment"
+      "book_appointment",
+      "transfer_to_human_mc",
+      "end_call_tool"
     ],
-    "chars": 22539,
+    "chars": 25364,
     "file": "solutions.md"
   },
   "support": {
@@ -43,9 +49,12 @@
     "persona": "Monica",
     "tools": [
       "resolve_contact",
-      "get_call_context"
+      "get_call_context",
+      "raise_support_ticket",
+      "transfer_to_human_mc",
+      "end_call_tool"
     ],
-    "chars": 19510,
+    "chars": 26931,
     "file": "support.md"
   },
   "questionnaire": {
@@ -56,9 +65,10 @@
       "resolve_contact",
       "get_call_context",
       "check_availability",
-      "book_appointment"
+      "book_appointment",
+      "end_call_tool"
     ],
-    "chars": 22811,
+    "chars": 24344,
     "file": "questionnaire.md"
   },
   "review_follow_up": {
@@ -69,9 +79,10 @@
       "resolve_contact",
       "get_call_context",
       "check_availability",
-      "book_appointment"
+      "book_appointment",
+      "end_call_tool"
     ],
-    "chars": 22003,
+    "chars": 23534,
     "file": "review_follow_up.md"
   },
   "confirmation": {
@@ -82,9 +93,10 @@
       "resolve_contact",
       "get_call_context",
       "check_availability",
-      "book_appointment"
+      "book_appointment",
+      "end_call_tool"
     ],
-    "chars": 21696,
+    "chars": 23225,
     "file": "confirmation.md"
   },
   "reminder": {
@@ -95,9 +107,10 @@
       "resolve_contact",
       "get_call_context",
       "check_availability",
-      "book_appointment"
+      "book_appointment",
+      "end_call_tool"
     ],
-    "chars": 21163,
+    "chars": 22696,
     "file": "reminder.md"
   },
   "no_show": {
@@ -108,9 +121,10 @@
       "resolve_contact",
       "get_call_context",
       "check_availability",
-      "book_appointment"
+      "book_appointment",
+      "end_call_tool"
     ],
-    "chars": 21266,
+    "chars": 22799,
     "file": "no_show.md"
   },
   "kickoff": {
@@ -121,9 +135,10 @@
       "resolve_contact",
       "get_call_context",
       "check_availability",
-      "book_appointment"
+      "book_appointment",
+      "end_call_tool"
     ],
-    "chars": 21533,
+    "chars": 23066,
     "file": "kickoff.md"
   },
   "nurture": {
@@ -134,9 +149,10 @@
       "resolve_contact",
       "get_call_context",
       "check_availability",
-      "book_appointment"
+      "book_appointment",
+      "end_call_tool"
     ],
-    "chars": 21868,
+    "chars": 23397,
     "file": "nurture.md"
   },
   "checkin": {
@@ -147,9 +163,10 @@
       "resolve_contact",
       "get_call_context",
       "check_availability",
-      "book_appointment"
+      "book_appointment",
+      "end_call_tool"
     ],
-    "chars": 21924,
+    "chars": 23453,
     "file": "checkin.md"
   }
 }

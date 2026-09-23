@@ -16,6 +16,8 @@
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import type { Json } from "@/integrations/supabase/types";
 import { normalizePhone, phonesMatch } from "@/server/voice.server";
+import { SUPPORT_SOURCE_SLUG, ingestSupportTicket } from "@/server/support-tickets.server";
+import { draftTicketFromSpeech, usableEmail } from "@/server/voiceTicketDraft.pure";
 
 type Rec = Record<string, any>;
 
@@ -854,6 +856,171 @@ async function handleBookAppointment(tc: ToolCall, message: Rec): Promise<Record
 
 /* ------------------------------ entry points ------------------------------- */
 
+// ── Support tickets ─────────────────────────────────────────────────────
+//
+// The Support assistant used to have no way to raise one. It was bound to
+// `resolve_contact` and `get_call_context` and its prompt told it to point the
+// caller at the portal, so a call could describe a production problem in full
+// and leave no record anywhere.
+//
+// The ticket pipeline is in this same app, so this calls it IN PROCESS rather
+// than over HTTP: `ingestSupportTicket` owns validation, the rate limit, the
+// P0-P4 classification, the audit events, the operator notification and the
+// self-healing planner, and none of that is re-implemented here. What this
+// adds is the translation from what a person says to what the schema demands.
+
+/**
+ * Where a voice-raised ticket is filed. `resolveWorkspace` tolerates a slug it
+ * does not know and files it at prime scope, which is the right home for calls
+ * to Aurixa's own reception line: the caller is phoning Aurixa, not logging in
+ * to a tenant workspace.
+ */
+const VOICE_TICKET_WORKSPACE = "aurixa-voice";
+
+/**
+ * Walk the same authentication ladder `verifySupportAuth` walks, from the
+ * inside. This is the same process holding the same database credential, so
+ * signing is not a bypass — it means a ticket raised by phone is recorded
+ * `verified` exactly like one raised through the portal, rather than being
+ * marked unverified for the sole reason that it did not arrive over the wire.
+ */
+async function supportIntakeAuthHeaders(rawBody: string): Promise<Record<string, string>> {
+  const { data: source } = await supabaseAdmin
+    .from("security_intake_sources")
+    .select("hmac_secret")
+    .eq("slug", SUPPORT_SOURCE_SLUG)
+    .maybeSingle();
+  if (source?.hmac_secret) {
+    const { intakeSignatureHeader } = await import("@/server/security-intake/signature");
+    return { "x-support-signature": await intakeSignatureHeader(rawBody, source.hmac_secret) };
+  }
+  const shared = process.env.SUPPORT_INGEST_SECRET;
+  return shared ? { "x-aurixa-support-secret": shared } : {};
+}
+
+async function handleRaiseSupportTicket(tc: ToolCall, message: Rec): Promise<Record<string, unknown>> {
+  const identity = identityFrom(message, tc.args);
+  const ctx = await readContext(identity);
+
+  // The caller's own words, mapped to the contract by one pure module. It is
+  // total: an unrecognised report becomes other/none rather than an error,
+  // because a miscategorised ticket is recoverable and a lost one is not.
+  const draft = draftTicketFromSpeech({
+    summary: tc.args.summary,
+    detail: tc.args.detail,
+    what_is_broken: tc.args.what_is_broken ?? tc.args.whatIsBroken,
+    since_when: tc.args.since_when ?? tc.args.sinceWhen,
+  });
+
+  // An address the caller spelled out is only used when it parses; otherwise
+  // the contact record is the better source. Reading an email back over the
+  // phone is the most fragile step in this flow, so it is the fallback rather
+  // than the first resort.
+  let email = usableEmail(tc.args.email);
+  let reporterName: string | null =
+    (typeof ctx?.full_name === "string" ? ctx.full_name : null) ??
+    (typeof ctx?.first_name === "string" ? ctx.first_name : null);
+
+  if (ctx?.contact_id) {
+    const { data: contact, error } = await supabaseAdmin
+      .from("crm_contacts")
+      .select("email, first_name, last_name")
+      .eq("id", ctx.contact_id)
+      .maybeSingle();
+    if (error) {
+      // A read that FAILED is not a contact without an email. Say so rather
+      // than sending the caller down the spell-it-out path for our fault.
+      console.error("[voice-tools] raise_support_ticket contact read failed:", error.message);
+    }
+    if (!email) email = usableEmail(contact?.email as string | undefined);
+    if (!reporterName && contact) {
+      const joined = [contact.first_name, contact.last_name].filter(Boolean).join(" ").trim();
+      reporterName = joined || null;
+    }
+  }
+
+  if (!email) {
+    return {
+      success: false,
+      ticket_created: false,
+      needs_email: true,
+      clarification_question:
+        "What is the best email address for the team to reply to? Ask the caller to say it, " +
+        "then repeat it back to them before calling this tool again.",
+      message: "No email address on file for this caller and none was supplied.",
+    };
+  }
+
+  const payload = {
+    version: 1 as const,
+    workspace_id: VOICE_TICKET_WORKSPACE,
+    reporter_email: email,
+    reporter_name: reporterName,
+    category: draft.category,
+    breakage_vector: draft.breakage_vector,
+    subject: draft.subject,
+    description: draft.description,
+    client_meta: {
+      source: "voice",
+      url: `vapi:call/${identity.vapiCallId ?? "unknown"}`,
+      user_agent: `aurixa-voice/${typeof message.call?.assistantId === "string" ? message.call.assistantId : "assistant"}`,
+    },
+  };
+
+  const rawBody = JSON.stringify(payload);
+  let outcome: { status: number; body: Record<string, unknown> };
+  try {
+    outcome = await ingestSupportTicket(
+      new Request("https://mission-control.aurixasystems.com.au/api/public/support/tickets", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(await supportIntakeAuthHeaders(rawBody)),
+        },
+        body: rawBody,
+      }),
+    );
+  } catch (err) {
+    console.error("[voice-tools] raise_support_ticket ingest threw:", (err as Error).message);
+    return {
+      success: false,
+      ticket_created: false,
+      message:
+        "The ticket could not be lodged. Tell the caller it has NOT been logged and that they " +
+        "can raise it on the support portal, and do not give them a reference.",
+    };
+  }
+
+  const reference = typeof outcome.body?.reference === "string" ? outcome.body.reference : null;
+  if (outcome.status >= 200 && outcome.status < 300 && reference) {
+    return {
+      success: true,
+      ticket_created: true,
+      reference,
+      priority: outcome.body?.priority ?? null,
+      category: draft.category,
+      message:
+        `Ticket ${reference} has been raised. Read the reference back to the caller, letting ` +
+        `them know the team will reply to ${email}.`,
+    };
+  }
+
+  // Anything else is a refusal, and the caller must not be told otherwise.
+  // A rate limit and a validation failure send an operator to different
+  // remedies, so the status is carried back rather than flattened.
+  console.error(
+    `[voice-tools] raise_support_ticket refused: ${outcome.status} ${JSON.stringify(outcome.body).slice(0, 300)}`,
+  );
+  return {
+    success: false,
+    ticket_created: false,
+    status: outcome.status,
+    message:
+      "The ticket was NOT lodged. Apologise, tell the caller it has not been logged, and offer " +
+      "to put them through to the team or point them at the support portal. Do not invent a reference.",
+  };
+}
+
 export async function handleToolCalls(message: Rec): Promise<Rec> {
   const calls = extractToolCalls(message);
   const results: Array<{ toolCallId: string; result: string }> = [];
@@ -877,6 +1044,9 @@ export async function handleToolCalls(message: Rec): Promise<Rec> {
           break;
         case "book_appointment":
           result = await handleBookAppointment(tc, message);
+          break;
+        case "raise_support_ticket":
+          result = await handleRaiseSupportTicket(tc, message);
           break;
         default:
           result = { success: false, error: `unknown_tool_${tc.name}` };
