@@ -37,6 +37,7 @@
     "check:migration-order": "node --max-old-space-size=4096 scripts/check-migration-dependency-order.mjs"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.128.0",
     "@cloudflare/vite-plugin": "^1.25.5",
     "@hookform/resolvers": "^5.2.2",
     "@octokit/auth-app": "^8.2.0",

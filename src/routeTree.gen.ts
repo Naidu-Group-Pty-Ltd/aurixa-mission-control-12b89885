@@ -70,6 +70,8 @@ import { Route as ModulesBuilderRouteImport } from './routes/modules.builder'
 import { Route as ModulesSlugRouteImport } from './routes/modules.$slug'
 import { Route as JoinTokenRouteImport } from './routes/join.$token'
 import { Route as HooksWarmHealthRouteImport } from './routes/hooks.warm-health'
+import { Route as HooksVoiceStudioPlanRouteImport } from './routes/hooks.voice-studio-plan'
+import { Route as HooksVoiceStudioDeployRouteImport } from './routes/hooks.voice-studio-deploy'
 import { Route as HooksVoiceOutboundDispatchRouteImport } from './routes/hooks.voice-outbound-dispatch'
 import { Route as HooksVoiceCallDrainRouteImport } from './routes/hooks.voice-call-drain'
 import { Route as HooksVerificationSelftestRouteImport } from './routes/hooks.verification-selftest'
@@ -144,7 +146,9 @@ import { Route as BillingCatalogRouteImport } from './routes/billing.catalog'
 import { Route as BillingCancelRouteImport } from './routes/billing.cancel'
 import { Route as BillingApiUsageRouteImport } from './routes/billing.api-usage'
 import { Route as ApiHealthRouteImport } from './routes/api.health'
+import { Route as VoiceStudioIndexRouteImport } from './routes/voice.studio.index'
 import { Route as CrmAccountsIndexRouteImport } from './routes/crm.accounts.index'
+import { Route as VoiceStudioProjectIdRouteImport } from './routes/voice.studio.$projectId'
 import { Route as EmailCampaignsCampaignIdRouteImport } from './routes/email.campaigns.$campaignId'
 import { Route as CrmAccountsAccountIdRouteImport } from './routes/crm.accounts.$accountId'
 import { Route as ClonesCloneIdSecretsRouteImport } from './routes/clones.$cloneId.secrets'
@@ -212,6 +216,7 @@ import { Route as ApiPublicSeatsDevicesRegisterRouteImport } from './routes/api.
 import { Route as ApiPublicSeatsDevicesListRouteImport } from './routes/api.public.seats.devices.list'
 import { Route as ApiPublicSeatsDevicesHeartbeatRouteImport } from './routes/api.public.seats.devices.heartbeat'
 import { Route as ApiPublicClonesGateCheckoutRouteImport } from './routes/api.public.clones.gate.checkout'
+import { Route as ApiPublicVoiceTTenantKeyWebhookRouteImport } from './routes/api.public.voice.t.$tenantKey.webhook'
 
 const YggdrasilRoute = YggdrasilRouteImport.update({
   id: '/yggdrasil',
@@ -518,6 +523,16 @@ const JoinTokenRoute = JoinTokenRouteImport.update({
 const HooksWarmHealthRoute = HooksWarmHealthRouteImport.update({
   id: '/hooks/warm-health',
   path: '/hooks/warm-health',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksVoiceStudioPlanRoute = HooksVoiceStudioPlanRouteImport.update({
+  id: '/hooks/voice-studio-plan',
+  path: '/hooks/voice-studio-plan',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksVoiceStudioDeployRoute = HooksVoiceStudioDeployRouteImport.update({
+  id: '/hooks/voice-studio-deploy',
+  path: '/hooks/voice-studio-deploy',
   getParentRoute: () => rootRouteImport,
 } as any)
 const HooksVoiceOutboundDispatchRoute =
@@ -909,9 +924,19 @@ const ApiHealthRoute = ApiHealthRouteImport.update({
   path: '/api/health',
   getParentRoute: () => rootRouteImport,
 } as any)
+const VoiceStudioIndexRoute = VoiceStudioIndexRouteImport.update({
+  id: '/voice/studio/',
+  path: '/voice/studio/',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const CrmAccountsIndexRoute = CrmAccountsIndexRouteImport.update({
   id: '/crm/accounts/',
   path: '/crm/accounts/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const VoiceStudioProjectIdRoute = VoiceStudioProjectIdRouteImport.update({
+  id: '/voice/studio/$projectId',
+  path: '/voice/studio/$projectId',
   getParentRoute: () => rootRouteImport,
 } as any)
 const EmailCampaignsCampaignIdRoute =
@@ -1287,6 +1312,12 @@ const ApiPublicClonesGateCheckoutRoute =
     path: '/checkout',
     getParentRoute: () => ApiPublicClonesGateRoute,
   } as any)
+const ApiPublicVoiceTTenantKeyWebhookRoute =
+  ApiPublicVoiceTTenantKeyWebhookRouteImport.update({
+    id: '/api/public/voice/t/$tenantKey/webhook',
+    path: '/api/public/voice/t/$tenantKey/webhook',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -1395,6 +1426,8 @@ export interface FileRoutesByFullPath {
   '/hooks/verification-selftest': typeof HooksVerificationSelftestRoute
   '/hooks/voice-call-drain': typeof HooksVoiceCallDrainRoute
   '/hooks/voice-outbound-dispatch': typeof HooksVoiceOutboundDispatchRoute
+  '/hooks/voice-studio-deploy': typeof HooksVoiceStudioDeployRoute
+  '/hooks/voice-studio-plan': typeof HooksVoiceStudioPlanRoute
   '/hooks/warm-health': typeof HooksWarmHealthRoute
   '/join/$token': typeof JoinTokenRoute
   '/modules/$slug': typeof ModulesSlugRoute
@@ -1429,7 +1462,9 @@ export interface FileRoutesByFullPath {
   '/clones/$cloneId/secrets': typeof ClonesCloneIdSecretsRoute
   '/crm/accounts/$accountId': typeof CrmAccountsAccountIdRoute
   '/email/campaigns/$campaignId': typeof EmailCampaignsCampaignIdRoute
+  '/voice/studio/$projectId': typeof VoiceStudioProjectIdRoute
   '/crm/accounts/': typeof CrmAccountsIndexRoute
+  '/voice/studio/': typeof VoiceStudioIndexRoute
   '/api/public/anthropic/identity': typeof ApiPublicAnthropicIdentityRoute
   '/api/public/anthropic/jwks': typeof ApiPublicAnthropicJwksRoute
   '/api/public/billing/handoff': typeof ApiPublicBillingHandoffRoute
@@ -1492,6 +1527,7 @@ export interface FileRoutesByFullPath {
   '/api/public/seats/devices/register': typeof ApiPublicSeatsDevicesRegisterRoute
   '/api/public/seats/devices/release': typeof ApiPublicSeatsDevicesReleaseRoute
   '/api/public/stripe/webhook/$cloneId': typeof ApiPublicStripeWebhookCloneIdRoute
+  '/api/public/voice/t/$tenantKey/webhook': typeof ApiPublicVoiceTTenantKeyWebhookRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -1599,6 +1635,8 @@ export interface FileRoutesByTo {
   '/hooks/verification-selftest': typeof HooksVerificationSelftestRoute
   '/hooks/voice-call-drain': typeof HooksVoiceCallDrainRoute
   '/hooks/voice-outbound-dispatch': typeof HooksVoiceOutboundDispatchRoute
+  '/hooks/voice-studio-deploy': typeof HooksVoiceStudioDeployRoute
+  '/hooks/voice-studio-plan': typeof HooksVoiceStudioPlanRoute
   '/hooks/warm-health': typeof HooksWarmHealthRoute
   '/join/$token': typeof JoinTokenRoute
   '/modules/$slug': typeof ModulesSlugRoute
@@ -1633,7 +1671,9 @@ export interface FileRoutesByTo {
   '/clones/$cloneId/secrets': typeof ClonesCloneIdSecretsRoute
   '/crm/accounts/$accountId': typeof CrmAccountsAccountIdRoute
   '/email/campaigns/$campaignId': typeof EmailCampaignsCampaignIdRoute
+  '/voice/studio/$projectId': typeof VoiceStudioProjectIdRoute
   '/crm/accounts': typeof CrmAccountsIndexRoute
+  '/voice/studio': typeof VoiceStudioIndexRoute
   '/api/public/anthropic/identity': typeof ApiPublicAnthropicIdentityRoute
   '/api/public/anthropic/jwks': typeof ApiPublicAnthropicJwksRoute
   '/api/public/billing/handoff': typeof ApiPublicBillingHandoffRoute
@@ -1696,6 +1736,7 @@ export interface FileRoutesByTo {
   '/api/public/seats/devices/register': typeof ApiPublicSeatsDevicesRegisterRoute
   '/api/public/seats/devices/release': typeof ApiPublicSeatsDevicesReleaseRoute
   '/api/public/stripe/webhook/$cloneId': typeof ApiPublicStripeWebhookCloneIdRoute
+  '/api/public/voice/t/$tenantKey/webhook': typeof ApiPublicVoiceTTenantKeyWebhookRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -1805,6 +1846,8 @@ export interface FileRoutesById {
   '/hooks/verification-selftest': typeof HooksVerificationSelftestRoute
   '/hooks/voice-call-drain': typeof HooksVoiceCallDrainRoute
   '/hooks/voice-outbound-dispatch': typeof HooksVoiceOutboundDispatchRoute
+  '/hooks/voice-studio-deploy': typeof HooksVoiceStudioDeployRoute
+  '/hooks/voice-studio-plan': typeof HooksVoiceStudioPlanRoute
   '/hooks/warm-health': typeof HooksWarmHealthRoute
   '/join/$token': typeof JoinTokenRoute
   '/modules/$slug': typeof ModulesSlugRoute
@@ -1839,7 +1882,9 @@ export interface FileRoutesById {
   '/clones/$cloneId/secrets': typeof ClonesCloneIdSecretsRoute
   '/crm/accounts/$accountId': typeof CrmAccountsAccountIdRoute
   '/email/campaigns/$campaignId': typeof EmailCampaignsCampaignIdRoute
+  '/voice/studio/$projectId': typeof VoiceStudioProjectIdRoute
   '/crm/accounts/': typeof CrmAccountsIndexRoute
+  '/voice/studio/': typeof VoiceStudioIndexRoute
   '/api/public/anthropic/identity': typeof ApiPublicAnthropicIdentityRoute
   '/api/public/anthropic/jwks': typeof ApiPublicAnthropicJwksRoute
   '/api/public/billing/handoff': typeof ApiPublicBillingHandoffRoute
@@ -1902,6 +1947,7 @@ export interface FileRoutesById {
   '/api/public/seats/devices/register': typeof ApiPublicSeatsDevicesRegisterRoute
   '/api/public/seats/devices/release': typeof ApiPublicSeatsDevicesReleaseRoute
   '/api/public/stripe/webhook/$cloneId': typeof ApiPublicStripeWebhookCloneIdRoute
+  '/api/public/voice/t/$tenantKey/webhook': typeof ApiPublicVoiceTTenantKeyWebhookRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -2012,6 +2058,8 @@ export interface FileRouteTypes {
     | '/hooks/verification-selftest'
     | '/hooks/voice-call-drain'
     | '/hooks/voice-outbound-dispatch'
+    | '/hooks/voice-studio-deploy'
+    | '/hooks/voice-studio-plan'
     | '/hooks/warm-health'
     | '/join/$token'
     | '/modules/$slug'
@@ -2046,7 +2094,9 @@ export interface FileRouteTypes {
     | '/clones/$cloneId/secrets'
     | '/crm/accounts/$accountId'
     | '/email/campaigns/$campaignId'
+    | '/voice/studio/$projectId'
     | '/crm/accounts/'
+    | '/voice/studio/'
     | '/api/public/anthropic/identity'
     | '/api/public/anthropic/jwks'
     | '/api/public/billing/handoff'
@@ -2109,6 +2159,7 @@ export interface FileRouteTypes {
     | '/api/public/seats/devices/register'
     | '/api/public/seats/devices/release'
     | '/api/public/stripe/webhook/$cloneId'
+    | '/api/public/voice/t/$tenantKey/webhook'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -2216,6 +2267,8 @@ export interface FileRouteTypes {
     | '/hooks/verification-selftest'
     | '/hooks/voice-call-drain'
     | '/hooks/voice-outbound-dispatch'
+    | '/hooks/voice-studio-deploy'
+    | '/hooks/voice-studio-plan'
     | '/hooks/warm-health'
     | '/join/$token'
     | '/modules/$slug'
@@ -2250,7 +2303,9 @@ export interface FileRouteTypes {
     | '/clones/$cloneId/secrets'
     | '/crm/accounts/$accountId'
     | '/email/campaigns/$campaignId'
+    | '/voice/studio/$projectId'
     | '/crm/accounts'
+    | '/voice/studio'
     | '/api/public/anthropic/identity'
     | '/api/public/anthropic/jwks'
     | '/api/public/billing/handoff'
@@ -2313,6 +2368,7 @@ export interface FileRouteTypes {
     | '/api/public/seats/devices/register'
     | '/api/public/seats/devices/release'
     | '/api/public/stripe/webhook/$cloneId'
+    | '/api/public/voice/t/$tenantKey/webhook'
   id:
     | '__root__'
     | '/'
@@ -2421,6 +2477,8 @@ export interface FileRouteTypes {
     | '/hooks/verification-selftest'
     | '/hooks/voice-call-drain'
     | '/hooks/voice-outbound-dispatch'
+    | '/hooks/voice-studio-deploy'
+    | '/hooks/voice-studio-plan'
     | '/hooks/warm-health'
     | '/join/$token'
     | '/modules/$slug'
@@ -2455,7 +2513,9 @@ export interface FileRouteTypes {
     | '/clones/$cloneId/secrets'
     | '/crm/accounts/$accountId'
     | '/email/campaigns/$campaignId'
+    | '/voice/studio/$projectId'
     | '/crm/accounts/'
+    | '/voice/studio/'
     | '/api/public/anthropic/identity'
     | '/api/public/anthropic/jwks'
     | '/api/public/billing/handoff'
@@ -2518,6 +2578,7 @@ export interface FileRouteTypes {
     | '/api/public/seats/devices/register'
     | '/api/public/seats/devices/release'
     | '/api/public/stripe/webhook/$cloneId'
+    | '/api/public/voice/t/$tenantKey/webhook'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -2624,6 +2685,8 @@ export interface RootRouteChildren {
   HooksVerificationSelftestRoute: typeof HooksVerificationSelftestRoute
   HooksVoiceCallDrainRoute: typeof HooksVoiceCallDrainRoute
   HooksVoiceOutboundDispatchRoute: typeof HooksVoiceOutboundDispatchRoute
+  HooksVoiceStudioDeployRoute: typeof HooksVoiceStudioDeployRoute
+  HooksVoiceStudioPlanRoute: typeof HooksVoiceStudioPlanRoute
   HooksWarmHealthRoute: typeof HooksWarmHealthRoute
   JoinTokenRoute: typeof JoinTokenRoute
   SecurityIntakeRoute: typeof SecurityIntakeRoute
@@ -2640,7 +2703,9 @@ export interface RootRouteChildren {
   ClientsHandoffTokenRoute: typeof ClientsHandoffTokenRoute
   CrmAccountsAccountIdRoute: typeof CrmAccountsAccountIdRoute
   EmailCampaignsCampaignIdRoute: typeof EmailCampaignsCampaignIdRoute
+  VoiceStudioProjectIdRoute: typeof VoiceStudioProjectIdRoute
   CrmAccountsIndexRoute: typeof CrmAccountsIndexRoute
+  VoiceStudioIndexRoute: typeof VoiceStudioIndexRoute
   ApiPublicAnthropicIdentityRoute: typeof ApiPublicAnthropicIdentityRoute
   ApiPublicAnthropicJwksRoute: typeof ApiPublicAnthropicJwksRoute
   ApiPublicBillingHandoffRoute: typeof ApiPublicBillingHandoffRoute
@@ -2701,6 +2766,7 @@ export interface RootRouteChildren {
   ApiPublicSeatsDevicesListRoute: typeof ApiPublicSeatsDevicesListRoute
   ApiPublicSeatsDevicesRegisterRoute: typeof ApiPublicSeatsDevicesRegisterRoute
   ApiPublicSeatsDevicesReleaseRoute: typeof ApiPublicSeatsDevicesReleaseRoute
+  ApiPublicVoiceTTenantKeyWebhookRoute: typeof ApiPublicVoiceTTenantKeyWebhookRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -3130,6 +3196,20 @@ declare module '@tanstack/react-router' {
       path: '/hooks/warm-health'
       fullPath: '/hooks/warm-health'
       preLoaderRoute: typeof HooksWarmHealthRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/voice-studio-plan': {
+      id: '/hooks/voice-studio-plan'
+      path: '/hooks/voice-studio-plan'
+      fullPath: '/hooks/voice-studio-plan'
+      preLoaderRoute: typeof HooksVoiceStudioPlanRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/voice-studio-deploy': {
+      id: '/hooks/voice-studio-deploy'
+      path: '/hooks/voice-studio-deploy'
+      fullPath: '/hooks/voice-studio-deploy'
+      preLoaderRoute: typeof HooksVoiceStudioDeployRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/hooks/voice-outbound-dispatch': {
@@ -3650,11 +3730,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiHealthRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/voice/studio/': {
+      id: '/voice/studio/'
+      path: '/voice/studio'
+      fullPath: '/voice/studio/'
+      preLoaderRoute: typeof VoiceStudioIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/crm/accounts/': {
       id: '/crm/accounts/'
       path: '/crm/accounts'
       fullPath: '/crm/accounts/'
       preLoaderRoute: typeof CrmAccountsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/voice/studio/$projectId': {
+      id: '/voice/studio/$projectId'
+      path: '/voice/studio/$projectId'
+      fullPath: '/voice/studio/$projectId'
+      preLoaderRoute: typeof VoiceStudioProjectIdRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/email/campaigns/$campaignId': {
@@ -4126,6 +4220,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicClonesGateCheckoutRouteImport
       parentRoute: typeof ApiPublicClonesGateRoute
     }
+    '/api/public/voice/t/$tenantKey/webhook': {
+      id: '/api/public/voice/t/$tenantKey/webhook'
+      path: '/api/public/voice/t/$tenantKey/webhook'
+      fullPath: '/api/public/voice/t/$tenantKey/webhook'
+      preLoaderRoute: typeof ApiPublicVoiceTTenantKeyWebhookRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -4350,6 +4451,8 @@ const rootRouteChildren: RootRouteChildren = {
   HooksVerificationSelftestRoute: HooksVerificationSelftestRoute,
   HooksVoiceCallDrainRoute: HooksVoiceCallDrainRoute,
   HooksVoiceOutboundDispatchRoute: HooksVoiceOutboundDispatchRoute,
+  HooksVoiceStudioDeployRoute: HooksVoiceStudioDeployRoute,
+  HooksVoiceStudioPlanRoute: HooksVoiceStudioPlanRoute,
   HooksWarmHealthRoute: HooksWarmHealthRoute,
   JoinTokenRoute: JoinTokenRoute,
   SecurityIntakeRoute: SecurityIntakeRoute,
@@ -4366,7 +4469,9 @@ const rootRouteChildren: RootRouteChildren = {
   ClientsHandoffTokenRoute: ClientsHandoffTokenRoute,
   CrmAccountsAccountIdRoute: CrmAccountsAccountIdRoute,
   EmailCampaignsCampaignIdRoute: EmailCampaignsCampaignIdRoute,
+  VoiceStudioProjectIdRoute: VoiceStudioProjectIdRoute,
   CrmAccountsIndexRoute: CrmAccountsIndexRoute,
+  VoiceStudioIndexRoute: VoiceStudioIndexRoute,
   ApiPublicAnthropicIdentityRoute: ApiPublicAnthropicIdentityRoute,
   ApiPublicAnthropicJwksRoute: ApiPublicAnthropicJwksRoute,
   ApiPublicBillingHandoffRoute: ApiPublicBillingHandoffRoute,
@@ -4428,6 +4533,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPublicSeatsDevicesListRoute: ApiPublicSeatsDevicesListRoute,
   ApiPublicSeatsDevicesRegisterRoute: ApiPublicSeatsDevicesRegisterRoute,
   ApiPublicSeatsDevicesReleaseRoute: ApiPublicSeatsDevicesReleaseRoute,
+  ApiPublicVoiceTTenantKeyWebhookRoute: ApiPublicVoiceTTenantKeyWebhookRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

@@ -49,6 +49,14 @@ const SERVICE_ROLE_ONLY = new Set([
   // default grants from anon and authenticated, so there is no policy to
   // write and adding one would open a table no browser has business reading.
   "prime_snapshot_scans",
+  // The Voice Cloning Studio's two secret-bearing tables: a client's VAPI
+  // private key, and each deployed fleet's webhook secret and Make transfer
+  // hook, all encrypted by the application. Read only by the Studio's server
+  // functions and the tenant webhook, which hold the service role; the
+  // migration REVOKEs the default grants, and the Studio shows a fingerprint.
+  // A policy here would hand a browser the ciphertext of a client's key.
+  "voice_studio_vapi_credentials",
+  "voice_tenant_configs",
 ]);
 
 const sql = readdirSync(MIGRATIONS)
