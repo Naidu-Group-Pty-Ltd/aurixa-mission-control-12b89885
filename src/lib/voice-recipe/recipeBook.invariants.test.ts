@@ -6,14 +6,24 @@ import { LESSONS } from "./lessons.pure";
 import { RECIPE_BOOK_VERSION, recipeBookSha, serializeRecipeBook } from "./recipeBook.pure";
 import { PLAYBOOK_PROVENANCE } from "./sections/playbooks.pure";
 import { BACKEND_MENU, TOOL_CATALOG, isDeployable, vapiToolPayload } from "./tools.pure";
-import { DEFAULT_TOOL_NAMES, PLAYBOOK_IDS, TOOL_KEYS, type AgentSpec, type BusinessVoiceContext } from "./types.pure";
+import {
+  DEFAULT_TOOL_NAMES,
+  PLAYBOOK_IDS,
+  TOOL_KEYS,
+  type AgentSpec,
+  type BusinessVoiceContext,
+} from "./types.pure";
 
 /** A business whose every slot says only "Placeholder" - anything else in a prompt came from the book. */
 const PLACEHOLDER: BusinessVoiceContext = {
   businessName: "Placeholder Co",
   productionTag: "Production - Mission Control voice fleet",
   identityParagraph: "Placeholder Co does placeholder work.",
-  kb: { materials: "- placeholder", factualQueries: '"placeholder?"', valueTriggers: "- placeholder" },
+  kb: {
+    materials: "- placeholder",
+    factualQueries: '"placeholder?"',
+    valueTriggers: "- placeholder",
+  },
   speechRules: "- placeholder",
   skeptical: { context: "Placeholder.", quotes: ['> "placeholder"'] },
   facts: { title: "Placeholder facts", body: "Placeholder." },
@@ -61,14 +71,22 @@ function agentFor(key: (typeof ARCHETYPE_KEYS)[number]): AgentSpec {
 describe("recipe book invariants", () => {
   it("no section carries another business's words", () => {
     for (const key of ARCHETYPE_KEYS) {
-      const prompt = compileAgentPrompt(agentFor(key), { business: PLACEHOLDER, toolNames: DEFAULT_TOOL_NAMES });
-      expect(prompt, key).not.toMatch(/\b(Aurixa|NPC|Naidu|Angela|Sandra|Monica|Erica|Rita|Mary|Sydney)\b|strategic review/i);
+      const prompt = compileAgentPrompt(agentFor(key), {
+        business: PLACEHOLDER,
+        toolNames: DEFAULT_TOOL_NAMES,
+      });
+      expect(prompt, key).not.toMatch(
+        /\b(Aurixa|NPC|Naidu|Angela|Sandra|Monica|Erica|Rita|Mary|Sydney)\b|strategic review/i,
+      );
     }
   });
 
   it("absolute rules close every prompt", () => {
     for (const key of ARCHETYPE_KEYS) {
-      const prompt = compileAgentPrompt(agentFor(key), { business: PLACEHOLDER, toolNames: DEFAULT_TOOL_NAMES });
+      const prompt = compileAgentPrompt(agentFor(key), {
+        business: PLACEHOLDER,
+        toolNames: DEFAULT_TOOL_NAMES,
+      });
       const last = prompt.lastIndexOf("\n# ");
       expect(prompt.slice(last), key).toMatch(/^\n# 15\. Absolute Rules/);
     }
@@ -79,7 +97,10 @@ describe("recipe book invariants", () => {
       const a = ARCHETYPES[key];
       expect(a.defaultTools, key).toContain("end_call");
       for (const t of a.defaultTools) {
-        expect(TOOL_CATALOG[t].allowedBackends.some((b) => isDeployable(t, b)), `${key}/${t}`).toBe(true);
+        expect(
+          TOOL_CATALOG[t].allowedBackends.some((b) => isDeployable(t, b)),
+          `${key}/${t}`,
+        ).toBe(true);
       }
     }
   });
@@ -87,7 +108,9 @@ describe("recipe book invariants", () => {
   it("outbound archetypes wait for the callee; inbound ones speak first", () => {
     for (const key of ARCHETYPE_KEYS) {
       const a = ARCHETYPES[key];
-      expect(a.firstMessageMode).toBe(a.direction === "outbound" ? "assistant-waits-for-user" : "assistant-speaks-first");
+      expect(a.firstMessageMode).toBe(
+        a.direction === "outbound" ? "assistant-waits-for-user" : "assistant-speaks-first",
+      );
     }
   });
 

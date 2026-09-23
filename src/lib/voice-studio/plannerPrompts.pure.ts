@@ -18,7 +18,13 @@
 //   so the model does not try to smuggle one into prose instead.
 import { KB_PARTS, type KbPartKey } from "../voice-recipe/kb.pure.ts";
 import { ARCHETYPES } from "../voice-recipe/archetypes.pure.ts";
-import type { AgentContent, BusinessProfile, DocumentFacts, PlanTopology, ValidationIssue } from "./schemas.pure.ts";
+import type {
+  AgentContent,
+  BusinessProfile,
+  DocumentFacts,
+  PlanTopology,
+  ValidationIssue,
+} from "./schemas.pure.ts";
 
 export const STUDIO_RULES = `# Your job
 
@@ -77,7 +83,10 @@ ${json(facts)}`,
   };
 }
 
-export function topologyPrompt(profile: BusinessProfile, repair: ValidationIssue[] | null): StagePrompt {
+export function topologyPrompt(
+  profile: BusinessProfile,
+  repair: ValidationIssue[] | null,
+): StagePrompt {
   const repairBlock = repair?.length
     ? `\n\nA previous topology failed these checks. Produce a corrected topology that resolves every error:\n${json(repair)}`
     : "";
@@ -131,7 +140,11 @@ ${topology.squad ? `Squad: ${json(topology.squad)}` : ""}`,
   };
 }
 
-export function voiceContextPrompt(profile: BusinessProfile, topology: PlanTopology, agents: AgentContent[]): StagePrompt {
+export function voiceContextPrompt(
+  profile: BusinessProfile,
+  topology: PlanTopology,
+  agents: AgentContent[],
+): StagePrompt {
   return {
     documents: [],
     instructions: `Write the business-wide words every agent's prompt shares. Each field fills a slot in the recipe book's prompt structure.

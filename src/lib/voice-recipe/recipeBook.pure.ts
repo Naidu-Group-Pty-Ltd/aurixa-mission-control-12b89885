@@ -34,7 +34,9 @@ export function serializeRecipeBook(): string {
   for (const key of ARCHETYPE_KEYS) {
     const a = ARCHETYPES[key];
     out.push(`### ${a.key} - ${a.label}`);
-    out.push(`- Direction: ${a.direction}; squad role: ${a.squadRole}; first message: ${a.firstMessageMode}`);
+    out.push(
+      `- Direction: ${a.direction}; squad role: ${a.squadRole}; first message: ${a.firstMessageMode}`,
+    );
     out.push(`- Purpose: ${a.purpose}`);
     out.push(`- Default tools: ${a.defaultTools.join(", ")}`);
     out.push(`- Optional tools: ${a.optionalTools.length ? a.optionalTools.join(", ") : "none"}`);
@@ -47,8 +49,10 @@ export function serializeRecipeBook(): string {
   out.push("");
   for (const key of TOOL_KEYS) {
     const t = TOOL_CATALOG[key];
-    out.push(`- ${t.key} (${t.label}): ${t.purpose} Allowed backends: ${t.allowedBackends.join(", ")}.` +
-      (t.requires.length ? ` Requires: ${t.requires.join(", ")}.` : ""));
+    out.push(
+      `- ${t.key} (${t.label}): ${t.purpose} Allowed backends: ${t.allowedBackends.join(", ")}.` +
+        (t.requires.length ? ` Requires: ${t.requires.join(", ")}.` : ""),
+    );
   }
   out.push("");
 
@@ -58,7 +62,9 @@ export function serializeRecipeBook(): string {
     const b = BACKEND_MENU[key];
     out.push(
       `- ${b.key} (${b.label}): ${b.description} ` +
-        (b.implemented ? "Deployable." : "NOT deployable - choosing it makes the tool an open item.") +
+        (b.implemented
+          ? "Deployable."
+          : "NOT deployable - choosing it makes the tool an open item.") +
         (b.prerequisites.length ? ` Needs from an operator: ${b.prerequisites.join(", ")}.` : ""),
     );
   }
@@ -81,7 +87,9 @@ export function serializeRecipeBook(): string {
 
   out.push("## Playbook sources");
   out.push("");
-  for (const [id, sources] of Object.entries(PLAYBOOK_PROVENANCE).sort(([a], [b]) => a.localeCompare(b))) {
+  for (const [id, sources] of Object.entries(PLAYBOOK_PROVENANCE).sort(([a], [b]) =>
+    a.localeCompare(b),
+  )) {
     out.push(`- ${id}: ${sources.map((s) => s.heading).join("; ")}`);
   }
   return out.join("\n") + "\n";

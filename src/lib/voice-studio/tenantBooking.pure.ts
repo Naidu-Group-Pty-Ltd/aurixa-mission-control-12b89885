@@ -43,7 +43,14 @@ export function parseHhmm(hhmm: string): number | null {
 
 /** The planner's booking window as a tenant window, or null when it is unusable. */
 export function tenantWindow(
-  w: { days: number[]; startTime: string; endTime: string; slotMinutes: number; minNoticeHours: number; horizonDays: number } | null,
+  w: {
+    days: number[];
+    startTime: string;
+    endTime: string;
+    slotMinutes: number;
+    minNoticeHours: number;
+    horizonDays: number;
+  } | null,
   timezone: string,
 ): TenantWindow | null {
   if (!w) return null;
@@ -126,7 +133,11 @@ export function candidateSlotsIn(now: Date, w: TenantWindow): Date[] {
 }
 
 /** Slots from `candidates` that no booked interval overlaps, for a booking of `minutes`. */
-export function freeOf(candidates: Date[], booked: Array<{ start: number; end: number }>, minutes: number): Date[] {
+export function freeOf(
+  candidates: Date[],
+  booked: Array<{ start: number; end: number }>,
+  minutes: number,
+): Date[] {
   return candidates.filter((slot) => {
     const s = slot.getTime();
     const e = s + minutes * 60_000;
@@ -148,7 +159,11 @@ export function slotSpoken(d: Date, timezone: string): string {
 
 // ------------------------------------------------------------ booking type --
 
-const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+const norm = (s: string) =>
+  s
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
 
 /**
  * Which booking type the caller means. Matched on the type's key, label and
@@ -159,7 +174,11 @@ export function classifyBookingType(
   text: string | null | undefined,
   types: BookingTypeDef[],
 ): { type: BookingTypeDef | null; clarificationQuestion: string | null } {
-  if (types.length === 0) return { type: null, clarificationQuestion: "This business has no bookable appointment types configured." };
+  if (types.length === 0)
+    return {
+      type: null,
+      clarificationQuestion: "This business has no bookable appointment types configured.",
+    };
   if (types.length === 1) return { type: types[0], clarificationQuestion: null };
   const t = ` ${norm(text ?? "")} `;
   const hits = types.filter((ty) =>
@@ -170,7 +189,10 @@ export function classifyBookingType(
   );
   if (hits.length === 1) return { type: hits[0], clarificationQuestion: null };
   const labels = types.map((ty) => ty.label);
-  const list = labels.length > 1 ? `${labels.slice(0, -1).join(", ")} or ${labels[labels.length - 1]}` : labels[0];
+  const list =
+    labels.length > 1
+      ? `${labels.slice(0, -1).join(", ")} or ${labels[labels.length - 1]}`
+      : labels[0];
   return { type: null, clarificationQuestion: `Is this for a ${list}?` };
 }
 
@@ -215,14 +237,30 @@ const MONTH_WORDS = [
  * else is left unrecognised rather than guessed - an invented preference
  * silently reorders what the caller is offered.
  */
-export function parseSlotPreference(text: string | null | undefined, now: Date, timezone: string): SlotPreference {
-  const pref: SlotPreference = { weekday: null, dayOfMonth: null, month: null, partOfDay: null, recognised: false };
+export function parseSlotPreference(
+  text: string | null | undefined,
+  now: Date,
+  timezone: string,
+): SlotPreference {
+  const pref: SlotPreference = {
+    weekday: null,
+    dayOfMonth: null,
+    month: null,
+    partOfDay: null,
+    recognised: false,
+  };
   const t = (text ?? "").toLowerCase();
   if (!t.trim()) return pref;
 
   // Relative days resolve to an absolute LOCAL date, because "tomorrow" said
   // at 11pm local is a different date from "tomorrow" said at 9am UTC.
-  const relativeDays = /\bday after tomorrow\b/.test(t) ? 2 : /\btomorrow\b/.test(t) ? 1 : /\btoday\b/.test(t) ? 0 : null;
+  const relativeDays = /\bday after tomorrow\b/.test(t)
+    ? 2
+    : /\btomorrow\b/.test(t)
+      ? 1
+      : /\btoday\b/.test(t)
+        ? 0
+        : null;
   if (relativeDays !== null) {
     const p = zoneParts(new Date(now.getTime() + relativeDays * 86_400_000), timezone);
     pref.dayOfMonth = p.d;
@@ -240,7 +278,9 @@ export function parseSlotPreference(text: string | null | undefined, now: Date, 
     const dom = /\b(\d{1,2})(?:st|nd|rd|th)?\b(?!\s*(?:am|pm|:|o'?clock))/.exec(t);
     // The full name or its three-letter form, both whole words - `\bmay` alone
     // reads "maybe" as May.
-    const monthIndex = MONTH_WORDS.findIndex((m) => new RegExp(`\\b(${m}|${m.slice(0, 3)})\\b`).test(t));
+    const monthIndex = MONTH_WORDS.findIndex((m) =>
+      new RegExp(`\\b(${m}|${m.slice(0, 3)})\\b`).test(t),
+    );
     if (dom) {
       const n = Number(dom[1]);
       if (n >= 1 && n <= 31) {
@@ -279,7 +319,11 @@ export function slotMatchesPreference(slot: Date, pref: SlotPreference, timezone
  * free must still be offered something. An unrecognised preference returns the
  * input untouched.
  */
-export function orderSlotsByPreference(slots: Date[], pref: SlotPreference, timezone: string): Date[] {
+export function orderSlotsByPreference(
+  slots: Date[],
+  pref: SlotPreference,
+  timezone: string,
+): Date[] {
   if (!pref.recognised) return slots;
   const preferred: Date[] = [];
   const rest: Date[] = [];

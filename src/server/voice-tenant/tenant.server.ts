@@ -41,7 +41,13 @@ type ContextRow = {
   handoff_ready: boolean;
 };
 
-const toContact = (r: { id: string; first_name: string | null; last_name: string | null; email: string | null; phone: string }): TenantContact => ({
+const toContact = (r: {
+  id: string;
+  first_name: string | null;
+  last_name: string | null;
+  email: string | null;
+  phone: string;
+}): TenantContact => ({
   id: r.id,
   firstName: r.first_name,
   lastName: r.last_name,
@@ -86,7 +92,13 @@ export function tenantStore(projectId: string): TenantStore {
       const { data, error } = await supabaseAdmin
         .from("voice_tenant_contacts")
         .upsert(
-          { project_id: projectId, phone: c.phone, first_name: c.firstName, last_name: c.lastName, email: c.email },
+          {
+            project_id: projectId,
+            phone: c.phone,
+            first_name: c.firstName,
+            last_name: c.lastName,
+            email: c.email,
+          },
           { onConflict: "project_id,phone" },
         )
         .select("id, first_name, last_name, email, phone")
@@ -166,7 +178,10 @@ export function tenantStore(projectId: string): TenantStore {
         .gte("ends_at", fromIso)
         .lte("starts_at", toIso);
       if (error) throw error;
-      return (data ?? []).map((b) => ({ start: Date.parse(b.starts_at), end: Date.parse(b.ends_at) }));
+      return (data ?? []).map((b) => ({
+        start: Date.parse(b.starts_at),
+        end: Date.parse(b.ends_at),
+      }));
     },
     async createAppointment(a) {
       const { data, error } = await supabaseAdmin
@@ -229,7 +244,9 @@ export async function ingestTenantWebhook(request: Request, tenantKey: string): 
 
   const { data: config, error } = await supabaseAdmin
     .from("voice_tenant_configs")
-    .select("project_id, webhook_secret_enc, enabled, business_name, timezone, booking_window, booking_types")
+    .select(
+      "project_id, webhook_secret_enc, enabled, business_name, timezone, booking_window, booking_types",
+    )
     .eq("tenant_key", tenantKey)
     .maybeSingle();
   if (error) {
@@ -238,7 +255,8 @@ export async function ingestTenantWebhook(request: Request, tenantKey: string): 
   }
   if (!config) return refuse("unknown_tenant", tenantKey, 404);
 
-  const presented = request.headers.get("x-vapi-secret") ?? request.headers.get("x-vapi-webhook-secret") ?? "";
+  const presented =
+    request.headers.get("x-vapi-secret") ?? request.headers.get("x-vapi-webhook-secret") ?? "";
   if (!presented) return refuse("secret_not_presented", tenantKey);
   let secret: string;
   try {
@@ -263,7 +281,9 @@ export async function ingestTenantWebhook(request: Request, tenantKey: string): 
     businessName: config.business_name ?? "the business",
     timezone,
     window: tenantWindow(config.booking_window as never, timezone),
-    bookingTypes: Array.isArray(config.booking_types) ? (config.booking_types as unknown as BookingTypeDef[]) : [],
+    bookingTypes: Array.isArray(config.booking_types)
+      ? (config.booking_types as unknown as BookingTypeDef[])
+      : [],
     store: tenantStore(config.project_id),
     now: () => new Date(),
   });

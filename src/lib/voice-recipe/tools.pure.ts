@@ -37,7 +37,8 @@ export const BACKEND_MENU: Record<BackendKey, BackendDef> = {
   vapi_native: {
     key: "vapi_native",
     label: "VAPI built-in",
-    description: "Runs inside VAPI itself: ending the call, the knowledge-base query, squad handoff.",
+    description:
+      "Runs inside VAPI itself: ending the call, the knowledge-base query, squad handoff.",
     implemented: true,
     prerequisites: [],
   },
@@ -99,7 +100,8 @@ export const TOOL_CATALOG: Record<ToolKey, ToolDef> = {
     kind: "function",
     allowedBackends: ["mission_control_tenant", "external_crm_custom"],
     tenantImplemented: true,
-    purpose: "Find or create the caller's contact from their phone number at the start of every call.",
+    purpose:
+      "Find or create the caller's contact from their phone number at the start of every call.",
     requires: [],
   },
   get_call_context: {
@@ -108,7 +110,8 @@ export const TOOL_CATALOG: Record<ToolKey, ToolDef> = {
     kind: "function",
     allowedBackends: ["mission_control_tenant"],
     tenantImplemented: true,
-    purpose: "Read what is already known about this call - identity and confirmed intent - including across a squad handoff.",
+    purpose:
+      "Read what is already known about this call - identity and confirmed intent - including across a squad handoff.",
     requires: ["resolve_contact"],
   },
   phone_number_inject: {
@@ -117,7 +120,8 @@ export const TOOL_CATALOG: Record<ToolKey, ToolDef> = {
     kind: "function",
     allowedBackends: ["mission_control_tenant"],
     tenantImplemented: true,
-    purpose: "Store the confirmed intent and the caller's reason right before a squad handoff, so the specialist starts informed.",
+    purpose:
+      "Store the confirmed intent and the caller's reason right before a squad handoff, so the specialist starts informed.",
     requires: ["resolve_contact", "squad_handoff"],
   },
   check_availability: {
@@ -234,106 +238,156 @@ export interface ToolPayloadContext {
   handoffIntents: string[];
 }
 
-const tenantServer = () => ({ url: SECRET_REF.tenantWebhookUrl, secret: SECRET_REF.tenantWebhookSecret });
+const tenantServer = () => ({
+  url: SECRET_REF.tenantWebhookUrl,
+  secret: SECRET_REF.tenantWebhookSecret,
+});
 
 /**
  * The org-level VAPI tool a (tool, backend) pair deploys as, or null when the
  * tool is not an org tool (kb_query is inline, squad_handoff is squad config,
  * and an undeployable pair has no payload at all).
  */
-export function vapiToolPayload(tool: ToolKey, backend: BackendKey, c: ToolPayloadContext): Record<string, unknown> | null {
+export function vapiToolPayload(
+  tool: ToolKey,
+  backend: BackendKey,
+  c: ToolPayloadContext,
+): Record<string, unknown> | null {
   if (!isDeployable(tool, backend)) return null;
   const n = c.names;
   switch (tool) {
     case "resolve_contact":
-      return fn(n.resolve_contact, tenantServer(), (
+      return fn(
+        n.resolve_contact,
+        tenantServer(),
         "Resolve the caller against the contact list by their phone number. " +
-        "Call this silently at the start of every conversation. The caller's phone " +
-        "number is supplied automatically; never provide it manually. If it returns " +
-        "contactState NEEDS_NAME, ask the caller for their full name once, then call " +
-        "it again with the name fields only. A valid contactId means the caller is " +
-        "resolved; a new contact is created automatically when a name is supplied for " +
-        "an unknown number."
-      ), {
-        type: "object",
-        required: [],
-        properties: {
-          full_name: { type: "string", description: "The caller's full name, if they gave it" },
-          first_name: { type: "string" },
-          last_name: { type: "string" },
-          email: { type: "string", description: "The caller's email address, if they gave it" },
+          "Call this silently at the start of every conversation. The caller's phone " +
+          "number is supplied automatically; never provide it manually. If it returns " +
+          "contactState NEEDS_NAME, ask the caller for their full name once, then call " +
+          "it again with the name fields only. A valid contactId means the caller is " +
+          "resolved; a new contact is created automatically when a name is supplied for " +
+          "an unknown number.",
+        {
+          type: "object",
+          required: [],
+          properties: {
+            full_name: { type: "string", description: "The caller's full name, if they gave it" },
+            first_name: { type: "string" },
+            last_name: { type: "string" },
+            email: { type: "string", description: "The caller's email address, if they gave it" },
+          },
         },
-      });
+      );
     case "get_call_context":
-      return fn(n.get_call_context, tenantServer(), (
+      return fn(
+        n.get_call_context,
+        tenantServer(),
         "Fetch the stored context for this call: who the caller is (contactId, " +
-        "firstName, fullName, phone), their confirmed intent, and whether they were " +
-        "already resolved earlier in the call or by another assistant. Call it " +
-        `silently once after the final ${n.resolve_contact} attempt.`
-      ), { type: "object", required: [], properties: {} });
+          "firstName, fullName, phone), their confirmed intent, and whether they were " +
+          "already resolved earlier in the call or by another assistant. Call it " +
+          `silently once after the final ${n.resolve_contact} attempt.`,
+        { type: "object", required: [], properties: {} },
+      );
     case "phone_number_inject":
-      return fn(n.phone_number_inject, tenantServer(), (
+      return fn(
+        n.phone_number_inject,
+        tenantServer(),
         "Package the caller's context before transferring them to a specialist " +
-        "assistant. Call this once, silently, right before a squad transfer, passing " +
-        "the confirmed intent and the caller's own words for why they called."
-      ), {
-        type: "object",
-        required: [],
-        properties: {
-          confirmedIntent: { type: "string", description: `One of: ${c.handoffIntents.join(", ")}` },
-          callerReason: { type: "string", description: "The caller's own words for why they called" },
+          "assistant. Call this once, silently, right before a squad transfer, passing " +
+          "the confirmed intent and the caller's own words for why they called.",
+        {
+          type: "object",
+          required: [],
+          properties: {
+            confirmedIntent: {
+              type: "string",
+              description: `One of: ${c.handoffIntents.join(", ")}`,
+            },
+            callerReason: {
+              type: "string",
+              description: "The caller's own words for why they called",
+            },
+          },
         },
-      });
+      );
     case "check_availability":
-      return fn(n.check_availability, tenantServer(), (
+      return fn(
+        n.check_availability,
+        tenantServer(),
         `Get real open slots from the ${c.businessName} calendar. ${c.bookingWindowSpoken} ` +
-        "Pass the booking type in the caller's words; if the type is ambiguous the " +
-        "tool returns a clarification question to ask."
-      ), {
-        type: "object",
-        required: ["booking_intent_text"],
-        properties: {
-          booking_intent_text: {
-            type: "string",
-            description: `What is being booked, in the caller's words (${c.bookingTypeLabels.join(", ")})`,
+          "Pass the booking type in the caller's words; if the type is ambiguous the " +
+          "tool returns a clarification question to ask.",
+        {
+          type: "object",
+          required: ["booking_intent_text"],
+          properties: {
+            booking_intent_text: {
+              type: "string",
+              description: `What is being booked, in the caller's words (${c.bookingTypeLabels.join(", ")})`,
+            },
+            preferred_date_text: {
+              type: "string",
+              description: "The caller's preferred day, if any",
+            },
           },
-          preferred_date_text: { type: "string", description: "The caller's preferred day, if any" },
         },
-      });
+      );
     case "book_appointment":
-      return fn(n.book_appointment, tenantServer(), (
+      return fn(
+        n.book_appointment,
+        tenantServer(),
         `Book one of the slots returned by ${n.check_availability}. Pass the exact ` +
-        "startIso value of the chosen slot as startTime. The caller must be resolved " +
-        `first (${n.resolve_contact}).`
-      ), {
-        type: "object",
-        required: ["booking_intent_text", "startTime"],
-        properties: {
-          booking_intent_text: { type: "string", description: "The booking type" },
-          startTime: { type: "string", description: "The exact startIso value of the chosen slot" },
-          notes: { type: "string", description: `Anything worth noting for the ${c.businessName} team` },
-        },
-      });
-    case "raise_support_ticket":
-      return fn(n.raise_support_ticket, tenantServer(), (
-        "Lodge a support ticket for the caller. Call this once the caller has " +
-        "described the problem - do not ask them to choose a category or a severity. " +
-        "Returns a reference number to read back to the caller. If it returns " +
-        "needs_email, ask for their email address, repeat it back, then call again."
-      ), {
-        type: "object",
-        required: ["summary", "detail"],
-        properties: {
-          summary: { type: "string", description: "One line naming the problem, in the caller's own words" },
-          detail: {
-            type: "string",
-            description: "What the caller said: what they were doing, what happened, any error wording they read out",
+          "startIso value of the chosen slot as startTime. The caller must be resolved " +
+          `first (${n.resolve_contact}).`,
+        {
+          type: "object",
+          required: ["booking_intent_text", "startTime"],
+          properties: {
+            booking_intent_text: { type: "string", description: "The booking type" },
+            startTime: {
+              type: "string",
+              description: "The exact startIso value of the chosen slot",
+            },
+            notes: {
+              type: "string",
+              description: `Anything worth noting for the ${c.businessName} team`,
+            },
           },
-          what_is_broken: { type: "string", description: "How much is affected, in the caller's words" },
-          since_when: { type: "string", description: "When it started, in the caller's words" },
-          email: { type: "string", description: "Only when the caller volunteers or confirms an email address." },
         },
-      });
+      );
+    case "raise_support_ticket":
+      return fn(
+        n.raise_support_ticket,
+        tenantServer(),
+        "Lodge a support ticket for the caller. Call this once the caller has " +
+          "described the problem - do not ask them to choose a category or a severity. " +
+          "Returns a reference number to read back to the caller. If it returns " +
+          "needs_email, ask for their email address, repeat it back, then call again.",
+        {
+          type: "object",
+          required: ["summary", "detail"],
+          properties: {
+            summary: {
+              type: "string",
+              description: "One line naming the problem, in the caller's own words",
+            },
+            detail: {
+              type: "string",
+              description:
+                "What the caller said: what they were doing, what happened, any error wording they read out",
+            },
+            what_is_broken: {
+              type: "string",
+              description: "How much is affected, in the caller's words",
+            },
+            since_when: { type: "string", description: "When it started, in the caller's words" },
+            email: {
+              type: "string",
+              description: "Only when the caller volunteers or confirms an email address.",
+            },
+          },
+        },
+      );
     case "transfer_to_human":
       // Mirrors transfer_to_human_mc: SILENT non-blocking request-start (the
       // prompt makes the assistant say its own line in the same turn), and a
@@ -363,10 +417,14 @@ export function vapiToolPayload(tool: ToolKey, backend: BackendKey, c: ToolPaylo
             type: "object",
             required: ["transferReason"],
             properties: {
-              transferReason: { type: "string", description: "Short reason for the transfer request." },
+              transferReason: {
+                type: "string",
+                description: "Short reason for the transfer request.",
+              },
               callerContext: {
                 type: "string",
-                description: "Brief context about the call so far, so the person who picks up knows what the caller wants.",
+                description:
+                  "Brief context about the call so far, so the person who picks up knows what the caller wants.",
               },
             },
           },
@@ -390,12 +448,21 @@ export function vapiToolPayload(tool: ToolKey, backend: BackendKey, c: ToolPaylo
   }
 }
 
-function fn(name: string, server: Record<string, unknown>, description: string, parameters: Record<string, unknown>) {
+function fn(
+  name: string,
+  server: Record<string, unknown>,
+  description: string,
+  parameters: Record<string, unknown>,
+) {
   return { type: "function", async: false, server, function: { name, description, parameters } };
 }
 
 /** The inline query tool VAPI keeps on each assistant, pointing at the KB file. */
-export function inlineKbTool(name: string, businessName: string, fileId: string): Record<string, unknown> {
+export function inlineKbTool(
+  name: string,
+  businessName: string,
+  fileId: string,
+): Record<string, unknown> {
   return {
     type: "query",
     function: { name },

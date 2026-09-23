@@ -61,16 +61,28 @@ export function estimateUsage(r: ResponseLike): Usage {
 
 export function interpretResponse<T>(r: ResponseLike, schema: z.ZodType<T>): T {
   if (r.stop_reason === "refusal") {
-    throw new ModelStopError("refusal", "the model declined this stage; check the documents for content it will not process");
+    throw new ModelStopError(
+      "refusal",
+      "the model declined this stage; check the documents for content it will not process",
+    );
   }
   if (r.stop_reason === "max_tokens") {
-    throw new ModelStopError("max_tokens", "the answer was cut off before it finished; the stage needs a larger output budget");
+    throw new ModelStopError(
+      "max_tokens",
+      "the answer was cut off before it finished; the stage needs a larger output budget",
+    );
   }
   if (r.stop_reason === "model_context_window_exceeded") {
-    throw new ModelStopError("model_context_window_exceeded", "the documents are too large to read in one request; remove or split some");
+    throw new ModelStopError(
+      "model_context_window_exceeded",
+      "the documents are too large to read in one request; remove or split some",
+    );
   }
   if (r.stop_reason !== "end_turn") {
-    throw new ModelStopError(String(r.stop_reason), `the model stopped for an unexpected reason (${r.stop_reason})`);
+    throw new ModelStopError(
+      String(r.stop_reason),
+      `the model stopped for an unexpected reason (${r.stop_reason})`,
+    );
   }
   const text = r.content
     .filter((b) => b.type === "text" && typeof b.text === "string")
@@ -85,7 +97,9 @@ export function interpretResponse<T>(r: ResponseLike, schema: z.ZodType<T>): T {
   }
   const result = schema.safeParse(parsed);
   if (!result.success) {
-    throw new ModelOutputError(`the model's answer did not match the stage schema: ${result.error.issues[0]?.message ?? "invalid"}`);
+    throw new ModelOutputError(
+      `the model's answer did not match the stage schema: ${result.error.issues[0]?.message ?? "invalid"}`,
+    );
   }
   return result.data;
 }

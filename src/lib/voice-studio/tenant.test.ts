@@ -18,12 +18,24 @@ import {
 } from "./tenantTools.pure";
 
 const TYPES: BookingTypeDef[] = [
-  { key: "check_up", label: "check-up and clean", synonyms: ["check up", "clean"], durationMinutes: 30 },
+  {
+    key: "check_up",
+    label: "check-up and clean",
+    synonyms: ["check up", "clean"],
+    durationMinutes: 30,
+  },
   { key: "consult", label: "new patient consult", synonyms: ["consultation"], durationMinutes: 60 },
 ];
 
 const WINDOW = tenantWindow(
-  { days: [1, 2, 3, 4, 5], startTime: "08:00", endTime: "16:30", slotMinutes: 30, minNoticeHours: 24, horizonDays: 14 },
+  {
+    days: [1, 2, 3, 4, 5],
+    startTime: "08:00",
+    endTime: "16:30",
+    slotMinutes: 30,
+    minNoticeHours: 24,
+    horizonDays: 14,
+  },
   "Australia/Perth",
 )!;
 
@@ -33,8 +45,32 @@ const NOW = new Date("2026-11-02T01:00:00Z");
 describe("tenantBooking", () => {
   it("builds a window and refuses an unusable one", () => {
     expect(WINDOW.firstStartMinutes).toBe(480);
-    expect(tenantWindow({ days: [], startTime: "08:00", endTime: "09:00", slotMinutes: 30, minNoticeHours: 0, horizonDays: 5 }, "UTC")).toBeNull();
-    expect(tenantWindow({ days: [1], startTime: "17:00", endTime: "09:00", slotMinutes: 30, minNoticeHours: 0, horizonDays: 5 }, "UTC")).toBeNull();
+    expect(
+      tenantWindow(
+        {
+          days: [],
+          startTime: "08:00",
+          endTime: "09:00",
+          slotMinutes: 30,
+          minNoticeHours: 0,
+          horizonDays: 5,
+        },
+        "UTC",
+      ),
+    ).toBeNull();
+    expect(
+      tenantWindow(
+        {
+          days: [1],
+          startTime: "17:00",
+          endTime: "09:00",
+          slotMinutes: 30,
+          minNoticeHours: 0,
+          horizonDays: 5,
+        },
+        "UTC",
+      ),
+    ).toBeNull();
     expect(tenantWindow(null, "UTC")).toBeNull();
   });
 
@@ -54,9 +90,23 @@ describe("tenantBooking", () => {
   });
 
   it("lands on a half-hour-offset zone's real starts", () => {
-    const w = tenantWindow({ days: [1, 2, 3, 4, 5], startTime: "09:00", endTime: "10:00", slotMinutes: 30, minNoticeHours: 0, horizonDays: 3 }, "Australia/Adelaide")!;
+    const w = tenantWindow(
+      {
+        days: [1, 2, 3, 4, 5],
+        startTime: "09:00",
+        endTime: "10:00",
+        slotMinutes: 30,
+        minNoticeHours: 0,
+        horizonDays: 3,
+      },
+      "Australia/Adelaide",
+    )!;
     const slots = candidateSlotsIn(NOW, w);
-    expect(slots.map((s) => zoneParts(s, "Australia/Adelaide").minutes).every((m) => [540, 570, 600].includes(m))).toBe(true);
+    expect(
+      slots
+        .map((s) => zoneParts(s, "Australia/Adelaide").minutes)
+        .every((m) => [540, 570, 600].includes(m)),
+    ).toBe(true);
   });
 
   it("classifies the booking type, and asks when it cannot tell", () => {
@@ -64,20 +114,33 @@ describe("tenantBooking", () => {
     expect(classifyBookingType("a new patient consult", TYPES).type?.key).toBe("consult");
     const ask = classifyBookingType("something", TYPES);
     expect(ask.type).toBeNull();
-    expect(ask.clarificationQuestion).toBe("Is this for a check-up and clean or new patient consult?");
+    expect(ask.clarificationQuestion).toBe(
+      "Is this for a check-up and clean or new patient consult?",
+    );
     expect(classifyBookingType("anything", [TYPES[0]]).type?.key).toBe("check_up");
   });
 
   it("resolves tomorrow in the business's timezone", () => {
     const pref = parseSlotPreference("tomorrow afternoon", NOW, "Australia/Perth");
-    expect(pref).toMatchObject({ dayOfMonth: 3, month: 11, partOfDay: "afternoon", recognised: true });
+    expect(pref).toMatchObject({
+      dayOfMonth: 3,
+      month: 11,
+      partOfDay: "afternoon",
+      recognised: true,
+    });
   });
 });
 
 function memoryStore() {
   const contacts: TenantContact[] = [];
   const contexts = new Map<string, TenantCallContext & { phoneKey: string | null }>();
-  const appointments: Array<{ id: string; startsAt: string; endsAt: string; contactId: string; bookingType: string }> = [];
+  const appointments: Array<{
+    id: string;
+    startsAt: string;
+    endsAt: string;
+    contactId: string;
+    bookingType: string;
+  }> = [];
   const tickets: Array<{ reference: string; email: string; summary: string }> = [];
   let n = 0;
   const store: TenantStore = {
@@ -85,7 +148,13 @@ function memoryStore() {
       return contacts.find((c) => phoneKey(c.phone) === phoneKey(phone)) ?? null;
     },
     async createContact(c) {
-      const row = { id: `c${++n}`, firstName: c.firstName, lastName: c.lastName, email: c.email, phone: c.phone };
+      const row = {
+        id: `c${++n}`,
+        firstName: c.firstName,
+        lastName: c.lastName,
+        email: c.email,
+        phone: c.phone,
+      };
       contacts.push(row);
       return row;
     },
@@ -97,7 +166,11 @@ function memoryStore() {
       if (c && !c.email) c.email = email;
     },
     async readContext(callId, key) {
-      return contexts.get(callId) ?? [...contexts.values()].find((c) => key && c.phoneKey === key) ?? null;
+      return (
+        contexts.get(callId) ??
+        [...contexts.values()].find((c) => key && c.phoneKey === key) ??
+        null
+      );
     },
     async upsertContext(callId, fields) {
       const prev = contexts.get(callId) ?? {
@@ -117,7 +190,10 @@ function memoryStore() {
       contexts.set(callId, { ...prev, ...fields });
     },
     async bookedIntervals() {
-      return appointments.map((a) => ({ start: Date.parse(a.startsAt), end: Date.parse(a.endsAt) }));
+      return appointments.map((a) => ({
+        start: Date.parse(a.startsAt),
+        end: Date.parse(a.endsAt),
+      }));
     },
     async createAppointment(a) {
       if (appointments.some((x) => x.startsAt === a.startsAt)) return null;
@@ -155,8 +231,15 @@ describe("handleTenantToolCalls", () => {
 
   it("asks for a name, creates the contact, then resolves it by number", async () => {
     const { store, contacts } = memoryStore();
-    expect(parse(await handleTenantToolCalls(call("resolve_contact", {}), ctx(store))).contactState).toBe("NEEDS_NAME");
-    const created = parse(await handleTenantToolCalls(call("resolve_contact", { full_name: "Jo Bloggs", email: "JO@example.com " }), ctx(store)));
+    expect(
+      parse(await handleTenantToolCalls(call("resolve_contact", {}), ctx(store))).contactState,
+    ).toBe("NEEDS_NAME");
+    const created = parse(
+      await handleTenantToolCalls(
+        call("resolve_contact", { full_name: "Jo Bloggs", email: "JO@example.com " }),
+        ctx(store),
+      ),
+    );
     expect(created).toMatchObject({ contactCreated: true, firstName: "Jo" });
     expect(contacts[0]).toMatchObject({ lastName: "Bloggs", email: "jo@example.com" });
     const again = parse(await handleTenantToolCalls(call("resolve_contact", {}), ctx(store)));
@@ -166,14 +249,32 @@ describe("handleTenantToolCalls", () => {
   it("offers real slots and books one; a taken slot is refused", async () => {
     const { store, appointments } = memoryStore();
     await handleTenantToolCalls(call("resolve_contact", { full_name: "Jo Bloggs" }), ctx(store));
-    const avail = parse(await handleTenantToolCalls(call("check_availability", { booking_intent_text: "a clean", preferred_date_text: "wednesday morning" }), ctx(store)));
+    const avail = parse(
+      await handleTenantToolCalls(
+        call("check_availability", {
+          booking_intent_text: "a clean",
+          preferred_date_text: "wednesday morning",
+        }),
+        ctx(store),
+      ),
+    );
     expect(avail.success).toBe(true);
     expect(avail.preference_met).toBe(true);
     const slot = avail.availability[0].startIso;
-    const booked = parse(await handleTenantToolCalls(call("book_appointment", { booking_intent_text: "clean", startTime: slot }), ctx(store)));
+    const booked = parse(
+      await handleTenantToolCalls(
+        call("book_appointment", { booking_intent_text: "clean", startTime: slot }),
+        ctx(store),
+      ),
+    );
     expect(booked.appointment_created).toBe(true);
     expect(appointments).toHaveLength(1);
-    const again = parse(await handleTenantToolCalls(call("book_appointment", { booking_intent_text: "clean", startTime: slot }), ctx(store)));
+    const again = parse(
+      await handleTenantToolCalls(
+        call("book_appointment", { booking_intent_text: "clean", startTime: slot }),
+        ctx(store),
+      ),
+    );
     expect(again.slot_taken).toBe(true);
   });
 
@@ -181,22 +282,49 @@ describe("handleTenantToolCalls", () => {
     const { store } = memoryStore();
     await handleTenantToolCalls(call("resolve_contact", { full_name: "Jo Bloggs" }), ctx(store));
     // Sunday - outside the window.
-    const r = parse(await handleTenantToolCalls(call("book_appointment", { booking_intent_text: "clean", startTime: "2026-11-08T02:00:00Z" }), ctx(store)));
+    const r = parse(
+      await handleTenantToolCalls(
+        call("book_appointment", {
+          booking_intent_text: "clean",
+          startTime: "2026-11-08T02:00:00Z",
+        }),
+        ctx(store),
+      ),
+    );
     expect(r.slot_taken).toBe(true);
   });
 
   it("says booking is not set up rather than offering times with no window", async () => {
     const { store } = memoryStore();
-    const r = parse(await handleTenantToolCalls(call("check_availability", { booking_intent_text: "clean" }), ctx(store, { window: null })));
+    const r = parse(
+      await handleTenantToolCalls(
+        call("check_availability", { booking_intent_text: "clean" }),
+        ctx(store, { window: null }),
+      ),
+    );
     expect(r.success).toBe(false);
     expect(r.message).toMatch(/Do not offer times/);
   });
 
   it("raises a ticket once it has an email", async () => {
     const { store, tickets } = memoryStore();
-    const first = parse(await handleTenantToolCalls(call("raise_support_ticket", { summary: "Cannot log in", detail: "error 5" }), ctx(store)));
+    const first = parse(
+      await handleTenantToolCalls(
+        call("raise_support_ticket", { summary: "Cannot log in", detail: "error 5" }),
+        ctx(store),
+      ),
+    );
     expect(first.needs_email).toBe(true);
-    const r = parse(await handleTenantToolCalls(call("raise_support_ticket", { summary: "Cannot log in", detail: "error 5", email: "a@b.co" }), ctx(store)));
+    const r = parse(
+      await handleTenantToolCalls(
+        call("raise_support_ticket", {
+          summary: "Cannot log in",
+          detail: "error 5",
+          email: "a@b.co",
+        }),
+        ctx(store),
+      ),
+    );
     expect(r.ticket_created).toBe(true);
     expect(tickets[0].email).toBe("a@b.co");
   });

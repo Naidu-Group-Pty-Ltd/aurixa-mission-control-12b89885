@@ -148,17 +148,25 @@ describe("xlsx", () => {
 
 describe("csv and text", () => {
   it("reads a CSV as a table", async () => {
-    const r = await extractDocument(new TextEncoder().encode("Service,Price\nClean,190\n"), "prices.csv");
+    const r = await extractDocument(
+      new TextEncoder().encode("Service,Price\nClean,190\n"),
+      "prices.csv",
+    );
     expect(r.text).toBe("| Service | Price |\n| Clean | 190 |");
   });
 
   it("reads Markdown as text and tidies it", async () => {
-    const r = await extractDocument(new TextEncoder().encode("# Hours\r\n\r\n\r\n\r\nMon-Fri  \r\n"), "about.md");
+    const r = await extractDocument(
+      new TextEncoder().encode("# Hours\r\n\r\n\r\n\r\nMon-Fri  \r\n"),
+      "about.md",
+    );
     expect(r.text).toBe("# Hours\n\nMon-Fri");
   });
 
   it("refuses an empty file", async () => {
-    await expect(extractDocument(new Uint8Array(), "a.txt")).rejects.toBeInstanceOf(ExtractionError);
+    await expect(extractDocument(new Uint8Array(), "a.txt")).rejects.toBeInstanceOf(
+      ExtractionError,
+    );
   });
 });
 
@@ -182,7 +190,9 @@ describe("ceilings are said, never silent", () => {
 
 describe("pdf", () => {
   it("is not extracted here - it goes to the model whole - but its pages are counted", async () => {
-    const pdf = new TextEncoder().encode("%PDF-1.7\n1 0 obj <</Type /Pages /Count 2>>\n2 0 obj <</Type /Page>>\n3 0 obj <</Type /Page>>\n");
+    const pdf = new TextEncoder().encode(
+      "%PDF-1.7\n1 0 obj <</Type /Pages /Count 2>>\n2 0 obj <</Type /Page>>\n3 0 obj <</Type /Page>>\n",
+    );
     expect(estimatePdfPages(pdf)).toBe(2);
     const r = await extractDocument(pdf, "brochure.pdf");
     expect(r).toMatchObject({ kind: "pdf", text: null, pageCount: 2 });
@@ -194,7 +204,9 @@ describe("pdf", () => {
   });
 
   it("refuses a file that only claims to be a PDF", async () => {
-    await expect(extractDocument(new TextEncoder().encode("hello"), "fake.pdf")).rejects.toThrow(/does not start like a PDF/);
+    await expect(extractDocument(new TextEncoder().encode("hello"), "fake.pdf")).rejects.toThrow(
+      /does not start like a PDF/,
+    );
   });
 });
 

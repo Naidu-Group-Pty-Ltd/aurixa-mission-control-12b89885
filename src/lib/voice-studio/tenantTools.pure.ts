@@ -47,12 +47,20 @@ export interface TenantCallContext {
 
 export interface TenantStore {
   findContactByPhone(phone: string): Promise<TenantContact | null>;
-  createContact(c: { phone: string; firstName: string; lastName: string | null; email: string | null }): Promise<TenantContact>;
+  createContact(c: {
+    phone: string;
+    firstName: string;
+    lastName: string | null;
+    email: string | null;
+  }): Promise<TenantContact>;
   getContact(id: string): Promise<TenantContact | null>;
   /** Fill a blank email; never overwrite one. */
   fillContactEmail(id: string, email: string): Promise<void>;
   readContext(vapiCallId: string, phoneKey: string): Promise<TenantCallContext | null>;
-  upsertContext(vapiCallId: string, fields: Partial<TenantCallContext> & { callerPhone: string | null; phoneKey: string | null }): Promise<void>;
+  upsertContext(
+    vapiCallId: string,
+    fields: Partial<TenantCallContext> & { callerPhone: string | null; phoneKey: string | null },
+  ): Promise<void>;
   bookedIntervals(fromIso: string, toIso: string): Promise<Array<{ start: number; end: number }>>;
   /** Returns null when the slot was taken between the check and the write. */
   createAppointment(a: {
@@ -131,7 +139,9 @@ export function extractToolCalls(message: Rec): ToolCall[] {
     }
   }
   if (!out.length) {
-    for (const raw of Array.isArray(message.toolWithToolCallList) ? message.toolWithToolCallList : []) {
+    for (const raw of Array.isArray(message.toolWithToolCallList)
+      ? message.toolWithToolCallList
+      : []) {
       const tc = asRecord(asRecord(raw).toolCall);
       const fn = asRecord(tc.function);
       push(tc.id, fn.name, fn.arguments);
@@ -150,7 +160,11 @@ function identityFrom(message: Rec, args: Rec): { vapiCallId: string; callerPhon
   return {
     vapiCallId: String(args.vapiCallId ?? call.id ?? message.callId ?? ""),
     callerPhone: String(
-      args.callerPhone ?? args.phone ?? asRecord(message.customer).number ?? asRecord(call.customer).number ?? "",
+      args.callerPhone ??
+        args.phone ??
+        asRecord(message.customer).number ??
+        asRecord(call.customer).number ??
+        "",
     ),
   };
 }
@@ -194,7 +208,12 @@ async function resolveContact(tc: ToolCall, message: Rec, ctx: TenantToolContext
   }
 
   if (!fullName && !firstArg && !lastArg) {
-    await ctx.store.upsertContext(id.vapiCallId, { ...ctxFields, contactState: "NEEDS_NAME", contactFound: false, contactCreated: false });
+    await ctx.store.upsertContext(id.vapiCallId, {
+      ...ctxFields,
+      contactState: "NEEDS_NAME",
+      contactFound: false,
+      contactCreated: false,
+    });
     return {
       success: true,
       contactState: "NEEDS_NAME",
@@ -209,13 +228,19 @@ async function resolveContact(tc: ToolCall, message: Rec, ctx: TenantToolContext
       success: false,
       contactState: "UNRESOLVED",
       nextAction: "continueConversation",
-      message: "The caller's number is withheld, so no contact can be created. Continue the conversation without one.",
+      message:
+        "The caller's number is withheld, so no contact can be created. Continue the conversation without one.",
     };
   }
 
   const firstName = firstArg || fullName.split(/\s+/)[0];
   const lastName = lastArg || fullName.split(/\s+/).slice(1).join(" ") || null;
-  const contact = await ctx.store.createContact({ phone: normalisedPhone(id.callerPhone), firstName, lastName, email });
+  const contact = await ctx.store.createContact({
+    phone: normalisedPhone(id.callerPhone),
+    firstName,
+    lastName,
+    email,
+  });
   const display = [firstName, lastName].filter(Boolean).join(" ");
   await ctx.store.upsertContext(id.vapiCallId, {
     ...ctxFields,
@@ -279,8 +304,10 @@ async function getCallContext(tc: ToolCall, message: Rec, ctx: TenantToolContext
 async function phoneNumberInject(tc: ToolCall, message: Rec, ctx: TenantToolContext): Promise<Rec> {
   const id = identityFrom(message, tc.args);
   const stored = await ctx.store.readContext(id.vapiCallId, phoneKey(id.callerPhone));
-  const confirmedIntent = tc.args.confirmedIntent ?? tc.args.confirmed_intent ?? stored?.confirmedIntent ?? null;
-  const callerReason = tc.args.callerReason ?? tc.args.caller_reason ?? stored?.callerReason ?? null;
+  const confirmedIntent =
+    tc.args.confirmedIntent ?? tc.args.confirmed_intent ?? stored?.confirmedIntent ?? null;
+  const callerReason =
+    tc.args.callerReason ?? tc.args.caller_reason ?? stored?.callerReason ?? null;
   await ctx.store.upsertContext(id.vapiCallId, {
     callerPhone: id.callerPhone || null,
     phoneKey: phoneKey(id.callerPhone) || null,
@@ -324,7 +351,10 @@ const noWindow = {
 
 async function checkAvailability(tc: ToolCall, ctx: TenantToolContext): Promise<Rec> {
   if (!ctx.window) return noWindow;
-  const intent = classifyBookingType(tc.args.booking_intent_text ?? tc.args.booking_type ?? "", ctx.bookingTypes);
+  const intent = classifyBookingType(
+    tc.args.booking_intent_text ?? tc.args.booking_type ?? "",
+    ctx.bookingTypes,
+  );
   if (!intent.type) {
     return {
       success: false,
@@ -333,10 +363,15 @@ async function checkAvailability(tc: ToolCall, ctx: TenantToolContext): Promise<
       allowed_booking_types: ctx.bookingTypes.map((t) => t.label),
     };
   }
-  const pref = parseSlotPreference(tc.args.preferred_date_text ?? tc.args.preferredDateText ?? "", ctx.now(), ctx.timezone);
+  const pref = parseSlotPreference(
+    tc.args.preferred_date_text ?? tc.args.preferredDateText ?? "",
+    ctx.now(),
+    ctx.timezone,
+  );
   const all = await freeSlots(ctx, intent.type.durationMinutes);
   const slots = orderSlotsByPreference(all, pref, ctx.timezone).slice(0, 8);
-  const preferenceMet = pref.recognised && slots.some((s) => slotMatchesPreference(s, pref, ctx.timezone));
+  const preferenceMet =
+    pref.recognised && slots.some((s) => slotMatchesPreference(s, pref, ctx.timezone));
   return {
     success: true,
     booking_type: intent.type.label,
@@ -363,11 +398,20 @@ async function checkAvailability(tc: ToolCall, ctx: TenantToolContext): Promise<
 async function bookAppointment(tc: ToolCall, message: Rec, ctx: TenantToolContext): Promise<Rec> {
   if (!ctx.window) return noWindow;
   const id = identityFrom(message, tc.args);
-  const intent = classifyBookingType(tc.args.booking_intent_text ?? tc.args.booking_type ?? "", ctx.bookingTypes);
+  const intent = classifyBookingType(
+    tc.args.booking_intent_text ?? tc.args.booking_type ?? "",
+    ctx.bookingTypes,
+  );
   if (!intent.type) {
-    return { success: false, needs_clarification: true, clarification_question: intent.clarificationQuestion };
+    return {
+      success: false,
+      needs_clarification: true,
+      clarification_question: intent.clarificationQuestion,
+    };
   }
-  const startMs = Date.parse(String(tc.args.startTime ?? tc.args.start_time ?? tc.args.startIso ?? ""));
+  const startMs = Date.parse(
+    String(tc.args.startTime ?? tc.args.start_time ?? tc.args.startIso ?? ""),
+  );
   if (Number.isNaN(startMs)) {
     return {
       success: false,
@@ -376,7 +420,9 @@ async function bookAppointment(tc: ToolCall, message: Rec, ctx: TenantToolContex
     };
   }
   const minutes = intent.type.durationMinutes;
-  const stillFree = (await freeSlots(ctx, minutes)).some((s) => Math.abs(s.getTime() - startMs) < 60_000);
+  const stillFree = (await freeSlots(ctx, minutes)).some(
+    (s) => Math.abs(s.getTime() - startMs) < 60_000,
+  );
   if (!stillFree) {
     return {
       success: false,
@@ -427,15 +473,26 @@ async function bookAppointment(tc: ToolCall, message: Rec, ctx: TenantToolContex
   };
 }
 
-async function raiseSupportTicket(tc: ToolCall, message: Rec, ctx: TenantToolContext): Promise<Rec> {
+async function raiseSupportTicket(
+  tc: ToolCall,
+  message: Rec,
+  ctx: TenantToolContext,
+): Promise<Rec> {
   const id = identityFrom(message, tc.args);
-  const summary = String(tc.args.summary ?? "").trim().slice(0, 300);
+  const summary = String(tc.args.summary ?? "")
+    .trim()
+    .slice(0, 300);
   if (!summary) {
-    return { success: false, ticket_created: false, message: "Ask the caller what the problem is in a sentence, then call this again." };
+    return {
+      success: false,
+      ticket_created: false,
+      message: "Ask the caller what the problem is in a sentence, then call this again.",
+    };
   }
   const stored = await ctx.store.readContext(id.vapiCallId, phoneKey(id.callerPhone));
   let email = heardEmail(tc.args.email);
-  if (!email && stored?.contactId) email = heardEmail((await ctx.store.getContact(stored.contactId))?.email);
+  if (!email && stored?.contactId)
+    email = heardEmail((await ctx.store.getContact(stored.contactId))?.email);
   if (!email) {
     return {
       success: false,
@@ -446,7 +503,11 @@ async function raiseSupportTicket(tc: ToolCall, message: Rec, ctx: TenantToolCon
       message: "No email address on file for this caller and none was supplied.",
     };
   }
-  const detail = [tc.args.detail, tc.args.what_is_broken && `Affected: ${tc.args.what_is_broken}`, tc.args.since_when && `Since: ${tc.args.since_when}`]
+  const detail = [
+    tc.args.detail,
+    tc.args.what_is_broken && `Affected: ${tc.args.what_is_broken}`,
+    tc.args.since_when && `Since: ${tc.args.since_when}`,
+  ]
     .filter((x) => typeof x === "string" && x.trim())
     .join("\n")
     .slice(0, 8000);
@@ -466,7 +527,10 @@ async function raiseSupportTicket(tc: ToolCall, message: Rec, ctx: TenantToolCon
 }
 
 /** Answer a VAPI tool-calls message with one result per call, in order. */
-export async function handleTenantToolCalls(message: Rec, ctx: TenantToolContext): Promise<{ results: Array<{ toolCallId: string; result: string }> }> {
+export async function handleTenantToolCalls(
+  message: Rec,
+  ctx: TenantToolContext,
+): Promise<{ results: Array<{ toolCallId: string; result: string }> }> {
   const results: Array<{ toolCallId: string; result: string }> = [];
   for (const tc of extractToolCalls(message)) {
     let result: Rec;

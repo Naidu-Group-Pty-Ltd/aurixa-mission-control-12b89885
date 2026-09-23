@@ -110,7 +110,9 @@ export function resolvePlaceholders(
   }
   if (Array.isArray(value)) return value.map((v) => resolvePlaceholders(v, lookup));
   if (value && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, resolvePlaceholders(v, lookup)]));
+    return Object.fromEntries(
+      Object.entries(value).map(([k, v]) => [k, resolvePlaceholders(v, lookup)]),
+    );
   }
   return value;
 }
@@ -138,9 +140,12 @@ export async function executeDeploy(input: DeployInput): Promise<DeployOutcome> 
   const outOfTime = () => input.now() >= input.deadline;
 
   const lookup = (ns: string, key: string): string | null => {
-    if (ns === "tool") return ledger.get(`tool:${key}`)?.vapiId ?? (dry ? `<new tool ${key}>` : null);
-    if (ns === "assistant") return ledger.get(`assistant:${key}`)?.vapiId ?? (dry ? `<new assistant ${key}>` : null);
-    if (ns === "kb") return ledger.get("kb_file:kb")?.vapiId ?? (dry ? "<new knowledge base file>" : null);
+    if (ns === "tool")
+      return ledger.get(`tool:${key}`)?.vapiId ?? (dry ? `<new tool ${key}>` : null);
+    if (ns === "assistant")
+      return ledger.get(`assistant:${key}`)?.vapiId ?? (dry ? `<new assistant ${key}>` : null);
+    if (ns === "kb")
+      return ledger.get("kb_file:kb")?.vapiId ?? (dry ? "<new knowledge base file>" : null);
     if (ns === "config" && key === "tenant_webhook_url") return secrets.tenantWebhookUrl;
     if (ns === "config" && key === "call_log_url") return secrets.callLogUrl;
     if (ns === "secret" && key === "tenant_webhook") return secrets.tenantWebhookSecret;
@@ -162,31 +167,65 @@ export async function executeDeploy(input: DeployInput): Promise<DeployOutcome> 
     if (known) {
       const remote = await api.get(`${path}/${known.vapiId}`);
       if (remote && known.payloadSha === sha) {
-        await step({ kind, key, action: "unchanged", status: "skipped", detail: "matches what was last written", vapiId: known.vapiId });
+        await step({
+          kind,
+          key,
+          action: "unchanged",
+          status: "skipped",
+          detail: "matches what was last written",
+          vapiId: known.vapiId,
+        });
         return known.vapiId;
       }
       if (remote) {
         if (dry) {
-          await step({ kind, key, action: "update", status: "planned", detail: "would update", vapiId: known.vapiId });
+          await step({
+            kind,
+            key,
+            action: "update",
+            status: "planned",
+            detail: "would update",
+            vapiId: known.vapiId,
+          });
           return known.vapiId;
         }
         const patchBody = merge ? merge(remote, body) : body;
         const updated = await api.patch(`${path}/${known.vapiId}`, stripImmutable(kind, patchBody));
         await record({ ...known, payloadSha: sha });
-        await step({ kind, key, action: "update", status: "ok", detail: "updated", vapiId: String(updated.id ?? known.vapiId) });
+        await step({
+          kind,
+          key,
+          action: "update",
+          status: "ok",
+          detail: "updated",
+          vapiId: String(updated.id ?? known.vapiId),
+        });
         return known.vapiId;
       }
       // Deleted in VAPI since it was written: create it again rather than
       // PATCH a ghost.
     }
     if (dry) {
-      await step({ kind, key, action: "create", status: "planned", detail: known ? "missing in VAPI; would recreate" : "would create" });
+      await step({
+        kind,
+        key,
+        action: "create",
+        status: "planned",
+        detail: known ? "missing in VAPI; would recreate" : "would create",
+      });
       return null;
     }
     const created = await api.post(path, body);
     if (!created?.id) throw new DeployError(`VAPI did not return an id for the new ${kind} ${key}`);
     await record({ kind, key, vapiId: String(created.id), payloadSha: sha, adopted: false });
-    await step({ kind, key, action: "create", status: "ok", detail: "created", vapiId: String(created.id) });
+    await step({
+      kind,
+      key,
+      action: "create",
+      status: "ok",
+      detail: "created",
+      vapiId: String(created.id),
+    });
     return String(created.id);
   };
 
@@ -204,15 +243,29 @@ export async function executeDeploy(input: DeployInput): Promise<DeployOutcome> 
       let fileId = known && known.payloadSha === pkg.kb.sha256 ? known.vapiId : null;
       if (!fileId) {
         if (dry) {
-          await step({ kind: "kb_file", key: "kb", action: "upload", status: "planned", detail: `would upload ${pkg.kb.fileName} (${pkg.kb.bytes} bytes, text/plain)` });
+          await step({
+            kind: "kb_file",
+            key: "kb",
+            action: "upload",
+            status: "planned",
+            detail: `would upload ${pkg.kb.fileName} (${pkg.kb.bytes} bytes, text/plain)`,
+          });
         } else {
           const up = await api.uploadTextFile(pkg.kb.fileName, pkg.kb.mimetype, pkg.kb.text);
-          if (!up?.id) throw new DeployError("VAPI did not return an id for the knowledge-base file");
+          if (!up?.id)
+            throw new DeployError("VAPI did not return an id for the knowledge-base file");
           fileId = String(up.id);
           // Recorded BEFORE waiting: a tick that runs out while VAPI parses
           // must find this file next time, not upload a second copy.
           await record({ kind: "kb_file", key: "kb", vapiId: fileId, payloadSha: pkg.kb.sha256 });
-          await step({ kind: "kb_file", key: "kb", action: "upload", status: "ok", detail: `uploaded ${pkg.kb.fileName}`, vapiId: fileId });
+          await step({
+            kind: "kb_file",
+            key: "kb",
+            action: "upload",
+            status: "ok",
+            detail: `uploaded ${pkg.kb.fileName}`,
+            vapiId: fileId,
+          });
         }
       }
       if (fileId) {
@@ -222,11 +275,20 @@ export async function executeDeploy(input: DeployInput): Promise<DeployOutcome> 
           const f = await api.get(`/file/${fileId}`);
           const status = String(f?.status ?? "missing");
           if (status === "done") {
-            await step({ kind: "kb_file", key: "kb", action: "wait", status: "ok", detail: "parsed (status done)", vapiId: fileId });
+            await step({
+              kind: "kb_file",
+              key: "kb",
+              action: "wait",
+              status: "ok",
+              detail: "parsed (status done)",
+              vapiId: fileId,
+            });
             break;
           }
           if (status === "failed" || status === "missing") {
-            throw new DeployError(`VAPI could not parse the knowledge-base file (status ${status}); nothing was pointed at it`);
+            throw new DeployError(
+              `VAPI could not parse the knowledge-base file (status ${status}); nothing was pointed at it`,
+            );
           }
           if (outOfTime() || polls >= MAX_KB_POLLS_PER_TICK) return { status: "continue", steps };
           await input.sleep(pollMs);
@@ -239,7 +301,9 @@ export async function executeDeploy(input: DeployInput): Promise<DeployOutcome> 
     for (const a of pkg.agents) {
       if (outOfTime()) return { status: "continue", steps };
       const body = resolvePlaceholders(a.assistant, lookup) as Record<string, any>;
-      await upsert("assistant", a.key, "/assistant", body, (remote, next) => keepUnmanagedInlineTools(remote, next, kbToolName));
+      await upsert("assistant", a.key, "/assistant", body, (remote, next) =>
+        keepUnmanagedInlineTools(remote, next, kbToolName),
+      );
     }
 
     // 4. The squad.
@@ -253,15 +317,39 @@ export async function executeDeploy(input: DeployInput): Promise<DeployOutcome> 
     if (input.phoneNumberId) {
       const target = pkg.squad
         ? { squadId: ledger.get("squad:main")?.vapiId ?? null, assistantId: null }
-        : { assistantId: ledger.get(`assistant:${pkg.agents.find((x) => x.direction === "inbound")?.key}`)?.vapiId ?? null, squadId: null };
+        : {
+            assistantId:
+              ledger.get(`assistant:${pkg.agents.find((x) => x.direction === "inbound")?.key}`)
+                ?.vapiId ?? null,
+            squadId: null,
+          };
       const phone = await api.get(`/phone-number/${input.phoneNumberId}`);
-      if (!phone) throw new DeployError(`phone number ${input.phoneNumberId} was not found in this VAPI org`);
+      if (!phone)
+        throw new DeployError(`phone number ${input.phoneNumberId} was not found in this VAPI org`);
       if (dry) {
-        await step({ kind: "phone", key: input.phoneNumberId, action: "bind", status: "planned", detail: "would route this number to the fleet" });
+        await step({
+          kind: "phone",
+          key: input.phoneNumberId,
+          action: "bind",
+          status: "planned",
+          detail: "would route this number to the fleet",
+        });
       } else {
         await api.patch(`/phone-number/${input.phoneNumberId}`, target);
-        await record({ kind: "phone", key: input.phoneNumberId, vapiId: input.phoneNumberId, payloadSha: await sha256Hex(stableStringify(target)) });
-        await step({ kind: "phone", key: input.phoneNumberId, action: "bind", status: "ok", detail: "routed to the fleet", vapiId: input.phoneNumberId });
+        await record({
+          kind: "phone",
+          key: input.phoneNumberId,
+          vapiId: input.phoneNumberId,
+          payloadSha: await sha256Hex(stableStringify(target)),
+        });
+        await step({
+          kind: "phone",
+          key: input.phoneNumberId,
+          action: "bind",
+          status: "ok",
+          detail: "routed to the fleet",
+          vapiId: input.phoneNumberId,
+        });
       }
     }
 
@@ -282,13 +370,27 @@ export async function executeDeploy(input: DeployInput): Promise<DeployOutcome> 
         status: "failed",
         steps,
         verification,
-        error: `read-back disagreed on ${bad.map((b) => `${b.agentKey} (${Object.entries(b.checks).filter(([, ok]) => !ok).map(([k]) => k).join(", ")})`).join("; ")}`,
+        error: `read-back disagreed on ${bad
+          .map(
+            (b) =>
+              `${b.agentKey} (${Object.entries(b.checks)
+                .filter(([, ok]) => !ok)
+                .map(([k]) => k)
+                .join(", ")})`,
+          )
+          .join("; ")}`,
       };
     }
     return { status: "succeeded", steps, verification };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    steps.push({ kind: "verify", key: "error", action: "verify", status: "failed", detail: message });
+    steps.push({
+      kind: "verify",
+      key: "error",
+      action: "verify",
+      status: "failed",
+      detail: message,
+    });
     return { status: "failed", steps, error: message };
   }
 }
@@ -302,7 +404,9 @@ function stripImmutable(kind: LedgerKind, body: Record<string, any>): Record<str
 
 function kbInlineName(pkg: BuildPackage): string | null {
   for (const a of pkg.agents) {
-    const tools = (a.assistant.model as { tools?: Array<{ type?: string; function?: { name?: string } }> })?.tools ?? [];
+    const tools =
+      (a.assistant.model as { tools?: Array<{ type?: string; function?: { name?: string } }> })
+        ?.tools ?? [];
     const q = tools.find((t) => t.type === "query");
     if (q?.function?.name) return q.function.name;
   }
@@ -316,7 +420,9 @@ export function keepUnmanagedInlineTools(
   managedKbName: string | null,
 ): Record<string, any> {
   const ours = new Set(
-    ((next.model?.tools ?? []) as Array<{ function?: { name?: string } }>).map((t) => t.function?.name).filter(Boolean),
+    ((next.model?.tools ?? []) as Array<{ function?: { name?: string } }>)
+      .map((t) => t.function?.name)
+      .filter(Boolean),
   );
   if (managedKbName) ours.add(managedKbName);
   const kept = ((remote.model?.tools ?? []) as Array<{ function?: { name?: string } }>).filter(
@@ -327,34 +433,52 @@ export function keepUnmanagedInlineTools(
 }
 
 /** Read every assistant (and the squad) back and compare with the package. */
-export async function verifyDeployment(pkg: BuildPackage, ledger: Map<string, LedgerEntry>, api: VapiApi): Promise<VerificationRow[]> {
+export async function verifyDeployment(
+  pkg: BuildPackage,
+  ledger: Map<string, LedgerEntry>,
+  api: VapiApi,
+): Promise<VerificationRow[]> {
   const fileId = ledger.get("kb_file:kb")?.vapiId ?? null;
   const rows: VerificationRow[] = [];
-  const squad = pkg.squad && ledger.get("squad:main") ? await api.get(`/squad/${ledger.get("squad:main")!.vapiId}`) : null;
-  const squadIds = new Set(((squad?.members ?? []) as Array<{ assistantId?: string }>).map((m) => m.assistantId));
+  const squad =
+    pkg.squad && ledger.get("squad:main")
+      ? await api.get(`/squad/${ledger.get("squad:main")!.vapiId}`)
+      : null;
+  const squadIds = new Set(
+    ((squad?.members ?? []) as Array<{ assistantId?: string }>).map((m) => m.assistantId),
+  );
 
   for (const a of pkg.agents) {
     const id = ledger.get(`assistant:${a.key}`)?.vapiId ?? null;
     const remote = id ? await api.get(`/assistant/${id}`) : null;
     const expectedToolIds = new Set(
-      ((a.assistant.model as { toolIds?: string[] }).toolIds ?? []).map((t) => ledger.get(`tool:${t.replace(/^\{\{tool:|\}\}$/g, "")}`)?.vapiId),
+      ((a.assistant.model as { toolIds?: string[] }).toolIds ?? []).map(
+        (t) => ledger.get(`tool:${t.replace(/^\{\{tool:|\}\}$/g, "")}`)?.vapiId,
+      ),
     );
     const model = remote?.model ?? {};
-    const prompt = (model.messages ?? []).find((m: { role?: string }) => m.role === "system")?.content ?? "";
+    const prompt =
+      (model.messages ?? []).find((m: { role?: string }) => m.role === "system")?.content ?? "";
     const wantsKb = Boolean(pkg.kb) && a.toolKeys.includes("kb_query");
     const inlineQuery = (model.tools ?? []).find((t: { type?: string }) => t.type === "query");
     const checks: Record<string, boolean> = {
       exists: Boolean(remote),
       system_prompt: remote ? (await sha256Hex(String(prompt))) === a.systemPromptSha256 : false,
       tool_ids: remote ? sameSet(new Set(model.toolIds ?? []), expectedToolIds) : false,
-      first_message_mode: remote?.firstMessageMode === (a.assistant as { firstMessageMode?: string }).firstMessageMode,
+      first_message_mode:
+        remote?.firstMessageMode ===
+        (a.assistant as { firstMessageMode?: string }).firstMessageMode,
       server_url: Boolean(remote?.server?.url) && !String(remote?.server?.url).includes("{{"),
     };
     if (wantsKb) {
       checks.kb_query_tool = Boolean(inlineQuery?.knowledgeBases?.[0]?.fileIds?.includes(fileId));
       checks.kb_model = Boolean(model.knowledgeBase?.fileIds?.includes(fileId));
     }
-    if (pkg.squad && pkg.squad.payload && JSON.stringify(pkg.squad.payload).includes(`{{assistant:${a.key}}}`)) {
+    if (
+      pkg.squad &&
+      pkg.squad.payload &&
+      JSON.stringify(pkg.squad.payload).includes(`{{assistant:${a.key}}}`)
+    ) {
       checks.squad_member = Boolean(id && squadIds.has(id));
     }
     rows.push({ agentKey: a.key, assistantId: id, checks });

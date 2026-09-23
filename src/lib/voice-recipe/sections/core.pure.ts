@@ -12,7 +12,11 @@
 // simply differ, which a model reading Markdown does not notice.
 import type { BusinessVoiceContext, Dialogue, ToolNames } from "../types.pure.ts";
 
-export function header(business: BusinessVoiceContext, persona: string, roleTitle: string): string[] {
+export function header(
+  business: BusinessVoiceContext,
+  persona: string,
+  roleTitle: string,
+): string[] {
   return [
     `# ${business.businessName} - "${persona}" ${roleTitle} Voice Agent System Prompt\n`,
     `*(${business.productionTag})*\n\n---\n`,
@@ -322,7 +326,12 @@ export function factsSection(b: BusinessVoiceContext): string {
  * the assistant cannot place, or withholds one it can, is the same defect in
  * opposite directions.
  */
-export function humanBlock(p: string, canTransfer: boolean, b: BusinessVoiceContext, n: ToolNames): string {
+export function humanBlock(
+  p: string,
+  canTransfer: boolean,
+  b: BusinessVoiceContext,
+  n: ToolNames,
+): string {
   if (canTransfer) return transferBlock(p, b, n);
   return `# 9. When the Caller Wants a Human
 
@@ -517,10 +526,16 @@ Handle the outcomes:
 `;
 }
 
-export function closingBlock(p: string, outbound: boolean, b: BusinessVoiceContext, n: ToolNames): string {
+export function closingBlock(
+  p: string,
+  outbound: boolean,
+  b: BusinessVoiceContext,
+  n: ToolNames,
+): string {
   const e = n.end_call;
   const extra = outbound
-    ? "For an outbound call, close by thanking them for their time - they " + "did not ask for this call.\n\n"
+    ? "For an outbound call, close by thanking them for their time - they " +
+      "did not ask for this call.\n\n"
     : "";
   return `# 11. Closing Behaviour
 

@@ -28,7 +28,9 @@ export class CredentialError extends Error {
 
 function requireEncryption(): void {
   if (!isEncryptionEnabled()) {
-    throw new CredentialError("CREDENTIALS_ENC_KEY is not set, so no secret can be stored safely; set it before using deploy");
+    throw new CredentialError(
+      "CREDENTIALS_ENC_KEY is not set, so no secret can be stored safely; set it before using deploy",
+    );
   }
 }
 
@@ -38,7 +40,11 @@ export function fingerprintOf(secret: string): string {
   return `...${secret.slice(-4)} (${hash})`;
 }
 
-export async function setProjectVapiKey(args: { projectId: string; apiKey: string; userId: string }): Promise<{ fingerprint: string }> {
+export async function setProjectVapiKey(args: {
+  projectId: string;
+  apiKey: string;
+  userId: string;
+}): Promise<{ fingerprint: string }> {
   requireEncryption();
   const key = args.apiKey.trim();
   if (key.length < 16) throw new CredentialError("that does not look like a VAPI private key");
@@ -51,7 +57,9 @@ export async function setProjectVapiKey(args: { projectId: string; apiKey: strin
       actorUserId: args.userId,
       metadata: { reason: "mission_control_key" },
     });
-    throw new CredentialError("this is Mission Control's own VAPI key; a client's fleet must deploy into the client's org");
+    throw new CredentialError(
+      "this is Mission Control's own VAPI key; a client's fleet must deploy into the client's org",
+    );
   }
   const probe = await probeVapiKey(key);
   if (!probe.ok) throw new CredentialError(probe.reason);
@@ -110,10 +118,16 @@ export function tenantWebhookUrl(tenantKey: string): string {
 /** What the Deploy tab shows: fingerprints and flags, never a value. */
 export async function readDeploySettings(projectId: string): Promise<DeploySettingsStatus> {
   const [{ data: cred, error: credError }, { data: cfg, error: cfgError }] = await Promise.all([
-    supabaseAdmin.from("voice_studio_vapi_credentials").select("fingerprint, verified_at").eq("project_id", projectId).maybeSingle(),
+    supabaseAdmin
+      .from("voice_studio_vapi_credentials")
+      .select("fingerprint, verified_at")
+      .eq("project_id", projectId)
+      .maybeSingle(),
     supabaseAdmin
       .from("voice_tenant_configs")
-      .select("tenant_key, secret_fingerprint, enabled, transfer_hook_url_enc, escalation_number, call_log_url, call_log_secret_enc")
+      .select(
+        "tenant_key, secret_fingerprint, enabled, transfer_hook_url_enc, escalation_number, call_log_url, call_log_secret_enc",
+      )
       .eq("project_id", projectId)
       .maybeSingle(),
   ]);
@@ -136,7 +150,10 @@ export async function readDeploySettings(projectId: string): Promise<DeploySetti
 }
 
 /** Mint the tenant's webhook identity once; an existing one is kept (rotating it would break a live fleet). */
-export async function ensureTenantConfig(projectId: string, businessName: string | null): Promise<{ tenantKey: string }> {
+export async function ensureTenantConfig(
+  projectId: string,
+  businessName: string | null,
+): Promise<{ tenantKey: string }> {
   requireEncryption();
   const { data: existing, error } = await supabaseAdmin
     .from("voice_tenant_configs")
@@ -172,25 +189,36 @@ export async function setDeploySettings(args: {
   if (args.makeTransferHookUrl !== undefined) {
     const url = args.makeTransferHookUrl?.trim() || null;
     if (url && !/^https:\/\/hook\.[a-z0-9.-]+\.make\.com\/[A-Za-z0-9]+$/.test(url)) {
-      throw new CredentialError("the transfer hook must be a Make webhook URL (https://hook.<region>.make.com/...)");
+      throw new CredentialError(
+        "the transfer hook must be a Make webhook URL (https://hook.<region>.make.com/...)",
+      );
     }
     patch.transfer_hook_url_enc = url ? encryptSecret(url) : null;
   }
   if (args.escalationNumber !== undefined) {
     const n = args.escalationNumber?.replace(/[^\d+]/g, "") || null;
-    if (n && !/^\+\d{8,15}$/.test(n)) throw new CredentialError("the escalation number must be in international form, e.g. +61 2 9999 9999");
+    if (n && !/^\+\d{8,15}$/.test(n))
+      throw new CredentialError(
+        "the escalation number must be in international form, e.g. +61 2 9999 9999",
+      );
     patch.escalation_number = n;
   }
   if (args.callLogUrl !== undefined) {
     const url = args.callLogUrl?.trim() || null;
-    if (url && !/^https:\/\//.test(url)) throw new CredentialError("the call log URL must be https");
+    if (url && !/^https:\/\//.test(url))
+      throw new CredentialError("the call log URL must be https");
     patch.call_log_url = url;
   }
   if (args.callLogSecret !== undefined) {
-    patch.call_log_secret_enc = args.callLogSecret?.trim() ? encryptSecret(args.callLogSecret.trim()) : null;
+    patch.call_log_secret_enc = args.callLogSecret?.trim()
+      ? encryptSecret(args.callLogSecret.trim())
+      : null;
   }
   if (!Object.keys(patch).length) return;
-  const { error } = await supabaseAdmin.from("voice_tenant_configs").update(patch as never).eq("project_id", args.projectId);
+  const { error } = await supabaseAdmin
+    .from("voice_tenant_configs")
+    .update(patch as never)
+    .eq("project_id", args.projectId);
   if (error) throw error;
   await writeAuditLog({
     action: "voice_studio.deploy_settings_set",
@@ -212,7 +240,9 @@ export async function readDeploySecrets(projectId: string): Promise<{
 }> {
   const { data, error } = await supabaseAdmin
     .from("voice_tenant_configs")
-    .select("tenant_key, webhook_secret_enc, transfer_hook_url_enc, call_log_url, call_log_secret_enc")
+    .select(
+      "tenant_key, webhook_secret_enc, transfer_hook_url_enc, call_log_url, call_log_secret_enc",
+    )
     .eq("project_id", projectId)
     .maybeSingle();
   if (error) throw error;

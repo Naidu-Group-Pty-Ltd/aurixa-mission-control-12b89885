@@ -43,7 +43,15 @@ export const FACT_TOPICS = [
   "other",
 ] as const;
 
-export const SYSTEM_CATEGORIES = ["crm", "calendar", "helpdesk", "telephony", "automation", "accounting", "other"] as const;
+export const SYSTEM_CATEGORIES = [
+  "crm",
+  "calendar",
+  "helpdesk",
+  "telephony",
+  "automation",
+  "accounting",
+  "other",
+] as const;
 
 /** When an outbound agent is dialled - maps onto Mission Control's campaign triggers. */
 export const OUTBOUND_TRIGGERS = [
@@ -58,9 +66,15 @@ export const OUTBOUND_TRIGGERS = [
 ] as const;
 
 export const Citation = z.object({
-  docId: z.string().describe("The id of the source document exactly as given, e.g. doc:3 or ctx:lead"),
-  locator: z.string().describe('Where in it: "p.4", "sheet Rates row 3", "section 2", or "" if unknown'),
-  quote: z.string().describe("A short verbatim quote (under 200 characters) that supports the statement"),
+  docId: z
+    .string()
+    .describe("The id of the source document exactly as given, e.g. doc:3 or ctx:lead"),
+  locator: z
+    .string()
+    .describe('Where in it: "p.4", "sheet Rates row 3", "section 2", or "" if unknown'),
+  quote: z
+    .string()
+    .describe("A short verbatim quote (under 200 characters) that supports the statement"),
 });
 export type Citation = z.infer<typeof Citation>;
 
@@ -68,7 +82,11 @@ export type Citation = z.infer<typeof Citation>;
 
 export const DocumentFacts = z.object({
   docId: z.string(),
-  summary: z.string().describe("Two or three sentences: what this document is and what it tells us about the business"),
+  summary: z
+    .string()
+    .describe(
+      "Two or three sentences: what this document is and what it tells us about the business",
+    ),
   facts: z.array(
     z.object({
       topic: z.enum(FACT_TOPICS),
@@ -82,7 +100,9 @@ export type DocumentFacts = z.infer<typeof DocumentFacts>;
 // ------------------------------------------------------------- stage 2 --
 
 export const BookingWindow = z.object({
-  days: z.array(z.number().int()).describe("ISO weekdays that take bookings: 1 = Monday ... 7 = Sunday"),
+  days: z
+    .array(z.number().int())
+    .describe("ISO weekdays that take bookings: 1 = Monday ... 7 = Sunday"),
   startTime: z.string().describe("First bookable time, 24h HH:MM"),
   endTime: z.string().describe("Last bookable start time, 24h HH:MM"),
   slotMinutes: z.number().int(),
@@ -94,12 +114,18 @@ export type BookingWindow = z.infer<typeof BookingWindow>;
 export const BusinessProfile = z.object({
   businessName: z.string(),
   industry: z.string(),
-  oneLiner: z.string().describe("What the business does, in one sentence a caller would understand"),
+  oneLiner: z
+    .string()
+    .describe("What the business does, in one sentence a caller would understand"),
   audiences: z.array(z.object({ name: z.string(), description: z.string() })),
-  services: z.array(z.object({ name: z.string(), description: z.string(), citations: z.array(Citation) })),
+  services: z.array(
+    z.object({ name: z.string(), description: z.string(), citations: z.array(Citation) }),
+  ),
   timezone: z.string().describe("IANA timezone of the business, e.g. Australia/Sydney"),
   hoursSummary: z.string(),
-  bookingWindow: BookingWindow.nullable().describe("Null when the documents do not establish when appointments can be booked"),
+  bookingWindow: BookingWindow.nullable().describe(
+    "Null when the documents do not establish when appointments can be booked",
+  ),
   bookingTypes: z.array(
     z.object({
       key: z.string().describe("lower_snake_case id"),
@@ -111,7 +137,9 @@ export const BusinessProfile = z.object({
   channels: z.object({
     inbound: z.boolean(),
     outbound: z.boolean(),
-    outboundCampaigns: z.array(z.object({ trigger: z.enum(OUTBOUND_TRIGGERS), description: z.string() })),
+    outboundCampaigns: z.array(
+      z.object({ trigger: z.enum(OUTBOUND_TRIGGERS), description: z.string() }),
+    ),
   }),
   systems: z.array(
     z.object({
@@ -122,8 +150,12 @@ export const BusinessProfile = z.object({
     }),
   ),
   humanEscalation: z.object({ available: z.boolean(), hoursSummary: z.string() }),
-  pricingPolicy: z.string().describe("What may be said about price, from the documents; empty if nothing is published"),
-  adviceRestrictions: z.array(z.string()).describe("Kinds of advice the business must not give over the phone"),
+  pricingPolicy: z
+    .string()
+    .describe("What may be said about price, from the documents; empty if nothing is published"),
+  adviceRestrictions: z
+    .array(z.string())
+    .describe("Kinds of advice the business must not give over the phone"),
   complianceConstraints: z.array(z.string()),
   neverSay: z.array(z.string()).describe("Claims the business must never make"),
   brandVoice: z.string(),
@@ -141,7 +173,10 @@ export const PlanTopology = z.object({
       personaName: z.string().describe("A first name the agent speaks as"),
       voice: z.enum(VOICE_KEYS),
       rationale: z.string(),
-      outboundTrigger: z.enum(OUTBOUND_TRIGGERS).nullable().describe("For outbound archetypes: what causes the call"),
+      outboundTrigger: z
+        .enum(OUTBOUND_TRIGGERS)
+        .nullable()
+        .describe("For outbound archetypes: what causes the call"),
       tools: z.array(
         z.object({
           tool: z.enum(TOOL_KEYS),
@@ -156,7 +191,9 @@ export const PlanTopology = z.object({
       name: z.string(),
       entryAgentKey: z.string(),
       members: z.array(z.object({ agentKey: z.string(), handoffTo: z.array(z.string()) })),
-      handoffIntents: z.array(z.object({ intent: z.string().describe("lower_snake_case"), description: z.string() })),
+      handoffIntents: z.array(
+        z.object({ intent: z.string().describe("lower_snake_case"), description: z.string() }),
+      ),
     })
     .nullable(),
   kbOutline: z.array(z.object({ part: z.enum(KB_PART_KEYS), headings: z.array(z.string()) })),
@@ -177,13 +214,23 @@ export const AgentContent = z.object({
   agentKey: z.string(),
   roleTitle: z.string().describe('e.g. "Inbound Front Desk", "Appointment Reminder (Outbound)"'),
   temperament: z.string().describe("A short description of how this persona sounds"),
-  roleSummary: z.array(z.string()).describe("The numbered duties of the role, in order of priority"),
-  notThisRole: z.string().describe('One sentence on what this agent is NOT, e.g. "You are not a sales agent."'),
-  firstMessage: z.string().describe("The first thing the agent says; outbound agents name the business and the reason"),
-  openingNotes: z.array(z.string()).describe("How the first minute should go after the first message"),
+  roleSummary: z
+    .array(z.string())
+    .describe("The numbered duties of the role, in order of priority"),
+  notThisRole: z
+    .string()
+    .describe('One sentence on what this agent is NOT, e.g. "You are not a sales agent."'),
+  firstMessage: z
+    .string()
+    .describe("The first thing the agent says; outbound agents name the business and the reason"),
+  openingNotes: z
+    .array(z.string())
+    .describe("How the first minute should go after the first message"),
   canDo: z.array(z.string()),
   cannotDo: z.array(z.string()),
-  dialogues: z.array(z.object({ title: z.string(), caller: z.string().nullable(), reply: z.string() })),
+  dialogues: z.array(
+    z.object({ title: z.string(), caller: z.string().nullable(), reply: z.string() }),
+  ),
   extraNever: z.array(z.string()),
   extraAlways: z.array(z.string()),
   voicemailMessage: z.string(),
@@ -193,7 +240,9 @@ export type AgentContent = z.infer<typeof AgentContent>;
 /** The business's words for every slot in BusinessVoiceContext, as plain text. */
 export const VoiceContextDraft = z.object({
   identityParagraph: z.string(),
-  kbWhy: z.string().describe("What the knowledge base holds about why customers choose the business"),
+  kbWhy: z
+    .string()
+    .describe("What the knowledge base holds about why customers choose the business"),
   kbFacts: z.string().describe("What the knowledge base holds as facts"),
   factualQueryExamples: z.array(z.string()),
   valueTriggers: z.array(z.string()),
@@ -201,8 +250,12 @@ export const VoiceContextDraft = z.object({
   skepticalContext: z.string(),
   skepticalLines: z.array(z.string()),
   factsTitle: z.string(),
-  factsParagraphs: z.array(z.string()).describe("The only process facts an agent may state, one paragraph each"),
-  transferDestination: z.string().describe('Who a transfer reaches, e.g. "Acme Dental front desk team"'),
+  factsParagraphs: z
+    .array(z.string())
+    .describe("The only process facts an agent may state, one paragraph each"),
+  transferDestination: z
+    .string()
+    .describe('Who a transfer reaches, e.g. "Acme Dental front desk team"'),
   followUpPromise: z.string().describe("What an agent that cannot transfer promises instead"),
   adviceDomains: z.array(z.string()),
   adviceDeflect: z.string(),
@@ -210,7 +263,9 @@ export const VoiceContextDraft = z.object({
   pricingDiscipline: z.string(),
   closingLine: z.string(),
   bookingIntro: z.string(),
-  bookingIsRequest: z.boolean().describe("True when a booking made on a call still has to be confirmed by the team"),
+  bookingIsRequest: z
+    .boolean()
+    .describe("True when a booking made on a call still has to be confirmed by the team"),
   bookingConfirmationNote: z.string(),
   baseNever: z.array(z.string()),
   baseAlways: z.array(z.string()),

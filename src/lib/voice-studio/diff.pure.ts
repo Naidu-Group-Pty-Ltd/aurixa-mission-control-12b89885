@@ -40,10 +40,15 @@ export function diffLines(a: string, b: string): DiffLine[] | null {
 }
 
 /** Keep only changed lines and `context` lines around them. */
-export function hunks(lines: DiffLine[], context = 2): Array<DiffLine | { op: "skip"; count: number }> {
+export function hunks(
+  lines: DiffLine[],
+  context = 2,
+): Array<DiffLine | { op: "skip"; count: number }> {
   const keep = new Array(lines.length).fill(false);
   lines.forEach((l, i) => {
-    if (l.op !== "same") for (let k = Math.max(0, i - context); k <= Math.min(lines.length - 1, i + context); k++) keep[k] = true;
+    if (l.op !== "same")
+      for (let k = Math.max(0, i - context); k <= Math.min(lines.length - 1, i + context); k++)
+        keep[k] = true;
   });
   const out: Array<DiffLine | { op: "skip"; count: number }> = [];
   let skipped = 0;
@@ -66,7 +71,12 @@ export interface PackageDiff {
     removed: number;
     lines: DiffLine[] | null;
   }>;
-  kb: { status: "added" | "removed" | "changed" | "same"; added: number; removed: number; lines: DiffLine[] | null };
+  kb: {
+    status: "added" | "removed" | "changed" | "same";
+    added: number;
+    removed: number;
+    lines: DiffLine[] | null;
+  };
   tools: Array<{ key: string; status: "added" | "removed" | "changed" | "same" }>;
   squadChanged: boolean;
 }
@@ -86,10 +96,18 @@ export function diffPackages(prev: BuildPackage | null, next: BuildPackage): Pac
       const lines = diffLines("", n!.systemPrompt);
       return { key, status: "added" as const, ...count(lines), lines };
     }
-    if (!n) return { key, status: "removed" as const, added: 0, removed: p.systemPrompt.split("\n").length, lines: null };
+    if (!n)
+      return {
+        key,
+        status: "removed" as const,
+        added: 0,
+        removed: p.systemPrompt.split("\n").length,
+        lines: null,
+      };
     const promptSame = p.systemPromptSha256 === n.systemPromptSha256;
     const bodySame = JSON.stringify(p.assistant) === JSON.stringify(n.assistant);
-    if (promptSame && bodySame) return { key, status: "same" as const, added: 0, removed: 0, lines: null };
+    if (promptSame && bodySame)
+      return { key, status: "same" as const, added: 0, removed: 0, lines: null };
     const lines = promptSame ? [] : diffLines(p.systemPrompt, n.systemPrompt);
     return { key, status: "changed" as const, ...count(lines), lines };
   });
@@ -99,8 +117,10 @@ export function diffPackages(prev: BuildPackage | null, next: BuildPackage): Pac
   else if (!prev?.kb) {
     const lines = diffLines("", next.kb!.text);
     kb = { status: "added", ...count(lines), lines };
-  } else if (!next.kb) kb = { status: "removed", added: 0, removed: prev.kb.text.split("\n").length, lines: null };
-  else if (prev.kb.sha256 === next.kb.sha256) kb = { status: "same", added: 0, removed: 0, lines: null };
+  } else if (!next.kb)
+    kb = { status: "removed", added: 0, removed: prev.kb.text.split("\n").length, lines: null };
+  else if (prev.kb.sha256 === next.kb.sha256)
+    kb = { status: "same", added: 0, removed: 0, lines: null };
   else {
     const lines = diffLines(prev.kb.text, next.kb.text);
     kb = { status: "changed", ...count(lines), lines };
@@ -110,7 +130,13 @@ export function diffPackages(prev: BuildPackage | null, next: BuildPackage): Pac
   const nt = new Map(next.tools.map((t) => [t.key, JSON.stringify(t)]));
   const tools = [...new Set([...pt.keys(), ...nt.keys()])].sort().map((key) => ({
     key,
-    status: !pt.has(key) ? ("added" as const) : !nt.has(key) ? ("removed" as const) : pt.get(key) === nt.get(key) ? ("same" as const) : ("changed" as const),
+    status: !pt.has(key)
+      ? ("added" as const)
+      : !nt.has(key)
+        ? ("removed" as const)
+        : pt.get(key) === nt.get(key)
+          ? ("same" as const)
+          : ("changed" as const),
   }));
 
   return {

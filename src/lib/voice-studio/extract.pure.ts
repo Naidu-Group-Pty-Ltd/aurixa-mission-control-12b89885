@@ -93,7 +93,10 @@ export function tidyText(text: string): string {
 }
 
 /** Cut to the ceiling at a line boundary, and say so. */
-export function capText(text: string, max = MAX_DOCUMENT_CHARS): { text: string; truncated: boolean } {
+export function capText(
+  text: string,
+  max = MAX_DOCUMENT_CHARS,
+): { text: string; truncated: boolean } {
   if (text.length <= max) return { text, truncated: false };
   const cut = text.lastIndexOf("\n", max);
   return { text: text.slice(0, cut > max * 0.8 ? cut : max), truncated: true };
@@ -108,7 +111,10 @@ export function capText(text: string, max = MAX_DOCUMENT_CHARS): { text: string;
  * a table is a price list, not a run-on sentence.
  */
 export function docxXmlToText(xml: string): string {
-  const body = xml.replace(/<w:(?:instrText|delText)\b[^>]*>[\s\S]*?<\/w:(?:instrText|delText)>/g, "");
+  const body = xml.replace(
+    /<w:(?:instrText|delText)\b[^>]*>[\s\S]*?<\/w:(?:instrText|delText)>/g,
+    "",
+  );
   const out: string[] = [];
 
   const paragraphText = (p: string): string => {
@@ -132,7 +138,9 @@ export function docxXmlToText(xml: string): string {
   };
 
   // Walk top-level blocks: a table is emitted row by row; a paragraph once.
-  const blocks = body.matchAll(/<w:tbl>[\s\S]*?<\/w:tbl>|<w:p\b[^>]*\/>|<w:p\b[^>]*>[\s\S]*?<\/w:p>/g);
+  const blocks = body.matchAll(
+    /<w:tbl>[\s\S]*?<\/w:tbl>|<w:p\b[^>]*\/>|<w:p\b[^>]*>[\s\S]*?<\/w:p>/g,
+  );
   for (const b of blocks) {
     const block = b[0];
     if (block.startsWith("<w:tbl>")) {
@@ -160,19 +168,34 @@ export async function docxToText(bytes: Uint8Array): Promise<string> {
   try {
     entries = readCentralDirectory(bytes);
   } catch (err) {
-    throw new ExtractionError(err instanceof ZipError ? `not a Word document: ${err.message}` : "not a Word document");
+    throw new ExtractionError(
+      err instanceof ZipError ? `not a Word document: ${err.message}` : "not a Word document",
+    );
   }
   const xml = await readZipText(bytes, entries, "word/document.xml");
-  if (xml == null) throw new ExtractionError("this is a zip archive but not a Word document - it carries no word/document.xml");
+  if (xml == null)
+    throw new ExtractionError(
+      "this is a zip archive but not a Word document - it carries no word/document.xml",
+    );
   return docxXmlToText(xml);
 }
 
 // ── Tables ──────────────────────────────────────────────────────────────────
 
 /** Rows as pipe-table lines, with empty rows and empty trailing columns dropped. */
-export function gridToPipeText(grid: string[][], maxRows = MAX_TABLE_ROWS): { text: string; truncated: boolean } {
+export function gridToPipeText(
+  grid: string[][],
+  maxRows = MAX_TABLE_ROWS,
+): { text: string; truncated: boolean } {
   const rows = grid
-    .map((r) => r.map((c) => String(c ?? "").replace(/\s+/g, " ").replace(/\|/g, "/").trim()))
+    .map((r) =>
+      r.map((c) =>
+        String(c ?? "")
+          .replace(/\s+/g, " ")
+          .replace(/\|/g, "/")
+          .trim(),
+      ),
+    )
     .filter((r) => r.some(Boolean));
   let width = 0;
   for (const r of rows) {
@@ -185,12 +208,16 @@ export function gridToPipeText(grid: string[][], maxRows = MAX_TABLE_ROWS): { te
   return { text, truncated: rows.length > maxRows };
 }
 
-export async function xlsxToText(bytes: Uint8Array): Promise<{ text: string; truncated: boolean; notes: string[] }> {
+export async function xlsxToText(
+  bytes: Uint8Array,
+): Promise<{ text: string; truncated: boolean; notes: string[] }> {
   let first;
   try {
     first = await readXlsx(bytes, { maxRows: MAX_TABLE_ROWS + 1, maxColumns: 64 });
   } catch (err) {
-    throw new ExtractionError(err instanceof Error ? err.message : "the workbook could not be read");
+    throw new ExtractionError(
+      err instanceof Error ? err.message : "the workbook could not be read",
+    );
   }
   const notes: string[] = [];
   const parts: string[] = [];
@@ -201,7 +228,10 @@ export async function xlsxToText(bytes: Uint8Array): Promise<{ text: string; tru
       notes.push(`Hidden sheet "${sheet.name}" was not read.`);
       continue;
     }
-    const read = i === first.sheetIndex ? first : await readXlsx(bytes, { sheetIndex: i, maxRows: MAX_TABLE_ROWS + 1, maxColumns: 64 });
+    const read =
+      i === first.sheetIndex
+        ? first
+        : await readXlsx(bytes, { sheetIndex: i, maxRows: MAX_TABLE_ROWS + 1, maxColumns: 64 });
     const table = gridToPipeText(read.grid);
     if (read.truncated || table.truncated) {
       truncated = true;
@@ -212,14 +242,22 @@ export async function xlsxToText(bytes: Uint8Array): Promise<{ text: string; tru
   return { text: tidyText(parts.join("\n\n")), truncated, notes };
 }
 
-export async function csvToText(bytes: Uint8Array, fileName: string): Promise<{ text: string; truncated: boolean; notes: string[] }> {
+export async function csvToText(
+  bytes: Uint8Array,
+  fileName: string,
+): Promise<{ text: string; truncated: boolean; notes: string[] }> {
   try {
     const t = await parseListFile(bytes, fileName, { maxRows: MAX_TABLE_ROWS + 1 });
     const table = gridToPipeText([t.headers, ...t.rows]);
-    return { text: tidyText(table.text), truncated: t.truncated || table.truncated, notes: t.notes };
+    return {
+      text: tidyText(table.text),
+      truncated: t.truncated || table.truncated,
+      notes: t.notes,
+    };
   } catch (err) {
     // A "CSV" that is not a table is still text worth reading.
-    if (err instanceof UnreadableFileError) return { text: tidyText(decodeText(bytes)), truncated: false, notes: [err.message] };
+    if (err instanceof UnreadableFileError)
+      return { text: tidyText(decodeText(bytes)), truncated: false, notes: [err.message] };
     throw err;
   }
 }
@@ -237,21 +275,32 @@ export function estimatePdfPages(bytes: Uint8Array): number | null {
   const text = new TextDecoder("latin1").decode(bytes);
   const pages = text.match(/\/Type\s*\/Page(?![a-zA-Z])/g)?.length ?? 0;
   if (pages > 0) return pages;
-  const count = [...text.matchAll(/\/Type\s*\/Pages\b[\s\S]{0,200}?\/Count\s+(\d+)/g)].map((m) => Number(m[1]));
+  const count = [...text.matchAll(/\/Type\s*\/Pages\b[\s\S]{0,200}?\/Count\s+(\d+)/g)].map((m) =>
+    Number(m[1]),
+  );
   return count.length ? Math.max(...count) : null;
 }
 
 // ── One entry point ─────────────────────────────────────────────────────────
 
-export async function extractDocument(bytes: Uint8Array, fileName: string, mimeType = ""): Promise<Extracted> {
+export async function extractDocument(
+  bytes: Uint8Array,
+  fileName: string,
+  mimeType = "",
+): Promise<Extracted> {
   const kind = documentKind(fileName, mimeType);
-  if (!kind) throw new ExtractionError(`"${fileName}" is not a type the studio reads (pdf, docx, xlsx, csv, txt, md)`);
+  if (!kind)
+    throw new ExtractionError(
+      `"${fileName}" is not a type the studio reads (pdf, docx, xlsx, csv, txt, md)`,
+    );
   if (bytes.length === 0) throw new ExtractionError("the file is empty");
 
   if (kind === "pdf") {
     const pageCount = estimatePdfPages(bytes);
     if (pageCount != null && pageCount > MAX_PDF_PAGES) {
-      throw new ExtractionError(`this PDF has about ${pageCount} pages; the model reads at most ${MAX_PDF_PAGES} in one request - split it`);
+      throw new ExtractionError(
+        `this PDF has about ${pageCount} pages; the model reads at most ${MAX_PDF_PAGES} in one request - split it`,
+      );
     }
     return { kind, text: null, truncated: false, pageCount, notes: [] };
   }
@@ -266,8 +315,18 @@ export async function extractDocument(bytes: Uint8Array, fileName: string, mimeT
 
   if (!raw) throw new ExtractionError("no readable text was found in this file");
   const capped = capText(raw);
-  if (capped.truncated) notes = [...notes, `Only the first ${MAX_DOCUMENT_CHARS.toLocaleString("en-AU")} characters were kept.`];
-  return { kind, text: capped.text, truncated: truncated || capped.truncated, pageCount: null, notes };
+  if (capped.truncated)
+    notes = [
+      ...notes,
+      `Only the first ${MAX_DOCUMENT_CHARS.toLocaleString("en-AU")} characters were kept.`,
+    ];
+  return {
+    kind,
+    text: capped.text,
+    truncated: truncated || capped.truncated,
+    pageCount: null,
+    notes,
+  };
 }
 
 /** Hex SHA-256 of the bytes - the document's identity within a project. */

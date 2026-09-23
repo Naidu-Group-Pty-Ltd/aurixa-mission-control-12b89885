@@ -11,7 +11,12 @@
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import type { Json } from "@/integrations/supabase/types";
 import { recipeBookSha, RECIPE_BOOK_VERSION } from "@/lib/voice-recipe/recipeBook.pure";
-import { advanceRun, planIsApprovable, type SourceDocument, type Usage } from "@/lib/voice-studio/plannerEngine.pure";
+import {
+  advanceRun,
+  planIsApprovable,
+  type SourceDocument,
+  type Usage,
+} from "@/lib/voice-studio/plannerEngine.pure";
 import { CONTEXT_DOC_ID } from "@/lib/voice-studio/targetContext.pure";
 import { anthropicPlannerModel, uploadPdfToFiles, VOICE_STUDIO_MODEL } from "./anthropic.server";
 import { gatherTargetContext } from "./context.server";
@@ -33,7 +38,10 @@ export function maxRunUsd(): number {
 }
 
 /** Queue a planning run: fix the document numbering, then leave it for the worker. */
-export async function queuePlanningRun(projectId: string, userId: string): Promise<{ runId: string }> {
+export async function queuePlanningRun(
+  projectId: string,
+  userId: string,
+): Promise<{ runId: string }> {
   const { data: live, error: liveError } = await supabaseAdmin
     .from("voice_studio_runs")
     .select("id")
@@ -69,7 +77,10 @@ export async function queuePlanningRun(projectId: string, userId: string): Promi
     .single();
   if (insertError) throw insertError;
 
-  const { error: projError } = await supabaseAdmin.from("voice_studio_projects").update({ status: "planning" }).eq("id", projectId);
+  const { error: projError } = await supabaseAdmin
+    .from("voice_studio_projects")
+    .update({ status: "planning" })
+    .eq("id", projectId);
   if (projError) throw projError;
   return { runId: run.id };
 }
@@ -84,10 +95,18 @@ type ClaimedRun = {
   recipe_sha: string | null;
 };
 
-export async function runVoiceStudioPlanTick(): Promise<{ claimed: number; completed: number; continued: number; failed: number }> {
+export async function runVoiceStudioPlanTick(): Promise<{
+  claimed: number;
+  completed: number;
+  continued: number;
+  failed: number;
+}> {
   const started = Date.now();
   const deadline = started + tickBudgetMs();
-  const { data: runs, error } = await supabaseAdmin.rpc("claim_voice_studio_runs", { _limit: 2, _lease_seconds: 600 });
+  const { data: runs, error } = await supabaseAdmin.rpc("claim_voice_studio_runs", {
+    _limit: 2,
+    _lease_seconds: 600,
+  });
   if (error) throw error;
 
   const summary = { claimed: runs?.length ?? 0, completed: 0, continued: 0, failed: 0 };
@@ -122,11 +141,22 @@ async function failRun(run: ClaimedRun, message: string): Promise<void> {
   console.error(`[voice-studio] run ${run.id} failed: ${message}`);
   const { error } = await supabaseAdmin
     .from("voice_studio_runs")
-    .update({ status: "failed", last_error: message.slice(0, 2000), completed_at: new Date().toISOString() })
+    .update({
+      status: "failed",
+      last_error: message.slice(0, 2000),
+      completed_at: new Date().toISOString(),
+    })
     .eq("id", run.id);
-  if (error) console.error(`[voice-studio] could not record the failure of run ${run.id}: ${error.message}`);
-  const { error: projError } = await supabaseAdmin.from("voice_studio_projects").update({ status: "failed" }).eq("id", run.project_id);
-  if (projError) console.error(`[voice-studio] could not mark project ${run.project_id} failed: ${projError.message}`);
+  if (error)
+    console.error(`[voice-studio] could not record the failure of run ${run.id}: ${error.message}`);
+  const { error: projError } = await supabaseAdmin
+    .from("voice_studio_projects")
+    .update({ status: "failed" })
+    .eq("id", run.project_id);
+  if (projError)
+    console.error(
+      `[voice-studio] could not mark project ${run.project_id} failed: ${projError.message}`,
+    );
 }
 
 async function processRun(run: ClaimedRun, deadline: number): Promise<"completed" | "continued"> {
@@ -159,10 +189,22 @@ async function processRun(run: ClaimedRun, deadline: number): Promise<"completed
     // A document deleted after the run was queued is simply not read.
     if (!doc) continue;
     let fileId = doc.anthropic_file_id;
-    if (doc.kind === "pdf" && !fileId) fileId = await ensurePdfUploaded(doc.id, doc.storage_path, doc.file_name);
-    sources.push({ docId: d.docId, title: d.title, text: doc.kind === "pdf" ? null : doc.extracted_text, fileId });
+    if (doc.kind === "pdf" && !fileId)
+      fileId = await ensurePdfUploaded(doc.id, doc.storage_path, doc.file_name);
+    sources.push({
+      docId: d.docId,
+      title: d.title,
+      text: doc.kind === "pdf" ? null : doc.extracted_text,
+      fileId,
+    });
   }
-  if (contextText) sources.push({ docId: CONTEXT_DOC_ID, title: "Mission Control context", text: contextText, fileId: null });
+  if (contextText)
+    sources.push({
+      docId: CONTEXT_DOC_ID,
+      title: "Mission Control context",
+      text: contextText,
+      fileId: null,
+    });
 
   const usageTotals = { ...((run.usage ?? {}) as Record<string, number>) };
   const model = anthropicPlannerModel({ runId: run.id, userId: run.requested_by });
@@ -185,7 +227,11 @@ async function processRun(run: ClaimedRun, deadline: number): Promise<"completed
       recordProgress: async (stage, costUsd) => {
         const { error } = await supabaseAdmin
           .from("voice_studio_runs")
-          .update({ stage, cost_usd: Number(costUsd.toFixed(4)), usage: usageTotals as unknown as Json })
+          .update({
+            stage,
+            cost_usd: Number(costUsd.toFixed(4)),
+            usage: usageTotals as unknown as Json,
+          })
           .eq("id", run.id);
         if (error) throw error;
       },
@@ -230,7 +276,12 @@ async function processRun(run: ClaimedRun, deadline: number): Promise<"completed
 
   const { error: runError } = await supabaseAdmin
     .from("voice_studio_runs")
-    .update({ status: "complete", stage: "assemble", last_error: null, completed_at: new Date().toISOString() })
+    .update({
+      status: "complete",
+      stage: "assemble",
+      last_error: null,
+      completed_at: new Date().toISOString(),
+    })
     .eq("id", run.id);
   if (runError) throw runError;
   const { error: projError } = await supabaseAdmin
@@ -250,12 +301,21 @@ function addUsage(totals: Record<string, number>, u: Usage): void {
 }
 
 async function loadArtifacts(runId: string): Promise<Map<string, unknown>> {
-  const { data, error } = await supabaseAdmin.from("voice_studio_artifacts").select("kind, key, data").eq("run_id", runId);
+  const { data, error } = await supabaseAdmin
+    .from("voice_studio_artifacts")
+    .select("kind, key, data")
+    .eq("run_id", runId);
   if (error) throw error;
   return new Map((data ?? []).map((r) => [`${r.kind}:${r.key}`, r.data as unknown]));
 }
 
-async function saveArtifact(runId: string, kind: string, key: string, data: unknown, usage: Usage | null): Promise<void> {
+async function saveArtifact(
+  runId: string,
+  kind: string,
+  key: string,
+  data: unknown,
+  usage: Usage | null,
+): Promise<void> {
   const { error } = await supabaseAdmin.from("voice_studio_artifacts").upsert(
     {
       run_id: runId,
@@ -269,9 +329,16 @@ async function saveArtifact(runId: string, kind: string, key: string, data: unkn
   if (error) throw error;
 }
 
-async function ensurePdfUploaded(documentId: string, storagePath: string, fileName: string): Promise<string> {
-  const { data: blob, error } = await supabaseAdmin.storage.from(VOICE_STUDIO_BUCKET).download(storagePath);
-  if (error || !blob) throw new Error(`"${fileName}" could not be read from storage: ${error?.message ?? "empty"}`);
+async function ensurePdfUploaded(
+  documentId: string,
+  storagePath: string,
+  fileName: string,
+): Promise<string> {
+  const { data: blob, error } = await supabaseAdmin.storage
+    .from(VOICE_STUDIO_BUCKET)
+    .download(storagePath);
+  if (error || !blob)
+    throw new Error(`"${fileName}" could not be read from storage: ${error?.message ?? "empty"}`);
   const fileId = await uploadPdfToFiles(new Uint8Array(await blob.arrayBuffer()), fileName);
   const { error: updateError } = await supabaseAdmin
     .from("voice_studio_documents")

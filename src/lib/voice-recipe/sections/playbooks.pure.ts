@@ -32,7 +32,9 @@ const src = (file: string, heading: string): Provenance => ({
 
 export const PLAYBOOK_PROVENANCE: Record<PlaybookId, Provenance[]> = {
   ai_transparency: [src("npc-active-nurturing.66d3e994.md", "2. AI Transparency Rule")],
-  kb_fallback_only: [src("npc-opt-in-follow-up-inbound.fdb1ecde.md", "9. Knowledge Base Usage – Fallback Only")],
+  kb_fallback_only: [
+    src("npc-opt-in-follow-up-inbound.fdb1ecde.md", "9. Knowledge Base Usage – Fallback Only"),
+  ],
   time_authority: [src("npc-active-nurturing.66d3e994.md", "6. Current Time Authority")],
   tool_turn_discipline: [
     src("npc-opt-in-follow-up-inbound.fdb1ecde.md", "8. Spoken Filler During Tools"),
@@ -71,13 +73,14 @@ const LETTERS = "ABCDEFGHIJ";
 
 export function renderPlaybooks(agent: AgentSpec, ctx: CompileContext): string {
   const chosen = ORDER.filter((id) => agent.playbooks.includes(id));
-  return chosen
-    .map((id, i) => RENDER[id](agent, ctx, `14${LETTERS[i]}`))
-    .join("\n");
+  return chosen.map((id, i) => RENDER[id](agent, ctx, `14${LETTERS[i]}`)).join("\n");
 }
 
 /** Absolute-rule lines a playbook adds - kept with the playbook that needs them. */
-export function playbookRules(agent: AgentSpec, ctx: CompileContext): { never: string[]; always: string[] } {
+export function playbookRules(
+  agent: AgentSpec,
+  ctx: CompileContext,
+): { never: string[]; always: string[] } {
   const never: string[] = [];
   const always: string[] = [];
   const n = ctx.toolNames;
@@ -86,13 +89,19 @@ export function playbookRules(agent: AgentSpec, ctx: CompileContext): { never: s
     never.push("Claim to be a person, or deny being an AI assistant when asked directly");
   }
   if (has("objection_handling")) {
-    never.push("Make more than three save attempts, more than one after a hard no, or any after hostility");
+    never.push(
+      "Make more than three save attempts, more than one after a hard no, or any after hostility",
+    );
   }
   if (has("time_authority")) {
-    always.push("Work out today and tomorrow from the injected current time in the business timezone, never from an assumed date");
+    always.push(
+      "Work out today and tomorrow from the injected current time in the business timezone, never from an assumed date",
+    );
   }
   if (has("reschedule_cancel") && agent.tools.includes("cancel_appointment")) {
-    always.push(`Confirm once before calling ${n.cancel_appointment} - a cancellation is never assumed`);
+    always.push(
+      `Confirm once before calling ${n.cancel_appointment} - a cancellation is never assumed`,
+    );
   }
   return { never, always };
 }

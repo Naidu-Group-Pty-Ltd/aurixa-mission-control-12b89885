@@ -107,6 +107,15 @@ export async function provisionCloneFromAgreement(
     // The clone exists whatever this row says; an unrecorded success would
     // read as stuck-provisioning and invite a second attempt, so say so.
     if (doneErr) console.error("[agreement-provisioning] success record failed:", doneErr.message);
+    // An agreement that bought voice agents opens a draft Cloning Studio
+    // project. It never fails provisioning; see voice-studio/provisioning.server.ts.
+    const { openStudioProjectForAgreement } = await import("./voice-studio/provisioning.server");
+    await openStudioProjectForAgreement({
+      agreementId,
+      cloneId,
+      clientName: agreement.client_org || agreement.client_name,
+      addonSlugs: agreement.addon_slugs,
+    });
     await notifyOperators({
       kind: "agreement_provisioned",
       severity: "success",

@@ -13,7 +13,11 @@
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import type { Json } from "@/integrations/supabase/types";
 import type { BuildPackage } from "@/lib/voice-studio/package.pure";
-import { executeDeploy, type DeployStep, type LedgerEntry } from "@/lib/voice-studio/vapiDeploy.pure";
+import {
+  executeDeploy,
+  type DeployStep,
+  type LedgerEntry,
+} from "@/lib/voice-studio/vapiDeploy.pure";
 import { writeAuditLog } from "@/server/audit.server";
 import { ensureTenantConfig, readDeploySecrets, readProjectVapiKey } from "./credentials.server";
 import { vapiClient } from "./vapi-client.server";
@@ -35,7 +39,9 @@ export async function queueDeployment(args: {
   if (error) throw error;
   if (pkg.project_id !== args.projectId) throw new Error("package_not_in_project");
   if (pkg.status !== "approved" && !(args.mode === "rollback" && pkg.status === "superseded")) {
-    throw new Error("only an approved package can be deployed; approve it on the Package tab first");
+    throw new Error(
+      "only an approved package can be deployed; approve it on the Package tab first",
+    );
   }
   if (args.mode === "rollback") {
     const { data: prior, error: priorError } = await supabaseAdmin
@@ -47,7 +53,10 @@ export async function queueDeployment(args: {
       .limit(1)
       .maybeSingle();
     if (priorError) throw priorError;
-    if (!prior) throw new Error("a rollback returns to a package that was deployed successfully before; this one never was");
+    if (!prior)
+      throw new Error(
+        "a rollback returns to a package that was deployed successfully before; this one never was",
+      );
   }
 
   // Fail at the click, not a minute later in the worker.
@@ -56,8 +65,13 @@ export async function queueDeployment(args: {
   await ensureTenantConfig(args.projectId, content.businessName);
   if (args.mode !== "dry_run") {
     const secrets = await readDeploySecrets(args.projectId);
-    if (content.tools.some((t) => t.backend === "make_twilio_redirect") && !secrets.makeTransferUrl) {
-      throw new Error("this package transfers calls to a human; set the Make transfer hook on the Deploy tab first");
+    if (
+      content.tools.some((t) => t.backend === "make_twilio_redirect") &&
+      !secrets.makeTransferUrl
+    ) {
+      throw new Error(
+        "this package transfers calls to a human; set the Make transfer hook on the Deploy tab first",
+      );
     }
   }
 
@@ -74,11 +88,15 @@ export async function queueDeployment(args: {
     .select("id")
     .single();
   // 23505: the one-live-deployment index.
-  if (insertError?.code === "23505") throw new Error("a deployment is already running for this project");
+  if (insertError?.code === "23505")
+    throw new Error("a deployment is already running for this project");
   if (insertError) throw insertError;
 
   if (args.mode !== "dry_run") {
-    const { error: projError } = await supabaseAdmin.from("voice_studio_projects").update({ status: "deploying" }).eq("id", args.projectId);
+    const { error: projError } = await supabaseAdmin
+      .from("voice_studio_projects")
+      .update({ status: "deploying" })
+      .eq("id", args.projectId);
     if (projError) throw projError;
   }
   await writeAuditLog({
@@ -86,7 +104,11 @@ export async function queueDeployment(args: {
     entityType: "voice_studio_project",
     entityId: args.projectId,
     actorUserId: args.userId,
-    metadata: { package_id: args.packageId, deployment_id: row.id, phone_number_id: args.phoneNumberId },
+    metadata: {
+      package_id: args.packageId,
+      deployment_id: row.id,
+      phone_number_id: args.phoneNumberId,
+    },
   });
   return { deploymentId: row.id };
 }
@@ -106,9 +128,17 @@ function tickBudget(): number {
   return Number.isFinite(n) && n >= 30_000 ? n : DEFAULT_TICK_BUDGET_MS;
 }
 
-export async function runVoiceStudioDeployTick(): Promise<{ claimed: number; succeeded: number; continued: number; failed: number }> {
+export async function runVoiceStudioDeployTick(): Promise<{
+  claimed: number;
+  succeeded: number;
+  continued: number;
+  failed: number;
+}> {
   const deadline = Date.now() + tickBudget();
-  const { data: rows, error } = await supabaseAdmin.rpc("claim_voice_studio_deployments", { _limit: 1, _lease_seconds: 600 });
+  const { data: rows, error } = await supabaseAdmin.rpc("claim_voice_studio_deployments", {
+    _limit: 1,
+    _lease_seconds: 600,
+  });
   if (error) throw error;
   const summary = { claimed: rows?.length ?? 0, succeeded: 0, continued: 0, failed: 0 };
   for (const d of (rows ?? []) as ClaimedDeployment[]) {
@@ -123,8 +153,15 @@ export async function runVoiceStudioDeployTick(): Promise<{ claimed: number; suc
   return summary;
 }
 
-async function runDeployment(d: ClaimedDeployment, deadline: number): Promise<"succeeded" | "continued" | "failed"> {
-  const { data: pkgRow, error } = await supabaseAdmin.from("voice_studio_packages").select("package").eq("id", d.package_id).single();
+async function runDeployment(
+  d: ClaimedDeployment,
+  deadline: number,
+): Promise<"succeeded" | "continued" | "failed"> {
+  const { data: pkgRow, error } = await supabaseAdmin
+    .from("voice_studio_packages")
+    .select("package")
+    .eq("id", d.package_id)
+    .single();
   if (error) throw error;
   const pkg = pkgRow.package as unknown as BuildPackage;
 
@@ -151,7 +188,9 @@ async function runDeployment(d: ClaimedDeployment, deadline: number): Promise<"s
     tenantWebhookSecret: s.tenantWebhookSecret,
     makeTransferUrl: s.makeTransferUrl,
     callLogUrl: s.callLogUrl ?? s.tenantWebhookUrl,
-    callLogSecret: s.callLogUrl ? (s.callLogSecret ?? s.tenantWebhookSecret) : s.tenantWebhookSecret,
+    callLogSecret: s.callLogUrl
+      ? (s.callLogSecret ?? s.tenantWebhookSecret)
+      : s.tenantWebhookSecret,
   };
 
   const steps: DeployStep[] = Array.isArray(d.steps) ? (d.steps as unknown as DeployStep[]) : [];
@@ -183,7 +222,8 @@ async function runDeployment(d: ClaimedDeployment, deadline: number): Promise<"s
         .from("voice_studio_deployments")
         .update({ steps: steps as unknown as Json })
         .eq("id", d.id);
-      if (stepError) console.error(`[voice-studio] step log for ${d.id} failed: ${stepError.message}`);
+      if (stepError)
+        console.error(`[voice-studio] step log for ${d.id} failed: ${stepError.message}`);
     },
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     now: Date.now,
@@ -228,7 +268,12 @@ async function runDeployment(d: ClaimedDeployment, deadline: number): Promise<"s
   return "succeeded";
 }
 
-async function finish(d: ClaimedDeployment, status: "succeeded" | "failed", error: string | null, verification: unknown): Promise<void> {
+async function finish(
+  d: ClaimedDeployment,
+  status: "succeeded" | "failed",
+  error: string | null,
+  verification: unknown,
+): Promise<void> {
   const { error: updateError } = await supabaseAdmin
     .from("voice_studio_deployments")
     .update({
@@ -238,13 +283,17 @@ async function finish(d: ClaimedDeployment, status: "succeeded" | "failed", erro
       completed_at: new Date().toISOString(),
     })
     .eq("id", d.id);
-  if (updateError) console.error(`[voice-studio] could not close deployment ${d.id}: ${updateError.message}`);
+  if (updateError)
+    console.error(`[voice-studio] could not close deployment ${d.id}: ${updateError.message}`);
   if (d.mode !== "dry_run") {
     const { error: projError } = await supabaseAdmin
       .from("voice_studio_projects")
       .update({ status: status === "succeeded" ? "deployed" : "package_approved" })
       .eq("id", d.project_id);
-    if (projError) console.error(`[voice-studio] could not update project ${d.project_id}: ${projError.message}`);
+    if (projError)
+      console.error(
+        `[voice-studio] could not update project ${d.project_id}: ${projError.message}`,
+      );
   }
   await writeAuditLog({
     action: `voice_studio.deploy_${d.mode}_${status}`,

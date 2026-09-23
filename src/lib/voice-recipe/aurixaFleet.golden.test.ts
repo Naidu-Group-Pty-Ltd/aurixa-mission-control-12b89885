@@ -10,7 +10,12 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { compileAgentPrompt } from "./compiler.pure";
-import { AURIXA_CONTEXT, AURIXA_TOOL_NAMES, agentFromFleetSpec, type FleetSpecAgent } from "./fixtures/aurixa.pure";
+import {
+  AURIXA_CONTEXT,
+  AURIXA_TOOL_NAMES,
+  agentFromFleetSpec,
+  type FleetSpecAgent,
+} from "./fixtures/aurixa.pure";
 
 const DIR = join(process.cwd(), "scripts/voice/fleet-prompts");
 const spec = JSON.parse(readFileSync(join(DIR, "fleet-spec.json"), "utf8")) as {

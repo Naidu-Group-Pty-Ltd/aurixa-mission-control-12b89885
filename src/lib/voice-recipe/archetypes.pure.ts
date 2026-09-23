@@ -70,7 +70,8 @@ export const ARCHETYPES: Record<ArchetypeKey, Archetype> = {
     defaultTools: [...CORE, "check_availability", "book_appointment"],
     optionalTools: ["transfer_to_human", "reschedule_appointment", "cancel_appointment"],
     playbooks: ["tool_turn_discipline", "tool_error_handling"],
-    purpose: "Books, moves or rebooks an appointment against real availability, usually after a handoff from the front desk.",
+    purpose:
+      "Books, moves or rebooks an appointment against real availability, usually after a handoff from the front desk.",
     provenance: "MC Review Booking (Sandra); NPC Strategy Session Inbound / IFC Inbound.",
   },
   solutions_advisor_inbound: {
@@ -82,7 +83,8 @@ export const ARCHETYPES: Record<ArchetypeKey, Archetype> = {
     defaultTools: [...CORE],
     optionalTools: ["transfer_to_human", "check_availability", "book_appointment"],
     playbooks: [],
-    purpose: "Answers deeper questions about what the business offers, from the knowledge base, and books the next step when the caller wants one.",
+    purpose:
+      "Answers deeper questions about what the business offers, from the knowledge base, and books the next step when the caller wants one.",
     provenance: "MC Solutions Advisor (Sandra).",
   },
   support_intake: {
@@ -94,7 +96,8 @@ export const ARCHETYPES: Record<ArchetypeKey, Archetype> = {
     defaultTools: [...CORE, "raise_support_ticket"],
     optionalTools: ["transfer_to_human"],
     playbooks: ["tool_error_handling"],
-    purpose: "Takes an existing customer's problem in their own words and logs a ticket with a reference read back before the call ends.",
+    purpose:
+      "Takes an existing customer's problem in their own words and logs a ticket with a reference read back before the call ends.",
     provenance: "MC Support Intake (Monica).",
   },
   outbound_booking_follow_up: {
@@ -115,8 +118,10 @@ export const ARCHETYPES: Record<ArchetypeKey, Archetype> = {
       "tool_error_handling",
       "negative_sentiment_close",
     ],
-    purpose: "Calls a new enquiry or lead back and books the first appointment, lightly persistent and never pushy.",
-    provenance: "NPC Opt-In Follow Up (Monica), NPC Quiz Follow Up (Erica); MC Questionnaire Chaser.",
+    purpose:
+      "Calls a new enquiry or lead back and books the first appointment, lightly persistent and never pushy.",
+    provenance:
+      "NPC Opt-In Follow Up (Monica), NPC Quiz Follow Up (Erica); MC Questionnaire Chaser.",
   },
   reminder_confirmation: {
     key: "reminder_confirmation",
@@ -125,10 +130,23 @@ export const ARCHETYPES: Record<ArchetypeKey, Archetype> = {
     firstMessageMode: "assistant-waits-for-user",
     squadRole: "standalone",
     defaultTools: [...CORE],
-    optionalTools: ["check_availability", "book_appointment", "reschedule_appointment", "cancel_appointment"],
-    playbooks: ["ai_transparency", "time_authority", "reschedule_cancel", "edge_cases", "tool_error_handling"],
-    purpose: "Confirms an upcoming appointment and handles a reschedule or cancellation when the person cannot make it.",
-    provenance: "MC Booking Confirmation (Rita), MC Session Reminder (Sandra); NPC Discovery Call Follow-Up.",
+    optionalTools: [
+      "check_availability",
+      "book_appointment",
+      "reschedule_appointment",
+      "cancel_appointment",
+    ],
+    playbooks: [
+      "ai_transparency",
+      "time_authority",
+      "reschedule_cancel",
+      "edge_cases",
+      "tool_error_handling",
+    ],
+    purpose:
+      "Confirms an upcoming appointment and handles a reschedule or cancellation when the person cannot make it.",
+    provenance:
+      "MC Booking Confirmation (Rita), MC Session Reminder (Sandra); NPC Discovery Call Follow-Up.",
   },
   no_show_recovery: {
     key: "no_show_recovery",
@@ -138,7 +156,14 @@ export const ARCHETYPES: Record<ArchetypeKey, Archetype> = {
     squadRole: "standalone",
     defaultTools: [...CORE, "check_availability", "book_appointment"],
     optionalTools: [],
-    playbooks: ["ai_transparency", "time_authority", "objection_handling", "edge_cases", "tool_error_handling", "negative_sentiment_close"],
+    playbooks: [
+      "ai_transparency",
+      "time_authority",
+      "objection_handling",
+      "edge_cases",
+      "tool_error_handling",
+      "negative_sentiment_close",
+    ],
     purpose: "Calls someone who missed an appointment, without blame, and rebooks it.",
     provenance: "MC No-Show Recovery (Sandra); NPC Discovery Call No-Show Follow-Up, IFC No-Show.",
   },
@@ -150,8 +175,15 @@ export const ARCHETYPES: Record<ArchetypeKey, Archetype> = {
     squadRole: "standalone",
     defaultTools: [...CORE],
     optionalTools: ["check_availability", "book_appointment"],
-    playbooks: ["ai_transparency", "kb_fallback_only", "objection_handling", "edge_cases", "negative_sentiment_close"],
-    purpose: "A courtesy check-in with a lead that went quiet - finds out whether it is still relevant and respects the answer.",
+    playbooks: [
+      "ai_transparency",
+      "kb_fallback_only",
+      "objection_handling",
+      "edge_cases",
+      "negative_sentiment_close",
+    ],
+    purpose:
+      "A courtesy check-in with a lead that went quiet - finds out whether it is still relevant and respects the answer.",
     provenance: "MC Re-Engagement (Mary); NPC Active Nurturing (Mary).",
   },
   onboarding_kickoff: {
@@ -175,7 +207,8 @@ export const ARCHETYPES: Record<ArchetypeKey, Archetype> = {
     defaultTools: [...CORE],
     optionalTools: ["check_availability", "book_appointment", "raise_support_ticket"],
     playbooks: ["ai_transparency", "edge_cases", "negative_sentiment_close"],
-    purpose: "A genuine service check-in with an existing customer; routes issues to support and never turns into a sales call.",
+    purpose:
+      "A genuine service check-in with an existing customer; routes issues to support and never turns into a sales call.",
     provenance: "MC Account Check-In (Mary).",
   },
 };

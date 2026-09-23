@@ -23,11 +23,11 @@ export interface KbBlock {
 }
 
 const ASCII_RULES: Array<[RegExp, string]> = [
-  [/[‘’‚‛]/g, "'"],
-  [/[“”„‟]/g, '"'],
-  [/[–—―]/g, "-"],
-  [/…/g, "..."],
-  [/ /g, " "],
+  [/[\u2018\u2019\u201a\u201b]/g, "'"],
+  [/[\u201c\u201d\u201e\u201f]/g, '"'],
+  [/[\u2013\u2014\u2015]/g, "-"],
+  [/\u2026/g, "..."],
+  [/\u00a0/g, " "],
 ];
 
 export class NonAsciiError extends Error {
@@ -42,6 +42,7 @@ export class NonAsciiError extends Error {
 export function toAscii(text: string): string {
   let out = text;
   for (const [re, to] of ASCII_RULES) out = out.replace(re, to);
+  // eslint-disable-next-line no-control-regex -- tab and newline are the two controls a KB may hold
   const stray = out.match(/[^\x09\x0a\x20-\x7e]/g);
   // Named rather than stripped: a character nobody decided about is a content
   // question, not something a renderer should quietly resolve.
@@ -88,7 +89,10 @@ export const BASE_DENYLIST: DenyRule[] = [
     pattern: /\bsoc\s*2\b|\biso(\/iec)?\s*27001\b/i,
     why: "a certification claim - held by infrastructure providers, not by the business",
   },
-  { pattern: /\b10x\b|\bten times\b|conversion lift/i, why: "an outcome figure no customer has measured" },
+  {
+    pattern: /\b10x\b|\bten times\b|conversion lift/i,
+    why: "an outcome figure no customer has measured",
+  },
   { pattern: /\bguarantee(d|s)?\s+(results|returns|approval)\b/i, why: "a guaranteed outcome" },
 ];
 
@@ -125,22 +129,26 @@ export const KB_PARTS = [
   {
     key: "why",
     title: "Why the business exists, and why now",
-    purpose: "The problem it solves in the caller's words, what it is in one breath, and what has changed that makes it timely.",
+    purpose:
+      "The problem it solves in the caller's words, what it is in one breath, and what has changed that makes it timely.",
   },
   {
     key: "for_you",
     title: "What it does for your kind of customer",
-    purpose: "One section per customer type: what their day looks like, what changes, what matters most, a question to ask, one way to put it.",
+    purpose:
+      "One section per customer type: what their day looks like, what changes, what matters most, a question to ask, one way to put it.",
   },
   {
     key: "different",
     title: "How it is different",
-    purpose: "Against the alternatives a caller already uses - never naming a competitor, never running one down.",
+    purpose:
+      "Against the alternatives a caller already uses - never naming a competitor, never running one down.",
   },
   {
     key: "hesitations",
     title: "When a caller hesitates",
-    purpose: "Each objection answered as acknowledge, one honest reframe, one easy next step, and a question back.",
+    purpose:
+      "Each objection answered as acknowledge, one honest reframe, one easy next step, and a question back.",
   },
   {
     key: "discovery",
@@ -155,7 +163,8 @@ export const KB_PARTS = [
   {
     key: "facts",
     title: "The facts",
-    purpose: "Services, prices only where published, hours, process, policies, support and contact details.",
+    purpose:
+      "Services, prices only where published, hours, process, policies, support and contact details.",
   },
   {
     key: "never_say",
@@ -164,4 +173,7 @@ export const KB_PARTS = [
   },
 ] as const;
 export type KbPartKey = (typeof KB_PARTS)[number]["key"];
-export const KB_PART_KEYS = KB_PARTS.map((p) => p.key) as unknown as readonly [KbPartKey, ...KbPartKey[]];
+export const KB_PART_KEYS = KB_PARTS.map((p) => p.key) as unknown as readonly [
+  KbPartKey,
+  ...KbPartKey[],
+];

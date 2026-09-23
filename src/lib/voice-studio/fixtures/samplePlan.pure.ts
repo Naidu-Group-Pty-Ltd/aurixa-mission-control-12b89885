@@ -31,24 +31,58 @@ export function samplePlan(): CloningPlan {
       ],
       timezone: "Australia/Sydney",
       hoursSummary: "Monday to Friday, 8am to 5pm",
-      bookingWindow: { days: [1, 2, 3, 4, 5], startTime: "08:00", endTime: "16:30", slotMinutes: 30, minNoticeHours: 24, horizonDays: 30 },
+      bookingWindow: {
+        days: [1, 2, 3, 4, 5],
+        startTime: "08:00",
+        endTime: "16:30",
+        slotMinutes: 30,
+        minNoticeHours: 24,
+        horizonDays: 30,
+      },
       bookingTypes: [
-        { key: "check_up", label: "check-up and clean", synonyms: ["check up", "clean"], durationMinutes: 30 },
-        { key: "consult", label: "new patient consult", synonyms: ["consultation"], durationMinutes: 30 },
+        {
+          key: "check_up",
+          label: "check-up and clean",
+          synonyms: ["check up", "clean"],
+          durationMinutes: 30,
+        },
+        {
+          key: "consult",
+          label: "new patient consult",
+          synonyms: ["consultation"],
+          durationMinutes: 30,
+        },
       ],
       channels: {
         inbound: true,
         outbound: true,
-        outboundCampaigns: [{ trigger: "appointment_reminder", description: "Remind patients the day before" }],
+        outboundCampaigns: [
+          { trigger: "appointment_reminder", description: "Remind patients the day before" },
+        ],
       },
-      systems: [{ name: "Dental4Windows", category: "calendar", notes: "Practice management system", citations: [] }],
+      systems: [
+        {
+          name: "Dental4Windows",
+          category: "calendar",
+          notes: "Practice management system",
+          citations: [],
+        },
+      ],
       humanEscalation: { available: true, hoursSummary: "Business hours" },
-      pricingPolicy: "Prices are discussed at the appointment; no prices are quoted over the phone.",
+      pricingPolicy:
+        "Prices are discussed at the appointment; no prices are quoted over the phone.",
       adviceRestrictions: ["clinical advice", "diagnosis"],
-      complianceConstraints: ["Do not collect health information over the phone beyond the reason for the visit"],
+      complianceConstraints: [
+        "Do not collect health information over the phone beyond the reason for the visit",
+      ],
       neverSay: ["That a treatment is painless", "That a price is guaranteed"],
       brandVoice: "Warm, local and unhurried",
-      gaps: [{ question: "Is there an after-hours emergency line?", whyItMatters: "Callers in pain will ask." }],
+      gaps: [
+        {
+          question: "Is there an after-hours emergency line?",
+          whyItMatters: "Callers in pain will ask.",
+        },
+      ],
     },
     topology: {
       agents: [
@@ -81,7 +115,11 @@ export function samplePlan(): CloningPlan {
             { tool: "get_call_context", backend: "mission_control_tenant", rationale: "" },
             { tool: "check_availability", backend: "mission_control_tenant", rationale: "" },
             { tool: "book_appointment", backend: "mission_control_tenant", rationale: "" },
-            { tool: "cancel_appointment", backend: "external_crm_custom", rationale: "Cancellations live in Dental4Windows" },
+            {
+              tool: "cancel_appointment",
+              backend: "external_crm_custom",
+              rationale: "Cancellations live in Dental4Windows",
+            },
             { tool: "end_call", backend: "vapi_native", rationale: "" },
             { tool: "kb_query", backend: "vapi_native", rationale: "" },
           ],
@@ -122,13 +160,23 @@ export function samplePlan(): CloningPlan {
         agentKey: "front_desk",
         roleTitle: "Inbound Front Desk",
         temperament: "warm, calm and genuinely helpful",
-        roleSummary: ["Resolve the caller.", "Answer general questions.", "Hand off to bookings when they want an appointment."],
+        roleSummary: [
+          "Resolve the caller.",
+          "Answer general questions.",
+          "Hand off to bookings when they want an appointment.",
+        ],
         notThisRole: "You are not a clinician and you do not give clinical advice.",
         firstMessage: "Hi, thanks for calling Harbourside Dental, this is Grace. How can I help?",
         openingNotes: ["Greet by first name once it is known."],
         canDo: ["Explain the services the practice offers", "Route the caller to bookings"],
         cannotDo: ["Give clinical advice", "Book appointments directly"],
-        dialogues: [{ title: "Caller wants a check-up", caller: "Can I book a clean?", reply: "Of course - I'll get you through to our bookings team." }],
+        dialogues: [
+          {
+            title: "Caller wants a check-up",
+            caller: "Can I book a clean?",
+            reply: "Of course - I'll get you through to our bookings team.",
+          },
+        ],
         extraNever: [],
         extraAlways: [],
         voicemailMessage: "Hi, it's Harbourside Dental returning your call.",
@@ -154,23 +202,29 @@ export function samplePlan(): CloningPlan {
         temperament: "brief and friendly",
         roleSummary: ["Confirm tomorrow's appointment."],
         notThisRole: "You are not a sales call.",
-        firstMessage: "Hi {{firstName}}, it's Ruby from Harbourside Dental about your appointment tomorrow.",
+        firstMessage:
+          "Hi {{firstName}}, it's Ruby from Harbourside Dental about your appointment tomorrow.",
         openingNotes: [],
         canDo: ["Confirm the appointment", "Take a message if they cannot make it"],
         cannotDo: ["Discuss treatment"],
         dialogues: [],
         extraNever: [],
         extraAlways: [],
-        voicemailMessage: "Hi, it's Harbourside Dental with a reminder about your appointment tomorrow.",
+        voicemailMessage:
+          "Hi, it's Harbourside Dental with a reminder about your appointment tomorrow.",
       },
     ],
     voiceContext: {
-      identityParagraph: "**Harbourside Dental** is a family dental practice in Manly offering check-ups, fillings, whitening and emergency appointments.",
+      identityParagraph:
+        "**Harbourside Dental** is a family dental practice in Manly offering check-ups, fillings, whitening and emergency appointments.",
       kbWhy: "what the practice offers and who it is for",
       kbFacts: "services, hours, booking policy and location",
       factualQueryExamples: ["What services do you offer?", "What are your hours?"],
       valueTriggers: ["The caller asks whether the practice suits their family."],
-      speechRules: ["Plain, friendly Australian English.", "Never read out URLs, IDs, JSON, or raw variables."],
+      speechRules: [
+        "Plain, friendly Australian English.",
+        "Never read out URLs, IDs, JSON, or raw variables.",
+      ],
       skepticalContext: "Some callers are nervous about the dentist.",
       skepticalLines: ["That's completely understandable - lots of people feel that way."],
       factsTitle: "Practice Facts (facts you may rely on)",
@@ -185,8 +239,14 @@ export function samplePlan(): CloningPlan {
       bookingIntro: "books real appointments in the practice diary.",
       bookingIsRequest: false,
       bookingConfirmationNote: "",
-      baseNever: ["Give clinical advice or a diagnosis", "Invent information, guess when unsure, or answer beyond the knowledge base and this prompt"],
-      baseAlways: ["Stay calm, polite, and respectful", "Resolve the contact per Section 0A and retrieve stored context per Section 0B"],
+      baseNever: [
+        "Give clinical advice or a diagnosis",
+        "Invent information, guess when unsure, or answer beyond the knowledge base and this prompt",
+      ],
+      baseAlways: [
+        "Stay calm, polite, and respectful",
+        "Resolve the contact per Section 0A and retrieve stored context per Section 0B",
+      ],
     },
     kb: [
       {
@@ -197,7 +257,13 @@ export function samplePlan(): CloningPlan {
           {
             kind: "p",
             text: "Check-ups and cleans, fillings, whitening and emergency appointments.",
-            citations: [{ docId: "doc:1", locator: "", quote: "We offer check-ups and cleans, fillings, whitening" }],
+            citations: [
+              {
+                docId: "doc:1",
+                locator: "",
+                quote: "We offer check-ups and cleans, fillings, whitening",
+              },
+            ],
           },
         ],
       },

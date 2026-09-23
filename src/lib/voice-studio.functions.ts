@@ -27,7 +27,9 @@ export const listStudioProjects = createServerFn({ method: "POST" })
   .handler(async ({ context }) => {
     const { data, error } = await context.supabase
       .from("voice_studio_projects")
-      .select("id, name, target_kind, clone_id, lead_id, agreement_id, status, created_at, updated_at, current_plan_id, current_package_id")
+      .select(
+        "id, name, target_kind, clone_id, lead_id, agreement_id, status, created_at, updated_at, current_plan_id, current_package_id",
+      )
       .order("updated_at", { ascending: false })
       .limit(200);
     if (error) throw error;
@@ -39,7 +41,8 @@ export const listStudioProjects = createServerFn({ method: "POST" })
         .select("project_id")
         .in("project_id", ids);
       if (docsError) throw docsError;
-      for (const d of docs ?? []) docCounts.set(d.project_id, (docCounts.get(d.project_id) ?? 0) + 1);
+      for (const d of docs ?? [])
+        docCounts.set(d.project_id, (docCounts.get(d.project_id) ?? 0) + 1);
     }
     return (data ?? []).map((p) => ({ ...p, document_count: docCounts.get(p.id) ?? 0 }));
   });
@@ -66,10 +69,15 @@ export const listStudioTargets = createServerFn({ method: "POST" })
       clones: (clones.data ?? []).map((c) => ({ id: c.id, label: c.name })),
       leads: (leads.data ?? []).map((l) => ({
         id: l.id,
-        label: l.entity_name || `${l.first_name ?? ""} ${l.last_name ?? ""}`.trim() || "Unnamed lead",
+        label:
+          l.entity_name || `${l.first_name ?? ""} ${l.last_name ?? ""}`.trim() || "Unnamed lead",
         detail: `Stage ${l.stage ?? 1}`,
       })),
-      agreements: (agreements.data ?? []).map((a) => ({ id: a.id, label: a.client_org || a.client_name, detail: a.status })),
+      agreements: (agreements.data ?? []).map((a) => ({
+        id: a.id,
+        label: a.client_org || a.client_name,
+        detail: a.status,
+      })),
     };
   });
 
@@ -78,19 +86,27 @@ export const getStudioProject = createServerFn({ method: "POST" })
   .inputValidator((input) => z.object({ id: uuid }).parse(input))
   .handler(async ({ data, context }) => {
     const sb = context.supabase;
-    const { data: project, error } = await sb.from("voice_studio_projects").select("*").eq("id", data.id).maybeSingle();
+    const { data: project, error } = await sb
+      .from("voice_studio_projects")
+      .select("*")
+      .eq("id", data.id)
+      .maybeSingle();
     if (error) throw error;
     if (!project) throw new Error("project_not_found");
 
     const [docs, runs, plans, packages, deployments, ledger] = await Promise.all([
       sb
         .from("voice_studio_documents")
-        .select("id, file_name, kind, size_bytes, extraction_status, truncated, page_count, error, created_at, extracted_text")
+        .select(
+          "id, file_name, kind, size_bytes, extraction_status, truncated, page_count, error, created_at, extracted_text",
+        )
         .eq("project_id", data.id)
         .order("created_at"),
       sb
         .from("voice_studio_runs")
-        .select("id, status, stage, attempts, last_error, cost_usd, usage, model, recipe_version, created_at, updated_at, completed_at")
+        .select(
+          "id, status, stage, attempts, last_error, cost_usd, usage, model, recipe_version, created_at, updated_at, completed_at",
+        )
         .eq("project_id", data.id)
         .order("created_at", { ascending: false })
         .limit(10),
@@ -106,18 +122,28 @@ export const getStudioProject = createServerFn({ method: "POST" })
         .order("version", { ascending: false }),
       sb
         .from("voice_studio_deployments")
-        .select("id, package_id, mode, status, steps, verification, last_error, created_at, completed_at")
+        .select(
+          "id, package_id, mode, status, steps, verification, last_error, created_at, completed_at",
+        )
         .eq("project_id", data.id)
         .order("created_at", { ascending: false })
         .limit(15),
-      sb.from("voice_studio_vapi_ledger").select("kind, key, vapi_id, verified_at, updated_at").eq("project_id", data.id).order("kind"),
+      sb
+        .from("voice_studio_vapi_ledger")
+        .select("kind, key, vapi_id, verified_at, updated_at")
+        .eq("project_id", data.id)
+        .order("kind"),
     ]);
     for (const r of [docs, runs, plans, packages, deployments, ledger]) if (r.error) throw r.error;
 
     // Returned as stored JSON; the page reads it as a CloningPlan / BuildPackage.
     let currentPlan: Json | null = null;
     if (project.current_plan_id) {
-      const { data: p, error: pError } = await sb.from("voice_studio_plans").select("plan").eq("id", project.current_plan_id).maybeSingle();
+      const { data: p, error: pError } = await sb
+        .from("voice_studio_plans")
+        .select("plan")
+        .eq("id", project.current_plan_id)
+        .maybeSingle();
       if (pError) throw pError;
       currentPlan = p?.plan ?? null;
     }
@@ -136,7 +162,10 @@ export const getStudioProject = createServerFn({ method: "POST" })
     return {
       project,
       // The list view needs the size of what was read, not every character of it.
-      documents: (docs.data ?? []).map(({ extracted_text, ...d }) => ({ ...d, text_chars: extracted_text?.length ?? 0 })),
+      documents: (docs.data ?? []).map(({ extracted_text, ...d }) => ({
+        ...d,
+        text_chars: extracted_text?.length ?? 0,
+      })),
       runs: runs.data ?? [],
       plans: plans.data ?? [],
       packages: packages.data ?? [],
@@ -162,10 +191,17 @@ export const getStudioPackageDiff = createServerFn({ method: "POST" })
   .inputValidator((input) => z.object({ fromId: uuid.nullable(), toId: uuid }).parse(input))
   .handler(async ({ data, context }) => {
     const ids = [data.toId, ...(data.fromId ? [data.fromId] : [])];
-    const { data: rows, error } = await context.supabase.from("voice_studio_packages").select("id, package").in("id", ids);
+    const { data: rows, error } = await context.supabase
+      .from("voice_studio_packages")
+      .select("id, package")
+      .in("id", ids);
     if (error) throw error;
-    const to = rows?.find((r) => r.id === data.toId)?.package as unknown as BuildPackage | undefined;
-    const from = data.fromId ? (rows?.find((r) => r.id === data.fromId)?.package as unknown as BuildPackage | undefined) : null;
+    const to = rows?.find((r) => r.id === data.toId)?.package as unknown as
+      | BuildPackage
+      | undefined;
+    const from = data.fromId
+      ? (rows?.find((r) => r.id === data.fromId)?.package as unknown as BuildPackage | undefined)
+      : null;
     if (!to) throw new Error("package_not_found");
     return diffPackages(from ?? null, to);
   });
@@ -212,7 +248,10 @@ export const updateStudioProjectNotes = createServerFn({ method: "POST" })
   .middleware([requireAdmin])
   .inputValidator((input) => z.object({ id: uuid, notes: z.string().max(10_000) }).parse(input))
   .handler(async ({ data, context }) => {
-    const { error } = await context.supabase.from("voice_studio_projects").update({ notes: data.notes || null }).eq("id", data.id);
+    const { error } = await context.supabase
+      .from("voice_studio_projects")
+      .update({ notes: data.notes || null })
+      .eq("id", data.id);
     if (error) throw error;
     return { ok: true };
   });
@@ -220,7 +259,13 @@ export const updateStudioProjectNotes = createServerFn({ method: "POST" })
 export const registerStudioDocumentFn = createServerFn({ method: "POST" })
   .middleware([requireAdmin])
   .inputValidator((input) =>
-    z.object({ projectId: uuid, storagePath: z.string().min(3).max(500), fileName: z.string().min(1).max(300) }).parse(input),
+    z
+      .object({
+        projectId: uuid,
+        storagePath: z.string().min(3).max(500),
+        fileName: z.string().min(1).max(300),
+      })
+      .parse(input),
   )
   .handler(async ({ data, context }) => {
     const { registerStudioDocument } = await shim();
@@ -242,7 +287,9 @@ export const startStudioPlanning = createServerFn({ method: "POST" })
   .handler(async ({ data, context }) => {
     const { queuePlanningRun, studioModelConfigured } = await shim();
     if (!studioModelConfigured()) {
-      throw new Error("the planning agent is not configured on this deployment (VOICE_STUDIO_ANTHROPIC_API_KEY)");
+      throw new Error(
+        "the planning agent is not configured on this deployment (VOICE_STUDIO_ANTHROPIC_API_KEY)",
+      );
     }
     return queuePlanningRun(data.projectId, context.userId);
   });
@@ -260,7 +307,10 @@ export const cancelStudioRun = createServerFn({ method: "POST" })
       .maybeSingle();
     if (error) throw error;
     if (run) {
-      const { error: projError } = await context.supabase.from("voice_studio_projects").update({ status: "draft" }).eq("id", run.project_id);
+      const { error: projError } = await context.supabase
+        .from("voice_studio_projects")
+        .update({ status: "draft" })
+        .eq("id", run.project_id);
       if (projError) throw projError;
     }
     return { ok: true };
@@ -269,7 +319,14 @@ export const cancelStudioRun = createServerFn({ method: "POST" })
 export const saveStudioPlanEdit = createServerFn({ method: "POST" })
   .middleware([requireAdmin])
   .inputValidator((input) =>
-    z.object({ projectId: uuid, basePlanId: uuid, edit: z.unknown(), note: z.string().max(1000).default("") }).parse(input),
+    z
+      .object({
+        projectId: uuid,
+        basePlanId: uuid,
+        edit: z.unknown(),
+        note: z.string().max(1000).default(""),
+      })
+      .parse(input),
   )
   .handler(async ({ data, context }) => {
     const { savePlanEdit } = await shim();
@@ -295,7 +352,9 @@ export const approveStudioPackage = createServerFn({ method: "POST" })
 
 export const setStudioVapiKey = createServerFn({ method: "POST" })
   .middleware([requireAdmin])
-  .inputValidator((input) => z.object({ projectId: uuid, apiKey: z.string().min(16).max(200) }).parse(input))
+  .inputValidator((input) =>
+    z.object({ projectId: uuid, apiKey: z.string().min(16).max(200) }).parse(input),
+  )
   .handler(async ({ data, context }) => {
     const { setProjectVapiKey } = await shim();
     // Only the fingerprint travels back.
@@ -335,5 +394,9 @@ export const queueStudioDeployment = createServerFn({ method: "POST" })
   )
   .handler(async ({ data, context }) => {
     const { queueDeployment } = await shim();
-    return queueDeployment({ ...data, phoneNumberId: data.phoneNumberId || null, userId: context.userId });
+    return queueDeployment({
+      ...data,
+      phoneNumberId: data.phoneNumberId || null,
+      userId: context.userId,
+    });
   });

@@ -26,8 +26,16 @@ import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { serializeRecipeBook } from "@/lib/voice-recipe/recipeBook.pure";
 import { STUDIO_RULES } from "@/lib/voice-studio/plannerPrompts.pure";
-import { estimateUsage, interpretResponse, type ResponseLike } from "@/lib/voice-studio/modelResult.pure";
-import { STAGE_EFFORT, type PlannerModel, type StructuredCall } from "@/lib/voice-studio/plannerEngine.pure";
+import {
+  estimateUsage,
+  interpretResponse,
+  type ResponseLike,
+} from "@/lib/voice-studio/modelResult.pure";
+import {
+  STAGE_EFFORT,
+  type PlannerModel,
+  type StructuredCall,
+} from "@/lib/voice-studio/plannerEngine.pure";
 
 export const VOICE_STUDIO_MODEL = "claude-opus-5";
 const MAX_OUTPUT_TOKENS = 64_000;
@@ -57,10 +65,17 @@ export async function uploadPdfToFiles(bytes: Uint8Array, fileName: string): Pro
   return meta.id;
 }
 
-export function anthropicPlannerModel(opts: { runId: string; userId: string | null }): PlannerModel {
+export function anthropicPlannerModel(opts: {
+  runId: string;
+  userId: string | null;
+}): PlannerModel {
   const anthropic = client();
   const system = [
-    { type: "text" as const, text: serializeRecipeBook(), cache_control: { type: "ephemeral" as const } },
+    {
+      type: "text" as const,
+      text: serializeRecipeBook(),
+      cache_control: { type: "ephemeral" as const },
+    },
     { type: "text" as const, text: STUDIO_RULES },
   ];
 
@@ -68,12 +83,21 @@ export function anthropicPlannerModel(opts: { runId: string; userId: string | nu
     async structured<T>(call: StructuredCall<T>) {
       const documents = call.prompt.documents.map((d) =>
         d.fileId
-          ? { type: "document" as const, title: d.title, context: `Source ${d.docId}`, source: { type: "file" as const, file_id: d.fileId } }
+          ? {
+              type: "document" as const,
+              title: d.title,
+              context: `Source ${d.docId}`,
+              source: { type: "file" as const, file_id: d.fileId },
+            }
           : {
               type: "document" as const,
               title: d.title,
               context: `Source ${d.docId}`,
-              source: { type: "text" as const, media_type: "text/plain" as const, data: d.text ?? "" },
+              source: {
+                type: "text" as const,
+                media_type: "text/plain" as const,
+                data: d.text ?? "",
+              },
             },
       );
 
@@ -85,7 +109,12 @@ export function anthropicPlannerModel(opts: { runId: string; userId: string | nu
         thinking: { type: "adaptive" },
         output_config: { effort: STAGE_EFFORT[call.stage], format: zodOutputFormat(call.schema) },
         system,
-        messages: [{ role: "user", content: [...documents, { type: "text", text: call.prompt.instructions }] }],
+        messages: [
+          {
+            role: "user",
+            content: [...documents, { type: "text", text: call.prompt.instructions }],
+          },
+        ],
       });
       const message = (await stream.finalMessage()) as unknown as ResponseLike;
       const usage = estimateUsage(message);
@@ -95,10 +124,16 @@ export function anthropicPlannerModel(opts: { runId: string; userId: string | nu
         model: message.model,
         prompt_tokens: usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens,
         completion_tokens: usage.outputTokens,
-        total_tokens: usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens + usage.outputTokens,
+        total_tokens:
+          usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens + usage.outputTokens,
         cost_estimate_usd: usage.costUsd,
         user_id: opts.userId,
-        metadata: { run_id: opts.runId, key: call.key, stop_reason: message.stop_reason, cache_read: usage.cacheReadTokens },
+        metadata: {
+          run_id: opts.runId,
+          key: call.key,
+          stop_reason: message.stop_reason,
+          cache_read: usage.cacheReadTokens,
+        },
       });
       // Metering is bookkeeping; a failed log line must not fail a stage that
       // has already been paid for.

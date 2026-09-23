@@ -10,7 +10,11 @@
 import * as z from "zod/v4";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import type { Json } from "@/integrations/supabase/types";
-import { checkCitations, collectCitations, computePlanConfidence } from "@/lib/voice-studio/confidence.pure";
+import {
+  checkCitations,
+  collectCitations,
+  computePlanConfidence,
+} from "@/lib/voice-studio/confidence.pure";
 import { compilePackage } from "@/lib/voice-studio/package.pure";
 import {
   AgentContent,
@@ -37,7 +41,11 @@ export type PlanEdit = z.infer<typeof PlanEdit>;
 /** The extracted text a plan's citations and numbers are checked against. */
 async function sourcesForRun(runId: string | null): Promise<Record<string, string>> {
   if (!runId) return {};
-  const { data: run, error } = await supabaseAdmin.from("voice_studio_runs").select("stage_cursor").eq("id", runId).maybeSingle();
+  const { data: run, error } = await supabaseAdmin
+    .from("voice_studio_runs")
+    .select("stage_cursor")
+    .eq("id", runId)
+    .maybeSingle();
   if (error) throw error;
   const cursor = (run?.stage_cursor ?? { docs: [] }) as unknown as RunCursor;
   const out: Record<string, string> = {};
@@ -86,10 +94,7 @@ export async function savePlanEdit(args: {
 
   const sources = await sourcesForRun(base.run_id);
   const result = validatePlan({ ...edit, sources });
-  const openItems = [
-    ...prior.openItems.filter((o) => o.source === "planner"),
-    ...result.openItems,
-  ];
+  const openItems = [...prior.openItems.filter((o) => o.source === "planner"), ...result.openItems];
   const plan: CloningPlan = {
     ...prior,
     ...edit,
@@ -148,15 +153,20 @@ export async function savePlanEdit(args: {
  * Approve a plan and compile its package. An errored plan is refused here
  * as well as in the browser: the button is a convenience, this is the rule.
  */
-export async function approvePlanAndCompile(args: { planId: string; userId: string }): Promise<{ packageId: string; version: number }> {
+export async function approvePlanAndCompile(args: {
+  planId: string;
+  userId: string;
+}): Promise<{ packageId: string; version: number }> {
   const { data: plan, error } = await supabaseAdmin
     .from("voice_studio_plans")
     .select("id, project_id, status, plan, has_errors")
     .eq("id", args.planId)
     .single();
   if (error) throw error;
-  if (plan.has_errors) throw new Error("this plan has validation errors; fix them in an edit before approving it");
-  if (plan.status === "superseded" || plan.status === "rejected") throw new Error(`this plan is ${plan.status}; approve the current version`);
+  if (plan.has_errors)
+    throw new Error("this plan has validation errors; fix them in an edit before approving it");
+  if (plan.status === "superseded" || plan.status === "rejected")
+    throw new Error(`this plan is ${plan.status}; approve the current version`);
 
   const cloning = plan.plan as unknown as CloningPlan;
   // Re-check on the server rather than trusting the stored flag alone.
@@ -229,11 +239,16 @@ export async function approvePackage(args: { packageId: string; userId: string }
     .eq("id", args.packageId)
     .single();
   if (error) throw error;
-  if (pkg.status === "superseded") throw new Error("this package has been superseded; approve the current version");
+  if (pkg.status === "superseded")
+    throw new Error("this package has been superseded; approve the current version");
   if (pkg.status !== "approved") {
     const { error: approveError } = await supabaseAdmin
       .from("voice_studio_packages")
-      .update({ status: "approved", approved_by: args.userId, approved_at: new Date().toISOString() })
+      .update({
+        status: "approved",
+        approved_by: args.userId,
+        approved_at: new Date().toISOString(),
+      })
       .eq("id", pkg.id);
     if (approveError) throw approveError;
   }

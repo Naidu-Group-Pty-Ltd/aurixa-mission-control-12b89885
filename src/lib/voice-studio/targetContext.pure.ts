@@ -10,7 +10,8 @@
 
 export const CONTEXT_DOC_ID = "ctx:target";
 
-const REDACT_KEYS = /^(email|client_email|admin_email|subject_email|mobile_number|phone|mobile|website|deploy_url|github_url|lovable_project_url|landing_page|referrer|page|url)$|_url$|_email$|_phone$/i;
+const REDACT_KEYS =
+  /^(email|client_email|admin_email|subject_email|mobile_number|phone|mobile|website|deploy_url|github_url|lovable_project_url|landing_page|referrer|page|url)$|_url$|_email$|_phone$/i;
 const EMAIL = /[^\s@]+@[^\s@]+\.[^\s@]+/g;
 const URLISH = /\bhttps?:\/\/\S+|\bwww\.\S+/gi;
 const PHONEISH = /\+?\d[\d\s()-]{7,}\d/g;
@@ -19,14 +20,19 @@ const PHONEISH = /\+?\d[\d\s()-]{7,}\d/g;
 export function redactForContext(value: unknown, key = ""): unknown {
   if (key && REDACT_KEYS.test(key)) return undefined;
   if (typeof value === "string") {
-    return value.replace(EMAIL, "[email removed]").replace(URLISH, "[link removed]").replace(PHONEISH, "[number removed]");
+    return value
+      .replace(EMAIL, "[email removed]")
+      .replace(URLISH, "[link removed]")
+      .replace(PHONEISH, "[number removed]");
   }
-  if (Array.isArray(value)) return value.map((v) => redactForContext(v)).filter((v) => v !== undefined);
+  if (Array.isArray(value))
+    return value.map((v) => redactForContext(v)).filter((v) => v !== undefined);
   if (value && typeof value === "object") {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value)) {
       const r = redactForContext(v, k);
-      if (r !== undefined && r !== null && r !== "" && !(Array.isArray(r) && r.length === 0)) out[k] = r;
+      if (r !== undefined && r !== null && r !== "" && !(Array.isArray(r) && r.length === 0))
+        out[k] = r;
     }
     return out;
   }
@@ -49,7 +55,9 @@ function lines(value: unknown, indent = ""): string[] {
     return out;
   }
   if (Array.isArray(value)) {
-    return value.flatMap((v) => (v && typeof v === "object" ? lines(v, indent + "  ") : [`${indent}- ${String(v)}`]));
+    return value.flatMap((v) =>
+      v && typeof v === "object" ? lines(v, indent + "  ") : [`${indent}- ${String(v)}`],
+    );
   }
   return [`${indent}${String(value)}`];
 }

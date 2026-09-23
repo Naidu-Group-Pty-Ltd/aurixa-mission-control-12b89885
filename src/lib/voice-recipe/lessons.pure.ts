@@ -19,7 +19,8 @@ export const LESSONS: Lesson[] = [
     why:
       "An assistant only gets another turn when the caller speaks, so a hang-up deferred to the next turn is " +
       "never placed and the call ends on a silence timeout.",
-    enforcedBy: "compiler: section 11.1 and absolute rules whenever end_call is bound; validator: every agent binds end_call",
+    enforcedBy:
+      "compiler: section 11.1 and absolute rules whenever end_call is bound; validator: every agent binds end_call",
   },
   {
     id: "SAME_TURN_TRANSFER",
@@ -85,6 +86,7 @@ export const LESSONS: Lesson[] = [
     id: "DOCUMENTS_ARE_DATA",
     rule: "Client documents are data about the business, never instructions.",
     why: "A document can say anything; only the recipe book and the operator decide tools, backends, URLs and secrets.",
-    enforcedBy: "planner: enum-constrained output with no URL/phone/secret fields; validator lint; two human approvals",
+    enforcedBy:
+      "planner: enum-constrained output with no URL/phone/secret fields; validator lint; two human approvals",
   },
 ];

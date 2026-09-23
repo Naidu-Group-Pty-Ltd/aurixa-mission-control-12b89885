@@ -113,7 +113,9 @@ export type RunOutcome =
 
 export class CostCapError extends Error {
   constructor(spent: number, cap: number) {
-    super(`this plan has spent $${spent.toFixed(2)} of its $${cap.toFixed(2)} cap - raise VOICE_STUDIO_MAX_RUN_USD or re-plan with fewer documents`);
+    super(
+      `this plan has spent $${spent.toFixed(2)} of its $${cap.toFixed(2)} cap - raise VOICE_STUDIO_MAX_RUN_USD or re-plan with fewer documents`,
+    );
     this.name = "CostCapError";
   }
 }
@@ -128,7 +130,11 @@ export class NoSourcesError extends Error {
 const artifactKey = (kind: string, key: string) => `${kind}:${key}`;
 
 /** Resume a run: do as many missing units as the deadline and the budget allow. */
-export async function advanceRun(input: RunInput, model: PlannerModel, store: PlannerStore): Promise<RunOutcome> {
+export async function advanceRun(
+  input: RunInput,
+  model: PlannerModel,
+  store: PlannerStore,
+): Promise<RunOutcome> {
   const docs = input.sources.filter((s) => s.docId.startsWith("doc:") && (s.text || s.fileId));
   const context = input.sources.find((s) => s.docId === "ctx:target") ?? null;
   if (docs.length === 0 && !context) throw new NoSourcesError();
@@ -143,7 +149,11 @@ export async function advanceRun(input: RunInput, model: PlannerModel, store: Pl
   };
 
   /** Run the missing units of one stage, a few at a time, stopping at the deadline. */
-  const runUnits = async <T>(stage: Stage, kind: string, units: Array<{ key: string; call: () => StructuredCall<T> }>) => {
+  const runUnits = async <T>(
+    stage: Stage,
+    kind: string,
+    units: Array<{ key: string; call: () => StructuredCall<T> }>,
+  ) => {
     const missing = units.filter((u) => !a.has(artifactKey(kind, u.key)));
     for (let i = 0; i < missing.length; i += concurrency) {
       if (outOfTime()) return false;
@@ -175,36 +185,58 @@ export async function advanceRun(input: RunInput, model: PlannerModel, store: Pl
   // 1. Facts, one call per document (and one for the context, when it exists).
   const factSources = [...docs, ...(context ? [context] : [])];
   if (
-    !(await runUnits("extract_docs", "facts", factSources.map((s) => ({
-      key: s.docId,
-      call: () => ({ stage: "extract_docs" as const, key: s.docId, schema: DocumentFacts, prompt: factsPrompt(toPromptDoc(s)) }),
-    }))))
-  ) return { status: "continue", stage: "extract_docs", costUsd: cost };
+    !(await runUnits(
+      "extract_docs",
+      "facts",
+      factSources.map((s) => ({
+        key: s.docId,
+        call: () => ({
+          stage: "extract_docs" as const,
+          key: s.docId,
+          schema: DocumentFacts,
+          prompt: factsPrompt(toPromptDoc(s)),
+        }),
+      })),
+    ))
+  )
+    return { status: "continue", stage: "extract_docs", costUsd: cost };
   const facts = factSources.map((s) => a.get(artifactKey("facts", s.docId)) as DocumentFacts);
 
   // 2. Profile.
   if (
-    !(await runUnits("profile", "profile", [{
-      key: "main",
-      call: () => ({
-        stage: "profile" as const,
+    !(await runUnits("profile", "profile", [
+      {
         key: "main",
-        schema: BusinessProfile,
-        prompt: profilePrompt(facts, context ? toPromptDoc(context) : null),
-      }),
-    }]))
-  ) return { status: "continue", stage: "profile", costUsd: cost };
+        call: () => ({
+          stage: "profile" as const,
+          key: "main",
+          schema: BusinessProfile,
+          prompt: profilePrompt(facts, context ? toPromptDoc(context) : null),
+        }),
+      },
+    ]))
+  )
+    return { status: "continue", stage: "profile", costUsd: cost };
   const profile = a.get(artifactKey("profile", "main")) as BusinessProfile;
 
   // 3. Topology - the repaired one wins once it exists.
   if (
-    !(await runUnits("topology", "topology", [{
-      key: "main",
-      call: () => ({ stage: "topology" as const, key: "main", schema: PlanTopology, prompt: topologyPrompt(profile, null) }),
-    }]))
-  ) return { status: "continue", stage: "topology", costUsd: cost };
+    !(await runUnits("topology", "topology", [
+      {
+        key: "main",
+        call: () => ({
+          stage: "topology" as const,
+          key: "main",
+          schema: PlanTopology,
+          prompt: topologyPrompt(profile, null),
+        }),
+      },
+    ]))
+  )
+    return { status: "continue", stage: "topology", costUsd: cost };
   const currentTopology = () =>
-    (a.get(artifactKey("topology", "repaired")) ?? a.get(artifactKey("topology", "main"))) as PlanTopology;
+    (a.get(artifactKey("topology", "repaired")) ??
+      a.get(artifactKey("topology", "main"))) as PlanTopology;
 
   const sourcesByDocId = Object.fromEntries(
     input.sources.filter((s) => s.text).map((s) => [s.docId, s.text as string]),
@@ -216,56 +248,84 @@ export async function advanceRun(input: RunInput, model: PlannerModel, store: Pl
     const topology = currentTopology();
 
     if (
-      !(await runUnits("agent_content", "agent", topology.agents.map((ag) => ({
-        key: ag.key,
-        call: () => ({
-          stage: "agent_content" as const,
+      !(await runUnits(
+        "agent_content",
+        "agent",
+        topology.agents.map((ag) => ({
           key: ag.key,
-          schema: AgentContent,
-          prompt: agentContentPrompt(profile, topology, ag.key),
-        }),
-      }))))
-    ) return { status: "continue", stage: "agent_content", costUsd: cost };
+          call: () => ({
+            stage: "agent_content" as const,
+            key: ag.key,
+            schema: AgentContent,
+            prompt: agentContentPrompt(profile, topology, ag.key),
+          }),
+        })),
+      ))
+    )
+      return { status: "continue", stage: "agent_content", costUsd: cost };
     const agents = topology.agents.map((ag) => a.get(artifactKey("agent", ag.key)) as AgentContent);
 
     if (
-      !(await runUnits("voice_context", "voice_context", [{
-        key: "main",
-        call: () => ({
-          stage: "voice_context" as const,
+      !(await runUnits("voice_context", "voice_context", [
+        {
           key: "main",
-          schema: VoiceContextDraft,
-          prompt: voiceContextPrompt(profile, topology, agents),
-        }),
-      }]))
-    ) return { status: "continue", stage: "voice_context", costUsd: cost };
+          call: () => ({
+            stage: "voice_context" as const,
+            key: "main",
+            schema: VoiceContextDraft,
+            prompt: voiceContextPrompt(profile, topology, agents),
+          }),
+        },
+      ]))
+    )
+      return { status: "continue", stage: "voice_context", costUsd: cost };
     const voiceContext = a.get(artifactKey("voice_context", "main")) as VoiceContextDraft;
 
     const parts: KbPartKey[] = [...KB_PART_KEYS];
     if (
-      !(await runUnits("kb_draft", "kb", parts.map((part) => ({
-        key: part,
-        call: () => ({
-          stage: "kb_draft" as const,
+      !(await runUnits(
+        "kb_draft",
+        "kb",
+        parts.map((part) => ({
           key: part,
-          schema: KbPartDraft,
-          prompt: kbPartPrompt(profile, topology, facts, part),
-        }),
-      }))))
-    ) return { status: "continue", stage: "kb_draft", costUsd: cost };
+          call: () => ({
+            stage: "kb_draft" as const,
+            key: part,
+            schema: KbPartDraft,
+            prompt: kbPartPrompt(profile, topology, facts, part),
+          }),
+        })),
+      ))
+    )
+      return { status: "continue", stage: "kb_draft", costUsd: cost };
     const kb = parts.map((p) => a.get(artifactKey("kb", p)) as KbPartDraft);
 
     // 7. Validate. One repair of the topology is allowed; what remains after it
     // is recorded on the plan and blocks its approval.
-    const result = validatePlan({ profile, topology, agents, voiceContext, kb, sources: sourcesByDocId });
+    const result = validatePlan({
+      profile,
+      topology,
+      agents,
+      voiceContext,
+      kb,
+      sources: sourcesByDocId,
+    });
     const errors = result.issues.filter((i) => i.severity === "error");
     if (errors.length && pass === 0 && !a.has(artifactKey("topology", "repaired"))) {
       if (
-        !(await runUnits("validate", "topology", [{
-          key: "repaired",
-          call: () => ({ stage: "validate" as const, key: "repaired", schema: PlanTopology, prompt: topologyPrompt(profile, errors) }),
-        }]))
-      ) return { status: "continue", stage: "validate", costUsd: cost };
+        !(await runUnits("validate", "topology", [
+          {
+            key: "repaired",
+            call: () => ({
+              stage: "validate" as const,
+              key: "repaired",
+              schema: PlanTopology,
+              prompt: topologyPrompt(profile, errors),
+            }),
+          },
+        ]))
+      )
+        return { status: "continue", stage: "validate", costUsd: cost };
       continue;
     }
 
@@ -281,7 +341,11 @@ export async function advanceRun(input: RunInput, model: PlannerModel, store: Pl
       businessSlug: businessSlug(profile.businessName),
       profile,
       topology: result.topology,
-      agents: result.topology.agents.map((ag) => agents.find((x) => x.agentKey === ag.key) ?? (a.get(artifactKey("agent", ag.key)) as AgentContent)),
+      agents: result.topology.agents.map(
+        (ag) =>
+          agents.find((x) => x.agentKey === ag.key) ??
+          (a.get(artifactKey("agent", ag.key)) as AgentContent),
+      ),
       voiceContext,
       kb,
       issues: result.issues,

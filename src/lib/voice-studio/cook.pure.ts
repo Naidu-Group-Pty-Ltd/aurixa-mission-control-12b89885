@@ -13,7 +13,14 @@ import {
   type ToolKey,
   type ToolNames,
 } from "../voice-recipe/types.pure.ts";
-import type { AgentContent, BookingWindow, BusinessProfile, CloningPlan, PlanTopology, VoiceContextDraft } from "./schemas.pure.ts";
+import type {
+  AgentContent,
+  BookingWindow,
+  BusinessProfile,
+  CloningPlan,
+  PlanTopology,
+  VoiceContextDraft,
+} from "./schemas.pure.ts";
 
 const WRAP = 76;
 
@@ -78,7 +85,8 @@ function dayRange(days: number[]): string {
   const sorted = [...new Set(days)].filter((d) => d >= 1 && d <= 7).sort((a, b) => a - b);
   if (!sorted.length) return "no days";
   const contiguous = sorted.every((d, i) => i === 0 || d === sorted[i - 1] + 1);
-  if (contiguous && sorted.length > 2) return `${WEEKDAY[sorted[0]]} to ${WEEKDAY[sorted[sorted.length - 1]]}`;
+  if (contiguous && sorted.length > 2)
+    return `${WEEKDAY[sorted[0]]} to ${WEEKDAY[sorted[sorted.length - 1]]}`;
   return sorted.map((d) => WEEKDAY[d]).join(", ");
 }
 
@@ -94,7 +102,10 @@ export function bookingWindowSpoken(w: BookingWindow | null, timezone: string): 
 }
 
 /** The business-owned slots, formatted from the planner's plain words. */
-export function buildBusinessContext(profile: BusinessProfile, v: VoiceContextDraft): BusinessVoiceContext {
+export function buildBusinessContext(
+  profile: BusinessProfile,
+  v: VoiceContextDraft,
+): BusinessVoiceContext {
   const city = profile.timezone.split("/").pop()?.replace(/_/g, " ") ?? profile.timezone;
   const confirmNote = v.bookingConfirmationNote.trim();
   return {
@@ -102,8 +113,13 @@ export function buildBusinessContext(profile: BusinessProfile, v: VoiceContextDr
     productionTag: "Production - Mission Control voice fleet",
     identityParagraph: wrap(v.identityParagraph),
     kb: {
-      materials: bullets([`**Why customers choose ${profile.businessName}** - ${v.kbWhy}`, `**The facts** - ${v.kbFacts}`]),
-      factualQueries: wrap(v.factualQueryExamples.map((q) => `"${q.replace(/"/g, "")}"`).join(", ") + "."),
+      materials: bullets([
+        `**Why customers choose ${profile.businessName}** - ${v.kbWhy}`,
+        `**The facts** - ${v.kbFacts}`,
+      ]),
+      factualQueries: wrap(
+        v.factualQueryExamples.map((q) => `"${q.replace(/"/g, "")}"`).join(", ") + ".",
+      ),
       valueTriggers: bullets(v.valueTriggers),
     },
     speechRules: bullets(v.speechRules),
@@ -122,7 +138,11 @@ export function buildBusinessContext(profile: BusinessProfile, v: VoiceContextDr
       intro: wrap(`{persona} ${v.bookingIntro.replace(/^\{persona\}\s*/, "")}`),
       timezoneNote: wrap(`All times are ${city} time - say so if the caller may be elsewhere.`),
       successExpectation: v.bookingIsRequest
-        ? wrap(`confirm the day and time back naturally, then set the expectation honestly: "${confirmNote}"`, "", 72).replace(/\n/g, "\n  ")
+        ? wrap(
+            `confirm the day and time back naturally, then set the expectation honestly: "${confirmNote}"`,
+            "",
+            72,
+          ).replace(/\n/g, "\n  ")
         : "confirm the day and time back naturally.",
       finalityBoundary: v.bookingIsRequest
         ? "Never present the booking as final beyond the confirmation rule."
@@ -150,7 +170,10 @@ export function squadRoutingSection(
   const squad = topology.squad;
   if (!squad) return null;
   const entry = squad.members.find((m) => m.agentKey === squad.entryAgentKey);
-  const targets = (entry?.handoffTo ?? []).map((k) => agentsByKey.get(k)).filter(Boolean) as Array<{ name: string; purpose: string }>;
+  const targets = (entry?.handoffTo ?? []).map((k) => agentsByKey.get(k)).filter(Boolean) as Array<{
+    name: string;
+    purpose: string;
+  }>;
   if (!targets.length) return null;
   const intents = squad.handoffIntents.map((i) => `\`${i.intent}\``).join(", ");
   const nameList = targets.map((t) => `'${t.name}'`).join(", ");
@@ -208,7 +231,10 @@ export function buildAgentSpecs(plan: CloningPlan, names: ToolNames): AgentSpec[
     return assistantName(plan.profile.businessName, c?.roleTitle ?? t?.archetype ?? key);
   };
   const summaries = new Map(
-    plan.topology.agents.map((a) => [a.key, { name: nameOf(a.key), purpose: ARCHETYPES[a.archetype].purpose }]),
+    plan.topology.agents.map((a) => [
+      a.key,
+      { name: nameOf(a.key), purpose: ARCHETYPES[a.archetype].purpose },
+    ]),
   );
 
   return plan.topology.agents.map((t) => {
@@ -216,19 +242,23 @@ export function buildAgentSpecs(plan: CloningPlan, names: ToolNames): AgentSpec[
     const c: AgentContent = contentByKey.get(t.key) ?? emptyContent(t.key);
     const tools = [...new Set<ToolKey>(t.tools.map((x) => x.tool))];
     const isEntry = plan.topology.squad?.entryAgentKey === t.key;
-    const squadSection = isEntry ? squadRoutingSection(t.personaName, plan.topology, summaries, names) : null;
-    const routerNever = isEntry && squadSection
-      ? [
-          "Trigger a transfer before the caller clearly confirms the intent",
-          "Continue speaking after the silent transfer",
-        ]
-      : [];
-    const routerAlways = isEntry && squadSection
-      ? [
-          `Call ${names.phone_number_inject} once, silently, before every transfer, with confirmedIntent and callerReason`,
-          `Transfer only to the named specialists, by name, silently`,
-        ]
-      : [];
+    const squadSection = isEntry
+      ? squadRoutingSection(t.personaName, plan.topology, summaries, names)
+      : null;
+    const routerNever =
+      isEntry && squadSection
+        ? [
+            "Trigger a transfer before the caller clearly confirms the intent",
+            "Continue speaking after the silent transfer",
+          ]
+        : [];
+    const routerAlways =
+      isEntry && squadSection
+        ? [
+            `Call ${names.phone_number_inject} once, silently, before every transfer, with confirmedIntent and callerReason`,
+            `Transfer only to the named specialists, by name, silently`,
+          ]
+        : [];
     return {
       key: t.key,
       name: nameOf(t.key),

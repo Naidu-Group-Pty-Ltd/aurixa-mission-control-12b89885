@@ -84,7 +84,9 @@ describe("executeDeploy", () => {
     const { api, objects, writes } = fakeVapi();
     const { out, saved } = await deploy(api, []);
     expect(out.status).toBe("succeeded");
-    expect(writes.filter((w) => w.startsWith("UPLOAD"))).toEqual(["UPLOAD harbourside-dental-knowledge-base.txt text/plain"]);
+    expect(writes.filter((w) => w.startsWith("UPLOAD"))).toEqual([
+      "UPLOAD harbourside-dental-knowledge-base.txt text/plain",
+    ]);
     expect(saved.filter((e) => e.kind === "assistant")).toHaveLength(3);
     expect(saved.some((e) => e.kind === "squad")).toBe(true);
     // No Studio placeholder survives into VAPI ({{firstName}} and friends are
@@ -94,7 +96,8 @@ describe("executeDeploy", () => {
     expect(dump).toContain("{{firstName}}");
     expect(dump).toContain("tenant-secret-value-123");
     if (out.status === "succeeded") {
-      for (const row of out.verification) expect(Object.values(row.checks).every(Boolean)).toBe(true);
+      for (const row of out.verification)
+        expect(Object.values(row.checks).every(Boolean)).toBe(true);
     }
   });
 
@@ -111,7 +114,9 @@ describe("executeDeploy", () => {
     const { api, writes } = fakeVapi();
     const { saved } = await deploy(api, []);
     const before = writes.length;
-    await deploy(api, saved, { secrets: { ...SECRETS, tenantWebhookSecret: "rotated-secret-456789" } });
+    await deploy(api, saved, {
+      secrets: { ...SECRETS, tenantWebhookSecret: "rotated-secret-456789" },
+    });
     expect(writes.slice(before).some((w) => w.startsWith("PATCH /tool/"))).toBe(true);
   });
 
@@ -151,7 +156,8 @@ describe("executeDeploy", () => {
     // Same payload hash, so the step is skipped - but verification still reads it.
     const again = await deploy(api, saved);
     expect(again.out.status).toBe("failed");
-    if (again.out.status === "failed") expect(again.out.error).toMatch(/front_desk \(system_prompt\)/);
+    if (again.out.status === "failed")
+      expect(again.out.error).toMatch(/front_desk \(system_prompt\)/);
   });
 
   it("recreates something deleted in VAPI rather than patching a ghost", async () => {
@@ -175,15 +181,27 @@ describe("executeDeploy", () => {
 describe("helpers", () => {
   it("keeps an inline tool somebody added by hand, and replaces the Studio's own", () => {
     const remote = {
-      model: { tools: [{ type: "query", function: { name: "acme_knowledge" } }, { type: "function", function: { name: "custom_thing" } }] },
+      model: {
+        tools: [
+          { type: "query", function: { name: "acme_knowledge" } },
+          { type: "function", function: { name: "custom_thing" } },
+        ],
+      },
     };
-    const next = { model: { tools: [{ type: "query", function: { name: "acme_knowledge" }, v: 2 }] } };
+    const next = {
+      model: { tools: [{ type: "query", function: { name: "acme_knowledge" }, v: 2 }] },
+    };
     const merged = keepUnmanagedInlineTools(remote, next, "acme_knowledge");
-    expect(merged.model.tools.map((t: { function: { name: string } }) => t.function.name)).toEqual(["acme_knowledge", "custom_thing"]);
+    expect(merged.model.tools.map((t: { function: { name: string } }) => t.function.name)).toEqual([
+      "acme_knowledge",
+      "custom_thing",
+    ]);
   });
 
   it("an unresolvable placeholder is an error, never an empty string", () => {
-    expect(() => resolvePlaceholders({ a: "{{secret:nope}}" }, () => null)).toThrow(/nothing to put/);
+    expect(() => resolvePlaceholders({ a: "{{secret:nope}}" }, () => null)).toThrow(
+      /nothing to put/,
+    );
     expect(resolvePlaceholders(["x {{tool:end_call}} y"], () => "t1")).toEqual(["x t1 y"]);
   });
 });

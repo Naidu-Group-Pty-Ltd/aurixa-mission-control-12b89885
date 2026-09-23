@@ -19,9 +19,11 @@ type Project = {
 };
 
 export async function gatherTargetContext(project: Project): Promise<string | null> {
-  const kind = (["clone", "lead", "agreement", "prospect"].includes(project.target_kind)
-    ? project.target_kind
-    : "prospect") as TargetContext["kind"];
+  const kind = (
+    ["clone", "lead", "agreement", "prospect"].includes(project.target_kind)
+      ? project.target_kind
+      : "prospect"
+  ) as TargetContext["kind"];
   const sections: Record<string, unknown> = {};
   if (project.notes) sections["Operator notes on this cloning project"] = project.notes;
 
@@ -31,7 +33,9 @@ export async function gatherTargetContext(project: Project): Promise<string | nu
   if (project.agreement_id) {
     const { data: agreement, error } = await supabaseAdmin
       .from("client_agreements")
-      .select("client_name, client_org, plan_slug, addon_slugs, module_ids, service_tier, notes, account_id, commencement_date")
+      .select(
+        "client_name, client_org, plan_slug, addon_slugs, module_ids, service_tier, notes, account_id, commencement_date",
+      )
       .eq("id", project.agreement_id)
       .maybeSingle();
     if (error) throw new Error(`the agreement could not be read: ${error.message}`);
@@ -81,7 +85,11 @@ export async function gatherTargetContext(project: Project): Promise<string | nu
   }
 
   if (leadId) {
-    const { data: lead, error } = await supabaseAdmin.from("waitlist_leads").select("*").eq("id", leadId).maybeSingle();
+    const { data: lead, error } = await supabaseAdmin
+      .from("waitlist_leads")
+      .select("*")
+      .eq("id", leadId)
+      .maybeSingle();
     if (error) throw new Error(`the lead could not be read: ${error.message}`);
     if (lead) sections["Priority access application and questionnaire"] = buildLeadSubject(lead);
   }

@@ -26,7 +26,10 @@ export const Route = createFileRoute("/hooks/voice-studio-deploy")({
         } catch (err) {
           console.error("voice studio deploy tick failed", err);
           return new Response(
-            JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "unknown_error" }),
+            JSON.stringify({
+              ok: false,
+              error: err instanceof Error ? err.message : "unknown_error",
+            }),
             { status: 500, headers: { "Content-Type": "application/json" } },
           );
         }

@@ -5,16 +5,37 @@ import { buildAgentSpecs, buildBusinessContext, quote, toolNamesFor, wrap } from
 import { checkCitations, collectCitations, computePlanConfidence } from "./confidence.pure";
 import { diffPackages } from "./diff.pure";
 import { compilePackage, stableStringify } from "./package.pure";
-import { AgentContent, BusinessProfile, DocumentFacts, KbPartDraft, PlanTopology, VoiceContextDraft } from "./schemas.pure";
+import {
+  AgentContent,
+  BusinessProfile,
+  DocumentFacts,
+  KbPartDraft,
+  PlanTopology,
+  VoiceContextDraft,
+} from "./schemas.pure";
 import { hasErrors, validatePlan } from "./validate.pure";
 import { SAMPLE_SOURCES, samplePlan } from "./fixtures/samplePlan.pure";
 
 const validateSample = (p = samplePlan()) =>
-  validatePlan({ profile: p.profile, topology: p.topology, agents: p.agents, voiceContext: p.voiceContext, kb: p.kb, sources: SAMPLE_SOURCES });
+  validatePlan({
+    profile: p.profile,
+    topology: p.topology,
+    agents: p.agents,
+    voiceContext: p.voiceContext,
+    kb: p.kb,
+    sources: SAMPLE_SOURCES,
+  });
 
 describe("schemas", () => {
   it("every stage schema converts to a structured-output format", () => {
-    for (const s of [DocumentFacts, BusinessProfile, PlanTopology, AgentContent, VoiceContextDraft, KbPartDraft]) {
+    for (const s of [
+      DocumentFacts,
+      BusinessProfile,
+      PlanTopology,
+      AgentContent,
+      VoiceContextDraft,
+      KbPartDraft,
+    ]) {
       const f = zodOutputFormat(s);
       expect(f.type).toBe("json_schema");
     }
@@ -66,7 +87,11 @@ describe("validatePlan", () => {
 
   it("refuses a tool the archetype does not bind", () => {
     const p = samplePlan();
-    p.topology.agents[2].tools.push({ tool: "raise_support_ticket", backend: "mission_control_tenant", rationale: "" });
+    p.topology.agents[2].tools.push({
+      tool: "raise_support_ticket",
+      backend: "mission_control_tenant",
+      rationale: "",
+    });
     expect(hasErrors(validatePlan({ ...p, sources: SAMPLE_SOURCES }).issues)).toBe(true);
   });
 
@@ -81,13 +106,24 @@ describe("validatePlan", () => {
     const p = samplePlan();
     p.topology.squad!.members[1].handoffTo = ["reminder"];
     const r = validatePlan({ ...p, sources: SAMPLE_SOURCES });
-    expect(r.issues.some((i) => i.code === "squad_outbound_member" || i.code === "squad_bad_handoff" || i.code === "squad_specialist_chain")).toBe(true);
+    expect(
+      r.issues.some(
+        (i) =>
+          i.code === "squad_outbound_member" ||
+          i.code === "squad_bad_handoff" ||
+          i.code === "squad_specialist_chain",
+      ),
+    ).toBe(true);
   });
 
   it("refuses two inbound agents with no squad", () => {
     const p = samplePlan();
     p.topology.squad = null;
-    expect(validatePlan({ ...p, sources: SAMPLE_SOURCES }).issues.some((i) => i.code === "inbound_without_squad")).toBe(true);
+    expect(
+      validatePlan({ ...p, sources: SAMPLE_SOURCES }).issues.some(
+        (i) => i.code === "inbound_without_squad",
+      ),
+    ).toBe(true);
   });
 
   it("refuses a web address, an injected instruction and an invented number in written text", () => {
@@ -104,7 +140,11 @@ describe("validatePlan", () => {
   it("accepts a number that is in the source documents", () => {
     const p = samplePlan();
     p.agents[0].dialogues.push({ title: "x", caller: null, reply: "Our number is 02 9977 1234" });
-    expect(validatePlan({ ...p, sources: SAMPLE_SOURCES }).issues.some((i) => i.code === "invented_number")).toBe(false);
+    expect(
+      validatePlan({ ...p, sources: SAMPLE_SOURCES }).issues.some(
+        (i) => i.code === "invented_number",
+      ),
+    ).toBe(false);
   });
 
   it("refuses a denied claim", () => {
@@ -117,7 +157,11 @@ describe("validatePlan", () => {
   it("refuses booking without a booking window", () => {
     const p = samplePlan();
     p.profile.bookingWindow = null;
-    expect(validatePlan({ ...p, sources: SAMPLE_SOURCES }).issues.some((i) => i.code === "no_booking_window")).toBe(true);
+    expect(
+      validatePlan({ ...p, sources: SAMPLE_SOURCES }).issues.some(
+        (i) => i.code === "no_booking_window",
+      ),
+    ).toBe(true);
   });
 });
 
@@ -125,7 +169,10 @@ describe("confidence", () => {
   it("verifies quotes that are really in the source, and marks PDFs asserted", () => {
     const p = samplePlan();
     const all = collectCitations(p.profile, p.kb);
-    const check = checkCitations([...all, { docId: "doc:9", locator: "p.2", quote: "a pdf quote" }], SAMPLE_SOURCES);
+    const check = checkCitations(
+      [...all, { docId: "doc:9", locator: "p.2", quote: "a pdf quote" }],
+      SAMPLE_SOURCES,
+    );
     expect(check.verified).toBe(2);
     expect(check.asserted).toBe(1);
   });
@@ -148,7 +195,9 @@ describe("cook + compiler on a new business", () => {
     const specs = buildAgentSpecs(p, names);
     const business = buildBusinessContext(p.profile, p.voiceContext);
     const prompt = compileAgentPrompt(specs[0], { business, toolNames: names });
-    expect(prompt).toMatch(/^# Harbourside Dental - "Grace" Inbound Front Desk Voice Agent System Prompt/);
+    expect(prompt).toMatch(
+      /^# Harbourside Dental - "Grace" Inbound Front Desk Voice Agent System Prompt/,
+    );
     expect(prompt).not.toMatch(/Aurixa|NPC|Naidu|Angela|Sandra/);
     expect(prompt).toContain("`harbourside_dental_knowledge`");
     expect(prompt).toContain("# 14. Squad Routing & Handoff");
@@ -164,7 +213,10 @@ describe("cook + compiler on a new business", () => {
     const p = samplePlan();
     const names = toolNamesFor(p.businessSlug);
     const spec = buildAgentSpecs(p, names).find((s) => s.key === "reminder")!;
-    const prompt = compileAgentPrompt(spec, { business: buildBusinessContext(p.profile, p.voiceContext), toolNames: names });
+    const prompt = compileAgentPrompt(spec, {
+      business: buildBusinessContext(p.profile, p.voiceContext),
+      toolNames: names,
+    });
     expect(prompt).toContain("# 11A. Outbound Call Etiquette");
     expect(prompt).toContain("AI Transparency");
     expect(prompt).toContain("Rescheduling and Cancelling");
@@ -174,7 +226,11 @@ describe("cook + compiler on a new business", () => {
 
   it("wraps quotes and bullets", () => {
     expect(quote("Hello there")).toBe('> "Hello there"');
-    expect(wrap("a ".repeat(60)).split("\n").every((l) => l.length <= 76)).toBe(true);
+    expect(
+      wrap("a ".repeat(60))
+        .split("\n")
+        .every((l) => l.length <= 76),
+    ).toBe(true);
   });
 });
 
@@ -186,7 +242,12 @@ describe("compilePackage", () => {
     expect(pkg.kb?.mimetype).toBe("text/plain");
     expect(pkg.squad?.payload).toBeTruthy();
     expect(pkg.prerequisites).toEqual(
-      expect.arrayContaining(["make_transfer_hook_url", "escalation_number", "vapi_api_key", "call_log_webhook_secret"]),
+      expect.arrayContaining([
+        "make_transfer_hook_url",
+        "escalation_number",
+        "vapi_api_key",
+        "call_log_webhook_secret",
+      ]),
     );
     // The undeployable cancel tool is left out of the agent and out of its prompt.
     const bookings = pkg.agents.find((a) => a.key === "bookings")!;
@@ -205,7 +266,10 @@ describe("compilePackage", () => {
 
   it("writes the KB file id in both places (KB_BOTH_LOCATIONS)", async () => {
     const pkg = await compilePackage(samplePlan());
-    const model = pkg.agents[0].assistant.model as { tools: Array<{ knowledgeBases: Array<{ fileIds: string[] }> }>; knowledgeBase: { fileIds: string[] } };
+    const model = pkg.agents[0].assistant.model as {
+      tools: Array<{ knowledgeBases: Array<{ fileIds: string[] }> }>;
+      knowledgeBase: { fileIds: string[] };
+    };
     expect(model.tools[0].knowledgeBases[0].fileIds).toEqual(["{{kb:file}}"]);
     expect(model.knowledgeBase.fileIds).toEqual(["{{kb:file}}"]);
   });

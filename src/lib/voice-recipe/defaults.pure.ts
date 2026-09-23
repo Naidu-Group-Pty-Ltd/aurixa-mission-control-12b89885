@@ -41,7 +41,10 @@ export const VOICE_PALETTE = [
   { key: "steady_male", label: "Steady, male", voiceId: "ErXwobaYiN019PkySvjV" },
 ] as const;
 export type VoiceKey = (typeof VOICE_PALETTE)[number]["key"];
-export const VOICE_KEYS = VOICE_PALETTE.map((v) => v.key) as unknown as readonly [VoiceKey, ...VoiceKey[]];
+export const VOICE_KEYS = VOICE_PALETTE.map((v) => v.key) as unknown as readonly [
+  VoiceKey,
+  ...VoiceKey[],
+];
 
 /** NPC waits four seconds before speaking over a caller who pauses. */
 export const START_SPEAKING_PLAN = { waitSeconds: 4 } as const;

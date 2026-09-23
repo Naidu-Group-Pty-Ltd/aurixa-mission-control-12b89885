@@ -12,10 +12,23 @@
 //   - anything else is an ERROR, and an errored plan cannot be approved.
 import { ARCHETYPES } from "../voice-recipe/archetypes.pure.ts";
 import { BASE_DENYLIST, findDeniedClaims } from "../voice-recipe/kb.pure.ts";
-import { BACKEND_MENU, TOOL_CATALOG, isDeployable, type BackendKey } from "../voice-recipe/tools.pure.ts";
+import {
+  BACKEND_MENU,
+  TOOL_CATALOG,
+  isDeployable,
+  type BackendKey,
+} from "../voice-recipe/tools.pure.ts";
 import { DEFAULT_TOOL_NAMES, TOOL_KEYS, type ToolKey } from "../voice-recipe/types.pure.ts";
 import { assistantName } from "./cook.pure.ts";
-import type { AgentContent, BusinessProfile, KbPartDraft, OpenItem, PlanTopology, ValidationIssue, VoiceContextDraft } from "./schemas.pure.ts";
+import type {
+  AgentContent,
+  BusinessProfile,
+  KbPartDraft,
+  OpenItem,
+  PlanTopology,
+  ValidationIssue,
+  VoiceContextDraft,
+} from "./schemas.pure.ts";
 
 export interface ValidateInput {
   profile: BusinessProfile;
@@ -46,15 +59,19 @@ const NATURAL_BACKEND: Partial<Record<ToolKey, BackendKey>> = {
   raise_support_ticket: "mission_control_tenant",
 };
 
-const INJECTION = /\b(ignore (all|any|the|previous|prior)|disregard (the|all|previous)|system prompt|you are now|new instructions|developer message)\b/i;
-const URL_LIKE = /\bhttps?:\/\/|\bwww\.[a-z0-9-]+\.|\b[a-z0-9-]+\.(com|com\.au|net|org|io|ai|co)(\/|\b)/i;
+const INJECTION =
+  /\b(ignore (all|any|the|previous|prior)|disregard (the|all|previous)|system prompt|you are now|new instructions|developer message)\b/i;
+const URL_LIKE =
+  /\bhttps?:\/\/|\bwww\.[a-z0-9-]+\.|\b[a-z0-9-]+\.(com|com\.au|net|org|io|ai|co)(\/|\b)/i;
 const PHONE_LIKE = /(\+?\d[\d\s-]{7,}\d)/g;
 
 export function validatePlan(input: ValidateInput): ValidateResult {
   const issues: ValidationIssue[] = [];
   const openItems: OpenItem[] = [];
-  const err = (code: string, message: string, path: string) => issues.push({ severity: "error", code, message, path });
-  const warn = (code: string, message: string, path: string) => issues.push({ severity: "warning", code, message, path });
+  const err = (code: string, message: string, path: string) =>
+    issues.push({ severity: "error", code, message, path });
+  const warn = (code: string, message: string, path: string) =>
+    issues.push({ severity: "warning", code, message, path });
   const open = (title: string, detail: string, owner: OpenItem["owner"] = "operator") =>
     openItems.push({ title, detail, owner, source: "validator" });
 
@@ -68,12 +85,18 @@ export function validatePlan(input: ValidateInput): ValidateResult {
   for (const [i, a] of topology.agents.entries()) {
     const path = `topology.agents[${i}]`;
     const arch = ARCHETYPES[a.archetype];
-    if (!/^[a-z][a-z0-9_]{1,40}$/.test(a.key)) err("bad_key", `Agent key "${a.key}" must be lower_snake_case.`, `${path}.key`);
+    if (!/^[a-z][a-z0-9_]{1,40}$/.test(a.key))
+      err("bad_key", `Agent key "${a.key}" must be lower_snake_case.`, `${path}.key`);
     if (keys.has(a.key)) err("duplicate_key", `Agent key "${a.key}" is used twice.`, `${path}.key`);
     keys.add(a.key);
-    if (!a.personaName.trim()) err("no_persona", `Agent "${a.key}" has no persona name.`, `${path}.personaName`);
+    if (!a.personaName.trim())
+      err("no_persona", `Agent "${a.key}" has no persona name.`, `${path}.personaName`);
     if (arch.direction === "outbound" && !a.outboundTrigger) {
-      warn("no_trigger", `Outbound agent "${a.key}" has no trigger, so nothing will dial it.`, `${path}.outboundTrigger`);
+      warn(
+        "no_trigger",
+        `Outbound agent "${a.key}" has no trigger, so nothing will dial it.`,
+        `${path}.outboundTrigger`,
+      );
     }
 
     // Repair: every default tool is bound (end_call above all - SAME_TURN_END_CALL).
@@ -82,15 +105,27 @@ export function validatePlan(input: ValidateInput): ValidateResult {
       if (d === "kb_query" && !hasKb) continue;
       if (!bound.has(d)) {
         const backend = NATURAL_BACKEND[d] ?? TOOL_CATALOG[d].allowedBackends[0];
-        a.tools.push({ tool: d, backend, rationale: "Added by validation: the archetype always binds it." });
+        a.tools.push({
+          tool: d,
+          backend,
+          rationale: "Added by validation: the archetype always binds it.",
+        });
         bound.set(d, a.tools[a.tools.length - 1]);
-        warn("default_tool_added", `Agent "${a.key}" was missing ${d}; it was added.`, `${path}.tools`);
+        warn(
+          "default_tool_added",
+          `Agent "${a.key}" was missing ${d}; it was added.`,
+          `${path}.tools`,
+        );
       }
     }
     // kb_query only where there is a knowledge base to query.
     if (!hasKb && bound.has("kb_query")) {
       a.tools = a.tools.filter((t) => t.tool !== "kb_query");
-      warn("kb_query_removed", `Agent "${a.key}" bound kb_query but the plan has no knowledge base.`, `${path}.tools`);
+      warn(
+        "kb_query_removed",
+        `Agent "${a.key}" bound kb_query but the plan has no knowledge base.`,
+        `${path}.tools`,
+      );
     }
 
     const allowed = new Set<ToolKey>([...arch.defaultTools, ...arch.optionalTools]);
@@ -108,7 +143,11 @@ export function validatePlan(input: ValidateInput): ValidateResult {
       }
       const def = TOOL_CATALOG[t.tool];
       if (!def.allowedBackends.includes(t.backend)) {
-        err("backend_not_allowed", `${t.tool} cannot run on ${t.backend}; allowed: ${def.allowedBackends.join(", ")}.`, tp);
+        err(
+          "backend_not_allowed",
+          `${t.tool} cannot run on ${t.backend}; allowed: ${def.allowedBackends.join(", ")}.`,
+          tp,
+        );
         continue;
       }
       if (!isDeployable(t.tool, t.backend)) {
@@ -135,11 +174,22 @@ export function validatePlan(input: ValidateInput): ValidateResult {
           "and the escalation number the call is redirected to.",
       );
     }
-    if ((seen.has("check_availability") || seen.has("book_appointment")) && !input.profile.bookingWindow) {
-      err("no_booking_window", `Agent "${a.key}" books appointments but the plan has no booking window.`, path);
+    if (
+      (seen.has("check_availability") || seen.has("book_appointment")) &&
+      !input.profile.bookingWindow
+    ) {
+      err(
+        "no_booking_window",
+        `Agent "${a.key}" books appointments but the plan has no booking window.`,
+        path,
+      );
     }
     if (seen.has("book_appointment") && !input.profile.bookingTypes.length) {
-      err("no_booking_types", `Agent "${a.key}" books appointments but the plan has no booking types.`, path);
+      err(
+        "no_booking_types",
+        `Agent "${a.key}" books appointments but the plan has no booking types.`,
+        path,
+      );
     }
   }
 
@@ -153,13 +203,25 @@ export function validatePlan(input: ValidateInput): ValidateResult {
       continue;
     }
     const n = assistantName(input.profile.businessName, c.roleTitle);
-    if (names.has(n)) err("duplicate_name", `Two agents would both be called "${n}".`, `agents.${a.key}.roleTitle`);
+    if (names.has(n))
+      err("duplicate_name", `Two agents would both be called "${n}".`, `agents.${a.key}.roleTitle`);
     names.add(n);
-    if (!c.canDo.length) warn("empty_can_do", `Agent "${a.key}" lists nothing it can do.`, `agents.${a.key}.canDo`);
-    if (!c.firstMessage.trim()) err("no_first_message", `Agent "${a.key}" has no first message.`, `agents.${a.key}.firstMessage`);
+    if (!c.canDo.length)
+      warn("empty_can_do", `Agent "${a.key}" lists nothing it can do.`, `agents.${a.key}.canDo`);
+    if (!c.firstMessage.trim())
+      err(
+        "no_first_message",
+        `Agent "${a.key}" has no first message.`,
+        `agents.${a.key}.firstMessage`,
+      );
   }
   for (const c of input.agents) {
-    if (!keys.has(c.agentKey)) warn("orphan_content", `Content was written for "${c.agentKey}", which is not in the plan.`, `agents.${c.agentKey}`);
+    if (!keys.has(c.agentKey))
+      warn(
+        "orphan_content",
+        `Content was written for "${c.agentKey}", which is not in the plan.`,
+        `agents.${c.agentKey}`,
+      );
   }
 
   // ------------------------------------------------------------- squad --
@@ -168,30 +230,71 @@ export function validatePlan(input: ValidateInput): ValidateResult {
   if (topology.squad) {
     const s = topology.squad;
     const entry = byKey.get(s.entryAgentKey);
-    if (!entry) err("squad_no_entry", `Squad entry "${s.entryAgentKey}" is not an agent in the plan.`, "topology.squad.entryAgentKey");
+    if (!entry)
+      err(
+        "squad_no_entry",
+        `Squad entry "${s.entryAgentKey}" is not an agent in the plan.`,
+        "topology.squad.entryAgentKey",
+      );
     else if (ARCHETYPES[entry.archetype].squadRole !== "entry") {
-      err("squad_entry_role", `The squad must start with an inbound front desk, not a ${ARCHETYPES[entry.archetype].label}.`, "topology.squad.entryAgentKey");
+      err(
+        "squad_entry_role",
+        `The squad must start with an inbound front desk, not a ${ARCHETYPES[entry.archetype].label}.`,
+        "topology.squad.entryAgentKey",
+      );
     }
     const members = new Set(s.members.map((m) => m.agentKey));
-    if (!members.has(s.entryAgentKey)) err("squad_entry_not_member", "The squad's entry agent is not one of its members.", "topology.squad.members");
+    if (!members.has(s.entryAgentKey))
+      err(
+        "squad_entry_not_member",
+        "The squad's entry agent is not one of its members.",
+        "topology.squad.members",
+      );
     for (const m of s.members) {
       const ag = byKey.get(m.agentKey);
       if (!ag) {
-        err("squad_unknown_member", `Squad member "${m.agentKey}" is not an agent in the plan.`, "topology.squad.members");
+        err(
+          "squad_unknown_member",
+          `Squad member "${m.agentKey}" is not an agent in the plan.`,
+          "topology.squad.members",
+        );
         continue;
       }
       if (ARCHETYPES[ag.archetype].direction === "outbound") {
-        err("squad_outbound_member", `Outbound agent "${m.agentKey}" cannot be in the inbound squad.`, "topology.squad.members");
+        err(
+          "squad_outbound_member",
+          `Outbound agent "${m.agentKey}" cannot be in the inbound squad.`,
+          "topology.squad.members",
+        );
       }
       for (const h of m.handoffTo) {
-        if (!members.has(h)) err("squad_bad_handoff", `"${m.agentKey}" hands off to "${h}", which is not in the squad.`, "topology.squad.members");
-        if (h === m.agentKey) err("squad_self_handoff", `"${m.agentKey}" hands off to itself.`, "topology.squad.members");
+        if (!members.has(h))
+          err(
+            "squad_bad_handoff",
+            `"${m.agentKey}" hands off to "${h}", which is not in the squad.`,
+            "topology.squad.members",
+          );
+        if (h === m.agentKey)
+          err(
+            "squad_self_handoff",
+            `"${m.agentKey}" hands off to itself.`,
+            "topology.squad.members",
+          );
         if (m.agentKey !== s.entryAgentKey && h !== s.entryAgentKey) {
-          err("squad_specialist_chain", `Specialist "${m.agentKey}" hands off to another specialist; only the front desk routes.`, "topology.squad.members");
+          err(
+            "squad_specialist_chain",
+            `Specialist "${m.agentKey}" hands off to another specialist; only the front desk routes.`,
+            "topology.squad.members",
+          );
         }
       }
     }
-    if (!s.handoffIntents.length) warn("squad_no_intents", "The squad has no handoff intents.", "topology.squad.handoffIntents");
+    if (!s.handoffIntents.length)
+      warn(
+        "squad_no_intents",
+        "The squad has no handoff intents.",
+        "topology.squad.handoffIntents",
+      );
   } else if (inbound.length > 1) {
     err(
       "inbound_without_squad",
@@ -201,8 +304,12 @@ export function validatePlan(input: ValidateInput): ValidateResult {
   }
 
   // ------------------------------------------------ the client's systems --
-  const usesTenant = topology.agents.some((a) => a.tools.some((t) => t.backend === "mission_control_tenant"));
-  const clientCrm = input.profile.systems.filter((s) => s.category === "crm" || s.category === "calendar");
+  const usesTenant = topology.agents.some((a) =>
+    a.tools.some((t) => t.backend === "mission_control_tenant"),
+  );
+  const clientCrm = input.profile.systems.filter(
+    (s) => s.category === "crm" || s.category === "calendar",
+  );
   if (usesTenant && clientCrm.length) {
     open(
       "Decide where contacts and bookings live",
@@ -219,12 +326,22 @@ export function validatePlan(input: ValidateInput): ValidateResult {
   const foreignToolNames = Object.values(DEFAULT_TOOL_NAMES);
   const lint = (text: string, path: string, boundNames: string[] | null) => {
     if (!text) return;
-    if (INJECTION.test(text)) err("injection_phrase", `Text reads like an instruction to the model: "${clip(text)}"`, path);
-    if (URL_LIKE.test(text)) err("url_in_text", `Text contains a web address; addresses come from an operator, not a plan: "${clip(text)}"`, path);
+    if (INJECTION.test(text))
+      err("injection_phrase", `Text reads like an instruction to the model: "${clip(text)}"`, path);
+    if (URL_LIKE.test(text))
+      err(
+        "url_in_text",
+        `Text contains a web address; addresses come from an operator, not a plan: "${clip(text)}"`,
+        path,
+      );
     for (const m of text.match(PHONE_LIKE) ?? []) {
       const digits = m.replace(/\D/g, "");
       if (digits.length >= 8 && !corpus.replace(/\D/g, "").includes(digits)) {
-        err("invented_number", `A number "${m.trim()}" appears that is in none of the source documents.`, path);
+        err(
+          "invented_number",
+          `A number "${m.trim()}" appears that is in none of the source documents.`,
+          path,
+        );
       }
     }
     if (boundNames) {
@@ -242,9 +359,20 @@ export function validatePlan(input: ValidateInput): ValidateResult {
     const a = byKey.get(c.agentKey);
     const bound = a ? a.tools.map((t) => DEFAULT_TOOL_NAMES[t.tool]) : [];
     const p = `agents.${c.agentKey}`;
-    [c.firstMessage, c.notThisRole, c.voicemailMessage, ...c.roleSummary, ...c.openingNotes, ...c.canDo, ...c.cannotDo, ...c.extraNever, ...c.extraAlways]
-      .forEach((t) => lint(t, p, bound));
-    c.dialogues.forEach((d) => [d.caller ?? "", d.reply].forEach((t) => lint(t, `${p}.dialogues`, bound)));
+    [
+      c.firstMessage,
+      c.notThisRole,
+      c.voicemailMessage,
+      ...c.roleSummary,
+      ...c.openingNotes,
+      ...c.canDo,
+      ...c.cannotDo,
+      ...c.extraNever,
+      ...c.extraAlways,
+    ].forEach((t) => lint(t, p, bound));
+    c.dialogues.forEach((d) =>
+      [d.caller ?? "", d.reply].forEach((t) => lint(t, `${p}.dialogues`, bound)),
+    );
   }
   if (input.voiceContext) {
     for (const [k, v] of Object.entries(input.voiceContext)) {

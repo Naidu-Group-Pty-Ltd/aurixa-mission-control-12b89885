@@ -45,18 +45,23 @@ export function assertProjectPath(projectId: string, storagePath: string): void 
   }
 }
 
-export async function registerStudioDocument(input: RegisterDocumentInput): Promise<RegisteredDocument> {
+export async function registerStudioDocument(
+  input: RegisterDocumentInput,
+): Promise<RegisteredDocument> {
   assertProjectPath(input.projectId, input.storagePath);
   const kind = documentKind(input.fileName);
   if (!kind) {
     await removeObject(input.storagePath);
-    throw new Error(`"${input.fileName}" is not a type the studio reads (pdf, docx, xlsx, csv, txt, md)`);
+    throw new Error(
+      `"${input.fileName}" is not a type the studio reads (pdf, docx, xlsx, csv, txt, md)`,
+    );
   }
 
   const { data: blob, error: dlError } = await supabaseAdmin.storage
     .from(VOICE_STUDIO_BUCKET)
     .download(input.storagePath);
-  if (dlError || !blob) throw new Error(`the uploaded file could not be read back: ${dlError?.message ?? "empty"}`);
+  if (dlError || !blob)
+    throw new Error(`the uploaded file could not be read back: ${dlError?.message ?? "empty"}`);
   if (blob.size > MAX_UPLOAD_BYTES) {
     await removeObject(input.storagePath);
     throw new Error("the file is larger than 25 MB");
@@ -91,7 +96,10 @@ export async function registerStudioDocument(input: RegisterDocumentInput): Prom
   try {
     extraction = await extractDocument(bytes, input.fileName, blob.type);
   } catch (err) {
-    failure = err instanceof ExtractionError || err instanceof Error ? err.message : "the file could not be read";
+    failure =
+      err instanceof ExtractionError || err instanceof Error
+        ? err.message
+        : "the file could not be read";
   }
 
   const status: RegisteredDocument["extraction_status"] = failure
@@ -140,7 +148,10 @@ export async function deleteStudioDocument(documentId: string): Promise<void> {
     .maybeSingle();
   if (error) throw error;
   if (!doc) return;
-  const { error: delError } = await supabaseAdmin.from("voice_studio_documents").delete().eq("id", documentId);
+  const { error: delError } = await supabaseAdmin
+    .from("voice_studio_documents")
+    .delete()
+    .eq("id", documentId);
   if (delError) throw delError;
   await removeObject(doc.storage_path);
 }
@@ -152,7 +163,10 @@ async function removeObject(path: string): Promise<void> {
 }
 
 /** A short-lived link to a stored document, for checking a citation against its source. */
-export async function signedDocumentUrl(documentId: string, expiresIn = 300): Promise<string | null> {
+export async function signedDocumentUrl(
+  documentId: string,
+  expiresIn = 300,
+): Promise<string | null> {
   const { data: doc, error } = await supabaseAdmin
     .from("voice_studio_documents")
     .select("storage_path")

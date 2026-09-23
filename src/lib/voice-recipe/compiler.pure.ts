@@ -71,7 +71,10 @@ export function compileAgentPrompt(agent: AgentSpec, ctx: CompileContext): strin
 }
 
 /** The absolute rules, in the order build() appends them. */
-export function absoluteRuleLines(agent: AgentSpec, ctx: CompileContext): { never: string[]; always: string[] } {
+export function absoluteRuleLines(
+  agent: AgentSpec,
+  ctx: CompileContext,
+): { never: string[]; always: string[] } {
   const n = ctx.toolNames;
   const has = (t: ToolKey) => agent.tools.includes(t);
   const never = [...ctx.business.absolute.baseNever];

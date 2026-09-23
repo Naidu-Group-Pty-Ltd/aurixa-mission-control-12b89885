@@ -28,9 +28,20 @@ import {
 } from "../voice-recipe/defaults.pure.ts";
 import { KB_PARTS, KB_UPLOAD, renderKbMarkdown, type KbBlock } from "../voice-recipe/kb.pure.ts";
 import { RECIPE_BOOK_VERSION } from "../voice-recipe/recipeBook.pure.ts";
-import { TOOL_CATALOG, inlineKbTool, isDeployable, vapiToolPayload, type BackendKey } from "../voice-recipe/tools.pure.ts";
+import {
+  TOOL_CATALOG,
+  inlineKbTool,
+  isDeployable,
+  vapiToolPayload,
+  type BackendKey,
+} from "../voice-recipe/tools.pure.ts";
 import type { ToolKey } from "../voice-recipe/types.pure.ts";
-import { bookingWindowSpoken, buildAgentSpecs, buildBusinessContext, toolNamesFor } from "./cook.pure.ts";
+import {
+  bookingWindowSpoken,
+  buildAgentSpecs,
+  buildBusinessContext,
+  toolNamesFor,
+} from "./cook.pure.ts";
 import type { CloningPlan, OpenItem } from "./schemas.pure.ts";
 
 export const PACKAGE_FORMAT = 1;
@@ -100,7 +111,9 @@ export async function compilePackage(plan: CloningPlan): Promise<BuildPackage> {
     while (changed) {
       changed = false;
       for (const k of [...m.keys()]) {
-        const missing = TOOL_CATALOG[k].requires.filter((r) => !m.has(r) && !(r === "squad_handoff" && !plan.topology.squad));
+        const missing = TOOL_CATALOG[k].requires.filter(
+          (r) => !m.has(r) && !(r === "squad_handoff" && !plan.topology.squad),
+        );
         if (missing.length) {
           m.delete(k);
           changed = true;
@@ -120,7 +133,10 @@ export async function compilePackage(plan: CloningPlan): Promise<BuildPackage> {
     ...a,
     tools: a.tools.filter((t) => effective.get(a.key)?.get(t.tool) === t.backend),
   }));
-  const specs = buildAgentSpecs({ ...plan, topology: { ...plan.topology, agents: plannedAgents } }, names);
+  const specs = buildAgentSpecs(
+    { ...plan, topology: { ...plan.topology, agents: plannedAgents } },
+    names,
+  );
 
   // ---------------------------------------------------------------- tools --
   const payloadCtx = {
@@ -167,7 +183,9 @@ export async function compilePackage(plan: CloningPlan): Promise<BuildPackage> {
   // --------------------------------------------------------------- agents --
   const contentByKey = new Map(plan.agents.map((c) => [c.agentKey, c]));
   const topoByKey = new Map(plannedAgents.map((a) => [a.key, a]));
-  const keyterms = [...new Set(plan.profile.businessName.split(/\s+/).filter((w) => w.length > 2))].slice(0, 5);
+  const keyterms = [
+    ...new Set(plan.profile.businessName.split(/\s+/).filter((w) => w.length > 2)),
+  ].slice(0, 5);
   const agents: PackageAgent[] = [];
   for (const spec of specs) {
     const t = topoByKey.get(spec.key)!;
@@ -176,7 +194,10 @@ export async function compilePackage(plan: CloningPlan): Promise<BuildPackage> {
     const systemPrompt = compileAgentPrompt(spec, { business, toolNames: names });
     const voice = VOICE_PALETTE.find((v) => v.key === t.voice) ?? VOICE_PALETTE[0];
     const toolIds = spec.tools.filter((k) => orgToolKeys.has(k)).map((k) => `{{tool:${k}}}`);
-    const inlineTools = spec.tools.includes("kb_query") && kb ? [inlineKbTool(names.kb_query, plan.profile.businessName, "{{kb:file}}")] : [];
+    const inlineTools =
+      spec.tools.includes("kb_query") && kb
+        ? [inlineKbTool(names.kb_query, plan.profile.businessName, "{{kb:file}}")]
+        : [];
     const model: Record<string, unknown> = {
       provider: MODEL_DEFAULT.provider,
       model: MODEL_DEFAULT.model,
@@ -198,9 +219,13 @@ export async function compilePackage(plan: CloningPlan): Promise<BuildPackage> {
       voicemailMessage: c?.voicemailMessage ?? "",
       // Call logs go to the clone's own vapi-call-webhook, which verifies
       // VAPI_WEBHOOK_SECRET; tool calls go to Mission Control per tool.
-      server: { url: "{{config:call_log_url}}", headers: { "x-vapi-webhook-secret": "{{secret:call_log}}" } },
+      server: {
+        url: "{{config:call_log_url}}",
+        headers: { "x-vapi-webhook-secret": "{{secret:call_log}}" },
+      },
     };
-    if (spec.tools.includes("transfer_to_human")) assistant.backgroundSound = BACKGROUND_SOUND_FOR_TRANSFER;
+    if (spec.tools.includes("transfer_to_human"))
+      assistant.backgroundSound = BACKGROUND_SOUND_FOR_TRANSFER;
     agents.push({
       key: spec.key,
       name: spec.name,
@@ -236,7 +261,11 @@ export async function compilePackage(plan: CloningPlan): Promise<BuildPackage> {
                 assistantName: nameOf.get(to) ?? to,
                 description: purposeOf.get(to) ?? "",
                 variableExtractionPlan: {
-                  schema: { type: "object", required: [], properties: { firstName: { type: "string" } } },
+                  schema: {
+                    type: "object",
+                    required: [],
+                    properties: { firstName: { type: "string" } },
+                  },
                 },
               })),
             },
@@ -250,7 +279,9 @@ export async function compilePackage(plan: CloningPlan): Promise<BuildPackage> {
 
   const prerequisites = [
     ...new Set(
-      tools.flatMap((t) => (t.backend === "make_twilio_redirect" ? ["make_transfer_hook_url", "escalation_number"] : [])),
+      tools.flatMap((t) =>
+        t.backend === "make_twilio_redirect" ? ["make_transfer_hook_url", "escalation_number"] : [],
+      ),
     ),
     "vapi_api_key",
     "call_log_webhook_secret",
@@ -278,7 +309,9 @@ export async function compilePackage(plan: CloningPlan): Promise<BuildPackage> {
 
 function dedupe(items: OpenItem[]): OpenItem[] {
   const seen = new Set<string>();
-  return items.filter((o) => (seen.has(o.title + o.detail) ? false : (seen.add(o.title + o.detail), true)));
+  return items.filter((o) =>
+    seen.has(o.title + o.detail) ? false : (seen.add(o.title + o.detail), true),
+  );
 }
 
 /** JSON with sorted keys - the same package always hashes the same. */
