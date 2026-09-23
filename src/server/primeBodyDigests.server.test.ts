@@ -18,6 +18,9 @@ import type { PrimeMigrationCorpus } from "./prime-backend.server";
 const octokit = {} as never;
 const ref = { owner: "o", repo: "r" } as never;
 
+/** A corpus reference, as the version these fixtures key their files by. */
+const idOf = (ref: string | { id: string }) => (typeof ref === "string" ? ref : ref.id);
+
 /** A corpus whose bodies GitHub will serve, at a given commit. */
 function corpusOf(
   sourceSha: string,
@@ -34,13 +37,13 @@ function corpusOf(
     })),
     sourceSha,
     withdrawal: { state: "absent", excluded: [], unmatched: [] },
-    bodyIdentity: (id) => (files[id] ? `blob-${id}` : null),
-    sizeOf: (id) => {
-      const f = files[id];
+    bodyIdentity: (ref) => (files[idOf(ref)] ? `blob-${idOf(ref)}` : null),
+    sizeOf: (ref) => {
+      const f = files[idOf(ref)];
       if (!f) return null;
       return f.size === undefined ? Buffer.byteLength(f.sql, "utf8") : f.size;
     },
-    loadSql: async (id) => files[id].sql,
+    loadSql: async (ref) => files[idOf(ref)].sql,
     openSqlStream: async () => {
       throw new Error("not used");
     },

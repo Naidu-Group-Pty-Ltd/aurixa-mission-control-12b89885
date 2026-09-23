@@ -275,7 +275,9 @@ export async function diagnosePrimeMigration(
   // this console simply will not hold it.
   let body: DiagnosisInput["body"];
   try {
-    const sql = await corpus.loadSql(meta.id);
+    // By FILE: on a collision `meta` is the first file, and a read by version
+    // would be refused — it cannot say which of the files is meant.
+    const sql = await corpus.loadSql(meta);
     body = { read: true, sql, bytes: Buffer.byteLength(sql, "utf8") };
   } catch (e) {
     body =

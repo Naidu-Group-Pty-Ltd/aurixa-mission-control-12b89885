@@ -279,3 +279,61 @@ describe("the prime's declared withdrawals", () => {
     expect(corpus.withdrawal.unmatched).toEqual(["20990101000000_not_here.sql"]);
   });
 });
+
+describe("a version two files share is two bodies", () => {
+  // The prime's own shape: two unrelated migrations under one version. Before
+  // this, a read by version answered whichever sorted last — so the fleet sync
+  // sent SECOND's body once for each file and never sent FIRST's at all.
+  const FIRST = "20260725110000_secure_agent_subscription_approval.sql";
+  const SECOND = "20260725110000_sign_email_sync_cron_invocations.sql";
+  const files = [
+    { name: FIRST, body: "create table first();", size: 21 },
+    { name: SECOND, body: "create table second();", size: 22 },
+  ];
+
+  it("reads each file as itself when it is named", async () => {
+    const { octokit, blobCalls } = fakeOctokit(files);
+    const corpus = await openPrimeMigrationCorpus(octokit, REF);
+    const [a, b] = corpus.metas;
+
+    await expect(corpus.loadSql(a)).resolves.toBe("create table first();");
+    await expect(corpus.loadSql(b)).resolves.toBe("create table second();");
+    // Two files, two fetches: the memo is per file, not per version.
+    expect(blobCalls).toEqual([`sha-${FIRST}`, `sha-${SECOND}`]);
+    expect(corpus.bodyIdentity(a)).toBe(`sha-${FIRST}`);
+    expect(corpus.bodyIdentity(b)).toBe(`sha-${SECOND}`);
+    expect(corpus.sizeOf(a)).toBe(21);
+    expect(corpus.sizeOf(b)).toBe(22);
+  });
+
+  it("refuses a read by version, naming both files, rather than guessing one", async () => {
+    const { octokit, blobCalls } = fakeOctokit(files);
+    const corpus = await openPrimeMigrationCorpus(octokit, REF);
+
+    await expect(corpus.loadSql("20260725110000")).rejects.toThrow(
+      new RegExp(`carried by 2 files on the prime \\(${FIRST}, ${SECOND}\\)`),
+    );
+    await expect(corpus.openSqlStream("20260725110000")).rejects.toThrow(
+      /read the file by its name/,
+    );
+    // "Cannot say" rather than one of the two answers.
+    expect(corpus.bodyIdentity("20260725110000")).toBeNull();
+    expect(corpus.sizeOf("20260725110000")).toBeNull();
+    expect(blobCalls).toEqual([]);
+  });
+
+  it("still reads a version by its string where one file carries it", async () => {
+    const { octokit } = fakeOctokit(CORPUS);
+    const corpus = await openPrimeMigrationCorpus(octokit, REF);
+    await expect(corpus.loadSql("20250102000000")).resolves.toBe("create table b();");
+    expect(corpus.bodyIdentity("20250102000000")).toBe("sha-20250102000000_b.sql");
+  });
+
+  it("refuses a file the corpus does not carry, by name", async () => {
+    const { octokit } = fakeOctokit(files);
+    const corpus = await openPrimeMigrationCorpus(octokit, REF);
+    await expect(
+      corpus.loadSql({ id: "20260725110000", name: "20260725110000_not_here.sql" }),
+    ).rejects.toThrow(/20260725110000_not_here\.sql is not in the prime corpus/);
+  });
+});

@@ -1442,13 +1442,14 @@ export type CorpusFacts = {
  */
 export function corpusFacts(
   metas: ReadonlyArray<{ id: string; name: string }>,
-  sizeOf: (id: string) => number | null,
+  sizeOf: (file: { id: string; name: string }) => number | null,
   ceilingBytes: number,
 ): CorpusFacts {
   const oversize: OversizeFile[] = [];
   let sizeUnknown = 0;
   for (const m of metas) {
-    const bytes = sizeOf(m.id);
+    // By FILE: a version two files share has two sizes.
+    const bytes = sizeOf(m);
     if (bytes === null) sizeUnknown += 1;
     else if (bytes > ceilingBytes) oversize.push({ id: m.id, name: m.name, bytes });
   }

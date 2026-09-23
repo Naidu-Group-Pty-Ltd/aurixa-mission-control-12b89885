@@ -23,7 +23,10 @@ const state = vi.hoisted(() => ({
   /** Statements that should throw, matched as a substring. */
   failOn: null as null | { needle: string; error: string },
   files: [] as Array<{ id: string; name: string; path: string }>,
+  /** Bodies by FILE name, as the corpus keys them: a shared version is two bodies. */
   bodies: new Map<string, string>(),
+  /** Every file whose body was read, in order. */
+  loaded: [] as string[],
   loadThrows: null as null | Error,
   sourceNull: false,
   backendThrows: false,
@@ -50,10 +53,12 @@ vi.mock("./prime-backend.server", () => ({
       excluded: state.withdrawn,
       unmatched: [],
     },
-    loadSql: async (id: string) => {
+    loadSql: async (ref: string | { name: string }) => {
       if (state.loadThrows) throw state.loadThrows;
-      const sql = state.bodies.get(id);
-      if (sql === undefined) throw new Error(`no body for ${id}`);
+      const name = typeof ref === "string" ? state.files.find((f) => f.id === ref)?.name : ref.name;
+      state.loaded.push(name ?? String(ref));
+      const sql = name === undefined ? undefined : state.bodies.get(name);
+      if (sql === undefined) throw new Error(`no body for ${name ?? String(ref)}`);
       return sql;
     },
   }),
@@ -86,7 +91,7 @@ function corpus(...entries: Array<[string, string, string]>) {
     name,
     path: `supabase/migrations/${name}`,
   }));
-  state.bodies = new Map(entries.map(([id, , sql]) => [id, sql]));
+  state.bodies = new Map(entries.map(([, name, sql]) => [name, sql]));
 }
 
 /** The prime's ledger answers with these versions. */
@@ -105,6 +110,7 @@ beforeEach(() => {
   state.failOn = null;
   state.files = [];
   state.bodies = new Map();
+  state.loaded = [];
   state.loadThrows = null;
   state.sourceNull = false;
   state.backendThrows = false;
@@ -347,5 +353,8 @@ describe("the collision survey rides every report", () => {
     ]);
     expect(diagnosis.verdict).toBe("version_collision");
     expect(trialRuns()).toEqual([]);
+    // The body read is the file the report names — the first — and never
+    // whichever of the pair a lookup by version happened to resolve to.
+    expect(state.loaded).toEqual(["20260901010000_a.sql"]);
   });
 });

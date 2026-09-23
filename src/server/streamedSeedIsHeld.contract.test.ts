@@ -98,7 +98,7 @@ describe("both fetch sites throw the structural class", () => {
 
   it("the batched read does, and the oversize refusals stay outside it", () => {
     const load = corpus.slice(
-      corpus.indexOf("const loadSql = (id: string)"),
+      corpus.indexOf("const loadSql = ("),
       corpus.indexOf("const openSqlStream ="),
     );
     expect(load).toContain("throw new PrimeBodyUnavailableError(");

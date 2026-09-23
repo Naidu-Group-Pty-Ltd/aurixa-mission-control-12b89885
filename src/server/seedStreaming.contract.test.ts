@@ -57,7 +57,7 @@ describe("the corpus streams a body it will not hold", () => {
   });
 
   it("exposes the stream beside loadSql, with no ceiling and no cache", () => {
-    const at = corpus.indexOf("const openSqlStream = async (id: string)");
+    const at = corpus.indexOf("const openSqlStream = async (");
     expect(at).toBeGreaterThan(-1);
     const open = corpus.slice(at, corpus.indexOf("};", at));
     expect(open).not.toContain("maxBytes");

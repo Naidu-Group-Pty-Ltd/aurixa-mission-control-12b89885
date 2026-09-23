@@ -53,8 +53,12 @@ vi.mock("./prime-backend.server", () => ({
       metas: state.files,
       sourceSha: "abc1234def",
       withdrawal: state.withdrawal,
-      sizeOf: (id: string) => state.sizes.get(id) ?? null,
-      loadSql: async (id: string) => {
+      // The pass hands FILES, never bare versions; these fixtures key by version
+      // because none of the files a body is read for shares one.
+      sizeOf: (ref: string | { id: string }) =>
+        state.sizes.get(typeof ref === "string" ? ref : ref.id) ?? null,
+      loadSql: async (ref: string | { id: string }) => {
+        const id = typeof ref === "string" ? ref : ref.id;
         state.loaded.push(id);
         state.inFlight += 1;
         state.peak = Math.max(state.peak, state.inFlight);

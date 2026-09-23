@@ -223,7 +223,8 @@ export async function readPrimeCorpusHealth(supabase: Db): Promise<PrimeCorpusHe
         };
         let body: SurveyInput["body"];
         try {
-          const sql = await corpus.loadSql(meta.id);
+          // By FILE, so the body surveyed is the file this row names.
+          const sql = await corpus.loadSql(meta);
           body = { read: true, sql, bytes: Buffer.byteLength(sql, "utf8") };
         } catch (e) {
           body =
