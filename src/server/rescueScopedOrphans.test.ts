@@ -112,7 +112,7 @@ describe("rescueScopedOrphans", () => {
     const r = await rescueScopedOrphans(
       [orphan("20261203010000")],
       corpus,
-      [{ id: "20261203010000", name: "x.sql", sql: SQL["20261203010000"] }],
+      [{ id: "20261203010000", name: "20261203010000_x.sql", sql: SQL["20261203010000"] }],
       load,
     );
     expect(r.send.map((m) => m.id)).toEqual(["20261203010000"]);
@@ -129,6 +129,131 @@ describe("rescueScopedOrphans", () => {
     expect(await rescueScopedOrphans([], corpus, [], loader())).toEqual({
       send: [],
       stillBlocked: [],
+    });
+  });
+});
+
+/**
+ * A version several files share is decided ONCE. The replay records versions,
+ * so sending one sibling while holding the other records the version over a
+ * file that never ran — and nothing sends a recorded version again.
+ */
+describe("rescueScopedOrphans — a shared version is one decision", () => {
+  const V = "20261205000000";
+  const HOLE_V = "20261204000000";
+  const file = (id: string, slug: string) => ({ id, name: `${id}_${slug}.sql` });
+  const BODIES: Record<string, string> = {
+    [`${HOLE_V}_first.sql`]: `CREATE TABLE IF NOT EXISTS public.shared_first_tbl (id int);`,
+    [`${HOLE_V}_second.sql`]: `CREATE TABLE IF NOT EXISTS public.shared_second_tbl (id int);`,
+    [`${V}_independent.sql`]: `CREATE TABLE IF NOT EXISTS public.v_independent_tbl (id int);`,
+    [`${V}_dependent.sql`]: `
+      CREATE TABLE IF NOT EXISTS public.v_dependent_log (id int);
+      INSERT INTO public.shared_second_tbl (id) VALUES (1);
+    `,
+    "20261206000000_after.sql": `UPDATE public.report_templates SET name = name WHERE false;`,
+    "20261207000000_needs_sibling.sql": `INSERT INTO public.v_independent_tbl (id) VALUES (1);`,
+  };
+  const byName = (unreadable: ReadonlySet<string> = new Set()) =>
+    vi.fn(async (m: { id: string; name: string }) => {
+      if (unreadable.has(m.name)) throw new Error(`no body for ${m.name}`);
+      const sql = BODIES[m.name];
+      if (sql === undefined) throw new Error(`no body for ${m.name}`);
+      return sql;
+    });
+  const holeFiles = [file(HOLE_V, "first"), file(HOLE_V, "second")];
+  const sharedCorpus = [
+    ...holeFiles,
+    file(V, "dependent"),
+    file(V, "independent"),
+    file("20261206000000", "after"),
+  ];
+  const orphanOf = (m: { id: string; name: string }, blockedBy: string[] = [HOLE_V]) => ({
+    meta: m,
+    blockedBy,
+  });
+
+  it("holds both files when the hole reaches either one of them", async () => {
+    const r = await rescueScopedOrphans(
+      [orphanOf(file(V, "dependent")), orphanOf(file(V, "independent"))],
+      sharedCorpus,
+      [],
+      byName(),
+    );
+    expect(r.send).toEqual([]);
+    expect(r.stillBlocked.map((o) => o.meta.name)).toEqual([
+      `${V}_dependent.sql`,
+      `${V}_independent.sql`,
+    ]);
+    for (const o of r.stillBlocked) expect(o.blockedBy).toEqual([HOLE_V]);
+  });
+
+  it("reads every file of a shared hole, each by its own name", async () => {
+    const load = byName();
+    await rescueScopedOrphans([orphanOf(file(V, "independent"))], sharedCorpus, [], load);
+    const holeReads = load.mock.calls.map(([m]) => m.name).filter((n) => n.startsWith(HOLE_V));
+    expect(holeReads).toEqual([`${HOLE_V}_first.sql`, `${HOLE_V}_second.sql`]);
+  });
+
+  it("finds what the SECOND file of a hole creates", async () => {
+    // Resolved by version, the hole read one file's body and missed what the
+    // other created; the dependent file here needs the second one's table.
+    const r = await rescueScopedOrphans(
+      [orphanOf(file(V, "dependent"))],
+      sharedCorpus,
+      [],
+      byName(),
+    );
+    expect(r.send).toEqual([]);
+    expect(r.stillBlocked[0].blockedBy).toEqual([HOLE_V]);
+  });
+
+  it("is opaque when any one file of the hole could not be read", async () => {
+    const r = await rescueScopedOrphans(
+      [orphanOf(file(V, "independent"))],
+      sharedCorpus,
+      [],
+      byName(new Set([`${HOLE_V}_second.sql`])),
+    );
+    expect(r.send).toEqual([]);
+    expect(r.stillBlocked[0].blockedBy).toEqual([HOLE_V]);
+  });
+
+  it("sends both files when nothing reaches either", async () => {
+    // A hole whose files create only the FIRST table reaches neither sibling.
+    const r = await rescueScopedOrphans(
+      [orphanOf(file(V, "independent")), orphanOf(file("20261206000000", "after"))],
+      [file(HOLE_V, "first"), file(V, "independent"), file("20261206000000", "after")],
+      [],
+      byName(),
+    );
+    expect(r.send.map((m) => m.name)).toEqual([`${V}_independent.sql`, "20261206000000_after.sql"]);
+  });
+
+  it("judges what comes after a held version against every file of it", async () => {
+    const heldV = [orphanOf(file(V, "dependent")), orphanOf(file(V, "independent"))];
+    // Nothing either file of V creates is named here, so it is sent.
+    const clear = await rescueScopedOrphans(
+      [...heldV, orphanOf(file("20261206000000", "after"), [])],
+      sharedCorpus,
+      [],
+      byName(),
+    );
+    expect(clear.send.map((m) => m.name)).toEqual(["20261206000000_after.sql"]);
+    expect(clear.stillBlocked.map((o) => o.meta.id)).toEqual([V, V]);
+
+    // This one names the table the INDEPENDENT file creates. That file was
+    // sendable on its own merits and is held only because its version is, so
+    // what it creates is still missing — and what needs it has to wait.
+    const waits = await rescueScopedOrphans(
+      [...heldV, orphanOf(file("20261207000000", "needs_sibling"), [])],
+      [...sharedCorpus, file("20261207000000", "needs_sibling")],
+      [],
+      byName(),
+    );
+    expect(waits.send).toEqual([]);
+    expect(waits.stillBlocked.at(-1)).toEqual({
+      meta: file("20261207000000", "needs_sibling"),
+      blockedBy: [V],
     });
   });
 });

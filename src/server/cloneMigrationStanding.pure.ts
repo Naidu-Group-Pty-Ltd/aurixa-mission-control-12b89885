@@ -20,20 +20,28 @@
  * said "5 PENDING". A cursor is a record of a run; a ledger is a fact about the
  * database, and this page is answering a question about the database.
  *
- * ## Why a version can never be sent
+ * ## Why a recorded shared version can never be sent again
  *
  * `supabase_migrations.schema_migrations.version` is the PRIMARY KEY, so a
- * version carried by more than one file can only ever record ONE of them.
- * `applyPrimeMigrations` skips by VERSION, so every other file at that version
- * is skipped for ever — on this clone and on every future one. The prime keeps
- * the frozen inventory in `supabase/migrations/MIGRATION_VERSION_COLLISIONS.json`
- * (42 groups, 98 files) and fails CI on a new one.
+ * version carried by more than one file is ONE row whichever of them ran.
+ * `applyPrimeMigrations` skips a version the clone records, so once it is
+ * recorded every file at it is settled for good — on this clone and on every
+ * future one. The prime keeps the frozen inventory in
+ * `supabase/migrations/MIGRATION_VERSION_COLLISIONS.json` (25 groups over 61
+ * files on 23 Sep 2026; 42 over 98 when this module was written) and fails CI
+ * on a new one.
  *
- * Ten of those 42 versions are in the prime's own ledger, so ten reach a clone
- * as runnable and each carries two files — ten files fleet-wide that the sync
- * will skip whatever anybody presses. Counting them as pending offers a button
+ * A shared version a clone does NOT yet record is sent whole — every file in
+ * one request — and recorded under every file's name joined by ` + `, which
+ * `evidenceNames` reads part by part, so each of those files reads as applied
+ * here. See `sharedVersionDelivery.pure.ts`. What is left for this reading is a
+ * version recorded WITHOUT that evidence: stamped from the prime, whose ledger
+ * records the version and, mostly, no file. Four of the 25 are recorded that
+ * way on the prime (measured 23 Sep 2026; ten of 42 when this was written) and
+ * every clone holds all four. Counting their files as pending offers a button
  * that cannot discharge them; counting them as applied claims the clone holds
- * something it does not. They are their own reading, one line per version.
+ * something it cannot be shown to. They are their own reading, one line per
+ * version.
  *
  * ## The `name` column is not evidence
  *

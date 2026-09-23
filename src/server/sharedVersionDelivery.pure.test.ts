@@ -140,4 +140,15 @@ describe("sharedVersionHoldMessage", () => {
     expect(text).toMatch(/seed_template_library_v12_guarded_verdict_line\.sql is too large/);
     expect(text).toMatch(/Nothing at this version was sent/);
   });
+
+  it("says so when no one file is too large and the request together is", () => {
+    const text = sharedVersionHoldMessage({
+      reason: "too_large",
+      version: A1.id,
+      file: null,
+      files: [A1.name, A2.name],
+    });
+    expect(text).toMatch(/together they are too large to travel/);
+    expect(text).not.toMatch(/null/);
+  });
 });

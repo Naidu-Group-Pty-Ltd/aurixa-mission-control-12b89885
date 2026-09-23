@@ -43,6 +43,15 @@
  * unrecorded and the next pass sends every file again, which is the same thing
  * a single file that fails part-way already asks of its own statements.
  *
+ * Nor does anything guard against one file's SESSION state reaching the next,
+ * because nothing at a shared version has any. Measured 23 Sep 2026 over the
+ * 61 files on the prime's HEAD, reading top-level statements only (not inside
+ * a function body or a `DO` block): the transaction-control statements are the
+ * `BEGIN`/`COMMIT` pairs of four files, each closing what it opened, and there
+ * is no `SET`, `RESET`, `set_config` or `SET ROLE` that would outlive its file.
+ * The prime's CI refuses a new shared version, so that measurement is of a set
+ * that can only shrink.
+ *
  * ## What it cannot settle
  *
  * A version the prime's ledger RECORDS clears every file at it, because the
@@ -154,8 +163,11 @@ export function sharedVersionNote(members: readonly MigrationFile[]): string {
 export type SharedVersionHold =
   /** The corpus carries files at this version that were not cleared to send. */
   | { reason: "incomplete"; version: string; sending: string[]; missing: string[] }
-  /** One of its files is too large to travel in the single request it needs. */
-  | { reason: "too_large"; version: string; file: string; files: string[] };
+  /**
+   * The single request it needs is past the size ceiling. `file` names the one
+   * file that is past it alone; null means none is, and together they are.
+   */
+  | { reason: "too_large"; version: string; file: string | null; files: string[] };
 
 /**
  * The files of `unit` the corpus carries but the replay was not handed.
@@ -192,8 +204,9 @@ export function sharedVersionHoldMessage(hold: SharedVersionHold): string {
   }
   return (
     `Version ${hold.version} is carried by ${hold.files.length} files (${hold.files.join(", ")}) and ` +
-    `${hold.file} is too large to travel in the one request that records the version. Nothing at ` +
-    `this version was sent, because sending the files apart would record the version after the ` +
-    `first of them. The remedy is on the prime: give each file a version of its own.`
+    `${hold.file === null ? "together they are" : `${hold.file} is`} too large to travel in the one ` +
+    `request that records the version. Nothing at this version was sent, because sending the files ` +
+    `apart would record the version after the first of them. The remedy is on the prime: give each ` +
+    `file a version of its own.`
   );
 }

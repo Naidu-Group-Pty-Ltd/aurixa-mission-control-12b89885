@@ -645,7 +645,7 @@ describe("the fix is mounted", () => {
     // Filed BEFORE the loop: that is what makes it complete on a pass the
     // budget stopped, and on one that broke on a cursor it could not honour.
     const holeNote = replay.indexOf("primeLedgerHoleNote(version)");
-    const loop = replay.indexOf("for (let i = 0; i < ordered.length; i++)");
+    const loop = replay.indexOf("for (const unit of versionUnits(ordered))");
     expect(holeNote).toBeGreaterThan(-1);
     expect(loop).toBeGreaterThan(holeNote);
   });

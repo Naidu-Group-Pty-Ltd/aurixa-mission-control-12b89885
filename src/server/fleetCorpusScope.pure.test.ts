@@ -706,3 +706,94 @@ describe("partitionByDependency — a hole stops only what depends on it", () =>
     expect(orphaned[0].blockedOn).toHaveLength(3);
   });
 });
+
+/**
+ * A version several files share is ONE unit: one hole, sent whole or held
+ * whole. Walked per file, the sibling no hole reached was sent, the replay
+ * recorded the version, and the sibling that waited was never sent again.
+ */
+describe("partitionByDependency — a shared version is one unit", () => {
+  const file = (
+    id: string,
+    slug: string,
+    facts?: { creates?: string[]; requires?: string[] },
+  ): { id: string; name: string; creates?: string[]; requires?: string[] } => ({
+    id,
+    name: `${id}_${slug}.sql`,
+    ...(facts?.creates !== undefined ? { creates: facts.creates } : {}),
+    ...(facts?.requires !== undefined ? { requires: facts.requires } : {}),
+  });
+  // Two real pairs from the prime's tree, 23 Sep 2026.
+  const SHARED = "20260725110000";
+  const OTHER = "20260729030000";
+
+  it("counts a withheld version once, however many files carry it", () => {
+    const metas = [
+      file(SHARED, "secure_agent_subscription_approval", { creates: [] }),
+      file(SHARED, "sign_email_sync_cron_invocations", { creates: [] }),
+    ];
+    const { holes } = partitionByDependency(metas, new Set(), new Set());
+    expect(holes).toEqual([SHARED]);
+  });
+
+  it("creates, as a hole, what every one of its files creates", () => {
+    const metas = [
+      file(SHARED, "a", { creates: ["first_obj"] }),
+      file(SHARED, "b", { creates: ["second_obj"] }),
+      file("20260801000000", "needs_second", { requires: ["second_obj"] }),
+    ];
+    const { orphaned } = partitionByDependency(metas, new Set(["20260801000000"]), new Set());
+    expect(orphaned).toHaveLength(1);
+    expect(orphaned[0].blockedBy).toEqual([SHARED]);
+    expect(orphaned[0].blockedOn).toEqual(["second_obj"]);
+  });
+
+  it("is opaque when any one of its files could not be read", () => {
+    // One file declares it creates nothing; the other was never read, and a
+    // file nobody read might create anything.
+    const metas = [
+      file(SHARED, "a", { creates: [] }),
+      file(SHARED, "b"),
+      file("20260801000000", "needs_nothing", { requires: [] }),
+    ];
+    const { send, orphaned } = partitionByDependency(metas, new Set(["20260801000000"]), new Set());
+    expect(send).toEqual([]);
+    expect(orphaned[0].blockedBy).toEqual([SHARED]);
+  });
+
+  it("holds every file of a runnable version when any one of them is blocked", () => {
+    const metas = [
+      file("20260720000000", "hole", { creates: ["wanted"] }),
+      file(OTHER, "optional_biometric_consent", { requires: [] }),
+      file(OTHER, "secure_bulk_generation_resume_cron", { requires: ["wanted"] }),
+    ];
+    const { send, orphaned } = partitionByDependency(metas, new Set([OTHER]), new Set());
+    expect(send).toEqual([]);
+    expect(orphaned.map((o) => o.meta.name)).toEqual([
+      `${OTHER}_optional_biometric_consent.sql`,
+      `${OTHER}_secure_bulk_generation_resume_cron.sql`,
+    ]);
+    // Both carry what holds the VERSION, not only what holds each file.
+    for (const o of orphaned) {
+      expect(o.blockedBy).toEqual(["20260720000000"]);
+      expect(o.blockedOn).toEqual(["wanted"]);
+    }
+  });
+
+  it("sends every file of a runnable version nothing blocks, in corpus order", () => {
+    const metas = [
+      file("20260720000000", "hole", { creates: ["unrelated"] }),
+      file(OTHER, "a", { requires: [] }),
+      file(OTHER, "b", { requires: ["clients"] }),
+    ];
+    const { send, orphaned } = partitionByDependency(metas, new Set([OTHER]), new Set());
+    expect(send.map((m) => m.name)).toEqual([`${OTHER}_a.sql`, `${OTHER}_b.sql`]);
+    expect(orphaned).toEqual([]);
+  });
+
+  it("neither sends nor counts a version the clone already records", () => {
+    const metas = [file(SHARED, "a", { creates: [] }), file(SHARED, "b", { creates: [] })];
+    const part = partitionByDependency(metas, new Set(), new Set([SHARED]));
+    expect(part).toEqual({ send: [], orphaned: [], holes: [] });
+  });
+});

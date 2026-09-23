@@ -48,6 +48,7 @@
  */
 
 import { isMachineStampedMigration } from "./migrationBodyIdentity.pure";
+import { versionUnits } from "./sharedVersionDelivery.pure";
 
 export type CorpusMeta = {
   id: string;
@@ -277,7 +278,10 @@ function nearest(sorted: readonly number[], target: number): number | null {
  * ran it. The body test cannot bridge anywhere; it can only confirm.
  *
  * It is also strictly stronger than the version test, which this corpus can
- * fool: 32 groups covering 77 files share a version string.
+ * fool: 24 versions are carried by 59 files (23 Sep 2026, withdrawals removed;
+ * 32 over 77 on 20 Sep), and a version the ledger records clears every file
+ * carrying it — including one the prime may never have run, which nothing here
+ * can tell apart. See `sharedVersionDelivery.pure.ts`.
  *
  * ## The skew test is a TIME test and only speaks about times
  *
@@ -542,62 +546,95 @@ export function partitionByDependency<T extends CorpusMeta>(
   const holes: string[] = [];
 
   /**
-   * Hole id -> the objects it creates, for the holes whose bodies were read.
-   * A hole ABSENT from this map is opaque: nobody could read it, so it blocks
-   * everything after it exactly as every hole used to.
+   * Hole version -> the objects it creates, for the holes whose bodies were
+   * read. A hole ABSENT from this map is opaque: nobody could read it, so it
+   * blocks everything after it exactly as every hole used to.
    */
   const provides = new Map<string, ReadonlySet<string>>();
 
-  for (const m of metas) {
-    // Already on this clone. Not a hole, and not ours to send again.
-    if (cloneApplied.has(m.id)) continue;
+  /** The holes so far that one FILE is blocked by, and what it waits for. */
+  const judge = (m: T): { blockedBy: ReadonlySet<string>; blockedOn: ReadonlySet<string> } => {
+    // Its own requirements could not be read. Every hole before it stands.
+    if (m.requires === undefined) return { blockedBy: new Set(holes), blockedOn: new Set() };
+    const needs = new Set(m.requires);
+    const blockedBy = new Set<string>();
+    const blockedOn = new Set<string>();
+    for (const hole of holes) {
+      const creates = provides.get(hole);
+      if (creates === undefined) {
+        // An opaque hole. Conservative, and the blanket rule's behaviour.
+        blockedBy.add(hole);
+        continue;
+      }
+      for (const need of needs) {
+        if (creates.has(need)) {
+          blockedOn.add(need);
+          blockedBy.add(hole);
+        }
+      }
+    }
+    return { blockedBy, blockedOn };
+  };
 
-    if (runnableIds.has(m.id)) {
+  /*
+    A VERSION IS THE UNIT, NOT A FILE.
+
+    Both ledgers this reads speak in versions, and a version several files
+    share is recorded ONCE for all of them — so a file is not sendable on its
+    own merits while a sibling is blocked, and a withheld version is one hole
+    however many files carry it. Walked per file, a shared version sent the
+    sibling a hole did not reach while the other waited, and the replay then
+    recorded the version: the waiting file was never sent by anything again.
+    The unit is sent whole or held whole, and it is held behind the UNION of
+    what blocks each of its files. See `sharedVersionDelivery.pure.ts`.
+
+    A version one file carries — every version but a handful — is a unit of
+    one, and walks exactly as it always did.
+  */
+  for (const unit of versionUnits(metas)) {
+    // Already on this clone. Not a hole, and not ours to send again.
+    if (cloneApplied.has(unit.version)) continue;
+
+    if (runnableIds.has(unit.version)) {
       // Nothing withheld before it: nothing to ask about.
       if (holes.length === 0) {
-        send.push(m);
+        send.push(...unit.members);
         continue;
       }
 
-      // Its own requirements could not be read. Every hole before it stands.
-      if (m.requires === undefined) {
-        orphaned.push({ meta: m, blockedBy: holes.slice(0, maxBlockedBy) });
-        continue;
-      }
-
-      const needs = new Set(m.requires);
-      const blockedBy: string[] = [];
+      const blockedBy = new Set<string>();
       const blockedOn = new Set<string>();
-      for (const hole of holes) {
-        const creates = provides.get(hole);
-        if (creates === undefined) {
-          // An opaque hole. Conservative, and the blanket rule's behaviour.
-          blockedBy.push(hole);
-          continue;
-        }
-        let hit = false;
-        for (const need of needs) {
-          if (creates.has(need)) {
-            blockedOn.add(need);
-            hit = true;
-          }
-        }
-        if (hit) blockedBy.push(hole);
+      for (const m of unit.members) {
+        const judged = judge(m);
+        for (const hole of judged.blockedBy) blockedBy.add(hole);
+        for (const need of judged.blockedOn) blockedOn.add(need);
       }
 
-      if (blockedBy.length === 0) send.push(m);
-      else
+      if (blockedBy.size === 0) {
+        send.push(...unit.members);
+        continue;
+      }
+      // In hole order, which is corpus order: the FIRST are what an operator
+      // would investigate.
+      const first = holes.filter((h) => blockedBy.has(h)).slice(0, maxBlockedBy);
+      for (const m of unit.members) {
         orphaned.push({
           meta: m,
-          blockedBy: blockedBy.slice(0, maxBlockedBy),
+          blockedBy: [...first],
           ...(blockedOn.size > 0 ? { blockedOn: [...blockedOn].slice(0, maxBlockedBy) } : {}),
         });
+      }
       continue;
     }
 
-    // Withheld by the scope and absent from this clone: a hole.
-    holes.push(m.id);
-    if (m.creates !== undefined) provides.set(m.id, new Set(m.creates));
+    // Withheld by the scope and absent from this clone: ONE hole, however
+    // many files carry the version. What it creates is known only where every
+    // file's creations were read — one unread file makes the whole hole
+    // opaque, because that file might create anything.
+    holes.push(unit.version);
+    if (unit.members.every((m) => m.creates !== undefined)) {
+      provides.set(unit.version, new Set(unit.members.flatMap((m) => m.creates ?? [])));
+    }
   }
 
   return { send, orphaned, holes };

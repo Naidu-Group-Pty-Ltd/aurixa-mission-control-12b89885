@@ -113,9 +113,11 @@ describe("the replay chunks an oversized seed", () => {
     expect(loop).toMatch(
       /if \(chunked\.stoppedEarly\) \{\s*chunkCursor = chunked\.cursor;\s*stoppedEarly = true;\s*break;/,
     );
-    expect(loop.indexOf("sentInChunks = true;")).toBeLessThan(
-      loop.indexOf("insert into supabase_migrations.schema_migrations"),
-    );
+    // The ledger is written by one helper both paths share, so what is pinned
+    // is the CALL, and that it comes after the last statement has gone.
+    const recordAt = loop.indexOf("await recordReplayedVersion(");
+    expect(recordAt).toBeGreaterThan(-1);
+    expect(loop.indexOf("sentInChunks = true;")).toBeLessThan(recordAt);
   });
 
   it("sends at least one statement a pass and resumes from the cursor", () => {
@@ -239,14 +241,14 @@ describe("the lane", () => {
     expect(gate).toMatch(
       /if \(!\(e instanceof OversizedMigrationError\) \|\| !openSqlStream\) throw e;/,
     );
-    expect(gate).toContain("sql = seedSkeleton(await readSeedShape(await openSqlStream(m.id)));");
+    expect(gate).toContain("sql = seedSkeleton(await readSeedShape(await openSqlStream(m)));");
     expect(lane).toContain(
       "assessPendingMigrations(pending, corpus.loadSql, corpus.openSqlStream)",
     );
   });
 
   it("hands the replay the stream, the cursor and a heartbeat that carries it", () => {
-    const call = sliceFrom(lane, "streamSql: (m) => corpus.openSqlStream(m.id),", 900);
+    const call = sliceFrom(lane, "streamSql: (m) => corpus.openSqlStream(m),", 900);
     expect(call).toContain("run.result?.chunk_cursor");
     expect(call).toMatch(/chunk_cursor: \{[\s\S]{0,200}?migrationId: p\.migrationId/);
     expect(call).toMatch(/chunk_cursor: \{[\s\S]{0,200}?statementsDone: p\.statementsDone/);

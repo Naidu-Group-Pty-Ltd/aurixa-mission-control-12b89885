@@ -656,7 +656,8 @@ async function executePrMerge(run: any, approvedByHuman: boolean): Promise<{ sta
  */
 async function assessPendingMigrations(
   pending: ReadonlyArray<{ id: string; name: string }>,
-  loadSql: (id: string) => Promise<string>,
+  /** Read by FILE: a version two files share is two bodies, and both are judged. */
+  loadSql: (m: { id: string; name: string }) => Promise<string>,
   /**
    * For a body the ceiling refuses: the seed's SKELETON is assessed — the
    * INSERT header, the ON CONFLICT clause and the trailing statements, which
@@ -665,7 +666,7 @@ async function assessPendingMigrations(
    * prime's ledger recorded it, and an approval would then have halted the
    * replay on the same throw.
    */
-  openSqlStream?: (id: string) => Promise<AsyncIterable<string>>,
+  openSqlStream?: (m: { id: string; name: string }) => Promise<AsyncIterable<string>>,
 ): Promise<Array<{ migration: string; reasons: string[] }>> {
   const offending: Array<{ migration: string; reasons: string[] }> = [];
   for (let i = 0; i < pending.length; i += SQL_GATE_FETCH_CONCURRENCY) {
@@ -675,11 +676,11 @@ async function assessPendingMigrations(
         try {
           let sql: string;
           try {
-            sql = await loadSql(m.id);
+            sql = await loadSql(m);
           } catch (e) {
             if (!(e instanceof OversizedMigrationError) || !openSqlStream) throw e;
             const { readSeedShape, seedSkeleton } = await import("@/server/seedChunking.pure");
-            sql = seedSkeleton(await readSeedShape(await openSqlStream(m.id)));
+            sql = seedSkeleton(await readSeedShape(await openSqlStream(m)));
           }
           const assessment = assessSqlDestructiveness(sql);
           return assessment.destructive
@@ -954,8 +955,10 @@ async function executeSqlMigration(
   const { openScopedPrimeCorpus } = await import("@/server/fleet-migration.server");
   const scoped = await openScopedPrimeCorpus(admin, source);
   if (!scoped.ok) throw new Error(scoped.error);
-  const { corpus, metas: scopedMetas, runnable } = scoped;
-  const runnableIds = new Set(runnable.map((m) => m.id));
+  // `runnableIds` is the scope's WHOLE versions — every file of each cleared —
+  // and never `runnable` mapped to its ids, which cleared a shared version on
+  // the strength of one of its files.
+  const { corpus, metas: scopedMetas, runnable, runnableIds } = scoped;
 
   const { runSqlOnProject, applyPrimeMigrations } =
     await import("@/server/backend-provisioning.server");
@@ -1037,7 +1040,8 @@ async function executeSqlMigration(
       runnable,
       // Alive, and which migration it is on — see `touchRun`.
       async (_status, detail) => touchRun(run, { in_flight: detail }),
-      (m) => corpus.loadSql(m.id),
+      // By FILE: a version two files share is two bodies.
+      (m) => corpus.loadSql(m),
       // `runnable` alone cannot say whether a cleared version sits behind a
       // withheld one. The whole corpus can — and the same enriched array the
       // partition above reads, so the replay's refusal and this lane's count
@@ -1048,7 +1052,7 @@ async function executeSqlMigration(
       // The cursor rides on the run's result, so a pass the budget stops
       // inside the seed resumes at the statement after the last one sent.
       {
-        streamSql: (m) => corpus.openSqlStream(m.id),
+        streamSql: (m) => corpus.openSqlStream(m),
         // Narrowed rather than cast. A `jsonb` read is `unknown`, and
         // `as { … } | null` is a promise to the compiler: a half-written row
         // satisfied it and was then used as a number of statements to SKIP.
@@ -1078,8 +1082,14 @@ async function executeSqlMigration(
   // refusal, and reporting the run as succeeded would claim work that did not
   // happen. What changes is only the claim the sentence makes.
   const held = (results ?? []).filter((r) => r.heldUpstreamLimited || r.heldOversize);
+  // A version a RULE held is a hold too — nothing was sent — but not one a
+  // retry can clear: a shared version that cannot travel whole waits on a
+  // change to the prime. So it is PARKED with the rule's own sentence rather
+  // than thrown into a retry loop that would re-read the same bodies to reach
+  // the same refusal.
+  const byRule = (results ?? []).filter((r) => r.heldByRule);
   const failed = (results ?? []).filter(
-    (r) => !r.success && !r.heldUpstreamLimited && !r.heldOversize,
+    (r) => !r.success && !r.heldUpstreamLimited && !r.heldOversize && !r.heldByRule,
   );
   if (failed.length > 0) {
     throw new Error(
@@ -1089,6 +1099,12 @@ async function executeSqlMigration(
   if (held.length > 0) {
     throw new Error(
       `migration ${held[0].name ?? held[0].id ?? "?"} was not sent: ${held[0].error ?? "unknown"}`,
+    );
+  }
+  if (byRule.length > 0) {
+    return parkRun(
+      run,
+      byRule.map((r) => `${r.name}: ${r.heldByRule?.detail ?? r.error ?? "held by rule"}`),
     );
   }
   // A pass that sent part of a chunked seed and nothing else still moved the

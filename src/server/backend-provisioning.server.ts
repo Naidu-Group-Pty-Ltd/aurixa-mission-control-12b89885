@@ -9,7 +9,7 @@
 
 import crypto from "node:crypto";
 
-import { classifySecret, TENANT_SCOPED_REMEDY } from "./prime-backend.server";
+import { classifySecret, MAX_MIGRATION_BYTES, TENANT_SCOPED_REMEDY } from "./prime-backend.server";
 import { OversizedMigrationError } from "./oversizedMigration.pure";
 import { assessLedgerState, ledgerRepairHint } from "./cloneLedgerState.pure";
 import { BudgetPause, ClaimLostError, cloneSaidNothing, pastDeadline } from "./provisioningBudget";
@@ -31,6 +31,13 @@ import {
   resolveMigrationFrontier,
   type MigrationFrontier,
 } from "./migrationFrontier.pure";
+import {
+  joinSharedVersionSql,
+  missingMembers,
+  sharedVersionHoldMessage,
+  sharedVersionNote,
+  versionUnits,
+} from "./sharedVersionDelivery.pure";
 
 const MGMT_API = "https://api.supabase.com/v1";
 
@@ -2360,6 +2367,28 @@ export type PrimeMigrationResult = {
    * never move the clone out of `ready`.
    */
   heldUpstreamLimited?: boolean;
+  /**
+   * Set when a RULE decided this version must not be sent as it stands. The
+   * clone was sent nothing and judged nothing, exactly as for the two holds
+   * above — and unlike them, waiting or chunking will not carry it: the
+   * remedy is a change on the prime, which `detail` names.
+   *
+   * `shared_version`: several files carry this version and they could not
+   * travel together — one was not cleared to send, or one is too large for
+   * the single request that records the version. Sending them apart would
+   * record the version after the first, and nothing would ever send the rest.
+   * See `sharedVersionDelivery.pure.ts`.
+   *
+   * Like the other holds it HALTS the replay, and like them it must never
+   * move the clone out of `ready`.
+   */
+  heldByRule?: { rule: "shared_version"; detail: string };
+  /**
+   * Every file this entry's version was sent with, where more than one file
+   * carries it. Absent for a version one file carries — which is every
+   * version but a handful.
+   */
+  sharedVersion?: string[];
 };
 
 /**
@@ -2392,24 +2421,28 @@ export async function rescueScopedOrphans<T extends { id: string; name: string }
 
   const { scopeHoles, holeRelationNames, MAX_SCOPING_BYTES } =
     await import("./cascade/migrationDependencyScope.pure");
-  const byId = new Map(corpus.map((m) => [m.id, m]));
-  const sqlOnItem = new Map(materialised.filter((m) => m.sql).map((m) => [m.id, m.sql as string]));
+  // Every corpus FILE at each version. A hole is a version, and what it
+  // creates is what every file carrying it creates.
+  const filesAt = new Map(versionUnits(corpus).map((u) => [u.version, u.members]));
+  // Keyed by FILE name: two files at one version are two bodies.
+  const sqlOnItem = new Map(
+    materialised.filter((m) => m.sql).map((m) => [m.name, m.sql as string]),
+  );
 
   /**
    * A body, or null where none can be established.
    *
    * Every throw lands on null and therefore on the prefix barrier: an
-   * oversize refusal, a GitHub 403, a corpus that does not hold the id. That
+   * oversize refusal, a GitHub 403, a corpus that does not hold the file. That
    * is the whole safety argument for this function — it can only ever fail
    * back to what the code did before it existed.
    */
-  const readSql = async (id: string): Promise<string | null> => {
-    const onItem = sqlOnItem.get(id);
+  const readSql = async (file: { id: string; name: string }): Promise<string | null> => {
+    const onItem = sqlOnItem.get(file.name);
     if (onItem !== undefined) return onItem;
-    const meta = byId.get(id);
-    if (!meta || !loadSql) return null;
+    if (!loadSql) return null;
     try {
-      const sql = await loadSql(meta);
+      const sql = await loadSql(file);
       return sql.length > MAX_SCOPING_BYTES ? null : sql;
     } catch {
       return null;
@@ -2417,20 +2450,36 @@ export async function rescueScopedOrphans<T extends { id: string; name: string }
   };
 
   const holes = new Map<string, { id: string; readable: boolean; creates: string[] }>();
-  const holeFor = async (id: string) => {
-    const hit = holes.get(id);
+  /**
+   * One hole per VERSION. Readable only where every file carrying it was read:
+   * an unread file might create anything, so one of them makes the whole hole
+   * opaque — and a version the corpus does not carry at all is unread too.
+   */
+  const holeFor = async (version: string) => {
+    const hit = holes.get(version);
     if (hit) return hit;
-    const sql = await readSql(id);
-    const made =
-      sql === null
-        ? { id, readable: false, creates: [] }
-        : { id, readable: true, creates: holeRelationNames(sql) };
-    holes.set(id, made);
+    const files = filesAt.get(version) ?? [];
+    const creates = new Set<string>();
+    let readable = files.length > 0;
+    for (const f of files) {
+      const sql = await readSql(f);
+      if (sql === null) {
+        readable = false;
+        break;
+      }
+      for (const name of holeRelationNames(sql)) creates.add(name);
+    }
+    const made = readable
+      ? { id: version, readable: true, creates: [...creates].sort() }
+      : { id: version, readable: false, creates: [] };
+    holes.set(version, made);
     return made;
   };
 
   const send: T[] = [];
   const stillBlocked: Array<{ meta: T; blockedBy: string[] }> = [];
+  /** Versions this pass has decided not to send, in the order it decided. */
+  const heldVersions: string[] = [];
   /*
     AN ORPHAN THAT STAYS BLOCKED IS A HOLE FOR THE ONES AFTER IT.
 
@@ -2446,16 +2495,85 @@ export async function rescueScopedOrphans<T extends { id: string; name: string }
     versions the prime never ran, plus every orphan this pass has just decided
     not to send. `orphaned` arrives in corpus order from
     `partitionByDependency`, which is what makes one forward pass sufficient.
+
+    AND A VERSION IS DECIDED ONCE, FOR EVERY FILE CARRYING IT.
+
+    The replay records a version, not a file, so sending one sibling while
+    holding the other would record the version over a file that never ran.
+    Each file is judged on its own body; the version is sent only if every one
+    of them may be, and held behind the union of what holds them otherwise.
   */
-  for (const orphan of orphaned) {
+  for (const unit of versionUnits(orphaned.map((o) => ({ ...o.meta, orphan: o })))) {
     const evidence: Array<{ id: string; readable: boolean; creates: string[] }> = [];
-    for (const id of orphan.blockedBy) evidence.push(await holeFor(id));
-    for (const earlier of stillBlocked) evidence.push(await holeFor(earlier.meta.id));
-    const decision = scopeHoles(await readSql(orphan.meta.id), evidence);
-    if (decision.act === "send") send.push(orphan.meta);
-    else stillBlocked.push({ meta: orphan.meta, blockedBy: [...decision.blockedBy] });
+    const seen = new Set<string>();
+    const consider = async (version: string) => {
+      if (seen.has(version)) return;
+      seen.add(version);
+      evidence.push(await holeFor(version));
+    };
+    for (const m of unit.members) for (const version of m.orphan.blockedBy) await consider(version);
+    for (const version of heldVersions) await consider(version);
+
+    const blockedBy = new Set<string>();
+    for (const m of unit.members) {
+      const decision = scopeHoles(await readSql(m.orphan.meta), evidence);
+      if (decision.act !== "send") for (const id of decision.blockedBy) blockedBy.add(id);
+    }
+    if (blockedBy.size === 0) {
+      for (const m of unit.members) send.push(m.orphan.meta);
+      continue;
+    }
+    // In the order the evidence was gathered: the partition's holes first, in
+    // corpus order, then the versions this pass held.
+    const ordered = evidence.map((e) => e.id).filter((id) => blockedBy.has(id));
+    for (const m of unit.members) stillBlocked.push({ meta: m.orphan.meta, blockedBy: ordered });
+    heldVersions.push(unit.version);
   }
   return { send, stillBlocked };
+}
+
+/**
+ * Record one replayed version in both ledgers, and say how it came to be there.
+ *
+ * The canonical Supabase table is the source of truth going forward; aurixa is
+ * kept as a mirror so older tooling and health checks keep working. (Issue
+ * #14.)
+ *
+ * And the PROVENANCE beside them. This is the one place in the product that
+ * can say "this version ran here" as a fact rather than a reading of a name —
+ * it is the code that just ran it. Everything written before this existed
+ * stays unclassified rather than being guessed at; see
+ * migrationProvenance.pure.ts.
+ *
+ * `do update` rather than `do nothing`: a version previously recorded by an
+ * assertion and since actually applied should say so. The reverse can never
+ * happen, because nothing else writes 'applied'.
+ *
+ * `name` is the file, or — for a version several files share — every file,
+ * joined by ` + `, which is the form `cloneMigrationStanding` reads part by
+ * part. One writer for both, so the two cannot come to record a version
+ * differently.
+ */
+async function recordReplayedVersion(
+  projectRef: string,
+  version: string,
+  name: string,
+): Promise<void> {
+  await runSqlOnProject(
+    projectRef,
+    `insert into supabase_migrations.schema_migrations (version, name, statements)
+       values (${sqlLiteral(version)}, ${sqlLiteral(name)}, ARRAY[]::text[])
+       on conflict (version) do nothing;
+     insert into aurixa.schema_migrations (version, name)
+       values (${sqlLiteral(version)}, ${sqlLiteral(name)})
+       on conflict (version) do nothing;
+     insert into aurixa.migration_provenance (version, provenance, note)
+       values (${sqlLiteral(version)}, 'applied', ${sqlLiteral(name)})
+       on conflict (version) do update
+         set provenance = 'applied',
+             recorded_at = now(),
+             note = excluded.note;`,
+  );
 }
 
 /**
@@ -2624,8 +2742,11 @@ export async function applyPrimeMigrations(
       Number.MAX_SAFE_INTEGER,
     );
     const rescue = await rescueScopedOrphans(part.orphaned, scope.corpus, migrations, loadSql);
-    const sendableIds = new Set([...part.send, ...rescue.send].map((m) => m.id));
-    sendable = migrations.filter((m) => sendableIds.has(m.id));
+    // By FILE name. Both lists hold every file of each version they send, and
+    // a filter by version would readmit a file the scope withheld whenever a
+    // sibling of it was cleared.
+    const sendableNames = new Set([...part.send, ...rescue.send].map((m) => m.name));
+    sendable = migrations.filter((m) => sendableNames.has(m.name));
     for (const o of rescue.stillBlocked) {
       results.push({
         id: o.meta.id,
@@ -2666,30 +2787,195 @@ export async function applyPrimeMigrations(
   }
 
   const ordered = [...sendable].sort((a, b) => a.name.localeCompare(b.name));
+  // Every file the corpus carries, which is what a version's completeness is
+  // judged against: the scoped callers' whole corpus, or — for provisioning,
+  // which replays the snapshot it just downloaded — that list itself, which
+  // carries every file by construction.
+  const corpusFiles: ReadonlyArray<{ id: string; name: string }> = scope
+    ? scope.corpus
+    : migrations;
   let attempted = 0;
   let slowestMs = 0;
   let stoppedEarly = false;
   let chunkCursorDiscarded = false;
   let chunksApplied = 0;
   let chunkCursor: ChunkCursor | null = null;
-  for (let i = 0; i < ordered.length; i++) {
-    const m = ordered[i];
-    if (applied.has(m.id)) {
-      results.push({ id: m.id, name: m.name, success: true, skipped: true });
-      latestApplied = m.id;
+  let position = 0;
+  /*
+    ONE VERSION AT A TIME, NOT ONE FILE.
+
+    The ledger records a VERSION, so the loop walks versions. A version one
+    file carries — every version but a handful — is exactly the migration this
+    loop always sent, down to the byte. A version several files share is sent
+    WHOLE: every file's own SQL in one request, recorded once, after that
+    request succeeded. Walked per file, the version was recorded after the
+    first sibling while `applied` — read once, above — still said it was
+    missing, and a budget stop, a failure or a hold between two siblings left
+    the rest behind a recorded version that nothing would ever send again.
+    See `sharedVersionDelivery.pure.ts`.
+  */
+  for (const unit of versionUnits(ordered)) {
+    const m = unit.members[0];
+    const shared = unit.members.length > 1;
+    const at = position;
+    position += unit.members.length;
+    if (applied.has(unit.version)) {
+      for (const f of unit.members) {
+        results.push({ id: f.id, name: f.name, success: true, skipped: true });
+      }
+      latestApplied = unit.version;
       continue;
+    }
+    // A version the corpus carries in more files than this replay was handed
+    // is never sent part-way. The scoped callers' partition already makes such
+    // a version a hole; this is the rule stated where the send is, so no caller
+    // can reach the request with half a version.
+    const missing = missingMembers(unit, corpusFiles);
+    if (missing.length > 0) {
+      const detail = sharedVersionHoldMessage({
+        reason: "incomplete",
+        version: unit.version,
+        sending: unit.members.map((f) => f.name),
+        missing,
+      });
+      results.push({
+        id: m.id,
+        name: m.name,
+        success: false,
+        heldByRule: { rule: "shared_version", detail },
+        error: detail,
+        sharedVersion: [...unit.members.map((f) => f.name), ...missing],
+      });
+      break;
     }
     // Asked only here — before a migration that would be sent — and never
     // before the first, so a pass that arrives with no budget left still
     // lands one rather than none. Stopping between migrations leaves the
-    // ledger consistent; stopping inside one is what the budget prevents.
+    // ledger consistent; stopping inside one is what the budget prevents —
+    // and a shared version is ONE migration here, so no budget stop can fall
+    // between two of its files.
     if (attempted > 0 && budget?.isPastDeadline(slowestMs)) {
       stoppedEarly = true;
       break;
     }
     attempted += 1;
     const startedAt = Date.now();
-    await onStatusUpdate?.("migrating", `Applying migration ${i + 1}/${ordered.length}: ${m.name}`);
+    await onStatusUpdate?.(
+      "migrating",
+      `Applying migration ${at + 1}/${ordered.length}: ${shared ? sharedVersionNote(unit.members) : m.name}`,
+    );
+    // What the ledger and the provenance record are written under: the file,
+    // or every file of a shared version — which `cloneMigrationStanding`
+    // reads part by part, so each of them reads as applied.
+    const recordedName = shared ? sharedVersionNote(unit.members) : m.name;
+    const together = shared ? { sharedVersion: unit.members.map((f) => f.name) } : {};
+    if (shared) {
+      /*
+        A SHARED VERSION TRAVELS AS ONE REQUEST, OR NOT AT ALL.
+
+        Every body is read before anything is sent. A body an upstream refused
+        to serve is the same wait it is for a single file. A body too large to
+        hold cannot travel with its siblings — the chunking lane sends one file
+        as many statements, and a version split across requests would be
+        recorded after the first of them — so the version is HELD by rule and
+        named. Anything else is thrown into the failure branch below, exactly
+        as a single file's read error is.
+      */
+      let sql: string;
+      try {
+        const bodies: string[] = [];
+        for (const f of unit.members) {
+          const body = f.sql ?? (loadSql ? await loadSql({ id: f.id, name: f.name }) : undefined);
+          if (body === undefined) {
+            throw new Error(`No SQL available for migration ${f.name} and no loader was provided`);
+          }
+          bodies.push(body);
+        }
+        sql = joinSharedVersionSql(bodies);
+        if (Buffer.byteLength(sql, "utf8") > MAX_MIGRATION_BYTES) {
+          // No one file is past the ceiling — the loader refuses those — but
+          // the request they have to share is.
+          const detail = sharedVersionHoldMessage({
+            reason: "too_large",
+            version: unit.version,
+            file: null,
+            files: unit.members.map((f) => f.name),
+          });
+          results.push({
+            id: m.id,
+            name: m.name,
+            success: false,
+            heldByRule: { rule: "shared_version", detail },
+            error: detail,
+            ...together,
+          });
+          break;
+        }
+      } catch (e) {
+        if (e instanceof ClaimLostError) throw e;
+        if (cloneSaidNothing(e)) {
+          results.push({
+            id: m.id,
+            name: m.name,
+            success: false,
+            heldUpstreamLimited: true,
+            error: e instanceof Error ? e.message : "Upstream rate limit",
+            ...together,
+          });
+          break;
+        }
+        if (e instanceof OversizedMigrationError) {
+          const detail = sharedVersionHoldMessage({
+            reason: "too_large",
+            version: unit.version,
+            file: e.migration,
+            files: unit.members.map((f) => f.name),
+          });
+          results.push({
+            id: m.id,
+            name: m.name,
+            success: false,
+            heldByRule: { rule: "shared_version", detail },
+            error: detail,
+            ...together,
+          });
+          break;
+        }
+        results.push({
+          id: m.id,
+          name: m.name,
+          success: false,
+          error: e instanceof Error ? e.message : "SQL failed",
+          ...together,
+        });
+        break;
+      }
+      try {
+        await runSqlOnProject(projectRef, sql);
+        await recordReplayedVersion(projectRef, unit.version, recordedName);
+        for (const f of unit.members) {
+          results.push({ id: f.id, name: f.name, success: true, ...together });
+        }
+        latestApplied = unit.version;
+        slowestMs = Math.max(slowestMs, Date.now() - startedAt);
+      } catch (e) {
+        if (e instanceof ClaimLostError) throw e;
+        // Unrecorded, so the next pass sends every file of it again: a file
+        // that committed its own transaction before the failure is re-run the
+        // way a single file that fails part-way re-runs its own statements.
+        results.push({
+          id: m.id,
+          name: m.name,
+          success: false,
+          error:
+            `${e instanceof Error ? e.message : "SQL failed"} ` +
+            `[sent as one request with every file at version ${unit.version}: ${recordedName}]`,
+          ...together,
+        });
+        break; // halt replay — schema state beyond this point is undefined
+      }
+      continue;
+    }
     try {
       // Resolved here, inside the loop and after the `applied` check above, so
       // a clone that is level pays for no bodies at all. A migration with
@@ -2781,34 +3067,7 @@ export async function applyPrimeMigrations(
         }
         await runSqlOnProject(projectRef, sql);
       }
-      // Record in BOTH ledgers: canonical Supabase table is the source of
-      // truth going forward, aurixa is kept as a mirror so older tooling /
-      // health checks keep working. (Issue #14.)
-      //
-      // And record the PROVENANCE beside them. This is the one place in the
-      // product that can say "this version ran here" as a fact rather than a
-      // reading of a name — it is the code that just ran it. Everything
-      // written before this existed stays unclassified rather than being
-      // guessed at; see migrationProvenance.pure.ts.
-      //
-      // `do update` rather than `do nothing`: a version previously recorded by
-      // an assertion and since actually applied should say so. The reverse can
-      // never happen, because nothing else writes 'applied'.
-      await runSqlOnProject(
-        projectRef,
-        `insert into supabase_migrations.schema_migrations (version, name, statements)
-           values (${sqlLiteral(m.id)}, ${sqlLiteral(m.name)}, ARRAY[]::text[])
-           on conflict (version) do nothing;
-         insert into aurixa.schema_migrations (version, name)
-           values (${sqlLiteral(m.id)}, ${sqlLiteral(m.name)})
-           on conflict (version) do nothing;
-         insert into aurixa.migration_provenance (version, provenance, note)
-           values (${sqlLiteral(m.id)}, 'applied', ${sqlLiteral(m.name)})
-           on conflict (version) do update
-             set provenance = 'applied',
-                 recorded_at = now(),
-                 note = excluded.note;`,
-      );
+      await recordReplayedVersion(projectRef, m.id, recordedName);
       results.push({ id: m.id, name: m.name, success: true });
       latestApplied = m.id;
       slowestMs = Math.max(slowestMs, Date.now() - startedAt);
