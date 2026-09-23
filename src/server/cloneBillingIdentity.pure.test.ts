@@ -5,6 +5,7 @@ import {
   CLONE_BILLING_ID_ENV,
   deriveCloneBillingId,
   describeBillingIdentity,
+  lastPublishedBillingUid,
   MAX_BILLING_ID_LENGTH,
   PRIME_BUILT_IN_BILLING_ID,
   type BillingIdHolder,
@@ -280,5 +281,44 @@ describe("describeBillingIdentity", () => {
 describe("the environment name is stated once", () => {
   it("is the name the prime repo's bundle reads", () => {
     expect(CLONE_BILLING_ID_ENV).toBe("VITE_AURIXA_BILLING_UID");
+  });
+});
+
+describe("lastPublishedBillingUid — what the hosting project was last given", () => {
+  it("is the newest publish that names one", () => {
+    expect(
+      lastPublishedBillingUid([
+        { billing_uid: "npc-crm-independent-6505dc", written: 6 },
+        { billing_uid: "something-older" },
+      ]),
+    ).toBe("npc-crm-independent-6505dc");
+  });
+
+  it("skips a record from before publishes named what they carried", () => {
+    // Such a publish never carried the variable, so it says nothing about it;
+    // an unchanged digest from then is the same.
+    expect(
+      lastPublishedBillingUid([
+        { skipped: true, reason: "env unchanged" },
+        { written: 5 },
+        { billing_uid: "acme-corp" },
+      ]),
+    ).toBe("acme-corp");
+  });
+
+  it("reads the worker's 'none' as no identity, never as one", () => {
+    // Stops there: the newest publish carried NONE, and an older one that
+    // carried something does not describe the hosting project now.
+    expect(
+      lastPublishedBillingUid([
+        { billing_uid: "none — this clone has no billing identity" },
+        { billing_uid: "acme-corp" },
+      ]),
+    ).toBeNull();
+  });
+
+  it("is null with no record at all, and ignores what is not a record", () => {
+    expect(lastPublishedBillingUid([])).toBeNull();
+    expect(lastPublishedBillingUid([null, "x", 3, { billing_uid: 7 }])).toBeNull();
   });
 });

@@ -257,3 +257,28 @@ export function describeBillingIdentity(
   }
   return `No billing identity recorded: ${verdict.message}`;
 }
+
+/**
+ * The identity the most recent environment publish carried, from the
+ * deployment worker's own records of its `syncing_env` step, newest first.
+ *
+ * The worker writes `billing_uid` on every publish — on a write and on a
+ * digest it found unchanged — and a record from before that field existed
+ * belongs to a publish that never carried the variable at all, so the first
+ * record naming one is the answer and a record naming none is skipped.
+ *
+ * `"none — …"` is what the worker writes when it published NO identity; it is
+ * returned as null rather than as a string that merely looks like an id,
+ * because comparing it to a column holding a real id must never succeed and
+ * displaying it as an identity would be a lie in the other direction.
+ */
+export function lastPublishedBillingUid(results: readonly unknown[]): string | null {
+  for (const result of results) {
+    if (!result || typeof result !== "object") continue;
+    const value = (result as Record<string, unknown>).billing_uid;
+    if (typeof value !== "string") continue;
+    const id = canonicaliseBillingId(value);
+    return BILLING_ID_SHAPE.test(id) && id.length >= MIN_BILLING_ID_LENGTH ? id : null;
+  }
+  return null;
+}
