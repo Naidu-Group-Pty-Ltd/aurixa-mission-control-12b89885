@@ -14,6 +14,9 @@ import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { asRow } from "@/lib/json-cast";
 import type { TablesUpdate } from "@/integrations/supabase/types";
 import {
+  billingFallbackConsequence,
+  billingFallbackSentence,
+  declaredPathArtefact,
   entryAssetPaths,
   isWrongBackend,
   readBundleIdentity,
@@ -45,7 +48,6 @@ const MAX_BYTES_PER_ASSET = 12_000_000;
 /** Never read more than the page's own entry plus its declared preloads. */
 const MAX_ASSETS = 6;
 
-/** The build id a manifest carries, or null. Used as the artefact identity. */
 /**
  * What a corrective rebuild has to produce a different one of.
  *
@@ -64,7 +66,9 @@ const MAX_ASSETS = 6;
  *
  * The hashed-asset path is untouched and needs no equivalent: an asset path
  * carries a content hash, so an unchanged source already yields an unchanged
- * artefact there.
+ * artefact there. That is also why a missing BILLING identity on a build that
+ * declares correctly is keyed on its entry chunk rather than on this — see
+ * `declaredPathArtefact`.
  */
 function declaredFaultOf(declaredRef: string, declaredSource: string | null): string {
   return `declared:${declaredSource ?? "unknown"}:${declaredRef}`;
@@ -132,24 +136,80 @@ export async function probeDeployedBundle(input: {
       }
     }
 
-    // A declaration settles it, so the bundle is never fetched. That is the
-    // difference between a few hundred bytes and five megabytes per clone per
-    // sweep, and it is also the difference between an answer and an inference.
+    // A declaration settles the BACKEND question — it is the build stating what
+    // it resolved, so nothing about the project ref is inferred from text.
+    //
+    // It settles nothing about BILLING. `/version.json` carries no identity, and
+    // this branch used to return without opening the JavaScript at all, so a
+    // declaring build's billing reading was `not_scanned` on every probe for
+    // ever — and `not_scanned` never earns a rebuild. Measured 23 Sep 2026:
+    // `npc-crm-independent`, the one clone whose build declares, had been
+    // served since 19 Sep with no identity of its own while every other clone's
+    // missing one was found and repaired by the sweep; the probe of the rebuild
+    // that re-published it still read `bytes_scanned: 0`. And porting that
+    // declaration to the prime — which the prime's own billing resolver names
+    // as outstanding — would have cascaded it to every clone, and the whole
+    // fleet's billing reading would have gone blind the same way.
+    //
+    // So a clone with an identity to look for still has its entry chunk read,
+    // for that and nothing else: the backend verdict stays the manifest's.
     if (declaredRef) {
-      const settled = readBundleIdentity({
-        source: "",
-        scanned: [`${base}/version.json`],
-        ownRef: input.ownRef,
-        primeRef: input.primeRef,
-        siteKey: input.siteKey,
-        billingUid: input.billingUid,
-        declaredRef,
-        declaredSource,
-      });
-      // The artefact is the DECLARATION, not the build that carried it — see
-      // `declaredFaultOf`. A build id changes on every rebuild, so keying the
-      // re-sync guard on one meant it never fired.
-      return { ...settled, artefact: declaredFaultOf(declaredRef, declaredSource) };
+      const manifestUrl = `${base}/version.json`;
+      const judgeDeclared = (source: string, assets: string[]) =>
+        readBundleIdentity({
+          source,
+          scanned: [manifestUrl, ...assets],
+          ownRef: input.ownRef,
+          primeRef: input.primeRef,
+          siteKey: input.siteKey,
+          billingUid: input.billingUid,
+          declaredRef,
+          declaredSource,
+        });
+
+      if (!(input.billingUid ?? "").trim()) {
+        // Nothing to look for, so nothing is fetched. The artefact is the
+        // DECLARATION, not the build that carried it — see `declaredFaultOf`.
+        // A build id changes on every rebuild, so keying the re-sync guard on
+        // one meant it never fired.
+        return {
+          ...judgeDeclared("", []),
+          artefact: declaredFaultOf(declaredRef, declaredSource),
+        };
+      }
+
+      const html = await fetchText(`${base}/`, ctl.signal);
+      const paths = html === null ? [] : entryAssetPaths(html).slice(0, MAX_ASSETS);
+      const scanned: string[] = [];
+      const parts: string[] = [];
+      const readInto = async (path: string) => {
+        const body = await fetchText(`${base}${path}`, ctl.signal);
+        if (body === null) return;
+        scanned.push(path);
+        parts.push(body);
+      };
+
+      // The entry first, and alone: the resolver that inlines the identity is
+      // imported by modules the entry carries on every build of this product
+      // (measured: each mirrored clone's reading comes from its entry chunk
+      // alone). Widened only when the entry answered neither way, for the
+      // reason `names_neither` is widened below — an absence is a fact about
+      // what was searched.
+      if (paths[0]) await readInto(paths[0]);
+      let reading = judgeDeclared(parts.join("\n"), scanned);
+      if (reading.billingUid === "not_scanned" && paths.length > 1) {
+        for (const path of paths.slice(1)) await readInto(path);
+        reading = judgeDeclared(parts.join("\n"), scanned);
+      }
+
+      return {
+        ...reading,
+        artefact: declaredPathArtefact({
+          verdict: reading.verdict,
+          declaredFault: declaredFaultOf(declaredRef, declaredSource),
+          entryAsset: paths[0] && scanned.includes(paths[0]) ? paths[0] : null,
+        }),
+      };
     }
 
     const html = await fetchText(`${base}/`, ctl.signal);
@@ -250,7 +310,7 @@ export async function verifyCloneBundleIdentity(
 ): Promise<BundleVerification> {
   const { data: row } = await admin
     .from("clone_deployments")
-    .select("clone_id, provider_slug, bundle_resync_artefact")
+    .select("clone_id, provider_slug, bundle_resync_artefact, bundle_billing_uid, bundle_artefact")
     .eq("clone_id", cloneId)
     .maybeSingle();
   if (!row)
@@ -333,14 +393,20 @@ export async function verifyCloneBundleIdentity(
     clone_id: cloneId,
     provider_slug: row.provider_slug ?? "vercel",
     action: "verify_bundle_identity",
-    // A bundle that serves the right database while crediting the prime for
-    // every purchase made on it is not a successful probe.
+    // A bundle that serves the right database while its customers' fallback
+    // link cannot buy — or credits the prime — is not a successful probe.
     success: !isWrongBackend(reading.verdict) && reading.billingUid !== "fallback",
+    // What the missing identity COSTS is read off the backend beside it: the
+    // clone's resolver spends the prime's built-in only while the build talks
+    // to the prime's project, so on a build resolving its own the fallback link
+    // is browse-only rather than crediting anybody. One sentence, shared with
+    // the card, so the log and the page cannot disagree about it.
     error_message: isWrongBackend(reading.verdict)
-      ? reading.detail
+      ? reading.billingUid === "fallback"
+        ? `${reading.detail} ${billingFallbackSentence(reading.verdict)}`
+        : reading.detail
       : reading.billingUid === "fallback"
-        ? "The artefact carries no billing identity of its own and falls through to the prime's, " +
-          "so purchases made from this workspace credit the prime."
+        ? billingFallbackSentence(reading.verdict)
         : null,
     payload: {
       verdict: reading.verdict,
@@ -361,10 +427,12 @@ export async function verifyCloneBundleIdentity(
   if (decision.resync) {
     try {
       const { requestEnvResync } = await import("./redeploy.server");
-      const res = await requestEnvResync({
-        cloneId,
-        reason: `the deployed bundle names the wrong Supabase project (${reading.verdict})`,
-      });
+      // The decision's own reason, not a fixed sentence. This used to say
+      // "names the wrong Supabase project" on every re-sync, including the
+      // ones asked for because a HEALTHY backend's bundle carried no billing
+      // identity — so the event log recorded a fault the probe had not found
+      // and hid the one it had.
+      const res = await requestEnvResync({ cloneId, reason: decision.reason });
       resyncRequested = res.queued;
     } catch {
       // Non-fatal: the reading is recorded and an operator has the button. A
@@ -373,20 +441,41 @@ export async function verifyCloneBundleIdentity(
     }
   }
 
-  if (verdictIsAboutTheClone(reading.verdict) && isWrongBackend(reading.verdict)) {
+  const wrongBackend = verdictIsAboutTheClone(reading.verdict) && isWrongBackend(reading.verdict);
+  // A missing billing identity is reported once per artefact rather than on
+  // every sweep. The wrong-backend report predates this and keeps its cadence;
+  // this one is new, and an alert that repeats every six hours about a bundle
+  // nobody has changed is an alert people learn to clear unread.
+  const newBillingFault =
+    reading.billingUid === "fallback" &&
+    (row.bundle_billing_uid !== "fallback" || row.bundle_artefact !== reading.artefact);
+  if (wrongBackend || newBillingFault) {
+    const remedy = resyncRequested
+      ? "An environment re-sync and rebuild have been requested."
+      : decision.reason;
     await admin.from("notifications").insert({
       kind: "deployment_bundle_identity",
-      severity: "error",
-      title: `Wrong backend in the bundle: ${clone?.name ?? cloneId}`,
-      body:
-        `${reading.detail} ` +
-        (resyncRequested
-          ? "An environment re-sync and rebuild have been requested."
-          : decision.reason),
+      // Money moving to the wrong workspace is an error; a fallback link that
+      // can only browse is a warning — nothing is charged wrongly.
+      severity:
+        wrongBackend || billingFallbackConsequence(reading.verdict) !== "browse_only"
+          ? "error"
+          : "warning",
+      title: wrongBackend
+        ? `Wrong backend in the bundle: ${clone?.name ?? cloneId}`
+        : `No billing identity in the bundle: ${clone?.name ?? cloneId}`,
+      body: [
+        wrongBackend ? reading.detail : null,
+        reading.billingUid === "fallback" ? billingFallbackSentence(reading.verdict) : null,
+        remedy,
+      ]
+        .filter(Boolean)
+        .join(" "),
       clone_id: cloneId,
       url: `/clones/${cloneId}`,
       metadata: {
         verdict: reading.verdict,
+        billing_uid: reading.billingUid,
         artefact: reading.artefact,
         scanned: reading.scanned,
         resync_requested: resyncRequested,

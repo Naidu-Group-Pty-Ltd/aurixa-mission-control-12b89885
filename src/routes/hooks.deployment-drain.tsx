@@ -557,17 +557,48 @@ async function step(row: DeploymentRow): Promise<StepOutcome> {
       // the widget above is: Vite inlines `VITE_*` at BUILD time, so an id
       // that arrives after `deploying` is an id the bundle does not have.
       //
-      // Read rather than derived. `clones.billing_user_id` is what every
-      // server-side resolution already uses — `startUidCheckout` looks a
-      // `?uid=` up against this exact column — so deriving a second answer
-      // here is how the bundle's fallback and the server's link come to name
-      // different workspaces. Null publishes nothing, and the clone's own
+      // Read from the column, never derived beside it. `clones.billing_user_id`
+      // is what every server-side resolution already uses — `startUidCheckout`
+      // looks a `?uid=` up against this exact column — so an answer computed
+      // here and not written there is how the bundle's fallback and the
+      // server's link come to name different workspaces.
+      //
+      // A clone that arrives with NONE is given one first, through the rule
+      // provisioning uses, and the column is written BEFORE anything is
+      // published — so the two can never disagree, and a clone provisioned
+      // while the control plane could not be read, or one that predates the
+      // writer, heals on its next build rather than shipping a bundle with no
+      // identity of its own. See `ensureCloneBillingIdForDeployment`. What
+      // cannot be given one still publishes nothing, and the clone's own
       // resolver then declines to spend the prime's built-in identity.
-      const billingUserId = clone.billing_user_id ?? null;
+      const { ensureCloneBillingIdForDeployment } =
+        await import("@/server/clone-billing-identity.server");
+      const billing = await ensureCloneBillingIdForDeployment({
+        cloneId: row.clone_id,
+        slug: clone.slug,
+        current: clone.billing_user_id,
+      });
+      const billingUserId = billing.billingId;
+      if (billing.healed) {
+        const { writeAuditLog } = await import("@/server/audit.server");
+        await writeAuditLog({
+          action: "clone.billing_identity_derived",
+          entityType: "clone",
+          entityId: row.clone_id,
+          actorUserId: null,
+          metadata: {
+            from: null,
+            to: billingUserId,
+            by: "deployment-drain:syncing_env",
+            note: billing.note,
+          },
+        });
+      }
       if (!billingUserId) {
         console.warn("[drain] clone has no billing identity; its bundle will carry none", {
           clone_id: row.clone_id,
           slug: clone.slug,
+          note: billing.note,
         });
       }
 
@@ -580,8 +611,20 @@ async function step(row: DeploymentRow): Promise<StepOutcome> {
         extra: { VITE_TURNSTILE_SITE_KEY: turnstileSiteKey },
       });
       const digest = envDigest(vars);
+      // What was published says so on BOTH branches. The digest covers the
+      // identity, so "unchanged" means the identity on the project is the one
+      // named here — and the card's "pushed to the hosting project" reads
+      // this field rather than inferring it from a digest that predates it.
+      const billingResult = {
+        billing_uid: billingUserId ?? "none — this clone has no billing identity",
+        ...(billing.healed ? { billing_uid_healed: true } : {}),
+        ...(billing.note ? { billing_uid_note: billing.note } : {}),
+      };
       if (digest === row.env_digest) {
-        return { kind: "advance", result: { skipped: true, reason: "env unchanged" } };
+        return {
+          kind: "advance",
+          result: { skipped: true, reason: "env unchanged", ...billingResult },
+        };
       }
       const synced = await provider.syncEnv(row.project_id, vars, row.team_id);
       return {
@@ -591,7 +634,7 @@ async function step(row: DeploymentRow): Promise<StepOutcome> {
           ...(synced as Record<string, unknown>),
           turnstile: turnstileNote,
           email: emailNote,
-          billing_uid: billingUserId ?? "none — this clone has no billing identity",
+          ...billingResult,
         },
       };
     }

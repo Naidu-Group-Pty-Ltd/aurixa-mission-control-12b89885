@@ -189,6 +189,7 @@ if (PUBLIC_PREFIXES.length === 0) throw new Error("unreachable");
     "checkCloneBillingId",
     "resolveCloneBillingIdForProvisioning",
     "setCloneBillingId",
+    "ensureCloneBillingIdForDeployment",
   ]) {
     const sig = src.match(new RegExp(`export async function ${fn}\\(([\\s\\S]*?)\\):`));
     if (!sig) {
@@ -202,16 +203,21 @@ if (PUBLIC_PREFIXES.length === 0) throw new Error("unreachable");
       );
     }
   }
+  // The deployment worker is a caller too: it heals a clone that reaches
+  // `syncing_env` with no identity, through the same lookup. Its client is
+  // named `admin`, which is why that name is on the list below — a check that
+  // only knows the names other files use cannot see this one pass its own.
   for (const CALLER of [
     "src/server/clone-provisioning.server.ts",
     "src/server/clone-billing-identity.functions.ts",
+    "src/routes/hooks.deployment-drain.tsx",
   ]) {
     const caller = readFileSync(CALLER, "utf8");
     const passing = caller.match(
-      /\b(?:billingIdHolders|checkCloneBillingId|resolveCloneBillingIdForProvisioning)\([\s\S]{0,400}?\)/g,
+      /\b(?:billingIdHolders|checkCloneBillingId|resolveCloneBillingIdForProvisioning|ensureCloneBillingIdForDeployment)\([\s\S]{0,400}?\)/g,
     );
     for (const call of passing ?? []) {
-      if (/\b(?:supabase|supabaseAdmin|db)\b\s*(?:,|\))/.test(call)) {
+      if (/\b(?:supabase|supabaseAdmin|admin|db)\b\s*(?:,|\))/.test(call)) {
         failures.push(
           `${CALLER}  passes a client into the billing-identity lookup:\n    ` +
             `${call.split("\n")[0].trim()}\n  Leave it off. The default is supabaseAdmin and ` +
@@ -220,6 +226,33 @@ if (PUBLIC_PREFIXES.length === 0) throw new Error("unreachable");
         );
       }
     }
+  }
+}
+
+// ── 7. The worker heals a missing identity before it publishes ─────────────
+//
+// Provisioning resolves an identity before the clone row is written, but its
+// resolution never throws — a control plane it could not read inserts the
+// clone with NULL and a note in a log. The worker is where every build is
+// made, so it is where the gap has to close: it must resolve through
+// `ensureCloneBillingIdForDeployment`, and publish what THAT returns rather
+// than the column it read before the heal.
+{
+  const DRAIN = "src/routes/hooks.deployment-drain.tsx";
+  const src = readFileSync(DRAIN, "utf8");
+  if (!/\bensureCloneBillingIdForDeployment\(/.test(src)) {
+    failures.push(
+      `${DRAIN}  never calls ensureCloneBillingIdForDeployment. A clone that reaches ` +
+        `syncing_env with no billing identity is then built with none, and nothing ` +
+        `retries the derivation — see src/server/clone-billing-identity.server.ts.`,
+    );
+  }
+  if (/const\s+billingUserId\s*=\s*clone\.billing_user_id\b/.test(src)) {
+    failures.push(
+      `${DRAIN}  publishes clone.billing_user_id as read before the heal. Publish ` +
+        `the identity ensureCloneBillingIdForDeployment returns, or a healed clone's ` +
+        `first build still ships without one.`,
+    );
   }
 }
 

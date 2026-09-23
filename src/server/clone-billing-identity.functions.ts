@@ -19,7 +19,7 @@ import {
   checkCloneBillingId,
   setCloneBillingId,
 } from "./clone-billing-identity.server";
-import { deriveCloneBillingId } from "./cloneBillingIdentity.pure";
+import { deriveCloneBillingId, lastPublishedBillingUid } from "./cloneBillingIdentity.pure";
 import { writeAuditLog } from "./audit.server";
 
 export type CloneBillingIdentity = {
@@ -33,10 +33,28 @@ export type CloneBillingIdentity = {
   suggested: string | null;
   /** The tenant this clone's spending is metered against, when it has one. */
   tenantBillingUserId: string | null;
-  /** True when the clone's own bundle would carry this id — i.e. the
-   *  environment has been synced since it was set. A claim about what was
-   *  PUSHED, which is not a claim about what the artefact holds. */
+  /**
+   * True when the most recent environment publish carried THIS id. A claim
+   * about what was PUSHED, which is not a claim about what the artefact holds.
+   *
+   * It was `Boolean(billing_user_id) && Boolean(env_digest)` — "an id exists
+   * and an environment was once pushed" — which is green for a digest written
+   * before the id existed. On 23 Sep 2026 that formula was green for
+   * `npc-crm-independent`, whose environment had last been published on
+   * 19 Sep: three days before it had an identity, and without one.
+   */
   publishedToHosting: boolean;
+  /**
+   * The identity the most recent publish actually carried, read from the
+   * worker's own record of it; null when no publish has recorded one. Lets the
+   * card say "the hosting project carries X" when X is not what is recorded.
+   */
+  publishedBillingUserId: string | null;
+  /**
+   * The backend verdict beside the billing reading. What a missing identity
+   * COSTS depends on it — see `billingFallbackConsequence`.
+   */
+  bundleIdentity: string | null;
   /**
    * What the SERVED bundle was measured to carry, from
    * `deployedBundleIdentity`. This is the one that decides where a purchase
@@ -65,14 +83,28 @@ export const getCloneBillingIdentity = createServerFn({ method: "GET" })
     if (error) throw new Error(error.message);
     if (!clone) throw new Error("Clone not found");
 
-    const [{ data: tenants }, { data: deployment }] = await Promise.all([
+    const [{ data: tenants }, { data: deployment }, { data: publishes }] = await Promise.all([
       supabaseAdmin.from("tenants").select("billing_user_id").eq("clone_id", clone.id),
       supabaseAdmin
         .from("clone_deployments")
-        .select("env_digest, bundle_billing_uid, bundle_checked_at")
+        .select("env_digest, bundle_billing_uid, bundle_checked_at, bundle_identity")
         .eq("clone_id", clone.id)
         .maybeSingle(),
+      // The worker records what each publish carried (`billing_uid` on the
+      // `syncing_env` step's result, on a write and on an unchanged digest
+      // alike). A publish from before that field existed never carried the
+      // variable at all, so the first record that names one is the answer.
+      supabaseAdmin
+        .from("deployment_events")
+        .select("result")
+        .eq("clone_id", clone.id)
+        .eq("action", "syncing_env")
+        .eq("success", true)
+        .order("created_at", { ascending: false })
+        .limit(25),
     ]);
+
+    const publishedBillingUserId = lastPublishedBillingUid((publishes ?? []).map((p) => p.result));
 
     return {
       cloneId: clone.id,
@@ -81,10 +113,17 @@ export const getCloneBillingIdentity = createServerFn({ method: "GET" })
       suggested: deriveCloneBillingId(clone.slug),
       tenantBillingUserId:
         (tenants ?? []).map((t) => t.billing_user_id).find((v): v is string => Boolean(v)) ?? null,
-      // A null digest means the next sync will push; a digest means one has
-      // been pushed. Neither proves what the live bundle holds, which is why
-      // the field is named for what was pushed.
-      publishedToHosting: Boolean(clone.billing_user_id) && Boolean(deployment?.env_digest),
+      // A null digest means the next publish writes the environment again and
+      // carries whatever the column holds then — so it is not settled as
+      // "pushed", whatever the last record said; the card says which case it
+      // is. Neither proves what the live bundle holds, which is why the field
+      // is named for what was pushed.
+      publishedToHosting:
+        Boolean(clone.billing_user_id) &&
+        Boolean(deployment?.env_digest) &&
+        publishedBillingUserId === clone.billing_user_id,
+      publishedBillingUserId,
+      bundleIdentity: deployment?.bundle_identity ?? null,
       bundleCarries:
         (deployment?.bundle_billing_uid as CloneBillingIdentity["bundleCarries"]) ?? null,
       bundleCheckedAt: deployment?.bundle_checked_at ?? null,

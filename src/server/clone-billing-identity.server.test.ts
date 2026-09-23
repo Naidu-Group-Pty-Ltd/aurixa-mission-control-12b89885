@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   billingIdHolders,
   checkCloneBillingId,
+  ensureCloneBillingIdForDeployment,
   resolveCloneBillingIdForProvisioning,
 } from "./clone-billing-identity.server";
 
@@ -219,5 +220,194 @@ describe("resolveCloneBillingIdForProvisioning", () => {
     const r = await resolveCloneBillingIdForProvisioning({ slug: "_" }, db({}));
     expect(r.billingId).toBeNull();
     expect(r.note).toContain("could be derived");
+  });
+});
+
+/**
+ * A control plane with rows in it, for the worker's heal: the heal WRITES,
+ * conditionally, and reads back — so the double has to hold state and answer
+ * `.is("billing_user_id", null)` the way Postgres does, or a test of "an
+ * operator who wrote first wins" is a test of the double.
+ */
+type CloneRow = { id: string; slug: string; name?: string; billing_user_id: string | null };
+type TenantRow = {
+  id: string;
+  display_name?: string | null;
+  external_ref?: string | null;
+  clone_id: string | null;
+  billing_user_id: string | null;
+};
+
+function controlPlane(opts: {
+  clones: CloneRow[];
+  tenants?: TenantRow[];
+  /** Make the conditional write fail with this message. */
+  failWrite?: string;
+  /** Make a holder lookup against this table fail. */
+  failLookup?: "clones" | "tenants";
+  /** An operator writes this between the heal's read and its write. */
+  operatorWritesFirst?: string;
+}) {
+  const writes: { id: string; to: unknown }[] = [];
+  const api = {
+    writes,
+    from(table: string) {
+      const rows: Record<string, unknown>[] =
+        table === "clones" ? opts.clones : ((opts.tenants ?? []) as Record<string, unknown>[]);
+      const filters: [string, unknown][] = [];
+      let patch: Record<string, unknown> | null = null;
+      const matching = () => rows.filter((r) => filters.every(([c, v]) => (r[c] ?? null) === v));
+      const chain = {
+        select: () => chain,
+        update(p: Record<string, unknown>) {
+          patch = p;
+          return chain;
+        },
+        eq(col: string, val: unknown) {
+          filters.push([col, val]);
+          return chain;
+        },
+        is(col: string, val: unknown) {
+          filters.push([col, val]);
+          return chain;
+        },
+        async maybeSingle() {
+          if (patch) {
+            if (opts.failWrite) return { data: null, error: { message: opts.failWrite } };
+            if (opts.operatorWritesFirst) {
+              const id = filters.find(([c]) => c === "id")?.[1];
+              for (const r of rows) if (r.id === id) r.billing_user_id = opts.operatorWritesFirst;
+            }
+            const target = matching();
+            for (const r of target) {
+              Object.assign(r, patch);
+              writes.push({ id: String(r.id), to: patch.billing_user_id });
+            }
+            return {
+              data: target[0] ? { billing_user_id: target[0].billing_user_id } : null,
+              error: null,
+            };
+          }
+          if (opts.failLookup === table) {
+            return { data: null, error: { message: `${table} exploded` } };
+          }
+          return { data: matching()[0] ?? null, error: null };
+        },
+      };
+      return chain;
+    },
+  };
+  return api as unknown as Parameters<typeof ensureCloneBillingIdForDeployment>[1] & typeof api;
+}
+
+describe("ensureCloneBillingIdForDeployment — the worker heals before it publishes", () => {
+  it("returns an identity the clone already holds, and reads and writes nothing", async () => {
+    const cp = controlPlane({
+      clones: [{ id: CLONE, slug: "acme-corp", billing_user_id: "chosen-by-operator" }],
+    });
+    const r = await ensureCloneBillingIdForDeployment(
+      { cloneId: CLONE, slug: "acme-corp", current: "chosen-by-operator" },
+      cp,
+    );
+    expect(r).toEqual({ billingId: "chosen-by-operator", healed: false, note: null });
+    expect(cp.writes).toEqual([]);
+  });
+
+  it("gives a clone with none the identity the rule derives, and records it first", async () => {
+    const clones: CloneRow[] = [{ id: CLONE, slug: "acme-corp", billing_user_id: null }];
+    const cp = controlPlane({ clones });
+    const r = await ensureCloneBillingIdForDeployment(
+      { cloneId: CLONE, slug: "acme-corp", current: null },
+      cp,
+    );
+    expect(r.billingId).toBe("acme-corp");
+    expect(r.healed).toBe(true);
+    // Written to the column before anything is published, so the bundle and
+    // every server-side resolution cannot name different workspaces.
+    expect(cp.writes).toEqual([{ id: CLONE, to: "acme-corp" }]);
+    expect(clones[0].billing_user_id).toBe("acme-corp");
+  });
+
+  it("heals where this clone's OWN tenant already carries the slug", async () => {
+    const cp = controlPlane({
+      clones: [{ id: CLONE, slug: "acme-corp", billing_user_id: null }],
+      tenants: [{ id: "t1", clone_id: CLONE, billing_user_id: "acme-corp" }],
+    });
+    const r = await ensureCloneBillingIdForDeployment(
+      { cloneId: CLONE, slug: "acme-corp", current: null },
+      cp,
+    );
+    expect(r.billingId).toBe("acme-corp");
+    expect(r.healed).toBe(true);
+  });
+
+  it("refuses what the rule refuses — a foreign tenant's id is never taken", async () => {
+    const cp = controlPlane({
+      clones: [{ id: CLONE, slug: "acme-corp", billing_user_id: null }],
+      tenants: [
+        { id: "t9", display_name: "Somebody Else", clone_id: OTHER, billing_user_id: "acme-corp" },
+      ],
+    });
+    const r = await ensureCloneBillingIdForDeployment(
+      { cloneId: CLONE, slug: "acme-corp", current: null },
+      cp,
+    );
+    expect(r.billingId).toBeNull();
+    expect(r.healed).toBe(false);
+    expect(r.note).toMatch(/shadow/);
+    expect(cp.writes).toEqual([]);
+  });
+
+  it("never gives a clone the prime's own identity", async () => {
+    const cp = controlPlane({ clones: [{ id: CLONE, slug: "npc-prime", billing_user_id: null }] });
+    const r = await ensureCloneBillingIdForDeployment(
+      { cloneId: CLONE, slug: "npc-prime", current: null },
+      cp,
+    );
+    expect(r.billingId).toBeNull();
+    expect(cp.writes).toEqual([]);
+  });
+
+  it("publishes the operator's choice when they recorded one while it ran", async () => {
+    const clones: CloneRow[] = [{ id: CLONE, slug: "acme-corp", billing_user_id: null }];
+    const cp = controlPlane({ clones, operatorWritesFirst: "their-choice" });
+    const r = await ensureCloneBillingIdForDeployment(
+      { cloneId: CLONE, slug: "acme-corp", current: null },
+      cp,
+    );
+    expect(r.billingId, "theirs, read back — not the derivation").toBe("their-choice");
+    expect(r.healed).toBe(false);
+    expect(clones[0].billing_user_id, "and the conditional write did not overwrite it").toBe(
+      "their-choice",
+    );
+  });
+
+  it("publishes nothing, and never throws, when the identity cannot be recorded", async () => {
+    const cp = controlPlane({
+      clones: [{ id: CLONE, slug: "acme-corp", billing_user_id: null }],
+      failWrite: "permission denied",
+    });
+    const r = await ensureCloneBillingIdForDeployment(
+      { cloneId: CLONE, slug: "acme-corp", current: null },
+      cp,
+    );
+    // An id the column does not hold, published into the bundle, is the one
+    // outcome worse than publishing none.
+    expect(r.billingId).toBeNull();
+    expect(r.note).toMatch(/could not be recorded/);
+  });
+
+  it("publishes nothing when the control plane cannot be read — it is not a free pass", async () => {
+    const cp = controlPlane({
+      clones: [{ id: CLONE, slug: "acme-corp", billing_user_id: null }],
+      failLookup: "tenants",
+    });
+    const r = await ensureCloneBillingIdForDeployment(
+      { cloneId: CLONE, slug: "acme-corp", current: null },
+      cp,
+    );
+    expect(r.billingId).toBeNull();
+    expect(cp.writes).toEqual([]);
+    expect(r.note).toMatch(/could not be checked/);
   });
 });

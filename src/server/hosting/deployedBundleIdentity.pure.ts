@@ -49,9 +49,13 @@
  * set that could not contain it would be the same mistake one field down.
  */
 
-/** The Supabase project ref pattern, as it appears in a URL or a JWT claim. */
 import { PRIME_BUILT_IN_BILLING_ID } from "@/server/cloneBillingIdentity.pure";
+import {
+  billingFallbackConsequence,
+  billingFallbackEffect,
+} from "@/lib/bundleIdentityReading.pure";
 
+/** The Supabase project ref pattern, as it appears in a URL or a JWT claim. */
 const REF = /^[a-z0-9]{16,32}$/;
 
 export type BundleIdentityVerdict =
@@ -124,6 +128,38 @@ export type BundleIdentityReading = {
   /** One sentence an operator can act on. */
   detail: string;
 };
+
+/**
+ * Does the artefact carry this billing identity as a VALUE?
+ *
+ * Not `source.includes(uid)`, which is what this was, and the difference
+ * stopped being theoretical the day identities started being derived from
+ * slugs. A slug is an ordinary string that a bundle has every other reason to
+ * contain: `preflight-property-group` is also the first label of that clone's
+ * hostname, and every clone's slug is the last segment of its repository URL.
+ * A substring match reads either of those as "the artefact carries this
+ * clone's identity" — a pass, on a bundle whose purchases fall through to
+ * somebody else — which is the green-while-true-of-nothing reading this whole
+ * module exists to end.
+ *
+ * So the identity must stand as a whole value: nothing that continues a name
+ * on either side (letters, digits, `-`, `_`), and none of the three characters
+ * that make it part of something larger — a `.` joins a hostname label, a `/`
+ * a URL path segment, an `@` an address. Every form the bundler actually emits
+ * for an inlined `VITE_*` survives that: a quoted literal (`"acme-corp"`), and
+ * the literal folded into a constant query string (`"?uid=acme-corp"`), which
+ * is what a minifier makes of a template interpolating a compile-time constant.
+ *
+ * Case-sensitive on purpose. The id is canonical lowercase, and the bundler
+ * inlines the published value byte for byte; an upper-case look-alike is a
+ * different string that happens to spell the same word.
+ */
+export function carriesIdentityLiteral(source: string, identity: string): boolean {
+  const id = identity.trim();
+  if (!id || !source) return false;
+  const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?<![A-Za-z0-9_\\-./@])${escaped}(?![A-Za-z0-9_\\-./@])`).test(source);
+}
 
 /** Is this verdict one that says the deployment is serving the wrong backend? */
 export function isWrongBackend(verdict: BundleIdentityVerdict): boolean {
@@ -212,12 +248,16 @@ export function readBundleIdentity(input: BundleIdentityInput): BundleIdentityRe
   // clone's artefact contains both, exactly as `carries_both` records for the
   // backend ref. Reading "the prime's is present" as a fault would condemn
   // every healthy clone in the fleet.
+  //
+  // Both are asked as whole values rather than substrings — see
+  // `carriesIdentityLiteral` for the hostname and repository URL that a slug
+  // also spells.
   const ownUid = (input.billingUid ?? "").trim().toLowerCase();
   const billingUid: BillingUidReading = !ownUid
     ? "none"
-    : input.source.includes(ownUid)
+    : carriesIdentityLiteral(input.source, ownUid)
       ? "own"
-      : input.source.includes(PRIME_BUILT_IN_BILLING_ID)
+      : carriesIdentityLiteral(input.source, PRIME_BUILT_IN_BILLING_ID)
         ? "fallback"
         : "not_scanned";
 
@@ -383,15 +423,56 @@ export function shouldRequestResync(input: {
         "That is a fault in the clone's own source, not in what was published to it.",
     };
   }
+  // What a missing identity COSTS depends on the backend beside it — see
+  // `billingFallbackConsequence`. This reason is written into the event log and
+  // onto the re-sync, so it may not claim the prime is being credited on a
+  // build whose own pairing check refuses the prime's identity.
   const fault = wrongBackend
     ? wrongBilling
-      ? "the bundle names the wrong backend AND carries the prime's billing identity"
+      ? "the bundle names the wrong backend AND carries no billing identity of its own"
       : "the bundle names the wrong backend"
-    : "the bundle carries the prime's billing identity, so this clone's customers' purchases credit the prime";
+    : `the bundle carries no billing identity of its own — ${billingFallbackEffect(
+        billingFallbackConsequence(input.verdict),
+      )}`;
   return {
     resync: true,
     reason: `${fault}; the published environment may not have reached the build, and rebuilding with it is the one remedy that can`,
   };
+}
+
+/**
+ * What the re-sync guard is keyed on when the build DECLARED its backend.
+ *
+ * Two faults, two keys, because a rebuild answers each of them differently.
+ *
+ * A wrong DECLARATION is keyed on the declaration itself (the server's
+ * `declaredFaultOf`). A build id changes on every deployment by construction,
+ * so a key built from one let the guard mint a fresh artefact per corrective
+ * rebuild and never fire; a rebuild that still declares the same wrong project
+ * has shown the same thing however many ids it burned.
+ *
+ * A missing BILLING identity on a build whose declaration is right is keyed on
+ * the entry chunk the identity was looked for in. That path carries a content
+ * hash and `VITE_AURIXA_BILLING_UID` is inlined into those bytes, so a rebuild
+ * that took the published identity changes it, and one that did not — a
+ * bundle reading the variable in a form no bundler substitutes — reproduces it
+ * byte for byte and the guard fires. Keyed on the declaration instead, a clone
+ * would get ONE billing rebuild for as long as its declaration stood, which is
+ * the life of the deployment, and none at all after an operator changed its
+ * identity.
+ *
+ * Nothing read — no identity to look for, or a page that would not answer —
+ * leaves the declaration as the key, exactly as before.
+ */
+export function declaredPathArtefact(input: {
+  verdict: BundleIdentityVerdict;
+  /** The declaration, as `declared:<source>:<ref>`. */
+  declaredFault: string;
+  /** The entry chunk that was actually read for the identity, or null. */
+  entryAsset: string | null;
+}): string {
+  if (isWrongBackend(input.verdict) || !input.entryAsset) return input.declaredFault;
+  return input.entryAsset;
 }
 
 /**
@@ -404,3 +485,10 @@ export function shouldRequestResync(input: {
  */
 export { bundleIdentityReading } from "@/lib/bundleIdentityReading.pure";
 export type { BundleIdentityCardReading } from "@/lib/bundleIdentityReading.pure";
+// What a missing billing identity costs, for the same reason and in the same
+// place: the card renders it and the probe records it, from one sentence.
+export {
+  billingFallbackConsequence,
+  billingFallbackSentence,
+} from "@/lib/bundleIdentityReading.pure";
+export type { BillingFallbackConsequence } from "@/lib/bundleIdentityReading.pure";
