@@ -33,6 +33,7 @@ function corpusOf(
       size: f.size === undefined ? Buffer.byteLength(f.sql, "utf8") : f.size,
     })),
     sourceSha,
+    withdrawal: { state: "absent", excluded: [], unmatched: [] },
     bodyIdentity: (id) => (files[id] ? `blob-${id}` : null),
     sizeOf: (id) => {
       const f = files[id];

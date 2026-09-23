@@ -62,6 +62,7 @@ import {
 } from "./backend-provisioning.server";
 import { scopeCorpusToPrime, assertPrimeLedgerUsable } from "./fleetCorpusScope.pure";
 import { LEDGER_BODY_DIGEST_SQL, EMPTY_BODY_SHA256 } from "./migrationBodyIdentity.pure";
+import { withdrawnButRecorded } from "./migrationWithdrawals.pure";
 import { digestPrimeBodies } from "./primeBodyDigests.server";
 import type { MigrationDependencyFacts } from "./migrationDependencyFacts.pure";
 import {
@@ -336,6 +337,29 @@ export type FleetMigrationResult = {
    * Diagnostic only. Neither number can move a migration into `runnable`.
    */
   withheldBreakdown: { neverApplied: number; skewSuspected: number; bodyUnread: number };
+  /**
+   * What the prime's `MIGRATION_WITHDRAWN.json` took out of the corpus before
+   * anything was scoped. Absent when the corpus was never read.
+   *
+   * Reported beside `withheld` and never inside it: a withheld file is one the
+   * prime has not run and a clone may be owed one day, a withdrawn file is one
+   * whose effect is deliberately absent everywhere. `unreadable` is the state
+   * to watch — it is the one in which a withdrawn file silently becomes a hole
+   * on every clone again.
+   */
+  withdrawn?: {
+    state: "absent" | "read" | "unreadable";
+    why?: string;
+    files: string[];
+    /** Listed, but not in the prime's tree. Enforced on nothing. */
+    unmatched: string[];
+    /**
+     * Withdrawn files whose version the prime's ledger RECORDS. The
+     * declaration and the ledger disagree, and which is wrong is a person's
+     * call; the file stays unsent either way.
+     */
+    recordedOnPrime: string[];
+  };
   /** Set when the run could not start at all. */
   error?: string;
 };
@@ -693,6 +717,11 @@ export async function openScopedPrimeCorpus(
       primeBodyCount: number;
       withheldEntries: ReturnType<typeof scopeCorpusToPrime<CorpusMetaOf>>["withheld"];
       primeRef: string;
+      /**
+       * Withdrawn files whose version the prime's ledger records anyway. The
+       * files stay out of the corpus; this only names the contradiction.
+       */
+      withdrawnButRecorded: ReadonlyArray<{ id: string; name: string }>;
     }
   | { ok: false; error: string }
 > {
@@ -808,6 +837,11 @@ export async function openScopedPrimeCorpus(
     primeAppliedCount: primeApplied.size,
     primeBodyCount: primeBodyDigests.size,
     primeRef,
+    withdrawnButRecorded: withdrawnButRecorded(
+      corpus.withdrawal.excluded,
+      new Set(corpus.metas.map((m) => m.id)),
+      primeApplied,
+    ),
   };
 }
 
@@ -1124,6 +1158,13 @@ export async function runFleetMigrationSync(
   const { corpus, metas: scopedMetas, runnable, sourceSha } = scoped;
   out.withheld = scoped.withheld;
   out.withheldBreakdown = scoped.breakdown;
+  out.withdrawn = {
+    state: corpus.withdrawal.state,
+    ...(corpus.withdrawal.why ? { why: corpus.withdrawal.why } : {}),
+    files: corpus.withdrawal.excluded.map((m) => m.name),
+    unmatched: [...corpus.withdrawal.unmatched],
+    recordedOnPrime: scoped.withdrawnButRecorded.map((m) => m.name),
+  };
 
   for (const backend of backends) {
     const cloneId = backend.clone_id;
@@ -2130,6 +2171,14 @@ export async function runFleetMigrationSync(
         .map((w) => w.meta.name),
       prime_backend_ref: scoped.primeRef,
       prime_applied: scoped.primeAppliedCount,
+      // What the prime declared withdrawn, and whether the declaration could be
+      // read. An unreadable manifest withdraws nothing, which turns every file
+      // it lists back into a hole — the audit row is where that shows first.
+      withdrawn_state: out.withdrawn?.state ?? null,
+      withdrawn_files: out.withdrawn?.files ?? [],
+      withdrawn_unmatched: out.withdrawn?.unmatched ?? [],
+      withdrawn_recorded_on_prime: out.withdrawn?.recordedOnPrime ?? [],
+      ...(out.withdrawn?.why ? { withdrawn_unreadable_why: out.withdrawn.why } : {}),
     },
   });
 

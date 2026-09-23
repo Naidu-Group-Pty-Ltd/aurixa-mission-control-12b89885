@@ -42,6 +42,8 @@ const state = vi.hoisted(() => ({
   /** Is the repair branch already there, and is a pull request open from it? */
   branchExists: false,
   openPr: null as null | { number: number; html_url: string },
+  /** Files the prime's MIGRATION_WITHDRAWN.json takes out of the corpus. */
+  withdrawn: [] as Array<{ id: string; name: string; path: string }>,
 }));
 
 vi.mock("./github-app.server", () => ({
@@ -107,6 +109,11 @@ vi.mock("./prime-backend.server", async (importOriginal) => {
     openPrimeMigrationCorpus: async () => ({
       metas: state.metas,
       sourceSha: "headsha0000000",
+      withdrawal: {
+        state: state.withdrawn.length > 0 ? "read" : "absent",
+        excluded: state.withdrawn,
+        unmatched: [],
+      },
       bodyIdentity: () => null,
       sizeOf: () => 100,
       loadSql: async () => {
@@ -131,6 +138,7 @@ const { openPrimeMigrationRepair, planPrimeMigrationRepair, repairBranchName, re
 const V = "20260901010000";
 
 beforeEach(() => {
+  state.withdrawn = [];
   state.routes = [];
   state.calls = [];
   state.audits = [];
@@ -190,6 +198,24 @@ describe("what else it refuses before touching anything", () => {
     expect(report.proposable).toBe(false);
     // And the ledger was never asked, because the answer could not matter.
     expect(state.routes.filter((r) => r.route.includes("git/ref"))).toEqual([]);
+  });
+
+  it("a withdrawn file — the decision is reversed on the prime, not proposed back here", async () => {
+    const W = "20260728120000";
+    state.metas = [{ id: V, name: `${V}_x.sql`, path: `supabase/migrations/${V}_x.sql` }];
+    state.withdrawn = [
+      {
+        id: W,
+        name: `${W}_aml_verification_checks.sql`,
+        path: `supabase/migrations/${W}_aml_verification_checks.sql`,
+      },
+    ];
+    await expect(planPrimeMigrationRepair({} as never, W)).rejects.toThrow(
+      /aml_verification_checks\.sql is declared withdrawn/,
+    );
+    // Refused before anything was read or written.
+    expect(writes()).toEqual([]);
+    expect(state.routes).toEqual([]);
   });
 
   it("a body it could not read", async () => {

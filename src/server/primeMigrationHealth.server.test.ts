@@ -31,6 +31,12 @@ const state = vi.hoisted(() => ({
   corpusThrows: null as null | Error,
   ledger: null as unknown,
   runnable: null as string[] | null,
+  withdrawal: { state: "absent", excluded: [], unmatched: [] } as {
+    state: "absent" | "read" | "unreadable";
+    why?: string;
+    excluded: Array<{ id: string; name: string; path: string }>;
+    unmatched: string[];
+  },
 }));
 
 vi.mock("./github-app.server", () => ({ getAppOctokit: () => ({}) }));
@@ -46,6 +52,7 @@ vi.mock("./prime-backend.server", () => ({
     return {
       metas: state.files,
       sourceSha: "abc1234def",
+      withdrawal: state.withdrawal,
       sizeOf: (id: string) => state.sizes.get(id) ?? null,
       loadSql: async (id: string) => {
         state.loaded.push(id);
@@ -121,6 +128,7 @@ function corpusOf(n: number, sql = "create table if not exists public.t (id int)
 }
 
 beforeEach(() => {
+  state.withdrawal = { state: "absent", excluded: [], unmatched: [] };
   state.loaded = [];
   state.inFlight = 0;
   state.peak = 0;
@@ -305,5 +313,43 @@ describe("what sits in front of a withheld file", () => {
 
     expect(health.surveys[0].blockedByCount).toBeNull();
     expect(health.surveys[0].standing).toBe("unknown");
+  });
+});
+
+describe("the prime's declared withdrawals", () => {
+  it("says so on the page when the manifest could not be used", async () => {
+    corpusOf(2);
+    state.withdrawal = {
+      state: "unreadable",
+      why: "MIGRATION_WITHDRAWN.json is not valid JSON",
+      excluded: [],
+      unmatched: [],
+    };
+
+    const health = await readPrimeCorpusHealth(supabase);
+
+    const text = health.notes.join(" ");
+    expect(text).toMatch(/could not be used/);
+    expect(text).toMatch(/not valid JSON/);
+  });
+
+  it("names the files it keeps off every clone", async () => {
+    corpusOf(2);
+    const file = {
+      id: "20260728120000",
+      name: "20260728120000_aml_verification_checks.sql",
+      path: "supabase/migrations/20260728120000_aml_verification_checks.sql",
+    };
+    state.withdrawal = { state: "read", excluded: [file], unmatched: [] };
+
+    const health = await readPrimeCorpusHealth(supabase);
+
+    expect(health.notes.join(" ")).toContain("20260728120000_aml_verification_checks.sql");
+  });
+
+  it("says nothing when the prime declares nothing", async () => {
+    corpusOf(2);
+    const health = await readPrimeCorpusHealth(supabase);
+    expect(health.notes.join(" ")).not.toMatch(/MIGRATION_WITHDRAWN/);
   });
 });

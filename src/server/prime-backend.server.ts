@@ -20,6 +20,13 @@ import { pruneBundleToReachable } from "./functionBundlePrune.pure";
 import { isPrimeOnlySecret } from "./primeOnlySecrets.pure";
 import { OversizedMigrationError, PrimeBodyUnavailableError } from "./oversizedMigration.pure";
 import { githubApiHeaders } from "./githubRequestHeaders.pure";
+import {
+  WITHDRAWALS_PATH,
+  partitionWithdrawn,
+  readWithdrawalManifest,
+  unreadableWithdrawals,
+  type WithdrawalReading,
+} from "./migrationWithdrawals.pure";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -635,6 +642,102 @@ let blobCache: { key: string; value: Map<string, string> } | null = null;
 export function resetPrimeSnapshotCache(): void {
   treeCache = null;
   blobCache = null;
+  withdrawalTextCache = null;
+}
+
+/**
+ * The withdrawal manifest's text, keyed by its git blob sha.
+ *
+ * Content-addressed, so it can never go stale: a changed manifest is a
+ * different sha and misses. One entry is enough — the prime has one manifest,
+ * and every reader that opens the corpus inside a sweep asks for the same one.
+ */
+let withdrawalTextCache: { sha: string; text: string } | null = null;
+
+/**
+ * Read `MIGRATION_WITHDRAWN.json` from a listing the caller has already taken.
+ *
+ * Never throws. A manifest that cannot be FETCHED is `unreadable`, and an
+ * unreadable manifest withdraws nothing — see `migrationWithdrawals.pure.ts`
+ * for why that is the safe direction. The listing is passed in rather than
+ * re-read so the manifest and the migrations it names come from one commit.
+ */
+async function readWithdrawalsFromListing(
+  octokit: Octokit,
+  ref: RepoRef,
+  blobs: ReadonlyArray<TreeBlob>,
+): Promise<WithdrawalReading> {
+  const blob = blobs.find((b) => b.path === WITHDRAWALS_PATH);
+  if (!blob) return readWithdrawalManifest(null);
+  if (withdrawalTextCache?.sha === blob.sha) {
+    return readWithdrawalManifest(withdrawalTextCache.text);
+  }
+  let text: string;
+  try {
+    text = decodeBase64Utf8(await fetchBlobBase64(octokit, ref, blob.sha));
+  } catch (e) {
+    return unreadableWithdrawals(
+      `${WITHDRAWALS_PATH} could not be fetched (${
+        e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+      })`,
+    );
+  }
+  withdrawalTextCache = { sha: blob.sha, text };
+  return readWithdrawalManifest(text);
+}
+
+/**
+ * What the withdrawal manifest took out of a corpus listing.
+ *
+ * Carried on every listing Mission Control delivers from, so an operator can
+ * see what was excluded and why — and see when the manifest could NOT be
+ * read, which is the one case where a withdrawn file becomes a hole again.
+ */
+export type PrimeWithdrawalReport = {
+  state: WithdrawalReading["state"];
+  /** Set when `state` is `unreadable`. */
+  why?: string;
+  /** Files in the tree the manifest lists. Absent from every list beside this. */
+  excluded: ReadonlyArray<PrimeMigrationMeta>;
+  /** Names the manifest lists that are not in the tree. */
+  unmatched: readonly string[];
+};
+
+/**
+ * The prime's migration files, with the declared withdrawals taken out.
+ *
+ * Every listing a delivery decision is made from goes through here, so the
+ * rule is applied once: `openPrimeMigrationCorpus` (the fleet sync, the
+ * per-clone sync, self-healing, the diagnosis, the repair, the health page,
+ * the ledger reconciliation) and `fetchPrimeMigrationList` (the registry).
+ *
+ * `fetchPrimeBackendSnapshot` deliberately does not: its introspection path
+ * stamps the prime's LEDGER rather than replaying files, and its opt-in
+ * `migration-replay` strategy is unscoped by construction and halts at the
+ * first template-library seed long before the first withdrawn file.
+ */
+async function primeMigrationEntries(
+  octokit: Octokit,
+  ref: RepoRef,
+  blobs: ReadonlyArray<TreeBlob>,
+): Promise<{
+  entries: Array<PrimeMigrationMeta & { sha: string; size?: number }>;
+  withdrawal: PrimeWithdrawalReport;
+}> {
+  const reading = await readWithdrawalsFromListing(octokit, ref, blobs);
+  const { kept, withdrawn, unmatched } = partitionWithdrawn(
+    migrationMetasFromBlobs([...blobs]),
+    reading,
+  );
+  return {
+    entries: kept,
+    withdrawal: {
+      state: reading.state,
+      ...(reading.state === "unreadable" ? { why: reading.why } : {}),
+      excluded: withdrawn.map(({ id, name, path }) => ({ id, name, path })),
+      unmatched,
+    },
+  };
 }
 
 async function listSupabaseBlobsUncached(
@@ -1052,14 +1155,19 @@ function migrationMetasFromBlobs(
 export async function fetchPrimeMigrationList(
   octokit: Octokit,
   ref: RepoRef,
-): Promise<{ migrations: PrimeMigrationMeta[]; sourceSha: string }> {
+): Promise<{
+  migrations: PrimeMigrationMeta[];
+  sourceSha: string;
+  withdrawal: PrimeWithdrawalReport;
+}> {
   const { blobs, commitSha } = await listSupabaseBlobs(octokit, ref);
-  const migrations = migrationMetasFromBlobs(blobs).map(({ id, name, path }) => ({
+  const { entries, withdrawal } = await primeMigrationEntries(octokit, ref, blobs);
+  const migrations = entries.map(({ id, name, path }) => ({
     id,
     name,
     path,
   }));
-  return { migrations, sourceSha: commitSha };
+  return { migrations, sourceSha: commitSha, withdrawal };
 }
 
 /**
@@ -1159,6 +1267,16 @@ export type PrimeMigrationCorpus = {
   /** Commit the listing was taken at. */
   sourceSha: string;
   /**
+   * What the prime's `MIGRATION_WITHDRAWN.json` took out of this corpus.
+   *
+   * A withdrawn file is absent from `metas`, `files`, `bodyIdentity`,
+   * `sizeOf`, `loadSql` and `openSqlStream` alike, so no reader can reach its
+   * body by version — which matters where a version is shared, because `byId`
+   * would otherwise resolve `20260724000000` to whichever of its two files
+   * sorts last. See `migrationWithdrawals.pure.ts`.
+   */
+  withdrawal: PrimeWithdrawalReport;
+  /**
    * Fetch one migration's SQL. Memoised, so a batch of clones missing the same
    * version pays for it once. Throws — naming the migration and its size — when
    * the body is past `MAX_MIGRATION_BYTES`.
@@ -1179,7 +1297,10 @@ export async function openPrimeMigrationCorpus(
 ): Promise<PrimeMigrationCorpus> {
   const maxBytes = opts?.maxBytes ?? MAX_MIGRATION_BYTES;
   const { blobs, commitSha } = await listSupabaseBlobs(octokit, ref);
-  const entries = migrationMetasFromBlobs(blobs);
+  // Withdrawals come out BEFORE `byId` is built, so a version shared by a
+  // withdrawn file and a live one resolves to the live one whatever their
+  // sort order.
+  const { entries, withdrawal } = await primeMigrationEntries(octokit, ref, blobs);
   const byId = new Map(entries.map((m) => [m.id, m]));
   const cache = new Map<string, Promise<string>>();
   const sizeOf = (id: string): number | null => {
@@ -1246,6 +1367,7 @@ export async function openPrimeMigrationCorpus(
       size: typeof size === "number" ? size : null,
     })),
     sourceSha: commitSha,
+    withdrawal,
     bodyIdentity: (id: string) => byId.get(id)?.sha ?? null,
     sizeOf,
     loadSql,

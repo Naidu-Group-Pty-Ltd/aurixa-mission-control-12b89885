@@ -51,6 +51,7 @@ import {
   openPrimeMigrationCorpus,
   resolvePrimeSource,
 } from "./prime-backend.server";
+import { withdrawalNotes } from "./migrationWithdrawals.pure";
 import { OversizedMigrationError } from "./oversizedMigration.pure";
 import { buildPrimeLedgerAssessment, type PrimeLedgerRepoRef } from "./primeMigrationLedger.server";
 import type { PrimeLedgerReading, WithheldRow } from "./primeMigrationLedger.pure";
@@ -174,6 +175,9 @@ export async function readPrimeCorpusHealth(supabase: Db): Promise<PrimeCorpusHe
   try {
     const corpus = await openPrimeMigrationCorpus(getAppOctokit(), source);
     headSha = corpus.sourceSha;
+    // Said on the page every time it is true, because an unreadable manifest
+    // is the one state in which a withdrawn file quietly becomes a hole again.
+    notes.push(...withdrawalNotes(corpus.withdrawal));
     facts = corpusFacts(corpus.metas, corpus.sizeOf, MAX_MIGRATION_BYTES);
 
     const byId = new Map<string, Array<{ id: string; name: string; path: string }>>();

@@ -83,6 +83,7 @@ import {
   resolvePrimeBackendRef,
   resolvePrimeSource,
 } from "./prime-backend.server";
+import { withdrawnVersionMessage } from "./migrationWithdrawals.pure";
 import { runSqlOnProject } from "./backend-provisioning.server";
 import { OversizedMigrationError } from "./oversizedMigration.pure";
 import { findVersionCollisions } from "./primeMigrationDiagnosis.pure";
@@ -193,6 +194,11 @@ export async function planPrimeMigrationRepair(
   const corpus = await openPrimeMigrationCorpus(getAppOctokit(), source);
   const here = corpus.metas.filter((m) => m.id === version);
   if (here.length === 0) {
+    // Refused with the reason rather than "no such migration": a repair of a
+    // withdrawn file would propose bringing back an effect somebody decided
+    // to remove, and that decision is reversed on the prime, not here.
+    const withdrawn = corpus.withdrawal.excluded.filter((m) => m.id === version);
+    if (withdrawn.length > 0) throw new Error(withdrawnVersionMessage(version, withdrawn));
     throw new Error(`No migration with version ${version} is on ${source.owner}/${source.repo}.`);
   }
 

@@ -196,3 +196,86 @@ describe("openPrimeMigrationCorpus", () => {
     expect(blobCalls).toHaveLength(2);
   });
 });
+
+describe("the prime's declared withdrawals", () => {
+  // Named for the prime's own case: one version, one live file and one
+  // withdrawn file — and the withdrawn one sorts LAST, which is the order in
+  // which `byId`'s last-wins used to hand its bytes to every reader of the
+  // version.
+  const LIVE = "20260724000000_live_sibling.sql";
+  const WITHDRAWN = "20260724000000_zz_withdrawn_sibling.sql";
+  const manifest = (files: string[]) =>
+    JSON.stringify({
+      schema_version: 1,
+      withdrawn: files.map((file) => ({ file, reason: "declared in a test" })),
+    });
+
+  it("takes a withdrawn file out before a shared version is resolved", async () => {
+    const { octokit } = fakeOctokit([
+      { name: LIVE, body: "create table live();" },
+      { name: WITHDRAWN, body: "create unique index withdrawn on t(x);" },
+      { name: "MIGRATION_WITHDRAWN.json", body: manifest([WITHDRAWN]) },
+    ]);
+    const corpus = await openPrimeMigrationCorpus(octokit, REF);
+
+    expect(corpus.metas.map((m) => m.name)).toEqual([LIVE]);
+    expect(corpus.files.map((f) => f.name)).toEqual([LIVE]);
+    await expect(corpus.loadSql("20260724000000")).resolves.toBe("create table live();");
+    expect(corpus.bodyIdentity("20260724000000")).toBe(`sha-${LIVE}`);
+    expect(corpus.withdrawal.state).toBe("read");
+    expect(corpus.withdrawal.excluded.map((m) => m.name)).toEqual([WITHDRAWN]);
+    expect(corpus.withdrawal.unmatched).toEqual([]);
+  });
+
+  it("reads the manifest once per blob, however many corpora are opened", async () => {
+    const { octokit, blobCalls } = fakeOctokit([
+      { name: LIVE, body: "create table live();" },
+      { name: "MIGRATION_WITHDRAWN.json", body: manifest([]) },
+    ]);
+    await openPrimeMigrationCorpus(octokit, REF);
+    await openPrimeMigrationCorpus(octokit, REF);
+    expect(blobCalls).toEqual(["sha-MIGRATION_WITHDRAWN.json"]);
+  });
+
+  it("withdraws nothing, and says why, when the manifest is not JSON", async () => {
+    const { octokit } = fakeOctokit([
+      { name: LIVE, body: "create table live();" },
+      { name: WITHDRAWN, body: "create unique index withdrawn on t(x);" },
+      { name: "MIGRATION_WITHDRAWN.json", body: "{ withdrawn: [" },
+    ]);
+    const corpus = await openPrimeMigrationCorpus(octokit, REF);
+
+    expect(corpus.metas.map((m) => m.name)).toEqual([LIVE, WITHDRAWN]);
+    expect(corpus.withdrawal.state).toBe("unreadable");
+    expect(corpus.withdrawal.why).toMatch(/not valid JSON/);
+  });
+
+  it("withdraws nothing when the manifest cannot be fetched, rather than failing the corpus", async () => {
+    const { octokit } = fakeOctokit([
+      { name: LIVE, body: "create table live();" },
+      { name: WITHDRAWN, body: "create unique index withdrawn on t(x);" },
+      { name: "MIGRATION_WITHDRAWN.json", body: manifest([WITHDRAWN]) },
+    ]);
+    const getBlob = (octokit as unknown as { git: { getBlob: ReturnType<typeof vi.fn> } }).git
+      .getBlob;
+    getBlob.mockImplementationOnce(async () => {
+      throw new Error("502 from GitHub");
+    });
+    const corpus = await openPrimeMigrationCorpus(octokit, REF);
+
+    expect(corpus.metas.map((m) => m.name)).toEqual([LIVE, WITHDRAWN]);
+    expect(corpus.withdrawal.state).toBe("unreadable");
+    expect(corpus.withdrawal.why).toMatch(/could not be fetched.*502 from GitHub/);
+  });
+
+  it("names a declaration about a file the tree does not carry", async () => {
+    const { octokit } = fakeOctokit([
+      { name: LIVE, body: "create table live();" },
+      { name: "MIGRATION_WITHDRAWN.json", body: manifest(["20990101000000_not_here.sql"]) },
+    ]);
+    const corpus = await openPrimeMigrationCorpus(octokit, REF);
+
+    expect(corpus.metas.map((m) => m.name)).toEqual([LIVE]);
+    expect(corpus.withdrawal.unmatched).toEqual(["20990101000000_not_here.sql"]);
+  });
+});

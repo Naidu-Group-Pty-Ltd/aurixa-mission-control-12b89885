@@ -27,6 +27,8 @@ const state = vi.hoisted(() => ({
   loadThrows: null as null | Error,
   sourceNull: false,
   backendThrows: false,
+  /** Files the prime's MIGRATION_WITHDRAWN.json takes out of the corpus. */
+  withdrawn: [] as Array<{ id: string; name: string; path: string }>,
 }));
 
 vi.mock("./github-app.server", () => ({ getAppOctokit: () => ({}) }));
@@ -43,6 +45,11 @@ vi.mock("./prime-backend.server", () => ({
   openPrimeMigrationCorpus: async () => ({
     metas: state.files,
     sourceSha: "abc1234",
+    withdrawal: {
+      state: state.withdrawn.length > 0 ? "read" : "absent",
+      excluded: state.withdrawn,
+      unmatched: [],
+    },
     loadSql: async (id: string) => {
       if (state.loadThrows) throw state.loadThrows;
       const sql = state.bodies.get(id);
@@ -92,6 +99,7 @@ function ledgerHolds(...versions: string[]) {
 }
 
 beforeEach(() => {
+  state.withdrawn = [];
   state.ran = [];
   state.respond = null;
   state.failOn = null;
@@ -271,6 +279,27 @@ describe("what it refuses to answer at all", () => {
     await expect(diagnosePrimeMigration({} as never, "20260901010000")).rejects.toThrow(
       /npc-property-dashbord/,
     );
+  });
+
+  it("a withdrawn version is refused with the declaration, not as a missing file", async () => {
+    corpus(["20260801010000", "20260801010000_a.sql", "select 1;"]);
+    ledgerHolds("20260801010000");
+    state.withdrawn = [
+      {
+        id: "20260728120000",
+        name: "20260728120000_aml_verification_checks.sql",
+        path: "supabase/migrations/20260728120000_aml_verification_checks.sql",
+      },
+    ];
+    const attempt = diagnosePrimeMigration({} as never, "20260728120000");
+    await expect(attempt).rejects.toThrow(
+      /20260728120000_aml_verification_checks\.sql is declared withdrawn/,
+    );
+    await expect(diagnosePrimeMigration({} as never, "20260728120000")).rejects.not.toThrow(
+      /No migration with version/,
+    );
+    // Nothing was sent anywhere to reach that answer.
+    expect(state.ran).toEqual([]);
   });
 
   it("an unreachable prime backend still reads the file and says the run did not happen", async () => {

@@ -58,6 +58,7 @@ import {
   resolvePrimeBackendRef,
   resolvePrimeSource,
 } from "./prime-backend.server";
+import { withdrawnVersionMessage } from "./migrationWithdrawals.pure";
 import { runSqlOnProject } from "./backend-provisioning.server";
 import { OversizedMigrationError } from "./oversizedMigration.pure";
 import { reconcileMigration } from "./primeLedgerReconciliation.pure";
@@ -206,6 +207,11 @@ export async function diagnosePrimeMigration(
   const collisions = findVersionCollisions(corpus.metas);
   const here = corpus.metas.filter((m) => m.id === version);
   if (here.length === 0) {
+    // A withdrawn file is not missing: it is on the prime, deliberately, and
+    // "no such migration" would send an operator looking for a file that is
+    // exactly where it should be.
+    const withdrawn = corpus.withdrawal.excluded.filter((m) => m.id === version);
+    if (withdrawn.length > 0) throw new Error(withdrawnVersionMessage(version, withdrawn));
     throw new Error(`No migration with version ${version} is on ${source.owner}/${source.repo}.`);
   }
   // On a collision the FIRST file in corpus order is diagnosed and the rest
