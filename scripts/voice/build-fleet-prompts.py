@@ -819,6 +819,15 @@ Never say raw variables aloud.""",
         "Use availability or booking tools",
         "Push next steps unless the caller asks",
     ],
+    extra_never=[
+        "Call availability or booking tools, or book/reschedule/cancel anything directly",
+        "Trigger a transfer before the caller clearly confirms the intent",
+        "Continue speaking after the silent transfer",
+    ],
+    extra_always=[
+        "Call phoneNumber_inject once, silently, before every transfer, with confirmedIntent and callerReason",
+        "Transfer only to 'MC Review Booking', 'MC Solutions Advisor', or 'MC Support Intake', by name, silently",
+    ],
     extra_sections="""# 14. Squad Routing & Handoff
 
 Angela does not book or manage appointments herself. Her role is to
@@ -1714,18 +1723,8 @@ def build(agent_key: str) -> str:
         parts.append(a["extra_sections"])
     if "book_appointment" in a["tools"]:
         parts.append(booking_block(p))
-    extra_never = []
-    extra_always = []
-    if agent_key == "front_desk":
-        extra_never = [
-            "Call availability or booking tools, or book/reschedule/cancel anything directly",
-            "Trigger a transfer before the caller clearly confirms the intent",
-            "Continue speaking after the silent transfer",
-        ]
-        extra_always = [
-            "Call phoneNumber_inject once, silently, before every transfer, with confirmedIntent and callerReason",
-            "Transfer only to 'MC Review Booking', 'MC Solutions Advisor', or 'MC Support Intake', by name, silently",
-        ]
+    extra_never = list(a.get("extra_never", []))
+    extra_always = list(a.get("extra_always", []))
     if "raise_support_ticket" in a["tools"]:
         extra_never = extra_never + [
             "Invent a ticket reference, or say a report is logged before raise_support_ticket returns one",
@@ -1784,7 +1783,49 @@ def render() -> dict:
             "file": f"{key}.md",
         }
     out["manifest.json"] = json.dumps(manifest, indent=2)
+    out["fleet-spec.json"] = fleet_spec()
     return out
+
+
+def fleet_spec() -> str:
+    """The agent data this generator renders from, for the TypeScript recipe book.
+
+    src/lib/voice-recipe/ is a port of the section functions above, so that the
+    Voice Cloning Studio can build fleets for other businesses from the same
+    proven structure. Its golden test compiles THIS file with the Aurixa
+    business context and must reproduce every fleet-prompts/*.md byte for byte
+    - which is what proves the port and this generator describe one prompt.
+    Emitting the data rather than retyping it means the agents are written
+    once; --check byte-compares it like every other generated file here.
+    """
+    spec = {}
+    for key, a in AGENTS.items():
+        spec[key] = {
+            "name": a["name"],
+            "assistant_id": a["aid"],
+            "persona": a["persona"],
+            "temperament": a["temperament"],
+            "outbound": a["outbound"],
+            "tools": a["tools"],
+            "role_title": a["role_title"],
+            "role_summary": a["role_summary"],
+            "opening": a["opening"],
+            "can_do": a["can_do"],
+            "cannot_do": a["cannot_do"],
+            "extra_sections": a.get("extra_sections"),
+            "dialogues": [
+                {
+                    "title": d[0],
+                    "caller": d[1],
+                    "reply": d[2],
+                    "after": d[3] if len(d) > 3 else None,
+                }
+                for d in a["dialogues_list"]
+            ],
+            "extra_never": a.get("extra_never", []),
+            "extra_always": a.get("extra_always", []),
+        }
+    return json.dumps({"agents": spec}, indent=2) + "\n"
 
 
 def check() -> int:
