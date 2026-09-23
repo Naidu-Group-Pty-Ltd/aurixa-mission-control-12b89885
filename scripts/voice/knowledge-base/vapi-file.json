@@ -14,11 +14,16 @@
     "to a different remedy, so both are recorded.",
     "",
     "A null file_id means the fleet's knowledge base is not managed from here",
-    "and apply-fleet-upgrade.py leaves every query tool exactly as it found it."
+    "and apply-fleet-upgrade.py leaves every query tool exactly as it found it.",
+    "",
+    "`previous_file_id` is the corpus the fleet answered from before this one. It",
+    "is kept rather than deleted, because rolling back is then one value here plus",
+    "a re-run of apply-fleet-upgrade.py rather than a re-upload."
   ],
-  "file_id": null,
-  "uploaded_at": null,
-  "bytes": 27591,
-  "sha256": "ea6ee7478c625eeca495ad9c0545e4df9e6b46fb3343314309731cf694470e89",
-  "source": "scripts/voice/knowledge-base/aurixa-voice-knowledge-base.md"
+  "file_id": "0af91eda-7a07-41b6-87be-72f75317dced",
+  "uploaded_at": "2026-09-23T14:33:03Z",
+  "bytes": 27371,
+  "sha256": "edf6f547f1777c9d94a9b94588419b38b81013105677eb2f7451de15e460e37a",
+  "source": "scripts/voice/knowledge-base/aurixa-voice-knowledge-base.md",
+  "previous_file_id": "6b497eaa-671c-4e6f-892f-212c54e83619"
 }

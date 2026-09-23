@@ -186,7 +186,42 @@ id and verifies it by read-back, which removes the last hand step.
 
 A null `file_id` means the corpus is not managed from here and every query tool
 is left exactly as found — **unbinding a knowledge base leaves every assistant
-answering from nothing, which is worse than a stale one.**
+answering from nothing, which is worse than a stale one.** VAPI stores the file
+id in *two* places on an assistant — the inline query tool's
+`knowledgeBases[].fileIds` and `model.knowledgeBase.fileIds` — and both carried
+the same id on all twelve when this was measured, so both are written together
+or neither is: an assistant naming two different corpora is worse than a stale
+one too.
+
+The corpus is rendered ASCII-only. A U+2014 reads no differently to a retrieval
+index or a TTS engine, and the file is carried by hand between this repository
+and a vendor's file store — every step of that journey is somewhere an encoding
+can be mangled silently, and an ASCII artefact can be compared byte for byte at
+either end. Which is what was done: the upload was read back from the store and
+its MD5 matched the committed file exactly.
+
+---
+
+## What is live, and how that was established
+
+Applied 23 Sep 2026 to all twelve assistants in org `453f00c2…`. Every write was
+a full `model` PATCH (a VAPI PATCH replaces a whole top-level key) built from a
+GET taken moments earlier, and every one was verified by a **fresh GET** rather
+than by the PATCH's own response:
+
+- `PATCH=200` on all twelve.
+- The **MD5 of the live system message equals the MD5 of the prompt this
+  repository generates**, on all twelve. Not the length — the bytes.
+- `toolIds` carry `end_call_tool` on all twelve, `transfer_to_human_mc` on the
+  four reception assistants, and `raise_support_ticket` on Support Intake.
+- The inline tool set is still exactly the knowledge-base `query` tool: nothing
+  was deleted, which is the defect this work exists to end.
+- Both knowledge-base file ids read `0af91eda-7a07-41b6-87be-72f75317dced`.
+- `model.model` is unchanged at `gpt-5.6-luna` on all twelve.
+
+The live state was also read **before** any write, and it matched this
+repository byte for byte on all twelve — so the drift this work was braced for
+did not exist, and the audit is recorded here rather than assumed.
 
 ---
 

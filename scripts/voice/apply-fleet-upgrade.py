@@ -39,8 +39,15 @@ KB = json.load(open(os.path.join(S, "knowledge-base", "vapi-file.json")))
 KB_FILE_ID = KB.get("file_id")
 
 
-def repoint_knowledge_base(tools):
-    """Point every inline `query` tool at the recorded knowledge-base file.
+def repoint_knowledge_base(model):
+    """Point this assistant at the recorded knowledge-base file.
+
+    VAPI stores the file id in TWO places on an assistant - the inline `query`
+    tool's `knowledgeBases[].fileIds`, and `model.knowledgeBase.fileIds` - and
+    both were carrying the same id on all twelve when this was measured.
+    Updating one and not the other leaves an assistant naming two different
+    corpora, which is a worse state than the stale one it started in, so both
+    are written together or neither is.
 
     The knowledge base used to reach the fleet by hand: build the document,
     upload it to VAPI, then edit twelve assistants to name the new file id.
@@ -54,13 +61,17 @@ def repoint_knowledge_base(tools):
     if not KB_FILE_ID:
         return 0
     changed = 0
-    for t in tools:
+    for t in model.get("tools") or []:
         if t.get("type") != "query":
             continue
         for kb in t.get("knowledgeBases") or []:
             if kb.get("fileIds") != [KB_FILE_ID]:
                 kb["fileIds"] = [KB_FILE_ID]
                 changed += 1
+    kb = model.get("knowledgeBase")
+    if isinstance(kb, dict) and kb.get("fileIds") != [KB_FILE_ID]:
+        kb["fileIds"] = [KB_FILE_ID]
+        changed += 1
     return changed
 
 
@@ -116,7 +127,7 @@ def main():
         # Nothing inline is ours to delete. The manifest governs `toolIds`; it
         # says nothing about what VAPI or an operator attached inline.
         model["tools"] = list(model.get("tools") or [])
-        repointed = repoint_knowledge_base(model["tools"])
+        repointed = repoint_knowledge_base(model)
 
         # toolIds are declarative from the manifest, but an id the manifest
         # does not name is KEPT rather than dropped: losing a binding silently
@@ -158,6 +169,7 @@ def main():
                 for kb in t.get("knowledgeBases") or []
                 for f in kb.get("fileIds") or []
             }
+            | set(((vm.get("knowledgeBase") or {}).get("fileIds")) or [])
         )
         got_sys = next(x for x in vm["messages"] if x["role"] == "system")["content"]
         # Assert what this script is responsible for, and nothing more. The old

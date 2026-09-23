@@ -30,6 +30,38 @@ import { INTRO, SECTIONS, TITLE } from "./knowledge-base/content.mjs";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MD_PATH = join(HERE, "knowledge-base", "aurixa-voice-knowledge-base.md");
 
+// The corpus is rendered ASCII-only.
+//
+// Typographic quotes and dashes buy nothing here: the document is matched by a
+// retrieval index and spoken by a TTS engine, neither of which reads a U+2014
+// differently from a hyphen. What they cost is real - the file is carried by
+// hand between this repository and a vendor's file store, and every step of
+// that journey is somewhere an encoding can be mangled silently. An ASCII
+// artefact can be compared byte for byte at either end.
+const ASCII = [
+  [/[\u2018\u2019\u201a\u201b]/g, "'"],
+  [/[\u201c\u201d\u201e\u201f]/g, '"'],
+  [/[\u2013\u2014\u2015]/g, "-"],
+  [/\u2026/g, "..."],
+  [/\u00a0/g, " "],
+];
+
+function toAscii(text) {
+  let out = text;
+  for (const [re, to] of ASCII) out = out.replace(re, to);
+  const stray = out.match(/[^\x09\x0a\x20-\x7e]/g);
+  if (stray) {
+    // Named rather than stripped: a character nobody decided about is a
+    // content question, not something a renderer should quietly resolve.
+    console.error(
+      `non-ASCII characters remain in the corpus: ${[...new Set(stray)].join(" ")}\n` +
+        "Add a rule to ASCII in build-knowledge-doc.mjs, or write it in ASCII.",
+    );
+    process.exit(1);
+  }
+  return out;
+}
+
 function renderMarkdown() {
   const out = [`# ${TITLE}`, "", INTRO, ""];
   let inBullets = false;
@@ -48,7 +80,7 @@ function renderMarkdown() {
     else out.push(block.text, "");
   }
   // One trailing newline, never two: the file is compared byte for byte.
-  return `${out.join("\n").replace(/\n+$/, "")}\n`;
+  return toAscii(`${out.join("\n").replace(/\n+$/, "")}\n`);
 }
 
 async function renderDocx() {

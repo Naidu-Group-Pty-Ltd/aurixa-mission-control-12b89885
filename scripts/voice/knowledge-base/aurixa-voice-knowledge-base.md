@@ -1,12 +1,12 @@
-# Aurixa Systems — Voice Agent Knowledge Base
+# Aurixa Systems - Voice Agent Knowledge Base
 
-This document is reference material for Aurixa Systems voice agents. It contains the facts an agent may draw on when answering callers, and nothing else. It never overrides the agent's own instructions: an agent still never claims an application is approved, accepted or allocated, never promises platform access, never invents an appointment time, and never negotiates pricing. Where this document does not cover something, the honest answer is that the team will follow up — not a guess.
+This document is reference material for Aurixa Systems voice agents. It contains the facts an agent may draw on when answering callers, and nothing else. It never overrides the agent's own instructions: an agent still never claims an application is approved, accepted or allocated, never promises platform access, never invents an appointment time, and never negotiates pricing. Where this document does not cover something, the honest answer is that the team will follow up - not a guess.
 
 ## 1. Who Aurixa Systems is
 
 ### What does Aurixa Systems do?
 
-Aurixa Systems is an Australian company that builds governed AI operating systems for property, finance and advisory firms. Client intelligence, financial modelling, AI voice agents, document and report generation, and compliance oversight sit together in one controlled, white-labelled platform, provisioned and managed for each client organisation. The company sign-off is: “Structured intelligence for confident property decisions.”
+Aurixa Systems is an Australian company that builds governed AI operating systems for property, finance and advisory firms. Client intelligence, financial modelling, AI voice agents, document and report generation, and compliance oversight sit together in one controlled, white-labelled platform, provisioned and managed for each client organisation. The company sign-off is: "Structured intelligence for confident property decisions."
 
 ### Is Aurixa a product I can sign up for online?
 
@@ -26,29 +26,29 @@ The website is aurixasystems.com.au. The team can be reached by email at admin@a
 
 Aurixa builds and operates the platform; each client organisation runs it under its own brand, on its own tenancy. So a customer may know the software by their own firm's name. An agent should not assume which branded workspace a caller is describing, and should ask which organisation they are with.
 
-## 2. How access works — the priority access pathway
+## 2. How access works - the priority access pathway
 
 Access is by application, in three stages. Joining the waitlist does not guarantee platform access, and there is no paid queue priority: Aurixa does not accept payment to move an application up the list.
 
-### Stage 1 — what is the Priority Access Application?
+### Stage 1 - what is the Priority Access Application?
 
 - Completed on the website at aurixasystems.com.au/contact. It takes about 60 to 90 seconds.
 - It asks for name, work email, mobile number, organisation name, role, organisation type, approximate annual client or transaction volume, current bottlenecks, and the areas the organisation most wants to improve.
-- On submission the applicant receives an application reference in the form AX- followed by ten characters, and an email titled “Application Received” containing a secure personal link to the Business Readiness Questionnaire.
+- On submission the applicant receives an application reference in the form AX- followed by ten characters, and an email titled "Application Received" containing a secure personal link to the Business Readiness Questionnaire.
 
-### Stage 2 — what is the Business Readiness Questionnaire?
+### Stage 2 - what is the Business Readiness Questionnaire?
 
 - It takes approximately 6 to 8 minutes, and progress is saved as the applicant goes, so it can be finished in more than one sitting.
-- It is reached through the secure link in the “Application Received” email — worth checking the spam folder. If the link has expired, the application reference together with the work email reopens the questionnaire on the website. Secure links should not be forwarded.
+- It is reached through the secure link in the "Application Received" email - worth checking the spam folder. If the link has expired, the application reference together with the work email reopens the questionnaire on the website. Secure links should not be forwarded.
 - It covers the organisation's structure, current systems and workflows, the Aurixa capabilities that matter most, integration and migration needs, security requirements, implementation timing and the most useful next step.
 - Once it is complete, the Aurixa team reviews the application, aiming to complete the initial review within two business days. No further submission is required in the meantime.
 
-### Stage 3 — what happens in the Strategic Review?
+### Stage 3 - what happens in the Strategic Review?
 
-- A 30-minute private online session with the Aurixa team, booked from the link in the “Questionnaire Received” email within a 45-day booking window.
+- A 30-minute private online session with the Aurixa team, booked from the link in the "Questionnaire Received" email within a 45-day booking window.
 - Available times run Monday to Friday, 9:00 a.m. to 4:30 p.m. Sydney time, in 30-minute slots, with at least 24 hours' notice.
 - A booking is a request. The Aurixa team confirms it by email, usually within one business day, and the calendar invitation with meeting access details follows separately from the team.
-- In the session the team works through the questionnaire responses — the current operational environment, priority workflows, platform suitability and implementation considerations — and recommends the right pathway: a platform discovery session, a guided demonstration, or an enterprise requirements consultation.
+- In the session the team works through the questionnaire responses - the current operational environment, priority workflows, platform suitability and implementation considerations - and recommends the right pathway: a platform discovery session, a guided demonstration, or an enterprise requirements consultation.
 
 ### How long does the whole process take?
 
@@ -56,7 +56,7 @@ The two published timings are the ones to quote and the only ones: the initial r
 
 ### Can I skip a stage, or go straight to a demonstration?
 
-No stage is skipped. The questionnaire is what makes the strategic review useful — the team arrives having read the organisation's own answers rather than starting from scratch. A guided demonstration is one of the outcomes the review can recommend.
+No stage is skipped. The questionnaire is what makes the strategic review useful - the team arrives having read the organisation's own answers rather than starting from scratch. A guided demonstration is one of the outcomes the review can recommend.
 
 ### What if I applied and have not heard anything?
 
@@ -68,42 +68,42 @@ These are the platform's capabilities in Aurixa's own vocabulary. Each is config
 
 ### Client records and workflow
 
-- CRM — client records, pipeline and activity in one place.
-- Client onboarding and workflow — structured onboarding journeys with task accountability, so a handover is a step rather than an email.
-- Buyer's agency workflow — the end-to-end buying journey for buyer's agents, from brief through to settlement.
-- Deal pipeline — opportunities and their stages, with the work each stage owes.
-- Calendar and task automation — bookings, reminders and downstream tasks triggered automatically rather than remembered.
+- CRM - client records, pipeline and activity in one place.
+- Client onboarding and workflow - structured onboarding journeys with task accountability, so a handover is a step rather than an email.
+- Buyer's agency workflow - the end-to-end buying journey for buyer's agents, from brief through to settlement.
+- Deal pipeline - opportunities and their stages, with the work each stage owes.
+- Calendar and task automation - bookings, reminders and downstream tasks triggered automatically rather than remembered.
 
-### Portals — what a client or partner sees
+### Portals - what a client or partner sees
 
-- Client and partner portals — branded portals where clients and partners see their own information, under the organisation's brand rather than Aurixa's.
-- Finance portal — finance and broker coordination, handovers and finance messaging.
-- Solicitor portal and builder or developer portal — partner hand-off portals, each with its own scope. A portal fee buys that portal's own scope and never grants the AML/CTF module.
+- Client and partner portals - branded portals where clients and partners see their own information, under the organisation's brand rather than Aurixa's.
+- Finance portal - finance and broker coordination, handovers and finance messaging.
+- Solicitor portal and builder or developer portal - partner hand-off portals, each with its own scope. A portal fee buys that portal's own scope and never grants the AML/CTF module.
 
 ### Financial modelling and analysis
 
-- Borrowing capacity and serviceability modelling — a lending matrix and capacity analysis.
-- Ten-year cash-flow and portfolio analysis — long-range financial modelling and portfolio views.
-- Property comparison and due diligence — side-by-side analysis and research workflows.
-- Commercial and industrial analysis — capacity and valuation work for commercial property.
+- Borrowing capacity and serviceability modelling - a lending matrix and capacity analysis.
+- Ten-year cash-flow and portfolio analysis - long-range financial modelling and portfolio views.
+- Property comparison and due diligence - side-by-side analysis and research workflows.
+- Commercial and industrial analysis - capacity and valuation work for commercial property.
 
 ### Reports and documents
 
-- Report generation — branded, data-driven client reports produced from live records rather than retyped.
-- Suburb and market reporting — market updates and location intelligence.
-- Template builder — document and report templates under the organisation's own brand.
-- Agreements — agreement templates the organisation issues itself.
+- Report generation - branded, data-driven client reports produced from live records rather than retyped.
+- Suburb and market reporting - market updates and location intelligence.
+- Template builder - document and report templates under the organisation's own brand.
+- Agreements - agreement templates the organisation issues itself.
 
 ### AI and communications
 
-- AI communications and email copilot — drafting and managing client communications with AI assistance.
-- AI voice agents and call logging — inbound and outbound voice agents, with full call records, transcripts and outcomes written back to the CRM.
-- Client AI and the Aurixa Intelligence Hub — assistance surfaced inside the client-facing surfaces and across the workspace.
+- AI communications and email copilot - drafting and managing client communications with AI assistance.
+- AI voice agents and call logging - inbound and outbound voice agents, with full call records, transcripts and outcomes written back to the CRM.
+- Client AI and the Aurixa Intelligence Hub - assistance surfaced inside the client-facing surfaces and across the workspace.
 
 ### Compliance
 
-- AML and CTF — an AML/CTF compliance workflow with oversight, screening, customer due diligence and reporting. It is a module in its own right and is included in every tier's headline price.
-- SMSF workflow — self-managed super fund advisory workflow.
+- AML and CTF - an AML/CTF compliance workflow with oversight, screening, customer due diligence and reporting. It is a module in its own right and is included in every tier's headline price.
+- SMSF workflow - self-managed super fund advisory workflow.
 
 ### Does it connect to the systems we already use?
 
@@ -111,19 +111,19 @@ There is an integrations capability covering connections to systems such as Micr
 
 ## 4. Plans and prices
 
-Aurixa is sold as seat-banded plans plus optional add-on modules, prepaid AI credits, and a one-off onboarding package. All prices are in Australian dollars and include GST — nothing is added at checkout. The strategic review is where pricing is worked through properly for a specific organisation; an agent states the published shape and never negotiates, discounts or promises custom terms.
+Aurixa is sold as seat-banded plans plus optional add-on modules, prepaid AI credits, and a one-off onboarding package. All prices are in Australian dollars and include GST - nothing is added at checkout. The strategic review is where pricing is worked through properly for a specific organisation; an agent states the published shape and never negotiates, discounts or promises custom terms.
 
 ### What do the plans cost?
 
-- Launch — A$999 per month for 1 to 4 seats, including 7,000 report credits a month. That headline includes the AML/CTF Compliance module; without it the same tier is A$849 per month.
-- Growth — A$1,399 per month for 5 to 15 seats, including 35,000 report credits a month. That headline includes the AML/CTF Compliance module; without it the same tier is A$1,249 per month.
-- Scale — A$2,699 per month for 16 to 30 seats, including 75,000 report credits a month. That headline includes the AML/CTF Compliance module; without it the same tier is A$2,549 per month.
+- Launch - A$999 per month for 1 to 4 seats, including 7,000 report credits a month. That headline includes the AML/CTF Compliance module; without it the same tier is A$849 per month.
+- Growth - A$1,399 per month for 5 to 15 seats, including 35,000 report credits a month. That headline includes the AML/CTF Compliance module; without it the same tier is A$1,249 per month.
+- Scale - A$2,699 per month for 16 to 30 seats, including 75,000 report credits a month. That headline includes the AML/CTF Compliance module; without it the same tier is A$2,549 per month.
 - Annual billing is available at 10% off, billed twelve months up front.
 - Plan changes are pro-rated on the next billing cycle.
 
 ### Why does each plan have two prices?
 
-The gap between a tier's two prices is always A$150 a month, which is what the AML/CTF Compliance module costs. It is described as a A$400 reference component less a A$250 Core Platform discount that applies only while AML/CTF is selected — but A$150 is the only amount ever charged, whether it is added to a plan or dropped from one. Never quote the A$400 figure as a price.
+The gap between a tier's two prices is always A$150 a month, which is what the AML/CTF Compliance module costs. It is described as a A$400 reference component less a A$250 Core Platform discount that applies only while AML/CTF is selected - but A$150 is the only amount ever charged, whether it is added to a plan or dropped from one. Never quote the A$400 figure as a price.
 
 ### What if we need more than 30 seats?
 
@@ -139,55 +139,55 @@ Each module is its own monthly subscription in Australian dollars including GST,
 
 ### Main Dashboard
 
-- Market Updates — A$79 a month. Included at no extra cost on Scale.
-- Commercial / Industrial — A$249 a month. Included at no extra cost on Scale.
-- Opportunity Marketplace — A$249 a month. Included at no extra cost on Scale.
+- Market Updates - A$79 a month. Included at no extra cost on Scale.
+- Commercial / Industrial - A$249 a month. Included at no extra cost on Scale.
+- Opportunity Marketplace - A$249 a month. Included at no extra cost on Scale.
 
 ### Reports & Analysis
 
-- Aurixa Intelligence Hub — A$129 a month.
-- Generated Reports — Comparisons — A$129 a month. Included at no extra cost on Growth and Scale.
-- Cash Flow Analysis — Comparisons — A$129 a month. Included at no extra cost on Growth and Scale.
+- Aurixa Intelligence Hub - A$129 a month.
+- Generated Reports - Comparisons - A$129 a month. Included at no extra cost on Growth and Scale.
+- Cash Flow Analysis - Comparisons - A$129 a month. Included at no extra cost on Growth and Scale.
 
 ### Client & CRM
 
-- Email Copilot — A$149 a month. Unlocks client Emails, which stay off on every tier without it.
-- Call Logs — A$249 a month. Plus a custom build price if requested.
-- Portfolio Analysis — A$179 a month. Included at no extra cost on Scale.
-- Send Portfolio To Client — A$99 a month. Included at no extra cost on Scale.
-- Client Forms — A$49 a month. Included at no extra cost on Launch, Growth and Scale. Enabled on every tier; the price applies to standalone purchase.
-- Borrowing Capacity — A$295 a month. Included at no extra cost on Scale.
-- Lenders — not yet available for purchase, and not priced.
-- Client AI — A$129 a month. Included at no extra cost on Scale.
+- Email Copilot - A$149 a month. Unlocks client Emails, which stay off on every tier without it.
+- Call Logs - A$249 a month. Plus a custom build price if requested.
+- Portfolio Analysis - A$179 a month. Included at no extra cost on Scale.
+- Send Portfolio To Client - A$99 a month. Included at no extra cost on Scale.
+- Client Forms - A$49 a month. Included at no extra cost on Launch, Growth and Scale. Enabled on every tier; the price applies to standalone purchase.
+- Borrowing Capacity - A$295 a month. Included at no extra cost on Scale.
+- Lenders - not yet available for purchase, and not priced.
+- Client AI - A$129 a month. Included at no extra cost on Scale.
 
 ### Operations
 
-- Agreements — A$129 a month. Included at no extra cost on Scale.
-- Marketing — A$249 a month. Included at no extra cost on Scale.
-- Deal Pipeline — A$149 a month. Included at no extra cost on Growth and Scale.
+- Agreements - A$129 a month. Included at no extra cost on Scale.
+- Marketing - A$249 a month. Included at no extra cost on Scale.
+- Deal Pipeline - A$149 a month. Included at no extra cost on Growth and Scale.
 
 ### AML / CTF Compliance
 
-- AML / CTF Compliance — A$150 a month.
+- AML / CTF Compliance - A$150 a month.
 
 ### Administration
 
-- Model Hub — A$249 a month. Included at no extra cost on Scale.
-- Finance Portal — A$349 a month. Included at no extra cost on Scale. Also unlocks client Send To Finance and Finance Messages.
-- Integrations — A$199 a month. Subject to the client integrating their own APIs.
-- API Usage — A$199 a month. Included at no extra cost on Scale.
-- Solicitor Portal — A$299 a month. Partner hand-off portal. A portal fee buys that portal's own scope and never grants AML/CTF.
-- Builder / Developer Portal — A$699 a month. Sold directly by the team rather than through a checkout. Sold separately, not as a tier add-on. A portal fee buys that portal's own scope and never grants AML/CTF.
+- Model Hub - A$249 a month. Included at no extra cost on Scale.
+- Finance Portal - A$349 a month. Included at no extra cost on Scale. Also unlocks client Send To Finance and Finance Messages.
+- Integrations - A$199 a month. Subject to the client integrating their own APIs.
+- API Usage - A$199 a month. Included at no extra cost on Scale.
+- Solicitor Portal - A$299 a month. Partner hand-off portal. A portal fee buys that portal's own scope and never grants AML/CTF.
+- Builder / Developer Portal - A$699 a month. Sold directly by the team rather than through a checkout. Sold separately, not as a tier add-on. A portal fee buys that portal's own scope and never grants AML/CTF.
 
 ### AI Assistant
 
-- Aurixa Agent — A$495 a month.
+- Aurixa Agent - A$495 a month.
 
 ### Can a module be cancelled on its own?
 
 Yes. Each add-on module is billed as its own monthly subscription and can be cancelled independently of the plan. Cancelling a module does not cancel the plan, and dropping the AML/CTF module changes the subscription by the same amount adding it would.
 
-## 6. Credits — what they are and how they are spent
+## 6. Credits - what they are and how they are spent
 
 ### What are report credits?
 
@@ -202,20 +202,20 @@ Credits meter the AI work the platform does, principally report generation. The 
 ### What do top-up packs cost?
 
 - One-off top-up packs run from 250 credits at A$20.90 to 15,000 credits at A$713.90; the larger packs cost substantially less per credit.
-- 250 credits — A$20.90
-- 500 credits — A$38.50
-- 1,000 credits — A$71.50
-- 2,500 credits — A$163.90
-- 5,000 credits — A$306.90
-- 7,500 credits — A$438.90
-- 10,000 credits — A$548.90
-- 15,000 credits — A$713.90
+- 250 credits - A$20.90
+- 500 credits - A$38.50
+- 1,000 credits - A$71.50
+- 2,500 credits - A$163.90
+- 5,000 credits - A$306.90
+- 7,500 credits - A$438.90
+- 10,000 credits - A$548.90
+- 15,000 credits - A$713.90
 
 ### What happens when we run out of credits?
 
 Report generation is what credits pay for, so running out stops new generations rather than locking the workspace. A top-up pack restores it immediately. A caller who is repeatedly running out is usually on the wrong tier for their volume, and that is worth raising with the team rather than solving with packs.
 
-## 7. Onboarding — what happens after signing
+## 7. Onboarding - what happens after signing
 
 ### What does onboarding involve?
 
@@ -251,7 +251,7 @@ No. Callers should not share client identification documents, financial records 
 
 ### How do I get help with something that is not working?
 
-Two routes, and both reach the same place. The support page at aurixasystems.com.au/support is the fastest: an assistant answers how-do-I questions against the platform user guide, and anything else becomes a ticket. Calling Aurixa also works — the support line can raise the ticket on the call and give the caller its reference number before hanging up.
+Two routes, and both reach the same place. The support page at aurixasystems.com.au/support is the fastest: an assistant answers how-do-I questions against the platform user guide, and anything else becomes a ticket. Calling Aurixa also works - the support line can raise the ticket on the call and give the caller its reference number before hanging up.
 
 ### What happens to a support ticket?
 
@@ -265,7 +265,7 @@ Tickets are triaged across five severity bands, and the response target attaches
 
 ### Who decides how urgent my issue is?
 
-The severity is worked out from what was reported — what is broken, how much of it, and what kind of problem it is — and it is deliberately not a question the customer is asked. Describing the problem fully is what gets it banded correctly. A caller who believes their issue has been under-rated should say so, and the team can look at it again.
+The severity is worked out from what was reported - what is broken, how much of it, and what kind of problem it is - and it is deliberately not a question the customer is asked. Describing the problem fully is what gets it banded correctly. A caller who believes their issue has been under-rated should say so, and the team can look at it again.
 
 ### What should I have ready when I report a problem?
 
@@ -276,7 +276,7 @@ The severity is worked out from what was reported — what is broken, how much o
 
 ### Which problems always go to a person?
 
-Outages, security concerns, suspected data loss and billing disputes are always escalated to a person. An agent collects the details and never troubleshoots such an incident on the call — no guessing at causes, no suggested workarounds inside the customer's environment.
+Outages, security concerns, suspected data loss and billing disputes are always escalated to a person. An agent collects the details and never troubleshoots such an incident on the call - no guessing at causes, no suggested workarounds inside the customer's environment.
 
 ### Can I add a screenshot or a file?
 
@@ -294,11 +294,11 @@ Plans are billed monthly, or twelve months up front at the annual discount. Add-
 
 ### Can we change plan?
 
-Yes. Plan changes are pro-rated on the next billing cycle. Which tier suits an organisation is a seats-and-volume question — the seat bands are 1 to 4, 5 to 15, and 16 to 30 — and past 30 seats it becomes an enterprise conversation.
+Yes. Plan changes are pro-rated on the next billing cycle. Which tier suits an organisation is a seats-and-volume question - the seat bands are 1 to 4, 5 to 15, and 16 to 30 - and past 30 seats it becomes an enterprise conversation.
 
 ### There is a problem with our invoice.
 
-Billing disputes always go to a person. An agent takes the details — what was charged, what was expected, and the organisation — raises it, and never adjusts, credits, refunds or explains away a charge on the call.
+Billing disputes always go to a person. An agent takes the details - what was charged, what was expected, and the organisation - raises it, and never adjusts, credits, refunds or explains away a charge on the call.
 
 ### Can we pay to be prioritised?
 
@@ -324,33 +324,33 @@ No. An agent never states, implies or guesses the outcome of an application, and
 
 ## 12. Quick answers
 
-- Where do I apply? — aurixasystems.com.au/contact; the application takes about 60 to 90 seconds.
-- My questionnaire link expired. — The application reference, which looks like AX- followed by ten characters, plus the work email reopens it on the website; links are time-limited for the applicant's protection.
-- I did not get the email. — It is worth checking the spam folder first; failing that the reference plus the work email reopens the questionnaire, and the team can resend against the reference.
-- I applied with the wrong email. — Email admin@aurixasystems.com.au and the team will correct it against the application reference.
-- How long until I hear back? — The team aims to complete the initial review within two business days of the questionnaire being completed.
-- When can the review be booked? — Monday to Friday, 9:00 a.m. to 4:30 p.m. Sydney time, at least 24 hours ahead, within a 45-day window; a separate confirmation email and calendar invitation follow from the team.
-- Can I pay to skip the queue? — No. Aurixa does not accept payment for queue priority.
-- Is a booking final once made on a call? — It is a request in the calendar; the Aurixa team confirms by email, usually within one business day.
-- Can modules be cancelled? — Yes, each add-on module is billed as its own monthly subscription and can be cancelled independently of the plan.
-- Is the platform white-labelled? — Yes; the platform is delivered under the client organisation's own brand.
-- Where do I report a fault? — aurixasystems.com.au/support, or on this call — the support line can raise the ticket and give you its reference.
-- How do I track a ticket I already raised? — On the support portal, using the ticket reference; updates are also emailed to the address on the ticket.
-- Do credits expire? — Yes, 30 days from issue; unused credits roll over inside that window and the soonest to expire are spent first.
-- Does a failed report cost credits? — No. Credits are held during a run and released if it fails.
-- Is our data held in Australia? — Yes; Australian data residency, with an isolated tenancy per organisation.
-- Confidential documents on calls or forms? — Please do not share client identification documents, financial records or confidential client information on a call or in an application.
+- Where do I apply? - aurixasystems.com.au/contact; the application takes about 60 to 90 seconds.
+- My questionnaire link expired. - The application reference, which looks like AX- followed by ten characters, plus the work email reopens it on the website; links are time-limited for the applicant's protection.
+- I did not get the email. - It is worth checking the spam folder first; failing that the reference plus the work email reopens the questionnaire, and the team can resend against the reference.
+- I applied with the wrong email. - Email admin@aurixasystems.com.au and the team will correct it against the application reference.
+- How long until I hear back? - The team aims to complete the initial review within two business days of the questionnaire being completed.
+- When can the review be booked? - Monday to Friday, 9:00 a.m. to 4:30 p.m. Sydney time, at least 24 hours ahead, within a 45-day window; a separate confirmation email and calendar invitation follow from the team.
+- Can I pay to skip the queue? - No. Aurixa does not accept payment for queue priority.
+- Is a booking final once made on a call? - It is a request in the calendar; the Aurixa team confirms by email, usually within one business day.
+- Can modules be cancelled? - Yes, each add-on module is billed as its own monthly subscription and can be cancelled independently of the plan.
+- Is the platform white-labelled? - Yes; the platform is delivered under the client organisation's own brand.
+- Where do I report a fault? - aurixasystems.com.au/support, or on this call - the support line can raise the ticket and give you its reference.
+- How do I track a ticket I already raised? - On the support portal, using the ticket reference; updates are also emailed to the address on the ticket.
+- Do credits expire? - Yes, 30 days from issue; unused credits roll over inside that window and the soonest to expire are spent first.
+- Does a failed report cost credits? - No. Credits are held during a run and released if it fails.
+- Is our data held in Australia? - Yes; Australian data residency, with an isolated tenancy per organisation.
+- Confidential documents on calls or forms? - Please do not share client identification documents, financial records or confidential client information on a call or in an application.
 
 ## 13. What an agent must never say
 
 These are the claims that would be wrong even where a caller pushes for them, and they hold whatever else this document says.
 
-- That an application is approved, accepted or allocated, or that access is guaranteed — including implying it by talking about next steps as though the decision were made.
+- That an application is approved, accepted or allocated, or that access is guaranteed - including implying it by talking about next steps as though the decision were made.
 - That the waitlist guarantees access, or that payment can move an application up it.
-- A price that is not in this document, a discount, a negotiated term, or an enterprise figure — enterprise is scoped and quoted, so there is nothing to quote.
+- A price that is not in this document, a discount, a negotiated term, or an enterprise figure - enterprise is scoped and quoted, so there is nothing to quote.
 - A fix time, a resolution time, or a specific person who will call back. The published response targets are the only timings.
 - A booking as confirmed. A booking made on a call is a request, and the team confirms it by email.
 - A ticket reference that was not returned by the system, or that a report is logged when it is not.
 - Financial, investment, lending, legal, tax or situation-specific compliance advice.
 - Anything about a named competitor.
-- Anything at all this document does not cover. The honest answer is that the information here covers the general details and the team is best placed to help directly — and then to make sure it is flagged for them.
+- Anything at all this document does not cover. The honest answer is that the information here covers the general details and the team is best placed to help directly - and then to make sure it is flagged for them.
