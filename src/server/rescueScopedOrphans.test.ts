@@ -80,8 +80,12 @@ describe("rescueScopedOrphans", () => {
     );
     expect(r.send).toEqual([]);
     expect(r.stillBlocked.map((o) => o.meta.id)).toEqual(["20261203000000", "20261203010000"]);
-    // And it is told WHICH unsent migration holds it, not just the prime's hole.
-    expect(r.stillBlocked[1].blockedBy).toEqual(["20261203000000"]);
+    // And it is told WHICH unsent migration holds it — in `waitsFor`, because
+    // `blockedBy` is read everywhere as the prime's ledger being short, and the
+    // prime ran the seed. `blockedBy` names the hole holding the seed, which is
+    // what has to be reconciled for either to move.
+    expect(r.stillBlocked[1].waitsFor).toEqual(["20261203000000"]);
+    expect(r.stillBlocked[1].blockedBy).toEqual([HOLE]);
   });
 
   it("does not hold a later orphan behind an EARLIER one that was sent", async () => {
@@ -251,9 +255,108 @@ describe("rescueScopedOrphans — a shared version is one decision", () => {
       byName(),
     );
     expect(waits.send).toEqual([]);
+    // It waits for V, and V waits for the hole: the hole is what `blockedBy`
+    // names, because the prime's ledger being short is all that field means.
     expect(waits.stillBlocked.at(-1)).toEqual({
       meta: file("20261207000000", "needs_sibling"),
-      blockedBy: [V],
+      blockedBy: [HOLE_V],
+      waitsFor: [V],
     });
+  });
+});
+
+/**
+ * A NAME is an edge the relations cannot see. A template-library refresh reads
+ * its seed's rows back by the seed's release name and references none of the
+ * seed's relations by any name `scopeHoles` reads — so judged on relations
+ * alone this pass would release a refresh the partition held for naming its
+ * seed. See `migrationVersionMentions.pure.ts`.
+ */
+describe("rescueScopedOrphans — a name holds what the relations do not", () => {
+  const SEED_V = "20261204020000";
+  const file = (id: string, slug: string) => ({ id, name: `${id}_${slug}.sql` });
+  const seed = file(SEED_V, "seed_template_library_v15");
+  const refresh = file("20261204030000", "refresh_active_masters_from_library_v15");
+  const BODIES: Record<string, string> = {
+    // Readable here, so the name is the ONLY thing connecting the two.
+    [seed.name]: `CREATE TABLE IF NOT EXISTS public.template_library_release_baselines (entry_id text);`,
+    [refresh.name]: `
+      CREATE TABLE IF NOT EXISTS public.template_master_refresh_decisions (id uuid);
+      UPDATE public.report_templates SET name = name
+       WHERE entry_id IN (SELECT entry_id FROM public.library_rows
+                           WHERE release = '${SEED_V}_seed_template_library_v15');`,
+    "20261204040000_unrelated.sql": `UPDATE public.report_templates SET name = name WHERE false;`,
+  };
+  const load = () =>
+    vi.fn(async (m: { id: string; name: string }) => {
+      const sql = BODIES[m.name];
+      if (sql === undefined) throw new Error(`no body for ${m.name}`);
+      return sql;
+    });
+  const corpus = [seed, refresh, file("20261204040000", "unrelated")];
+
+  it("holds an orphan that names a hole it is judged against, though no relation reaches it", async () => {
+    // The seed as the partition's hole: nothing of its relations is named.
+    const r = await rescueScopedOrphans(
+      [{ meta: refresh, blockedBy: [SEED_V] }],
+      corpus,
+      [],
+      load(),
+    );
+    expect(r.send).toEqual([]);
+    expect(r.stillBlocked).toEqual([{ meta: refresh, blockedBy: [SEED_V] }]);
+  });
+
+  it("releases the same kind of orphan where it names nothing", async () => {
+    const unrelated = file("20261204040000", "unrelated");
+    const r = await rescueScopedOrphans(
+      [{ meta: unrelated, blockedBy: [SEED_V] }],
+      corpus,
+      [],
+      load(),
+    );
+    expect(r.send).toEqual([unrelated]);
+  });
+
+  it("holds an orphan that names a version this pass held, and says which", async () => {
+    // The seed is an orphan the pass keeps (its own body is past the ceiling
+    // here), then the refresh names it.
+    const loader = vi.fn(async (m: { id: string; name: string }) => {
+      if (m.name === seed.name) throw new Error(`Migration ${m.name} is too large to hold`);
+      if (m.id === "20250124120000") return "CREATE TABLE public.early (id int);";
+      return BODIES[m.name];
+    });
+    const r = await rescueScopedOrphans(
+      [
+        { meta: seed, blockedBy: ["20250124120000"] },
+        { meta: refresh, blockedBy: ["20250124120000"] },
+      ],
+      [file("20250124120000", "early"), ...corpus],
+      [],
+      loader,
+    );
+    expect(r.send).toEqual([]);
+    expect(r.stillBlocked[1]).toEqual({
+      meta: refresh,
+      blockedBy: ["20250124120000"],
+      waitsFor: [SEED_V],
+    });
+  });
+
+  it("does not read a name in a comment", async () => {
+    const commented = file("20261204050000", "commented");
+    const loader = vi.fn(async (m: { id: string; name: string }) =>
+      m.name === commented.name
+        ? `-- follows ${SEED_V}, which it does not read
+UPDATE public.report_templates SET name = name WHERE false;`
+        : BODIES[m.name],
+    );
+    const r = await rescueScopedOrphans(
+      [{ meta: commented, blockedBy: [SEED_V] }],
+      [...corpus, commented],
+      [],
+      loader,
+    );
+    expect(r.send).toEqual([commented]);
   });
 });

@@ -4,6 +4,7 @@ import {
   dependencyFactsOf,
   type MigrationDependencyFacts,
 } from "./migrationDependencyFacts.pure";
+import { mentionedVersionsOf } from "./migrationVersionMentions.pure";
 import { fetchBlobTextsBatched, decodeBase64Utf8 } from "./prime-backend.server";
 import type { RepoRef } from "./github-app.server";
 import type { Octokit } from "@octokit/rest";
@@ -73,6 +74,8 @@ type CacheEntry = {
    * one the barrier must not narrow on.
    */
   facts: Map<string, MigrationDependencyFacts>;
+  /** The versions each decoded body names. Same keys as {@link facts}, same rule. */
+  mentions: Map<string, string[]>;
 };
 let cache: CacheEntry | null = null;
 
@@ -110,6 +113,17 @@ export type PrimeBodyDigestPass = {
    * the extraction is one pass of regexes over it.
    */
   factsByPath: Map<string, MigrationDependencyFacts>;
+  /**
+   * Repo path → the migration versions that body names in executable SQL, for
+   * the bodies this pass decoded — the edge by which a refresh waits for the
+   * seed it reads. See `migrationVersionMentions.pure.ts`.
+   *
+   * Keyed exactly as {@link factsByPath} and filled from the same decoded
+   * text, so a path is in both or in neither: `partitionByDependency` narrows
+   * a candidate only where both were read, and a body read for one and not
+   * the other would put it back on the blanket rule for no reason.
+   */
+  mentionsByPath: Map<string, string[]>;
 };
 
 /**
@@ -130,10 +144,16 @@ export async function digestPrimeBodies(
   const maxBytes = opts?.maxBytes ?? MAX_DIGEST_BYTES;
 
   if (!cache || cache.sourceSha !== corpus.sourceSha) {
-    cache = { sourceSha: corpus.sourceSha, digests: new Map(), facts: new Map() };
+    cache = {
+      sourceSha: corpus.sourceSha,
+      digests: new Map(),
+      facts: new Map(),
+      mentions: new Map(),
+    };
   }
   const warm = cache.digests;
   const warmFacts = cache.facts;
+  const warmMentions = cache.mentions;
   const byPathMeta = new Map(corpus.files.map((f) => [f.path, f]));
 
   const wanted = [...new Set(paths)].slice(0, MAX_DIGEST_FILES);
@@ -160,6 +180,7 @@ export async function digestPrimeBodies(
         warm.set(path, bodyDigests(sql));
         // The text is decoded either way; the facts are the cheap half.
         warmFacts.set(path, dependencyFactsOf(sql));
+        warmMentions.set(path, mentionedVersionsOf(sql));
         fetched += 1;
       }
     } catch {
@@ -171,6 +192,7 @@ export async function digestPrimeBodies(
 
   const byPath = new Map<string, string[]>();
   const factsByPath = new Map<string, MigrationDependencyFacts>();
+  const mentionsByPath = new Map<string, string[]>();
   const unread: string[] = [];
   for (const path of wanted) {
     const d = warm.get(path) ?? [];
@@ -178,6 +200,8 @@ export async function digestPrimeBodies(
     if (d.length === 0) unread.push(path);
     const f = warmFacts.get(path);
     if (f !== undefined) factsByPath.set(path, f);
+    const named = warmMentions.get(path);
+    if (named !== undefined) mentionsByPath.set(path, named);
   }
-  return { byPath, fetched, unread, factsByPath };
+  return { byPath, fetched, unread, factsByPath, mentionsByPath };
 }

@@ -97,6 +97,18 @@ describe("the facts are read, and read for the whole corpus", () => {
     expect(scoping).toMatch(/return \{\s*ok: true,\s*corpus,\s*metas,/);
   });
 
+  it("the versions a body names travel beside its facts, from the same pass", () => {
+    // `partitionByDependency` narrows a candidate only where its `requires`
+    // AND its `mentions` were read, because a candidate whose names nobody
+    // read might name anything the barrier holds. Facts attached without the
+    // names therefore put every candidate back on the blanket barrier —
+    // fail-closed, and exactly as total a stall as reading nothing. See
+    // `migrationVersionMentions.pure.ts`.
+    expect(scoping).toMatch(/mentions = pass\.mentionsByPath;/);
+    expect(scoping).toMatch(/const named = mentions\.get\(m\.path\);/);
+    expect(scoping).toMatch(/\.\.\.\(named === undefined \? \{\} : \{ mentions: named \}\)/);
+  });
+
   it("a digest is still attached only where a version did not already clear it", () => {
     // Widening the READ must not widen what is DIGESTED: a version-matched
     // file never reaches the digest branch of `scopeCorpusToPrime`, but it

@@ -158,6 +158,33 @@ describe("digestPrimeBodies", () => {
     expect(out.fetched).toBe(1);
   });
 
+  /**
+   * The partition narrows a candidate only where BOTH its facts and its names
+   * were read, so the two maps must agree about which bodies were: a path in
+   * one and not the other would put that file back on the blanket rule for no
+   * reason. See `CorpusMeta.mentions`.
+   */
+  it("reads what each decoded body names beside its facts, and neither for a body it did not read", async () => {
+    const refresh =
+      "UPDATE public.report_templates SET name = name " +
+      "WHERE release = '20261204020000_seed_template_library_v15'; -- not 20261203000000";
+    const files = {
+      r: { sql: refresh },
+      big: { sql: "x", size: MAX_DIGEST_BYTES + 1 },
+    };
+    serves({ r: { sql: refresh } });
+    const out = await digestPrimeBodies(corpusOf("sha-names", files), ["r", "big"], octokit, ref);
+    expect(out.mentionsByPath.get("r")).toEqual(["20261204020000"]);
+    expect([...out.mentionsByPath.keys()]).toEqual([...out.factsByPath.keys()]);
+    expect(out.mentionsByPath.has("big")).toBe(false);
+    expect(out.factsByPath.has("big")).toBe(false);
+
+    // And from the cache exactly as from the read.
+    const again = await digestPrimeBodies(corpusOf("sha-names", files), ["r"], octokit, ref);
+    expect(again.fetched).toBe(0);
+    expect(again.mentionsByPath.get("r")).toEqual(["20261204020000"]);
+  });
+
   it("carries an id the corpus does not hold as unread rather than throwing", async () => {
     const files = { a: { sql: "SELECT 1;" } };
     serves(files);

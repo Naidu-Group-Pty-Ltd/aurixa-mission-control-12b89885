@@ -85,6 +85,19 @@ export type CorpusMeta = {
   creates?: readonly string[];
   /** Object names it resolves at the statement. Same three states as {@link creates}. */
   requires?: readonly string[];
+  /**
+   * Migration versions it NAMES in executable SQL, from `mentionedVersionsOf`.
+   *
+   * The edge the facts cannot see: a template-library refresh reads its seed's
+   * rows back by the seed's release name and creates or requires nothing the
+   * seed does. See `migrationVersionMentions.pure.ts`.
+   *
+   * Same three states as {@link requires}, and read WITH it: a candidate is
+   * narrowed only where both were read, because a candidate whose names nobody
+   * read might name anything the barrier holds. Every production path decodes
+   * the one text for both, so they arrive together or not at all.
+   */
+  mentions?: readonly string[];
 };
 
 /**
@@ -479,15 +492,58 @@ export function scopeCorpusToPrime<T extends CorpusMeta>(
  * nobody asked, so a hole whose body could not be read blocks everything after
  * it exactly as before, and a candidate whose body could not be read is
  * blocked by every hole before it exactly as before. A caller that supplies no
- * facts at all gets byte-identical behaviour to the blanket rule — which is
- * what makes this safe to land ahead of the wiring that feeds it.
+ * facts at all gets the blanket rule's decisions — which is what made this safe
+ * to land ahead of the wiring that feeds it.
+ *
+ * ## And a migration held back is a barrier too
+ *
+ * Everything above is about what a HOLE may stop. A runnable version the
+ * barrier holds back is the same thing to whatever follows it — a version this
+ * clone does not have and this run will not send — and it was not treated as
+ * one: the orphan was reported, and what came after it was judged against the
+ * holes alone.
+ *
+ * Measured 23 Sep 2026 over the prime's tree and every clone's ledger. Each
+ * template-library release is a SEED and, one version later, a REFRESH that
+ * reads the seed's baseline rows back by the seed's own release name. The seed
+ * is 40 MB, past the ceiling the facts are read under, so every hole before it
+ * holds it. The refresh is 17 KB, reads cleanly, and requires nothing a hole
+ * creates — so it was SENT. On the CRM clone that is all five, v15 to v19,
+ * ahead of the five seeds they refresh from; the v15 refresh failed there on
+ * 22 Sep for want of `template_library_release_baselines`, a table its seed
+ * creates, and halted everything behind it. On NPC Test and Preflight the
+ * v16–v19 refreshes had already run against libraries that did not hold those
+ * releases, refreshed nothing, and were RECORDED — so nothing will run them
+ * when the seeds do land.
+ *
+ * So a held version stops what follows it on exactly the terms a hole does —
+ * what it creates against what a candidate requires, and everything where it
+ * could not be read — and on one more that neither facts nor holes could see:
+ * a candidate that NAMES it in executable SQL waits for it, because that is
+ * how a refresh says which seed it reads. The same edge applies to a hole a
+ * candidate names. See `migrationVersionMentions.pure.ts`.
+ *
+ * A held seed that could not be read therefore holds everything after it,
+ * which costs liveness where the facts are unread and is the only answer that
+ * is not a guess: an unread file might create anything.
  */
 export type OrphanedEntry<T> = {
   meta: T;
   /**
-   * The holes that actually block it — the ones creating an object it
-   * requires, where both sides' facts were read, and every earlier hole where
-   * either side's were not.
+   * The HOLES that keep it here, in corpus order — the prime's ledger being
+   * short, and nothing else.
+   *
+   * The ones it depends on itself: those creating an object it requires or
+   * that it names, where both sides were read, and every earlier hole where
+   * either side was not. And where it waits on a migration this run is also
+   * holding (see {@link waitsFor}), the holes holding THAT one — which are what
+   * has to be reconciled for either to move.
+   *
+   * Never a held version. This field is read, everywhere it is read, as the
+   * prime being behind its own repository — the blockage ledger opens a
+   * `prime_ledger_hole` row for each version it names — so a held version here
+   * would send an operator to reconcile the prime over a file the prime has
+   * run. Never empty either: every barrier stands for at least one hole.
    */
   blockedBy: string[];
   /**
@@ -498,12 +554,23 @@ export type OrphanedEntry<T> = {
    * particular, it is behind a hole nobody could ask about.
    */
   blockedOn?: string[];
+  /**
+   * Runnable versions ahead of it that this run is holding back too, and that
+   * it depends on — in corpus order. Absent when only holes hold it.
+   *
+   * These are what it would run after: a template-library refresh names here
+   * the seed it reads.
+   */
+  waitsFor?: string[];
 };
 
 export type DependencyPartition<T> = {
   /** Runnable, in corpus order, with every predecessor accounted for. */
   send: T[];
-  /** Runnable, but sitting behind at least one hole. Never sent. */
+  /**
+   * Runnable, but depending on a hole — or on a version held back for one.
+   * Never sent.
+   */
   orphaned: OrphanedEntry<T>[];
   /**
    * Every corpus version the prime's ledger does not record and this clone
@@ -530,10 +597,13 @@ export type DependencyPartition<T> = {
  * @param runnableIds  Ids `scopeCorpusToPrime` cleared — the prime has run these.
  * @param cloneApplied This clone's own ledger. A version it already holds is
  *                     not a hole, whatever the prime's ledger says about it.
- * @param maxBlockedBy Cap on the blockers recorded per orphan; the number of
- *                     holes can run to hundreds and this is read by a person.
- *                     The FIRST ones are kept — those are what an operator
- *                     would investigate.
+ * @param maxBlockedBy Cap on the blockers recorded per orphan — its holes,
+ *                     the objects it waits on and the versions it waits for;
+ *                     the number of holes can run to hundreds and this is read
+ *                     by a person. The FIRST ones are kept — those are what an
+ *                     operator would investigate. It bounds what is RECORDED
+ *                     and never what is decided: a held version stands for
+ *                     every one of its holes, whatever the cap.
  */
 export function partitionByDependency<T extends CorpusMeta>(
   metas: readonly T[],
@@ -546,34 +616,58 @@ export function partitionByDependency<T extends CorpusMeta>(
   const holes: string[] = [];
 
   /**
-   * Hole version -> the objects it creates, for the holes whose bodies were
-   * read. A hole ABSENT from this map is opaque: nobody could read it, so it
-   * blocks everything after it exactly as every hole used to.
+   * Everything a later version may have to wait for, in corpus order: every
+   * hole, and every runnable version this walk has already decided to hold.
    */
-  const provides = new Map<string, ReadonlySet<string>>();
+  type Barrier = {
+    version: string;
+    /** True for a version held back; false for a hole the prime never ran. */
+    held: boolean;
+    /**
+     * The objects it creates, for a barrier whose every file was read.
+     * Undefined is OPAQUE: nobody could read it, so it blocks everything after
+     * it exactly as every hole used to.
+     */
+    creates: ReadonlySet<string> | undefined;
+    /** The holes it stands for: itself when it is one, what holds it when held. */
+    roots: readonly string[];
+  };
+  const barriers: Barrier[] = [];
 
-  /** The holes so far that one FILE is blocked by, and what it waits for. */
-  const judge = (m: T): { blockedBy: ReadonlySet<string>; blockedOn: ReadonlySet<string> } => {
-    // Its own requirements could not be read. Every hole before it stands.
-    if (m.requires === undefined) return { blockedBy: new Set(holes), blockedOn: new Set() };
+  /** What a whole unit creates — known only where every one of its files was read. */
+  const createdBy = (members: readonly T[]): ReadonlySet<string> | undefined =>
+    members.every((m) => m.creates !== undefined)
+      ? new Set(members.flatMap((m) => m.creates ?? []))
+      : undefined;
+
+  /** The barriers so far that one FILE is blocked by, and the objects it waits for. */
+  const judge = (m: T): { blocking: ReadonlySet<Barrier>; blockedOn: ReadonlySet<string> } => {
+    // What it requires or what it names could not be read. Every barrier
+    // before it stands: an unread file might need, or name, anything.
+    if (m.requires === undefined || m.mentions === undefined) {
+      return { blocking: new Set(barriers), blockedOn: new Set() };
+    }
     const needs = new Set(m.requires);
-    const blockedBy = new Set<string>();
+    const names = new Set(m.mentions);
+    const blocking = new Set<Barrier>();
     const blockedOn = new Set<string>();
-    for (const hole of holes) {
-      const creates = provides.get(hole);
-      if (creates === undefined) {
-        // An opaque hole. Conservative, and the blanket rule's behaviour.
-        blockedBy.add(hole);
+    for (const b of barriers) {
+      if (b.creates === undefined) {
+        // An opaque barrier. Conservative, and the blanket rule's behaviour.
+        blocking.add(b);
         continue;
       }
+      // It names the barrier's version: it says, in its own SQL, that it
+      // reads what that version wrote.
+      if (names.has(b.version)) blocking.add(b);
       for (const need of needs) {
-        if (creates.has(need)) {
+        if (b.creates.has(need)) {
           blockedOn.add(need);
-          blockedBy.add(hole);
+          blocking.add(b);
         }
       }
     }
-    return { blockedBy, blockedOn };
+    return { blocking, blockedOn };
   };
 
   /*
@@ -596,34 +690,44 @@ export function partitionByDependency<T extends CorpusMeta>(
     if (cloneApplied.has(unit.version)) continue;
 
     if (runnableIds.has(unit.version)) {
-      // Nothing withheld before it: nothing to ask about.
-      if (holes.length === 0) {
+      // Nothing withheld or held before it: nothing to ask about.
+      if (barriers.length === 0) {
         send.push(...unit.members);
         continue;
       }
 
-      const blockedBy = new Set<string>();
+      const blocking = new Set<Barrier>();
       const blockedOn = new Set<string>();
       for (const m of unit.members) {
         const judged = judge(m);
-        for (const hole of judged.blockedBy) blockedBy.add(hole);
+        for (const b of judged.blocking) blocking.add(b);
         for (const need of judged.blockedOn) blockedOn.add(need);
       }
 
-      if (blockedBy.size === 0) {
+      if (blocking.size === 0) {
         send.push(...unit.members);
         continue;
       }
-      // In hole order, which is corpus order: the FIRST are what an operator
-      // would investigate.
-      const first = holes.filter((h) => blockedBy.has(h)).slice(0, maxBlockedBy);
+
+      // The holes behind every barrier that holds it — in hole order, which is
+      // corpus order, so the FIRST are what an operator would investigate.
+      const rooted = new Set<string>();
+      for (const b of blocking) for (const hole of b.roots) rooted.add(hole);
+      const roots = holes.filter((h) => rooted.has(h));
+      // The held versions it waits on directly, in corpus order.
+      const waits = barriers.filter((b) => b.held && blocking.has(b)).map((b) => b.version);
       for (const m of unit.members) {
         orphaned.push({
           meta: m,
-          blockedBy: [...first],
+          blockedBy: roots.slice(0, maxBlockedBy),
           ...(blockedOn.size > 0 ? { blockedOn: [...blockedOn].slice(0, maxBlockedBy) } : {}),
+          ...(waits.length > 0 ? { waitsFor: waits.slice(0, maxBlockedBy) } : {}),
         });
       }
+      // Held, so a barrier for what follows — standing for its holes, uncapped:
+      // the cap is for a person reading one row, and a later version inherits
+      // every one of them.
+      barriers.push({ version: unit.version, held: true, creates: createdBy(unit.members), roots });
       continue;
     }
 
@@ -632,9 +736,12 @@ export function partitionByDependency<T extends CorpusMeta>(
     // file's creations were read — one unread file makes the whole hole
     // opaque, because that file might create anything.
     holes.push(unit.version);
-    if (unit.members.every((m) => m.creates !== undefined)) {
-      provides.set(unit.version, new Set(unit.members.flatMap((m) => m.creates ?? [])));
-    }
+    barriers.push({
+      version: unit.version,
+      held: false,
+      creates: createdBy(unit.members),
+      roots: [unit.version],
+    });
   }
 
   return { send, orphaned, holes };

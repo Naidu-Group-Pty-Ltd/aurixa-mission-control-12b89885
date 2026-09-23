@@ -821,6 +821,7 @@ export async function openScopedPrimeCorpus(
   const needBody = new Set(corpus.metas.filter((m) => !primeApplied.has(m.id)).map((m) => m.path));
   let digested: Map<string, string[]> = new Map();
   let facts: Map<string, MigrationDependencyFacts> = new Map();
+  let mentions: Map<string, string[]> = new Map();
   try {
     const pass = await digestPrimeBodies(
       corpus,
@@ -830,6 +831,7 @@ export async function openScopedPrimeCorpus(
     );
     digested = pass.byPath;
     facts = pass.factsByPath;
+    mentions = pass.mentionsByPath;
   } catch {
     // Nothing is cleared by body this tick and nothing is narrowed by
     // dependency. That is the behaviour this function had before bodies were
@@ -843,10 +845,14 @@ export async function openScopedPrimeCorpus(
     // read that was widened for a different reason.
     const d = needBody.has(m.path) ? digested.get(m.path) : undefined;
     const f = facts.get(m.path);
+    // Beside the facts and from the same decoded text: the partition narrows a
+    // candidate only where both were read. See `CorpusMeta.mentions`.
+    const named = mentions.get(m.path);
     return {
       ...m,
       ...(d === undefined ? {} : { bodyDigests: d }),
       ...(f === undefined ? {} : { creates: f.creates, requires: f.requires }),
+      ...(named === undefined ? {} : { mentions: named }),
     };
   });
 

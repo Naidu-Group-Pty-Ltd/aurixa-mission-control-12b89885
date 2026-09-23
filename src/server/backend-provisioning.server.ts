@@ -39,6 +39,7 @@ import {
   versionUnits,
 } from "./sharedVersionDelivery.pure";
 import { ledgerWriteRefusal } from "./migrationLedgerWrites.pure";
+import { mentionedVersionsOf } from "./migrationVersionMentions.pure";
 
 const MGMT_API = "https://api.supabase.com/v1";
 
@@ -2314,8 +2315,19 @@ export type PrimeMigrationResult = {
    * clone does not have and this run will not send. It is NOT applied. Names
    * the first few holes so an operator sees what to reconcile rather than a
    * bare "skipped". See `partitionByDependency`.
+   *
+   * HOLES only — versions the prime's ledger does not record — even where
+   * what holds it directly is another migration this run is holding: then it
+   * names the holes holding that one, and {@link waitsFor} names the migration.
+   * Every reader of this field reads it as the prime being short.
    */
   blockedBy?: string[];
+  /**
+   * The runnable versions ahead of it that this run is ALSO holding, and that
+   * it depends on — a template-library refresh names here the seed it reads.
+   * Absent when only holes hold it. See `OrphanedEntry.waitsFor`.
+   */
+  waitsFor?: string[];
   /**
    * Set when the body was too large for this runtime to HOLD and this caller
    * supplied no streaming option, so the replay declined to carry it.
@@ -2397,31 +2409,45 @@ export type PrimeMigrationResult = {
 };
 
 /**
- * How many blockers an orphan's row shows. See `partitionByDependency`'s own
- * `maxBlockedBy`: the number of holes can run to hundreds and this is read by
- * a person, so the FIRST are kept — those are what an operator investigates.
+ * How many blockers an orphan's row shows — of its holes, and of the versions
+ * it waits for. See `partitionByDependency`'s own `maxBlockedBy`: the number of
+ * holes can run to hundreds and this is read by a person, so the FIRST are
+ * kept — those are what an operator investigates.
  */
 const ORPHAN_BLOCKED_BY_DISPLAY_CAP = 5;
 
 /**
  * Ask, of each orphan, whether the holes ahead of it actually reach it.
  *
- * `partitionByDependency` answers with corpus POSITION, which is the only
- * thing it has: it is handed metadata, not SQL. This is the second look, taken
+ * `partitionByDependency` answers from the facts each file was read for, which
+ * is all it has: it is handed metadata, not SQL. This is the second look, taken
  * where the SQL loader is, and `migrationDependencyScope.pure.ts` owns the
- * rule — including every way it stays fail-closed.
+ * rule — including every way it stays fail-closed. One edge is judged here as
+ * well as there: an orphan that NAMES a version it is being judged against
+ * waits for it, whatever that version's relations are — see
+ * `migrationVersionMentions.pure.ts`. Without it this pass would release,
+ * against the holes' relations alone, a refresh the partition held for naming
+ * the seed it reads.
  *
  * Two costs are deliberately not paid. A hole is read once per pass however
  * many orphans name it. And a candidate past `MAX_SCOPING_BYTES` is never
  * fetched at all — the corpus's template-library seeds are ~41 MB each, and
  * the answer is not worth the isolate.
  */
+export type ScopedOrphanStillBlocked<T> = {
+  meta: T;
+  /** Holes only, in corpus order — see `OrphanedEntry.blockedBy`. */
+  blockedBy: string[];
+  /** Versions this pass held that it depends on — see `OrphanedEntry.waitsFor`. */
+  waitsFor?: string[];
+};
+
 export async function rescueScopedOrphans<T extends { id: string; name: string }>(
   orphaned: ReadonlyArray<{ meta: T; blockedBy: string[] }>,
   corpus: ReadonlyArray<{ id: string; name: string }>,
   materialised: ReadonlyArray<{ id: string; name: string; sql?: string }>,
   loadSql?: (m: { id: string; name: string }) => Promise<string>,
-): Promise<{ send: T[]; stillBlocked: Array<{ meta: T; blockedBy: string[] }> }> {
+): Promise<{ send: T[]; stillBlocked: ScopedOrphanStillBlocked<T>[] }> {
   if (orphaned.length === 0) return { send: [], stillBlocked: [] };
 
   const { scopeHoles, holeRelationNames, MAX_SCOPING_BYTES } =
@@ -2482,9 +2508,15 @@ export async function rescueScopedOrphans<T extends { id: string; name: string }
   };
 
   const send: T[] = [];
-  const stillBlocked: Array<{ meta: T; blockedBy: string[] }> = [];
+  const stillBlocked: ScopedOrphanStillBlocked<T>[] = [];
   /** Versions this pass has decided not to send, in the order it decided. */
   const heldVersions: string[] = [];
+  /**
+   * The HOLES each held version stands for: what held it, traced back to the
+   * prime's ledger. What is held behind it inherits them, because they are
+   * what has to be reconciled for either to move.
+   */
+  const rootsOf = new Map<string, readonly string[]>();
   /*
     AN ORPHAN THAT STAYS BLOCKED IS A HOLE FOR THE ONES AFTER IT.
 
@@ -2521,18 +2553,48 @@ export async function rescueScopedOrphans<T extends { id: string; name: string }
 
     const blockedBy = new Set<string>();
     for (const m of unit.members) {
-      const decision = scopeHoles(await readSql(m.orphan.meta), evidence);
+      const sql = await readSql(m.orphan.meta);
+      const decision = scopeHoles(sql, evidence);
       if (decision.act !== "send") for (const id of decision.blockedBy) blockedBy.add(id);
+      // It NAMES one of them: it says in its own SQL that it reads what that
+      // version wrote. An unread body is already held by everything above.
+      if (sql !== null) {
+        const named = new Set(mentionedVersionsOf(sql));
+        for (const e of evidence) if (named.has(e.id)) blockedBy.add(e.id);
+      }
     }
     if (blockedBy.size === 0) {
       for (const m of unit.members) send.push(m.orphan.meta);
       continue;
     }
-    // In the order the evidence was gathered: the partition's holes first, in
-    // corpus order, then the versions this pass held.
-    const ordered = evidence.map((e) => e.id).filter((id) => blockedBy.has(id));
-    for (const m of unit.members) stillBlocked.push({ meta: m.orphan.meta, blockedBy: ordered });
+    // Split what holds it the way every reader needs it: the HOLES, which are
+    // the prime's ledger being short, and the versions this pass held, which
+    // are not — a held version stands for the holes holding it. The evidence
+    // lists the partition's holes first and then what this pass held, both in
+    // corpus order, so `waitsFor` is in corpus order; the holes are sorted,
+    // which for a version is corpus order.
+    const roots = new Set<string>();
+    const waitsFor: string[] = [];
+    for (const e of evidence) {
+      if (!blockedBy.has(e.id)) continue;
+      const held = rootsOf.get(e.id);
+      if (held === undefined) {
+        roots.add(e.id);
+        continue;
+      }
+      waitsFor.push(e.id);
+      for (const hole of held) roots.add(hole);
+    }
+    const holesFirst = [...roots].sort();
+    for (const m of unit.members) {
+      stillBlocked.push({
+        meta: m.orphan.meta,
+        blockedBy: [...holesFirst],
+        ...(waitsFor.length > 0 ? { waitsFor: [...waitsFor] } : {}),
+      });
+    }
     heldVersions.push(unit.version);
+    rootsOf.set(unit.version, holesFirst);
   }
   return { send, stillBlocked };
 }
@@ -2759,6 +2821,9 @@ export async function applyPrimeMigrations(
         success: true,
         skipped: true,
         blockedBy: o.blockedBy.slice(0, ORPHAN_BLOCKED_BY_DISPLAY_CAP),
+        ...(o.waitsFor && o.waitsFor.length > 0
+          ? { waitsFor: o.waitsFor.slice(0, ORPHAN_BLOCKED_BY_DISPLAY_CAP) }
+          : {}),
       });
     }
     /*
