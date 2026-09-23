@@ -100,3 +100,13 @@ VAPI-side wiring: point the inbound number/squad `server.url` at
 with an `x-vapi-secret` header, and give the assistants the tools named in
 `src/server/voice-tools.server.ts` (`resolve_contact`, `get_call_context`,
 `check_availability`, `book_appointment`, `phoneNumber_inject`).
+
+The reception number does **not** reach VAPI by the native
+`api.vapi.ai/twilio/inbound_call` route: Twilio serves static TwiML first, so
+the caller gets a short beat before the agent speaks. VAPI has no answer-delay
+field anywhere in its API, so there is nowhere else to put it. Read
+[`voice-inbound-pre-answer-delay.md`](./voice-inbound-pre-answer-delay.md)
+before changing that number's `VoiceUrl`, its `voice_fallback_url`, or the
+SIP phone record the TwiML dials — it records what the caller actually hears,
+why the fallback makes the arrangement safe, and the one check that can tell a
+working delay from a fallback answering normally.
