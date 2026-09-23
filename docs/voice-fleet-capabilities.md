@@ -38,11 +38,28 @@ The script printed `applied` at precisely the moment it had destroyed a
 capability — code and check agreeing while only the server disagreed, which is
 the same shape as the AML `.or()` double and the `PGRST205` fallback.
 
-Two further facts made it total rather than partial. `manifest.json` named five
-tools and `end_call_tool` was not among them, and `model["toolIds"]` was
-replaced wholesale, so nothing attached by hand survived either. And **all
-twelve prompts mentioned the tool zero times**: the capability was absent in the
-binding *and* in the instruction.
+`manifest.json` named five tools and `end_call_tool` was not among them, and
+`model["toolIds"]` was replaced wholesale, so nothing attached by hand survived
+either. And **all twelve prompts mentioned the tool zero times** — the only line
+about closing in any of them was *"Never rush to end the call."*
+
+### A correction, from reading the assistants again after the fix
+
+The first account of this said the capability was absent in the binding *and* in
+the instruction. The binding half is only half true, and the distinction decides
+which fix is load-bearing.
+
+`endCallFunctionEnabled` is a **top-level assistant field, separate from the
+tool list, and it reads `true` on all twelve** — the inline-tool filter never
+touched it. So VAPI's own end-call function was available to the model the whole
+time, and the fleet still never used it: the five most recent calls all ended
+`customer-ended-call`, never `assistant-ended-call`. The caller hung up every
+time.
+
+So **the prompt is the load-bearing half of this fix.** The script's inline-tool
+deletion is a real defect and stays fixed — it would have removed the explicit
+tool the moment anyone attached one, which is exactly what this work then did —
+but it is not what kept the fleet from hanging up. An instruction nobody gave is.
 
 Three rules now hold it:
 
@@ -258,3 +275,40 @@ hand beside `create-vapi-org-tools.py`.
 `end_call_tool` and `transfer_to_human_mc` are VAPI-native (`endCall`,
 `transferCall`) and need no webhook handler. `raise_support_ticket` is a
 `function` tool and is dispatched in `voice-tools.server.ts`.
+
+---
+
+## What is still unproven, and why
+
+Everything above is established by reading VAPI back. **None of it is
+established by a call**, and the difference matters.
+
+A phone call could not be placed from the session that did this work. VAPI's
+`/chat` endpoint — which would have driven a text conversation through the same
+assistant, tools and knowledge base — answers **HTTP 402** for this
+organisation, so that substitute is closed too. The account is not out of
+credit: five inbound calls landed and completed normally the same day.
+
+So these remain open, and each needs somebody to dial **+61 2 8105 6305**:
+
+| what | what to do | what proves it |
+|---|---|---|
+| end call | let the agent finish and say goodbye | `endedReason` is `assistant-ended-call`, not `customer-ended-call` or a timeout, and the transcript's last turn carries the tool call beside the closing line |
+| transfer | ask for a person | a child leg to +61 433 005 110, and the handover line in the same turn as the call |
+| availability | ask for a time next week | `check_availability` in the call's tool calls, and only those times offered |
+| booking | accept one | `book_appointment` succeeds and a `crm_appointments` row exists |
+| **support ticket** | report a fault to Monica | a `TKT-…` reference read aloud **and** a matching row in the support portal |
+| knowledge | ask something outside the old seven topics — "what does a plan cost", "do credits expire", "who decides how urgent my ticket is" | answered from the new corpus, with the **current** prices |
+
+**The support ticket cannot pass until this branch is deployed.** The tool is
+bound on the assistant and the handler exists in `voice-tools.server.ts`, but
+the handler is in this branch and the webhook runs what is on `main`. Until
+then Monica will call the tool, get `unknown_tool_raise_support_ticket`, and —
+correctly — tell the caller it was not logged and offer to put them through.
+That is honest, and it is still a failure; it is strictly better than the
+previous state, where she could neither log it nor transfer.
+
+The webhook's shared secret is **write-only in VAPI** (`serverUrlSecret` reads
+back only as `isServerUrlSecretSet`), so the handlers could not be exercised
+directly from here either. That is the right design and it is recorded, not
+complained about.
