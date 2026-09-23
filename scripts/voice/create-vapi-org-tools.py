@@ -16,6 +16,13 @@ SERVER = {
     "secret": os.environ["VAPI_WEBHOOK_SECRET_VALUE"],
 }
 
+# The Make webhook behind `transfer_to_human_mc`. It is read from the
+# environment rather than written down here: anyone holding the URL can ask
+# Make to redirect a call that is in progress, so it is closer to a credential
+# than to configuration. Its value is the webhook URL of the Make scenario
+# "Aurixa Vapi - Transfer Caller to Human via Twilio Redirect".
+MAKE_TRANSFER_HOOK_URL = os.environ["MAKE_TRANSFER_HOOK_URL"]
+
 TOOLS = [
     {
         "type": "function",
@@ -158,30 +165,79 @@ TOOLS = [
             },
         },
     },
-    # Not `function` tools: VAPI runs these itself, so neither reaches our
-    # webhook and neither needs a handler. They are declared here so the org's
-    # tool set is reproducible from this file alone.
+    # The transfer is NOT a native VAPI `transferCall`, and that is the whole
+    # point. On 23 Sep 2026 call 01a0cefc the assistant said its line and placed
+    # the tool call in the same turn - the prompt half worked - and VAPI answered
+    # `call.in-progress.error-transfer-failed` seventeen seconds in. NPC reached
+    # the same conclusion first: its native `transferCall` tool
+    # (3a6a892d, created 2026-05-07) is bound to ZERO assistants, and the tool all
+    # thirteen of its live assistants use was created 2026-05-20 as a `function`
+    # that asks Make to redirect the Twilio PARENT call into
+    # `<Dial><Number>...</Number></Dial>`. This mirrors that.
+    #
+    # Two things carry it. The `request-start` message is SILENT and
+    # non-blocking, because the prompt already makes the assistant say its own
+    # line in the same turn and a tool that also speaks turns one sentence into
+    # two. And `request-failed` sets `endCallAfterSpokenEnabled: False`, so a
+    # transfer that cannot be completed leaves the caller talking to the
+    # assistant instead of dropping them - which is what the reported defect
+    # felt like from the caller's end.
+    #
+    # It needs no static `parameters[]`: every other function tool in this org
+    # reads the caller from `message.call.customer.number`, which VAPI sends on
+    # every tool call, and the Make scenario keys its datastore lookup on the
+    # same field.
     {
-        "type": "transferCall",
-        "destinations": [
+        "type": "function",
+        "async": False,
+        "server": {
+            "url": MAKE_TRANSFER_HOOK_URL,
+            "timeoutSeconds": 20,
+        },
+        "messages": [
+            {"type": "request-start", "content": "", "blocking": False},
             {
-                "type": "number",
-                "number": "+61433005110",
-                "message": "Connecting you to the team now.",
-                "description": (
-                    "The Aurixa Systems escalation line - a person who can help when the "
-                    "assistant cannot."
+                "type": "request-failed",
+                "content": (
+                    "Sorry, I could not connect you through just now. I can keep helping "
+                    "here, or the team will pick up if you call back on this number."
                 ),
+                "endCallAfterSpokenEnabled": False,
             },
         ],
         "function": {
             "name": "transfer_to_human_mc",
             "description": (
                 "Transfer the caller to a human on the Aurixa Systems team. Use when the caller "
-                "asks for a person, or when their need is outside what this assistant can do."
+                "clearly asks for a person, or when their need is outside what this assistant "
+                "can do. This does not perform a native Vapi transfer: it asks Make to redirect "
+                "the active Twilio call to the Aurixa escalation line."
             ),
+            "parameters": {
+                "type": "object",
+                "required": ["transferReason"],
+                "properties": {
+                    "transferReason": {
+                        "type": "string",
+                        "description": (
+                            "Short reason for the transfer request. Example: Caller asked to "
+                            "speak with a human team member."
+                        ),
+                    },
+                    "callerContext": {
+                        "type": "string",
+                        "description": (
+                            "Brief context about the call so far, so the person who picks up "
+                            "knows what the caller wants."
+                        ),
+                    },
+                },
+            },
         },
     },
+    # `endCall` is not a `function` tool: VAPI runs it itself, so it never
+    # reaches our webhook and needs no handler. It is declared here so the org's
+    # tool set is reproducible from this file alone.
     {
         "type": "endCall",
         "function": {

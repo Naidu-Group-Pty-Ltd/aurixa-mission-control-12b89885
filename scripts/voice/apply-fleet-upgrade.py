@@ -38,6 +38,39 @@ MANIFEST = json.load(open(os.path.join(S, "fleet-prompts", "manifest.json")))
 KB = json.load(open(os.path.join(S, "knowledge-base", "vapi-file.json")))
 KB_FILE_ID = KB.get("file_id")
 
+# How the fleet listens. Declared here so it is reproducible, because until
+# 23 Sep 2026 it was not declared anywhere and every value had been set by hand.
+#
+# `eotThreshold` / `eotTimeoutMs` are Flux's end-of-turn controls and are what
+# actually decides whether an assistant talks over the caller or leaves dead
+# air - the difference a person hears as "robotic". Six of NPC's fifteen
+# assistants set them; none of ours did. The values are NPC's.
+#
+# `keyterm` is ours rather than NPC's, and it was measured. Across the six
+# calls of 23 Sep 2026 the company name was recorded as Arixa, Auryxia, Erixa,
+# Aryxa, Ryxa and (once) Aurixa - on BOTH legs, including turns where the model
+# had just been handed the correct spelling by a tool result. A language model
+# does not turn "Aurixa" into "Aryxa"; a speech-to-text does. So this is a
+# transcription defect, not a pronunciation one, and the remedy is to tell the
+# transcriber the word exists.
+TRANSCRIBER = {
+    "provider": "deepgram",
+    "model": "flux-general-en",
+    "language": "en",
+    "eotThreshold": 0.7,
+    "eotTimeoutMs": 5000,
+    "keyterm": ["Aurixa"],
+}
+
+# Office ambience, on the assistants a person actually rings. NPC sets it on
+# its inbound assistants for the same reason: silence between turns is what
+# makes synthesised speech sound synthesised.
+#
+# The reception set is DERIVED from the manifest rather than listed again - an
+# assistant is reception exactly when it can hand the caller to a human.
+RECEPTION_TOOL = "transfer_to_human_mc"
+BACKGROUND_SOUND = "office"
+
 
 def repoint_knowledge_base(model):
     """Point this assistant at the recorded knowledge-base file.
@@ -153,7 +186,11 @@ def main():
         msgs[sys_idx] = {**msgs[sys_idx], "content": prompt}
         model["messages"] = msgs
 
-        api("PATCH", f"/assistant/{aid}", {"model": model})
+        body = {"model": model, "transcriber": dict(TRANSCRIBER)}
+        is_reception = RECEPTION_TOOL in m["tools"]
+        if is_reception:
+            body["backgroundSound"] = BACKGROUND_SOUND
+        api("PATCH", f"/assistant/{aid}", body)
         time.sleep(1.5)
         v = api("GET", f"/assistant/{aid}")
         vm = v["model"]
@@ -177,18 +214,28 @@ def main():
         # loss of the end-call tool a passing condition. Every manifest tool
         # must be bound; the KB query tool must have survived; anything else
         # inline is somebody else's and is not judged here.
+        # The speech settings are asserted by READ-BACK, like everything else
+        # here: a PATCH that returned 200 is not evidence the field landed.
+        got_tr = v.get("transcriber") or {}
+        tr_ok = all(got_tr.get(k) == val for k, val in TRANSCRIBER.items())
+        bg_ok = (not is_reception) or v.get("backgroundSound") == BACKGROUND_SOUND
         ok = (
             set(want_ids) <= set(got_ids)
             and any(kind == "query" for kind, _ in got_inline)
             and (not KB_FILE_ID or got_kb_files == [KB_FILE_ID])
             and len(got_sys) == len(prompt)
             and vm.get("model") == "gpt-5.6-luna"
+            and tr_ok
+            and bg_ok
         )
         status = "applied" if ok else "VERIFY-FAILED"
         kb_note = f" kb={','.join(got_kb_files) or 'none'}" + (f" (repointed {repointed})" if repointed else "")
+        speech = f" transcriber={'ok' if tr_ok else 'DRIFTED'}" + (
+            f" bg={v.get('backgroundSound') or 'none'}" if is_reception else ""
+        )
         print(
             f"{status:14s} {m['name']:32s} prompt={len(got_sys)} toolIds={len(got_ids)} "
-            f"inline={got_inline}{kb_note} model={vm.get('model')}"
+            f"inline={got_inline}{kb_note}{speech} model={vm.get('model')}"
         )
 
 
