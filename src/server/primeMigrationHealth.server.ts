@@ -51,6 +51,8 @@ import {
   openPrimeMigrationCorpus,
   resolvePrimeSource,
 } from "./prime-backend.server";
+import { withdrawalNotes } from "./migrationWithdrawals.pure";
+import { seedSkeletonNotes, usableSeedSkeletons } from "./seedSkeletonManifest.pure";
 import { OversizedMigrationError } from "./oversizedMigration.pure";
 import { buildPrimeLedgerAssessment, type PrimeLedgerRepoRef } from "./primeMigrationLedger.server";
 import type { PrimeLedgerReading, WithheldRow } from "./primeMigrationLedger.pure";
@@ -174,6 +176,18 @@ export async function readPrimeCorpusHealth(supabase: Db): Promise<PrimeCorpusHe
   try {
     const corpus = await openPrimeMigrationCorpus(getAppOctokit(), source);
     headSha = corpus.sourceSha;
+    // Said on the page every time it is true, because an unreadable manifest
+    // is the one state in which a withdrawn file quietly becomes a hole again.
+    notes.push(...withdrawalNotes(corpus.withdrawal));
+    // And the seed skeletons, for the same reason: an unusable manifest or a
+    // stale entry turns a seed back into a barrier to everything behind it on
+    // every clone, and this page is where that should be read first. Nothing
+    // here reads a body, so no file counts as already read.
+    notes.push(
+      ...seedSkeletonNotes(
+        usableSeedSkeletons(await corpus.seedSkeletons(), corpus.files, () => false).report,
+      ),
+    );
     facts = corpusFacts(corpus.metas, corpus.sizeOf, MAX_MIGRATION_BYTES);
 
     const byId = new Map<string, Array<{ id: string; name: string; path: string }>>();
@@ -219,7 +233,8 @@ export async function readPrimeCorpusHealth(supabase: Db): Promise<PrimeCorpusHe
         };
         let body: SurveyInput["body"];
         try {
-          const sql = await corpus.loadSql(meta.id);
+          // By FILE, so the body surveyed is the file this row names.
+          const sql = await corpus.loadSql(meta);
           body = { read: true, sql, bytes: Buffer.byteLength(sql, "utf8") };
         } catch (e) {
           body =

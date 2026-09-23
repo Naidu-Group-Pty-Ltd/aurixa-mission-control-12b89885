@@ -1409,7 +1409,8 @@ export function diagnoseMigration(input: DiagnosisInput): MigrationDiagnosis {
   A collision is the sharpest of them. `schema_migrations.version` is the
   primary key, so a version two files carry can only ever record one of them
   and no amount of running anything closes the hole — every clone queues behind
-  it for ever. On this prime there are 32, across 77 files.
+  it for ever. On this prime there were 32, across 77 files, on 20 Sep 2026,
+  and 25 across 61 on 23 Sep.
 */
 
 export type OversizeFile = { id: string; name: string; bytes: number };
@@ -1442,13 +1443,14 @@ export type CorpusFacts = {
  */
 export function corpusFacts(
   metas: ReadonlyArray<{ id: string; name: string }>,
-  sizeOf: (id: string) => number | null,
+  sizeOf: (file: { id: string; name: string }) => number | null,
   ceilingBytes: number,
 ): CorpusFacts {
   const oversize: OversizeFile[] = [];
   let sizeUnknown = 0;
   for (const m of metas) {
-    const bytes = sizeOf(m.id);
+    // By FILE: a version two files share has two sizes.
+    const bytes = sizeOf(m);
     if (bytes === null) sizeUnknown += 1;
     else if (bytes > ceilingBytes) oversize.push({ id: m.id, name: m.name, bytes });
   }

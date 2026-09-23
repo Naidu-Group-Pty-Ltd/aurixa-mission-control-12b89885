@@ -62,8 +62,11 @@ import {
 } from "./backend-provisioning.server";
 import { scopeCorpusToPrime, assertPrimeLedgerUsable } from "./fleetCorpusScope.pure";
 import { LEDGER_BODY_DIGEST_SQL, EMPTY_BODY_SHA256 } from "./migrationBodyIdentity.pure";
+import { withdrawnButRecorded } from "./migrationWithdrawals.pure";
+import { wholeRunnableVersions, type SplitVersion } from "./sharedVersionDelivery.pure";
 import { digestPrimeBodies } from "./primeBodyDigests.server";
 import type { MigrationDependencyFacts } from "./migrationDependencyFacts.pure";
+import { readThroughSeedSkeletons, type SeedSkeletonReport } from "./seedSkeletonManifest.pure";
 import {
   MIGRATION_CLAIMABLE_STATUSES,
   blockIsDischarged,
@@ -317,6 +320,20 @@ export type FleetMigrationResult = {
    */
   rateLimited: Array<{ cloneId: string; cloneName: string; migration: string }>;
   /**
+   * Clones where a version was HELD by a rule rather than sent: nothing was
+   * sent and the clone is exactly as it was. Its own field for the reason the
+   * other two holds have theirs, and a third because the remedy differs again
+   * — this one is neither waited out nor carried by the chunking lane, it is a
+   * change on the prime. `migration` is the first file of the version.
+   */
+  heldByRule: Array<{ cloneId: string; cloneName: string; migration: string; rule: string }>;
+  /**
+   * Versions the scope cleared part of — one file of a shared version in the
+   * prime's ledger by body, another not. Nothing at such a version is sent to
+   * any clone. Said once per run, because it is a fact about the prime.
+   */
+  splitVersions?: SplitVersion[];
+  /**
    * Repo migrations the prime has NOT applied, and which were therefore not
    * offered to any clone. Reported rather than silently filtered — a run that
    * says "962 files, 4 applied" with no account of the rest is how a corpus
@@ -336,6 +353,39 @@ export type FleetMigrationResult = {
    * Diagnostic only. Neither number can move a migration into `runnable`.
    */
   withheldBreakdown: { neverApplied: number; skewSuspected: number; bodyUnread: number };
+  /**
+   * What the prime's `MIGRATION_WITHDRAWN.json` took out of the corpus before
+   * anything was scoped. Absent when the corpus was never read.
+   *
+   * Reported beside `withheld` and never inside it: a withheld file is one the
+   * prime has not run and a clone may be owed one day, a withdrawn file is one
+   * whose effect is deliberately absent everywhere. `unreadable` is the state
+   * to watch — it is the one in which a withdrawn file silently becomes a hole
+   * on every clone again.
+   */
+  withdrawn?: {
+    state: "absent" | "read" | "unreadable";
+    why?: string;
+    files: string[];
+    /** Listed, but not in the prime's tree. Enforced on nothing. */
+    unmatched: string[];
+    /**
+     * Withdrawn files whose version the prime's ledger RECORDS. The
+     * declaration and the ledger disagree, and which is wrong is a person's
+     * call; the file stays unsent either way.
+     */
+    recordedOnPrime: string[];
+  };
+  /**
+   * What the prime's `migration-seed-skeletons.json` contributed: the seeds
+   * whose dependency facts this pass read through a skeleton, and the ones it
+   * could not. Absent when the corpus was never read or the step failed.
+   *
+   * `unreadable` is the state to watch, for the reason `withdrawn`'s is: it is
+   * the one in which every seed quietly becomes a barrier to everything behind
+   * it again, and the count of what was sent is the only other place it shows.
+   */
+  seedSkeletons?: SeedSkeletonReport;
   /** Set when the run could not start at all. */
   error?: string;
 };
@@ -351,6 +401,7 @@ const EMPTY: FleetMigrationResult = {
   skipped: [],
   heldOversize: [],
   rateLimited: [],
+  heldByRule: [],
   withheld: 0,
   withheldBreakdown: { neverApplied: 0, skewSuspected: 0, bodyUnread: 0 },
 };
@@ -684,6 +735,21 @@ export async function openScopedPrimeCorpus(
        */
       metas: readonly CorpusMetaOf[];
       runnable: ReturnType<typeof scopeCorpusToPrime<CorpusMetaOf>>["runnable"];
+      /**
+       * The VERSIONS a replay may treat as runnable: those every file of which
+       * the scope cleared. Every caller hands this to the partition and the
+       * replay rather than mapping `runnable` to its ids, which cleared a whole
+       * shared version on the strength of one of its files — so a file the
+       * prime never ran was sent because its sibling had been.
+       */
+      runnableIds: ReadonlySet<string>;
+      /**
+       * Versions the scope cleared PART of: some files at the version are in
+       * the prime's ledger by body, others are not. Each stands as a hole and
+       * nothing at it is sent; named, because a version the prime ran half of
+       * is a finding about the prime rather than a gap on a clone.
+       */
+      splitVersions: SplitVersion[];
       runnableBy: ReturnType<typeof scopeCorpusToPrime<CorpusMetaOf>>["runnableBy"];
       withheld: number;
       breakdown: ReturnType<typeof scopeCorpusToPrime<CorpusMetaOf>>["breakdown"];
@@ -693,6 +759,18 @@ export async function openScopedPrimeCorpus(
       primeBodyCount: number;
       withheldEntries: ReturnType<typeof scopeCorpusToPrime<CorpusMetaOf>>["withheld"];
       primeRef: string;
+      /**
+       * Withdrawn files whose version the prime's ledger records anyway. The
+       * files stay out of the corpus; this only names the contradiction.
+       */
+      withdrawnButRecorded: ReadonlyArray<{ id: string; name: string }>;
+      /**
+       * What the prime's seed skeletons contributed to this pass's facts: the
+       * seeds read through one, and the ones that could not be. Null when the
+       * manifest step itself failed, which leaves every seed unread — the
+       * behaviour the pass had before the prime published skeletons.
+       */
+      seedSkeletons: SeedSkeletonReport | null;
     }
   | { ok: false; error: string }
 > {
@@ -761,6 +839,7 @@ export async function openScopedPrimeCorpus(
   const needBody = new Set(corpus.metas.filter((m) => !primeApplied.has(m.id)).map((m) => m.path));
   let digested: Map<string, string[]> = new Map();
   let facts: Map<string, MigrationDependencyFacts> = new Map();
+  let mentions: Map<string, string[]> = new Map();
   try {
     const pass = await digestPrimeBodies(
       corpus,
@@ -770,10 +849,31 @@ export async function openScopedPrimeCorpus(
     );
     digested = pass.byPath;
     facts = pass.factsByPath;
+    mentions = pass.mentionsByPath;
   } catch {
     // Nothing is cleared by body this tick and nothing is narrowed by
     // dependency. That is the behaviour this function had before bodies were
     // read at all, which is the only safe direction for a failure here to fall.
+  }
+  // The seeds past the pass's ceiling, read through the statements the prime
+  // publishes for them — each pinned to the blob it describes, so only a seed
+  // whose bytes are the ones listed here gains facts. Facts and names only:
+  // `digested` is untouched, so a skeleton clears nothing by body and a seed
+  // the prime has not run stays withheld. What changes is that such a seed is
+  // no longer an OPAQUE barrier holding every migration behind it. See
+  // `seedSkeletonManifest.pure.ts`.
+  let seedSkeletons: SeedSkeletonReport | null = null;
+  try {
+    const through = readThroughSeedSkeletons(await corpus.seedSkeletons(), corpus.files, {
+      facts,
+      mentions,
+    });
+    facts = through.facts;
+    mentions = through.mentions;
+    seedSkeletons = through.report;
+  } catch {
+    // Every seed unread, as before the prime published skeletons. The reader
+    // does not reject; this is for what it does not foresee.
   }
   const metas = corpus.metas.map((m) => {
     // Digests are attached to exactly the set they always were. A
@@ -783,10 +883,14 @@ export async function openScopedPrimeCorpus(
     // read that was widened for a different reason.
     const d = needBody.has(m.path) ? digested.get(m.path) : undefined;
     const f = facts.get(m.path);
+    // Beside the facts and from the same decoded text: the partition narrows a
+    // candidate only where both were read. See `CorpusMeta.mentions`.
+    const named = mentions.get(m.path);
     return {
       ...m,
       ...(d === undefined ? {} : { bodyDigests: d }),
       ...(f === undefined ? {} : { creates: f.creates, requires: f.requires }),
+      ...(named === undefined ? {} : { mentions: named }),
     };
   });
 
@@ -795,11 +899,14 @@ export async function openScopedPrimeCorpus(
     primeApplied,
     primeBodyDigests,
   );
+  const { runnableIds, split } = wholeRunnableVersions(metas, runnable);
   return {
     ok: true,
     corpus,
     metas,
     runnable,
+    runnableIds,
+    splitVersions: split,
     runnableBy,
     withheld: withheld.length,
     withheldEntries: withheld,
@@ -808,6 +915,12 @@ export async function openScopedPrimeCorpus(
     primeAppliedCount: primeApplied.size,
     primeBodyCount: primeBodyDigests.size,
     primeRef,
+    withdrawnButRecorded: withdrawnButRecorded(
+      corpus.withdrawal.excluded,
+      new Set(corpus.metas.map((m) => m.id)),
+      primeApplied,
+    ),
+    seedSkeletons,
   };
 }
 
@@ -1091,6 +1204,7 @@ export async function runFleetMigrationSync(
     failed: [],
     heldOversize: [],
     rateLimited: [],
+    heldByRule: [],
     excluded: excludedCount,
     rehabilitated,
     skipped: skipped.map((v) => ({
@@ -1124,6 +1238,15 @@ export async function runFleetMigrationSync(
   const { corpus, metas: scopedMetas, runnable, sourceSha } = scoped;
   out.withheld = scoped.withheld;
   out.withheldBreakdown = scoped.breakdown;
+  if (scoped.splitVersions.length > 0) out.splitVersions = scoped.splitVersions;
+  out.withdrawn = {
+    state: corpus.withdrawal.state,
+    ...(corpus.withdrawal.why ? { why: corpus.withdrawal.why } : {}),
+    files: corpus.withdrawal.excluded.map((m) => m.name),
+    unmatched: [...corpus.withdrawal.unmatched],
+    recordedOnPrime: scoped.withdrawnButRecorded.map((m) => m.name),
+  };
+  if (scoped.seedSkeletons) out.seedSkeletons = scoped.seedSkeletons;
 
   for (const backend of backends) {
     const cloneId = backend.clone_id;
@@ -1250,12 +1373,14 @@ export async function runFleetMigrationSync(
         backend.supabase_project_ref!,
         runnable,
         undefined,
-        (m) => corpus.loadSql(m.id),
+        // By FILE: a version two files share is two bodies.
+        (m) => corpus.loadSql(m),
         // `runnable` alone cannot say whether a cleared version sits behind a
         // withheld one. The whole corpus can — and `scoped.metas` rather than
         // `corpus.metas`, because only the first carries the dependency facts
-        // that narrow the barrier from blanket to per-dependency.
-        { corpus: scopedMetas, runnableIds: new Set(runnable.map((m) => m.id)) },
+        // that narrow the barrier from blanket to per-dependency. The ids are
+        // the scope's WHOLE versions, never `runnable`'s: see its field.
+        { corpus: scopedMetas, runnableIds: scoped.runnableIds },
         /*
           A BODY TOO BIG TO HOLD IS STILL SENDABLE.
 
@@ -1301,7 +1426,7 @@ export async function runFleetMigrationSync(
         // cannot live to finish and then reports the clone level.
         { isPastDeadline: (reserveMs) => Date.now() + reserveMs >= deadlineAt },
         {
-          streamSql: (m) => corpus.openSqlStream(m.id),
+          streamSql: (m) => corpus.openSqlStream(m),
           /*
             AND WHICH BODY THAT STREAM WILL OPEN.
 
@@ -1312,7 +1437,7 @@ export async function runFleetMigrationSync(
             because rewriting every tuple's VALUES moves neither the header, the
             ON CONFLICT clause, the tail nor the COUNT.
           */
-          bodyIdentity: (m) => corpus.bodyIdentity(m.id),
+          bodyIdentity: (m) => corpus.bodyIdentity(m),
           /*
             THE CURSOR IS THE DIFFERENCE BETWEEN SLOW AND NEVER.
 
@@ -1447,8 +1572,13 @@ export async function runFleetMigrationSync(
       // anything. Measured 19 Sep 2026, three clones were moved to `failed`
       // here under the name of a migration not one of them had been sent.
       const limited = results.filter((r) => r.heldUpstreamLimited);
+      // The third kind: a version a RULE held — a shared version that could
+      // not travel whole. Nothing was sent, so nothing about the clone was
+      // judged, and it answers to the rule above rather than to the failure
+      // branch. See `sharedVersionDelivery.pure.ts`.
+      const byRule = results.filter((r) => r.heldByRule);
       const failures = results.filter(
-        (r) => !r.success && !r.heldOversize && !r.heldUpstreamLimited,
+        (r) => !r.success && !r.heldOversize && !r.heldUpstreamLimited && !r.heldByRule,
       );
       // Runnable, but sitting behind a version this clone has not got. Skipped
       // rather than run — see `partitionByDependency`.
@@ -1463,6 +1593,7 @@ export async function runFleetMigrationSync(
         failures.length === 0 &&
         held.length === 0 &&
         limited.length === 0 &&
+        byRule.length === 0 &&
         // Nor is a pass that sent part of a chunked seed. `upToDate` is read as
         // "nothing to do on this clone", and a clone forty statements into a
         // 40 MB seed has a great deal left to do — the same distinction
@@ -1526,6 +1657,7 @@ export async function runFleetMigrationSync(
         blocked.length === 0 &&
         held.length === 0 &&
         limited.length === 0 &&
+        byRule.length === 0 &&
         // A pass that sent part of a chunked seed and finished no migration
         // still moved this clone forward. Counting it as "nothing happened"
         // would leave the previous pass's sentence standing over real progress.
@@ -1889,77 +2021,83 @@ export async function runFleetMigrationSync(
                           // there is nothing to find, because nothing was sent.
                           `Synced to ${syncedTo} — ${held[0].name} is too large for this pass to carry ` +
                           `and is left for the chunking lane; the clone is unchanged and still in the fleet`
-                        : blocked.length > 0
-                          ? // `ready` and NOT level. Saying only "Synced to X" here
-                            // would report a clone holding dozens of migrations back
-                            // as healthy — the exact shape of report this module
-                            // exists to stop. The first hole is named because it is
-                            // the one to reconcile first.
-                            `Synced to ${syncedTo} — ${blocked.length} migration(s) held back behind ` +
-                            `${blocked[0].blockedBy?.[0] ?? "a withheld version"}, which the prime's ledger does not record`
-                          : pausedMidReplay
-                            ? // Said before the level reading, because it is the
-                              // one case where "Synced to X" would be a claim
-                              // about a clone the pass never finished examining.
-                              //
-                              // WHERE IT STOPPED DECIDES WHAT THE NEXT PASS DOES,
-                              // and this promised a resume on every one of them.
-                              //
-                              // A pass stops in one of two places. INSIDE a seed,
-                              // where a cursor is written and the next pass really
-                              // does carry on from that statement; or BETWEEN
-                              // migrations, where there is no position at all and
-                              // the next pass starts the following migration from
-                              // its beginning. `chunkCursor` is exactly that fact,
-                              // computed above for the write.
-                              //
-                              // `chunksApplied` cannot stand in for it: it counts
-                              // statements sent THIS pass, so a pass that sent the
-                              // last three statements of a seed, recorded it, and
-                              // then ran out of budget reported "(3 statement(s) of
-                              // a large seed sent) … it resumes where it stopped".
-                              // True about the statements, false about the resume,
-                              // and read as the inverse of what happened — the
-                              // seed had just finished. Measured on `npc-test` at
-                              // 00:00 on 20 Sep 2026, cursor null.
-                              `Synced to ${syncedTo} so far — this pass stopped at its time budget ` +
-                              `with more to send` +
-                              //
-                              // AND THE QUESTION IS WHAT THE ROW WILL HOLD, not
-                              // what this pass did. The third reading said "the
-                              // next pass starts from the one after X" on
-                              // `chunkCursor === null && chunksApplied === 0` —
-                              // which is precisely the case where `cursorWrite`
-                              // resolves to `{}` and a STORED cursor survives
-                              // untouched. A pass that hit the deadline before
-                              // reaching the seed therefore promised a fresh
-                              // start while the next pass resumes mid-seed from
-                              // the cursor already on the row. Found by review.
-                              (chunkCursor !== null
-                                ? ` (${chunksApplied} statement(s) of a large seed sent); the next ` +
-                                  `pass carries on from statement ${chunkCursor.statementsDone} of it`
-                                : chunkCursorDiscarded || cursorFileLanded
-                                  ? `${chunksApplied > 0 ? ` (${chunksApplied} statement(s) sent, finishing a large seed)` : ""}; ` +
-                                    `the next pass starts the migration after it`
-                                  : storedCursor !== null
-                                    ? `; this pass did not reach the large seed it is part-way through, so the ` +
-                                      `next pass carries on from statement ${storedCursor.statementsDone} of it`
-                                    : `; the next pass starts from the one after ${syncedTo}`)
-                            : primeLedgerHoles.length > 0
-                              ? // Level with the prime, and the prime is not
-                                // level with its own repository. Said on the
-                                // rung BELOW the pause because a pass that has
-                                // not finished looking should report that
-                                // first — but said, because until this existed
-                                // a hole with nothing queued behind it
-                                // produced no entry, no blockage row and no
-                                // sentence, and four such versions sat
-                                // unrecorded on the prime for days.
-                                `Synced to ${syncedTo} — ${primeLedgerHoleSentence(
-                                  primeLedgerHoles.slice(0, PRIME_LEDGER_HOLE_NOTE_CAP),
-                                  primeLedgerHoles.length,
-                                )}`
-                              : `Synced to ${syncedTo}`,
+                        : byRule.length > 0
+                          ? // A HOLD again, and one no pass will clear on its
+                            // own: the rule's own sentence names what was not
+                            // sent and the change on the prime that ends it.
+                            `Synced to ${syncedTo} — ${byRule[0].heldByRule?.detail ?? byRule[0].error ?? ""} ` +
+                            `The clone is unchanged and still in the fleet.`
+                          : blocked.length > 0
+                            ? // `ready` and NOT level. Saying only "Synced to X" here
+                              // would report a clone holding dozens of migrations back
+                              // as healthy — the exact shape of report this module
+                              // exists to stop. The first hole is named because it is
+                              // the one to reconcile first.
+                              `Synced to ${syncedTo} — ${blocked.length} migration(s) held back behind ` +
+                              `${blocked[0].blockedBy?.[0] ?? "a withheld version"}, which the prime's ledger does not record`
+                            : pausedMidReplay
+                              ? // Said before the level reading, because it is the
+                                // one case where "Synced to X" would be a claim
+                                // about a clone the pass never finished examining.
+                                //
+                                // WHERE IT STOPPED DECIDES WHAT THE NEXT PASS DOES,
+                                // and this promised a resume on every one of them.
+                                //
+                                // A pass stops in one of two places. INSIDE a seed,
+                                // where a cursor is written and the next pass really
+                                // does carry on from that statement; or BETWEEN
+                                // migrations, where there is no position at all and
+                                // the next pass starts the following migration from
+                                // its beginning. `chunkCursor` is exactly that fact,
+                                // computed above for the write.
+                                //
+                                // `chunksApplied` cannot stand in for it: it counts
+                                // statements sent THIS pass, so a pass that sent the
+                                // last three statements of a seed, recorded it, and
+                                // then ran out of budget reported "(3 statement(s) of
+                                // a large seed sent) … it resumes where it stopped".
+                                // True about the statements, false about the resume,
+                                // and read as the inverse of what happened — the
+                                // seed had just finished. Measured on `npc-test` at
+                                // 00:00 on 20 Sep 2026, cursor null.
+                                `Synced to ${syncedTo} so far — this pass stopped at its time budget ` +
+                                `with more to send` +
+                                //
+                                // AND THE QUESTION IS WHAT THE ROW WILL HOLD, not
+                                // what this pass did. The third reading said "the
+                                // next pass starts from the one after X" on
+                                // `chunkCursor === null && chunksApplied === 0` —
+                                // which is precisely the case where `cursorWrite`
+                                // resolves to `{}` and a STORED cursor survives
+                                // untouched. A pass that hit the deadline before
+                                // reaching the seed therefore promised a fresh
+                                // start while the next pass resumes mid-seed from
+                                // the cursor already on the row. Found by review.
+                                (chunkCursor !== null
+                                  ? ` (${chunksApplied} statement(s) of a large seed sent); the next ` +
+                                    `pass carries on from statement ${chunkCursor.statementsDone} of it`
+                                  : chunkCursorDiscarded || cursorFileLanded
+                                    ? `${chunksApplied > 0 ? ` (${chunksApplied} statement(s) sent, finishing a large seed)` : ""}; ` +
+                                      `the next pass starts the migration after it`
+                                    : storedCursor !== null
+                                      ? `; this pass did not reach the large seed it is part-way through, so the ` +
+                                        `next pass carries on from statement ${storedCursor.statementsDone} of it`
+                                      : `; the next pass starts from the one after ${syncedTo}`)
+                              : primeLedgerHoles.length > 0
+                                ? // Level with the prime, and the prime is not
+                                  // level with its own repository. Said on the
+                                  // rung BELOW the pause because a pass that has
+                                  // not finished looking should report that
+                                  // first — but said, because until this existed
+                                  // a hole with nothing queued behind it
+                                  // produced no entry, no blockage row and no
+                                  // sentence, and four such versions sat
+                                  // unrecorded on the prime for days.
+                                  `Synced to ${syncedTo} — ${primeLedgerHoleSentence(
+                                    primeLedgerHoles.slice(0, PRIME_LEDGER_HOLE_NOTE_CAP),
+                                    primeLedgerHoles.length,
+                                  )}`
+                                : `Synced to ${syncedTo}`,
                 error_message: failures.length > 0 ? failures[0].error : null,
               }),
         })
@@ -2007,6 +2145,16 @@ export async function runFleetMigrationSync(
       // this is a line in the run's result rather than an alert.
       for (const l of limited) {
         out.rateLimited.push({ cloneId, cloneName, migration: l.name });
+      }
+
+      // And the third hold: a line in the run's result, never an alert.
+      for (const r of byRule) {
+        out.heldByRule.push({
+          cloneId,
+          cloneName,
+          migration: r.name,
+          rule: r.heldByRule?.rule ?? "unknown",
+        });
       }
 
       if (failures.length > 0) {
@@ -2114,6 +2262,15 @@ export async function runFleetMigrationSync(
       failed: out.failed.length,
       held_oversize: out.heldOversize.map((h) => `${h.cloneName}: ${h.migration}`),
       rate_limited: out.rateLimited.map((l) => `${l.cloneName}: ${l.migration}`),
+      held_by_rule: out.heldByRule.map((h) => `${h.cloneName}: ${h.migration} (${h.rule})`),
+      ...(out.splitVersions
+        ? {
+            split_versions: out.splitVersions.map(
+              (v) =>
+                `${v.version}: cleared ${v.cleared.join(", ")}; withheld ${v.withheld.join(", ")}`,
+            ),
+          }
+        : {}),
       excluded: out.excluded,
       // WHICH ones, and why. `excluded: 2` is the reading that hid two
       // tenants falling out of the fleet for a day.
@@ -2130,6 +2287,24 @@ export async function runFleetMigrationSync(
         .map((w) => w.meta.name),
       prime_backend_ref: scoped.primeRef,
       prime_applied: scoped.primeAppliedCount,
+      // What the prime declared withdrawn, and whether the declaration could be
+      // read. An unreadable manifest withdraws nothing, which turns every file
+      // it lists back into a hole — the audit row is where that shows first.
+      withdrawn_state: out.withdrawn?.state ?? null,
+      withdrawn_files: out.withdrawn?.files ?? [],
+      withdrawn_unmatched: out.withdrawn?.unmatched ?? [],
+      withdrawn_recorded_on_prime: out.withdrawn?.recordedOnPrime ?? [],
+      ...(out.withdrawn?.why ? { withdrawn_unreadable_why: out.withdrawn.why } : {}),
+      // Which seeds the barrier could see into, and which it could not. An
+      // unreadable manifest or a stale entry turns a seed back into a barrier
+      // to everything behind it, and a smaller `advanced` is otherwise the
+      // only sign.
+      seed_skeletons_state: out.seedSkeletons?.state ?? null,
+      seed_skeletons_used: out.seedSkeletons?.used ?? [],
+      seed_skeletons_stale: out.seedSkeletons?.stale ?? [],
+      seed_skeletons_unmatched: out.seedSkeletons?.unmatched ?? [],
+      seed_skeletons_refused: out.seedSkeletons?.refused ?? [],
+      ...(out.seedSkeletons?.why ? { seed_skeletons_unreadable_why: out.seedSkeletons.why } : {}),
     },
   });
 

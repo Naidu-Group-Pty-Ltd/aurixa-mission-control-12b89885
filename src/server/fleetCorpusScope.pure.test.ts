@@ -575,6 +575,25 @@ describe("the self-healing sql_migration lane is the third replay path", () => {
   });
 });
 
+type Facts = { creates?: string[]; requires?: string[]; mentions?: string[] };
+type FactsMeta = {
+  id: string;
+  name: string;
+  creates?: string[];
+  requires?: string[];
+  mentions?: string[];
+};
+
+/** The facts of a body that was read: every one present, empty unless given. */
+const readFacts = (facts?: Facts): Omit<FactsMeta, "id" | "name"> =>
+  facts === undefined
+    ? {}
+    : {
+        creates: facts.creates ?? [],
+        requires: facts.requires ?? [],
+        mentions: facts.mentions ?? [],
+      };
+
 /**
  * The barrier is per-dependency.
  *
@@ -583,14 +602,14 @@ describe("the self-healing sql_migration lane is the third replay path", () => {
  * the one the blanket rule reduces to `would_send 0`.
  */
 describe("partitionByDependency — a hole stops only what depends on it", () => {
-  const withFacts = (
-    id: string,
-    facts?: { creates?: string[]; requires?: string[] },
-  ): { id: string; name: string; creates?: string[]; requires?: string[] } => ({
+  // A body production READ carries all three facts, because they come from one
+  // decoded text: what it creates, what it requires and what it names. A
+  // fixture passes the ones it is about and the rest are EMPTY — read, and
+  // nothing there. No facts object at all is a body nobody read.
+  const withFacts = (id: string, facts?: Facts): FactsMeta => ({
     id,
     name: `${id}_m.sql`,
-    ...(facts?.creates !== undefined ? { creates: facts.creates } : {}),
-    ...(facts?.requires !== undefined ? { requires: facts.requires } : {}),
+    ...readFacts(facts),
   });
 
   it("sends past a hole that creates nothing the candidate needs", () => {
@@ -704,5 +723,318 @@ describe("partitionByDependency — a hole stops only what depends on it", () =>
     );
     expect(orphaned[0].blockedBy).toHaveLength(3);
     expect(orphaned[0].blockedOn).toHaveLength(3);
+  });
+});
+
+/**
+ * A version several files share is ONE unit: one hole, sent whole or held
+ * whole. Walked per file, the sibling no hole reached was sent, the replay
+ * recorded the version, and the sibling that waited was never sent again.
+ */
+describe("partitionByDependency — a shared version is one unit", () => {
+  // As `withFacts` above: a body that was read carries all three facts.
+  const file = (id: string, slug: string, facts?: Facts): FactsMeta => ({
+    id,
+    name: `${id}_${slug}.sql`,
+    ...readFacts(facts),
+  });
+  // Two real pairs from the prime's tree, 23 Sep 2026.
+  const SHARED = "20260725110000";
+  const OTHER = "20260729030000";
+
+  it("counts a withheld version once, however many files carry it", () => {
+    const metas = [
+      file(SHARED, "secure_agent_subscription_approval", { creates: [] }),
+      file(SHARED, "sign_email_sync_cron_invocations", { creates: [] }),
+    ];
+    const { holes } = partitionByDependency(metas, new Set(), new Set());
+    expect(holes).toEqual([SHARED]);
+  });
+
+  it("creates, as a hole, what every one of its files creates", () => {
+    const metas = [
+      file(SHARED, "a", { creates: ["first_obj"] }),
+      file(SHARED, "b", { creates: ["second_obj"] }),
+      file("20260801000000", "needs_second", { requires: ["second_obj"] }),
+    ];
+    const { orphaned } = partitionByDependency(metas, new Set(["20260801000000"]), new Set());
+    expect(orphaned).toHaveLength(1);
+    expect(orphaned[0].blockedBy).toEqual([SHARED]);
+    expect(orphaned[0].blockedOn).toEqual(["second_obj"]);
+  });
+
+  it("is opaque when any one of its files could not be read", () => {
+    // One file declares it creates nothing; the other was never read, and a
+    // file nobody read might create anything.
+    const metas = [
+      file(SHARED, "a", { creates: [] }),
+      file(SHARED, "b"),
+      file("20260801000000", "needs_nothing", { requires: [] }),
+    ];
+    const { send, orphaned } = partitionByDependency(metas, new Set(["20260801000000"]), new Set());
+    expect(send).toEqual([]);
+    expect(orphaned[0].blockedBy).toEqual([SHARED]);
+  });
+
+  it("holds every file of a runnable version when any one of them is blocked", () => {
+    const metas = [
+      file("20260720000000", "hole", { creates: ["wanted"] }),
+      file(OTHER, "optional_biometric_consent", { requires: [] }),
+      file(OTHER, "secure_bulk_generation_resume_cron", { requires: ["wanted"] }),
+    ];
+    const { send, orphaned } = partitionByDependency(metas, new Set([OTHER]), new Set());
+    expect(send).toEqual([]);
+    expect(orphaned.map((o) => o.meta.name)).toEqual([
+      `${OTHER}_optional_biometric_consent.sql`,
+      `${OTHER}_secure_bulk_generation_resume_cron.sql`,
+    ]);
+    // Both carry what holds the VERSION, not only what holds each file.
+    for (const o of orphaned) {
+      expect(o.blockedBy).toEqual(["20260720000000"]);
+      expect(o.blockedOn).toEqual(["wanted"]);
+    }
+  });
+
+  it("sends every file of a runnable version nothing blocks, in corpus order", () => {
+    const metas = [
+      file("20260720000000", "hole", { creates: ["unrelated"] }),
+      file(OTHER, "a", { requires: [] }),
+      file(OTHER, "b", { requires: ["clients"] }),
+    ];
+    const { send, orphaned } = partitionByDependency(metas, new Set([OTHER]), new Set());
+    expect(send.map((m) => m.name)).toEqual([`${OTHER}_a.sql`, `${OTHER}_b.sql`]);
+    expect(orphaned).toEqual([]);
+  });
+
+  it("neither sends nor counts a version the clone already records", () => {
+    const metas = [file(SHARED, "a", { creates: [] }), file(SHARED, "b", { creates: [] })];
+    const part = partitionByDependency(metas, new Set(), new Set([SHARED]));
+    expect(part).toEqual({ send: [], orphaned: [], holes: [] });
+  });
+});
+
+/**
+ * A runnable version the barrier holds back is a barrier for what follows it.
+ *
+ * Every case is written against the shape that made it necessary, measured on
+ * 23 Sep 2026: a template-library SEED nobody could read (40 MB, past the facts
+ * ceiling) held behind a hole, and the REFRESH one version later that reads
+ * the seed's rows back by the seed's release name — creating and requiring
+ * nothing the seed does, so the facts alone sent it ahead of its seed.
+ */
+describe("partitionByDependency — a version held back is a barrier too", () => {
+  const at = (id: string, facts?: Facts): FactsMeta => ({
+    id,
+    name: `${id}_m.sql`,
+    ...readFacts(facts),
+  });
+
+  // On the CRM clone the first hole is at corpus ordinal 1.
+  const HOLE = "20250124120000";
+  const SEED = "20261204020000";
+  const REFRESH = "20261204030000";
+  const LATER = "20261206000000";
+
+  const hole = at(HOLE, { creates: [] });
+  const unreadSeed = at(SEED); // 40 MB: nothing about it was read
+  const refresh = at(REFRESH, {
+    creates: ["template_master_refresh_decisions"],
+    requires: ["template_master_refresh_decisions"],
+    mentions: [SEED],
+  });
+
+  it("holds the refresh behind the seed it names — which the facts alone sent", () => {
+    const { send, orphaned, holes } = partitionByDependency(
+      [hole, unreadSeed, refresh],
+      new Set([SEED, REFRESH]),
+      new Set(),
+    );
+    expect(holes).toEqual([HOLE]);
+    expect(send).toEqual([]);
+    expect(orphaned.map((o) => o.meta.id)).toEqual([SEED, REFRESH]);
+    // It is told which migration it waits for, and the hole behind that one.
+    expect(orphaned[1].waitsFor).toEqual([SEED]);
+    expect(orphaned[1].blockedBy).toEqual([HOLE]);
+  });
+
+  it("never puts a held version in `blockedBy`, which is read as the prime's ledger being short", () => {
+    const { orphaned } = partitionByDependency(
+      [hole, unreadSeed, refresh],
+      new Set([SEED, REFRESH]),
+      new Set(),
+    );
+    for (const o of orphaned) expect(o.blockedBy).not.toContain(SEED);
+    expect(orphaned[0].waitsFor).toBeUndefined();
+  });
+
+  it("holds the refresh by its name alone, where the seed's facts WERE read", () => {
+    // The seed's creations are known and the refresh requires none of them:
+    // only the name connects the two.
+    const readSeed = at(SEED, {
+      creates: ["template_library_release_baselines"],
+      requires: ["template_library_entries"],
+    });
+    const needy = at("20250101000000", { creates: ["template_library_entries"] });
+    const { send, orphaned } = partitionByDependency(
+      [needy, readSeed, refresh],
+      new Set([SEED, REFRESH]),
+      new Set(),
+    );
+    expect(send).toEqual([]);
+    expect(orphaned[0].blockedOn).toEqual(["template_library_entries"]);
+    expect(orphaned[1].meta.id).toBe(REFRESH);
+    expect(orphaned[1].waitsFor).toEqual([SEED]);
+    expect(orphaned[1].blockedOn).toBeUndefined();
+  });
+
+  it("sends what neither needs nor names a held version whose creations were read", () => {
+    const readSeed = at(SEED, {
+      creates: ["template_library_release_baselines"],
+      requires: ["template_library_entries"],
+    });
+    const needy = at("20250101000000", { creates: ["template_library_entries"] });
+    const unrelated = at(LATER, { requires: ["extension_migration_status"] });
+    const { send, orphaned } = partitionByDependency(
+      [needy, readSeed, unrelated],
+      new Set([SEED, LATER]),
+      new Set(),
+    );
+    expect(send.map((m) => m.id)).toEqual([LATER]);
+    expect(orphaned.map((o) => o.meta.id)).toEqual([SEED]);
+  });
+
+  it("holds what REQUIRES something a held version creates, and names the object", () => {
+    const readSeed = at(SEED, {
+      creates: ["template_library_release_baselines"],
+      requires: ["template_library_entries"],
+    });
+    const needy = at("20250101000000", { creates: ["template_library_entries"] });
+    const reader = at(LATER, { requires: ["template_library_release_baselines"] });
+    const { orphaned } = partitionByDependency(
+      [needy, readSeed, reader],
+      new Set([SEED, LATER]),
+      new Set(),
+    );
+    expect(orphaned[1].meta.id).toBe(LATER);
+    expect(orphaned[1].blockedOn).toEqual(["template_library_release_baselines"]);
+    expect(orphaned[1].waitsFor).toEqual([SEED]);
+    expect(orphaned[1].blockedBy).toEqual(["20250101000000"]);
+  });
+
+  /**
+   * The direction this must fail in: an unread file might create anything.
+   * This is what costs liveness where a seed's facts are unread — and it is
+   * the only answer that is not a guess.
+   */
+  it("a held version nobody could read holds everything after it", () => {
+    const unrelated = at(LATER, { requires: [] });
+    const { send, orphaned } = partitionByDependency(
+      [hole, unreadSeed, unrelated],
+      new Set([SEED, LATER]),
+      new Set(),
+    );
+    expect(send).toEqual([]);
+    expect(orphaned[1].meta.id).toBe(LATER);
+    expect(orphaned[1].waitsFor).toEqual([SEED]);
+    expect(orphaned[1].blockedBy).toEqual([HOLE]);
+  });
+
+  it("a candidate that NAMES a hole waits for it, whatever the hole creates", () => {
+    // A guard that says in its own SQL that the hole must run first.
+    const guard = at(LATER, { requires: [], mentions: [HOLE] });
+    const { send, orphaned } = partitionByDependency([hole, guard], new Set([LATER]), new Set());
+    expect(send).toEqual([]);
+    expect(orphaned[0].blockedBy).toEqual([HOLE]);
+    expect(orphaned[0].waitsFor).toBeUndefined();
+  });
+
+  it("a candidate whose names were not read is not narrowed, whatever else was", () => {
+    // `requires` read, `mentions` absent: a caller that attached one and not
+    // the other. It might name anything the barrier holds.
+    const halfRead = { id: LATER, name: `${LATER}_m.sql`, creates: [], requires: [] };
+    const { send, orphaned } = partitionByDependency([hole, halfRead], new Set([LATER]), new Set());
+    expect(send).toEqual([]);
+    expect(orphaned[0].blockedBy).toEqual([HOLE]);
+  });
+
+  it("a name blocks nothing where the version is already on the clone, or sent in this run", () => {
+    // On the clone already: neither a hole nor held.
+    const onClone = partitionByDependency(
+      [hole, unreadSeed, refresh],
+      new Set([SEED, REFRESH]),
+      new Set([HOLE, SEED]),
+    );
+    expect(onClone.send.map((m) => m.id)).toEqual([REFRESH]);
+
+    // Sent in this run, ahead of it: nothing holds the seed.
+    const together = partitionByDependency(
+      [unreadSeed, refresh],
+      new Set([SEED, REFRESH]),
+      new Set(),
+    );
+    expect(together.send.map((m) => m.id)).toEqual([SEED, REFRESH]);
+    expect(together.orphaned).toEqual([]);
+  });
+
+  it("a version is never a barrier to itself — a seed spells its own release name", () => {
+    const selfNaming = at(SEED, { requires: [], mentions: [SEED] });
+    const { send } = partitionByDependency(
+      [at(HOLE, { creates: ["unrelated"] }), selfNaming],
+      new Set([SEED]),
+      new Set(),
+    );
+    expect(send.map((m) => m.id)).toEqual([SEED]);
+  });
+
+  it("carries the holes through a chain, and every version it waits for", () => {
+    // Hole → held seed → held refresh → a third that names the refresh.
+    const third = at(LATER, { requires: [], mentions: [REFRESH] });
+    const readSeed = at(SEED, { creates: ["template_library_release_baselines"], requires: ["x"] });
+    const { orphaned } = partitionByDependency(
+      [at(HOLE, { creates: ["x"] }), readSeed, refresh, third],
+      new Set([SEED, REFRESH, LATER]),
+      new Set(),
+    );
+    expect(orphaned.map((o) => o.meta.id)).toEqual([SEED, REFRESH, LATER]);
+    expect(orphaned[2].blockedBy).toEqual([HOLE]);
+    expect(orphaned[2].waitsFor).toEqual([REFRESH]);
+  });
+
+  it("caps `waitsFor` at maxBlockedBy, keeping the first", () => {
+    const held = Array.from({ length: 6 }, (_, i) => at(`2026120${i}000000`)); // unread, opaque
+    const tail = at("20261299000000", { requires: [] });
+    const { orphaned } = partitionByDependency(
+      [hole, ...held, tail],
+      new Set([...held.map((m) => m.id), tail.id]),
+      new Set(),
+      3,
+    );
+    expect(orphaned.at(-1)?.waitsFor).toEqual(held.slice(0, 3).map((m) => m.id));
+    expect(orphaned.at(-1)?.blockedBy).toEqual([HOLE]);
+  });
+
+  it("holds a whole shared version when one of its files names a held one", () => {
+    // The seed was READ, so only the name connects it to `a` — and `b`, which
+    // neither needs nor names it, is held because its version is.
+    const readSeed = at(SEED, { creates: ["template_library_release_baselines"], requires: ["x"] });
+    const V = "20261207010000";
+    const a = { id: V, name: `${V}_a.sql`, ...readFacts({ mentions: [SEED] }) };
+    const b = { id: V, name: `${V}_b.sql`, ...readFacts({}) };
+    const alone = partitionByDependency(
+      [at(HOLE, { creates: ["x"] }), readSeed, b],
+      new Set([SEED, V]),
+      new Set(),
+    );
+    expect(alone.send.map((m) => m.name)).toEqual([b.name]);
+
+    const { send, orphaned } = partitionByDependency(
+      [at(HOLE, { creates: ["x"] }), readSeed, a, b],
+      new Set([SEED, V]),
+      new Set(),
+    );
+    expect(send).toEqual([]);
+    expect(orphaned.map((o) => o.meta.name)).toEqual([`${SEED}_m.sql`, a.name, b.name]);
+    expect(orphaned[1].waitsFor).toEqual([SEED]);
+    expect(orphaned[2].waitsFor).toEqual([SEED]);
   });
 });

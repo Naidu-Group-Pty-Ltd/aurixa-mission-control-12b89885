@@ -2657,7 +2657,7 @@ describe("a body too big to hold is not a migration that failed", () => {
     // on the same object. One of four callers supplied it, which is why the
     // other three could not apply the 39 MB seed at all.
     for (const src of [fleet(), button()]) {
-      expect(src).toMatch(/streamSql: \(m\) => corpus\.openSqlStream\(m\.id\)/);
+      expect(src).toMatch(/streamSql: \(m\) => corpus\.openSqlStream\(m\)/);
     }
   });
 
@@ -2670,7 +2670,7 @@ describe("a body too big to hold is not a migration that failed", () => {
       // fits on one line: what is pinned here is the rule, not the wrapping.
       const flat = src.replace(/\s+/g, " ");
       expect(flat).toMatch(
-        /const failures = results\.filter\( ?\(r\) => !r\.success && !r\.heldOversize && !r\.heldUpstreamLimited,? ?\)/,
+        /const failures = results\.filter\( ?\(r\) => !r\.success && !r\.heldOversize && !r\.heldUpstreamLimited && !r\.heldByRule,? ?\)/,
       );
       expect(src).toMatch(/const held = results\.filter\(\(r\) => r\.heldOversize\)/);
       expect(src).toMatch(/const limited = results\.filter\(\(r\) => r\.heldUpstreamLimited\)/);

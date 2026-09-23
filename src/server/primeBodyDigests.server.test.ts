@@ -18,6 +18,9 @@ import type { PrimeMigrationCorpus } from "./prime-backend.server";
 const octokit = {} as never;
 const ref = { owner: "o", repo: "r" } as never;
 
+/** A corpus reference, as the version these fixtures key their files by. */
+const idOf = (ref: string | { id: string }) => (typeof ref === "string" ? ref : ref.id);
+
 /** A corpus whose bodies GitHub will serve, at a given commit. */
 function corpusOf(
   sourceSha: string,
@@ -33,13 +36,18 @@ function corpusOf(
       size: f.size === undefined ? Buffer.byteLength(f.sql, "utf8") : f.size,
     })),
     sourceSha,
-    bodyIdentity: (id) => (files[id] ? `blob-${id}` : null),
-    sizeOf: (id) => {
-      const f = files[id];
+    withdrawal: { state: "absent", excluded: [], unmatched: [] },
+    // The digest pass never asks; a call is a regression this makes loud.
+    seedSkeletons: async () => {
+      throw new Error("not used");
+    },
+    bodyIdentity: (ref) => (files[idOf(ref)] ? `blob-${idOf(ref)}` : null),
+    sizeOf: (ref) => {
+      const f = files[idOf(ref)];
       if (!f) return null;
       return f.size === undefined ? Buffer.byteLength(f.sql, "utf8") : f.size;
     },
-    loadSql: async (id) => files[id].sql,
+    loadSql: async (ref) => files[idOf(ref)].sql,
     openSqlStream: async () => {
       throw new Error("not used");
     },
@@ -141,9 +149,9 @@ describe("digestPrimeBodies", () => {
   });
 
   /**
-   * Ids collide in this corpus — 77 files share a version with another — so a
-   * caller can hand the same path twice and a naive pass would put one blob in
-   * the batch twice and count it twice.
+   * Ids collide in this corpus — 61 files shared a version with another on
+   * 23 Sep 2026 — so a caller can hand the same path twice and a naive pass
+   * would put one blob in the batch twice and count it twice.
    */
   it("asks for a body once however many times it is named", async () => {
     const files = { a: { sql: "SELECT 1;" } };
@@ -152,6 +160,33 @@ describe("digestPrimeBodies", () => {
     const asked = batched.mock.calls[0][2] as Array<{ rel: string }>;
     expect(asked.map((e) => e.rel)).toEqual(["a"]);
     expect(out.fetched).toBe(1);
+  });
+
+  /**
+   * The partition narrows a candidate only where BOTH its facts and its names
+   * were read, so the two maps must agree about which bodies were: a path in
+   * one and not the other would put that file back on the blanket rule for no
+   * reason. See `CorpusMeta.mentions`.
+   */
+  it("reads what each decoded body names beside its facts, and neither for a body it did not read", async () => {
+    const refresh =
+      "UPDATE public.report_templates SET name = name " +
+      "WHERE release = '20261204020000_seed_template_library_v15'; -- not 20261203000000";
+    const files = {
+      r: { sql: refresh },
+      big: { sql: "x", size: MAX_DIGEST_BYTES + 1 },
+    };
+    serves({ r: { sql: refresh } });
+    const out = await digestPrimeBodies(corpusOf("sha-names", files), ["r", "big"], octokit, ref);
+    expect(out.mentionsByPath.get("r")).toEqual(["20261204020000"]);
+    expect([...out.mentionsByPath.keys()]).toEqual([...out.factsByPath.keys()]);
+    expect(out.mentionsByPath.has("big")).toBe(false);
+    expect(out.factsByPath.has("big")).toBe(false);
+
+    // And from the cache exactly as from the read.
+    const again = await digestPrimeBodies(corpusOf("sha-names", files), ["r"], octokit, ref);
+    expect(again.fetched).toBe(0);
+    expect(again.mentionsByPath.get("r")).toEqual(["20261204020000"]);
   });
 
   it("carries an id the corpus does not hold as unread rather than throwing", async () => {

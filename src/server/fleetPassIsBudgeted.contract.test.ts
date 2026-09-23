@@ -1129,7 +1129,7 @@ describe("what a pass stopped inside is resumable", () => {
       Asserted on the lane rather than only on the replay, because the replay's
       check is inert if nobody hands it a `bodyIdentity`.
     */
-    expect(lane).toContain("bodyIdentity: (m) => corpus.bodyIdentity(m.id)");
+    expect(lane).toContain("bodyIdentity: (m) => corpus.bodyIdentity(m)");
     // And it has to be WRITTEN, or the next pass has nothing to compare and the
     // refusal below restarts the seed on every single pass.
     const cb = lane.indexOf("onStatementDone:");

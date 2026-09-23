@@ -367,9 +367,19 @@ export async function* chunkSeedStatements(
 }
 
 /**
+ * The line a skeleton carries where the rows were.
+ *
+ * Named once because two readers depend on it: {@link seedSkeleton} writes it,
+ * and `seedSkeletonManifest.pure.ts` checks a skeleton the PRIME published has
+ * exactly one, after `VALUES` and before its `ON CONFLICT` clause — the prime
+ * builds its skeletons with this join, ported character for character.
+ */
+export const SEED_ROWS_MARKER = "  (…)";
+
+/**
  * The executable skeleton — every statement the data is poured into — for
  * the destructiveness gate. Rows are data and are not assessed as SQL.
  */
 export function seedSkeleton(shape: SeedShape): string {
-  return [shape.header, "  (…)", shape.onConflict, shape.tail].filter(Boolean).join("\n");
+  return [shape.header, SEED_ROWS_MARKER, shape.onConflict, shape.tail].filter(Boolean).join("\n");
 }

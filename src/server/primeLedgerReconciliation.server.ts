@@ -98,7 +98,9 @@ export async function buildPrimeLedgerReconciliation(
   for (const m of take) {
     let sql: string;
     try {
-      sql = await corpus.loadSql(m.id);
+      // By FILE: two files at one version are two bodies, and the evidence
+      // below is about each of them.
+      sql = await corpus.loadSql(m);
     } catch (e) {
       /*
         A body we cannot read is not a migration we can vouch for — and it is

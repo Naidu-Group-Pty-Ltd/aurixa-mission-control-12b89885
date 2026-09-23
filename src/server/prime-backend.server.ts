@@ -20,6 +20,19 @@ import { pruneBundleToReachable } from "./functionBundlePrune.pure";
 import { isPrimeOnlySecret } from "./primeOnlySecrets.pure";
 import { OversizedMigrationError, PrimeBodyUnavailableError } from "./oversizedMigration.pure";
 import { githubApiHeaders } from "./githubRequestHeaders.pure";
+import {
+  WITHDRAWALS_PATH,
+  partitionWithdrawn,
+  readWithdrawalManifest,
+  unreadableWithdrawals,
+  type WithdrawalReading,
+} from "./migrationWithdrawals.pure";
+import {
+  SEED_SKELETONS_PATH,
+  readSeedSkeletonManifest,
+  unreadableSeedSkeletons,
+  type SeedSkeletonReading,
+} from "./seedSkeletonManifest.pure";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -34,6 +47,19 @@ export type PrimeMigration = {
 };
 
 export type PrimeMigrationMeta = Omit<PrimeMigration, "sql">;
+
+/**
+ * How a reader names the migration it wants from the corpus: a FILE, as every
+ * list of corpus entries hands them out, or a bare VERSION string.
+ *
+ * A file always names one body. A version names one body only where one file
+ * carries it — and the corpus carried 24 versions that two or more files share
+ * (23 Sep 2026, withdrawals removed). Resolving those by version is how every
+ * sibling came to be sent the body of whichever sorted last, so a version
+ * shared by several files is refused by name rather than resolved to one of
+ * them. See `sharedVersionDelivery.pure.ts`.
+ */
+export type PrimeMigrationRef = string | { id: string; name: string };
 
 export type PrimeFunctionFile = {
   /** Path relative to supabase/functions/, e.g. "my-fn/index.ts" or "_shared/cors.ts" */
@@ -635,6 +661,148 @@ let blobCache: { key: string; value: Map<string, string> } | null = null;
 export function resetPrimeSnapshotCache(): void {
   treeCache = null;
   blobCache = null;
+  withdrawalTextCache = null;
+  seedSkeletonCache = null;
+}
+
+/**
+ * The withdrawal manifest's text, keyed by its git blob sha.
+ *
+ * Content-addressed, so it can never go stale: a changed manifest is a
+ * different sha and misses. One entry is enough — the prime has one manifest,
+ * and every reader that opens the corpus inside a sweep asks for the same one.
+ */
+let withdrawalTextCache: { sha: string; text: string } | null = null;
+
+/**
+ * Read `MIGRATION_WITHDRAWN.json` from a listing the caller has already taken.
+ *
+ * Never throws. A manifest that cannot be FETCHED is `unreadable`, and an
+ * unreadable manifest withdraws nothing — see `migrationWithdrawals.pure.ts`
+ * for why that is the safe direction. The listing is passed in rather than
+ * re-read so the manifest and the migrations it names come from one commit.
+ */
+async function readWithdrawalsFromListing(
+  octokit: Octokit,
+  ref: RepoRef,
+  blobs: ReadonlyArray<TreeBlob>,
+): Promise<WithdrawalReading> {
+  const blob = blobs.find((b) => b.path === WITHDRAWALS_PATH);
+  if (!blob) return readWithdrawalManifest(null);
+  if (withdrawalTextCache?.sha === blob.sha) {
+    return readWithdrawalManifest(withdrawalTextCache.text);
+  }
+  let text: string;
+  try {
+    text = decodeBase64Utf8(await fetchBlobBase64(octokit, ref, blob.sha));
+  } catch (e) {
+    return unreadableWithdrawals(
+      `${WITHDRAWALS_PATH} could not be fetched (${
+        e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+      })`,
+    );
+  }
+  withdrawalTextCache = { sha: blob.sha, text };
+  return readWithdrawalManifest(text);
+}
+
+/**
+ * The seed skeleton manifest's READING, keyed by its git blob sha.
+ *
+ * The reading rather than the text, unlike the withdrawal cache above: this
+ * document is ~450 KB where that one is a few, and parsing it on every pass to
+ * arrive at the same answer is work a content-addressed key makes pointless.
+ * A reading that says the text could not be USED is cached with it, because it
+ * is a fact about those bytes; a fetch that failed is not, because it is a
+ * fact about one moment.
+ */
+let seedSkeletonCache: { sha: string; reading: SeedSkeletonReading } | null = null;
+
+/**
+ * Read `migration-seed-skeletons.json` from a listing the caller has already
+ * taken, so the skeletons and the files they are pinned to come from one
+ * commit.
+ *
+ * Never throws. A manifest that cannot be fetched is `unreadable`, and an
+ * unreadable manifest describes nothing — every large file is read as unread,
+ * which is how the corpus behaved before the prime published one. See
+ * `seedSkeletonManifest.pure.ts`.
+ */
+async function readSeedSkeletonsFromListing(
+  octokit: Octokit,
+  ref: RepoRef,
+  blobs: ReadonlyArray<TreeBlob>,
+): Promise<SeedSkeletonReading> {
+  const blob = blobs.find((b) => b.path === SEED_SKELETONS_PATH);
+  if (!blob) return readSeedSkeletonManifest(null);
+  if (seedSkeletonCache?.sha === blob.sha) return seedSkeletonCache.reading;
+  let text: string;
+  try {
+    text = decodeBase64Utf8(await fetchBlobBase64(octokit, ref, blob.sha));
+  } catch (e) {
+    return unreadableSeedSkeletons(
+      `it could not be fetched (${
+        e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+      })`,
+    );
+  }
+  const reading = readSeedSkeletonManifest(text);
+  seedSkeletonCache = { sha: blob.sha, reading };
+  return reading;
+}
+
+/**
+ * What the withdrawal manifest took out of a corpus listing.
+ *
+ * Carried on every listing Mission Control delivers from, so an operator can
+ * see what was excluded and why — and see when the manifest could NOT be
+ * read, which is the one case where a withdrawn file becomes a hole again.
+ */
+export type PrimeWithdrawalReport = {
+  state: WithdrawalReading["state"];
+  /** Set when `state` is `unreadable`. */
+  why?: string;
+  /** Files in the tree the manifest lists. Absent from every list beside this. */
+  excluded: ReadonlyArray<PrimeMigrationMeta>;
+  /** Names the manifest lists that are not in the tree. */
+  unmatched: readonly string[];
+};
+
+/**
+ * The prime's migration files, with the declared withdrawals taken out.
+ *
+ * Every listing a delivery decision is made from goes through here, so the
+ * rule is applied once: `openPrimeMigrationCorpus` (the fleet sync, the
+ * per-clone sync, self-healing, the diagnosis, the repair, the health page,
+ * the ledger reconciliation) and `fetchPrimeMigrationList` (the registry).
+ *
+ * `fetchPrimeBackendSnapshot` deliberately does not: its introspection path
+ * stamps the prime's LEDGER rather than replaying files, and its opt-in
+ * `migration-replay` strategy is unscoped by construction and halts at the
+ * first template-library seed long before the first withdrawn file.
+ */
+async function primeMigrationEntries(
+  octokit: Octokit,
+  ref: RepoRef,
+  blobs: ReadonlyArray<TreeBlob>,
+): Promise<{
+  entries: Array<PrimeMigrationMeta & { sha: string; size?: number }>;
+  withdrawal: PrimeWithdrawalReport;
+}> {
+  const reading = await readWithdrawalsFromListing(octokit, ref, blobs);
+  const { kept, withdrawn, unmatched } = partitionWithdrawn(
+    migrationMetasFromBlobs([...blobs]),
+    reading,
+  );
+  return {
+    entries: kept,
+    withdrawal: {
+      state: reading.state,
+      ...(reading.state === "unreadable" ? { why: reading.why } : {}),
+      excluded: withdrawn.map(({ id, name, path }) => ({ id, name, path })),
+      unmatched,
+    },
+  };
 }
 
 async function listSupabaseBlobsUncached(
@@ -1052,14 +1220,19 @@ function migrationMetasFromBlobs(
 export async function fetchPrimeMigrationList(
   octokit: Octokit,
   ref: RepoRef,
-): Promise<{ migrations: PrimeMigrationMeta[]; sourceSha: string }> {
+): Promise<{
+  migrations: PrimeMigrationMeta[];
+  sourceSha: string;
+  withdrawal: PrimeWithdrawalReport;
+}> {
   const { blobs, commitSha } = await listSupabaseBlobs(octokit, ref);
-  const migrations = migrationMetasFromBlobs(blobs).map(({ id, name, path }) => ({
+  const { entries, withdrawal } = await primeMigrationEntries(octokit, ref, blobs);
+  const migrations = entries.map(({ id, name, path }) => ({
     id,
     name,
     path,
   }));
-  return { migrations, sourceSha: commitSha };
+  return { migrations, sourceSha: commitSha, withdrawal };
 }
 
 /**
@@ -1118,8 +1291,11 @@ export type PrimeMigrationCorpus = {
    *
    * Deliberately NOT added to `metas`: five call sites consume that array and
    * none of them wants a sha, while exactly one caller wants this.
+   *
+   * Null too for a version two files share, because a version alone cannot
+   * say which body is meant — see {@link PrimeMigrationRef}.
    */
-  bodyIdentity: (id: string) => string | null;
+  bodyIdentity: (ref: PrimeMigrationRef) => string | null;
   /**
    * One migration's size in bytes as the TREE reported it, or null.
    *
@@ -1131,20 +1307,20 @@ export type PrimeMigrationCorpus = {
    * than waving it through.
    *
    * Deliberately not added to `metas`, for `bodyIdentity`'s reason: five call
-   * sites consume that array and none of them wants a size.
+   * sites consume that array and none of them wants a size. Null for a version
+   * two files share, for `bodyIdentity`'s reason too.
    */
-  sizeOf: (id: string) => number | null;
+  sizeOf: (ref: PrimeMigrationRef) => number | null;
   /**
    * Every migration FILE, with the blob identity a body read needs.
    *
    * Keyed by path rather than id because ids are not unique in this corpus:
-   * `MIGRATION_VERSION_COLLISIONS.json` records 32 groups covering 77 files
-   * that share a version string, and `migrationIdFromFilename` returns that
-   * version. `byId` below keeps whichever of a pair sorts last, so anything
-   * asking `loadSql(id)` about a collision group gets one member's bytes with
-   * nothing saying which — fine for a replay that only needs the version
-   * applied once, and wrong for a reader that wants to know what each FILE
-   * contains.
+   * 24 versions are carried by 59 files (23 Sep 2026, after withdrawals; 32
+   * versions over 77 files on 20 Sep, before nine were renamed apart), and
+   * `migrationIdFromFilename` returns that version. The readers below resolve
+   * a version only where one file carries it and refuse it where several do,
+   * so a reader that wants each FILE's contents has to name the file — which
+   * this array, and every list derived from it, lets it do.
    *
    * `size` is null where the tree reported none, which is "unknown" and never
    * "empty" — the rule `loadSql` applies before it fetches.
@@ -1159,18 +1335,55 @@ export type PrimeMigrationCorpus = {
   /** Commit the listing was taken at. */
   sourceSha: string;
   /**
-   * Fetch one migration's SQL. Memoised, so a batch of clones missing the same
-   * version pays for it once. Throws — naming the migration and its size — when
-   * the body is past `MAX_MIGRATION_BYTES`.
+   * What the prime's `MIGRATION_WITHDRAWN.json` took out of this corpus.
+   *
+   * A withdrawn file is absent from `metas`, `files`, `bodyIdentity`,
+   * `sizeOf`, `loadSql` and `openSqlStream` alike, so no reader can reach its
+   * body by version — which matters where a version is shared: withdrawing
+   * one of `20260724000000`'s two files leaves that version carried by one
+   * file, which a version string then resolves to. See
+   * `migrationWithdrawals.pure.ts`.
    */
-  loadSql: (id: string) => Promise<string>;
+  withdrawal: PrimeWithdrawalReport;
+  /**
+   * The skeletons the prime publishes for the migrations too large for the
+   * fleet sync to read — every statement a seed's rows are poured into, pinned
+   * to the blob it was read from. See `seedSkeletonManifest.pure.ts`.
+   *
+   * Asked for rather than read with the listing, because one reader in a
+   * corpus's many wants it: the fleet sync's dependency pass. Read once per
+   * corpus and from the same listing as `files`, so an entry's pin is compared
+   * against the commit it was taken at. Never rejects — a manifest that could
+   * not be read is a reading that says so, and describes nothing.
+   */
+  seedSkeletons: () => Promise<SeedSkeletonReading>;
+  /**
+   * Fetch one migration's SQL. Memoised per FILE, so a batch of clones missing
+   * the same file pays for it once. Throws — naming the migration and its size
+   * — when the body is past `MAX_MIGRATION_BYTES`, and names the files when a
+   * version string is shared by more than one of them.
+   */
+  loadSql: (ref: PrimeMigrationRef) => Promise<string>;
   /**
    * Stream one migration's SQL, with no size ceiling and no memoisation: the
    * body never exists in memory as a whole, so there is nothing to keep. For
    * the seed-shaped INSERT the ceiling refuses — see `seedChunking.pure.ts`.
+   * Refuses a shared version exactly as `loadSql` does.
    */
-  openSqlStream: (id: string) => Promise<AsyncIterable<string>>;
+  openSqlStream: (ref: PrimeMigrationRef) => Promise<AsyncIterable<string>>;
 };
+
+/**
+ * Why a version string names no single file: the sentence a reader that asked
+ * by version is refused with. Exported so a caller can recognise the case in
+ * a test without matching prose.
+ */
+export function sharedVersionReadRefusal(version: string, names: readonly string[]): string {
+  return (
+    `Version ${version} is carried by ${names.length} files on the prime (${names.join(", ")}), ` +
+    `so a read by version alone cannot say which body is meant; read the file by its name.`
+  );
+}
 
 export async function openPrimeMigrationCorpus(
   octokit: Octokit,
@@ -1179,23 +1392,61 @@ export async function openPrimeMigrationCorpus(
 ): Promise<PrimeMigrationCorpus> {
   const maxBytes = opts?.maxBytes ?? MAX_MIGRATION_BYTES;
   const { blobs, commitSha } = await listSupabaseBlobs(octokit, ref);
-  const entries = migrationMetasFromBlobs(blobs);
-  const byId = new Map(entries.map((m) => [m.id, m]));
+  // Withdrawals come out BEFORE the indexes are built, so a version shared by
+  // a withdrawn file and a live one is carried, here, by the live one alone.
+  const { entries, withdrawal } = await primeMigrationEntries(octokit, ref, blobs);
+  type Entry = (typeof entries)[number];
+  const byName = new Map(entries.map((m) => [m.name, m]));
+  const byVersion = new Map<string, Entry[]>();
+  for (const m of entries) {
+    const files = byVersion.get(m.id);
+    if (files) files.push(m);
+    else byVersion.set(m.id, [m]);
+  }
+  /**
+   * The one file a reference names, or the reason there is none.
+   *
+   * A FILE resolves by its name. A VERSION resolves only where exactly one file
+   * carries it: resolving a shared version to one of its files is what handed
+   * every sibling the same body, and a reader that asks by version has no way
+   * to say which it wanted — so it is told, rather than given a guess.
+   */
+  const resolve = (want: PrimeMigrationRef): { meta: Entry } | { refusal: string } => {
+    if (typeof want !== "string") {
+      const meta = byName.get(want.name);
+      return meta
+        ? { meta }
+        : { refusal: `Migration ${want.name} is not in the prime corpus at ${commitSha}` };
+    }
+    const files = byVersion.get(want) ?? [];
+    if (files.length === 1) return { meta: files[0] };
+    if (files.length === 0) {
+      return { refusal: `Migration ${want} is not in the prime corpus at ${commitSha}` };
+    }
+    return {
+      refusal: sharedVersionReadRefusal(
+        want,
+        files.map((f) => f.name),
+      ),
+    };
+  };
+  const fileOf = (want: PrimeMigrationRef): Entry | null => {
+    const r = resolve(want);
+    return "meta" in r ? r.meta : null;
+  };
+  // Keyed by FILE name: two files at one version are two bodies.
   const cache = new Map<string, Promise<string>>();
-  const sizeOf = (id: string): number | null => {
-    const size = byId.get(id)?.size;
+  const sizeOf = (want: PrimeMigrationRef): number | null => {
+    const size = fileOf(want)?.size;
     return typeof size === "number" ? size : null;
   };
 
-  const loadSql = (id: string): Promise<string> => {
-    const hit = cache.get(id);
+  const loadSql = (want: PrimeMigrationRef): Promise<string> => {
+    const resolved = resolve(want);
+    if ("refusal" in resolved) return Promise.reject(new Error(resolved.refusal));
+    const meta = resolved.meta;
+    const hit = cache.get(meta.name);
     if (hit) return hit;
-    const meta = byId.get(id);
-    if (!meta) {
-      return Promise.reject(
-        new Error(`Migration ${id} is not in the prime corpus at ${commitSha}`),
-      );
-    }
     const pending = (async () => {
       // Refuse before the round trip when the tree already told us the size.
       if (typeof meta.size === "number" && meta.size > maxBytes) {
@@ -1225,16 +1476,20 @@ export async function openPrimeMigrationCorpus(
     // A rejected fetch must not be cached as the answer: the next clone in the
     // batch would inherit a failure that may have been transient, and every
     // later run would too.
-    pending.catch(() => cache.delete(id));
-    cache.set(id, pending);
+    pending.catch(() => cache.delete(meta.name));
+    cache.set(meta.name, pending);
     return pending;
   };
 
-  const openSqlStream = async (id: string): Promise<AsyncIterable<string>> => {
-    const meta = byId.get(id);
-    if (!meta) throw new Error(`Migration ${id} is not in the prime corpus at ${commitSha}`);
+  const openSqlStream = async (want: PrimeMigrationRef): Promise<AsyncIterable<string>> => {
+    const resolved = resolve(want);
+    if ("refusal" in resolved) throw new Error(resolved.refusal);
+    const meta = resolved.meta;
     return fetchBlobTextStream(octokit, ref, meta.sha, meta.name);
   };
+
+  // One read per corpus, and only for a caller that asks.
+  let seedSkeletons: Promise<SeedSkeletonReading> | null = null;
 
   return {
     metas: entries.map(({ id, name, path }) => ({ id, name, path })),
@@ -1246,7 +1501,9 @@ export async function openPrimeMigrationCorpus(
       size: typeof size === "number" ? size : null,
     })),
     sourceSha: commitSha,
-    bodyIdentity: (id: string) => byId.get(id)?.sha ?? null,
+    withdrawal,
+    seedSkeletons: () => (seedSkeletons ??= readSeedSkeletonsFromListing(octokit, ref, blobs)),
+    bodyIdentity: (want: PrimeMigrationRef) => fileOf(want)?.sha ?? null,
     sizeOf,
     loadSql,
     openSqlStream,

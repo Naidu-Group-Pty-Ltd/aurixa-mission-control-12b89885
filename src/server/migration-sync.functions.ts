@@ -179,7 +179,10 @@ export const getCloneMigrationStatus = createServerFn({ method: "POST" })
         if (scoped.ok) {
           latestVersion = scoped.runnable[scoped.runnable.length - 1]?.id ?? "none";
           standing = readCloneMigrationStanding({
-            runnable: scoped.runnable,
+            // Whole versions only, as the sync sends them: a version the scope
+            // cleared part of is a hole the sync will not step into, so it is
+            // not work a press of the button can do.
+            runnable: scoped.runnable.filter((m) => scoped.runnableIds.has(m.id)),
             ledger: ledger.ok ? ledger.rows : null,
             ledgerError: ledger.ok ? null : ledger.error,
             recordedVersion: currentVersion,
@@ -332,23 +335,25 @@ export const syncCloneMigrations = createServerFn({ method: "POST" })
           backend.supabase_project_ref,
           runnable,
           undefined,
-          (m) => corpus.loadSql(m.id),
+          // By FILE: a version two files share is two bodies.
+          (m) => corpus.loadSql(m),
           // Same rule as the fleet sync: this button is the other scoped
           // caller, so it gets the same refusal to step over a hole — and the
           // same `scoped.metas`, which carries the dependency facts that
-          // narrow that refusal to what actually depends on the hole.
-          { corpus: scopedMetas, runnableIds: new Set(runnable.map((m) => m.id)) },
+          // narrow that refusal to what actually depends on the hole — and
+          // the same WHOLE versions, so no file is cleared by its sibling.
+          { corpus: scopedMetas, runnableIds: scoped.runnableIds },
           undefined,
           // And the same stream. A body past the corpus ceiling used to make
           // this button report "Migration failed at <the 39 MB seed>" — the
           // one migration an operator is most likely to press it FOR.
           {
-            streamSql: (m) => corpus.openSqlStream(m.id),
+            streamSql: (m) => corpus.openSqlStream(m),
             // This route sends in one go and writes no cursor, so the identity
             // buys nothing here and costs nothing either. Supplied so the two
             // callers cannot drift into disagreeing about which body a stream
             // is of.
-            bodyIdentity: (m) => corpus.bodyIdentity(m.id),
+            bodyIdentity: (m) => corpus.bodyIdentity(m),
           },
         );
 
@@ -360,8 +365,11 @@ export const syncCloneMigrations = createServerFn({ method: "POST" })
         // And the same for a body an upstream quota refused to SERVE: the
         // clone was never sent it, so it cannot have rejected it.
         const limited = results.filter((r) => r.heldUpstreamLimited);
+        // And for a version a RULE held — a shared version that could not
+        // travel whole: nothing was sent, so nothing was rejected.
+        const byRule = results.filter((r) => r.heldByRule);
         const failures = results.filter(
-          (r) => !r.success && !r.heldOversize && !r.heldUpstreamLimited,
+          (r) => !r.success && !r.heldOversize && !r.heldUpstreamLimited && !r.heldByRule,
         );
         const newVersion = latestApplied ?? backend.migration_version ?? "none";
 
@@ -407,7 +415,10 @@ export const syncCloneMigrations = createServerFn({ method: "POST" })
                   : held.length > 0
                     ? `Synced to ${newVersion} — ${held[0].name} is too large for this pass to carry ` +
                       `and is left for the chunking lane; the clone is unchanged and still in the fleet`
-                    : `Migrations up to date (${newVersion})`,
+                    : byRule.length > 0
+                      ? `Synced to ${newVersion} — ${byRule[0].heldByRule?.detail ?? byRule[0].error ?? ""} ` +
+                        `The clone is unchanged and still in the fleet.`
+                      : `Migrations up to date (${newVersion})`,
             error_message: failures.length > 0 ? failures[0].error : null,
           })
           .eq("clone_id", data.cloneId);
@@ -433,6 +444,7 @@ export const syncCloneMigrations = createServerFn({ method: "POST" })
             // Counted separately in the record too, so an audit row cannot
             // report a hold as a failure any more than the status line can.
             held_oversize: held.map((h) => h.name),
+            held_by_rule: byRule.map((h) => `${h.name} (${h.heldByRule?.rule ?? "unknown"})`),
             new_version: newVersion,
             source_repo: `${source.owner}/${source.repo}`,
             source_sha: sourceSha,

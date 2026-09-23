@@ -56,6 +56,26 @@ describe("a succeeded deploy records the revision the functions reached", () => 
     expect(success).not.toContain("recordBackendRevision");
   });
 
+  it("does not stamp over a bundle that failed to land", () => {
+    /*
+      A last pass can complete the run with some bundles failed. Stamping then
+      tells the next catch-up those functions are at this revision; they have
+      not changed since, so the diff never names them and they are never
+      planned again. Unstamped, the catch-up plans from the older revision and
+      owes them again: a redeploy, never a skip.
+    */
+    const beforeSuccess = lane.slice(0, lane.lastIndexOf("return succeedRun(run, {"));
+    const stamp = beforeSuccess.lastIndexOf("recordBackendRevision(run.clone_id");
+    const guard = beforeSuccess.lastIndexOf("const revisionRecorded = failedDetail.length === 0;");
+    expect(guard).toBeGreaterThan(-1);
+    expect(guard).toBeLessThan(stamp);
+    expect(beforeSuccess.slice(guard, stamp)).toMatch(/if \(revisionRecorded\) \{\s*await $/);
+    // And the run says which it was, so a reader does not take `source_sha`
+    // for the clone's revision.
+    const success = lane.slice(lane.lastIndexOf("return succeedRun(run, {"));
+    expect(success).toContain("revision_recorded: revisionRecorded");
+  });
+
   it("writes it to the backend's own column, never to the clone's", () => {
     const helper = healing.slice(
       healing.indexOf("async function recordBackendRevision"),

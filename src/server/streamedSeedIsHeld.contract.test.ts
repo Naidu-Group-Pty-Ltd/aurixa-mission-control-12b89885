@@ -98,7 +98,7 @@ describe("both fetch sites throw the structural class", () => {
 
   it("the batched read does, and the oversize refusals stay outside it", () => {
     const load = corpus.slice(
-      corpus.indexOf("const loadSql = (id: string)"),
+      corpus.indexOf("const loadSql = ("),
       corpus.indexOf("const openSqlStream ="),
     );
     expect(load).toContain("throw new PrimeBodyUnavailableError(");
@@ -231,7 +231,7 @@ describe("a pass whose only outcome is a hold still says so", () => {
 describe("the self-healing lane stops calling a hold a failure", () => {
   it("partitions the holds out of failures", () => {
     expect(code(healing)).toMatch(
-      /const failed = \(results \?\? \[\]\)\.filter\(\s*\(r\) => !r\.success && !r\.heldUpstreamLimited && !r\.heldOversize,?\s*\);/,
+      /const failed = \(results \?\? \[\]\)\.filter\(\s*\(r\) => !r\.success && !r\.heldUpstreamLimited && !r\.heldOversize && !r\.heldByRule,?\s*\);/,
     );
   });
 

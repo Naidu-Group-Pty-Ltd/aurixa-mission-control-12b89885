@@ -23,10 +23,15 @@ const state = vi.hoisted(() => ({
   /** Statements that should throw, matched as a substring. */
   failOn: null as null | { needle: string; error: string },
   files: [] as Array<{ id: string; name: string; path: string }>,
+  /** Bodies by FILE name, as the corpus keys them: a shared version is two bodies. */
   bodies: new Map<string, string>(),
+  /** Every file whose body was read, in order. */
+  loaded: [] as string[],
   loadThrows: null as null | Error,
   sourceNull: false,
   backendThrows: false,
+  /** Files the prime's MIGRATION_WITHDRAWN.json takes out of the corpus. */
+  withdrawn: [] as Array<{ id: string; name: string; path: string }>,
 }));
 
 vi.mock("./github-app.server", () => ({ getAppOctokit: () => ({}) }));
@@ -43,10 +48,17 @@ vi.mock("./prime-backend.server", () => ({
   openPrimeMigrationCorpus: async () => ({
     metas: state.files,
     sourceSha: "abc1234",
-    loadSql: async (id: string) => {
+    withdrawal: {
+      state: state.withdrawn.length > 0 ? "read" : "absent",
+      excluded: state.withdrawn,
+      unmatched: [],
+    },
+    loadSql: async (ref: string | { name: string }) => {
       if (state.loadThrows) throw state.loadThrows;
-      const sql = state.bodies.get(id);
-      if (sql === undefined) throw new Error(`no body for ${id}`);
+      const name = typeof ref === "string" ? state.files.find((f) => f.id === ref)?.name : ref.name;
+      state.loaded.push(name ?? String(ref));
+      const sql = name === undefined ? undefined : state.bodies.get(name);
+      if (sql === undefined) throw new Error(`no body for ${name ?? String(ref)}`);
       return sql;
     },
   }),
@@ -79,7 +91,7 @@ function corpus(...entries: Array<[string, string, string]>) {
     name,
     path: `supabase/migrations/${name}`,
   }));
-  state.bodies = new Map(entries.map(([id, , sql]) => [id, sql]));
+  state.bodies = new Map(entries.map(([, name, sql]) => [name, sql]));
 }
 
 /** The prime's ledger answers with these versions. */
@@ -92,11 +104,13 @@ function ledgerHolds(...versions: string[]) {
 }
 
 beforeEach(() => {
+  state.withdrawn = [];
   state.ran = [];
   state.respond = null;
   state.failOn = null;
   state.files = [];
   state.bodies = new Map();
+  state.loaded = [];
   state.loadThrows = null;
   state.sourceNull = false;
   state.backendThrows = false;
@@ -273,6 +287,27 @@ describe("what it refuses to answer at all", () => {
     );
   });
 
+  it("a withdrawn version is refused with the declaration, not as a missing file", async () => {
+    corpus(["20260801010000", "20260801010000_a.sql", "select 1;"]);
+    ledgerHolds("20260801010000");
+    state.withdrawn = [
+      {
+        id: "20260728120000",
+        name: "20260728120000_aml_verification_checks.sql",
+        path: "supabase/migrations/20260728120000_aml_verification_checks.sql",
+      },
+    ];
+    const attempt = diagnosePrimeMigration({} as never, "20260728120000");
+    await expect(attempt).rejects.toThrow(
+      /20260728120000_aml_verification_checks\.sql is declared withdrawn/,
+    );
+    await expect(diagnosePrimeMigration({} as never, "20260728120000")).rejects.not.toThrow(
+      /No migration with version/,
+    );
+    // Nothing was sent anywhere to reach that answer.
+    expect(state.ran).toEqual([]);
+  });
+
   it("an unreachable prime backend still reads the file and says the run did not happen", async () => {
     corpus(["20260901010000", "20260901010000_t.sql", "create table t (id int);"]);
     state.backendThrows = true;
@@ -318,5 +353,8 @@ describe("the collision survey rides every report", () => {
     ]);
     expect(diagnosis.verdict).toBe("version_collision");
     expect(trialRuns()).toEqual([]);
+    // The body read is the file the report names — the first — and never
+    // whichever of the pair a lookup by version happened to resolve to.
+    expect(state.loaded).toEqual(["20260901010000_a.sql"]);
   });
 });

@@ -409,10 +409,10 @@ describe("the catalogue speaks only about what it was asked", () => {
 
 describe("a version two files carry is a hole nothing can close", () => {
   /*
-    `schema_migrations.version` is the PRIMARY KEY. Measured on the prime, 32
-    versions are carried by 77 files — so 45 of those files can never be
-    recorded, and each one is a barrier `partitionByDependency` refuses to
-    step over. Running them changes nothing; the repair is a rename.
+    `schema_migrations.version` is the PRIMARY KEY. Measured on the prime on
+    20 Sep 2026, 32 versions were carried by 77 files — so 45 of those files
+    could never be recorded, and each one is a barrier `partitionByDependency`
+    refuses to step over. Running them changes nothing; the repair is a rename.
   */
   it("finds each repeated version and names every file on it", () => {
     const found = findVersionCollisions([

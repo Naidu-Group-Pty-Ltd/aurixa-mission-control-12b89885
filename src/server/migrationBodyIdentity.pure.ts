@@ -24,7 +24,8 @@
  * stores the SQL it ran. A body that matches is proof the prime ran those
  * exact bytes — which is strictly stronger than a version match, because
  * versions in this corpus are not even unique: `MIGRATION_VERSION_COLLISIONS.json`
- * records 32 groups covering 77 files that share one.
+ * records the files that share one — 25 groups over 61 files on 23 Sep 2026,
+ * 32 over 77 on 20 Sep.
  *
  * ## The rule
  *
