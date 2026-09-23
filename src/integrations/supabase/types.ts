@@ -12704,6 +12704,856 @@ export type Database = {
         }
         Relationships: []
       }
+      voice_studio_artifacts: {
+        Row: {
+          created_at: string
+          data: Json
+          id: string
+          key: string
+          kind: string
+          run_id: string
+          usage: Json
+        }
+        Insert: {
+          created_at?: string
+          data: Json
+          id?: string
+          key: string
+          kind: string
+          run_id: string
+          usage?: Json
+        }
+        Update: {
+          created_at?: string
+          data?: Json
+          id?: string
+          key?: string
+          kind?: string
+          run_id?: string
+          usage?: Json
+        }
+        Relationships: [
+          {
+            foreignKeyName: "voice_studio_artifacts_run_id_fkey"
+            columns: ["run_id"]
+            isOneToOne: false
+            referencedRelation: "voice_studio_runs"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      voice_studio_deployments: {
+        Row: {
+          attempts: number
+          claimed_at: string | null
+          completed_at: string | null
+          created_at: string
+          id: string
+          last_error: string | null
+          mode: string
+          package_id: string
+          phone_number_id: string | null
+          project_id: string
+          requested_by: string | null
+          status: string
+          steps: Json
+          updated_at: string
+          verification: Json | null
+        }
+        Insert: {
+          attempts?: number
+          claimed_at?: string | null
+          completed_at?: string | null
+          created_at?: string
+          id?: string
+          last_error?: string | null
+          mode: string
+          package_id: string
+          phone_number_id?: string | null
+          project_id: string
+          requested_by?: string | null
+          status?: string
+          steps?: Json
+          updated_at?: string
+          verification?: Json | null
+        }
+        Update: {
+          attempts?: number
+          claimed_at?: string | null
+          completed_at?: string | null
+          created_at?: string
+          id?: string
+          last_error?: string | null
+          mode?: string
+          package_id?: string
+          phone_number_id?: string | null
+          project_id?: string
+          requested_by?: string | null
+          status?: string
+          steps?: Json
+          updated_at?: string
+          verification?: Json | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "voice_studio_deployments_package_id_fkey"
+            columns: ["package_id"]
+            isOneToOne: false
+            referencedRelation: "voice_studio_packages"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "voice_studio_deployments_project_id_fkey"
+            columns: ["project_id"]
+            isOneToOne: false
+            referencedRelation: "voice_studio_projects"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      voice_studio_documents: {
+        Row: {
+          anthropic_file_id: string | null
+          created_at: string
+          created_by: string | null
+          error: string | null
+          extracted_text: string | null
+          extraction_status: string
+          file_name: string
+          id: string
+          kind: string
+          mime_type: string
+          page_count: number | null
+          project_id: string
+          sha256: string
+          size_bytes: number
+          storage_path: string
+          truncated: boolean
+        }
+        Insert: {
+          anthropic_file_id?: string | null
+          created_at?: string
+          created_by?: string | null
+          error?: string | null
+          extracted_text?: string | null
+          extraction_status?: string
+          file_name: string
+          id?: string
+          kind: string
+          mime_type: string
+          page_count?: number | null
+          project_id: string
+          sha256: string
+          size_bytes?: number
+          storage_path: string
+          truncated?: boolean
+        }
+        Update: {
+          anthropic_file_id?: string | null
+          created_at?: string
+          created_by?: string | null
+          error?: string | null
+          extracted_text?: string | null
+          extraction_status?: string
+          file_name?: string
+          id?: string
+          kind?: string
+          mime_type?: string
+          page_count?: number | null
+          project_id?: string
+          sha256?: string
+          size_bytes?: number
+          storage_path?: string
+          truncated?: boolean
+        }
+        Relationships: [
+          {
+            foreignKeyName: "voice_studio_documents_project_id_fkey"
+            columns: ["project_id"]
+            isOneToOne: false
+            referencedRelation: "voice_studio_projects"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      voice_studio_packages: {
+        Row: {
+          approved_at: string | null
+          approved_by: string | null
+          content_sha256: string
+          created_at: string
+          created_by: string | null
+          id: string
+          package: Json
+          plan_id: string
+          project_id: string
+          status: string
+          version: number
+        }
+        Insert: {
+          approved_at?: string | null
+          approved_by?: string | null
+          content_sha256: string
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          package: Json
+          plan_id: string
+          project_id: string
+          status?: string
+          version: number
+        }
+        Update: {
+          approved_at?: string | null
+          approved_by?: string | null
+          content_sha256?: string
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          package?: Json
+          plan_id?: string
+          project_id?: string
+          status?: string
+          version?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "voice_studio_packages_plan_id_fkey"
+            columns: ["plan_id"]
+            isOneToOne: false
+            referencedRelation: "voice_studio_plans"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "voice_studio_packages_project_id_fkey"
+            columns: ["project_id"]
+            isOneToOne: false
+            referencedRelation: "voice_studio_projects"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      voice_studio_plans: {
+        Row: {
+          approved_at: string | null
+          approved_by: string | null
+          confidence: number | null
+          created_at: string
+          created_by: string | null
+          edit_note: string | null
+          has_errors: boolean
+          id: string
+          plan: Json
+          project_id: string
+          run_id: string | null
+          status: string
+          version: number
+        }
+        Insert: {
+          approved_at?: string | null
+          approved_by?: string | null
+          confidence?: number | null
+          created_at?: string
+          created_by?: string | null
+          edit_note?: string | null
+          has_errors?: boolean
+          id?: string
+          plan: Json
+          project_id: string
+          run_id?: string | null
+          status?: string
+          version: number
+        }
+        Update: {
+          approved_at?: string | null
+          approved_by?: string | null
+          confidence?: number | null
+          created_at?: string
+          created_by?: string | null
+          edit_note?: string | null
+          has_errors?: boolean
+          id?: string
+          plan?: Json
+          project_id?: string
+          run_id?: string | null
+          status?: string
+          version?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "voice_studio_plans_project_id_fkey"
+            columns: ["project_id"]
+            isOneToOne: false
+            referencedRelation: "voice_studio_projects"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "voice_studio_plans_run_id_fkey"
+            columns: ["run_id"]
+            isOneToOne: false
+            referencedRelation: "voice_studio_runs"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      voice_studio_projects: {
+        Row: {
+          agreement_id: string | null
+          clone_id: string | null
+          created_at: string
+          created_by: string | null
+          current_package_id: string | null
+          current_plan_id: string | null
+          id: string
+          lead_id: string | null
+          name: string
+          notes: string | null
+          status: string
+          target_kind: string
+          updated_at: string
+        }
+        Insert: {
+          agreement_id?: string | null
+          clone_id?: string | null
+          created_at?: string
+          created_by?: string | null
+          current_package_id?: string | null
+          current_plan_id?: string | null
+          id?: string
+          lead_id?: string | null
+          name: string
+          notes?: string | null
+          status?: string
+          target_kind: string
+          updated_at?: string
+        }
+        Update: {
+          agreement_id?: string | null
+          clone_id?: string | null
+          created_at?: string
+          created_by?: string | null
+          current_package_id?: string | null
+          current_plan_id?: string | null
+          id?: string
+          lead_id?: string | null
+          name?: string
+          notes?: string | null
+          status?: string
+          target_kind?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "voice_studio_projects_agreement_id_fkey"
+            columns: ["agreement_id"]
+            isOneToOne: false
+            referencedRelation: "client_agreements"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "voice_studio_projects_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "voice_studio_projects_current_package_fkey"
+            columns: ["current_package_id"]
+            isOneToOne: false
+            referencedRelation: "voice_studio_packages"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "voice_studio_projects_current_plan_fkey"
+            columns: ["current_plan_id"]
+            isOneToOne: false
+            referencedRelation: "voice_studio_plans"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "voice_studio_projects_lead_id_fkey"
+            columns: ["lead_id"]
+            isOneToOne: false
+            referencedRelation: "waitlist_leads"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      voice_studio_runs: {
+        Row: {
+          attempts: number
+          claimed_at: string | null
+          completed_at: string | null
+          cost_usd: number
+          created_at: string
+          id: string
+          last_error: string | null
+          model: string | null
+          project_id: string
+          recipe_sha: string | null
+          recipe_version: string | null
+          requested_by: string | null
+          stage: string
+          stage_cursor: Json
+          status: string
+          updated_at: string
+          usage: Json
+        }
+        Insert: {
+          attempts?: number
+          claimed_at?: string | null
+          completed_at?: string | null
+          cost_usd?: number
+          created_at?: string
+          id?: string
+          last_error?: string | null
+          model?: string | null
+          project_id: string
+          recipe_sha?: string | null
+          recipe_version?: string | null
+          requested_by?: string | null
+          stage?: string
+          stage_cursor?: Json
+          status?: string
+          updated_at?: string
+          usage?: Json
+        }
+        Update: {
+          attempts?: number
+          claimed_at?: string | null
+          completed_at?: string | null
+          cost_usd?: number
+          created_at?: string
+          id?: string
+          last_error?: string | null
+          model?: string | null
+          project_id?: string
+          recipe_sha?: string | null
+          recipe_version?: string | null
+          requested_by?: string | null
+          stage?: string
+          stage_cursor?: Json
+          status?: string
+          updated_at?: string
+          usage?: Json
+        }
+        Relationships: [
+          {
+            foreignKeyName: "voice_studio_runs_project_id_fkey"
+            columns: ["project_id"]
+            isOneToOne: false
+            referencedRelation: "voice_studio_projects"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      voice_studio_vapi_credentials: {
+        Row: {
+          api_key_enc: string
+          created_at: string
+          fingerprint: string
+          last_error: string | null
+          project_id: string
+          set_by: string | null
+          updated_at: string
+          verified_at: string | null
+        }
+        Insert: {
+          api_key_enc: string
+          created_at?: string
+          fingerprint: string
+          last_error?: string | null
+          project_id: string
+          set_by?: string | null
+          updated_at?: string
+          verified_at?: string | null
+        }
+        Update: {
+          api_key_enc?: string
+          created_at?: string
+          fingerprint?: string
+          last_error?: string | null
+          project_id?: string
+          set_by?: string | null
+          updated_at?: string
+          verified_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "voice_studio_vapi_credentials_project_id_fkey"
+            columns: ["project_id"]
+            isOneToOne: true
+            referencedRelation: "voice_studio_projects"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      voice_studio_vapi_ledger: {
+        Row: {
+          adopted: boolean
+          created_at: string
+          id: string
+          key: string
+          kind: string
+          package_id: string | null
+          payload_sha: string
+          project_id: string
+          updated_at: string
+          vapi_id: string
+          verified_at: string | null
+        }
+        Insert: {
+          adopted?: boolean
+          created_at?: string
+          id?: string
+          key: string
+          kind: string
+          package_id?: string | null
+          payload_sha: string
+          project_id: string
+          updated_at?: string
+          vapi_id: string
+          verified_at?: string | null
+        }
+        Update: {
+          adopted?: boolean
+          created_at?: string
+          id?: string
+          key?: string
+          kind?: string
+          package_id?: string | null
+          payload_sha?: string
+          project_id?: string
+          updated_at?: string
+          vapi_id?: string
+          verified_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "voice_studio_vapi_ledger_package_id_fkey"
+            columns: ["package_id"]
+            isOneToOne: false
+            referencedRelation: "voice_studio_packages"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "voice_studio_vapi_ledger_project_id_fkey"
+            columns: ["project_id"]
+            isOneToOne: false
+            referencedRelation: "voice_studio_projects"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      voice_tenant_appointments: {
+        Row: {
+          booking_type: string
+          contact_id: string | null
+          created_at: string
+          ends_at: string
+          id: string
+          notes: string | null
+          project_id: string
+          starts_at: string
+          status: string
+          updated_at: string
+          vapi_call_id: string | null
+        }
+        Insert: {
+          booking_type: string
+          contact_id?: string | null
+          created_at?: string
+          ends_at: string
+          id?: string
+          notes?: string | null
+          project_id: string
+          starts_at: string
+          status?: string
+          updated_at?: string
+          vapi_call_id?: string | null
+        }
+        Update: {
+          booking_type?: string
+          contact_id?: string | null
+          created_at?: string
+          ends_at?: string
+          id?: string
+          notes?: string | null
+          project_id?: string
+          starts_at?: string
+          status?: string
+          updated_at?: string
+          vapi_call_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "voice_tenant_appointments_contact_id_fkey"
+            columns: ["contact_id"]
+            isOneToOne: false
+            referencedRelation: "voice_tenant_contacts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "voice_tenant_appointments_project_id_fkey"
+            columns: ["project_id"]
+            isOneToOne: false
+            referencedRelation: "voice_studio_projects"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      voice_tenant_call_context: {
+        Row: {
+          caller_phone: string | null
+          caller_reason: string | null
+          confirmed_intent: string | null
+          contact_created: boolean | null
+          contact_found: boolean | null
+          contact_id: string | null
+          contact_state: string | null
+          created_at: string
+          first_name: string | null
+          full_name: string | null
+          handoff_ready: boolean
+          id: string
+          normalized_phone: string | null
+          project_id: string
+          source: string | null
+          updated_at: string
+          vapi_call_id: string
+        }
+        Insert: {
+          caller_phone?: string | null
+          caller_reason?: string | null
+          confirmed_intent?: string | null
+          contact_created?: boolean | null
+          contact_found?: boolean | null
+          contact_id?: string | null
+          contact_state?: string | null
+          created_at?: string
+          first_name?: string | null
+          full_name?: string | null
+          handoff_ready?: boolean
+          id?: string
+          normalized_phone?: string | null
+          project_id: string
+          source?: string | null
+          updated_at?: string
+          vapi_call_id: string
+        }
+        Update: {
+          caller_phone?: string | null
+          caller_reason?: string | null
+          confirmed_intent?: string | null
+          contact_created?: boolean | null
+          contact_found?: boolean | null
+          contact_id?: string | null
+          contact_state?: string | null
+          created_at?: string
+          first_name?: string | null
+          full_name?: string | null
+          handoff_ready?: boolean
+          id?: string
+          normalized_phone?: string | null
+          project_id?: string
+          source?: string | null
+          updated_at?: string
+          vapi_call_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "voice_tenant_call_context_contact_id_fkey"
+            columns: ["contact_id"]
+            isOneToOne: false
+            referencedRelation: "voice_tenant_contacts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "voice_tenant_call_context_project_id_fkey"
+            columns: ["project_id"]
+            isOneToOne: false
+            referencedRelation: "voice_studio_projects"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      voice_tenant_configs: {
+        Row: {
+          booking_types: Json
+          booking_window: Json | null
+          business_name: string | null
+          call_log_secret_enc: string | null
+          call_log_url: string | null
+          created_at: string
+          enabled: boolean
+          escalation_number: string | null
+          package_id: string | null
+          project_id: string
+          secret_fingerprint: string
+          tenant_key: string
+          timezone: string
+          transfer_hook_url_enc: string | null
+          updated_at: string
+          webhook_secret_enc: string
+        }
+        Insert: {
+          booking_types?: Json
+          booking_window?: Json | null
+          business_name?: string | null
+          call_log_secret_enc?: string | null
+          call_log_url?: string | null
+          created_at?: string
+          enabled?: boolean
+          escalation_number?: string | null
+          package_id?: string | null
+          project_id: string
+          secret_fingerprint: string
+          tenant_key: string
+          timezone?: string
+          transfer_hook_url_enc?: string | null
+          updated_at?: string
+          webhook_secret_enc: string
+        }
+        Update: {
+          booking_types?: Json
+          booking_window?: Json | null
+          business_name?: string | null
+          call_log_secret_enc?: string | null
+          call_log_url?: string | null
+          created_at?: string
+          enabled?: boolean
+          escalation_number?: string | null
+          package_id?: string | null
+          project_id?: string
+          secret_fingerprint?: string
+          tenant_key?: string
+          timezone?: string
+          transfer_hook_url_enc?: string | null
+          updated_at?: string
+          webhook_secret_enc?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "voice_tenant_configs_package_id_fkey"
+            columns: ["package_id"]
+            isOneToOne: false
+            referencedRelation: "voice_studio_packages"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "voice_tenant_configs_project_id_fkey"
+            columns: ["project_id"]
+            isOneToOne: true
+            referencedRelation: "voice_studio_projects"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      voice_tenant_contacts: {
+        Row: {
+          created_at: string
+          email: string | null
+          first_name: string | null
+          id: string
+          last_name: string | null
+          notes: string | null
+          phone: string
+          project_id: string
+          source: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          email?: string | null
+          first_name?: string | null
+          id?: string
+          last_name?: string | null
+          notes?: string | null
+          phone: string
+          project_id: string
+          source?: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          email?: string | null
+          first_name?: string | null
+          id?: string
+          last_name?: string | null
+          notes?: string | null
+          phone?: string
+          project_id?: string
+          source?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "voice_tenant_contacts_project_id_fkey"
+            columns: ["project_id"]
+            isOneToOne: false
+            referencedRelation: "voice_studio_projects"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      voice_tenant_tickets: {
+        Row: {
+          contact_id: string | null
+          created_at: string
+          detail: string | null
+          email: string | null
+          id: string
+          project_id: string
+          reference: string
+          status: string
+          summary: string
+          updated_at: string
+          vapi_call_id: string | null
+        }
+        Insert: {
+          contact_id?: string | null
+          created_at?: string
+          detail?: string | null
+          email?: string | null
+          id?: string
+          project_id: string
+          reference: string
+          status?: string
+          summary: string
+          updated_at?: string
+          vapi_call_id?: string | null
+        }
+        Update: {
+          contact_id?: string | null
+          created_at?: string
+          detail?: string | null
+          email?: string | null
+          id?: string
+          project_id?: string
+          reference?: string
+          status?: string
+          summary?: string
+          updated_at?: string
+          vapi_call_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "voice_tenant_tickets_contact_id_fkey"
+            columns: ["contact_id"]
+            isOneToOne: false
+            referencedRelation: "voice_tenant_contacts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "voice_tenant_tickets_project_id_fkey"
+            columns: ["project_id"]
+            isOneToOne: false
+            referencedRelation: "voice_studio_projects"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       waitlist_leads: {
         Row: {
           account_id: string | null
@@ -13110,6 +13960,14 @@ export type Database = {
       claim_lead_stage_emails: {
         Args: { _lease_seconds?: number; _limit?: number }
         Returns: Database["public"]["Tables"]["lead_stage_emails"]["Row"][]
+      }
+      claim_voice_studio_deployments: {
+        Args: { _lease_seconds?: number; _limit?: number }
+        Returns: Database["public"]["Tables"]["voice_studio_deployments"]["Row"][]
+      }
+      claim_voice_studio_runs: {
+        Args: { _lease_seconds?: number; _limit?: number }
+        Returns: Database["public"]["Tables"]["voice_studio_runs"]["Row"][]
       }
       api_usage_fleet_summary: {
         Args: { _period_start?: string }

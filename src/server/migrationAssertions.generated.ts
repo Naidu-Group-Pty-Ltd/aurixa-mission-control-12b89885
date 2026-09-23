@@ -761,4 +761,46 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260922170000",
     assertions: [{ kind: "column", table: "clone_deployments", column: "bundle_billing_uid" }],
   },
+  {
+    migration: "20260924100000_voice_studio_core.sql",
+    version: "20260924100000",
+    assertions: [
+      { kind: "table", table: "voice_studio_projects" },
+      { kind: "table", table: "voice_studio_documents" },
+      { kind: "table", table: "voice_studio_runs" },
+      { kind: "table", table: "voice_studio_artifacts" },
+      { kind: "table", table: "voice_studio_plans" },
+      { kind: "table", table: "voice_studio_packages" },
+      { kind: "rpc", fn: "claim_voice_studio_runs" },
+    ],
+  },
+  {
+    migration: "20260924110000_voice_studio_tenancy.sql",
+    version: "20260924110000",
+    assertions: [
+      { kind: "table", table: "voice_studio_vapi_credentials" },
+      { kind: "table", table: "voice_tenant_configs" },
+      { kind: "table", table: "voice_tenant_contacts" },
+      { kind: "table", table: "voice_tenant_call_context" },
+      { kind: "table", table: "voice_tenant_appointments" },
+      { kind: "table", table: "voice_tenant_tickets" },
+    ],
+  },
+  {
+    migration: "20260924120000_voice_studio_deploy.sql",
+    version: "20260924120000",
+    assertions: [
+      { kind: "table", table: "voice_studio_deployments" },
+      { kind: "table", table: "voice_studio_vapi_ledger" },
+      { kind: "rpc", fn: "claim_voice_studio_deployments" },
+    ],
+  },
+  {
+    migration: "20260924130000_voice_studio_bucket_and_cron.sql",
+    version: "20260924130000",
+    assertions: [
+      { kind: "cron", jobname: "voice-studio-plan-drain" },
+      { kind: "cron", jobname: "voice-studio-deploy-drain" },
+    ],
+  },
 ];

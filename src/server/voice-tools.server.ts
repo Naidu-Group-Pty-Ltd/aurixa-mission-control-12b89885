@@ -18,6 +18,12 @@ import type { Json } from "@/integrations/supabase/types";
 import { normalizePhone, phonesMatch } from "@/server/voice.server";
 import { SUPPORT_SOURCE_SLUG, ingestSupportTicket } from "@/server/support-tickets.server";
 import { draftTicketFromSpeech, usableEmail } from "@/server/voiceTicketDraft.pure";
+import {
+  orderSlotsByPreference as sharedOrderSlotsByPreference,
+  parseSlotPreference as sharedParseSlotPreference,
+  slotMatchesPreference as sharedSlotMatchesPreference,
+  type SlotPreference as SharedSlotPreference,
+} from "@/lib/voice-studio/tenantBooking.pure";
 
 type Rec = Record<string, any>;
 
@@ -182,143 +188,32 @@ export function classifyBookingIntent(text: string | null | undefined): {
  * "Thursday afternoon would suit" was read the first eight chronological
  * slots regardless, which is worse than never asking.
  *
- * Every field is independently optional and a slot must satisfy all the ones
- * that are set. `recognised` is false when nothing was understood, and that
- * is the signal to leave the ordering exactly as it was.
+ * The parsing and matching live once, parameterised by timezone, in
+ * `tenantBooking.pure.ts` — the Voice Cloning Studio's tenant fleets use the
+ * same rules in their own timezone. These wrappers pin Aurixa's.
  */
-export type SlotPreference = {
-  weekday: number | null;
-  dayOfMonth: number | null;
-  month: number | null;
-  partOfDay: "morning" | "afternoon" | null;
-  recognised: boolean;
-};
+export type SlotPreference = SharedSlotPreference;
 
-const WEEKDAY_WORDS: Array<[RegExp, number]> = [
-  [/\bsun(day)?\b/, 0],
-  [/\bmon(day)?\b/, 1],
-  [/\btue(s|sday)?\b/, 2],
-  [/\bwed(s|nesday)?\b/, 3],
-  [/\bthu(r|rs|rsday)?\b/, 4],
-  [/\bfri(day)?\b/, 5],
-  [/\bsat(urday)?\b/, 6],
-];
-
-const MONTH_WORDS = [
-  "january",
-  "february",
-  "march",
-  "april",
-  "may",
-  "june",
-  "july",
-  "august",
-  "september",
-  "october",
-  "november",
-  "december",
-];
-
-/**
- * Parse the caller's day preference. Deliberately narrow: a weekday name, a
- * relative day, a day-of-month with an optional month, and morning/afternoon.
- * Anything else is left unrecognised rather than guessed — an invented
- * preference silently reorders what the caller is offered.
- */
 export function parseSlotPreference(
   text: string | null | undefined,
   now: Date = new Date(),
 ): SlotPreference {
-  const pref: SlotPreference = {
-    weekday: null,
-    dayOfMonth: null,
-    month: null,
-    partOfDay: null,
-    recognised: false,
-  };
-  const t = (text ?? "").toLowerCase();
-  if (!t.trim()) return pref;
-
-  // Relative days resolve to an absolute Sydney date, because "tomorrow" said
-  // at 11pm Sydney is a different date from "tomorrow" said at 9am UTC.
-  const relativeDays = /\bday after tomorrow\b/.test(t)
-    ? 2
-    : /\btomorrow\b/.test(t)
-      ? 1
-      : /\btoday\b/.test(t)
-        ? 0
-        : null;
-  if (relativeDays !== null) {
-    const p = sydneyParts(new Date(now.getTime() + relativeDays * 24 * 60 * 60_000));
-    pref.dayOfMonth = p.d;
-    pref.month = p.m;
-    pref.recognised = true;
-  } else {
-    for (const [re, day] of WEEKDAY_WORDS) {
-      if (re.test(t)) {
-        pref.weekday = day;
-        pref.recognised = true;
-        break;
-      }
-    }
-    // "the 18th", "18 September", "18/9"
-    const dom = /\b(\d{1,2})(?:st|nd|rd|th)?\b(?!\s*(?:am|pm|:|o'?clock))/.exec(t);
-    // The full name or its three-letter form, both whole words — `\bmay` alone
-    // reads "maybe" as May.
-    const monthIndex = MONTH_WORDS.findIndex((m) =>
-      new RegExp(`\\b(${m}|${m.slice(0, 3)})\\b`).test(t),
-    );
-    if (dom) {
-      const n = Number(dom[1]);
-      if (n >= 1 && n <= 31) {
-        pref.dayOfMonth = n;
-        pref.recognised = true;
-        if (monthIndex >= 0) pref.month = monthIndex + 1;
-      }
-    }
-  }
-
-  if (/\bmorning\b|\bbefore lunch\b|\bam\b/.test(t)) {
-    pref.partOfDay = "morning";
-    pref.recognised = true;
-  } else if (/\bafternoon\b|\bafter lunch\b|\bpm\b|\blate in the day\b/.test(t)) {
-    pref.partOfDay = "afternoon";
-    pref.recognised = true;
-  }
-
-  return pref;
+  return sharedParseSlotPreference(text, now, BOOKING_WINDOW.timezone);
 }
 
 /** Does this slot satisfy every constraint the caller actually stated? */
 export function slotMatchesPreference(slot: Date, pref: SlotPreference): boolean {
-  if (!pref.recognised) return false;
-  const p = sydneyParts(slot);
-  if (pref.weekday !== null && p.day !== pref.weekday) return false;
-  if (pref.dayOfMonth !== null && p.d !== pref.dayOfMonth) return false;
-  if (pref.month !== null && p.m !== pref.month) return false;
-  if (pref.partOfDay === "morning" && p.minutes >= 12 * 60) return false;
-  if (pref.partOfDay === "afternoon" && p.minutes < 12 * 60) return false;
-  return true;
+  return sharedSlotMatchesPreference(slot, pref, BOOKING_WINDOW.timezone);
 }
 
 /**
  * Preferred slots first, everything else after, each half still in time order.
- *
- * A SORT, never a filter — the same rule the prime repo's image ordering
- * answers to. A caller who asks for Thursday and has no Thursday free must
- * still be offered something, and an agent that goes quiet because the
- * preference could not be met is worse than one that says "Thursday is full,
- * but I have Wednesday at two".
- *
- * An unrecognised preference returns the input untouched, so the no-preference
- * path is byte-identical to what it was.
+ * A SORT, never a filter — see `tenantBooking.pure.ts`. An unrecognised
+ * preference returns the input untouched, so the no-preference path is
+ * byte-identical to what it was.
  */
 export function orderSlotsByPreference(slots: Date[], pref: SlotPreference): Date[] {
-  if (!pref.recognised) return slots;
-  const preferred: Date[] = [];
-  const rest: Date[] = [];
-  for (const s of slots) (slotMatchesPreference(s, pref) ? preferred : rest).push(s);
-  return [...preferred, ...rest];
+  return sharedOrderSlotsByPreference(slots, pref, BOOKING_WINDOW.timezone);
 }
 
 const KIND_LABEL: Record<AppointmentKind, string> = {
