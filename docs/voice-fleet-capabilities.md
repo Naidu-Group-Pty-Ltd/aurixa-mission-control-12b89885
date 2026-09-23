@@ -135,12 +135,20 @@ place and an in-process caller cannot drift from a webhook caller.
 The squad's only transfer was VAPI's built-in `transferCall` **between squad
 members by name** — agent to agent, never to a person.
 
-The mechanism is deliberately *not* NPC's. NPC transfers by redirecting the
-Twilio parent call from a Make scenario; Mission Control's voice module runs no
-Make scenarios, and honouring that is worth more than symmetry. So this is
-VAPI's own `transferCall` tool with a number destination, and
-`routeHandoff` / `transfer-destination-request` are untouched — this adds a
-destination, it does not switch on the unreachable handoff path.
+The mechanism chosen here was deliberately *not* NPC's: NPC transfers by
+redirecting the Twilio parent call from a Make scenario, Mission Control's
+voice module ran none, and honouring that looked worth more than symmetry. So
+this was VAPI's own `transferCall` tool with a number destination, with
+`routeHandoff` / `transfer-destination-request` untouched.
+
+> **Superseded on 23 Sep 2026.** The first call that asked for a human answered
+> `call.in-progress.error-transfer-failed` in seventeen seconds. Native
+> `transferCall` is the mechanism NPC had already tried and abandoned, and the
+> asymmetry this paragraph defends was the defect. The transfer is a `function`
+> tool reaching Make now — see
+> [§2 of *The three defects the first six calls found*](#2-the-transfer-the-prompt-worked-the-transport-did-not).
+> The rest of this section still stands: the prompt rule below is what made the
+> assistant's half work, and it is unchanged.
 
 What *is* borrowed is the prompt rule, because that is what was measured to
 work: say the handover line and place the call in the **same turn**, and if
@@ -272,9 +280,11 @@ hand beside `create-vapi-org-tools.py`.
 | MC Support Intake | `resolve_contact`, `get_call_context`, `raise_support_ticket`, `transfer_to_human_mc`, `end_call_tool` |
 | the eight outbound agents | `resolve_contact`, `get_call_context`, `check_availability`, `book_appointment`, `end_call_tool` |
 
-`end_call_tool` and `transfer_to_human_mc` are VAPI-native (`endCall`,
-`transferCall`) and need no webhook handler. `raise_support_ticket` is a
-`function` tool and is dispatched in `voice-tools.server.ts`.
+`end_call_tool` is VAPI-native (`endCall`) and needs no webhook handler.
+`raise_support_ticket` is a `function` tool dispatched in
+`voice-tools.server.ts`. `transfer_to_human_mc` **was** a native `transferCall`
+and is now a `function` tool that reaches Make — see
+[The three defects the first six calls found](#the-three-defects-the-first-six-calls-found).
 
 ---
 
@@ -312,3 +322,171 @@ The webhook's shared secret is **write-only in VAPI** (`serverUrlSecret` reads
 back only as `isServerUrlSecretSet`), so the handlers could not be exercised
 directly from here either. That is the right design and it is recorded, not
 complained about.
+
+---
+
+## The three defects the first six calls found
+
+Six calls landed on **+61 2 8105 6305** between 15:51 and 16:03 on 23 Sep 2026,
+the first real exercise of everything above. Three faults were reported: the
+end-call tool fired only after the agent had repeated herself, the transfer to a
+human dropped the call, and the voice sounded monotonous on the handoff.
+
+Every record is in `voice_calls.artifact_messages`. **Two of the three
+diagnoses that looked obvious were wrong, and the measurements are why.**
+
+| call | agent | `endedReason` | dur |
+|---|---|---|---|
+| `01a0cef6` | MC Front Desk | `customer-ended-call` | 143s |
+| `01a0cef9` | MC Front Desk | `assistant-ended-call` | 59s |
+| `01a0cefa` | MC Front Desk | `assistant-ended-call` | 53s |
+| `01a0cefc` | MC Front Desk | **`call.in-progress.error-transfer-failed`** | **17s** |
+| `01a0cefd` | MC Review Booking | `silence-timed-out` | 63s |
+| `01a0cf00` | MC Front Desk | `customer-ended-call` | 107s |
+
+### 1. Three goodbyes, and a tool call deferred past a caller turn
+
+`01a0cefa`, in order: the closing line; the caller says *"Okay. Bye."*; the
+assistant says **"Hold on a sec. Goodbye, Steven. Thanks for calling Aurixa
+Systems."**; the caller says *"Fine."*; an empty assistant turn carrying the
+tool call; `end_call_tool` returns `Success.`; and the assistant says
+**"Goodbye, Steven. Thanks for calling Aurixa Systems"** a second time.
+
+The obvious explanation was that the second goodbye lived on the tool — either
+`end_call_tool`'s `request-start` content or an assistant `endCallMessage`. It
+did not. Read live, **`end_call_tool` carries
+`{"type":"request-start","content":"","blocking":true}`** — already silent,
+already NPC's shape — and `transfer_to_human_mc`, `resolve_contact`,
+`get_call_context` and `raise_support_ticket` carry **`messages: null`**. No
+assistant sets `endCallMessage`. Every word of it was the model's own output.
+
+So the fix is entirely in the prompt, and the rule it needed is one NPC does
+not have: NPC's once-only language covers the disclaimer, the wrap-up question
+and the tool call, and says nothing about the goodbye. §11 now opens by
+deferring to §11.1 by name — *a prompt is read top to bottom and the nearest
+instruction wins*, the lesson the NPC ablation already paid for — and §11.1
+gains four rules: the closing line is spoken **once per call**; a caller's own
+goodbye is answered by `end_call_tool` **alone, with no words at all**; nothing
+is said after the tool call; and no holding phrase belongs in a closing turn.
+The same four land in the absolute-rules list, and only where `end_call_tool`
+is actually bound.
+
+All of it is in `build-fleet-prompts.py`. The twelve `.md` files are generated
+and `--check` fails on a hand edit.
+
+### 2. The transfer: the prompt worked, the transport did not
+
+`01a0cefc` complete: the caller asks for a human, `resolve_contact` and
+`get_call_context` both return `"+61433005110"`, the tool returns **`Transfer
+initiated.`**, the assistant says *"Connecting you to the team now."* — and
+VAPI answers `call.in-progress.error-transfer-failed`.
+
+**The line and the tool call were in the same turn.** The same-turn rule earned
+in §1 was doing its job. What failed was VAPI's native `transferCall`, and NPC
+had already been here: its native transfer tool (`3a6a892d`, created
+2026-05-07, `transferPlan: {mode: "warm-transfer-twiml", sipVerb: "refer"}`) is
+bound to **zero** assistants, and the tool all thirteen of its live assistants
+use was created 2026-05-20 as a `function` that asks Make to redirect the
+Twilio **parent** call into `<Dial><Number>…</Number></Dial>`.
+
+That mechanism is now ported:
+
+| piece | what it is |
+|---|---|
+| reception TwiML scenario (`6373069`) | now writes the parent `CallSid` to a datastore, keyed on the caller's number, **before** the unchanged TwiML response |
+| transfer scenario (`6378776`) | webhook → datastore lookup → router on the parent `CallSid` existing → Twilio redirect → mark `transfer_requested` → the `{results:[{toolCallId, result}]}` envelope VAPI requires |
+| `transfer_to_human_mc` | re-created as `type: "function"`, id `21635191-2773-457b-ac3d-4d573e29f258` |
+
+Four things carry it.
+
+**The TwiML response body did not change** — it still holds the 5s pre-answer
+pause and the `action=` dial-failure handler, both load-bearing, and it was
+read back byte-for-byte after the edit.
+
+**The `request-start` message is silent and non-blocking**, because the prompt
+already makes the assistant speak in that same turn and a tool that also speaks
+turns one sentence into two — which is §1's defect by another route.
+
+**`request-failed` sets `endCallAfterSpokenEnabled: false`**, so a transfer that
+cannot be completed leaves the caller talking to the assistant. A stateful
+transport means "no parent-call row, no transfer" is now a reachable state, and
+this is what stops that state becoming a dropped call.
+
+**The old `transferCall` tool is kept, unbound**, exactly as NPC keeps
+`3a6a892d`. It is the rollback.
+
+One thing was deliberately not built: the caller under test **is** the transfer
+destination (`+61 433 005 110`), so VAPI was being asked to transfer someone to
+themselves. That is a test artefact, real callers ring from other numbers, and
+no self-transfer guard was added.
+
+### 3. The voice, and two premises that did not survive contact
+
+The report was that the handoff voice sounds *"monotonous and robotic"*, most
+likely *"the ElevenLabs model in Vapi not being the optimized one that the NPC
+agents use"*. Read live, every Aurixa assistant already carries
+
+```json
+{"provider":"11labs","model":"eleven_flash_v2_5","stability":0.5,"similarityBoost":0.75}
+```
+
+with transcriber `deepgram` / `flux-general-en` — **byte-identical to NPC's**,
+which runs `eleven_flash_v2_5` on 13 of 15. Front Desk even uses NPC Angela's
+own `voiceId`, Support uses Monica's, and the handoff voice
+(`02y4x5i9YrzYlFvGo1pp`) is the one NPC runs on four assistants. There was
+nothing to match; the premise was wrong.
+
+The second premise was mine. One **fixed** `firstMessage` is recorded six
+different ways — *Arixa*, *Auryxia*, *Erixa*, *Aryxa*, *Ryxa*, and once
+correctly — which reads like a TTS mispronouncing a coined name. It is not.
+In one call a `tool` turn carries *"**Aurixa** Systems is an Australian
+company…"* (text, never spoken), the assistant turn built from it reads
+*"**Aryxa** Systems builds…"*, and the caller's own turn reads *"What does
+**Ryxa** Systems do?"*. **Both legs are mangled, including one the TTS never
+touches.** A language model handed the correct spelling does not produce
+"Aryxa"; a speech-to-text does. This is a transcription defect.
+
+So what actually shipped is what the measurements support, not what the report
+guessed:
+
+- **`keyterm: ["Aurixa"]`** on all twelve, so the transcriber knows the word
+  exists. This matters beyond the name: the transcript is what the model reads.
+- **`eotThreshold: 0.7` / `eotTimeoutMs: 5000`** on all twelve — Flux's
+  end-of-turn controls, which decide whether an assistant talks over the caller
+  or leaves dead air, and which are the nearest thing here to a "sounds robotic"
+  lever. Six of NPC's fifteen assistants set them; none of ours did.
+- **`language: "en"`**, which NPC sets everywhere and we set nowhere.
+- **`backgroundSound: "office"`** on the four reception assistants — NPC's
+  setting on the assistants a person rings, and an audible change to what every
+  caller hears, so it is called out rather than slipped in.
+
+`startSpeakingPlan.waitSeconds` was deliberately **not** copied. NPC's inbound
+agent sets 4, but the Aurixa reception line already holds a 5s pre-answer pause
+in its own TwiML, and stacking the two buys four seconds of extra silence on a
+delay that was already tuned.
+
+All of it is declared in `apply-fleet-upgrade.py` now, where the reception set
+is **derived** from which assistants bind `transfer_to_human_mc` rather than
+listed a second time, and every field is asserted by read-back rather than by
+the PATCH returning 200.
+
+### How this was applied, and what proves it
+
+The twelve prompts and the tool re-binding went in one pass, because a VAPI
+PATCH replaces the whole `model` key. Each assistant was read, its system
+message patched by anchored replacement, `23e06c8b…` swapped for `21635191…`
+where present, PATCHed, and then **read back fresh**:
+
+- `PATCH` 200 on all twelve
+- live content length equals the generated file's on all twelve
+- **live md5 equals the generated file's md5 on all twelve**
+- `21635191…` bound on exactly the four reception assistants, `23e06c8b…` on
+  none
+- transcriber and `backgroundSound` read back as set
+
+What none of that establishes is how a call sounds or whether the transfer
+connects. The table in *What is still unproven* applies unchanged, with one
+row sharpened: a successful transfer now shows a Twilio child leg to
++61 433 005 110 **and**, on the VAPI side, a trailing `tool_calls` with no
+result — NPC's documented success signature, because the SIP leg is torn down
+before the result can be written.
