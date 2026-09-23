@@ -149,9 +149,9 @@ describe("digestPrimeBodies", () => {
   });
 
   /**
-   * Ids collide in this corpus — 77 files share a version with another — so a
-   * caller can hand the same path twice and a naive pass would put one blob in
-   * the batch twice and count it twice.
+   * Ids collide in this corpus — 61 files shared a version with another on
+   * 23 Sep 2026 — so a caller can hand the same path twice and a naive pass
+   * would put one blob in the batch twice and count it twice.
    */
   it("asks for a body once however many times it is named", async () => {
     const files = { a: { sql: "SELECT 1;" } };

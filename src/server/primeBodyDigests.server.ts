@@ -90,10 +90,10 @@ export type PrimeBodyDigestPass = {
    * Repo path → digests. An EMPTY array means asked and unreadable, never
    * "no match".
    *
-   * Keyed by PATH and not by migration id, because ids collide: 77 files in
-   * this corpus share a version with another, and a digest filed under the
-   * version would be one sibling's bytes standing in for the other's. A path
-   * is unique by construction.
+   * Keyed by PATH and not by migration id, because ids collide: 61 files in
+   * this corpus shared a version with another on 23 Sep 2026 (77 on 20 Sep),
+   * and a digest filed under the version would be one sibling's bytes standing
+   * in for the other's. A path is unique by construction.
    */
   byPath: Map<string, string[]>;
   /** Bodies read from GitHub this call (the rest came from the cache). */
