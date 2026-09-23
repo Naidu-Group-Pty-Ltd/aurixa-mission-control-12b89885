@@ -24,6 +24,8 @@
     "check:discarded-errors": "node scripts/check-discarded-errors.mjs",
     "check:migration-assertions": "node scripts/check-migration-assertions.mjs",
     "check:applied-digests": "node scripts/check-applied-digests.mjs",
+    "check:voice-kb": "node --experimental-strip-types scripts/voice/build-knowledge-doc.mjs --check",
+    "check:voice-prompts": "python3 scripts/voice/build-fleet-prompts.py --check",
     "migrations:assertions": "node scripts/generate-migration-assertions.mjs",
     "migrations:assertions:check": "node scripts/generate-migration-assertions.mjs --check",
     "lint": "eslint .",

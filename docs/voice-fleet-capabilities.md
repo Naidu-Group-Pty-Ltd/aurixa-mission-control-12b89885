@@ -490,3 +490,100 @@ row sharpened: a successful transfer now shows a Twilio child leg to
 +61 433 005 110 **and**, on the VAPI side, a trailing `tool_calls` with no
 result — NPC's documented success signature, because the SIP leg is torn down
 before the result can be written.
+
+---
+
+## The knowledge base could not sell, and the live copy was never read at all
+
+Reported: the agents "keep mentioning features and pricing". Measured on the
+27 KB corpus that replaced the brochure above: roughly half process, support
+and billing rules, 30% price lists, 15% one-line feature definitions, and
+**nothing** on why a firm would want the platform - no problem statement, no
+segment, no difference from what a firm uses now, no answer to a hesitation.
+A caller asking "why would a firm like mine need this?" retrieved the nearest
+passage, which was a price or a feature bullet. And the prompts only told the
+agents to query for *factual* questions, so even a better corpus would not have
+been asked.
+
+### The corpus
+
+`knowledge-base/content.mjs` is now 18 sections and 104 question-shaped
+headings (57,784 characters), in four parts: **why Aurixa exists and why now**;
+**what it does for each kind of firm** (buyer's agents, property and wealth
+advisers, brokers, agencies, conveyancers and solicitors, accountants,
+developers and builders, multi-office groups - each answering the same five
+questions so any one retrieves cleanly); **handling a real conversation**
+(how it differs, fourteen hesitations answered as acknowledge / reframe / one
+next step, discovery questions and what each answer points to, illustrative
+walk-throughs); and the **reference material**, now with each tier's catalog
+blurb and a generated "what each plan includes" from `tier-features.ts`. Every
+price is still generated from the catalog. Four content rules, in the module's
+header and in the corpus itself:
+
+- **Nothing is invented.** There are no customers, testimonials or measured
+  results, so there are none in the corpus and an agent is told never to supply
+  one. Walk-throughs say they are illustrative. The origin is stated without a
+  name - built inside a working Australian property advisory firm and used there
+  every day.
+- **No property-data provider is named, ever.** The one sentence that named one
+  (the integrations answer) now names categories, and `build-knowledge-doc.mjs`
+  carries a **denylist checked on the rendered output**: the provider under its
+  old name, its new name and its product name, plus the unbacked claims the
+  public site makes (a patent, certifications held by infrastructure providers
+  rather than by Aurixa, outcome multiples no customer has measured). Proven to
+  fail on each injected term and to pass the clean corpus.
+- **The AML/CTF reforms are the "why now", with no dates** and never a view on
+  whether a firm is covered - that goes to the firm's adviser or AUSTRAC. The
+  platform prepares drafts and never lodges.
+- **Hesitation guidance never overrides a prompt.** The corpus says so in its
+  first paragraph, and the prompt says so again (below).
+
+### The prompts
+
+`kb_block()` in `build-fleet-prompts.py` changed in three places on all twelve:
+what the knowledge base holds (two kinds of material, named); **when to query**,
+which now includes the caller naming their kind of business, asking why or how
+it differs, and hesitating on price, timing, size, trust, switching or needing
+to check with someone; and a new **3.3 Using What Comes Back** - one point then
+a question back, tied to what the caller said, walk-throughs presented as
+illustrative, and no hesitation answer overriding the prompt's own limits.
+
+### A Markdown upload is stored and never parsed
+
+The corpus uploaded earlier today (`0af91eda…`, `text/markdown`) reads
+**`status: failed`** in VAPI's file store, with no parsed text. So did a second
+Markdown upload of the new corpus. Every `.docx` and `.pdf` in the same store
+reads `done`. A failed file binds to a query tool exactly like a good one and
+nothing reports it, so from 14:33 until this deploy the fleet was pointed at a
+knowledge base with nothing in it to retrieve. The same bytes uploaded as
+**`text/plain`, `.txt`** parse to `done`.
+
+So the upload is judged by the store's own `status`, never by the POST's 201,
+and `vapi-file.json` records the id, the mimetype it was uploaded as, the status
+the store reported, and the size, MD5 and SHA-256 of what was uploaded.
+`previous_file_id` is the last corpus that *parsed* (`6b497eaa…`), because
+rolling back to a file that never parsed is not a rollback.
+
+### What is live, and what proves it
+
+- `c14445c8-7057-4377-a246-1c8de9f645b4`, `text/plain`, `status: done`, 57,784
+  bytes; downloaded back from the store, **MD5 `692914a3…` equals the committed
+  file's**. The failed Markdown duplicate this deploy created was deleted.
+- All twelve assistants: the live system message was read first and matched the
+  previous generated prompt byte for byte; four anchored replacements were
+  applied only if the result's MD5 equalled the newly generated file's; then a
+  `model` PATCH carrying the same provider, model, `toolIds` and inline tools
+  with the file id swapped in both places VAPI stores it.
+- Read back fresh on all twelve: `PATCH` 200, **live MD5 equals the generated
+  prompt's**, both file-id locations read `c14445c8…` and none reads
+  `0af91eda…`, the `aurixa_knowledge` query tool present, `toolIds` identical to
+  what was read before the write.
+- CI now runs both generators' `--check` (`check:voice-kb`, `check:voice-prompts`).
+  The KB check also fails when the committed corpus's SHA-256 differs from the
+  one recorded as uploaded - the corpus was edited and the live agents were not
+  given it - which is how a stale price list reached callers before.
+
+What this cannot establish is how it sounds. A call asking "what would this do
+for a mortgage broker?" and then "honestly, it sounds expensive" should get an
+answer about the caller's own business and a question back - not a list of
+features or a price.
