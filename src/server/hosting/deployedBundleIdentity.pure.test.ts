@@ -9,7 +9,11 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import {
+  billingFallbackConsequence,
+  billingFallbackSentence,
   bundleIdentityReading,
+  carriesIdentityLiteral,
+  declaredPathArtefact,
   entryAssetPaths,
   isWrongBackend,
   readBundleIdentity,
@@ -535,9 +539,9 @@ describe("the artefact a re-sync is keyed on must survive a rebuild", () => {
 describe("a bundle carrying the prime's billing identity is its own reason to rebuild", () => {
   const artefact = "own:dduzbchuswwbefdunfct";
 
-  it("re-syncs on a HEALTHY backend whose artefact falls back to the prime's uid", () => {
-    // They fail apart. A clone can serve its own database perfectly while
-    // every purchase made on it credits the prime.
+  it("re-syncs on a HEALTHY backend whose artefact carries no identity of its own", () => {
+    // They fail apart. A clone can serve its own database perfectly while its
+    // bundle carries no billing identity at all.
     const d = shouldRequestResync({
       verdict: "carries_own",
       billingUid: "fallback",
@@ -545,7 +549,25 @@ describe("a bundle carrying the prime's billing identity is its own reason to re
       lastResyncArtefact: null,
     });
     expect(d.resync).toBe(true);
-    expect(d.reason).toMatch(/credit the prime/);
+    // Renegotiated. This asserted /credit the prime/, which pinned an
+    // overclaim: on a build resolving its OWN backend the clone's resolver
+    // refuses the prime's identity, so the fallback link is browse-only and
+    // nobody is credited. The reason is written onto the re-sync and into the
+    // event log, so it has to say what the fault actually costs.
+    expect(d.reason).toMatch(/no billing identity of its own/);
+    expect(d.reason).toMatch(/browse-only/);
+    expect(d.reason).not.toMatch(/credits the prime/);
+  });
+
+  it("names the prime as credited only where the build resolves the prime's backend", () => {
+    const d = shouldRequestResync({
+      verdict: "carries_prime",
+      billingUid: "fallback",
+      artefact,
+      lastResyncArtefact: null,
+    });
+    expect(d.resync).toBe(true);
+    expect(d.reason).toMatch(/wrong backend AND carries no billing identity of its own/);
   });
 
   it("does not re-sync on own, not_scanned or none", () => {
@@ -596,5 +618,177 @@ describe("the server keys the declared path on the fault, not the build", () => 
     // deletes real code (measured elsewhere in this repo at 13,438 chars).
     expect(bare).not.toMatch(/artefact:\s*buildIdOf\(/);
     expect(bare).toMatch(/artefact:\s*declaredFaultOf\(/);
+  });
+
+  it("and a build that declares still has its bytes read for the billing identity", () => {
+    // The declared branch used to return before any JavaScript was fetched,
+    // so a declaring build's billing reading was `not_scanned` for ever. The
+    // artefact there is now chosen by the pure rule, with the declaration
+    // still the key for a wrong backend.
+    expect(bare).toMatch(/artefact:\s*declaredPathArtefact\(/);
+    expect(bare).toMatch(/declaredFault:\s*declaredFaultOf\(/);
+  });
+
+  it("the re-sync is asked for with the decision's own reason", () => {
+    // It said "names the wrong Supabase project" on every re-sync, including
+    // the ones a healthy backend's missing billing identity asked for.
+    expect(bare).not.toMatch(/reason:\s*`the deployed bundle names the wrong Supabase project/);
+    expect(bare).toMatch(/requestEnvResync\(\{\s*cloneId,\s*reason:\s*decision\.reason\s*\}\)/);
+  });
+});
+
+describe("a billing identity is carried as a VALUE, never as a fragment of one", () => {
+  // A slug is an ordinary string a bundle has every other reason to contain.
+  // Each of these used to read as `own` — a pass on a bundle carrying none.
+  const UID = "preflight-property-group";
+
+  it("is not the first label of the clone's own hostname", () => {
+    expect(carriesIdentityLiteral(`fetch("https://${UID}.aurixasystems.com.au/api")`, UID)).toBe(
+      false,
+    );
+  });
+
+  it("is not a segment of the clone's repository URL", () => {
+    expect(carriesIdentityLiteral(`"https://github.com/naidu-group-pty-ltd/${UID}"`, UID)).toBe(
+      false,
+    );
+    expect(carriesIdentityLiteral(`"/repos/${UID}/contents"`, UID)).toBe(false);
+  });
+
+  it("is not a longer name that contains it, on either side", () => {
+    expect(carriesIdentityLiteral(`"${UID}-staging"`, UID)).toBe(false);
+    expect(carriesIdentityLiteral(`"old-${UID}"`, UID)).toBe(false);
+    expect(carriesIdentityLiteral(`"${UID}_2"`, UID)).toBe(false);
+  });
+
+  it("is not an address", () => {
+    expect(carriesIdentityLiteral(`"${UID}@aurixasystems.com.au"`, UID)).toBe(false);
+  });
+
+  it("is every form the bundler emits for an inlined VITE_ value", () => {
+    // A quoted literal, however the minifier bound it.
+    expect(carriesIdentityLiteral(`const a="${UID}";`, UID)).toBe(true);
+    expect(carriesIdentityLiteral(`{uid:'${UID}'}`, UID)).toBe(true);
+    // A template interpolating a compile-time constant, folded into one string.
+    expect(
+      carriesIdentityLiteral(`"https://www.aurixasystems.com.au/pricing?uid=${UID}"`, UID),
+    ).toBe(true);
+    expect(carriesIdentityLiteral(`"?uid=${UID}&action=save-card"`, UID)).toBe(true);
+  });
+
+  it("finds nothing in nothing", () => {
+    expect(carriesIdentityLiteral("", UID)).toBe(false);
+    expect(carriesIdentityLiteral(`"${UID}"`, "")).toBe(false);
+    expect(carriesIdentityLiteral(`"${UID}"`, "   ")).toBe(false);
+  });
+
+  it("reads a bundle that spells the slug only as its hostname as FALLBACK, not OWN", () => {
+    // The whole point, end to end: the hostname is there, the identity is not,
+    // and the built-in is — so this bundle has no identity of its own.
+    const r = readBundleIdentity({
+      source: `${OWN_BACKEND_SOURCE};const h="https://${UID}.aurixasystems.com.au",f="npc-prime"`,
+      scanned: ["/assets/index-CZeyBDYv.js"],
+      ownRef: DASHBOARD_CLONE,
+      primeRef: PRIME,
+      billingUid: UID,
+    });
+    expect(r.billingUid).toBe("fallback");
+  });
+
+  it("does not read the built-in out of a longer name either", () => {
+    const r = readBundleIdentity({
+      source: `${OWN_BACKEND_SOURCE};const x="npc-prime-archive"`,
+      scanned: ["/assets/index-CZeyBDYv.js"],
+      ownRef: DASHBOARD_CLONE,
+      primeRef: PRIME,
+      billingUid: UID,
+    });
+    expect(r.billingUid).toBe("not_scanned");
+  });
+});
+
+describe("the artefact a declared build is keyed on", () => {
+  const declaredFault = "declared:env:qvuwrvwzjyigptmnijyb";
+  const entryAsset = "/assets/index-ZGt6E6UT.js";
+
+  it("is the declaration for a wrong backend, even when the entry was read", () => {
+    // A rebuild that still declares the same wrong project has shown the same
+    // thing however many content hashes it minted getting there.
+    expect(declaredPathArtefact({ verdict: "carries_prime", declaredFault, entryAsset })).toBe(
+      declaredFault,
+    );
+  });
+
+  it("is the content-hashed entry for a billing fault on a healthy declaration", () => {
+    // The identity is inlined into those bytes: a rebuild that took it changes
+    // the hash, one that did not reproduces it and the guard fires.
+    expect(declaredPathArtefact({ verdict: "carries_own", declaredFault, entryAsset })).toBe(
+      entryAsset,
+    );
+    expect(declaredPathArtefact({ verdict: "names_neither", declaredFault, entryAsset })).toBe(
+      entryAsset,
+    );
+  });
+
+  it("is the declaration when nothing was read", () => {
+    expect(declaredPathArtefact({ verdict: "carries_own", declaredFault, entryAsset: null })).toBe(
+      declaredFault,
+    );
+  });
+
+  it("so a billing rebuild is attempted once per bundle, not once per clone", () => {
+    // Keyed on the declaration, a clone would have had ONE billing rebuild for
+    // the life of its deployment, and none after its identity was changed.
+    const first = declaredPathArtefact({ verdict: "carries_own", declaredFault, entryAsset });
+    const afterAnUnrelatedRelease = declaredPathArtefact({
+      verdict: "carries_own",
+      declaredFault,
+      entryAsset: "/assets/index-Q1w2E3r4.js",
+    });
+    expect(
+      shouldRequestResync({
+        verdict: "carries_own",
+        billingUid: "fallback",
+        artefact: afterAnUnrelatedRelease,
+        lastResyncArtefact: first,
+      }).resync,
+    ).toBe(true);
+    expect(
+      shouldRequestResync({
+        verdict: "carries_own",
+        billingUid: "fallback",
+        artefact: first,
+        lastResyncArtefact: first,
+      }).resync,
+    ).toBe(false);
+  });
+});
+
+describe("what a bundle with no billing identity costs", () => {
+  it("credits the prime only where the build resolves the prime's backend", () => {
+    expect(billingFallbackConsequence("carries_prime")).toBe("credits_prime");
+    expect(billingFallbackSentence("carries_prime")).toMatch(/credits the prime/);
+  });
+
+  it("is a browse-only link where the build resolves its own", () => {
+    expect(billingFallbackConsequence("carries_own")).toBe("browse_only");
+    const s = billingFallbackSentence("carries_own");
+    expect(s).toMatch(/browse-only/);
+    expect(s).not.toMatch(/credits the prime/);
+  });
+
+  it("says it cannot tell where the verdict cannot", () => {
+    for (const v of ["carries_both", "names_neither", "unreachable", "unreadable", null]) {
+      expect(billingFallbackConsequence(v)).toBe("unproven");
+      expect(billingFallbackSentence(v)).toMatch(/cannot say which/);
+    }
+  });
+
+  it("never claims the minted links are affected", () => {
+    // They carry `clones.billing_user_id` server-side; the bundle's identity
+    // only reaches the last-resort links.
+    for (const v of ["carries_prime", "carries_own", "carries_both"]) {
+      expect(billingFallbackSentence(v)).toMatch(/Links Mission Control mints are unaffected/);
+    }
   });
 });

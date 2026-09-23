@@ -91,3 +91,67 @@ export function bundleIdentityReading(input: {
       };
   }
 }
+
+/**
+ * What a bundle with no billing identity of its own actually costs.
+ *
+ * `fallback` means the probe read the chunk that carries the identity and found
+ * the prime's built-in `npc-prime` there rather than this clone's own id — and
+ * the built-in is compiled into EVERY build, so in practice `fallback` means
+ * "this bundle has no identity of its own". What happens next is not one thing,
+ * and the copy that said "purchases made from this workspace credit the prime"
+ * was right about the three mirrored clones and wrong about the fourth, whose
+ * build resolves its own backend:
+ *
+ * - The identity only reaches the LAST-RESORT links — `AURIXA_PRICING_URL` and
+ *   `AURIXA_SAVE_CARD_URL`, used when Mission Control cannot mint an attributed
+ *   one. The minted links carry `clones.billing_user_id` server-side and are
+ *   right whatever the bundle holds.
+ * - Which way the last-resort link fails depends on the BACKEND the build
+ *   resolved, because the clone's resolver (`aurixaBillingIdentity.ts`) spends
+ *   the built-in only while the build talks to the prime's project. Resolving
+ *   the prime's, the link credits the prime. Resolving its own, the pairing
+ *   check refuses the built-in and the link opens the pricing page
+ *   browse-only — nobody is charged wrongly, and nobody can buy from it.
+ *
+ * So the consequence is read off the backend verdict beside it, and a verdict
+ * that cannot say which project the browser uses says so rather than choosing.
+ *
+ * Client-safe on purpose: the card renders it and the probe records it, and a
+ * sentence written twice is how the card and the event log come to disagree.
+ */
+export type BillingFallbackConsequence = "credits_prime" | "browse_only" | "unproven";
+
+export function billingFallbackConsequence(
+  backendVerdict: string | null | undefined,
+): BillingFallbackConsequence {
+  switch (backendVerdict) {
+    case "carries_prime":
+      return "credits_prime";
+    case "carries_own":
+      return "browse_only";
+    default:
+      return "unproven";
+  }
+}
+
+/** The consequence as a clause, for a sentence that has already named the fault. */
+export function billingFallbackEffect(consequence: BillingFallbackConsequence): string {
+  switch (consequence) {
+    case "credits_prime":
+      return "the build resolves the prime's backend, so its last-resort purchase link spends the prime's identity and credits the prime";
+    case "browse_only":
+      return "the build resolves its own backend, so its last-resort purchase link refuses the prime's identity and opens the pricing page browse-only: nobody is charged wrongly, and nobody can buy from it";
+    case "unproven":
+      return "its last-resort purchase link either credits the prime or opens browse-only, depending on which backend the build resolves, and this reading cannot say which";
+  }
+}
+
+/** One sentence for an operator: the fault, then what it costs. */
+export function billingFallbackSentence(backendVerdict: string | null | undefined): string {
+  return (
+    "The served bundle carries no billing identity of its own — " +
+    `${billingFallbackEffect(billingFallbackConsequence(backendVerdict))}. ` +
+    "Links Mission Control mints are unaffected; this is the link a customer gets when it cannot mint one."
+  );
+}
