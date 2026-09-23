@@ -37,6 +37,8 @@ const state = vi.hoisted(() => ({
     excluded: Array<{ id: string; name: string; path: string }>;
     unmatched: string[];
   },
+  /** What `corpus.seedSkeletons()` answers. Built by the real reader in each test. */
+  seedSkeletons: null as unknown,
 }));
 
 vi.mock("./github-app.server", () => ({ getAppOctokit: () => ({}) }));
@@ -51,8 +53,12 @@ vi.mock("./prime-backend.server", () => ({
     if (state.corpusThrows) throw state.corpusThrows;
     return {
       metas: state.files,
+      // A file's git blob id is its version padded to forty hex digits, so a
+      // fixture can pin a skeleton to it — or, on purpose, to anything else.
+      files: state.files.map((f) => ({ ...f, sha: f.id.padStart(40, "0"), size: null })),
       sourceSha: "abc1234def",
       withdrawal: state.withdrawal,
+      seedSkeletons: async () => state.seedSkeletons,
       // The pass hands FILES, never bare versions; these fixtures key by version
       // because none of the files a body is read for shares one.
       sizeOf: (ref: string | { id: string }) =>
@@ -90,6 +96,7 @@ import {
   BODY_CONCURRENCY,
 } from "./primeMigrationHealth.server";
 import { OversizedMigrationError } from "./oversizedMigration.pure";
+import { readSeedSkeletonManifest } from "./seedSkeletonManifest.pure";
 
 const supabase = {} as never;
 
@@ -133,6 +140,7 @@ function corpusOf(n: number, sql = "create table if not exists public.t (id int)
 
 beforeEach(() => {
   state.withdrawal = { state: "absent", excluded: [], unmatched: [] };
+  state.seedSkeletons = readSeedSkeletonManifest(null);
   state.loaded = [];
   state.inFlight = 0;
   state.peak = 0;
@@ -355,5 +363,82 @@ describe("the prime's declared withdrawals", () => {
     corpusOf(2);
     const health = await readPrimeCorpusHealth(supabase);
     expect(health.notes.join(" ")).not.toMatch(/MIGRATION_WITHDRAWN/);
+  });
+});
+
+describe("the prime's seed skeletons", () => {
+  /** The shape the prime's join produces, rows left out. */
+  const SKELETON = [
+    "INSERT INTO public.template_library_entries (slug, schema)",
+    "VALUES",
+    "  (…)",
+    "ON CONFLICT (slug) DO UPDATE",
+    "  SET schema = EXCLUDED.schema;",
+  ].join("\n");
+
+  const manifest = (
+    skeletons: Array<{ path: string; blob: string }>,
+    refused: Array<{ path: string }> = [],
+  ) =>
+    JSON.stringify({
+      schema_version: 1,
+      generated_by: "scripts/build-migration-seed-skeletons.mjs",
+      min_bytes: 262144,
+      skeletons: skeletons.map((e) => ({ ...e, bytes: 1_000_000, tuples: 2, skeleton: SKELETON })),
+      refused: refused.map((e) => ({ ...e, blob: "0".repeat(40), bytes: 1_000_000, why: "x" })),
+    });
+
+  it("says so on the page when the manifest could not be used", async () => {
+    corpusOf(2);
+    state.seedSkeletons = readSeedSkeletonManifest("{ not json");
+
+    const text = (await readPrimeCorpusHealth(supabase)).notes.join(" ");
+
+    expect(text).toContain("migration-seed-skeletons.json");
+    expect(text).toMatch(/could not be used \(it is not valid JSON/);
+    // What it costs, in the operator's words: every seed holds what follows it.
+    expect(text).toMatch(/holds every migration after it/);
+  });
+
+  it("names a seed whose bytes changed since the manifest was generated", async () => {
+    corpusOf(2);
+    const [seed] = state.files;
+    state.seedSkeletons = readSeedSkeletonManifest(
+      manifest([{ path: seed.path, blob: "f".repeat(40) }]),
+    );
+
+    const text = (await readPrimeCorpusHealth(supabase)).notes.join(" ");
+
+    expect(text).toMatch(
+      /changed since the prime's supabase\/migration-seed-skeletons\.json was generated/,
+    );
+    expect(text).toContain(seed.name);
+  });
+
+  it("names a seed the prime could not describe", async () => {
+    corpusOf(2);
+    const [, seed] = state.files;
+    state.seedSkeletons = readSeedSkeletonManifest(manifest([], [{ path: seed.path }]));
+
+    const text = (await readPrimeCorpusHealth(supabase)).notes.join(" ");
+
+    expect(text).toMatch(/could not describe 1 migration file/);
+    expect(text).toContain(seed.name);
+  });
+
+  it("says nothing when every seed is described at its own bytes, or there is no manifest", async () => {
+    corpusOf(2);
+    const [seed] = state.files;
+    state.seedSkeletons = readSeedSkeletonManifest(
+      manifest([{ path: seed.path, blob: seed.id.padStart(40, "0") }]),
+    );
+    expect((await readPrimeCorpusHealth(supabase)).notes.join(" ")).not.toMatch(
+      /seed-skeletons|could not describe/,
+    );
+
+    state.seedSkeletons = readSeedSkeletonManifest(null);
+    expect((await readPrimeCorpusHealth(supabase)).notes.join(" ")).not.toMatch(
+      /seed-skeletons|could not describe/,
+    );
   });
 });

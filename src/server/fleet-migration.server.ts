@@ -66,6 +66,7 @@ import { withdrawnButRecorded } from "./migrationWithdrawals.pure";
 import { wholeRunnableVersions, type SplitVersion } from "./sharedVersionDelivery.pure";
 import { digestPrimeBodies } from "./primeBodyDigests.server";
 import type { MigrationDependencyFacts } from "./migrationDependencyFacts.pure";
+import { readThroughSeedSkeletons, type SeedSkeletonReport } from "./seedSkeletonManifest.pure";
 import {
   MIGRATION_CLAIMABLE_STATUSES,
   blockIsDischarged,
@@ -375,6 +376,16 @@ export type FleetMigrationResult = {
      */
     recordedOnPrime: string[];
   };
+  /**
+   * What the prime's `migration-seed-skeletons.json` contributed: the seeds
+   * whose dependency facts this pass read through a skeleton, and the ones it
+   * could not. Absent when the corpus was never read or the step failed.
+   *
+   * `unreadable` is the state to watch, for the reason `withdrawn`'s is: it is
+   * the one in which every seed quietly becomes a barrier to everything behind
+   * it again, and the count of what was sent is the only other place it shows.
+   */
+  seedSkeletons?: SeedSkeletonReport;
   /** Set when the run could not start at all. */
   error?: string;
 };
@@ -753,6 +764,13 @@ export async function openScopedPrimeCorpus(
        * files stay out of the corpus; this only names the contradiction.
        */
       withdrawnButRecorded: ReadonlyArray<{ id: string; name: string }>;
+      /**
+       * What the prime's seed skeletons contributed to this pass's facts: the
+       * seeds read through one, and the ones that could not be. Null when the
+       * manifest step itself failed, which leaves every seed unread — the
+       * behaviour the pass had before the prime published skeletons.
+       */
+      seedSkeletons: SeedSkeletonReport | null;
     }
   | { ok: false; error: string }
 > {
@@ -837,6 +855,26 @@ export async function openScopedPrimeCorpus(
     // dependency. That is the behaviour this function had before bodies were
     // read at all, which is the only safe direction for a failure here to fall.
   }
+  // The seeds past the pass's ceiling, read through the statements the prime
+  // publishes for them — each pinned to the blob it describes, so only a seed
+  // whose bytes are the ones listed here gains facts. Facts and names only:
+  // `digested` is untouched, so a skeleton clears nothing by body and a seed
+  // the prime has not run stays withheld. What changes is that such a seed is
+  // no longer an OPAQUE barrier holding every migration behind it. See
+  // `seedSkeletonManifest.pure.ts`.
+  let seedSkeletons: SeedSkeletonReport | null = null;
+  try {
+    const through = readThroughSeedSkeletons(await corpus.seedSkeletons(), corpus.files, {
+      facts,
+      mentions,
+    });
+    facts = through.facts;
+    mentions = through.mentions;
+    seedSkeletons = through.report;
+  } catch {
+    // Every seed unread, as before the prime published skeletons. The reader
+    // does not reject; this is for what it does not foresee.
+  }
   const metas = corpus.metas.map((m) => {
     // Digests are attached to exactly the set they always were. A
     // version-matched file never reaches the digest branch of
@@ -882,6 +920,7 @@ export async function openScopedPrimeCorpus(
       new Set(corpus.metas.map((m) => m.id)),
       primeApplied,
     ),
+    seedSkeletons,
   };
 }
 
@@ -1207,6 +1246,7 @@ export async function runFleetMigrationSync(
     unmatched: [...corpus.withdrawal.unmatched],
     recordedOnPrime: scoped.withdrawnButRecorded.map((m) => m.name),
   };
+  if (scoped.seedSkeletons) out.seedSkeletons = scoped.seedSkeletons;
 
   for (const backend of backends) {
     const cloneId = backend.clone_id;
@@ -2255,6 +2295,16 @@ export async function runFleetMigrationSync(
       withdrawn_unmatched: out.withdrawn?.unmatched ?? [],
       withdrawn_recorded_on_prime: out.withdrawn?.recordedOnPrime ?? [],
       ...(out.withdrawn?.why ? { withdrawn_unreadable_why: out.withdrawn.why } : {}),
+      // Which seeds the barrier could see into, and which it could not. An
+      // unreadable manifest or a stale entry turns a seed back into a barrier
+      // to everything behind it, and a smaller `advanced` is otherwise the
+      // only sign.
+      seed_skeletons_state: out.seedSkeletons?.state ?? null,
+      seed_skeletons_used: out.seedSkeletons?.used ?? [],
+      seed_skeletons_stale: out.seedSkeletons?.stale ?? [],
+      seed_skeletons_unmatched: out.seedSkeletons?.unmatched ?? [],
+      seed_skeletons_refused: out.seedSkeletons?.refused ?? [],
+      ...(out.seedSkeletons?.why ? { seed_skeletons_unreadable_why: out.seedSkeletons.why } : {}),
     },
   });
 

@@ -37,6 +37,10 @@ function corpusOf(
     })),
     sourceSha,
     withdrawal: { state: "absent", excluded: [], unmatched: [] },
+    // The digest pass never asks; a call is a regression this makes loud.
+    seedSkeletons: async () => {
+      throw new Error("not used");
+    },
     bodyIdentity: (ref) => (files[idOf(ref)] ? `blob-${idOf(ref)}` : null),
     sizeOf: (ref) => {
       const f = files[idOf(ref)];

@@ -109,6 +109,29 @@ describe("the facts are read, and read for the whole corpus", () => {
     expect(scoping).toMatch(/\.\.\.\(named === undefined \? \{\} : \{ mentions: named \}\)/);
   });
 
+  it("the seeds past the pass's ceiling are read through the prime's skeletons — for facts and names only", () => {
+    // Without this a ~40 MB seed has no facts, so a seed a clone does not have
+    // is an OPAQUE barrier and holds every migration behind it: measured on the
+    // four clones' ledgers, 1, 3, 3 and 1 versions sent, against 5, 7, 7 and 25
+    // with the skeletons read. See `seedSkeletonManifest.pure.ts`.
+    const pass = scoping.indexOf("digestPrimeBodies(");
+    const through = scoping.indexOf("readThroughSeedSkeletons(");
+    const attach = scoping.indexOf("const metas = corpus.metas.map(");
+    expect(pass).toBeGreaterThan(-1);
+    // After the pass, so a body read in full outranks its description; before
+    // the attach, so the facts reach the metas the partition reads.
+    expect(through).toBeGreaterThan(pass);
+    expect(attach).toBeGreaterThan(through);
+    expect(scoping).toMatch(
+      /readThroughSeedSkeletons\(await corpus\.seedSkeletons\(\), corpus\.files, \{\s*facts,\s*mentions,\s*\}\)/,
+    );
+    const step = scoping.slice(through, attach);
+    expect(step).toMatch(/facts = through\.facts;/);
+    expect(step).toMatch(/mentions = through\.mentions;/);
+    // A skeleton is not the body: nothing it says may clear a file by body.
+    expect(step).not.toMatch(/digested/);
+  });
+
   it("a digest is still attached only where a version did not already clear it", () => {
     // Widening the READ must not widen what is DIGESTED: a version-matched
     // file never reaches the digest branch of `scopeCorpusToPrime`, but it

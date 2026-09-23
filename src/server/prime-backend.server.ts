@@ -27,6 +27,12 @@ import {
   unreadableWithdrawals,
   type WithdrawalReading,
 } from "./migrationWithdrawals.pure";
+import {
+  SEED_SKELETONS_PATH,
+  readSeedSkeletonManifest,
+  unreadableSeedSkeletons,
+  type SeedSkeletonReading,
+} from "./seedSkeletonManifest.pure";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -656,6 +662,7 @@ export function resetPrimeSnapshotCache(): void {
   treeCache = null;
   blobCache = null;
   withdrawalTextCache = null;
+  seedSkeletonCache = null;
 }
 
 /**
@@ -697,6 +704,51 @@ async function readWithdrawalsFromListing(
   }
   withdrawalTextCache = { sha: blob.sha, text };
   return readWithdrawalManifest(text);
+}
+
+/**
+ * The seed skeleton manifest's READING, keyed by its git blob sha.
+ *
+ * The reading rather than the text, unlike the withdrawal cache above: this
+ * document is ~450 KB where that one is a few, and parsing it on every pass to
+ * arrive at the same answer is work a content-addressed key makes pointless.
+ * A reading that says the text could not be USED is cached with it, because it
+ * is a fact about those bytes; a fetch that failed is not, because it is a
+ * fact about one moment.
+ */
+let seedSkeletonCache: { sha: string; reading: SeedSkeletonReading } | null = null;
+
+/**
+ * Read `migration-seed-skeletons.json` from a listing the caller has already
+ * taken, so the skeletons and the files they are pinned to come from one
+ * commit.
+ *
+ * Never throws. A manifest that cannot be fetched is `unreadable`, and an
+ * unreadable manifest describes nothing — every large file is read as unread,
+ * which is how the corpus behaved before the prime published one. See
+ * `seedSkeletonManifest.pure.ts`.
+ */
+async function readSeedSkeletonsFromListing(
+  octokit: Octokit,
+  ref: RepoRef,
+  blobs: ReadonlyArray<TreeBlob>,
+): Promise<SeedSkeletonReading> {
+  const blob = blobs.find((b) => b.path === SEED_SKELETONS_PATH);
+  if (!blob) return readSeedSkeletonManifest(null);
+  if (seedSkeletonCache?.sha === blob.sha) return seedSkeletonCache.reading;
+  let text: string;
+  try {
+    text = decodeBase64Utf8(await fetchBlobBase64(octokit, ref, blob.sha));
+  } catch (e) {
+    return unreadableSeedSkeletons(
+      `it could not be fetched (${
+        e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+      })`,
+    );
+  }
+  const reading = readSeedSkeletonManifest(text);
+  seedSkeletonCache = { sha: blob.sha, reading };
+  return reading;
 }
 
 /**
@@ -1294,6 +1346,18 @@ export type PrimeMigrationCorpus = {
    */
   withdrawal: PrimeWithdrawalReport;
   /**
+   * The skeletons the prime publishes for the migrations too large for the
+   * fleet sync to read — every statement a seed's rows are poured into, pinned
+   * to the blob it was read from. See `seedSkeletonManifest.pure.ts`.
+   *
+   * Asked for rather than read with the listing, because one reader in a
+   * corpus's many wants it: the fleet sync's dependency pass. Read once per
+   * corpus and from the same listing as `files`, so an entry's pin is compared
+   * against the commit it was taken at. Never rejects — a manifest that could
+   * not be read is a reading that says so, and describes nothing.
+   */
+  seedSkeletons: () => Promise<SeedSkeletonReading>;
+  /**
    * Fetch one migration's SQL. Memoised per FILE, so a batch of clones missing
    * the same file pays for it once. Throws — naming the migration and its size
    * — when the body is past `MAX_MIGRATION_BYTES`, and names the files when a
@@ -1424,6 +1488,9 @@ export async function openPrimeMigrationCorpus(
     return fetchBlobTextStream(octokit, ref, meta.sha, meta.name);
   };
 
+  // One read per corpus, and only for a caller that asks.
+  let seedSkeletons: Promise<SeedSkeletonReading> | null = null;
+
   return {
     metas: entries.map(({ id, name, path }) => ({ id, name, path })),
     files: entries.map(({ id, name, path, sha, size }) => ({
@@ -1435,6 +1502,7 @@ export async function openPrimeMigrationCorpus(
     })),
     sourceSha: commitSha,
     withdrawal,
+    seedSkeletons: () => (seedSkeletons ??= readSeedSkeletonsFromListing(octokit, ref, blobs)),
     bodyIdentity: (want: PrimeMigrationRef) => fileOf(want)?.sha ?? null,
     sizeOf,
     loadSql,

@@ -22,7 +22,7 @@ const REF = { owner: "Naidu-Group-Pty-Ltd", repo: "npc-property-dashbord", branc
  * 60,000 ms every time. So "did it produce the right SQL" is necessary and not
  * sufficient; "how many bodies did it download" is the property under test.
  */
-function fakeOctokit(files: Array<{ name: string; body: string; size?: number }>) {
+function fakeOctokit(files: Array<{ name: string; body: string; size?: number; path?: string }>) {
   const blobCalls: string[] = [];
   const shaOf = (name: string) => `sha-${name}`;
   const octokit = {
@@ -40,7 +40,9 @@ function fakeOctokit(files: Array<{ name: string; body: string; size?: number }>
           truncated: false,
           tree: files.map((f) => ({
             type: "blob",
-            path: `supabase/migrations/${f.name}`,
+            // Everything lists under `supabase/migrations/` unless a file
+            // says where it lives — the seed skeleton manifest does not.
+            path: f.path ?? `supabase/migrations/${f.name}`,
             sha: shaOf(f.name),
             ...(f.size === undefined ? {} : { size: f.size }),
           })),
@@ -277,6 +279,106 @@ describe("the prime's declared withdrawals", () => {
 
     expect(corpus.metas.map((m) => m.name)).toEqual([LIVE]);
     expect(corpus.withdrawal.unmatched).toEqual(["20990101000000_not_here.sql"]);
+  });
+});
+
+describe("the prime's seed skeletons", () => {
+  // Beside the migrations directory, not in it: it describes migrations and is
+  // not one, and a reader of `supabase/migrations/` must not mistake it for one.
+  const MANIFEST = {
+    name: "migration-seed-skeletons.json",
+    path: "supabase/migration-seed-skeletons.json",
+  };
+  const SEED = "20261204020000_seed_template_library_v15.sql";
+  const skeletons = JSON.stringify({
+    schema_version: 1,
+    generated_by: "scripts/build-migration-seed-skeletons.mjs",
+    min_bytes: 262144,
+    skeletons: [
+      {
+        path: `supabase/migrations/${SEED}`,
+        blob: "a".repeat(40),
+        bytes: 40_000_000,
+        tuples: 2,
+        skeleton:
+          "INSERT INTO public.template_library_entries (slug)\nVALUES\n  (…)\nON CONFLICT (slug) DO NOTHING;",
+      },
+    ],
+    refused: [],
+  });
+
+  it("is read only when asked, from the listing the corpus was built from", async () => {
+    const { octokit, blobCalls } = fakeOctokit([
+      { name: SEED, body: "x", size: 40_000_000 },
+      { ...MANIFEST, body: skeletons },
+    ]);
+    const corpus = await openPrimeMigrationCorpus(octokit, REF);
+
+    // Not a migration, and not fetched by opening the corpus.
+    expect(corpus.metas.map((m) => m.name)).toEqual([SEED]);
+    expect(blobCalls).toEqual([]);
+
+    const reading = await corpus.seedSkeletons();
+    expect(reading.state).toBe("read");
+    expect([...reading.entries.keys()]).toEqual([`supabase/migrations/${SEED}`]);
+    expect(blobCalls).toEqual(["sha-migration-seed-skeletons.json"]);
+  });
+
+  it("is fetched once per blob, however many times and corpora ask", async () => {
+    const { octokit, blobCalls } = fakeOctokit([
+      { name: SEED, body: "x", size: 40_000_000 },
+      { ...MANIFEST, body: skeletons },
+    ]);
+    const first = await openPrimeMigrationCorpus(octokit, REF);
+    await Promise.all([first.seedSkeletons(), first.seedSkeletons()]);
+    const second = await openPrimeMigrationCorpus(octokit, REF);
+    await second.seedSkeletons();
+    expect(blobCalls).toEqual(["sha-migration-seed-skeletons.json"]);
+  });
+
+  it("reads as absent, fetching nothing, where the tree carries no manifest", async () => {
+    const { octokit, blobCalls } = fakeOctokit([{ name: SEED, body: "x", size: 40_000_000 }]);
+    const corpus = await openPrimeMigrationCorpus(octokit, REF);
+    const reading = await corpus.seedSkeletons();
+    expect(reading.state).toBe("absent");
+    expect(reading.entries.size).toBe(0);
+    expect(blobCalls).toEqual([]);
+  });
+
+  it("reads as unreadable, never as a failed corpus, when it cannot be fetched — and does not remember the failure", async () => {
+    const { octokit } = fakeOctokit([
+      { name: SEED, body: "x", size: 40_000_000 },
+      { ...MANIFEST, body: skeletons },
+    ]);
+    const getBlob = (octokit as unknown as { git: { getBlob: ReturnType<typeof vi.fn> } }).git
+      .getBlob;
+    getBlob.mockImplementationOnce(async () => {
+      throw new Error("502 from GitHub");
+    });
+
+    const first = await openPrimeMigrationCorpus(octokit, REF);
+    const failed = await first.seedSkeletons();
+    expect(failed.state).toBe("unreadable");
+    expect(failed.state === "unreadable" && failed.why).toMatch(
+      /could not be fetched.*502 from GitHub/,
+    );
+    expect(failed.entries.size).toBe(0);
+
+    // A blip is a fact about one moment, not about the bytes: the next pass
+    // reads the manifest.
+    const second = await openPrimeMigrationCorpus(octokit, REF);
+    expect((await second.seedSkeletons()).state).toBe("read");
+  });
+
+  it("reads as unreadable, and says why, when it is not a manifest", async () => {
+    const { octokit } = fakeOctokit([
+      { name: SEED, body: "x", size: 40_000_000 },
+      { ...MANIFEST, body: "{ skeletons: [" },
+    ]);
+    const corpus = await openPrimeMigrationCorpus(octokit, REF);
+    const reading = await corpus.seedSkeletons();
+    expect(reading.state).toBe("unreadable");
+    expect(reading.state === "unreadable" && reading.why).toMatch(/not valid JSON/);
   });
 });
 
