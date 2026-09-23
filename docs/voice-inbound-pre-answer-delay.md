@@ -19,11 +19,14 @@ answers with static TwiML:
 ```xml
 <Response>
   <Pause length="5"/>
-  <Dial>
+  <Dial timeout="20" action="<the failed-dial handler's hook>" method="POST">
     <Sip>sip:aurixa-…@sip.vapi.ai</Sip>
   </Dial>
 </Response>
 ```
+
+`timeout` and `action` belong to the failed-dial handler, which has a section
+of its own below. The pause is the `<Pause>` and nothing else.
 
 The `<Sip>` target is a **vapi-provider phone record**,
 `663c24e4-0393-4d75-aa75-63c43aeb9303`, bound to the MC Reception Squad
@@ -111,6 +114,114 @@ This is also why "the phone was answered" is never evidence that the delay is
 working. The fallback answers the call perfectly normally. The only honest
 check is the one below.
 
+## The failed-dial handler
+
+`voice_fallback_url` above covers one layer, and the SIP phone record's
+`fallbackDestination: +61 433 005 110` covers a second — VAPI answers the SIP
+leg but the squad cannot be reached. Between them sits a third layer that
+neither can see: **a `<Dial>` that fails.**
+
+If VAPI's SIP ingress were unreachable, Twilio would fetch the TwiML above
+(fine), execute it (fine), the `<Dial><Sip>` would fail, and — with no verb
+after it — the call would simply end. The handler is what turns that into a
+person:
+
+```xml
+<Response>
+  <Say voice="alice" language="en-AU">Sorry, we could not connect you to our
+    reception system. Putting you through to the team now.</Say>
+  <Dial callerId="<this line's number>" timeout="25" answerOnBridge="true">
+    <Number>+61433005110</Number>
+  </Dial>
+  <Say voice="alice" language="en-AU">We could not reach the team either.
+    Please call back shortly.</Say>
+  <Hangup/>
+</Response>
+```
+
+The inner `<Dial>` deliberately carries **no** `action`, so when the mobile
+does not answer it falls through to the closing `<Say>`.
+
+Each line has its own handler so that either can be rolled back alone. Both
+are stateless responders in the same place as the TwiML above: *Aurixa
+Reception - Dial Failure Handler* and *NPC Reception - Dial Failure Handler*.
+
+### It has to answer the normal case too
+
+This is the part that is easy to get wrong. Twilio's `<Dial>` reference:
+*"If you specify an `action` URL for `<Dial>`, Twilio will continue the
+initial call after the dialed party hangs up. Any TwiML verbs included after
+this `<Dial>` will be unreachable… you must respond to Twilio's request with
+TwiML instructions on how to handle the call."*
+
+So the handler is reached after **every** dial, not only a failed one, and a
+finished conversation that gets no answer hangs. It replies `<Response/>` —
+end the call — for anything that is not a failure.
+
+That is also why the two simpler-looking shapes are wrong and must not be
+reintroduced: a bare `<Say>`/`<Dial>` *after* the `<Dial>` fires at the end of
+every normal call, and two nouns inside one `<Dial>` ring **simultaneously**,
+so the mobile would ring on every inbound call.
+
+### The branch is in the mapper, never in a router filter
+
+A Make **router filter cannot read a custom webhook's fields.**
+`{{1.DialCallStatus}}` resolves correctly in a *mapper* and is empty inside a
+*filter*, because a webhook carrying no data structure gives Make nothing to
+bind against at filter time. Measured directly: with a payload of
+`status=[failed]`, the route filtered `notequal "failed"` fired and the route
+filtered `equal "failed"` did not, while the same expression in a mapper read
+`raw=[failed] eq=[Y]`.
+
+Three rounds of this were spent blaming the filter operator. It was never the
+operator. The handler is therefore one module with the decision inline:
+
+```
+{{if(contains("no-answer|failed|busy"; 1.DialCallStatus); "<divert…>"; "<Response/>")}}
+```
+
+Two details that cost a run each. **`or()` does not exist in Make** —
+`Function 'or' not found!` — hence `contains()` over a delimited list, which
+is safe because no other `DialCallStatus` value (`completed`, `answered`,
+`canceled`) is a substring of it. And the TwiML uses **single-quoted
+attributes** so it can sit inside a double-quoted Make string with no
+escaping.
+
+`no-answer` is in the list deliberately: a dial that never connects surfaces
+as `no-answer`, not `failed`, so keying on `failed` alone would miss the case
+the handler exists for.
+
+### How to simulate an outage
+
+Not with a wrong SIP username. **`sip.vapi.ai` answers an unknown user and
+then drops the call** — `DialCallStatus=completed`, `DialCallDuration=1` — so
+a bad username is invisible to the status test and is not a stand-in for
+anything. Use an **unroutable host**; that is what yields `failed`.
+
+Run it as a Twilio call whose own `Twiml` parameter carries the broken
+`<Dial>` and the handler's action URL. That exercises the handler with the
+live number nowhere in the path. Measured that way: SIP leg `in-progress`,
+the unroutable host `failed` two seconds later, the handler taking the divert
+branch, and a leg to `+61 433 005 110` `ringing` six seconds after that.
+
+### `transfer_to_human` is unaffected
+
+The one real risk, because the NPC line's transfer works by redirecting the
+**parent** call while the `<Dial><Sip>` is still live — and it was not
+knowable from the documentation whether a callback for that torn-down dial
+would arrive and hang up the call the transfer had just set up.
+
+Measured rather than reasoned about: the redirect was accepted (HTTP 200),
+the SIP leg was torn down at 21 s, a leg to `+61 433 005 110` went
+`in-progress`, and both parent legs stayed live. A parent redirect survives
+the handler.
+
+### What it costs
+
+A Make round-trip at the end of every call, measured at 141–290 ms, and a
+second execution per call. Rollback is the two attributes on the one mapper
+field, next call only.
+
 ## How to verify it, and how to roll it back
 
 **Verify** by asserting against VAPI's own call record, never by ear:
@@ -121,6 +232,7 @@ check is the one below.
 | routing | `squadId` is `d6bfd085-2724-476d-9d5e-0c9d72463e4c` |
 | **the pause itself** | the gap between the TwiML host's response and the VAPI call's `createdAt` is ≈ 5 s |
 | the webhook still authenticates | a `tool_calls` → `tool_call_result` pair in the call's `messages` |
+| the handler is not diverting good calls | Twilio's log for the call shows **no** child leg to `+61 433 005 110` |
 
 Measured on 23 September 2026: TwiML served at `04:49:21.942Z`, VAPI call
 created at `04:49:27.188Z` — a gap of **5.25 s**, reconciling with
@@ -150,11 +262,12 @@ Make.com scenarios**, and `docs/voice-agents-architecture.md` opens by saying
 that state no longer lives outside Mission Control. Both remain true and
 neither is bent by this.
 
-The TwiML host is a **stateless responder**: one webhook, one response, no
-data store, no reads, no writes. It holds nothing, and it is not in the path
-of any tool call — the agents still reach
-`/api/public/voice/webhook` directly. Its only job is to answer one HTTP
-request with a fixed XML document before handing the call to VAPI.
+The TwiML host and the failed-dial handler are both **stateless responders**:
+one webhook, one response, no data store, no reads, no writes. They hold
+nothing, and neither is in the path of any tool call — the agents still reach
+`/api/public/voice/webhook` directly. Their only job is to answer one HTTP
+request with an XML document, one before the call is handed to VAPI and one
+after the dial ends.
 
 It is worth being honest about the trade anyway: it puts a third party in the
 synchronous path of every inbound call, which is precisely what the fallback
