@@ -132,6 +132,67 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "async": False,
+        "server": SERVER,
+        "function": {
+            "name": "raise_support_ticket",
+            "description": (
+                "Lodge a support ticket in Mission Control for the caller. Call this once the "
+                "caller has described the problem - do not ask them to choose a category or a "
+                "severity, the server works those out from what they said. Returns a reference "
+                "number to read back to the caller. If it returns needs_email, ask for their "
+                "email address, repeat it back, then call again."
+            ),
+            "parameters": {
+                "type": "object",
+                "required": ["summary", "detail"],
+                "properties": {
+                    "summary": {"type": "string", "description": "One line naming the problem, in the caller's own words"},
+                    "detail": {"type": "string", "description": "What the caller said: what they were doing, what happened, any error wording they read out"},
+                    "what_is_broken": {"type": "string", "description": "How much is affected, in the caller's words - everything is down, one feature, it is slow, it comes and goes, it just looks wrong"},
+                    "since_when": {"type": "string", "description": "When it started, in the caller's words"},
+                    "email": {"type": "string", "description": "Only when the caller volunteers or confirms an email address. Leave empty otherwise - their contact record is used."},
+                },
+            },
+        },
+    },
+    # Not `function` tools: VAPI runs these itself, so neither reaches our
+    # webhook and neither needs a handler. They are declared here so the org's
+    # tool set is reproducible from this file alone.
+    {
+        "type": "transferCall",
+        "destinations": [
+            {
+                "type": "number",
+                "number": "+61433005110",
+                "message": "Connecting you to the team now.",
+                "description": (
+                    "The Aurixa Systems escalation line - a person who can help when the "
+                    "assistant cannot."
+                ),
+            },
+        ],
+        "function": {
+            "name": "transfer_to_human_mc",
+            "description": (
+                "Transfer the caller to a human on the Aurixa Systems team. Use when the caller "
+                "asks for a person, or when their need is outside what this assistant can do."
+            ),
+        },
+    },
+    {
+        "type": "endCall",
+        "function": {
+            "name": "end_call_tool",
+            "description": (
+                "Hang up. Call this in the SAME turn as the spoken goodbye, never in a later "
+                "one: the assistant only gets another turn when the caller speaks, and a caller "
+                "who has just been said goodbye to has no reason to."
+            ),
+        },
+    },
 ]
 
 

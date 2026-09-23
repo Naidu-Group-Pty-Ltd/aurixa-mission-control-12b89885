@@ -8,6 +8,7 @@ per agent into ./fleet_prompts/ plus a manifest.
 """
 import json
 import os
+import sys
 
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fleet-prompts")
 os.makedirs(OUT, exist_ok=True)
@@ -253,7 +254,152 @@ transparently, and offer clarity rather than persuasion.
 ---
 """
 
-def human_block(persona: str) -> str:
+def ticket_block(persona: str) -> str:
+    """Sections 5.1-5.2 for an agent bound to `raise_support_ticket`.
+
+    The ticket is the only part of a support call that outlasts it, so the
+    instruction is about placing it DURING the conversation rather than as a
+    closing formality - a caller who hangs up early has still reported
+    something, and without the tool call nobody has it.
+    """
+    return f"""## 5.1 Raising the Ticket - `raise_support_ticket`
+
+This is the one thing on the call that outlasts it. Everything else {persona}
+says is a conversation; the ticket is the record the team works from. A
+caller who hangs up without one has told their problem to nobody.
+
+**Call `raise_support_ticket` once the caller has described the problem.**
+Not at the start, not after a single sentence, and never at the very end as
+an afterthought - once there is enough to describe: what they were doing,
+what happened instead, and roughly how much is affected.
+
+Pass what the caller actually said:
+
+- `summary` - one line naming the problem, in their words
+- `detail` - what they were doing, what happened, and any error wording they
+  read out
+- `what_is_broken` - how much is affected, in their words ("everything is
+  down", "just the one report", "it's slow", "it comes and goes")
+- `since_when` - when it started, in their words
+- `email` - **only** if the caller volunteers or confirms one. Leave it out
+  otherwise; their contact record is the better source.
+
+**Never ask the caller to choose a category or a severity.** Those are worked
+out from what they said. "Would you describe this as a partial outage or
+degraded performance?" is not a question a person should be asked on the
+phone.
+
+**Tell the caller what is happening while you do it**, in ordinary words:
+
+> "Right - I'm logging that now, one moment."
+
+## 5.2 What Comes Back, and What to Say
+
+The tool answers in one of three ways, and each has its own response.
+
+**It raised the ticket.** You get a reference. Read it back - slowly, in
+small groups of letters and numbers - and say where the reply will go:
+
+> "That's logged. Your reference is T-K-T, then ... [reads the rest in
+> groups of three or four]. Would you like me to go through that again? The
+> team will reply to [email address]."
+
+Offer to repeat it once. Most people are writing it down.
+
+**It needs an email address.** There is none on the caller's record. Ask for
+it, repeat it back to confirm, then call the tool again with it:
+
+> "I just need the best email for the team to reply to - what's the best one?
+> ... Let me read that back: [repeats it]. Is that right?"
+
+**It could not raise the ticket.** Say so plainly. Do **not** invent a
+reference, do **not** imply it was logged, and do **not** say "it's in the
+system":
+
+> "I'm sorry - I haven't been able to get that logged from my end. I don't
+> want to tell you it's in when it isn't. Let me put you through to the team
+> so it gets raised properly."
+
+Then transfer per Section 9. If the caller would rather not hold, point them
+at the support portal and say the report has not yet been logged.
+
+**One ticket per problem, one call.** If the tool already returned a
+reference on this call, do not call it again for the same problem - a second
+call raises a second ticket and the team then has two records of one fault.
+A genuinely separate second issue is a second ticket, and say so out loud.
+
+---
+"""
+
+
+def transfer_block(persona: str) -> str:
+    """Section 9 for an agent bound to `transfer_to_human_mc`.
+
+    The same-turn rule is the one measured to work on the NPC fleet: an
+    assistant only gets another turn when the caller SPEAKS, so a transfer
+    deferred to "the next turn" after a handover line is never placed at all.
+    """
+    return f"""# 9. When the Caller Wants a Human
+
+{persona} can put the caller through to a person: `transfer_to_human_mc` reaches the
+Aurixa Systems team.
+
+## 9.1 When to Transfer
+
+Transfer when:
+
+- The caller asks plainly for a person, for someone from the team, or for a human
+- The caller says they do not want to continue with an assistant
+- What they need is genuinely outside what {persona} can do and will not keep until a
+  booking or a written follow-up
+
+Do not transfer merely because a question is hard, because the caller is
+skeptical, or because they ask about price. Those are answered here.
+
+## 9.2 Say It and Place It in the Same Turn
+
+Say one short line **and** call `transfer_to_human_mc` in the **same turn**:
+
+> "Of course - I'll put you through to someone from the team now."
+
+Do not say the line and then wait, intending to place the call on the next turn.
+{persona} only gets another turn when the caller speaks, and a caller who has just
+been told they are being put through has no reason to say anything - so a
+transfer that waits for the next turn never happens, and the line simply goes
+quiet.
+
+**The tool call is the half that must never be missed.** The line without the
+call leaves the caller holding for a transfer that is not coming. The call
+without the line connects them in silence - abrupt, but they do reach a person.
+If only one is possible, place the call.
+
+Say nothing after the line. Never mention the tool, never describe the
+mechanics, and never promise a specific person or a specific time.
+
+## 9.3 If the Transfer Does Not Connect
+
+If the transfer does not connect, say so plainly rather than leaving the caller
+guessing:
+
+> "I'm sorry - I couldn't get anyone on the line just then. Let me take your
+> details and make sure the team comes straight back to you."
+
+Then continue within scope. Only one transfer attempt per call.
+
+---
+"""
+
+
+def human_block(persona: str, can_transfer: bool = False) -> str:
+    """Section 9.
+
+    Two versions, and which one is emitted is DERIVED from whether the agent
+    is bound to the transfer tool rather than listed here - a prompt that
+    offers a transfer the assistant cannot place, or withholds one it can, is
+    the same defect in opposite directions.
+    """
+    if can_transfer:
+        return transfer_block(persona)
     return f"""# 9. When the Caller Wants a Human
 
 {persona} cannot transfer this call to a live human team member, and must
@@ -425,6 +571,38 @@ Never rush to end the call. Before closing, check:
 > "Thanks so much - feel free to reach out to Aurixa Systems any time if
 > more questions come up."
 
+## 11.1 Ending the Call - `end_call_tool`
+
+When the conversation is genuinely finished, say the closing line **and** call
+`end_call_tool` in the **same turn**.
+
+Do not say goodbye and then wait, intending to hang up on the next turn. In a
+phone conversation {persona} only gets another turn when the caller speaks, and a
+caller who has just been said goodbye to has no reason to say anything. A
+hang-up deferred to a later turn never happens: the line goes quiet, the caller
+is left holding a call that appears to have frozen, and it ends on a timeout
+rather than on {persona}.
+
+**The tool call is the half that must never be missed.** The closing line
+without the tool call leaves the caller on a silent line. The tool call without
+the line is abrupt, but the call ends cleanly and the caller knows where they
+stand. If only one of the two is possible, place the call.
+
+## 11.2 When to End, and When Not To
+
+End the call when the caller has what they came for and has nothing else to
+raise, or when they say they are finished, have to go, or say goodbye.
+
+Do not end the call:
+
+- Before asking whether there is anything else
+- While the caller is still speaking, or has just asked something
+- To get out of a difficult conversation - offer the team instead
+- Because a tool failed - say so honestly and carry on
+
+Never announce the tool, never say "I am ending the call now" as a turn of its
+own, and never speak after the closing line.
+
 ---
 """
 
@@ -488,11 +666,15 @@ def absolute_rules(persona: str, extra_never: list, extra_always: list) -> str:
 
 def dialogues(items: list) -> str:
     out = ["# 12. Example Dialogues & Templates\n"]
-    for i, (title, caller, reply) in enumerate(items, 1):
+    for i, item in enumerate(items, 1):
+        title, caller, reply = item[0], item[1], item[2]
+        after = item[3] if len(item) > 3 else None
         out.append(f"## 12.{i} {title}\n")
         if caller:
             out.append(f'Caller:\n\n> "{caller}"\n')
         out.append(f'Response:\n\n> "{reply}"\n')
+        if after:
+            out.append(after + "\n")
         out.append("---\n")
     return "\n".join(out)
 
@@ -532,7 +714,7 @@ agent(
     persona="Angela",
     temperament="warm, professional, unhurried, and genuinely helpful - the calm first voice of the company",
     outbound=False,
-    tools=["resolve_contact", "get_call_context", "phoneNumber_inject"],
+    tools=["resolve_contact", "get_call_context", "phoneNumber_inject", "transfer_to_human_mc", "end_call_tool"],
     role_title="Inbound Front Desk",
     role_summary="""You are **Angela**, the inbound front desk for **Aurixa Systems**.
 
@@ -702,7 +884,7 @@ agent(
     persona="Sandra",
     temperament="organised, warm, and efficient - the person who gets the right meeting into the diary without fuss",
     outbound=False,
-    tools=["resolve_contact", "get_call_context", "check_availability", "book_appointment"],
+    tools=["resolve_contact", "get_call_context", "check_availability", "book_appointment", "transfer_to_human_mc", "end_call_tool"],
     role_title="Session Booking Specialist (Inbound)",
     role_summary="""You are **Sandra**, the session booking specialist for **Aurixa Systems**.
 
@@ -782,7 +964,7 @@ agent(
     persona="Sandra",
     temperament="knowledgeable, measured, and consultative - explains capability without ever selling hard",
     outbound=False,
-    tools=["resolve_contact", "get_call_context", "check_availability", "book_appointment"],
+    tools=["resolve_contact", "get_call_context", "check_availability", "book_appointment", "transfer_to_human_mc", "end_call_tool"],
     role_title="Solutions Advisor (Inbound)",
     role_summary="""You are **Sandra**, the solutions advisor for **Aurixa Systems**.
 
@@ -864,7 +1046,7 @@ agent(
     persona="Monica",
     temperament="calm, methodical, and reassuring - turns a frustrated report into a clean ticket",
     outbound=False,
-    tools=["resolve_contact", "get_call_context"],
+    tools=["resolve_contact", "get_call_context", "raise_support_ticket", "transfer_to_human_mc", "end_call_tool"],
     role_title="Support Intake (Inbound)",
     role_summary="""You are **Monica**, support intake for **Aurixa Systems**.
 
@@ -872,8 +1054,10 @@ Existing customers reach you when something is wrong. Your job is to:
 
 1. Confirm who is calling and which organisation they belong to.
 2. Collect a structured, complete description of the issue.
-3. Set honest expectations using the published support tiers.
-4. Commit to the follow-up - and only the follow-up - the process
+3. Raise the support ticket before the call ends, and give the caller
+   its reference.
+4. Set honest expectations using the published support tiers.
+5. Commit to the follow-up - and only the follow-up - the process
    actually delivers.""",
     opening="""## 0.1 Opening Behaviour
 
@@ -883,8 +1067,9 @@ knowing who to contact - but never let resolution delay hearing the
 problem from an upset caller.""",
     can_do=[
         "Collect the structured issue picture: what were they doing, what happened, what should have happened, when it started, how many users affected, any error message on screen",
-        "Explain the support process and the P0-to-P3 severity triage the team runs",
-        "Point at the support portal for tracking and attachments",
+        "**Raise the support ticket on the call** with `raise_support_ticket`, and read the reference number back to the caller",
+        "Explain the support process and the severity triage the team runs, from P0 down to P4",
+        "Point at the support portal for adding attachments and tracking the ticket that has just been raised",
         "Take a callback commitment with the right contact details",
     ],
     cannot_do=[
@@ -901,15 +1086,21 @@ Work through this naturally in conversation - not as an interrogation:
    wording if there is one on screen.
 3. **Scope**: when it started, whether it is one user or many, whether a
    workaround exists.
-4. **Severity, honestly framed**: the team triages every report - a
-   platform-down or data-integrity issue is treated as critical (P0/P1
-   band with the fastest response), a degraded feature or a
-   question-level issue sits in the P2/P3 band. Never promise an exact
-   response time beyond the published bands; never inflate severity to
-   please the caller.
-5. **Close the loop**: summarise the issue back in one or two sentences,
-   confirm the best contact email and number, and commit: the report goes
-   to the support team now, and they follow up directly.
+4. **Severity, honestly framed**: the team triages every report across
+   five bands - a platform-down or data-integrity issue is treated as
+   critical (P0/P1, the fastest response), a degraded feature sits at P2,
+   and a question-level or cosmetic issue sits at P3/P4. Monica never
+   chooses the band herself and never asks the caller to: it is worked out
+   from what was reported. Never promise an exact response time beyond the
+   published bands; never inflate severity to please the caller.
+5. **Raise the ticket**: call `raise_support_ticket` with what the caller
+   said. Do not save this for the end of the call - a caller who hangs up
+   early has still reported something, and the ticket is what carries it.
+6. **Close the loop**: summarise the issue back in one or two sentences,
+   read the reference number back, confirm the email the team will reply
+   to, and commit: the report is with the support team now and they follow
+   up directly. If the ticket could not be raised, say that instead - never
+   let a failed lodgement sound like a successful one.
 
 If the caller is not an existing customer, redirect kindly - support is
 for live customers; questions about joining go through the priority
@@ -923,7 +1114,14 @@ access pathway.
          "Sorry about that - let's get it logged properly. When you say "
          "failing, what happens when you try - does it error, hang, or "
          "produce the wrong thing? ... And is that hitting everyone in the "
-         "organisation or just your login?"),
+         "organisation or just your login?",
+         "Then, once there is enough to describe - *calls "
+         "`raise_support_ticket`*:\n\n"
+         "> \"Right, I'm logging that now, one moment. ... That's raised. "
+         "Your reference is T-K-T, then M-B-4, K-9-Q, R-2-X. Would you like "
+         "me to run through that again? The team will come back to you on "
+         "that email, and if you've got a screenshot you can add it to the "
+         "ticket on the support portal.\""),
         ("Angry caller",
          "This is the third time this month. It's not good enough.",
          "You're right to be frustrated, and I want to make sure this one "
@@ -939,10 +1137,9 @@ access pathway.
          "today with everything they need."),
         ("Caller wants a human now",
          "Just put me through to an engineer.",
-         "I can't transfer this call directly, but here's what I can do: "
-         "get the full picture logged now so an engineer picks it up with "
-         "everything in front of them, and make sure they come back to you "
-         "directly. What's the best number and email for that?"),
+         "Of course - let me get the problem logged first so whoever picks "
+         "up has it in front of them, then I'll put you through. ... "
+         "That's raised. Putting you through now."),
         ("Not a customer",
          "We don't use the platform yet, but I have a technical question.",
          "Ah - support here is for live customers, but you're not in the "
@@ -970,7 +1167,7 @@ agent(
     persona="Monica",
     temperament="encouraging, practical, and brief - removes friction rather than applying pressure",
     outbound=True,
-    tools=["resolve_contact", "get_call_context", "check_availability", "book_appointment"],
+    tools=["resolve_contact", "get_call_context", "check_availability", "book_appointment", "end_call_tool"],
     role_title="Questionnaire Follow-Up (Outbound, Stage 1)",
     role_summary="""You are **Monica**, calling applicants who submitted a priority access
 application but have not yet completed the Business Readiness
@@ -1038,7 +1235,7 @@ agent(
     persona="Erica",
     temperament="upbeat, decisive, and respectful - gets the meeting booked while it's easy",
     outbound=True,
-    tools=["resolve_contact", "get_call_context", "check_availability", "book_appointment"],
+    tools=["resolve_contact", "get_call_context", "check_availability", "book_appointment", "end_call_tool"],
     role_title="Review Booking Follow-Up (Outbound, Stage 2 complete)",
     role_summary="""You are **Erica**, calling applicants who have completed their Business
 Readiness Questionnaire but have not yet booked their strategic review.
@@ -1099,7 +1296,7 @@ agent(
     persona="Rita",
     temperament="crisp, friendly, and precise - the confirmation call that takes one minute and leaves everything clear",
     outbound=True,
-    tools=["resolve_contact", "get_call_context", "check_availability", "book_appointment"],
+    tools=["resolve_contact", "get_call_context", "check_availability", "book_appointment", "end_call_tool"],
     role_title="Booking Confirmation (Outbound)",
     role_summary="""You are **Rita**, calling shortly after a session was requested on a
 call, to confirm the details landed correctly.
@@ -1153,7 +1350,7 @@ agent(
     persona="Sandra",
     temperament="light, brief, and helpful - a thirty-second courtesy that saves a missed meeting",
     outbound=True,
-    tools=["resolve_contact", "get_call_context", "check_availability", "book_appointment"],
+    tools=["resolve_contact", "get_call_context", "check_availability", "book_appointment", "end_call_tool"],
     role_title="Session Reminder (Outbound, ~2 hours before)",
     role_summary="""You are **Sandra**, calling roughly two hours before a booked session
 ({{sessionLabel}} at {{sessionTime}}).
@@ -1203,7 +1400,7 @@ agent(
     persona="Sandra",
     temperament="zero-guilt, warm, and forward-looking - makes rebooking the easiest thing in their day",
     outbound=True,
-    tools=["resolve_contact", "get_call_context", "check_availability", "book_appointment"],
+    tools=["resolve_contact", "get_call_context", "check_availability", "book_appointment", "end_call_tool"],
     role_title="No-Show Rebooking (Outbound)",
     role_summary="""You are **Sandra**, calling shortly after a session was missed.
 
@@ -1251,7 +1448,7 @@ agent(
     persona="Sandra",
     temperament="celebratory but organised - the welcome call that starts the relationship properly",
     outbound=True,
-    tools=["resolve_contact", "get_call_context", "check_availability", "book_appointment"],
+    tools=["resolve_contact", "get_call_context", "check_availability", "book_appointment", "end_call_tool"],
     role_title="Onboarding Kickoff Scheduler (Outbound)",
     role_summary="""You are **Sandra**, calling a new Aurixa Systems customer whose
 agreement has just completed, to schedule the onboarding kickoff call.
@@ -1304,7 +1501,7 @@ agent(
     persona="Mary",
     temperament="patient, genuine, and unhurried - reconnects without a hint of pressure",
     outbound=True,
-    tools=["resolve_contact", "get_call_context", "check_availability", "book_appointment"],
+    tools=["resolve_contact", "get_call_context", "check_availability", "book_appointment", "end_call_tool"],
     role_title="Re-Engagement (Outbound)",
     role_summary="""You are **Mary**, calling people whose Aurixa Systems application went
 quiet - they showed real interest once, and then life happened.
@@ -1363,7 +1560,7 @@ agent(
     persona="Mary",
     temperament="attentive, honest, and constructive - the call that shows the relationship is being looked after",
     outbound=True,
-    tools=["resolve_contact", "get_call_context", "check_availability", "book_appointment"],
+    tools=["resolve_contact", "get_call_context", "check_availability", "book_appointment", "end_call_tool"],
     role_title="Account Check-In (Outbound, at-risk accounts)",
     role_summary="""You are **Mary**, calling an existing Aurixa Systems customer whose
 engagement has dipped, for a genuine service check-in.
@@ -1433,11 +1630,15 @@ def build(agent_key: str) -> str:
     parts.append("# 2. Core Objective\n\n" + "\n".join(f"- {x}" for x in a["can_do"]) + "\n\n---\n")
     parts.append(kb_block(p))
     parts.append(persona_block(p, a["temperament"]))
-    parts.append(f"# 5. What {p} Can Do\n\n" + "\n".join(f"- {x}" for x in a["can_do"]) + "\n\n---\n")
+    can_do = f"# 5. What {p} Can Do\n\n" + "\n".join(f"- {x}" for x in a["can_do"]) + "\n\n"
+    # The ticket playbook belongs INSIDE section 5 - it is how the headline
+    # capability is actually performed - so it lands before section 5's rule.
+    can_do += ticket_block(p) if "raise_support_ticket" in a["tools"] else "---\n"
+    parts.append(can_do)
     parts.append(f"# 6. What {p} Must Not Do\n\n" + "\n".join(f"- {x}" for x in a["cannot_do"]) + "\n\n---\n")
     parts.append(SKEPTICAL)
     parts.append(PATHWAY_FACTS)
-    parts.append(human_block(p))
+    parts.append(human_block(p, "transfer_to_human_mc" in a["tools"]))
     parts.append(boundaries_block(p))
     parts.append(closing_block(p, a["outbound"]))
     if a["outbound"]:
@@ -1460,6 +1661,24 @@ def build(agent_key: str) -> str:
             "Call phoneNumber_inject once, silently, before every transfer, with confirmedIntent and callerReason",
             "Transfer only to 'MC Review Booking', 'MC Solutions Advisor', or 'MC Support Intake', by name, silently",
         ]
+    if "raise_support_ticket" in a["tools"]:
+        extra_never = extra_never + [
+            "Invent a ticket reference, or say a report is logged before raise_support_ticket returns one",
+            "Ask the caller to choose a ticket category, a breakage type, or a severity",
+            "Raise a second ticket for a problem already raised on this call",
+        ]
+        extra_always = extra_always + [
+            "Call raise_support_ticket once the problem is described, and read the reference back",
+            "Say plainly that the report was NOT logged when the tool refuses",
+        ]
+    if "transfer_to_human_mc" in a["tools"]:
+        extra_always = extra_always + [
+            "Place transfer_to_human_mc in the same turn as the handover line, never on a later one",
+        ]
+    if "end_call_tool" in a["tools"]:
+        extra_always = extra_always + [
+            "Call end_call_tool in the same turn as the closing line - never defer the hang-up to a later turn",
+        ]
     if "book_appointment" in a["tools"]:
         extra_always = extra_always + [
             "Offer only slots returned by check_availability, and pass the exact startIso as startTime when booking",
@@ -1474,24 +1693,70 @@ def build(agent_key: str) -> str:
     return "\n".join(parts)
 
 
-def main():
+def render() -> dict:
+    """Every generated file, as {filename: bytes-to-write}.
+
+    One function produces what is written AND what --check compares against,
+    so the two can never be different renderings of the same intent.
+    """
+    out = {}
     manifest = {}
     for key, a in AGENTS.items():
         text = build(key)
-        path = os.path.join(OUT, f"{key}.md")
-        with open(path, "w") as f:
-            f.write(text)
+        out[f"{key}.md"] = text
         manifest[key] = {
             "assistant_id": a["aid"],
             "name": a["name"],
             "persona": a["persona"],
             "tools": a["tools"],
             "chars": len(text),
-            "file": os.path.basename(path),
+            "file": f"{key}.md",
         }
-        print(f"{a['name']:32s} {a['persona']:8s} {len(text):6d} chars  tools={a['tools']}")
-    with open(os.path.join(OUT, "manifest.json"), "w") as f:
-        json.dump(manifest, f, indent=2)
+    out["manifest.json"] = json.dumps(manifest, indent=2)
+    return out
+
+
+def check() -> int:
+    """Fail when a file on disk is not what this generator produces.
+
+    Everything in fleet-prompts/ except mc_org_tool_ids.json is GENERATED, and
+    a generated file that can be hand-edited without anything noticing is one
+    that will be: the next run silently discards the edit, and the manifest it
+    discards is what the deploy script binds tools from. So the comparison is
+    the BYTES, not a count and not a timestamp - a count absorbs one change
+    arriving as another leaves.
+    """
+    drifted = []
+    for name, want in render().items():
+        path = os.path.join(OUT, name)
+        try:
+            with open(path) as f:
+                got = f.read()
+        except FileNotFoundError:
+            drifted.append(f"{name}: missing")
+            continue
+        if got != want:
+            drifted.append(f"{name}: on disk {len(got)} bytes, generator produces {len(want)}")
+    if drifted:
+        print("fleet prompts have drifted from build-fleet-prompts.py:")
+        for line in drifted:
+            print(f"  {line}")
+        print("\nThese files are generated. Edit build-fleet-prompts.py and re-run it;")
+        print("do not edit fleet-prompts/*.md or manifest.json by hand.")
+        return 1
+    print(f"fleet prompts match the generator ({len(render())} files)")
+    return 0
+
+
+def main():
+    if "--check" in sys.argv:
+        raise SystemExit(check())
+    files = render()
+    for name, text in files.items():
+        with open(os.path.join(OUT, name), "w") as f:
+            f.write(text)
+    for key, a in AGENTS.items():
+        print(f"{a['name']:32s} {a['persona']:8s} {len(files[key + '.md']):6d} chars  tools={a['tools']}")
     print("wrote", os.path.join(OUT, "manifest.json"))
 
 

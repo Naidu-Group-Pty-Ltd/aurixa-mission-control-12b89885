@@ -2,12 +2,12 @@
 // Same signature scheme as the Codex webhook (sha256=<hex>) but keyed by the
 // source's own secret so vendors can rotate independently.
 
-export async function verifyIntakeSignature(
-  rawBody: string,
-  signatureHeader: string | null,
-  secret: string | null,
-): Promise<boolean> {
-  if (!secret || !signatureHeader) return false;
+/**
+ * The scheme itself, in one place. Verification and in-process signing both go
+ * through this, so the two cannot drift into computing different digests over
+ * the same bytes.
+ */
+export async function signIntakeBody(rawBody: string, secret: string): Promise<string> {
   const enc = new TextEncoder();
   const key = await crypto.subtle.importKey(
     "raw",
@@ -17,9 +17,23 @@ export async function verifyIntakeSignature(
     ["sign"],
   );
   const sig = await crypto.subtle.sign("HMAC", key, enc.encode(rawBody));
-  const hex = Array.from(new Uint8Array(sig))
+  return Array.from(new Uint8Array(sig))
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
+}
+
+/** `sha256=<hex>`, the form the header carries. */
+export async function intakeSignatureHeader(rawBody: string, secret: string): Promise<string> {
+  return `sha256=${await signIntakeBody(rawBody, secret)}`;
+}
+
+export async function verifyIntakeSignature(
+  rawBody: string,
+  signatureHeader: string | null,
+  secret: string | null,
+): Promise<boolean> {
+  if (!secret || !signatureHeader) return false;
+  const hex = await signIntakeBody(rawBody, secret);
   const provided = signatureHeader.startsWith("sha256=")
     ? signatureHeader.slice(7)
     : signatureHeader;
