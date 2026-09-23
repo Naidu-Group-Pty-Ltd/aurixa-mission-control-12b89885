@@ -227,3 +227,117 @@ export async function setCloneBillingId(
 
   return { ok: true, billingId: verdict.billingId, rebuild };
 }
+
+export type DeploymentBillingIdentity = {
+  /** The identity to publish into the build, or null when none can be given. */
+  billingId: string | null;
+  /** True when THIS call derived and recorded it — the clone had none. */
+  healed: boolean;
+  /** Why no identity is being published, or what happened on the way to one. */
+  note: string | null;
+};
+
+/**
+ * The identity the deployment worker publishes — healing a missing one first.
+ *
+ * Provisioning resolves an identity before the clone row is written, so a
+ * clone created through it never reaches the worker without one. That is a
+ * guarantee about one code path at one moment, and the worker is where every
+ * build is actually made. A clone can still arrive with NULL: provisioning's
+ * resolution NEVER throws, so a control plane that could not be read at that
+ * moment inserts the clone with no identity and a note in a server log nobody
+ * reads; and every clone that predates the writer held NULL until a one-off
+ * repair migration filled it. Publishing NULL builds a bundle with no identity
+ * of its own — its last-resort purchase link is browse-only at best and, on a
+ * build resolving the prime's backend, credits the prime — and nothing retries
+ * the derivation, because the next thing that looks is a probe after the fact.
+ *
+ * So the gap closes where the environment is built, through the same rule
+ * provisioning and the operator's own page use: an id this refuses is refused
+ * there too, and a clone whose slug cannot yield a usable one keeps NULL and
+ * says why rather than receiving something that means something else.
+ *
+ * Three properties hold it:
+ *
+ * - **Only NULL is healed.** An identity already recorded — the operator's or
+ *   the derivation's — is returned untouched and never re-derived. Nothing can
+ *   clear the column (`setCloneBillingId` refuses a blank id), so NULL is
+ *   never an operator's choice.
+ * - **The write is conditional on the column still being NULL.** An operator
+ *   who assigns one between the worker's read and this write wins, and the
+ *   worker publishes THEIRS.
+ * - **Never throws, never blocks a build.** A clone that cannot be given an
+ *   identity deploys without one exactly as it did before this existed; the
+ *   note travels on the step's result into the event log, and the bundle probe
+ *   is still the backstop.
+ */
+export async function ensureCloneBillingIdForDeployment(
+  input: { cloneId: string; slug: string; current: string | null | undefined },
+  db: Db = supabaseAdmin as Db,
+): Promise<DeploymentBillingIdentity> {
+  const current = typeof input.current === "string" ? input.current.trim() : "";
+  if (current) return { billingId: current, healed: false, note: null };
+
+  try {
+    const resolved = await resolveCloneBillingIdForProvisioning(
+      { slug: input.slug, cloneId: input.cloneId },
+      db,
+    );
+    if (!resolved.billingId) {
+      return {
+        billingId: null,
+        healed: false,
+        note: resolved.note ?? "No billing identity could be given to this clone.",
+      };
+    }
+
+    const { data: written, error: writeErr } = await (db as Db)
+      .from("clones")
+      .update({ billing_user_id: resolved.billingId })
+      .eq("id", input.cloneId)
+      .is("billing_user_id", null)
+      .select("billing_user_id")
+      .maybeSingle();
+    if (writeErr) {
+      // Publishing an id the column does not hold would make the bundle and
+      // every server-side resolution name different workspaces — the one
+      // outcome worse than publishing none.
+      return {
+        billingId: null,
+        healed: false,
+        note: `The derived identity "${resolved.billingId}" could not be recorded, so none was published: ${writeErr.message}`,
+      };
+    }
+    if (written?.billing_user_id) {
+      return { billingId: written.billing_user_id, healed: true, note: resolved.note };
+    }
+
+    // The conditional write matched nothing: the column is no longer NULL, so
+    // somebody recorded an identity while this ran. Publish what they chose.
+    const { data: now, error: readErr } = await (db as Db)
+      .from("clones")
+      .select("billing_user_id")
+      .eq("id", input.cloneId)
+      .maybeSingle();
+    if (readErr) {
+      return {
+        billingId: null,
+        healed: false,
+        note: `An identity was recorded while this deployment ran and could not be read back: ${readErr.message}`,
+      };
+    }
+    return {
+      billingId: now?.billing_user_id ?? null,
+      healed: false,
+      note: now?.billing_user_id
+        ? "An identity was recorded while this deployment ran; publishing that one."
+        : "The clone has no billing identity and none could be recorded.",
+    };
+  } catch (err) {
+    return {
+      billingId: null,
+      healed: false,
+      note: `The billing identity could not be resolved: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
