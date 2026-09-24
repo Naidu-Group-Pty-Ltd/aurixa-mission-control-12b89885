@@ -132,6 +132,12 @@ place and an in-process caller cannot drift from a webhook caller.
 | `book_appointment` | handler present, **never exercised** | exercised in live verification |
 | transfer to a human | **no tool, no handler, no prompt mention anywhere** | `transfer_to_human_mc` on the four reception assistants |
 
+> **Since 24 Sep 2026 both calendar tools answer from Cal.com** once
+> `CALCOM_API_KEY` is set: `book_appointment` makes a real booking whose
+> invitation Cal.com emails straight away, and the Stage 3 page on the waitlist
+> site books the same calendar. What each path does, and the order to switch it
+> on in, is [CALCOM_BOOKING.md](./CALCOM_BOOKING.md).
+
 The squad's only transfer was VAPI's built-in `transferCall` **between squad
 members by name** — agent to agent, never to a person.
 
