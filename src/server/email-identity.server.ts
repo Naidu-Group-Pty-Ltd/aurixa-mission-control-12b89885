@@ -44,19 +44,28 @@ import {
 import {
   withAbsoluteRecordNames,
   canMintKey,
+  decideEmailIdentityHealth,
   deriveFromAddress,
   deriveSendingDomain,
+  domainFullyVerified,
   identityReadiness,
+  isEmailAuditPass,
   isValidSendingDomain,
   keyLast4,
+  keyOwed,
+  mapResendDomainStatus,
   mayAlignSenderAddress,
+  missingKeyPatch,
   decideEmailIdentitySweep,
   expectedDnsProbes,
   planDnsInstallation,
+  planDnsRecordSync,
   resolveEmailDnsZone,
+  vanishedDomainPatch,
   type EmailIdentityReadiness,
   type EmailIdentityRow,
   type EmailSweepFacts,
+  type ExistingDnsRecord,
 } from "./cloneEmailIdentity.pure";
 import { resolveCloneSecretTarget, CloneSecretTargetError } from "./cloneAllowedOrigins.server";
 
@@ -103,12 +112,9 @@ function msg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-/** Resend's domain status vocabulary → this table's. */
-function mapDomainStatus(resendStatus: string): EmailIdentityRow["domain_status"] {
-  if (resendStatus === "verified") return "verified";
-  if (resendStatus === "failure") return "failed";
-  // not_started | pending | temporary_failure — all "the DNS answer is not in yet".
-  return "pending_dns";
+/** Resend answered 404 for this resource — the only evidence that it is gone. */
+function isResendNotFound(e: unknown): boolean {
+  return e instanceof ResendError && e.status === 404;
 }
 
 function rowFromDb(data: Record<string, unknown> | null): EmailIdentityRow | null {
@@ -205,7 +211,9 @@ async function persistIdentity(
 
 /**
  * Find-or-create the domain at Resend. Creation losing a race (or repeating
- * after a partial run) is adopted via the list — the name is the identity.
+ * after a partial run) is adopted via the list — the name is the identity —
+ * and the list is walked to its end, because Resend pages it and a domain on
+ * page two exists exactly as much as one on page one.
  */
 async function ensureResendDomain(
   sendingDomain: string,
@@ -217,50 +225,163 @@ async function ensureResendDomain(
     return await resendApi.createDomain({ name: sendingDomain, region });
   } catch (e) {
     if (e instanceof ResendError && e.status >= 400 && e.status < 500) {
-      const { data } = await resendApi.listDomains();
-      const hit = data.find((d) => d.name.toLowerCase() === sendingDomain);
+      const { items } = await resendApi.listAllDomains();
+      const hit = items.find((d) => d.name.toLowerCase() === sendingDomain);
       if (hit) return resendApi.getDomain(hit.id);
     }
     throw e;
   }
 }
 
+const DNS_RECORD_COMMENT = "Resend sending domain (Aurixa Mission Control email identity)";
+
 /**
- * Write Resend's records into the clone's own Cloudflare zone. Returns true
- * only when EVERY record is in place — a partial installation is reported as
- * not-installed so the operator sees records to check rather than a tick over
- * a domain that can never verify.
+ * Bring Resend's records into a Cloudflare zone, correcting what is there.
+ *
+ * This used to be "create unless an exact copy exists", which is right once.
+ * Every later occasion it was wrong in a way that could never verify: a
+ * re-registered domain gets a NEW DKIM key under the SAME selector, and a
+ * second TXT beside the old one is a selector no verifier can use; and every
+ * CNAME was created PROXIED (the client's default for a CNAME), so the
+ * fallback return path Resend added to new registrations in August 2026
+ * resolved to Cloudflare's own addresses rather than to Resend. Measured on
+ * NPC CRM Independent, 24 Sep 2026: DKIM, SPF and MX verified; the CNAME never
+ * could.
+ *
+ * What to do with each record is `planDnsRecordSync`'s decision — create,
+ * update in place, or refuse — and it only ever touches Resend's own names.
+ * Returns `installed: true` only when EVERY record is in place: a partial
+ * result is reported as not installed, so a domain that can never verify does
+ * not get a tick.
  */
-async function installDnsViaCloudflare(
+async function syncDnsViaCloudflare(
   zoneId: string,
   records: ResendDnsRecord[],
-): Promise<{ installed: boolean; detail: string }> {
+): Promise<{ installed: boolean; created: number; rewritten: number; detail: string }> {
   const { cloudflareApi } = await import("./cloudflare/client");
-  let written = 0;
+  let inPlace = 0;
+  let created = 0;
+  // Records that EXISTED and were changed or removed. Counted apart from
+  // creations because a resolver may still be serving the old value, which
+  // decides whether Resend should be asked to look yet.
+  let rewritten = 0;
+  const problems: string[] = [];
+
+  // One read per NAME rather than per record: the SPF TXT and the MX share a
+  // name, and a CNAME has to be judged against everything at its name.
+  const byName = new Map<string, ResendDnsRecord[]>();
   for (const r of records) {
-    const type = r.type.toUpperCase();
-    if (type !== "TXT" && type !== "MX" && type !== "CNAME") {
-      return { installed: false, detail: `Unsupported record type ${r.type} for ${r.name}` };
-    }
-    const existing = await cloudflareApi.listDnsRecords(zoneId, { name: r.name, type });
-    const already = existing.some((x) => x.content.replace(/^"|"$/g, "") === r.value);
-    if (already) {
-      written += 1;
-      continue;
-    }
-    await cloudflareApi.createDnsRecord(zoneId, {
-      type: type as "TXT" | "MX" | "CNAME",
-      name: r.name,
-      content: r.value,
-      ...(type === "MX" ? { priority: r.priority ?? 10 } : {}),
-      comment: "Resend sending domain (Aurixa Mission Control email identity)",
-    });
-    written += 1;
+    const key = r.name.trim().toLowerCase();
+    byName.set(key, [...(byName.get(key) ?? []), r]);
   }
+
+  for (const [name, required] of byName) {
+    const existing = (await cloudflareApi.listDnsRecords(zoneId, { name })) as ExistingDnsRecord[];
+    for (const record of required) {
+      const step = planDnsRecordSync(record, existing);
+      const type = record.type.trim().toUpperCase() as "TXT" | "MX" | "CNAME";
+      if (step.action === "conflict") {
+        problems.push(step.detail ?? `${record.type} ${record.name} could not be written`);
+        continue;
+      }
+      if (step.action === "create") {
+        await cloudflareApi.createDnsRecord(zoneId, {
+          type,
+          name: record.name,
+          content: record.value,
+          ...(type === "MX" ? { priority: record.priority ?? 10 } : {}),
+          // Explicit, never the client's default: a CNAME behind the proxy is
+          // not the CNAME Resend asked for.
+          ...(type === "CNAME" ? { proxied: false } : {}),
+          comment: DNS_RECORD_COMMENT,
+        });
+        created += 1;
+      } else if (step.action === "update" && step.existingId) {
+        await cloudflareApi.updateDnsRecord(zoneId, step.existingId, {
+          content: record.value,
+          ...(type === "MX" ? { priority: record.priority ?? 10 } : {}),
+          ...(type === "CNAME" ? { proxied: false } : {}),
+        });
+        rewritten += 1;
+      }
+      for (const id of step.remove) {
+        await cloudflareApi.deleteDnsRecord(zoneId, id);
+        rewritten += 1;
+      }
+      inPlace += 1;
+    }
+  }
+
+  const changed = created + rewritten;
   return {
-    installed: written === records.length,
-    detail: `${written}/${records.length} records in place`,
+    installed: inPlace === records.length && problems.length === 0,
+    created,
+    rewritten,
+    detail:
+      `${inPlace}/${records.length} records in place` +
+      (changed > 0 ? `, ${changed} change(s) written` : "") +
+      (problems.length > 0 ? ` — ${problems.join("; ")}` : ""),
   };
+}
+
+type CloneHostFactsRow = Awaited<ReturnType<typeof readCloneHostFacts>>;
+type FleetZoneRow = Awaited<ReturnType<typeof readFleetZone>>;
+
+/**
+ * Install, or re-assert, the identity's DNS records.
+ *
+ * `via` is null when this attempt settled nothing — a transient failure or a
+ * partial write — so the step stays open and the next pass tries again.
+ * Anything else is an outcome: `cloudflare` when every record is in place,
+ * `manual` when the records are outside any zone this platform may write.
+ */
+async function syncIdentityDns(
+  supabase: Db,
+  cloneId: string,
+  row: EmailIdentityRow,
+  clone: CloneHostFactsRow,
+  fleet: FleetZoneRow,
+): Promise<{ via: "cloudflare" | "manual" | null; created: number; rewritten: number }> {
+  const zone = resolveEmailDnsZone({
+    cloneCloudflareEnabled: clone.cloudflare_enabled,
+    cloneZoneId: clone.cloudflare_zone_id,
+    fleetZoneId: fleet?.cloudflare_zone_id ?? null,
+    fleetZoneName: fleet?.cloudflare_zone_name ?? null,
+  });
+  // No zone at all to write into — determined, and the operator's to do.
+  if (!zone) return { via: "manual", created: 0, rewritten: 0 };
+  try {
+    // The fleet zone's name is stored beside its id, so the common case costs
+    // no vendor call. A clone's own zone has no local name.
+    let zoneName = zone.zoneName;
+    if (!zoneName) {
+      const { cloudflareApi } = await import("./cloudflare/client");
+      zoneName = (await cloudflareApi.getZone(zone.zoneId)).name;
+    }
+    const plan = planDnsInstallation(row.dns_records, zoneName);
+    // Records outside the resolved zone — a tenant-owned sending domain.
+    // Retrying cannot change this: Resend's required records for a given
+    // domain do not move. Determined.
+    if (plan.manual.length > 0) return { via: "manual", created: 0, rewritten: 0 };
+    const res = await syncDnsViaCloudflare(zone.zoneId, plan.auto);
+    if (res.installed) return { via: "cloudflare", created: res.created, rewritten: res.rewritten };
+    // A PARTIAL write is worth retrying — leave it undetermined.
+    await persistIdentity(supabase, cloneId, {
+      sending_domain: row.sending_domain,
+      last_error: `DNS not fully in place: ${res.detail}`,
+    });
+    return { via: null, created: res.created, rewritten: res.rewritten };
+  } catch (e) {
+    // Cloudflare being unreachable must not strand the flow, and must not
+    // permanently downgrade this clone to manual DNS either: it is transient,
+    // so the step stays open and the next advance tries again. The records
+    // are shown meanwhile.
+    await persistIdentity(supabase, cloneId, {
+      sending_domain: row.sending_domain,
+      last_error: `Cloudflare DNS installation failed: ${msg(e)}`,
+    });
+    return { via: null, created: 0, rewritten: 0 };
+  }
 }
 
 /**
@@ -341,6 +462,13 @@ export async function advanceEmailIdentity(
      * exists.
      */
     resume?: boolean;
+    /**
+     * Re-assert the DNS records even though the domain is fully verified, and
+     * re-check a sendable-but-partial domain. Passed by the hourly health
+     * audit: records drift (somebody edits the zone, a CNAME is put behind the
+     * proxy) without Resend's status changing until mail starts failing.
+     */
+    reassertDns?: boolean;
   },
 ): Promise<AdvanceResult> {
   if (!isResendConfigured()) {
@@ -411,95 +539,87 @@ export async function advanceEmailIdentity(
     }
 
     // ── Resend domain ────────────────────────────────────────────────
+    //
+    // A domain id is a claim about Resend, and Resend is asked. If it answers
+    // 404 the domain is gone — deleted at Resend, which is what happened to
+    // NPC Test's on 14 Sep 2026 while its row went on reading "verified" —
+    // and the row is sent back through registration rather than failing every
+    // pass on "Domain not found" for ever. Only Resend's own 404 counts: any
+    // other failure is thrown and retried, because re-registering a live
+    // domain would replace a working DKIM key.
     let domain: ResendDomain | null = null;
-    if (row.resend_domain_id || opts.mode === "provision") {
-      domain = await ensureResendDomain(row.sending_domain, row.region, row.resend_domain_id);
-      const status = mapDomainStatus(domain.status);
+    if (row.resend_domain_id) {
+      try {
+        domain = await resendApi.getDomain(row.resend_domain_id);
+      } catch (e) {
+        if (!isResendNotFound(e)) throw e;
+        const patch = vanishedDomainPatch();
+        await persistIdentity(supabase, cloneId, {
+          sending_domain: row.sending_domain,
+          ...patch,
+          dns_records: [] as unknown as Json,
+          last_error:
+            opts.mode === "provision"
+              ? null
+              : `Resend no longer holds ${row.sending_domain} — provision to register it again`,
+        });
+        row = { ...row, ...patch };
+        advanced.push("domain_vanished_reset");
+      }
+    }
+    if (!domain && opts.mode === "provision") {
+      domain = await ensureResendDomain(row.sending_domain, row.region, null);
+      advanced.push("domain_registered");
+    }
+    if (domain) {
+      // Resend answers with names relative to the registrable domain;
+      // everything downstream — the planner, the Cloudflare writer, the table
+      // an operator copies from — expects FQDNs.
+      const records = withAbsoluteRecordNames(domain.records ?? [], row.sending_domain);
+      const status = mapResendDomainStatus(domain.status, records);
       await persistIdentity(supabase, cloneId, {
         sending_domain: row.sending_domain,
         resend_domain_id: domain.id,
         domain_status: status,
-        // Resend answers with names relative to the registrable domain;
-        // everything downstream — the planner, the Cloudflare writer, the
-        // table an operator copies from — expects FQDNs.
-        dns_records: withAbsoluteRecordNames(
-          domain.records ?? [],
-          row.sending_domain,
-        ) as unknown as Json,
+        dns_records: records as unknown as Json,
         last_error: null,
       });
-      if (!row.resend_domain_id) advanced.push("domain_registered");
-      row = {
-        ...row,
-        resend_domain_id: domain.id,
-        domain_status: status,
-        dns_records: withAbsoluteRecordNames(domain.records ?? [], row.sending_domain),
-      };
+      row = { ...row, resend_domain_id: domain.id, domain_status: status, dns_records: records };
     }
 
-    // ── DNS installation ─────────────────────────────────────────────
-    if (domain && !row.dns_installed_via && row.dns_records.length > 0) {
-      const zone = resolveEmailDnsZone({
-        cloneCloudflareEnabled: clone.cloudflare_enabled,
-        cloneZoneId: clone.cloudflare_zone_id,
-        fleetZoneId: fleet?.cloudflare_zone_id ?? null,
-        fleetZoneName: fleet?.cloudflare_zone_name ?? null,
-      });
-      // null = UNDETERMINED: this attempt neither installed nor established
-      // that it never can, so the step stays open and the next advance retries.
-      // Anything else is an outcome and settles.
-      let via: "cloudflare" | "manual" | null = null;
-      if (!zone) {
-        // No zone at all to write into — determined, and the operator's to do.
-        via = "manual";
-      } else {
-        try {
-          // The fleet zone's name is stored beside its id, so the common case
-          // costs no vendor call. A clone's own zone has no local name.
-          let zoneName = zone.zoneName;
-          if (!zoneName) {
-            const { cloudflareApi } = await import("./cloudflare/client");
-            zoneName = (await cloudflareApi.getZone(zone.zoneId)).name;
-          }
-          const plan = planDnsInstallation(row.dns_records, zoneName);
-          if (plan.manual.length > 0) {
-            // Records outside the resolved zone — a tenant-owned sending
-            // domain. Retrying cannot change this: Resend's required records
-            // for a given domain do not move. Determined.
-            via = "manual";
-          } else {
-            const res = await installDnsViaCloudflare(zone.zoneId, plan.auto);
-            if (res.installed) via = "cloudflare";
-            else
-              // A PARTIAL write is worth retrying — leave it undetermined.
-              await persistIdentity(supabase, cloneId, {
-                sending_domain: row.sending_domain,
-                last_error: `DNS partially installed: ${res.detail}`,
-              });
-          }
-        } catch (e) {
-          // Cloudflare being unreachable must not strand the flow, and must
-          // not permanently downgrade this clone to manual DNS either: it is
-          // transient, so the step stays open and the next advance tries again.
-          // The records are shown meanwhile.
-          await persistIdentity(supabase, cloneId, {
-            sending_domain: row.sending_domain,
-            last_error: `Cloudflare DNS installation failed: ${msg(e)}`,
-          });
-        }
-      }
+    // ── DNS ──────────────────────────────────────────────────────────
+    //
+    // Installed once, then RE-ASSERTED while any record is still unverified
+    // (and on the hourly audit, `reassertDns`). Installing once and never
+    // looking again is how a proxied CNAME and a re-registration's stale DKIM
+    // key sat in the zone with nothing able to notice them: the step read
+    // "done" because it had been done, not because it was right.
+    let dnsChanged = false;
+    let dnsRewritten = false;
+    const dnsOwed = !row.dns_installed_via;
+    const dnsReassert =
+      row.dns_installed_via === "cloudflare" &&
+      (opts.reassertDns === true || !domainFullyVerified(row));
+    if (domain && row.dns_records.length > 0 && (dnsOwed || dnsReassert)) {
+      const res = await syncIdentityDns(supabase, cloneId, row, clone, fleet);
+      dnsChanged = res.created + res.rewritten > 0;
+      dnsRewritten = res.rewritten > 0;
       // Settling used to require `via === "cloudflare" || !zoneId`, which left
       // the step UNRECORDED whenever a zone existed but could not carry every
       // record. `dns_installed_via` stayed null, the path reported DNS as the
       // open step forever, and each advance re-ran the whole attempt. Handing
       // the records over IS an outcome; a transient failure is not.
-      if (via) {
+      if (dnsOwed && res.via) {
         await persistIdentity(supabase, cloneId, {
           sending_domain: row.sending_domain,
-          dns_installed_via: via,
+          dns_installed_via: res.via,
         });
-        row = { ...row, dns_installed_via: via };
-        advanced.push(via === "cloudflare" ? "dns_installed_cloudflare" : "dns_handed_to_operator");
+        row = { ...row, dns_installed_via: res.via };
+        advanced.push(
+          res.via === "cloudflare" ? "dns_installed_cloudflare" : "dns_handed_to_operator",
+        );
+      } else if (!dnsOwed && dnsChanged) {
+        advanced.push(`dns_repaired:${res.created + res.rewritten}`);
       }
     }
 
@@ -517,37 +637,53 @@ export async function advanceEmailIdentity(
     // One DoH lookup per distinct name is far cheaper than a wrong answer
     // cached for thirty minutes, and "not visible yet" is reported rather than
     // being indistinguishable from "Resend says no".
-    if (row.resend_domain_id && row.domain_status !== "verified") {
+    //
+    // Nor right after an EXISTING record was rewritten: a resolver may still
+    // hold the old value — a replaced DKIM key, a CNAME that was behind the
+    // proxy — and a presence check cannot tell. The next pass asks instead.
+    //
+    // A domain that can already SEND but is not fully verified — the August
+    // 2026 fallback CNAME still outstanding — is re-checked on the audit pass
+    // only. It is not urgent, and asking every five minutes would be a
+    // thousand calls a week to learn nothing new.
+    const sendable = row.domain_status === "verified";
+    if (dnsRewritten) {
+      advanced.push("verification_deferred_dns_rewritten");
+    } else if (
+      row.resend_domain_id &&
+      !domainFullyVerified(row) &&
+      (!sendable || opts.reassertDns === true)
+    ) {
       const visibility = await dnsRecordsVisible(row.dns_records);
       if (!visibility.allPresent) {
         advanced.push(`verification_deferred_dns_missing:${visibility.missing.join(",")}`);
       } else {
         await resendApi.verifyDomain(row.resend_domain_id);
         const fresh = await resendApi.getDomain(row.resend_domain_id);
-        const status = mapDomainStatus(fresh.status);
-        if (status !== row.domain_status) {
-          await persistIdentity(supabase, cloneId, {
-            sending_domain: row.sending_domain,
-            domain_status: status,
-            dns_records: withAbsoluteRecordNames(
-              fresh.records ?? [],
-              row.sending_domain,
-            ) as unknown as Json,
-          });
-          row = {
-            ...row,
-            domain_status: status,
-            dns_records: withAbsoluteRecordNames(fresh.records ?? [], row.sending_domain),
-          };
-          advanced.push(`verification_${status}`);
-        }
+        const records = withAbsoluteRecordNames(fresh.records ?? [], row.sending_domain);
+        const status = mapResendDomainStatus(fresh.status, records);
+        // Always stored: per-record statuses move while the domain's does not.
+        await persistIdentity(supabase, cloneId, {
+          sending_domain: row.sending_domain,
+          domain_status: status,
+          dns_records: records as unknown as Json,
+        });
+        if (status !== row.domain_status) advanced.push(`verification_${status}`);
+        row = { ...row, domain_status: status, dns_records: records };
       }
     }
 
     // ── Key mint + write ─────────────────────────────────────────────
-    if (opts.mode === "provision" && !row.resend_key_id) {
+    //
+    // Owed when there is no key, or when there is one the clone does not hold
+    // a working copy of — the vanished-domain reset keeps the old key's id for
+    // exactly this. That old key is retired only AFTER the new one has been
+    // written to the clone, the order a rotation uses, so the clone is never
+    // left holding nothing.
+    if (opts.mode === "provision" && keyOwed(row)) {
       const gate = canMintKey(row);
       if (gate.ok) {
+        const previousKeyId = row.resend_key_id;
         const minted = await mintAndWriteKey(
           supabase,
           cloneId,
@@ -558,6 +694,12 @@ export async function advanceEmailIdentity(
         if (!minted.ok) return minted;
         row = minted.row;
         advanced.push("key_minted_and_written");
+        if (previousKeyId && previousKeyId !== row.resend_key_id) {
+          await resendApi.deleteApiKey(previousKeyId).catch((e) => {
+            console.error(`[email-identity] previous key ${previousKeyId} not deleted:`, msg(e));
+          });
+          advanced.push("previous_key_retired");
+        }
       }
     }
 
@@ -854,6 +996,157 @@ export async function sweepEmailIdentities(
       // One stuck identity must not stop the sweep for the others.
       report.failed += 1;
       report.detail.push({ cloneId: rowFacts.clone_id, outcome: "failed", note: msg(e) });
+    }
+  }
+  return report;
+}
+
+export type EmailAuditReport = {
+  /** False when this pass was not the hour's audit pass, or Resend is not configured. */
+  ran: boolean;
+  considered: number;
+  healthy: number;
+  repaired: number;
+  failed: number;
+  /** Whether Resend's listings were read to the end; an incomplete one proves no absence. */
+  domainsComplete: boolean | null;
+  keysComplete: boolean | null;
+  detail: Array<{ cloneId: string; outcome: string; note?: string }>;
+};
+
+/**
+ * Check every FINISHED identity against Resend, and repair what has drifted.
+ *
+ * `sweepEmailIdentities` stops at "complete" — rightly, a finished identity is
+ * not work — and until this existed nothing looked at one again. NPC Test's
+ * sending domain was deleted at Resend on 14 Sep 2026 to make room under the
+ * plan's domain limit. Its row still read verified, key written, sender
+ * written; the clone kept a key scoped to a domain that no longer existed, and
+ * every mail it tried to send was refused for ten days with nothing anywhere
+ * reporting it.
+ *
+ * Three findings, each acted on at once (`decideEmailIdentityHealth` decides):
+ *
+ *   - **domain gone** — confirmed by Resend's own 404 on a read by id, never by
+ *     absence from a listing. `advanceEmailIdentity` sees the 404, resets the
+ *     row (`vanishedDomainPatch`) and registers the domain again in the same
+ *     pass; DNS is re-synced over the old DKIM key, the domain re-verifies on
+ *     later passes, and the new key replaces the dead one on the clone.
+ *   - **domain no longer verified** — re-driven through the same advance.
+ *   - **key gone** — minted again, from a key listing read to its END.
+ *
+ * Every active identity whose DNS this platform wrote also has its records
+ * re-asserted (`reassertDns`): a record edited, deleted or put behind the proxy
+ * is corrected here rather than discovered by a customer.
+ *
+ * Hourly, from the drain that already runs, rather than on a schedule of its
+ * own — see `isEmailAuditPass`. It never touches a revoked identity: a
+ * deliberate stop stays stopped.
+ */
+export async function auditEmailIdentities(
+  supabase: Db,
+  opts: { now?: number; force?: boolean; limit?: number } = {},
+): Promise<EmailAuditReport> {
+  const report: EmailAuditReport = {
+    ran: false,
+    considered: 0,
+    healthy: 0,
+    repaired: 0,
+    failed: 0,
+    domainsComplete: null,
+    keysComplete: null,
+    detail: [],
+  };
+  if (!isResendConfigured()) return report;
+  const now = opts.now ?? Date.now();
+  if (!opts.force && !isEmailAuditPass(now)) return report;
+  report.ran = true;
+
+  const { data, error } = await supabase
+    .from("clone_email_identities")
+    .select(
+      "clone_id, sending_domain, resend_domain_id, resend_key_id, key_written_at, from_address_written_at, revoked_at, dns_installed_via",
+    )
+    // A revoked identity is nobody's work — see `decideEmailIdentitySweep`.
+    .is("revoked_at", null)
+    .order("updated_at", { ascending: true })
+    .limit(opts.limit ?? 50);
+  if (error) throw new Error(`Could not list email identities: ${error.message}`);
+
+  // Read once for the whole fleet. A listing that FAILED is not an empty
+  // account: thrown, so nothing below can mistake it for "every domain gone".
+  const [domains, keys] = await Promise.all([
+    resendApi.listAllDomains(),
+    resendApi.listAllApiKeys(),
+  ]);
+  report.domainsComplete = domains.complete;
+  report.keysComplete = keys.complete;
+  const domainStatus = new Map(domains.items.map((d) => [d.id, d.status]));
+  const keyIds = new Set(keys.items.map((k) => k.id));
+
+  for (const raw of data ?? []) {
+    const identity = raw as unknown as Pick<
+      EmailIdentityRow,
+      | "clone_id"
+      | "sending_domain"
+      | "resend_domain_id"
+      | "resend_key_id"
+      | "key_written_at"
+      | "from_address_written_at"
+      | "revoked_at"
+      | "dns_installed_via"
+    >;
+    const verdict = decideEmailIdentityHealth({
+      identity,
+      listedDomainStatus: identity.resend_domain_id
+        ? (domainStatus.get(identity.resend_domain_id) ?? null)
+        : null,
+      keysComplete: keys.complete,
+      keyListed: identity.resend_key_id ? keyIds.has(identity.resend_key_id) : false,
+    });
+    if (verdict.kind === "not_audited") continue;
+    report.considered += 1;
+
+    try {
+      if (verdict.kind === "key_missing") {
+        await persistIdentity(supabase, identity.clone_id, {
+          sending_domain: identity.sending_domain,
+          ...missingKeyPatch(),
+        });
+      }
+      const needsWork = verdict.kind !== "healthy";
+      // A healthy identity is only re-asserted where this platform owns its
+      // DNS; one handed to an operator has nothing here to correct.
+      if (!needsWork && identity.dns_installed_via !== "cloudflare") {
+        report.healthy += 1;
+        continue;
+      }
+      // `provision`, never `resume`: the audit carries a finished identity
+      // back to finished, and a revoked one was filtered out above.
+      const res = await advanceEmailIdentity(supabase, identity.clone_id, {
+        mode: "provision",
+        reassertDns: true,
+      });
+      if (!res.ok) {
+        report.failed += 1;
+        report.detail.push({ cloneId: identity.clone_id, outcome: verdict.kind, note: res.error });
+        continue;
+      }
+      const acted = res.advanced.filter((a) => !a.startsWith("verification_deferred"));
+      if (needsWork || acted.length > 0) {
+        report.repaired += 1;
+        report.detail.push({
+          cloneId: identity.clone_id,
+          outcome: verdict.kind,
+          note: res.advanced.join(",") || undefined,
+        });
+      } else {
+        report.healthy += 1;
+      }
+    } catch (e) {
+      // One identity's failure must not stop the audit of the rest.
+      report.failed += 1;
+      report.detail.push({ cloneId: identity.clone_id, outcome: verdict.kind, note: msg(e) });
     }
   }
   return report;

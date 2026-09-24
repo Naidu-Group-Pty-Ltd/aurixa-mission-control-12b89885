@@ -46,6 +46,20 @@ describe("only an operator may resume a revoked email identity", () => {
     expect(calls[0]).not.toContain("resume");
   });
 
+  it("the hourly health audit never asks to resume, and skips revoked identities", () => {
+    // The audit re-drives FINISHED identities — a domain Resend lost, a key
+    // somebody deleted. A revoked identity is exactly the finished-looking
+    // shape it must never touch, so it is filtered at the query as well as
+    // refused by the decision.
+    const source = read("server", "email-identity.server.ts");
+    const audit = source.slice(source.indexOf("export async function auditEmailIdentities"));
+    const body = audit.slice(0, audit.indexOf("\n}\n"));
+    const calls = advanceCalls(body);
+    expect(calls, "the audit must still re-drive identities").not.toHaveLength(0);
+    for (const call of calls) expect(call).not.toContain("resume");
+    expect(body).toContain('.is("revoked_at", null)');
+  });
+
   it("the deployment drain's credential arming never asks to resume", () => {
     const calls = advanceCalls(read("..", "src", "routes", "hooks.deployment-drain.tsx"));
     expect(calls, "provisioning must still start an identity").not.toHaveLength(0);

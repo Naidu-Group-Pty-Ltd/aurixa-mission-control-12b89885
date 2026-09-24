@@ -82,6 +82,24 @@ describe("the email identity drain starts as well as advances", () => {
     expect(fn.slice(0, 5000)).toContain('mode: "provision"');
   });
 
+  it("audits finished identities after the sweep, without letting a failed audit stop it", () => {
+    // A finished identity used to be looked at never again — NPC Test's
+    // domain was deleted at Resend and its row read "verified" for ten days.
+    const sweep = EMAIL_DRAIN.indexOf("sweepEmailIdentities(supabaseAdmin)");
+    const audit = EMAIL_DRAIN.indexOf("auditEmailIdentities(supabaseAdmin)");
+    expect(audit).toBeGreaterThan(sweep);
+    const guarded = EMAIL_DRAIN.slice(EMAIL_DRAIN.lastIndexOf("try {", audit), audit);
+    expect(guarded, "the audit runs inside its own try").toContain("try {");
+  });
+
+  it("never writes a CNAME for Resend behind Cloudflare's proxy", () => {
+    // The client proxies a CNAME by default; the fallback return path Resend
+    // added in August 2026 cannot verify behind it.
+    const sync = EMAIL_SERVER.slice(EMAIL_SERVER.indexOf("async function syncDnsViaCloudflare"));
+    const body = sync.slice(0, sync.indexOf("\n}\n"));
+    expect(body.match(/type === "CNAME" \? \{ proxied: false \}/g)?.length).toBe(2);
+  });
+
   it("gates on a backend and not on a hosting project", () => {
     const fn = EMAIL_SERVER.slice(
       EMAIL_SERVER.indexOf("export async function reconcileEmailIdentities"),
