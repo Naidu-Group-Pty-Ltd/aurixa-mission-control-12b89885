@@ -188,8 +188,11 @@ export function permeate(
  * neither side and `strandedSubjects` drops it — which is protection by
  * consequence rather than by rule, and this repository's own habit is to
  * assert a property rather than inherit it from something nobody stated.
+ *
+ * Given the spec's own path, a RELATIVE literal is read too — see
+ * {@link resolveFromSpec}. Without it, nothing relative is.
  */
-export function subjectsNamedBy(text: string): string[] {
+export function subjectsNamedBy(text: string, specPath?: string): string[] {
   const found = new Set<string>();
 
   // One quoted literal: `readFileSync("src/lib/a.ts")`.
@@ -219,7 +222,66 @@ export function subjectsNamedBy(text: string): string[] {
     found.add([m[1], ...tail].join("/"));
   }
 
+  // The RELATIVE form: `readFileSync(resolve(__dirname, "../../../../supabase/
+  // functions/market-sales-ingest/index.ts"))`, `new URL("./fixtures/a.json",
+  // import.meta.url)`.
+  //
+  // Measured over the prime's 1,526 spec files on 24 Sep 2026: 202 of them
+  // name at least one file in the tree this way that neither rule above
+  // reads, 297 subjects between them — 145 read, 152 imported. The live case
+  // is cascade #23 on `npc-crm-independent-6505dc`: `stateProjectionFiles
+  // .spec.ts` asserted about `market-sales-ingest/index.ts` through
+  // `'../../../../supabase/…'`, crossed without it, and turned `verify` red
+  // against the clone's older copy while every rule here said nothing.
+  //
+  // Only with the spec's own path, because a relative literal means nothing
+  // without the directory it is relative to. What it resolves to answers to
+  // the same rule as the whole literal: a known root, an extension, and never
+  // a `..` — the resolution removes every one, and refuses any that would
+  // climb out of the repository.
+  if (specPath !== undefined) {
+    const relative = /['"`]((?:\.\.?\/)+[A-Za-z0-9_./-]+\.[A-Za-z0-9]+)['"`]/g;
+    for (const m of text.matchAll(relative)) {
+      const resolved = resolveFromSpec(specPath, m[1]);
+      if (resolved !== null && SUBJECT_PATH.test(resolved)) found.add(resolved);
+    }
+  }
+
   return [...found].filter((path) => !path.split("/").includes("..")).sort();
+}
+
+/** A repository path the subject rule accepts: a known root and a file extension. */
+const SUBJECT_PATH = /^(?:src|supabase|docs|scripts|public)\/[A-Za-z0-9_./-]+\.[A-Za-z0-9]+$/;
+
+/**
+ * A literal relative to a spec, as the repository path it names — or null.
+ *
+ * Resolved segment by segment against the spec's own directory, the way
+ * `import`, `new URL(…, import.meta.url)` and `resolve(__dirname, …)` resolve
+ * it. A `..` that would climb above the repository root refuses the whole
+ * literal rather than clamping at the root: clamped, `../../../../etc/x.conf`
+ * would name a file the spec never meant.
+ *
+ * The spec's path comes from a git tree listing, which never holds `..` or a
+ * leading `/`. One that does is refused rather than trusted, because the
+ * guarantee this returns — a path inside the repository — must not rest on
+ * the caller.
+ */
+export function resolveFromSpec(specPath: string, literal: string): string | null {
+  if (specPath.startsWith("/")) return null;
+  const base = specPath.split("/").slice(0, -1);
+  if (base.some((segment) => segment === ".." || segment === "." || segment === "")) return null;
+  const out = [...base];
+  for (const segment of literal.split("/")) {
+    if (segment === "" || segment === ".") continue;
+    if (segment === "..") {
+      if (out.length === 0) return null;
+      out.pop();
+      continue;
+    }
+    out.push(segment);
+  }
+  return out.length === 0 ? null : out.join("/");
 }
 
 /**
@@ -252,7 +314,7 @@ export function strandedSubjects(args: {
   // evidence about what differs, the conservative answer is to change nothing.
   if (!primeSha || !cloneSha) return [];
 
-  return subjectsNamedBy(specText).filter((subject) => {
+  return subjectsNamedBy(specText, specPath).filter((subject) => {
     // Crossing beside it. Nothing is stranded.
     if (crossing.has(subject)) return false;
 

@@ -73,6 +73,7 @@ rather than pretending the boundary began with this module.
 | `reconcileDeployWorkflow`       | **pump** | the prime's deploy workflow keeping this clone's project references                                                     |
 | `reconcileSecurityInventory`    | **pump** | a baseline counted from the config and registry this same pass reconciled                                               |
 | `reconcileFunctionCountRatchet` | **pump** | the prime's function-count spec carrying this repository's own number                                                   |
+| `reconcileEdgeTypecheckBaseline` | **pump** | the prime's Edge Function type baseline keeping this clone's count for every file it keeps its own version of          |
 
 ## The two new channels
 
@@ -357,6 +358,21 @@ way**, and the live case is the 20 September incident itself —
 prime and 2.1.0 on the clone. The channel was blind to an instance of the
 exact failure it exists to refuse.
 
+**And it was blind to a relative path, which is how the next one was
+written.** Cascade #23 on `npc-crm-independent-6505dc` delivered
+`stateProjectionFiles.spec.ts`, which reads `market-sales-ingest/index.ts`
+through `'../../../../supabase/…'`. Neither form reads that, so the spec
+crossed alone and `verify` went red against the clone's older ingest
+function. Measured over the prime's 1,526 spec files on 24 September: **202
+name at least one file in the tree only this way**, 297 subjects between them
+(145 read, 152 imported). `subjectsNamedBy` now takes the spec's own path and
+resolves `./` and `../` literals against the spec's directory. The result
+answers to the same rule as a whole literal: a known root, an extension, and
+no `..`. A climb above the repository root refuses the literal rather than
+clamping at the root. Without the spec's path, nothing relative is read,
+because a relative literal means nothing without the directory it is
+relative to.
+
 **A reused blob skipped the membrane.** The resume ledger short-circuits 119
 lines before `permeate` and sets `content: null`, which also takes the file out
 of the set the spec channel reads. Narrower than it looks: every per-file
@@ -634,6 +650,55 @@ composed file, rather than asserted about the template.
 
 It is gated on the holds' own trigger and no wider: this reconciles precisely
 where it used to withhold.
+
+## The Edge Function type baseline counts files, so it follows them
+
+`supabase/functions-registry/edge-typecheck-baseline.json` freezes the Deno type
+errors in each edge-function file, and `check-edge-functions.mjs` fails CI when
+a file's count rises above its entry. The path is a repository invariant, so
+prime's copy crosses on every pass — and **it counts PRIME'S files**. On a
+mirror every counted file crosses with it, so that is right. On a module-scoped
+clone it is not: a file outside the clone's globs keeps the clone's version, and
+prime's number describes a file the clone does not hold.
+
+Measured on cascade #23 to `npc-crm-independent-6505dc` (prime@2e9eab9). Prime
+fixed `manage-ci-assessments/index.ts` and dropped its entry of 4. The clone's
+copy is outside its scope and was not delivered, so it still has its four
+errors. The gate read an unchanged file as `0 → 4` and failed `security`. It
+would have failed the same way on every later cascade, because the invariant
+delivers prime's baseline every time.
+
+`edgeTypecheckBaselineReconcile.pure.ts` applies one rule: **a count describes a
+file, so it follows the file.** Where the clone keeps its own version of a
+counted file, the clone's count stands. Keeping means the clone holds the file,
+it differs from prime's, and this delivery does not write it. Every other entry
+is prime's. The total is re-summed, which is how the generator defines it. Where
+nothing is kept, the result is prime's file byte for byte, so every mirror is
+unchanged.
+
+Three rules carry it.
+
+- **It runs after the subject carry.** A subject carried in behind a spec is
+  prime's file, and prime's count describes it. Run before the carry, the
+  reconcile would keep the clone's count for a file the carry then replaced.
+  Prime's version can carry more errors than that count, so the gate would fail
+  the other way. A delete counts as crossing, because the clone's version does
+  not survive it. `edgeTypecheckBaselineReconcile.contract.test.ts` pins the
+  order as source. Planting either defect fails it.
+- **A file is only rewritten in the shape its generator writes.** Each input
+  must re-serialise to itself byte for byte before anything is merged. A
+  duplicate key, which `JSON.parse` silently drops, fails that, and so does
+  hand-formatting. On failure the reconcile declines.
+- **A decline changes nothing.** Prime's copy stands, which is what every pass
+  did before this existed, and the pass never fails. Where counts were kept, the
+  pull request names each file with the clone's count and prime's count, because
+  a number a machine rewrote in a file a person is reviewing has to say that it
+  did.
+
+What it does not decide: the gate files an error under the file it is in, so a
+file that is identical on both sides can still count differently where something
+it imports differs. Such a file takes prime's count, which is what every file
+got before this.
 
 ## What a second adversarial review found in the carry gate
 
