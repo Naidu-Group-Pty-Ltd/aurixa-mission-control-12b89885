@@ -22,10 +22,14 @@ import { reportableHeld } from "./syncExclusions.pure";
 const raw = readFileSync("src/server/cascade-engine.server.ts", "utf8");
 const engine = stripComments(raw);
 
-/** The carry loop, from its own `for` to the statement after it. */
+/**
+ * The carry loop, from its own `for` to the statement after it — the Edge
+ * Function type baseline's reconcile, which has to read what the loop
+ * decided (`edgeTypecheckBaselineReconcile.contract.test.ts`).
+ */
 function carryLoop(): string {
   const from = engine.indexOf("for (let round = 0; ; round += 1) {");
-  const to = engine.indexOf("const finalProgress: Partial<CascadeResultUpdate>");
+  const to = engine.indexOf("let edgeBaselineNote: string | null = null;");
   expect(from, "carry loop not found").toBeGreaterThan(-1);
   expect(to).toBeGreaterThan(from);
   return engine.slice(from, to);

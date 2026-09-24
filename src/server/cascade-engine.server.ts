@@ -89,6 +89,11 @@ import {
   reconcileSecurityInventory,
 } from "./cascade/securityBaselineReconcile.pure";
 import {
+  EDGE_TYPECHECK_BASELINE_PATH,
+  describeKeptCounts,
+  reconcileEdgeTypecheckBaseline,
+} from "./cascade/edgeTypecheckBaselineReconcile.pure";
+import {
   MAX_SUBJECTS_CARRIED,
   orphanSpecHoldAfterCarry,
   permeate,
@@ -3146,6 +3151,81 @@ export async function processClone(args: {
     if (round >= maxCarryRounds) carryingAllowed = false;
   }
 
+  // ── the Edge Function type baseline follows the files it counts ───────
+  //
+  // `supabase/functions-registry/**` is a repository invariant, so prime's
+  // `edge-typecheck-baseline.json` crosses on every pass — and it counts the
+  // type errors in PRIME'S files. Where this clone keeps its own version of a
+  // counted file, prime's number describes a file the clone does not hold,
+  // and the gate reads an unchanged file as a regression. Cascade #23 to the
+  // CRM failed `security` on `manage-ci-assessments` 0 → 4 over a file
+  // nobody touched, and every later cascade would have failed the same way.
+  //
+  // AFTER the subject carry, because what crosses decides whose count
+  // stands: a subject carried in behind a spec is prime's file, and prime's
+  // count describes it. A delete crosses too — the clone's version does not
+  // survive it. Nothing is asked unless prime's baseline is in the delivery
+  // (identical files owe nothing), and a refusal leaves prime's copy standing,
+  // which is what every pass did before this.
+  //
+  // Written inline rather than as a blob, so a rehearsal reports the file it
+  // would write rather than dropping it.
+  let edgeBaselineNote: string | null = null;
+  if (
+    mode !== "notify" &&
+    primeShaByPath !== null &&
+    cloneShaByPath !== null &&
+    treeEntries.some((t) => t.path === EDGE_TYPECHECK_BASELINE_PATH && t.sha !== null)
+  ) {
+    try {
+      const [primeBaseline, cloneBaseline] = await Promise.all([
+        getFileContent(octokit, primeRef, EDGE_TYPECHECK_BASELINE_PATH),
+        getFileContent(octokit, cloneRef, EDGE_TYPECHECK_BASELINE_PATH),
+      ]);
+      if (primeBaseline && cloneBaseline && !primeBaseline.binary && !cloneBaseline.binary) {
+        const crossing = new Set<string>([
+          ...treeEntries.filter((t) => t.sha !== null).map((t) => t.path),
+          ...pendingDeletes,
+        ]);
+        const verdict = reconcileEdgeTypecheckBaseline({
+          primeJson: primeBaseline.content,
+          cloneJson: cloneBaseline.content,
+          primeSha: primeShaByPath,
+          cloneSha: cloneShaByPath,
+          crossing,
+        });
+        if (!verdict.ok) {
+          console.warn(
+            `[cascade] ${EDGE_TYPECHECK_BASELINE_PATH} not reconciled for clone ${clone.id}, ` +
+              `prime's copy stands: ${verdict.reason}`,
+          );
+        } else if (verdict.keptFromClone.length > 0) {
+          dropFromTree(EDGE_TYPECHECK_BASELINE_PATH);
+          // Where the clone's file already says what the reconcile says,
+          // there is nothing to write and nothing to report as written.
+          if (verdict.merged !== cloneBaseline.content) {
+            treeEntries.push({
+              path: EDGE_TYPECHECK_BASELINE_PATH,
+              mode: "100644",
+              type: "blob",
+              content: verdict.merged,
+            });
+            deliveredSource[EDGE_TYPECHECK_BASELINE_PATH] = verdict.merged;
+          }
+          edgeBaselineNote = `${EDGE_TYPECHECK_BASELINE_PATH} · ${describeKeptCounts(verdict.keptFromClone)}`;
+        }
+      }
+    } catch (e) {
+      // Never fails the pass: prime's copy is what every pass before this
+      // one delivered.
+      console.warn(
+        `[cascade] ${EDGE_TYPECHECK_BASELINE_PATH} reconcile skipped for clone ${clone.id}: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      );
+    }
+  }
+
   // The finished pass's own ledger, carried on the result row so the NEXT
   // pass — for whatever prime commit — reuses every blob prime still holds.
   // Real path only; a rehearsal records nothing.
@@ -3522,6 +3602,14 @@ export async function processClone(args: {
         `security registry this same pass reconciled — the numbers describe the tree this ` +
         `proposal creates rather than either side's.\n\n` +
         baselineNotes.map((l) => `- ${l}`).join("\n")
+      : "") +
+    (edgeBaselineNote
+      ? `\n\n### The Edge Function type baseline followed the files it counts\n\n` +
+        `\`${EDGE_TYPECHECK_BASELINE_PATH}\` freezes the type errors in each edge-function file, ` +
+        `and prime's copy counts PRIME'S files. Where this clone keeps its own version of a ` +
+        `counted file, this clone's count for it was kept; every other count is prime's, and ` +
+        `the total is re-summed.\n\n` +
+        `- ${edgeBaselineNote}`
       : "") +
     (deployWorkflowNote
       ? `\n\n### The deploy workflow was carried, not copied\n\n` +

@@ -171,6 +171,12 @@ const STANDING: readonly StandingOrgan[] = [
     where: "securityBaselineReconcile.pure.ts",
     does: "Delivers the prime's function-count spec carrying this repository's own number, counted with the rule read out of that spec rather than restated.",
   },
+  {
+    kind: "pump",
+    name: "reconcileEdgeTypecheckBaseline",
+    where: "edgeTypecheckBaselineReconcile.pure.ts",
+    does: "Delivers the prime's Edge Function type baseline with this clone's own count kept for every counted file it keeps its own version of, because prime's number describes prime's file.",
+  },
 ];
 
 /**

@@ -315,12 +315,16 @@ describe("the registry describes the fleet as it is", () => {
     // last two arrived when the two security baselines stopped being merely
     // withheld — a hold leaves the clone's numbers describing the tree it had
     // before the pass, which is red on a file the cascade declined to write.
+    // The Edge Function type baseline joined them when cascade #23 failed
+    // `security` on a count describing prime's version of a file the clone
+    // kept its own copy of.
     expect(pumps).toEqual([
       "reconcileConfigToml",
       "reconcileSecurityRegistry",
       "reconcileDeployWorkflow",
       "reconcileSecurityInventory",
       "reconcileFunctionCountRatchet",
+      "reconcileEdgeTypecheckBaseline",
     ]);
     expect(channels).toContain("backendIdentityHold");
     expect(channels).toContain("securityInventoryHold");
