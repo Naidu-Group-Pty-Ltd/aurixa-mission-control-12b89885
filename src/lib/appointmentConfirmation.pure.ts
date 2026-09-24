@@ -25,8 +25,10 @@
  *
  * **The prose never claims more than the platform does.** It confirms what was
  * booked and says the invitation follows separately — the same wording the
- * agent already spoke — rather than presenting itself as the invitation, which
- * nothing here creates.
+ * agent already spoke — rather than presenting itself as the invitation. Where
+ * the booking is held in Cal.com, Cal.com sends that invitation itself, so the
+ * sentence is literally true; this email adds the video link Cal.com issued,
+ * and a booking made by hand in the tracker, which has neither, gets neither.
  */
 import { renderTemplate } from "@/lib/email/mergeTemplate.pure";
 
@@ -45,6 +47,12 @@ export type AppointmentConfirmationInput = {
   graphConfigured: boolean;
   /** `defaultMailbox()` — the address the send would come from. */
   mailbox: string | null;
+  /**
+   * The video link Cal.com issued, where the booking is held there. Absent for
+   * a booking made by hand in the tracker, which has none. Only an http(s)
+   * link is ever used — it is written into an `href`.
+   */
+  meetingUrl?: string | null;
 };
 
 export type ConfirmationPlan =
@@ -108,6 +116,37 @@ const HTML_BODY = [
   "<p>Aurixa Systems</p>",
 ].join("\n");
 
+// The same message with the video link. Separate templates rather than a
+// conditional inside one, because the merge renders an absent field as empty
+// and "Join the call: " followed by nothing reads as a broken email.
+const TEXT_BODY_WITH_LINK = [
+  "Hi {{firstName}},",
+  "",
+  "Your {{session}} is booked for {{when}} ({{timezone}}).",
+  "",
+  "Join the video call: {{meetingUrl}}",
+  "",
+  "The calendar invitation follows separately from this email. If the time no",
+  "longer suits, reply to this message and we will move it.",
+  "",
+  "Aurixa Systems",
+].join("\n");
+
+const HTML_BODY_WITH_LINK = [
+  "<p>Hi {{firstName}},</p>",
+  "<p>Your {{session}} is booked for <strong>{{when}}</strong> ({{timezone}}).</p>",
+  '<p>Join the video call: <a href="{{meetingUrl}}">{{meetingUrl}}</a></p>',
+  "<p>The calendar invitation follows separately from this email. If the time no",
+  "longer suits, reply to this message and we will move it.</p>",
+  "<p>Aurixa Systems</p>",
+].join("\n");
+
+/** An http(s) link, or null. Anything else could not be trusted in an `href`. */
+function usableMeetingUrl(value: string | null | undefined): string | null {
+  const url = (value ?? "").trim();
+  return /^https?:\/\/[^\s"'<>]+$/i.test(url) ? url : null;
+}
+
 /**
  * Whether to email the caller, and what to send.
  *
@@ -130,7 +169,14 @@ export function planConfirmationEmail(input: AppointmentConfirmationInput): Conf
   // gave; "Hi ," reads as a broken template, so the greeting degrades to the
   // one word rather than to a dangling comma.
   const firstName = input.firstName.trim() || "there";
-  const context = { session, when, timezone: input.timezone, firstName };
+  const meetingUrl = usableMeetingUrl(input.meetingUrl);
+  const context = {
+    session,
+    when,
+    timezone: input.timezone,
+    firstName,
+    meetingUrl: meetingUrl ?? "",
+  };
 
   return {
     send: true,
@@ -139,8 +185,8 @@ export function planConfirmationEmail(input: AppointmentConfirmationInput): Conf
     // The subject is plain text in the wire format, so it is rendered unescaped
     // on both paths; only the HTML body escapes.
     subject: renderTemplate(SUBJECT, context, { html: false }),
-    text: renderTemplate(TEXT_BODY, context, { html: false }),
-    html: renderTemplate(HTML_BODY, context, { html: true }),
+    text: renderTemplate(meetingUrl ? TEXT_BODY_WITH_LINK : TEXT_BODY, context, { html: false }),
+    html: renderTemplate(meetingUrl ? HTML_BODY_WITH_LINK : HTML_BODY, context, { html: true }),
   };
 }
 
@@ -170,8 +216,11 @@ export function operatorBookingNotice(
         ? "No confirmation email was sent: this deployment has no mailbox configured."
         : "No confirmation email was sent: the appointment time could not be read.";
 
+  const meetingUrl = usableMeetingUrl(input.meetingUrl);
+  const linkLine = meetingUrl ? ` Video call: ${meetingUrl}` : "";
+
   return {
     title: `${who} booked a ${session}`,
-    body: when ? `${when} (${input.timezone}). ${emailLine}` : emailLine,
+    body: (when ? `${when} (${input.timezone}). ${emailLine}` : emailLine) + linkLine,
   };
 }

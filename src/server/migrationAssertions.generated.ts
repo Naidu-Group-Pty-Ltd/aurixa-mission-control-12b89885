@@ -803,4 +803,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "cron", jobname: "voice-studio-deploy-drain" },
     ],
   },
+  {
+    migration: "20260924140000_calendar_notification_kinds.sql",
+    version: "20260924140000",
+    assertions: [{ kind: "enum", type: "notification_kind" }],
+  },
 ];

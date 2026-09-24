@@ -1,0 +1,26 @@
+-- @asserts enum:notification_kind
+--
+-- Two alarms the Cal.com calendar raises.
+--
+-- `calendar_booking_failed` -- somebody asked for a time and did not get it
+-- because the CALENDAR failed rather than because the time was taken: Cal.com
+-- did not answer, refused the API key, or no longer knows the event type. The
+-- voice agent tells the caller the booking was NOT made and that the team will
+-- call back, and this notice is what makes that promise keepable. It is also
+-- the only signal that a misconfigured key has turned every booking path into
+-- a refusal, so it must not be folded into a kind somebody has muted.
+--
+-- `crm_appointment_changed` -- a booking moved or was cancelled somewhere
+-- other than Mission Control: the attendee used the reschedule or cancel link
+-- in their Cal.com invitation, or the host changed it in Cal.com. The CRM row,
+-- the reminder call and the operators all need to hear about it, and
+-- `crm_appointment_booked` means the opposite of a cancellation.
+--
+-- Their own values rather than existing ones, for the reason the booked kind
+-- gave: `notification_preferences.muted_kinds` is keyed on this enum, so a
+-- kind shared between two meanings is a mute that silences both.
+--
+-- ALTER TYPE lives in its own migration on purpose: a new enum value cannot be
+-- added and used in the same transaction.
+ALTER TYPE public.notification_kind ADD VALUE IF NOT EXISTS 'calendar_booking_failed';
+ALTER TYPE public.notification_kind ADD VALUE IF NOT EXISTS 'crm_appointment_changed';

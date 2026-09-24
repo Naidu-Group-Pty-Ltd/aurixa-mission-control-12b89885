@@ -14571,6 +14571,8 @@ export type Database = {
         | "clone_announcement_published"
         | "clone_announcement_archived"
         | "deployment_bundle_identity"
+        | "calendar_booking_failed"
+        | "crm_appointment_changed"
       notification_severity: "info" | "success" | "warning" | "error"
       overage_policy: "block" | "topup_only" | "pay_as_you_go"
       provisioning_method: "fork" | "template" | "clone"
@@ -15068,6 +15070,8 @@ export const Constants = {
         "clone_announcement_published",
         "clone_announcement_archived",
         "deployment_bundle_identity",
+        "calendar_booking_failed",
+        "crm_appointment_changed",
       ],
       notification_severity: ["info", "success", "warning", "error"],
       overage_policy: ["block", "topup_only", "pay_as_you_go"],
