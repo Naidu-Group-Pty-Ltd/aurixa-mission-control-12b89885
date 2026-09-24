@@ -13,13 +13,14 @@ import { verifyCronAuth } from "@/server/cron-auth.server";
 // with its records installed and its domain verified, and still holding no
 // key — one click short of the mail outage the feature exists to end.
 //
-// It advances and never starts. Registering a sending domain chooses a
-// hostname and a region and creates a resource at Resend; that is an
-// operator's decision. `decideEmailIdentitySweep` refuses any row without a
-// `resend_domain_id`, which is also what makes it safe for the drain to use
-// the same `provision` mode the operator's button uses — `refresh`
-// deliberately mints nothing, and a drain that polls verification forever
-// without ever minting the key would close no gap at all.
+// The sweep carries a decision forward and never makes one: a row records the
+// sending domain and region somebody — or the start pass below — chose, and
+// that includes a row whose registration was REFUSED (NPC CRM Independent's
+// hit Resend's plan limit and was never retried until
+// `decideEmailIdentitySweep` learned to). It uses the same `provision` mode
+// the operator's button uses — `refresh` deliberately mints nothing, and a
+// drain that polls verification forever without ever minting the key would
+// close no gap at all.
 //
 // The response is the run's own reading: whether the master key is visible at
 // all, and a per-clone outcome. An empty success on an unconfigured
@@ -33,7 +34,7 @@ export const Route = createFileRoute("/hooks/email-identity-drain")({
         if (!auth.ok) return auth.response;
 
         try {
-          const { reconcileEmailIdentities, sweepEmailIdentities } =
+          const { auditEmailIdentities, reconcileEmailIdentities, sweepEmailIdentities } =
             await import("@/server/email-identity.server");
 
           /*
@@ -57,7 +58,28 @@ export const Route = createFileRoute("/hooks/email-identity-drain")({
            * the next one, not two passes later.
            */
           const started = await reconcileEmailIdentities(supabaseAdmin);
-          const report = { ...(await sweepEmailIdentities(supabaseAdmin)), started };
+          const swept = await sweepEmailIdentities(supabaseAdmin);
+
+          /*
+           * AFTER the sweep, and on one pass an hour (`isEmailAuditPass`): the
+           * health audit re-reads every FINISHED identity against Resend. The
+           * sweep stops at "complete", and nothing else ever looked again — so
+           * a sending domain deleted at Resend left a clone with a dead key
+           * and a row reading "verified" for ten days (NPC Test).
+           *
+           * Its own try: a Resend listing that fails must not take the start
+           * and the sweep down with it, and neither must it read as healthy.
+           */
+          let audit: Awaited<ReturnType<typeof auditEmailIdentities>> | { error: string };
+          try {
+            audit = await auditEmailIdentities(supabaseAdmin);
+          } catch (e) {
+            audit = { error: e instanceof Error ? e.message : "Email identity audit failed" };
+            console.error("[hooks/email-identity-drain] audit:", audit.error);
+          }
+          const report = { ...swept, started, audit };
+          const auditActed =
+            "error" in audit ? true : audit.ran && (audit.repaired > 0 || audit.failed > 0);
 
           // Only write a breadcrumb when the run did something or refused for
           // a reason worth reading. A drain that files an identical row every
@@ -67,6 +89,7 @@ export const Route = createFileRoute("/hooks/email-identity-drain")({
             report.failed ||
             started.started ||
             started.failed ||
+            auditActed ||
             !report.resendConfigured
           ) {
             await writeAuditLog({

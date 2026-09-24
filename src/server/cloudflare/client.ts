@@ -128,9 +128,17 @@ export const cloudflareApi = {
     const q = new URLSearchParams({ per_page: "100" });
     if (params?.name) q.set("name", params.name);
     if (params?.type) q.set("type", params.type);
-    return cf<Array<{ id: string; name: string; type: string; content: string; proxied: boolean }>>(
-      `/zones/${zoneId}/dns_records?${q.toString()}`,
-    );
+    return cf<
+      Array<{
+        id: string;
+        name: string;
+        type: string;
+        content: string;
+        proxied: boolean;
+        /** MX only. */
+        priority?: number;
+      }>
+    >(`/zones/${zoneId}/dns_records?${q.toString()}`);
   },
   createDnsRecord: (
     zoneId: string,
@@ -164,7 +172,15 @@ export const cloudflareApi = {
   updateDnsRecord: (
     zoneId: string,
     recordId: string,
-    body: Partial<{ type: string; name: string; content: string; proxied: boolean; ttl: number }>,
+    body: Partial<{
+      type: string;
+      name: string;
+      content: string;
+      proxied: boolean;
+      ttl: number;
+      /** MX only — Cloudflare rejects it elsewhere. */
+      priority: number;
+    }>,
   ) =>
     cf<{ id: string; name: string; type: string; content: string; proxied: boolean }>(
       `/zones/${zoneId}/dns_records/${recordId}`,

@@ -283,6 +283,97 @@ its own, and it is not what makes it work: to send under a tenant's own domain,
 provision the identity with an explicit `sendingDomain` and verify it. The
 sender then follows the key, because it is written from it.
 
+## Two clones that never had mail, and a finished identity nobody read again
+
+Measured 24 Sep 2026. Of the three clones, one sent mail. **NPC CRM
+Independent** had never had a sending domain, and **NPC Test** had one that
+Resend no longer held. Both rows looked settled, and nothing retried either.
+
+**CRM Independent: a refusal was treated as a blank.** Its first registration,
+on 19 Sep, hit Resend's plan limit ("You have reached the domain limit of your
+plan"). The row stayed `unprovisioned` with that error. `decideEmailIdentitySweep`
+refused every row with no `resend_domain_id` as `not_started`, on the theory
+that registering is a choice the sweep must not make. But a row without a
+domain id exists only because a registration was attempted and failed. The
+hostname and region were already chosen, and retrying chooses nothing. So the
+drain answered `not_started` every five minutes for five days, including after
+the plan was upgraded. The sweep now retries that row, paced by the same
+30-minute cooling-off as every other failure.
+
+Once registered, it stopped one step short, for two more reasons:
+
+- **Every CNAME was written behind Cloudflare's proxy.** The client proxies a
+  CNAME by default, and a proxied name answers with Cloudflare's own
+  addresses. Domains registered since August 2026 carry a fourth record, the
+  fallback return path `r<…>` → `send.forge.rmta.net`, and it could never
+  verify. The writer now sets `proxied: false` on every CNAME it creates or
+  corrects.
+- **A domain that can send was read as one that cannot.** With DKIM, MX and
+  SPF verified and only the fallback CNAME pending, Resend reports
+  `partially_verified`. Resend's guidance is that such a domain sends, just
+  without the fallback. The old mapping fell through to `pending_dns`, and
+  `canMintKey` refused the key. It also held the first verification until the
+  CNAME resolved. `mapResendDomainStatus` now treats a partial status as
+  sendable while every DKIM record is verified. The verification gate
+  (`expectedDnsProbes`) waits on TXT and MX only, and asks about the CNAME
+  last.
+
+**NPC Test: a finished identity was never looked at again.** Its domain was
+deleted at Resend on 14 Sep to make room under the old plan's domain limit.
+The row still read verified, key written, sender written, which is complete.
+The sweep rightly stops at complete, and nothing else ever read the row
+again. The clone kept a key scoped to a domain that no longer existed, and
+every mail it sent was refused for ten days with nothing reporting it.
+
+### What changed
+
+| Fault                                                                | Fix                                                                                                                                                                      |
+| -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| A refused registration was never retried                             | `decideEmailIdentitySweep` retries a row with no domain id, after the cooling-off                                                                                        |
+| CNAMEs written proxied                                               | `syncDnsViaCloudflare` writes and corrects every CNAME with `proxied: false` (pinned by `everyRouteArms.contract.test.ts`)                                               |
+| DNS written once, never corrected                                    | `planDnsRecordSync` compares what the zone holds and chooses keep, create, update in place or conflict. DNS is re-asserted while any record is unverified, and hourly    |
+| A re-registration's new DKIM key would sit beside the old one        | Same kind at the same name is the stale copy. It is updated, and duplicates are removed. A TXT that is neither DKIM nor SPF belongs to someone else and is never touched |
+| `partially_verified` read as not sendable                            | `mapResendDomainStatus`; `domainFullyVerified` keeps the repair and the re-check going until the fallback verifies                                                       |
+| Verification gated on the fallback CNAME                             | `VERIFICATION_GATE_TYPES` is TXT and MX                                                                                                                                  |
+| Verification asked for while a resolver may still hold the old value | Skipped for one pass after an existing record is rewritten (`verification_deferred_dns_rewritten`)                                                                       |
+| Nothing re-read a finished identity                                  | `auditEmailIdentities`, hourly from the same drain (`isEmailAuditPass`)                                                                                                  |
+| A domain deleted at Resend left a dead key                           | A 404 on the read by id resets the row (`vanishedDomainPatch`), and it is registered again in the same pass. The new key is written, then the old one is retired         |
+| A key deleted at Resend                                              | Minted again, but only when the key listing was read to its end (`missingKeyPatch`)                                                                                      |
+| Resend lists were read one page deep                                 | `listAllDomains` / `listAllApiKeys` walk every page and report `complete`                                                                                                |
+
+### Rules
+
+- **A refusal is an attempt, not a blank.** A row that records a chosen
+  hostname and region is retried. What is never started automatically is a
+  clone with no row at all, and that is `reconcileEmailIdentities`' decision.
+- **Only Resend's own 404 proves a domain is gone.** Missing from a listing is
+  a question, and the audit asks it by id. Re-registering a live domain would
+  replace a working DKIM key, so a listing that failed or was cut short
+  changes nothing.
+- **A key's absence is concluded only from a complete listing.** `complete:
+false` means unknown, never absent.
+- **A replacement is written before the old key goes**, the same order as a
+  rotation, so the clone never holds nothing.
+- **The audit never resumes.** It filters revoked identities at the query, and
+  `canMintKey` refuses them anyway. A deliberate stop stays stopped (pinned by
+  `emailIdentityResume.contract.test.ts`).
+- **The DNS writer only ever touches names Resend named.** It refuses to put a
+  CNAME on a name that holds anything else, and says so in `last_error`.
+
+### How the two clones recover
+
+Both recover without operator action once this version is **published** in
+Lovable.
+
+- **CRM Independent.** On the first drain pass, the `partially_verified`
+  domain maps to verified, the proxied CNAME is corrected, and the key and
+  sender are minted and written. The hourly audit then verifies the fallback
+  CNAME.
+- **NPC Test.** Healed by the first hourly audit pass. Resend's 404 resets the
+  row and the domain is registered again. The DKIM record is updated in place,
+  the new CNAME is created unproxied, and verification follows on later
+  passes. The key is minted and written, then the dead key is retired.
+
 ## Ledger fix carried in the same change
 
 `clone_backend_secrets.status` is CHECK-constrained to
@@ -319,5 +410,9 @@ is checked and logged.
   revocation instant.
 - The flow never edits a tenant's own DNS. Records for domains outside a
   Mission-Control-managed Cloudflare zone are always handed to the operator.
-- `advanceEmailIdentity` never deletes anything; teardown is an explicit
-  revoke.
+- `advanceEmailIdentity` never deletes a domain, and never deletes a key
+  that is still the clone's working credential. Teardown is an explicit
+  revoke. It does delete a DNS record that contradicts one Resend requires,
+  such as a second DKIM key under the same selector. It also retires a key
+  whose domain no longer exists, once its replacement has been written to the
+  clone.

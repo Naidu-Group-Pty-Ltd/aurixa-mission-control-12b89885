@@ -363,6 +363,29 @@ export function identityReadiness(
 export type DnsProbe = { name: string; type: string };
 
 /**
+ * The records that decide whether a domain can SEND.
+ *
+ * Domains registered at Resend after August 2026 carry a FOURTH record: a
+ * CNAME, `r<return-path>` → `send.forge.rmta.net`, a second (fallback) sending
+ * host beside the SES return path the MX and SPF records describe. Resend
+ * verifies each return path on its own, and a domain whose DKIM and one
+ * return path are verified is `partially_verified` — it sends, without the
+ * fallback.
+ *
+ * Measured on `send.npc-crm-independent…` on 24 Sep 2026: DKIM, MX and SPF
+ * verified while the CNAME stayed `pending`, because the Cloudflare writer had
+ * created it PROXIED — a proxied name answers with Cloudflare's own addresses
+ * and no CNAME at all. And the gate asked about the CNAME too, so it never
+ * called verify: one broken fallback record held back the records that decide
+ * whether mail can be sent at all.
+ *
+ * So the first verification waits on these types alone. The CNAME is still
+ * installed (unproxied) and still verified — after the domain can send, not
+ * before.
+ */
+const VERIFICATION_GATE_TYPES = new Set(["TXT", "MX"]);
+
+/**
  * The distinct (name, type) lookups that decide whether Resend's records are
  * visible in DNS yet.
  *
@@ -372,11 +395,27 @@ export type DnsProbe = { name: string; type: string };
  * re-implementing that here would mean re-implementing TXT chunk joining and
  * getting it subtly wrong. All this needs to know is whether the name exists,
  * because that is what a negative cache poisons.
+ *
+ * Only the sending records hold the door (see `VERIFICATION_GATE_TYPES`), and
+ * once some of them have verified, only the ones that have NOT. The fallback
+ * CNAME is asked about last — when it is the only record outstanding — so a
+ * partially verified domain is re-checked once it can be seen, and a broken
+ * fallback never delays the records that decide whether mail goes out.
  */
 export function expectedDnsProbes(records: ResendDnsRecord[]): DnsProbe[] {
+  const isVerified = (r: ResendDnsRecord) => (r.status ?? "").toLowerCase() === "verified";
+  const gates = (r: ResendDnsRecord) => VERIFICATION_GATE_TYPES.has(r.type.trim().toUpperCase());
+  const anyVerified = records.some(isVerified);
+  const pending = records.filter((r) => !isVerified(r));
+  const pendingSending = pending.filter(gates);
+  const candidates = !anyVerified
+    ? records.filter(gates)
+    : pendingSending.length > 0
+      ? pendingSending
+      : pending;
   const seen = new Set<string>();
   const probes: DnsProbe[] = [];
-  for (const r of records) {
+  for (const r of candidates) {
     const name = r.name.trim().toLowerCase();
     const type = r.type.trim().toUpperCase();
     if (!name || !type) continue;
@@ -386,6 +425,254 @@ export function expectedDnsProbes(records: ResendDnsRecord[]): DnsProbe[] {
     probes.push({ name, type });
   }
   return probes;
+}
+
+/**
+ * Resend's domain status → this table's.
+ *
+ * `verified` means verified. So does `partially_verified`, where DKIM and one
+ * of the two return paths are — Resend's own guidance is that such a domain
+ * sends, only without the fallback host (see `VERIFICATION_GATE_TYPES`). This
+ * used to fall through to "the DNS answer is not in yet", which made a domain
+ * that could send look like one that could not, and `canMintKey` refused the
+ * key the clone needed: NPC CRM Independent sat there on 24 Sep 2026.
+ *
+ * A partial status counts only while every DKIM record is verified. DKIM is
+ * what no path can send without, so a partial status WITHOUT it — the sending
+ * half failed while something else verified — is still not a working domain.
+ *
+ * The outstanding record is not forgotten: `domainFullyVerified` keeps the DNS
+ * repair and the re-check running until every record is verified.
+ */
+export function mapResendDomainStatus(
+  status: string,
+  records: ResendDnsRecord[] = [],
+): EmailIdentityRow["domain_status"] {
+  const s = status.trim().toLowerCase();
+  if (s === "verified") return "verified";
+  if (s === "partially_verified" || s === "partially_failed") {
+    const dkim = records.filter(
+      (r) => /dkim/i.test(r.record ?? "") || /(^|\.)_domainkey\./i.test(r.name),
+    );
+    const dkimVerified =
+      dkim.length > 0 && dkim.every((r) => (r.status ?? "").toLowerCase() === "verified");
+    if (dkimVerified) return "verified";
+    return s === "partially_failed" ? "failed" : "pending_dns";
+  }
+  if (s === "failure" || s === "failed") return "failed";
+  // not_started | pending | temporary_failure — "the DNS answer is not in yet".
+  return "pending_dns";
+}
+
+/**
+ * Whether every record Resend published is verified — stricter than "can
+ * send", and what decides whether the DNS repair and the re-check keep going.
+ * A record with no status (an older reading) is not counted against it.
+ */
+export function domainFullyVerified(
+  row: Pick<EmailIdentityRow, "domain_status" | "dns_records">,
+): boolean {
+  if (row.domain_status !== "verified") return false;
+  return row.dns_records.every((r) => {
+    const s = (r.status ?? "").toLowerCase();
+    return s === "" || s === "verified";
+  });
+}
+
+// ─── DNS record sync ─────────────────────────────────────────────────
+
+/** A record as Cloudflare holds it — what the sync compares Resend's against. */
+export type ExistingDnsRecord = {
+  id: string;
+  name: string;
+  type: string;
+  content: string;
+  proxied?: boolean | null;
+  priority?: number | null;
+};
+
+/**
+ * What to do about ONE of Resend's required records.
+ *
+ * `action` is about the record itself; `remove` lists records at the same
+ * name that CONTRADICT it — a second DKIM key under the selector, a second SPF
+ * policy, an SES feedback MX for another region — and must go once the right
+ * one is in place, because their mere presence breaks the check.
+ */
+export type DnsSyncStep = {
+  record: ResendDnsRecord;
+  action: "keep" | "create" | "update" | "conflict";
+  /** The Cloudflare record to keep or update. */
+  existingId?: string;
+  /** Why an update is needed: a different value, or a proxy in front of a CNAME. */
+  reason?: "stale_value" | "proxied";
+  remove: string[];
+  /** Set on a conflict: why nothing may be written for this record. */
+  detail?: string;
+};
+
+function normHost(value: string): string {
+  return value.trim().toLowerCase().replace(/\.$/, "");
+}
+
+/**
+ * A TXT value as its RDATA, not as Cloudflare prints it.
+ *
+ * Cloudflare answers TXT content wrapped in quotes, and a long value — a DKIM
+ * key — may come back as several quoted strings, which DNS concatenates. The
+ * comparison is on what a resolver would hand a verifier.
+ */
+function normTxt(value: string): string {
+  const raw = value.trim();
+  const chunks = raw.match(/"((?:[^"\\]|\\.)*)"/g);
+  const joined =
+    chunks && chunks.length > 0 && raw.startsWith('"')
+      ? chunks.map((c) => c.slice(1, -1).replace(/\\(.)/g, "$1")).join("")
+      : raw;
+  return joined.replace(/\s+/g, " ").trim();
+}
+
+/** Which kind of TXT a value is — a name may legitimately hold other TXT. */
+function txtKind(value: string): "dkim" | "spf" | "other" {
+  const v = normTxt(value);
+  if (/^v=spf1(\s|$)/i.test(v)) return "spf";
+  if (/^(v=DKIM1\s*;\s*)?([a-z]=[^;]*;\s*)*p=/i.test(v)) return "dkim";
+  return "other";
+}
+
+/** Resend's bounce MX: an SES feedback host, in some region. */
+function isSesFeedbackMx(content: string): boolean {
+  return /^feedback-smtp\.[a-z0-9-]+\.amazonses\.com$/.test(normHost(content));
+}
+
+/**
+ * Decide how to bring ONE required record into the zone, given what the zone
+ * already holds at that name.
+ *
+ * ## Why this replaced "create unless an exact copy exists"
+ *
+ * The writer used to look for a record with the SAME value and, finding none,
+ * CREATE one. That is correct exactly once. When a sending domain is
+ * registered again — NPC Test's was deleted at Resend on 14 Sep 2026 and has
+ * to be re-registered — Resend issues a NEW DKIM key under the SAME selector
+ * name, and "create" adds a second TXT record beside the old one. A selector
+ * with two keys is one no verifier can use, and the domain would never verify.
+ * The same holds for SPF (two `v=spf1` records are a permanent error) and for
+ * the bounce MX after a region change.
+ *
+ * So a record of the SAME KIND at the SAME NAME is this record's stale copy,
+ * and is updated in place. Kind is decided by content, not by name: a TXT that
+ * is neither DKIM nor SPF is somebody else's and is never touched. And a CNAME
+ * behind Cloudflare's proxy is not the CNAME Resend asked for — it resolves to
+ * Cloudflare's addresses — so a proxied one is updated too.
+ *
+ * Nothing here touches a name Resend did not name, and nothing touches a
+ * record whose content could belong to anybody else.
+ */
+export function planDnsRecordSync(
+  required: ResendDnsRecord,
+  existingAtName: ExistingDnsRecord[],
+): DnsSyncStep {
+  const name = normHost(required.name);
+  const type = required.type.trim().toUpperCase();
+  const atName = existingAtName.filter((e) => normHost(e.name) === name);
+  const sameType = atName.filter((e) => e.type.trim().toUpperCase() === type);
+
+  if (type === "CNAME") {
+    const others = atName.filter((e) => e.type.trim().toUpperCase() !== "CNAME");
+    const cname = sameType[0];
+    if (!cname) {
+      if (others.length > 0) {
+        return {
+          record: required,
+          action: "conflict",
+          remove: [],
+          detail:
+            `${required.name} already holds ${[...new Set(others.map((o) => o.type))].join(", ")} ` +
+            "record(s); a CNAME cannot share a name with anything, so nothing was written there",
+        };
+      }
+      return { record: required, action: "create", remove: [] };
+    }
+    if (normHost(cname.content) !== normHost(required.value)) {
+      return {
+        record: required,
+        action: "update",
+        existingId: cname.id,
+        reason: "stale_value",
+        remove: [],
+      };
+    }
+    if (cname.proxied) {
+      return {
+        record: required,
+        action: "update",
+        existingId: cname.id,
+        reason: "proxied",
+        remove: [],
+      };
+    }
+    return { record: required, action: "keep", existingId: cname.id, remove: [] };
+  }
+
+  if (type === "MX") {
+    const want = normHost(required.value);
+    const exact = sameType.find((e) => normHost(e.content) === want);
+    const stale = sameType.filter((e) => e !== exact && isSesFeedbackMx(e.content));
+    if (exact) {
+      return {
+        record: required,
+        action: "keep",
+        existingId: exact.id,
+        remove: stale.map((s) => s.id),
+      };
+    }
+    if (stale.length > 0) {
+      return {
+        record: required,
+        action: "update",
+        existingId: stale[0].id,
+        reason: "stale_value",
+        remove: stale.slice(1).map((s) => s.id),
+      };
+    }
+    return { record: required, action: "create", remove: [] };
+  }
+
+  if (type === "TXT") {
+    const want = normTxt(required.value);
+    const kind = txtKind(want);
+    const exact = sameType.find((e) => normTxt(e.content) === want);
+    // Same kind, different value: the stale copy of this record. A TXT of
+    // another kind is somebody else's and is left alone.
+    const contradicting =
+      kind === "other" ? [] : sameType.filter((e) => e !== exact && txtKind(e.content) === kind);
+    if (exact) {
+      return {
+        record: required,
+        action: "keep",
+        existingId: exact.id,
+        remove: contradicting.map((c) => c.id),
+      };
+    }
+    if (contradicting.length > 0) {
+      return {
+        record: required,
+        action: "update",
+        existingId: contradicting[0].id,
+        reason: "stale_value",
+        remove: contradicting.slice(1).map((c) => c.id),
+      };
+    }
+    return { record: required, action: "create", remove: [] };
+  }
+
+  return {
+    record: required,
+    action: "conflict",
+    remove: [],
+    detail: `Unsupported record type ${required.type} for ${required.name}`,
+  };
 }
 
 export type EmailSweepFacts = {
@@ -468,25 +755,42 @@ export const EMAIL_SWEEP_COOLDOWN_MS = 30 * 60 * 1000;
 /**
  * Whether the scheduled drain should carry this identity forward.
  *
- * **The drain ADVANCES an identity; it never STARTS one.** Registering a
- * sending domain picks a hostname and a region and creates a resource at
- * Resend — an operator's decision, not a sweep's. A sweep that started them
- * would register a domain for every clone that lacks one, at the moment the
- * feature was switched on.
+ * **The sweep carries a decision forward; it never makes one.** Choosing a
+ * sending domain picks a hostname and a region — that is recorded in the ROW,
+ * by the operator's button, by provisioning, or by `reconcileEmailIdentities`
+ * for a clone that has none. A clone with no row is therefore not this
+ * sweep's to begin (`not_started`), and `decideEmailIdentityStart` owns that
+ * case.
  *
- * That rule is enforced structurally rather than by care: the drain acts only
- * on a row that ALREADY has `resend_domain_id`, and `advanceEmailIdentity`
- * creates a domain only when that field is null. So the skip below is what
- * makes it safe to hand the drain the same `provision` mode the operator's
- * button uses — which it needs, because `refresh` deliberately mints nothing,
- * and a drain that polls verification forever without ever minting the key is
- * exactly the gap this exists to close.
+ * ## A row whose registration FAILED is a decision, not a blank
+ *
+ * This used to refuse every row without a `resend_domain_id` as "not
+ * started", on the theory that registering is a choice the sweep must not
+ * make. But the only way a row exists without one is that a registration was
+ * ATTEMPTED — `advanceEmailIdentity` writes the row and registers in the same
+ * pass — and failed. The hostname and region were already chosen; retrying
+ * them chooses nothing.
+ *
+ * Measured on NPC CRM Independent: its first registration on 19 Sep 2026 hit
+ * Resend's plan limit ("You have reached the domain limit of your plan"). The
+ * row was left `unprovisioned` with that error, and the drain answered
+ * `not_started` for it every five minutes for five days — including after the
+ * plan was upgraded — because nothing anywhere would ever try again. A clone
+ * provisioned into a transient refusal stayed unable to send mail for good.
+ *
+ * The retry is paced by the same cooling-off window as every other failure,
+ * so a refusal that persists costs one Resend call every half hour, and it is
+ * still refused outright for a revoked identity.
+ *
+ * The drain still runs `provision` mode, which it needs: `refresh` mints
+ * nothing, and a drain that polls verification without ever minting the key
+ * would close no gap at all.
  */
 export function decideEmailIdentitySweep(facts: EmailSweepFacts): EmailSweepVerdict {
   const id = facts.identity;
 
-  // Nothing has been registered for this clone. See above: not ours to start.
-  if (!id?.resend_domain_id) return { act: false, reason: "not_started" };
+  // No identity at all: the start pass's decision, not this one's.
+  if (!id) return { act: false, reason: "not_started" };
 
   // Somebody stopped this clone's mail on purpose. Resuming is an operator's
   // decision, exactly as starting one is.
@@ -514,6 +818,13 @@ export function decideEmailIdentitySweep(facts: EmailSweepFacts): EmailSweepVerd
     if (Number.isFinite(since) && since >= 0 && since < EMAIL_SWEEP_COOLDOWN_MS) {
       return { act: false, reason: "cooling_off" };
     }
+  }
+
+  // Registered once and refused, or registered and then lost at Resend (the
+  // health audit clears the id of a domain Resend no longer holds). Either
+  // way the domain was chosen already; see above.
+  if (!id.resend_domain_id) {
+    return { act: true, why: "sending domain not registered at Resend yet — registering it" };
   }
 
   if (id.domain_status === "verified") {
@@ -562,6 +873,139 @@ export function canMintKey(row: EmailIdentityRow | null): { ok: boolean; reason?
     };
   }
   return { ok: true };
+}
+
+// ─── Health audit ────────────────────────────────────────────────────
+
+/**
+ * How often a FINISHED identity is checked against Resend.
+ *
+ * The sweep stops at "complete", and until this existed nothing looked at an
+ * identity again. NPC Test's domain was deleted at Resend on 14 Sep 2026 to
+ * make room under the plan's domain limit; its row still read `verified`, key
+ * written, sender written — complete — and the clone's key, scoped to a domain
+ * that no longer existed, could send nothing. Ten days, every mail path, and
+ * no reading anywhere said so.
+ *
+ * Hourly because a finished identity changes rarely and the audit reads the
+ * whole fleet: two paginated listings from Resend per pass, plus a Cloudflare
+ * read per sending name. Each check that finds something wrong acts at once.
+ */
+export const EMAIL_AUDIT_EVERY_MS = 60 * 60 * 1000;
+
+/**
+ * Whether this pass of the five-minute drain is the hour's audit pass.
+ *
+ * Derived from the clock rather than stored, so it needs no table and no
+ * second cron job — `THE_CLONING_ENGINE.md` records six scheduled jobs that
+ * were never scheduled at all, and a job of its own is the likeliest way for
+ * this check never to run. The window is one drain interval wide, so exactly
+ * one pass an hour lands in it.
+ */
+export function isEmailAuditPass(now: number, drainIntervalMs = 5 * 60 * 1000): boolean {
+  if (!Number.isFinite(now)) return false;
+  return (
+    ((now % EMAIL_AUDIT_EVERY_MS) + EMAIL_AUDIT_EVERY_MS) % EMAIL_AUDIT_EVERY_MS < drainIntervalMs
+  );
+}
+
+export type EmailHealthFacts = {
+  identity: Pick<
+    EmailIdentityRow,
+    | "resend_domain_id"
+    | "resend_key_id"
+    | "key_written_at"
+    | "from_address_written_at"
+    | "revoked_at"
+  >;
+  /** The domain's status as Resend's listing shows it; null when the listing does not show it. */
+  listedDomainStatus: string | null;
+  /** Whether the key listing was read to its end — a partial listing proves no absence. */
+  keysComplete: boolean;
+  /** Whether the identity's key appears in the key listing. */
+  keyListed: boolean;
+};
+
+export type EmailHealthVerdict =
+  | { kind: "not_audited"; reason: "revoked" | "unfinished" }
+  | { kind: "healthy" }
+  /** Absent from the listing. NOT yet a finding: the caller asks Resend for it by id. */
+  | { kind: "domain_unlisted" }
+  | { kind: "domain_degraded"; status: string }
+  | { kind: "key_missing" };
+
+/**
+ * What the hourly audit concludes about one identity.
+ *
+ * Only a FINISHED identity is audited: an unfinished one is the sweep's, and
+ * a revoked one is nobody's. The rules, in order:
+ *
+ * - **A domain missing from the listing is a question, not an answer.** The
+ *   caller confirms it with a read by id, and only Resend's own 404 counts —
+ *   a listing that was cut short must never re-register a live domain.
+ * - **A domain that is no longer verified is re-driven**, not reported: the
+ *   same advance that finished it re-installs DNS and re-checks.
+ * - **A key that is not in a COMPLETE listing was deleted at Resend** and is
+ *   minted again. An incomplete listing proves nothing, so nothing happens.
+ */
+export function decideEmailIdentityHealth(f: EmailHealthFacts): EmailHealthVerdict {
+  const id = f.identity;
+  if (id.revoked_at) return { kind: "not_audited", reason: "revoked" };
+  if (!id.resend_domain_id || !id.key_written_at || !id.from_address_written_at) {
+    return { kind: "not_audited", reason: "unfinished" };
+  }
+  if (f.listedDomainStatus === null) return { kind: "domain_unlisted" };
+  const status = f.listedDomainStatus.trim().toLowerCase();
+  if (status !== "verified" && status !== "partially_verified") {
+    return { kind: "domain_degraded", status };
+  }
+  if (f.keysComplete && id.resend_key_id && !f.keyListed) return { kind: "key_missing" };
+  return { kind: "healthy" };
+}
+
+/**
+ * The row once Resend no longer holds the identity's domain: back to
+ * registration, with DNS owed again so the new DKIM key replaces the old one.
+ *
+ * `resend_key_id` is deliberately KEPT while `key_written_at` is cleared. The
+ * old key is scoped to a domain that no longer exists and can send nothing,
+ * but it is still the one on the clone — so it is retired only after the
+ * replacement has been written there, exactly as a rotation does it.
+ */
+export function vanishedDomainPatch() {
+  return {
+    resend_domain_id: null,
+    domain_status: "unprovisioned" as const,
+    dns_records: [] as ResendDnsRecord[],
+    dns_installed_via: null,
+    key_last4: null,
+    key_written_at: null,
+    from_address_written_at: null,
+    last_error: null,
+  };
+}
+
+/**
+ * The row once its key is gone from Resend: nothing left to retire, so the
+ * id goes too, and the key and its address are owed again as one credential.
+ */
+export function missingKeyPatch() {
+  return {
+    resend_key_id: null,
+    key_last4: null,
+    key_written_at: null,
+    from_address_written_at: null,
+    last_error: null,
+  };
+}
+
+/**
+ * Whether a key must be minted: none exists, or one exists that has not
+ * reached the clone (the audit's vanished-domain reset leaves exactly that —
+ * see `vanishedDomainPatch`). Whether one MAY be minted is `canMintKey`.
+ */
+export function keyOwed(row: Pick<EmailIdentityRow, "resend_key_id" | "key_written_at">): boolean {
+  return !row.resend_key_id || !row.key_written_at;
 }
 
 // ─── Ledger vocabulary ───────────────────────────────────────────────

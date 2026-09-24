@@ -115,10 +115,55 @@ export type ResendDomain = {
 
 export type ResendApiKeySummary = { id: string; name: string; created_at: string };
 
+/** One page of a Resend list endpoint. `has_more` is absent on an unpaginated answer. */
+export type ResendPage<T> = { data: T[]; has_more?: boolean };
+
+/**
+ * Pages a list endpoint may be walked through before the walk is abandoned as
+ * incomplete. At 100 a page that is 5,000 domains — five times the plan's
+ * ceiling — so reaching it means something is wrong, not that the fleet is big.
+ */
+const MAX_LIST_PAGES = 50;
+
+/**
+ * Walk a cursor-paginated list to its end.
+ *
+ * The first version of this client read ONE page and called it the list.
+ * Resend pages at 20 by default, so with a fleet past twenty domains the
+ * adoption path in `ensureResendDomain` could not find a domain that plainly
+ * existed, and anything deciding that a domain or key is MISSING would have
+ * decided it about everything on page two.
+ *
+ * `complete` is the part that matters. An absence may be concluded only from a
+ * walk that reached the end — `has_more: false`, or a page with no `has_more`
+ * at all (an endpoint that does not paginate answered everything it has). A
+ * walk cut short by the page ceiling reports `complete: false`, and callers
+ * treat that as "unknown", never as "absent".
+ */
+async function listAll<T extends { id: string }>(
+  path: string,
+): Promise<{ items: T[]; complete: boolean }> {
+  const items: T[] = [];
+  let after: string | null = null;
+  for (let page = 0; page < MAX_LIST_PAGES; page++) {
+    const q = new URLSearchParams({ limit: "100" });
+    if (after) q.set("after", after);
+    const res = await resend<ResendPage<T>>(`${path}?${q.toString()}`);
+    const data = Array.isArray(res?.data) ? res.data : [];
+    items.push(...data);
+    if (res?.has_more !== true) return { items, complete: true };
+    const last = data[data.length - 1]?.id;
+    // `has_more` with nothing to continue from cannot be walked any further.
+    if (!last || last === after) return { items, complete: false };
+    after = last;
+  }
+  return { items, complete: false };
+}
+
 export const resendApi = {
   /**
    * Register a sending domain. 4xx on a name that already exists — callers
-   * adopt the existing domain via `listDomains` rather than treating that as
+   * adopt the existing domain via `listAllDomains` rather than treating that as
    * failure (see `ensureDomain` in email-identity.server.ts).
    */
   createDomain: (body: { name: string; region?: string }) =>
@@ -126,7 +171,8 @@ export const resendApi = {
 
   getDomain: (id: string) => resend<ResendDomain>(`/domains/${id}`),
 
-  listDomains: () => resend<{ data: ResendDomain[] }>("/domains"),
+  /** Every domain on the platform team, walked to the end. See `listAll`. */
+  listAllDomains: () => listAll<ResendDomain>("/domains"),
 
   /** Ask Resend to (re)check the domain's DNS. Status arrives via getDomain. */
   verifyDomain: (id: string) =>
@@ -149,7 +195,8 @@ export const resendApi = {
       body: JSON.stringify(body),
     }),
 
-  listApiKeys: () => resend<{ data: ResendApiKeySummary[] }>("/api-keys"),
+  /** Every API key on the platform team, walked to the end. See `listAll`. */
+  listAllApiKeys: () => listAll<ResendApiKeySummary>("/api-keys"),
 
   deleteApiKey: (id: string) => resend<void>(`/api-keys/${id}`, { method: "DELETE" }),
 };

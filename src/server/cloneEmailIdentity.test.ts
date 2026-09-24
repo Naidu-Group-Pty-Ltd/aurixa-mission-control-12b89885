@@ -1,7 +1,17 @@
 import { describe, it, expect } from "vitest";
 import {
   canMintKey,
+  decideEmailIdentityHealth,
   decideEmailIdentityStart,
+  domainFullyVerified,
+  isEmailAuditPass,
+  keyOwed,
+  mapResendDomainStatus,
+  missingKeyPatch,
+  planDnsRecordSync,
+  vanishedDomainPatch,
+  EMAIL_AUDIT_EVERY_MS,
+  type ExistingDnsRecord,
   deriveFromAddress,
   deriveSendingDomain,
   identityReadiness,
@@ -490,17 +500,60 @@ describe("decideEmailIdentitySweep", () => {
     updated_at: "2026-08-29T09:00:00Z",
   };
 
-  it("never starts an identity that has no domain registered", () => {
-    // The invariant the drain's safety rests on: `advanceEmailIdentity`
-    // creates a domain only when `resend_domain_id` is null, so refusing here
-    // is what makes it safe to hand the drain `provision` mode.
+  it("never starts an identity for a clone that has none — that is the start pass's", () => {
     expect(decideEmailIdentitySweep({ identity: null, now: NOW })).toEqual({
       act: false,
       reason: "not_started",
     });
+  });
+
+  it("retries a registration that was refused — the domain was already chosen", () => {
+    // NPC CRM Independent, 19 Sep 2026: the first registration hit Resend's
+    // plan limit, the row was left with no domain id, and the drain answered
+    // `not_started` every five minutes for five days — after the plan was
+    // upgraded too. A row with no domain id is a registration that FAILED;
+    // its hostname and region are in the row, so retrying chooses nothing.
+    const v = decideEmailIdentitySweep({
+      identity: { ...base, resend_domain_id: null, domain_status: "unprovisioned" },
+      now: NOW,
+    });
+    expect(v.act).toBe(true);
+    expect(v.act && v.why).toContain("registering");
+  });
+
+  it("paces a refused registration with the same cooling-off window", () => {
+    const refused = {
+      ...base,
+      resend_domain_id: null,
+      domain_status: "unprovisioned" as const,
+      last_error: "You have reached the domain limit of your plan. Upgrade to add more.",
+      updated_at: new Date(NOW - 60_000).toISOString(),
+    };
+    expect(decideEmailIdentitySweep({ identity: refused, now: NOW })).toEqual({
+      act: false,
+      reason: "cooling_off",
+    });
+    const later = {
+      ...refused,
+      updated_at: new Date(NOW - EMAIL_SWEEP_COOLDOWN_MS - 1).toISOString(),
+    };
+    expect(decideEmailIdentitySweep({ identity: later, now: NOW }).act).toBe(true);
+  });
+
+  it("never re-registers a domain somebody revoked and deleted", () => {
+    // Revoke with `deleteDomain: true` clears the domain id — and stamps
+    // `revoked_at`, which is what keeps the retry above from undoing it.
     expect(
-      decideEmailIdentitySweep({ identity: { ...base, resend_domain_id: null }, now: NOW }),
-    ).toEqual({ act: false, reason: "not_started" });
+      decideEmailIdentitySweep({
+        identity: {
+          ...base,
+          resend_domain_id: null,
+          domain_status: "revoked",
+          revoked_at: "2026-08-29T09:45:00Z",
+        },
+        now: NOW,
+      }),
+    ).toEqual({ act: false, reason: "revoked" });
   });
 
   it("stops once BOTH the key and the sender address have reached the clone", () => {
@@ -765,5 +818,351 @@ describe("decideEmailIdentityStart", () => {
       act: false,
       reason: "already_started",
     });
+  });
+});
+
+// ─── DNS sync, partial verification and the health audit ─────────────
+
+const DOMAIN = "send.npc-test.aurixasystems.com.au";
+const DKIM_NAME = `resend._domainkey.${DOMAIN}`;
+const RETURN = `send.${DOMAIN}`;
+const FALLBACK = `rsend.${DOMAIN}`;
+const NEW_KEY = "p=MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDnew";
+const OLD_KEY = "p=MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDold";
+
+const required = {
+  dkim: { record: "DKIM", name: DKIM_NAME, type: "TXT", value: NEW_KEY },
+  mx: {
+    record: "SPF",
+    name: RETURN,
+    type: "MX",
+    value: "feedback-smtp.us-east-1.amazonses.com",
+    priority: 10,
+  },
+  spf: { record: "SPF", name: RETURN, type: "TXT", value: "v=spf1 include:amazonses.com ~all" },
+  cname: { record: "SPF", name: FALLBACK, type: "CNAME", value: "send.forge.rmta.net" },
+} satisfies Record<string, ResendDnsRecord>;
+
+const cf = (over: Partial<ExistingDnsRecord> & Pick<ExistingDnsRecord, "type" | "content">) =>
+  ({
+    id: `r-${Math.random().toString(36).slice(2, 8)}`,
+    name: DKIM_NAME,
+    proxied: false,
+    ...over,
+  }) as ExistingDnsRecord;
+
+describe("planDnsRecordSync", () => {
+  it("creates a record the zone does not hold", () => {
+    expect(planDnsRecordSync(required.dkim, [])).toMatchObject({ action: "create", remove: [] });
+  });
+
+  it("keeps an exact copy, reading the value as DNS would — quoted and chunked", () => {
+    // Cloudflare prints TXT content quoted, and a long key can come back as
+    // several strings that DNS concatenates.
+    const half = NEW_KEY.length / 2;
+    const existing = cf({
+      type: "TXT",
+      content: `"${NEW_KEY.slice(0, half)}" "${NEW_KEY.slice(half)}"`,
+    });
+    expect(planDnsRecordSync(required.dkim, [existing])).toMatchObject({
+      action: "keep",
+      existingId: existing.id,
+    });
+  });
+
+  it("updates a re-registration's stale DKIM key in place instead of adding a second", () => {
+    // The defect: "create unless an exact copy exists" put the new key BESIDE
+    // the old one, and a selector holding two keys is one no verifier uses.
+    const stale = cf({ type: "TXT", content: `"${OLD_KEY}"` });
+    expect(planDnsRecordSync(required.dkim, [stale])).toEqual({
+      record: required.dkim,
+      action: "update",
+      existingId: stale.id,
+      reason: "stale_value",
+      remove: [],
+    });
+  });
+
+  it("removes a contradicting DKIM key that sits beside the right one", () => {
+    const right = cf({ type: "TXT", content: NEW_KEY });
+    const stale = cf({ type: "TXT", content: OLD_KEY });
+    expect(planDnsRecordSync(required.dkim, [stale, right])).toMatchObject({
+      action: "keep",
+      existingId: right.id,
+      remove: [stale.id],
+    });
+  });
+
+  it("never touches a TXT record of another kind at the same name", () => {
+    const other = cf({ name: RETURN, type: "TXT", content: "google-site-verification=abc" });
+    const plan = planDnsRecordSync(required.spf, [other]);
+    expect(plan.action).toBe("create");
+    expect(plan.remove).toEqual([]);
+  });
+
+  it("replaces a second SPF policy rather than publishing two", () => {
+    const stale = cf({ name: RETURN, type: "TXT", content: '"v=spf1 include:old.example ~all"' });
+    expect(planDnsRecordSync(required.spf, [stale])).toMatchObject({
+      action: "update",
+      existingId: stale.id,
+    });
+  });
+
+  it("moves the bounce MX to the region Resend now names", () => {
+    const stale = cf({
+      name: RETURN,
+      type: "MX",
+      content: "feedback-smtp.eu-west-1.amazonses.com",
+      priority: 10,
+    });
+    expect(planDnsRecordSync(required.mx, [stale])).toMatchObject({
+      action: "update",
+      existingId: stale.id,
+    });
+  });
+
+  it("leaves an unrelated MX alone and adds Resend's beside it", () => {
+    const theirs = cf({ name: RETURN, type: "MX", content: "mx.tenant-mail.example", priority: 5 });
+    expect(planDnsRecordSync(required.mx, [theirs])).toMatchObject({
+      action: "create",
+      remove: [],
+    });
+  });
+
+  it("takes a CNAME out from behind the proxy — a proxied name is not Resend's CNAME", () => {
+    // NPC CRM Independent, 24 Sep 2026: the client proxies every CNAME by
+    // default, so the fallback return path resolved to Cloudflare and never
+    // verified.
+    const proxied = cf({
+      name: FALLBACK,
+      type: "CNAME",
+      content: "send.forge.rmta.net",
+      proxied: true,
+    });
+    expect(planDnsRecordSync(required.cname, [proxied])).toMatchObject({
+      action: "update",
+      existingId: proxied.id,
+      reason: "proxied",
+    });
+  });
+
+  it("keeps an unproxied CNAME that already points at Resend", () => {
+    const right = cf({ name: FALLBACK, type: "CNAME", content: "send.forge.rmta.net." });
+    expect(planDnsRecordSync(required.cname, [right])).toMatchObject({ action: "keep" });
+  });
+
+  it("refuses to write a CNAME over a name that holds anything else", () => {
+    const a = cf({ name: FALLBACK, type: "A", content: "203.0.113.7" });
+    const plan = planDnsRecordSync(required.cname, [a]);
+    expect(plan.action).toBe("conflict");
+    expect(plan.detail).toContain("cannot share a name");
+  });
+
+  it("only ever judges records at the required record's own name", () => {
+    const elsewhere = cf({ name: `other.${DOMAIN}`, type: "TXT", content: OLD_KEY });
+    expect(planDnsRecordSync(required.dkim, [elsewhere])).toMatchObject({
+      action: "create",
+      remove: [],
+    });
+  });
+});
+
+describe("expectedDnsProbes — the fallback CNAME does not hold the door", () => {
+  const all = [required.dkim, required.mx, required.spf, required.cname];
+
+  it("waits on the sending records only, before anything has verified", () => {
+    expect(
+      expectedDnsProbes(all)
+        .map((p) => p.type)
+        .sort(),
+    ).toEqual(["MX", "TXT", "TXT"]);
+  });
+
+  it("asks about what is still outstanding once some records have verified", () => {
+    const partial = [
+      { ...required.dkim, status: "verified" },
+      { ...required.mx, status: "pending" },
+      { ...required.spf, status: "verified" },
+      { ...required.cname, status: "pending" },
+    ];
+    // The MX still decides whether mail can be sent; the CNAME waits behind it.
+    expect(expectedDnsProbes(partial)).toEqual([{ name: RETURN, type: "MX" }]);
+  });
+
+  it("asks about the CNAME once it is the only record left", () => {
+    const partial = [
+      { ...required.dkim, status: "verified" },
+      { ...required.mx, status: "verified" },
+      { ...required.spf, status: "verified" },
+      { ...required.cname, status: "pending" },
+    ];
+    expect(expectedDnsProbes(partial)).toEqual([{ name: FALLBACK, type: "CNAME" }]);
+  });
+});
+
+describe("mapResendDomainStatus", () => {
+  const withDkim = (status: string) => [{ ...required.dkim, status }, required.cname];
+
+  it("maps verified to verified", () => {
+    expect(mapResendDomainStatus("verified")).toBe("verified");
+  });
+
+  it("counts a partially verified domain as sendable while its DKIM is verified", () => {
+    // Resend's own guidance: a partially verified domain sends, without the
+    // fallback host. Reading it as "not in yet" refused NPC CRM Independent
+    // its key on a domain that could send.
+    expect(mapResendDomainStatus("partially_verified", withDkim("verified"))).toBe("verified");
+  });
+
+  it("does not count a partial status whose DKIM has not verified", () => {
+    expect(mapResendDomainStatus("partially_verified", withDkim("pending"))).toBe("pending_dns");
+    expect(mapResendDomainStatus("partially_verified", [])).toBe("pending_dns");
+    expect(mapResendDomainStatus("partially_failed", withDkim("failed"))).toBe("failed");
+  });
+
+  it("accepts both spellings of failure", () => {
+    expect(mapResendDomainStatus("failure")).toBe("failed");
+    expect(mapResendDomainStatus("failed")).toBe("failed");
+  });
+
+  it("reads everything else as the DNS answer not being in yet", () => {
+    for (const s of ["not_started", "pending", "temporary_failure", "something_new"]) {
+      expect(mapResendDomainStatus(s)).toBe("pending_dns");
+    }
+  });
+});
+
+describe("domainFullyVerified", () => {
+  it("is false while any published record is outstanding", () => {
+    expect(
+      domainFullyVerified({
+        domain_status: "verified",
+        dns_records: [
+          { ...required.dkim, status: "verified" },
+          { ...required.cname, status: "pending" },
+        ],
+      }),
+    ).toBe(false);
+  });
+
+  it("is true once every record is verified, and ignores records with no status", () => {
+    expect(
+      domainFullyVerified({
+        domain_status: "verified",
+        dns_records: [{ ...required.dkim, status: "verified" }, required.mx],
+      }),
+    ).toBe(true);
+  });
+
+  it("is false for a domain that is not verified at all", () => {
+    expect(domainFullyVerified({ domain_status: "pending_dns", dns_records: [] })).toBe(false);
+  });
+});
+
+describe("decideEmailIdentityHealth", () => {
+  const finished = {
+    resend_domain_id: "d-1",
+    resend_key_id: "k-1",
+    key_written_at: "2026-09-03T16:00:25Z",
+    from_address_written_at: "2026-09-03T16:00:25Z",
+    revoked_at: null,
+  };
+  const facts = (over: Partial<Parameters<typeof decideEmailIdentityHealth>[0]> = {}) => ({
+    identity: finished,
+    listedDomainStatus: "verified" as string | null,
+    keysComplete: true,
+    keyListed: true,
+    ...over,
+  });
+
+  it("leaves revoked and unfinished identities alone — they are not the audit's", () => {
+    expect(
+      decideEmailIdentityHealth(
+        facts({ identity: { ...finished, revoked_at: "2026-09-01T00:00:00Z" } }),
+      ),
+    ).toEqual({ kind: "not_audited", reason: "revoked" });
+    expect(
+      decideEmailIdentityHealth(
+        facts({ identity: { ...finished, from_address_written_at: null } }),
+      ),
+    ).toEqual({ kind: "not_audited", reason: "unfinished" });
+  });
+
+  it("treats a domain missing from the listing as a question, not an answer", () => {
+    // NPC Test's domain was deleted at Resend. The audit asks Resend for it by
+    // id, and only Resend's 404 resets anything.
+    expect(decideEmailIdentityHealth(facts({ listedDomainStatus: null }))).toEqual({
+      kind: "domain_unlisted",
+    });
+  });
+
+  it("re-drives a domain that is no longer verified", () => {
+    expect(decideEmailIdentityHealth(facts({ listedDomainStatus: "failed" }))).toEqual({
+      kind: "domain_degraded",
+      status: "failed",
+    });
+  });
+
+  it("does not call a partially verified domain degraded — it sends", () => {
+    expect(decideEmailIdentityHealth(facts({ listedDomainStatus: "partially_verified" }))).toEqual({
+      kind: "healthy",
+    });
+  });
+
+  it("re-mints a key that a COMPLETE listing does not contain", () => {
+    expect(decideEmailIdentityHealth(facts({ keyListed: false }))).toEqual({ kind: "key_missing" });
+  });
+
+  it("concludes nothing about a key from an incomplete listing", () => {
+    expect(decideEmailIdentityHealth(facts({ keyListed: false, keysComplete: false }))).toEqual({
+      kind: "healthy",
+    });
+  });
+});
+
+describe("the vanished-domain reset", () => {
+  it("owes DNS and the credential again, and keeps the old key's id to retire later", () => {
+    const patch = vanishedDomainPatch();
+    expect(patch).toMatchObject({
+      resend_domain_id: null,
+      dns_installed_via: null,
+      key_written_at: null,
+      from_address_written_at: null,
+    });
+    // Kept on purpose: the dead key is still what the clone holds, and it is
+    // retired only after its replacement has been written there.
+    expect(patch).not.toHaveProperty("resend_key_id");
+  });
+
+  it("makes a key owed while an unretired one is still recorded", () => {
+    expect(keyOwed({ resend_key_id: "old", key_written_at: null })).toBe(true);
+    expect(keyOwed({ resend_key_id: null, key_written_at: null })).toBe(true);
+    expect(keyOwed({ resend_key_id: "k", key_written_at: "2026-09-03T16:00:25Z" })).toBe(false);
+  });
+
+  it("forgets a key that Resend no longer holds", () => {
+    expect(missingKeyPatch()).toMatchObject({ resend_key_id: null, key_written_at: null });
+  });
+});
+
+describe("isEmailAuditPass", () => {
+  const hour = Date.parse("2026-09-24T05:00:00Z");
+  it("is the first drain interval of each hour, and only that", () => {
+    expect(isEmailAuditPass(hour)).toBe(true);
+    expect(isEmailAuditPass(hour + 4 * 60_000 + 59_000)).toBe(true);
+    expect(isEmailAuditPass(hour + 5 * 60_000)).toBe(false);
+    expect(isEmailAuditPass(hour + EMAIL_AUDIT_EVERY_MS - 1)).toBe(false);
+  });
+
+  it("lands on exactly one five-minute pass an hour", () => {
+    let hits = 0;
+    for (let t = hour; t < hour + EMAIL_AUDIT_EVERY_MS; t += 5 * 60_000) {
+      if (isEmailAuditPass(t + 2_000)) hits += 1;
+    }
+    expect(hits).toBe(1);
+  });
+
+  it("never fires on an unusable clock", () => {
+    expect(isEmailAuditPass(Number.NaN)).toBe(false);
   });
 });
