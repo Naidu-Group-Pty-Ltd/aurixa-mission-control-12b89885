@@ -357,6 +357,21 @@ way**, and the live case is the 20 September incident itself —
 prime and 2.1.0 on the clone. The channel was blind to an instance of the
 exact failure it exists to refuse.
 
+**And it was blind to a relative path, which is how the next one was
+written.** Cascade #23 on `npc-crm-independent-6505dc` delivered
+`stateProjectionFiles.spec.ts`, which reads `market-sales-ingest/index.ts`
+through `'../../../../supabase/…'`. Neither form reads that, so the spec
+crossed alone and `verify` went red against the clone's older ingest
+function. Measured over the prime's 1,526 spec files on 24 September: **202
+name at least one file in the tree only this way**, 297 subjects between them
+(145 read, 152 imported). `subjectsNamedBy` now takes the spec's own path and
+resolves `./` and `../` literals against the spec's directory. The result
+answers to the same rule as a whole literal: a known root, an extension, and
+no `..`. A climb above the repository root refuses the literal rather than
+clamping at the root. Without the spec's path, nothing relative is read,
+because a relative literal means nothing without the directory it is
+relative to.
+
 **A reused blob skipped the membrane.** The resume ledger short-circuits 119
 lines before `permeate` and sets `content: null`, which also takes the file out
 of the set the spec channel reads. Narrower than it looks: every per-file

@@ -543,6 +543,29 @@ describe("a spec crosses with what it asserts about, or not at all", () => {
     expect(j.held.map((h) => h.path).sort()).toEqual(["docs/BACKEND_ISOLATION.md", spec].sort());
   });
 
+  it("reads a subject the spec names relative to itself", () => {
+    // The shape that sent cascade #23 red: `'../../…'` named nothing the
+    // subject rule could see, so the spec crossed alone.
+    const relative = `readFileSync(resolve(here, "../../../docs/BACKEND_ISOLATION.md"), "utf8")`;
+    const j = judge({
+      paths: [spec],
+      texts: { [spec]: relative },
+      originTree: tree({ [spec]: "s", "docs/BACKEND_ISOLATION.md": "doc" }),
+    });
+    expect(j.write).toEqual([]);
+    expect(j.held[0].note).toContain("`docs/BACKEND_ISOLATION.md`");
+    expect(
+      absentSubjects({
+        specText: relative,
+        specPath: spec,
+        originTree: tree({ [spec]: "s", "docs/BACKEND_ISOLATION.md": "doc" }),
+        destinationTree: tree({}),
+        crossing: new Set(),
+        deletingOnDestination: new Set(),
+      }),
+    ).toEqual(["docs/BACKEND_ISOLATION.md"]);
+  });
+
   it("counts no subject the origin lacks — a spec that a path is absent is true on both sides", () => {
     expect(
       absentSubjects({

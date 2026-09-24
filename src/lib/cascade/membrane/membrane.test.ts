@@ -14,6 +14,7 @@ import {
   orphanSpecHoldAfterCarry,
   permeate,
   planSubjectCarry,
+  resolveFromSpec,
   strandedSubjects,
   subjectsNamedBy,
 } from "./membrane.pure";
@@ -674,6 +675,108 @@ describe("what a spec is read as naming", () => {
     // The last segment must carry an extension, or a `readdirSync` walk
     // becomes a subject that can never be compared.
     expect(subjectsNamedBy('readdirSync(join(ROOT, "src", "lib", "crm"))')).toEqual([]);
+  });
+});
+
+describe("a subject named relative to the spec", () => {
+  // Cascade #23 on npc-crm-independent-6505dc, verbatim in shape: the spec
+  // read its ingest function through a literal no rule here could see, so it
+  // crossed without it and `verify` went red against the clone's older copy.
+  const specPath = "src/lib/reports/__tests__/stateProjectionFiles.spec.ts";
+  const SPEC = `
+    const source = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)),
+      '../../../../supabase/functions/market-sales-ingest/index.ts'), 'utf8');
+  `;
+
+  it("reads nothing relative without the spec's own path", () => {
+    // A relative literal means nothing without the directory it is relative
+    // to, so a caller that cannot say which spec it read gets what it got
+    // before.
+    expect(subjectsNamedBy(SPEC)).toEqual([]);
+  });
+
+  it("resolves a relative literal against the spec's own directory", () => {
+    expect(subjectsNamedBy(SPEC, specPath)).toEqual([
+      "supabase/functions/market-sales-ingest/index.ts",
+    ]);
+    expect(subjectsNamedBy('new URL("./fixtures/nsw.json", import.meta.url)', specPath)).toEqual([
+      "src/lib/reports/__tests__/fixtures/nsw.json",
+    ]);
+    expect(subjectsNamedBy('import { a } from "../a.pure.ts";', specPath)).toEqual([
+      "src/lib/reports/a.pure.ts",
+    ]);
+  });
+
+  it("strands the spec on the subject cascade #23 delivered it without", () => {
+    const stranded = strandedSubjects({
+      specPath,
+      specText: SPEC,
+      primeSha: new Map([["supabase/functions/market-sales-ingest/index.ts", "new"]]),
+      cloneSha: new Map([["supabase/functions/market-sales-ingest/index.ts", "old"]]),
+      crossing: new Set([specPath]),
+    });
+    expect(stranded).toEqual(["supabase/functions/market-sales-ingest/index.ts"]);
+  });
+
+  it("takes a relative directory, or a root this fleet does not ship, as no subject", () => {
+    expect(subjectsNamedBy("resolve(here, '../../../../supabase/migrations')", specPath)).toEqual(
+      [],
+    );
+    expect(subjectsNamedBy("read('../../../../.github/workflows/ci.yml')", specPath)).toEqual([]);
+    expect(subjectsNamedBy("read('../../../../package.json')", specPath)).toEqual([]);
+  });
+
+  it("reads both forms of one subject as one", () => {
+    const text = `${SPEC}\nreadFileSync("supabase/functions/market-sales-ingest/index.ts");`;
+    expect(subjectsNamedBy(text, specPath)).toEqual([
+      "supabase/functions/market-sales-ingest/index.ts",
+    ]);
+  });
+});
+
+describe("resolveFromSpec never leaves the repository", () => {
+  const specPath = "src/a/__tests__/b.spec.ts";
+
+  it("resolves inside the tree", () => {
+    expect(resolveFromSpec(specPath, "../c.ts")).toBe("src/a/c.ts");
+    expect(resolveFromSpec(specPath, "./d/e.json")).toBe("src/a/__tests__/d/e.json");
+    expect(resolveFromSpec(specPath, "../../../docs/x.md")).toBe("docs/x.md");
+  });
+
+  it("refuses a climb above the root rather than clamping at it", () => {
+    // Clamped, this would name `etc/passwd.conf` — a file the spec never meant.
+    expect(resolveFromSpec(specPath, "../../../../etc/passwd.conf")).toBeNull();
+    expect(resolveFromSpec(specPath, "../../../../../../root/.ssh/id_rsa.pub")).toBeNull();
+  });
+
+  it("refuses a spec path that is not a tree path", () => {
+    expect(resolveFromSpec("/etc/b.spec.ts", "./c.ts")).toBeNull();
+    expect(resolveFromSpec("src/../b.spec.ts", "./c.ts")).toBeNull();
+    expect(resolveFromSpec("src//b.spec.ts", "./c.ts")).toBeNull();
+  });
+
+  it("names nothing a hostile literal could turn into a traversal", () => {
+    const hostile = [
+      'import x from "../../../../../../etc/passwd.conf";',
+      'const p = "../../../../../root/.ssh/id_rsa.pub";',
+      'const q = "./../../../../../../etc/shadow.conf";',
+      // Resolves to the ROOT's `.github/workflows/ci.yml`, which is outside
+      // the five directories and refused like its whole-literal spelling.
+      'readFileSync("../../../.github/workflows/ci.yml")',
+    ].join("\n");
+    const named = subjectsNamedBy(hostile, specPath);
+    expect(named).toEqual([]);
+    expect(named.filter((p) => p.split("/").includes(".."))).toEqual([]);
+  });
+
+  it("reads a relative literal as what it names, not as the root path it resembles", () => {
+    // From `src/a/__tests__/`, `../../.github/…` is `src/.github/…` — inside
+    // the repository and under `src/`, so the rule reads it as that path. It
+    // is not `.github/workflows/ci.yml`, and a tree holding no such file
+    // matches nothing, exactly as for any other path a spec names.
+    expect(subjectsNamedBy('readFileSync("../../.github/workflows/ci.yml")', specPath)).toEqual([
+      "src/.github/workflows/ci.yml",
+    ]);
   });
 });
 

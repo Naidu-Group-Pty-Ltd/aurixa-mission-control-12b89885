@@ -606,13 +606,15 @@ export function lateralImportHold(args: {
  */
 export function absentSubjects(args: {
   specText: string;
+  /** The spec's own path, so a subject it names relative to itself is read too. */
+  specPath?: string;
   originTree: TreeIndex;
   destinationTree: TreeIndex;
   crossing: ReadonlySet<string>;
   deletingOnDestination: ReadonlySet<string>;
 }): string[] {
   const { originTree, destinationTree, crossing, deletingOnDestination } = args;
-  return subjectsNamedBy(args.specText).filter(
+  return subjectsNamedBy(args.specText, args.specPath).filter(
     (subject) =>
       originTree.has(subject) &&
       !crossing.has(subject) &&
@@ -880,6 +882,7 @@ export function judgeLateralWrites(args: {
         });
         const absent = absentSubjects({
           specText: text,
+          specPath: path,
           originTree,
           destinationTree: destination.tree,
           crossing,
