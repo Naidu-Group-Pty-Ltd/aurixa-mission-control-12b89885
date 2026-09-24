@@ -343,10 +343,15 @@ export function moduleSpecifiersOf(source: string): string[] {
  * `survivingFiles` is what the engine can actually see: the held files it read
  * because it could not deliver them, and any clone-only source. That is
  * sufficient rather than partial — see the header.
+ *
+ * `remover` names who deleted the file, for the sentence a reader is shown.
+ * It is the prime for the vertical cascade; the lateral lane passes the parent
+ * the deletion came from, because "Prime removed this" would be false there.
  */
 export function withholdReferencedDeletions(
   verdicts: readonly DeletionVerdict[],
   survivingFiles: Readonly<Record<string, string>>,
+  remover = "Prime",
 ): DeletionVerdict[] {
   const deleting = new Set(verdicts.filter((v) => v.act === "delete").map((v) => v.path));
   if (deleting.size === 0) return [...verdicts];
@@ -373,7 +378,7 @@ export function withholdReferencedDeletions(
       path: v.path,
       reason: "still_referenced" as const,
       why:
-        `Prime removed this, but ${by.map((p) => `\`${p}\``).join(", ")} still import(s) it on ` +
+        `${remover} removed this, but ${by.map((p) => `\`${p}\``).join(", ")} still import(s) it on ` +
         `this clone and the cascade cannot change ${by.length === 1 ? "it" : "them"}. ` +
         `Deleting it would break the build.`,
     };

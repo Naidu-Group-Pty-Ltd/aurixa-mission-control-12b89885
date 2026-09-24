@@ -193,21 +193,54 @@ export async function listFilesMatchingGlobs(
 export async function listTreeEntries(
   octokit: Octokit,
   ref: RepoRef,
-): Promise<{ entries: Map<string, string>; sizes: Map<string, number>; truncated: boolean }> {
-  const { isSafeRepoPath } = await import("@/lib/module-globs");
+): Promise<TreeListing & { headSha: string }> {
   const { data: branch } = await octokit.repos.getBranch({
     owner: ref.owner,
     repo: ref.repo,
     branch: ref.branch,
   });
+  const listing = await listTreeAt(octokit, ref, branch.commit.commit.tree.sha);
+  return { ...listing, headSha: branch.commit.sha };
+}
+
+/** One repository tree, flattened: every blob's SHA, size and mode by path. */
+export type TreeListing = {
+  entries: Map<string, string>;
+  sizes: Map<string, number>;
+  /**
+   * The git mode of each blob — `100644` for a file, `100755` for an
+   * executable, `120000` for a symbolic link. Carried because a delivery that
+   * writes every file `100644` silently strips the executable bit from a
+   * script and turns a symlink into a file holding its target's path.
+   */
+  modes: Map<string, string>;
+  truncated: boolean;
+};
+
+/**
+ * The tree at a KNOWN tree SHA, rather than at wherever a branch points now.
+ *
+ * `listTreeEntries` reads the branch and then its tree, which is right for a
+ * caller that wants "the current tree". A caller that has already read the
+ * head — to decide whether a pass is worth running at all — needs the tree of
+ * THAT head, or the decision and the tree it acts on describe two different
+ * commits whenever the branch moves between the two calls.
+ */
+export async function listTreeAt(
+  octokit: Octokit,
+  ref: Pick<RepoRef, "owner" | "repo">,
+  treeSha: string,
+): Promise<TreeListing> {
+  const { isSafeRepoPath } = await import("@/lib/module-globs");
   const { data: tree } = await octokit.git.getTree({
     owner: ref.owner,
     repo: ref.repo,
-    tree_sha: branch.commit.commit.tree.sha,
+    tree_sha: treeSha,
     recursive: "true",
   });
   const entries = new Map<string, string>();
   const sizes = new Map<string, number>();
+  const modes = new Map<string, string>();
   for (const node of tree.tree ?? []) {
     if (node.type !== "blob") continue;
     if (typeof node.path !== "string" || typeof node.sha !== "string") continue;
@@ -218,8 +251,9 @@ export async function listTreeEntries(
     // deciding anything about it would otherwise have to ask the contents API
     // per path — see `CASCADE_MAX_FILE_BYTES` and the convergence auditor.
     if (typeof node.size === "number") sizes.set(node.path, node.size);
+    if (typeof node.mode === "string") modes.set(node.path, node.mode);
   }
-  return { entries, sizes, truncated: Boolean(tree.truncated) };
+  return { entries, sizes, modes, truncated: Boolean(tree.truncated) };
 }
 
 /**

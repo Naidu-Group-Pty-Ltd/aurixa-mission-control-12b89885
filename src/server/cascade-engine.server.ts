@@ -21,6 +21,7 @@ import {
   toGitTreeParam,
   type DeliveryTreeEntry,
 } from "./cascade/treeDelivery.pure";
+import { readInstalledGlobs } from "./cascade/installedGlobs.server";
 import {
   getAppOctokit,
   listFilesMatchingGlobs,
@@ -1389,57 +1390,14 @@ export async function processClone(args: {
   if (overrideGlobs && overrideGlobs.length > 0) {
     installedGlobs = overrideGlobs;
   } else {
-    const { data: cmods } = await supabase
-      .from("clone_modules")
-      .select("modules(slug, file_globs)")
-      .eq("clone_id", clone.id);
-
-    // Library pins: when a clone pins a specific library version for a module
-    // slug, swap that module's live globs for the pinned entry's file_paths.
-    // This lets a fork stay on v3 of "checkout" while the prime is on v5.
-    const { data: pins } = await supabase
-      .from("clone_library_pins")
-      .select("slug, version, library_entry_id")
-      .eq("clone_id", clone.id);
-
-    const pinRows = (pins ?? []) as Array<{
-      slug: string;
-      version: number;
-      library_entry_id: string;
-    }>;
-
-    const pinMap = new Map<string, { version: number; files: string[] }>();
-    if (pinRows.length > 0) {
-      const entryIds = pinRows.map((p) => p.library_entry_id);
-      const { data: entries } = await supabase
-        .from("module_library")
-        .select("id, file_paths")
-        .in("id", entryIds);
-      const fileMap = new Map<string, string[]>();
-      for (const e of (entries ?? []) as Array<{ id: string; file_paths: string[] | null }>) {
-        fileMap.set(e.id, e.file_paths ?? []);
-      }
-      for (const p of pinRows) {
-        const files = fileMap.get(p.library_entry_id) ?? [];
-        if (files.length > 0) pinMap.set(p.slug, { version: p.version, files });
-      }
-    }
-
-    const honored: string[] = [];
-    installedGlobs = (cmods ?? []).flatMap(
-      (cm: { modules: { slug: string | null; file_globs: string[] | null } | null }) => {
-        const slug = cm.modules?.slug ?? null;
-        if (slug && pinMap.has(slug)) {
-          const pin = pinMap.get(slug)!;
-          honored.push(`${slug}@v${pin.version}`);
-          return pin.files;
-        }
-        return cm.modules?.file_globs ?? [];
-      },
-    );
-    if (honored.length > 0) {
-      pinSummary = `pins: ${honored.join(", ")}`;
-    }
+    // One reader for both lanes — see `cascade/installedGlobs.server.ts`,
+    // which also carries the library-pin rule that used to be written here.
+    // The engine reads it leniently, exactly as it did inline: `failed` is the
+    // lateral lane's to act on, and a partial list here still delivers nothing
+    // the clone did not install.
+    const installed = await readInstalledGlobs(supabase, clone.id);
+    installedGlobs = installed.globs;
+    pinSummary = installed.pinSummary;
   }
 
   if (!isMirror && installedGlobs.length === 0) {

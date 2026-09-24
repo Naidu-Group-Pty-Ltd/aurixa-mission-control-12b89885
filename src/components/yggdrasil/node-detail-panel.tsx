@@ -12,6 +12,11 @@ import { Badge } from "@/components/ui/badge";
 import { StatusPill } from "@/components/status-pill";
 import type { TreeNode } from "./use-tree-layout";
 import { membranesTouching } from "@/lib/cascade/membrane/fleetMembranes.pure";
+import {
+  lateralsTouching,
+  otherSide,
+  type LateralBoundary,
+} from "@/lib/cascade/membrane/lateralMembranes.pure";
 import type { Membrane } from "@/lib/cascade/membrane/membrane.pure";
 
 interface Props {
@@ -87,9 +92,69 @@ function MembraneLine({ label, membrane }: { label: "in" | "out"; membrane: Memb
   );
 }
 
+/**
+ * A boundary BESIDE this deployment, rather than above or below it.
+ *
+ * Both directions are counted, separately, because a lateral boundary's two
+ * membranes are not mirror images — the CRM line runs opposite ways across
+ * them — so one count for the pair would describe neither.
+ */
+function LateralLine({ repo, boundary }: { repo: string; boundary: LateralBoundary }) {
+  const other = otherSide(boundary, repo);
+  if (!other) return null;
+  const directions: Array<{ word: "in" | "out"; membrane: Membrane | undefined }> = [
+    { word: "in", membrane: boundary.toward[repo] },
+    { word: "out", membrane: boundary.toward[other] },
+  ];
+  return (
+    <div className="flex flex-col gap-0.5 font-mono text-[11px]">
+      <div className="flex items-start gap-1.5">
+        <span className="w-6 shrink-0 text-muted-foreground" title="Beside: work crosses both ways">
+          <span aria-hidden>⇄</span>
+          <span className="sr-only">beside</span>
+        </span>
+        <span className="min-w-0 flex-1 truncate text-foreground" title={other}>
+          {other}
+        </span>
+      </div>
+      <div className="flex flex-wrap items-center gap-x-3 pl-[1.875rem] text-[10px] text-muted-foreground">
+        {directions.map(({ word, membrane }) => {
+          if (!membrane) return <span key={word}>{word} — nothing crosses</span>;
+          const closed = membrane.channels.filter((c) => c.state === "closed");
+          const gated = membrane.channels.filter((c) => c.state === "gated");
+          return (
+            <span key={word} className="flex items-center gap-1">
+              {word}
+              {closed.length > 0 ? (
+                <span
+                  className="flex items-center gap-0.5 text-destructive"
+                  title={closed.map((c) => c.note).join(" ")}
+                >
+                  <Ban className="h-3 w-3" />
+                  {closed.length}
+                </span>
+              ) : null}
+              {gated.length > 0 ? (
+                <span
+                  className="flex items-center gap-0.5 text-warning"
+                  title={gated.map((c) => c.note).join(" ")}
+                >
+                  <CircleDashed className="h-3 w-3" />
+                  {gated.length}
+                </span>
+              ) : null}
+            </span>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export function YggdrasilNodePanel({ node, allNodes, onClose }: Props) {
   const lineage = useMemo(() => buildLineage(node, allNodes), [node, allNodes]);
   const membranes = useMemo(() => membranesTouching(node.githubRepo), [node.githubRepo]);
+  const laterals = useMemo(() => lateralsTouching(node.githubRepo), [node.githubRepo]);
 
   return (
     <motion.div
@@ -230,7 +295,7 @@ export function YggdrasilNodePanel({ node, allNodes, onClose }: Props) {
             selected. What this adds is the thing a node alone cannot say —
             that what reaches it was filtered on the way in, and that what
             leaves it is filtered again. */}
-        {membranes.inbound || membranes.outbound.length > 0 ? (
+        {membranes.inbound || membranes.outbound.length > 0 || laterals.length > 0 ? (
           <div className="border-t border-border/30 pt-3">
             <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
               Membranes
@@ -245,6 +310,9 @@ export function YggdrasilNodePanel({ node, allNodes, onClose }: Props) {
               )}
               {membranes.outbound.map((m) => (
                 <MembraneLine key={m.to} label="out" membrane={m} />
+              ))}
+              {laterals.map((boundary) => (
+                <LateralLine key={boundary.id} repo={node.githubRepo} boundary={boundary} />
               ))}
             </div>
           </div>
