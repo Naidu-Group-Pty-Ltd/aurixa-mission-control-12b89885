@@ -265,8 +265,10 @@ never a count, for the reason `check-edge-functions.mjs` already paid for: a
 count absorbs one change arriving as another leaves.
 
 `mc_org_tool_ids.json` is the one file in that directory that is *not*
-generated. It maps a tool name to its VAPI org tool id and is maintained by
-hand beside `create-vapi-org-tools.py`.
+generated. It maps a tool name to its VAPI org tool id, and
+`create-vapi-org-tools.py` keeps it: that script finds each tool by the id
+recorded there, brings its definition in line with the declaration (PATCH,
+then read back), and records the id of any tool it has to create.
 
 ---
 
