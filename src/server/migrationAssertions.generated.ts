@@ -808,4 +808,20 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260924140000",
     assertions: [{ kind: "enum", type: "notification_kind" }],
   },
+  {
+    migration: "20260925100000_subscription_agreements.sql",
+    version: "20260925100000",
+    assertions: [
+      { kind: "column", table: "client_agreements", column: "document_kind" },
+      { kind: "column", table: "client_agreements", column: "lead_id" },
+      { kind: "column", table: "client_agreements", column: "offer" },
+      { kind: "column", table: "client_agreements", column: "offer_reference" },
+      { kind: "column", table: "client_agreements", column: "issued_at" },
+      { kind: "column", table: "client_agreements", column: "issued_snapshot" },
+      { kind: "column", table: "client_agreements", column: "signed_record_path" },
+      { kind: "check", table: "client_agreements", column: "document_kind", value: "subscription" },
+      { kind: "table", table: "agreement_issuing_profile" },
+      { kind: "enum", type: "notification_kind" },
+    ],
+  },
 ];

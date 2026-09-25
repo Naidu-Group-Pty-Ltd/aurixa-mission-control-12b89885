@@ -74,6 +74,33 @@ export type Database = {
         }
         Relationships: []
       }
+      agreement_issuing_profile: {
+        Row: {
+          created_at: string
+          facts: Json
+          id: string
+          singleton: boolean
+          updated_at: string
+          updated_by: string | null
+        }
+        Insert: {
+          created_at?: string
+          facts?: Json
+          id?: string
+          singleton?: boolean
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Update: {
+          created_at?: string
+          facts?: Json
+          id?: string
+          singleton?: boolean
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Relationships: []
+      }
       ai_usage_log: {
         Row: {
           completion_tokens: number | null
@@ -1095,6 +1122,7 @@ export type Database = {
           contact_id: string | null
           created_at: string
           created_by: string | null
+          document_kind: string
           docusign_envelope_id: string | null
           docusign_sent_at: string | null
           docusign_signed_at: string | null
@@ -1102,9 +1130,14 @@ export type Database = {
           docusign_voided_at: string | null
           excluded_module_ids: string[]
           id: string
+          issued_at: string | null
+          issued_snapshot: Json | null
+          lead_id: string | null
           metadata: Json
           module_ids: string[]
           notes: string | null
+          offer: Json | null
+          offer_reference: string | null
           plan_slug: string | null
           provision_error: string | null
           provision_on_signature: boolean
@@ -1112,6 +1145,9 @@ export type Database = {
           provision_status: string
           provisioned_clone_id: string | null
           service_tier: string | null
+          signed_record_path: string | null
+          signed_record_retained_at: string | null
+          signed_record_sha256: string | null
           status: string
           updated_at: string
           void_reason: string | null
@@ -1127,6 +1163,7 @@ export type Database = {
           contact_id?: string | null
           created_at?: string
           created_by?: string | null
+          document_kind?: string
           docusign_envelope_id?: string | null
           docusign_sent_at?: string | null
           docusign_signed_at?: string | null
@@ -1134,9 +1171,14 @@ export type Database = {
           docusign_voided_at?: string | null
           excluded_module_ids?: string[]
           id?: string
+          issued_at?: string | null
+          issued_snapshot?: Json | null
+          lead_id?: string | null
           metadata?: Json
           module_ids?: string[]
           notes?: string | null
+          offer?: Json | null
+          offer_reference?: string | null
           plan_slug?: string | null
           provision_error?: string | null
           provision_on_signature?: boolean
@@ -1144,6 +1186,9 @@ export type Database = {
           provision_status?: string
           provisioned_clone_id?: string | null
           service_tier?: string | null
+          signed_record_path?: string | null
+          signed_record_retained_at?: string | null
+          signed_record_sha256?: string | null
           status?: string
           updated_at?: string
           void_reason?: string | null
@@ -1159,6 +1204,7 @@ export type Database = {
           contact_id?: string | null
           created_at?: string
           created_by?: string | null
+          document_kind?: string
           docusign_envelope_id?: string | null
           docusign_sent_at?: string | null
           docusign_signed_at?: string | null
@@ -1166,9 +1212,14 @@ export type Database = {
           docusign_voided_at?: string | null
           excluded_module_ids?: string[]
           id?: string
+          issued_at?: string | null
+          issued_snapshot?: Json | null
+          lead_id?: string | null
           metadata?: Json
           module_ids?: string[]
           notes?: string | null
+          offer?: Json | null
+          offer_reference?: string | null
           plan_slug?: string | null
           provision_error?: string | null
           provision_on_signature?: boolean
@@ -1176,6 +1227,9 @@ export type Database = {
           provision_status?: string
           provisioned_clone_id?: string | null
           service_tier?: string | null
+          signed_record_path?: string | null
+          signed_record_retained_at?: string | null
+          signed_record_sha256?: string | null
           status?: string
           updated_at?: string
           void_reason?: string | null
@@ -1193,6 +1247,13 @@ export type Database = {
             columns: ["contact_id"]
             isOneToOne: false
             referencedRelation: "crm_contacts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "client_agreements_lead_id_fkey"
+            columns: ["lead_id"]
+            isOneToOne: false
+            referencedRelation: "waitlist_leads"
             referencedColumns: ["id"]
           },
           {
@@ -14573,6 +14634,7 @@ export type Database = {
         | "deployment_bundle_identity"
         | "calendar_booking_failed"
         | "crm_appointment_changed"
+        | "agreement_attention"
       notification_severity: "info" | "success" | "warning" | "error"
       overage_policy: "block" | "topup_only" | "pay_as_you_go"
       provisioning_method: "fork" | "template" | "clone"
@@ -15072,6 +15134,7 @@ export const Constants = {
         "deployment_bundle_identity",
         "calendar_booking_failed",
         "crm_appointment_changed",
+        "agreement_attention",
       ],
       notification_severity: ["info", "success", "warning", "error"],
       overage_policy: ["block", "topup_only", "pay_as_you_go"],

@@ -108,6 +108,36 @@ describe("decideProvisionOnSignature", () => {
       reason: "no_actor",
     });
   });
+
+  it("provisions a signed Subscription Agreement only once its signed record is retained", () => {
+    expect(
+      decideProvisionOnSignature(
+        agreement({ document_kind: "subscription", signed_record_path: null }),
+      ),
+    ).toMatchObject({ action: "skip", reason: "acceptance_not_retained" });
+    expect(
+      decideProvisionOnSignature(
+        agreement({ document_kind: "subscription", signed_record_path: "a-1/env-1-signed.pdf" }),
+      ),
+    ).toEqual({ action: "provision" });
+    // A Service Level Agreement never needed one, and still does not.
+    expect(
+      decideProvisionOnSignature(agreement({ document_kind: "sla", signed_record_path: null })),
+    ).toEqual({ action: "provision" });
+  });
+
+  it("names the earlier refusals before the retention one", () => {
+    expect(
+      decideProvisionOnSignature(
+        agreement({ document_kind: "subscription", provision_on_signature: false }),
+      ),
+    ).toMatchObject({ reason: "not_armed" });
+    expect(
+      decideProvisionOnSignature(
+        agreement({ document_kind: "subscription", provision_status: "provisioned" }),
+      ),
+    ).toMatchObject({ reason: "already_done" });
+  });
 });
 
 describe("effectiveModuleIds", () => {
