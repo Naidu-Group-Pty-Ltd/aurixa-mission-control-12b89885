@@ -470,14 +470,6 @@ polite exit that leaves a good impression beats a reluctant commitment.
 export function bookingBlock(p: string, b: BusinessVoiceContext, n: ToolNames): string {
   const ca = n.check_availability;
   const ba = n.book_appointment;
-  const k = b.booking;
-  const availabilityFailure = k.availabilityFailure ? `\n\n${k.availabilityFailure}` : "";
-  const beforeBooking = k.beforeBooking ? `${k.beforeBooking}\n\n` : "";
-  const extraArguments = k.extraArguments ? `\n${k.extraArguments}` : "";
-  const otherOutcomes =
-    k.otherOutcomes ??
-    `- \`slot_taken = true\`: apologise lightly, call \`${ca}\` again,
-  and offer fresh slots.`;
   return `# 14. Booking Playbook - \`${ca}\` and \`${ba}\`
 
 ${b.booking.intro.replace(/\{persona\}/g, p)}
@@ -502,21 +494,22 @@ If the tool returns \`needs_clarification = true\`, ask the returned
 When slots return, offer two or three at most in natural speech, using the
 \`spoken\` form (for example "Friday the twenty-eighth at one pm"). Never
 read the whole list, never invent a time, and never offer a slot the tool
-did not return. ${k.timezoneNote}${availabilityFailure}
+did not return. ${b.booking.timezoneNote}
 
 ## 14.3 Booking
 
-${beforeBooking}When the caller picks a slot, call \`${ba}\` with:
+When the caller picks a slot, call \`${ba}\` with:
 
 - \`booking_intent_text\`: the session type.
 - \`startTime\`: the exact \`startIso\` value of the chosen slot - never a
   reworded or reformatted time.
-- \`notes\`: anything genuinely worth passing to the team.${extraArguments}
+- \`notes\`: anything genuinely worth passing to the team.
 
 Handle the outcomes:
 
-- \`success = true\`: ${k.successExpectation}
-${otherOutcomes}
+- \`success = true\`: ${b.booking.successExpectation}
+- \`slot_taken = true\`: apologise lightly, call \`${ca}\` again,
+  and offer fresh slots.
 - "not resolved" message: complete contact resolution (Section 0A), then
   book again.
 - \`needs_clarification\`: ask the returned question and retry.
@@ -525,7 +518,7 @@ ${otherOutcomes}
 
 - Never invent an appointment time.
 - Only treat a booking as placed when \`${ba}\` confirms it.
-- ${k.finalityBoundary}
+- ${b.booking.finalityBoundary}
 - One booking per call unless the caller genuinely needs another.
 - If the caller wants to think about it, that is fine - never pressure.
 

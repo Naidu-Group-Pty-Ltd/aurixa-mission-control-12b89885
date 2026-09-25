@@ -75,25 +75,19 @@ form. So the code can ship first.
    queues it on the push to `main`, ahead of the Lovable publish. It is
    additive, and a notice raised before it lands is dropped rather than failing
    the booking it reports.
-5. **Converge the voice fleet** (each needs `VAPI_KEY`; the first also
-   `VAPI_WEBHOOK_SECRET_VALUE`, the value Mission Control checks as
+5. **Bring the booking tools up to date** (needs `VAPI_KEY`, and
+   `VAPI_WEBHOOK_SECRET_VALUE` — the value Mission Control checks as
    `VAPI_WEBHOOK_SECRET`):
    ```bash
    python3 scripts/voice/create-vapi-org-tools.py --dry-run   # what differs
    python3 scripts/voice/create-vapi-org-tools.py             # PATCH + read back
-   python3 scripts/voice/upload-knowledge-base.py            # text/plain, polled to `done`
-   python3 scripts/voice/apply-fleet-upgrade.py              # prompts, tools, KB file, all 12
    ```
-   The first brings `check_availability` and `book_appointment` to their
-   declarations — `book_appointment` takes the caller's `email`,
+   This brings `check_availability` and `book_appointment` to their
+   declarations: `book_appointment` takes the caller's `email`,
    `reschedule_existing` and a 45-second timeout, and both say something when
-   the calendar is slow. The second uploads the knowledge base, whose booking
-   answers now say the calendar confirms a booking there and then. Commit what
-   they write (`fleet-prompts/mc_org_tool_ids.json`,
-   `knowledge-base/vapi-file.json`): **`npm run check:voice-kb` fails in CI
-   until the new corpus is uploaded and recorded**, which is the guard working —
-   the fleet would otherwise answer from a knowledge base that says the team
-   confirms bookings by email.
+   the calendar is slow. Commit `fleet-prompts/mc_org_tool_ids.json` if it had
+   to create a tool. Until it runs, a caller with no email on file cannot
+   finish a booking, because the live declaration has nowhere to put one.
 6. **Deploy the waitlist site** (`aurixa-systems`). It asks this route for
    times on load; until step 2 it keeps its request form, and afterwards it
    books.
@@ -166,6 +160,35 @@ event type that no longer exists — is never spoken as a booking. The agent say
 nothing was booked and that the team will call back, and that promise is kept
 by a `calendar_booking_failed` notice. A refused key or a missing event type
 raises it at `error` severity, because it means every booking path is failing.
+
+### What the agents say about a booking
+
+The fleet's words change separately from its tools. The twelve prompts and the
+knowledge base still describe a booking made on a call as a request the team
+confirms by email. Once Cal.com is on, that understates what happens — Cal.com
+confirms the booking and emails the invitation at once — but it never claims
+more than happened, and every reply from `book_appointment` already tells the
+agent what to say for the outcome it got (`voiceBooking.pure.ts`).
+
+The new wording ships in a change of its own because its knowledge-base half
+cannot merge before the new corpus is uploaded: `npm run check:voice-kb` fails
+while the committed corpus differs from the copy `knowledge-base/vapi-file.json`
+records, so the fleet never answers from a corpus the repository does not hold.
+The prompts travel with it, so the prompts and the knowledge base never
+disagree. With `VAPI_KEY`, on that change's branch:
+
+```bash
+python3 scripts/voice/upload-knowledge-base.py   # text/plain, polled to `done`; commit vapi-file.json
+```
+
+then merge it, and from `main`:
+
+```bash
+python3 scripts/voice/apply-fleet-upgrade.py     # prompts and knowledge-base file, all 12
+```
+
+Uploading changes nothing live. The fleet reads the new file only once
+`apply-fleet-upgrade.py` points it there.
 
 ## What operators see
 

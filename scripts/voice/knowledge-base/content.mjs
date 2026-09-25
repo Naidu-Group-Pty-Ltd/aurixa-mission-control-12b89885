@@ -533,7 +533,7 @@ export const SECTIONS = [
   ...bullets([
     "A 30-minute private online session with the Aurixa team, booked from the link in the \"Questionnaire Received\" email within a 45-day booking window.",
     "Available times run Monday to Friday, 9:00 a.m. to 4:30 p.m. Sydney time, in 30-minute slots, with at least 24 hours' notice.",
-    "Booking a time confirms it in the Aurixa calendar there and then, whether it is booked on the scheduling page or on a call with an agent. The calendar invitation with the video link is emailed straight away to the address given.",
+    "A booking is a request. The Aurixa team confirms it by email, usually within one business day, and the calendar invitation with meeting access details follows separately from the team.",
     "In the session the team works through the questionnaire responses — the current operational environment, priority workflows, platform suitability and implementation considerations — and recommends the right pathway: a platform discovery session, a guided demonstration, or an enterprise requirements consultation.",
   ]),
   h2("Why is the strategic review worth the time?"),
@@ -542,7 +542,7 @@ export const SECTIONS = [
   ),
   h2("How long does the whole process take?"),
   p(
-    "The one published timing is the one to quote: the initial review is aimed at within two business days of the questionnaire being completed. A strategic review is confirmed the moment it is booked, so there is no wait for a confirmation. Everything after that depends on the organisation's own timing and what the strategic review recommends, so no agent should put a figure on it.",
+    "The two published timings are the ones to quote and the only ones: the initial review is aimed at within two business days of the questionnaire being completed, and a booking request is confirmed by email usually within one business day. Everything after that depends on the organisation's own timing and what the strategic review recommends, so no agent should put a figure on it.",
   ),
   h2("Can I skip a stage, or go straight to a demonstration?"),
   p(
@@ -645,7 +645,7 @@ export const SECTIONS = [
   h1("16. What a caller can do on this call"),
   h2("Can you book me in?"),
   p(
-    "The agents can offer real available times and book one. A booking made on a call is confirmed in the Aurixa calendar there and then, and the calendar invitation with the video link is emailed to the caller straight away. An agent says a session is booked only once the calendar has confirmed it, never offers a time the calendar did not, and moves a session the caller already holds rather than booking a second one.",
+    "The agents can offer real available times and place a booking request. A booking made on a call is a request: the Aurixa team confirms it by email, usually within one business day, and the calendar invitation follows separately. An agent never presents a booking as final and never invents a time that was not offered.",
   ),
   h2("Can you put me through to a person?"),
   p(
@@ -668,9 +668,9 @@ export const SECTIONS = [
     "I did not get the email. — It is worth checking the spam folder first; failing that the reference plus the work email reopens the questionnaire, and the team can resend against the reference.",
     "I applied with the wrong email. — Email admin@aurixasystems.com.au and the team will correct it against the application reference.",
     "How long until I hear back? — The team aims to complete the initial review within two business days of the questionnaire being completed.",
-    "When can the review be booked? — Monday to Friday, 9:00 a.m. to 4:30 p.m. Sydney time, at least 24 hours ahead, within a 45-day window; the calendar invitation with the video link is emailed as soon as it is booked.",
+    "When can the review be booked? — Monday to Friday, 9:00 a.m. to 4:30 p.m. Sydney time, at least 24 hours ahead, within a 45-day window; a separate confirmation email and calendar invitation follow from the team.",
     "Can I pay to skip the queue? — No. Aurixa does not accept payment for queue priority.",
-    "Is a booking made on a call confirmed? — Yes. Once the agent says it is booked, it is in the Aurixa calendar and the invitation with the video link is on its way by email.",
+    "Is a booking final once made on a call? — It is a request in the calendar; the Aurixa team confirms by email, usually within one business day.",
     "Is it only for big firms? — No. The smallest plan is designed for a solo adviser or a small team, and groups past 30 seats are an Enterprise conversation.",
     "Is the AML/CTF module compulsory? — No. Every plan can be taken without it, for less.",
     "Can modules be cancelled? — Yes, each add-on module is billed as its own monthly subscription and can be cancelled independently of the plan.",
@@ -692,7 +692,7 @@ export const SECTIONS = [
     "That the waitlist guarantees access, or that payment can move an application up it.",
     "A price that is not in this document, a discount, a negotiated term, or an enterprise figure — enterprise is scoped and quoted, so there is nothing to quote.",
     "A fix time, a resolution time, or a specific person who will call back. The published response targets are the only timings.",
-    "That a session is booked or moved before the calendar has confirmed it, or a time the calendar did not offer.",
+    "A booking as confirmed. A booking made on a call is a request, and the team confirms it by email.",
     "A ticket reference that was not returned by the system, or that a report is logged when it is not.",
     "A customer's name, a testimonial, a case study, or a measured result — how many hours saved, how much faster, how much more business. None is published, so any figure would be invented.",
     "That a walk-through in this document is a real client's story. They are illustrative.",

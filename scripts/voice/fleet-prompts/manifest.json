@@ -10,7 +10,7 @@
       "transfer_to_human_mc",
       "end_call_tool"
     ],
-    "chars": 29687,
+    "chars": 29745,
     "file": "front_desk.md"
   },
   "review_booking": {
@@ -25,9 +25,8 @@
       "transfer_to_human_mc",
       "end_call_tool"
     ],
-    "chars": 30548,
-    "file": "review_booking.md",
-    "first_message": "Hi, it's Sandra - I look after bookings for the Aurixa team. Is there a day or a time of day that suits you best?"
+    "chars": 28040,
+    "file": "review_booking.md"
   },
   "solutions": {
     "assistant_id": "5c639d89-423a-4ea8-ae70-58a10edae617",
@@ -41,7 +40,7 @@
       "transfer_to_human_mc",
       "end_call_tool"
     ],
-    "chars": 30822,
+    "chars": 29104,
     "file": "solutions.md"
   },
   "support": {
@@ -55,7 +54,7 @@
       "transfer_to_human_mc",
       "end_call_tool"
     ],
-    "chars": 30613,
+    "chars": 30671,
     "file": "support.md"
   },
   "questionnaire": {
@@ -69,7 +68,7 @@
       "book_appointment",
       "end_call_tool"
     ],
-    "chars": 29802,
+    "chars": 28084,
     "file": "questionnaire.md"
   },
   "review_follow_up": {
@@ -83,7 +82,7 @@
       "book_appointment",
       "end_call_tool"
     ],
-    "chars": 29014,
+    "chars": 27273,
     "file": "review_follow_up.md"
   },
   "confirmation": {
@@ -97,7 +96,7 @@
       "book_appointment",
       "end_call_tool"
     ],
-    "chars": 28580,
+    "chars": 26963,
     "file": "confirmation.md"
   },
   "reminder": {
@@ -111,7 +110,7 @@
       "book_appointment",
       "end_call_tool"
     ],
-    "chars": 28150,
+    "chars": 26436,
     "file": "reminder.md"
   },
   "no_show": {
@@ -125,7 +124,7 @@
       "book_appointment",
       "end_call_tool"
     ],
-    "chars": 28257,
+    "chars": 26539,
     "file": "no_show.md"
   },
   "kickoff": {
@@ -139,7 +138,7 @@
       "book_appointment",
       "end_call_tool"
     ],
-    "chars": 28524,
+    "chars": 26806,
     "file": "kickoff.md"
   },
   "nurture": {
@@ -153,7 +152,7 @@
       "book_appointment",
       "end_call_tool"
     ],
-    "chars": 28853,
+    "chars": 27135,
     "file": "nurture.md"
   },
   "checkin": {
@@ -167,7 +166,7 @@
       "book_appointment",
       "end_call_tool"
     ],
-    "chars": 28909,
+    "chars": 27191,
     "file": "checkin.md"
   }
 }
