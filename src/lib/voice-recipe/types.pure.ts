@@ -168,6 +168,21 @@ export interface BusinessVoiceContext {
     finalityBoundary: string;
     /** The absolute "always" rule every booking agent carries about what a booking means. */
     afterBookingRule: string;
+    /**
+     * The optional parts below are for a booking tool that answers more than
+     * "booked" or "slot taken" - Mission Control's own, on Cal.com. Each is
+     * absent for every other business, and an absent part renders the section
+     * exactly as it was before the part existed, so a fleet built for a client
+     * is unchanged by them.
+     */
+    /** Paragraph after the timezone note in 14.2: what to do when availability cannot be read. */
+    availabilityFailure?: string;
+    /** Paragraph opening 14.3, before the tool call. */
+    beforeBooking?: string;
+    /** Bullets appended to the booking tool's argument list in 14.3. */
+    extraArguments?: string;
+    /** The outcome bullets after `success = true`, replacing the default `slot_taken` bullet. */
+    otherOutcomes?: string;
   };
   absolute: {
     baseNever: string[];
