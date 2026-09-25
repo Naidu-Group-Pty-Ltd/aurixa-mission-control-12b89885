@@ -87,7 +87,11 @@ form. So the code can ship first.
    `reschedule_existing` and a 45-second timeout, and both say something when
    the calendar is slow. Commit `fleet-prompts/mc_org_tool_ids.json` if it had
    to create a tool. Until it runs, a caller with no email on file cannot
-   finish a booking, because the live declaration has nowhere to put one.
+   finish a booking, because the live declaration has nowhere to put one. Run
+   it after Mission Control is published with the Cal.com code, never before:
+   the new `book_appointment` description tells the agent a success is a
+   confirmed booking with the invitation already emailed, which the earlier
+   code does not do.
 6. **Deploy the waitlist site** (`aurixa-systems`). It asks this route for
    times on load; until step 2 it keeps its request form, and afterwards it
    books.
