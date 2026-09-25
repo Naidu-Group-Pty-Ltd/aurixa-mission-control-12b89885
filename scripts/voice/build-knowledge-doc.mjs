@@ -160,8 +160,8 @@ if (process.argv.includes("--check")) {
         `  on disk        ${onDisk.length} characters\n` +
         `  content module ${md.length} characters\n\n` +
         `That file is generated. Edit knowledge-base/content.mjs and re-run this script.\n` +
-        `Remember the uploaded copy: re-upload to VAPI and record the new file id in\n` +
-        `knowledge-base/vapi-file.json, or the live agents keep answering from the old one.`,
+        `Remember the uploaded copy: scripts/voice/upload-knowledge-base.py uploads it and\n` +
+        `records the new file id, or the live agents keep answering from the old one.`,
     );
     process.exit(1);
   }
@@ -176,9 +176,10 @@ if (process.argv.includes("--check")) {
       `the committed knowledge base is not the one the live agents read:\n` +
         `  committed          sha256 ${sha256}\n` +
         `  uploaded to VAPI   sha256 ${uploaded.sha256} (file ${uploaded.file_id})\n\n` +
-        `Upload the committed file to VAPI as text/plain (see vapi-file.json), check the\n` +
-        `store reports status=done, record its file id, bytes and SHA-256 there, and\n` +
-        `re-point the fleet with apply-fleet-upgrade.py.`,
+        `Run scripts/voice/upload-knowledge-base.py - it uploads the committed file as\n` +
+        `text/plain, waits for the store to report status=done, and records the file id,\n` +
+        `bytes and SHA-256 in vapi-file.json - then re-point the fleet with\n` +
+        `apply-fleet-upgrade.py.`,
     );
     process.exit(1);
   }

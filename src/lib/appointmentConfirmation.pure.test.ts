@@ -60,8 +60,9 @@ describe("planConfirmationEmail", () => {
   });
 
   it("says the invitation comes separately rather than being one", () => {
-    // The platform creates no calendar invitation, so the email must not read
-    // as one — this is the same sentence the agent speaks on the call.
+    // Cal.com sends the invitation for a booking it holds, and a tracker
+    // booking has none, so this email must never read as the invitation — this
+    // is the same sentence the agent speaks on the call.
     const plan = planConfirmationEmail(base);
     if (!plan.send) throw new Error("unreachable");
     expect(plan.text).toContain("calendar invitation follows separately");
@@ -106,6 +107,35 @@ describe("planConfirmationEmail", () => {
     expect(plan.text).not.toContain("Hi ,");
   });
 
+  it("carries the video link Cal.com issued, in both bodies", () => {
+    const url = "https://app.cal.com/video/abc123";
+    const plan = planConfirmationEmail({ ...base, meetingUrl: url });
+    if (!plan.send) throw new Error("unreachable");
+    expect(plan.text).toContain(`Join the video call: ${url}`);
+    expect(plan.html).toContain(`<a href="${url}">${url}</a>`);
+    // The invitation sentence survives: the link is an addition, not a
+    // replacement for the invitation Cal.com sends.
+    expect(plan.text).toContain("calendar invitation follows separately");
+  });
+
+  it("says nothing about a link when there is none, rather than an empty line", () => {
+    for (const meetingUrl of [undefined, null, "", "   "]) {
+      const plan = planConfirmationEmail({ ...base, meetingUrl });
+      if (!plan.send) throw new Error("unreachable");
+      expect(plan.text).not.toContain("Join the video call");
+      expect(plan.html).not.toContain("href");
+    }
+  });
+
+  it("refuses a link that is not http(s), because it is written into an href", () => {
+    for (const meetingUrl of ["javascript:alert(1)", "data:text/html,x", 'https://x" onclick="y']) {
+      const plan = planConfirmationEmail({ ...base, meetingUrl });
+      if (!plan.send) throw new Error("unreachable");
+      expect(plan.html).not.toContain("href");
+      expect(plan.text).not.toContain("Join the video call");
+    }
+  });
+
   it("names an unmapped appointment kind generically instead of leaving a hole", () => {
     const plan = planConfirmationEmail({ ...base, sessionLabel: null });
     if (!plan.send) throw new Error("unreachable");
@@ -142,6 +172,15 @@ describe("operatorBookingNotice", () => {
     const anonymous = { ...base, fullName: "  ", firstName: "  " };
     expect(operatorBookingNotice(anonymous, planConfirmationEmail(anonymous)).title).toBe(
       "An unnamed contact booked a strategic review",
+    );
+  });
+
+  it("hands the operator the video link where there is one", () => {
+    const input = { ...base, meetingUrl: "https://app.cal.com/video/abc123" };
+    const notice = operatorBookingNotice(input, planConfirmationEmail(input));
+    expect(notice.body).toContain("Video call: https://app.cal.com/video/abc123");
+    expect(operatorBookingNotice(base, planConfirmationEmail(base)).body).not.toContain(
+      "Video call",
     );
   });
 

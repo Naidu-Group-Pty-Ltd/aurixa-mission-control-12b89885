@@ -14,6 +14,7 @@ import {
   type AppointmentConfirmationInput,
 } from "@/lib/appointmentConfirmation.pure";
 import { notifyOperators } from "@/server/audit.server";
+import { readCalcomMirror } from "@/server/calcom.pure";
 import { defaultMailbox, isGraphConfigured, sendMail } from "@/server/graph-client";
 import { enqueueOutboundForTrigger, type EnqueueOutcome } from "@/server/voice.server";
 
@@ -311,6 +312,8 @@ async function announceAppointment(appointment: ScheduledAppointment): Promise<v
       email: contact?.email ?? null,
       graphConfigured: isGraphConfigured(),
       mailbox: defaultMailbox(),
+      // Present where Cal.com holds the booking: its video link.
+      meetingUrl: readCalcomMirror(appointment.metadata)?.meetingUrl ?? null,
     };
 
     const plan = planConfirmationEmail(input);
@@ -472,4 +475,153 @@ export async function onAppointmentStatusChange(
     if (cancelError) console.error("[journey] reminder cancel failed:", cancelError.message);
   }
   return null;
+}
+
+/* ------------------------- changes made in the calendar ------------------------ */
+
+/** Who an appointment is with, for a notice title. Never throws. */
+async function appointmentParty(contactId: string | null): Promise<string> {
+  if (!contactId) return "An unnamed contact";
+  const { data, error } = await supabaseAdmin
+    .from("crm_contacts")
+    .select("first_name, last_name")
+    .eq("id", contactId)
+    .maybeSingle();
+  if (error) console.error("[journey] contact read for a change notice failed:", error.message);
+  const who = [data?.first_name, data?.last_name].filter(Boolean).join(" ").trim();
+  return who || "An unnamed contact";
+}
+
+function whenIn(startsAt: string, timezone: string | null): string {
+  const zone = timezone || "Australia/Sydney";
+  try {
+    return new Intl.DateTimeFormat("en-AU", {
+      timeZone: zone,
+      weekday: "long",
+      day: "numeric",
+      month: "long",
+      hour: "numeric",
+      minute: "2-digit",
+      hour12: true,
+    }).format(new Date(startsAt));
+  } catch {
+    return startsAt;
+  }
+}
+
+/**
+ * An appointment moved to a new time — on a call with the voice assistant, or
+ * in Cal.com by the attendee's reschedule link or the host. The row has
+ * already been moved; this is the consequences.
+ *
+ * Every call still waiting on the appointment was scheduled against the OLD
+ * time and carries it in its variables, so each is cancelled. The reminder is
+ * re-queued for the new time, and so is any other call that had not happened
+ * yet (a confirmation call a minute after booking, say) — but not one that
+ * already happened, because nothing here should ring somebody twice to confirm
+ * the same session.
+ */
+export async function onAppointmentRescheduled(
+  appointmentId: string,
+  previousStartsAt: string,
+  via: "voice_agent" | "calcom",
+  actorUserId?: string | null,
+): Promise<EnqueueOutcome | null> {
+  const { data: appointment, error } = await supabaseAdmin
+    .from("crm_appointments")
+    .select("id, kind, starts_at, timezone, journey_id, contact_id")
+    .eq("id", appointmentId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!appointment) return null;
+
+  const { data: cancelled, error: cancelError } = await supabaseAdmin
+    .from("voice_outbound_jobs")
+    .update({ status: "canceled", last_error: "appointment_rescheduled" })
+    .eq("appointment_id", appointmentId)
+    .in("status", ["pending", "dispatching"])
+    .select("trigger_type");
+  if (cancelError) {
+    console.error("[journey] reminder cancel on reschedule failed:", cancelError.message);
+  }
+
+  const label = SESSION_LABEL[appointment.kind] ?? "session";
+  const who = await appointmentParty(appointment.contact_id);
+  await notifyOperators({
+    kind: "crm_appointment_changed",
+    severity: "info",
+    title: `${who} moved their ${label}`,
+    body:
+      `From ${whenIn(previousStartsAt, appointment.timezone)} to ` +
+      `${whenIn(appointment.starts_at, appointment.timezone)} (${appointment.timezone || "Australia/Sydney"}). ` +
+      (via === "voice_agent"
+        ? "Moved on a call with the voice assistant; Cal.com sent the updated invitation."
+        : "Moved in Cal.com, by the attendee's reschedule link or by the host."),
+    url: "/crm",
+    metadata: { appointment_id: appointment.id, previous_starts_at: previousStartsAt, via },
+  });
+
+  if (!appointment.journey_id) return null;
+  const scheduled = SCHEDULED_TRIGGERS[appointment.kind] ?? [];
+  const requeue = new Set<VoiceTriggerType>(scheduled.filter((t) => t === "session_reminder"));
+  if (!cancelError) {
+    for (const row of cancelled ?? []) {
+      if (scheduled.includes(row.trigger_type)) requeue.add(row.trigger_type);
+    }
+  }
+  if (requeue.size === 0) return null;
+  const subject = await subjectForJourney(appointment.journey_id);
+  if (!subject) return null;
+  let last: EnqueueOutcome | null = null;
+  for (const trigger of requeue) {
+    last = await fire(trigger, subject, {
+      appointmentId: appointment.id,
+      appointmentAt: new Date(appointment.starts_at),
+      extras: {
+        sessionTime: appointment.starts_at,
+        sessionLabel: SESSION_LABEL[appointment.kind],
+      },
+      actorUserId,
+    });
+  }
+  return last;
+}
+
+/**
+ * An appointment cancelled, or its attendee marked absent, in Cal.com. The
+ * row's status has already been written; this revokes or fires the calls
+ * through the one status path the tracker uses, and tells the operators about
+ * a cancellation (a no-show is the host's own mark, so it needs no notice).
+ */
+export async function onAppointmentChangedInCalendar(
+  appointmentId: string,
+  change: { status: "canceled" | "no_show"; reason?: string | null },
+): Promise<void> {
+  await onAppointmentStatusChange(appointmentId, change.status);
+  if (change.status !== "canceled") return;
+
+  const { data: appointment, error } = await supabaseAdmin
+    .from("crm_appointments")
+    .select("id, kind, starts_at, timezone, contact_id")
+    .eq("id", appointmentId)
+    .maybeSingle();
+  if (error) {
+    console.error("[journey] appointment read for a cancellation notice failed:", error.message);
+    return;
+  }
+  if (!appointment) return;
+  const label = SESSION_LABEL[appointment.kind] ?? "session";
+  const who = await appointmentParty(appointment.contact_id);
+  const reason = (change.reason ?? "").trim();
+  await notifyOperators({
+    kind: "crm_appointment_changed",
+    severity: "warning",
+    title: `${who} cancelled their ${label}`,
+    body:
+      `${whenIn(appointment.starts_at, appointment.timezone)} (${appointment.timezone || "Australia/Sydney"}) ` +
+      `was cancelled in Cal.com${reason ? ` — "${reason.slice(0, 300)}"` : ""}. Its reminder calls ` +
+      "have been withdrawn.",
+    url: "/crm",
+    metadata: { appointment_id: appointment.id, reason: reason || null },
+  });
 }

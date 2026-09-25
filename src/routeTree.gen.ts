@@ -171,6 +171,7 @@ import { Route as ApiPublicSupportTicketsRouteImport } from './routes/api.public
 import { Route as ApiPublicSupportAssistantActivityRouteImport } from './routes/api.public.support.assistant-activity'
 import { Route as ApiPublicStripeWebhookRouteImport } from './routes/api.public.stripe.webhook'
 import { Route as ApiPublicStorefrontWalletRouteImport } from './routes/api.public.storefront.wallet'
+import { Route as ApiPublicStorefrontStrategicReviewRouteImport } from './routes/api.public.storefront.strategic-review'
 import { Route as ApiPublicStorefrontSetupRouteImport } from './routes/api.public.storefront.setup'
 import { Route as ApiPublicStorefrontSessionRouteImport } from './routes/api.public.storefront.session'
 import { Route as ApiPublicStorefrontPlanChangeRouteImport } from './routes/api.public.storefront.plan-change'
@@ -193,6 +194,7 @@ import { Route as ApiPublicIntegrationsSecretsRouteImport } from './routes/api.p
 import { Route as ApiPublicHooksDocusignRouteImport } from './routes/api.public.hooks.docusign'
 import { Route as ApiPublicHooksCodexSecurityRouteImport } from './routes/api.public.hooks.codex-security'
 import { Route as ApiPublicHooksCodexRemediationRouteImport } from './routes/api.public.hooks.codex-remediation'
+import { Route as ApiPublicHooksCalcomRouteImport } from './routes/api.public.hooks.calcom'
 import { Route as ApiPublicHandoffsConsentRouteImport } from './routes/api.public.handoffs.consent'
 import { Route as ApiPublicHandoffBeaconRouteImport } from './routes/api.public.handoff.beacon'
 import { Route as ApiPublicHandoffAuditIngestRouteImport } from './routes/api.public.handoff.audit-ingest'
@@ -1057,6 +1059,12 @@ const ApiPublicStorefrontWalletRoute =
     path: '/api/public/storefront/wallet',
     getParentRoute: () => rootRouteImport,
   } as any)
+const ApiPublicStorefrontStrategicReviewRoute =
+  ApiPublicStorefrontStrategicReviewRouteImport.update({
+    id: '/api/public/storefront/strategic-review',
+    path: '/api/public/storefront/strategic-review',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiPublicStorefrontSetupRoute =
   ApiPublicStorefrontSetupRouteImport.update({
     id: '/api/public/storefront/setup',
@@ -1181,6 +1189,11 @@ const ApiPublicHooksCodexRemediationRoute =
     path: '/api/public/hooks/codex-remediation',
     getParentRoute: () => rootRouteImport,
   } as any)
+const ApiPublicHooksCalcomRoute = ApiPublicHooksCalcomRouteImport.update({
+  id: '/api/public/hooks/calcom',
+  path: '/api/public/hooks/calcom',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiPublicHandoffsConsentRoute =
   ApiPublicHandoffsConsentRouteImport.update({
     id: '/api/public/handoffs/consent',
@@ -1482,6 +1495,7 @@ export interface FileRoutesByFullPath {
   '/api/public/handoff/audit-ingest': typeof ApiPublicHandoffAuditIngestRoute
   '/api/public/handoff/beacon': typeof ApiPublicHandoffBeaconRoute
   '/api/public/handoffs/consent': typeof ApiPublicHandoffsConsentRoute
+  '/api/public/hooks/calcom': typeof ApiPublicHooksCalcomRoute
   '/api/public/hooks/codex-remediation': typeof ApiPublicHooksCodexRemediationRoute
   '/api/public/hooks/codex-security': typeof ApiPublicHooksCodexSecurityRoute
   '/api/public/hooks/docusign': typeof ApiPublicHooksDocusignRoute
@@ -1504,6 +1518,7 @@ export interface FileRoutesByFullPath {
   '/api/public/storefront/plan-change': typeof ApiPublicStorefrontPlanChangeRoute
   '/api/public/storefront/session': typeof ApiPublicStorefrontSessionRoute
   '/api/public/storefront/setup': typeof ApiPublicStorefrontSetupRoute
+  '/api/public/storefront/strategic-review': typeof ApiPublicStorefrontStrategicReviewRoute
   '/api/public/storefront/wallet': typeof ApiPublicStorefrontWalletRoute
   '/api/public/stripe/webhook': typeof ApiPublicStripeWebhookRouteWithChildren
   '/api/public/support/assistant-activity': typeof ApiPublicSupportAssistantActivityRoute
@@ -1691,6 +1706,7 @@ export interface FileRoutesByTo {
   '/api/public/handoff/audit-ingest': typeof ApiPublicHandoffAuditIngestRoute
   '/api/public/handoff/beacon': typeof ApiPublicHandoffBeaconRoute
   '/api/public/handoffs/consent': typeof ApiPublicHandoffsConsentRoute
+  '/api/public/hooks/calcom': typeof ApiPublicHooksCalcomRoute
   '/api/public/hooks/codex-remediation': typeof ApiPublicHooksCodexRemediationRoute
   '/api/public/hooks/codex-security': typeof ApiPublicHooksCodexSecurityRoute
   '/api/public/hooks/docusign': typeof ApiPublicHooksDocusignRoute
@@ -1713,6 +1729,7 @@ export interface FileRoutesByTo {
   '/api/public/storefront/plan-change': typeof ApiPublicStorefrontPlanChangeRoute
   '/api/public/storefront/session': typeof ApiPublicStorefrontSessionRoute
   '/api/public/storefront/setup': typeof ApiPublicStorefrontSetupRoute
+  '/api/public/storefront/strategic-review': typeof ApiPublicStorefrontStrategicReviewRoute
   '/api/public/storefront/wallet': typeof ApiPublicStorefrontWalletRoute
   '/api/public/stripe/webhook': typeof ApiPublicStripeWebhookRouteWithChildren
   '/api/public/support/assistant-activity': typeof ApiPublicSupportAssistantActivityRoute
@@ -1902,6 +1919,7 @@ export interface FileRoutesById {
   '/api/public/handoff/audit-ingest': typeof ApiPublicHandoffAuditIngestRoute
   '/api/public/handoff/beacon': typeof ApiPublicHandoffBeaconRoute
   '/api/public/handoffs/consent': typeof ApiPublicHandoffsConsentRoute
+  '/api/public/hooks/calcom': typeof ApiPublicHooksCalcomRoute
   '/api/public/hooks/codex-remediation': typeof ApiPublicHooksCodexRemediationRoute
   '/api/public/hooks/codex-security': typeof ApiPublicHooksCodexSecurityRoute
   '/api/public/hooks/docusign': typeof ApiPublicHooksDocusignRoute
@@ -1924,6 +1942,7 @@ export interface FileRoutesById {
   '/api/public/storefront/plan-change': typeof ApiPublicStorefrontPlanChangeRoute
   '/api/public/storefront/session': typeof ApiPublicStorefrontSessionRoute
   '/api/public/storefront/setup': typeof ApiPublicStorefrontSetupRoute
+  '/api/public/storefront/strategic-review': typeof ApiPublicStorefrontStrategicReviewRoute
   '/api/public/storefront/wallet': typeof ApiPublicStorefrontWalletRoute
   '/api/public/stripe/webhook': typeof ApiPublicStripeWebhookRouteWithChildren
   '/api/public/support/assistant-activity': typeof ApiPublicSupportAssistantActivityRoute
@@ -2114,6 +2133,7 @@ export interface FileRouteTypes {
     | '/api/public/handoff/audit-ingest'
     | '/api/public/handoff/beacon'
     | '/api/public/handoffs/consent'
+    | '/api/public/hooks/calcom'
     | '/api/public/hooks/codex-remediation'
     | '/api/public/hooks/codex-security'
     | '/api/public/hooks/docusign'
@@ -2136,6 +2156,7 @@ export interface FileRouteTypes {
     | '/api/public/storefront/plan-change'
     | '/api/public/storefront/session'
     | '/api/public/storefront/setup'
+    | '/api/public/storefront/strategic-review'
     | '/api/public/storefront/wallet'
     | '/api/public/stripe/webhook'
     | '/api/public/support/assistant-activity'
@@ -2323,6 +2344,7 @@ export interface FileRouteTypes {
     | '/api/public/handoff/audit-ingest'
     | '/api/public/handoff/beacon'
     | '/api/public/handoffs/consent'
+    | '/api/public/hooks/calcom'
     | '/api/public/hooks/codex-remediation'
     | '/api/public/hooks/codex-security'
     | '/api/public/hooks/docusign'
@@ -2345,6 +2367,7 @@ export interface FileRouteTypes {
     | '/api/public/storefront/plan-change'
     | '/api/public/storefront/session'
     | '/api/public/storefront/setup'
+    | '/api/public/storefront/strategic-review'
     | '/api/public/storefront/wallet'
     | '/api/public/stripe/webhook'
     | '/api/public/support/assistant-activity'
@@ -2533,6 +2556,7 @@ export interface FileRouteTypes {
     | '/api/public/handoff/audit-ingest'
     | '/api/public/handoff/beacon'
     | '/api/public/handoffs/consent'
+    | '/api/public/hooks/calcom'
     | '/api/public/hooks/codex-remediation'
     | '/api/public/hooks/codex-security'
     | '/api/public/hooks/docusign'
@@ -2555,6 +2579,7 @@ export interface FileRouteTypes {
     | '/api/public/storefront/plan-change'
     | '/api/public/storefront/session'
     | '/api/public/storefront/setup'
+    | '/api/public/storefront/strategic-review'
     | '/api/public/storefront/wallet'
     | '/api/public/stripe/webhook'
     | '/api/public/support/assistant-activity'
@@ -2723,6 +2748,7 @@ export interface RootRouteChildren {
   ApiPublicHandoffAuditIngestRoute: typeof ApiPublicHandoffAuditIngestRoute
   ApiPublicHandoffBeaconRoute: typeof ApiPublicHandoffBeaconRoute
   ApiPublicHandoffsConsentRoute: typeof ApiPublicHandoffsConsentRoute
+  ApiPublicHooksCalcomRoute: typeof ApiPublicHooksCalcomRoute
   ApiPublicHooksCodexRemediationRoute: typeof ApiPublicHooksCodexRemediationRoute
   ApiPublicHooksCodexSecurityRoute: typeof ApiPublicHooksCodexSecurityRoute
   ApiPublicHooksDocusignRoute: typeof ApiPublicHooksDocusignRoute
@@ -2745,6 +2771,7 @@ export interface RootRouteChildren {
   ApiPublicStorefrontPlanChangeRoute: typeof ApiPublicStorefrontPlanChangeRoute
   ApiPublicStorefrontSessionRoute: typeof ApiPublicStorefrontSessionRoute
   ApiPublicStorefrontSetupRoute: typeof ApiPublicStorefrontSetupRoute
+  ApiPublicStorefrontStrategicReviewRoute: typeof ApiPublicStorefrontStrategicReviewRoute
   ApiPublicStorefrontWalletRoute: typeof ApiPublicStorefrontWalletRoute
   ApiPublicStripeWebhookRoute: typeof ApiPublicStripeWebhookRouteWithChildren
   ApiPublicSupportAssistantActivityRoute: typeof ApiPublicSupportAssistantActivityRoute
@@ -3905,6 +3932,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicStorefrontWalletRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/storefront/strategic-review': {
+      id: '/api/public/storefront/strategic-review'
+      path: '/api/public/storefront/strategic-review'
+      fullPath: '/api/public/storefront/strategic-review'
+      preLoaderRoute: typeof ApiPublicStorefrontStrategicReviewRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/storefront/setup': {
       id: '/api/public/storefront/setup'
       path: '/api/public/storefront/setup'
@@ -4057,6 +4091,13 @@ declare module '@tanstack/react-router' {
       path: '/api/public/hooks/codex-remediation'
       fullPath: '/api/public/hooks/codex-remediation'
       preLoaderRoute: typeof ApiPublicHooksCodexRemediationRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/hooks/calcom': {
+      id: '/api/public/hooks/calcom'
+      path: '/api/public/hooks/calcom'
+      fullPath: '/api/public/hooks/calcom'
+      preLoaderRoute: typeof ApiPublicHooksCalcomRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/public/handoffs/consent': {
@@ -4489,6 +4530,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPublicHandoffAuditIngestRoute: ApiPublicHandoffAuditIngestRoute,
   ApiPublicHandoffBeaconRoute: ApiPublicHandoffBeaconRoute,
   ApiPublicHandoffsConsentRoute: ApiPublicHandoffsConsentRoute,
+  ApiPublicHooksCalcomRoute: ApiPublicHooksCalcomRoute,
   ApiPublicHooksCodexRemediationRoute: ApiPublicHooksCodexRemediationRoute,
   ApiPublicHooksCodexSecurityRoute: ApiPublicHooksCodexSecurityRoute,
   ApiPublicHooksDocusignRoute: ApiPublicHooksDocusignRoute,
@@ -4511,6 +4553,8 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPublicStorefrontPlanChangeRoute: ApiPublicStorefrontPlanChangeRoute,
   ApiPublicStorefrontSessionRoute: ApiPublicStorefrontSessionRoute,
   ApiPublicStorefrontSetupRoute: ApiPublicStorefrontSetupRoute,
+  ApiPublicStorefrontStrategicReviewRoute:
+    ApiPublicStorefrontStrategicReviewRoute,
   ApiPublicStorefrontWalletRoute: ApiPublicStorefrontWalletRoute,
   ApiPublicStripeWebhookRoute: ApiPublicStripeWebhookRouteWithChildren,
   ApiPublicSupportAssistantActivityRoute:

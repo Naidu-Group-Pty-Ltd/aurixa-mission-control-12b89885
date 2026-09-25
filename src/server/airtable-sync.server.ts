@@ -124,6 +124,53 @@ async function fetchAirtablePage(table: string, offset?: string): Promise<Airtab
   return (await res.json()) as AirtablePage;
 }
 
+/**
+ * One filtered read of one table, answered live rather than from the mirror.
+ *
+ * For a decision that cannot wait for the next sync tick: the Stage 3
+ * scheduler asks whether an applicant may book the moment they click, and the
+ * mirror is up to ten minutes behind the grant that let them in. The same
+ * gateway and credential as the sync; throws on any failure, so a caller can
+ * tell "Airtable said no" from "Airtable could not be asked".
+ */
+export async function queryAirtableTable(
+  table: string,
+  query: { filterByFormula: string; maxRecords?: number },
+  timeoutMs = 8_000,
+): Promise<AirtableRecord[]> {
+  const lovableKey = process.env.LOVABLE_API_KEY;
+  const airtableKey = process.env.AIRTABLE_API_KEY;
+  if (!lovableKey) throw new Error("LOVABLE_API_KEY not configured");
+  if (!airtableKey) throw new Error("AIRTABLE_API_KEY not configured");
+
+  const params = new URLSearchParams({
+    filterByFormula: query.filterByFormula,
+    maxRecords: String(query.maxRecords ?? 1),
+  });
+  const url = `${GATEWAY_URL}/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(table)}?${params}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${lovableKey}`,
+        "X-Connection-Api-Key": airtableKey,
+      },
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`Airtable gateway ${res.status} on ${table}: ${body.slice(0, 300)}`);
+    }
+    const page = (await res.json()) as Partial<AirtablePage>;
+    if (!Array.isArray(page.records))
+      throw new Error(`Airtable gateway on ${table}: no records array`);
+    return page.records;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 type TableWalk = { records: AirtableRecord[]; pages: number; truncated: boolean };
 
 /** Every record in one table, paged to the end (or to `MAX_PAGES`). */

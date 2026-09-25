@@ -7,14 +7,50 @@
 //   { results: [{ toolCallId, result: "<stringified JSON>" }] }
 // VAPI matches results to calls by id; a bare JSON body is silently ignored.
 //
-// Availability is deterministic, not model-resolved: the strategic-review
-// booking rules are code here (see BOOKING_WINDOW — Mon–Fri 09:00–16:30
-// Australia/Sydney, 30-minute slots, 24 hours' notice, 45 days ahead), so a
-// promise like "we can do Tuesday at 3" never depends on a model's date
-// arithmetic. That constant is the authority; this comment used to quote the
-// NPC window it replaced, which is how a reader comes to trust the wrong hours.
+// Availability is deterministic, not model-resolved, so a promise like "we can
+// do Tuesday at 3" never depends on a model's date arithmetic. Where
+// `CALCOM_API_KEY` is set the calendar is Cal.com (`calcom.server.ts`): it
+// answers availability against every booking from every path — this fleet,
+// the Stage 3 scheduler on the waitlist site, anything booked in Cal.com
+// itself — holds the booking, and sends the invitation with the video link.
+// Without the key, BOOKING_WINDOW below is the calendar (Mon–Fri, 30-minute
+// slots ending by 16:30 Australia/Sydney, 24 hours' notice, 45 days ahead)
+// checked against `crm_appointments` alone. That constant is the authority on
+// the legacy path; this comment used to quote the NPC window it replaced,
+// which is how a reader comes to trust the wrong hours.
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import type { Json } from "@/integrations/supabase/types";
+import { notifyOperators } from "@/server/audit.server";
+import {
+  CALCOM_EVENT_TYPE_SLUGS,
+  mirrorFromBooking,
+  readCalcomMirror,
+  type CalcomBooking,
+  type CalcomFailure,
+  type CalcomMirror,
+} from "@/server/calcom.pure";
+import {
+  calcomConfig,
+  createCalcomBooking,
+  findLiveCalcomBooking,
+  listUpcomingCalcomBookings,
+  rescheduleCalcomBooking,
+  type CalcomConfig,
+} from "@/server/calcom.server";
+import { calcomFreeSlots } from "@/server/calendar.server";
+import {
+  alreadyBookedReply,
+  availabilityUnavailableReply,
+  bookedReply,
+  bookingNotConfirmedReply,
+  calendarFaultOf,
+  heldBookingOfKind,
+  nearestAlternatives,
+  needsEmailReply,
+  rescheduledReply,
+  slotTakenReply,
+  type SpokenSlot,
+} from "@/server/voiceBooking.pure";
 import { normalizePhone, phonesMatch } from "@/server/voice.server";
 import { SUPPORT_SOURCE_SLUG, ingestSupportTicket } from "@/server/support-tickets.server";
 import { draftTicketFromSpeech, usableEmail } from "@/server/voiceTicketDraft.pure";
@@ -532,6 +568,17 @@ async function handleGetCallContext(tc: ToolCall, message: Rec): Promise<Record<
       message: "No stored caller context found. Continue the conversation and resolve the contact.",
     };
   }
+  // The address on file, so a booking specialist handed this caller can check
+  // where the calendar invitation will go instead of asking for it cold —
+  // `resolve_contact` returns it, and a transfer used to lose it here.
+  const { data: contact, error: contactError } = await supabaseAdmin
+    .from("crm_contacts")
+    .select("email")
+    .eq("id", ctx.contact_id)
+    .maybeSingle();
+  if (contactError) {
+    console.error("[voice-tools] get_call_context contact read failed:", contactError.message);
+  }
   return {
     success: true,
     contextFound: true,
@@ -541,6 +588,7 @@ async function handleGetCallContext(tc: ToolCall, message: Rec): Promise<Record<
     firstName: ctx.first_name,
     fullName: ctx.full_name,
     phone: ctx.caller_phone,
+    email: parseContactEmail(contact?.email),
     contactState: ctx.contact_state,
     contactFound: ctx.contact_found,
     contactCreated: ctx.contact_created,
@@ -582,7 +630,96 @@ async function handlePhoneNumberInject(
   };
 }
 
-async function handleCheckAvailability(tc: ToolCall): Promise<Record<string, unknown>> {
+/* ------------------------------ the calendar ------------------------------- */
+
+function spokenSlotOf(start: Date): SpokenSlot {
+  return {
+    startIso: start.toISOString(),
+    endIso: new Date(start.getTime() + BOOKING_WINDOW.slotMinutes * 60_000).toISOString(),
+    spoken: slotLabel(start),
+  };
+}
+
+/** VAPI hands a boolean argument over as JSON `true` or, from some models, as text. */
+function argTrue(value: unknown): boolean {
+  return value === true || (typeof value === "string" && /^(true|yes|1)$/i.test(value.trim()));
+}
+
+type SlotRead =
+  | { ok: true; calendar: "calcom" | "local"; slots: Date[] }
+  | { ok: false; failure: CalcomFailure };
+
+/**
+ * Free slots for one kind of session, soonest first, from whichever calendar
+ * this deployment runs on.
+ *
+ * With `CALCOM_API_KEY` set that is Cal.com, read through `calendar.server.ts`
+ * exactly as the Stage 3 scheduler reads it. Without it, the legacy local
+ * window checked against `crm_appointments` — unchanged, so deploying this
+ * before the key is set changes nothing a caller hears.
+ */
+async function readFreeSlots(
+  kind: AppointmentKind,
+  now: Date,
+  config: CalcomConfig | null,
+): Promise<SlotRead> {
+  if (!config) return { ok: true, calendar: "local", slots: await freeSlots(now, 1_000) };
+  const read = await calcomFreeSlots(config, kind, now);
+  return read.ok ? { ok: true, calendar: "calcom", slots: read.slots } : read;
+}
+
+/**
+ * Tells the operators that somebody asked for a time and did not get it for a
+ * reason that was ours. Returns whether the notice landed, because the agent
+ * may only promise "the team has been alerted" when it has been.
+ */
+async function alertBookingFailure(input: {
+  failure: CalcomFailure;
+  message: string;
+  kind: AppointmentKind;
+  who: string;
+  requested: SpokenSlot | null;
+  phone: string;
+  email: string | null;
+  vapiCallId: string;
+  moving?: string | null;
+}): Promise<boolean> {
+  const fault = calendarFaultOf(input.failure);
+  const label = KIND_LABEL[input.kind];
+  const wanted = input.requested ? `${label} at ${input.requested.spoken}` : `a ${label}`;
+  const contact = [input.phone, input.email].filter(Boolean).join(" · ") || "no contact details";
+  const cause =
+    fault === "misconfigured"
+      ? `Cal.com refused Mission Control (${input.failure}: ${input.message}). Every booking will ` +
+        `fail until CALCOM_API_KEY or the ${label} event type is fixed.`
+      : `Cal.com did not answer (${input.failure}: ${input.message}).`;
+  return notifyOperators({
+    kind: "calendar_booking_failed",
+    severity: fault === "misconfigured" ? "error" : "warning",
+    title: input.requested
+      ? `Booking NOT made: ${input.who} wanted ${wanted}`
+      : `The booking calendar could not be read for ${input.who}`,
+    body:
+      `${cause} ${input.moving ? `They asked to move their ${input.moving} booking. ` : ""}` +
+      (input.requested
+        ? "The caller was told nothing was booked and that the team would call back."
+        : "The caller was told the calendar could not be read, and was offered a call back.") +
+      ` Contact: ${contact}.`,
+    url: "/voice/calls",
+    metadata: {
+      failure: input.failure,
+      fault,
+      kind: input.kind,
+      requested_start: input.requested?.startIso ?? null,
+      vapi_call_id: input.vapiCallId || null,
+    },
+  });
+}
+
+async function handleCheckAvailability(
+  tc: ToolCall,
+  message: Rec,
+): Promise<Record<string, unknown>> {
   const intent = classifyBookingIntent(
     tc.args.booking_intent_text ?? tc.args.bookingIntentText ?? tc.args.search_reason ?? "",
   );
@@ -599,15 +736,38 @@ async function handleCheckAvailability(tc: ToolCall): Promise<Record<string, unk
     tc.args.preferred_date_text ?? tc.args.preferredDateText ?? tc.args.preferred_date ?? "",
     now,
   );
+  const read = await readFreeSlots(intent.kind, now, calcomConfig());
+  if (!read.ok) {
+    // An outage clears itself and would page somebody for every caller; a
+    // refused key or a missing event type does not, and nothing else says so.
+    if (calendarFaultOf(read.failure) === "misconfigured") {
+      const identity = identityFrom(message, tc.args);
+      await alertBookingFailure({
+        failure: read.failure,
+        message: "availability check refused",
+        kind: intent.kind,
+        who: identity.callerPhone || "A caller",
+        requested: null,
+        phone: identity.callerPhone,
+        email: null,
+        vapiCallId: identity.vapiCallId,
+      });
+    }
+    return availabilityUnavailableReply({
+      bookingType: KIND_LABEL[intent.kind],
+      kind: intent.kind,
+      failure: read.failure,
+    });
+  }
   // Look past the first handful before ordering: the caller's Thursday is
   // often outside the eight soonest slots, and slicing first is what made the
   // preference unhonourable rather than merely unhonoured.
-  const all = await freeSlots(now, 200);
-  const ordered = orderSlotsByPreference(all, pref);
+  const ordered = orderSlotsByPreference(read.slots, pref);
   const slots = ordered.slice(0, 8);
   const preferenceMet = pref.recognised && slots.some((s) => slotMatchesPreference(s, pref));
   return {
     success: true,
+    calendar: read.calendar,
     booking_type: KIND_LABEL[intent.kind],
     kind: intent.kind,
     timezone: BOOKING_WINDOW.timezone,
@@ -615,19 +775,17 @@ async function handleCheckAvailability(tc: ToolCall): Promise<Record<string, unk
     preference_understood: pref.recognised,
     preference_met: pref.recognised ? preferenceMet : null,
     availability: slots.map((s) => ({
-      startIso: s.toISOString(),
-      endIso: new Date(s.getTime() + BOOKING_WINDOW.slotMinutes * 60_000).toISOString(),
-      spoken: slotLabel(s),
+      ...spokenSlotOf(s),
       matches_preference: pref.recognised ? slotMatchesPreference(s, pref) : null,
     })),
     message:
       slots.length === 0
-        ? "No slots are free in the next week. Offer to have the team call the customer back instead."
+        ? "Nothing is free in the booking window (the next 45 days). Offer to have the team call the customer back instead."
         : pref.recognised && preferenceMet
-          ? "Availability returned, preferred times first. Offer only slots from the availability list. Do not create a booking from this tool."
+          ? "Availability returned, preferred times first (Sydney time). Offer only slots from the availability list. Do not create a booking from this tool."
           : pref.recognised
-            ? "Availability returned, but nothing free matches what the caller asked for. Say so plainly, then offer the nearest alternatives from the availability list. Do not create a booking from this tool."
-            : "Availability returned. Offer only slots from the availability list. Do not create a booking from this tool.",
+            ? "Availability returned, but nothing free matches what the caller asked for. Say so plainly, then offer the nearest alternatives from the availability list (Sydney time). Do not create a booking from this tool."
+            : "Availability returned (Sydney time). Offer only slots from the availability list. Do not create a booking from this tool.",
   };
 }
 
@@ -655,7 +813,11 @@ async function handleBookAppointment(tc: ToolCall, message: Rec): Promise<Record
     };
   }
   const start = new Date(startMs);
-  const stillFree = (await freeSlots(new Date(), 200)).some(
+
+  const config = calcomConfig();
+  if (config) return bookThroughCalcom({ tc, identity, kind: intent.kind, start, config });
+
+  const stillFree = (await freeSlots(new Date(), 1_000)).some(
     (s) => Math.abs(s.getTime() - start.getTime()) < 60_000,
   );
   if (!stillFree) {
@@ -678,36 +840,8 @@ async function handleBookAppointment(tc: ToolCall, message: Rec): Promise<Record
     };
   }
 
-  // A contact may hold more than one journey, and `.maybeSingle()` ERRORS on
-  // that rather than returning a row. The error used to be discarded, so
-  // `journey` came back null, the appointment was written with
-  // `journey_id: null`, and `onAppointmentScheduled` bailed on exactly that —
-  // no stage advance, no confirmation call, no reminder, and no line in the
-  // log saying why. The booking still appeared in the calendar, so the whole
-  // cadence failed invisibly.
-  //
-  // Ordering and taking one makes the multi-journey case deterministic
-  // instead of fatal, and the error is now read rather than dropped: a read
-  // that FAILED is not a row that is ABSENT.
-  const { data: journey, error: journeyError } = await supabaseAdmin
-    .from("crm_client_journeys")
-    .select("id")
-    .eq("contact_id", ctx.contact_id)
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  if (journeyError) {
-    console.error(
-      `[voice-tools] journey read failed for contact ${ctx.contact_id}: ${journeyError.message} — ` +
-        `the booking will be written without a journey, so no confirmation call or reminder is queued`,
-    );
-  }
-
-  const { data: callRow } = await supabaseAdmin
-    .from("voice_calls")
-    .select("id")
-    .eq("vapi_call_id", identity.vapiCallId)
-    .maybeSingle();
+  const journeyId = await latestJourneyId(ctx.contact_id);
+  const bookedByCallId = await callRowId(identity.vapiCallId);
 
   const ends = new Date(start.getTime() + BOOKING_WINDOW.slotMinutes * 60_000);
   const { data: appointment, error } = await supabaseAdmin
@@ -715,14 +849,14 @@ async function handleBookAppointment(tc: ToolCall, message: Rec): Promise<Record
     .insert({
       account_id: ctx.account_id,
       contact_id: ctx.contact_id,
-      journey_id: journey?.id ?? null,
+      journey_id: journeyId,
       kind: intent.kind,
       title: `${KIND_LABEL[intent.kind]} — ${ctx.full_name ?? identity.callerPhone}`,
       starts_at: start.toISOString(),
       ends_at: ends.toISOString(),
       status: "scheduled",
       source: "voice_agent",
-      booked_by_call_id: callRow?.id ?? null,
+      booked_by_call_id: bookedByCallId,
       notes: tc.args.notes ?? null,
     })
     .select("id, starts_at")
@@ -730,16 +864,13 @@ async function handleBookAppointment(tc: ToolCall, message: Rec): Promise<Record
   if (error) throw error;
 
   await upsertContext(identity, { confirmed_intent: intent.kind });
-
-  // Booking consequences (reminder / confirmation calls, journey advance) are
-  // one code path, shared with manual bookings from the tracker UI.
-  const { onAppointmentScheduled } = await import("@/server/crm-journey.server");
-  await onAppointmentScheduled(appointment.id);
+  await runBookingConsequences(appointment.id);
 
   return {
     success: true,
     appointment_created: true,
     appointmentId: appointment.id,
+    calendar: "local",
     booking_type: KIND_LABEL[intent.kind],
     startTime: appointment.starts_at,
     timezone: BOOKING_WINDOW.timezone,
@@ -747,6 +878,534 @@ async function handleBookAppointment(tc: ToolCall, message: Rec): Promise<Record
     message:
       "Booking confirmed in the calendar. Confirm the day and time back to the caller in natural speech.",
   };
+}
+
+/**
+ * The contact's newest journey, or null.
+ *
+ * A contact may hold more than one journey, and `.maybeSingle()` ERRORS on
+ * that rather than returning a row. The error used to be discarded, so the
+ * appointment was written with `journey_id: null` and `onAppointmentScheduled`
+ * bailed on exactly that — no stage advance, no confirmation call, no
+ * reminder, and no line in the log saying why. Ordering and taking one makes
+ * the multi-journey case deterministic instead of fatal, and a read that
+ * FAILED is logged rather than mistaken for a contact with no journey.
+ */
+async function latestJourneyId(contactId: string): Promise<string | null> {
+  const { data: journey, error } = await supabaseAdmin
+    .from("crm_client_journeys")
+    .select("id")
+    .eq("contact_id", contactId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) {
+    console.error(
+      `[voice-tools] journey read failed for contact ${contactId}: ${error.message} — ` +
+        `the booking will be written without a journey, so no confirmation call or reminder is queued`,
+    );
+  }
+  return journey?.id ?? null;
+}
+
+async function callRowId(vapiCallId: string): Promise<string | null> {
+  if (!vapiCallId) return null;
+  const { data, error } = await supabaseAdmin
+    .from("voice_calls")
+    .select("id")
+    .eq("vapi_call_id", vapiCallId)
+    .maybeSingle();
+  if (error) console.error("[voice-tools] voice call read failed:", error.message);
+  return data?.id ?? null;
+}
+
+/**
+ * Booking consequences (reminder and confirmation calls, the journey advance,
+ * the confirmation email and the operator notice) are one code path, shared
+ * with manual bookings from the tracker UI.
+ *
+ * It runs AFTER the booking exists, so it must never throw back into the tool:
+ * an exception here used to become `tool_failed`, and the agent then told a
+ * caller whose booking had succeeded that it had not — which is how a caller
+ * books the same session twice.
+ */
+async function runBookingConsequences(appointmentId: string): Promise<void> {
+  try {
+    const { onAppointmentScheduled } = await import("@/server/crm-journey.server");
+    await onAppointmentScheduled(appointmentId);
+  } catch (err) {
+    console.error(
+      `[voice-tools] booking consequences failed for appointment ${appointmentId}: ${(err as Error).message}`,
+    );
+  }
+}
+
+type MirroredAppointment = { id: string; starts_at: string; metadata: Json; mirror: CalcomMirror };
+
+/** The contact's next live Cal.com-backed appointment of this kind, or null. */
+async function liveCalcomAppointment(
+  contactId: string,
+  kind: AppointmentKind,
+  now: Date,
+): Promise<MirroredAppointment | null> {
+  const { data, error } = await supabaseAdmin
+    .from("crm_appointments")
+    .select("id, starts_at, metadata")
+    .eq("contact_id", contactId)
+    .eq("kind", kind)
+    .in("status", ["scheduled", "confirmed"])
+    .gte("starts_at", now.toISOString())
+    .order("starts_at", { ascending: true })
+    .limit(10);
+  if (error) {
+    // Unknown is not "none", but refusing to book over our own read failure
+    // would cost the caller the booking; Cal.com still refuses a clash.
+    console.error("[voice-tools] existing-booking read failed:", error.message);
+    return null;
+  }
+  for (const row of data ?? []) {
+    const mirror = readCalcomMirror(row.metadata);
+    if (mirror) return { id: row.id, starts_at: row.starts_at, metadata: row.metadata, mirror };
+  }
+  return null;
+}
+
+/** The row already mirroring this Cal.com booking, if an earlier attempt wrote one. */
+async function appointmentForBookingUid(uid: string): Promise<string | null> {
+  const { data, error } = await supabaseAdmin
+    .from("crm_appointments")
+    .select("id")
+    .eq("metadata->calcom->>uid", uid)
+    .limit(1)
+    .maybeSingle();
+  if (error) console.error("[voice-tools] mirror lookup failed:", error.message);
+  return data?.id ?? null;
+}
+
+/**
+ * The caller's live booking of this kind that Cal.com holds and the CRM does
+ * not — one made on the Stage 3 page, or on the event type's own Cal.com
+ * link — or null. The addresses are asked in parallel, because this sits on
+ * a live call. A read that fails answers null: refusing the booking over our
+ * own read would cost the caller it, and Cal.com still refuses a clash.
+ */
+async function heldInCalendar(
+  config: CalcomConfig,
+  kind: AppointmentKind,
+  candidates: Array<string | null>,
+): Promise<{ booking: CalcomBooking; attendeeEmail: string } | null> {
+  const emails = [...new Set(candidates.filter((e): e is string => Boolean(e)))];
+  const lists = await Promise.all(
+    emails.map((attendeeEmail) => listUpcomingCalcomBookings(config, { attendeeEmail })),
+  );
+  const found = lists.flatMap((listed) => (listed.ok ? listed.value : []));
+  const booking = heldBookingOfKind(
+    found,
+    { slug: CALCOM_EVENT_TYPE_SLUGS[kind], kind },
+    emails,
+    new Date(),
+  );
+  if (!booking) return null;
+  const attendeeEmail = booking.attendeeEmails.find((e) => emails.includes(e)) ?? emails[0];
+  return { booking, attendeeEmail };
+}
+
+type CalcomBookingArgs = {
+  tc: ToolCall;
+  identity: CallIdentity;
+  kind: AppointmentKind;
+  start: Date;
+  config: CalcomConfig;
+};
+
+const MOVE_REASON = "Moved by the caller on a call with the Aurixa voice assistant.";
+
+/**
+ * `book_appointment` on Cal.com.
+ *
+ * Cal.com holds the booking and sends the invitation with the video link, so
+ * it needs an email address — the one the caller just spelled out, or the one
+ * on file. The CRM row it then writes is a mirror (see `CalcomMirror`) that
+ * keeps the journey, the reminder calls and the tracker working.
+ *
+ * A caller who already holds this kind of session is not booked twice —
+ * whether the CRM holds it (booked on a call) or only Cal.com does (booked on
+ * the Stage 3 page, or on Cal.com's own link). They are asked whether to MOVE
+ * it, and a second call with `reschedule_existing` moves it in Cal.com, which
+ * issues the updated invitation.
+ */
+async function bookThroughCalcom(args: CalcomBookingArgs): Promise<Record<string, unknown>> {
+  const { tc, identity, kind, start, config } = args;
+  const label = KIND_LABEL[kind];
+  const requested = spokenSlotOf(start);
+
+  const ctx = await readContext(identity);
+  if (!ctx?.contact_id || !ctx.account_id) {
+    return {
+      success: false,
+      appointment_created: false,
+      message:
+        "The caller is not resolved to a contact yet. Call resolve_contact first, then book again.",
+    };
+  }
+  const contactId: string = ctx.contact_id;
+  const accountId: string = ctx.account_id;
+
+  const { data: contact, error: contactError } = await supabaseAdmin
+    .from("crm_contacts")
+    .select("first_name, last_name, email, phone")
+    .eq("id", contactId)
+    .maybeSingle();
+  if (contactError) {
+    console.error("[voice-tools] book_appointment contact read failed:", contactError.message);
+  }
+
+  // The address the caller just gave wins for THIS invitation — they asked
+  // for it to go there — but it never overwrites the one on file; it only
+  // fills a blank, the same rule `resolve_contact` keeps.
+  const spokenEmail = parseContactEmail(tc.args.email);
+  const email = spokenEmail ?? parseContactEmail(contact?.email);
+  if (!email) return needsEmailReply(label);
+  if (spokenEmail && contact && !contact.email) {
+    const { error: emailError } = await supabaseAdmin
+      .from("crm_contacts")
+      .update({ email: spokenEmail })
+      .eq("id", contactId)
+      .is("email", null);
+    if (emailError) {
+      console.error("[voice-tools] contact email backfill failed:", emailError.message);
+    }
+  }
+
+  const name =
+    [contact?.first_name, contact?.last_name].filter(Boolean).join(" ").trim() ||
+    (typeof ctx.full_name === "string" ? ctx.full_name.trim() : "") ||
+    (typeof ctx.first_name === "string" ? ctx.first_name.trim() : "") ||
+    "Aurixa caller";
+
+  const existing = await liveCalcomAppointment(contactId, kind, new Date());
+  if (existing) {
+    const existingStart = new Date(existing.starts_at);
+    if (Math.abs(existingStart.getTime() - start.getTime()) < 60_000) {
+      // Asked for the time they already hold — a retried tool call, or a
+      // caller confirming. It IS booked; say so rather than "slot taken".
+      await upsertContext(identity, { confirmed_intent: kind });
+      return bookedReply({
+        appointmentId: existing.id,
+        bookingType: label,
+        bookingUid: existing.mirror.uid,
+        startIso: existingStart.toISOString(),
+        timezone: BOOKING_WINDOW.timezone,
+        spoken: slotLabel(existingStart),
+        email: existing.mirror.attendeeEmail ?? email,
+        meetingLink: Boolean(existing.mirror.meetingUrl),
+        alreadyConfirmed: true,
+      });
+    }
+    if (!argTrue(tc.args.reschedule_existing ?? tc.args.rescheduleExisting)) {
+      return alreadyBookedReply({
+        bookingType: label,
+        existing: spokenSlotOf(existingStart),
+        requestedSpoken: requested.spoken,
+      });
+    }
+    return moveThroughCalcom({ ...args, existing, requested, name, email });
+  }
+
+  // Not in the CRM is not the same as not booked. The Stage 3 page already
+  // refuses to book a second review over one made on a call; this is the
+  // other half of that rule.
+  const held = await heldInCalendar(config, kind, [email, parseContactEmail(contact?.email)]);
+  if (held) {
+    const heldStart = new Date(held.booking.start);
+    if (Math.abs(heldStart.getTime() - start.getTime()) < 60_000) {
+      await upsertContext(identity, { confirmed_intent: kind });
+      return bookedReply({
+        appointmentId: await appointmentForBookingUid(held.booking.uid),
+        bookingType: label,
+        bookingUid: held.booking.uid,
+        startIso: heldStart.toISOString(),
+        timezone: BOOKING_WINDOW.timezone,
+        spoken: slotLabel(heldStart),
+        email: held.attendeeEmail,
+        meetingLink: Boolean(held.booking.meetingUrl),
+        alreadyConfirmed: true,
+      });
+    }
+    if (!argTrue(tc.args.reschedule_existing ?? tc.args.rescheduleExisting)) {
+      return alreadyBookedReply({
+        bookingType: label,
+        existing: spokenSlotOf(heldStart),
+        requestedSpoken: requested.spoken,
+      });
+    }
+    return moveCalendarOnlyBooking({ ...args, held, requested, name });
+  }
+
+  const created = await createCalcomBooking(config, {
+    kind,
+    start,
+    attendee: {
+      name,
+      email,
+      timeZone: tc.args.timezone ?? tc.args.time_zone ?? tc.args.timeZone ?? null,
+      phone: identity.callerPhone || contact?.phone || null,
+    },
+    notes: typeof tc.args.notes === "string" ? tc.args.notes : null,
+    metadata: {
+      source: "voice_agent",
+      kind,
+      contactId,
+      accountId,
+      vapiCallId: identity.vapiCallId || null,
+    },
+  });
+
+  let booking: CalcomBooking | null = created.ok ? created.value : null;
+  let recovered = false;
+  if (!created.ok && created.failure !== "auth" && created.failure !== "not_found") {
+    // A timeout may have written the booking, and a "not available" may be
+    // the caller's OWN booking from an attempt whose answer was lost. Either
+    // way the honest reply depends on what Cal.com now holds for them.
+    booking = await findLiveCalcomBooking(config, email, start);
+    recovered = booking !== null;
+  }
+
+  if (!booking) {
+    const failure: CalcomFailure = created.ok ? "unavailable" : created.failure;
+    if (failure === "slot_unavailable") {
+      const fresh = await readFreeSlots(kind, new Date(), config);
+      return slotTakenReply({
+        requestedSpoken: requested.spoken,
+        alternatives: fresh.ok ? nearestAlternatives(fresh.slots, start).map(spokenSlotOf) : [],
+      });
+    }
+    const alerted = await alertBookingFailure({
+      failure,
+      message: created.ok ? "" : created.message,
+      kind,
+      who: name,
+      requested,
+      phone: identity.callerPhone,
+      email,
+      vapiCallId: identity.vapiCallId,
+    });
+    return bookingNotConfirmedReply({
+      requestedSpoken: requested.spoken,
+      operatorsAlerted: alerted,
+    });
+  }
+
+  // The booking exists in Cal.com and the invitation has gone. Everything
+  // below is bookkeeping, and none of it may turn a real booking into a
+  // reported failure.
+  const bookedStart = new Date(booking.start);
+  let appointmentId = recovered ? await appointmentForBookingUid(booking.uid) : null;
+  if (!appointmentId) {
+    const journeyId = await latestJourneyId(contactId);
+    const bookedByCallId = await callRowId(identity.vapiCallId);
+    const { data: appointment, error: insertError } = await supabaseAdmin
+      .from("crm_appointments")
+      .insert({
+        account_id: accountId,
+        contact_id: contactId,
+        journey_id: journeyId,
+        kind,
+        title: `${label} — ${name}`,
+        starts_at: booking.start,
+        ends_at: booking.end,
+        status: "scheduled",
+        source: "voice_agent",
+        booked_by_call_id: bookedByCallId,
+        notes: typeof tc.args.notes === "string" ? tc.args.notes : null,
+        metadata: { calcom: mirrorFromBooking(booking, email) } as unknown as Json,
+      })
+      .select("id")
+      .single();
+    if (insertError) {
+      console.error(
+        `[voice-tools] Cal.com booking ${booking.uid} made but its CRM record failed: ${insertError.message}`,
+      );
+      await notifyOperators({
+        kind: "calendar_booking_failed",
+        severity: "warning",
+        title: `${name} is booked in Cal.com but not in the CRM`,
+        body:
+          `${label}, ${slotLabel(bookedStart)} (Sydney time). The Cal.com booking and its ` +
+          `invitation stand, but the CRM record failed (${insertError.message}), so no reminder ` +
+          `or confirmation call is queued. Add it in the tracker.`,
+        url: "/crm",
+        metadata: { calcom_uid: booking.uid, contact_id: contactId },
+      });
+    } else {
+      appointmentId = appointment.id;
+      await runBookingConsequences(appointment.id);
+    }
+  }
+
+  await upsertContext(identity, { confirmed_intent: kind });
+  return bookedReply({
+    appointmentId,
+    bookingType: label,
+    bookingUid: booking.uid,
+    startIso: bookedStart.toISOString(),
+    timezone: BOOKING_WINDOW.timezone,
+    spoken: slotLabel(bookedStart),
+    email,
+    meetingLink: Boolean(booking.meetingUrl),
+    alreadyConfirmed: recovered,
+  });
+}
+
+/** Moves the caller's existing Cal.com booking to the requested start. */
+async function moveThroughCalcom(
+  args: CalcomBookingArgs & {
+    existing: MirroredAppointment;
+    requested: SpokenSlot;
+    name: string;
+    email: string;
+  },
+): Promise<Record<string, unknown>> {
+  const { identity, kind, start, config, existing, email } = args;
+  const label = KIND_LABEL[kind];
+  const previousStart = new Date(existing.starts_at);
+  const previousSpoken = slotLabel(previousStart);
+
+  const moved = await rescheduleCalcomBooking(config, existing.mirror.uid, start, MOVE_REASON);
+  if (!moved.ok) {
+    return moveRefused({ ...args, failure: moved.failure, message: moved.message, previousSpoken });
+  }
+
+  const booking = moved.value;
+  const metadata =
+    existing.metadata && typeof existing.metadata === "object" && !Array.isArray(existing.metadata)
+      ? (existing.metadata as Record<string, unknown>)
+      : {};
+  // Compare-and-set on the old start: the Cal.com webhook reports the same
+  // move and may land first. Whichever writes second changes nothing, so the
+  // reminder is moved and the operators are told exactly once.
+  const { data: updated, error: updateError } = await supabaseAdmin
+    .from("crm_appointments")
+    .update({
+      starts_at: booking.start,
+      ends_at: booking.end,
+      status: "scheduled",
+      metadata: {
+        ...metadata,
+        calcom: mirrorFromBooking(booking, email, existing.mirror),
+      } as unknown as Json,
+    })
+    .eq("id", existing.id)
+    .eq("starts_at", existing.starts_at)
+    .select("id");
+  if (updateError) {
+    console.error(
+      `[voice-tools] Cal.com booking moved to ${booking.uid} but the CRM record did not follow: ${updateError.message}`,
+    );
+  } else if ((updated ?? []).length > 0) {
+    try {
+      const { onAppointmentRescheduled } = await import("@/server/crm-journey.server");
+      await onAppointmentRescheduled(existing.id, previousStart.toISOString(), "voice_agent");
+    } catch (err) {
+      console.error(
+        `[voice-tools] reschedule consequences failed for ${existing.id}: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  await upsertContext(identity, { confirmed_intent: kind });
+  const newStart = new Date(booking.start);
+  return rescheduledReply({
+    appointmentId: existing.id,
+    bookingType: label,
+    bookingUid: booking.uid,
+    startIso: newStart.toISOString(),
+    timezone: BOOKING_WINDOW.timezone,
+    spoken: slotLabel(newStart),
+    previousSpoken,
+    email: existing.mirror.attendeeEmail ?? email,
+  });
+}
+
+/**
+ * What the caller hears when a move did not happen. Their existing booking
+ * stands either way, and every reply says so.
+ */
+async function moveRefused(
+  args: CalcomBookingArgs & {
+    failure: CalcomFailure;
+    message: string;
+    requested: SpokenSlot;
+    previousSpoken: string;
+    name: string;
+    email: string;
+  },
+): Promise<Record<string, unknown>> {
+  const { identity, kind, start, config, failure, requested, previousSpoken, name, email } = args;
+  if (failure === "slot_unavailable") {
+    const fresh = await readFreeSlots(kind, new Date(), config);
+    return slotTakenReply({
+      requestedSpoken: requested.spoken,
+      alternatives: fresh.ok ? nearestAlternatives(fresh.slots, start).map(spokenSlotOf) : [],
+      existingKept: previousSpoken,
+    });
+  }
+  const alerted = await alertBookingFailure({
+    failure,
+    message: args.message,
+    kind,
+    who: name,
+    requested,
+    phone: identity.callerPhone,
+    email,
+    vapiCallId: identity.vapiCallId,
+    moving: previousSpoken,
+  });
+  return bookingNotConfirmedReply({
+    requestedSpoken: requested.spoken,
+    operatorsAlerted: alerted,
+    existingKept: previousSpoken,
+  });
+}
+
+/**
+ * Moves a booking the CRM has never held — made on the Stage 3 page, or on
+ * the event type's own Cal.com link. Cal.com sends the updated invitation.
+ * Nothing is written here: the booking stays where it was made, and the
+ * Cal.com webhook tells the operators about the move, as it does for every
+ * change to a booking outside the CRM.
+ */
+async function moveCalendarOnlyBooking(
+  args: CalcomBookingArgs & {
+    held: { booking: CalcomBooking; attendeeEmail: string };
+    requested: SpokenSlot;
+    name: string;
+  },
+): Promise<Record<string, unknown>> {
+  const { identity, kind, start, config, held } = args;
+  const previousSpoken = slotLabel(new Date(held.booking.start));
+  const moved = await rescheduleCalcomBooking(config, held.booking.uid, start, MOVE_REASON);
+  if (!moved.ok) {
+    return moveRefused({
+      ...args,
+      failure: moved.failure,
+      message: moved.message,
+      previousSpoken,
+      email: held.attendeeEmail,
+    });
+  }
+  await upsertContext(identity, { confirmed_intent: kind });
+  const newStart = new Date(moved.value.start);
+  return rescheduledReply({
+    appointmentId: null,
+    bookingType: KIND_LABEL[kind],
+    bookingUid: moved.value.uid,
+    startIso: newStart.toISOString(),
+    timezone: BOOKING_WINDOW.timezone,
+    spoken: slotLabel(newStart),
+    previousSpoken,
+    email: held.attendeeEmail,
+  });
 }
 
 /* ------------------------------ entry points ------------------------------- */
@@ -935,7 +1594,7 @@ export async function handleToolCalls(message: Rec): Promise<Rec> {
           result = await handlePhoneNumberInject(tc, message);
           break;
         case "check_availability":
-          result = await handleCheckAvailability(tc);
+          result = await handleCheckAvailability(tc, message);
           break;
         case "book_appointment":
           result = await handleBookAppointment(tc, message);
