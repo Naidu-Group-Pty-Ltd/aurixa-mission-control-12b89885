@@ -218,7 +218,9 @@ Any gap blocks the send. Every rule the arithmetic follows is the agreement's
 own, quoted in `subscriptionPricing.pure.ts`:
 
 - **5.1** — a 12-month commitment takes 15% off the complete with-AML or
-  without-AML base.
+  without-AML base. The figure is the price list's own
+  (`COMMITMENT_DISCOUNT_BPS`), so the pricing page's annual plan and an
+  agreement's annual prepayment agree to the cent.
 - **5.4** — the discount applies to the base only. Seats, modules, credit packs
   and support stay at their accepted prices. The clause's own worked
   differences are reproduced in a test.
@@ -361,8 +363,9 @@ will be provisioned.
 ### Where the approved text and Mission Control disagree
 
 Each difference was put to the owner, who decided all three on
-25 September 2026. Each is named in code or a test rather than left to be
-found, and none stops an offer being issued.
+25 September 2026. Two stand by decision and the third is resolved. Each is
+named in code or a test rather than left to be found, and none stops an offer
+being issued.
 
 - **Growth includes Market News Feed** in the agreement, but the catalogue
   (`aurixa-catalog.ts`) bundles it only at Scale. *Decided: it stays that
@@ -374,15 +377,23 @@ found, and none stops an offer being issued.
 - **Advanced Forms Builder** is sold in Schedule A3, but the catalogue has no
   module for it. *Decided: a signature does not switch it on.* The line prices
   and prints, and the page says it is not provisioned automatically.
-- **The commitment discount.** The agreement's is **15% of the base** for a
-  12-month commitment (clause 5.1), payable monthly or as one annual
-  prepayment (5.2), and never applied to seats, modules, credit packs or
-  support (5.4). The public price list's annual option (`ANNUAL_DISCOUNT`)
-  took 10% instead. *Decided: 15% everywhere* — the price list, the pricing
-  page and the voice agents follow the agreement, not the other way round.
-  That change ships on its own, because it mints new annual prices in Stripe
-  and re-uploads the voice agents' knowledge base; the agreement prices only
-  from its own text either way.
+- **The commitment discount** — resolved. The agreement's is **15% of the
+  base** for a 12-month commitment (clause 5.1), payable monthly or as one
+  annual prepayment (5.2), and never applied to seats, modules, credit packs or
+  support (5.4). The public price list's annual plan used to take 10% instead.
+  *Decided: 15% everywhere* — the price list, the pricing page and the voice
+  agents follow the agreement. `COMMITMENT_DISCOUNT_BPS` in `aurixa-catalog.ts`
+  is now the one figure:
+  - the agreement's arithmetic imports it rather than restating it;
+  - the annual plan is priced as the agreement's annual prepayment — the
+    discount comes off each month and the result is multiplied by twelve —
+    and a test compares the two for every tier, with and without AML;
+  - a template that ever states a different figure fails its test.
+
+  Changing it mints new annual prices: after the code is published, an admin
+  presses *Create Stripe prices & apply* on the seat plan price list card.
+  It also changes the voice agents' knowledge base, which
+  `scripts/voice/upload-knowledge-base.py` uploads.
 
 ### Rolling it out
 

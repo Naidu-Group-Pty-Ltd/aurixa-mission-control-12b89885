@@ -346,7 +346,7 @@ Aurixa is sold as seat-banded plans plus optional add-on modules, prepaid AI cre
 - Launch - A$999 per month for 1 to 4 seats, including 7,000 report credits a month. That headline includes the AML/CTF Compliance module; without it the same tier is A$849 per month.
 - Growth - A$1,399 per month for 5 to 15 seats, including 35,000 report credits a month. That headline includes the AML/CTF Compliance module; without it the same tier is A$1,249 per month.
 - Scale - A$2,699 per month for 16 to 30 seats, including 75,000 report credits a month. That headline includes the AML/CTF Compliance module; without it the same tier is A$2,549 per month.
-- Annual billing is available at 10% off, billed twelve months up front.
+- A 12-month commitment takes 15% off the plan's price. Paid up front it is the annual price - twelve discounted months, billed at once - or it can be paid in twelve monthly instalments under a Subscription Agreement. The discount is on the plan alone: add-on modules and credit packs stay at their listed prices.
 - Plan changes are pro-rated on the next billing cycle.
 
 ### Which plan fits a firm like ours?
@@ -578,7 +578,7 @@ Support is for live customers, but the caller is not in the wrong place: pre-pur
 
 ### How is Aurixa billed?
 
-Plans are billed monthly, or twelve months up front at the annual discount. Add-on modules are billed as their own monthly subscriptions. Credit top-up packs and onboarding are one-off purchases. All published figures are in Australian dollars and include GST, so the amount quoted is the amount charged.
+Plans are billed monthly, or as a 12-month commitment at the commitment discount - paid twelve months up front, or in monthly instalments under a Subscription Agreement. Add-on modules are billed as their own monthly subscriptions. Credit top-up packs and onboarding are one-off purchases. All published figures are in Australian dollars and include GST, so the amount quoted is the amount charged.
 
 ### Can we change plan?
 

@@ -41,8 +41,26 @@
 /** Australian GST is 10%, so a tax-inclusive total is 11/10 of its base. */
 export const GST_DIVISOR = 11;
 
-/** Annual plans bill 12 months at a 10% discount. */
-export const ANNUAL_DISCOUNT = 0.1;
+/**
+ * A 12-month commitment takes 15% off the plan's base, in basis points so the
+ * arithmetic stays in whole cents.
+ *
+ * This is clause 5.1 of the Subscription Agreement, and it is the only
+ * commitment discount there is. The owner decided on 25 September 2026 that
+ * the price list follows the agreement, so the annual plan — a 12-month
+ * commitment paid up front — is priced by the same rule as the agreement's
+ * annual prepayment (5.2), and `subscriptionPricing.pure.ts` reads the figure
+ * from here rather than restating it. Until then the annual plan took 10% off,
+ * a figure the 2026 pricing model never set.
+ *
+ * It is a discount on the base alone (5.4). Add-on modules bill as their own
+ * monthly subscriptions and credit packs are one-off purchases, so neither
+ * ever carries it.
+ */
+export const COMMITMENT_DISCOUNT_BPS = 1500;
+
+/** The commitment discount as a fraction, for saying "15%". The arithmetic uses the basis points. */
+export const ANNUAL_DISCOUNT = COMMITMENT_DISCOUNT_BPS / 10_000;
 
 /**
  * The AML/CTF reference component, as the pricing model states it.
@@ -85,17 +103,29 @@ export function exGstCents(inclGstCents: number): number {
   return inclGstCents - gstComponentCents(inclGstCents);
 }
 
-/**
- * The annual charge for a monthly tax-inclusive price: twelve months less 10%.
- * Still tax-inclusive — the discount is applied to the total the customer pays.
- */
-export function annualCents(monthlyInclGstCents: number): number {
-  return Math.round(monthlyInclGstCents * 12 * (1 - ANNUAL_DISCOUNT));
+/** What a 12-month commitment takes off a monthly base, rounded to the cent. */
+export function commitmentDiscountCents(monthlyInclGstCents: number): number {
+  return Math.round((monthlyInclGstCents * COMMITMENT_DISCOUNT_BPS) / 10_000);
 }
 
-/** What an annual plan works out to per month, for "$X/mo billed annually". */
+/**
+ * The annual charge for a monthly tax-inclusive base: twelve committed months,
+ * paid up front. Still tax-inclusive — the discount comes off the amount the
+ * customer pays.
+ *
+ * The discount is taken off each month and the result multiplied, never taken
+ * off the year, because that is how the agreement states its annual
+ * prepayment: twelve times the discounted monthly base (clause 5.2). The two
+ * figures therefore agree to the cent for any base, not only for whole-dollar
+ * ones.
+ */
+export function annualCents(monthlyInclGstCents: number): number {
+  return annualPerMonthCents(monthlyInclGstCents) * 12;
+}
+
+/** What an annual plan works out to per month, for "$X/mo billed annually": the discounted base. */
 export function annualPerMonthCents(monthlyInclGstCents: number): number {
-  return Math.round(annualCents(monthlyInclGstCents) / 12);
+  return monthlyInclGstCents - commitmentDiscountCents(monthlyInclGstCents);
 }
 
 export type BillingPeriod = "monthly" | "annual";
