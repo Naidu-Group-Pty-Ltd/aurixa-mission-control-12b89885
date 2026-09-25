@@ -187,6 +187,10 @@ then merge it, and from `main`:
 python3 scripts/voice/apply-fleet-upgrade.py     # prompts, first messages and knowledge-base file, all 12
 ```
 
+Run that only once Mission Control is published with the Cal.com code and
+`CALCOM_API_KEY` is set. Before then the live `book_appointment` still records
+a request, and these words would claim a confirmation it does not make.
+
 Uploading changes nothing live. The fleet reads the new file only once
 `apply-fleet-upgrade.py` points it there. Until then the live agents still call
 a booking a request the team confirms by email — an understatement once
