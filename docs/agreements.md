@@ -124,12 +124,14 @@ sentences.
 
 | Tier | File, under `public/agreements/subscription/` | Template id | SHA-256 | Tokens per cycle |
 | --- | --- | --- | --- | --- |
-| Launch | `aurixa-launch-subscription-agreement.docx` | `aurixa-subscription-launch-v8` | `769a86aa…` | 7,000 |
-| Growth | `aurixa-growth-subscription-agreement.docx` | `aurixa-subscription-growth-v8` | `055d801b…` | 35,000 |
-| Scale | `aurixa-scale-subscription-agreement.docx` | `aurixa-subscription-scale-v8` | `7c22dc9b…` | 75,000 |
+| Launch | `aurixa-launch-subscription-agreement.docx` | `aurixa-subscription-launch-v8` | `f2fcd625…` | 7,000 |
+| Growth | `aurixa-growth-subscription-agreement.docx` | `aurixa-subscription-growth-v8` | `cd14a5e1…` | 35,000 |
+| Scale | `aurixa-scale-subscription-agreement.docx` | `aurixa-subscription-scale-v8` | `d8c6d20d…` | 75,000 |
 
-These are the approved files, committed byte for byte. Nothing in this
-repository generates or edits them. `SUBSCRIPTION_TEMPLATES`
+These are the owner's final documents (C01 Launch, C02 Growth, C03 Scale).
+Their text is committed exactly as approved; only their document properties
+were amended (see *What the files carry*). Nothing in this repository
+generates or edits them. `SUBSCRIPTION_TEMPLATES`
 (`src/lib/agreements/subscriptionTemplates.ts`) pins each file's full digest.
 The send fetches the template from the Worker's own origin and refuses any file
 whose digest differs — a stale deploy, a CDN serving something else, or an
@@ -144,15 +146,29 @@ price the same document's Schedule A3 prints.
 **Replacing a template.** Commit the new file. In the same change, replace its
 digest in `SUBSCRIPTION_TEMPLATES`, and its id and version if the title
 changed. Then run the tests: they re-read every content control and the A3/A5
-tables from the new file.
+tables from the new file. They also fail if its document properties mention a
+draft, or name anyone other than Aurixa Systems Pty Ltd as its author or last
+editor. Word's Document Inspector (File › Info › Check for Issues) removes the
+names; set the title (it must end with the version) and the status again
+afterwards.
 
 **What the files carry.** They are served publicly, as the SLA PDF is, and the
-list page links to all three. Their `docProps` still describe them as an
-"approval draft" and name the last person who edited them. An issued document
-rebuilds `docProps/core.xml` (title, offer reference, template id). The
-committed files keep their metadata so that their digests stay those of the
-approved text. If the metadata should not be public, clear it in Word and
-re-pin the digests.
+list page links to all three. Their document properties are final: status
+*Final*, creator and last editor *Aurixa Systems Pty Ltd*, and a title that
+names the tier and version.
+
+- **The amendment.** On 25 September 2026 the approved files' `docProps/core.xml`
+  was replaced — it described them as an "approval draft" and named the person
+  who last edited them. That is the only part that changed. Every other part is
+  byte-identical to the approved files, which were pinned as `769a86aa…`,
+  `055d801b…` and `7c22dc9b…`.
+- **The guard.** A test fails if a committed template's properties ever again
+  carry a draft status or a person's name.
+- **Issued documents** rebuild `docProps/core.xml` again, with the title, offer
+  reference and template id.
+- **The artwork.** The cover and divider images carry C2PA content credentials
+  recording that Claude produced them. That is a provenance record, not
+  personal information, and it is left as it is.
 
 ### Completing the document
 
@@ -344,21 +360,29 @@ will be provisioned.
 
 ### Where the approved text and Mission Control disagree
 
-Each of these is named in a test rather than left to be found. None stops an
-offer being issued.
+Each difference was put to the owner, who decided all three on
+25 September 2026. Each is named in code or a test rather than left to be
+found, and none stops an offer being issued.
 
 - **Growth includes Market News Feed** in the agreement, but the catalogue
-  (`aurixa-catalog.ts`) bundles it only at Scale. The agreement is what the
-  customer signs, so a Growth signature provisions `market-updates` as an
-  add-on (`KNOWN_INCLUSION_DIFFERENCES` in `subscriptionTemplates.test.ts`).
-  Aligning the catalogue is a commercial decision.
+  (`aurixa-catalog.ts`) bundles it only at Scale. *Decided: it stays that
+  way.* Market News Feed remains an extra that the Growth agreement includes,
+  so a Growth signature provisions `market-updates` as an add-on and the
+  catalogue is unchanged. `KNOWN_INCLUSION_DIFFERENCES` in
+  `subscriptionTemplates.test.ts` names the difference, and any new one fails
+  until it is decided and named there.
 - **Advanced Forms Builder** is sold in Schedule A3, but the catalogue has no
-  module for it. The line prices and prints, and the page says it is not
-  provisioned automatically.
-- **Discounts differ.** The agreement's commitment discount is **15% of the
-  base** (clause 5.1). The public pricing's annual option (`ANNUAL_DISCOUNT`)
-  is 10% of the whole subscription. The two are different offers, and the
-  agreement prices only from its own text.
+  module for it. *Decided: a signature does not switch it on.* The line prices
+  and prints, and the page says it is not provisioned automatically.
+- **The commitment discount.** The agreement's is **15% of the base** for a
+  12-month commitment (clause 5.1), payable monthly or as one annual
+  prepayment (5.2), and never applied to seats, modules, credit packs or
+  support (5.4). The public price list's annual option (`ANNUAL_DISCOUNT`)
+  took 10% instead. *Decided: 15% everywhere* — the price list, the pricing
+  page and the voice agents follow the agreement, not the other way round.
+  That change ships on its own, because it mints new annual prices in Stripe
+  and re-uploads the voice agents' knowledge base; the agreement prices only
+  from its own text either way.
 
 ### Rolling it out
 

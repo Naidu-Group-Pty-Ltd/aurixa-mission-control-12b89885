@@ -12,10 +12,10 @@
  *   3. the result must be an issued document — no control, no `[placeholder]`,
  *      each DocuSign anchor exactly once, well-formed XML — and no header,
  *      footer or note part may carry a control or a placeholder either;
- *   4. the document properties are replaced: the template's say "Approval
- *      draft … Populate the accepted Order before issue" and carry the last
- *      editor's personal name, neither of which belongs on an offer sent to a
- *      customer;
+ *   4. the document properties are replaced with the offer's own — its title,
+ *      reference and template id — because an issued copy describes an offer,
+ *      not the template it was completed from (the template's own properties
+ *      are final, and a test keeps them so);
  *   5. the package is written and then READ BACK, and the document part must
  *      round-trip byte-for-byte — the archive is proven by reopening it, not
  *      assumed from having written it;

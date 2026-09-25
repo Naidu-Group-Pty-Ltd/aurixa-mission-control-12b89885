@@ -145,6 +145,22 @@ describe.each(SUBSCRIPTION_TIER_SLUGS)("the %s template", (tier) => {
     expect(partText(pkg, "word/footer1.xml")).toContain(`${template.tierName} Agreement`);
   });
 
+  // The file is public — the list page links to it — so its document
+  // properties are part of what Aurixa publishes. The approved files first
+  // arrived calling themselves an "approval draft" and naming the person who
+  // last edited them; the owner's final documents must say neither.
+  it("carries final document properties: no draft status, and no person named", async () => {
+    const { pkg } = await templateParts(tier);
+    for (const name of pkg.order.filter((n) => n.startsWith("docProps/"))) {
+      expect(partText(pkg, name), name).not.toMatch(/draft/i);
+    }
+    const core = partText(pkg, "docProps/core.xml");
+    for (const tag of ["dc:creator", "cp:lastModifiedBy"]) {
+      const value = core.match(new RegExp(`<${tag}>([^<]*)</${tag}>`))?.[1] ?? "";
+      expect(["", "Aurixa Systems Pty Ltd"], tag).toContain(value);
+    }
+  });
+
   it("states clause 5.4's AML differences, which the catalogue reproduces", async () => {
     const { document } = await templateParts(tier);
     const text = documentText(document);
@@ -189,10 +205,11 @@ describe("the manifest against the commercial catalogue", () => {
 
   /**
    * Where the approved text and the catalogue disagree about what a tier
-   * includes. Each entry is a known, reported difference: the agreement is
-   * what the customer signs, so provisioning must honour it (the Growth
+   * includes. Each entry is a difference the owner has decided: the Growth
    * agreement includes Market News Feed, which the catalogue bundles only at
-   * Scale). A new disagreement fails until it is looked at and named here.
+   * Scale, and it stays that way — a Growth signature provisions it as an
+   * add-on (decided 25 September 2026). A new disagreement fails until it is
+   * decided and named here.
    */
   const KNOWN_INCLUSION_DIFFERENCES = new Set(["growth:market-news-feed"]);
 

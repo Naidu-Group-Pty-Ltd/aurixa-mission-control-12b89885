@@ -431,8 +431,9 @@ export function looksLikePdf(bytes: Uint8Array): boolean {
  * "Included; no separate access fee" while the deployed entitlement gate
  * bundles `market-updates` only at Scale; the agreement is what the customer
  * signs, so a Growth signature provisions it as an add-on rather than leaving
- * the customer without something their contract includes. Seats are capacity,
- * not a module, and do not appear here.
+ * the customer without something their contract includes — the owner's
+ * decision of 25 September 2026, which leaves the catalogue as it is. Seats
+ * are capacity, not a module, and do not appear here.
  */
 export function provisioningSelectionFromOffer(offer: SubscriptionOffer): {
   planSlug: SubscriptionTierSlug;

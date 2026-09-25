@@ -64,7 +64,7 @@ export const SUBSCRIPTION_TEMPLATES: Readonly<Record<SubscriptionTierSlug, Subsc
       id: "aurixa-subscription-launch-v8",
       version: "Version 8",
       path: "/agreements/subscription/aurixa-launch-subscription-agreement.docx",
-      sha256: "769a86aaeff7887ad4ae47800580a94fbc7614c9a14edc7d9604c8195450dfe0",
+      sha256: "f2fcd6258a523c580383e7ed70a15ee0892a8a70f26f8f7809edf633cd264cd6",
       includedTokensPerCycle: 7_000,
     },
     growth: {
@@ -73,7 +73,7 @@ export const SUBSCRIPTION_TEMPLATES: Readonly<Record<SubscriptionTierSlug, Subsc
       id: "aurixa-subscription-growth-v8",
       version: "Version 8",
       path: "/agreements/subscription/aurixa-growth-subscription-agreement.docx",
-      sha256: "055d801b620f017546d9e8293610d5ad197adaf4b7dfe530349a1203898aa641",
+      sha256: "cd14a5e13d18be3cdb838c33f5636a590450caff73f10957d39d6b6c05df0147",
       includedTokensPerCycle: 35_000,
     },
     scale: {
@@ -82,7 +82,7 @@ export const SUBSCRIPTION_TEMPLATES: Readonly<Record<SubscriptionTierSlug, Subsc
       id: "aurixa-subscription-scale-v8",
       version: "Version 8",
       path: "/agreements/subscription/aurixa-scale-subscription-agreement.docx",
-      sha256: "7c22dc9b713e38e16b5e6ff47e9ab480e6f1a6306f27f46ea82067b6c5f10144",
+      sha256: "d8c6d20d0ca29019f499682da5ee996db1d81e15ae66b106aeb9bf8ea673dd95",
       includedTokensPerCycle: 75_000,
     },
   };
@@ -236,7 +236,8 @@ export const A3_ITEMS: readonly A3Item[] = [
     // The template distinguishes this from the standard Client Forms every
     // tier includes ("Standard Client Forms do not automatically include the
     // separate Advanced Forms Builder"). The commercial catalogue has no
-    // module for it, so nothing is provisioned from this line automatically.
+    // module for it, so a signature does not switch it on — confirmed by the
+    // owner on 25 September 2026.
     key: "advanced-forms-builder",
     label: "Advanced Forms Builder",
     kind: "module",
