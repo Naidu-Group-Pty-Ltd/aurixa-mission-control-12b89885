@@ -23,14 +23,27 @@
  * Money is integer cents throughout; nothing here touches a float that is
  * then displayed.
  */
-import { AML_NET_UPLIFT_CENTS, GST_DIVISOR, tierPriceCents } from "@/lib/pricing/aurixa-catalog";
+import {
+  AML_NET_UPLIFT_CENTS,
+  COMMITMENT_DISCOUNT_BPS,
+  commitmentDiscountCents,
+  GST_DIVISOR,
+  tierPriceCents,
+} from "@/lib/pricing/aurixa-catalog";
 import { catalogTier, type SubscriptionTierSlug } from "./subscriptionTemplates";
 
 export type SubscriptionTerm = "flexible" | "committed_monthly" | "committed_annual";
 
 export const COMMITMENT_MONTHS = 12;
-/** Clause 5.1's 15%, in basis points so the arithmetic stays integral. */
-export const COMMITMENT_DISCOUNT_BPS = 1500;
+
+/**
+ * Clause 5.1's 15%, and the dollar discount it grants on a base, rounded to the
+ * cent. Both are the price list's own: the annual plan is a 12-month
+ * commitment paid up front, so the catalogue prices it by this same rule, and
+ * one definition means the pricing page and an issued agreement cannot quote
+ * different discounts.
+ */
+export { COMMITMENT_DISCOUNT_BPS, commitmentDiscountCents };
 
 export function isCommitted(term: SubscriptionTerm): boolean {
   return term !== "flexible";
@@ -73,11 +86,6 @@ export function gstContainedCents(inclGstCents: number): number {
 /** The standard monthly base: the catalogue's tier price, with or without AML. */
 export function standardBaseCents(tier: SubscriptionTierSlug, withAml: boolean): number {
   return tierPriceCents(catalogTier(tier), { withAml });
-}
-
-/** The dollar discount clause 5.1 grants on a base, rounded to the cent. */
-export function commitmentDiscountCents(standardBase: number): number {
-  return Math.round((standardBase * COMMITMENT_DISCOUNT_BPS) / 10_000);
 }
 
 export type BasePricing = {

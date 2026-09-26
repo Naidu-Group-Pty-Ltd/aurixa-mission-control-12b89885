@@ -3,15 +3,21 @@
  *
  * Every pin in `subscriptionTemplates.ts` is checked against the `.docx` it
  * describes — the digest, the control vocabulary, Schedule A3, Schedule A5,
- * the token allowance and clause 5.4's AML differences — and then against the
- * commercial catalogue, with the known disagreements named rather than
- * tolerated. Replacing a template file without updating the manifest, or a
- * catalogue price change the approved text does not carry, fails here.
+ * the token allowance, clause 5.1's discount and clause 5.4's AML
+ * differences — and then against the commercial catalogue, with the known
+ * disagreements named rather than tolerated. Replacing a template file without
+ * updating the manifest, or a catalogue price change the approved text does
+ * not carry, fails here.
  */
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { MODULES, TIERS, moduleSaleBlock } from "@/lib/pricing/aurixa-catalog";
+import {
+  COMMITMENT_DISCOUNT_BPS,
+  MODULES,
+  TIERS,
+  moduleSaleBlock,
+} from "@/lib/pricing/aurixa-catalog";
 import { documentText, inventoryControls } from "./docxFill.pure";
 import { partText, readDocx } from "./docxPackage.pure";
 import {
@@ -159,6 +165,17 @@ describe.each(SUBSCRIPTION_TIER_SLUGS)("the %s template", (tier) => {
       const value = core.match(new RegExp(`<${tag}>([^<]*)</${tag}>`))?.[1] ?? "";
       expect(["", "Aurixa Systems Pty Ltd"], tag).toContain(value);
     }
+  });
+
+  // The price list's commitment discount is this clause's, not a copy of it —
+  // so a template that ever states a different figure fails here, rather than
+  // the pricing page quietly offering one discount and the agreement another.
+  it("states clause 5.1's commitment discount, which the price list applies", async () => {
+    const { document } = await templateParts(tier);
+    const text = documentText(document).replace(/\s+/g, " ");
+    expect(text).toContain(
+      `In return for committing to the selected base for 12 consecutive calendar months, you receive ${COMMITMENT_DISCOUNT_BPS / 100}% off the complete with-AML or without-AML base`,
+    );
   });
 
   it("states clause 5.4's AML differences, which the catalogue reproduces", async () => {

@@ -20,9 +20,13 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { previewCatalogSync, runCatalogSync } from "@/lib/catalog-sync.functions";
+import { ANNUAL_DISCOUNT } from "@/lib/pricing/aurixa-catalog";
 
 const aud = (cents: number) =>
   new Intl.NumberFormat("en-AU", { style: "currency", currency: "AUD" }).format(cents / 100);
+
+/** The commitment discount as the card says it — read from the price list, never typed. */
+const commitmentPercent = `${Math.round(ANNUAL_DISCOUNT * 100)}%`;
 
 type Plan = {
   ok: boolean;
@@ -95,11 +99,12 @@ export function CatalogSyncCard() {
           charges and what the pricing page leads with; the without-AML figure is shown beside it.
           Every figure is tax-inclusive — GST is contained in the amount, not added to it — and
           Stripe prices are created with <code className="mx-1">tax_behavior: inclusive</code> so
-          enabling Stripe Tax later cannot inflate a total. Annual bills twelve months less 10%.
-          Each tier's included credits are written onto the Stripe product and price, so an invoice
-          and the billing portal say what the subscription entitles the customer to — and are
-          granted per month on both billing periods, since credits lapse 30 days after they are
-          issued.
+          enabling Stripe Tax later cannot inflate a total. Annual is a 12-month commitment paid up
+          front: twelve months of the base less {commitmentPercent}, the Subscription Agreement's
+          own commitment discount. Each tier's included credits are written onto the Stripe product
+          and price, so an invoice and the billing portal say what the subscription entitles the
+          customer to — and are granted per month on both billing periods, since credits lapse 30
+          days after they are issued.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -175,7 +180,7 @@ export function CatalogSyncCard() {
                   <TableRow key={`${p.tierSlug}-${p.interval}`}>
                     <TableCell className="text-xs capitalize">{p.tierSlug}</TableCell>
                     <TableCell className="text-xs">
-                      {p.interval === "year" ? "Annual (−10%)" : "Monthly"}
+                      {p.interval === "year" ? `Annual (−${commitmentPercent})` : "Monthly"}
                     </TableCell>
                     <TableCell className="text-right font-mono text-xs">
                       {aud(p.unitAmount)}

@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { tierPriceCents } from "@/lib/pricing/aurixa-catalog";
+import { catalogTier, SUBSCRIPTION_TIER_SLUGS } from "./subscriptionTemplates";
 import {
   addDays,
   anniversary,
@@ -82,6 +84,20 @@ describe("the base price (clauses 5.1, 5.2, 5.4)", () => {
     expect(monthly.annualPrepaymentCents).toBeNull();
     // "neither payment option increases the 15% base discount"
     expect(annual.committedTotalCents).toBe(monthly.committedTotalCents);
+  });
+
+  // The pricing page's annual plan IS a 12-month commitment paid up front, so
+  // it must charge exactly what an agreement's annual prepayment states — the
+  // owner's decision of 25 September 2026. This is the check that the price
+  // list and the agreement cannot drift apart again.
+  it("prices the catalogue's annual plan as the agreement's annual prepayment, on every base", () => {
+    for (const tier of SUBSCRIPTION_TIER_SLUGS) {
+      for (const withAml of [true, false]) {
+        const agreement = priceBase(tier, withAml, "committed_annual").annualPrepaymentCents;
+        const storefront = tierPriceCents(catalogTier(tier), { period: "annual", withAml });
+        expect(storefront, `${tier}, ${withAml ? "with" : "without"} AML`).toBe(agreement);
+      }
+    }
   });
 });
 
