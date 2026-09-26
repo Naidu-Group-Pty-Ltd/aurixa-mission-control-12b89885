@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite dev",
     "build": "NODE_OPTIONS=--max-old-space-size=6144 vite build",
-    "build:dev": "vite build --mode development",
+    "build:dev": "NODE_OPTIONS=--max-old-space-size=6144 vite build --mode development",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "check:supabase-types": "node scripts/check-supabase-types.mjs",
