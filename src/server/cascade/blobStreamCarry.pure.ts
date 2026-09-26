@@ -75,19 +75,29 @@
  * The most a cascade will carry in one file, now that carrying it does not
  * mean holding it.
  *
- * This is GitHub's number rather than ours: the create-blob endpoint is
- * documented to 100 MB, and past it there is no request to make. Saying so is
- * the point — a file over this is refused by the API, not by a budget an
- * operator could argue with, and the hold should send them to the only remedy
- * that exists (make the file smaller, or keep it out of the tree) rather than
- * to a knob.
+ * GitHub's number rather than ours, and MEASURED rather than read. This said
+ * 100 MB, taken from the create-blob endpoint's documentation, until prime's
+ * seeds grew past the real limit, which is lower. Measured on
+ * `npc-client-dashboard`, 26 Sep 2026: every template-library seed up to v19
+ * was carried and landed byte-identical — the largest, v16, is 41,780,944
+ * bytes — while v20, v21 and v22 (42,195,218 to 42,406,114 bytes) were refused
+ * on every pass with HTTP 422, "Sorry, your input was too large to process".
+ * 40 MiB (41,943,040 bytes) sits between the largest file the endpoint has
+ * taken and the smallest it has refused.
  *
- * Prime's largest tracked file is 39.8 MB, so nothing in the fleet is near
- * it. The headroom is deliberate: the number is a statement about the
- * transport, and pinning it to today's corpus would mean re-deciding it every
- * time a seed grows.
+ * The number has to be right in both directions. Too high, and a file the API
+ * will refuse is streamed on every pass anyway: at 100 MB each pass sent about
+ * 127 MB (`CASCADE_STREAM_BYTES_PER_PASS`) into three certain refusals, spent
+ * its window on work that could never land, and the hold told the operator
+ * the next pass would retry, so nobody moved the files. And the convergence
+ * auditor imports this ceiling, so it counted all three as owed and would have
+ * escalated a healthy clone as stalled. Too low, and a file the API would take
+ * is held for a person.
+ *
+ * A file between the two measurements (41.78 MB to 41.94 MB) is still tried.
+ * If it is refused, it goes back to the same hold as any failed carry.
  */
-export const CASCADE_STREAM_MAX_FILE_BYTES = 100 * 1024 * 1024;
+export const CASCADE_STREAM_MAX_FILE_BYTES = 40 * 1024 * 1024;
 
 /**
  * How much a single pass will carry as a stream before it leaves the rest for

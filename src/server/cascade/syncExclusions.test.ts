@@ -568,7 +568,28 @@ describe("a file the cascade could not carry is held, and says which it was", ()
     expect(PAST_CEILING.note).not.toMatch(/migration sync refuses/i);
     expect(PAST_CEILING.note, "and it says an approval cannot help").toMatch(/No approval/i);
     expect(PAST_CEILING.note).toMatch(/200\.3 MB/);
-    expect(PAST_CEILING.note).toMatch(/100\.0 MB/);
+    expect(PAST_CEILING.note).toMatch(/40\.0 MB/);
+  });
+
+  it("sends a file git can still take to a push, and one it cannot to nothing", () => {
+    /*
+      The API's blob ceiling is ~40 MB (measured) and a push takes a file up
+      to 100 MB, so a file between the two is not stuck — a person can push
+      it. The note said "has to become smaller" for all of them, which sent
+      an operator away from the one road that works for a 42 MB seed.
+    */
+    const V20 = oversizeHold(
+      "supabase/migrations/20261219060000_seed_template_library_v20_continuous_front_matter.sql",
+      42_195_218,
+      CASCADE_STREAM_MAX_FILE_BYTES,
+    );
+    expect(V20.note).toMatch(/40\.2 MB upstream/);
+    expect(V20.note).toMatch(/push it from a local clone/);
+    expect(V20.note).toMatch(/No approval can release a ceiling/);
+    // Past what a push takes, there is no road in, and it says so.
+    expect(PAST_CEILING.note).not.toMatch(/push it from a local clone/);
+    expect(PAST_CEILING.note).toMatch(/A push is refused as well/);
+    expect(PAST_CEILING.note).toMatch(/has to become smaller, or stay out of the tree/);
   });
 
   it("does not send a failed carry to a person, because the next pass retries", () => {

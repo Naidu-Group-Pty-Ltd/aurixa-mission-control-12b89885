@@ -723,6 +723,12 @@ export const CASCADE_MAX_FILE_BYTES = 8 * 1024 * 1024;
 const megabytes = (bytes: number): string => `${(bytes / 1_048_576).toFixed(1)} MB`;
 
 /**
+ * The largest file GitHub accepts by `git push`. Past it a push is refused as
+ * well, and there is no road into a repository at all.
+ */
+const GIT_PUSH_MAX_FILE_BYTES = 100 * 1024 * 1024;
+
+/**
  * Hold a file the cascade could not carry, and say so where a person reads.
  *
  * `oversize` rather than `manual_reconcile`, so it is counted and listed
@@ -764,6 +770,16 @@ export function oversizeHold(
         `hand.`,
     };
   }
+  // The remedy depends on which side of the push ceiling the file is. GitHub's
+  // blob API refuses from about 40 MB, and a push takes a file up to 100 MB.
+  // Telling an operator a 42 MB seed "has to become smaller" sends them away
+  // from the one road that works.
+  const remedy =
+    bytes <= GIT_PUSH_MAX_FILE_BYTES
+      ? `A person can still push it from a local clone, since git takes a file this size; ` +
+        `otherwise it has to become smaller, or stay out of the tree.`
+      : `A push is refused as well, so the file has to become smaller, or stay out of the ` +
+        `tree.`;
   return {
     path,
     pattern: "(size: over the cascade ceiling)",
@@ -771,8 +787,7 @@ export function oversizeHold(
     note:
       `${megabytes(bytes)} upstream, over the ${megabytes(maxBytes)} GitHub will accept as ` +
       `one blob, so the clone's REPOSITORY does not receive it. No approval can release a ` +
-      `ceiling and no pass will carry it — the file has to become smaller, or stay out of ` +
-      `the tree. Where it is a migration, the migration sync chunks it and the clone's ` +
-      `database still gets it.`,
+      `ceiling and no pass will carry it. ${remedy} Where it is a migration, the migration ` +
+      `sync chunks it and the clone's database still gets it.`,
   };
 }

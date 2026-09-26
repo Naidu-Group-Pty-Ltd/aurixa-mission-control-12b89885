@@ -302,13 +302,23 @@ decides whether the custodian may touch it at all.
 
 | class | owner | self-heals | today |
 |---|---|---|---|
-| `invocation_cut` — pass larger than one tick | machinery | yes | yes, pass ledger |
+| `invocation_cut` — pass larger than one tick | machinery | yes, where a tick's work is kept | pass ledger; text now read in batches |
 | `policy_unseeded` — mirror with no exclusions | machinery | **yes — seed it** | refuses, correctly, for ever |
 | `tree_truncated` | machinery | yes | refuses |
-| `oversize_file` — past GitHub's 100 MB blob ceiling | **person** | no | held + named |
-| `oversize_file` — 8 MB to 100 MB | machinery | **yes — streamed** | carried, no longer held |
+| `oversize_file` — past GitHub's 40 MiB blob ceiling (measured) | **person** | no | held + named, push by hand |
+| `oversize_file` — 8 MB to 40 MiB | machinery | **yes — streamed** | carried, no longer held |
 | `backend_identity_hold` | **person** | no | held + named |
 | `bulk_deletion_over_cap` | **person** | no | held, `cascade_path_approvals` |
+
+> **Corrected 26 Sep 2026 — `invocation_cut` self-heals only where a tick's
+> work is kept.** The pass ledger keeps what a tick PREPARED as a blob. A text
+> file travels inline in the tree write and is never ledgered, so a pass whose
+> delivery is mostly source text starts every tick from nothing. The module-scoped
+> `npc-crm-independent-6505dc` was that pass: every tick of the 26 Sep events
+> paused with no file prepared (0 of 390 at prime@c19ab0a, 0 of 399 at
+> prime@0e89502), and the drain retired each event at its attempt ceiling. For that clone the class healed nothing, on any tick.
+> The fix makes the pass fit, not the ledger bigger. See
+> [`CASCADE_ONE_TICK.md`](./CASCADE_ONE_TICK.md).
 
 #### A proposal exists and never merges
 
@@ -507,6 +517,14 @@ as `stalled`, permanently, on a fleet behaving exactly as designed.
 > an auditor still refusing at 8 MB would score an undelivered 41.7 MB seed as
 > *not owed* and call a clone missing fourteen files converged. See
 > [`CASCADE_LARGE_FILES.md`](./CASCADE_LARGE_FILES.md).
+>
+> **Corrected again 26 Sep 2026 — GitHub's ceiling is 40 MiB, not 100 MB.**
+> The 100 MB came from the create-blob endpoint's documentation. The endpoint
+> took v16 (41,780,944 bytes) and refused v20, v21 and v22 (42.2–42.4 MB) with
+> HTTP 422 on every pass, so a 100 MB reading scored three files the API will
+> never take as owed. That is the same failure this step exists to prevent,
+> arrived at from the other side. The ceiling is measured now, and it is
+> still imported rather than restated.
 
 That is `drift_high` in a new costume, and it would have discredited this
 reading the same way. **The rule it bought generalises past the constant: the
