@@ -63,21 +63,43 @@ describe("the slices this file reads exist", () => {
 });
 
 describe("a succeeded deploy records the revision its functions are proven at", () => {
-  it("records it on the run itself, on every completion", () => {
-    for (const success of successes) {
-      expect(success).toContain("functions_revision: functionsRevision");
-      expect(success).toContain("revision_recorded: functionsRevision !== null");
-    }
+  /** The completion reached when a pass has nothing left to fetch. */
+  const emptyBatch = successes[0];
+  /** The completion after a pass that deployed a batch itself. */
+  const finalCompletion = successes[1];
+
+  it("records it on the run itself, when the run deployed the bundles", () => {
+    expect(finalCompletion).toContain("functions_revision: functionsRevision");
+    expect(finalCompletion).toContain("revision_recorded: functionsRevision !== null");
+  });
+
+  it("proves nothing over an empty batch, which deployed nothing itself", () => {
+    /*
+      An empty batch means every bundle holds a copy newer than this
+      generation — read from the TARGET's timestamps, which Lovable publishing
+      the clone's own checkout, or the clone's CI, refresh exactly as this run
+      does. Recording the snapshot's revision there would claim the prime's
+      HEAD for a function that may hold an older tree, and a baseline past a
+      change never plans it again. Recording none steps the catch-up back to
+      the previous proof: a wider diff, never a skip.
+    */
+    expect(emptyBatch).toContain("functions_revision: null");
+    expect(emptyBatch).toContain("revision_recorded: false");
+    const emptyBranch = lane.slice(
+      lane.indexOf("if (batch.length === 0 && !generation.sourceMoved)"),
+      lane.indexOf("return succeedRun(run, {"),
+    );
+    expect(emptyBranch).not.toContain("functionsRevisionOfSuccess(");
   });
 
   it("computes it with the one rule, never inline", () => {
-    // Two completions, one rule: `functionsRevisionOfSuccess` is what the
-    // catch-up's reader mirrors, so a second spelling here is how the writer
-    // and the reader come to disagree.
+    // One rule: `functionsRevisionOfSuccess` is what the catch-up's reader
+    // mirrors, so a second spelling here is how the writer and the reader come
+    // to disagree.
     const calls = lane.match(/functionsRevisionOfSuccess\(\{/g) ?? [];
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(1);
     // A named run is proven only up to the revision its list was computed to.
-    expect(lane.match(/plannedToSha: run\.plan\?\.prime_sha/g) ?? []).toHaveLength(2);
+    expect(lane.match(/plannedToSha: run\.plan\?\.prime_sha/g) ?? []).toHaveLength(1);
   });
 
   it("proves nothing over a bundle that failed to land", () => {

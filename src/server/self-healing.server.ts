@@ -911,13 +911,20 @@ async function clearFailedVerdict(
  * waiting for a worker that is doing this very job is not a failed attempt,
  * and charging it would park a run for being polite. Due again after the
  * monitor interval, by which time a fleet pass has long since released.
+ *
+ * And it keeps the approval it came in with. `approvedByHuman` is read from
+ * the status and nothing else, and a wait comes AFTER the destructiveness gate
+ * an operator's approval let the run past — so handing an approved run back
+ * `planned` sends it through that gate again, which parks it for the very
+ * approval it already has, with not one statement sent in between. The drain
+ * takes `approved` runs as well as `planned` ones, so the run is still due.
  */
 async function waitForClaim(
-  run: { id: string; attempts?: number | null },
+  run: { id: string; status?: string | null; attempts?: number | null },
   why: string,
 ): Promise<{ status: string }> {
   await markRun(run.id, {
-    status: "planned",
+    status: run.status === "approved" ? "approved" : "planned",
     attempts: run.attempts ?? 0,
     next_attempt_at: new Date(Date.now() + MONITOR_RETRY_MINUTES * 60_000).toISOString(),
     last_error: `waiting: ${why}`.slice(0, 2000),
@@ -1393,18 +1400,18 @@ async function executeEdgeFunctionDeploy(
   // the new baseline recorded, and the next pass fetches the whole set again.
   if (batch.length === 0 && !generation.sourceMoved) {
     // Nothing left to fetch with the tree held still: every bundle this run
-    // owed was deployed from this revision by an earlier pass of the same
-    // generation, and a bundle that failed there is fetched again rather than
-    // counted as refreshed. So this is a completion like the one below, and
-    // it records the revision the same way — it used to record nothing, which
-    // left the catch-up planning from an older proof after a run that had
-    // delivered everything.
-    const functionsRevision = functionsRevisionOfSuccess({
-      wanted,
-      deployedFromSha: snapshot.sourceSha,
-      plannedToSha: run.plan?.prime_sha,
-      failedBundles: 0,
-    });
+    // owed holds a copy on the clone newer than this generation began, so
+    // there is nothing for the run to do and it completes.
+    //
+    // It proves NO revision, though, and records none. "Newer than this
+    // generation" is read from the TARGET's timestamps, which say a copy
+    // landed, not where it came from: Lovable publishing the clone's own
+    // checkout, or the clone's CI, refreshes them exactly as this run does.
+    // This pass deployed nothing itself, so recording the snapshot's revision
+    // could tell the catch-up a function is at the prime's HEAD when it holds
+    // an older tree — and a baseline past a change never plans that change
+    // again. Recording none steps the catch-up back to the previous proof,
+    // which can only make its next diff wider: a redeploy, never a skip.
     return succeedRun(run, {
       deployed: refreshed.length,
       note:
@@ -1412,8 +1419,8 @@ async function executeEdgeFunctionDeploy(
           ? "every bundle this run owed is on the clone"
           : "no function bundles to deploy",
       source_sha: snapshot.sourceSha ?? null,
-      functions_revision: functionsRevision,
-      revision_recorded: functionsRevision !== null,
+      functions_revision: null,
+      revision_recorded: false,
       generation_at: generation.baselineAt,
     });
   }

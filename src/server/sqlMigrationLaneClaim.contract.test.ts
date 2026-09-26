@@ -187,12 +187,26 @@ describe("waiting for the claim costs the run nothing", () => {
       is the one from before this invocation, the rule every other requeue in
       the file follows.
     */
-    expect(wait).toContain('status: "planned"');
     expect(wait).toContain("attempts: run.attempts ?? 0");
     expect(wait).toContain("next_attempt_at:");
     expect(wait).toContain("waiting:");
     expect(wait).not.toContain("(run.attempts ?? 0) + 1");
     expect(wait).not.toContain("completed_at");
+  });
+
+  it("keeps an operator's approval while it waits", () => {
+    /*
+      `approvedByHuman` is read from the status alone, and the wait comes after
+      the destructiveness gate the approval let the run past. Written back
+      `planned`, an approved run meets that gate again and parks for the same
+      approval — with nothing sent in between.
+    */
+    expect(healing).toContain('const approvedByHuman = run.status === "approved";');
+    expect(wait).toContain('status: run.status === "approved" ? "approved" : "planned"');
+    expect(wait).not.toMatch(/status: "planned"/);
+    // Safe only because the drain still takes an approved run when it is due.
+    const sweep = healing.slice(healing.indexOf("export async function sweepSupportRemediations"));
+    expect(sweep).toContain('.in("status", ["planned", "approved"])');
   });
 
   it("every return the claim can produce is either the replay or a wait", () => {
