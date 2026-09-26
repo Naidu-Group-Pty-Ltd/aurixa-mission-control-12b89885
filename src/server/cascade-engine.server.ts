@@ -59,6 +59,25 @@ import {
 } from "./cascade/deletionPropagation.pure";
 import { probeDeletions, probeHeldPaths } from "./cascadeDeletions.server";
 import {
+  describeSpecsBroughtAcross,
+  leftBehindSpecHold,
+  MAX_LEFT_BEHIND_PROBES,
+  MAX_SHIM_HOPS,
+  pathsTheDeliveryChanges,
+  specsBothSidesHoldDifferently,
+  specsLeftBehind,
+  subjectsOfKeptSpec,
+  withLeftBehindNote,
+  type CarryBasis,
+  type LeftBehindCutShort,
+  type LeftBehindSpec,
+  type LeftBehindTouch,
+  type SpecSide,
+} from "./cascade/specsLeftBehind.pure";
+import { gitBlobSha } from "./cascade/gitBlobSha.pure";
+import { MAX_OUTSIDE_ROOT_PROBES, outsideRootCandidates } from "./cascade/outsideRootSubjects.pure";
+import { decodeBase64Utf8, fetchBlobTextsBatched } from "./prime-backend.server";
+import {
   decideHoldRelease,
   describeHoldReleases,
   holdReleaseSuffixFor,
@@ -2514,6 +2533,25 @@ export async function processClone(args: {
    * recorded: a held path is one a spec naming it should still strand on.
    */
   const reconciledPaths = new Set<string>();
+  /**
+   * The decided paths whose merge CHANGES the clone's file — the part of
+   * `reconciledPaths` that is a write. A pump's steady state writes the
+   * clone's own bytes back and is not here.
+   *
+   * The forward half reads `reconciledPaths`: a spec naming a pumped path is
+   * judged by the merge, not stranded on it. The reverse half asks what the
+   * delivery CHANGES, and reads this (`pathsTheDeliveryChanges`) — excluding
+   * every pumped path left a kept spec about a `config.toml` the pump really
+   * changed running its old assertions against the new merge.
+   */
+  const reconcileWrites = new Set<string>();
+  /**
+   * What a rehearsal's pumps would write. A dry run composes no entry for
+   * `config.toml`, the registry or the deploy workflow, so without this it
+   * would judge the kept specs against a delivery missing those writes and
+   * answer differently from the pass it rehearses.
+   */
+  const rehearsedWrites = new Set<string>();
   if (mode !== "notify") {
     try {
       const [primeCfg, cloneCfg] = await Promise.all([
@@ -2550,6 +2588,8 @@ export async function processClone(args: {
           configReconcileNote =
             `${CONFIG_TOML_PATH} · ${now} function declaration(s), was ${was} · ` +
             `project ${verdict.ownRef} unchanged${kept}`;
+          reconcileWrites.add(CONFIG_TOML_PATH);
+          if (dryRun) rehearsedWrites.add(CONFIG_TOML_PATH);
           if (!dryRun) {
             const { data: cfgBlob } = await octokit.git.createBlob({
               owner: cloneRef.owner,
@@ -2625,6 +2665,10 @@ export async function processClone(args: {
           needsReconcile.push(held);
         } else {
           cloneOwnedFunctions = [...new Set([...cloneOwnedFunctions, ...verdict.carriedForward])];
+          if (verdict.changed) {
+            reconcileWrites.add(SECURITY_REGISTRY_PATH);
+            if (dryRun) rehearsedWrites.add(SECURITY_REGISTRY_PATH);
+          }
           if (verdict.changed && !dryRun) {
             const { data: regBlob } = await octokit.git.createBlob({
               owner: cloneRef.owner,
@@ -2786,6 +2830,11 @@ export async function processClone(args: {
       }
       deliveredSource[held.path] = outcome.merged;
       reconciledPaths.add(held.path);
+      // A write only where the merge differs from the clone's copy, which the
+      // clone's tree already answers by blob id (`gitBlobSha.pure.ts`).
+      if (cloneShaByPath?.get(held.path) !== gitBlobSha(outcome.merged)) {
+        reconcileWrites.add(held.path);
+      }
       baselineNotes.push(`${held.path} · reconciled to ${outcome.count} function(s)`);
     };
 
@@ -2873,6 +2922,8 @@ export async function processClone(args: {
             (verdict.cloneWasHazardous
               ? " · the copy it replaces defaulted its deploy target to another deployment"
               : "");
+          reconcileWrites.add(DEPLOY_WORKFLOW_PATH);
+          if (dryRun) rehearsedWrites.add(DEPLOY_WORKFLOW_PATH);
           if (!dryRun) {
             const { data: wfBlob } = await octokit.git.createBlob({
               owner: cloneRef.owner,
@@ -2901,6 +2952,137 @@ export async function processClone(args: {
       );
     }
   }
+
+  // ── Which of prime's deletions this delivery makes ──────────────────────
+  //
+  // Decided HERE, before the spec channel, and the order is the fix. The
+  // channel's reverse half asks what the delivery CHANGES on the clone, and a
+  // removal is a change only once it is decided: `pendingDeletes` is the
+  // provisional list, and the reference check and the bulk cap below can each
+  // withhold any of it. Judged against the provisional list, a kept spec was
+  // replaced for a file that then stayed exactly as it was.
+  //
+  // Three kinds of file can still import what prime deleted. A HELD file,
+  // because the cascade cannot change it — `src/App.tsx` is `manual_reconcile`
+  // on the client-facing mirror and imports from the AML shell. A CLONE-ONLY
+  // file, because prime has never seen it. And a deletion this very check
+  // WITHHOLDS: a kept file is an old prime version, and an old prime version
+  // imports exactly what prime deleted beside it, because a decommission
+  // leaves in one commit. Everything else is either delivered by this run
+  // (prime's own content, which cannot import a path prime deleted) or
+  // byte-identical to prime's copy, which cannot either.
+  //
+  // One more kind is asked later, and only once: a spec this clone keeps at a
+  // different version from prime's. Whether it STAYS is the channel's to
+  // decide — a kept spec left behind by a removal is brought across with it
+  // where prime's history allows, and prime's copy cannot import the file
+  // prime deleted — so it is a survivor only once the channel has spoken.
+  // Counted here, it would withhold every removal it asserts about, and a spec
+  // is never brought across for a removal that does not happen: the deletion
+  // would be held for ever by the very spec it was meant to settle. Below the
+  // channel the specs that stayed narrow the plan, and narrowing only ever
+  // withholds, so no removal is made that the channel was not told about.
+  //
+  // Only read when there is a deletion to protect, so a run that deletes
+  // nothing spends nothing.
+  /** The clone's text of each file this pass has read, or null where it holds none. */
+  const cloneTexts = new Map<string, string | null>();
+  /**
+   * The clone's copy of a file, read once per pass for every question asked
+   * of it. Null where the clone holds none or it is binary. A read that FAILS
+   * throws and is not remembered: a read that failed is not a file with no
+   * imports.
+   */
+  const readCloneText = async (path: string): Promise<string | null> => {
+    const known = cloneTexts.get(path);
+    if (known !== undefined) return known;
+    const f = await getFileContent(octokit, cloneRef, path);
+    const text = f && !f.binary ? f.content : null;
+    cloneTexts.set(path, text);
+    return text;
+  };
+  /**
+   * What must survive a removal: the clone's copy of every held source and of
+   * the files only the clone holds, and `also`. A read that fails leaves the
+   * file out — it is not a file with no imports, but it is also not evidence
+   * against a deletion, and the bytes rule already stands.
+   */
+  const deletionSurvivors = async (
+    also: ReadonlyMap<string, string>,
+  ): Promise<Record<string, string>> => {
+    const deleting = new Set(deletionVerdicts.filter((v) => v.act === "delete").map((v) => v.path));
+    const heldSources = needsReconcile
+      .map((h) => h.path)
+      .filter((path) => /\.[cm]?tsx?$/.test(path));
+    const cloneOnlySources = deletionCandidates
+      .map((c) => c.path)
+      .filter((p) => !deleting.has(p) && /\.[cm]?tsx?$/.test(p))
+      .sort()
+      .slice(0, 60);
+    const surviving: Record<string, string> = Object.fromEntries(also);
+    await Promise.all(
+      [...new Set([...heldSources, ...cloneOnlySources])].map(async (path) => {
+        try {
+          const text = await readCloneText(path);
+          if (text !== null) surviving[path] = text;
+        } catch {
+          /* leave it out — see above */
+        }
+      }),
+    );
+    return surviving;
+  };
+  /**
+   * Withhold every deletion a survivor still imports, closed over its own
+   * keeps: a withheld deletion is itself a survivor, and one pass over the
+   * graph is not a closure. Measured 16 Sep 2026 on npc-client#189 — held
+   * `src/App.tsx` kept `BuilderPortalAdmin.tsx`, the dialog only that page
+   * imports was deleted, and the PR could not build. Each newly kept file's
+   * source joins the survivors and is scanned like the rest, until nothing
+   * more flips. Terminates: every iteration grows `surviving` or
+   * `unreadableSurvivors`, both bounded by the verdict list.
+   */
+  const withholdStillReferenced = async (surviving: Record<string, string>): Promise<void> => {
+    deletionVerdicts = withholdReferencedDeletions(deletionVerdicts, surviving);
+    const unreadableSurvivors = new Set<string>();
+    for (;;) {
+      const unread = deletionVerdicts
+        .filter((v) => v.act === "keep" && v.reason === "still_referenced")
+        .map((v) => v.path)
+        .filter((p) => !(p in surviving) && !unreadableSurvivors.has(p));
+      if (unread.length === 0) break;
+      await Promise.all(
+        unread.map(async (path) => {
+          try {
+            // A read that fails is not a file with no imports — inventing an
+            // empty one would ship the very break this check exists to stop.
+            // The path is only excused from the closure, never given content.
+            const text = await readCloneText(path);
+            if (text !== null) surviving[path] = text;
+            else unreadableSurvivors.add(path);
+          } catch (e) {
+            // A rate limit is the window, not this file: defer the clone
+            // rather than deliver a tree the unread survivor may contradict.
+            if (classifyGitHubFailure(e).kind === "rate_limited") throw e;
+            unreadableSurvivors.add(path);
+          }
+        }),
+      );
+      deletionVerdicts = withholdReferencedDeletions(deletionVerdicts, surviving);
+    }
+  };
+  if (pendingDeletes.length > 0) await withholdStillReferenced(await deletionSurvivors(new Map()));
+  // Approvals are consulted only past the cap, and they are never evidence:
+  // a path still has to earn its delete verdict from prime's history before
+  // the approved set is even read. See `planDeletions`.
+  let deletionPlan = planDeletions(deletionVerdicts, MAX_DELETIONS_PER_CASCADE, deletionApproved);
+  /** The removals planned before the channel ran: the most the narrowing can withhold. */
+  const plannedBeforeTheChannel: ReadonlySet<string> = new Set(deletionPlan.deletes);
+  /**
+   * The removals this delivery makes. Every question the channel asks about a
+   * removal asks this set, never `pendingDeletes`.
+   */
+  let deletesCrossing: ReadonlySet<string> = new Set(deletionPlan.deletes);
 
   // ── The membrane's spec channel, over the FINISHED delivery ────────────
   //
@@ -2959,7 +3141,270 @@ export async function processClone(args: {
   // specs — and a CARRIED subject can itself be a spec, so the set of specs
   // grows by up to the same cap while the loop runs. Counting only the specs
   // present at the start bounded the loop below its own worst case.
-  const maxCarryRounds = MAX_SUBJECTS_CARRIED * 2 + Object.keys(deliveredSource).length + 1;
+  //
+  // ── …and the other direction: a spec this clone KEEPS, left behind ─────
+  //
+  // Everything above judges a spec the delivery CARRIES. The same sentence
+  // binds the other way round, and nothing asked it: a subject the delivery
+  // carries, asserted about by a spec it does NOT carry. On a mirror that
+  // cannot happen — every spec that is behind is a candidate and crosses with
+  // everything else — but on a module-scoped clone it is the common case, and
+  // cascade PR #26 to `npc-crm-independent-6505dc` failed `verify` on four
+  // specs the clone held at an older version while the files they test
+  // crossed. See `specsLeftBehind.pure.ts`.
+  //
+  // Read ONCE, here, for the specs both sides hold at different versions that
+  // the delivery is not already carrying: prime's copy and the clone's, since
+  // either may name what the other does not — each resolved against its OWN
+  // tree, with the modules it imports read from its own side, so a re-export
+  // shim is looked through where it lives and an import only the clone holds
+  // still names its subject. Batched by blob sha, eighty to a request. A read
+  // that fails skips this half for the pass — which is what every pass did
+  // before it — except a rate limit, which is the window's answer and defers
+  // the clone like any other.
+  //
+  // "Crossing" for this half is what the delivery CHANGES on the clone
+  // (`pathsTheDeliveryChanges`): prime's files written verbatim, a pump's
+  // merge where it differs from the clone's file, and the removals the
+  // finished deletion plan makes. Not `deliveredPaths`, which also counts
+  // every path a pump decided — including its steady state, where the merged
+  // file IS the clone's own and nothing is written; the first replay read that
+  // as a change and held the clone's own `crmConversations.spec.ts` under
+  // "this delivery updates supabase/config.toml" on a delivery that wrote no
+  // `config.toml` at all. And not every pumped path left out either, which was
+  // wrong the other way: a pump that does change `config.toml` changes it, and
+  // a spec asserting about it has to be judged.
+  const changedOnClone = () =>
+    pathsTheDeliveryChanges({
+      entries: treeEntries,
+      reconciled: reconciledPaths,
+      reconcileWrites,
+      rehearsed: rehearsedWrites,
+      removing: deletesCrossing,
+    });
+  const keptSpecSubjects = new Map<string, string[]>();
+  /** Prime's text of each kept spec, for what its version would bring with it. */
+  const primeKeptText = new Map<string, string>();
+  /** The clone's text of each kept spec: what stays wherever the spec does not move. */
+  const cloneKeptText = new Map<string, string>();
+  if (primeShaByPath !== null && cloneShaByPath !== null) {
+    const primeTree = primeShaByPath;
+    const cloneTree = cloneShaByPath;
+    const changedAtStart = changedOnClone();
+    // Nor a path a pump decided. It is the pump's, written or deliberately left
+    // as the clone's own, and carrying prime's raw copy in behind a subject
+    // would undo the reconcile inside its own pass.
+    const kept = specsBothSidesHoldDifferently({ primeSha: primeTree, cloneSha: cloneTree }).filter(
+      (path) => !changedAtStart.has(path) && !reconciledPaths.has(path),
+    );
+    if (kept.length > 0) {
+      const readTexts = async (
+        ref: RepoRef,
+        tree: ReadonlyMap<string, string>,
+        paths: string[],
+      ) => {
+        const entries = paths
+          .map((rel) => ({ rel, sha: tree.get(rel) }))
+          .filter((e): e is { rel: string; sha: string } => e.sha !== undefined);
+        const out = new Map<string, string>();
+        for (const [rel, b64] of await fetchBlobTextsBatched(octokit, ref, entries)) {
+          out.set(rel, decodeBase64Utf8(b64));
+        }
+        return out;
+      };
+      try {
+        const [primeSpecs, cloneSpecs] = await Promise.all([
+          readTexts(primeRef, primeTree, kept),
+          readTexts(cloneRef, cloneTree, kept),
+        ]);
+        // Each side's copy against its own tree, its modules read from its own
+        // repository. What this delivery carries is prime's and already in
+        // hand, and a module both sides hold at one blob is read once.
+        const treeOf = { prime: primeTree, clone: cloneTree } as const;
+        const refOf = { prime: primeRef, clone: cloneRef } as const;
+        const specsOf = { prime: primeSpecs, clone: cloneSpecs } as const;
+        const textBySha = new Map<string, string>();
+        const carried = new Map<string, string>(Object.entries(deliveredSource));
+        const moduleText = (side: SpecSide["side"], path: string): string | undefined => {
+          if (side === "prime" && carried.has(path)) return carried.get(path);
+          const sha = treeOf[side].get(path);
+          return sha === undefined ? undefined : textBySha.get(sha);
+        };
+        const sidesOf = (spec: string): SpecSide[] =>
+          (["prime", "clone"] as const).map((side) => ({
+            side,
+            text: specsOf[side].get(spec),
+            tree: treeOf[side],
+            readText: (path: string) => moduleText(side, path),
+          }));
+        const unreadable = { prime: new Set<string>(), clone: new Set<string>() };
+        // One read per hop and side: each round learns the modules the last one
+        // reached. Prime's side first, so the clone's skips every blob the two
+        // share.
+        for (let hop = 0; hop <= MAX_SHIM_HOPS; hop += 1) {
+          const unread = { prime: new Set<string>(), clone: new Set<string>() };
+          for (const spec of kept) {
+            subjectsOfKeptSpec({
+              specPath: spec,
+              sides: sidesOf(spec),
+              onUnread: (side, path) => {
+                if (!unreadable[side].has(path)) unread[side].add(path);
+              },
+            });
+          }
+          if (unread.prime.size === 0 && unread.clone.size === 0) break;
+          for (const side of ["prime", "clone"] as const) {
+            const asking = [...unread[side]]
+              .filter((path) => {
+                const sha = treeOf[side].get(path);
+                return sha !== undefined && !textBySha.has(sha);
+              })
+              .sort();
+            const read =
+              asking.length > 0
+                ? await readTexts(refOf[side], treeOf[side], asking)
+                : new Map<string, string>();
+            for (const path of unread[side]) {
+              const sha = treeOf[side].get(path);
+              const text = read.get(path);
+              if (sha !== undefined && text !== undefined) textBySha.set(sha, text);
+              if (moduleText(side, path) === undefined) unreadable[side].add(path);
+            }
+          }
+        }
+        for (const spec of kept) {
+          const subjects = subjectsOfKeptSpec({ specPath: spec, sides: sidesOf(spec) });
+          if (subjects.length > 0) keptSpecSubjects.set(spec, subjects);
+        }
+        for (const [spec, text] of primeSpecs) primeKeptText.set(spec, text);
+        // The clone's copies are the pass's clone reads too: the narrowing
+        // below asks the ones that stay what they import.
+        for (const [spec, text] of cloneSpecs) {
+          cloneKeptText.set(spec, text);
+          cloneTexts.set(spec, text);
+        }
+      } catch (e) {
+        if (classifyGitHubFailure(e).kind === "rate_limited") throw e;
+        console.warn(
+          `[cascade] the specs clone ${clone.id} keeps could not be read — a spec left behind by ` +
+            `its subject is not looked for this pass: ${e instanceof Error ? e.message : String(e)}`,
+        );
+        keptSpecSubjects.clear();
+        primeKeptText.clear();
+        cloneKeptText.clear();
+      }
+    }
+  }
+
+  // ── …and a spec's subject outside the content roots, on evidence ────────
+  //
+  // `strandedSubjects` reads a subject under five roots only, so a spec that
+  // asserts about a file anywhere else crosses without it. Outside those
+  // roots are the files a clone is expected to keep its own version of — its
+  // CI, its build, its per-deployment workflows — so a file there counts as a
+  // spec's subject only where prime's own history shows the clone's copy is
+  // byte-identical to a version prime held, or an operator approved
+  // overwriting it: carrying it then loses nothing of the clone's. A file the
+  // clone keeps its own version of stays the clone's. See
+  // `outsideRootSubjects.pure.ts`.
+  //
+  // One verdict per path per pass, asked only while something can still be
+  // carried, and at most `MAX_OUTSIDE_ROOT_PROBES` probes. A failed read is
+  // not a verdict. A file never asked about is not carried; what that means
+  // for its spec is decided where the spec is.
+  const outsideVerdicts = new Map<string, HoldRelease>();
+  /** Files outside the content roots carried beside a spec, and the specs that named them. */
+  const outsideCarriedFor = new Map<string, Set<string>>();
+  let outsideProbes = 0;
+  const outsideHeld = (path: string): HeldPath => ({
+    path,
+    pattern: "",
+    reason: "manual_reconcile",
+    note: null,
+  });
+  const judgeOutsideRoot = async (paths: readonly string[]): Promise<void> => {
+    const asking: Array<{ path: string; cloneSha: string }> = [];
+    for (const path of paths) {
+      if (outsideVerdicts.has(path)) continue;
+      const cloneSha = cloneShaByPath?.get(path);
+      if (cloneSha === undefined) continue;
+      const approved = overwriteApproved.has(path);
+      const known = knownHeldEvidence.get(path);
+      if (approved || known) {
+        outsideVerdicts.set(
+          path,
+          decideHoldRelease({
+            held: outsideHeld(path),
+            cloneSha,
+            evidence: known ?? null,
+            approved,
+          }),
+        );
+        continue;
+      }
+      asking.push({ path, cloneSha });
+    }
+    if (asking.length === 0 || shouldStop()) return;
+    const room = Math.max(0, MAX_OUTSIDE_ROOT_PROBES - outsideProbes);
+    const batch = asking.slice(0, room);
+    if (batch.length === 0) return;
+    outsideProbes += batch.length;
+    const evidence = await probeHeldPaths({
+      octokit,
+      primeRef,
+      candidates: batch,
+      maxProbes: batch.length,
+    });
+    for (const [path, answer] of evidence) {
+      if (answer.kind === "unsettled") continue;
+      const cloneSha = cloneShaByPath?.get(path) ?? null;
+      if (cloneSha) heldLedger[path] = { clone: cloneSha, evidence: answer };
+      outsideVerdicts.set(
+        path,
+        decideHoldRelease({ held: outsideHeld(path), cloneSha, evidence: answer, approved: false }),
+      );
+    }
+  };
+  /** Every spec seen left behind this pass: the crossing files it asserts about, and which go. */
+  const leftBehind = new Map<string, LeftBehindSpec>();
+  /**
+   * The kept specs the delivery leaves behind as it stands NOW. The one way
+   * this half asks, so no site can judge a spec against a different set: what
+   * the delivery changes, and which of those it removes.
+   */
+  const keptLeftBehind = (): LeftBehindSpec[] =>
+    specsLeftBehind({
+      kept: keptSpecSubjects,
+      crossing: changedOnClone(),
+      removing: deletesCrossing,
+    });
+  /**
+   * Every hold this half made or annotated, so each can be written again once
+   * the delivery is final. A note is written when its spec is judged, and the
+   * delivery still changes after that: a subject is held later in the pass, a
+   * removal is withheld once the specs that stay are known. Keyed by spec.
+   */
+  const reverseHolds = new Map<
+    string,
+    { current: HeldPath; rebuild: (touch: LeftBehindTouch) => HeldPath | null }
+  >();
+  /** Put `next` where `prev` stands in both lists, or take `prev` out of both. */
+  const replaceHold = (prev: HeldPath, next: HeldPath | null) => {
+    for (const list of [partition.held, needsReconcile]) {
+      const at = list.indexOf(prev);
+      if (at === -1) continue;
+      if (next) list[at] = next;
+      else list.splice(at, 1);
+    }
+  };
+  /** The evidence verdict per left-behind spec: may prime's copy replace the clone's? */
+  const leftBehindVerdicts = new Map<string, HoldRelease>();
+  /** A left-behind spec not judged this pass, and why. */
+  const leftBehindCut = new Map<string, LeftBehindCutShort>();
+  let leftBehindProbes = 0;
+
+  const maxCarryRounds =
+    MAX_SUBJECTS_CARRIED * 2 + Object.keys(deliveredSource).length + keptSpecSubjects.size + 1;
 
   // Imports owed by a subject the carry already brought across. Fed back in
   // as stranded paths, so they meet `planSubjectCarry`, the exclusions, the
@@ -2972,6 +3417,7 @@ export async function processClone(args: {
   for (let round = 0; ; round += 1) {
     const deliveredPaths = new Set([...treeEntries.map((t) => t.path), ...reconciledPaths]);
     const strandedBySpec = new Map<string, string[]>();
+    const outsideNamedBy = new Map<string, string[]>();
     for (const [specPath, specText] of Object.entries(deliveredSource)) {
       const stranded = strandedSubjects({
         specPath,
@@ -2981,6 +3427,34 @@ export async function processClone(args: {
         crossing: deliveredPaths,
       });
       if (stranded.length > 0) strandedBySpec.set(specPath, stranded);
+      if (primeShaByPath !== null && cloneShaByPath !== null) {
+        const outside = outsideRootCandidates({
+          specPath,
+          specText,
+          primeSha: primeShaByPath,
+          cloneSha: cloneShaByPath,
+          crossing: deliveredPaths,
+        });
+        if (outside.length > 0) outsideNamedBy.set(specPath, outside);
+      }
+    }
+    // A file outside the content roots joins its spec's stranded subjects only
+    // on evidence, and is then carried or holds the spec exactly as one inside
+    // them does. One never asked about stays out, as it always has.
+    if (outsideNamedBy.size > 0) {
+      if (carryingAllowed) {
+        await judgeOutsideRoot([...new Set([...outsideNamedBy.values()].flat())].sort());
+      }
+      for (const [specPath, outside] of outsideNamedBy) {
+        const travelling = outside.filter((path) => outsideVerdicts.get(path)?.act === "release");
+        if (travelling.length === 0) continue;
+        strandedBySpec.set(specPath, [...(strandedBySpec.get(specPath) ?? []), ...travelling]);
+        for (const path of travelling) {
+          const naming = outsideCarriedFor.get(path) ?? new Set<string>();
+          naming.add(specPath);
+          outsideCarriedFor.set(path, naming);
+        }
+      }
     }
     // An import already delivered, or already put through the rules once, is
     // settled. Clearing them here is what makes the loop terminate: an owed
@@ -2989,11 +3463,141 @@ export async function processClone(args: {
     for (const owed of [...importsOwed]) {
       if (deliveredPaths.has(owed) || attemptedSubjects.has(owed)) importsOwed.delete(owed);
     }
-    if (strandedBySpec.size === 0 && (!carryingAllowed || importsOwed.size === 0)) break;
+    // The other direction. A kept spec whose subject is crossing is carried
+    // in behind it on the same terms as a subject — `planSubjectCarry`, the
+    // exclusions, `prepareOne` — but only after prime's own history says the
+    // clone's copy is an older version of prime's, or an operator approved
+    // overwriting it. The spec is outside this clone's scope and no rule sent
+    // it, so replacing it must lose nothing of the clone's. Everything else is
+    // held for a person, naming the subject that crossed.
+    const owedSpecs: string[] = [];
+    if (keptSpecSubjects.size > 0) {
+      const heldNow = new Set(partition.held.map((h) => h.path));
+      const unjudged: Array<{ path: string; cloneSha: string }> = [];
+      const leftBehindNow = keptLeftBehind();
+      for (const lb of leftBehindNow) {
+        leftBehind.set(lb.spec, lb);
+        if (heldNow.has(lb.spec) || attemptedSubjects.has(lb.spec)) continue;
+        if (leftBehindVerdicts.has(lb.spec)) continue;
+        const cloneSha = cloneShaByPath?.get(lb.spec);
+        if (cloneSha === undefined) continue;
+        if (overwriteApproved.has(lb.spec) || knownHeldEvidence.has(lb.spec)) continue;
+        unjudged.push({ path: lb.spec, cloneSha });
+      }
+      // Asked only while something can still be carried: a verdict nobody can
+      // act on this pass is a request spent for nothing.
+      let evidence = new Map<string, HeldPathEvidence>();
+      if (carryingAllowed && unjudged.length > 0) {
+        if (shouldStop()) {
+          for (const u of unjudged) leftBehindCut.set(u.path, "budget");
+        } else {
+          const room = Math.max(0, MAX_LEFT_BEHIND_PROBES - leftBehindProbes);
+          const asking = unjudged.slice(0, room);
+          for (const u of unjudged.slice(room)) leftBehindCut.set(u.path, "probes");
+          if (asking.length > 0) {
+            leftBehindProbes += asking.length;
+            evidence = await probeHeldPaths({
+              octokit,
+              primeRef,
+              candidates: asking,
+              maxProbes: asking.length,
+            });
+            for (const [path, answer] of evidence) {
+              if (answer.kind === "unsettled") continue;
+              const clone = cloneShaByPath?.get(path);
+              if (clone) heldLedger[path] = { clone, evidence: answer };
+            }
+          }
+        }
+      }
+      const releasing: string[] = [];
+      for (const lb of leftBehindNow) {
+        if (heldNow.has(lb.spec) || attemptedSubjects.has(lb.spec)) continue;
+        let verdict = leftBehindVerdicts.get(lb.spec);
+        if (verdict === undefined) {
+          const approved = overwriteApproved.has(lb.spec);
+          const answer = knownHeldEvidence.get(lb.spec) ?? evidence.get(lb.spec) ?? null;
+          // Not judged this round and nothing on file: left for the sweep.
+          if (!approved && answer === null) continue;
+          verdict = decideHoldRelease({
+            held: { path: lb.spec, pattern: "", reason: "manual_reconcile", note: null },
+            cloneSha: cloneShaByPath?.get(lb.spec) ?? null,
+            evidence: answer,
+            approved,
+          });
+          leftBehindVerdicts.set(lb.spec, verdict);
+          leftBehindCut.delete(lb.spec);
+          if (verdict.act === "hold") {
+            const held = leftBehindSpecHold({
+              membrane,
+              spec: lb.spec,
+              touchedBy: lb.touchedBy,
+              removed: lb.removed,
+              why: verdict.why,
+            });
+            partition.held.push(held);
+            needsReconcile.push(held);
+            attemptedSubjects.add(lb.spec);
+            const why = verdict.why;
+            reverseHolds.set(lb.spec, {
+              current: held,
+              rebuild: (touch) =>
+                touch.touchedBy.length + (touch.withheld?.length ?? 0) === 0
+                  ? null
+                  : leftBehindSpecHold({ membrane, spec: lb.spec, ...touch, why }),
+            });
+            continue;
+          }
+        }
+        if (verdict.act === "release") releasing.push(lb.spec);
+      }
+      // Prime's copy may assert about a file outside the content roots that
+      // the clone holds at an older version and no delivery would carry —
+      // `reportTypography.spec.ts` reads a document under `.claude/`. Asked
+      // BEFORE the spec moves: once it has, a file nobody asked about would
+      // leave prime's newer assertions running against the older copy, which
+      // is worse than the older spec this replaces. What the answers bring is
+      // then carried beside the spec by the stranded-subject rule above.
+      if (releasing.length > 0) {
+        const outsideOf = new Map<string, string[]>();
+        for (const spec of releasing) {
+          const text = primeKeptText.get(spec);
+          outsideOf.set(
+            spec,
+            text !== undefined && primeShaByPath !== null && cloneShaByPath !== null
+              ? outsideRootCandidates({
+                  specPath: spec,
+                  specText: text,
+                  primeSha: primeShaByPath,
+                  cloneSha: cloneShaByPath,
+                  crossing: deliveredPaths,
+                })
+              : [],
+          );
+        }
+        if (carryingAllowed) {
+          await judgeOutsideRoot([...new Set([...outsideOf.values()].flat())].sort());
+        }
+        for (const spec of releasing) {
+          if ((outsideOf.get(spec) ?? []).some((path) => !outsideVerdicts.has(path))) {
+            leftBehindCut.set(spec, shouldStop() ? "budget" : "outside_probes");
+            continue;
+          }
+          leftBehindCut.delete(spec);
+          owedSpecs.push(spec);
+        }
+      }
+    }
+    if (
+      strandedBySpec.size === 0 &&
+      (!carryingAllowed || (importsOwed.size === 0 && owedSpecs.length === 0))
+    ) {
+      break;
+    }
 
     // Try to bring the subjects across before deciding the specs cannot go.
     const plan = planSubjectCarry({
-      stranded: [...[...strandedBySpec.values()].flat(), ...importsOwed],
+      stranded: [...[...strandedBySpec.values()].flat(), ...importsOwed, ...owedSpecs],
       held: partition.held,
       attempted: attemptedSubjects,
       limit: Math.max(0, MAX_SUBJECTS_CARRIED - carriedSubjects.length),
@@ -3130,8 +3734,18 @@ export async function processClone(args: {
                 ? "ceiling"
                 : null,
       });
-      partition.held.push(held);
-      needsReconcile.push(held);
+      // Brought in only because the clone's older copy was being left behind:
+      // that older copy is what stays, and the hold says so.
+      const lb = leftBehind.get(specPath);
+      const hold = lb ? withLeftBehindNote(held, lb) : held;
+      partition.held.push(hold);
+      needsReconcile.push(hold);
+      if (lb) {
+        reverseHolds.set(specPath, {
+          current: hold,
+          rebuild: (touch) => withLeftBehindNote(held, touch),
+        });
+      }
       delete deliveredSource[specPath];
       for (let i = treeEntries.length - 1; i >= 0; i -= 1) {
         if (treeEntries[i].path === specPath) treeEntries.splice(i, 1);
@@ -3149,6 +3763,59 @@ export async function processClone(args: {
     // least one spec and `deliveredSource` strictly shrinks, so it settles in
     // at most one round per spec.
     if (round >= maxCarryRounds) carryingAllowed = false;
+  }
+
+  // Every kept spec still left behind once the delivery is final, that no
+  // rule already holds, is held here — never shipped past. Two ways to reach
+  // this: prime's history cleared it and the carry stopped before it (the
+  // budget or a ceiling), or it was never judged at all (the budget, or the
+  // probe ceiling). Both clear on a later pass, and the note says which.
+  if (keptSpecSubjects.size > 0) {
+    const heldNow = new Set(partition.held.map((h) => h.path));
+    for (const lb of keptLeftBehind()) {
+      leftBehind.set(lb.spec, lb);
+      if (heldNow.has(lb.spec)) continue;
+      const cutShort: LeftBehindCutShort =
+        leftBehindCut.get(lb.spec) ?? (carryStoppedOnBudget ? "budget" : "ceiling");
+      const held = leftBehindSpecHold({
+        membrane,
+        spec: lb.spec,
+        touchedBy: lb.touchedBy,
+        removed: lb.removed,
+        cutShort,
+      });
+      partition.held.push(held);
+      needsReconcile.push(held);
+      reverseHolds.set(lb.spec, {
+        current: held,
+        rebuild: (touch) =>
+          touch.touchedBy.length + (touch.withheld?.length ?? 0) === 0
+            ? null
+            : leftBehindSpecHold({ membrane, spec: lb.spec, ...touch, cutShort }),
+      });
+    }
+  }
+
+  // ── …and the removals, once the specs that stay are known ───────────────
+  //
+  // A kept spec the channel did not bring across stays on the clone as it is,
+  // and a file it imports cannot be removed beneath it: the reference check's
+  // own rule, asked of the one kind of survivor it could not ask before the
+  // channel ran (see "Which of prime's deletions this delivery makes"). The
+  // held files are asked again as well, because the channel holds specs of
+  // its own.
+  //
+  // Narrowing only ever withholds. A plan the bulk cap refused has nothing to
+  // narrow, and a plan it accepted stays accepted with fewer paths in it —
+  // still under the cap, or still wholly approved — so no removal is made
+  // that the channel was not told about. What it withholds is named on every
+  // hold that asserts about it, below.
+  if (deletesCrossing.size > 0 && deletionPlan.refusal === null) {
+    const landedNow = new Set(treeEntries.filter((t) => t.sha !== null).map((t) => t.path));
+    const staying = new Map([...cloneKeptText].filter(([spec]) => !landedNow.has(spec)));
+    await withholdStillReferenced(await deletionSurvivors(staying));
+    deletionPlan = planDeletions(deletionVerdicts, MAX_DELETIONS_PER_CASCADE, deletionApproved);
+    deletesCrossing = new Set(deletionPlan.deletes);
   }
 
   // ── the Edge Function type baseline follows the files it counts ───────
@@ -3185,7 +3852,7 @@ export async function processClone(args: {
       if (primeBaseline && cloneBaseline && !primeBaseline.binary && !cloneBaseline.binary) {
         const crossing = new Set<string>([
           ...treeEntries.filter((t) => t.sha !== null).map((t) => t.path),
-          ...pendingDeletes,
+          ...deletesCrossing,
         ]);
         const verdict = reconcileEdgeTypecheckBaseline({
           primeJson: primeBaseline.content,
@@ -3225,6 +3892,67 @@ export async function processClone(args: {
       );
     }
   }
+
+  // ── Every note this half wrote, written again from the finished delivery ─
+  //
+  // A note was written when its spec was judged, and three things can happen
+  // after that: a subject is held later in the pass, a removal is withheld by
+  // the narrowing above, and the type baseline keeps the clone's own file. So
+  // each is rewritten from what the delivery finally does. A withheld removal
+  // is named as withheld; a hold left with nothing to say is dropped, because
+  // nothing it asserts about changes and no removal waits on it — the spec
+  // simply stays, as it would have without this half.
+  if (reverseHolds.size > 0) {
+    const finalLeftBehind = new Map(keptLeftBehind().map((lb) => [lb.spec, lb]));
+    const withheldRemovals = [...plannedBeforeTheChannel].filter((p) => !deletesCrossing.has(p));
+    for (const [spec, entry] of reverseHolds) {
+      const lb = finalLeftBehind.get(spec);
+      const subjects = new Set(keptSpecSubjects.get(spec) ?? []);
+      const next = entry.rebuild({
+        touchedBy: lb?.touchedBy ?? [],
+        removed: lb?.removed ?? [],
+        withheld: withheldRemovals.filter((path) => subjects.has(path)).sort(),
+      });
+      replaceHold(entry.current, next);
+      if (next) entry.current = next;
+      else reverseHolds.delete(spec);
+    }
+  }
+
+  // Named in the pull request: a spec brought up to date with the file it
+  // tests, and a file outside the content roots carried beside the spec that
+  // asserts about it. Neither is in this clone's scope, so the diff would
+  // otherwise show them with no reason given. Only what actually landed, and
+  // named for what the delivery finally does: a file it was brought across
+  // for that the delivery no longer changes is said to be unchanged.
+  const basisOf = (verdict: HoldRelease | undefined): CarryBasis =>
+    verdict?.act === "release" && verdict.basis === "approved" ? "approved" : "unedited";
+  const landed = new Set(treeEntries.filter((t) => t.sha !== null).map((t) => t.path));
+  const finalChanged = changedOnClone();
+  const specsBroughtAcrossNote = describeSpecsBroughtAcross({
+    specs: [...leftBehindVerdicts]
+      .filter(([spec, verdict]) => verdict.act === "release" && landed.has(spec))
+      .map(([spec, verdict]) => {
+        const touchedBy = (keptSpecSubjects.get(spec) ?? []).filter(
+          (subject) => subject !== spec && finalChanged.has(subject),
+        );
+        return {
+          spec,
+          touchedBy,
+          removed: touchedBy.filter((subject) => deletesCrossing.has(subject)),
+          unchanged: (leftBehind.get(spec)?.touchedBy ?? []).filter((s) => !finalChanged.has(s)),
+          basis: basisOf(verdict),
+        };
+      }),
+    outside: [...outsideCarriedFor]
+      .filter(([path]) => landed.has(path))
+      .map(([path, naming]) => ({
+        path,
+        specs: [...naming].filter((spec) => landed.has(spec)).sort(),
+        basis: basisOf(outsideVerdicts.get(path)),
+      }))
+      .filter((o) => o.specs.length > 0),
+  });
 
   // The finished pass's own ledger, carried on the result row so the NEXT
   // pass — for whatever prime commit — reuses every blob prime still holds.
@@ -3297,15 +4025,10 @@ export async function processClone(args: {
   const heldSourcePaths = needsReconcile
     .map((h) => h.path)
     .filter((path) => /\.[cm]?tsx?$/.test(path));
-  // The clone's copies of its held files, kept beyond this block because the
-  // deletion reference check needs exactly the same sources: a held file is
-  // precisely a file the cascade cannot fix, so a held file importing a module
-  // this run wants to delete is the one way a deletion can break the build.
-  const heldFiles: Record<string, string> = {};
-  if (
-    heldSourcePaths.length > 0 &&
-    (Object.keys(deliveredSource).length > 0 || pendingDeletes.length > 0)
-  ) {
+  if (heldSourcePaths.length > 0 && Object.keys(deliveredSource).length > 0) {
+    // The clone's copies, through the pass's one clone reader: the deletion
+    // reference check has usually read them already.
+    const heldFiles: Record<string, string> = {};
     const heldFilesPrime: Record<string, string> = {};
     await Promise.all(
       heldSourcePaths.flatMap((path) => [
@@ -3313,8 +4036,8 @@ export async function processClone(args: {
         // warning; inventing an empty one would claim the cascade is safe.
         (async () => {
           try {
-            const f = await getFileContent(octokit, cloneRef, path);
-            if (f) heldFiles[path] = f.content;
+            const text = await readCloneText(path);
+            if (text !== null) heldFiles[path] = text;
           } catch {
             /* leave it out — see above */
           }
@@ -3353,79 +4076,6 @@ export async function processClone(args: {
           .join("; ")}`
       : "";
 
-  // ── Is anything still importing what this run wants to delete? ────────────
-  //
-  // Three kinds of file can be. A HELD file, because the cascade cannot
-  // change it — `src/App.tsx` is `manual_reconcile` on the client-facing
-  // mirror and imports from the AML shell. A CLONE-ONLY file, because prime
-  // has never seen it. And a deletion this very check WITHHOLDS: a kept file
-  // is an old prime version, and an old prime version imports exactly what
-  // prime deleted beside it, because a decommission leaves in one commit.
-  // Everything else is either delivered by this run (prime's own content,
-  // which cannot import a path prime deleted) or byte-identical to prime's
-  // copy, which cannot either.
-  //
-  // Only read when there is a deletion to protect, so a run that deletes
-  // nothing spends nothing.
-  if (pendingDeletes.length > 0) {
-    const deleting = new Set(pendingDeletes);
-    const cloneOnlySources = deletionCandidates
-      .map((c) => c.path)
-      .filter((p) => !deleting.has(p) && /\.[cm]?tsx?$/.test(p))
-      .sort()
-      .slice(0, 60);
-    const surviving: Record<string, string> = { ...heldFiles };
-    await Promise.all(
-      cloneOnlySources.map(async (path) => {
-        try {
-          const f = await getFileContent(octokit, cloneRef, path);
-          if (f && !f.binary) surviving[path] = f.content;
-        } catch {
-          /* A read that failed is not a file with no imports — but it is also
-             not evidence against a deletion. The bytes rule already stands. */
-        }
-      }),
-    );
-    deletionVerdicts = withholdReferencedDeletions(deletionVerdicts, surviving);
-    // The third kind, closed over: a withheld deletion is itself a survivor,
-    // and one pass over the graph is not a closure. Measured 16 Sep 2026 on
-    // npc-client#189 — held `src/App.tsx` kept `BuilderPortalAdmin.tsx`, the
-    // dialog only that page imports was deleted, and the PR could not build.
-    // Each newly kept file's source joins the survivors and is scanned like
-    // the rest, until nothing more flips. Terminates: every iteration grows
-    // `surviving` or `unreadable`, both bounded by the verdict list.
-    const unreadableSurvivors = new Set<string>();
-    for (;;) {
-      const unread = deletionVerdicts
-        .filter((v) => v.act === "keep" && v.reason === "still_referenced")
-        .map((v) => v.path)
-        .filter((p) => !(p in surviving) && !unreadableSurvivors.has(p));
-      if (unread.length === 0) break;
-      await Promise.all(
-        unread.map(async (path) => {
-          try {
-            const f = await getFileContent(octokit, cloneRef, path);
-            // A read that fails is not a file with no imports — inventing an
-            // empty one would ship the very break this check exists to stop.
-            // The path is only excused from the closure, never given content.
-            if (f && !f.binary) surviving[path] = f.content;
-            else unreadableSurvivors.add(path);
-          } catch (e) {
-            // A rate limit is the window, not this file: defer the clone
-            // rather than deliver a tree the unread survivor may contradict.
-            if (classifyGitHubFailure(e).kind === "rate_limited") throw e;
-            unreadableSurvivors.add(path);
-          }
-        }),
-      );
-      deletionVerdicts = withholdReferencedDeletions(deletionVerdicts, surviving);
-    }
-  }
-
-  // Approvals are consulted only past the cap, and they are never evidence:
-  // a path still has to earn its delete verdict from prime's history before
-  // the approved set is even read. See `planDeletions`.
-  const deletionPlan = planDeletions(deletionVerdicts, MAX_DELETIONS_PER_CASCADE, deletionApproved);
   for (const path of deletionPlan.deletes) {
     // `sha: null` is how a tree entry removes a path from `base_tree`.
     treeEntries.push({ path, mode: "100644" as const, type: "blob" as const, sha: null });
@@ -3629,6 +4279,13 @@ export async function processClone(args: {
         `travels — through the same content holds as every other write. Protected paths are ` +
         `never released.\n\n` +
         describeHoldReleases(holdReleases)
+      : "") +
+    (specsBroughtAcrossNote
+      ? `\n\n### Brought across beside the files they test\n\n` +
+        `A spec and the file it asserts about travel together or neither does. None of these ` +
+        `is in this clone's scope: each moved because a file it belongs with did, and only where ` +
+        `nothing of this clone's is lost — the same evidence a held path is released on.\n\n` +
+        specsBroughtAcrossNote
       : "") +
     (needsReconcile.length > 0
       ? `\n\n### Needs a human — ${needsReconcile.length} file(s) changed upstream and were held back\n\n` +

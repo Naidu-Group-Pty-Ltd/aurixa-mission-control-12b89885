@@ -168,6 +168,18 @@ export function permeate(
 }
 
 /**
+ * The top-level directories `subjectsNamedBy` reads a subject under — the
+ * repository's CONTENT, as opposed to its infrastructure.
+ *
+ * Named once so the reader of everything else
+ * (`subjectsNamedOutsideRoots`, in `outsideRootSubjects.pure.ts`) cannot come
+ * to disagree with this one about where the line is. The three patterns below
+ * spell the same list inline; a test asserts each form reads a subject under
+ * every root here and none under any other.
+ */
+export const SUBJECT_ROOTS: readonly string[] = ["src", "supabase", "docs", "scripts", "public"];
+
+/**
  * The repository paths a spec asserts about.
  *
  * Read from the literal path strings a spec contains, which is how every

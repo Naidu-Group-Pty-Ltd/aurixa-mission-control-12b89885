@@ -170,6 +170,13 @@ companion pull would widen a module-scoped clone by that many files chosen by
 a regex, which is a different and larger decision than the one this channel is
 allowed to make.
 
+That is one direction of the rule: a spec the delivery carries. The other
+direction is a spec the clone keeps, left behind by a subject that crosses. It
+is what turned the independent's `verify` red, and it is in
+[*The other half*](#the-other-half-a-spec-the-clone-keeps-left-behind-by-its-subject).
+It widens nothing either, because every spec it moves is one the clone already
+holds.
+
 ## The rules that carry it
 
 **A membrane is per EDGE, not per fleet.** An ion that crossed prime → parent
@@ -307,16 +314,19 @@ this codebase already takes in a dozen places.
 
 ## What is asserted
 
-| file                               | what it pins                                                                                                                                                                                                                                                |
-| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `membrane.test.ts`                 | permeation, the routing rule's reach, the glob scoping, the orphan-spec rule and the project-ref detector — over verbatim breached source from `ClientConversationsTab.tsx`, and against the shipped `backendRefsIn` itself rather than a restatement of it |
-| `membraneIsWired.contract.test.ts` | that the engine resolves a membrane from `primeRef.repo`, asks it per file, ACTS on a refusal, judges specs against the finished delivery rather than the candidates, and takes a held spec back out of it                                                  |
-| `membraneGeometry.test.ts`         | the band's placement, against an independent evaluation of the drawn cubic                                                                                                                                                                                  |
-| `membraneBandRenders.test.ts`      | what the component actually EMITS — the placement survives, and no animated transform shares its element                                                                                                                                                    |
-| `membraneIsDrawn.contract.test.ts` | that the band and the panel are rendered, in the right layer, keyed on the edge                                                                                                                                                                             |
+| file                               | what it pins                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `membrane.test.ts`                 | permeation, the routing rule's reach, the glob scoping, the orphan-spec rule and the project-ref detector — over verbatim breached source from `ClientConversationsTab.tsx`, and against the shipped `backendRefsIn` itself rather than a restatement of it                                                                                                                                                                                                                                                                                                                                                              |
+| `membraneIsWired.contract.test.ts` | that the engine resolves a membrane from `primeRef.repo`, asks it per file, ACTS on a refusal, judges specs against the finished delivery rather than the candidates, and takes a held spec back out of it; for the other half, that a kept spec is judged against what the delivery CHANGES on the clone (a pump's merge only where it writes, a removal only from the finished plan, settled before the channel and narrowed after it), with each copy read against its own tree, is replaced only on a release verdict with its files outside the content roots judged first, is held for a person otherwise, and is named in the pull request; and that a file outside the roots joins a spec's subjects only on a release verdict, within its probe ceiling |
+| `carryGate.contract.test.ts`       | what the subject carry may do and may not undo — that its refusals meet `reportableHeld`, that a carried subject owes its import closure, that the loop is bounded above its own worst case (including the specs the other half brings), and that the stranded list it hands back includes the specs it still owes                                                                                                                                                                                                                                                                                                       |
+| `specsLeftBehind.test.ts`          | what counts as a kept spec's subject (a path it names inside or outside the content roots, a module it imports, a module a barrel re-exports, never the transitive graph), each copy against its own tree; what counts as crossing (a pump's merge only where it writes, a removal only from the finished plan); which kept specs a crossing file leaves behind (never one that is itself crossing); the hold, removal, withheld and cut-short wording; and the lines the pull request prints for what this half moved                                                                                                                                                                                                                                                            |
+| `outsideRootSubjects.test.ts`      | what the reader outside the content roots reads, over the verbatim `reportTypography.spec.ts` lines, and what it refuses (a bare root file, a comment, a directory, a `..` climb, an absolute path); that it and `subjectsNamedBy` split the tree at `SUBJECT_ROOTS` with no path read by both or by neither; and which files are worth a question to prime's history                                                                                                                                                                                                                                                    |
+| `membraneGeometry.test.ts`         | the band's placement, against an independent evaluation of the drawn cubic                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `membraneBandRenders.test.ts`      | what the component actually EMITS — the placement survives, and no animated transform shares its element                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `membraneIsDrawn.contract.test.ts` | that the band and the panel are rendered, in the right layer, keyed on the edge                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 
-Every assertion in the two contract tests was proven non-vacuous by planting
-the defect it describes and watching it fail.
+Every assertion in the three contract tests was proven non-vacuous by
+planting the defect it describes and watching it fail.
 
 ## What an adversarial review found in this work
 
@@ -554,6 +564,16 @@ listing holds no `..` segment so it matches neither side and `strandedSubjects`
 drops it — which is protection by consequence rather than by rule, on the one
 place in the cascade where model-written prose becomes a filesystem path. It is
 refused at the source now.
+
+**That is still the rule for what a spec's own words can carry.** A file
+outside the five directories can now follow a spec across, but never because
+the spec names it. It moves only on the evidence a held path is released on:
+prime's history shows the clone's copy is an older version of prime's, or an
+operator approved overwriting it. Even then it goes through `planSubjectCarry`,
+the same partition and `prepareOne`, so a `.github/workflows/…` file still
+meets the judging-workflow rule and a protected path stays protected. The `..`,
+`.` and absolute-path refusals are the same on that side. See
+[*A subject outside the content roots, on evidence*](#a-subject-outside-the-content-roots-on-evidence).
 
 **A subject an existing rule already holds is never released by this.**
 `planSubjectCarry` is handed the live partition and returns its refusals
@@ -803,6 +823,217 @@ for the case where a rule would otherwise have held the subject and taken the
 spec down with it. What the carry does NOT do is sweep a clone for specs whose
 subjects a PREVIOUS pass left behind. Nothing here is a backfill, and a pass
 that delivers nothing judges nothing.
+
+That paragraph was written about a MIRROR, and on a module-scoped clone half
+of it was wrong. There a spec that is behind is not delivered with everything
+else, because the installed globs are drawn around features and a test
+directory is shared by many of them — so a file crosses while the clone's own
+copy of the spec that tests it stays put. The channel now asks that question
+too, for the specs whose subjects cross in THIS pass; it is still not a
+backfill. See the next section.
+
+## The other half: a spec the clone keeps, left behind by its subject
+
+The spec channel rests on one sentence: *a spec and its subject travel together
+or neither does.* Everything above enforces one direction of it — a spec the
+delivery CARRIES brings its subject in behind it or is held. Nothing looked the
+other way: a subject the delivery carries, asserted about by a spec it does
+NOT carry.
+
+**What that cost.** `npc-crm-independent-6505dc` is the fleet's one
+module-scoped clone, and cascade PR #26 (prime@885b324) crossed 254 files and
+failed `verify` on six assertions in four specs. Every one was a spec the clone
+holds at an older version of prime's, not in the delivery, whose subject was.
+Replayed offline through the engine on `main`, two of the four
+(`investmentProgramme.spec.ts`, `planningData.spec.ts`) were already carried by
+the forward half's newer subject rules. The other two —
+`geocoderWiring.spec.ts` and `osmGeocode.spec.ts` — are this.
+`osmGeocode.spec.ts` is also why imports alone were not enough: it imports
+`src/lib/geocode/osmGeocode.pure.ts`, which is byte-identical on both sides and
+does nothing but re-export the edge module that crossed.
+
+**What counts as a subject** (`specsLeftBehind.pure.ts`) is read from the
+spec's own text, prime's copy and the clone's, since either may name what the
+other does not: a path it names (`subjectsNamedBy`, the forward half's own
+rule, and `subjectsNamedOutsideRoots` below), a module it imports, and — behind
+an import that does nothing but re-export — the module it re-exports. Not the
+transitive import graph: measured on the same cascade, following every import
+triggers 16 specs and would pull six more files behind them, including the
+PROTECTED `src/integrations/supabase/env.ts`, while the three kinds above
+trigger 14 and catch all four failing specs. Each copy is read against its OWN
+tree, with the modules it imports read from its own repository: prime's copy
+is the one that would land, the clone's is the one CI runs. The first draft
+resolved both against prime's tree, so the clone's copy importing a module
+only the clone holds named nothing — a removal of that module then looked like
+no change to the spec that imports it, and nothing else held such a spec,
+because it is neither clone-only nor held.
+
+**What counts as crossing is what the delivery CHANGES on the clone**
+(`pathsTheDeliveryChanges`): prime's files written verbatim; a reconcile
+pump's merge, but only where it differs from the clone's file; and the removals
+the finished deletion plan makes. Not the forward half's `deliveredPaths`,
+which also counts every path a pump decided, including a pump's steady state
+where the merged file IS the clone's own and nothing is written. The first
+replay read that as a change and held the clone's own `crmConversations.spec.ts`
+under *"this delivery updates supabase/config.toml"* on a delivery that wrote
+no `config.toml` at all. The correction then went too far and left every pumped
+path out, so a kept spec about a `config.toml` the pump really did change was
+never judged and its old assertions ran against the new merge. A pump that
+writes merges prime's additions into the clone's own file and keeps the clone's
+declarations by construction, so a spec about it is judged by the merge,
+exactly as the forward half already judges one.
+
+Three pumps say whether they changed the file (`changed` is
+`merged !== clone`). The two security baselines do not, so their merge is
+compared with the clone's blob by id (`gitBlobSha.pure.ts`) — the clone's tree
+listing already holds that id, so it costs no read. A rehearsal composes no
+entry for the three pumps, so what they would write is recorded apart and a dry
+run answers as the real pass would. And a path a pump decided is never itself
+taken for a kept spec: it is the pump's, and carrying prime's raw copy in
+behind a subject would undo the reconcile inside its own pass.
+
+**Whether the spec may be replaced is `decideHoldRelease`'s question**, asked
+of prime's history exactly as for a held path: the spec is outside this
+clone's scope and no rule sent it, so it moves only where the clone's copy is
+byte-identical to a version prime itself held — nothing of the clone's is lost
+— or an operator recorded an overwrite approval. A spec carrying work of the
+clone's own is held for a person, naming the files that crossed. Once it
+moves, prime's copy is an ordinary delivered spec: the forward half judges its
+subjects, and a forward hold on it says both halves of why it was in play
+(`withLeftBehindNote`). Anything not judged this pass — the clock, a probe
+ceiling of `MAX_LEFT_BEHIND_PROBES` (32), the carry ceiling — is held by a
+sweep after the loop, saying which, so nothing is ever shipped past.
+
+### A removal is a change only once it is decided
+
+A deletion verdict is provisional until the reference check and the bulk cap
+have spoken, and either can withhold it — the cap refuses a whole unapproved
+set above 25. The first draft read the provisional list, so a kept spec could
+be replaced for a file that then stayed exactly as it was. So the plan is
+settled BEFORE the channel runs, over the survivors it has always had — held
+files, clone-only files, and the closure over its own keeps — and the channel
+reads only what the plan removes.
+
+One kind of survivor has to wait: a spec the clone keeps. Whether it stays is
+the channel's decision — a kept spec left behind by a removal is brought across
+with it where prime's history allows, and prime's copy cannot import a file
+prime deleted. Counted before the channel, it would withhold every removal it
+asserts about, and a spec is never brought across for a removal that does not
+happen: the deletion would be held for ever by the very spec it was meant to
+settle. So once every spec is judged, the kept specs that stayed narrow the
+plan. Narrowing only ever withholds, and a plan the cap refused is never
+trimmed to fit it, so no removal is made that the channel was not told about.
+
+Then every note this half wrote is written again from what the delivery finally
+does, because a note is written when its spec is judged and the delivery
+changes after that. A withheld removal is named as withheld on every hold that
+asserts about it. A hold left with nothing to say is dropped: nothing it
+asserts about changes and no removal waits on it, so the spec simply stays, as
+it would have. And the pull request names a spec brought across for the files
+the delivery finally changes, saying which it was brought across for that the
+delivery then kept.
+
+### A subject outside the content roots, on evidence
+
+The replay then found the case both halves had been blind to.
+`reportTypography.spec.ts` followed `charts.pure.ts` across, correctly, and its
+current version reads `.claude/skills/npc-services-design/reports/REPORT_RULES.md`
+and checks the document against the fonts the code exports. The clone held that
+document one version behind prime's, so three of its eighty tests failed:
+*"Cinzel is installed; the doc says otherwise."* `subjectsNamedBy` reads five
+roots — `src`, `supabase`, `docs`, `scripts`, `public` — and `.claude` is not
+one. The same gap exists for any spec a delivery carries by any route; the
+reverse half is only where it first cost a red check.
+
+It is not fixed by adding a sixth root, because outside the content roots are
+the files a clone is EXPECTED to keep its own version of. On the independent,
+specs it holds name three such files that differ from prime's:
+`REPORT_RULES.md` and `.github/workflows/apply-migration.yml` are older
+versions of prime's (the second protected), and `.github/workflows/ci.yml`
+matches none of the 143 versions prime ever held. `geocoderWiring.spec.ts`
+reads that `ci.yml` and passes against it. Carrying by name alone would have
+overwritten the one module-scoped clone's CI workflow to satisfy a spec that
+did not need it.
+
+So a file there travels on the same EVIDENCE a held path is released on
+(`outsideRootSubjects.pure.ts`): only where prime's history shows the clone's
+copy is an older version of prime's, or an operator approved overwriting it.
+Then it joins its spec's stranded subjects and is carried through the same
+path and content rules as any other, or holds the spec with the rule that
+stopped it. A file the clone keeps its own version of stays the clone's, and
+the spec is judged against it there, as every spec already was. For a spec the
+reverse half is about to bring across, the question is asked BEFORE it moves:
+a file nobody asked about would leave prime's newer assertions running against
+an older copy, which is worse than the older spec it replaced. Three bounds: a
+bare file at the repository root never counts (`package.json` travels with its
+lockfile or not at all, and `REPOSITORY_INVARIANTS` decides the root one file
+at a time); a mention in a comment does not count; and the path must exist in
+both trees, so model-written text still cannot name `..` or an absolute path.
+Across prime's 1,565 specs, 17 name such a file — 22 references to 16 files.
+
+### What the replay showed, and what it cost
+
+Replayed through the engine with both halves, PR #26 becomes 280 files: the
+268 `main` already carries, ten specs brought up to date with the files they
+test, `closeDroppedBlocks.ts` behind one of them, and `REPORT_RULES.md`. Every
+step of the independent's own `security` job passes on that tree (33 steps,
+the Deno type-checks included, with the repository variable CI runs it with),
+and every step of `verify` (25). The first draft's hold on
+`crmConversations.spec.ts` — the steady-state `config.toml` above — is gone,
+and nothing replaced it.
+
+Three files needed a person on `main` and still do: `supabaseTarget.pure.ts`
+and two judging workflows. Two more are now named where `main` passed over
+them in silence. The clone keeps `registry.spec.ts` one version behind prime's,
+and this delivery updates the sidebar files it asserts about. Prime's version
+cannot come, because it also asserts about `src/App.tsx`, which this clone
+keeps its own version of by rule. So the clone's older copy stays, exactly as
+it did on `main`, and a person is now told that it is behind the files it
+tests, with `App.tsx` listed beside it. A hold never blocks a merge; it is a
+line in the pull request.
+
+The pull request now names every file this half moved and why, under
+*"Brought across beside the files they test"*, because none of them is in the
+clone's scope and a reader of the diff would otherwise meet them unexplained.
+
+Rebuilt at prime@6053a39 after the three corrections above — removals from the
+finished plan, a pump's real writes counted, each copy read against its own
+tree — the replay composes a delivery byte-identical to the one before them:
+342 entries, none different, the same seven withheld and five needing a person.
+The one difference is the pull request's list of specs brought across, which
+now names what each follows in the FINISHED delivery, including the files
+carried in behind it later in the pass. The corrections govern the cases that
+tree does not reach, and the contract tests pin each of them.
+
+The cost, counted by the replay's fake GitHub against the same pass on `main`:
+four GraphQL batches to read the kept specs and the modules they import, and
+13 more commit listings and 68 more content reads between the probes and the
+twelve extra files' own contents. Thirteen probes: eleven kept specs,
+`REPORT_RULES.md` (found one version back) and `ci.yml` (walked the full ten
+versions the probe allows, matching nothing). A file outside the roots is asked
+about at most `MAX_OUTSIDE_ROOT_PROBES` (16) times a pass.
+
+### What it deliberately does not do
+
+- **It never overwrites a spec carrying the clone's own work.** Evidence or an
+  operator's approval, the same two routes a held path has, and nothing else.
+- **It is not a backfill.** A spec is looked at only when a file it asserts
+  about changes on the clone in this pass.
+- **It does not follow imports transitively,** for the measured reason above.
+- **It does not read a file outside the content roots into the forward
+  half's no-questions carry.** Inside the roots a stale subject is carried
+  without asking history, because a clone keeps its own product code under a
+  path rule; outside them it keeps its own infrastructure by default, so the
+  evidence is always asked.
+- **It does not take back a spec brought across for a change that later went
+  away.** A subject held later in the pass, or a removal the narrowing
+  withheld, leaves prime's copy of the spec landed through the forward half's
+  own rules, against a file the delivery kept. The pull request names it as
+  brought across for a file the delivery no longer changes. Only a spec
+  asserting that file's ABSENCE could fail on it.
+- **The reference check reads imports, not names.** A kept spec that names a
+  deleted file in a string, rather than importing it, does not hold that
+  removal back. The check's limit is older than this half.
 
 ## What an acid test against the live fleet found
 

@@ -321,6 +321,362 @@ describe("the engine asks the membrane", () => {
 });
 
 /**
+ * THE OTHER HALF OF THE SPEC CHANNEL — a spec this clone keeps, left behind.
+ *
+ * The forward half judges a spec the delivery carries. This half judges the
+ * converse — a subject the delivery carries, asserted about by a spec it does
+ * NOT carry — which is what failed `verify` on cascade PR #26 to the CRM
+ * clone. Its safety rests on three positions, each asserted as source: it
+ * reads the SAME crossing set the forward half reads, it carries nothing the
+ * evidence rule has not cleared, and nothing it finds is shipped past.
+ */
+describe("the engine looks for the specs a delivery leaves behind", () => {
+  /** From the kept-spec read to the statement after the carry loop. */
+  const reverseHalf = () => {
+    const from = engine.indexOf("const keptSpecSubjects = new Map<string, string[]>();");
+    const to = engine.indexOf("const finalProgress: Partial<CascadeResultUpdate>");
+    expect(from).toBeGreaterThan(-1);
+    expect(to).toBeGreaterThan(from);
+    return engine.slice(from, to);
+  };
+
+  it("reads the kept specs once, before the loop, from BOTH sides and only with both trees", () => {
+    const read = engine.indexOf("const keptSpecSubjects = new Map<string, string[]>();");
+    const loop = engine.indexOf("for (let round = 0; ; round += 1) {");
+    expect(read).toBeGreaterThan(-1);
+    expect(loop).toBeGreaterThan(read);
+    const block = engine.slice(read, loop);
+    expect(block).toMatch(/if \(primeShaByPath !== null && cloneShaByPath !== null\)/);
+    expect(block).toContain("specsBothSidesHoldDifferently({");
+    // Prime's copy and the clone's: either may name what the other does not,
+    // and the clone's is the one CI runs.
+    expect(block).toMatch(/readTexts\(primeRef,\s*primeTree,\s*kept\)/);
+    expect(block).toMatch(/readTexts\(cloneRef,\s*cloneTree,\s*kept\)/);
+    expect(block).toContain("fetchBlobTextsBatched(octokit, ref, entries)");
+  });
+
+  it("reads each copy against its OWN tree, and its modules from its own side", () => {
+    // Resolved against prime's tree, the clone's copy importing a module only
+    // the clone holds named nothing — so removing that module looked like no
+    // change to the spec that imports it, and nothing else in the delivery
+    // holds such a spec: it is neither clone-only nor held.
+    const read = engine.indexOf("const keptSpecSubjects = new Map<string, string[]>();");
+    const loop = engine.indexOf("for (let round = 0; ; round += 1) {");
+    const block = engine.slice(read, loop);
+    expect(block).toContain("const treeOf = { prime: primeTree, clone: cloneTree } as const;");
+    expect(block).toContain("const refOf = { prime: primeRef, clone: cloneRef } as const;");
+    expect(block).toMatch(/text: specsOf\[side\]\.get\(spec\),\s*tree: treeOf\[side\],/);
+    expect(block).toContain("await readTexts(refOf[side], treeOf[side], asking)");
+    expect(block).toContain("subjectsOfKeptSpec({");
+    // The one-tree reading is gone, not merely unused.
+    expect(engine).not.toContain("specSubjects({");
+  });
+
+  it("defers on a rate limit rather than skipping this half on the window's say-so", () => {
+    const read = engine.indexOf("const keptSpecSubjects = new Map<string, string[]>();");
+    const loop = engine.indexOf("for (let round = 0; ; round += 1) {");
+    const block = engine.slice(read, loop);
+    expect(block).toMatch(
+      /catch \(e\) \{\s*if \(classifyGitHubFailure\(e\)\.kind === "rate_limited"\) throw e;/,
+    );
+  });
+
+  it("judges a spec left behind by what the delivery CHANGES, never by what a pump merely decided", () => {
+    // Prime's files written verbatim, a pump's merge where it differs from the
+    // clone's file, and the removals the finished plan makes. A pump's steady
+    // state writes nothing — the merged file IS the clone's — and the first
+    // replay held the clone's own spec under "this delivery updates
+    // supabase/config.toml" on a delivery that wrote no config.toml. Leaving
+    // every pumped path out was wrong the other way: a pump that DOES change
+    // config.toml changed it, and a spec asserting about it went unjudged.
+    expect(engine).toMatch(
+      /const changedOnClone = \(\) =>\s*pathsTheDeliveryChanges\(\{\s*entries: treeEntries,\s*reconciled: reconciledPaths,\s*reconcileWrites,\s*rehearsed: rehearsedWrites,\s*removing: deletesCrossing,?\s*\}\);/,
+    );
+    const block = reverseHalf();
+    // Every question this half asks about crossing is ONE question, asked of
+    // the changed set and the finished removals, so no site can ask another.
+    const calls = engine.match(/specsLeftBehind\(\{[^}]*\}\)/g) ?? [];
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain("crossing: changedOnClone()");
+    expect(calls[0]).toContain("removing: deletesCrossing");
+    expect((block.match(/\bkeptLeftBehind\(\)/g) ?? []).length).toBeGreaterThanOrEqual(3);
+    expect(block).toContain("const changedAtStart = changedOnClone();");
+    // A pumped path is the pump's: never a kept spec carried in over it.
+    expect(block).toMatch(
+      /\.filter\(\s*\(path\) => !changedAtStart\.has\(path\) && !reconciledPaths\.has\(path\),?\s*\)/,
+    );
+    // The forward half keeps the pumps' decisions as delivered: a spec naming
+    // a reconciled path is judged by the merge, not stranded on it.
+    const at = engine.indexOf("strandedSubjects({");
+    expect(engine.slice(at, at + 400)).toContain("crossing: deliveredPaths");
+    expect(engine).toMatch(
+      /const deliveredPaths = new Set\(\[\.\.\.treeEntries\.map\(\(t\) => t\.path\), \.\.\.reconciledPaths\]\);/,
+    );
+  });
+
+  it("counts a pump's merge as a change exactly where it changes the clone's file", () => {
+    // Each pump's `changed` is `merged !== clone`, and a rehearsal composes no
+    // entry for these three, so what they would write is recorded apart.
+    const between = (from: string, to: string) => {
+      const a = engine.indexOf(from);
+      const b = engine.indexOf(to, a);
+      expect(a, from).toBeGreaterThan(-1);
+      expect(b, to).toBeGreaterThan(a);
+      return engine.slice(a, b);
+    };
+    const pumps = [
+      [between("reconcileConfigToml({", "reconcileSecurityRegistry({"), "CONFIG_TOML_PATH"],
+      [
+        between("reconcileSecurityRegistry({", "cloneOnlyEdgeFunctions({"),
+        "SECURITY_REGISTRY_PATH",
+      ],
+      [
+        between("reconcileDeployWorkflow({", "const changedOnClone = () =>"),
+        "DEPLOY_WORKFLOW_PATH",
+      ],
+    ] as const;
+    for (const [block, path] of pumps) {
+      const changed = block.indexOf("if (verdict.changed");
+      const write = block.indexOf(`reconcileWrites.add(${path});`);
+      expect(changed, path).toBeGreaterThan(-1);
+      expect(write, path).toBeGreaterThan(changed);
+      expect(block, path).toContain(`if (dryRun) rehearsedWrites.add(${path});`);
+    }
+    // The two baselines carry no `changed`; the clone's blob id answers it.
+    const settle = between("const settleBaseline = async (", "if (inventoryHold) {");
+    expect(settle).toMatch(
+      /if \(cloneShaByPath\?\.get\(held\.path\) !== gitBlobSha\(outcome\.merged\)\) \{\s*reconcileWrites\.add\(held\.path\);/,
+    );
+  });
+
+  it("counts as removed only what the finished deletion plan removes", () => {
+    // A deletion verdict is provisional until the reference check and the
+    // bulk cap have spoken, and either can withhold it. Judged against the
+    // provisional list, a kept spec was replaced for a file that then stayed
+    // exactly as it was.
+    const withhold = engine.indexOf(
+      "if (pendingDeletes.length > 0) await withholdStillReferenced(await deletionSurvivors(new Map()));",
+    );
+    const plan = engine.indexOf(
+      "let deletionPlan = planDeletions(deletionVerdicts, MAX_DELETIONS_PER_CASCADE, deletionApproved);",
+    );
+    const read = engine.indexOf("const keptSpecSubjects = new Map<string, string[]>();");
+    expect(withhold).toBeGreaterThan(engine.indexOf("reconcileDeployWorkflow({"));
+    expect(plan).toBeGreaterThan(withhold);
+    expect(read).toBeGreaterThan(plan);
+    // The removals the channel reads are only ever the plan's.
+    const assigns = engine.match(/\bdeletesCrossing(?::[^=]+)? = [^;]+;/g) ?? [];
+    expect(assigns).toHaveLength(2);
+    for (const assign of assigns) expect(assign).toMatch(/= new Set\(deletionPlan\.deletes\);$/);
+    // And never the provisional list, anywhere in this half.
+    expect(reverseHalf()).not.toContain("pendingDeletes");
+  });
+
+  it("narrows the removals once the specs that stay are known, and never widens them", () => {
+    // A kept spec the channel did not bring across stays as it is, and a file
+    // it imports cannot be removed beneath it. Counted before the channel, it
+    // would withhold every removal it asserts about for ever — a spec is never
+    // brought across for a removal that does not happen — so it is asked here.
+    const sweep = engine.indexOf("for (const lb of keptLeftBehind()) {");
+    const at = engine.indexOf("if (deletesCrossing.size > 0 && deletionPlan.refusal === null) {");
+    const baseline = engine.indexOf("reconcileEdgeTypecheckBaseline({");
+    expect(sweep).toBeGreaterThan(-1);
+    expect(at).toBeGreaterThan(sweep);
+    expect(baseline).toBeGreaterThan(at);
+    const branch = engine.slice(at, baseline);
+    // What stays is the clone's copy of every kept spec that did not land.
+    expect(branch).toContain("[...cloneKeptText].filter(([spec]) => !landedNow.has(spec))");
+    expect(branch).toContain("await withholdStillReferenced(await deletionSurvivors(staying));");
+    // Re-planned from verdicts that only ever lost a delete, and only where the
+    // first plan was accepted: a refused set is never trimmed to fit the cap.
+    expect(branch).toContain(
+      "deletionPlan = planDeletions(deletionVerdicts, MAX_DELETIONS_PER_CASCADE, deletionApproved);",
+    );
+    // Before the channel, the kept specs are not survivors.
+    const preLoop = engine.slice(
+      engine.indexOf("const deletionSurvivors = async ("),
+      engine.indexOf("let deletionPlan = planDeletions("),
+    );
+    expect(preLoop).not.toContain("cloneKeptText");
+    expect(preLoop).toContain("deletionSurvivors(new Map())");
+  });
+
+  it("carries a left-behind spec only where the evidence rule released it", () => {
+    const block = reverseHalf();
+    expect(block).toContain("decideHoldRelease({");
+    expect(block).toMatch(/if \(verdict\.act === "release"\) releasing\.push\(lb\.spec\);/);
+    // `owedSpecs` gains a spec in exactly one place, and only from `releasing`.
+    const pushes = block.match(/owedSpecs\.push\(/g) ?? [];
+    expect(pushes).toHaveLength(1);
+    expect(block).toMatch(/for \(const spec of releasing\) \{[\s\S]*?owedSpecs\.push\(spec\);/);
+    // And what is owed meets the plan — the exclusions, the ceiling, `prepareOne`.
+    expect(block).toMatch(/stranded:\s*\[.*\.\.\.importsOwed,\s*\.\.\.owedSpecs\]/);
+  });
+
+  it("asks what prime's copy would need outside the content roots BEFORE the spec moves", () => {
+    const block = reverseHalf();
+    const release = block.indexOf("if (releasing.length > 0) {");
+    expect(release).toBeGreaterThan(-1);
+    const branch = block.slice(release, block.indexOf("owedSpecs.push(spec);", release) + 30);
+    // Read from PRIME's copy, the one that would land.
+    expect(branch).toContain("const text = primeKeptText.get(spec);");
+    expect(branch).toContain("outsideRootCandidates({");
+    expect(branch).toContain("specText: text,");
+    // Asked before the push, and a spec whose question went unasked stays put.
+    const ask = branch.indexOf("await judgeOutsideRoot(");
+    const unasked = branch.indexOf("!outsideVerdicts.has(path)");
+    const push = branch.indexOf("owedSpecs.push(spec);");
+    expect(ask).toBeGreaterThan(-1);
+    expect(unasked).toBeGreaterThan(ask);
+    expect(push).toBeGreaterThan(unasked);
+    expect(branch).toMatch(
+      /\.some\(\(path\) => !outsideVerdicts\.has\(path\)\)\) \{\s*leftBehindCut\.set\(spec, shouldStop\(\) \? "budget" : "outside_probes"\);\s*continue;/,
+    );
+  });
+
+  it("asks prime's history within a ceiling and never past the pass's own clock", () => {
+    const block = reverseHalf();
+    // The spec's own question, not the one about files outside the roots.
+    const from = block.indexOf("if (carryingAllowed && unjudged.length > 0) {");
+    expect(from).toBeGreaterThan(-1);
+    const branch = block.slice(from, block.indexOf("const releasing: string[] = [];", from));
+    expect(branch).toContain("MAX_LEFT_BEHIND_PROBES - leftBehindProbes");
+    const clock = branch.indexOf("if (shouldStop()) {");
+    const probe = branch.indexOf("await probeHeldPaths({");
+    expect(clock).toBeGreaterThan(-1);
+    expect(probe).toBeGreaterThan(clock);
+  });
+
+  it("holds a spec the evidence refused, for a person, rather than dropping it", () => {
+    const block = reverseHalf();
+    expect(block).toMatch(
+      /if \(verdict\.act === "hold"\) \{\s*const held = leftBehindSpecHold\(\{/,
+    );
+    const at = block.indexOf('if (verdict.act === "hold") {');
+    const branch = block.slice(at, at + 500);
+    expect(branch).toContain("partition.held.push(held)");
+    expect(branch).toContain("needsReconcile.push(held)");
+    expect(branch).toContain("attemptedSubjects.add(lb.spec)");
+  });
+
+  it("holds every spec still left behind once the delivery is final — none is shipped past", () => {
+    const loopEnd = engine.indexOf("if (round >= maxCarryRounds) carryingAllowed = false;");
+    const sweep = engine.indexOf("for (const lb of keptLeftBehind()) {", loopEnd);
+    const baseline = engine.indexOf("reconcileEdgeTypecheckBaseline({");
+    expect(loopEnd).toBeGreaterThan(-1);
+    expect(sweep).toBeGreaterThan(loopEnd);
+    // Before the baseline reconcile, which reads the final crossing set too.
+    expect(baseline).toBeGreaterThan(sweep);
+    const block = engine.slice(sweep, sweep + 900);
+    expect(block).toContain("if (heldNow.has(lb.spec)) continue;");
+    expect(block).toMatch(/leftBehindSpecHold\(\{[^}]*\bcutShort\b[^}]*\}\)/);
+    expect(block).toContain("needsReconcile.push(held)");
+  });
+
+  it("says, on a forward hold, when the spec was only in play because it was left behind", () => {
+    const block = reverseHalf();
+    expect(block).toMatch(/const hold = lb \? withLeftBehindNote\(held, lb\) : held;/);
+  });
+
+  it("writes every note again from the finished delivery, naming a withheld removal", () => {
+    // A note is written when its spec is judged, and a subject can be held
+    // later in the pass or a removal withheld by the narrowing. So every hold
+    // this half makes is registered, then rewritten — or dropped where nothing
+    // is left to say — once the delivery is final.
+    const block = reverseHalf();
+    expect(block.match(/reverseHolds\.set\(/g) ?? []).toHaveLength(3);
+    const at = engine.indexOf("if (reverseHolds.size > 0) {");
+    const baseline = engine.indexOf("reconcileEdgeTypecheckBaseline({");
+    const narrowing = engine.indexOf(
+      "if (deletesCrossing.size > 0 && deletionPlan.refusal === null) {",
+    );
+    const note = engine.indexOf("const specsBroughtAcrossNote = describeSpecsBroughtAcross({");
+    expect(at).toBeGreaterThan(baseline);
+    expect(at).toBeGreaterThan(narrowing);
+    expect(note).toBeGreaterThan(at);
+    const refresh = engine.slice(at, note);
+    expect(refresh).toContain("keptLeftBehind()");
+    expect(refresh).toContain(
+      "[...plannedBeforeTheChannel].filter((p) => !deletesCrossing.has(p))",
+    );
+    expect(refresh).toContain("replaceHold(entry.current, next);");
+    // Replaced or dropped in BOTH lists, by identity.
+    const replace = engine.slice(engine.indexOf("const replaceHold = ("), at);
+    expect(replace).toContain("for (const list of [partition.held, needsReconcile]) {");
+    expect(replace).toContain("const at = list.indexOf(prev);");
+  });
+
+  it("names what it brought across in the pull request — only what landed", () => {
+    expect(engine).toContain("const specsBroughtAcrossNote = describeSpecsBroughtAcross({");
+    expect(engine).toMatch(
+      /const landed = new Set\(treeEntries\.filter\(\(t\) => t\.sha !== null\)\.map\(\(t\) => t\.path\)\);/,
+    );
+    const at = engine.indexOf("const specsBroughtAcrossNote = describeSpecsBroughtAcross({");
+    const composed = engine.slice(at, at + 900);
+    expect(composed).toMatch(/verdict\.act === "release" && landed\.has\(spec\)/);
+    expect(composed).toContain(".filter(([path]) => landed.has(path))");
+    // Named for what the delivery FINALLY changes, and what it was brought
+    // across for that the delivery no longer changes is said to be unchanged.
+    const finalAt = engine.indexOf("const finalChanged = changedOnClone();");
+    expect(finalAt).toBeGreaterThan(engine.indexOf("reconcileEdgeTypecheckBaseline({"));
+    expect(at).toBeGreaterThan(finalAt);
+    expect(composed).toContain(
+      "unchanged: (leftBehind.get(spec)?.touchedBy ?? []).filter((s) => !finalChanged.has(s))",
+    );
+    expect(engine).toContain("### Brought across beside the files they test");
+  });
+});
+
+describe("a spec's subject outside the content roots travels only on evidence", () => {
+  /** The forward loop's first statements: where a round decides what is stranded. */
+  const roundTop = () => {
+    const from = engine.indexOf("for (let round = 0; ; round += 1) {");
+    const to = engine.indexOf("for (const owed of [...importsOwed]) {", from);
+    expect(from).toBeGreaterThan(-1);
+    expect(to).toBeGreaterThan(from);
+    return engine.slice(from, to);
+  };
+  /** The one place such a file is put to prime's history. */
+  const judge = () => {
+    const from = engine.indexOf("const judgeOutsideRoot = async");
+    const to = engine.indexOf("\n  };", from);
+    expect(from).toBeGreaterThan(-1);
+    expect(to).toBeGreaterThan(from);
+    return engine.slice(from, to);
+  };
+
+  it("reads every delivered spec against the forward half's own crossing set", () => {
+    const top = roundTop();
+    expect(top).toContain("outsideRootCandidates({");
+    const at = top.indexOf("outsideRootCandidates({");
+    expect(top.slice(at, at + 250)).toContain("crossing: deliveredPaths");
+  });
+
+  it("joins a spec's stranded subjects only on a release verdict, and is then carried or holds the spec", () => {
+    const top = roundTop();
+    expect(top).toMatch(/if \(carryingAllowed\) \{\s*await judgeOutsideRoot\(/);
+    expect(top).toContain('outsideVerdicts.get(path)?.act === "release"');
+    expect(top).toContain(
+      "strandedBySpec.set(specPath, [...(strandedBySpec.get(specPath) ?? []), ...travelling]);",
+    );
+  });
+
+  it("asks within its own ceiling, never past the clock, and never takes a failed read for a verdict", () => {
+    const block = judge();
+    expect(block).toContain("MAX_OUTSIDE_ROOT_PROBES - outsideProbes");
+    const clock = block.indexOf("shouldStop()");
+    const probe = block.indexOf("await probeHeldPaths({");
+    expect(clock).toBeGreaterThan(-1);
+    expect(probe).toBeGreaterThan(clock);
+    expect(block).toMatch(/if \(answer\.kind === "unsettled"\) continue;/);
+    // The verdict is the held-path rule's, word for word: nothing of the
+    // clone's may be lost, or a person approved losing it.
+    expect(block).toContain("decideHoldRelease({");
+    expect(block).toContain("overwriteApproved.has(path)");
+  });
+});
+
+/**
  * THE PATHS THIS MODULE RESTATES.
  *
  * `ionSpecies.pure.ts` is reached by a route, so it may not import a VALUE

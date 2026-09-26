@@ -206,7 +206,9 @@ const SPEC_CHANNEL = {
   note:
     "A spec crosses only with the subject it asserts about, so this delivery carries the subject " +
     "in behind it — judged by the same rules as any other file, and never releasing one another " +
-    "rule holds. Where a subject cannot travel, both stay, and the hold names which rule stopped it.",
+    "rule holds. The other way round too: a spec this clone keeps at an older version of prime's " +
+    "follows the file it tests across. Where either cannot travel, both stay, and the hold names " +
+    "which rule stopped it.",
 };
 
 /** A routed CRM name may be spelled anywhere in the browser layer. */

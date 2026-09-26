@@ -46,12 +46,16 @@ describe("the baseline is reconciled over the finished delivery", () => {
     expect(emptyCheck).toBeGreaterThan(step);
   });
 
-  it("counts a delete as crossing", () => {
+  it("counts a delete as crossing — the deletes the finished plan makes", () => {
     // A file this pass deletes does not survive on the clone, so the clone's
-    // count for it describes nothing.
+    // count for it describes nothing. A deletion the reference check or the
+    // bulk cap withheld DOES survive, and the clone's count still describes
+    // it — so the set is the finished plan's, never the provisional
+    // `pendingDeletes`.
     expect(reconcileStep()).toMatch(
-      /const crossing = new Set<string>\(\[\s*\.\.\.treeEntries\.filter\(\(t\) => t\.sha !== null\)\.map\(\(t\) => t\.path\),\s*\.\.\.pendingDeletes,?\s*\]\)/,
+      /const crossing = new Set<string>\(\[\s*\.\.\.treeEntries\.filter\(\(t\) => t\.sha !== null\)\.map\(\(t\) => t\.path\),\s*\.\.\.deletesCrossing,?\s*\]\)/,
     );
+    expect(reconcileStep()).not.toContain("pendingDeletes");
   });
 
   it("acts only where prime's baseline is in the delivery", () => {
