@@ -229,12 +229,14 @@ export function cursorAppliesToBody(
  * `chunkCursorFor` can tell a well-formed cursor from a malformed one; it
  * cannot tell a cursor of 9,000 from a seed of forty statements, because the
  * only way to know a stream's length is to walk it. So this is asked AFTER the
- * walk, with the count it produced.
+ * walk, with the count it produced — the chunker's own report of how many
+ * statements the seed has (`SeedPlan.total`), never a tally of what the loop
+ * was handed, which starts at the cursor and so can never fall below it.
  *
  * ## Why it matters more than it looks
  *
- * `applyChunkedSeed` skips while `index < skip`. A cursor past the end skips
- * every statement, reaches EOF having applied none, and returns
+ * `applyChunkedSeed` sends nothing before the cursor. A cursor past the end
+ * sends nothing at all, reaches EOF having applied none, and would return
  * `stoppedEarly: false` — which the replay reads as "the seed went" and
  * follows by writing the migration's ledger row. The clone then records a
  * version whose data it does not hold, and every later pass skips it as

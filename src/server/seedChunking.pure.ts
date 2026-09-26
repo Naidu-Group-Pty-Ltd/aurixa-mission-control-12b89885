@@ -64,10 +64,101 @@ export type ChunkedStatement = {
   /** Tuples in this statement; 0 for the tail. */
   rows: number;
   bytes: number;
+  /**
+   * This statement's position in the whole seed, from 0, the trailing
+   * statements included.
+   *
+   * Carried on the statement because a caller handed a WINDOW of the seed
+   * (see {@link StatementWindow}) cannot count its way to a position: the
+   * statements before the window are never handed over at all. The cursor
+   * stores positions, so the position has to come from the one place that
+   * walked every statement.
+   */
+  index: number;
 };
 
-const encoder = new TextEncoder();
-const byteLength = (s: string) => encoder.encode(s).length;
+/**
+ * Which of the seed's statements one call builds and hands over.
+ *
+ * ## Why a pass is handed a window rather than the whole seed
+ *
+ * Nothing may be handed over until the second read reaches EOF (see the
+ * comment inside {@link chunkSeedStatements}), so everything handed over is
+ * HELD until then — and a statement is a string of up to a megabyte of seed
+ * text. Holding all of them is what killed the fleet drain: measured
+ * 26 Sep 2026 over the real `20261207000000_seed_template_library_v16_…`
+ * (41,780,944 bytes), the queue came to **86.7 MB of heap**, because 44 of its
+ * 45 statements carry at least one character outside Latin-1 and V8 stores
+ * such a string at two bytes a character. That is two thirds of a 128 MB
+ * isolate before the corpus, the clients and the request bodies. A pass that
+ * sent ONE statement and stopped fitted; the first pass allowed a second
+ * statement died sending it, every time, as an HTTP 502 with nothing logged.
+ *
+ * A pass never sends more than a handful of statements inside its budget, so
+ * it is handed the statements from its cursor onward and no more than
+ * `maxHeldChars` of them. Everything else is still WALKED — every tuple is
+ * validated and counted, and the grouping is computed over the whole file so
+ * a position means the same statement on every pass — it is just never built.
+ */
+export type StatementWindow = {
+  /**
+   * Statements before this position are counted and never built: an earlier
+   * pass sent them.
+   */
+  skip: number;
+  /**
+   * The most statement text, in UTF-16 code units, held at once. The first
+   * statement at or after `skip` is always held however large it is, so a
+   * pass always has something to send; after that, the window closes at the
+   * first statement that would exceed this, so what is handed over is always
+   * CONTIGUOUS and a later, smaller statement is never sent ahead of it.
+   */
+  maxHeldChars: number;
+};
+
+/**
+ * What the second read established, reported before anything is handed over.
+ *
+ * `total` is what tells a windowed caller whether the statements it was handed
+ * FINISH the seed. Without it, a window that ran out and a seed that ended
+ * look identical to the loop consuming them — and the first reading makes the
+ * caller write the migration's ledger row for a seed it has not finished.
+ */
+export type SeedPlan = {
+  /** Statements in the whole seed, the trailing statements included. */
+  total: number;
+  /** Statements this call will hand over, from the window's `skip` onward. */
+  held: number;
+};
+
+/**
+ * The UTF-8 length of a string, without encoding it.
+ *
+ * `TextEncoder.encode(s).length` allocates a buffer the size of the string to
+ * read one number off it, and this runs on every tuple of a 41 MB seed on
+ * every pass — 41 MB of short-lived buffers, which are external memory in the
+ * isolate that is already the constraint above. Lone surrogates count three
+ * bytes, as the encoder's U+FFFD replacement does, so the two agree on every
+ * string; `seedChunking.test.ts` holds them to it.
+ */
+export function utf8ByteLength(s: string): number {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c < 0x80) n += 1;
+    else if (c < 0x800) n += 2;
+    else if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length) {
+      const d = s.charCodeAt(i + 1);
+      if (d >= 0xdc00 && d <= 0xdfff) {
+        n += 4;
+        i += 1;
+      } else n += 3;
+    } else n += 3;
+  }
+  return n;
+}
+
+const byteLength = utf8ByteLength;
 
 /** Split a stream of text into lines without their terminators. */
 export async function* linesOf(chunks: AsyncIterable<string>): AsyncGenerator<string> {
@@ -229,31 +320,69 @@ export async function readSeedShape(chunks: AsyncIterable<string>): Promise<Seed
  *
  * A tuple larger than the budget on its own is still emitted, alone — a row
  * cannot be split, and whether the API takes it is the API's answer to give.
+ *
+ * With a `window`, only the statements from `window.skip` onward, up to
+ * `window.maxHeldChars` of them, are built and handed over; `onPlan` reports
+ * how many the seed has in all, before the first is handed over. Without one,
+ * every statement is — which is the whole seed held at once, and is only
+ * affordable for a seed a fraction of the size of the template library's. See
+ * {@link StatementWindow}.
  */
 export async function* chunkSeedStatements(
   chunks: AsyncIterable<string>,
   shape: SeedShape,
-  opts: { maxStatementBytes: number },
+  opts: {
+    maxStatementBytes: number;
+    window?: StatementWindow;
+    onPlan?: (plan: SeedPlan) => void;
+  },
 ): AsyncGenerator<ChunkedStatement> {
+  const skip = Math.max(0, opts.window?.skip ?? 0);
+  const maxHeldChars = opts.window?.maxHeldChars ?? Number.POSITIVE_INFINITY;
   const overhead = byteLength(shape.header) + byteLength(shape.onConflict) + 2;
+  // The same wrapper in code units: `header\n` + rows + `\n` + `onConflict`.
+  const overheadChars = shape.header.length + shape.onConflict.length + 2;
   let group: string[] = [];
   let groupBytes = overhead;
+  // Code units in the group's tuples plus the `,\n` between them.
+  let groupChars = 0;
   let firstRow = 1;
   let rowsSeen = 0;
+  // Statements met so far, held or not: the next one's position in the seed.
+  let position = 0;
+  let heldChars = 0;
+  // Once a statement is turned away for size, nothing after it is held.
+  let windowClosed = false;
   const ready: ChunkedStatement[] = [];
+
+  /** Whether the statement at `position`, `chars` long, is one to build. */
+  const admits = (chars: number): boolean => {
+    if (position < skip || windowClosed) return false;
+    if (ready.length === 0 || heldChars + chars <= maxHeldChars) return true;
+    windowClosed = true;
+    return false;
+  };
 
   const flush = () => {
     if (group.length === 0) return;
-    const sql = `${shape.header}\n${group.join(",\n")}\n${shape.onConflict}`;
-    ready.push({
-      label: `rows ${firstRow}-${firstRow + group.length - 1}`,
-      sql,
-      rows: group.length,
-      bytes: byteLength(sql),
-    });
+    // Decided BEFORE the statement is built: building it to measure it is the
+    // allocation the window exists to avoid.
+    if (admits(overheadChars + groupChars)) {
+      const sql = `${shape.header}\n${group.join(",\n")}\n${shape.onConflict}`;
+      ready.push({
+        label: `rows ${firstRow}-${firstRow + group.length - 1}`,
+        sql,
+        rows: group.length,
+        bytes: byteLength(sql),
+        index: position,
+      });
+      heldChars += sql.length;
+    }
+    position += 1;
     firstRow += group.length;
     group = [];
     groupBytes = overhead;
+    groupChars = 0;
   };
 
   /*
@@ -284,30 +413,41 @@ export async function* chunkSeedStatements(
     new clause it never writes those rows at all. That is a permanent wrong
     write, where holding the statements costs only memory.
 
-    THE MEMORY IS REAL, IS NOT BOUNDED BY `maxStatementBytes`, AND IS 35 MB.
+    THE MEMORY IS REAL, AND THE FIGURE THAT STOOD HERE WAS WRONG BY HALF.
 
-    `ready` grows to the whole file, which `maxStatementBytes` bounds one
-    statement of and not the queue. MEASURED rather than reasoned about, on a
-    41,335,822-byte fixture of 543 tuples built to the real seed's shape: 43
-    statements, and the heap grows 34.7 MB between entering this function and
-    the first statement being handed over — about 88% of the body's bytes.
+    `ready` grows to everything this call hands over, which `maxStatementBytes`
+    bounds one statement of and not the queue. This comment said the queue was
+    35 MB, measured on a 41,335,822-byte fixture "built to the real seed's
+    shape" — and then corrected an earlier ~84 MB down to it, on the grounds
+    that V8 stores an ASCII string at one byte a character. Both halves of that
+    were true of the FIXTURE, which was ASCII. The real seed is not.
 
-    That corrects a figure I put in this comment and in a commit message. I had
-    said ~84 MB, doubling for UTF-16; V8 stores an ASCII string as a ONE-byte
-    string, so the queue is ~1x the file rather than ~2x. The overstatement
-    mattered, because it turned "a large fraction of the ceiling" into "almost
-    certainly fatal".
+    Measured 26 Sep 2026 over the prime's own
+    `20261207000000_seed_template_library_v16_verdict_and_running_head.sql`:
+    45 statements, 44 of them carrying at least one character outside Latin-1
+    (1,738 such characters in the file), and **86.7 MB of heap** held once the
+    first statement is handed over. A statement is flattened from its tuples,
+    and one em dash anywhere in it makes the whole string two bytes a
+    character. So the first figure was the right one, for the reason it gave.
 
-    What is left is still worth knowing: ~27% of a 128 MB isolate, held for the
-    whole send, for one migration of one clone, in a runtime whose ceiling is
-    the stated reason `openPrimeMigrationCorpus` refuses a body at 8 MB. A pass
-    killed for it would be indistinguishable in the record from one killed on
-    wall clock, which is the shape measured on 19 Sep 2026 — so it remains a
-    POSSIBLE reading of that symptom and not a demonstrated one.
+    And it was the demonstrated reading, not a possible one. With a 45-second
+    budget a pass sent one statement and let go of the queue; the first passes
+    allowed a second statement (90 seconds, 26 Sep 2026, #291) died sending it
+    — five in a row, each within about 70–76 s, each an HTTP 502 with no audit
+    row and the claim left set — while passes of up to 88 s that sent ONE
+    statement had succeeded the same morning. Wall clock was not the limit.
+    The isolate's memory was: the queue fitted beside one statement's request
+    and response, and not beside two.
 
-    Fixing it needs `onConflict` and `tail` known BEFORE the streaming pass — a
-    ranged read of the blob's last few kilobytes — which is an API
-    `PrimeMigrationCorpus` does not have.
+    So the queue is BOUNDED now rather than accepted: {@link StatementWindow}
+    builds only the statements this pass may send, and they are handed over by
+    shifting, so a sent statement is not held while the rest go. The EOF rule
+    below is untouched — everything handed over is still held until the second
+    read has agreed with the first; there is simply far less of it.
+
+    Removing the queue altogether still needs `onConflict` and `tail` known
+    BEFORE the streaming pass — a ranged read of the blob's last few kilobytes —
+    which is an API `PrimeMigrationCorpus` does not have.
 
     `seedChunking.test.ts` pins both halves of this: nothing is yielded before
     EOF, and nothing is yielded before a disagreement throws. Do not
@@ -315,8 +455,12 @@ export async function* chunkSeedStatements(
   */
   const walking = walk(chunks, (tuple) => {
     rowsSeen += 1;
+    // The GROUPING is decided on bytes alone and never on the window, so a
+    // position names the same statement on every pass whatever each pass
+    // holds.
     const bytes = byteLength(tuple) + 2;
     if (group.length > 0 && groupBytes + bytes > opts.maxStatementBytes) flush();
+    groupChars += (group.length > 0 ? 2 : 0) + tuple.length;
     group.push(tuple);
     groupBytes += bytes;
   });
@@ -360,10 +504,26 @@ export async function* chunkSeedStatements(
     );
   }
 
-  for (const s of ready) yield s;
   if (shape.tail) {
-    yield { label: "trailing statements", sql: shape.tail, rows: 0, bytes: byteLength(shape.tail) };
+    // A statement like any other: it has a position, and it is held only
+    // inside the window. It is the REMEMBERED tail, compared equal just above.
+    if (admits(shape.tail.length)) {
+      ready.push({
+        label: "trailing statements",
+        sql: shape.tail,
+        rows: 0,
+        bytes: byteLength(shape.tail),
+        index: position,
+      });
+    }
+    position += 1;
   }
+
+  opts.onPlan?.({ total: position, held: ready.length });
+
+  // Handed over by SHIFTING, so a statement already sent is not still held by
+  // this queue while the ones after it go.
+  while (ready.length > 0) yield ready.shift()!;
 }
 
 /**

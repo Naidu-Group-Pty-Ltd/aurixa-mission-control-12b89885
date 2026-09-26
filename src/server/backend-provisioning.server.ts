@@ -3136,6 +3136,20 @@ export async function applyPrimeMigrations(
           });
           break;
         }
+        if (chunked.unresumable) {
+          // Held before its first statement went, exactly as a body with no
+          // stream is: this caller could not carry on from a pause, so it is
+          // not handed a part. `heldOversize` is the flag every caller already
+          // reads as "left for the chunking lane" — never as a failure.
+          results.push({
+            id: m.id,
+            name: m.name,
+            success: false,
+            heldOversize: true,
+            error: chunked.unresumable,
+          });
+          break;
+        }
         if (chunked.upstreamRefusal) {
           // A HOLD, not a pause. Both stop here and both keep the cursor, but
           // they are reported differently on purpose: a pause is this pass
@@ -3252,6 +3266,11 @@ export type OversizeApplyOptions = {
   streamSql: (m: { id: string; name: string }) => Promise<AsyncIterable<string>>;
   /** Largest statement to send. Default `DEFAULT_SEED_STATEMENT_BYTES`. */
   maxStatementBytes?: number;
+  /**
+   * The most seed text one pass holds, in UTF-16 code units. Default
+   * `SEED_HELD_CHARS`; a test seam, like the statement size above.
+   */
+  maxHeldChars?: number;
   /** Where the previous pass stopped, if it stopped inside this migration. */
   cursor?: ChunkCursor | null;
   /**
@@ -3265,7 +3284,18 @@ export type OversizeApplyOptions = {
    * statement has been sent.
    */
   bodyIdentity?: (m: { id: string; name: string }) => string | null;
-  /** Called after every statement lands, so the run's heartbeat carries the cursor. */
+  /**
+   * Called after every statement lands, so the run's heartbeat carries the cursor.
+   *
+   * ITS PRESENCE IS ALSO WHAT MAKES A CALLER ONE THAT RESUMES. A caller that
+   * records no progress cannot carry on from a pause, so it is never handed
+   * part of a seed: a seed the pass's window cannot hold to the end is HELD
+   * before its first statement goes (see `unresumable` on `applyChunkedSeed`),
+   * and left to a lane that does record its place. Raised by review on #292 —
+   * the per-clone sync button would otherwise send one window of a 41 MB seed,
+   * ignore the pause, report the clone up to date, and start from statement 0
+   * on every press.
+   */
   onStatementDone?: (progress: {
     migrationId: string;
     name: string;
@@ -3288,6 +3318,24 @@ export type OversizeApplyOptions = {
  * magnitude in size, so the budget is bytes rather than rows.
  */
 export const DEFAULT_SEED_STATEMENT_BYTES = 1_000_000;
+
+/**
+ * How much seed text one pass builds and holds: eight million code units.
+ *
+ * NOT A THROUGHPUT KNOB. A pass sends statements until its budget is spent,
+ * and at the default statement size a pass's budget is spent after a handful —
+ * so this bounds what a pass HOLDS, and a pass that reaches the end of what it
+ * holds before its budget simply pauses and the next pass carries on from the
+ * cursor.
+ *
+ * Sized against the isolate rather than the seed. Eight million code units is
+ * at most 16 MB of heap, two bytes a character being the case the real seed is
+ * in (see `StatementWindow`): under an eighth of the 128 MB ceiling, beside the
+ * corpus, the clients and one statement's request and response. The whole
+ * queue it replaces measured 86.7 MB, and a pass sending its second statement
+ * beside that was killed every time it was tried.
+ */
+export const SEED_HELD_CHARS = 8_000_000;
 
 async function applyChunkedSeed(
   projectRef: string,
@@ -3328,6 +3376,15 @@ async function applyChunkedSeed(
    * `migrationLedgerWrites.pure.ts`.
    */
   ledgerWrite?: string;
+  /**
+   * Set when the caller records no progress (`onStatementDone` absent) and
+   * this pass's window does not reach the end of the seed. Nothing of the seed
+   * was sent: the replay HOLDS it, as it holds a body it has no stream for,
+   * because a caller that cannot resume would otherwise send a part, drop the
+   * cursor that says which part, and report the migration as though nothing
+   * were outstanding.
+   */
+  unresumable?: string;
 }> {
   const { readSeedShape, chunkSeedStatements, SeedShapeError, seedSkeleton } =
     await import("./seedChunking.pure");
@@ -3352,9 +3409,35 @@ async function applyChunkedSeed(
   const identityOf = () => (bodySha === null ? {} : { bodySha });
   const cursorIsForThisBody = cursorAppliesToBody(oversize.cursor, m.id, bodySha);
   const skip = cursorIsForThisBody ? (oversize.cursor?.statementsDone ?? 0) : 0;
-  let index = 0;
+  const maxHeldChars = oversize.maxHeldChars ?? SEED_HELD_CHARS;
+  /*
+    A POSITION, NOT A COUNT OF WHAT WAS HANDED OVER.
+
+    Every statement before `index` is in the clone. It starts at the cursor
+    because the chunker no longer hands this loop the statements before it —
+    it walks them, and builds nothing for them, which is most of the ~87 MB a
+    resumed pass used to hold (see `StatementWindow`). So the loop cannot
+    count its way to a position; it reads each statement's own.
+  */
+  let index = skip;
   let applied = 0;
   let slowestMs = 0;
+  /*
+    How many statements the whole seed comes to, from the chunker once its
+    second read has agreed with the first. It is what separates "the window
+    ran out" from "the seed ended" below — the loop sees both as the same
+    empty iterator, and only the second may be followed by a ledger row.
+    Typed wide on purpose: it is assigned in a callback, and a narrowed `null`
+    would read as permanently null after the loop.
+  */
+  let statementsInSeed = null as number | null;
+  /*
+    Whether the statements this pass is handed run to the END of the seed —
+    from the same report, and typed wide for the same reason. Only a caller
+    that cannot resume needs it: see the refusal at the head of the loop.
+  */
+  let windowFinishesSeed = false as boolean;
+  const resumable = oversize.onStatementDone !== undefined;
   /*
     ONE READ ON A RESUMED PASS.
 
@@ -3420,10 +3503,37 @@ async function applyChunkedSeed(
     }
     for await (const stmt of chunkSeedStatements(await oversize.streamSql(m), shape, {
       maxStatementBytes,
+      window: { skip, maxHeldChars },
+      onPlan: (plan) => {
+        statementsInSeed = plan.total;
+        windowFinishesSeed = skip + plan.held >= plan.total;
+      },
     })) {
-      if (index < skip) {
-        index += 1;
-        continue;
+      /*
+        A CALLER THAT CANNOT RESUME IS NEVER HANDED PART OF A SEED.
+
+        A pause is only a pause to a caller that stores the cursor it returns
+        and passes it back. To one that does not, it is a truncation: the
+        statements sent so far land, the position that says how far they
+        reached is dropped, the migration is neither a success nor a failure in
+        the caller's results — so "up to date" is what gets reported — and the
+        next attempt starts from statement 0 and stops in the same place. So
+        such a caller is held BEFORE the first statement goes, and the seed is
+        left to a lane that records its place. Asked here rather than before
+        the loop because this is the first moment the window's reach is known:
+        the chunker reports it once its second read has agreed with the first.
+      */
+      if (!resumable && !windowFinishesSeed) {
+        return {
+          applied: 0,
+          stoppedEarly: false,
+          cursor: null,
+          upstreamRefusal: null,
+          unresumable:
+            `${m.name} is ${statementsInSeed ?? "an unknown number of"} statement(s), more than one ` +
+            "pass can hold, and this caller records no place to resume from — so nothing of it " +
+            "was sent here; the chunking lane sends it a window at a time",
+        };
       }
       // At least one statement a pass, so a pass never comes back with the
       // cursor where it found it.
@@ -3435,9 +3545,21 @@ async function applyChunkedSeed(
           upstreamRefusal: null,
         };
       }
+      /*
+        The statement must be the NEXT one. The chunker hands over a contiguous
+        run starting at the cursor, and a gap here would record a position past
+        a statement the clone never received — so a gap is refused before it is
+        sent rather than trusted.
+      */
+      if (stmt.index !== index) {
+        throw new Error(
+          `${m.name}: the chunker handed over statement ${stmt.index + 1} where ${index + 1} was ` +
+            "next — refusing to send out of order",
+        );
+      }
       const startedAt = Date.now();
       await runSqlOnProject(projectRef, stmt.sql);
-      index += 1;
+      index = stmt.index + 1;
       applied += 1;
       slowestMs = Math.max(slowestMs, Date.now() - startedAt);
       await oversize.onStatementDone?.({
@@ -3530,7 +3652,19 @@ async function applyChunkedSeed(
     }
     throw e;
   }
-  if (cursorRanPastEnd(skip, index)) {
+  /*
+    THE CHUNKER REPORTS THE SEED'S LENGTH BEFORE IT HANDS ANYTHING OVER, OR IT
+    THROWS. Reaching here without a length is therefore a defect in that
+    contract, and it is refused rather than read as the seed finishing — the
+    reading that writes a ledger row for rows the clone does not hold.
+  */
+  if (statementsInSeed === null) {
+    throw new Error(
+      `${m.name}: the chunker finished without saying how many statements the seed has — ` +
+        "refusing to record it as sent",
+    );
+  }
+  if (cursorRanPastEnd(skip, statementsInSeed)) {
     /*
       A CURSOR THE FILE CANNOT SUPPORT IS NOT A REASON TO CALL THE SEED DONE.
 
@@ -3552,6 +3686,29 @@ async function applyChunkedSeed(
       applied: 0,
       stoppedEarly: true,
       cursor: { migrationId: m.id, statementsDone: 0, ...identityOf() },
+      upstreamRefusal: null,
+    };
+  }
+  if (index < statementsInSeed) {
+    /*
+      THE WINDOW RAN OUT BEFORE THE SEED DID.
+
+      Every statement this pass held has gone and there are more after them.
+      That is a pause exactly as the budget stop above is one — the cursor
+      moves to the next statement and the next pass carries on from it — and
+      NOT the end of the seed, which is what falling through would say: the
+      replay answers `stoppedEarly: false` by writing the migration's ledger
+      row, for a seed a window of which reached the clone.
+    */
+    return {
+      applied,
+      stoppedEarly: true,
+      cursor: {
+        migrationId: m.id,
+        statementsDone: index,
+        shape: shape ?? undefined,
+        ...identityOf(),
+      },
       upstreamRefusal: null,
     };
   }

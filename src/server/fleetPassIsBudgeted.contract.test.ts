@@ -1251,9 +1251,11 @@ describe("what a pass stopped inside is resumable", () => {
     ) {
       sites.push(i);
     }
-    // Four: the budget pause, the per-statement progress, the upstream refusal,
-    // and the ran-past-end reset. If a fifth appears this fails and is read.
-    expect(sites, "the cursor-minting sites in applyChunkedSeed").toHaveLength(4);
+    // Five: the budget pause, the per-statement progress, the upstream refusal,
+    // the ran-past-end reset, and the window pause — a pass that has sent every
+    // statement it held with more of the seed still to go (see
+    // `StatementWindow`). If a sixth appears this fails and is read.
+    expect(sites, "the cursor-minting sites in applyChunkedSeed").toHaveLength(5);
     for (const at of sites) {
       // `identityOf()` before the object it is in closes. The window is the
       // object, not a byte count — a field added above it must not make this
