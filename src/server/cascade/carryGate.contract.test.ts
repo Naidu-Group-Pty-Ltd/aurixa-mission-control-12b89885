@@ -87,10 +87,11 @@ describe("a carried subject is a delivered module, so it meets the import closur
     // Fed back as stranded paths, so they meet `planSubjectCarry`, the
     // exclusions, the ceiling and `prepareOne` on the terms every other
     // candidate does. Nothing crosses for having been IMPORTED any more than
-    // for having been mentioned.
+    // for having been mentioned — and the specs the other half owes (a kept
+    // spec left behind by its subject) meet the plan on the same terms.
     const loop = carryLoop();
     expect(loop).toMatch(
-      /stranded: \[\s*\.\.\.\[\.\.\.strandedBySpec\.values\(\)\]\.flat\(\),\s*\.\.\.importsOwed,?\s*\]/,
+      /stranded: \[\s*\.\.\.\[\.\.\.strandedBySpec\.values\(\)\]\.flat\(\),\s*\.\.\.importsOwed,\s*\.\.\.owedSpecs,?\s*\]/,
     );
   });
 
@@ -162,9 +163,11 @@ describe("the belt stops the carry, not the loop", () => {
   });
 
   it("still ends, because with carrying off every round holds a spec", () => {
+    // With carrying off the loop ends on the first round nothing is stranded;
+    // with it on, only once nothing is owed either — imports or specs.
     const loop = carryLoop();
     expect(loop).toMatch(
-      /if \(strandedBySpec\.size === 0 && \(!carryingAllowed \|\| importsOwed\.size === 0\)\) break;/,
+      /if \(\s*strandedBySpec\.size === 0 &&\s*\(!carryingAllowed \|\| \(importsOwed\.size === 0 && owedSpecs\.length === 0\)\)\s*\) \{\s*break;\s*\}/,
     );
   });
 
@@ -172,9 +175,11 @@ describe("the belt stops the carry, not the loop", () => {
     // Carry rounds are bounded by the 200-subject cap and hold rounds by the
     // number of specs — and a CARRIED subject can itself be a spec, so that
     // set grows by up to the same cap while the loop runs. Counting only the
-    // specs present at the start bounded the loop BELOW its worst case.
+    // specs present at the start bounded the loop BELOW its worst case. The
+    // kept specs the other half may bring in are counted too: once carried,
+    // each answers to the forward half like any delivered spec.
     expect(engine).toMatch(
-      /const maxCarryRounds =\s*MAX_SUBJECTS_CARRIED \* 2 \+ Object\.keys\(deliveredSource\)\.length \+ 1;/,
+      /const maxCarryRounds =\s*MAX_SUBJECTS_CARRIED \* 2 \+ Object\.keys\(deliveredSource\)\.length \+ keptSpecSubjects\.size \+ 1;/,
     );
   });
 });
