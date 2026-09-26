@@ -132,14 +132,48 @@ describe("the policy is consulted, not imitated", () => {
     expect(handWritten).toBe(false);
   });
 
-  it("the migration run defers its assessment to the lane, explicitly", () => {
+  it("plans no migration run: a cascade's migrations are the fleet lane's", () => {
     /*
-      Not a bypass. `executeSqlMigration` loads every PENDING body immediately
-      before applying it and parks the batch on the first destructive
-      statement — a stronger check than one taken at plan time, because the
-      prime moves in between. The flag says WHERE the assessment happens.
+      It planned a `sql_migration` catch-up on every cascade that delivered a
+      migration file, and the self-healing lane then replayed onto the clone
+      the same scoped migrations the fleet migration lane applies every thirty
+      minutes — without that lane's claim. Two appliers in one schema is how a
+      migration is sent twice and a clone is blocked on a duplicate object it
+      never lacked. Measured 26 Sep 2026, every clone also held one PARKED
+      catch-up run that absorbed every later cascade as "already queued —
+      BLOCKED", while the fleet lane delivered the migrations regardless.
     */
-    expect(planner).toContain("sqlAssessedByLane: true");
+    const bare = stripComments(planner);
+    expect(bare).not.toContain('action_type: "sql_migration",\n    priority');
+    expect(bare).not.toContain("sqlAssessedByLane");
+    expect(bare).not.toContain("planMigrationCatchUp");
+    expect(bare).toContain("outcome: await handMigrationsToFleetLane(input)");
+  });
+
+  it("retires an earlier cascade catch-up only while nobody is running or has approved it", () => {
+    const hand = stripComments(planner).slice(
+      stripComments(planner).indexOf("async function handMigrationsToFleetLane"),
+    );
+    // Only the ones a cascade planned — a ticket's or a person's catch-up is
+    // theirs, and stays.
+    expect(hand).toContain('.eq("plan->>source", "cascade")');
+    expect(hand).toContain('.eq("plan->>mode", "catch_up")');
+    // Compare-and-swap on the status it was read in: a pass that claimed it,
+    // or a person who approved it, in the meantime wins.
+    expect(hand).toMatch(/\.eq\("id", row\.id\)\s*\.in\("status", \["planned", "awaiting_validation"\]\)/);
+    expect(hand).not.toContain('"executing"');
+    expect(hand).not.toContain('"approved"');
+    // Retired, with the record of why, never deleted.
+    expect(hand).toContain('status: "skipped"');
+    expect(hand).not.toMatch(/\.delete\(/);
+  });
+
+  it("the migration lane that remains still assesses before it applies", () => {
+    /*
+      A ticket or a person can still ask for a catch-up explicitly, and that
+      lane loads every PENDING body immediately before applying it and parks
+      the batch on the first destructive statement.
+    */
     const lane = read("src/server/self-healing.server.ts");
     expect(lane).toContain("assessSqlDestructiveness(sql)");
     expect(lane).toContain("if (!approvedByHuman) {");

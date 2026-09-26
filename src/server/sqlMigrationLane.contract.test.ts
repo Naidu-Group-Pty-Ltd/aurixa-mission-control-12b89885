@@ -98,11 +98,18 @@ describe("pending is what the fleet sync would send, never the raw corpus", () =
 
 describe("a pass is bounded", () => {
   it("the deadline is taken at lane entry, before any read", () => {
-    const deadline = lane.indexOf("const deadlineAt = Date.now() + SQL_MIGRATION_BUDGET_MS");
+    const deadline = lane.indexOf("const deadlineAt = Math.min(");
     const firstRead = lane.indexOf("await admin");
     expect(deadline).toBeGreaterThan(-1);
     expect(firstRead).toBeGreaterThan(-1);
     expect(deadline).toBeLessThan(firstRead);
+    // The lane's own budget, and never past the drain tick that invoked it:
+    // the drain runs its due runs one after another inside ONE request, and a
+    // second run given a fresh forty-five seconds at ~46 s was killed mid-pass
+    // and charged an attempt for it. See `DRAIN_TICK_BUDGET_MS`.
+    const taken = lane.slice(deadline, lane.indexOf(");", deadline));
+    expect(taken).toContain("Date.now() + SQL_MIGRATION_BUDGET_MS");
+    expect(taken).toContain("tickDeadlineAt ?? Number.POSITIVE_INFINITY");
   });
 
   it("and is handed to the replay, with the slowest migration reserved", () => {
