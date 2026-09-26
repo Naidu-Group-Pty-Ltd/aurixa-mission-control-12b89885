@@ -90,6 +90,58 @@ async function pass(cursor: ChunkCursor | null, maxHeldChars: number) {
   return { out, api, progress };
 }
 
+/**
+ * One press of a caller that records no progress — the per-clone sync button's
+ * shape: a stream and an identity, and no cursor and no `onStatementDone`.
+ */
+async function pressWithoutProgress(maxHeldChars: number) {
+  const api = recordingManagementApi();
+  vi.stubGlobal("fetch", vi.fn(api.fetch));
+  const out = await applyPrimeMigrations(
+    REF,
+    [{ id: SEED.id, name: SEED.name }],
+    undefined,
+    async () => {
+      throw new OversizedMigrationError(SEED.name, 41_780_944, MAX_MIGRATION_BYTES);
+    },
+    undefined,
+    undefined,
+    {
+      streamSql: async () => once(BODY),
+      bodyIdentity: () => BODY_SHA,
+      maxStatementBytes: STATEMENT_BYTES,
+      maxHeldChars,
+    },
+  );
+  vi.unstubAllGlobals();
+  return { out, api };
+}
+
+describe("applyPrimeMigrations — a caller that cannot resume", () => {
+  it("is handed nothing of a seed one window cannot hold to the end, and holds it", async () => {
+    // Raised by review on #292. Sending the first window and returning a pause
+    // to a caller that drops the cursor is a truncation: part of the seed
+    // lands, the migration is neither a success nor a failure in its results,
+    // "up to date" is reported, and the next press starts from statement 0.
+    const { out, api } = await pressWithoutProgress(1);
+    expect(api.bodies()).toEqual([]);
+    expect(api.recorded()).toEqual([]);
+    expect(out.stoppedEarly).toBe(false);
+    expect(out.chunkCursor).toBeNull();
+    expect(out.results).toHaveLength(1);
+    expect(out.results[0]).toMatchObject({ id: SEED.id, success: false, heldOversize: true });
+    expect(out.results[0].error).toMatch(/nothing of it was sent/);
+  });
+
+  it("still sends — and records — a seed its window holds to the end", async () => {
+    const all = await everyStatement();
+    const { out, api } = await pressWithoutProgress(Number.POSITIVE_INFINITY);
+    expect(api.bodies()).toEqual(all);
+    expect(out.results[0].success).toBe(true);
+    expect(api.recorded()).toEqual([{ version: SEED.id, name: SEED.name }]);
+  });
+});
+
 describe("applyPrimeMigrations — a seed sent a window at a time", () => {
   it("sends every statement exactly once, in order, across passes that each hold a few", async () => {
     const all = await everyStatement();

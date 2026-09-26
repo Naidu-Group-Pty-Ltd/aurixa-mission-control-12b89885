@@ -3136,6 +3136,20 @@ export async function applyPrimeMigrations(
           });
           break;
         }
+        if (chunked.unresumable) {
+          // Held before its first statement went, exactly as a body with no
+          // stream is: this caller could not carry on from a pause, so it is
+          // not handed a part. `heldOversize` is the flag every caller already
+          // reads as "left for the chunking lane" — never as a failure.
+          results.push({
+            id: m.id,
+            name: m.name,
+            success: false,
+            heldOversize: true,
+            error: chunked.unresumable,
+          });
+          break;
+        }
         if (chunked.upstreamRefusal) {
           // A HOLD, not a pause. Both stop here and both keep the cursor, but
           // they are reported differently on purpose: a pause is this pass
@@ -3270,7 +3284,18 @@ export type OversizeApplyOptions = {
    * statement has been sent.
    */
   bodyIdentity?: (m: { id: string; name: string }) => string | null;
-  /** Called after every statement lands, so the run's heartbeat carries the cursor. */
+  /**
+   * Called after every statement lands, so the run's heartbeat carries the cursor.
+   *
+   * ITS PRESENCE IS ALSO WHAT MAKES A CALLER ONE THAT RESUMES. A caller that
+   * records no progress cannot carry on from a pause, so it is never handed
+   * part of a seed: a seed the pass's window cannot hold to the end is HELD
+   * before its first statement goes (see `unresumable` on `applyChunkedSeed`),
+   * and left to a lane that does record its place. Raised by review on #292 —
+   * the per-clone sync button would otherwise send one window of a 41 MB seed,
+   * ignore the pause, report the clone up to date, and start from statement 0
+   * on every press.
+   */
   onStatementDone?: (progress: {
     migrationId: string;
     name: string;
@@ -3351,6 +3376,15 @@ async function applyChunkedSeed(
    * `migrationLedgerWrites.pure.ts`.
    */
   ledgerWrite?: string;
+  /**
+   * Set when the caller records no progress (`onStatementDone` absent) and
+   * this pass's window does not reach the end of the seed. Nothing of the seed
+   * was sent: the replay HOLDS it, as it holds a body it has no stream for,
+   * because a caller that cannot resume would otherwise send a part, drop the
+   * cursor that says which part, and report the migration as though nothing
+   * were outstanding.
+   */
+  unresumable?: string;
 }> {
   const { readSeedShape, chunkSeedStatements, SeedShapeError, seedSkeleton } =
     await import("./seedChunking.pure");
@@ -3397,6 +3431,13 @@ async function applyChunkedSeed(
     would read as permanently null after the loop.
   */
   let statementsInSeed = null as number | null;
+  /*
+    Whether the statements this pass is handed run to the END of the seed —
+    from the same report, and typed wide for the same reason. Only a caller
+    that cannot resume needs it: see the refusal at the head of the loop.
+  */
+  let windowFinishesSeed = false as boolean;
+  const resumable = oversize.onStatementDone !== undefined;
   /*
     ONE READ ON A RESUMED PASS.
 
@@ -3465,8 +3506,35 @@ async function applyChunkedSeed(
       window: { skip, maxHeldChars },
       onPlan: (plan) => {
         statementsInSeed = plan.total;
+        windowFinishesSeed = skip + plan.held >= plan.total;
       },
     })) {
+      /*
+        A CALLER THAT CANNOT RESUME IS NEVER HANDED PART OF A SEED.
+
+        A pause is only a pause to a caller that stores the cursor it returns
+        and passes it back. To one that does not, it is a truncation: the
+        statements sent so far land, the position that says how far they
+        reached is dropped, the migration is neither a success nor a failure in
+        the caller's results — so "up to date" is what gets reported — and the
+        next attempt starts from statement 0 and stops in the same place. So
+        such a caller is held BEFORE the first statement goes, and the seed is
+        left to a lane that records its place. Asked here rather than before
+        the loop because this is the first moment the window's reach is known:
+        the chunker reports it once its second read has agreed with the first.
+      */
+      if (!resumable && !windowFinishesSeed) {
+        return {
+          applied: 0,
+          stoppedEarly: false,
+          cursor: null,
+          upstreamRefusal: null,
+          unresumable:
+            `${m.name} is ${statementsInSeed ?? "an unknown number of"} statement(s), more than one ` +
+            "pass can hold, and this caller records no place to resume from — so nothing of it " +
+            "was sent here; the chunking lane sends it a window at a time",
+        };
+      }
       // At least one statement a pass, so a pass never comes back with the
       // cursor where it found it.
       if (applied > 0 && budget?.isPastDeadline(slowestMs)) {
