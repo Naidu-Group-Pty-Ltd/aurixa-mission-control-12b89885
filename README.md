@@ -24,3 +24,5 @@ cd <repository-name>
 npm i
 npm run dev
 ```
+
+**Adding or changing a dependency?** Run `bun install` after `npm install`, and commit both `package-lock.json` and `bun.lockb`. Lovable publishes from `bun.lockb` with a frozen lockfile, so a package that npm's lockfile has and `bun.lockb` lacks stops every publish. CI's "Lovable install (bun.lockb)" check fails when that happens.
