@@ -824,4 +824,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "enum", type: "notification_kind" },
     ],
   },
+  {
+    migration: "20260926160000_fleet_drain_leaves_the_sweep_its_minutes.sql",
+    version: "20260926160000",
+    assertions: [{ kind: "cron", jobname: "fleet-migration-drain-5min" }],
+  },
 ];

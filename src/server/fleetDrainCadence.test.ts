@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { fleetDrainHasWork } from "./fleet-migration.server";
 import { isMidSeed, scopeQueueToMode } from "./fleetMigrationEligibility.pure";
@@ -15,19 +15,72 @@ const CURSOR = { migrationId: "20261203000000", statementsDone: 25 };
 /*
   THE CADENCE IS READ FROM THE MIGRATIONS, NEVER WRITTEN DOWN HERE.
 
-  The whole claim of this change is a RELATION between two numbers — the drain
-  must be faster than the sweep — and a test carrying its own copy of either
-  one stops testing that the day somebody edits a schedule.
+  The whole claim of this change is a RELATION between two schedules — the
+  drain must be faster than the sweep, and must never run beside it — and a
+  test carrying its own copy of either one stops testing that the day somebody
+  edits a schedule.
+
+  And from the LAST migration that sets each schedule, not the first. This read
+  the drain's five-minute step out of the file that created the job, and would have gone
+  on reading it after a later migration moved the job — a test of a schedule
+  production no longer runs, passing for ever.
 */
-const cadenceOf = (path: string, job: string): number => {
-  const sql = read(path);
-  const m = new RegExp(`cron\\.schedule\\(\\s*'${job}',\\s*'\\*/(\\d+) \\* \\* \\* \\*'`).exec(sql);
-  expect(m, `could not read ${job}'s schedule from ${path}`).not.toBeNull();
-  return Number(m![1]);
+const MIGRATIONS = "supabase/migrations";
+const migrationCode = readdirSync(join(process.cwd(), MIGRATIONS))
+  .filter((f) => f.endsWith(".sql"))
+  .sort()
+  .map((f) => ({ file: f, sql: sqlCode(read(`${MIGRATIONS}/${f}`)) }));
+
+/** Where a job's schedule was last set, and to what. */
+const scheduleOf = (job: string): { schedule: string; file: string } => {
+  let found: { schedule: string; file: string } | null = null;
+  for (const { file, sql } of migrationCode) {
+    const created = new RegExp(`cron\\.schedule\\(\\s*'${job}',\\s*'([^']+)'`).exec(sql);
+    if (created) found = { schedule: created[1], file };
+    // A later `cron.alter_job` in a migration that names the job by its
+    // `jobname`, with the schedule either inline or held in a constant.
+    if (!sql.includes(`jobname = '${job}'`)) continue;
+    const altered = /cron\.alter_job\([^;]*?schedule\s*:=\s*('[^']+'|[a-z_]+)/.exec(sql);
+    if (!altered) continue;
+    const value = altered[1].startsWith("'")
+      ? altered[1].slice(1, -1)
+      : new RegExp(`${altered[1]}\\s+CONSTANT\\s+TEXT\\s*:=\\s*'([^']+)'`).exec(sql)?.[1];
+    expect(value, `${file} alters ${job} to a schedule this test cannot read`).toBeTruthy();
+    found = { schedule: value!, file };
+  }
+  expect(found, `no migration schedules ${job}`).not.toBeNull();
+  return found!;
 };
 
-const SWEEP_SQL = "supabase/migrations/20260827070000_schedule_fleet_migration_sync.sql";
+/**
+ * The minutes of the hour a schedule fires in. Only the minute field may vary:
+ * every fleet schedule is hourly-periodic, and one that is not would make the
+ * relations below meaningless rather than false.
+ */
+const minutesOf = (schedule: string): number[] => {
+  const [minute, ...rest] = schedule.trim().split(/\s+/);
+  expect(rest, `${schedule} varies by more than the minute`).toEqual(["*", "*", "*", "*"]);
+  const out = new Set<number>();
+  for (const part of minute.split(",")) {
+    const m = /^(\*|\d+)(?:-(\d+))?(?:\/(\d+))?$/.exec(part);
+    expect(m, `cannot read minute field ${part}`).not.toBeNull();
+    const from = m![1] === "*" ? 0 : Number(m![1]);
+    const to = m![1] === "*" ? 59 : m![2] !== undefined ? Number(m![2]) : m![3] ? 59 : from;
+    const step = m![3] ? Number(m![3]) : 1;
+    for (let x = from; x <= to; x += step) out.add(x);
+  }
+  return [...out].sort((a, b) => a - b);
+};
+
+/** The shortest gap, in minutes and around the hour, between two sets of firings. */
+const closestApproach = (a: number[], b: number[]): number =>
+  Math.min(...a.flatMap((x) => b.map((y) => Math.min((x - y + 60) % 60, (y - x + 60) % 60))));
+
+const SWEEP_JOB = "fleet-migration-sync-30min";
+const DRAIN_JOB = "fleet-migration-drain-5min";
 const DRAIN_SQL = "supabase/migrations/20260920100000_schedule_fleet_migration_drain.sql";
+const DRAIN_MOVE_SQL =
+  "supabase/migrations/20260926160000_fleet_drain_leaves_the_sweep_its_minutes.sql";
 
 describe("a clone mid-seed is the only thing a drain tick serves", () => {
   it("reads the cursor through the narrowing, never off the column", () => {
@@ -133,7 +186,9 @@ describe("the pass applies the mode after eligibility, and before it spends", ()
     expect(above.length).toBeLessThanOrEqual(1);
     for (const at of above) {
       const guard = body.lastIndexOf('if (mode !== "sweep") continue;', at);
-      expect(guard, "a corpus open above the empty-batch return is not sweep-only").toBeGreaterThan(-1);
+      expect(guard, "a corpus open above the empty-batch return is not sweep-only").toBeGreaterThan(
+        -1,
+      );
       // Nothing between the guard and the open may leave the guarded branch.
       expect(body.slice(guard, at)).not.toMatch(/\n {4}\}/);
     }
@@ -258,9 +313,9 @@ describe("the drain is scheduled, and faster than the sweep", () => {
   const drain = sqlCode(read(DRAIN_SQL));
 
   it("runs more often than the sweep it supplements", () => {
-    const sweepMinutes = cadenceOf(SWEEP_SQL, "fleet-migration-sync-30min");
-    const drainMinutes = cadenceOf(DRAIN_SQL, "fleet-migration-drain-5min");
-    expect(drainMinutes).toBeLessThan(sweepMinutes);
+    const sweep = minutesOf(scheduleOf(SWEEP_JOB).schedule);
+    const drainTicks = minutesOf(scheduleOf(DRAIN_JOB).schedule);
+    expect(drainTicks.length).toBeGreaterThan(sweep.length);
   });
 
   it("posts to the drain door, not the sweep's", () => {
@@ -278,5 +333,56 @@ describe("the drain is scheduled, and faster than the sweep", () => {
     expect(drain).toContain("IF NOT EXISTS (");
     expect(drain).toContain("FROM cron.job");
     expect(drain).toContain("cron.unschedule('fleet-migration-drain-5min')");
+  });
+});
+
+describe("two fleet passes never run at once", () => {
+  /*
+    Measured 26 Sep 2026, over the stretches of the day when a lone pass fitted
+    its isolate: every lone drain tick answered 200, and three of the ten paired
+    ticks — 13:30, 14:00 and 15:30 — came back as two 502s, one isolate killed
+    for memory under both passes. At 15:30 both passes ended in the same instant
+    and both claims were left standing. Pairing is not always fatal; it is the
+    only condition under which a pass that fits alone has died.
+  */
+  const sweep = minutesOf(scheduleOf(SWEEP_JOB).schedule);
+  const drainTicks = minutesOf(scheduleOf(DRAIN_JOB).schedule);
+
+  it("reads the schedules production runs", () => {
+    // The move is the drain's last word; the sweep's is still its own file.
+    expect(scheduleOf(DRAIN_JOB).file).toBe(DRAIN_MOVE_SQL.split("/").pop());
+    expect(sweep).toEqual([0, 30]);
+    expect(drainTicks).toEqual([5, 10, 15, 20, 25, 35, 40, 45, 50, 55]);
+  });
+
+  it("the drain never fires in a minute the sweep fires in", () => {
+    expect(drainTicks.filter((m) => sweep.includes(m))).toEqual([]);
+  });
+
+  it("leaves more than a pass's whole HTTP patience between a sweep and a drain", () => {
+    // A pass cannot outlive the request that started it, and that request is
+    // given `timeout_milliseconds` — read from the migration that set it, not
+    // restated. Firings closer than that can overlap; firings further apart
+    // cannot.
+    const patience = /'timeout_milliseconds := 60000',\s*'timeout_milliseconds := (\d+)'/.exec(
+      sqlCode(read("supabase/migrations/20260922150000_fleet_sync_http_patience.sql")),
+    );
+    expect(patience, "could not read the fleet jobs' HTTP patience").not.toBeNull();
+    const patienceMinutes = Math.ceil(Number(patience![1]) / 60_000);
+    expect(closestApproach(sweep, drainTicks)).toBeGreaterThan(patienceMinutes);
+  });
+
+  it("moves only the schedule, and only a job still on the old one", () => {
+    const move = sqlCode(read(DRAIN_MOVE_SQL));
+    // `alter_job` keeps the command — the URL, the vault-read secret and the
+    // patience — so the move cannot re-point the job or drop its secret.
+    expect(move).toMatch(/cron\.alter_job\(v_job\.jobid, schedule := v_new\)/);
+    expect(move).not.toMatch(/cron\.(un)?schedule\(/);
+    expect(move).toContain("WHERE jobname = 'fleet-migration-drain-5min'");
+    // Asserted by effect: the stored schedule decides, so a job already moved
+    // or set by hand is left as it is.
+    expect(move).toMatch(
+      /ELSIF v_job\.schedule = '\*\/5 \* \* \* \*' THEN\s*PERFORM cron\.alter_job/,
+    );
   });
 });

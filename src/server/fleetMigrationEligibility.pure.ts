@@ -331,8 +331,9 @@ export type MigrationQueueRow = {
  * actually in flight, which is the thing the order is being asked about — and
  * it self-rotates: serving the laggard advances it past its peers, which then
  * lead. Comparing counts across two DIFFERENT seeds would be meaningless, and
- * this never does: it is reached only when two clones agree on
- * `migration_version`, so their next migration is the same file.
+ * this never does: it is reached only when both clones are inside the SAME
+ * file, or neither is inside any. (It used to say "only when two clones agree
+ * on `migration_version`", which is not the same thing — see the next section.)
  *
  * A clone with no cursor sorts as zero, which puts a clone that is not
  * mid-seed ahead of one that is. That is deliberate and cheap — such a pass
@@ -370,20 +371,55 @@ export type MigrationQueueRow = {
  * depends on the table's physical layout at all — not because two clones with
  * the same version, the same progress and the same claim time are expected, but
  * because "expected" is what the first version of this function assumed.
+ *
+ * ## The first key read the marker, and the marker is not where the work is
+ *
+ * `migration_version` is the last version a pass WALKED to — `latestApplied`
+ * moves past a version the clone already holds, and past one this lane is
+ * withholding, because the barrier is per-dependency rather than blanket. So a
+ * clone can record a version well ahead of a seed it has not finished: the seed
+ * was withheld while later, independent migrations landed, and was released
+ * afterwards. "Furthest behind first" read from that marker puts the clone that
+ * is furthest behind on the only work that takes more than a moment LAST.
+ *
+ * Measured 26 September 2026. NPC Test recorded `20261223100000` — the highest
+ * version in the fleet — with its cursor ONE statement into `20261208000000`,
+ * the v17 template seed; Preflight recorded `20261207000000` with its cursor 29
+ * statements into the same file, byte for byte (the same `bodySha`). A drain
+ * serves only clones with a seed in flight, and served the independent and
+ * Preflight first on every tick, each of which spends most of a pass's budget;
+ * NPC Test was reached only on the ticks where both finished early, and its
+ * seed stood at 1 statement while Preflight's stood at 29.
+ *
+ * So the first key is the clone's POSITION, not its marker: the file it is
+ * inside when a cursor says it is inside one — `chunk_cursor` names the file
+ * the next statement belongs to, and nothing before it is still owed by that
+ * pass — and otherwise the version it recorded. Inside a file sorts before
+ * having finished it, so a clone part-way through `X` is behind one that
+ * recorded `X`. That is also what makes the second key honest: progress is now
+ * compared only between two clones inside the same file.
+ *
+ * Neither reading is perfect, and the cursor is chosen because its error is the
+ * smaller one. A version released below a cursor that is already standing is
+ * owed first and the row cannot show it — but the pass walks in order and sends
+ * it before resuming, so the cost is one pass served slightly early, the
+ * conservative direction this function has always taken. A malformed cursor is
+ * read as no cursor at all, exactly as before.
  */
 export function compareMigrationQueue(a: MigrationQueueRow, b: MigrationQueueRow): number {
-  // Nulls first: a backend that has never recorded a version is furthest
-  // behind by definition.
-  const av = a.migration_version ?? "";
-  const bv = b.migration_version ?? "";
-  if (av !== bv) {
-    if (av === "") return -1;
-    if (bv === "") return 1;
-    return av < bv ? -1 : 1;
+  const ap = migrationQueuePosition(a);
+  const bp = migrationQueuePosition(b);
+  // Nulls first: a backend that has never recorded a version, and is inside no
+  // file, is furthest behind by definition.
+  if (ap.version !== bp.version) {
+    if (ap.version === "") return -1;
+    if (bp.version === "") return 1;
+    return ap.version < bp.version ? -1 : 1;
   }
-  const ap = chunkCursorFor(a.chunk_cursor)?.statementsDone ?? 0;
-  const bp = chunkCursorFor(b.chunk_cursor)?.statementsDone ?? 0;
-  if (ap !== bp) return ap - bp;
+  // Part-way through a file is behind having finished it.
+  if (ap.inside !== bp.inside) return ap.inside ? -1 : 1;
+  // Reached only inside the SAME file, or inside none, where both are 0.
+  if (ap.statementsDone !== bp.statementsDone) return ap.statementsDone - bp.statementsDone;
   // Least recently CLAIMED by this lane, nulls first. Compared as strings
   // because an ISO-8601 UTC timestamp sorts lexicographically, and parsing a
   // date to compare two of them is a way to turn a malformed value into NaN.
@@ -399,6 +435,30 @@ export function compareMigrationQueue(a: MigrationQueueRow, b: MigrationQueueRow
   const ai = a.clone_id ?? "";
   const bi = b.clone_id ?? "";
   return ai < bi ? -1 : ai > bi ? 1 : 0;
+}
+
+/**
+ * Where a clone's migration WORK stands — the first two keys of
+ * `compareMigrationQueue`, named so the order can be explained and tested
+ * rather than inferred from a sort.
+ *
+ * Inside the file its cursor names when it has a cursor this lane can narrow;
+ * otherwise at the version it recorded, finished. Read through `chunkCursorFor`,
+ * so a malformed cursor is no cursor, never a position.
+ */
+export function migrationQueuePosition(row: MigrationQueueRow): {
+  /** A version, `""` for a backend that has recorded none and is inside none. */
+  version: string;
+  /** Part-way through `version`, as opposed to having recorded it. */
+  inside: boolean;
+  /** Statements of `version` landed. 0 when not inside it. */
+  statementsDone: number;
+} {
+  const cursor = chunkCursorFor(row.chunk_cursor);
+  if (cursor !== null) {
+    return { version: cursor.migrationId, inside: true, statementsDone: cursor.statementsDone };
+  }
+  return { version: row.migration_version ?? "", inside: false, statementsDone: 0 };
 }
 
 /** The eligible rows, in the order the pass should serve them. Never mutates. */

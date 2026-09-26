@@ -15,6 +15,7 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { stripComments } from "../sourceComments.pure";
 
 const read = (p: string) => readFileSync(join(process.cwd(), p), "utf8");
 const drain = read("src/server/cascadeMergeDrain.server.ts");
@@ -60,6 +61,17 @@ describe("a clear on the per-proposal path is counted like the sweep's", () => {
     expect(perClone).toMatch(/noticeCleared: \(\) => \{\s*report\.noticesCleared \+= 1;\s*\}/);
   });
 
+  it("adds to the run's count only after the await, never across it", () => {
+    // `x += await f()` reads x before the await and writes it after, and the
+    // per-clone worker runs for several clones at once — so two clones'
+    // counts overwrite each other. Measured on the first production run: four
+    // pull requests' notices cleared, `noticesCleared: 3` reported.
+    expect(perClone).toMatch(/report\.noticesCleared \+= cleared;/);
+    // Code only: the comment beside the fix quotes the form it replaced.
+    expect(stripComments(perClone)).not.toMatch(/[-+*/]=\s*await\b/);
+    expect(drain).toMatch(/mapWithConcurrencyUntil\(\s*eligible,/);
+  });
+
   it("counts a notice taken down, never an update that matched nothing", () => {
     // Most closed proposals never raised a notice. An update that matched no
     // row succeeds just the same, so the rows that came back are the answer.
@@ -80,7 +92,7 @@ describe("an alarm this pass did not read is looked up once", () => {
 
   it("is asked only inside the budget, and skips what the work list will read anyway", () => {
     expect(perClone).toMatch(
-      /if \(!isPastDeadline\(\)\) \{\s*report\.noticesCleared \+= await clearNoticesForClosedProposals\(/,
+      /if \(!isPastDeadline\(\)\) \{[\s\S]*?const cleared = await clearNoticesForClosedProposals\(/,
     );
     // What was READ, never `all`: a proposal the cap left out is on the work
     // list and unread, and passing `all` let its alarm stand for as long as
