@@ -19,6 +19,15 @@ const wantFor = (path: string, text: string): TextWant => ({
   size: Buffer.byteLength(text, "utf8"),
 });
 
+/**
+ * The id git gives a blob holding exactly these bytes. `gitBlobSha` takes a
+ * text and hashes its UTF-8 encoding, so it cannot describe a file that is
+ * not UTF-8, which is what one test below needs.
+ */
+function blobIdOfBytes(bytes: Buffer): string {
+  return createHash("sha1").update(`blob ${bytes.byteLength}\0`).update(bytes).digest("hex");
+}
+
 /** A syntactically valid blob id that no text in these tests hashes to. */
 const fakeSha = (n: number) => n.toString(16).padStart(40, "0");
 
@@ -156,10 +165,7 @@ describe("acceptTextAnswers", () => {
     // binary test is about NUL bytes, so `isBinary` is false — and the id check
     // is the only thing that catches it.
     const latin1 = Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x0a]); // "café\n" in Latin-1
-    const realSha = createHash("sha1")
-      .update(`blob ${latin1.byteLength}\0`)
-      .update(latin1)
-      .digest("hex");
+    const realSha = blobIdOfBytes(latin1);
     const latinWant: TextWant = { path: "docs/cafe.txt", sha: realSha, size: latin1.byteLength };
     const altered = { text: latin1.toString("utf8"), isBinary: false, isTruncated: false };
     expect(altered.text).toContain("�");
