@@ -305,8 +305,8 @@ decides whether the custodian may touch it at all.
 | `invocation_cut` — pass larger than one tick | machinery | yes | yes, pass ledger |
 | `policy_unseeded` — mirror with no exclusions | machinery | **yes — seed it** | refuses, correctly, for ever |
 | `tree_truncated` | machinery | yes | refuses |
-| `oversize_file` — past GitHub's 100 MB blob ceiling | **person** | no | held + named |
-| `oversize_file` — 8 MB to 100 MB | machinery | **yes — streamed** | carried, no longer held |
+| `oversize_file` — past GitHub's 40 MiB blob ceiling (measured) | **person** | no | held + named, push by hand |
+| `oversize_file` — 8 MB to 40 MiB | machinery | **yes — streamed** | carried, no longer held |
 | `backend_identity_hold` | **person** | no | held + named |
 | `bulk_deletion_over_cap` | **person** | no | held, `cascade_path_approvals` |
 
@@ -507,6 +507,14 @@ as `stalled`, permanently, on a fleet behaving exactly as designed.
 > an auditor still refusing at 8 MB would score an undelivered 41.7 MB seed as
 > *not owed* and call a clone missing fourteen files converged. See
 > [`CASCADE_LARGE_FILES.md`](./CASCADE_LARGE_FILES.md).
+>
+> **Corrected again 26 Sep 2026 — GitHub's ceiling is 40 MiB, not 100 MB.**
+> The 100 MB came from the create-blob endpoint's documentation. The endpoint
+> took v16 (41,780,944 bytes) and refused v20, v21 and v22 (42.2–42.4 MB) with
+> HTTP 422 on every pass, so a 100 MB reading scored three files the API will
+> never take as owed. That is the same failure this step exists to prevent,
+> arrived at from the other side. The ceiling is measured now, and it is
+> still imported rather than restated.
 
 That is `drift_high` in a new costume, and it would have discredited this
 reading the same way. **The rule it bought generalises past the constant: the
