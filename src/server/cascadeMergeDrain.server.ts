@@ -177,8 +177,11 @@ export type MergeDrainReport = {
   repaired: number;
   /**
    * Pull requests whose standing blocked notice this run cleared because the
-   * pull request had closed — see `clearNoticesForClosedProposals`. Counted
-   * per pull request, not per notice.
+   * pull request had closed — by the per-proposal handling, which clears the
+   * notice of any proposal it reads closed, or by
+   * `clearNoticesForClosedProposals`, which reads the ones that handling did
+   * not. Counted per pull request, not per notice, and only where a notice
+   * was actually taken down: a clear that matched nothing is not an event.
    */
   noticesCleared: number;
   held: Record<string, number>;
@@ -417,6 +420,15 @@ export async function drainCascadeMerges(
       .slice(0, MAX_PRS_PER_RUN)
       .sort((a, b) => a - b);
 
+    /**
+     * The pull requests this pass has READ, which is what the notice sweep
+     * below may skip — never `all`. A proposal the cap left out is on the
+     * work list and unread, and skipping it too let an alarm about a closed
+     * pull request stand for as long as twenty-five newer proposals stayed
+     * open ahead of it. Added only once `handleOne` returns: it reads the
+     * pull request first, and one that threw may not have got that far.
+     */
+    const read = new Set<number>();
     for (const number of numbers) {
       // The budget binds the inner loop too. One clone holding 25 proposals
       // could otherwise spend the whole run on its own, which is the same
@@ -436,7 +448,11 @@ export async function drainCascadeMerges(
           rows: rowsForPr,
           label,
           cloneId: clone.id,
+          noticeCleared: () => {
+            report.noticesCleared += 1;
+          },
         });
+        read.add(number);
         report.detail.push(outcome);
         if (outcome.outcome === "merged") {
           report.merged += 1;
@@ -457,7 +473,7 @@ export async function drainCascadeMerges(
     }
 
     /*
-      THE ALARMS OF PROPOSALS THAT ARE NO LONGER IN THE WORK LIST.
+      THE ALARMS OF PROPOSALS THIS PASS DID NOT READ.
 
       The loop above clears the notice of any proposal it finds closed. But a
       proposal whose row was already brought forward — merged outside this
@@ -465,11 +481,12 @@ export async function drainCascadeMerges(
       standing was never looked at again either, and stood for ever. Measured
       26 Sep 2026: notices over #11 and #23 on the independent, #115 on NPC
       Test and #114 on Preflight, all four pull requests closed, and the ledger
-      reporting `ci_red` over them on all three clones for up to six days.
-      Those are looked up here, once each, and cleared if the pull request has
-      closed. Only while the budget allows, and never a reason to fail the run
-      — a notice left standing is an alarm one pass too long, not a reason to
-      discard what this pass did.
+      reporting `ci_red` over them on all three clones for up to six days. The
+      same is true of a proposal the per-run cap left out, which is on the
+      work list and still unread. Those are looked up here, once each, and
+      cleared if the pull request has closed. Only while the budget allows,
+      and never a reason to fail the run — a notice left standing is an alarm
+      one pass too long, not a reason to discard what this pass did.
     */
     if (!isPastDeadline()) {
       report.noticesCleared += await clearNoticesForClosedProposals({
@@ -478,7 +495,7 @@ export async function drainCascadeMerges(
         owner,
         repo,
         cloneId: clone.id,
-        workList: new Set(all),
+        alreadyRead: read,
         isPastDeadline,
       });
     }
@@ -596,8 +613,16 @@ async function handleOne(args: {
   rows: ResultRow[];
   label: string;
   cloneId: string;
+  /**
+   * Told when this pull request's standing blocked notice was taken down, so
+   * the run's report counts the clears this path makes as well as the
+   * sweep's. A clear is also the only audit trail an alarm leaves when it
+   * goes, and a proposal that closed between the list and this read makes no
+   * other change the route would file a row for.
+   */
+  noticeCleared: () => void;
 }): Promise<MergeDrainOutcome> {
-  const { supabase, octokit, owner, repo, number, rows, label, cloneId } = args;
+  const { supabase, octokit, owner, repo, number, rows, label, cloneId, noticeCleared } = args;
 
   const { data: pr } = await octokit.pulls.get({ owner, repo, pull_number: number });
   let facts: PullRequestFacts = {
@@ -842,7 +867,7 @@ async function handleOne(args: {
   // successor fails the same way it raises its own, under its own number. See
   // `cascade/blockedEscalation.pure.ts`.
   if (facts.state === "closed") {
-    await clearBlockedNotifications(supabase, cloneId, number);
+    if (await clearBlockedNotifications(supabase, cloneId, number)) noticeCleared();
   }
   if (mergedNow) {
     return {
@@ -935,8 +960,11 @@ async function raiseBlockedNotification(
 /**
  * A closed proposal clears its own standing alarm. Never fails the drain.
  *
- * Returns whether the clear was written, so a caller counting what it cleared
- * counts what it did rather than what it tried.
+ * Returns whether a notice was taken down — rows came back from the update —
+ * so a caller counting what it cleared counts what it did rather than what it
+ * tried. Most closed proposals never raised a notice at all, and an update
+ * that matched nothing reporting `true` would file an audit row for every one
+ * of them.
  */
 async function clearBlockedNotifications(
   supabase: Db,
@@ -944,18 +972,19 @@ async function clearBlockedNotifications(
   prNumber: number,
 ): Promise<boolean> {
   try {
-    const { error } = await supabase
+    const { data, error } = await supabase
       .from("notifications")
       .update({ read_at: new Date().toISOString() })
       .eq("kind", "cascade_blocked")
       .eq("clone_id", cloneId)
       .eq("metadata->>pr", String(prNumber))
-      .is("read_at", null);
+      .is("read_at", null)
+      .select("id");
     if (error) {
       console.error("[merge-drain] could not clear cascade_blocked:", error.message);
       return false;
     }
-    return true;
+    return (data ?? []).length > 0;
   } catch (e) {
     console.error("[merge-drain] blocked-notification clear failed:", e);
     return false;
@@ -964,7 +993,7 @@ async function clearBlockedNotifications(
 
 /**
  * Clear the standing blocked notices of this clone's pull requests that have
- * closed, for the pull requests the drain's work list no longer carries.
+ * closed, for the pull requests this pass has not already read.
  *
  * `blockedNoticesToRecheck` decides which notices are worth a read — see it
  * for the four it leaves standing unread — and the pull request's own state
@@ -981,11 +1010,11 @@ async function clearNoticesForClosedProposals(args: {
   owner: string;
   repo: string;
   cloneId: string;
-  /** Pull requests the per-proposal handling reads, and so clears itself. */
-  workList: ReadonlySet<number>;
+  /** Pull requests the per-proposal handling read this pass, and so cleared itself. */
+  alreadyRead: ReadonlySet<number>;
   isPastDeadline: () => boolean;
 }): Promise<number> {
-  const { supabase, octokit, owner, repo, cloneId, workList, isPastDeadline } = args;
+  const { supabase, octokit, owner, repo, cloneId, alreadyRead, isPastDeadline } = args;
   let cleared = 0;
   try {
     const { data, error } = await supabase
@@ -1006,7 +1035,7 @@ async function clearNoticesForClosedProposals(args: {
       urlRepo: parsePrRepo(n.url),
       urlPr: parsePrNumber(n.url),
     }));
-    for (const number of blockedNoticesToRecheck(notices, { owner, repo, workList })) {
+    for (const number of blockedNoticesToRecheck(notices, { owner, repo, alreadyRead })) {
       if (isPastDeadline()) break;
       try {
         const { data: pr } = await octokit.pulls.get({ owner, repo, pull_number: number });

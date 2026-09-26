@@ -29,13 +29,17 @@ const sweep = drain.slice(
   drain.indexOf("async function clearNoticesForClosedProposals("),
   drain.indexOf("async function writeReconciliation("),
 );
+const clear = drain.slice(
+  drain.indexOf("async function clearBlockedNotifications("),
+  drain.indexOf("async function clearNoticesForClosedProposals("),
+);
 
 describe("a proposal the drain reads closed clears its own alarm", () => {
   it("clears on every close, not only on a merge this drain performed", () => {
     // The clear used to sit inside `if (mergedNow)`, so a proposal merged by a
     // person, or declined, left its notice standing for ever.
     expect(handleOne).toMatch(
-      /if \(facts\.state === "closed"\) \{\s*await clearBlockedNotifications\(supabase, cloneId, number\);\s*\}/,
+      /if \(facts\.state === "closed"\) \{\s*if \(await clearBlockedNotifications\(supabase, cloneId, number\)\) noticeCleared\(\);\s*\}/,
     );
     // `mergedNow` sets `facts.state` to closed, so the merge is still covered.
     expect(handleOne).toMatch(/facts = \{ state: "closed", merged: true/);
@@ -47,7 +51,25 @@ describe("a proposal the drain reads closed clears its own alarm", () => {
   });
 });
 
-describe("an alarm the work list no longer carries is looked up once", () => {
+describe("a clear on the per-proposal path is counted like the sweep's", () => {
+  it("hands every read a callback that adds to the run's count", () => {
+    // Counting only the sweep's clears reported `noticesCleared: 0` for the
+    // ordinary case — a proposal closed while still recorded as open — and a
+    // pull request that closed between the list and the read cleared its
+    // notice with no audit row at all.
+    expect(perClone).toMatch(/noticeCleared: \(\) => \{\s*report\.noticesCleared \+= 1;\s*\}/);
+  });
+
+  it("counts a notice taken down, never an update that matched nothing", () => {
+    // Most closed proposals never raised a notice. An update that matched no
+    // row succeeds just the same, so the rows that came back are the answer.
+    expect(clear).toMatch(/\.is\("read_at", null\)\s*\.select\("id"\);/);
+    expect(clear).toMatch(/return \(data \?\? \[\]\)\.length > 0;/);
+    expect(clear).not.toMatch(/return true;/);
+  });
+});
+
+describe("an alarm this pass did not read is looked up once", () => {
   it("runs for every clone, after the pull-request loop and before the visit stamp", () => {
     const loopEndAt = perClone.lastIndexOf("report.detail.push({ clone: label, pr: number");
     const sweepAt = perClone.indexOf("await clearNoticesForClosedProposals(");
@@ -60,14 +82,23 @@ describe("an alarm the work list no longer carries is looked up once", () => {
     expect(perClone).toMatch(
       /if \(!isPastDeadline\(\)\) \{\s*report\.noticesCleared \+= await clearNoticesForClosedProposals\(/,
     );
-    // `all`, not the capped `numbers`: a proposal beyond this run's cap is
-    // still the per-proposal handling's to read on a later run.
-    expect(perClone).toMatch(/workList: new Set\(all\)/);
+    // What was READ, never `all`: a proposal the cap left out is on the work
+    // list and unread, and passing `all` let its alarm stand for as long as
+    // twenty-five newer proposals stayed open ahead of it.
+    expect(perClone).toMatch(/alreadyRead: read,/);
+    expect(perClone).not.toMatch(/new Set\(all\)/);
+    // Recorded as read only once `handleOne` has returned — it reads the pull
+    // request first, and a call that threw may not have got that far.
+    const callAt = perClone.indexOf("await handleOne(");
+    const readAt = perClone.indexOf("read.add(number);");
+    const pushAt = perClone.indexOf("report.detail.push(outcome);");
+    expect(readAt).toBeGreaterThan(callAt);
+    expect(pushAt).toBeGreaterThan(readAt);
     expect(sweep).toMatch(/if \(isPastDeadline\(\)\) break;/);
   });
 
   it("clears only a pull request it READ as closed", () => {
-    expect(sweep).toMatch(/blockedNoticesToRecheck\(notices, \{ owner, repo, workList \}\)/);
+    expect(sweep).toMatch(/blockedNoticesToRecheck\(notices, \{ owner, repo, alreadyRead \}\)/);
     expect(sweep).toMatch(/octokit\.pulls\.get\(\{ owner, repo, pull_number: number \}\)/);
     const readAt = sweep.indexOf("octokit.pulls.get(");
     const guardAt = sweep.indexOf('if (pr.state !== "closed") continue;');

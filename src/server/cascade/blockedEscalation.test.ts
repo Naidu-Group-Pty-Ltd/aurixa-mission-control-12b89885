@@ -50,19 +50,22 @@ describe("blockedNoticesToRecheck — which standing alarms are worth a read", (
     expect(
       blockedNoticesToRecheck([notice(115, url(115)), notice("114")], {
         ...REPO,
-        workList: none,
+        alreadyRead: none,
       }),
     ).toEqual([114, 115]);
   });
 
   it("asks once per pull request, however many failure shapes it alarmed under", () => {
     const three = [notice(23, url(23)), notice(23, url(23)), notice(23)];
-    expect(blockedNoticesToRecheck(three, { ...REPO, workList: none })).toEqual([23]);
+    expect(blockedNoticesToRecheck(three, { ...REPO, alreadyRead: none })).toEqual([23]);
   });
 
-  it("leaves a pull request the work list still carries to the per-proposal handling", () => {
+  it("does not read again a pull request this pass has already read", () => {
+    // The per-proposal handling read #120 and cleared its notice itself if it
+    // was closed; #115 was never read this pass — left out by the cap, or no
+    // longer on the work list at all — so it is the one worth a request.
     expect(
-      blockedNoticesToRecheck([notice(115), notice(120)], { ...REPO, workList: new Set([120]) }),
+      blockedNoticesToRecheck([notice(115), notice(120)], { ...REPO, alreadyRead: new Set([120]) }),
     ).toEqual([115]);
   });
 
@@ -70,7 +73,7 @@ describe("blockedNoticesToRecheck — which standing alarms are worth a read", (
     const unreadable = [notice(undefined), notice(null), notice(0), notice(-3), notice(2.5)];
     const strings = [notice(""), notice("12a"), notice("#12"), notice({ n: 12 })];
     expect(
-      blockedNoticesToRecheck([...unreadable, ...strings], { ...REPO, workList: none }),
+      blockedNoticesToRecheck([...unreadable, ...strings], { ...REPO, alreadyRead: none }),
     ).toEqual([]);
   });
 
@@ -78,10 +81,12 @@ describe("blockedNoticesToRecheck — which standing alarms are worth a read", (
     // `pull/42` read in the wrong repository answers about a real, unrelated
     // pull request — the re-pointed-fork hazard the drain's rows refuse too.
     const foreign = notice(42, url(42, "npc-client-dashboard"));
-    expect(blockedNoticesToRecheck([foreign], { ...REPO, workList: none })).toEqual([]);
+    expect(blockedNoticesToRecheck([foreign], { ...REPO, alreadyRead: none })).toEqual([]);
   });
 
   it("leaves a notice whose URL and metadata name different pull requests", () => {
-    expect(blockedNoticesToRecheck([notice(12, url(13))], { ...REPO, workList: none })).toEqual([]);
+    expect(blockedNoticesToRecheck([notice(12, url(13))], { ...REPO, alreadyRead: none })).toEqual(
+      [],
+    );
   });
 });

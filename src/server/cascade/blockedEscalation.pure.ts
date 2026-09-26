@@ -112,8 +112,8 @@ export type StandingBlockedNotice = {
 };
 
 /**
- * The pull requests a clone's standing blocked notices name that the drain's
- * work list does NOT carry — the ones it must look up to learn whether they
+ * The pull requests a clone's standing blocked notices name that this drain
+ * pass has NOT already read — the ones it must look up to learn whether they
  * closed.
  *
  * Four refusals, each on the side of leaving a notice standing, because the
@@ -128,16 +128,20 @@ export type StandingBlockedNotice = {
  *   handling already refuses for the same reason.
  * - **A notice whose URL and metadata disagree is left alone.** Two numbers
  *   for one pull request is a record nobody should act on by picking one.
- * - **A pull request still in the drain's work list is not asked about.** The
- *   per-proposal handling reads it and clears its notice itself when it finds
- *   it closed, so a read here would spend a request to learn nothing.
+ * - **A pull request this pass already read is not asked about again.** The
+ *   per-proposal handling clears the notice itself when it finds the pull
+ *   request closed, so a second read would spend a request to learn nothing.
+ *   The set is what was READ, never what the work list carries: a proposal
+ *   the per-run cap left out is on the work list and unread, and excluding it
+ *   let an alarm about a closed pull request stand for as long as twenty-five
+ *   newer proposals stayed open ahead of it.
  *
  * Returned ascending and without repeats: several notices — one per failure
  * shape — can name the same pull request, and one read answers all of them.
  */
 export function blockedNoticesToRecheck(
   notices: readonly StandingBlockedNotice[],
-  ctx: { owner: string; repo: string; workList: ReadonlySet<number> },
+  ctx: { owner: string; repo: string; alreadyRead: ReadonlySet<number> },
 ): number[] {
   const out = new Set<number>();
   for (const n of notices) {
@@ -150,7 +154,7 @@ export function blockedNoticesToRecheck(
     if (!Number.isInteger(pr) || pr <= 0) continue;
     if (n.urlRepo && (n.urlRepo.owner !== ctx.owner || n.urlRepo.repo !== ctx.repo)) continue;
     if (n.urlPr !== null && n.urlPr !== pr) continue;
-    if (ctx.workList.has(pr)) continue;
+    if (ctx.alreadyRead.has(pr)) continue;
     out.add(pr);
   }
   return [...out].sort((a, b) => a - b);
