@@ -1258,12 +1258,116 @@ the engine's own words on a plan-less pass (`reason: patchSummary`, under a
 comment saying "Its own words are better than a number"), so the impact card an
 operator reads **before** firing now carries the clause too.
 
+## What crossing `_shared` everywhere leaves behind
+
+`supabase/functions/_shared/**` is in every module's globs, so on a
+module-scoped clone the shared layer crosses on every pass whatever is
+installed. Three kinds of file sit next to it and do not cross with it, and
+cascade PR #29 to `npc-crm-independent-6505dc` (prime@cdff4f2 onto the clone's
+main at 1ae9288) went red over all three. Nothing was wrong with the delivery's
+contents; what was wrong was that files which depend on the shared layer were
+left at an older version while it moved.
+
+Reproduced offline by replaying that exact cascade through the engine against
+local copies of both repositories. The replay writes the same 135 files the real
+pull request did. The clone's own CI, run on that delivery, failed three
+`verify` steps and `security`'s WP-14, and each failure traced to one of the
+three kinds below.
+
+**An Edge Function no installed module names** (`strandedFunctions.pure.ts`).
+A function's own directory crosses only where a module's globs name it, and 57
+of the functions prime deploys sit inside no module's globs. The clone was
+provisioned with them, so it holds them, and they stood still. Fourteen were
+behind at prime@cdff4f2, and every one was a version prime itself had held.
+Seven `render-*-pdf` handlers written against last month's shared layer failed
+WP-14 against this month's. `designRouteWiring.spec.ts`, which crossed inside a
+module, reads the same seven handlers from disk and failed 29 of its 37 tests.
+It builds each path from a list (`resolve(FUNCTIONS, route, 'index.ts')`), so no
+named-path rule could see what it asserts about.
+
+The rule is the hold-release question asked of a file that was never held, only
+out of scope. A function file the clone already holds, outside the widened
+scope, whose blob differs, travels at prime's version where prime's history
+shows the clone's copy is a version prime held, or where an operator approved
+overwriting it. Four bounds:
+
+- It never adds a function the clone lacks, because adding one is an
+  installation.
+- It never replaces a copy the clone edited. Such a copy stays, named in the
+  pull request.
+- It joins the candidates before the import closure and the partition, so
+  exclusions and imports apply exactly as inside a module.
+- It walks at most `MAX_STRANDED_PROBES` histories a pass into the shared
+  `held_evidence` ledger.
+
+A copy older than the ten-version walk is never guessed at. On that replay
+`builder-stock-marketplace` is prime's version fifteen commits back, and it
+stays until an operator approves. The Edge Function type baseline follows on its
+own: it keeps the clone's count only for a file the clone keeps its own version
+of. So the four errors the clone's stale `manage-ci-assessments` handler was
+allowed (cascade #23, above) give way to prime's zero once prime's handler
+lands.
+
+**A bridge onto a new shared module** (`reExportBridges.pure.ts`). The frontend
+reaches a shared module through a `src/` file that does nothing but re-export
+it; prime holds 311 such bridges. `designSystemSourceOfTruth.spec.ts` requires
+one bridge per module in `_shared/reportDesign/`. Five new modules landed there;
+the import closure brought the two bridges a delivered file imports and left
+the three nothing imports yet. A bridge prime holds and the clone lacks is now
+owed when four things are true:
+
+- It is a small source file under `src/`. The largest of the 311 is 3,945
+  bytes.
+- It does nothing but re-export, by the same reading the kept-spec channel uses
+  to look through a shim.
+- Every module it re-exports is under `_shared/` and will be prime's own copy
+  on the clone once the delivery lands.
+- The clone already holds a file in its directory.
+
+This is the one place the cascade adds a file the clone has never had to a
+module-scoped clone outside the import closure. It is bounded to files with no
+behaviour of their own, onto modules that are landing, in directories the clone
+carries. It is judged in the carry loop over the FINISHED delivery, because a
+shared module that a later rule holds back must not get a bridge re-exporting
+it. It is carried by `planSubjectCarry`, the exclusions and `prepareOne` like
+any other carried file. Reading the pool costs one batch, paced on the pass's
+clock like the main read, so an unread bridge is simply not owed that pass: at
+prime@cdff4f2, 18 files were small enough to be a bridge, and exactly five were.
+
+**A spec that imports a directory** (`specsLeftBehind.pure.ts`, the fourth
+subject kind). `adapterListings.spec.ts` imports `../adapters`. Its `index.ts`
+is a registry that does work, not a shim, so the kept-spec channel stopped at
+it. `qaAdapter.ts` crossed with a behaviour change prime made in the same commit
+as its spec, and the clone kept the old spec. That cost two failed assertions.
+An index that does work is now read as its directory's surface: the modules it
+imports from its OWN directory are the spec's subjects too. It is one hop only,
+and a member is a subject, not a place to keep walking. The spec is then judged
+like any other left-behind spec. Its copy was a version prime held, so prime's
+copy replaced it.
+
+The same replay after the change writes 151 files:
+
+- the eleven stranded handlers not already crossing, since two of the fourteen
+  were carried as spec subjects already;
+- the reconciled type baseline;
+- the three bridges;
+- `adapterListings.spec.ts`.
+
+It needs no new hold and held nothing it did not hold before. The clone's CI on
+that delivery passes WP-14 (316 errors against a baseline of 326, none new) and
+the three `verify` steps that were red. `strandedFunctionsAreWired` and
+`reExportBridgesAreWired` pin where each rule runs, as source.
+
 ## What this deliberately does not do
 
 - **It does not widen a clone's scope to a file the clone does not have.**
   Carrying a subject updates a file this clone already holds and is behind on;
   adding a path it has never had is a different act with a different blast
-  radius, and `strandedSubjects` refuses to name one.
+  radius, and `strandedSubjects` refuses to name one. The one exception is a
+  bridge: a file with no behaviour of its own, re-exporting only shared modules
+  the delivery lands, in a directory the clone already carries (above). The
+  stranded-function rule is not an exception; it only ever updates a function
+  the clone holds.
 - **It does not rewrite source.** The two new organs are channels. A pump that
   synthesises an import is a pump that can ship a file that does not compile.
 - **It does not read the database.** Every membrane is a literal in
