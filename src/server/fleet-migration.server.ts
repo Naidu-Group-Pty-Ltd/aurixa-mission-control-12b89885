@@ -1247,8 +1247,9 @@ export async function runFleetMigrationSync(
   const skipped = verdicts.filter((v) => !v.verdict.eligible);
   const excludedCount = skipped.length;
 
-  // Furthest behind first, ties broken by least progress on the seed in
-  // flight. The order lives in the pure module beside the eligibility rules
+  // Furthest behind first — by the file a clone is INSIDE where its cursor
+  // names one, not the version it last recorded — ties broken by least progress
+  // on that file. The order lives in the pure module beside the eligibility rules
   // because who is served first is the same kind of decision as who is served
   // at all — and because a comparator that returned 0 on a tie handed this
   // fleet's whole budget to one clone for as long as it was measured. See

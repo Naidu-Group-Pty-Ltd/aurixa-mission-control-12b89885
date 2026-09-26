@@ -8,7 +8,9 @@ import {
   blockedVersionFrom,
   compareMigrationQueue,
   migrationEligibility,
+  migrationQueuePosition,
   orderMigrationQueue,
+  scopeQueueToMode,
   type BackendFacts,
 } from "./fleetMigrationEligibility.pure";
 import { isUpstreamRateLimit } from "./provisioningBudget";
@@ -427,8 +429,13 @@ describe("the order the pass serves clones in", () => {
 
   it("never lets progress outrank being further behind", () => {
     // A clone deep into a seed is still ahead of one that has not reached the
-    // migration at all. Progress is a TIE-break and may not cross a frontier.
-    const order = orderMigrationQueue([at("20261204010000", 0), at("20261201100000", 39)]);
+    // migration at all. Progress is a TIE-break and may not cross a frontier —
+    // here, a clone just starting a LATER seed against one deep into an
+    // earlier one.
+    const order = orderMigrationQueue([
+      at("20261204010000", 0, "20261204020000"),
+      at("20261201100000", 39, "20261202000000"),
+    ]);
     expect(order[0].migration_version).toBe("20261201100000");
   });
 
@@ -439,26 +446,150 @@ describe("the order the pass serves clones in", () => {
     expect(order[0].chunk_cursor).toBeUndefined();
   });
 
-  it("reads a malformed cursor as no progress rather than trusting it", () => {
+  it("reads a malformed cursor as no cursor at all rather than trusting it", () => {
     // Through `chunkCursorFor`, so a negative, a float or a missing id cannot
-    // become a position in the queue.
+    // become a position in the queue. Asserted as an EQUIVALENCE against every
+    // kind of neighbour, because "sorts before one mid-seed" is also what a
+    // trusted negative count would do, and would not tell the two apart.
+    const self = { clone_id: "self", migration_version: "20261201100000" };
+    const neighbours = [
+      { clone_id: "behind", migration_version: "20261130000000" },
+      { clone_id: "level", migration_version: "20261201100000" },
+      { clone_id: "ahead", migration_version: "20261204010000" },
+      {
+        clone_id: "inside",
+        migration_version: "20261201100000",
+        chunk_cursor: { migrationId: "20261202000000", statementsDone: 1 },
+      },
+    ];
     for (const bad of [
       { migrationId: "20261202000000", statementsDone: -3 },
       { migrationId: "20261202000000", statementsDone: 1.5 },
+      { migrationId: "", statementsDone: 4 },
       { statementsDone: 900 },
       "nonsense",
       null,
     ]) {
-      expect(
-        compareMigrationQueue(
-          { migration_version: "x", chunk_cursor: bad },
-          {
-            migration_version: "x",
-            chunk_cursor: { migrationId: "20261202000000", statementsDone: 1 },
-          },
-        ),
-      ).toBeLessThan(0);
+      expect(migrationQueuePosition({ ...self, chunk_cursor: bad })).toEqual(
+        migrationQueuePosition(self),
+      );
+      for (const n of neighbours) {
+        expect(compareMigrationQueue({ ...self, chunk_cursor: bad }, n)).toBe(
+          compareMigrationQueue(self, n),
+        );
+      }
     }
+  });
+
+  /*
+    THE FIRST KEY IS WHERE THE WORK IS, NOT WHERE THE MARKER IS.
+
+    `migration_version` is the last version a pass walked to, and the walk moves
+    past a version this lane is withholding. So the marker can stand well ahead
+    of a seed the clone has barely started — and "furthest behind first" read
+    from the marker served that clone last.
+  */
+  describe("by the file a clone is inside, not the version it recorded", () => {
+    const clone = (
+      id: string,
+      version: string | null,
+      cursor?: { migrationId: string; statementsDone: number },
+    ) => ({
+      clone_id: id,
+      migration_version: version,
+      ...(cursor ? { chunk_cursor: cursor } : {}),
+    });
+
+    // The four rows as `clone_backends` held them on 26 Sep 2026, cursors
+    // reduced to the two fields the order reads.
+    const MEASURED = [
+      clone("npc-client-dashboard", "20261219060000"),
+      clone("independent", "20261206000000", {
+        migrationId: "20261207000000",
+        statementsDone: 8,
+      }),
+      clone("npc-test", "20261223100000", { migrationId: "20261208000000", statementsDone: 1 }),
+      clone("preflight", "20261207000000", { migrationId: "20261208000000", statementsDone: 29 }),
+    ];
+
+    it("serves the measured fleet by where each clone's seed stands", () => {
+      // NPC Test recorded the highest version in the fleet and was one
+      // statement into the v17 seed Preflight was 29 statements into; the
+      // marker sorted it last, behind a clone 28 statements further on.
+      expect(orderMigrationQueue(MEASURED).map((r) => r.clone_id)).toEqual([
+        "independent",
+        "npc-test",
+        "preflight",
+        "npc-client-dashboard",
+      ]);
+    });
+
+    it("gives a drain tick the laggard first, not the clone with the lowest marker", () => {
+      // A drain serves only clones with a seed in flight, and its budget
+      // usually covers one or two of them. Whichever reaches the slice first
+      // is the one that moves.
+      const drain = orderMigrationQueue(scopeQueueToMode(MEASURED, "drain"));
+      expect(drain.map((r) => r.clone_id)).toEqual(["independent", "npc-test", "preflight"]);
+    });
+
+    it("puts a clone part-way through a file behind one that has finished it", () => {
+      const order = orderMigrationQueue([
+        clone("finished", "20261208000000"),
+        clone("inside", "20261207000000", { migrationId: "20261208000000", statementsDone: 40 }),
+      ]);
+      expect(order.map((r) => r.clone_id)).toEqual(["inside", "finished"]);
+    });
+
+    it("still serves a clone that has not reached a file before one inside it", () => {
+      // The ordinary case, unchanged: the cursor names the NEXT file, so a
+      // clone recording the version before it, with no cursor, is further back.
+      const order = orderMigrationQueue([
+        clone("inside", "20261207000000", { migrationId: "20261208000000", statementsDone: 0 }),
+        clone("before", "20261207000000"),
+      ]);
+      expect(order.map((r) => r.clone_id)).toEqual(["before", "inside"]);
+    });
+
+    it("compares progress only between two clones inside the SAME file", () => {
+      // 39 statements into an earlier seed is further back than 2 into a later
+      // one. Under the marker both read `20261201100000`, the counts were
+      // compared across two different files, and the clone on the later seed
+      // was served first.
+      const order = orderMigrationQueue([
+        clone("later-seed", "20261201100000", { migrationId: "20261204020000", statementsDone: 2 }),
+        clone("earlier-seed", "20261201100000", {
+          migrationId: "20261202000000",
+          statementsDone: 39,
+        }),
+      ]);
+      expect(order.map((r) => r.clone_id)).toEqual(["earlier-seed", "later-seed"]);
+    });
+
+    it("names the position it sorts by", () => {
+      expect(migrationQueuePosition(MEASURED[2])).toEqual({
+        version: "20261208000000",
+        inside: true,
+        statementsDone: 1,
+      });
+      expect(migrationQueuePosition(MEASURED[0])).toEqual({
+        version: "20261219060000",
+        inside: false,
+        statementsDone: 0,
+      });
+      expect(migrationQueuePosition({ migration_version: null })).toEqual({
+        version: "",
+        inside: false,
+        statementsDone: 0,
+      });
+    });
+
+    it("keeps a backend that has recorded nothing, and is inside nothing, first", () => {
+      const order = orderMigrationQueue([
+        clone("inside", null, { migrationId: "20260419215311", statementsDone: 0 }),
+        clone("nothing", null),
+      ]);
+      expect(order.map((r) => r.clone_id)).toEqual(["nothing", "inside"]);
+    });
   });
 
   /*
