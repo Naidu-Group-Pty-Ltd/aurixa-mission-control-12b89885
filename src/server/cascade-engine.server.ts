@@ -78,6 +78,23 @@ import {
   type SpecSide,
 } from "./cascade/specsLeftBehind.pure";
 import { gitBlobSha } from "./cascade/gitBlobSha.pure";
+import {
+  MAX_STRANDED_PROBES,
+  decideStrandedRefresh,
+  describeStrandedFunctions,
+  strandedFilesToProbe,
+  strandedFunctionFiles,
+  strandedRefreshPaths,
+  strandedSuffixFor,
+  type StrandedVerdict,
+} from "./cascade/strandedFunctions.pure";
+import {
+  bridgeCandidates,
+  bridgeSuffixFor,
+  bridgesOwed,
+  describeBridges,
+  type OwedBridge,
+} from "./cascade/reExportBridges.pure";
 import { MAX_OUTSIDE_ROOT_PROBES, outsideRootCandidates } from "./cascade/outsideRootSubjects.pure";
 import { decodeBase64Utf8, fetchBlobTextsBatched } from "./prime-backend.server";
 import {
@@ -1498,6 +1515,13 @@ export async function processClone(args: {
    * `prefetchPrimeText` below. `null` exactly when `primeShaByPath` is.
    */
   let primeSizeByPath: ReadonlyMap<string, number> | null = null;
+  /**
+   * Every prime path a module-scoped clone's scope sends, BEFORE the tree
+   * narrowing: the installed globs plus the repository invariants. What a
+   * stranded Edge Function is stranded from. `null` on a mirror, whose scope
+   * is the whole tree.
+   */
+  let widenedScope: ReadonlySet<string> | null = null;
   let primeModeByPath: ReadonlyMap<string, string> | null = null;
   if (isMirror) {
     const [primeTree, cloneTree] = await Promise.all([
@@ -1560,6 +1584,7 @@ export async function processClone(args: {
       primeRef,
       globsForModuleScopedClone(installedGlobs),
     );
+    widenedScope = new Set(candidatePaths);
     scopeLabel = `installed modules + ${REPOSITORY_INVARIANTS.length} repository invariant(s)`;
     /*
       Every prime path inside the INSTALLED globs — the module's whole section,
@@ -1639,6 +1664,156 @@ export async function processClone(args: {
         }
       }
       for (const path of primeInScope) primeDirectories.add(directoryOf(path));
+    }
+  }
+
+  // ── Recorded operator approvals for this clone ────────────────────────────
+  //
+  // Two of the engine's own refusals end in "a person has to decide", and
+  // `cascade_path_approvals` is where the decision lives: `overwrite` releases
+  // one held `manual_reconcile` path, `bulk_deletion` admits a deletion set
+  // past the cap. Read FAIL-SAFE, not fail-closed: an approval only ever
+  // WIDENS what a pass may do, so an unreadable table means no approvals and
+  // the pass runs exactly as it would have before the table existed.
+  const overwriteApproved = new Set<string>();
+  const deletionApproved = new Set<string>();
+  {
+    const approvalsRes = await supabase
+      .from("cascade_path_approvals")
+      .select("kind, path")
+      .eq("clone_id", clone.id)
+      .is("revoked_at", null)
+      .gt("expires_at", new Date().toISOString());
+    if (approvalsRes.error) {
+      console.warn(
+        `[cascade] approvals unreadable for clone ${clone.id} — proceeding with none: ${approvalsRes.error.message}`,
+      );
+    }
+    for (const row of (approvalsRes.data ?? []) as Array<{ kind: string; path: string }>) {
+      if (row.kind === "overwrite") overwriteApproved.add(row.path);
+      else if (row.kind === "bulk_deletion") deletionApproved.add(row.path);
+    }
+  }
+
+  // ── The pass's ledger, opened before the first paid question ─────────────
+  //
+  // What a previous pass already prepared and already settled, reusable
+  // wherever the fact it recorded still holds: a blob while prime still
+  // holds the blob it was made from, a probe answer while the clone still
+  // holds the blob it was asked about. Real path only: a rehearsal reuses
+  // nothing and records nothing. Constructed HERE — above the first paid
+  // question a pass asks, which is now the stranded-function walk and then
+  // the HOLD probes: re-walking the same held paths every pass was measured
+  // at ~90 calls and ~30 seconds of fixed cost, which pushed every working
+  // tick past the 60-second isolate window.
+  const resume = dryRun ? undefined : args.resume;
+  const priorProgress = resume ? readProgress(resume.progress) : null;
+  const known = resume ? resumableBlobs(priorProgress, primeShaByPath) : new Map<string, string>();
+  const knownEvidence = resume
+    ? resumableDeletionEvidence(priorProgress, cloneShaByPath ?? null)
+    : new Map<string, SettledDeletionEvidence>();
+  const knownHeldEvidence = resume
+    ? resumableHeldEvidence(priorProgress, cloneShaByPath ?? null)
+    : new Map<string, SettledHeldEvidence>();
+  const evidenceLedger: Record<string, DeletionEvidenceEntry> = {};
+  const heldLedger: Record<string, HeldEvidenceEntry> = {};
+  const progress: CascadeProgress = {
+    version: 1,
+    source_sha: sourceSha,
+    prepared: {},
+    deletion_evidence: evidenceLedger,
+    held_evidence: heldLedger,
+    // The write list is not final until the hold releases below have run;
+    // set once `primeFiles` exists.
+    total: 0,
+  };
+  for (const [path, blob] of known) {
+    const prime = primeShaByPath?.get(path);
+    if (prime) progress.prepared[path] = { blob, prime };
+  }
+  for (const [path, evidence] of knownEvidence) {
+    const clone = cloneShaByPath?.get(path);
+    if (clone) evidenceLedger[path] = { clone, evidence };
+  }
+  for (const [path, evidence] of knownHeldEvidence) {
+    const clone = cloneShaByPath?.get(path);
+    if (clone) heldLedger[path] = { clone, evidence };
+  }
+
+  // ── An Edge Function this clone carries is kept current ──────────────────
+  //
+  // `_shared/**` crosses on every module-scoped clone; a function's own
+  // directory crosses only where an installed module names it, and the
+  // catalogue does not name every function. So a function the clone was
+  // provisioned with and no module covers stands still while the shared layer
+  // it imports moves: on the independent at prime@cdff4f2 fourteen such files
+  // were behind, every one an unedited prime version, and two of the clone's
+  // own CI checks failed over seven of them. See `strandedFunctions.pure.ts`.
+  //
+  // HERE, and the placement is the argument: above the import closure, so a
+  // refreshed handler brings what it imports, and above
+  // `partitionCascadePaths`, so the exclusions hold it exactly as they would
+  // hold it inside a module. Only files the clone already holds, only where
+  // prime's history shows the clone's copy is a version prime held (or an
+  // operator approved overwriting it), and at most `MAX_STRANDED_PROBES`
+  // walks a pass — each settled answer goes into the same `held_evidence`
+  // ledger the hold releases use, so the next pass continues from it.
+  const strandedVerdicts: StrandedVerdict[] = [];
+  if (widenedScope !== null && primeShaByPath !== null && cloneShaByPath !== null) {
+    const behind = strandedFunctionFiles({
+      prime: primeShaByPath,
+      clone: cloneShaByPath,
+      inScope: widenedScope,
+    });
+    // A file an exclusion names is that exclusion's business, exactly as it
+    // is inside a module: it is not a candidate here at all.
+    const excluded = new Set(
+      partitionCascadePaths(
+        behind.map((f) => f.path),
+        exclusions,
+      ).held.map((h) => h.path),
+    );
+    const stranded = behind.filter((f) => !excluded.has(f.path));
+    if (stranded.length > 0) {
+      const settled = new Set(
+        stranded
+          .filter((f) => overwriteApproved.has(f.path) || knownHeldEvidence.has(f.path))
+          .map((f) => f.path),
+      );
+      const asking = strandedFilesToProbe({
+        files: stranded,
+        settled,
+        max: MAX_STRANDED_PROBES,
+        rotation: probeRotationFor(sourceSha),
+      });
+      const evidence: Map<string, HeldPathEvidence> =
+        asking.length > 0
+          ? await probeHeldPaths({
+              octokit,
+              primeRef,
+              candidates: asking.map((f) => ({ path: f.path, cloneSha: f.cloneSha })),
+              maxProbes: asking.length,
+            })
+          : new Map();
+      for (const [path, answer] of evidence) {
+        if (answer.kind === "unsettled") continue;
+        const clone = cloneShaByPath.get(path);
+        if (clone) heldLedger[path] = { clone, evidence: answer };
+      }
+      for (const file of stranded) {
+        strandedVerdicts.push(
+          decideStrandedRefresh({
+            file,
+            evidence: knownHeldEvidence.get(file.path) ?? evidence.get(file.path) ?? null,
+            approved: overwriteApproved.has(file.path),
+          }),
+        );
+      }
+      const refreshed = strandedRefreshPaths(strandedVerdicts);
+      if (refreshed.length > 0) {
+        candidatePaths = [...candidatePaths, ...refreshed];
+        scopeLabel = `${scopeLabel} + ${refreshed.length} Edge Function file(s) kept current`;
+      }
     }
   }
 
@@ -1807,78 +1982,6 @@ export async function processClone(args: {
   // `src/integrations/**` would otherwise reach the clone's backend identity
   // by a different route than the one this was written for.
   const partition = partitionCascadePaths(candidatePaths, exclusions);
-
-  // ── Recorded operator approvals for this clone ────────────────────────────
-  //
-  // Two of the engine's own refusals end in "a person has to decide", and
-  // `cascade_path_approvals` is where the decision lives: `overwrite` releases
-  // one held `manual_reconcile` path, `bulk_deletion` admits a deletion set
-  // past the cap. Read FAIL-SAFE, not fail-closed: an approval only ever
-  // WIDENS what a pass may do, so an unreadable table means no approvals and
-  // the pass runs exactly as it would have before the table existed.
-  const overwriteApproved = new Set<string>();
-  const deletionApproved = new Set<string>();
-  {
-    const approvalsRes = await supabase
-      .from("cascade_path_approvals")
-      .select("kind, path")
-      .eq("clone_id", clone.id)
-      .is("revoked_at", null)
-      .gt("expires_at", new Date().toISOString());
-    if (approvalsRes.error) {
-      console.warn(
-        `[cascade] approvals unreadable for clone ${clone.id} — proceeding with none: ${approvalsRes.error.message}`,
-      );
-    }
-    for (const row of (approvalsRes.data ?? []) as Array<{ kind: string; path: string }>) {
-      if (row.kind === "overwrite") overwriteApproved.add(row.path);
-      else if (row.kind === "bulk_deletion") deletionApproved.add(row.path);
-    }
-  }
-
-  // ── The pass's ledger, opened before the first paid question ─────────────
-  //
-  // What a previous pass already prepared and already settled, reusable
-  // wherever the fact it recorded still holds: a blob while prime still
-  // holds the blob it was made from, a probe answer while the clone still
-  // holds the blob it was asked about. Real path only: a rehearsal reuses
-  // nothing and records nothing. Constructed HERE — above the HOLD probes,
-  // which are the first paid question a pass asks: re-walking the same held
-  // paths every pass was measured at ~90 calls and ~30 seconds of fixed
-  // cost, which pushed every working tick past the 60-second isolate window.
-  const resume = dryRun ? undefined : args.resume;
-  const priorProgress = resume ? readProgress(resume.progress) : null;
-  const known = resume ? resumableBlobs(priorProgress, primeShaByPath) : new Map<string, string>();
-  const knownEvidence = resume
-    ? resumableDeletionEvidence(priorProgress, cloneShaByPath ?? null)
-    : new Map<string, SettledDeletionEvidence>();
-  const knownHeldEvidence = resume
-    ? resumableHeldEvidence(priorProgress, cloneShaByPath ?? null)
-    : new Map<string, SettledHeldEvidence>();
-  const evidenceLedger: Record<string, DeletionEvidenceEntry> = {};
-  const heldLedger: Record<string, HeldEvidenceEntry> = {};
-  const progress: CascadeProgress = {
-    version: 1,
-    source_sha: sourceSha,
-    prepared: {},
-    deletion_evidence: evidenceLedger,
-    held_evidence: heldLedger,
-    // The write list is not final until the hold releases below have run;
-    // set once `primeFiles` exists.
-    total: 0,
-  };
-  for (const [path, blob] of known) {
-    const prime = primeShaByPath?.get(path);
-    if (prime) progress.prepared[path] = { blob, prime };
-  }
-  for (const [path, evidence] of knownEvidence) {
-    const clone = cloneShaByPath?.get(path);
-    if (clone) evidenceLedger[path] = { clone, evidence };
-  }
-  for (const [path, evidence] of knownHeldEvidence) {
-    const clone = cloneShaByPath?.get(path);
-    if (clone) heldLedger[path] = { clone, evidence };
-  }
 
   // ── A hold protects WORK, not a path ──────────────────────────────────────
   //
@@ -3509,6 +3612,43 @@ export async function processClone(args: {
   // as stranded paths, so they meet `planSubjectCarry`, the exclusions, the
   // ceiling and `prepareOne` on the terms every other candidate does.
   const importsOwed = new Set<string>();
+
+  // ── A bridge travels with the shared module it re-exports ─────────────
+  //
+  // `_shared/**` crosses on every module-scoped clone; the `src/` file that
+  // re-exports a shared module for the frontend crosses only where a glob
+  // names it or a delivered file imports it. PR #29 to the independent landed
+  // five new `_shared/reportDesign/` modules and three of their bridges stayed
+  // behind, failing the clone's own parity spec. See `reExportBridges.pure.ts`.
+  //
+  // The pool is decided by path and size alone and read in one batch; whether
+  // a bridge is OWED is asked of the delivery each round, like every other
+  // debt this loop settles, and it is carried by the same machinery.
+  const bridgePool: string[] =
+    widenedScope !== null &&
+    primeShaByPath !== null &&
+    cloneShaByPath !== null &&
+    primeSizeByPath !== null
+      ? bridgeCandidates({
+          prime: primeShaByPath,
+          primeSizes: primeSizeByPath,
+          clone: cloneShaByPath,
+        })
+      : [];
+  // Paced on the pass's budget, like the main pass's read and unlike the
+  // import closure's: a bridge whose text was not read is simply not owed
+  // this pass, which is yesterday's behaviour, and the next pass asks again.
+  // Measured on the independent at prime@cdff4f2 the pool was 18 files and
+  // 36 KB — one batch.
+  if (bridgePool.length > 0) {
+    await prefetchPrimeText(
+      bridgePool,
+      resume?.budget ? (reserveMs) => resume.budget!.isPastDeadline(reserveMs) : undefined,
+    );
+  }
+  /** Bridges this pass carried, by path, with the modules each re-exports. */
+  const bridgesCarried = new Map<string, OwedBridge>();
+  let bridgesOwedNow: OwedBridge[] = [];
   // Past the belt the carry stops being ATTEMPTED and the loop keeps going.
   // See where it is set.
   let carryingAllowed = true;
@@ -3562,6 +3702,20 @@ export async function processClone(args: {
     for (const owed of [...importsOwed]) {
       if (deliveredPaths.has(owed) || attemptedSubjects.has(owed)) importsOwed.delete(owed);
     }
+    // A bridge is owed only onto a shared module this delivery lands (or one
+    // already prime's copy on the clone), so it is asked of the delivery as it
+    // stands THIS round: a module a rule held back is not in it, and a bridge
+    // onto it would re-export a file the clone does not have.
+    bridgesOwedNow =
+      bridgePool.length > 0 && primeShaByPath !== null && cloneShaByPath !== null
+        ? bridgesOwed({
+            candidates: bridgePool,
+            readPrime: (path) => exactPrimeText.get(path)?.text,
+            prime: primeShaByPath,
+            clone: cloneShaByPath,
+            delivered: deliveredPaths,
+          }).filter((b) => !attemptedSubjects.has(b.path))
+        : [];
     // The other direction. A kept spec whose subject is crossing is carried
     // in behind it on the same terms as a subject — `planSubjectCarry`, the
     // exclusions, `prepareOne` — but only after prime's own history says the
@@ -3689,14 +3843,20 @@ export async function processClone(args: {
     }
     if (
       strandedBySpec.size === 0 &&
-      (!carryingAllowed || (importsOwed.size === 0 && owedSpecs.length === 0))
+      (!carryingAllowed ||
+        (importsOwed.size === 0 && owedSpecs.length === 0 && bridgesOwedNow.length === 0))
     ) {
       break;
     }
 
     // Try to bring the subjects across before deciding the specs cannot go.
     const plan = planSubjectCarry({
-      stranded: [...[...strandedBySpec.values()].flat(), ...importsOwed, ...owedSpecs],
+      stranded: [
+        ...[...strandedBySpec.values()].flat(),
+        ...importsOwed,
+        ...owedSpecs,
+        ...bridgesOwedNow.map((b) => b.path),
+      ],
       held: partition.held,
       attempted: attemptedSubjects,
       limit: Math.max(0, MAX_SUBJECTS_CARRIED - carriedSubjects.length),
@@ -3781,6 +3941,10 @@ export async function processClone(args: {
       // round, which is correct and now says which rule stopped it.
       const written = absorbPrepared(carried);
       carriedSubjects.push(...written);
+      for (const path of written) {
+        const bridge = bridgesOwedNow.find((b) => b.path === path);
+        if (bridge) bridgesCarried.set(path, bridge);
+      }
       // A carried subject is a delivered module, so it answers to the import
       // closure like any other. Asking only at the top of the pass is how a
       // carried module arrives without what it imports, permanently: the
@@ -4210,7 +4374,16 @@ export async function processClone(args: {
   const reconcileSuffix = reconcileSuffixFor(needsReconcile.length);
   const releaseSuffix = holdReleaseSuffixFor(holdReleases);
   const deleteSuffix = deletionSuffixFor(deletionPlan);
-  const fileSummary = `${summaryFiles.join(", ")}${summarySuffix}${pinSuffix}${heldSuffix}${reconcileSuffix}${releaseSuffix}${deleteSuffix}${staleSuffix}${missingSuffix}`;
+  // What these two rules actually LANDED. A refreshed handler or a carried
+  // bridge is still a write that `prepareOne` can hold, and a summary that
+  // counted the intention would claim a file the delivery does not carry.
+  const landedWrites = new Set(treeEntries.filter((t) => t.sha !== null).map((t) => t.path));
+  const strandedReported = strandedVerdicts.filter(
+    (v) => v.act !== "refresh" || landedWrites.has(v.path),
+  );
+  const bridgesReported = [...bridgesCarried.values()].filter((b) => landedWrites.has(b.path));
+  const carryOnSuffix = `${strandedSuffixFor(strandedReported)}${bridgeSuffixFor(bridgesReported)}`;
+  const fileSummary = `${summaryFiles.join(", ")}${summarySuffix}${pinSuffix}${heldSuffix}${reconcileSuffix}${releaseSuffix}${carryOnSuffix}${deleteSuffix}${staleSuffix}${missingSuffix}`;
 
   // The decision, complete, and the last point before anything is written.
   // Emitted on BOTH paths deliberately: a dry run that took a different route
@@ -4382,6 +4555,22 @@ export async function processClone(args: {
         `travels — through the same content holds as every other write. Protected paths are ` +
         `never released.\n\n` +
         describeHoldReleases(holdReleases)
+      : "") +
+    (describeStrandedFunctions(strandedReported)
+      ? `\n\n### Edge Functions this clone carries, kept current\n\n` +
+        `No installed module names these functions, so their own directories never cross — ` +
+        `but the shared layer they import crosses on every pass. Each file is one this clone ` +
+        `already holds, and it travels only where prime's own history shows the clone's copy ` +
+        `is a version prime held, so nothing of this clone's is lost. A function this clone ` +
+        `does not have is never added.\n\n` +
+        describeStrandedFunctions(strandedReported)
+      : "") +
+    (bridgesReported.length > 0
+      ? `\n\n### Bridges carried beside the shared modules they re-export\n\n` +
+        `Each file does nothing but re-export a module under \`supabase/functions/_shared/\` ` +
+        `that this delivery lands, or that is already prime's copy here. It adds no behaviour ` +
+        `and sits in a directory this clone already carries.\n\n` +
+        describeBridges(bridgesReported)
       : "") +
     (specsBroughtAcrossNote
       ? `\n\n### Brought across beside the files they test\n\n` +
