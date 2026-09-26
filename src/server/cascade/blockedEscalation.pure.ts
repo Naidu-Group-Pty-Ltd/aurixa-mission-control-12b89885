@@ -26,10 +26,35 @@
  * The fingerprint is the pull request number plus the gate's own verdict
  * sentence — which names each failing check and its conclusion, so a failure
  * that changes shape (a new check joins, one clears) re-alerts, and the same
- * shape never alerts twice while the first notification is unread. Clearing
- * is the merge: a proposal that landed marks its blocked notifications read,
- * so the next freeze starts loud again. This is `decideDriftReport`'s rule
- * — compare against what was last OBSERVED — applied to the merge drain.
+ * shape never alerts twice while the first notification is unread.
+ *
+ * ## Clearing is the proposal CLOSING, not only the merge
+ *
+ * A proposal that landed marks its blocked notifications read, so the next
+ * freeze starts loud again. That was the whole clearing rule, and it assumed
+ * the only way a proposal stops being open is by merging. It is not: the
+ * lateral lane closes a proposal that has nothing left to offer, an operator
+ * closes one — which the notice's own last line tells them to do — and a
+ * person merges one by hand. None of those went through the drain's merge, so
+ * none cleared anything, and the notice stood for ever over a pull request
+ * that no longer existed as a proposal.
+ *
+ * It did not stand quietly. The blockage ledger reads every unread notice as
+ * the gate's verdict on the clone's CURRENT proposal, so it reported `ci_red`
+ * on three clones for days over pull requests that had closed: NPC Test on
+ * #115 and Preflight on #114, both closed unmerged two minutes after they
+ * opened on 20 Sep 2026, and the independent on #23, closed unmerged on
+ * 24 Sep — with #11 standing behind it, merged outside the drain on 20 Sep
+ * and still unread six days later. A standing alarm about a closed pull
+ * request describes nothing anybody can act on, and a list carrying one is a
+ * list that has stopped being a list of what needs doing.
+ *
+ * So a proposal clears its alarm however it closes. What stays loud is the
+ * CONDITION: if the successor proposal fails the same way, it raises its own
+ * notice under its own number, and a clone that is still behind with nothing
+ * to explain it is the ledger's `unclassified`, which is louder still. This is
+ * `decideDriftReport`'s rule — compare against what was last OBSERVED —
+ * applied to the merge drain.
  *
  * Client-safe: pure, no imports.
  */
@@ -69,4 +94,64 @@ export function describeBlockedProposal(args: {
     title: `Cascade blocked · ${cloneLabel} · PR #${prNumber}`,
     body: lines.join("\n\n"),
   };
+}
+
+/**
+ * A standing blocked notice as the drain reads it back.
+ *
+ * `pr` is `metadata.pr` exactly as stored, so it is typed wide: every notice
+ * this drain raises carries a number there, and anything else is a notice
+ * this helper declines to act on rather than one it guesses about.
+ */
+export type StandingBlockedNotice = {
+  pr: unknown;
+  /** The repository the notice's URL names, or null when it has no URL. */
+  urlRepo: { owner: string; repo: string } | null;
+  /** The pull request number the notice's URL names, or null. */
+  urlPr: number | null;
+};
+
+/**
+ * The pull requests a clone's standing blocked notices name that the drain's
+ * work list does NOT carry — the ones it must look up to learn whether they
+ * closed.
+ *
+ * Four refusals, each on the side of leaving a notice standing, because the
+ * failure worth avoiding is clearing an alarm about a proposal that is still
+ * open and still failing:
+ *
+ * - **A number it cannot read is left alone.** No `metadata.pr`, or one that
+ *   is not a positive integer, names no pull request to ask about.
+ * - **A notice naming another repository is left alone.** This clone was once
+ *   re-pointed off a personal fork, and `pull/42` read in the new repository
+ *   answers about a real, unrelated pull request — the hazard the drain's row
+ *   handling already refuses for the same reason.
+ * - **A notice whose URL and metadata disagree is left alone.** Two numbers
+ *   for one pull request is a record nobody should act on by picking one.
+ * - **A pull request still in the drain's work list is not asked about.** The
+ *   per-proposal handling reads it and clears its notice itself when it finds
+ *   it closed, so a read here would spend a request to learn nothing.
+ *
+ * Returned ascending and without repeats: several notices — one per failure
+ * shape — can name the same pull request, and one read answers all of them.
+ */
+export function blockedNoticesToRecheck(
+  notices: readonly StandingBlockedNotice[],
+  ctx: { owner: string; repo: string; workList: ReadonlySet<number> },
+): number[] {
+  const out = new Set<number>();
+  for (const n of notices) {
+    const pr =
+      typeof n.pr === "number"
+        ? n.pr
+        : typeof n.pr === "string" && /^\d+$/.test(n.pr)
+          ? Number(n.pr)
+          : NaN;
+    if (!Number.isInteger(pr) || pr <= 0) continue;
+    if (n.urlRepo && (n.urlRepo.owner !== ctx.owner || n.urlRepo.repo !== ctx.repo)) continue;
+    if (n.urlPr !== null && n.urlPr !== pr) continue;
+    if (ctx.workList.has(pr)) continue;
+    out.add(pr);
+  }
+  return [...out].sort((a, b) => a - b);
 }
