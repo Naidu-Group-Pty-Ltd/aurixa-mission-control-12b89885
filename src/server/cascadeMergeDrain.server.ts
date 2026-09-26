@@ -489,7 +489,19 @@ export async function drainCascadeMerges(
       one pass too long, not a reason to discard what this pass did.
     */
     if (!isPastDeadline()) {
-      report.noticesCleared += await clearNoticesForClosedProposals({
+      /*
+        AWAITED FIRST, AND ONLY THEN ADDED.
+
+        `report.noticesCleared += await …` reads the total BEFORE the await and
+        writes it back after, and this function runs for several clones at
+        once. Two sweeps finishing close together each wrote their own count
+        over the other's: the first run in production cleared the notices of
+        four pull requests (#115, #114, #11, #23) and reported
+        `noticesCleared: 3`. Worse than a wrong number, a sweep that cleared
+        nothing finishing last would write back the 0 it had read, and the
+        audit row that depends on `noticesCleared > 0` would never be filed.
+      */
+      const cleared = await clearNoticesForClosedProposals({
         supabase,
         octokit,
         owner,
@@ -498,6 +510,7 @@ export async function drainCascadeMerges(
         alreadyRead: read,
         isPastDeadline,
       });
+      report.noticesCleared += cleared;
     }
 
     /*
