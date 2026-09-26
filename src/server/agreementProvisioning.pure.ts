@@ -107,6 +107,10 @@ export type AgreementProvisionFacts = {
   client_name: string;
   client_org: string | null;
   created_by: string | null;
+  /** `sla` or `subscription`; absent on rows read before the column existed. */
+  document_kind?: string | null;
+  /** Where the signed record was retained; subscription agreements need one. */
+  signed_record_path?: string | null;
 };
 
 export type ProvisionDecision =
@@ -119,6 +123,7 @@ export type ProvisionSkipReason =
   | "already_done"
   | "in_flight"
   | "failed_needs_operator"
+  | "acceptance_not_retained"
   | "no_plan"
   | "no_actor";
 
@@ -156,6 +161,18 @@ export function decideProvisionOnSignature(a: AgreementProvisionFacts): Provisio
       action: "skip",
       reason: "failed_needs_operator",
       detail: "A previous attempt failed — retrigger from the agreement once the cause is fixed",
+    };
+  }
+  // A Subscription Agreement says "We retain the accepted document and
+  // commercial snapshot before activating the purchase" (clause 1.2). The
+  // snapshot is written when the offer is issued; the signed record is copied
+  // out of DocuSign when it completes. Until that copy exists, nothing is
+  // provisioned from the signature.
+  if (a.document_kind === "subscription" && !a.signed_record_path) {
+    return {
+      action: "skip",
+      reason: "acceptance_not_retained",
+      detail: "The signed Subscription Agreement has not been retained yet",
     };
   }
   if (!a.plan_slug) {

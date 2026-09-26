@@ -34,13 +34,21 @@ export function TierModulePicker({
   onPickedChange,
   selection,
   onSelectionChange,
+  selectionLockedReason,
 }: {
   modules: ModuleRow[];
   picked: Set<string>;
   onPickedChange: (next: Set<string>) => void;
   selection: TierSelection;
   onSelectionChange: (next: TierSelection) => void;
+  /**
+   * When the tier and add-ons are decided elsewhere — a Subscription
+   * Agreement's offer — they are shown but not changed here, and this says
+   * why. Modules can still be adjusted by hand.
+   */
+  selectionLockedReason?: string;
 }) {
+  const selectionLocked = Boolean(selectionLockedReason);
   const [loading, setLoading] = useState(false);
   const [entitled, setEntitled] = useState<Set<string>>(new Set());
   const [unmapped, setUnmapped] = useState<Array<{ sourceName: string; reason: string }>>([]);
@@ -139,6 +147,8 @@ export function TierModulePicker({
                 <button
                   key={t.slug}
                   type="button"
+                  disabled={selectionLocked}
+                  aria-pressed={active}
                   onClick={() =>
                     onSelectionChange({
                       planSlug: active ? null : t.slug,
@@ -146,10 +156,10 @@ export function TierModulePicker({
                     })
                   }
                   className={cn(
-                    "rounded-md border p-3 text-left transition-colors",
+                    "rounded-md border p-3 text-left transition-colors disabled:cursor-not-allowed",
                     active
                       ? "border-primary bg-primary/5"
-                      : "border-border hover:border-primary/40",
+                      : "border-border hover:border-primary/40 disabled:opacity-50 disabled:hover:border-border",
                   )}
                 >
                   <div className="flex items-center gap-1.5">
@@ -163,11 +173,15 @@ export function TierModulePicker({
               );
             })}
           </div>
-          {!selection.planSlug && (
-            <p className="mt-2 text-xs text-muted-foreground">
-              No tier selected — pick modules manually below, or choose a tier to start from its
-              entitlements.
-            </p>
+          {selectionLockedReason ? (
+            <p className="mt-2 text-xs text-muted-foreground">{selectionLockedReason}</p>
+          ) : (
+            !selection.planSlug && (
+              <p className="mt-2 text-xs text-muted-foreground">
+                No tier selected — pick modules manually below, or choose a tier to start from its
+                entitlements.
+              </p>
+            )
           )}
         </div>
 
@@ -184,12 +198,14 @@ export function TierModulePicker({
                   <button
                     key={a.slug}
                     type="button"
+                    disabled={selectionLocked}
+                    aria-pressed={on}
                     onClick={() => toggleAddon(a.slug)}
                     className={cn(
-                      "inline-flex items-center gap-1 rounded-md border px-2 py-1 font-mono text-[10px] transition-colors",
+                      "inline-flex items-center gap-1 rounded-md border px-2 py-1 font-mono text-[10px] transition-colors disabled:cursor-not-allowed",
                       on
                         ? "border-primary bg-primary/10 text-primary"
-                        : "border-border text-muted-foreground hover:border-primary/40",
+                        : "border-border text-muted-foreground hover:border-primary/40 disabled:opacity-50 disabled:hover:border-border",
                     )}
                   >
                     <Plus className="h-2.5 w-2.5" />

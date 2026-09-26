@@ -39,12 +39,12 @@ import { Route as AuthRouteImport } from './routes/auth'
 import { Route as AuditLogRouteImport } from './routes/audit-log'
 import { Route as ApprovalsRouteImport } from './routes/approvals'
 import { Route as AnnouncementsRouteImport } from './routes/announcements'
-import { Route as AgreementsRouteImport } from './routes/agreements'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as SettingsIndexRouteImport } from './routes/settings.index'
 import { Route as SecurityIndexRouteImport } from './routes/security.index'
 import { Route as EmailIndexRouteImport } from './routes/email.index'
 import { Route as CrmIndexRouteImport } from './routes/crm.index'
+import { Route as AgreementsIndexRouteImport } from './routes/agreements.index'
 import { Route as VoicePhoneRouteImport } from './routes/voice.phone'
 import { Route as VoiceOutboundRouteImport } from './routes/voice.outbound'
 import { Route as VoiceCallsRouteImport } from './routes/voice.calls'
@@ -146,6 +146,8 @@ import { Route as BillingCatalogRouteImport } from './routes/billing.catalog'
 import { Route as BillingCancelRouteImport } from './routes/billing.cancel'
 import { Route as BillingApiUsageRouteImport } from './routes/billing.api-usage'
 import { Route as ApiHealthRouteImport } from './routes/api.health'
+import { Route as AgreementsIssuingProfileRouteImport } from './routes/agreements.issuing-profile'
+import { Route as AgreementsAgreementIdRouteImport } from './routes/agreements.$agreementId'
 import { Route as VoiceStudioIndexRouteImport } from './routes/voice.studio.index'
 import { Route as CrmAccountsIndexRouteImport } from './routes/crm.accounts.index'
 import { Route as VoiceStudioProjectIdRouteImport } from './routes/voice.studio.$projectId'
@@ -370,11 +372,6 @@ const AnnouncementsRoute = AnnouncementsRouteImport.update({
   path: '/announcements',
   getParentRoute: () => rootRouteImport,
 } as any)
-const AgreementsRoute = AgreementsRouteImport.update({
-  id: '/agreements',
-  path: '/agreements',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
@@ -398,6 +395,11 @@ const EmailIndexRoute = EmailIndexRouteImport.update({
 const CrmIndexRoute = CrmIndexRouteImport.update({
   id: '/crm/',
   path: '/crm/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AgreementsIndexRoute = AgreementsIndexRouteImport.update({
+  id: '/agreements/',
+  path: '/agreements/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const VoicePhoneRoute = VoicePhoneRouteImport.update({
@@ -926,6 +928,17 @@ const ApiHealthRoute = ApiHealthRouteImport.update({
   path: '/api/health',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AgreementsIssuingProfileRoute =
+  AgreementsIssuingProfileRouteImport.update({
+    id: '/agreements/issuing-profile',
+    path: '/agreements/issuing-profile',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const AgreementsAgreementIdRoute = AgreementsAgreementIdRouteImport.update({
+  id: '/agreements/$agreementId',
+  path: '/agreements/$agreementId',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const VoiceStudioIndexRoute = VoiceStudioIndexRouteImport.update({
   id: '/voice/studio/',
   path: '/voice/studio/',
@@ -1334,7 +1347,6 @@ const ApiPublicVoiceTTenantKeyWebhookRoute =
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
-  '/agreements': typeof AgreementsRoute
   '/announcements': typeof AnnouncementsRoute
   '/approvals': typeof ApprovalsRoute
   '/audit-log': typeof AuditLogRoute
@@ -1365,6 +1377,8 @@ export interface FileRoutesByFullPath {
   '/settings': typeof SettingsRouteWithChildren
   '/slo': typeof SloRoute
   '/yggdrasil': typeof YggdrasilRoute
+  '/agreements/$agreementId': typeof AgreementsAgreementIdRoute
+  '/agreements/issuing-profile': typeof AgreementsIssuingProfileRoute
   '/api/health': typeof ApiHealthRoute
   '/billing/api-usage': typeof BillingApiUsageRoute
   '/billing/cancel': typeof BillingCancelRoute
@@ -1466,6 +1480,7 @@ export interface FileRoutesByFullPath {
   '/voice/calls': typeof VoiceCallsRoute
   '/voice/outbound': typeof VoiceOutboundRoute
   '/voice/phone': typeof VoicePhoneRoute
+  '/agreements/': typeof AgreementsIndexRoute
   '/crm/': typeof CrmIndexRoute
   '/email/': typeof EmailIndexRoute
   '/security/': typeof SecurityIndexRoute
@@ -1546,7 +1561,6 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
-  '/agreements': typeof AgreementsRoute
   '/announcements': typeof AnnouncementsRoute
   '/approvals': typeof ApprovalsRoute
   '/audit-log': typeof AuditLogRoute
@@ -1576,6 +1590,8 @@ export interface FileRoutesByTo {
   '/security-partners': typeof SecurityPartnersRoute
   '/slo': typeof SloRoute
   '/yggdrasil': typeof YggdrasilRoute
+  '/agreements/$agreementId': typeof AgreementsAgreementIdRoute
+  '/agreements/issuing-profile': typeof AgreementsIssuingProfileRoute
   '/api/health': typeof ApiHealthRoute
   '/billing/api-usage': typeof BillingApiUsageRoute
   '/billing/cancel': typeof BillingCancelRoute
@@ -1677,6 +1693,7 @@ export interface FileRoutesByTo {
   '/voice/calls': typeof VoiceCallsRoute
   '/voice/outbound': typeof VoiceOutboundRoute
   '/voice/phone': typeof VoicePhoneRoute
+  '/agreements': typeof AgreementsIndexRoute
   '/crm': typeof CrmIndexRoute
   '/email': typeof EmailIndexRoute
   '/security': typeof SecurityIndexRoute
@@ -1758,7 +1775,6 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
-  '/agreements': typeof AgreementsRoute
   '/announcements': typeof AnnouncementsRoute
   '/approvals': typeof ApprovalsRoute
   '/audit-log': typeof AuditLogRoute
@@ -1789,6 +1805,8 @@ export interface FileRoutesById {
   '/settings': typeof SettingsRouteWithChildren
   '/slo': typeof SloRoute
   '/yggdrasil': typeof YggdrasilRoute
+  '/agreements/$agreementId': typeof AgreementsAgreementIdRoute
+  '/agreements/issuing-profile': typeof AgreementsIssuingProfileRoute
   '/api/health': typeof ApiHealthRoute
   '/billing/api-usage': typeof BillingApiUsageRoute
   '/billing/cancel': typeof BillingCancelRoute
@@ -1890,6 +1908,7 @@ export interface FileRoutesById {
   '/voice/calls': typeof VoiceCallsRoute
   '/voice/outbound': typeof VoiceOutboundRoute
   '/voice/phone': typeof VoicePhoneRoute
+  '/agreements/': typeof AgreementsIndexRoute
   '/crm/': typeof CrmIndexRoute
   '/email/': typeof EmailIndexRoute
   '/security/': typeof SecurityIndexRoute
@@ -1972,7 +1991,6 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
-    | '/agreements'
     | '/announcements'
     | '/approvals'
     | '/audit-log'
@@ -2003,6 +2021,8 @@ export interface FileRouteTypes {
     | '/settings'
     | '/slo'
     | '/yggdrasil'
+    | '/agreements/$agreementId'
+    | '/agreements/issuing-profile'
     | '/api/health'
     | '/billing/api-usage'
     | '/billing/cancel'
@@ -2104,6 +2124,7 @@ export interface FileRouteTypes {
     | '/voice/calls'
     | '/voice/outbound'
     | '/voice/phone'
+    | '/agreements/'
     | '/crm/'
     | '/email/'
     | '/security/'
@@ -2184,7 +2205,6 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
-    | '/agreements'
     | '/announcements'
     | '/approvals'
     | '/audit-log'
@@ -2214,6 +2234,8 @@ export interface FileRouteTypes {
     | '/security-partners'
     | '/slo'
     | '/yggdrasil'
+    | '/agreements/$agreementId'
+    | '/agreements/issuing-profile'
     | '/api/health'
     | '/billing/api-usage'
     | '/billing/cancel'
@@ -2315,6 +2337,7 @@ export interface FileRouteTypes {
     | '/voice/calls'
     | '/voice/outbound'
     | '/voice/phone'
+    | '/agreements'
     | '/crm'
     | '/email'
     | '/security'
@@ -2395,7 +2418,6 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/'
-    | '/agreements'
     | '/announcements'
     | '/approvals'
     | '/audit-log'
@@ -2426,6 +2448,8 @@ export interface FileRouteTypes {
     | '/settings'
     | '/slo'
     | '/yggdrasil'
+    | '/agreements/$agreementId'
+    | '/agreements/issuing-profile'
     | '/api/health'
     | '/billing/api-usage'
     | '/billing/cancel'
@@ -2527,6 +2551,7 @@ export interface FileRouteTypes {
     | '/voice/calls'
     | '/voice/outbound'
     | '/voice/phone'
+    | '/agreements/'
     | '/crm/'
     | '/email/'
     | '/security/'
@@ -2608,7 +2633,6 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
-  AgreementsRoute: typeof AgreementsRoute
   AnnouncementsRoute: typeof AnnouncementsRoute
   ApprovalsRoute: typeof ApprovalsRoute
   AuditLogRoute: typeof AuditLogRoute
@@ -2639,6 +2663,8 @@ export interface RootRouteChildren {
   SettingsRoute: typeof SettingsRouteWithChildren
   SloRoute: typeof SloRoute
   YggdrasilRoute: typeof YggdrasilRoute
+  AgreementsAgreementIdRoute: typeof AgreementsAgreementIdRoute
+  AgreementsIssuingProfileRoute: typeof AgreementsIssuingProfileRoute
   ApiHealthRoute: typeof ApiHealthRoute
   BillingApiUsageRoute: typeof BillingApiUsageRoute
   BillingCancelRoute: typeof BillingCancelRoute
@@ -2721,6 +2747,7 @@ export interface RootRouteChildren {
   VoiceCallsRoute: typeof VoiceCallsRoute
   VoiceOutboundRoute: typeof VoiceOutboundRoute
   VoicePhoneRoute: typeof VoicePhoneRoute
+  AgreementsIndexRoute: typeof AgreementsIndexRoute
   CrmIndexRoute: typeof CrmIndexRoute
   EmailIndexRoute: typeof EmailIndexRoute
   SecurityIndexRoute: typeof SecurityIndexRoute
@@ -3008,13 +3035,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AnnouncementsRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/agreements': {
-      id: '/agreements'
-      path: '/agreements'
-      fullPath: '/agreements'
-      preLoaderRoute: typeof AgreementsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/': {
       id: '/'
       path: '/'
@@ -3048,6 +3068,13 @@ declare module '@tanstack/react-router' {
       path: '/crm'
       fullPath: '/crm/'
       preLoaderRoute: typeof CrmIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/agreements/': {
+      id: '/agreements/'
+      path: '/agreements'
+      fullPath: '/agreements/'
+      preLoaderRoute: typeof AgreementsIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/voice/phone': {
@@ -3757,6 +3784,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiHealthRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/agreements/issuing-profile': {
+      id: '/agreements/issuing-profile'
+      path: '/agreements/issuing-profile'
+      fullPath: '/agreements/issuing-profile'
+      preLoaderRoute: typeof AgreementsIssuingProfileRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/agreements/$agreementId': {
+      id: '/agreements/$agreementId'
+      path: '/agreements/$agreementId'
+      fullPath: '/agreements/$agreementId'
+      preLoaderRoute: typeof AgreementsAgreementIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/voice/studio/': {
       id: '/voice/studio/'
       path: '/voice/studio'
@@ -4389,7 +4430,6 @@ const ApiPublicStripeWebhookRouteWithChildren =
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
-  AgreementsRoute: AgreementsRoute,
   AnnouncementsRoute: AnnouncementsRoute,
   ApprovalsRoute: ApprovalsRoute,
   AuditLogRoute: AuditLogRoute,
@@ -4420,6 +4460,8 @@ const rootRouteChildren: RootRouteChildren = {
   SettingsRoute: SettingsRouteWithChildren,
   SloRoute: SloRoute,
   YggdrasilRoute: YggdrasilRoute,
+  AgreementsAgreementIdRoute: AgreementsAgreementIdRoute,
+  AgreementsIssuingProfileRoute: AgreementsIssuingProfileRoute,
   ApiHealthRoute: ApiHealthRoute,
   BillingApiUsageRoute: BillingApiUsageRoute,
   BillingCancelRoute: BillingCancelRoute,
@@ -4503,6 +4545,7 @@ const rootRouteChildren: RootRouteChildren = {
   VoiceCallsRoute: VoiceCallsRoute,
   VoiceOutboundRoute: VoiceOutboundRoute,
   VoicePhoneRoute: VoicePhoneRoute,
+  AgreementsIndexRoute: AgreementsIndexRoute,
   CrmIndexRoute: CrmIndexRoute,
   EmailIndexRoute: EmailIndexRoute,
   SecurityIndexRoute: SecurityIndexRoute,

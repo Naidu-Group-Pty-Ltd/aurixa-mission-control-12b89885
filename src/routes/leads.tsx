@@ -51,6 +51,7 @@ import {
   ListChecks,
   Gauge,
   FileText,
+  FileSignature,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { formatDistanceToNow } from "@/lib/format";
@@ -59,6 +60,10 @@ import { RefreshButton } from "@/components/refresh-button";
 import { MetricCell } from "@/components/metric-bar";
 import { toast } from "sonner";
 import { convertLead } from "@/lib/crm.functions";
+import {
+  NewSubscriptionDialog,
+  type OfferRecipient,
+} from "@/components/agreements/new-subscription-dialog";
 import {
   stage2Sections,
   type QuestionnaireAnswers,
@@ -256,6 +261,7 @@ function LeadsPage() {
   const [loading, setLoading] = useState(true);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [offerFor, setOfferFor] = useState<OfferRecipient | null>(null);
   const [stageEmails, setStageEmails] = useState<Map<string, StageEmailRow[]> | null>(null);
 
   type SearchState = typeof search;
@@ -721,12 +727,27 @@ function LeadsPage() {
                   expanded={expandedId === lead.id}
                   onToggle={() => setExpandedId((cur) => (cur === lead.id ? null : lead.id))}
                   onStatusChange={(status) => void setStatus(lead, status)}
+                  onPrepareAgreement={() =>
+                    setOfferFor({
+                      kind: "lead",
+                      id: lead.id,
+                      name: [lead.first_name, lead.last_name].filter(Boolean).join(" "),
+                      email: lead.email,
+                      org: lead.entity_name,
+                    })
+                  }
                 />
               ))}
             </ul>
           )}
         </CardContent>
       </Card>
+
+      <NewSubscriptionDialog
+        open={offerFor !== null}
+        onOpenChange={(open) => !open && setOfferFor(null)}
+        recipient={offerFor}
+      />
     </div>
   );
 }
@@ -756,12 +777,15 @@ function LeadRow({
   expanded,
   onToggle,
   onStatusChange,
+  onPrepareAgreement,
 }: {
   lead: Lead;
   emails: StageEmails;
   expanded: boolean;
   onToggle: () => void;
   onStatusChange: (status: LeadStatus) => void;
+  /** Raise a Subscription Agreement offer for this lead. */
+  onPrepareAgreement: () => void;
 }) {
   const meta = (lead.metadata ?? {}) as Record<string, unknown>;
   const row = lead as Lead & Record<string, unknown>;
@@ -820,6 +844,17 @@ function LeadRow({
           <Badge variant="outline" className={cn("text-[10px] uppercase", statusTone(lead.status))}>
             {lead.status}
           </Badge>
+          {lead.status !== "disqualified" && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8 text-xs"
+              title="Prepare a Subscription Agreement offer for this lead"
+              onClick={onPrepareAgreement}
+            >
+              <FileSignature className="mr-1 h-3 w-3" /> Agreement
+            </Button>
+          )}
           <ConvertLeadButton lead={lead} />
           <Select value={lead.status} onValueChange={(v) => onStatusChange(v as LeadStatus)}>
             <SelectTrigger className="h-8 w-[130px] text-xs">

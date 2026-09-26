@@ -353,18 +353,31 @@ const PUBLIC_ORIGIN = (
   process.env.PUBLIC_APP_URL ?? "https://mission-control.aurixasystems.com.au"
 ).replace(/\/+$/, "");
 
-async function loadTemplateBase64(): Promise<string> {
-  const res = await fetch(PUBLIC_ORIGIN + TEMPLATE_PATH);
-  if (!res.ok) throw new Error(`SLA template fetch failed: ${res.status}`);
-  const bytes = new Uint8Array(await res.arrayBuffer());
-  const head = String.fromCharCode(...bytes.subarray(0, 5));
-  if (!head.startsWith("%PDF")) throw new Error("SLA template is not a PDF");
+/**
+ * Where the Worker fetches an agreement template it ships as a static asset —
+ * the SLA PDF and the three Subscription Agreement templates alike.
+ */
+export function agreementAssetUrl(path: string): string {
+  return PUBLIC_ORIGIN + path;
+}
+
+/** Base64 for a DocuSign document or a download, in chunks a call stack can take. */
+export function bytesToBase64(bytes: Uint8Array): string {
   let bin = "";
   const chunk = 0x8000;
   for (let i = 0; i < bytes.length; i += chunk) {
     bin += String.fromCharCode(...bytes.subarray(i, i + chunk));
   }
   return btoa(bin);
+}
+
+async function loadTemplateBase64(): Promise<string> {
+  const res = await fetch(agreementAssetUrl(TEMPLATE_PATH));
+  if (!res.ok) throw new Error(`SLA template fetch failed: ${res.status}`);
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  const head = String.fromCharCode(...bytes.subarray(0, 5));
+  if (!head.startsWith("%PDF")) throw new Error("SLA template is not a PDF");
+  return bytesToBase64(bytes);
 }
 
 type AgreementRow = {
@@ -379,9 +392,14 @@ type AgreementRow = {
   metadata: Json;
 };
 
-export async function sendAgreementEnvelope(agreementId: string): Promise<{
+export async function sendAgreementEnvelope(
+  agreementId: string,
+  opts: { actorUserId?: string | null } = {},
+): Promise<{
   envelopeId: string;
   status: string;
+  /** Subscription only: a lost send's envelope was found and recorded rather than a new one sent. */
+  recovered?: boolean;
 }> {
   const config = docusignConfig();
   if (!config.ready)
@@ -390,12 +408,19 @@ export async function sendAgreementEnvelope(agreementId: string): Promise<{
   const { data: agreement, error } = await supabaseAdmin
     .from("client_agreements")
     .select(
-      "id, client_name, client_email, client_org, service_tier, commencement_date, status, docusign_envelope_id, metadata",
+      "id, client_name, client_email, client_org, service_tier, commencement_date, status, docusign_envelope_id, metadata, document_kind",
     )
     .eq("id", agreementId)
     .maybeSingle();
   if (error) throw error;
   if (!agreement) throw new Error("agreement_not_found");
+  // A Subscription Agreement is a completed offer, not the fixed SLA PDF: its
+  // own module issues it, claims the send and writes the commercial snapshot
+  // first. Everything after the envelope exists is shared.
+  if (agreement.document_kind === "subscription") {
+    const { sendSubscriptionEnvelope } = await import("./subscription-agreements.server");
+    return await sendSubscriptionEnvelope(agreementId, opts);
+  }
   const row = agreement as AgreementRow;
   if (row.docusign_envelope_id) throw new Error("agreement_already_sent");
 
@@ -501,11 +526,12 @@ export async function applyDocusignStatus(
 ): Promise<{ status: string; transitioned: boolean }> {
   const { data: agreement, error } = await supabaseAdmin
     .from("client_agreements")
-    .select("id, status, client_name")
+    .select("id, status, client_name, client_org, document_kind, service_tier, offer_reference")
     .eq("id", agreementId)
     .maybeSingle();
   if (error) throw error;
   if (!agreement) throw new Error("agreement_not_found");
+  const isSubscription = agreement.document_kind === "subscription";
 
   const mapped = mapEnvelopeStatus(docusignStatus);
   const updates: Database["public"]["Tables"]["client_agreements"]["Update"] = {
@@ -525,14 +551,47 @@ export async function applyDocusignStatus(
   if (updateError) console.error("[agreements] status update failed:", updateError.message);
 
   if (transitioned && (mapped === "signed" || mapped === "declined")) {
+    const documentName = isSubscription
+      ? `${agreement.service_tier ?? ""} Subscription Agreement`.trim()
+      : "Service Level Agreement";
+    const party = isSubscription
+      ? `${agreement.client_org ?? agreement.client_name} (${agreement.client_name})`
+      : agreement.client_name;
     await notifyOperators({
       kind: mapped === "signed" ? "agreement_signed" : "agreement_declined",
       severity: mapped === "signed" ? "success" : "warning",
       title: mapped === "signed" ? "Agreement signed" : "Agreement declined",
-      body: `${agreement.client_name}'s Service Level Agreement was ${mapped}.`,
-      url: "/agreements",
+      body:
+        `${party}'s ${documentName} was ${mapped}` +
+        (isSubscription && agreement.offer_reference
+          ? ` (offer ${agreement.offer_reference}).`
+          : "."),
+      url: isSubscription ? `/agreements/${agreementId}` : "/agreements",
       metadata: { agreement_id: agreementId },
     }).catch((err) => console.error("[agreements] notify failed:", (err as Error).message));
+  }
+
+  // A signed Subscription Agreement is retained before anything else happens
+  // to it (clause 1.2). Provisioning checks for the record and asks for it
+  // once more itself, so a failure here delays a clone rather than losing the
+  // evidence — but a person hears about it now, not when a clone is missed.
+  if (mapped === "signed" && isSubscription) {
+    const { retainSignedSubscriptionRecord } = await import("./subscription-agreements.server");
+    const retained = await retainSignedSubscriptionRecord(agreementId);
+    // Said once, on the transition; the sweep's retries are recorded in its own result.
+    if (!retained.ok && transitioned) {
+      await notifyOperators({
+        kind: "agreement_attention",
+        severity: "error",
+        title: "Signed agreement not yet retained",
+        body:
+          `${agreement.client_org ?? agreement.client_name}'s signed Subscription Agreement could not be ` +
+          `copied into the records bucket (${retained.error}). Nothing is provisioned from it until it is; ` +
+          "the agreements sweep keeps trying, and Provision now on the agreement retries at once.",
+        url: `/agreements/${agreementId}`,
+        metadata: { agreement_id: agreementId, error: retained.error },
+      });
+    }
   }
 
   if (mapped === "signed") {
@@ -554,21 +613,31 @@ export async function downloadSignedPdf(agreementId: string): Promise<{
   base64: string;
   filename: string;
 }> {
-  const config = docusignConfig();
-  if (!config.ready)
-    throw new Error(`DocuSign not configured; missing: ${config.missing.join(", ")}`);
-
   const { data: agreement, error } = await supabaseAdmin
     .from("client_agreements")
-    .select("id, client_name, docusign_envelope_id")
+    .select("id, client_name, client_org, docusign_envelope_id, document_kind, signed_record_path")
     .eq("id", agreementId)
     .maybeSingle();
   if (error) throw error;
   if (!agreement?.docusign_envelope_id) throw new Error("envelope_not_found");
+  const isSubscription = agreement.document_kind === "subscription";
 
+  // The retained record is THE signed Subscription Agreement: served from the
+  // records bucket, and only while it still hashes to what was recorded.
+  if (isSubscription && agreement.signed_record_path) {
+    const { readRetainedSignedRecord } = await import("./subscription-agreements.server");
+    const retained = await readRetainedSignedRecord(agreementId);
+    if (retained) return retained;
+  }
+
+  // Only a copy DocuSign still holds needs DocuSign: the retained record above
+  // is ours, and is served whether or not the integration is connected.
+  const config = docusignConfig();
+  if (!config.ready)
+    throw new Error(`DocuSign not configured; missing: ${config.missing.join(", ")}`);
   const token = await getDocusignAccessToken(config);
   const res = await fetch(
-    `${config.baseUrl}/v2.1/accounts/${config.accountId}/envelopes/${agreement.docusign_envelope_id}/documents/combined`,
+    `${config.baseUrl}/v2.1/accounts/${config.accountId}/envelopes/${agreement.docusign_envelope_id}/documents/combined${isSubscription ? "?certificate=true" : ""}`,
     { headers: { Authorization: `Bearer ${token}`, Accept: "application/pdf" } },
   );
   if (!res.ok) {
@@ -576,14 +645,12 @@ export async function downloadSignedPdf(agreementId: string): Promise<{
     throw new Error(`DocuSign download failed: ${text.slice(0, 200)}`);
   }
   const bytes = new Uint8Array(await res.arrayBuffer());
-  let bin = "";
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    bin += String.fromCharCode(...bytes.subarray(i, i + chunk));
-  }
+  const who = (agreement.client_org ?? agreement.client_name).replace(/[^a-z0-9]+/gi, "_");
   return {
-    base64: btoa(bin),
-    filename: `${agreement.client_name.replace(/[^a-z0-9]+/gi, "_")}_SLA_signed.pdf`,
+    base64: bytesToBase64(bytes),
+    filename: isSubscription
+      ? `${who}_Subscription_Agreement_signed.pdf`
+      : `${agreement.client_name.replace(/[^a-z0-9]+/gi, "_")}_SLA_signed.pdf`,
   };
 }
 

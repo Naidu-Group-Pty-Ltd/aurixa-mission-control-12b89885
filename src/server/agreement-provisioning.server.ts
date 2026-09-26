@@ -39,7 +39,8 @@ export type ProvisionFromAgreementResult =
 
 const AGREEMENT_SELECT =
   "id, status, client_name, client_email, client_org, provision_on_signature, provision_status, " +
-  "plan_slug, module_ids, addon_slugs, excluded_module_ids, admin_email, provision_region, created_by";
+  "plan_slug, module_ids, addon_slugs, excluded_module_ids, admin_email, provision_region, created_by, " +
+  "document_kind, signed_record_path";
 
 /**
  * Provision the clone an agreement describes. `trigger: "signature"` is the
@@ -71,7 +72,27 @@ export async function provisionCloneFromAgreement(
     agreement.provision_on_signature = true;
   }
 
-  const decision = decideProvisionOnSignature(agreement);
+  let decision = decideProvisionOnSignature(agreement);
+  // A signed Subscription Agreement is retained before anything is
+  // provisioned from it. The signed-status path normally did that already;
+  // trying once more here, only when retention is the one thing in the way, is
+  // what lets the operator's button recover a copy that could not be taken at
+  // the moment of signature.
+  if (decision.action === "skip" && decision.reason === "acceptance_not_retained") {
+    const { retainSignedSubscriptionRecord } = await import("./subscription-agreements.server");
+    const retained = await retainSignedSubscriptionRecord(agreementId);
+    if (retained.ok) {
+      agreement.signed_record_path = retained.path;
+      decision = decideProvisionOnSignature(agreement);
+    } else {
+      return {
+        ok: true,
+        skipped: true,
+        reason: decision.reason,
+        detail: `${decision.detail}: ${retained.error}`,
+      };
+    }
+  }
   if (decision.action === "skip") {
     return { ok: true, skipped: true, reason: decision.reason, detail: decision.detail };
   }
