@@ -6983,80 +6983,6 @@ export type Database = {
           },
         ]
       }
-      lead_stage_emails: {
-        Row: {
-          attempts: number
-          audience: string
-          claimed_at: string | null
-          created_at: string
-          graph_request_id: string | null
-          graph_status: number | null
-          id: string
-          last_error: string | null
-          lead_id: string
-          mailbox: string | null
-          reason: string | null
-          recipient_source: string | null
-          recipients: string[]
-          sent_at: string | null
-          stage: number
-          status: string
-          subject: string | null
-          to_address: string | null
-          updated_at: string
-        }
-        Insert: {
-          attempts?: number
-          audience: string
-          claimed_at?: string | null
-          created_at?: string
-          graph_request_id?: string | null
-          graph_status?: number | null
-          id?: string
-          last_error?: string | null
-          lead_id: string
-          mailbox?: string | null
-          reason?: string | null
-          recipient_source?: string | null
-          recipients?: string[]
-          sent_at?: string | null
-          stage: number
-          status?: string
-          subject?: string | null
-          to_address?: string | null
-          updated_at?: string
-        }
-        Update: {
-          attempts?: number
-          audience?: string
-          claimed_at?: string | null
-          created_at?: string
-          graph_request_id?: string | null
-          graph_status?: number | null
-          id?: string
-          last_error?: string | null
-          lead_id?: string
-          mailbox?: string | null
-          reason?: string | null
-          recipient_source?: string | null
-          recipients?: string[]
-          sent_at?: string | null
-          stage?: number
-          status?: string
-          subject?: string | null
-          to_address?: string | null
-          updated_at?: string
-        }
-        Relationships: [
-          {
-            foreignKeyName: "lead_stage_emails_lead_id_fkey"
-            columns: ["lead_id"]
-            isOneToOne: false
-            referencedRelation: "waitlist_leads"
-            referencedColumns: ["id"]
-          },
-        ]
-      }
       feedback_submissions: {
         Row: {
           additional_comments: string | null
@@ -8313,6 +8239,80 @@ export type Database = {
             columns: ["tenant_id"]
             isOneToOne: false
             referencedRelation: "tenants"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      lead_stage_emails: {
+        Row: {
+          attempts: number
+          audience: string
+          claimed_at: string | null
+          created_at: string
+          graph_request_id: string | null
+          graph_status: number | null
+          id: string
+          last_error: string | null
+          lead_id: string
+          mailbox: string | null
+          reason: string | null
+          recipient_source: string | null
+          recipients: string[]
+          sent_at: string | null
+          stage: number
+          status: string
+          subject: string | null
+          to_address: string | null
+          updated_at: string
+        }
+        Insert: {
+          attempts?: number
+          audience: string
+          claimed_at?: string | null
+          created_at?: string
+          graph_request_id?: string | null
+          graph_status?: number | null
+          id?: string
+          last_error?: string | null
+          lead_id: string
+          mailbox?: string | null
+          reason?: string | null
+          recipient_source?: string | null
+          recipients?: string[]
+          sent_at?: string | null
+          stage: number
+          status?: string
+          subject?: string | null
+          to_address?: string | null
+          updated_at?: string
+        }
+        Update: {
+          attempts?: number
+          audience?: string
+          claimed_at?: string | null
+          created_at?: string
+          graph_request_id?: string | null
+          graph_status?: number | null
+          id?: string
+          last_error?: string | null
+          lead_id?: string
+          mailbox?: string | null
+          reason?: string | null
+          recipient_source?: string | null
+          recipients?: string[]
+          sent_at?: string | null
+          stage?: number
+          status?: string
+          subject?: string | null
+          to_address?: string | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "lead_stage_emails_lead_id_fkey"
+            columns: ["lead_id"]
+            isOneToOne: false
+            referencedRelation: "waitlist_leads"
             referencedColumns: ["id"]
           },
         ]
@@ -13119,6 +13119,13 @@ export type Database = {
             referencedColumns: ["id"]
           },
           {
+            foreignKeyName: "voice_studio_projects_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones_missing_isolated_backend"
+            referencedColumns: ["clone_id"]
+          },
+          {
             foreignKeyName: "voice_studio_projects_current_package_fkey"
             columns: ["current_package_id"]
             isOneToOne: false
@@ -13647,25 +13654,36 @@ export type Database = {
           role: string | null
           source: string
           stage: number
+          stage_dedupe_key: string | null
           stage1_email_message_id: string | null
+          stage2_access_mode: string | null
           stage2_admin_time: string | null
           stage2_airtable_record_id: string | null
+          stage2_answers: Json
           stage2_authority: string | null
           stage2_capabilities: string[]
+          stage2_completed_at: string | null
           stage2_difficult_workflow: string | null
           stage2_entity_structure: string | null
           stage2_integrations: string[]
+          stage2_investment: string | null
           stage2_invite_count: number | null
           stage2_invite_sent_at: string | null
           stage2_migration: string | null
+          stage2_next_step: string | null
           stage2_problems: string[]
           stage2_regions: string[]
           stage2_security: string[]
+          stage2_status: string | null
+          stage2_summary: string | null
           stage2_systems: string[]
+          stage2_timeline: string | null
           stage2_user_count: string | null
           stage3_access_denied_reason: string | null
+          stage3_access_mode: string | null
           stage3_access_state: string | null
           stage3_airtable_record_id: string | null
+          stage3_booked_at: string | null
           stage3_booking_reference: string | null
           stage3_booking_url: string | null
           stage3_confirmation_sent_at: string | null
@@ -13675,17 +13693,6 @@ export type Database = {
           stage3_invite_sent_at: string | null
           stage3_local_time: string | null
           stage3_notes: string | null
-          stage_dedupe_key: string | null
-          stage2_access_mode: string | null
-          stage2_answers: Json
-          stage2_completed_at: string | null
-          stage2_investment: string | null
-          stage2_next_step: string | null
-          stage2_status: string | null
-          stage2_summary: string | null
-          stage2_timeline: string | null
-          stage3_access_mode: string | null
-          stage3_booked_at: string | null
           stage3_session_end: string | null
           stage3_session_start: string | null
           stage3_status: string | null
@@ -13732,25 +13739,36 @@ export type Database = {
           role?: string | null
           source?: string
           stage?: number
+          stage_dedupe_key?: string | null
           stage1_email_message_id?: string | null
+          stage2_access_mode?: string | null
           stage2_admin_time?: string | null
           stage2_airtable_record_id?: string | null
+          stage2_answers?: Json
           stage2_authority?: string | null
           stage2_capabilities?: string[]
+          stage2_completed_at?: string | null
           stage2_difficult_workflow?: string | null
           stage2_entity_structure?: string | null
           stage2_integrations?: string[]
+          stage2_investment?: string | null
           stage2_invite_count?: number | null
           stage2_invite_sent_at?: string | null
           stage2_migration?: string | null
+          stage2_next_step?: string | null
           stage2_problems?: string[]
           stage2_regions?: string[]
           stage2_security?: string[]
+          stage2_status?: string | null
+          stage2_summary?: string | null
           stage2_systems?: string[]
+          stage2_timeline?: string | null
           stage2_user_count?: string | null
           stage3_access_denied_reason?: string | null
+          stage3_access_mode?: string | null
           stage3_access_state?: string | null
           stage3_airtable_record_id?: string | null
+          stage3_booked_at?: string | null
           stage3_booking_reference?: string | null
           stage3_booking_url?: string | null
           stage3_confirmation_sent_at?: string | null
@@ -13760,17 +13778,6 @@ export type Database = {
           stage3_invite_sent_at?: string | null
           stage3_local_time?: string | null
           stage3_notes?: string | null
-          stage_dedupe_key?: string | null
-          stage2_access_mode?: string | null
-          stage2_answers?: Json
-          stage2_completed_at?: string | null
-          stage2_investment?: string | null
-          stage2_next_step?: string | null
-          stage2_status?: string | null
-          stage2_summary?: string | null
-          stage2_timeline?: string | null
-          stage3_access_mode?: string | null
-          stage3_booked_at?: string | null
           stage3_session_end?: string | null
           stage3_session_start?: string | null
           stage3_status?: string | null
@@ -13817,25 +13824,36 @@ export type Database = {
           role?: string | null
           source?: string
           stage?: number
+          stage_dedupe_key?: string | null
           stage1_email_message_id?: string | null
+          stage2_access_mode?: string | null
           stage2_admin_time?: string | null
           stage2_airtable_record_id?: string | null
+          stage2_answers?: Json
           stage2_authority?: string | null
           stage2_capabilities?: string[]
+          stage2_completed_at?: string | null
           stage2_difficult_workflow?: string | null
           stage2_entity_structure?: string | null
           stage2_integrations?: string[]
+          stage2_investment?: string | null
           stage2_invite_count?: number | null
           stage2_invite_sent_at?: string | null
           stage2_migration?: string | null
+          stage2_next_step?: string | null
           stage2_problems?: string[]
           stage2_regions?: string[]
           stage2_security?: string[]
+          stage2_status?: string | null
+          stage2_summary?: string | null
           stage2_systems?: string[]
+          stage2_timeline?: string | null
           stage2_user_count?: string | null
           stage3_access_denied_reason?: string | null
+          stage3_access_mode?: string | null
           stage3_access_state?: string | null
           stage3_airtable_record_id?: string | null
+          stage3_booked_at?: string | null
           stage3_booking_reference?: string | null
           stage3_booking_url?: string | null
           stage3_confirmation_sent_at?: string | null
@@ -13845,17 +13863,6 @@ export type Database = {
           stage3_invite_sent_at?: string | null
           stage3_local_time?: string | null
           stage3_notes?: string | null
-          stage_dedupe_key?: string | null
-          stage2_access_mode?: string | null
-          stage2_answers?: Json
-          stage2_completed_at?: string | null
-          stage2_investment?: string | null
-          stage2_next_step?: string | null
-          stage2_status?: string | null
-          stage2_summary?: string | null
-          stage2_timeline?: string | null
-          stage3_access_mode?: string | null
-          stage3_booked_at?: string | null
           stage3_session_end?: string | null
           stage3_session_start?: string | null
           stage3_status?: string | null
@@ -14018,18 +14025,6 @@ export type Database = {
         }
         Returns: Json
       }
-      claim_lead_stage_emails: {
-        Args: { _lease_seconds?: number; _limit?: number }
-        Returns: Database["public"]["Tables"]["lead_stage_emails"]["Row"][]
-      }
-      claim_voice_studio_deployments: {
-        Args: { _lease_seconds?: number; _limit?: number }
-        Returns: Database["public"]["Tables"]["voice_studio_deployments"]["Row"][]
-      }
-      claim_voice_studio_runs: {
-        Args: { _lease_seconds?: number; _limit?: number }
-        Returns: Database["public"]["Tables"]["voice_studio_runs"]["Row"][]
-      }
       api_usage_fleet_summary: {
         Args: { _period_start?: string }
         Returns: Json
@@ -14077,6 +14072,90 @@ export type Database = {
       check_public_rate_limit: {
         Args: { _identity: string; _limit?: number; _scope: string }
         Returns: Json
+      }
+      claim_lead_stage_emails: {
+        Args: { _lease_seconds?: number; _limit?: number }
+        Returns: {
+          attempts: number
+          audience: string
+          claimed_at: string | null
+          created_at: string
+          graph_request_id: string | null
+          graph_status: number | null
+          id: string
+          last_error: string | null
+          lead_id: string
+          mailbox: string | null
+          reason: string | null
+          recipient_source: string | null
+          recipients: string[]
+          sent_at: string | null
+          stage: number
+          status: string
+          subject: string | null
+          to_address: string | null
+          updated_at: string
+        }[]
+        SetofOptions: {
+          from: "*"
+          to: "lead_stage_emails"
+          isOneToOne: false
+          isSetofReturn: true
+        }
+      }
+      claim_voice_studio_deployments: {
+        Args: { _lease_seconds?: number; _limit?: number }
+        Returns: {
+          attempts: number
+          claimed_at: string | null
+          completed_at: string | null
+          created_at: string
+          id: string
+          last_error: string | null
+          mode: string
+          package_id: string
+          phone_number_id: string | null
+          project_id: string
+          requested_by: string | null
+          status: string
+          steps: Json
+          updated_at: string
+          verification: Json | null
+        }[]
+        SetofOptions: {
+          from: "*"
+          to: "voice_studio_deployments"
+          isOneToOne: false
+          isSetofReturn: true
+        }
+      }
+      claim_voice_studio_runs: {
+        Args: { _lease_seconds?: number; _limit?: number }
+        Returns: {
+          attempts: number
+          claimed_at: string | null
+          completed_at: string | null
+          cost_usd: number
+          created_at: string
+          id: string
+          last_error: string | null
+          model: string | null
+          project_id: string
+          recipe_sha: string | null
+          recipe_version: string | null
+          requested_by: string | null
+          stage: string
+          stage_cursor: Json
+          status: string
+          updated_at: string
+          usage: Json
+        }[]
+        SetofOptions: {
+          from: "*"
+          to: "voice_studio_runs"
+          isOneToOne: false
+          isSetofReturn: true
+        }
       }
       cleanup_billing_attribution: { Args: never; Returns: Json }
       clone_has_dedicated_backend: {
@@ -14597,7 +14676,6 @@ export type Database = {
         | "crm_task_assigned"
         | "lead_stage_two"
         | "lead_stage_three"
-        | "lead_stage_email_failed"
         | "support_ticket_created"
         | "support_ticket_escalated"
         | "remediation_awaiting_validation"
@@ -14632,6 +14710,7 @@ export type Database = {
         | "clone_announcement_published"
         | "clone_announcement_archived"
         | "deployment_bundle_identity"
+        | "lead_stage_email_failed"
         | "calendar_booking_failed"
         | "crm_appointment_changed"
         | "agreement_attention"
@@ -15097,7 +15176,6 @@ export const Constants = {
         "crm_task_assigned",
         "lead_stage_two",
         "lead_stage_three",
-        "lead_stage_email_failed",
         "support_ticket_created",
         "support_ticket_escalated",
         "remediation_awaiting_validation",
@@ -15132,6 +15210,7 @@ export const Constants = {
         "clone_announcement_published",
         "clone_announcement_archived",
         "deployment_bundle_identity",
+        "lead_stage_email_failed",
         "calendar_booking_failed",
         "crm_appointment_changed",
         "agreement_attention",
