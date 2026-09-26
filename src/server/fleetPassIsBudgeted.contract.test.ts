@@ -110,8 +110,41 @@ describe("a pass is bounded", () => {
     expect(deadline).toBeLessThan(firstRead);
   });
 
-  it("declares a budget of its own rather than borrowing another lane's name", () => {
-    expect(lane).toMatch(/const FLEET_PASS_BUDGET_MS = 45_000;/);
+  it("declares a budget of its own, derived from the patience its cron jobs give it", () => {
+    // Not another lane's name and not a free literal. It was a literal — 45 s,
+    // chosen when pg_net gave up at sixty — and it stayed there for days after
+    // the jobs were given 150 s, so every pass spent its setup and a full seed
+    // read to send one statement. A budget stated as the patience less the
+    // headroom cannot fall behind the patience again unnoticed.
+    expect(lane).toMatch(
+      /const FLEET_PASS_BUDGET_MS = FLEET_HOOK_PATIENCE_MS - FLEET_PASS_HEADROOM_MS;/,
+    );
+  });
+
+  it("names the same patience the migration gives both fleet jobs", () => {
+    const literal = (name: string): number => {
+      const m = new RegExp(`const ${name} = ([\\d_]+);`).exec(lane);
+      expect(m, `${name} is not a plain literal in the lane`).not.toBeNull();
+      return Number(m![1].replace(/_/g, ""));
+    };
+    const patience = literal("FLEET_HOOK_PATIENCE_MS");
+    const headroom = literal("FLEET_PASS_HEADROOM_MS");
+
+    const sql = sqlCode(read("supabase/migrations/20260922150000_fleet_sync_http_patience.sql"));
+    const m = /'timeout_milliseconds := 60000',\s*'timeout_milliseconds := (\d+)'/.exec(sql);
+    expect(m, "could not read the fleet jobs' patience from their migration").not.toBeNull();
+    expect(patience).toBe(Number(m![1]));
+    // Both jobs, by name — a patience given to one cadence is not the other's.
+    expect(sql).toContain("'fleet-migration-sync-30min'");
+    expect(sql).toContain("'fleet-migration-drain-5min'");
+
+    // Room for the unit a pass may start just inside its budget, and for the
+    // writes after it. Less than a third of the patience would leave a slow
+    // statement to outlive the request.
+    expect(headroom).toBeGreaterThanOrEqual(patience / 3);
+    // And a budget that still does work: more than a claim's reserve and the
+    // setup a pass pays before its first statement.
+    expect(patience - headroom).toBeGreaterThan(45_000);
   });
 
   it("checks the deadline BEFORE claiming, so an out-of-time pass leaks nothing", () => {

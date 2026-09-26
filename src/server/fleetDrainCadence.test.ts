@@ -108,13 +108,35 @@ describe("the pass applies the mode after eligibility, and before it spends", ()
       What makes a five-minute cadence affordable. The early return on an empty
       batch has to sit ABOVE the corpus open, or an idle drain tick pays for a
       GitHub tree walk and a read of the prime's ledger, 288 times a day.
+
+      One open may sit above it: the sequence test that asks whether a block
+      was caused by the lane's own order. That one is behind a SWEEP-only
+      guard, so a drain tick still reaches the empty-batch return having read
+      nothing from GitHub — which is the property, stated where it holds.
     */
-    const body = lane.slice(entry);
+    const body = lane.slice(entry, lane.indexOf("\nexport ", entry + 1));
     const earlyReturn = body.indexOf("if (!backends || backends.length === 0) return out;");
-    const corpus = body.indexOf("openScopedPrimeCorpus(supabase, source)");
     expect(earlyReturn, "the empty-batch return is gone").toBeGreaterThan(-1);
-    expect(corpus, "the corpus open is gone").toBeGreaterThan(-1);
-    expect(earlyReturn).toBeLessThan(corpus);
+
+    const opens: number[] = [];
+    for (let at = body.indexOf("openScopedPrimeCorpus(supabase, source)"); at !== -1; ) {
+      opens.push(at);
+      at = body.indexOf("openScopedPrimeCorpus(supabase, source)", at + 1);
+    }
+    expect(opens.length, "the corpus open is gone").toBeGreaterThan(0);
+
+    // The replay's own open is below the return.
+    expect(opens.filter((at) => at > earlyReturn)).toHaveLength(1);
+
+    // Anything above it is the sequence test, and only a sweep reaches it.
+    const above = opens.filter((at) => at < earlyReturn);
+    expect(above.length).toBeLessThanOrEqual(1);
+    for (const at of above) {
+      const guard = body.lastIndexOf('if (mode !== "sweep") continue;', at);
+      expect(guard, "a corpus open above the empty-batch return is not sweep-only").toBeGreaterThan(-1);
+      // Nothing between the guard and the open may leave the guarded branch.
+      expect(body.slice(guard, at)).not.toMatch(/\n {4}\}/);
+    }
   });
 });
 

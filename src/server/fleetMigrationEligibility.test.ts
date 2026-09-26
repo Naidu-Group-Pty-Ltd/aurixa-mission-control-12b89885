@@ -347,10 +347,32 @@ describe("the lane's rehabilitation pass", () => {
   });
 
   it("is not silent when it cannot do its job", () => {
-    // Best effort, but a failed read and a refused write both leave a clone
+    // Best effort, but a failed ledger read, a corpus that could not be
+    // opened for the sequence test and a refused write all leave a clone
     // fenced out of the fleet, which is exactly what nobody noticed for five
-    // hours. Both paths log with the driver's own words.
-    expect((pass.match(/console\.error\(/g) ?? []).length).toBe(2);
+    // hours. Every one of them logs with the driver's own words.
+    expect((pass.match(/console\.error\(/g) ?? []).length).toBe(3);
+  });
+
+  it("asks the lane's order only after the ledger could not discharge the block", () => {
+    // The sequence test is a third route, never a replacement: a block the
+    // clone's own ledger discharges is cleared on that evidence first, and a
+    // quota refusal never reaches either question.
+    const ledger = pass.indexOf("blockIsDischarged(");
+    const sequence = pass.indexOf("blockOvertakenBySequence(");
+    expect(sequence, "the pass must test a block against the lane's order").toBeGreaterThan(-1);
+    expect(ledger).toBeLessThan(sequence);
+    // From the same ledger read, so it cannot disagree with the replay.
+    expect(pass).toContain("cloneApplied: new Set(appliedVersions)");
+  });
+
+  it("tests the lane's order on sweep passes only", () => {
+    // It needs the scoped corpus, and a drain tick must reach its empty-batch
+    // return having read nothing from GitHub.
+    const guard = pass.indexOf('if (mode !== "sweep") continue;');
+    const open = pass.indexOf("openScopedPrimeCorpus(supabase, source)");
+    expect(guard).toBeGreaterThan(-1);
+    expect(guard).toBeLessThan(open);
   });
 
   it("reports what it rehabilitated rather than letting a count move quietly", () => {
