@@ -366,7 +366,9 @@ describe("the engine looks for the specs a delivery leaves behind", () => {
     expect(block).toContain("const treeOf = { prime: primeTree, clone: cloneTree } as const;");
     expect(block).toContain("const refOf = { prime: primeRef, clone: cloneRef } as const;");
     expect(block).toMatch(/text: specsOf\[side\]\.get\(spec\),\s*tree: treeOf\[side\],/);
-    expect(block).toContain("await readTexts(refOf[side], treeOf[side], asking)");
+    // Both sides are read in one round (keptSpecReadsBothSides.contract.test.ts
+    // pins the round); each is still read from its own repository and tree.
+    expect(block).toContain("readTexts(refOf[side], treeOf[side], asking[side])");
     expect(block).toContain("subjectsOfKeptSpec({");
     // The one-tree reading is gone, not merely unused.
     expect(engine).not.toContain("specSubjects({");

@@ -29,8 +29,11 @@ import {
   getFileContent,
   OversizeFileError,
   copyBlobByStream,
+  readBlobTextsBatched,
+  repoFileFromExactText,
   type RepoRef,
 } from "./github-app.server";
+import { isBatchableTextMode, type TextWant } from "./cascade/primeTextBatch.pure";
 import { cascadeEventStatus, summariseCascade } from "./cascade/prReconcile.pure";
 import type { CascadeBudget, CascadeRunResult } from "@/lib/cascadeRunOutcome";
 import {
@@ -1489,6 +1492,13 @@ export async function processClone(args: {
   let cloneShaByPath: ReadonlyMap<string, string> | null = null;
   /** Prime's blob SHA per path, when its listing was complete. */
   let primeShaByPath: ReadonlyMap<string, string> | null = null;
+  /**
+   * Prime's blob size and git mode per path, from the same listing. What lets
+   * prime's text be read a batch at a time by blob id — see
+   * `prefetchPrimeText` below. `null` exactly when `primeShaByPath` is.
+   */
+  let primeSizeByPath: ReadonlyMap<string, number> | null = null;
+  let primeModeByPath: ReadonlyMap<string, string> | null = null;
   if (isMirror) {
     const [primeTree, cloneTree] = await Promise.all([
       listTreeEntries(octokit, primeRef),
@@ -1508,6 +1518,8 @@ export async function processClone(args: {
     }
     cloneShaByPath = cloneTree.entries;
     primeShaByPath = primeTree.entries;
+    primeSizeByPath = primeTree.sizes;
+    primeModeByPath = primeTree.modes;
     for (const [path, sha] of cloneTree.entries) {
       if (!primeTree.entries.has(path)) {
         onlyInClone++;
@@ -1596,6 +1608,8 @@ export async function processClone(args: {
       );
       cloneShaByPath = cloneTree.entries;
       primeShaByPath = primeTree.entries;
+      primeSizeByPath = primeTree.sizes;
+      primeModeByPath = primeTree.modes;
     }
 
     // The clone's own tree, read for one more reason: a module-scoped cascade
@@ -1627,6 +1641,55 @@ export async function processClone(args: {
       for (const path of primeInScope) primeDirectories.add(directoryOf(path));
     }
   }
+
+  /*
+    PRIME'S TEXT, READ ONCE AND EIGHTY AT A TIME.
+
+    The import closure reads every candidate module to learn what it imports,
+    and the prepare loop then reads the same files again to write them — one
+    contents request each, twice over. Replayed at prime@ded5d92 against
+    `npc-crm-independent-6505dc`, that was 836 of the pass's 884 GitHub calls:
+    351 by the closure before a single file was prepared, 408 by the prepare
+    loop after it. No tick could hold them. Every tick of the 26 Sep events
+    paused with no file prepared (0 of 390 at prime@c19ab0a, 0 of 399 at
+    prime@0e89502), and text travels inline in the tree write, so nothing a
+    tick read was ledgered and the next began from nothing. After three ticks
+    the drain retired the event.
+
+    So both readers draw from one cache, filled by GraphQL batches of the blob
+    ids this pass's own listing gave (`primeTextBatch.pure.ts`). A text enters
+    it only where its git blob id equals the listing's, which proves it is the
+    file byte for byte. A path the cache cannot answer — no complete listing, a
+    symbolic link, a file too large for GraphQL to serve whole, a blob that is
+    not UTF-8, a batch that failed — is read per file exactly as before, with
+    the oversize ceiling and the stream lane where they always were.
+  */
+  const exactPrimeText = new Map<string, { sha: string; text: string }>();
+  /** Every path a prefetch has considered, answered or not: asked once a pass. */
+  const primeTextConsidered = new Set<string>();
+  const prefetchPrimeText = async (
+    paths: Iterable<string>,
+    isPastDeadline?: (reserveMs: number) => boolean,
+  ): Promise<void> => {
+    const shas = primeShaByPath;
+    const sizes = primeSizeByPath;
+    const modes = primeModeByPath;
+    if (shas === null || sizes === null || modes === null) return;
+    const wants: TextWant[] = [];
+    for (const path of paths) {
+      if (primeTextConsidered.has(path)) continue;
+      primeTextConsidered.add(path);
+      const sha = shas.get(path);
+      if (sha === undefined || !isBatchableTextMode(modes.get(path))) continue;
+      wants.push({ path, sha, size: sizes.get(path) });
+    }
+    if (wants.length === 0) return;
+    const texts = await readBlobTextsBatched(octokit, primeRef, wants, { isPastDeadline });
+    for (const [path, text] of texts) {
+      const sha = shas.get(path);
+      if (sha !== undefined) exactPrimeText.set(path, { sha, text });
+    }
+  };
 
   /*
     A PAYLOAD MUST CONTAIN WHAT IT IMPORTS.
@@ -1683,24 +1746,30 @@ export async function processClone(args: {
     const WALKABLE = /\.[cm]?[jt]sx?$/;
     const primeText = new Map<string, string>();
     const readInto = async (paths: readonly string[]) => {
-      await mapWithConcurrency(
-        paths.filter((p) => WALKABLE.test(p) && !primeText.has(p)),
-        8,
-        async (path) => {
-          try {
-            const f = await getFileContent(octokit, primeRef, path, {
-              maxBytes: CASCADE_MAX_FILE_BYTES,
-            });
-            // Binary is never walked: a lossy reading of bytes that were never
-            // text cannot contain an import, and asking is how a guard starts
-            // reporting nonsense.
-            if (f && !f.binary) primeText.set(path, f.content);
-          } catch {
-            // Unreadable is carried, not fatal. Refusing the whole closure
-            // over one oversize blob would throw away every path it found.
-          }
-        },
-      );
+      const walkable = paths.filter((p) => WALKABLE.test(p) && !primeText.has(p));
+      // Never cut short by the budget: a closure that stops early lets a
+      // module cross without what it imports, which is the defect it exists to
+      // prevent. Batching is what makes finishing it affordable.
+      await prefetchPrimeText(walkable);
+      await mapWithConcurrency(walkable, 8, async (path) => {
+        const batched = exactPrimeText.get(path);
+        if (batched !== undefined) {
+          primeText.set(path, batched.text);
+          return;
+        }
+        try {
+          const f = await getFileContent(octokit, primeRef, path, {
+            maxBytes: CASCADE_MAX_FILE_BYTES,
+          });
+          // Binary is never walked: a lossy reading of bytes that were never
+          // text cannot contain an import, and asking is how a guard starts
+          // reporting nonsense.
+          if (f && !f.binary) primeText.set(path, f.content);
+        } catch {
+          // Unreadable is carried, not fatal. Refusing the whole closure
+          // over one oversize blob would throw away every path it found.
+        }
+      });
     };
 
     const closeOver = async (
@@ -2228,24 +2297,33 @@ export async function processClone(args: {
     // return will not.
     filesRead += 1;
     let primeFile: Awaited<ReturnType<typeof getFileContent>>;
-    try {
-      primeFile = await getFileContent(octokit, primeRef, path, {
-        maxBytes: CASCADE_MAX_FILE_BYTES,
-      });
-    } catch (e) {
-      // NOT held first. One file past the read ceiling used to kill the whole
-      // pass — and the forty-seven beside it — on every attempt until the
-      // event ran out of claims, and holding it was the fix. But "cannot be
-      // held" is not "cannot be carried": the bytes never have to enter this
-      // isolate, and a file too large to read is streamed from prime's blob
-      // straight into the clone's, base64-encoded in flight. The hold below
-      // is what is left when that cannot be done — which is a file past
-      // GitHub's own ceiling, or a carry that failed. See
-      // `blobStreamCarry.pure.ts` and `CASCADE_MAX_FILE_BYTES`.
-      if (e instanceof OversizeFileError) {
-        return await carryOversizeByStream(e, path, fileStartedAt);
+    // Prime's text from this pass's batched read, where it proved exact — the
+    // same `RepoFile` the contents API would have given, at no request. The
+    // cache holds only files far below `CASCADE_MAX_FILE_BYTES`, so nothing it
+    // answers could have been refused as oversize.
+    const batched = exactPrimeText.get(path);
+    if (batched !== undefined) {
+      primeFile = repoFileFromExactText(batched.sha, batched.text);
+    } else {
+      try {
+        primeFile = await getFileContent(octokit, primeRef, path, {
+          maxBytes: CASCADE_MAX_FILE_BYTES,
+        });
+      } catch (e) {
+        // NOT held first. One file past the read ceiling used to kill the
+        // whole pass — and the forty-seven beside it — on every attempt until
+        // the event ran out of claims, and holding it was the fix. But "cannot
+        // be held" is not "cannot be carried": the bytes never have to enter
+        // this isolate, and a file too large to read is streamed from prime's
+        // blob straight into the clone's, base64-encoded in flight. The hold
+        // below is what is left when that cannot be done — which is a file
+        // past GitHub's own ceiling, or a carry that failed. See
+        // `blobStreamCarry.pure.ts` and `CASCADE_MAX_FILE_BYTES`.
+        if (e instanceof OversizeFileError) {
+          return await carryOversizeByStream(e, path, fileStartedAt);
+        }
+        throw e;
       }
-      throw e;
     }
     if (!primeFile) return null;
 
@@ -2411,6 +2489,14 @@ export async function processClone(args: {
     };
   };
 
+  // What the loop below will read, fetched first, a batch at a time: a file
+  // the ledger already holds as a blob is reused without a read, so it is not
+  // asked. Paced on the pass's budget — text is never ledgered, so a batch
+  // read past the point where the loop can use it would be thrown away.
+  await prefetchPrimeText(
+    primeFiles.filter((path) => isSpecPath(path) || !known.has(path)),
+    resume?.budget ? (reserveMs) => resume.budget!.isPastDeadline(reserveMs) : undefined,
+  );
   const { results: prepared, stopped: preparePaused } = await mapWithConcurrencyUntil<
     string,
     Prepared | null
@@ -3238,9 +3324,14 @@ export async function processClone(args: {
             readText: (path: string) => moduleText(side, path),
           }));
         const unreadable = { prime: new Set<string>(), clone: new Set<string>() };
-        // One read per hop and side: each round learns the modules the last one
-        // reached. Prime's side first, so the clone's skips every blob the two
-        // share.
+        // One read per hop and side, both sides at once: each round learns the
+        // modules the last one reached. The clone skips every blob prime is
+        // asking this round as well as every blob already in hand, so a blob
+        // the two share is read once, from prime. `readTexts` answers every
+        // path it is asked or throws, so prime's answers are in hand before
+        // the clone's paths are judged below, exactly as when the two sides
+        // took turns — which cost the independent's pass four seconds of the
+        // tick on a two-hop walk.
         for (let hop = 0; hop <= MAX_SHIM_HOPS; hop += 1) {
           const unread = { prime: new Set<string>(), clone: new Set<string>() };
           for (const spec of kept) {
@@ -3253,20 +3344,28 @@ export async function processClone(args: {
             });
           }
           if (unread.prime.size === 0 && unread.clone.size === 0) break;
-          for (const side of ["prime", "clone"] as const) {
-            const asking = [...unread[side]]
+          const askingOf = (side: SpecSide["side"], alsoSkip: ReadonlySet<string>) =>
+            [...unread[side]]
               .filter((path) => {
                 const sha = treeOf[side].get(path);
-                return sha !== undefined && !textBySha.has(sha);
+                return sha !== undefined && !textBySha.has(sha) && !alsoSkip.has(sha);
               })
               .sort();
-            const read =
-              asking.length > 0
-                ? await readTexts(refOf[side], treeOf[side], asking)
-                : new Map<string, string>();
+          const primeAsking = askingOf("prime", new Set());
+          const primeAskingShas = new Set(primeAsking.map((path) => treeOf.prime.get(path)!));
+          const asking = { prime: primeAsking, clone: askingOf("clone", primeAskingShas) };
+          const [primeRead, cloneRead] = await Promise.all(
+            (["prime", "clone"] as const).map((side) =>
+              asking[side].length > 0
+                ? readTexts(refOf[side], treeOf[side], asking[side])
+                : Promise.resolve(new Map<string, string>()),
+            ),
+          );
+          const readOf = { prime: primeRead, clone: cloneRead } as const;
+          for (const side of ["prime", "clone"] as const) {
             for (const path of unread[side]) {
               const sha = treeOf[side].get(path);
-              const text = read.get(path);
+              const text = readOf[side].get(path);
               if (sha !== undefined && text !== undefined) textBySha.set(sha, text);
               if (moduleText(side, path) === undefined) unreadable[side].add(path);
             }
@@ -3652,6 +3751,10 @@ export async function processClone(args: {
 
     if (carryingAllowed && gated.write.length > 0 && !carryStoppedOnBudget) {
       for (const subject of plan.carry) attemptedSubjects.add(subject);
+      await prefetchPrimeText(
+        gated.write.filter((path) => isSpecPath(path) || !known.has(path)),
+        resume?.budget ? (reserveMs) => resume.budget!.isPastDeadline(reserveMs) : undefined,
+      );
       const { results: carried, stopped } = await mapWithConcurrencyUntil<string, Prepared | null>(
         gated.write,
         8,
