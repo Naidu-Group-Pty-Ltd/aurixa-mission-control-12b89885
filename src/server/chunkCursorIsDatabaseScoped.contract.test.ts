@@ -139,11 +139,18 @@ describe("a fresh project ref clears the cursor", () => {
 
 describe("a cursor the file cannot support never writes a ledger row", () => {
   it("the walk is judged against the count it produced", () => {
-    expect(replay).toContain("if (cursorRanPastEnd(skip, index))");
+    /*
+      The count is the chunker's own report of how long the seed is. It used to
+      be the loop's tally of what it had been handed, and that stopped being
+      the same number when the chunker stopped handing over the statements
+      before the cursor: a tally that starts AT the cursor can never fall below
+      it, so judged against that, this guard could never fire again.
+    */
+    expect(replay).toContain("if (cursorRanPastEnd(skip, statementsInSeed))");
   });
 
   it("returns a PAUSE, so the caller breaks before recording the migration", () => {
-    const at = replay.indexOf("if (cursorRanPastEnd(skip, index))");
+    const at = replay.indexOf("if (cursorRanPastEnd(skip, statementsInSeed))");
     expect(at).toBeGreaterThan(-1);
     const body = replay.slice(at, at + 400);
     expect(body).toContain("stoppedEarly: true");
@@ -158,7 +165,7 @@ describe("a cursor the file cannot support never writes a ledger row", () => {
       livelock one layer along. Zero is an ordinary value the next pass acts on
       by sending from the first statement.
     */
-    const at = replay.indexOf("if (cursorRanPastEnd(skip, index))");
+    const at = replay.indexOf("if (cursorRanPastEnd(skip, statementsInSeed))");
     // Bounded to the guard's OWN block. A byte window would run on into the
     // success return below it, which legitimately carries `cursor: null` —
     // and this assertion would then be about that line instead.
@@ -168,7 +175,7 @@ describe("a cursor the file cannot support never writes a ledger row", () => {
   });
 
   it("the guard runs BEFORE the success return, not after it", () => {
-    const guard = replay.indexOf("if (cursorRanPastEnd(skip, index))");
+    const guard = replay.indexOf("if (cursorRanPastEnd(skip, statementsInSeed))");
     const success = replay.indexOf(
       "return { applied, stoppedEarly: false, cursor: null, upstreamRefusal: null };",
     );

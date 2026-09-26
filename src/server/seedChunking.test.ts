@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import {
   type ChunkedStatement,
+  type SeedPlan,
   type SeedShape,
   SeedShapeError,
   assertDollarQuotesBalanced,
@@ -8,6 +10,7 @@ import {
   linesOf,
   readSeedShape,
   seedSkeleton,
+  utf8ByteLength,
 } from "./seedChunking.pure";
 
 /** Feed text in awkward pieces so line boundaries fall inside chunks. */
@@ -334,5 +337,165 @@ describe("chunkSeedStatements — the remembered tail", () => {
       // into is, and it is unknown until the line the tail follows.
       expect(got, "statements went out before the shape was agreed").toEqual([]);
     });
+  });
+});
+
+/*
+  A PASS IS HANDED A WINDOW OF THE SEED, NOT THE WHOLE OF IT.
+
+  Everything handed over is held until the second read reaches EOF, and on the
+  real template seed "everything" measured 86.7 MB — two-byte strings, because
+  44 of its 45 statements carry a character outside Latin-1. The first pass
+  allowed to send a second statement beside that was killed sending it, every
+  time. So a pass is handed the statements from its cursor on, no more than a
+  cap of them, and everything else is walked and never built. These pin what
+  that must not change: the statements themselves, their positions, and the
+  EOF rule.
+*/
+describe("chunkSeedStatements — a window of the seed", () => {
+  /** Rows of varied size, every one carrying an em dash, as the real seed's do. */
+  const ROWS = Array.from({ length: 11 }, (_, i) =>
+    tuple(`entry-${i}`, [`{"title": "Entry ${i} — seeded", "pad": "${"z".repeat(40 + i * 25)}"}`]),
+  );
+  const TEXT = seed(ROWS);
+  const BYTES = 420;
+
+  async function every(): Promise<ChunkedStatement[]> {
+    const shape = await readSeedShape(pieces(TEXT));
+    const out: ChunkedStatement[] = [];
+    for await (const st of chunkSeedStatements(pieces(TEXT), shape, { maxStatementBytes: BYTES }))
+      out.push(st);
+    return out;
+  }
+
+  async function windowed(skip: number, maxHeldChars: number, text = TEXT) {
+    const shape = await readSeedShape(pieces(TEXT));
+    const plans: SeedPlan[] = [];
+    const out: ChunkedStatement[] = [];
+    let handedBeforePlan = 0;
+    for await (const st of chunkSeedStatements(pieces(text), shape, {
+      maxStatementBytes: BYTES,
+      window: { skip, maxHeldChars },
+      onPlan: (plan) => {
+        handedBeforePlan = out.length;
+        plans.push(plan);
+      },
+    }))
+      out.push(st);
+    return { out, plans, handedBeforePlan };
+  }
+
+  it("numbers every statement by its place in the whole seed, the tail included", async () => {
+    const all = await every();
+    expect(all.length, "the fixture must come to several statements").toBeGreaterThan(5);
+    expect(all.map((st) => st.index)).toEqual(all.map((_, i) => i));
+    expect(all.at(-1)).toMatchObject({ label: "trailing statements", index: all.length - 1 });
+  });
+
+  it("hands over exactly the statements from the cursor on, byte for byte", async () => {
+    const all = await every();
+    for (const skip of [0, 1, 3, all.length - 1]) {
+      const { out } = await windowed(skip, Number.POSITIVE_INFINITY);
+      expect(out, `skip ${skip}`).toEqual(all.slice(skip));
+    }
+  });
+
+  it("holds no more than the cap, and always at least the next statement", async () => {
+    const all = await every();
+    const two = all[2].sql.length + all[3].sql.length;
+    const { out: capped } = await windowed(2, two);
+    expect(capped.map((st) => st.index)).toEqual([2, 3]);
+    // A cap smaller than any statement still hands over one: a pass that is
+    // handed nothing would come back with the cursor where it found it.
+    const { out: tiny } = await windowed(4, 1);
+    expect(tiny.map((st) => st.index)).toEqual([4]);
+    expect(tiny[0]).toEqual(all[4]);
+  });
+
+  it("keeps what it hands over contiguous, never skipping a statement that did not fit", async () => {
+    const all = await every();
+    // Find a statement followed by a LARGER one and then a smaller one, and cap
+    // the window so the larger does not fit beside the first while the smaller
+    // would. Handing the smaller one over would send it before the larger.
+    const at = all.findIndex(
+      (st, i) =>
+        i + 2 < all.length &&
+        all[i + 1].sql.length > st.sql.length &&
+        all[i + 2].sql.length < all[i + 1].sql.length,
+    );
+    expect(at, "the fixture needs a large statement between two smaller ones").toBeGreaterThan(-1);
+    const cap = all[at].sql.length + all[at + 2].sql.length;
+    expect(all[at].sql.length + all[at + 1].sql.length).toBeGreaterThan(cap);
+    const { out } = await windowed(at, cap);
+    expect(out.map((st) => st.index)).toEqual([at]);
+  });
+
+  it("says how long the whole seed is before it hands anything over", async () => {
+    const all = await every();
+    const { out, plans, handedBeforePlan } = await windowed(3, all[3].sql.length);
+    expect(plans).toEqual([{ total: all.length, held: out.length }]);
+    expect(handedBeforePlan).toBe(0);
+  });
+
+  it("says so, and hands over nothing, when the cursor is past the end", async () => {
+    const all = await every();
+    const { out, plans } = await windowed(all.length + 7, Number.POSITIVE_INFINITY);
+    expect(out).toEqual([]);
+    expect(plans).toEqual([{ total: all.length, held: 0 }]);
+    // And on equality — a pass that sent the last statement and died before
+    // its ledger row — the same: nothing to send, and the length to prove it.
+    const { out: level, plans: levelPlans } = await windowed(all.length, 10);
+    expect(level).toEqual([]);
+    expect(levelPlans).toEqual([{ total: all.length, held: 0 }]);
+  });
+
+  it("still refuses a second read that disagrees, before any plan or statement", async () => {
+    const changed = seed(ROWS.slice(0, 10));
+    const run = windowed(2, Number.POSITIVE_INFINITY, changed);
+    await expect(run).rejects.toThrow(/the blob changed between reads/);
+  });
+
+  it("bounds a two-byte seed by the cap, where the whole seed is many times it", async () => {
+    const all = await every();
+    const whole = all.reduce((n, st) => n + st.sql.length, 0);
+    const cap = Math.ceil(whole / 5);
+    for (let skip = 0; skip < all.length; skip += 1) {
+      const { out } = await windowed(skip, cap);
+      const held = out.reduce((n, st) => n + st.sql.length, 0);
+      // One statement may exceed the cap on its own; two may not.
+      if (out.length > 1) expect(held, `skip ${skip}`).toBeLessThanOrEqual(cap);
+      expect(out[0].index).toBe(skip);
+    }
+    // And the fixture is the case that matters: two-byte, as the real seed is.
+    expect(all.every((st) => st.rows === 0 || /[\u0100-\uffff]/.test(st.sql))).toBe(true);
+  });
+
+  it("releases each statement as it hands it over rather than iterating a held queue", () => {
+    // What the window saves is only saved if a sent statement stops being held
+    // while the rest go; iterating the queue keeps every one of them alive
+    // until the last is sent. Judged on the source, because a heap reading in
+    // a test runner is not one to assert on.
+    const src = readFileSync("src/server/seedChunking.pure.ts", "utf8");
+    expect(src).toContain("while (ready.length > 0) yield ready.shift()!;");
+    expect(src).not.toMatch(/for \(const \w+ of ready\) yield/);
+  });
+});
+
+describe("utf8ByteLength", () => {
+  it("agrees with the encoder it replaces, on every kind of character", () => {
+    const encoder = new TextEncoder();
+    for (const sample of [
+      "",
+      "plain ascii",
+      "caf\u00e9 \u00b7 \u00a3",
+      "em dash \u2014 and \u20ac",
+      "astral \u{1F3E0} house",
+      "lone high \ud83d then text",
+      "lone low \udc00 then text",
+      "\ud83d",
+      tuple("mixed", ['{"t": "Entry \u2014 caf\u00e9 \u{1F4C8}"}']),
+    ]) {
+      expect(utf8ByteLength(sample), JSON.stringify(sample)).toBe(encoder.encode(sample).length);
+    }
   });
 });

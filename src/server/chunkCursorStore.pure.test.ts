@@ -241,8 +241,8 @@ describe("cursorAppliesToBody", () => {
 /**
  * A cursor past the end of the file.
  *
- * `applyChunkedSeed` skips while `index < skip`, so a cursor naming more
- * statements than the seed has skips every one of them, applies nothing, and —
+ * `applyChunkedSeed` sends nothing before the cursor, so a cursor naming more
+ * statements than the seed has sends nothing at all, applies nothing, and —
  * before this — returned `stoppedEarly: false`, which the replay reads as "the
  * seed went" and answers by writing the ledger row. The clone then records a
  * version it does not hold and every later pass skips it as applied.
