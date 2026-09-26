@@ -62,16 +62,41 @@
  *
  * ## What counts as crossing
  *
- * A file whose content on the clone CHANGES: prime's file written verbatim,
- * or a file removed. Not the forward half's `deliveredPaths`, which also
- * counts every path a reconcile pump decided — including a pump's steady
- * state, where the merged file IS the clone's own and nothing is written. The
- * first replay read that as a change and held the clone's own
- * `crmConversations.spec.ts` under "this delivery updates
- * supabase/config.toml" on a delivery that wrote no `config.toml` at all. A
- * pump that does write merges prime's additions into the clone's own file and
- * keeps the clone's declarations by construction, so a spec about it is
- * judged by the merge, as the forward half already judges one.
+ * A file whose content on the clone CHANGES, and nothing else
+ * (`pathsTheDeliveryChanges`). Three ways to change one:
+ *
+ *   · prime's file written verbatim — always a change, because a path whose
+ *     blob already matches is never prepared at all;
+ *   · a reconcile pump's merge, but only where the merge differs from the
+ *     clone's file. A pump's steady state writes the clone's own bytes back,
+ *     and the first replay read that as a change: it held the clone's own
+ *     `crmConversations.spec.ts` under "this delivery updates
+ *     supabase/config.toml" on a delivery that wrote no `config.toml`. The
+ *     next draft excluded every pumped path instead, which was wrong the other
+ *     way — a pump that DOES change `config.toml` changes it, and a spec about
+ *     it must be judged. A pump that writes merges prime's additions into the
+ *     clone's own file and keeps the clone's declarations by construction, so
+ *     a spec about it is judged by the merge, as the forward half already
+ *     judges one;
+ *   · a removal — one the finished deletion plan makes. A deletion verdict is
+ *     provisional until the reference check and the bulk cap have spoken, and
+ *     either can withhold it: judged against the provisional set, a spec could
+ *     be replaced for a file that then stayed exactly as it was.
+ *
+ * Not the forward half's `deliveredPaths`, which counts every path a pump
+ * DECIDED — the right question for a spec the delivery carries, and the wrong
+ * one here.
+ *
+ * ## Each copy is read against its own tree
+ *
+ * The clone's copy of a kept spec is the one CI runs, and what it imports is
+ * resolved against the CLONE's tree and read from the clone. Resolved against
+ * prime's, an import of a module only the clone holds resolves to nothing: a
+ * deletion of that module then looked like no change to the spec that imports
+ * it, and nothing else in the delivery holds such a spec — it is neither
+ * clone-only nor held. Prime's copy is resolved against prime's tree, because
+ * it is prime's version that would land. A module byte-identical on both
+ * sides is read once.
  *
  * ## The spec prime's version replaces may need a file of its own
  *
@@ -123,11 +148,11 @@ export function isReExportShim(source: string): boolean {
   return found > 0 && /^[\s;]*$/.test(rest);
 }
 
-/** Every `@/` or relative specifier in `source`, resolved against prime's tree. */
-function resolvedImports(source: string, importer: string, prime: TreeIndex): string[] {
+/** Every `@/` or relative specifier in `source`, resolved against `tree`. */
+function resolvedImports(source: string, importer: string, tree: TreeIndex): string[] {
   const out: string[] = [];
   for (const specifier of importsOf(source)) {
-    const target = resolveSpecifier(specifier, importer, prime);
+    const target = resolveSpecifier(specifier, importer, tree);
     if (target !== null) out.push(target);
   }
   return out;
@@ -136,26 +161,28 @@ function resolvedImports(source: string, importer: string, prime: TreeIndex): st
 /**
  * The files a spec asserts about, as far as its own text says.
  *
- * `readText` answers for the modules it imports, so a re-export shim can be
- * looked through; a module it cannot read is kept as a subject and simply not
- * looked through, which can only narrow what is found, never invent it.
- * `onUnread` names each module whose text was asked for and not available,
- * so a caller can read those and ask again.
+ * `tree` is the tree the text belongs to: its imports resolve there and
+ * nowhere else, and `readText` answers from the same side. `readText` answers
+ * for the modules it imports, so a re-export shim can be looked through; a
+ * module it cannot read is kept as a subject and simply not looked through,
+ * which can only narrow what is found, never invent it. `onUnread` names each
+ * module whose text was asked for and not available, so a caller can read
+ * those and ask again.
  */
 export function specSubjects(args: {
   specPath: string;
   specText: string;
-  prime: TreeIndex;
+  tree: TreeIndex;
   readText: (path: string) => string | undefined;
   onUnread?: (path: string) => void;
 }): string[] {
-  const { specPath, specText, prime, readText, onUnread } = args;
+  const { specPath, specText, tree, readText, onUnread } = args;
   const found = new Set<string>([
     ...subjectsNamedBy(specText, specPath),
     ...subjectsNamedOutsideRoots(specText, specPath),
   ]);
 
-  const direct = resolvedImports(specText, specPath, prime);
+  const direct = resolvedImports(specText, specPath, tree);
   for (const path of direct) found.add(path);
 
   // Through shims only. Each hop reads modules the previous hop reached, and
@@ -172,7 +199,7 @@ export function specSubjects(args: {
         continue;
       }
       if (!isReExportShim(text)) continue;
-      for (const target of resolvedImports(text, module, prime)) {
+      for (const target of resolvedImports(text, module, tree)) {
         if (seen.has(target)) continue;
         seen.add(target);
         found.add(target);
@@ -183,6 +210,86 @@ export function specSubjects(args: {
   }
 
   return [...found].sort();
+}
+
+/** One repository's copy of a kept spec, and how to read that repository. */
+export type SpecSide = {
+  /** Which repository this is: where its modules are read from. */
+  side: "prime" | "clone";
+  /** This side's text of the spec, or undefined where it was not read. */
+  text: string | undefined;
+  /** This side's tree. The text's imports resolve here and nowhere else. */
+  tree: TreeIndex;
+  /** This side's text of a module, for looking through a shim. */
+  readText: (path: string) => string | undefined;
+};
+
+/**
+ * A kept spec's subjects: what either copy asserts about, each read against
+ * its own tree.
+ *
+ * Both copies, because either may name what the other does not — prime's is
+ * the version that would land, the clone's is the one CI runs now. Each
+ * against its OWN tree, because an import resolves where its text lives: the
+ * clone's copy importing a module only the clone holds names that module,
+ * and read against prime's tree it named nothing. `onUnread` says which side
+ * a module was not read from, so the caller reads it from that repository.
+ */
+export function subjectsOfKeptSpec(args: {
+  specPath: string;
+  sides: readonly SpecSide[];
+  onUnread?: (side: SpecSide["side"], path: string) => void;
+}): string[] {
+  const found = new Set<string>();
+  for (const s of args.sides) {
+    if (s.text === undefined) continue;
+    const onUnread = args.onUnread;
+    for (const subject of specSubjects({
+      specPath: args.specPath,
+      specText: s.text,
+      tree: s.tree,
+      readText: s.readText,
+      onUnread: onUnread ? (path) => onUnread(s.side, path) : undefined,
+    })) {
+      found.add(subject);
+    }
+  }
+  return [...found].sort();
+}
+
+/**
+ * What this delivery changes on the clone — the one set every question this
+ * half asks about crossing is asked against.
+ *
+ * A write counts where it changes the clone's file: every verbatim write does,
+ * and a reconcile pump's does only where its merge differs from the clone's
+ * copy (`reconcileWrites`). A rehearsal composes no entry for three of the
+ * pumps, so what those would write arrives as `rehearsed`, and a dry run
+ * answers as the real pass would. A removal counts only where the finished
+ * deletion plan makes it; an entry that removes is not read here, because the
+ * plan, not the tree being composed, is where a removal is decided.
+ */
+export function pathsTheDeliveryChanges(args: {
+  /** The tree the delivery composes. `sha: null` removes; anything else writes. */
+  entries: ReadonlyArray<{ path: string; sha?: string | null }>;
+  /** Every path a reconcile pump decided, whether or not its merge changed the file. */
+  reconciled: ReadonlySet<string>;
+  /** The decided paths whose merge differs from the clone's copy: a real write. */
+  reconcileWrites: ReadonlySet<string>;
+  /** A rehearsal's pump writes that composed no tree entry. */
+  rehearsed: ReadonlySet<string>;
+  /** The removals the finished deletion plan makes. Never a provisional verdict. */
+  removing: ReadonlySet<string>;
+}): Set<string> {
+  const out = new Set<string>();
+  for (const e of args.entries) {
+    if (e.sha === null) continue;
+    if (args.reconciled.has(e.path) && !args.reconcileWrites.has(e.path)) continue;
+    out.add(e.path);
+  }
+  for (const path of args.rehearsed) out.add(path);
+  for (const path of args.removing) out.add(path);
+  return out;
 }
 
 /**
@@ -206,19 +313,24 @@ export function specsBothSidesHoldDifferently(args: {
   return out.sort();
 }
 
-/** A spec this clone keeps, and the files crossing now that it asserts about. */
-export type LeftBehindSpec = { spec: string; touchedBy: string[] };
+/**
+ * A spec this clone keeps, and the files crossing now that it asserts about.
+ * `removed` is the part of `touchedBy` the delivery removes rather than writes.
+ */
+export type LeftBehindSpec = { spec: string; touchedBy: string[]; removed: string[] };
 
 /**
  * The kept specs a delivery would leave behind: not crossing themselves, with
- * at least one subject that is. Sorted by spec, and each `touchedBy` sorted,
- * so a pass asks the same questions in the same order every time.
+ * at least one subject that is. Sorted by spec, and each list sorted, so a
+ * pass asks the same questions in the same order every time.
  */
 export function specsLeftBehind(args: {
-  /** Kept spec → its subjects, as `specSubjects` read them. */
+  /** Kept spec → its subjects, as `subjectsOfKeptSpec` read them. */
   kept: ReadonlyMap<string, readonly string[]>;
-  /** Every path the delivery writes or removes. */
+  /** Every path the delivery changes: written or removed. */
   crossing: ReadonlySet<string>;
+  /** The paths in `crossing` the delivery removes. */
+  removing?: ReadonlySet<string>;
 }): LeftBehindSpec[] {
   const out: LeftBehindSpec[] = [];
   for (const spec of [...args.kept.keys()].sort()) {
@@ -226,7 +338,9 @@ export function specsLeftBehind(args: {
     const touchedBy = [...new Set(args.kept.get(spec) ?? [])]
       .filter((subject) => subject !== spec && args.crossing.has(subject))
       .sort();
-    if (touchedBy.length > 0) out.push({ spec, touchedBy });
+    if (touchedBy.length === 0) continue;
+    const removed = touchedBy.filter((subject) => args.removing?.has(subject) ?? false);
+    out.push({ spec, touchedBy, removed });
   }
   return out;
 }
@@ -263,38 +377,107 @@ const LEFT_BEHIND_CUT_SHORT: Record<LeftBehindCutShort, string> = {
 };
 
 /**
+ * What a kept spec's subjects are doing in the finished delivery, which is
+ * what every note about the spec has to say.
+ */
+export type LeftBehindTouch = {
+  /** Subjects this delivery changes: written or removed. */
+  touchedBy: readonly string[];
+  /** The part of `touchedBy` this delivery removes rather than writes. */
+  removed?: readonly string[];
+  /**
+   * Subjects prime deleted whose removal this delivery withholds, because a
+   * file this clone keeps still imports them. Known only once the delivery is
+   * final: the removals are narrowed after every spec has been judged.
+   */
+  withheld?: readonly string[];
+};
+
+/** Up to three paths, then how many more. */
+function listSome(paths: readonly string[], shown = 3): string {
+  const named = paths.slice(0, shown).join(", ");
+  return paths.length > shown ? `${named} (and ${paths.length - shown} more)` : named;
+}
+
+/** `touchedBy` split into what the delivery writes and what it removes. */
+function splitTouch(touch: LeftBehindTouch): { updated: string[]; gone: string[] } {
+  const removed = new Set(touch.removed ?? []);
+  return {
+    updated: touch.touchedBy.filter((path) => !removed.has(path)),
+    gone: touch.touchedBy.filter((path) => removed.has(path)),
+  };
+}
+
+const WITHHELD_BECAUSE =
+  "that removal is withheld this pass because a file this clone keeps still imports it";
+
+/**
  * The held row for a spec this clone keeps whose subject crossed without it.
  *
  * `manual_reconcile`, so it is reported under "Needs a human" and an operator
  * may approve overwriting it — which is the one act that settles it when the
  * clone's copy carries work of its own. The note names the subjects that
  * crossed, because that is what the operator has to reconcile the spec
- * against, and says why prime's copy stayed put.
+ * against; says which of them the delivery removes, because "runs against
+ * the updated files" is false of a file that is gone; and says why prime's
+ * copy stayed put.
+ *
+ * Written again once the delivery is final, from what it finally does. A
+ * removal withheld after the spec was judged is named as withheld, and the
+ * hold stays: the clone's older copy still asserts about a file prime deleted,
+ * and bringing prime's version across is how that is settled.
  */
-export function leftBehindSpecHold(args: {
-  membrane: Pick<Membrane, "from" | "to">;
-  spec: string;
-  touchedBy: readonly string[];
-  /** A refusal from `decideHoldRelease`, in its own words. */
-  why?: string;
-  cutShort?: LeftBehindCutShort;
-}): HeldPath {
-  const { membrane, spec, touchedBy } = args;
-  const named = touchedBy.slice(0, 3).join(", ");
-  const more = touchedBy.length > 3 ? ` (and ${touchedBy.length - 3} more)` : "";
+export function leftBehindSpecHold(
+  args: {
+    membrane: Pick<Membrane, "from" | "to">;
+    spec: string;
+    /** A refusal from `decideHoldRelease`, in its own words. */
+    why?: string;
+    cutShort?: LeftBehindCutShort;
+  } & LeftBehindTouch,
+): HeldPath {
+  const { membrane, spec } = args;
+  const { updated, gone } = splitTouch(args);
+  const withheld = args.withheld ?? [];
   const reason = args.cutShort
     ? `Prime's version did not travel with them because ${LEFT_BEHIND_CUT_SHORT[args.cutShort]}.`
     : `Prime's version did not travel with them: ${args.why ?? "prime's history for this spec was not read this pass."}`;
+
+  let change: string;
+  if (updated.length > 0 && gone.length === 0) {
+    change = `this delivery updates ${updated.length} file(s) it asserts about: ${listSome(updated)}.`;
+  } else if (updated.length > 0) {
+    change =
+      `this delivery updates ${updated.length} file(s) it asserts about (${listSome(updated)}) ` +
+      `and removes ${gone.length} that prime deleted (${listSome(gone)}).`;
+  } else if (gone.length > 0) {
+    change = `this delivery removes ${gone.length} file(s) it asserts about, which prime deleted: ${listSome(gone)}.`;
+  } else if (withheld.length > 0) {
+    change = `it asserts about ${withheld.length} file(s) prime deleted: ${listSome(withheld)}.`;
+  } else {
+    change = "this delivery changes nothing it asserts about.";
+  }
+
+  const touched = updated.length + gone.length > 0;
+  const withheldNote =
+    withheld.length === 0
+      ? ""
+      : touched
+        ? ` Prime also deleted ${listSome(withheld)}, which it asserts about; ${WITHHELD_BECAUSE}.`
+        : ` This delivery withholds that removal because a file this clone keeps still imports it.`;
+  const closing = !touched
+    ? "Nothing it asserts about changes on this pass. A spec and its subject travel together " +
+      "or neither does, so bring prime's version across or update this clone's to match."
+    : `Until it is reconciled, this spec's older assertions run against ` +
+      `${updated.length > 0 ? "the updated files" : "a tree without them"} — a spec and its ` +
+      `subject travel together or neither does, so bring prime's version across or update this ` +
+      `clone's to match.`;
+
   return {
     path: spec,
     pattern: `(membrane: ${membrane.from}→${membrane.to} · spec channel: left behind by its subject)`,
     reason: "manual_reconcile",
-    note:
-      `This clone keeps its own version of this spec, and this delivery updates ` +
-      `${touchedBy.length} file(s) it asserts about: ${named}${more}. ${reason} Until it is ` +
-      `reconciled, this spec's older assertions run against the updated files — a spec and its ` +
-      `subject travel together or neither does, so bring prime's version across or update this ` +
-      `clone's to match.`,
+    note: `This clone keeps its own version of this spec, and ${change}${withheldNote} ${reason} ${closing}`,
   };
 }
 
@@ -305,15 +488,34 @@ export function leftBehindSpecHold(args: {
  * not travel. It cannot know the spec was only brought in because this
  * clone's older copy was being left behind, and that the older copy is what
  * stays. Both halves are said, so the operator reconciles against the right
- * files.
+ * files. Written again once the delivery is final, like every hold this half
+ * makes; a touch with nothing in it leaves the hold as it was.
  */
-export function withLeftBehindNote(hold: HeldPath, touchedBy: readonly string[]): HeldPath {
-  const named = touchedBy.slice(0, 3).join(", ");
-  const more = touchedBy.length > 3 ? ` (and ${touchedBy.length - 3} more)` : "";
-  const addition =
-    `It was brought in because this delivery updates ${named}${more}, which this clone's own ` +
-    `older copy asserts about; that older copy is what stays, so reconcile it against the ` +
-    `updated files.`;
+export function withLeftBehindNote(hold: HeldPath, touch: LeftBehindTouch): HeldPath {
+  const { updated, gone } = splitTouch(touch);
+  const withheld = touch.withheld ?? [];
+  let addition: string;
+  if (updated.length + gone.length > 0) {
+    const what =
+      gone.length === 0
+        ? `updates ${listSome(updated)}`
+        : updated.length === 0
+          ? `removes ${listSome(gone)}`
+          : `updates ${listSome(updated)} and removes ${listSome(gone)}`;
+    addition =
+      `It was brought in because this delivery ${what}, which this clone's own older copy ` +
+      `asserts about; that older copy is what stays, so reconcile it against ` +
+      `${updated.length > 0 ? "the updated files" : "a tree without them"}.`;
+    if (withheld.length > 0) {
+      addition += ` Prime also deleted ${listSome(withheld)}, which it asserts about; ${WITHHELD_BECAUSE}.`;
+    }
+  } else if (withheld.length > 0) {
+    addition =
+      `It was brought in because prime deleted ${listSome(withheld)}, which this clone's own ` +
+      `older copy asserts about. That older copy is what stays, and ${WITHHELD_BECAUSE}.`;
+  } else {
+    return hold;
+  }
   return { ...hold, note: hold.note ? `${hold.note} ${addition}` : addition };
 }
 
@@ -340,17 +542,43 @@ function nameSome(paths: readonly string[], shown = 3): string {
  * Empty when neither happened.
  *
  * Neither is in this clone's scope and no rule of its own sent them, so a
- * reader of the diff would otherwise meet them with no reason given.
+ * reader of the diff would otherwise meet them with no reason given. A spec
+ * is named for what the FINISHED delivery does to the files it follows —
+ * which can be less than when it was brought across, because a file can be
+ * held later in the pass or a removal withheld; those are named as
+ * `unchanged`, since prime's version still landed.
  */
 export function describeSpecsBroughtAcross(args: {
-  specs: ReadonlyArray<{ spec: string; touchedBy: readonly string[]; basis: CarryBasis }>;
+  specs: ReadonlyArray<{
+    spec: string;
+    touchedBy: readonly string[];
+    removed?: readonly string[];
+    unchanged?: readonly string[];
+    basis: CarryBasis;
+  }>;
   outside: ReadonlyArray<{ path: string; specs: readonly string[]; basis: CarryBasis }>;
 }): string {
   const lines: string[] = [];
   for (const s of [...args.specs].sort((a, b) => a.spec.localeCompare(b.spec))) {
-    lines.push(
-      `- \`${s.spec}\` — follows ${nameSome(s.touchedBy)}, which this delivery updates; ${BASIS_WORDS[s.basis]}.`,
-    );
+    const { updated, gone } = splitTouch(s);
+    const unchanged = s.unchanged ?? [];
+    let follows: string;
+    if (updated.length + gone.length > 0) {
+      follows =
+        gone.length === 0
+          ? `follows ${nameSome(updated)}, which this delivery updates`
+          : updated.length === 0
+            ? `follows ${nameSome(gone)}, which this delivery removes`
+            : `follows ${nameSome(updated)}, which this delivery updates, and ${nameSome(gone)}, which it removes`;
+      if (unchanged.length > 0) {
+        follows += ` (it was also brought across for ${nameSome(unchanged)}, which this delivery no longer changes)`;
+      }
+    } else if (unchanged.length > 0) {
+      follows = `was brought across for ${nameSome(unchanged)}, which this delivery no longer changes`;
+    } else {
+      follows = "was brought across with the files it asserts about";
+    }
+    lines.push(`- \`${s.spec}\` — ${follows}; ${BASIS_WORDS[s.basis]}.`);
   }
   for (const o of [...args.outside].sort((a, b) => a.path.localeCompare(b.path))) {
     lines.push(

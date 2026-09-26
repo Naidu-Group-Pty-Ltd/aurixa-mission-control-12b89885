@@ -6,9 +6,11 @@ import {
   leftBehindSpecHold,
   MAX_LEFT_BEHIND_PROBES,
   MAX_SHIM_HOPS,
+  pathsTheDeliveryChanges,
   specSubjects,
   specsBothSidesHoldDifferently,
   specsLeftBehind,
+  subjectsOfKeptSpec,
   withLeftBehindNote,
 } from "./specsLeftBehind.pure";
 
@@ -58,7 +60,7 @@ describe("specSubjects — what a spec asserts about, from its own text", () => 
     const got = specSubjects({
       specPath: "src/lib/geocode/__tests__/geocoderWiring.spec.ts",
       specText: `readFileSync("docs/integrations/GEOCODING_WITHOUT_GOOGLE.md", "utf8")`,
-      prime,
+      tree: prime,
       readText: () => undefined,
     });
     expect(got).toContain("docs/integrations/GEOCODING_WITHOUT_GOOGLE.md");
@@ -68,7 +70,7 @@ describe("specSubjects — what a spec asserts about, from its own text", () => 
     const got = specSubjects({
       specPath: "src/lib/reportDesign/__tests__/reportTypography.spec.ts",
       specText: `readFileSync(resolve(REPO, '.claude/skills/npc-services-design/reports/REPORT_RULES.md'))`,
-      prime: tree(),
+      tree: tree(),
       readText: () => undefined,
     });
     expect(got).toContain(".claude/skills/npc-services-design/reports/REPORT_RULES.md");
@@ -79,7 +81,7 @@ describe("specSubjects — what a spec asserts about, from its own text", () => 
     const got = specSubjects({
       specPath: SPEC,
       specText: `import { a } from "@/lib/geocode/osmGeocode.pure";\nimport { b } from "../geocodeResult.pure";\n`,
-      prime,
+      tree: prime,
       readText: () => "export const z = 1;",
     });
     expect(got).toEqual(expect.arrayContaining([SHIM, "src/lib/geocode/geocodeResult.pure.ts"]));
@@ -92,7 +94,7 @@ describe("specSubjects — what a spec asserts about, from its own text", () => 
     const got = specSubjects({
       specPath: SPEC,
       specText: `import { parseProviderOrder } from "../osmGeocode.pure";\n`,
-      prime,
+      tree: prime,
       readText: (path) =>
         path === SHIM
           ? `export * from "../../../supabase/functions/_shared/geocode/osmGeocode.pure.ts";`
@@ -113,7 +115,7 @@ describe("specSubjects — what a spec asserts about, from its own text", () => 
     const got = specSubjects({
       specPath: SPEC,
       specText: `import { thing } from "@/a";`,
-      prime,
+      tree: prime,
       readText: (path) => texts[path],
     });
     expect(got).toEqual(["src/a.ts", "src/b.ts", "src/c.ts"]);
@@ -125,7 +127,7 @@ describe("specSubjects — what a spec asserts about, from its own text", () => 
     const got = specSubjects({
       specPath: SPEC,
       specText: `import { w } from "@/wrapper";`,
-      prime,
+      tree: prime,
       readText: (path) =>
         path === "src/wrapper.ts" ? `import { i } from "./inner";\nexport const w = i;` : undefined,
     });
@@ -138,7 +140,7 @@ describe("specSubjects — what a spec asserts about, from its own text", () => 
     const got = specSubjects({
       specPath: SPEC,
       specText: `import { a } from "../osmGeocode.pure";`,
-      prime,
+      tree: prime,
       readText: () => undefined,
       onUnread: (path) => unread.push(path),
     });
@@ -156,7 +158,7 @@ describe("specSubjects — what a spec asserts about, from its own text", () => 
     const got = specSubjects({
       specPath: SPEC,
       specText: `import { a } from "../osmGeocode.pure";`,
-      prime: tree(SPEC, SHIM),
+      tree: tree(SPEC, SHIM),
       readText: () => undefined,
     });
     expect(got).toContain("src/lib/geocode/osmGeocode.pure");
@@ -170,7 +172,7 @@ describe("specSubjects — what a spec asserts about, from its own text", () => 
     const got = specSubjects({
       specPath: SPEC,
       specText: `import { x } from "@/a";`,
-      prime,
+      tree: prime,
       readText: (path) => (path === "src/a.ts" ? `export * from "./b";` : `export * from "./a";`),
     });
     expect(got).toEqual(["src/a.ts", "src/b.ts"]);
@@ -182,7 +184,7 @@ describe("specSubjects — what a spec asserts about, from its own text", () => 
     const got = specSubjects({
       specPath: SPEC,
       specText: `import { x } from "@/s0";`,
-      prime,
+      tree: prime,
       readText: (path) => {
         const i = chain.indexOf(path);
         return i >= 0 && i < chain.length - 1 ? `export * from "./s${i + 1}";` : undefined;
@@ -192,14 +194,191 @@ describe("specSubjects — what a spec asserts about, from its own text", () => 
     expect(got).toHaveLength(MAX_SHIM_HOPS + 1);
   });
 
-  it("drops a specifier prime's tree does not hold rather than guessing a path", () => {
+  it("drops a specifier the tree does not hold rather than guessing a path", () => {
     const got = specSubjects({
       specPath: SPEC,
       specText: `import { x } from "@/lib/nowhere";`,
-      prime: tree(SPEC),
+      tree: tree(SPEC),
       readText: () => undefined,
     });
     expect(got).toEqual([]);
+  });
+});
+
+describe("subjectsOfKeptSpec — each copy read against its own tree", () => {
+  const SPEC = "src/lib/crm/__tests__/crmInbox.spec.ts";
+  const CLONE_ONLY = "src/lib/crm/crmInboxClone.ts";
+  const SHARED = "src/lib/crm/inboxShared.ts";
+
+  it("resolves the clone's copy against the clone's tree, where prime's tree holds nothing to resolve to", () => {
+    // The clone's copy imports a module only the clone holds. Against prime's
+    // tree that import resolves to nothing, so a removal of the module read as
+    // no change to the spec that imports it.
+    const cloneText = `import { inbox } from "../crmInboxClone";\n`;
+    const primeTree = tree(SPEC, SHARED);
+    const cloneTree = tree(SPEC, SHARED, CLONE_ONLY);
+    expect(
+      specSubjects({
+        specPath: SPEC,
+        specText: cloneText,
+        tree: primeTree,
+        readText: () => undefined,
+      }),
+    ).toEqual([]);
+    const got = subjectsOfKeptSpec({
+      specPath: SPEC,
+      sides: [
+        {
+          side: "prime",
+          text: `import { s } from "../inboxShared";\n`,
+          tree: primeTree,
+          readText: () => undefined,
+        },
+        { side: "clone", text: cloneText, tree: cloneTree, readText: () => undefined },
+      ],
+    });
+    expect(got).toEqual([CLONE_ONLY, SHARED]);
+  });
+
+  it("looks through each side's shim with that side's own text", () => {
+    // Both copies import the same shim path, and the shim re-exports a
+    // different module on each side. Each side's target is its own.
+    const shim = "src/lib/crm/inbox.ts";
+    const text = `import { i } from "../inbox";\n`;
+    const primeTree = tree(SPEC, shim, "src/lib/crm/x.ts");
+    const cloneTree = tree(SPEC, shim, "src/lib/crm/y.ts");
+    const got = subjectsOfKeptSpec({
+      specPath: SPEC,
+      sides: [
+        {
+          side: "prime",
+          text,
+          tree: primeTree,
+          readText: (p) => (p === shim ? `export * from "./x";` : undefined),
+        },
+        {
+          side: "clone",
+          text,
+          tree: cloneTree,
+          readText: (p) => (p === shim ? `export * from "./y";` : undefined),
+        },
+      ],
+    });
+    expect(got).toEqual([shim, "src/lib/crm/x.ts", "src/lib/crm/y.ts"]);
+  });
+
+  it("says which side a module could not be read from, so it is read from that repository", () => {
+    const shim = "src/lib/crm/inbox.ts";
+    const unread: Array<[string, string]> = [];
+    subjectsOfKeptSpec({
+      specPath: SPEC,
+      sides: [
+        {
+          side: "prime",
+          text: `import { i } from "../inbox";`,
+          tree: tree(SPEC, shim),
+          readText: () => undefined,
+        },
+        {
+          side: "clone",
+          text: `import { i } from "../inbox";`,
+          tree: tree(SPEC, shim),
+          readText: () => undefined,
+        },
+      ],
+      onUnread: (side, path) => unread.push([side, path]),
+    });
+    expect(unread).toEqual([
+      ["prime", shim],
+      ["clone", shim],
+    ]);
+  });
+
+  it("skips a side whose copy was not read, rather than reading it as a spec with no subjects", () => {
+    const got = subjectsOfKeptSpec({
+      specPath: SPEC,
+      sides: [
+        { side: "prime", text: undefined, tree: tree(SPEC, SHARED), readText: () => undefined },
+        {
+          side: "clone",
+          text: `import { s } from "../inboxShared";`,
+          tree: tree(SPEC, SHARED),
+          readText: () => undefined,
+        },
+      ],
+    });
+    expect(got).toEqual([SHARED]);
+  });
+});
+
+describe("pathsTheDeliveryChanges — what crossing means on this side of the channel", () => {
+  const none = new Set<string>();
+
+  it("counts a verbatim write, and never a tree entry that removes", () => {
+    const got = pathsTheDeliveryChanges({
+      entries: [
+        { path: "src/a.ts", sha: "blob-a" },
+        { path: "src/gone.ts", sha: null },
+      ],
+      reconciled: none,
+      reconcileWrites: none,
+      rehearsed: none,
+      removing: none,
+    });
+    expect([...got]).toEqual(["src/a.ts"]);
+  });
+
+  it("does not count a reconcile pump whose merge writes the clone's own bytes back", () => {
+    // The first replay held the clone's own crmConversations.spec.ts under
+    // "this delivery updates supabase/config.toml" on a delivery that changed
+    // no config.toml.
+    const got = pathsTheDeliveryChanges({
+      entries: [{ path: "supabase/config.toml", sha: "same-as-clone" }],
+      reconciled: new Set(["supabase/config.toml"]),
+      reconcileWrites: none,
+      rehearsed: none,
+      removing: none,
+    });
+    expect(got.size).toBe(0);
+  });
+
+  it("does count a reconcile pump whose merge changes the file", () => {
+    const got = pathsTheDeliveryChanges({
+      entries: [{ path: "supabase/config.toml", sha: "merged" }],
+      reconciled: new Set(["supabase/config.toml"]),
+      reconcileWrites: new Set(["supabase/config.toml"]),
+      rehearsed: none,
+      removing: none,
+    });
+    expect([...got]).toEqual(["supabase/config.toml"]);
+  });
+
+  it("counts what a rehearsal would write, so a dry run answers as the real pass would", () => {
+    const got = pathsTheDeliveryChanges({
+      entries: [],
+      reconciled: none,
+      reconcileWrites: none,
+      rehearsed: new Set(["supabase/security/SECURITY_REGISTRY.json"]),
+      removing: none,
+    });
+    expect([...got]).toEqual(["supabase/security/SECURITY_REGISTRY.json"]);
+  });
+
+  it("counts a removal only from the finished plan, never from the tree's own removing entries", () => {
+    // A removal the reference check withheld still has no place in `removing`,
+    // and the entry that would have made it is ignored here, so a withheld
+    // removal can never read as crossing.
+    const got = pathsTheDeliveryChanges({
+      entries: [
+        { path: "src/planned.ts", sha: null },
+        { path: "src/withheld.ts", sha: null },
+      ],
+      reconciled: none,
+      reconcileWrites: none,
+      rehearsed: none,
+      removing: new Set(["src/planned.ts"]),
+    });
+    expect([...got]).toEqual(["src/planned.ts"]);
   });
 });
 
@@ -245,8 +424,8 @@ describe("specsLeftBehind — a kept spec whose subject is crossing", () => {
       crossing: new Set(["src/y.ts", "src/z.ts", "src/a.ts"]),
     });
     expect(got).toEqual([
-      { spec: "src/a/__tests__/a.spec.ts", touchedBy: ["src/a.ts"] },
-      { spec: "src/z/__tests__/z.spec.ts", touchedBy: ["src/y.ts", "src/z.ts"] },
+      { spec: "src/a/__tests__/a.spec.ts", touchedBy: ["src/a.ts"], removed: [] },
+      { spec: "src/z/__tests__/z.spec.ts", touchedBy: ["src/y.ts", "src/z.ts"], removed: [] },
     ]);
   });
 
@@ -260,6 +439,21 @@ describe("specsLeftBehind — a kept spec whose subject is crossing", () => {
 
   it("is nothing when no subject crosses", () => {
     expect(specsLeftBehind({ kept, crossing: new Set(["src/other.ts"]) })).toEqual([]);
+  });
+
+  it("says which of the crossing subjects the delivery removes", () => {
+    const got = specsLeftBehind({
+      kept,
+      crossing: new Set(["src/y.ts", "src/z.ts"]),
+      removing: new Set(["src/y.ts"]),
+    });
+    expect(got).toEqual([
+      {
+        spec: "src/z/__tests__/z.spec.ts",
+        touchedBy: ["src/y.ts", "src/z.ts"],
+        removed: ["src/y.ts"],
+      },
+    ]);
   });
 });
 
@@ -329,6 +523,87 @@ describe("leftBehindSpecHold — what a person is told", () => {
       expect(h.note).not.toContain("carries work done here");
     }
   });
+  it("says a delivery that only updates its subjects in exactly the words it always has", () => {
+    // Pinned whole: every hold written before removals were told apart used
+    // these words, and an operator's reading of them must not move.
+    const held = leftBehindSpecHold({
+      membrane,
+      spec: "src/pages/__tests__/crmConversations.spec.ts",
+      touchedBy: ["supabase/config.toml"],
+      why: "This clone's copy matches no version prime ever held at this path — it carries work done here.",
+    });
+    expect(held.note).toBe(
+      "This clone keeps its own version of this spec, and this delivery updates 1 file(s) it " +
+        "asserts about: supabase/config.toml. Prime's version did not travel with them: This " +
+        "clone's copy matches no version prime ever held at this path — it carries work done " +
+        "here. Until it is reconciled, this spec's older assertions run against the updated " +
+        "files — a spec and its subject travel together or neither does, so bring prime's " +
+        "version across or update this clone's to match.",
+    );
+  });
+
+  it("never calls a removed file updated, and says the spec runs against a tree without it", () => {
+    const held = leftBehindSpecHold({
+      membrane,
+      spec: "src/s.spec.ts",
+      touchedBy: ["src/gone.ts"],
+      removed: ["src/gone.ts"],
+      why: "x.",
+    });
+    expect(held.note).toContain(
+      "this delivery removes 1 file(s) it asserts about, which prime deleted: src/gone.ts.",
+    );
+    expect(held.note).not.toContain("updates");
+    expect(held.note).toContain("run against a tree without them");
+    expect(held.note).not.toContain("the updated files");
+  });
+
+  it("names both halves when a delivery updates some subjects and removes others", () => {
+    const held = leftBehindSpecHold({
+      membrane,
+      spec: "src/s.spec.ts",
+      touchedBy: ["src/a.ts", "src/gone.ts"],
+      removed: ["src/gone.ts"],
+      why: "x.",
+    });
+    expect(held.note).toContain(
+      "this delivery updates 1 file(s) it asserts about (src/a.ts) and removes 1 that prime deleted (src/gone.ts).",
+    );
+    expect(held.note).toContain("run against the updated files");
+  });
+
+  it("names a removal the delivery withheld beside what it does change", () => {
+    const held = leftBehindSpecHold({
+      membrane,
+      spec: "src/s.spec.ts",
+      touchedBy: ["src/a.ts"],
+      withheld: ["src/kept-import.ts"],
+      why: "x.",
+    });
+    expect(held.note).toContain("updates 1 file(s) it asserts about: src/a.ts.");
+    expect(held.note).toContain(
+      "Prime also deleted src/kept-import.ts, which it asserts about; that removal is withheld this pass because a file this clone keeps still imports it.",
+    );
+  });
+
+  it("stays and says why where the only subject that moved had its removal withheld", () => {
+    // The hold is the row an operator approves to let the spec — and so the
+    // removal — through, so it is not dropped when nothing else changes.
+    const held = leftBehindSpecHold({
+      membrane,
+      spec: "src/s.spec.ts",
+      touchedBy: [],
+      withheld: ["src/kept-import.ts"],
+      why: "x.",
+    });
+    expect(held.note).toContain("it asserts about 1 file(s) prime deleted: src/kept-import.ts.");
+    expect(held.note).toContain(
+      "This delivery withholds that removal because a file this clone keeps still imports it.",
+    );
+    expect(held.note).toContain("Nothing it asserts about changes on this pass.");
+    expect(held.note).not.toContain("updates");
+    expect(held.note).not.toContain("older assertions run against");
+  });
 });
 
 describe("withLeftBehindNote — a forward hold on a spec brought in from behind", () => {
@@ -339,7 +614,7 @@ describe("withLeftBehindNote — a forward hold on a spec brought in from behind
       reason: "manual_reconcile" as const,
       note: "This spec asserts about 1 file(s) that differ upstream.",
     };
-    const out = withLeftBehindNote(hold, ["src/lib/navigation/registry.ts"]);
+    const out = withLeftBehindNote(hold, { touchedBy: ["src/lib/navigation/registry.ts"] });
     expect(out.path).toBe(hold.path);
     expect(out.pattern).toBe(hold.pattern);
     expect(out.note?.startsWith(hold.note)).toBe(true);
@@ -350,9 +625,45 @@ describe("withLeftBehindNote — a forward hold on a spec brought in from behind
   it("stands on its own where the hold carried no note", () => {
     const out = withLeftBehindNote(
       { path: "p", pattern: "x", reason: "manual_reconcile", note: null },
-      ["src/a.ts"],
+      { touchedBy: ["src/a.ts"] },
     );
     expect(out.note).toMatch(/^It was brought in because/);
+  });
+  const hold = {
+    path: "src/s.spec.ts",
+    pattern: "(membrane: a→b · spec channel gated on its subject)",
+    reason: "manual_reconcile" as const,
+    note: "Forward.",
+  };
+
+  it("adds exactly the words it always has where the delivery only updates", () => {
+    expect(withLeftBehindNote(hold, { touchedBy: ["src/a.ts"] }).note).toBe(
+      "Forward. It was brought in because this delivery updates src/a.ts, which this clone's own " +
+        "older copy asserts about; that older copy is what stays, so reconcile it against the " +
+        "updated files.",
+    );
+  });
+
+  it("says a removed subject was removed, and what the older copy is reconciled against", () => {
+    const note = withLeftBehindNote(hold, {
+      touchedBy: ["src/gone.ts"],
+      removed: ["src/gone.ts"],
+    }).note;
+    expect(note).toContain("this delivery removes src/gone.ts");
+    expect(note).toContain("reconcile it against a tree without them.");
+    expect(note).not.toContain("updates");
+  });
+
+  it("says why the spec was in play when the only thing that moved was a withheld removal", () => {
+    const note = withLeftBehindNote(hold, { touchedBy: [], withheld: ["src/kept-import.ts"] }).note;
+    expect(note).toContain("It was brought in because prime deleted src/kept-import.ts");
+    expect(note).toContain(
+      "that removal is withheld this pass because a file this clone keeps still imports it.",
+    );
+  });
+
+  it("leaves the hold exactly as it was when nothing it asserts about moved at all", () => {
+    expect(withLeftBehindNote(hold, { touchedBy: [] })).toBe(hold);
   });
 });
 
@@ -384,6 +695,74 @@ describe("describeSpecsBroughtAcross — why a file outside this clone's scope i
     expect(lines[0]).toContain("an operator recorded an overwrite approval");
     expect(lines[1]).toContain("osmGeocode.spec.ts");
     expect(lines[1]).toContain("byte-identical to an older version of prime's");
+  });
+
+  it("names a spec in exactly the words it always has where the delivery only updates", () => {
+    expect(
+      describeSpecsBroughtAcross({
+        specs: [{ spec: "src/s.spec.ts", touchedBy: ["src/a.ts"], basis: "unedited" }],
+        outside: [],
+      }),
+    ).toBe(
+      "- `src/s.spec.ts` — follows `src/a.ts`, which this delivery updates; this clone's copy was " +
+        "byte-identical to an older version of prime's.",
+    );
+  });
+
+  it("tells a removed subject from an updated one", () => {
+    const removedOnly = describeSpecsBroughtAcross({
+      specs: [
+        {
+          spec: "src/s.spec.ts",
+          touchedBy: ["src/gone.ts"],
+          removed: ["src/gone.ts"],
+          basis: "unedited",
+        },
+      ],
+      outside: [],
+    });
+    expect(removedOnly).toContain("follows `src/gone.ts`, which this delivery removes;");
+    const mixed = describeSpecsBroughtAcross({
+      specs: [
+        {
+          spec: "src/s.spec.ts",
+          touchedBy: ["src/a.ts", "src/gone.ts"],
+          removed: ["src/gone.ts"],
+          basis: "approved",
+        },
+      ],
+      outside: [],
+    });
+    expect(mixed).toContain(
+      "follows `src/a.ts`, which this delivery updates, and `src/gone.ts`, which it removes;",
+    );
+  });
+
+  it("owns up to a subject the finished delivery no longer changes, because prime's version still landed", () => {
+    const partly = describeSpecsBroughtAcross({
+      specs: [
+        {
+          spec: "src/s.spec.ts",
+          touchedBy: ["src/a.ts"],
+          unchanged: ["src/held.ts"],
+          basis: "unedited",
+        },
+      ],
+      outside: [],
+    });
+    expect(partly).toContain(
+      "follows `src/a.ts`, which this delivery updates (it was also brought across for `src/held.ts`, which this delivery no longer changes);",
+    );
+    const wholly = describeSpecsBroughtAcross({
+      specs: [
+        { spec: "src/s.spec.ts", touchedBy: [], unchanged: ["src/held.ts"], basis: "unedited" },
+      ],
+      outside: [],
+    });
+    expect(wholly).toContain(
+      "— was brought across for `src/held.ts`, which this delivery no longer changes;",
+    );
+    expect(wholly).not.toContain("follows");
   });
 
   it("names a file carried beside the spec that asserts about it", () => {
