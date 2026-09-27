@@ -334,6 +334,23 @@ export type DetectedBlockage = {
 const ms = (iso: string | null) => (iso ? new Date(iso).getTime() : null);
 
 /**
+ * Whether start `a` is earlier than start `b`. An absent or unreadable start
+ * is never earlier than a readable one, so it can only ever be replaced.
+ */
+const startsEarlier = (a: string | null, b: string | null): boolean => {
+  const x = ms(a);
+  if (x === null || !Number.isFinite(x)) return false;
+  const y = ms(b);
+  return y === null || !Number.isFinite(y) || x < y;
+};
+
+/** A start for sorting: unreadable or absent sorts last. */
+const startOrder = (iso: string | null): number => {
+  const v = ms(iso);
+  return v !== null && Number.isFinite(v) ? v : Number.POSITIVE_INFINITY;
+};
+
+/**
  * How far out a deferral may legitimately be parked.
  *
  * `rateLimitDeferral` never places one past sixty-five minutes, on the
@@ -357,22 +374,32 @@ export function classifyBlockages(facts: CloneBlockageFacts, now: Date): Detecte
     The ledger keys its open set on the fingerprint, so a pass that detected
     one fingerprint twice would open two rows, and every later pass would see
     only one of them — the other stays open for ever with nothing able to
-    clear it. The first detection of an identity stands; a repeat of it is the
-    same condition, not a second one.
+    clear it. A repeat of an identity is the same condition, not a second one.
+
+    Its words are the first detection's, and every caller emits the most
+    current first. Its START is the earliest any detection reports: the
+    condition has existed since its first evidence, and a row opened on a
+    later one would understate how long it has stood (Codex's reading of the
+    first-wins guard, which kept whichever repeat the facts listed first).
   */
-  const emitted = new Set<string>();
+  const emitted = new Map<string, DetectedBlockage>();
   const add = (cls: BlockageClass, fingerprint: string, detail: string, since: string | null) => {
-    if (emitted.has(fingerprint)) return;
-    emitted.add(fingerprint);
+    const prior = emitted.get(fingerprint);
+    if (prior) {
+      if (startsEarlier(since, prior.since)) prior.since = since;
+      return;
+    }
     const policy = BLOCKAGE_POLICY[cls];
-    found.push({
+    const detected: DetectedBlockage = {
       cls,
       owner: policy.owner,
       selfHeals: policy.selfHeals,
       fingerprint,
       detail,
       since,
-    });
+    };
+    emitted.set(fingerprint, detected);
+    found.push(detected);
   };
 
   /*
@@ -491,7 +518,23 @@ export function classifyBlockages(facts: CloneBlockageFacts, now: Date): Detecte
   const refused = new Set(
     refusals.map((r) => pullRequestKey(r.prUrl)).filter((k): k is string => k !== null),
   );
-  for (const p of facts.openProposals) {
+  // A refusal is described by its newest notice and dates from its OLDEST
+  // unread one: while any of them stands unread, the pull request has been
+  // refused since the first.
+  const refusedSince = new Map<string, string>();
+  for (const n of facts.blockedNotices) {
+    const key = refusalKey(n);
+    const prior = refusedSince.get(key);
+    if (prior === undefined || startsEarlier(n.createdAt, prior)) refusedSince.set(key, n.createdAt);
+  }
+  // Oldest first, so a pull request with more than one open record is
+  // described by its oldest, whose words and start then agree.
+  const proposalsOldestFirst = [...facts.openProposals].sort((a, b) => {
+    const x = startOrder(a.createdAt);
+    const y = startOrder(b.createdAt);
+    return x === y ? 0 : x < y ? -1 : 1;
+  });
+  for (const p of proposalsOldestFirst) {
     if (retargeted.includes(p)) continue;
     const key = pullRequestKey(p.prUrl);
     if (key !== null && refused.has(key)) continue;
@@ -621,7 +664,7 @@ export function classifyBlockages(facts: CloneBlockageFacts, now: Date): Detecte
         ? detail
         : `This pull request is in ${elsewhere}, which ${facts.label} no longer cascades to, so ` +
             `the drain leaves its notice unread and it stands until an operator reads it. ${detail}`,
-      r.createdAt,
+      refusedSince.get(refusalKey(r)) ?? r.createdAt,
     );
   }
 
@@ -730,13 +773,25 @@ export function refusalFingerprint(r: BlockedNotice, repoFullName: string | null
 }
 
 /**
+ * Which refusal a notice belongs to: its pull request, or its title where the
+ * URL does not parse (the title names the pull request as well). One rule, so
+ * the refusals `standingRefusals` keeps and the starts `classifyBlockages`
+ * gives them can never be grouped two different ways.
+ */
+export function refusalKey(n: BlockedNotice): string {
+  return pullRequestKey(n.prUrl) ?? `title:${n.title}`;
+}
+
+/**
  * The standing refusals a clone's unread notices describe: the NEWEST notice
  * for each pull request, newest first.
  *
  * The drain's dedupe key is the pull request AND its verdict, so a pull
  * request whose failure changes shape gets a second notice while the first
  * stays unread. Those are one refusal, and the newest verdict is the current
- * one; two pull requests are two refusals, each owed its own finding.
+ * one; two pull requests are two refusals, each owed its own finding. The
+ * refusal still dates from its oldest unread notice, which `classifyBlockages`
+ * reads through `refusalKey` rather than from the notice kept here.
  *
  * A notice whose URL does not parse is keyed on its title, which names the
  * pull request as well, so it still counts as one refusal rather than none.
@@ -754,7 +809,7 @@ export function standingRefusals(notices: ReadonlyArray<BlockedNotice>): Blocked
   const seen = new Set<string>();
   const out: BlockedNotice[] = [];
   for (const n of newestFirst) {
-    const key = pullRequestKey(n.prUrl) ?? `title:${n.title}`;
+    const key = refusalKey(n);
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(n);

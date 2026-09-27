@@ -514,7 +514,7 @@ describe("every refused pull request keeps its own finding", () => {
     expect(found.some((b) => b.cls === "unreconciled_proposal")).toBe(false);
   });
 
-  it("one pull request refused twice is one finding, carrying the newest verdict", () => {
+  it("one pull request refused twice is one finding, carrying the newest verdict and the first refusal's start", () => {
     const found = classifyBlockages(
       stalled({
         openProposals: [proposal(264, 60 * 15)],
@@ -529,7 +529,8 @@ describe("every refused pull request keeps its own finding", () => {
     expect(found[0].cls).toBe("ci_red");
     expect(found[0].detail).toContain("verify (failure)");
     expect(found[0].detail).not.toContain("security (failure)");
-    expect(found[0].since).toBe(ago(30));
+    // Refused since the first unread notice, whichever verdict is current.
+    expect(found[0].since).toBe(ago(60 * 14));
   });
 
   it("a notice with no URL and one with a URL for the same pull request open one row, not two", () => {
@@ -649,6 +650,68 @@ describe("the classifier never reports one identity twice", () => {
       NOW,
     );
     expect(found.map((b) => b.fingerprint)).toEqual([`unreconciled_proposal:${pr}`]);
+  });
+
+  /*
+    Codex's reading of the first-wins guard: the facts list repeats in no
+    particular order, so keeping whichever came first could date a row from
+    its NEWER evidence. A repeated identity dates from the earliest.
+  */
+  it("two open records of one pull request date from the older, whichever is listed first", () => {
+    const pr = "https://github.com/Naidu-Group-Pty-Ltd/npc-client-dashboard/pull/250";
+    const repo = "Naidu-Group-Pty-Ltd/npc-client-dashboard";
+    for (const order of ["newer first", "older first"] as const) {
+      const newer = { resultId: "rB", prUrl: pr, prRepo: repo, createdAt: ago(300) };
+      const older = { resultId: "rA", prUrl: pr, prRepo: repo, createdAt: ago(600) };
+      const found = classifyBlockages(
+        facts({ openProposals: order === "newer first" ? [newer, older] : [older, newer] }),
+        NOW,
+      );
+      expect(found, order).toHaveLength(1);
+      expect(found[0].since, order).toBe(ago(600));
+      // Its words name the same start, rather than contradicting it.
+      expect(found[0].detail, order).toContain(ago(600));
+    }
+  });
+
+  it("a notice with no URL older than one with a URL: one row, dated from the older", () => {
+    const found = classifyBlockages(
+      stalled({
+        blockedNotices: [
+          {
+            title: "Cascade blocked · NPC Client Dashboard · PR #9",
+            body: "Newest verdict.",
+            createdAt: ago(10),
+            prUrl: "https://github.com/Naidu-Group-Pty-Ltd/npc-client-dashboard/pull/9",
+          },
+          {
+            title: "Cascade blocked · NPC Client Dashboard · PR #9",
+            body: "Older verdict.",
+            createdAt: ago(900),
+            prUrl: null,
+          },
+        ],
+      }),
+      NOW,
+    );
+    expect(found).toHaveLength(1);
+    expect(found[0].since).toBe(ago(900));
+    expect(found[0].detail).toContain("Newest verdict.");
+  });
+
+  it("an unreadable start never displaces a readable one", () => {
+    const pr = "https://github.com/Naidu-Group-Pty-Ltd/npc-client-dashboard/pull/250";
+    const repo = "Naidu-Group-Pty-Ltd/npc-client-dashboard";
+    const found = classifyBlockages(
+      facts({
+        openProposals: [
+          { resultId: "rA", prUrl: pr, prRepo: repo, createdAt: ago(600) },
+          { resultId: "rB", prUrl: pr, prRepo: repo, createdAt: "not a date" },
+        ],
+      }),
+      NOW,
+    );
+    expect(found.map((b) => b.since)).toEqual([ago(600)]);
   });
 
   it("no fingerprint repeats across a busy clone", () => {
