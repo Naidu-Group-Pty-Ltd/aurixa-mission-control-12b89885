@@ -7,7 +7,9 @@ import {
   isInvocationCut,
   parsePrRepo,
   pullRequestKey,
+  standingRefusals,
   type BlockageClass,
+  type BlockedNotice,
   type CloneBlockageFacts,
 } from "./blockageTaxonomy.pure";
 import { MAX_ATTEMPTS, STALL_MINUTES } from "./drainLimits.pure";
@@ -25,8 +27,7 @@ const facts = (over: Partial<CloneBlockageFacts> = {}): CloneBlockageFacts => ({
   openProposals: [],
   events: [],
   consecutiveFailures: 0,
-  blockedNotice: null,
-  blockedPrUrls: [],
+  blockedNotices: [],
   primeLedgerHoles: [],
   sloMinutes: 90,
   ...over,
@@ -338,11 +339,14 @@ describe("the gate's verdict is read, never re-derived", () => {
         owedFingerprint: "40:x",
         unchangedSince: ago(200),
       },
-      blockedNotice: {
-        title: "Cascade blocked · NPC Client Dashboard · PR #200",
-        body: "Cascade PR #200 on NPC Client Dashboard is failing the same way on a rebuilt head — this does not clear on its own.\n\nNot merging — 1 check(s) failing: security (failure).\n\nThe proposal carries: Open",
-        createdAt: ago(120),
-      },
+      blockedNotices: [
+        {
+          title: "Cascade blocked · NPC Client Dashboard · PR #200",
+          body: "Cascade PR #200 on NPC Client Dashboard is failing the same way on a rebuilt head — this does not clear on its own.\n\nNot merging — 1 check(s) failing: security (failure).\n\nThe proposal carries: Open",
+          createdAt: ago(120),
+          prUrl: "https://github.com/Naidu-Group-Pty-Ltd/npc-client-dashboard/pull/200",
+        },
+      ],
     });
     const found = classifyBlockages(f, NOW);
     expect(found.map((b) => b.cls)).toEqual(["ci_red"]);
@@ -363,10 +367,11 @@ describe("a proposal the drain has refused is not an unreconciled one", () => {
     failure only prime's author can clear.
   */
   const PR264 = "https://github.com/Naidu-Group-Pty-Ltd/npc-client-dashboard/pull/264";
-  const notice264 = {
+  const notice264: BlockedNotice = {
     title: "Cascade blocked · NPC Client Dashboard · PR #264",
     body: "Cascade PR #264 on NPC Client Dashboard is failing the same way on a rebuilt head — this does not clear on its own.\n\nNot merging — 1 check(s) failing: verify (failure).",
     createdAt: ago(60 * 14),
+    prUrl: PR264,
   };
   const open264 = {
     resultId: "r264",
@@ -376,26 +381,26 @@ describe("a proposal the drain has refused is not an unreconciled one", () => {
   };
 
   it("reports the refusal alone, not a second finding about the same pull request", () => {
-    const f = stalled({
-      openProposals: [open264],
-      blockedNotice: notice264,
-      blockedPrUrls: [PR264],
-    });
+    const f = stalled({ openProposals: [open264], blockedNotices: [notice264] });
     expect(classes(f)).toEqual(["ci_red"]);
   });
 
   it("reproduces the double finding when the notice's pull request is not read", () => {
     // The shape before the ledger carried the notice's URL: the same facts,
     // with nothing saying which pull request the notice names.
-    const f = stalled({ openProposals: [open264], blockedNotice: notice264 });
+    const f = stalled({ openProposals: [open264], blockedNotices: [{ ...notice264, prUrl: null }] });
     expect(classes(f)).toEqual(["ci_red", "unreconciled_proposal"]);
   });
 
   it("matches the pull request, not the spelling of its URL", () => {
     const f = stalled({
       openProposals: [open264],
-      blockedNotice: notice264,
-      blockedPrUrls: ["https://github.com/naidu-group-pty-ltd/NPC-Client-Dashboard/pull/264/checks"],
+      blockedNotices: [
+        {
+          ...notice264,
+          prUrl: "https://github.com/naidu-group-pty-ltd/NPC-Client-Dashboard/pull/264/checks",
+        },
+      ],
     });
     expect(classes(f)).toEqual(["ci_red"]);
   });
@@ -410,8 +415,7 @@ describe("a proposal the drain has refused is not an unreconciled one", () => {
     const found = classifyBlockages(
       stalled({
         openProposals: [open264, stale],
-        blockedNotice: notice264,
-        blockedPrUrls: [PR264],
+        blockedNotices: [notice264],
       }),
       NOW,
     );
@@ -424,8 +428,9 @@ describe("a proposal the drain has refused is not an unreconciled one", () => {
   it("the same number in another repository is another pull request", () => {
     const f = stalled({
       openProposals: [open264],
-      blockedNotice: notice264,
-      blockedPrUrls: ["https://github.com/Naidu-Group-Pty-Ltd/preflight-property-group/pull/264"],
+      blockedNotices: [
+        { ...notice264, prUrl: "https://github.com/Naidu-Group-Pty-Ltd/preflight-property-group/pull/264" },
+      ],
     });
     expect(classes(f)).toEqual(["ci_red", "unreconciled_proposal"]);
   });
@@ -433,8 +438,7 @@ describe("a proposal the drain has refused is not an unreconciled one", () => {
   it("a proposal whose URL does not parse is never stood down by a notice", () => {
     const f = stalled({
       openProposals: [{ ...open264, prUrl: null, prRepo: null }],
-      blockedNotice: notice264,
-      blockedPrUrls: [PR264],
+      blockedNotices: [notice264],
     });
     expect(classes(f)).toEqual(["ci_red", "unreconciled_proposal"]);
   });
@@ -443,11 +447,7 @@ describe("a proposal the drain has refused is not an unreconciled one", () => {
     // `ci_red` is conditioned on divergence and drops against a converged
     // clone; the proposal it explains is the same history, not a standing
     // fault left over for somebody to chase.
-    const f = facts({
-      openProposals: [open264],
-      blockedNotice: notice264,
-      blockedPrUrls: [PR264],
-    });
+    const f = facts({ openProposals: [open264], blockedNotices: [notice264] });
     expect(classifyBlockages(f, NOW)).toEqual([]);
   });
 
@@ -456,6 +456,175 @@ describe("a proposal the drain has refused is not an unreconciled one", () => {
     // record is then the only trace, and it must stay.
     const f = facts({ openProposals: [open264] });
     expect(classes(f)).toEqual(["unreconciled_proposal"]);
+  });
+});
+
+describe("every refused pull request keeps its own finding", () => {
+  /*
+    Codex's reading of the first cut: the ledger kept the NEWEST notice per
+    clone for `ci_red` while every notice's URL stood `unreconciled_proposal`
+    down, so a clone with two refused pull requests reported the newest and
+    said nothing at all about the older one. One finding each, now.
+  */
+  const url = (n: number) => `https://github.com/Naidu-Group-Pty-Ltd/npc-client-dashboard/pull/${n}`;
+  const notice = (n: number, minsAgo: number, why = "verify (failure)"): BlockedNotice => ({
+    title: `Cascade blocked · NPC Client Dashboard · PR #${n}`,
+    body: `Cascade PR #${n} on NPC Client Dashboard is failing the same way on a rebuilt head — this does not clear on its own.\n\nNot merging — 1 check(s) failing: ${why}.`,
+    createdAt: ago(minsAgo),
+    prUrl: url(n),
+  });
+  const proposal = (n: number, minsAgo: number) => ({
+    resultId: `r${n}`,
+    prUrl: url(n),
+    prRepo: "Naidu-Group-Pty-Ltd/npc-client-dashboard",
+    createdAt: ago(minsAgo),
+  });
+
+  it("two refused pull requests are two ci_red findings, and neither is called unreconciled", () => {
+    const found = classifyBlockages(
+      stalled({
+        openProposals: [proposal(250, 60 * 40), proposal(264, 60 * 15)],
+        // Newest first, as the ledger reads them.
+        blockedNotices: [notice(264, 60 * 14), notice(250, 60 * 30)],
+      }),
+      NOW,
+    );
+    expect(found.map((b) => b.fingerprint).sort()).toEqual([
+      "ci_red:Cascade blocked · NPC Client Dashboard · PR #250",
+      "ci_red:Cascade blocked · NPC Client Dashboard · PR #264",
+    ]);
+    expect(found.every((b) => b.owner === "prime_author" && !b.selfHeals)).toBe(true);
+  });
+
+  it("every proposal the refusals stand down is named by a ci_red finding", () => {
+    const notices = [notice(264, 60), notice(250, 120), notice(233, 240)];
+    const found = classifyBlockages(
+      stalled({
+        openProposals: [proposal(233, 60 * 50), proposal(250, 60 * 40), proposal(264, 60 * 30)],
+        blockedNotices: notices,
+      }),
+      NOW,
+    );
+    const ciRed = found.filter((b) => b.cls === "ci_red").map((b) => b.fingerprint);
+    for (const n of [233, 250, 264]) {
+      expect(ciRed).toContain(`ci_red:Cascade blocked · NPC Client Dashboard · PR #${n}`);
+    }
+    expect(found.some((b) => b.cls === "unreconciled_proposal")).toBe(false);
+  });
+
+  it("one pull request refused twice is one finding, carrying the newest verdict", () => {
+    const found = classifyBlockages(
+      stalled({
+        openProposals: [proposal(264, 60 * 15)],
+        // The failure changed shape, so the drain raised a second notice and
+        // left the first unread. Given oldest first on purpose: the order the
+        // facts arrive in must not decide which verdict is current.
+        blockedNotices: [notice(264, 60 * 14, "security (failure)"), notice(264, 30, "verify (failure)")],
+      }),
+      NOW,
+    );
+    expect(found).toHaveLength(1);
+    expect(found[0].cls).toBe("ci_red");
+    expect(found[0].detail).toContain("verify (failure)");
+    expect(found[0].detail).not.toContain("security (failure)");
+    expect(found[0].since).toBe(ago(30));
+  });
+
+  it("a notice with no URL and one with a URL for the same pull request open one row, not two", () => {
+    const found = classifyBlockages(
+      stalled({
+        openProposals: [proposal(264, 60 * 15)],
+        blockedNotices: [notice(264, 30), { ...notice(264, 60 * 14), prUrl: null }],
+      }),
+      NOW,
+    );
+    expect(found.map((b) => b.fingerprint)).toEqual([
+      "ci_red:Cascade blocked · NPC Client Dashboard · PR #264",
+    ]);
+  });
+});
+
+describe("the classifier never reports one identity twice", () => {
+  /*
+    The ledger keys its open set on the fingerprint. Two detections with one
+    fingerprint open two rows, and every later pass sees only one of them —
+    the other would stand open for ever.
+  */
+  it("two open records of one pull request are one unreconciled finding", () => {
+    const pr = "https://github.com/Naidu-Group-Pty-Ltd/npc-client-dashboard/pull/250";
+    const found = classifyBlockages(
+      facts({
+        openProposals: [
+          { resultId: "rA", prUrl: pr, prRepo: "Naidu-Group-Pty-Ltd/npc-client-dashboard", createdAt: ago(600) },
+          { resultId: "rB", prUrl: pr, prRepo: "Naidu-Group-Pty-Ltd/npc-client-dashboard", createdAt: ago(300) },
+        ],
+      }),
+      NOW,
+    );
+    expect(found.map((b) => b.fingerprint)).toEqual([`unreconciled_proposal:${pr}`]);
+  });
+
+  it("no fingerprint repeats across a busy clone", () => {
+    const found = classifyBlockages(
+      stalled({
+        exclusionCount: 0,
+        blockedNotices: [
+          {
+            title: "Cascade blocked · NPC Client Dashboard · PR #9",
+            body: "Not merging.",
+            createdAt: ago(10),
+            prUrl: "https://github.com/Naidu-Group-Pty-Ltd/npc-client-dashboard/pull/9",
+          },
+          {
+            title: "Cascade blocked · NPC Client Dashboard · PR #9",
+            body: "Not merging, again.",
+            createdAt: ago(5),
+            prUrl: null,
+          },
+        ],
+        primeLedgerHoles: [
+          { version: "20261219040000", heldCount: 2, firstHeld: "20261219050000" },
+        ],
+      }),
+      NOW,
+    );
+    const fps = found.map((b) => b.fingerprint);
+    expect(new Set(fps).size).toBe(fps.length);
+  });
+});
+
+describe("standingRefusals", () => {
+  const n = (pr: number | null, createdAt: string, title = `Cascade blocked · X · PR #${pr}`): BlockedNotice => ({
+    title,
+    body: "",
+    createdAt,
+    prUrl: pr === null ? null : `https://github.com/o/r/pull/${pr}`,
+  });
+
+  it("keeps the newest notice per pull request, newest first, whatever order it is given", () => {
+    const a = n(1, "2026-09-27T01:00:00Z");
+    const b = n(2, "2026-09-27T02:00:00Z");
+    const c = n(1, "2026-09-27T03:00:00Z");
+    for (const input of [[a, b, c], [c, b, a], [b, a, c]]) {
+      expect(standingRefusals(input)).toEqual([c, b]);
+    }
+  });
+
+  it("keys a notice with no URL on its title, so it still counts once", () => {
+    const x = n(null, "2026-09-27T01:00:00Z", "Cascade blocked · X · PR #7");
+    const y = n(null, "2026-09-27T02:00:00Z", "Cascade blocked · X · PR #7");
+    const z = n(null, "2026-09-27T03:00:00Z", "Cascade blocked · X · PR #8");
+    expect(standingRefusals([x, y, z])).toEqual([z, y]);
+  });
+
+  it("an unreadable date sorts last rather than breaking the order", () => {
+    const good = n(1, "2026-09-27T01:00:00Z");
+    const bad = n(2, "not a date");
+    expect(standingRefusals([bad, good])).toEqual([good, bad]);
+  });
+
+  it("nothing to stand on is nothing", () => {
+    expect(standingRefusals([])).toEqual([]);
   });
 });
 
@@ -648,11 +817,14 @@ describe("a delivery that went wrong costs nothing once the clone holds everythi
           resultStatus: "pushing",
         }),
       ],
-      blockedNotice: {
-        title: "Cascade blocked · x · PR #1",
-        body: "Not merging — 1 check(s) failing: verify (failure).",
-        createdAt: ago(300),
-      },
+      blockedNotices: [
+        {
+          title: "Cascade blocked · x · PR #1",
+          body: "Not merging — 1 check(s) failing: verify (failure).",
+          createdAt: ago(300),
+          prUrl: "https://github.com/Naidu-Group-Pty-Ltd/npc-client-dashboard/pull/1",
+        },
+      ],
     });
     expect(classifyBlockages(f, NOW)).toEqual([]);
   });

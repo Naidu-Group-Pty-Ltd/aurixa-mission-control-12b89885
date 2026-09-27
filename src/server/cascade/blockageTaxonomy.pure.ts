@@ -235,6 +235,15 @@ export const BLOCKAGE_POLICY: Record<BlockageClass, BlockagePolicy> = {
   },
 };
 
+/** One unread `cascade_blocked` notice, as the ledger reads it back. */
+export type BlockedNotice = {
+  title: string;
+  body: string;
+  createdAt: string;
+  /** The pull request the notice names (`notifications.url`), when it names one. */
+  prUrl: string | null;
+};
+
 /** Everything one clone's classification is decided from. */
 export type CloneBlockageFacts = {
   cloneId: string;
@@ -276,17 +285,18 @@ export type CloneBlockageFacts = {
   }>;
   /** Failed rows for this clone since its last successful one. */
   consecutiveFailures: number;
-  /** The drain's own standing-blockage notification, when one is unread. */
-  blockedNotice: { title: string; body: string; createdAt: string } | null;
   /**
-   * Every pull request an UNREAD `cascade_blocked` notice names for this clone
-   * — all of them, where `blockedNotice` keeps only the newest.
+   * Every UNREAD `cascade_blocked` notice the drain has raised for this clone.
    *
-   * Each is the drain's own proof that it read that pull request and refused
-   * to merge it, so a proposal named here is not one whose record is behind.
-   * Read so `unreconciled_proposal` can stand down for it; see that loop.
+   * Each is the drain's own verdict on one pull request it read and refused to
+   * merge, carrying the URL it names. ALL of them, never only the newest: two
+   * refused pull requests are two standing refusals, and a reading that kept
+   * one notice per clone reported `ci_red` for the newest while the URL of the
+   * older still stood `unreconciled_proposal` down — so the older refused pull
+   * request had no finding at all. `standingRefusals` collapses them to one
+   * per pull request; `classifyBlockages` reports each.
    */
-  blockedPrUrls: readonly string[];
+  blockedNotices: ReadonlyArray<BlockedNotice>;
   /**
    * Prime versions this clone's last migration pass was held behind.
    *
@@ -341,7 +351,19 @@ export function classifyBlockages(facts: CloneBlockageFacts, now: Date): Detecte
   const t = now.getTime();
   const sloMs = Math.max(1, facts.sloMinutes) * 60_000;
 
+  /*
+    ONE ROW PER IDENTITY, WHATEVER THE FACTS REPEAT.
+
+    The ledger keys its open set on the fingerprint, so a pass that detected
+    one fingerprint twice would open two rows, and every later pass would see
+    only one of them — the other stays open for ever with nothing able to
+    clear it. The first detection of an identity stands; a repeat of it is the
+    same condition, not a second one.
+  */
+  const emitted = new Set<string>();
   const add = (cls: BlockageClass, fingerprint: string, detail: string, since: string | null) => {
+    if (emitted.has(fingerprint)) return;
+    emitted.add(fingerprint);
     const policy = BLOCKAGE_POLICY[cls];
     found.push({
       cls,
@@ -463,8 +485,11 @@ export function classifyBlockages(facts: CloneBlockageFacts, now: Date): Detecte
     names the pull request, the drain's verdict stands alone; everywhere else
     this class still fires, including a proposal whose checks never report.
   */
+  const refusals = standingRefusals(facts.blockedNotices);
+  // Every key here belongs to a refusal the `ci_red` block below reports, so a
+  // proposal stood down in this loop is never left without a finding.
   const refused = new Set(
-    facts.blockedPrUrls.map(pullRequestKey).filter((k): k is string => k !== null),
+    refusals.map((r) => pullRequestKey(r.prUrl)).filter((k): k is string => k !== null),
   );
   for (const p of facts.openProposals) {
     if (retargeted.includes(p)) continue;
@@ -586,13 +611,8 @@ export function classifyBlockages(facts: CloneBlockageFacts, now: Date): Detecte
     second implementation of "may this merge", which is how one of them
     becomes wrong.
   */
-  if (facts.blockedNotice) {
-    add(
-      "ci_red",
-      `ci_red:${facts.blockedNotice.title}`,
-      firstParagraphs(facts.blockedNotice.body, 2),
-      facts.blockedNotice.createdAt,
-    );
+  for (const r of refusals) {
+    add("ci_red", `ci_red:${r.title}`, firstParagraphs(r.body, 2), r.createdAt);
   }
 
   /*
@@ -667,6 +687,38 @@ export function pullRequestKey(prUrl: string | null): string | null {
   if (!prUrl) return null;
   const m = /github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:[/?#]|$)/i.exec(prUrl);
   return m ? `${m[1]}/${m[2]}#${Number(m[3])}`.toLowerCase() : null;
+}
+
+/**
+ * The standing refusals a clone's unread notices describe: the NEWEST notice
+ * for each pull request, newest first.
+ *
+ * The drain's dedupe key is the pull request AND its verdict, so a pull
+ * request whose failure changes shape gets a second notice while the first
+ * stays unread. Those are one refusal, and the newest verdict is the current
+ * one; two pull requests are two refusals, each owed its own finding.
+ *
+ * A notice whose URL does not parse is keyed on its title, which names the
+ * pull request as well, so it still counts as one refusal rather than none.
+ * Two refusals whose titles coincide share a `ci_red` fingerprint and are
+ * reported once — one row naming that pull request, never two rows with one
+ * identity (see `add` in `classifyBlockages`).
+ */
+export function standingRefusals(notices: ReadonlyArray<BlockedNotice>): BlockedNotice[] {
+  const at = (iso: string) => {
+    const v = Date.parse(iso);
+    return Number.isFinite(v) ? v : 0;
+  };
+  const newestFirst = [...notices].sort((a, b) => at(b.createdAt) - at(a.createdAt));
+  const seen = new Set<string>();
+  const out: BlockedNotice[] = [];
+  for (const n of newestFirst) {
+    const key = pullRequestKey(n.prUrl) ?? `title:${n.title}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(n);
+  }
+  return out;
 }
 
 function firstParagraphs(body: string, n: number): string {

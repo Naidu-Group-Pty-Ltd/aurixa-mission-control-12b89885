@@ -142,10 +142,32 @@ describe("the taxonomy is the custodian's permission, and it is one list", () =>
     refused. A read that dropped the column would bring back the double finding
     with every test above still green, so the wiring is asserted where it is.
   */
-  it("hands over the pull request every standing refusal names", () => {
+  it("hands over every standing refusal, with the pull request it names", () => {
     expect(ledger).toMatch(
       /from\(\s*"notifications"\s*\)\s*\.select\(\s*"clone_id, title, body, created_at, url"\s*\)\s*\.eq\(\s*"kind",\s*"cascade_blocked"\s*\)\s*\.is\(\s*"read_at",\s*null\s*\)/,
     );
-    expect(ledger).toContain("blockedPrUrls: blockedPrUrlsByClone.get(clone.id) ?? []");
+    expect(ledger).toContain("prUrl: row.url");
+    expect(ledger).toContain("blockedNotices: blockedNoticesByClone.get(clone.id) ?? []");
+    /* Every notice, never one per clone: the older refusal is owed a finding too. */
+    expect(/blockedNoticesByClone\.has\(/.test(ledger)).toBe(false);
+  });
+});
+
+describe("the open set is reconciled by one plan, oldest row first", () => {
+  /*
+    `planBlockageReconcile` is what clears a second open row with one identity
+    — the row no pass could otherwise reach. The ledger must act on its plan
+    rather than a second copy of the rule, and must read the open set oldest
+    first so the row it keeps is the one that carries the true start.
+  */
+  it("acts on the planner's decision", () => {
+    expect(ledger).toContain("planBlockageReconcile(");
+    expect(ledger).toContain("for (const id of plan.clear)");
+  });
+
+  it("reads the open set oldest first", () => {
+    expect(ledger).toMatch(
+      /\.is\(\s*"cleared_at",\s*null\s*\)\s*\.order\(\s*"first_seen_at",\s*\{\s*ascending:\s*true\s*\}\s*\)/,
+    );
   });
 });
