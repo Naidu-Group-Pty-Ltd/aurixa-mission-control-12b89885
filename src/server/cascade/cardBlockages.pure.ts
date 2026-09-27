@@ -30,6 +30,15 @@
  * for its sentence, and two such rows need not say the same thing. So they
  * are grouped by class AND detail, and one row's words are never drawn over
  * another's.
+ *
+ * ## A class the database counted
+ *
+ * The card reads every open row (`cardBlockagesRead.server.ts`), up to a
+ * bound on one render's read. Past the bound it asks the database to count
+ * each known class instead, and those counts are handed in as `tallies`. A
+ * counted class is whole, so its line is the count and nothing the walk saw
+ * of it is added again; a class the database counted at zero draws no line,
+ * even if the walk, which ran first, still saw a row of it.
  */
 import {
   BLOCKAGE_POLICY,
@@ -47,6 +56,13 @@ export type OpenBlockageRow = {
   self_heals: boolean;
 };
 
+/**
+ * The database's own count of one known class's open rows on a clone, and
+ * when the oldest of them was first seen. `firstSeenAt` is null only when
+ * nothing is open.
+ */
+export type ClassTally = { count: number; firstSeenAt: string | null };
+
 /** One line on the card: a class that is open, and how much of it. */
 export type CardBlockageGroup = {
   /** A stable key for the line, unique within one card. */
@@ -62,6 +78,20 @@ export type CardBlockageGroup = {
   selfHeals: boolean;
 };
 
+/** What the card is handed: its lines, and how much of the ledger they cover. */
+export type CardBlockages = {
+  /** One line per open class, oldest class first. */
+  groups: CardBlockageGroup[];
+  /** Every open row on this clone. */
+  total: number;
+  /**
+   * How many of those rows the lines count. Below `total` only when rows of
+   * a class this build does not know lay past the bound on one read, which is
+   * the one thing a count by class cannot reach: the card says how many.
+   */
+  counted: number;
+};
+
 /**
  * Every open row, one line per class, oldest class first.
  *
@@ -69,14 +99,39 @@ export type CardBlockageGroup = {
  * taxonomy, the one source the sentence already comes from, so a line cannot
  * pair one policy's words with another's owner. An unknown class keeps the
  * row's own values, because nothing else describes it.
+ *
+ * A class in `tallies` is drawn from its count and never from its rows.
  */
-export function groupCardBlockages(rows: readonly OpenBlockageRow[]): CardBlockageGroup[] {
+export function groupCardBlockages(
+  rows: readonly OpenBlockageRow[],
+  tallies?: ReadonlyMap<string, ClassTally>,
+): CardBlockageGroup[] {
   const groups = new Map<string, CardBlockageGroup>();
+  // Only a class the taxonomy knows can be drawn from a count, so only its
+  // rows are set aside for one.
+  const counted = new Set<string>();
+  for (const [cls, tally] of tallies ?? []) {
+    const policy = policyOf(cls);
+    if (!policy) continue;
+    counted.add(cls);
+    if (tally.count <= 0) continue;
+    groups.set(cls, {
+      key: cls,
+      cls: cls as BlockageClass,
+      owner: policy.owner,
+      what: policy.what,
+      count: tally.count,
+      // Never empty while the count is above zero: the reader refuses a
+      // count with no oldest row. An empty start would sort last.
+      firstSeenAt: tally.firstSeenAt ?? "",
+      selfHeals: policy.selfHeals,
+    });
+  }
   for (const row of rows) {
+    // Counted whole by the database; its rows would count it twice.
+    if (counted.has(row.class)) continue;
     const cls = row.class as BlockageClass;
-    const policy = Object.prototype.hasOwnProperty.call(BLOCKAGE_POLICY, cls)
-      ? BLOCKAGE_POLICY[cls]
-      : undefined;
+    const policy = policyOf(row.class);
     const key = policy ? row.class : `${row.class}:${row.detail}`;
     const group = groups.get(key);
     if (!group) {
@@ -97,6 +152,15 @@ export function groupCardBlockages(rows: readonly OpenBlockageRow[]): CardBlocka
   return [...groups.values()].sort(
     (a, b) => order(a.firstSeenAt) - order(b.firstSeenAt) || a.key.localeCompare(b.key),
   );
+}
+
+/** Whether the taxonomy knows this class, as a guard rather than a cast. */
+function isKnownBlockageClass(cls: string): cls is BlockageClass {
+  return Object.prototype.hasOwnProperty.call(BLOCKAGE_POLICY, cls);
+}
+
+function policyOf(cls: string) {
+  return isKnownBlockageClass(cls) ? BLOCKAGE_POLICY[cls] : undefined;
 }
 
 /** A start for sorting: an unreadable one sorts last rather than first. */

@@ -253,9 +253,11 @@ function Blockages({ blockages }: { blockages: CloneConvergenceView["blockages"]
       </p>
     );
   }
-  if (blockages.groups.length === 0) return null;
+  // Rows the lines leave out, which only a class this build does not know,
+  // lying past the bound on one read, can be. Drawn even with no line above.
+  const unread = blockages.total - blockages.counted;
+  if (blockages.groups.length === 0 && unread <= 0) return null;
 
-  const unread = blockages.total - blockages.read;
   return (
     <ul className="space-y-1.5 border-t border-border pt-2">
       {blockages.groups.map((g) => (

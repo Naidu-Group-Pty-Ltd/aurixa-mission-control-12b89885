@@ -13,6 +13,9 @@ import { BLOCKAGE_POLICY, type BlockageClass } from "./blockageTaxonomy.pure";
 const panel = readFileSync("src/components/clone-convergence-panel.tsx", "utf8");
 const panelCode = stripNonCode(panel);
 const fn = stripNonCode(readFileSync("src/server/convergence.functions.ts", "utf8"));
+const blockageRead = stripNonCode(
+  readFileSync("src/server/cascade/cardBlockagesRead.server.ts", "utf8"),
+);
 const card = stripNonCode(readFileSync("src/components/clone-sync-status-card.tsx", "utf8"));
 const migration = readFileSync(
   "supabase/migrations/20260918140000_convergence_observations.sql",
@@ -116,9 +119,10 @@ describe("it reads through the server", () => {
 });
 
 describe("it measures and never repairs", () => {
-  it("the panel and its server function write nothing", () => {
+  it("the panel, its server function and its blockage read write nothing", () => {
     for (const forbidden of [".insert(", ".update(", ".upsert(", ".delete(", ".rpc("]) {
       expect(fn, `server function must not ${forbidden}`).not.toContain(forbidden);
+      expect(blockageRead, `blockage read must not ${forbidden}`).not.toContain(forbidden);
       expect(panelCode, `panel must not ${forbidden}`).not.toContain(forbidden);
     }
   });
@@ -126,6 +130,7 @@ describe("it measures and never repairs", () => {
   it("it cannot reach the engine", () => {
     for (const forbidden of ["runCascade", "processClone", "getAppOctokit", "cascade_events"]) {
       expect(fn, `server function must not reach ${forbidden}`).not.toContain(forbidden);
+      expect(blockageRead, `blockage read must not reach ${forbidden}`).not.toContain(forbidden);
     }
   });
 });
@@ -159,18 +164,29 @@ describe("what an operator is shown", () => {
     The card read the six oldest open rows and drew each one's class sentence.
     On the CRM independent that was one sentence six times over 52 open rows,
     with no word of the other forty-six — and ordered oldest first, a class
-    that opened later could not reach the card at all. The read now counts,
-    the rows are grouped by class, and the panel says when a read fell short.
+    that opened later could not reach the card at all. Reading the oldest 500
+    instead only moved the cut: Codex found that a class whose first row lay
+    past it was still not drawn. The read now walks every open row, and past
+    a bound counts every known class, and the panel says what it left out.
   */
-  it("the card counts every open row and draws every open class", () => {
-    expect(fn).toContain('count: "exact"');
-    expect(fn).toContain("groupCardBlockages(");
+  it("the card reads every open row and draws every open class", () => {
+    // One read, and it is the walk: nothing here queries the table itself.
+    expect(fn).toContain("readCardBlockages(supabase, data.cloneId)");
+    expect(fn).not.toContain('"clone_sync_blockages"');
     expect(fn).not.toMatch(/\.limit\(\s*6\s*\)/);
-    expect(fn).not.toContain("CARD_BLOCKAGE_LIMIT");
+    // Walked by key until an empty page, and never by offset.
+    expect(blockageRead).toContain('.order("id", { ascending: true })');
+    expect(blockageRead).toContain('query.gt("id", after)');
+    expect(blockageRead).toContain("batch.length === 0");
+    expect(blockageRead).not.toContain(".range(");
+    // Past the bound, every class the taxonomy knows is counted.
+    expect(blockageRead).toContain("Object.keys(BLOCKAGE_POLICY)");
+    expect(blockageRead).toContain('count: "exact"');
+    expect(blockageRead).toContain("groupCardBlockages(walked, tallies)");
     expect(panelCode).toContain("blockages.groups.map(");
     expect(panelCode).toContain("g.count");
-    expect(panelCode).toContain("blockages.total - blockages.read");
-    // …and says so whenever the read fell short, on nothing but that.
+    expect(panelCode).toContain("blockages.total - blockages.counted");
+    // …and says so whenever the lines leave rows out, on nothing but that.
     expect(panelCode).toMatch(/\{unread > 0 && \(/);
   });
 });
