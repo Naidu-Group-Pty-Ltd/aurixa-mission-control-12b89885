@@ -32,24 +32,36 @@
  *
  * ## What counts as a subject here
  *
- * Three kinds, each read from the spec's own text:
+ * Four kinds, each read from the spec's own text:
  *
  *   · a path it NAMES — `subjectsNamedBy`, the forward half's rule, and
  *     `subjectsNamedOutsideRoots` for a file outside the content roots, so
  *     both directions agree on what a named subject is;
  *   · a module it IMPORTS, in either specifier form (`importsOf`,
- *     `resolveSpecifier` — the import closure's own reader); and
+ *     `resolveSpecifier` — the import closure's own reader);
  *   · behind an imported module that does nothing but re-export, the module it
  *     re-exports. A shim adds no behaviour, so what the spec tests is its
- *     target; `src/lib/workflow/*` onto `_shared/workflow/` is the pattern.
+ *     target; `src/lib/workflow/*` onto `_shared/workflow/` is the pattern; and
+ *   · behind an imported directory INDEX that does work of its own, the
+ *     modules it imports from its own directory. An index is the directory's
+ *     surface — `import { getAdapter } from '../adapters'` imports the adapters
+ *     package, and a spec against the package asserts about its members.
+ *     Measured on cascade PR #29 to the same clone (prime@cdff4f2):
+ *     `adapterListings.spec.ts` imports `../adapters`, whose `index.ts` is a
+ *     registry rather than a shim; `qaAdapter.ts` crossed, the clone's copy of
+ *     the spec stayed at the version that expected the old adapter, and
+ *     `verify` failed two assertions. One hop and one directory only: a member
+ *     is a subject, not a place to keep walking, and a top-level barrel naming
+ *     modules in other directories does not make those the spec's subject.
  *
  * Deliberately NOT the transitive import graph. Measured on the same
  * cascade: following every import triggers 16 specs and would pull six more
  * files behind them, including `src/integrations/supabase/env.ts` — a
- * PROTECTED path naming the clone's own backend — while the three kinds above
- * trigger 14 and catch all four failing specs. A spec that imports an
+ * PROTECTED path naming the clone's own backend — while the first three kinds
+ * above trigger 14 and catch all four failing specs. A spec that imports an
  * unchanged module whose own dependency changed is asserting about that
- * module, not about the dependency.
+ * module, not about the dependency — unless that module is the index of the
+ * dependency's own directory, which is the fourth kind and nothing wider.
  *
  * ## What this module does not decide
  *
@@ -132,6 +144,24 @@ const RE_EXPORT =
   /\bexport\s+(?:type\s+)?(?:\*(?:\s+as\s+[A-Za-z_$][\w$]*)?|\{[^}]*\})\s*from\s*['"][^'"]+['"]\s*;?/g;
 
 /**
+ * The specifiers of a module that does nothing but re-export, in order, or
+ * null where it does anything else (or re-exports nothing).
+ *
+ * `isReExportShim`'s question with its answer kept: a caller that wants to
+ * know WHAT a shim re-exports, not only that it is one, asks here, so the two
+ * can never disagree about which modules are shims.
+ */
+export function reExportSpecifiers(source: string): string[] | null {
+  const specifiers: string[] = [];
+  const rest = stripComments(source).replace(RE_EXPORT, (statement) => {
+    const m = /['"]([^'"]+)['"]\s*;?\s*$/.exec(statement);
+    if (m) specifiers.push(m[1]);
+    return "";
+  });
+  return specifiers.length > 0 && /^[\s;]*$/.test(rest) ? specifiers : null;
+}
+
+/**
  * Whether a module does nothing but re-export.
  *
  * Every statement left once comments are gone must be a re-export, and there
@@ -140,12 +170,16 @@ const RE_EXPORT =
  * in its own right, so it is not looked through.
  */
 export function isReExportShim(source: string): boolean {
-  let found = 0;
-  const rest = stripComments(source).replace(RE_EXPORT, () => {
-    found += 1;
-    return "";
-  });
-  return found > 0 && /^[\s;]*$/.test(rest);
+  return reExportSpecifiers(source) !== null;
+}
+
+/** A directory's index module: `index.ts`, `index.tsx`, `index.js`, … */
+const DIRECTORY_INDEX = /(?:^|\/)index\.[cm]?[jt]sx?$/;
+
+/** The directory part of a path, or "" at the root. */
+function directoryOf(path: string): string {
+  const i = path.lastIndexOf("/");
+  return i === -1 ? "" : path.slice(0, i);
 }
 
 /** Every `@/` or relative specifier in `source`, resolved against `tree`. */
@@ -186,7 +220,9 @@ export function specSubjects(args: {
   for (const path of direct) found.add(path);
 
   // Through shims only. Each hop reads modules the previous hop reached, and
-  // only a module that is nothing but re-exports is followed further.
+  // only a module that is nothing but re-exports is followed further; a
+  // directory's index that does work names its own directory's modules and
+  // stops there.
   const seen = new Set<string>(direct);
   let frontier = direct;
   for (let hop = 0; hop < MAX_SHIM_HOPS && frontier.length > 0; hop += 1) {
@@ -198,7 +234,18 @@ export function specSubjects(args: {
         onUnread?.(module);
         continue;
       }
-      if (!isReExportShim(text)) continue;
+      if (!isReExportShim(text)) {
+        // A directory's index that does work is the directory's surface: the
+        // modules it imports from its own directory are what a spec importing
+        // the directory asserts about. Added, never walked further.
+        if (DIRECTORY_INDEX.test(module)) {
+          const dir = directoryOf(module);
+          for (const member of resolvedImports(text, module, tree)) {
+            if (member !== module && directoryOf(member) === dir) found.add(member);
+          }
+        }
+        continue;
+      }
       for (const target of resolvedImports(text, module, tree)) {
         if (seen.has(target)) continue;
         seen.add(target);

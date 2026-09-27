@@ -88,10 +88,11 @@ describe("a carried subject is a delivered module, so it meets the import closur
     // exclusions, the ceiling and `prepareOne` on the terms every other
     // candidate does. Nothing crosses for having been IMPORTED any more than
     // for having been mentioned — and the specs the other half owes (a kept
-    // spec left behind by its subject) meet the plan on the same terms.
+    // spec left behind by its subject) meet the plan on the same terms, as do
+    // the bridges a landed shared module owes (`reExportBridges.pure.ts`).
     const loop = carryLoop();
     expect(loop).toMatch(
-      /stranded: \[\s*\.\.\.\[\.\.\.strandedBySpec\.values\(\)\]\.flat\(\),\s*\.\.\.importsOwed,\s*\.\.\.owedSpecs,?\s*\]/,
+      /stranded: \[\s*\.\.\.\[\.\.\.strandedBySpec\.values\(\)\]\.flat\(\),\s*\.\.\.importsOwed,\s*\.\.\.owedSpecs,\s*\.\.\.bridgesOwedNow\.map\(\(b\) => b\.path\),?\s*\]/,
     );
   });
 
@@ -164,10 +165,10 @@ describe("the belt stops the carry, not the loop", () => {
 
   it("still ends, because with carrying off every round holds a spec", () => {
     // With carrying off the loop ends on the first round nothing is stranded;
-    // with it on, only once nothing is owed either — imports or specs.
+    // with it on, only once nothing is owed either — imports, specs or bridges.
     const loop = carryLoop();
     expect(loop).toMatch(
-      /if \(\s*strandedBySpec\.size === 0 &&\s*\(!carryingAllowed \|\| \(importsOwed\.size === 0 && owedSpecs\.length === 0\)\)\s*\) \{\s*break;\s*\}/,
+      /if \(\s*strandedBySpec\.size === 0 &&\s*\(!carryingAllowed \|\|\s*\(importsOwed\.size === 0 && owedSpecs\.length === 0 && bridgesOwedNow\.length === 0\)\)\s*\) \{\s*break;\s*\}/,
     );
   });
 

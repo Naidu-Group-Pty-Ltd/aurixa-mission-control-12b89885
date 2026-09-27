@@ -4,6 +4,7 @@ import {
   describeSpecsBroughtAcross,
   isReExportShim,
   leftBehindSpecHold,
+  reExportSpecifiers,
   MAX_LEFT_BEHIND_PROBES,
   MAX_SHIM_HOPS,
   pathsTheDeliveryChanges,
@@ -47,6 +48,29 @@ describe("isReExportShim — a module with no behaviour of its own", () => {
   it("is not a module with nothing in it", () => {
     expect(isReExportShim("")).toBe(false);
     expect(isReExportShim("// just a comment\n")).toBe(false);
+  });
+});
+
+describe("reExportSpecifiers — what a shim re-exports, in the shim rule's own reading", () => {
+  it("returns every specifier of a pure re-export, in order", () => {
+    expect(
+      reExportSpecifiers(
+        `/** header */\nexport * from "../a.pure.ts";\nexport { b as c } from './b';\nexport type { T } from "@/t";\n`,
+      ),
+    ).toEqual(["../a.pure.ts", "./b", "@/t"]);
+  });
+
+  it("returns null for anything isReExportShim refuses, and agrees with it everywhere", () => {
+    for (const text of [
+      `export * from "./x";\nexport const y = 1;\n`,
+      `import x from "./x";\nexport default x;\n`,
+      "",
+      "// only a comment\n",
+    ]) {
+      expect(reExportSpecifiers(text)).toBeNull();
+      expect(isReExportShim(text)).toBe(false);
+    }
+    expect(isReExportShim(`export * from "./x";`)).toBe(true);
   });
 });
 
@@ -120,6 +144,55 @@ describe("specSubjects — what a spec asserts about, from its own text", () => 
     });
     expect(got).toEqual(["src/a.ts", "src/b.ts", "src/c.ts"]);
     expect(got).not.toContain("src/d.ts");
+  });
+
+  it("reads the modules a directory's index imports from its own directory", () => {
+    // `adapterListings.spec.ts` on the independent, cascade PR #29: the spec
+    // imports `../adapters`, whose `index.ts` is a registry that does work, and
+    // `qaAdapter.ts` behind it crossed while the clone's spec stayed behind.
+    const S = "src/lib/reportTemplate/__tests__/adapterListings.spec.ts";
+    const INDEX = "src/lib/reportTemplate/adapters/index.ts";
+    const QA = "src/lib/reportTemplate/adapters/qaAdapter.ts";
+    const CLIENT = "src/lib/reportTemplate/adapters/clientDetailsAdapter.ts";
+    const OUTSIDE = "supabase/functions/_shared/reports/reportTemplateSelection.pure.ts";
+    const prime = tree(S, INDEX, QA, CLIENT, OUTSIDE);
+    const got = specSubjects({
+      specPath: S,
+      specText: `import { listAdapters, getAdapter } from '../adapters';\n`,
+      tree: prime,
+      readText: (path) =>
+        path === INDEX
+          ? `import { qaAdapter } from './qaAdapter';\n` +
+            `import { clientDetailsAdapter } from './clientDetailsAdapter';\n` +
+            `import { normaliseReportType } from '../../../../supabase/functions/_shared/reports/reportTemplateSelection.pure.ts';\n` +
+            `export const REPORT_TEMPLATE_ADAPTERS = [qaAdapter, clientDetailsAdapter];\n` +
+            `export function getAdapter(t: string) { return normaliseReportType(t); }\n`
+          : undefined,
+    });
+    expect(got).toEqual(expect.arrayContaining([INDEX, QA, CLIENT]));
+    // The index's own directory only: a module it imports from elsewhere is
+    // the index's subject, not the spec's.
+    expect(got).not.toContain(OUTSIDE);
+    expect(specsLeftBehind({ kept: new Map([[S, got]]), crossing: new Set([QA]) })).toEqual([
+      { spec: S, touchedBy: [QA], removed: [] },
+    ]);
+  });
+
+  it("stops at the index's members rather than walking on through them", () => {
+    const S = "src/pkg/__tests__/pkg.spec.ts";
+    const prime = tree(S, "src/pkg/index.ts", "src/pkg/member.ts", "src/pkg/deep.ts");
+    const got = specSubjects({
+      specPath: S,
+      specText: `import { m } from "../index";`,
+      tree: prime,
+      readText: (path) =>
+        path === "src/pkg/index.ts"
+          ? `import { m } from "./member";\nexport const run = () => m;`
+          : path === "src/pkg/member.ts"
+            ? `import { d } from "./deep";\nexport const m = d;`
+            : undefined,
+    });
+    expect(got).toEqual(["src/pkg/index.ts", "src/pkg/member.ts"]);
   });
 
   it("does not look through a module that does work, however few lines it has", () => {
