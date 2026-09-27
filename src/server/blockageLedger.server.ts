@@ -39,9 +39,12 @@ import type { Database } from "@/integrations/supabase/types";
 import {
   classifyBlockages,
   parsePrRepo,
+  type BlockedNotice,
   type CloneBlockageFacts,
   type DetectedBlockage,
 } from "./cascade/blockageTaxonomy.pure";
+import { planBlockageReconcile, type OpenBlockageRow } from "./cascade/blockageReconcile.pure";
+import { readUnreadBlockedNotices } from "./cascade/blockedNoticeRead.server";
 import { DEFAULT_CONVERGENCE_SLO_MINUTES } from "./convergenceAudit.server";
 
 type Db = SupabaseClient<Database>;
@@ -270,30 +273,23 @@ async function gatherFacts(
     the notice on the merge. UNREAD only — a notice a person has read is one
     they have seen, and re-reporting it is how a list stops being a list of
     what needs doing.
+
+    EVERY unread notice, with the pull request it names. Keeping the newest per
+    clone reported one refused pull request and silently dropped any other —
+    `standingRefusals` makes them one refusal per pull request instead.
   */
-  const blocked = await supabase
-    .from("notifications")
-    .select("clone_id, title, body, created_at")
-    .eq("kind", "cascade_blocked")
-    .is("read_at", null)
-    .in("clone_id", ids)
-    .order("created_at", { ascending: false });
-  if (blocked.error) {
-    throw new Error(`Could not read blocked notices: ${blocked.error.message}`);
-  }
-  const blockedByClone = new Map<string, CloneBlockageFacts["blockedNotice"]>();
-  for (const row of (blocked.data ?? []) as Array<{
-    clone_id: string | null;
-    title: string;
-    body: string;
-    created_at: string;
-  }>) {
-    if (!row.clone_id || blockedByClone.has(row.clone_id)) continue;
-    blockedByClone.set(row.clone_id, {
+  const blockedRows = await readUnreadBlockedNotices(supabase, ids);
+  const blockedNoticesByClone = new Map<string, BlockedNotice[]>();
+  for (const row of blockedRows) {
+    if (!row.clone_id) continue;
+    const notices = blockedNoticesByClone.get(row.clone_id) ?? [];
+    notices.push({
       title: row.title,
       body: row.body,
       createdAt: row.created_at,
+      prUrl: row.url,
     });
+    blockedNoticesByClone.set(row.clone_id, notices);
   }
 
   /*
@@ -421,7 +417,7 @@ async function gatherFacts(
       openProposals: proposalsByClone.get(clone.id) ?? [],
       events,
       consecutiveFailures,
-      blockedNotice: blockedByClone.get(clone.id) ?? null,
+      blockedNotices: blockedNoticesByClone.get(clone.id) ?? [],
       primeLedgerHoles: holesByClone.get(clone.id) ?? [],
       sloMinutes,
     });
@@ -437,7 +433,9 @@ async function gatherFacts(
  * conditions with no open row open one; open rows nothing detected are
  * CLEARED rather than deleted. A blockage records that a condition existed,
  * and destroying that record is how the second occurrence looks like the
- * first.
+ * first. What goes where is `planBlockageReconcile`'s decision — including
+ * clearing a second open row with one identity, which no pass could otherwise
+ * ever reach.
  */
 async function reconcileOne(
   supabase: Db,
@@ -447,39 +445,31 @@ async function reconcileOne(
 ): Promise<{ opened: number; stillOpen: number; cleared: number }> {
   const nowIso = now.toISOString();
 
+  // Oldest first, so the row a duplicated identity keeps is the one that
+  // carries the true start of its condition.
   const openRes = await supabase
     .from("clone_sync_blockages")
     .select("id, fingerprint")
     .eq("clone_id", cloneId)
-    .is("cleared_at", null);
+    .is("cleared_at", null)
+    .order("first_seen_at", { ascending: true })
+    .order("id", { ascending: true });
   // An open set that could not be READ is not an empty one — acting on that
   // would open a duplicate of every standing blockage on every pass.
   if (openRes.error) {
     throw new Error(`Could not read open blockages: ${openRes.error.message}`);
   }
-  const open = new Map(
-    ((openRes.data ?? []) as Array<{ id: string; fingerprint: string }>).map((r) => [
-      r.fingerprint,
-      r.id,
-    ]),
-  );
-  const detectedByFingerprint = new Map(detected.map((d) => [d.fingerprint, d]));
+  const plan = planBlockageReconcile((openRes.data ?? []) as OpenBlockageRow[], detected);
 
-  let opened = 0;
-  let stillOpen = 0;
-  let cleared = 0;
+  for (const { id, detected: d } of plan.refresh) {
+    const { error } = await supabase
+      .from("clone_sync_blockages")
+      .update({ last_seen_at: nowIso, detail: d.detail })
+      .eq("id", id);
+    if (error) throw new Error(`Could not refresh blockage ${id}: ${error.message}`);
+  }
 
-  for (const d of detected) {
-    const existing = open.get(d.fingerprint);
-    if (existing) {
-      const { error } = await supabase
-        .from("clone_sync_blockages")
-        .update({ last_seen_at: nowIso, detail: d.detail })
-        .eq("id", existing);
-      if (error) throw new Error(`Could not refresh blockage ${existing}: ${error.message}`);
-      stillOpen += 1;
-      continue;
-    }
+  for (const d of plan.open) {
     const { error } = await supabase.from("clone_sync_blockages").insert({
       clone_id: cloneId,
       class: d.cls,
@@ -491,20 +481,17 @@ async function reconcileOne(
       last_seen_at: nowIso,
     });
     if (error) throw new Error(`Could not open blockage ${d.fingerprint}: ${error.message}`);
-    opened += 1;
   }
 
-  for (const [fingerprint, id] of open) {
-    if (detectedByFingerprint.has(fingerprint)) continue;
+  for (const id of plan.clear) {
     const { error } = await supabase
       .from("clone_sync_blockages")
       .update({ cleared_at: nowIso })
       .eq("id", id);
     if (error) throw new Error(`Could not clear blockage ${id}: ${error.message}`);
-    cleared += 1;
   }
 
-  return { opened, stillOpen, cleared };
+  return { opened: plan.open.length, stillOpen: plan.refresh.length, cleared: plan.clear.length };
 }
 
 export { msg as blockageLedgerErrorMessage };
