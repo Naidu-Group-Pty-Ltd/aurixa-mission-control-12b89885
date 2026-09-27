@@ -86,7 +86,7 @@ import {
   PRIME_LEDGER_HOLE_NOTE_CAP,
   blockageDetailFor,
   primeLedgerHoleSentence,
-  primeLedgerHoleSpan,
+  primeLedgerHoleTally,
   reconcileBlockageRecord,
 } from "./fleetBlockageRecord.pure";
 
@@ -2125,13 +2125,13 @@ export async function runFleetMigrationSync(
                               // the one sentence with no count: the CRM independent
                               // read "2 migration(s) held back behind 20260703000000"
                               // over 189 holes by version, 50 of them noted, the two
-                              // newest in no note at all. The span is taken from every
-                              // hole.
+                              // newest in no note at all. The tally is taken from every
+                              // hole, and it is THIS clone's: the partition skips what
+                              // the clone already holds, so it is never the prime's
+                              // whole gap and is not worded as one.
                               `Synced to ${syncedTo} — ${blocked.length} migration(s) held back behind ` +
                               `${blocked[0].blockedBy?.[0] ?? "a withheld version"}, which the prime's ledger does not record` +
-                              (primeLedgerHoles.length > 1
-                                ? `; in all it is short of ${primeLedgerHoleSpan(primeLedgerHoles)}`
-                                : "")
+                              primeLedgerHoleTally(primeLedgerHoles)
                             : pausedMidReplay
                               ? // Said before the level reading, because it is the
                                 // one case where "Synced to X" would be a claim

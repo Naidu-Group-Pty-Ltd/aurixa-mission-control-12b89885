@@ -404,18 +404,44 @@ export function blockageDetailFor(args: {
  * and no clone can be sent them until it does. A sentence that read as a fault
  * on the clone would send an operator to repair a tenant that is behaving
  * exactly correctly — which is the mistake this whole area keeps making.
+ *
+ * AND WHOSE COUNT IT IS. The clone is the subject because the count is the
+ * clone's. `partitionByDependency` skips every version the clone already
+ * holds, so these are the versions the prime's ledger does not record AND
+ * this clone is still waiting on: a prime whose ledger omits A, B and C,
+ * beside a clone that already holds A, gives that clone two. It read "the
+ * prime's ledger is short of 2 versions", which understated the prime's gap
+ * while wearing the words for all of it. The prime's own count is a reading
+ * against the prime, not against any one clone: Fleet Manager → Prime Ledger
+ * Reconciliation.
  */
 export function primeLedgerHoleSentence(holes: readonly string[]): string {
   const one = holes.length <= 1;
   return (
-    `the prime's ledger is short of ${primeLedgerHoleSpan(holes)}, which this clone is level ` +
-    `without; ${one ? "it" : "they"} cannot be sent to any clone until the prime records ` +
+    `this clone is waiting on ${primeLedgerHoleSpan(holes)}, which the prime's ledger does ` +
+    `not record; ${one ? "it" : "they"} cannot be sent to any clone until the prime records ` +
     (one ? "it" : "them")
   );
 }
 
 /**
- * How many versions the prime's ledger is short of, and between which.
+ * What the held-back sentence adds: every hole this clone is waiting on,
+ * counted, with both ends.
+ *
+ * That sentence already names one hole, the first thing held back is
+ * waiting behind, so a clone with only one says nothing more. Its count is
+ * the clone's for the reason {@link primeLedgerHoleSentence} gives, and it is
+ * phrased with the clone as the subject for the same reason.
+ */
+export function primeLedgerHoleTally(holes: readonly string[]): string {
+  if (holes.length <= 1) return "";
+  return `; in all this clone is waiting on ${countAndEnds(holes, "such versions")}`;
+}
+
+/**
+ * How many versions of the prime's ledger gap this clone is waiting on, and
+ * between which. The clone's count, never the prime's: a version the clone
+ * already holds is no hole for it, whatever the prime's ledger says.
  *
  * TAKES EVERY HOLE, NEVER THE NOTES. The notes are capped at
  * `PRIME_LEDGER_HOLE_NOTE_CAP` and kept oldest first, so on a clone past the
@@ -434,7 +460,12 @@ export function primeLedgerHoleSentence(holes: readonly string[]): string {
 export function primeLedgerHoleSpan(holes: readonly string[]): string {
   if (holes.length === 0) return "a version";
   if (holes.length === 1) return holes[0];
-  return `${holes.length} versions, ${holes[0]} to ${holes[holes.length - 1]}`;
+  return countAndEnds(holes, "versions");
+}
+
+/** "N <noun>, first to last" — one spelling for the span and the tally. */
+function countAndEnds(holes: readonly string[], noun: string): string {
+  return `${holes.length} ${noun}, ${holes[0]} to ${holes[holes.length - 1]}`;
 }
 
 function entriesOf(stored: unknown): AppliedRecordEntry[] {
