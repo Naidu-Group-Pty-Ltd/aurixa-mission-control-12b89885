@@ -113,3 +113,50 @@ describe("what a cascade owes the backend", () => {
     expect(hasBackendWork(work)).toBe(true);
   });
 });
+
+describe("what the prime keeps for itself", () => {
+  /*
+    The paths arrive from the PRIME's history (`workForCascade` compares two
+    prime revisions), so the prime's own feature's edits arrive here too. None
+    of it is anything a clone is given.
+  */
+  it("owes a clone nothing for the prime's own functions", () => {
+    const work = cascadeBackendWork([
+      "supabase/functions/migration-dispatcher/index.ts",
+      "supabase/functions/ghl-migrate-contacts-worker/index.ts",
+    ]);
+    expect(work).toEqual(NO_BACKEND_WORK);
+    expect(hasBackendWork(work)).toBe(false);
+  });
+
+  it("does not widen to every function for the prime's own shared files", () => {
+    // A `_shared/` edit widens to every bundle — but these three ship only in
+    // the prime's own functions, and widening on them would redeploy the
+    // whole fleet for code no clone carries.
+    const work = cascadeBackendWork([
+      "supabase/functions/_shared/migration-jobs.ts",
+      "supabase/functions/_shared/ghl-worker-fetch.ts",
+      "supabase/functions/_shared/ghl-asset-harvester.ts",
+    ]);
+    expect(work).toEqual(NO_BACKEND_WORK);
+  });
+
+  it("still owes what else the same cascade changed", () => {
+    const work = cascadeBackendWork([
+      "supabase/functions/migration-orchestrator/index.ts",
+      "supabase/functions/_shared/migration-jobs.ts",
+      "supabase/functions/aml-cases/index.ts",
+      "supabase/migrations/20261230000000_x.sql",
+    ]);
+    expect(work.staleFunctions).toEqual(["aml-cases"]);
+    expect(work.migrationsOwed).toBe(true);
+  });
+
+  it("still widens for a shared file the clones do carry", () => {
+    const work = cascadeBackendWork([
+      "supabase/functions/_shared/migration-jobs.ts",
+      "supabase/functions/_shared/logApiUsage.ts",
+    ]);
+    expect(work.staleFunctions).toBeNull();
+  });
+});
