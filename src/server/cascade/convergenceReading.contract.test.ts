@@ -21,6 +21,16 @@ const migration = readFileSync(
   "supabase/migrations/20260918140000_convergence_observations.sql",
   "utf8",
 );
+// The one database function the blockage read calls, comments stripped: what
+// it DOES, not what its prose says about it.
+const groupsSql = readFileSync(
+  "supabase/migrations/20260927100000_clone_open_blockage_groups.sql",
+  "utf8",
+).replace(/--[^\n]*/g, "");
+const groupsFn = groupsSql.slice(
+  groupsSql.indexOf("create or replace function public.clone_open_blockage_groups("),
+  groupsSql.indexOf("$$;") + 3,
+);
 
 describe("the reading is shown, and shown beside the pointer", () => {
   it("something renders the panel", () => {
@@ -122,9 +132,35 @@ describe("it measures and never repairs", () => {
   it("the panel, its server function and its blockage read write nothing", () => {
     for (const forbidden of [".insert(", ".update(", ".upsert(", ".delete(", ".rpc("]) {
       expect(fn, `server function must not ${forbidden}`).not.toContain(forbidden);
-      expect(blockageRead, `blockage read must not ${forbidden}`).not.toContain(forbidden);
       expect(panelCode, `panel must not ${forbidden}`).not.toContain(forbidden);
     }
+    for (const forbidden of [".insert(", ".update(", ".upsert(", ".delete("]) {
+      expect(blockageRead, `blockage read must not ${forbidden}`).not.toContain(forbidden);
+    }
+    // Nor does it query a table: its one read is the function below.
+    expect(blockageRead).not.toContain(".from(");
+  });
+
+  /*
+    The blockage read makes ONE call, to a database function, and a function
+    can write. This one cannot, and that is the migration's to guarantee rather
+    than this reader's to promise: `stable`, so Postgres refuses a write from
+    inside it ("INSERT is not allowed in a non-volatile function", measured on
+    Postgres 16); `security invoker`, so the table's RLS decides what it reads;
+    and called as a GET, which PostgREST runs in a read-only transaction.
+  */
+  it("the blockage read's one call is a function that cannot write", () => {
+    expect(blockageRead.match(/\.rpc\(/g)).toHaveLength(1);
+    expect(blockageRead).toMatch(/\.rpc\(\s*"clone_open_blockage_groups"/);
+    expect(blockageRead).toContain("{ get: true }");
+    expect(groupsFn).toMatch(/\blanguage sql\s+stable\s+security invoker\b/i);
+    expect(groupsFn).not.toMatch(
+      /\b(security definer|volatile|insert|update|delete|merge|truncate)\b/i,
+    );
+    // Revoking from PUBLIC leaves `anon`'s default grant standing, so it is named.
+    expect(groupsSql).toContain(
+      "revoke all on function public.clone_open_blockage_groups(uuid, text[]) from anon;",
+    );
   });
 
   it("it cannot reach the engine", () => {
@@ -159,34 +195,40 @@ describe("what an operator is shown", () => {
   });
 
   /*
-    ONE LINE PER CLASS, AND EVERY CLASS.
+    ONE LINE PER CLASS, AND EVERY CLASS, IN ONE STATEMENT.
 
     The card read the six oldest open rows and drew each one's class sentence.
     On the CRM independent that was one sentence six times over 52 open rows,
     with no word of the other forty-six — and ordered oldest first, a class
-    that opened later could not reach the card at all. Reading the oldest 500
-    instead only moved the cut: Codex found that a class whose first row lay
-    past it was still not drawn. And a walk by a random id misses a row opened
-    while it runs, which Codex found next. The card now reads in one statement
-    whose own count says whether it carried everything; past that, it counts
-    every known class, and the panel says what it left out.
+    that opened later could not reach the card at all. Codex then found a gap
+    in each reading that replaced it: the oldest 500 rows only moved the cut; a
+    walk by a random id misses a row opened while it runs; and counting each
+    class in its own statement lets the counts see different moments. The
+    database now folds every open row in one statement, and the totals it
+    returns with the lines say what a cap left out.
   */
   it("the card reads every open row and draws every open class", () => {
     // One reader, and nothing here queries the table itself.
     expect(fn).toContain("readCardBlockages(supabase, data.cloneId)");
     expect(fn).not.toContain('"clone_sync_blockages"');
     expect(fn).not.toMatch(/\.limit\(\s*6\s*\)/);
-    // Complete only on the word of the count returned WITH the rows.
-    expect(blockageRead).toContain(
-      '.select("id, class, owner, detail, first_seen_at, self_heals", { count: "exact" })',
-    );
-    expect(blockageRead).toContain("first.count <= rows.length");
-    // No walk: a keyset over random ids, or an offset, misses rows.
+    expect(blockageRead).not.toContain('"clone_sync_blockages"');
+    // It names every class this build knows, and draws what comes back.
+    expect(blockageRead).toContain("_known_classes: [...KNOWN_BLOCKAGE_CLASSES]");
+    expect(blockageRead).toContain("cardBlockagesFrom(data)");
+    // No walk, no offset, and no second statement to disagree with the first.
     expect(blockageRead).not.toContain(".gt(");
     expect(blockageRead).not.toContain(".range(");
-    // Past one statement, every class the taxonomy knows is counted.
-    expect(blockageRead).toContain("Object.keys(BLOCKAGE_POLICY)");
-    expect(blockageRead).toContain("groupCardBlockages(carried, tallies)");
+    expect(blockageRead).not.toContain("Promise.all");
+    // The function is ONE statement over every open row of the clone…
+    const body = groupsFn.slice(groupsFn.indexOf("$$") + 2, groupsFn.lastIndexOf("$$"));
+    expect(body.split(";").filter((part) => part.trim()).length).toBe(1);
+    expect(body).toMatch(/where b\.clone_id = _clone_id\s+and b\.cleared_at is null/);
+    // …with totals over every line, counted before any cap…
+    expect(body).toContain("(sum(l.open_count) over ())::bigint as total_open");
+    expect(body).toContain("count(*) over () as total_lines");
+    // …and the classes this build knows first, so a cap can only cut the rest.
+    expect(body).toMatch(/order by l\.known desc,/);
     expect(panelCode).toContain("blockages.groups.map(");
     expect(panelCode).toContain("g.count");
     expect(panelCode).toContain("blockages.total - blockages.counted");

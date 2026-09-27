@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import { BLOCKAGE_POLICY } from "./blockageTaxonomy.pure";
-import { CARD_BLOCKAGE_READ_LIMIT, readCardBlockages } from "./cardBlockagesRead.server";
+import type { OpenBlockageLine } from "./cardBlockages.pure";
+import { readCardBlockages } from "./cardBlockagesRead.server";
 
 type Row = {
   id: string;
@@ -16,7 +17,6 @@ type Row = {
 };
 
 const CLONE = "clone-1";
-const CLASS_COUNT = Object.keys(BLOCKAGE_POLICY).length;
 
 const at = (minutes: number) => new Date(Date.UTC(2026, 8, 20) + minutes * 60_000).toISOString();
 
@@ -35,221 +35,201 @@ const blockage = (prefix: string, n: number, over: Partial<Row> = {}): Row => ({
 const many = (length: number, make: (n: number) => Row) =>
   Array.from({ length }, (_, n) => make(n));
 
+type RpcCall = { fn: string; args: Record<string, unknown>; options: unknown };
+
 /**
- * A PostgREST stand-in. Each request is one statement: it applies the filters
- * it is handed, orders by the columns named, truncates at `cap` without saying
- * so, and — when asked — counts the matching rows before the limit, from the
- * same rows it returns, as the real one does.
+ * A stand-in for `clone_open_blockage_groups` behind PostgREST. It folds the
+ * open rows the way the function does (`20260927100000_clone_open_blockage_groups.sql`,
+ * whose behaviour was checked on Postgres 16): a known class is one line, an
+ * unknown one a line per detail, each line with the oldest row's owner, known
+ * classes first, and the totals counted over every line. Then it cuts the
+ * answer at `cap` without saying so, as PostgREST's `max_rows` does.
+ *
+ * It has no `from`: a reader that queried the table itself would throw here.
  */
-function fakeServer(
+function fakeDatabase(
   rows: Row[],
   opts: {
     cap?: number;
-    failOn?: number;
-    /** Answer this request's count request with no count. */
-    withholdCountOn?: number;
-    /** Answer this request with a count but none of the rows it counted. */
-    dropRowsOn?: number;
+    fail?: string;
+    answer?: unknown;
+    rewrite?: (l: OpenBlockageLine[]) => OpenBlockageLine[];
   } = {},
 ) {
-  let calls = 0;
+  const calls: RpcCall[] = [];
   const client = {
-    from(table: string) {
-      expect(table).toBe("clone_sync_blockages");
-      const filters: Array<(r: Row) => boolean> = [];
-      const sorts: Array<keyof Row> = [];
-      let limit = Number.POSITIVE_INFINITY;
-      let counting = false;
-      const builder = {
-        select: (_cols: string, o?: { count?: string }) => {
-          counting = o?.count === "exact";
-          return builder;
-        },
-        eq: (col: keyof Row, val: unknown) => (filters.push((r) => r[col] === val), builder),
-        is: (col: keyof Row, val: unknown) => (filters.push((r) => r[col] === val), builder),
-        order: (col: keyof Row) => (sorts.push(col), builder),
-        limit: (n: number) => ((limit = n), builder),
-        then(resolve: (v: unknown) => unknown, reject: (e: unknown) => unknown) {
-          calls += 1;
-          const call = calls;
-          if (opts.failOn === call) {
-            return Promise.resolve({ data: null, error: { message: "boom" }, count: null }).then(
-              resolve,
-              reject,
-            );
-          }
-          const matching = rows
-            .filter((r) => filters.every((f) => f(r)))
-            .sort((a, b) => {
-              for (const col of sorts) {
-                if (a[col]! < b[col]!) return -1;
-                if (a[col]! > b[col]!) return 1;
-              }
-              return 0;
-            });
-          const data =
-            opts.dropRowsOn === call
-              ? []
-              : matching.slice(0, Math.min(limit, opts.cap ?? Number.POSITIVE_INFINITY));
-          const count = counting && opts.withholdCountOn !== call ? matching.length : null;
-          return Promise.resolve({ data, error: null, count }).then(resolve, reject);
-        },
-      };
-      return builder;
+    from() {
+      throw new Error("the card read must not query the table itself");
+    },
+    rpc(fn: string, args: Record<string, unknown>, options: unknown) {
+      calls.push({ fn, args, options });
+      if (opts.fail) return Promise.resolve({ data: null, error: { message: opts.fail } });
+      if ("answer" in opts) return Promise.resolve({ data: opts.answer, error: null });
+
+      const known = new Set(args._known_classes as string[]);
+      const lines = new Map<string, { known: boolean; rows: Row[] }>();
+      for (const r of rows) {
+        if (r.clone_id !== args._clone_id || r.cleared_at !== null) continue;
+        const isKnown = known.has(r.class);
+        const key = isKnown ? r.class : `${r.class}\u0000${r.detail}`;
+        const line = lines.get(key) ?? { known: isKnown, rows: [] };
+        line.rows.push(r);
+        lines.set(key, line);
+      }
+      const byOldest = (a: Row, b: Row) =>
+        a.first_seen_at.localeCompare(b.first_seen_at) || a.id.localeCompare(b.id);
+      const folded = [...lines.values()].map(({ known: k, rows: rs }) => {
+        const oldest = [...rs].sort(byOldest)[0];
+        return { k, oldest, count: rs.length };
+      });
+      folded.sort(
+        (a, b) =>
+          Number(b.k) - Number(a.k) ||
+          a.oldest.first_seen_at.localeCompare(b.oldest.first_seen_at) ||
+          a.oldest.class.localeCompare(b.oldest.class),
+      );
+      const totalOpen = folded.reduce((n, f) => n + f.count, 0);
+      let answer: OpenBlockageLine[] = folded.map((f) => ({
+        class: f.oldest.class,
+        detail: f.k ? null : f.oldest.detail,
+        owner: f.oldest.owner,
+        self_heals: f.oldest.self_heals,
+        open_count: f.count,
+        oldest_first_seen_at: f.oldest.first_seen_at,
+        total_open: totalOpen,
+        total_lines: folded.length,
+      }));
+      if (opts.cap !== undefined) answer = answer.slice(0, opts.cap);
+      if (opts.rewrite) answer = opts.rewrite(answer);
+      return Promise.resolve({ data: answer, error: null });
     },
   };
-  return { client: client as unknown as SupabaseClient<Database>, calls: () => calls };
+  return { client: client as unknown as SupabaseClient<Database>, calls };
 }
 
-describe("readCardBlockages: one statement carries every open row", () => {
-  it("reads the clone's open rows once, and draws them as one line per class", async () => {
-    const rows = [
-      ...many(52, (n) => blockage("a", n)),
-      blockage("z", 1, { class: "ci_red", owner: "prime_author", first_seen_at: at(9_000) }),
-      blockage("b", 1, { cleared_at: at(9_000) }),
-      blockage("c", 1, { clone_id: "clone-2" }),
-    ];
-    const { client, calls } = fakeServer(rows);
-    const { data, error } = await readCardBlockages(client, CLONE);
-    expect(error).toBeNull();
-    expect(data!.groups.map((g) => [g.cls, g.count, g.firstSeenAt])).toEqual([
-      ["prime_ledger_hole", 52, at(0)],
-      ["ci_red", 1, at(9_000)],
+const read = async (db: ReturnType<typeof fakeDatabase>) => readCardBlockages(db.client, CLONE);
+
+describe("the card asks the database once", () => {
+  it("as a GET, naming the clone and every class this build knows", async () => {
+    const db = fakeDatabase([]);
+    await read(db);
+    expect(db.calls).toEqual([
+      {
+        fn: "clone_open_blockage_groups",
+        args: { _clone_id: CLONE, _known_classes: Object.keys(BLOCKAGE_POLICY) },
+        // PostgREST runs a GET in a read-only transaction.
+        options: { get: true },
+      },
     ]);
-    expect(data!.total).toBe(53);
-    expect(data!.counted).toBe(53);
-    // One statement: the rows, and the count that says they are all of them.
-    expect(calls()).toBe(1);
   });
+});
 
-  it("nothing open is one request and no lines", async () => {
-    const { client, calls } = fakeServer([blockage("a", 1, { cleared_at: at(9_000) })]);
-    const { data } = await readCardBlockages(client, CLONE);
-    expect(data).toEqual({ groups: [], total: 0, counted: 0 });
-    expect(calls()).toBe(1);
-  });
-
-  it("a read the server cut short is never taken for the whole", async () => {
-    // A cap below the limit returns fewer rows than were asked for; the count
-    // that came with them says there are more, so the read goes on to count.
+describe("every open class is drawn, with its count", () => {
+  it("the CRM independent's 52 holes and a red PR opened after them are two lines", async () => {
     const rows = [
-      ...many(300, (n) => blockage("a", n)),
-      blockage("z", 1, { class: "ci_red", owner: "prime_author", first_seen_at: at(9_000) }),
+      ...many(52, (n) => blockage("hole-", n)),
+      blockage("ci-", 0, { class: "ci_red", owner: "prime_author", first_seen_at: at(10_000) }),
     ];
-    const { client } = fakeServer(rows, { cap: 100 });
-    const { data } = await readCardBlockages(client, CLONE);
-    expect(data!.groups.map((g) => [g.cls, g.count])).toEqual([
-      ["prime_ledger_hole", 300],
+    const { data, error } = await read(fakeDatabase(rows));
+    expect(error).toBeNull();
+    expect(data?.groups.map((g) => [g.cls, g.count, g.firstSeenAt])).toEqual([
+      ["prime_ledger_hole", 52, at(0)],
+      ["ci_red", 1, at(10_000)],
+    ]);
+    expect([data?.total, data?.counted]).toEqual([53, 53]);
+  });
+
+  it("a class whose every row is newer than 2,600 others is still drawn, whatever the cap", async () => {
+    // Past the six, the 500 and the 2,000 rows every earlier reading stopped at.
+    const rows = [
+      ...many(2_600, (n) => blockage("hole-", n)),
+      ...many(3, (n) =>
+        blockage("ci-", n, {
+          class: "ci_red",
+          owner: "prime_author",
+          first_seen_at: at(90_000 + n),
+        }),
+      ),
+    ];
+    const { data } = await read(fakeDatabase(rows, { cap: 1_000 }));
+    expect(data?.groups.map((g) => [g.cls, g.count])).toEqual([
+      ["prime_ledger_hole", 2_600],
+      ["ci_red", 3],
+    ]);
+    expect([data?.total, data?.counted]).toEqual([2_603, 2_603]);
+  });
+
+  it("a cap cuts only lines of a class this build does not know, and the card says how many rows", async () => {
+    const rows = [
+      ...many(1_500, (n) =>
+        blockage("old-", n, {
+          class: "retired_class",
+          detail: `reason ${n}`,
+          first_seen_at: at(-5_000 + n),
+        }),
+      ),
+      ...many(52, (n) => blockage("hole-", n)),
+      blockage("ci-", 0, { class: "ci_red", owner: "prime_author", first_seen_at: at(10_000) }),
+    ];
+    const { data } = await read(fakeDatabase(rows, { cap: 1_000 }));
+    // Both known classes arrive, however many older unknown lines there are.
+    expect(
+      data?.groups.filter((g) => g.cls in BLOCKAGE_POLICY).map((g) => [g.cls, g.count]),
+    ).toEqual([
+      ["prime_ledger_hole", 52],
       ["ci_red", 1],
     ]);
-    expect(data!.total - data!.counted).toBe(0);
+    // 998 unknown lines arrived; the other 502 rows are what the panel says it left out.
+    expect([data?.total, data?.counted]).toEqual([1_553, 1_051]);
+  });
+
+  it("never counts a cleared row, or another clone's", async () => {
+    const rows = [
+      blockage("hole-", 1),
+      blockage("hole-", 2, { cleared_at: at(5) }),
+      blockage("ci-", 1, { class: "ci_red", owner: "prime_author", clone_id: "clone-2" }),
+    ];
+    const { data } = await read(fakeDatabase(rows));
+    expect(data?.groups.map((g) => [g.cls, g.count])).toEqual([["prime_ledger_hole", 1]]);
+    expect([data?.total, data?.counted]).toEqual([1, 1]);
+  });
+
+  it("nothing open is no lines", async () => {
+    expect(await read(fakeDatabase([]))).toEqual({
+      data: { groups: [], total: 0, counted: 0 },
+      error: null,
+    });
   });
 });
 
 /*
-  More open rows than one statement carries: every class the taxonomy knows
-  is counted by the database, each count one statement with its oldest row.
+  A failed read is `null` on the card and drawn as "could not be read": "nothing
+  is blocking this clone" is a claim, and a read that did not happen cannot
+  make it.
 */
-describe("readCardBlockages: past one statement, every known class is counted", () => {
-  it("draws every known class with its exact count, including one the first read never reached", async () => {
-    // What Codex found in the first commit's bound: oldest first and cut at
-    // 500, a class whose every row came later was not drawn at all.
-    const rows = [
-      ...many(CARD_BLOCKAGE_READ_LIMIT + 600, (n) => blockage("a", n)),
-      ...many(30, (n) =>
-        blockage("z", n, {
-          class: "ci_red",
-          owner: "prime_author",
-          first_seen_at: at(50_000 - n),
-        }),
-      ),
-    ];
-    const { client, calls } = fakeServer(rows);
-    const { data, error } = await readCardBlockages(client, CLONE);
-    expect(error).toBeNull();
-    expect(data!.groups.map((g) => [g.cls, g.count, g.firstSeenAt])).toEqual([
-      ["prime_ledger_hole", CARD_BLOCKAGE_READ_LIMIT + 600, at(0)],
-      ["ci_red", 30, at(50_000 - 29)],
-    ]);
-    expect(data!.total).toBe(CARD_BLOCKAGE_READ_LIMIT + 630);
-    expect(data!.counted).toBe(data!.total);
-    // The first read, then one count of everything and one per class.
-    expect(calls()).toBe(1 + 1 + CLASS_COUNT);
-  });
-
-  it("a class this build does not know is drawn from what the first read carried, and the rest is said", async () => {
-    const retired = (prefix: string, n: number, minutes: number) =>
-      blockage(prefix, n, {
-        class: "retired_class",
-        owner: "machinery",
-        detail: "why",
-        first_seen_at: at(minutes),
-      });
-    const rows = [
-      // Oldest, so the first read carries them.
-      ...many(3, (n) => retired("a", n, n - 100)),
-      ...many(CARD_BLOCKAGE_READ_LIMIT, (n) => blockage("b", n)),
-      // Newest, past what the first read carried.
-      ...many(5, (n) => retired("z", n, 90_000 + n)),
-    ];
-    const { client } = fakeServer(rows);
-    const { data } = await readCardBlockages(client, CLONE);
-    expect(data!.groups.map((g) => [g.what, g.count])).toEqual([
-      ["why", 3],
-      [BLOCKAGE_POLICY.prime_ledger_hole.what, CARD_BLOCKAGE_READ_LIMIT],
-    ]);
-    expect(data!.total).toBe(CARD_BLOCKAGE_READ_LIMIT + 8);
-    // What no count by class can reach, and what the card says it left out.
-    expect(data!.total - data!.counted).toBe(5);
-  });
-});
-
-describe("readCardBlockages: a read that cannot be trusted is not a shorter list", () => {
-  const large = () => many(CARD_BLOCKAGE_READ_LIMIT + 1, (n) => blockage("a", n));
-
-  it("a failed first read fails the read", async () => {
-    const { client } = fakeServer(large(), { failOn: 1 });
-    expect(await readCardBlockages(client, CLONE)).toEqual({
-      data: null,
-      error: { message: "boom" },
-    });
-  });
-
-  it("a first read with no count fails the read, rather than being taken as complete", async () => {
-    const { client } = fakeServer(
-      many(3, (n) => blockage("a", n)),
-      { withholdCountOn: 1 },
+describe("a read that did not happen is never drawn as none", () => {
+  it("a failed request fails the read", async () => {
+    const res = await read(
+      fakeDatabase([blockage("hole-", 1)], { fail: "PGRST202: function not found" }),
     );
-    const { data, error } = await readCardBlockages(client, CLONE);
-    expect(data).toBeNull();
-    expect(error!.message).toBe("the database did not count this clone's open blockages");
+    expect(res).toEqual({ data: null, error: { message: "PGRST202: function not found" } });
   });
 
-  it("a failed class count fails the read", async () => {
-    const { client } = fakeServer(large(), { failOn: 3 });
-    expect(await readCardBlockages(client, CLONE)).toEqual({
-      data: null,
-      error: { message: "boom" },
-    });
+  it("an answer that is not a list fails the read", async () => {
+    const res = await read(fakeDatabase([], { answer: null }));
+    expect(res.data).toBeNull();
+    expect(res.error?.message).toMatch(/no answer/);
   });
 
-  it("a total the database did not count fails the read, and never reads as zero", async () => {
-    const { client } = fakeServer(large(), { withholdCountOn: 2 });
-    const { data, error } = await readCardBlockages(client, CLONE);
-    expect(data).toBeNull();
-    expect(error!.message).toBe("the database did not count this clone's open blockages");
-  });
-
-  it("a class counted with no oldest row fails the read", async () => {
-    // Request 3 is the first class in the taxonomy: give it a row, then answer
-    // with the count and none of the rows.
-    const first = Object.keys(BLOCKAGE_POLICY)[0];
-    const rows = [...large(), blockage("z", 1, { class: first, owner: "machinery" })];
-    const { client } = fakeServer(rows, { dropRowsOn: 3 });
-    const { data, error } = await readCardBlockages(client, CLONE);
-    expect(data).toBeNull();
-    expect(error!.message).toBe(
-      `the database counted 1 open ${first} rows and returned none of them`,
+  it("an answer that contradicts itself fails the read", async () => {
+    const rows = [...many(3, (n) => blockage("hole-", n)), blockage("ci-", 0, { class: "ci_red" })];
+    const res = await read(
+      fakeDatabase(rows, {
+        rewrite: (lines) =>
+          lines.map((l, i) => (i === 0 ? { ...l, total_open: l.total_open + 7 } : l)),
+      }),
     );
+    expect(res.data).toBeNull();
+    expect(res.error?.message).toMatch(/disagree/);
   });
 });

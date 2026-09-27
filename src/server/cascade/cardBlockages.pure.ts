@@ -24,22 +24,35 @@
  * showed and shows every class that is open. The rows themselves, each with
  * its own detail, are on the prime page's per-clone comparison.
  *
+ * ## The database folds the rows, in one statement
+ *
+ * The lines come from `clone_open_blockage_groups`
+ * (`20260927100000_clone_open_blockage_groups.sql`): every open row on the
+ * clone, one line per class, each with its count and its oldest row, and on
+ * every line the totals over all lines. It is one statement, so the lines and
+ * the totals describe one moment. Every reading this card tried before it was
+ * either cut short or assembled from statements that saw different moments.
+ *
+ * PostgREST caps an answer and says nothing when it does. The lines of a class
+ * this build knows come first, and there are few of them, so a cap can only cut
+ * lines of a class it does not know. The totals were counted before the cap,
+ * so `total - counted` is exactly the rows the lines that arrived leave out,
+ * and the card says so.
+ *
  * ## A class the taxonomy no longer knows
  *
  * A row can outlive its class. The card falls back to the row's own detail
- * for its sentence, and two such rows need not say the same thing. So they
- * are grouped by class AND detail, and one row's words are never drawn over
- * another's.
+ * for its sentence, and two such rows need not say the same thing. So the
+ * database splits such a class by detail, and one row's words are never drawn
+ * over another's.
  *
- * ## A class the database counted
+ * ## An answer that contradicts itself is not drawn
  *
- * The card reads its rows in one statement (`cardBlockagesRead.server.ts`).
- * When that statement cannot carry every open row, the reader asks the
- * database to count each known class instead, and those counts are handed in
- * as `tallies`. A counted class is whole, so its line is the count and nothing
- * the first read carried of it is added again. A class the database counted at
- * zero draws no line, even if the first read, which ran before, carried a row
- * of it.
+ * One statement computes the totals once, so every line carries the same pair,
+ * and a whole answer's lines add up to its total. An answer that breaks either
+ * rule is not something this module understands, and drawing it would put a
+ * number on the card nobody measured. It is refused, and the card draws the
+ * refusal as "could not be read", never as a shorter list.
  */
 import {
   BLOCKAGE_POLICY,
@@ -47,22 +60,25 @@ import {
   type BlockageOwner,
 } from "@/server/cascade/blockageTaxonomy.pure";
 
-/** An open `clone_sync_blockages` row, as the card's read selects it. */
-export type OpenBlockageRow = {
-  id: string;
-  class: string;
-  owner: string;
-  detail: string;
-  first_seen_at: string;
-  self_heals: boolean;
-};
+/** Every class this build knows, as the database is told them. */
+export const KNOWN_BLOCKAGE_CLASSES: readonly string[] = Object.keys(BLOCKAGE_POLICY);
 
-/**
- * The database's own count of one known class's open rows on a clone, and
- * when the oldest of them was first seen. `firstSeenAt` is null only when
- * nothing is open.
- */
-export type ClassTally = { count: number; firstSeenAt: string | null };
+/** One line of `clone_open_blockage_groups`, as PostgREST returns it. */
+export type OpenBlockageLine = {
+  class: string;
+  /** Null on a class the caller named as known; that class's rows' detail otherwise. */
+  detail: string | null;
+  /** The oldest row's owner. A known class takes its owner from the taxonomy instead. */
+  owner: string;
+  /** The oldest row's flag. A known class takes its flag from the taxonomy instead. */
+  self_heals: boolean;
+  open_count: number;
+  oldest_first_seen_at: string;
+  /** Every open row on the clone, counted before any cap. The same on every line. */
+  total_open: number;
+  /** Every line of the answer, counted before any cap. The same on every line. */
+  total_lines: number;
+};
 
 /** One line on the card: a class that is open, and how much of it. */
 export type CardBlockageGroup = {
@@ -86,74 +102,94 @@ export type CardBlockages = {
   /** Every open row on this clone. */
   total: number;
   /**
-   * How many of those rows the lines count. Below `total` only when rows of
-   * a class this build does not know lay past what one read could carry,
-   * which is the one thing a count by class cannot reach: the card says how
-   * many.
+   * How many of those rows the lines count. Below `total` only when PostgREST
+   * cut the answer, which can only cut lines of a class this build does not
+   * know: the card says how many rows that leaves out.
    */
   counted: number;
 };
 
+/** The database's answer read as the card draws it, or why it cannot be. */
+export type CardBlockagesAnswer =
+  | { ok: true; blockages: CardBlockages }
+  | { ok: false; reason: string };
+
 /**
- * Every open row, one line per class, oldest class first.
+ * The lines of one `clone_open_blockage_groups` answer, one per class, oldest
+ * class first.
  *
  * A known class takes its owner, self-heal flag and sentence from the
  * taxonomy, the one source the sentence already comes from, so a line cannot
  * pair one policy's words with another's owner. An unknown class keeps the
- * row's own values, because nothing else describes it.
- *
- * A class in `tallies` is drawn from its count and never from its rows.
+ * line's own values, because nothing else describes it.
  */
-export function groupCardBlockages(
-  rows: readonly OpenBlockageRow[],
-  tallies?: ReadonlyMap<string, ClassTally>,
-): CardBlockageGroup[] {
-  const groups = new Map<string, CardBlockageGroup>();
-  // Only a class the taxonomy knows can be drawn from a count, so only its
-  // rows are set aside for one.
-  const counted = new Set<string>();
-  for (const [cls, tally] of tallies ?? []) {
-    const policy = policyOf(cls);
-    if (!policy) continue;
-    counted.add(cls);
-    if (tally.count <= 0) continue;
-    groups.set(cls, {
-      key: cls,
-      cls: cls as BlockageClass,
-      owner: policy.owner,
-      what: policy.what,
-      count: tally.count,
-      // Never empty while the count is above zero: the reader refuses a
-      // count with no oldest row. An empty start would sort last.
-      firstSeenAt: tally.firstSeenAt ?? "",
-      selfHeals: policy.selfHeals,
-    });
+export function cardBlockagesFrom(lines: readonly OpenBlockageLine[]): CardBlockagesAnswer {
+  if (lines.length === 0) {
+    // No line means no open row: a cap never leaves an answer empty.
+    return { ok: true, blockages: { groups: [], total: 0, counted: 0 } };
   }
-  for (const row of rows) {
-    // Counted whole by the database; its rows would count it twice.
-    if (counted.has(row.class)) continue;
-    const cls = row.class as BlockageClass;
-    const policy = policyOf(row.class);
-    const key = policy ? row.class : `${row.class}:${row.detail}`;
+
+  const { total_open: total, total_lines: totalLines } = lines[0];
+  if (!isCount(total) || !isCount(totalLines)) {
+    return refused("the answer's totals are not counts");
+  }
+
+  const groups = new Map<string, CardBlockageGroup>();
+  let counted = 0;
+  for (const line of lines) {
+    if (line.total_open !== total || line.total_lines !== totalLines) {
+      return refused("the answer's lines disagree about its totals");
+    }
+    if (!isCount(line.open_count) || line.open_count === 0) {
+      return refused(`a ${line.class} line stands for no rows`);
+    }
+    counted += line.open_count;
+
+    const policy = policyOf(line.class);
+    if (!policy && !line.detail) {
+      // The detail is the only sentence an unknown class has, and the card
+      // never draws a class name in its place.
+      return refused(`a line of a class this build does not know came back without its words`);
+    }
+    const key = policy ? line.class : `${line.class}:${line.detail}`;
     const group = groups.get(key);
-    if (!group) {
-      groups.set(key, {
-        key,
-        cls,
-        owner: policy ? policy.owner : (row.owner as BlockageOwner),
-        what: policy ? policy.what : row.detail,
-        count: 1,
-        firstSeenAt: row.first_seen_at,
-        selfHeals: policy ? policy.selfHeals : row.self_heals,
-      });
+    if (group) {
+      // One class the database split, drawn once: the defect this card had.
+      group.count += line.open_count;
+      if (earlier(line.oldest_first_seen_at, group.firstSeenAt)) {
+        group.firstSeenAt = line.oldest_first_seen_at;
+      }
       continue;
     }
-    group.count += 1;
-    if (earlier(row.first_seen_at, group.firstSeenAt)) group.firstSeenAt = row.first_seen_at;
+    groups.set(key, {
+      key,
+      cls: line.class as BlockageClass,
+      owner: policy ? policy.owner : (line.owner as BlockageOwner),
+      what: policy ? policy.what : (line.detail as string),
+      count: line.open_count,
+      firstSeenAt: line.oldest_first_seen_at,
+      selfHeals: policy ? policy.selfHeals : line.self_heals,
+    });
   }
-  return [...groups.values()].sort(
-    (a, b) => order(a.firstSeenAt) - order(b.firstSeenAt) || a.key.localeCompare(b.key),
-  );
+
+  if (lines.length > totalLines || counted > total) {
+    return refused("the answer's lines claim more than its totals");
+  }
+  if (lines.length === totalLines && counted !== total) {
+    // Every line arrived, so the lines are every open row.
+    return refused("the answer's lines do not add up to its total");
+  }
+
+  return {
+    ok: true,
+    blockages: {
+      groups: [...groups.values()].sort(
+        (a, b) => order(a.firstSeenAt) - order(b.firstSeenAt) || a.key.localeCompare(b.key),
+      ),
+      total,
+      counted,
+    },
+  };
 }
 
 /** Whether the taxonomy knows this class, as a guard rather than a cast. */
@@ -163,6 +199,14 @@ function isKnownBlockageClass(cls: string): cls is BlockageClass {
 
 function policyOf(cls: string) {
   return isKnownBlockageClass(cls) ? BLOCKAGE_POLICY[cls] : undefined;
+}
+
+function isCount(n: unknown): n is number {
+  return typeof n === "number" && Number.isSafeInteger(n) && n >= 0;
+}
+
+function refused(reason: string): CardBlockagesAnswer {
+  return { ok: false, reason };
 }
 
 /** A start for sorting: an unreadable one sorts last rather than first. */
