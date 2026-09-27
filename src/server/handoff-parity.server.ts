@@ -47,6 +47,11 @@ import {
   type SurplusClassification,
 } from "./surplusOrigin.pure";
 import { isPrimeOnlySecret } from "./primeOnlySecrets.pure";
+import {
+  isPrimeOnlyBucket,
+  isPrimeOnlyCronJob,
+  isPrimeOnlyFunction,
+} from "./primeOnlyFeatures.pure";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 
@@ -436,7 +441,7 @@ function diffExtensions(prime: Snapshot, target: Snapshot) {
 
 // ── G3 surfaces ───────────────────────────────────────────────────────
 
-function diffBuckets(prime: Snapshot, target: Snapshot) {
+export function diffBuckets(prime: Snapshot, target: Snapshot) {
   const missing: string[] = [];
   const configDrift: Array<{
     id: string;
@@ -445,8 +450,16 @@ function diffBuckets(prime: Snapshot, target: Snapshot) {
     target: unknown;
   }> = [];
   const extra: string[] = [];
+  const withheld: string[] = [];
 
   for (const [id, pb] of prime.bucketsById) {
+    // The prime's own feature's bucket is never replicated, so its absence is
+    // not a gap and its configuration is not drift. A clone that holds it holds
+    // it because a migration created it. See `primeOnlyFeatures.pure.ts`.
+    if (isPrimeOnlyBucket(id)) {
+      if (!target.bucketsById.has(id)) withheld.push(id);
+      continue;
+    }
     const tb = target.bucketsById.get(id);
     if (!tb) {
       missing.push(id);
@@ -474,24 +487,36 @@ function diffBuckets(prime: Snapshot, target: Snapshot) {
       });
     }
   }
-  for (const id of target.bucketsById.keys()) if (!prime.bucketsById.has(id)) extra.push(id);
+  for (const id of target.bucketsById.keys()) {
+    if (!prime.bucketsById.has(id) && !isPrimeOnlyBucket(id)) extra.push(id);
+  }
 
   return {
     prime_count: prime.bucketsById.size,
     target_count: target.bucketsById.size,
     missing_in_target: missing.sort(),
+    /** The prime's own buckets this clone does not hold — as it should not. */
+    withheld_by_policy: withheld.sort(),
     extra_in_target: extra.sort(),
     config_drift: configDrift,
   };
 }
 
-function diffCron(prime: Snapshot, target: Snapshot) {
+export function diffCron(prime: Snapshot, target: Snapshot) {
   const missing: string[] = [];
   const scheduleDrift: Array<{ jobname: string; prime: string; target: string }> = [];
   const activeDrift: Array<{ jobname: string; prime: boolean; target: boolean }> = [];
   const extra: string[] = [];
+  const withheld: string[] = [];
+  const primeOnlyInTarget: string[] = [];
 
   for (const [name, pj] of prime.cronByName) {
+    // The prime's own jobs are never replicated: each invokes a function no
+    // clone is given. See `primeOnlyFeatures.pure.ts`.
+    if (isPrimeOnlyCronJob(pj)) {
+      if (!target.cronByName.has(name)) withheld.push(name);
+      continue;
+    }
     const tj = target.cronByName.get(name);
     if (!tj) {
       missing.push(name);
@@ -504,12 +529,24 @@ function diffCron(prime: Snapshot, target: Snapshot) {
       activeDrift.push({ jobname: name, prime: pj.active, target: tj.active });
     }
   }
-  for (const name of target.cronByName.keys()) if (!prime.cronByName.has(name)) extra.push(name);
+  for (const [name, tj] of target.cronByName) {
+    if (isPrimeOnlyCronJob(tj)) primeOnlyInTarget.push(name);
+    else if (!prime.cronByName.has(name)) extra.push(name);
+  }
 
   return {
     prime_count: prime.cronByName.size,
     target_count: target.cronByName.size,
     missing_in_target: missing.sort(),
+    /** The prime's own jobs this clone does not schedule — as it should not. */
+    withheld_by_policy: withheld.sort(),
+    /**
+     * The prime's own jobs this clone DOES schedule, put there by the
+     * migrations that create the feature's tables. Each calls a function the
+     * clone is not given; `sweepPrimeOnlyCronJobs` takes them off after the
+     * next apply. Named, and not blocking: nothing about the tenant is wrong.
+     */
+    prime_only_in_target: primeOnlyInTarget.sort(),
     extra_in_target: extra.sort(),
     schedule_drift: scheduleDrift,
     active_drift: activeDrift,
@@ -540,19 +577,43 @@ export function classifyEdgeFunctionShortfall(
   primeSlugs: Iterable<string>,
   targetSlugs: Iterable<string>,
   declared: ReadonlySet<string> | null,
-): { missing: string[]; undeclared: string[]; extra: string[] } {
+): {
+  missing: string[];
+  undeclared: string[];
+  extra: string[];
+  /** The prime's own functions, absent from the clone as they should be. */
+  withheld: string[];
+  /** The prime's own functions the clone still runs. */
+  primeOnlyPresent: string[];
+} {
   const target = new Set<string>(targetSlugs);
   const prime = new Set<string>(primeSlugs);
   const missing: string[] = [];
   const undeclared: string[] = [];
   const extra: string[] = [];
+  const withheld: string[] = [];
+  const primeOnlyPresent: string[] = [];
   for (const slug of prime) {
     if (target.has(slug)) continue;
-    if (declared && !declared.has(slug)) undeclared.push(slug);
+    // Asked FIRST, before the declared set: the prime's own functions are left
+    // out of what its repository declares for a clone, so read second they
+    // would be reported as residue the repo had dropped, and with no declared
+    // set as a gap that blocks. They are neither. See `primeOnlyFeatures.pure.ts`.
+    if (isPrimeOnlyFunction(slug)) withheld.push(slug);
+    else if (declared && !declared.has(slug)) undeclared.push(slug);
     else missing.push(slug);
   }
-  for (const slug of target) if (!prime.has(slug)) extra.push(slug);
-  return { missing: missing.sort(), undeclared: undeclared.sort(), extra: extra.sort() };
+  for (const slug of target) {
+    if (isPrimeOnlyFunction(slug)) primeOnlyPresent.push(slug);
+    else if (!prime.has(slug)) extra.push(slug);
+  }
+  return {
+    missing: missing.sort(),
+    undeclared: undeclared.sort(),
+    extra: extra.sort(),
+    withheld: withheld.sort(),
+    primeOnlyPresent: primeOnlyPresent.sort(),
+  };
 }
 
 function diffEdgeFunctions(
@@ -560,7 +621,7 @@ function diffEdgeFunctions(
   target: Snapshot,
   declared: ReadonlySet<string> | null,
 ) {
-  const { missing, undeclared, extra } = classifyEdgeFunctionShortfall(
+  const { missing, undeclared, extra, withheld, primeOnlyPresent } = classifyEdgeFunctionShortfall(
     prime.edgeFnSet,
     target.edgeFnSet,
     declared,
@@ -579,6 +640,14 @@ function diffEdgeFunctions(
     prime_only_undeclared: undeclared,
     /** True when a declared set was supplied, so the two lists above mean what they say. */
     declared_known: declared !== null,
+    /** The prime's own functions this clone does not run — as it should not. */
+    withheld_by_policy: withheld,
+    /**
+     * The prime's own functions this clone DOES run: deployed before the
+     * feature was held back. Named, and not blocking — removing them is an
+     * operator's act on a live project, never a side effect of a reading.
+     */
+    prime_only_in_target: primeOnlyPresent,
     extra_in_target: extra,
   };
 }
@@ -791,6 +860,36 @@ function diffMatviews(prime: Snapshot, target: Snapshot) {
 
 function diffSequences(prime: Snapshot, target: Snapshot) {
   return diffKeySets(prime.sequenceKeys, target.sequenceKeys);
+}
+
+/**
+ * The summary's reading of the prime's own feature: what policy withholds, and
+ * what a clone still holds of it. Empty when there is nothing of either.
+ */
+export function primeOnlyParityLine(
+  edgeFns: { withheld_by_policy: readonly string[]; prime_only_in_target: readonly string[] },
+  cron: { withheld_by_policy: readonly string[]; prime_only_in_target: readonly string[] },
+  buckets: { withheld_by_policy: readonly string[] },
+): string {
+  const withheld = [
+    ["edge-fns", edgeFns.withheld_by_policy.length],
+    ["cron", cron.withheld_by_policy.length],
+    ["buckets", buckets.withheld_by_policy.length],
+  ].filter(([, n]) => (n as number) > 0);
+  const present = [
+    ["edge-fns", edgeFns.prime_only_in_target.length],
+    ["cron", cron.prime_only_in_target.length],
+  ].filter(([, n]) => (n as number) > 0);
+  let line = "";
+  if (withheld.length > 0) {
+    line += ` · prime-only, withheld by policy: ${withheld.map(([k, n]) => `${k}=${n}`).join(" ")}`;
+  }
+  if (present.length > 0) {
+    line +=
+      ` · prime-only, still on this clone: ${present.map(([k, n]) => `${k}=${n}`).join(" ")}` +
+      " (not blocking: the next migration apply sweeps the jobs; undeploying the functions is an operator's act)";
+  }
+  return line;
 }
 
 export type ParityResult = {
@@ -1116,7 +1215,12 @@ export async function computeParity(
     // narrowing above is invisible and reads as a clone that matches.
     (edgeFns.prime_only_undeclared.length > 0
       ? ` · prime-only edge-fns its repo no longer declares=${edgeFns.prime_only_undeclared.length}`
-      : "");
+      : "") +
+    // The prime's own feature, held back from every clone by policy. What is
+    // absent is said so, or the narrowing reads as a clone that matches; what
+    // is still present is said too, because each one is a function or a job
+    // the clone should not be running. See `primeOnlyFeatures.pure.ts`.
+    primeOnlyParityLine(edgeFns, cron, buckets);
 
   return {
     prime_ref: primeRef,

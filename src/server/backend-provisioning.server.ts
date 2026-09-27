@@ -45,6 +45,11 @@ import {
   planSecretWrite,
   type SecretWriteResult,
 } from "./secretWriteDiff.pure";
+import {
+  primeOnlyBucketReason,
+  primeOnlyCronJobsIn,
+  primeOnlyCronReason,
+} from "./primeOnlyFeatures.pure";
 
 const MGMT_API = "https://api.supabase.com/v1";
 
@@ -659,8 +664,15 @@ export async function getProjectAuthConfig(
  */
 export type BucketReplicationResult = {
   id: string;
-  status: "created" | "exists" | "failed" | "deferred";
+  /**
+   * `withheld` is a bucket the prime keeps for its own feature: not created
+   * here, not brought into step with the prime's configuration, and never
+   * copied into. See `primeOnlyFeatures.pure.ts`.
+   */
+  status: "created" | "exists" | "failed" | "deferred" | "withheld";
   error?: string;
+  /** Why the bucket itself was not replicated, when it was not. */
+  withheld?: string;
   objects_copied?: number;
   objects_failed?: number;
   objects_skipped?: number;
@@ -1140,6 +1152,16 @@ export async function replicateStorageBuckets(
   const targetUrl = getProjectUrl(targetRef);
 
   for (const bucket of primeBuckets) {
+    // The prime's own feature's bucket. A migration in the shared corpus
+    // creates it on every clone that applies the corpus — measured 27 Sep
+    // 2026, all four hold it, private and empty — so it is left exactly as a
+    // clone has it: not created where it is absent, not reconfigured where it
+    // differs, and never copied into. See `primeOnlyFeatures.pure.ts`.
+    const primeOnly = primeOnlyBucketReason(bucket.id);
+    if (primeOnly) {
+      results.push({ id: bucket.id, status: "withheld", withheld: `prime-only — ${primeOnly}` });
+      continue;
+    }
     let configResult: BucketReplicationResult;
     const already = onClone.get(bucket.id);
     if (already && sameConfig(already, bucket)) {
@@ -1824,6 +1846,18 @@ export async function replicateCronJobs(
 
   const results: CronJobReplicationResult[] = [];
   for (const job of primeJobs) {
+    // The prime's own jobs stay on the prime: each invokes a function no clone
+    // is given. See `primeOnlyFeatures.pure.ts`.
+    const primeOnly = primeOnlyCronReason(job);
+    if (primeOnly) {
+      results.push({
+        jobname: job.jobname,
+        status: "skipped",
+        rewrote_url: false,
+        reason: `prime-only — ${primeOnly}`,
+      });
+      continue;
+    }
     const hostRewrite = rewriteCronCommand(job.command, primeRef, cloneRef);
     const keyRewrite = rewriteEmbeddedAnonKey(
       hostRewrite.command,
@@ -1938,7 +1972,117 @@ export async function replicateCronJobs(
       });
     }
   }
+
+  // And the prime's own jobs ALREADY on the clone. Skipping them above keeps
+  // this step from scheduling one; it cannot take back what a migration
+  // scheduled, and the migrations that create the feature's tables schedule
+  // its dispatcher. Left for the next pass when the budget is spent — the
+  // step is re-entered after the pause, so nothing is lost by waiting.
+  if (!pastDeadline(deadlineAt)) {
+    const sweep = await sweepPrimeOnlyCronJobs(cloneRef, { primeRef });
+    for (const s of sweep.unscheduled) {
+      const reason = `prime-only — unscheduled from this clone: ${s.reason}`;
+      const seen = results.find((r) => r.jobname === s.jobname && r.status === "skipped");
+      if (seen) seen.reason = reason;
+      else results.push({ jobname: s.jobname, status: "skipped", rewrote_url: false, reason });
+    }
+    for (const f of sweep.failed) {
+      results.push({
+        jobname: f.jobname,
+        status: "failed",
+        rewrote_url: false,
+        error: `prime-only, and could not be unscheduled from this clone: ${f.error}`,
+      });
+    }
+  }
   return results;
+}
+
+/**
+ * What one sweep found on a project and did about it.
+ */
+export type PrimeOnlyCronSweep = {
+  unscheduled: Array<{ jobid: number; jobname: string; reason: string }>;
+  failed: Array<{ jobid: number; jobname: string; reason: string; error: string }>;
+  /** Why nothing was unscheduled although something was found; null otherwise. */
+  skipped: string | null;
+};
+
+/**
+ * Unschedule the prime's own pg_cron jobs from a project that is not the prime.
+ *
+ * The feature is the prime's (`primeOnlyFeatures.pure.ts`), but its tables are
+ * schema and every clone applies them — and the migrations that create them
+ * also schedule `migration-dispatcher-15s`, which invokes a function no clone
+ * is given. A clone that applied them calls a function it does not have every
+ * fifteen seconds, for ever: measured 27 Sep 2026, all four clones did.
+ *
+ * Three rules make it safe to run after every apply.
+ *
+ * - It never acts on the prime. The prime's ref is compared before anything is
+ *   unscheduled, and a ref that cannot be resolved stops the sweep: a sweep
+ *   that cannot tell which project it is on does nothing.
+ * - It removes exactly what it read, by `jobid`, and only what the register
+ *   names (`primeOnlyCronJobsIn`), so it cannot take an ordinary job with it.
+ * - It never throws. It is housekeeping after something else succeeded, and
+ *   that work must not be reported as failed because of it.
+ */
+export async function sweepPrimeOnlyCronJobs(
+  targetRef: string,
+  opts: { primeRef?: string | null } = {},
+): Promise<PrimeOnlyCronSweep> {
+  const sweep: PrimeOnlyCronSweep = { unscheduled: [], failed: [], skipped: null };
+  let raw: unknown;
+  try {
+    raw = await runSqlOnProject(targetRef, `select jobid, jobname, command from cron.job`);
+  } catch (err) {
+    sweep.skipped = `the schedule could not be read: ${err instanceof Error ? err.message : String(err)}`;
+    return sweep;
+  }
+  const rows = Array.isArray(raw) ? (raw as Array<Record<string, unknown>>) : [];
+  const jobs = rows
+    .map((r) => ({
+      jobid: Number(r?.jobid),
+      jobname: String(r?.jobname ?? ""),
+      command: String(r?.command ?? ""),
+    }))
+    .filter((j) => Number.isSafeInteger(j.jobid) && j.jobid > 0);
+  const found = primeOnlyCronJobsIn(jobs);
+  if (found.length === 0) return sweep;
+
+  let primeRef = (opts.primeRef ?? "").trim();
+  if (!primeRef) {
+    try {
+      const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+      const { resolvePrimeBackendRef } = await import("./prime-backend.server");
+      primeRef = (await resolvePrimeBackendRef(supabaseAdmin)).trim();
+    } catch (err) {
+      sweep.skipped =
+        `the prime's project could not be resolved, so this project cannot be ruled out as the ` +
+        `prime: ${err instanceof Error ? err.message : String(err)}`;
+      return sweep;
+    }
+  }
+  if (!primeRef || primeRef.toLowerCase() === targetRef.trim().toLowerCase()) {
+    sweep.skipped = primeRef
+      ? "this is the prime's own project, and these jobs are its own"
+      : "the prime's project is not known, so this project cannot be ruled out as the prime";
+    return sweep;
+  }
+  for (const { job, reason } of found) {
+    try {
+      await runSqlOnProject(targetRef, `select cron.unschedule(${job.jobid}::bigint);`);
+      sweep.unscheduled.push({ jobid: job.jobid, jobname: job.jobname, reason });
+    } catch (err) {
+      sweep.failed.push({
+        jobid: job.jobid,
+        jobname: job.jobname,
+        reason,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return sweep;
 }
 
 // ─── G4: Required extensions + realtime publication parity ───────────
@@ -2755,6 +2899,13 @@ export async function applyPrimeMigrations(
    * is present by construction.
    */
   primeLedgerHoles: string[];
+  /**
+   * The prime's own pg_cron jobs this pass found on the clone and took off it,
+   * after what it sent. Null when the sweep did not run: nothing reached the
+   * clone, or the budget stopped the pass and the next one will sweep. See
+   * `sweepPrimeOnlyCronJobs`.
+   */
+  primeOnlyCronSweep: PrimeOnlyCronSweep | null;
 }> {
   await runSqlOnProject(projectRef, TRACKING_TABLE_SQL);
 
@@ -2874,6 +3025,10 @@ export async function applyPrimeMigrations(
   let stoppedEarly = false;
   let chunkCursorDiscarded = false;
   let chunksApplied = 0;
+  // Whether any migration body was SENT this pass, failed or not — a file that
+  // fails part-way may already have committed what it scheduled. Not
+  // `latestApplied`, which a version the clone already held also sets.
+  let sentToClone = false;
   let chunkCursor: ChunkCursor | null = null;
   let position = 0;
   /*
@@ -3047,6 +3202,7 @@ export async function applyPrimeMigrations(
         break;
       }
       try {
+        sentToClone = true;
         await runSqlOnProject(projectRef, sql);
         await recordReplayedVersion(projectRef, unit.version, recordedName);
         for (const f of unit.members) {
@@ -3201,6 +3357,7 @@ export async function applyPrimeMigrations(
           });
           break;
         }
+        sentToClone = true;
         await runSqlOnProject(projectRef, sql);
       }
       await recordReplayedVersion(projectRef, m.id, recordedName);
@@ -3234,6 +3391,31 @@ export async function applyPrimeMigrations(
     }
   }
 
+  // What was just applied may have scheduled the prime's own jobs: the
+  // migrations that create its feature's tables also schedule the dispatcher,
+  // which invokes a function no clone is given. Swept only after something
+  // reached the clone — a pass that sent nothing scheduled nothing — and not
+  // when the budget stopped the pass, because the pass that continues it will
+  // sweep. See `sweepPrimeOnlyCronJobs`, which never throws and never acts on
+  // the prime.
+  const primeOnlyCronSweep =
+    (sentToClone || chunksApplied > 0) && !stoppedEarly
+      ? await sweepPrimeOnlyCronJobs(projectRef)
+      : null;
+  if (primeOnlyCronSweep && primeOnlyCronSweep.unscheduled.length > 0) {
+    console.info("[migrations] unscheduled the prime's own jobs from a clone", {
+      projectRef,
+      jobs: primeOnlyCronSweep.unscheduled.map((j) => j.jobname),
+    });
+  }
+  if (primeOnlyCronSweep && (primeOnlyCronSweep.failed.length > 0 || primeOnlyCronSweep.skipped)) {
+    console.warn("[migrations] the prime's own jobs could not be swept from a clone", {
+      projectRef,
+      failed: primeOnlyCronSweep.failed.map((j) => `${j.jobname}: ${j.error}`),
+      skipped: primeOnlyCronSweep.skipped,
+    });
+  }
+
   return {
     results,
     latestApplied,
@@ -3242,6 +3424,7 @@ export async function applyPrimeMigrations(
     chunkCursor,
     chunkCursorDiscarded,
     primeLedgerHoles,
+    primeOnlyCronSweep,
   };
 }
 
@@ -5526,7 +5709,7 @@ export async function provisionCloneBackend(
     }
     await onStatusUpdate?.(
       "migrating",
-      `All ${declared.length} edge functions the prime's repository declares are already on the project — nothing to deploy this pass`,
+      `All ${declared.length} edge functions the prime's repository declares for a clone are already on the project — nothing to deploy this pass`,
     );
     edgeFunctions = declared.map((slug) => ({ slug, success: true, skipped: true }));
   } else {

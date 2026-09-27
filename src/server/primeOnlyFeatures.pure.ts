@@ -23,10 +23,14 @@
  * append-only.
  *
  * - The cascade holds its files as `protected` (`partitionCascadePaths`).
- * - Provisioning neither deploys its functions, nor schedules its crons, nor
- *   creates its bucket.
- * - Parity does not count their absence.
- * - What a migration schedules is swept after it applies (`isPrimeOnlyCronJob`).
+ * - Provisioning never deploys its functions: the prime's function tree is
+ *   read without them (`prime-backend.server.ts`), so the declared contract,
+ *   the deploy set and the secret scan all agree.
+ * - Provisioning never schedules its crons, and never creates or reconfigures
+ *   its bucket (`replicateCronJobs`, `replicateStorageBuckets`).
+ * - Parity does not count their absence, and names what a clone still holds.
+ * - What a migration schedules is swept after it applies, and by the cron
+ *   step, from any project that is not the prime (`sweepPrimeOnlyCronJobs`).
  *
  * ## What is deliberately NOT here
  *
@@ -42,6 +46,15 @@
  * the dispatcher, each first unscheduling `migration-dispatcher%`, so a clone
  * that applies them schedules a job invoking a function it does not have. That
  * is what `isPrimeOnlyCronJob` exists to find after every apply.
+ *
+ * The BUCKET is schema in the same sense. `20260507171554` creates
+ * `ghl-marketing-dump` in the same file as the feature's tables, so every
+ * clone that applies the corpus holds it — measured 27 Sep 2026: all four,
+ * private, zero objects. It stays, like the tables. What the register decides
+ * is that nothing ELSE puts it there or keeps it in step: replication neither
+ * creates it nor copies into it, and parity does not count its absence. It is
+ * never deleted by this platform — a bucket with an object in it is somebody's
+ * data, and the only way to know it is empty is to have looked.
  *
  * Measured on prime@387feb03: each function directory holds only `index.ts`,
  * nothing outside the set imports into it except `src/App.tsx` (the route),
@@ -172,7 +185,13 @@ export function isPrimeOnlyFunction(name: string): boolean {
 }
 
 export function isPrimeOnlyBucket(id: string): boolean {
-  return byBucket.has((id ?? "").trim());
+  return primeOnlyBucketReason(id) !== null;
+}
+
+/** Why a storage bucket is the prime's alone, or null when it is not. */
+export function primeOnlyBucketReason(id: string): string | null {
+  const feature = byBucket.get((id ?? "").trim());
+  return feature ? `${feature.title}: the bucket belongs to the prime's own feature.` : null;
 }
 
 /**
@@ -241,6 +260,24 @@ export function isPrimeOnlyCronJob(job: {
   command?: string | null;
 }): boolean {
   return primeOnlyCronReason(job) !== null;
+}
+
+/**
+ * The prime-only jobs among a project's `cron.job` rows, each with its reason,
+ * in the order they were given.
+ *
+ * What the sweep acts on and what parity reports, so the two cannot disagree
+ * about which job is the prime's.
+ */
+export function primeOnlyCronJobsIn<T extends { jobname?: string | null; command?: string | null }>(
+  jobs: readonly T[],
+): Array<{ job: T; reason: string }> {
+  const out: Array<{ job: T; reason: string }> = [];
+  for (const job of jobs) {
+    const reason = primeOnlyCronReason(job);
+    if (reason) out.push({ job, reason });
+  }
+  return out;
 }
 
 /**

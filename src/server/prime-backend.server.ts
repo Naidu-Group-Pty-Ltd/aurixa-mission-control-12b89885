@@ -18,6 +18,7 @@ import type { RepoRef } from "./github-app.server";
 import { countGithubCall } from "./githubUsageMeter";
 import { pruneBundleToReachable } from "./functionBundlePrune.pure";
 import { isPrimeOnlySecret } from "./primeOnlySecrets.pure";
+import { isPrimeOnlyPath } from "./primeOnlyFeatures.pure";
 import { OversizedMigrationError, PrimeBodyUnavailableError } from "./oversizedMigration.pure";
 import { githubApiHeaders } from "./githubRequestHeaders.pure";
 import {
@@ -110,13 +111,16 @@ export type PrimeBackendSnapshot = {
    */
   functionSourceOmitted: boolean;
   /**
-   * Every slug the repository declares at this commit, from the tree walk.
+   * Every slug the repository declares FOR A CLONE at this commit, from the
+   * tree walk.
    *
    * Unlike `functions`, this is never narrowed by `skipFunctionSlugs`, by
    * `functionLimit` or by `includeFunctionSource: false` — see
    * `declaredFunctionSlugsFromPaths`. It is what a clone is CONTRACTED to
    * carry, which is not the same set as what the prime's project happens to
-   * be running.
+   * be running — and not the same set as the prime's own tree either: what the
+   * prime keeps for itself is left out where the tree is read
+   * (`isCloneFunctionPath`), so the contract and the deploy set agree.
    */
   declaredFunctionSlugs: string[];
   /**
@@ -242,6 +246,24 @@ export function declaredFunctionSlugsFromPaths(relPaths: string[]): string[] {
     if (pickEntrypoint(slug, [...ownPaths, ...sharedFiles])) out.push(slug);
   }
   return out.sort();
+}
+
+/**
+ * Whether a repository path is an edge-function file a CLONE is built from:
+ * under `supabase/functions/`, and not something the prime keeps for itself
+ * (`primeOnlyFeatures.pure.ts`).
+ *
+ * Asked once, where the prime's tree is read, rather than at each stage that
+ * reads it, because the three things built from that list have to agree. The
+ * declared slugs are what a clone is contracted to carry and the bundles are
+ * what it is given, and a slug in the first that is never in the second is a
+ * livelock: the pass that fetches no source pauses until every declared slug
+ * is live on the clone, and a prime-only one never would be. The secret scan
+ * reads the same files, and measured on prime@387feb03 no secret is read by
+ * prime-only code alone, so the scan names exactly what it named before.
+ */
+export function isCloneFunctionPath(repoPath: string): boolean {
+  return repoPath.startsWith(FUNCTIONS_PREFIX) && !isPrimeOnlyPath(repoPath);
 }
 
 /**
@@ -1651,7 +1673,7 @@ export async function fetchDeclaredEdgeFunctionSlugs(
     const { blobs } = await listSupabaseBlobs(octokit, ref);
     return declaredFunctionSlugsFromPaths(
       blobs
-        .filter((b) => b.path.startsWith(FUNCTIONS_PREFIX))
+        .filter((b) => isCloneFunctionPath(b.path))
         .map((b) => b.path.slice(FUNCTIONS_PREFIX.length)),
     );
   } catch {
@@ -1788,7 +1810,7 @@ export async function fetchPrimeBackendSnapshot(
     // declares — the two facts were never the same one.
     const declaredEarly = declaredFunctionSlugsFromPaths(
       blobs
-        .filter((b) => b.path.startsWith(FUNCTIONS_PREFIX))
+        .filter((b) => isCloneFunctionPath(b.path))
         .map((b) => b.path.slice(FUNCTIONS_PREFIX.length)),
     );
     const configBlobEarly = blobs.find((b) => b.path === CONFIG_TOML_PATH);
@@ -1808,7 +1830,9 @@ export async function fetchPrimeBackendSnapshot(
       functionSourceTruncated: false,
     };
   }
-  const functionBlobs = blobs.filter((b) => b.path.startsWith(FUNCTIONS_PREFIX));
+  // Everything below is built from this one list: the bundles, the secret
+  // scan and the declared slugs. See `isCloneFunctionPath`.
+  const functionBlobs = blobs.filter((b) => isCloneFunctionPath(b.path));
   const relPaths = functionBlobs.map((b) => b.path.slice(FUNCTIONS_PREFIX.length));
   const shaByRel = new Map(
     functionBlobs.map((b) => [b.path.slice(FUNCTIONS_PREFIX.length), b.sha]),

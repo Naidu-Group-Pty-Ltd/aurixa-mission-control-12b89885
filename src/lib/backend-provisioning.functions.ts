@@ -193,12 +193,15 @@ async function runBackendProvisioning(
     const cachedSecretNames = Array.isArray(cachedScan?.secret_names)
       ? (cachedScan.secret_names as string[])
       : null;
-    const cachedDeclaredSlugs = Array.isArray(cachedScan?.declared_function_slugs)
-      ? (cachedScan.declared_function_slugs as string[])
-      : null;
-    const { shouldSkipFunctionSource, scanIsCacheable } = await import(
+    const { shouldSkipFunctionSource, scanIsCacheable, withoutPrimeOnlyFunctions } = await import(
       /* @vite-ignore */ "@/lib/_server-shims/primeScanCache.pure"
     );
+    // Read through the rule the tree walk applies: a row scanned before the
+    // prime kept its own feature back still names it. See
+    // `withoutPrimeOnlyFunctions`.
+    const cachedDeclaredSlugs = Array.isArray(cachedScan?.declared_function_slugs)
+      ? withoutPrimeOnlyFunctions(cachedScan.declared_function_slugs as string[])
+      : null;
     const skipFunctionSource = shouldSkipFunctionSource({
       resumingSchema,
       cachedSecretNames,
