@@ -1759,21 +1759,33 @@ export async function processClone(args: {
   // walks a pass — each settled answer goes into the same `held_evidence`
   // ledger the hold releases use, so the next pass continues from it.
   const strandedVerdicts: StrandedVerdict[] = [];
+  /**
+   * What this block settled about a stranded file's history, for the hold
+   * releases below: a refreshed file an approvable exclusion names is held by
+   * the partition and released there, on this same answer, rather than walked
+   * a second time in one pass.
+   */
+  const strandedEvidence = new Map<string, HeldPathEvidence>();
   if (widenedScope !== null && primeShaByPath !== null && cloneShaByPath !== null) {
     const behind = strandedFunctionFiles({
       prime: primeShaByPath,
       clone: cloneShaByPath,
       inScope: widenedScope,
     });
-    // A file an exclusion names is that exclusion's business, exactly as it
-    // is inside a module: it is not a candidate here at all.
-    const excluded = new Set(
-      partitionCascadePaths(
-        behind.map((f) => f.path),
-        exclusions,
-      ).held.map((h) => h.path),
-    );
-    const stranded = behind.filter((f) => !excluded.has(f.path));
+    // A file an exclusion names meets that exclusion exactly as it would
+    // inside a module. A hold nothing can release (`protected`, `oversize`)
+    // is never written, so its history is not walked. A `manual_reconcile`
+    // hold is released only by `decideHoldRelease`, on the evidence or an
+    // operator's approval, so a refreshed file it names is still added below:
+    // the partition holds it and the hold releases decide it, as they do for
+    // a path in scope.
+    const holds = partitionCascadePaths(
+      behind.map((f) => f.path),
+      exclusions,
+    ).held;
+    const releasable = new Set(approvableHeld(holds).map((h) => h.path));
+    const neverWritten = new Set(holds.filter((h) => !releasable.has(h.path)).map((h) => h.path));
+    const stranded = behind.filter((f) => !neverWritten.has(f.path));
     if (stranded.length > 0) {
       const settled = new Set(
         stranded
@@ -1797,6 +1809,7 @@ export async function processClone(args: {
           : new Map();
       for (const [path, answer] of evidence) {
         if (answer.kind === "unsettled") continue;
+        strandedEvidence.set(path, answer);
         const clone = cloneShaByPath.get(path);
         if (clone) heldLedger[path] = { clone, evidence: answer };
       }
@@ -2011,8 +2024,15 @@ export async function processClone(args: {
       // Evidence probes are bounded and only possible where the clone's blob
       // SHA is already known from the tree listing — a truncated listing
       // releases nothing, which is yesterday's behaviour.
+      // A stranded Edge Function the refresh above added was walked there, in
+      // this same pass, and its answer is reused rather than asked twice.
       const needsEvidence = releasable
-        .filter((h) => !overwriteApproved.has(h.path) && !knownHeldEvidence.has(h.path))
+        .filter(
+          (h) =>
+            !overwriteApproved.has(h.path) &&
+            !knownHeldEvidence.has(h.path) &&
+            !strandedEvidence.has(h.path),
+        )
         .map((h) => ({ path: h.path, cloneSha: cloneShaByPath?.get(h.path) ?? null }))
         .filter((c): c is { path: string; cloneSha: string } => c.cloneSha !== null)
         .slice(0, MAX_HOLD_RELEASE_PROBES);
@@ -2030,7 +2050,11 @@ export async function processClone(args: {
         const verdict = decideHoldRelease({
           held,
           cloneSha: cloneShaByPath?.get(held.path) ?? null,
-          evidence: knownHeldEvidence.get(held.path) ?? evidence.get(held.path) ?? null,
+          evidence:
+            knownHeldEvidence.get(held.path) ??
+            strandedEvidence.get(held.path) ??
+            evidence.get(held.path) ??
+            null,
           approved: overwriteApproved.has(held.path),
         });
         holdReleases.push(verdict);
@@ -4378,8 +4402,12 @@ export async function processClone(args: {
   // bridge is still a write that `prepareOne` can hold, and a summary that
   // counted the intention would claim a file the delivery does not carry.
   const landedWrites = new Set(treeEntries.filter((t) => t.sha !== null).map((t) => t.path));
+  // A refreshed file a `manual_reconcile` exclusion names was held by the
+  // partition and released by the hold releases, and is reported there, once,
+  // with why the hold gave way.
+  const releasedHolds = new Set(holdReleases.filter((r) => r.act === "release").map((r) => r.path));
   const strandedReported = strandedVerdicts.filter(
-    (v) => v.act !== "refresh" || landedWrites.has(v.path),
+    (v) => v.act !== "refresh" || (landedWrites.has(v.path) && !releasedHolds.has(v.path)),
   );
   const bridgesReported = [...bridgesCarried.values()].filter((b) => landedWrites.has(b.path));
   const carryOnSuffix = `${strandedSuffixFor(strandedReported)}${bridgeSuffixFor(bridgesReported)}`;

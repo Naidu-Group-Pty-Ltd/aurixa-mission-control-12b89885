@@ -1296,7 +1296,16 @@ overwriting it. Four bounds:
 - It never replaces a copy the clone edited. Such a copy stays, named in the
   pull request.
 - It joins the candidates before the import closure and the partition, so
-  exclusions and imports apply exactly as inside a module.
+  exclusions and imports apply exactly as inside a module. That includes the
+  hold releases: a file a `manual_reconcile` exclusion names is held by the
+  partition and released by `decideHoldRelease`, on the evidence this block
+  already gathered or on an operator's approval, and reported once, under the
+  released holds. A `protected` or `oversize` one is never walked. Replayed
+  with a synthetic exclusion of each kind, the unedited handler under
+  `manual_reconcile` was released on evidence and the protected one was
+  neither walked nor written. `builder-stock-marketplace` under
+  `manual_reconcile` with an `overwrite` approval was released by the
+  approval.
 - It walks at most `MAX_STRANDED_PROBES` histories a pass into the shared
   `held_evidence` ledger.
 

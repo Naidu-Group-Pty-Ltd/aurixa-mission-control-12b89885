@@ -51,7 +51,12 @@
  *   - **Never past the exclusions.** A refreshed file joins the candidates
  *     before `partitionCascadePaths`, so a protected or held path is held
  *     exactly as it would be inside a module, and before the import closure,
- *     so a refreshed handler brings what it imports.
+ *     so a refreshed handler brings what it imports. A hold nothing can
+ *     release (`protected`, `oversize`) is not walked at all. A
+ *     `manual_reconcile` hold is NOT skipped: the partition holds the file
+ *     and `decideHoldRelease` releases it on the same evidence or an
+ *     operator's approval, as it would a path in scope. Skipping every
+ *     excluded file left an approval with no effect on a stranded one.
  *   - **Bounded, and resumable.** At most `MAX_STRANDED_PROBES` histories are
  *     walked in one pass; every settled answer lands in the pass's
  *     `held_evidence` ledger, keyed by the clone's blob, so the next pass

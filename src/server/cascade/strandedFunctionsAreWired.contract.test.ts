@@ -84,9 +84,21 @@ describe("what the refresh block does", () => {
     );
   });
 
-  it("leaves a file an exclusion names to that exclusion", () => {
+  it("skips only a hold nothing can release, and keeps a releasable one for the hold releases", () => {
+    // A `protected` or `oversize` hold is never written, so its history is
+    // never walked. A `manual_reconcile` hold is NOT dropped here: a file it
+    // names is refreshed like any other, the partition holds it, and
+    // `decideHoldRelease` releases it on the evidence or an operator's
+    // approval — exactly as it would a path inside a module. Dropping every
+    // excluded path here is how an approval came to have no effect on a
+    // stranded file (Codex, PR #295).
     expect(block).toContain("partitionCascadePaths(");
-    expect(block).toMatch(/behind\.filter\(\(f\) => !excluded\.has\(f\.path\)\)/);
+    expect(block).toContain(
+      "const releasable = new Set(approvableHeld(holds).map((h) => h.path));",
+    );
+    expect(block).toMatch(/holds\.filter\(\(h\) => !releasable\.has\(h\.path\)\)/);
+    expect(block).toMatch(/behind\.filter\(\(f\) => !neverWritten\.has\(f\.path\)\)/);
+    expect(block).not.toMatch(/!excluded\.has\(/);
   });
 
   it("walks prime's history at most MAX_STRANDED_PROBES times, skipping what is settled", () => {
@@ -98,7 +110,7 @@ describe("what the refresh block does", () => {
 
   it("records every settled answer in the held-evidence ledger, keyed by the clone's blob", () => {
     expect(block).toMatch(
-      /if \(answer\.kind === "unsettled"\) continue;\s*const clone = cloneShaByPath\.get\(path\);\s*if \(clone\) heldLedger\[path\] = \{ clone, evidence: answer \};/,
+      /if \(answer\.kind === "unsettled"\) continue;\s*strandedEvidence\.set\(path, answer\);\s*const clone = cloneShaByPath\.get\(path\);\s*if \(clone\) heldLedger\[path\] = \{ clone, evidence: answer \};/,
     );
   });
 
@@ -109,10 +121,36 @@ describe("what the refresh block does", () => {
   });
 });
 
+describe("a stranded file a manual_reconcile exclusion names meets the hold releases", () => {
+  const releases = engine.slice(
+    engine.indexOf("const holdReleases: HoldRelease[] = [];"),
+    engine.indexOf("const primeFiles = partition.write;"),
+  );
+
+  it("finds the hold-release block", () => {
+    expect(releases.length).toBeGreaterThan(500);
+  });
+
+  it("does not walk again what the refresh walked in this pass", () => {
+    expect(releases).toMatch(
+      /!overwriteApproved\.has\(h\.path\) &&\s*!knownHeldEvidence\.has\(h\.path\) &&\s*!strandedEvidence\.has\(h\.path\)/,
+    );
+  });
+
+  it("releases on that same answer", () => {
+    expect(releases).toMatch(
+      /knownHeldEvidence\.get\(held\.path\) \?\?\s*strandedEvidence\.get\(held\.path\) \?\?\s*evidence\.get\(held\.path\) \?\?\s*null/,
+    );
+  });
+});
+
 describe("what is reported is what landed", () => {
-  it("filters refresh verdicts to the writes the delivery carries", () => {
+  it("filters refresh verdicts to the writes the delivery carries, reporting a released hold once", () => {
     expect(engine).toMatch(
-      /const strandedReported = strandedVerdicts\.filter\(\s*\(v\) => v\.act !== "refresh" \|\| landedWrites\.has\(v\.path\),\s*\);/,
+      /const releasedHolds = new Set\(\s*holdReleases\.filter\(\(r\) => r\.act === "release"\)\.map\(\(r\) => r\.path\),?\s*\);/,
+    );
+    expect(engine).toMatch(
+      /const strandedReported = strandedVerdicts\.filter\(\s*\(v\) => v\.act !== "refresh" \|\| \(landedWrites\.has\(v\.path\) && !releasedHolds\.has\(v\.path\)\),?\s*\);/,
     );
     expect(engine).toContain("strandedSuffixFor(strandedReported)");
     expect(engine).toContain("describeStrandedFunctions(strandedReported)");
