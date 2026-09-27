@@ -222,7 +222,12 @@ export const BLOCKAGE_POLICY: Record<BlockageClass, BlockagePolicy> = {
     owner: "operator",
     selfHeals: false,
     conditionedOnDivergence: false,
-    what: "The prime has merged a migration it has not run, so this clone is held at the version before it — and so is everything after.",
+    /*
+      Said about the prime's LEDGER, never its schema, and about what depends
+      on the version, never "everything after": the barrier has been
+      per-dependency since 22 Sep 2026. See the row's own detail.
+    */
+    what: "The prime's ledger does not record a migration its repository carries, so no clone can be sent it — and a clone's migrations that may depend on it wait until it is recorded.",
   },
   unclassified: {
     /*
@@ -409,11 +414,11 @@ export function classifyBlockages(facts: CloneBlockageFacts, now: Date): Detecte
     everything behind it.
   */
   /*
-    A migration the prime merged and never ran.
+    A migration the prime's repository carries and its ledger does not record.
 
-    First alongside the unseeded policy, for the same reason: it blocks
-    everything behind it, and it is the clone's SCHEMA rather than one
-    delivery. One blockage per hole VERSION, fingerprinted on that version —
+    First alongside the unseeded policy, for a like reason: it holds whatever
+    of the clone's migrations needs it, and it is the clone's SCHEMA rather
+    than one delivery. One blockage per hole VERSION, fingerprinted on that version —
     so the row is stable across passes, and it discharges itself the moment
     the prime's ledger records the version and the next pass stops reporting
     `blockedBy`. Nobody has to remember to close it.
@@ -447,10 +452,31 @@ export function classifyBlockages(facts: CloneBlockageFacts, now: Date): Detecte
         lives, so an operator holding this row can find out which of the two
         they have rather than being told.
       */
-      `${facts.label} is held at the version before ${hole.version}: the prime's ledger does not record that migration, so this clone may not run it either. ` +
-        `${hole.heldCount} migration(s) wait behind it` +
-        (hole.firstHeld ? `, starting with ${hole.firstHeld}` : "") +
-        ". It clears when the prime runs that file — nothing here can, and stamping the prime's ledger instead would send this clone a migration whose prerequisite does not exist. " +
+      /*
+        AND WHAT IT KNOWS ABOUT THE CLONE.
+
+        It used to open "<clone> is held at the version before <hole>", which
+        was true of the blanket barrier and has not been true since the
+        barrier became per-dependency: a hole now holds only the migrations
+        that need what it creates, and the clone advances past it. Read on
+        27 Sep 2026, every one of the fleet's 58 open hole rows said it, over
+        clones recorded at 20261226090000 — past every hole named — and 55 of
+        them went on to say "0 migration(s) wait behind it".
+
+        So the sentence says what the clone's own record says, and no more:
+        how many of its migrations are recorded as waiting behind this
+        version, or that none is. "Recorded" in BOTH readings, because the
+        count is read from `blockedBy`, which lists at most the first five
+        holes behind each migration held — a migration whose sixth hole is
+        this one is not counted here, so the count is a floor and never a
+        total (Codex, on this change).
+      */
+      (hole.heldCount > 0
+        ? `${facts.label} has ${hole.heldCount} migration(s) recorded as waiting behind ${hole.version}` +
+          (hole.firstHeld ? `, starting with ${hole.firstHeld}` : "") +
+          ": the prime's ledger does not record that migration, so this clone may not run it either, and what waits behind it stays held until it does. "
+        : `The prime's ledger does not record ${hole.version}, so no clone may be sent it; nothing on ${facts.label} is recorded as waiting behind it. `) +
+        "It clears when the prime runs that file — nothing here can, and stamping the prime's ledger instead would send this clone a migration whose prerequisite does not exist. " +
         "Whether this prime ran it untracked is a separate reading, against its catalog rather than its ledger: Fleet Manager → Prime Ledger Reconciliation.",
       null,
     );
@@ -525,7 +551,8 @@ export function classifyBlockages(facts: CloneBlockageFacts, now: Date): Detecte
   for (const n of facts.blockedNotices) {
     const key = refusalKey(n);
     const prior = refusedSince.get(key);
-    if (prior === undefined || startsEarlier(n.createdAt, prior)) refusedSince.set(key, n.createdAt);
+    if (prior === undefined || startsEarlier(n.createdAt, prior))
+      refusedSince.set(key, n.createdAt);
   }
   // Oldest first, so a pull request with more than one open record is
   // described by its oldest, whose words and start then agree.
@@ -769,7 +796,9 @@ export function refusalRepoElsewhere(r: BlockedNotice, repoFullName: string | nu
  */
 export function refusalFingerprint(r: BlockedNotice, repoFullName: string | null): string {
   const elsewhere = refusalRepoElsewhere(r, repoFullName);
-  return elsewhere === null ? `ci_red:${r.title}` : `ci_red:${r.title} · ${elsewhere.toLowerCase()}`;
+  return elsewhere === null
+    ? `ci_red:${r.title}`
+    : `ci_red:${r.title} · ${elsewhere.toLowerCase()}`;
 }
 
 /**

@@ -9,6 +9,8 @@ import {
   migrationLaneWroteDetail,
   primeLedgerHoleNote,
   primeLedgerHoleSentence,
+  primeLedgerHoleSpan,
+  primeLedgerHoleTally,
   reconcileBlockageRecord,
 } from "./fleetBlockageRecord.pure";
 import { partitionByDependency } from "./fleetCorpusScope.pure";
@@ -288,8 +290,10 @@ describe("what an operator is told", () => {
 
   it("names the hole as the prime's to record, never as a fault on the clone", () => {
     const sentence = primeLedgerHoleSentence(["20261206000000"]);
-    expect(sentence).toContain("the prime's ledger is short of 20261206000000");
-    expect(sentence).toContain("this clone is level without");
+    expect(sentence).toContain(
+      "this clone is waiting on 20261206000000, which the prime's ledger does not record",
+    );
+    expect(sentence).toContain("until the prime records it");
     expect(sentence).not.toMatch(/fail|error|broken|refused/i);
   });
 
@@ -298,12 +302,95 @@ describe("what an operator is told", () => {
     an operator is shown, because on this reading the number is the message.
   */
   it("states the true count even where the notes were capped", () => {
-    const filed = Array.from({ length: PRIME_LEDGER_HOLE_NOTE_CAP }, (_, i) => `h${i}`);
-    expect(primeLedgerHoleSentence(filed, 300)).toContain("and 299 other version(s)");
+    const holes = Array.from({ length: 300 }, (_, i) => `h${String(i).padStart(3, "0")}`);
+    expect(primeLedgerHoleSentence(holes)).toContain("waiting on 300 versions");
   });
 
-  it("does not undercount when no total is supplied", () => {
-    expect(primeLedgerHoleSentence(["a", "b", "c"])).toContain("and 2 other version(s)");
+  /*
+    The CRM independent, 27 Sep 2026: 189 holes by version, 50 noted oldest first, the
+    notes ending at 20260721160000 — and the two newest, the pair every mirror
+    reports, in no note and in no sentence. A span read from the notes names
+    the fiftieth-oldest as the newest, so the sentence is read from every hole
+    and names both ends.
+  */
+  it("names the newest hole, which the capped notes do not hold", () => {
+    const holes = [
+      "20250124120000",
+      ...Array.from({ length: 186 }, (_, i) => `2026${String(i).padStart(10, "0")}`),
+      "20261219040000",
+      "20261219050000",
+    ];
+    expect(holes).toHaveLength(189);
+    const notes = holes.slice(0, PRIME_LEDGER_HOLE_NOTE_CAP);
+    expect(notes).not.toContain("20261219050000");
+
+    const sentence = primeLedgerHoleSentence(holes);
+    expect(sentence).toContain("189 versions, 20250124120000 to 20261219050000");
+    expect(sentence).toContain("they cannot be sent to any clone until the prime records them");
+  });
+
+  it("names a single hole by itself, without a count", () => {
+    expect(primeLedgerHoleSpan(["20261206000000"])).toBe("20261206000000");
+    expect(primeLedgerHoleSentence(["20261206000000"])).toContain(
+      "it cannot be sent to any clone until the prime records it",
+    );
+  });
+
+  it("names two holes as a count and both ends", () => {
+    expect(primeLedgerHoleSpan(["20261219040000", "20261219050000"])).toBe(
+      "2 versions, 20261219040000 to 20261219050000",
+    );
+  });
+
+  it("tallies every hole for the held-back sentence, and adds nothing for one", () => {
+    expect(primeLedgerHoleTally([])).toBe("");
+    // The held-back sentence already names the one hole it is waiting behind.
+    expect(primeLedgerHoleTally(["20261219040000"])).toBe("");
+    expect(primeLedgerHoleTally(["20261219040000", "20261219050000"])).toBe(
+      "; in all this clone is waiting on 2 such versions, 20261219040000 to 20261219050000",
+    );
+  });
+
+  /*
+    THE COUNT IS THE CLONE'S, AND IS SAID AS THE CLONE'S.
+
+    The partition skips every version a clone already holds, so its holes are
+    the prime's gap less what this clone has. A prime whose ledger omits A, B
+    and C, beside a clone that already holds A, gives that clone two — and the
+    sentences used to read "the prime's ledger is short of 2 versions", which
+    understates the prime's gap while wearing the words for all of it.
+  */
+  it("counts what this clone is waiting on, never the prime's whole gap", () => {
+    const meta = (id: string) => ({ id, name: id });
+    const part = partitionByDependency(
+      [meta("a"), meta("b"), meta("c"), meta("d")],
+      // The prime has run d alone: its ledger omits a, b and c.
+      new Set(["d"]),
+      // This clone already holds a.
+      new Set(["a"]),
+    );
+    expect(part.holes).toEqual(["b", "c"]);
+
+    const sentence = primeLedgerHoleSentence(part.holes);
+    const tally = primeLedgerHoleTally(part.holes);
+    expect(sentence).toBe(
+      "this clone is waiting on 2 versions, b to c, which the prime's ledger does not record; " +
+        "they cannot be sent to any clone until the prime records them",
+    );
+    expect(tally).toBe("; in all this clone is waiting on 2 such versions, b to c");
+    // Neither may word the clone's two as the prime being short of two.
+    for (const text of [sentence, tally]) {
+      expect(text).not.toMatch(/ledger is short of|in all it is short of/);
+    }
+  });
+
+  it("a retraction states every hole it is handed, never a capped count", () => {
+    const holes = Array.from({ length: 189 }, (_, i) => `v${String(i).padStart(3, "0")}`);
+    const detail = blockageDetailFor({ standing: null, holes, syncedTo: "20261226090000" });
+    expect(detail).toBe(
+      "Synced to 20261226090000 — this clone is waiting on 189 versions, v000 to v188, " +
+        "which the prime's ledger does not record; they cannot be sent to any clone until the prime records them",
+    );
   });
 });
 
@@ -364,7 +451,9 @@ describe("a pass that stopped early knows nothing about being level", () => {
     });
     expect(detail).toContain("so far");
     expect(detail).toContain("stopped at its time budget");
-    expect(detail).toContain("the prime's ledger is short of 20261207000000");
+    expect(detail).toContain(
+      "this clone is waiting on 20261207000000, which the prime's ledger does not record",
+    );
     // The bare level reading is exactly what must not appear.
     expect(detail).not.toBe("Synced to 20261202090000");
   });
@@ -648,6 +737,23 @@ describe("the fix is mounted", () => {
     const loop = replay.indexOf("for (const unit of versionUnits(ordered))");
     expect(holeNote).toBeGreaterThan(-1);
     expect(loop).toBeGreaterThan(holeNote);
+  });
+
+  /*
+    The sentences name the count and both ends, so they read EVERY hole. The
+    notes are capped and kept oldest first; handed those, a sentence reports
+    the cap as the count and the fiftieth-oldest hole as the newest — which is
+    what the held-back sentence did by saying nothing at all.
+  */
+  it("the lane's sentences are composed from every hole, never the capped notes", () => {
+    const lane = read("src/server/fleet-migration.server.ts");
+    expect(lane).toContain("primeLedgerHoleSentence(primeLedgerHoles)");
+    expect(lane).toContain("holes: primeLedgerHoles,");
+    expect(lane).toMatch(/held back behind[\s\S]{0,400}primeLedgerHoleTally\(primeLedgerHoles\)/);
+    expect(lane).not.toMatch(/primeLedgerHoleSentence\([^)]*slice\(/);
+    expect(lane).not.toMatch(/primeLedgerHoleTally\([^)]*slice\(/);
+    // The count is this clone's and is never worded as the prime's whole gap.
+    expect(lane).not.toContain("in all it is short of");
   });
 
   it("the blockage ledger opens a row for a hole that withholds nothing", () => {
