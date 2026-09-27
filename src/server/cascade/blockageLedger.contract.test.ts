@@ -143,13 +143,37 @@ describe("the taxonomy is the custodian's permission, and it is one list", () =>
     with every test above still green, so the wiring is asserted where it is.
   */
   it("hands over every standing refusal, with the pull request it names", () => {
-    expect(ledger).toMatch(
-      /from\(\s*"notifications"\s*\)\s*\.select\(\s*"clone_id, title, body, created_at, url"\s*\)\s*\.eq\(\s*"kind",\s*"cascade_blocked"\s*\)\s*\.is\(\s*"read_at",\s*null\s*\)/,
+    const reader = readFileSync("src/server/cascade/blockedNoticeRead.server.ts", "utf8");
+    expect(reader).toMatch(
+      /from\(\s*"notifications"\s*\)\s*\.select\(\s*"id, clone_id, title, body, created_at, url"\s*\)\s*\.eq\(\s*"kind",\s*"cascade_blocked"\s*\)\s*\.is\(\s*"read_at",\s*null\s*\)/,
     );
     expect(ledger).toContain("prUrl: row.url");
     expect(ledger).toContain("blockedNotices: blockedNoticesByClone.get(clone.id) ?? []");
     /* Every notice, never one per clone: the older refusal is owed a finding too. */
     expect(/blockedNoticesByClone\.has\(/.test(ledger)).toBe(false);
+  });
+});
+
+describe("the blocked notices are read whole, however many there are", () => {
+  /*
+    PostgREST truncates a response at its row cap and says nothing, so a
+    capped read looks exactly like a complete one — and every notice it did
+    not return is a refusal whose `ci_red` silently disappears. Codex found
+    the unpaged read. `blockedNoticeRead.test.ts` proves the paging against a
+    capped server; this pins that the ledger goes through it, and that the
+    reader stays a reader.
+  */
+  const reader = stripNonCode(readFileSync("src/server/cascade/blockedNoticeRead.server.ts", "utf8"));
+
+  it("reads the notices through the paged reader, never inline", () => {
+    expect(ledger).toContain("await readUnreadBlockedNotices(supabase, ids)");
+    expect(/from\(\s*["']notifications["']\s*\)/.test(ledger)).toBe(false);
+  });
+
+  it("the reader writes nothing", () => {
+    for (const mutator of MUTATORS) {
+      expect(reader.includes(mutator), `the notice reader must never ${mutator}`).toBe(false);
+    }
   });
 });
 

@@ -44,6 +44,7 @@ import {
   type DetectedBlockage,
 } from "./cascade/blockageTaxonomy.pure";
 import { planBlockageReconcile, type OpenBlockageRow } from "./cascade/blockageReconcile.pure";
+import { readUnreadBlockedNotices } from "./cascade/blockedNoticeRead.server";
 import { DEFAULT_CONVERGENCE_SLO_MINUTES } from "./convergenceAudit.server";
 
 type Db = SupabaseClient<Database>;
@@ -277,24 +278,9 @@ async function gatherFacts(
     clone reported one refused pull request and silently dropped any other —
     `standingRefusals` makes them one refusal per pull request instead.
   */
-  const blocked = await supabase
-    .from("notifications")
-    .select("clone_id, title, body, created_at, url")
-    .eq("kind", "cascade_blocked")
-    .is("read_at", null)
-    .in("clone_id", ids)
-    .order("created_at", { ascending: false });
-  if (blocked.error) {
-    throw new Error(`Could not read blocked notices: ${blocked.error.message}`);
-  }
+  const blockedRows = await readUnreadBlockedNotices(supabase, ids);
   const blockedNoticesByClone = new Map<string, BlockedNotice[]>();
-  for (const row of (blocked.data ?? []) as Array<{
-    clone_id: string | null;
-    title: string;
-    body: string;
-    created_at: string;
-    url: string | null;
-  }>) {
+  for (const row of blockedRows) {
     if (!row.clone_id) continue;
     const notices = blockedNoticesByClone.get(row.clone_id) ?? [];
     notices.push({
