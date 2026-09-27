@@ -222,8 +222,9 @@ export function subjectsNamedBy(text: string, specPath?: string): string[] {
   // blind to an instance of the exact failure it exists to refuse.
   //
   // Anchored on a known root, so a relative `join(__dirname, "..", "a.ts")`
-  // matches nothing, and the last segment must carry an extension, so a
-  // directory walk does not become a subject.
+  // is not read here (the spec-directory form below reads it), and the last
+  // segment must carry an extension, so a directory walk does not become a
+  // subject.
   const segmented =
     /['"`](src|supabase|docs|scripts|public)['"`]((?:\s*,\s*['"`][A-Za-z0-9_.-]+['"`])+)/g;
   for (const m of text.matchAll(segmented)) {
@@ -257,9 +258,67 @@ export function subjectsNamedBy(text: string, specPath?: string): string[] {
       const resolved = resolveFromSpec(specPath, m[1]);
       if (resolved !== null && SUBJECT_PATH.test(resolved)) found.add(resolved);
     }
+
+    // The SPEC-DIRECTORY form: `readFileSync(join(__dirname, "..", "..",
+    // "App.tsx"))`. The segments of one path, relative to the spec's own
+    // directory, and neither rule above reads them: the segment rule needs a
+    // known root first, and the relative rule needs one literal that carries
+    // its own `./`.
+    //
+    // Measured over the prime's 1,621 spec files on 27 Sep 2026: 12 of them
+    // name another file in the tree this way that no rule above reads, 15
+    // references to 13 distinct files, and 4 more read their own source,
+    // which every consumer already discards. None lies outside the content
+    // roots, and no reading an existing rule made changed.
+    //
+    // The live case is cascade #264 on `npc-client-dashboard`.
+    // `builderStockMessagePopups.spec.ts` read `src/App.tsx` exactly this way
+    // to check for the `admin/builder-portal/:tab/:conversationId` route. It
+    // crossed while `App.tsx` was held for a person to reconcile, and
+    // `verify` went red against the clone's own copy while every rule here
+    // said nothing.
+    for (const path of specDirectorySegmentPaths(text, specPath)) {
+      if (SUBJECT_PATH.test(path)) found.add(path);
+    }
   }
 
   return [...found].filter((path) => !path.split("/").includes("..")).sort();
+}
+
+/**
+ * A run of literal segments after the spec's own directory:
+ * `join(__dirname, "..", "..", "App.tsx")`,
+ * `path.resolve(import.meta.dirname, "../..", "src", "a.ts")`.
+ *
+ * Only after `__dirname` or `import.meta.dirname`, the two spellings that mean
+ * the spec's own directory whatever the file around them says. A
+ * `join(REPO_ROOT, "..", …)` means something else, and is left unread rather
+ * than resolved against the wrong base. The run stops at the first argument
+ * that is not a plain literal, so an interpolated name contributes nothing
+ * rather than half a path.
+ */
+const SPEC_DIRECTORY_SEGMENTS =
+  /\b(?:join|resolve)\(\s*(?:__dirname|import\.meta\.dirname)\s*((?:,\s*['"`][A-Za-z0-9_./-]+['"`])+)/g;
+
+/**
+ * The paths a spec names as segments of its own directory, resolved against
+ * it and not yet filtered by root.
+ *
+ * Both subject readers use this — `subjectsNamedBy` keeps what lies under the
+ * content roots, `subjectsNamedOutsideRoots` what lies outside them — so the
+ * two cannot read the form two different ways. A segment that begins with `/`
+ * refuses the whole match, because `resolve` restarts at the filesystem root
+ * there, and no filesystem path is a repository path.
+ */
+export function specDirectorySegmentPaths(text: string, specPath: string): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(SPEC_DIRECTORY_SEGMENTS)) {
+    const segments = [...m[1].matchAll(/['"`]([A-Za-z0-9_./-]+)['"`]/g)].map((x) => x[1]);
+    if (segments.some((segment) => segment.startsWith("/"))) continue;
+    const resolved = resolveFromSpec(specPath, segments.join("/"));
+    if (resolved !== null) out.push(resolved);
+  }
+  return out;
 }
 
 /** A repository path the subject rule accepts: a known root and a file extension. */

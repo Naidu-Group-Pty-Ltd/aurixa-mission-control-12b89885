@@ -39,12 +39,21 @@ describe("subjectsNamedOutsideRoots — what a spec names outside the content ro
     expect(subjectsNamedOutsideRoots(text)).toEqual([]);
   });
 
+  it("reads the segments of a path after the spec's own directory", () => {
+    // No other form reads this one: the first literal opens on a climb, not a
+    // top-level directory, and carries no extension of its own.
+    const text = `readFileSync(join(__dirname, '../../../../.github/workflows', 'ci.yml'), 'utf8')`;
+    expect(subjectsNamedOutsideRoots(text, SPEC)).toEqual([".github/workflows/ci.yml"]);
+    expect(subjectsNamedOutsideRoots(text)).toEqual([]);
+  });
+
   it("never reads a bare file at the repository root — that is the repository's own configuration", () => {
     const text = [
       `readFileSync('package.json', 'utf8');`,
       `readFileSync(join(ROOT, 'vite.config.ts'));`,
       `const doc = read('CLAUDE.md');`,
       `readFileSync(resolve(__dirname, '../../../../.env.example'))`,
+      `readFileSync(join(__dirname, '..', '..', '..', '..', 'package.json'))`,
     ].join("\n");
     expect(subjectsNamedOutsideRoots(text, SPEC)).toEqual([]);
   });
@@ -73,6 +82,7 @@ describe("subjectsNamedOutsideRoots — what a spec names outside the content ro
       `read('.github/../etc/passwd.conf');`,
       `readFileSync('/etc/hosts.conf');`,
       `resolve(__dirname, '../../../../../../outside/the.repo')`,
+      `join(__dirname, '../../../../../outside/the', 'repo.md')`,
     ].join("\n");
     expect(subjectsNamedOutsideRoots(text, SPEC)).toEqual([]);
   });
@@ -98,7 +108,8 @@ describe("the two readers split the tree at the same line", () => {
       const whole = `readFileSync('${root}/a/b.ts')`;
       const segmented = `join(ROOT, '${root}', 'a', 'b.ts')`;
       const relative = `resolve(__dirname, '../../../../${root}/a/b.ts')`;
-      for (const text of [whole, segmented, relative]) {
+      const specDirectory = `join(__dirname, '..', '..', '..', '..', '${root}', 'a', 'b.ts')`;
+      for (const text of [whole, segmented, relative, specDirectory]) {
         expect(subjectsNamedBy(text, SPEC)).toEqual([`${root}/a/b.ts`]);
         expect(subjectsNamedOutsideRoots(text, SPEC)).toEqual([]);
       }
@@ -110,7 +121,8 @@ describe("the two readers split the tree at the same line", () => {
       const whole = `readFileSync('${top}/a/b.md')`;
       const segmented = `join(ROOT, '${top}', 'a', 'b.md')`;
       const relative = `resolve(__dirname, '../../../../${top}/a/b.md')`;
-      for (const text of [whole, segmented, relative]) {
+      const specDirectory = `join(__dirname, '..', '..', '..', '..', '${top}', 'a', 'b.md')`;
+      for (const text of [whole, segmented, relative, specDirectory]) {
         expect(subjectsNamedBy(text, SPEC)).toEqual([]);
         expect(subjectsNamedOutsideRoots(text, SPEC)).toEqual([`${top}/a/b.md`]);
       }
