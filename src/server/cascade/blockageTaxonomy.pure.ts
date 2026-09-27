@@ -279,6 +279,15 @@ export type CloneBlockageFacts = {
   /** The drain's own standing-blockage notification, when one is unread. */
   blockedNotice: { title: string; body: string; createdAt: string } | null;
   /**
+   * Every pull request an UNREAD `cascade_blocked` notice names for this clone
+   * — all of them, where `blockedNotice` keeps only the newest.
+   *
+   * Each is the drain's own proof that it read that pull request and refused
+   * to merge it, so a proposal named here is not one whose record is behind.
+   * Read so `unreconciled_proposal` can stand down for it; see that loop.
+   */
+  blockedPrUrls: readonly string[];
+  /**
    * Prime versions this clone's last migration pass was held behind.
    *
    * Read from `clone_backends.migrations_applied` — the pass already records
@@ -440,9 +449,27 @@ export function classifyBlockages(facts: CloneBlockageFacts, now: Date): Detecte
   /*
     An open proposal whose record is simply behind. Distinct from the above:
     the URL is right, so the drain CAN reach it and has not.
+
+    NOT A PROPOSAL THE DRAIN HAS JUST REFUSED.
+
+    Measured 27 Sep 2026: NPC Client Dashboard #264 and the independent's #29
+    each carried BOTH this class and `ci_red`, for one pull request. The drain
+    reads each of them every five minutes and holds it on the same failing
+    check, and its unread `cascade_blocked` notice is the record of exactly
+    that read. So the record is not behind: the pull request is open and red,
+    `ci_red` says so and names its owner, and this row said the opposite —
+    a stale record the machinery would heal — about a failure no machinery
+    can clear. Two findings about one row, one of them false. Where a notice
+    names the pull request, the drain's verdict stands alone; everywhere else
+    this class still fires, including a proposal whose checks never report.
   */
+  const refused = new Set(
+    facts.blockedPrUrls.map(pullRequestKey).filter((k): k is string => k !== null),
+  );
   for (const p of facts.openProposals) {
     if (retargeted.includes(p)) continue;
+    const key = pullRequestKey(p.prUrl);
+    if (key !== null && refused.has(key)) continue;
     const age = t - (ms(p.createdAt) ?? t);
     if (age < sloMs) continue;
     add(
@@ -628,6 +655,18 @@ export function parsePrRepo(prUrl: string | null): string | null {
   if (!prUrl) return null;
   const m = /github\.com\/([^/]+)\/([^/]+)\/pull\/\d+/i.exec(prUrl);
   return m ? `${m[1]}/${m[2]}` : null;
+}
+
+/**
+ * One pull request, however its URL is spelled: `owner/repo#number`, with the
+ * owner and repository compared without regard to case, as GitHub compares
+ * them. Null when the URL does not parse — an unparsed URL matches nothing,
+ * so it can never stand a finding down by accident.
+ */
+export function pullRequestKey(prUrl: string | null): string | null {
+  if (!prUrl) return null;
+  const m = /github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:[/?#]|$)/i.exec(prUrl);
+  return m ? `${m[1]}/${m[2]}#${Number(m[3])}`.toLowerCase() : null;
 }
 
 function firstParagraphs(body: string, n: number): string {

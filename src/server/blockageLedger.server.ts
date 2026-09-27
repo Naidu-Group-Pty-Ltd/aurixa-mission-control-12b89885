@@ -273,7 +273,7 @@ async function gatherFacts(
   */
   const blocked = await supabase
     .from("notifications")
-    .select("clone_id, title, body, created_at")
+    .select("clone_id, title, body, created_at, url")
     .eq("kind", "cascade_blocked")
     .is("read_at", null)
     .in("clone_id", ids)
@@ -282,13 +282,23 @@ async function gatherFacts(
     throw new Error(`Could not read blocked notices: ${blocked.error.message}`);
   }
   const blockedByClone = new Map<string, CloneBlockageFacts["blockedNotice"]>();
+  // Every pull request a standing notice names, not only the newest notice's:
+  // each one is the drain's proof that it read that pull request.
+  const blockedPrUrlsByClone = new Map<string, string[]>();
   for (const row of (blocked.data ?? []) as Array<{
     clone_id: string | null;
     title: string;
     body: string;
     created_at: string;
+    url: string | null;
   }>) {
-    if (!row.clone_id || blockedByClone.has(row.clone_id)) continue;
+    if (!row.clone_id) continue;
+    if (row.url) {
+      const urls = blockedPrUrlsByClone.get(row.clone_id) ?? [];
+      urls.push(row.url);
+      blockedPrUrlsByClone.set(row.clone_id, urls);
+    }
+    if (blockedByClone.has(row.clone_id)) continue;
     blockedByClone.set(row.clone_id, {
       title: row.title,
       body: row.body,
@@ -422,6 +432,7 @@ async function gatherFacts(
       events,
       consecutiveFailures,
       blockedNotice: blockedByClone.get(clone.id) ?? null,
+      blockedPrUrls: blockedPrUrlsByClone.get(clone.id) ?? [],
       primeLedgerHoles: holesByClone.get(clone.id) ?? [],
       sloMinutes,
     });

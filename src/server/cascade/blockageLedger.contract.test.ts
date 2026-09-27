@@ -135,4 +135,17 @@ describe("the taxonomy is the custodian's permission, and it is one list", () =>
     expect(/MAX_ATTEMPTS\s*=\s*\d/.test(taxonomy)).toBe(false);
     expect(/STALL_MINUTES\s*=\s*\d/.test(taxonomy)).toBe(false);
   });
+
+  /*
+    The notice names its pull request in `url`, and that is the only thing that
+    lets `unreconciled_proposal` stand down for a proposal the drain has
+    refused. A read that dropped the column would bring back the double finding
+    with every test above still green, so the wiring is asserted where it is.
+  */
+  it("hands over the pull request every standing refusal names", () => {
+    expect(ledger).toMatch(
+      /from\(\s*"notifications"\s*\)\s*\.select\(\s*"clone_id, title, body, created_at, url"\s*\)\s*\.eq\(\s*"kind",\s*"cascade_blocked"\s*\)\s*\.is\(\s*"read_at",\s*null\s*\)/,
+    );
+    expect(ledger).toContain("blockedPrUrls: blockedPrUrlsByClone.get(clone.id) ?? []");
+  });
 });

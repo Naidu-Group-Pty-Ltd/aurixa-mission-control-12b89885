@@ -6,6 +6,7 @@ import {
   classifyBlockages,
   isInvocationCut,
   parsePrRepo,
+  pullRequestKey,
   type BlockageClass,
   type CloneBlockageFacts,
 } from "./blockageTaxonomy.pure";
@@ -25,6 +26,7 @@ const facts = (over: Partial<CloneBlockageFacts> = {}): CloneBlockageFacts => ({
   events: [],
   consecutiveFailures: 0,
   blockedNotice: null,
+  blockedPrUrls: [],
   primeLedgerHoles: [],
   sloMinutes: 90,
   ...over,
@@ -349,6 +351,144 @@ describe("the gate's verdict is read, never re-derived", () => {
     expect(found[0].selfHeals).toBe(false);
     /* A real cause was found, so the unclassified rule must NOT also fire. */
     expect(found).toHaveLength(1);
+  });
+});
+
+describe("a proposal the drain has refused is not an unreconciled one", () => {
+  /*
+    The reading on 27 Sep 2026: NPC Client Dashboard #264 carried `ci_red`
+    AND `unreconciled_proposal`. The drain reads it every five minutes and
+    refuses it on the same failing check — the unread notice is that read —
+    so "its record is behind, the machinery will heal it" was false, about a
+    failure only prime's author can clear.
+  */
+  const PR264 = "https://github.com/Naidu-Group-Pty-Ltd/npc-client-dashboard/pull/264";
+  const notice264 = {
+    title: "Cascade blocked · NPC Client Dashboard · PR #264",
+    body: "Cascade PR #264 on NPC Client Dashboard is failing the same way on a rebuilt head — this does not clear on its own.\n\nNot merging — 1 check(s) failing: verify (failure).",
+    createdAt: ago(60 * 14),
+  };
+  const open264 = {
+    resultId: "r264",
+    prUrl: PR264,
+    prRepo: "Naidu-Group-Pty-Ltd/npc-client-dashboard",
+    createdAt: ago(60 * 15),
+  };
+
+  it("reports the refusal alone, not a second finding about the same pull request", () => {
+    const f = stalled({
+      openProposals: [open264],
+      blockedNotice: notice264,
+      blockedPrUrls: [PR264],
+    });
+    expect(classes(f)).toEqual(["ci_red"]);
+  });
+
+  it("reproduces the double finding when the notice's pull request is not read", () => {
+    // The shape before the ledger carried the notice's URL: the same facts,
+    // with nothing saying which pull request the notice names.
+    const f = stalled({ openProposals: [open264], blockedNotice: notice264 });
+    expect(classes(f)).toEqual(["ci_red", "unreconciled_proposal"]);
+  });
+
+  it("matches the pull request, not the spelling of its URL", () => {
+    const f = stalled({
+      openProposals: [open264],
+      blockedNotice: notice264,
+      blockedPrUrls: ["https://github.com/naidu-group-pty-ltd/NPC-Client-Dashboard/pull/264/checks"],
+    });
+    expect(classes(f)).toEqual(["ci_red"]);
+  });
+
+  it("stands down for the refused pull request only — another stale proposal is still reported", () => {
+    const stale = {
+      resultId: "r250",
+      prUrl: "https://github.com/Naidu-Group-Pty-Ltd/npc-client-dashboard/pull/250",
+      prRepo: "Naidu-Group-Pty-Ltd/npc-client-dashboard",
+      createdAt: ago(60 * 30),
+    };
+    const found = classifyBlockages(
+      stalled({
+        openProposals: [open264, stale],
+        blockedNotice: notice264,
+        blockedPrUrls: [PR264],
+      }),
+      NOW,
+    );
+    expect(found.map((b) => b.fingerprint).sort()).toEqual([
+      "ci_red:Cascade blocked · NPC Client Dashboard · PR #264",
+      `unreconciled_proposal:${stale.prUrl}`,
+    ]);
+  });
+
+  it("the same number in another repository is another pull request", () => {
+    const f = stalled({
+      openProposals: [open264],
+      blockedNotice: notice264,
+      blockedPrUrls: ["https://github.com/Naidu-Group-Pty-Ltd/preflight-property-group/pull/264"],
+    });
+    expect(classes(f)).toEqual(["ci_red", "unreconciled_proposal"]);
+  });
+
+  it("a proposal whose URL does not parse is never stood down by a notice", () => {
+    const f = stalled({
+      openProposals: [{ ...open264, prUrl: null, prRepo: null }],
+      blockedNotice: notice264,
+      blockedPrUrls: [PR264],
+    });
+    expect(classes(f)).toEqual(["ci_red", "unreconciled_proposal"]);
+  });
+
+  it("on a converged clone the refused proposal is history, like the refusal itself", () => {
+    // `ci_red` is conditioned on divergence and drops against a converged
+    // clone; the proposal it explains is the same history, not a standing
+    // fault left over for somebody to chase.
+    const f = facts({
+      openProposals: [open264],
+      blockedNotice: notice264,
+      blockedPrUrls: [PR264],
+    });
+    expect(classifyBlockages(f, NOW)).toEqual([]);
+  });
+
+  it("still reports a proposal nobody has refused and nothing has reconciled", () => {
+    // A proposal whose checks never report raises no notice at all; the stale
+    // record is then the only trace, and it must stay.
+    const f = facts({ openProposals: [open264] });
+    expect(classes(f)).toEqual(["unreconciled_proposal"]);
+  });
+});
+
+describe("pullRequestKey", () => {
+  it("names one pull request however the URL is written", () => {
+    const key = "naidu-group-pty-ltd/npc-client-dashboard#264";
+    for (const url of [
+      "https://github.com/Naidu-Group-Pty-Ltd/npc-client-dashboard/pull/264",
+      "https://github.com/naidu-group-pty-ltd/npc-client-dashboard/pull/264/",
+      "https://github.com/Naidu-Group-Pty-Ltd/npc-client-dashboard/pull/264/files",
+      "https://github.com/Naidu-Group-Pty-Ltd/npc-client-dashboard/pull/264?w=1",
+      "https://github.com/Naidu-Group-Pty-Ltd/npc-client-dashboard/pull/264#issuecomment-1",
+    ]) {
+      expect(pullRequestKey(url), url).toBe(key);
+    }
+  });
+
+  it("returns null rather than guessing", () => {
+    for (const url of [
+      null,
+      "",
+      "https://github.com/Naidu-Group-Pty-Ltd/npc-client-dashboard",
+      "https://github.com/Naidu-Group-Pty-Ltd/npc-client-dashboard/issues/264",
+      "https://github.com/Naidu-Group-Pty-Ltd/npc-client-dashboard/pull/264abc",
+    ]) {
+      expect(pullRequestKey(url)).toBeNull();
+    }
+  });
+
+  it("keeps two pull requests two", () => {
+    expect(pullRequestKey("https://github.com/o/r/pull/26")).not.toBe(
+      pullRequestKey("https://github.com/o/r/pull/264"),
+    );
   });
 });
 
