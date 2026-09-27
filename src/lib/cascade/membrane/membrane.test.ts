@@ -670,8 +670,9 @@ describe("what a spec is read as naming", () => {
     expect(subjectsNamedBy(text)).toEqual(["docs/b.md", "src/lib/a.ts"]);
   });
 
-  it("takes no relative walk, because it names no repository path", () => {
-    // `join(__dirname, "..", "..", "a.ts")` opens on no known root.
+  it("takes no relative walk without the spec's own path, because alone it names no repository path", () => {
+    // `join(__dirname, "..", "..", "a.ts")` opens on no known root; given the
+    // spec's path, the spec-directory form reads it (below).
     expect(subjectsNamedBy('readFileSync(join(__dirname, "..", "..", "a.ts"))')).toEqual([]);
   });
 
@@ -734,6 +735,91 @@ describe("a subject named relative to the spec", () => {
     const text = `${SPEC}\nreadFileSync("supabase/functions/market-sales-ingest/index.ts");`;
     expect(subjectsNamedBy(text, specPath)).toEqual([
       "supabase/functions/market-sales-ingest/index.ts",
+    ]);
+  });
+});
+
+describe("a subject named as segments of the spec's own directory", () => {
+  // Cascade #264 on npc-client-dashboard, verbatim from prime's spec. It read
+  // `src/App.tsx` for a route the clone's held copy did not have yet, in a
+  // form no rule here read, so it crossed alone and `verify` went red against
+  // the clone's own copy.
+  const specPath = "src/lib/__tests__/builderStockMessagePopups.spec.ts";
+  const SPEC = `
+    const app = readFileSync(join(__dirname, '..', '..', 'App.tsx'), 'utf8');
+    expect(app).toContain('path="admin/builder-portal/:tab/:conversationId"');
+    const layout = readFileSync(join(__dirname, '..', '..', 'components', 'layout', 'DashboardLayout.tsx'), 'utf8');
+  `;
+
+  it("resolves the segments against the spec's own directory", () => {
+    expect(subjectsNamedBy(SPEC, specPath)).toEqual([
+      "src/App.tsx",
+      "src/components/layout/DashboardLayout.tsx",
+    ]);
+  });
+
+  it("reads nothing this way without the spec's own path", () => {
+    expect(subjectsNamedBy(SPEC)).toEqual([]);
+  });
+
+  it("strands the spec on the subject cascade #264 delivered it without", () => {
+    const stranded = strandedSubjects({
+      specPath,
+      specText: SPEC,
+      primeSha: new Map([
+        ["src/App.tsx", "prime"],
+        ["src/components/layout/DashboardLayout.tsx", "same"],
+      ]),
+      cloneSha: new Map([
+        ["src/App.tsx", "clone"],
+        ["src/components/layout/DashboardLayout.tsx", "same"],
+      ]),
+      crossing: new Set([specPath]),
+    });
+    expect(stranded).toEqual(["src/App.tsx"]);
+  });
+
+  it("reads `import.meta.dirname`, `resolve`, and a segment that carries its own slashes", () => {
+    expect(
+      subjectsNamedBy('readFileSync(path.resolve(import.meta.dirname, "../..", "a.pure.ts"))', specPath),
+    ).toEqual(["src/a.pure.ts"]);
+    expect(subjectsNamedBy("join(__dirname, `fixtures/nsw.json`)", specPath)).toEqual([
+      "src/lib/__tests__/fixtures/nsw.json",
+    ]);
+  });
+
+  it("reads nothing after a base that is not the spec's own directory", () => {
+    // `ROOT` could be anything; resolving it as the spec's directory would
+    // name a file the spec never meant.
+    expect(subjectsNamedBy('readFileSync(join(ROOT, "..", "..", "App.tsx"))', specPath)).toEqual([]);
+    expect(subjectsNamedBy('readFileSync(join(here, "..", "..", "App.tsx"))', specPath)).toEqual([]);
+  });
+
+  it("stops at the first argument that is not a plain literal", () => {
+    // What the run holds before `name` is a directory, and a directory is no
+    // subject. It never becomes half a path.
+    expect(subjectsNamedBy('readFileSync(join(__dirname, "..", name, "a.ts"))', specPath)).toEqual([]);
+    expect(
+      subjectsNamedBy("readFileSync(join(__dirname, 'fixtures', `${name}.json`))", specPath),
+    ).toEqual([]);
+  });
+
+  it("takes a directory, a climb above the root, or an absolute segment as no subject", () => {
+    expect(subjectsNamedBy('readdirSync(join(__dirname, "..", "fixtures"))', specPath)).toEqual([]);
+    expect(
+      subjectsNamedBy('join(__dirname, "..", "..", "..", "..", "etc", "passwd.conf")', specPath),
+    ).toEqual([]);
+    // `resolve` restarts at the filesystem root on a segment that begins
+    // with `/`, and no filesystem path is a repository path.
+    expect(subjectsNamedBy('resolve(__dirname, "/etc/passwd.conf")', specPath)).toEqual([]);
+    expect(subjectsNamedBy('resolve(__dirname, "..", "/src/a.ts")', specPath)).toEqual([]);
+  });
+
+  it("reads one subject named both ways as one", () => {
+    const text = `${SPEC}\nreadFileSync("src/App.tsx");`;
+    expect(subjectsNamedBy(text, specPath)).toEqual([
+      "src/App.tsx",
+      "src/components/layout/DashboardLayout.tsx",
     ]);
   });
 });

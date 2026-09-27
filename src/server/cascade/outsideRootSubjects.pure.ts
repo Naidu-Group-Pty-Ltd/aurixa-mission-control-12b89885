@@ -69,7 +69,11 @@
  */
 
 import { isSpecPath } from "@/lib/cascade/membrane/ionSpecies.pure";
-import { resolveFromSpec, SUBJECT_ROOTS } from "@/lib/cascade/membrane/membrane.pure";
+import {
+  resolveFromSpec,
+  specDirectorySegmentPaths,
+  SUBJECT_ROOTS,
+} from "@/lib/cascade/membrane/membrane.pure";
 import { stripComments } from "../sourceComments.pure";
 
 /**
@@ -104,10 +108,11 @@ function isOutsideRootPath(path: string): boolean {
 /**
  * The repository paths outside the content roots a spec names in its code.
  *
- * The three forms `subjectsNamedBy` reads — a whole literal, the segments of
- * one path, and (given the spec's own path) a relative literal — over the
- * spec's text with its comments removed, keeping only what lies in a
- * directory outside `SUBJECT_ROOTS`. Sorted.
+ * The four forms `subjectsNamedBy` reads — a whole literal, the segments of
+ * one path, and (given the spec's own path) a relative literal or the
+ * segments of one after the spec's own directory — over the spec's text with
+ * its comments removed, keeping only what lies in a directory outside
+ * `SUBJECT_ROOTS`. Sorted.
  */
 export function subjectsNamedOutsideRoots(text: string, specPath?: string): string[] {
   const code = stripComments(text);
@@ -127,6 +132,9 @@ export function subjectsNamedOutsideRoots(text: string, specPath?: string): stri
     for (const m of code.matchAll(RELATIVE)) {
       const resolved = resolveFromSpec(specPath, m[1]);
       if (resolved !== null && isOutsideRootPath(resolved)) found.add(resolved);
+    }
+    for (const path of specDirectorySegmentPaths(code, specPath)) {
+      if (isOutsideRootPath(path)) found.add(path);
     }
   }
 
