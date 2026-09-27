@@ -10,24 +10,17 @@ import {
 
 type Db = SupabaseClient<Database>;
 
-/** Rows per request. Below PostgREST's cap, and never trusted to be it. */
-export const CARD_BLOCKAGE_PAGE = 500;
-
 /**
- * How many open rows one render of the card will walk before it asks the
- * database to count by class instead. Counted in ROWS RECEIVED, never in
- * requests, so a server cap below the page cannot shorten the walk.
+ * How many open rows the card's one read asks for. Below PostgREST's cap, and
+ * never trusted to be it: whether the read carried everything is decided by
+ * the count that comes back with it, never by how many rows arrived.
  *
- * It bounds the read and never what the card says. Every open row is read up
- * to here; past here every class the taxonomy knows is counted exactly. The
- * largest class on any clone is `prime_ledger_hole`, fed by at most fifty
+ * The largest class on any clone is `prime_ledger_hole`, fed by at most fifty
  * notes (`PRIME_LEDGER_HOLE_NOTE_CAP`) and the few holes held migrations name
- * — 52 rows on the CRM independent on 27 Sep 2026 — so a clone reaches this
- * only through something new.
+ * — 52 rows on the CRM independent on 27 Sep 2026 — so a clone has more open
+ * rows than this only through something new.
  */
-export const CARD_BLOCKAGE_ROW_CEILING = 2_000;
-
-const ROW_COLUMNS = "id, class, owner, detail, first_seen_at, self_heals";
+export const CARD_BLOCKAGE_READ_LIMIT = 500;
 
 /** A read of the card's blockages, shaped like the PostgREST result it replaces. */
 export type CardBlockagesRead =
@@ -38,79 +31,67 @@ export type CardBlockagesRead =
  * Every open blockage on one clone, as the card draws it: one line per class,
  * each with the number of rows behind it.
  *
- * ## Why it walks, and how
+ * ## One statement, and the count that comes with it
  *
  * The card read the six oldest open rows, and the first version of this
- * change the oldest 500. Either way a class whose first row fell past the
- * cut was not drawn and a class spanning it was undercounted, while the card
- * claimed to list every open class. PostgREST also truncates a response at its `max_rows` without
- * saying so, so an unpaged read that hit the cap would look complete.
+ * change the oldest 500. Either way a class whose first row fell past the cut
+ * was not drawn and a class spanning it was undercounted, while the card
+ * claimed to list every open class.
  *
- * So it walks by `id`, as `readUnreadBlockedNotices` does, for the reasons
- * that module paid for. A key does not move when a row is cleared between two
- * pages, where an offset would push a row past the boundary. It reads until a
- * page comes back EMPTY rather than short, so a server cap smaller than the
- * page cannot end the walk early. And a page that repeats a row fails the
- * read, because a walk that is not advancing cannot be trusted and must not
- * loop. The order of the walk does not matter to the card: the grouping dates
- * each class by its oldest row whatever order the rows arrive in.
+ * Paging does not settle it either. A walk by `id` misses any row opened
+ * while it runs: ids are `gen_random_uuid()`, so a new row can sort behind the
+ * cursor, and the empty page that ends the walk then reports a partial reading
+ * as complete. No key closes that. `created_at` is taken when the inserting
+ * statement starts rather than when it commits, and the ledger opens rows with
+ * an old `first_seen_at` on purpose.
  *
- * ## Past the ceiling
+ * So the card reads once. PostgREST computes an exact count in the same
+ * statement as the rows it returns, so the two describe one moment. When the
+ * count is no more than the rows returned, that one statement carried every
+ * open row: a complete and consistent reading, whatever PostgREST's cap was.
+ * That is every clone today.
  *
- * A render that has received `CARD_BLOCKAGE_ROW_CEILING` rows stops walking
- * and asks the database for two things. The first is the number of open rows.
- * The second is, for each class the taxonomy knows, the number of its open
- * rows and when the oldest was first seen. Every known class is then drawn
- * with its true count, however many rows it has. What no count by class can
- * reach is a class this build does not know, and that shows as rows the lines
- * leave out; the card says how many.
+ * ## When one statement cannot carry them
+ *
+ * The card asks the database for one count per class the taxonomy knows, with
+ * each class's oldest row. A count and its oldest row are one statement, so
+ * every known class is drawn with its true count, however many rows it has. A
+ * class this build does not know is drawn from the rows the first read
+ * carried. The rest of its rows cannot be counted by class, so the card says
+ * how many rows it leaves out.
  *
  * A failed request, or a count the database did not give, fails the whole
  * read. The card draws that as "could not be read", never as a shorter list.
  * Read-only by construction: it names one table and never writes it.
  */
 export async function readCardBlockages(supabase: Db, cloneId: string): Promise<CardBlockagesRead> {
-  const rows: OpenBlockageRow[] = [];
-  const received = new Set<string>();
-  let after: string | null = null;
-  for (;;) {
-    let query = supabase
-      .from("clone_sync_blockages")
-      .select(ROW_COLUMNS)
-      .eq("clone_id", cloneId)
-      .is("cleared_at", null)
-      .order("id", { ascending: true })
-      .limit(CARD_BLOCKAGE_PAGE);
-    if (after !== null) query = query.gt("id", after);
-    const res = await query;
-    if (res.error) return failed(res.error.message);
-    const batch = (res.data ?? []) as OpenBlockageRow[];
-    if (batch.length === 0) {
-      // The end of the walk: every open row was read, and the lines count them all.
-      return {
-        data: { groups: groupCardBlockages(rows), total: rows.length, counted: rows.length },
-        error: null,
-      };
-    }
-    for (const row of batch) {
-      if (received.has(row.id)) {
-        return failed(
-          `blockage ${row.id} came back twice, so the walk is not advancing and what it ` +
-            `returned cannot be trusted`,
-        );
-      }
-      received.add(row.id);
-      rows.push(row);
-    }
-    if (rows.length >= CARD_BLOCKAGE_ROW_CEILING) return countByClass(supabase, cloneId, rows);
-    after = batch[batch.length - 1].id;
+  const first = await supabase
+    .from("clone_sync_blockages")
+    .select("id, class, owner, detail, first_seen_at, self_heals", { count: "exact" })
+    .eq("clone_id", cloneId)
+    .is("cleared_at", null)
+    .order("first_seen_at", { ascending: true })
+    .order("id", { ascending: true })
+    .limit(CARD_BLOCKAGE_READ_LIMIT);
+  if (first.error) return failed(first.error.message);
+  if (first.count === null) {
+    return failed("the database did not count this clone's open blockages");
   }
+  const rows = (first.data ?? []) as OpenBlockageRow[];
+  if (first.count <= rows.length) {
+    // The statement that returned these rows counted no more: every open row is here.
+    return {
+      data: { groups: groupCardBlockages(rows), total: rows.length, counted: rows.length },
+      error: null,
+    };
+  }
+  return countByClass(supabase, cloneId, rows);
 }
 
 async function countByClass(
   supabase: Db,
   cloneId: string,
-  walked: readonly OpenBlockageRow[],
+  carried: readonly OpenBlockageRow[],
 ): Promise<CardBlockagesRead> {
   const classes = Object.keys(BLOCKAGE_POLICY);
   const open = () =>
@@ -126,7 +107,9 @@ async function countByClass(
     ),
   ]);
   if (all.error) return failed(all.error.message);
-  if (all.count === null) return failed("the database did not count this clone's open blockages");
+  if (all.count === null) {
+    return failed("the database did not count this clone's open blockages");
+  }
 
   const tallies = new Map<string, ClassTally>();
   let counted = 0;
@@ -143,11 +126,11 @@ async function countByClass(
     tallies.set(cls, { count: res.count, firstSeenAt });
     counted += res.count;
   }
-  // The walk is still the only reading of a class the taxonomy does not know.
-  counted += walked.filter((r) => !tallies.has(r.class)).length;
+  // The first read is still the only reading of a class the taxonomy does not know.
+  counted += carried.filter((r) => !tallies.has(r.class)).length;
   return {
     data: {
-      groups: groupCardBlockages(walked, tallies),
+      groups: groupCardBlockages(carried, tallies),
       // The counts are separate statements a moment apart; the lines never
       // claim more than the total, and the total never less than the lines.
       total: Math.max(all.count, counted),

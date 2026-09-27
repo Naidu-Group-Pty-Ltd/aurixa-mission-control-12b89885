@@ -166,23 +166,27 @@ describe("what an operator is shown", () => {
     with no word of the other forty-six — and ordered oldest first, a class
     that opened later could not reach the card at all. Reading the oldest 500
     instead only moved the cut: Codex found that a class whose first row lay
-    past it was still not drawn. The read now walks every open row, and past
-    a bound counts every known class, and the panel says what it left out.
+    past it was still not drawn. And a walk by a random id misses a row opened
+    while it runs, which Codex found next. The card now reads in one statement
+    whose own count says whether it carried everything; past that, it counts
+    every known class, and the panel says what it left out.
   */
   it("the card reads every open row and draws every open class", () => {
-    // One read, and it is the walk: nothing here queries the table itself.
+    // One reader, and nothing here queries the table itself.
     expect(fn).toContain("readCardBlockages(supabase, data.cloneId)");
     expect(fn).not.toContain('"clone_sync_blockages"');
     expect(fn).not.toMatch(/\.limit\(\s*6\s*\)/);
-    // Walked by key until an empty page, and never by offset.
-    expect(blockageRead).toContain('.order("id", { ascending: true })');
-    expect(blockageRead).toContain('query.gt("id", after)');
-    expect(blockageRead).toContain("batch.length === 0");
+    // Complete only on the word of the count returned WITH the rows.
+    expect(blockageRead).toContain(
+      '.select("id, class, owner, detail, first_seen_at, self_heals", { count: "exact" })',
+    );
+    expect(blockageRead).toContain("first.count <= rows.length");
+    // No walk: a keyset over random ids, or an offset, misses rows.
+    expect(blockageRead).not.toContain(".gt(");
     expect(blockageRead).not.toContain(".range(");
-    // Past the bound, every class the taxonomy knows is counted.
+    // Past one statement, every class the taxonomy knows is counted.
     expect(blockageRead).toContain("Object.keys(BLOCKAGE_POLICY)");
-    expect(blockageRead).toContain('count: "exact"');
-    expect(blockageRead).toContain("groupCardBlockages(walked, tallies)");
+    expect(blockageRead).toContain("groupCardBlockages(carried, tallies)");
     expect(panelCode).toContain("blockages.groups.map(");
     expect(panelCode).toContain("g.count");
     expect(panelCode).toContain("blockages.total - blockages.counted");

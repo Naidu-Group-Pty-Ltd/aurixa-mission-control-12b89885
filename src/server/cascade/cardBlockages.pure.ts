@@ -33,12 +33,13 @@
  *
  * ## A class the database counted
  *
- * The card reads every open row (`cardBlockagesRead.server.ts`), up to a
- * bound on one render's read. Past the bound it asks the database to count
- * each known class instead, and those counts are handed in as `tallies`. A
- * counted class is whole, so its line is the count and nothing the walk saw
- * of it is added again; a class the database counted at zero draws no line,
- * even if the walk, which ran first, still saw a row of it.
+ * The card reads its rows in one statement (`cardBlockagesRead.server.ts`).
+ * When that statement cannot carry every open row, the reader asks the
+ * database to count each known class instead, and those counts are handed in
+ * as `tallies`. A counted class is whole, so its line is the count and nothing
+ * the first read carried of it is added again. A class the database counted at
+ * zero draws no line, even if the first read, which ran before, carried a row
+ * of it.
  */
 import {
   BLOCKAGE_POLICY,
@@ -86,8 +87,9 @@ export type CardBlockages = {
   total: number;
   /**
    * How many of those rows the lines count. Below `total` only when rows of
-   * a class this build does not know lay past the bound on one read, which is
-   * the one thing a count by class cannot reach: the card says how many.
+   * a class this build does not know lay past what one read could carry,
+   * which is the one thing a count by class cannot reach: the card says how
+   * many.
    */
   counted: number;
 };

@@ -106,14 +106,14 @@ describe("the sync card lists every class that is open, once", () => {
 });
 
 /*
-  Past the bound on one read, the reader asks the database to count each
-  known class. A counted class is whole: its line is the count, and nothing
-  the walk saw of it is added again.
+  When one read cannot carry every open row, the reader asks the database to
+  count each known class. A counted class is whole: its line is the count,
+  and nothing the first read carried of it is added again.
 */
 describe("a class the database counted", () => {
   const tallies = (entries: Array<[string, ClassTally]>) => new Map(entries);
 
-  it("is drawn from its count and its oldest row, never from the rows walked", () => {
+  it("is drawn from its count and its oldest row, never from the rows read", () => {
     const groups = groupCardBlockages(
       independent().slice(0, 7),
       tallies([["prime_ledger_hole", { count: 2_600, firstSeenAt: "2026-09-20T00:00:00Z" }]]),
@@ -125,7 +125,7 @@ describe("a class the database counted", () => {
     expect(groups[0].owner).toBe(BLOCKAGE_POLICY.prime_ledger_hole.owner);
   });
 
-  it("draws a class the walk never reached", () => {
+  it("draws a class the first read never reached", () => {
     const groups = groupCardBlockages(
       independent(),
       tallies([
@@ -139,7 +139,7 @@ describe("a class the database counted", () => {
     ]);
   });
 
-  it("counted at zero, draws no line even where the walk, which ran first, saw a row", () => {
+  it("counted at zero, draws no line even where the first read, which ran before, carried a row", () => {
     const groups = groupCardBlockages(
       [row({ id: "ci", class: "ci_red", owner: "prime_author" })],
       tallies([["ci_red", { count: 0, firstSeenAt: null }]]),
@@ -147,7 +147,7 @@ describe("a class the database counted", () => {
     expect(groups).toEqual([]);
   });
 
-  it("a known class with no count is still drawn from the rows walked", () => {
+  it("a known class with no count is still drawn from the rows read", () => {
     const groups = groupCardBlockages(
       [...independent(), row({ id: "ci", class: "ci_red", owner: "prime_author" })],
       tallies([["ci_red", { count: 1, firstSeenAt: "2026-09-26T00:00:00Z" }]]),

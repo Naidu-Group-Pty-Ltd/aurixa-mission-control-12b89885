@@ -66,8 +66,8 @@ export const readCloneConvergence = createServerFn({ method: "POST" })
         .select("sync_status, commits_behind")
         .eq("id", data.cloneId)
         .maybeSingle(),
-      // Every open row, walked by key; past a bound, every known class
-      // counted by the database. See `cardBlockagesRead.server.ts`.
+      // Every open row in one statement, or past what one statement can
+      // carry, every known class counted. See `cardBlockagesRead.server.ts`.
       readCardBlockages(supabase, data.cloneId),
     ]);
 
