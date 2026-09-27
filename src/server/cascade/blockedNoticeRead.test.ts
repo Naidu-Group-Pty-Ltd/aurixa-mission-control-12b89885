@@ -3,7 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import {
   BLOCKED_NOTICE_PAGE,
-  MAX_BLOCKED_NOTICE_PAGES,
+  MAX_UNREAD_BLOCKED_NOTICES,
   readUnreadBlockedNotices,
   type BlockedNoticeRow,
 } from "./blockedNoticeRead.server";
@@ -30,7 +30,13 @@ const notice = (n: number, over: Partial<Row> = {}): Row => ({
  */
 function fakeServer(
   rows: Row[],
-  opts: { cap?: number; beforeCall?: (call: number) => void; failOn?: number } = {},
+  opts: {
+    cap?: number;
+    beforeCall?: (call: number) => void;
+    failOn?: number;
+    /** A server that drops the keyset filter, and so answers every page with the first. */
+    ignoreKeyset?: boolean;
+  } = {},
 ) {
   let calls = 0;
   const client = {
@@ -43,7 +49,10 @@ function fakeServer(
         eq: (col: keyof Row, val: unknown) => (filters.push((r) => r[col] === val), builder),
         is: (col: keyof Row, val: unknown) => (filters.push((r) => r[col] === val), builder),
         in: (col: keyof Row, vals: unknown[]) => (filters.push((r) => vals.includes(r[col])), builder),
-        gt: (col: keyof Row, val: string) => (filters.push((r) => String(r[col]) > val), builder),
+        gt: (col: keyof Row, val: string) => {
+          if (!opts.ignoreKeyset) filters.push((r) => String(r[col]) > val);
+          return builder;
+        },
         order: () => builder,
         limit: (n: number) => ((limit = n), builder),
         then(resolve: (v: unknown) => unknown, reject: (e: unknown) => unknown) {
@@ -112,14 +121,49 @@ describe("readUnreadBlockedNotices", () => {
     );
   });
 
-  it("a backlog past the ceiling fails closed", async () => {
-    const rows = Array.from({ length: BLOCKED_NOTICE_PAGE * MAX_BLOCKED_NOTICE_PAGES + 1 }, (_, i) =>
-      notice(i),
-    );
+  /*
+    The ceiling is a count of notices, so a backlog at it is read in full
+    however the server pages it. Codex found the request-count ceiling this
+    replaced refusing both of these: at 500 a page the 40th request came back
+    full and the empty page that proves the end was one request past it, and
+    a server cap of 100 turned 40 requests into 4,000 notices.
+  */
+  it("a backlog exactly at the ceiling is read in full, one empty page after the last", async () => {
+    const rows = Array.from({ length: MAX_UNREAD_BLOCKED_NOTICES }, (_, i) => notice(i));
+    const { client, calls } = fakeServer(rows);
+    const got = await readUnreadBlockedNotices(client, ["c1"]);
+    expect(got).toHaveLength(MAX_UNREAD_BLOCKED_NOTICES);
+    expect(calls()).toBe(MAX_UNREAD_BLOCKED_NOTICES / BLOCKED_NOTICE_PAGE + 1);
+  });
+
+  it("a backlog at the ceiling behind a server cap below the page is read in full", async () => {
+    const rows = Array.from({ length: MAX_UNREAD_BLOCKED_NOTICES }, (_, i) => notice(i));
+    const { client, calls } = fakeServer(rows, { cap: 100 });
+    const got = await readUnreadBlockedNotices(client, ["c1"]);
+    expect(new Set(got.map((r) => r.id)).size).toBe(MAX_UNREAD_BLOCKED_NOTICES);
+    expect(calls()).toBe(MAX_UNREAD_BLOCKED_NOTICES / 100 + 1);
+  });
+
+  it("one notice past the ceiling fails closed", async () => {
+    const rows = Array.from({ length: MAX_UNREAD_BLOCKED_NOTICES + 1 }, (_, i) => notice(i));
     const { client } = fakeServer(rows);
     await expect(readUnreadBlockedNotices(client, ["c1"])).rejects.toThrow(
       "which is a backlog to clear rather than a list to classify",
     );
+  });
+
+  /*
+    With no request ceiling, what ends the walk is that every page must
+    advance it. A server that ignored the key would answer every page with the
+    first; that is refused on the second page rather than read for ever.
+  */
+  it("a page that repeats a notice fails the read rather than looping", async () => {
+    const rows = Array.from({ length: BLOCKED_NOTICE_PAGE + 20 }, (_, i) => notice(i));
+    const { client, calls } = fakeServer(rows, { ignoreKeyset: true });
+    await expect(readUnreadBlockedNotices(client, ["c1"])).rejects.toThrow(
+      `notice ${pad(0)} came back twice`,
+    );
+    expect(calls()).toBe(2);
   });
 
   it("nothing unread is one request and an empty list", async () => {

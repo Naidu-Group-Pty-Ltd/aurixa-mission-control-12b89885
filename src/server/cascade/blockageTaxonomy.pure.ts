@@ -612,7 +612,17 @@ export function classifyBlockages(facts: CloneBlockageFacts, now: Date): Detecte
     becomes wrong.
   */
   for (const r of refusals) {
-    add("ci_red", `ci_red:${r.title}`, firstParagraphs(r.body, 2), r.createdAt);
+    const elsewhere = refusalRepoElsewhere(r, facts.repoFullName);
+    const detail = firstParagraphs(r.body, 2);
+    add(
+      "ci_red",
+      refusalFingerprint(r, facts.repoFullName),
+      elsewhere === null
+        ? detail
+        : `This pull request is in ${elsewhere}, which ${facts.label} no longer cascades to, so ` +
+            `the drain leaves its notice unread and it stands until an operator reads it. ${detail}`,
+      r.createdAt,
+    );
   }
 
   /*
@@ -690,6 +700,36 @@ export function pullRequestKey(prUrl: string | null): string | null {
 }
 
 /**
+ * The repository a refusal's pull request is in, when that is NOT the one the
+ * clone record now names — the notices a clone re-pointed since still holds,
+ * which the drain leaves unread because it can judge only the clone's own
+ * repository. Null for a refusal in the clone's own repository, and for one
+ * whose URL does not parse.
+ */
+export function refusalRepoElsewhere(r: BlockedNotice, repoFullName: string | null): string | null {
+  const repo = parsePrRepo(r.prUrl);
+  if (repo === null) return null;
+  if (repoFullName !== null && repo.toLowerCase() === repoFullName.toLowerCase()) return null;
+  return repo;
+}
+
+/**
+ * A refusal's identity in the ledger.
+ *
+ * The title names the clone and the pull request's NUMBER, and a number is one
+ * pull request only within one repository. For a refusal in the clone's own
+ * repository — every refusal the drain raises — that is enough, and the
+ * identity is the title exactly as it has always been, so a standing row keeps
+ * its identity and its start. A refusal in any other repository carries the
+ * repository as well: its number can match one of the clone's own, and the
+ * two would otherwise share one fingerprint, which the ledger reports once.
+ */
+export function refusalFingerprint(r: BlockedNotice, repoFullName: string | null): string {
+  const elsewhere = refusalRepoElsewhere(r, repoFullName);
+  return elsewhere === null ? `ci_red:${r.title}` : `ci_red:${r.title} · ${elsewhere.toLowerCase()}`;
+}
+
+/**
  * The standing refusals a clone's unread notices describe: the NEWEST notice
  * for each pull request, newest first.
  *
@@ -700,9 +740,10 @@ export function pullRequestKey(prUrl: string | null): string | null {
  *
  * A notice whose URL does not parse is keyed on its title, which names the
  * pull request as well, so it still counts as one refusal rather than none.
- * Two refusals whose titles coincide share a `ci_red` fingerprint and are
- * reported once — one row naming that pull request, never two rows with one
- * identity (see `add` in `classifyBlockages`).
+ * Two pull requests with one number in two repositories are two refusals, and
+ * `refusalFingerprint` keeps their identities apart; a notice with no URL and
+ * one with a URL for the same pull request share a fingerprint and are
+ * reported once (see `add` in `classifyBlockages`).
  */
 export function standingRefusals(notices: ReadonlyArray<BlockedNotice>): BlockedNotice[] {
   const at = (iso: string) => {

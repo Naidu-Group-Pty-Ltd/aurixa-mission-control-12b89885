@@ -7,6 +7,8 @@ import {
   isInvocationCut,
   parsePrRepo,
   pullRequestKey,
+  refusalFingerprint,
+  refusalRepoElsewhere,
   standingRefusals,
   type BlockageClass,
   type BlockedNotice,
@@ -541,6 +543,91 @@ describe("every refused pull request keeps its own finding", () => {
     expect(found.map((b) => b.fingerprint)).toEqual([
       "ci_red:Cascade blocked · NPC Client Dashboard · PR #264",
     ]);
+  });
+});
+
+describe("a refusal in another repository is its own finding", () => {
+  /*
+    Codex's reading of the fingerprint guard: the title names the clone and
+    the pull request's NUMBER, and a clone re-pointed since still holds
+    unread notices from its old repository — the drain can judge only the
+    clone's own, so it leaves them. The old repository's #42 and the new
+    one's #42 had one title, so the guard reported one and dropped the other.
+  */
+  const own = "Naidu-Group-Pty-Ltd/npc-client-dashboard";
+  const old = "Naidu-Group-Pty-Ltd/npc-client-dashboard-legacy";
+  const refusal = (repo: string, n: number, minsAgo: number): BlockedNotice => ({
+    title: `Cascade blocked · NPC Client Dashboard · PR #${n}`,
+    body: `Cascade PR #${n} on NPC Client Dashboard is failing the same way on a rebuilt head.\n\nNot merging.`,
+    createdAt: ago(minsAgo),
+    prUrl: `https://github.com/${repo}/pull/${n}`,
+  });
+
+  it("one number in two repositories is two ci_red findings", () => {
+    const found = classifyBlockages(
+      stalled({ blockedNotices: [refusal(own, 42, 30), refusal(old, 42, 60 * 24 * 9)] }),
+      NOW,
+    );
+    expect(found.map((b) => b.fingerprint).sort()).toEqual([
+      "ci_red:Cascade blocked · NPC Client Dashboard · PR #42",
+      "ci_red:Cascade blocked · NPC Client Dashboard · PR #42 · naidu-group-pty-ltd/npc-client-dashboard-legacy",
+    ]);
+    expect(found.every((b) => b.cls === "ci_red")).toBe(true);
+  });
+
+  it("says where the other repository's refusal is, and why it stands", () => {
+    const found = classifyBlockages(stalled({ blockedNotices: [refusal(old, 42, 90)] }), NOW);
+    expect(found).toHaveLength(1);
+    expect(found[0].detail).toContain(`This pull request is in ${old}, which NPC Client Dashboard no longer cascades to`);
+    expect(found[0].detail).toContain("Not merging.");
+  });
+
+  /*
+    The rows already open carry the title as their identity. A refusal in the
+    clone's own repository must keep it byte for byte, or the first pass after
+    this ships would clear every standing ci_red row and open it again with
+    today as its start.
+  */
+  it("a refusal in the clone's own repository keeps the fingerprint it has always had", () => {
+    for (const repo of [own, own.toLowerCase(), own.toUpperCase()]) {
+      const found = classifyBlockages(stalled({ blockedNotices: [refusal(repo, 264, 30)] }), NOW);
+      expect(found.map((b) => b.fingerprint), repo).toEqual([
+        "ci_red:Cascade blocked · NPC Client Dashboard · PR #264",
+      ]);
+      expect(found[0].detail.startsWith("Cascade PR #264")).toBe(true);
+    }
+  });
+});
+
+describe("refusalFingerprint", () => {
+  const r = (prUrl: string | null): BlockedNotice => ({
+    title: "Cascade blocked · X · PR #7",
+    body: "",
+    createdAt: "2026-09-27T00:00:00Z",
+    prUrl,
+  });
+
+  it("is the title for the clone's own repository, compared without case", () => {
+    expect(refusalFingerprint(r("https://github.com/O/R/pull/7"), "o/r")).toBe("ci_red:Cascade blocked · X · PR #7");
+    expect(refusalRepoElsewhere(r("https://github.com/O/R/pull/7"), "o/r")).toBeNull();
+  });
+
+  it("names the repository for any other", () => {
+    expect(refusalFingerprint(r("https://github.com/O/Old/pull/7"), "o/r")).toBe(
+      "ci_red:Cascade blocked · X · PR #7 · o/old",
+    );
+    expect(refusalRepoElsewhere(r("https://github.com/O/Old/pull/7"), "o/r")).toBe("O/Old");
+  });
+
+  it("names the repository when the clone record names none", () => {
+    expect(refusalFingerprint(r("https://github.com/o/r/pull/7"), null)).toBe("ci_red:Cascade blocked · X · PR #7 · o/r");
+  });
+
+  it("is the title when the URL does not parse, since nothing else names the repository", () => {
+    for (const url of [null, "", "https://github.com/o/r/issues/7"]) {
+      expect(refusalFingerprint(r(url), "o/r")).toBe("ci_red:Cascade blocked · X · PR #7");
+      expect(refusalRepoElsewhere(r(url), "o/r")).toBeNull();
+    }
   });
 });
 

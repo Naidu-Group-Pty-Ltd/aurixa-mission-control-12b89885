@@ -14,8 +14,14 @@ export type BlockedNoticeRow = {
 
 /** Rows per request. Below PostgREST's cap, and never trusted to be it. */
 export const BLOCKED_NOTICE_PAGE = 500;
-/** A backlog past this is not a list to classify; the pass fails closed. */
-export const MAX_BLOCKED_NOTICE_PAGES = 40;
+/**
+ * More unread notices than this is a backlog to clear, not a list to classify,
+ * and the pass fails closed. Counted in NOTICES RECEIVED, never in requests:
+ * a request ceiling refuses a backlog under it whenever the server caps a page
+ * below `BLOCKED_NOTICE_PAGE`, or whenever the last page is full and the empty
+ * page that proves the end is one request past the ceiling.
+ */
+export const MAX_UNREAD_BLOCKED_NOTICES = 20_000;
 
 /**
  * Every unread `cascade_blocked` notice for these clones, however many.
@@ -31,6 +37,11 @@ export const MAX_BLOCKED_NOTICE_PAGES = 40;
  * not move. And it reads until a page comes back EMPTY rather than short, so
  * a server cap smaller than the page can never end the walk early.
  *
+ * It always ends. Every page either comes back empty (the end), repeats a
+ * notice already received (the walk is not advancing, so its list cannot be
+ * trusted), or adds at least one notice to a count that fails closed past
+ * `MAX_UNREAD_BLOCKED_NOTICES`.
+ *
  * Read-only by construction: it names one table and never writes it.
  */
 export async function readUnreadBlockedNotices(
@@ -38,8 +49,9 @@ export async function readUnreadBlockedNotices(
   ids: readonly string[],
 ): Promise<BlockedNoticeRow[]> {
   const rows: BlockedNoticeRow[] = [];
+  const received = new Set<string>();
   let after: string | null = null;
-  for (let page = 0; page < MAX_BLOCKED_NOTICE_PAGES; page += 1) {
+  for (;;) {
     let query = supabase
       .from("notifications")
       .select("id, clone_id, title, body, created_at, url")
@@ -55,11 +67,22 @@ export async function readUnreadBlockedNotices(
     }
     const batch = (res.data ?? []) as BlockedNoticeRow[];
     if (batch.length === 0) return rows;
-    rows.push(...batch);
+    for (const row of batch) {
+      if (received.has(row.id)) {
+        throw new Error(
+          `Could not read blocked notices: notice ${row.id} came back twice, so the walk is not ` +
+            `advancing and the list it returned cannot be trusted.`,
+        );
+      }
+      received.add(row.id);
+      rows.push(row);
+    }
+    if (rows.length > MAX_UNREAD_BLOCKED_NOTICES) {
+      throw new Error(
+        `Could not read blocked notices: more than ${MAX_UNREAD_BLOCKED_NOTICES} are unread, ` +
+          `which is a backlog to clear rather than a list to classify.`,
+      );
+    }
     after = batch[batch.length - 1].id;
   }
-  throw new Error(
-    `Could not read blocked notices: more than ${BLOCKED_NOTICE_PAGE * MAX_BLOCKED_NOTICE_PAGES} ` +
-      `are unread, which is a backlog to clear rather than a list to classify.`,
-  );
 }
