@@ -65,8 +65,21 @@
  * read at all — because a read that FAILED is not a set that is EMPTY, and
  * falling back to today's behaviour is the one answer that cannot be newly
  * wrong.
+ *
+ * ## A clone can differ from the prime by holding LESS, too
+ *
+ * The prime keeps features no clone receives (`primeOnlyFeatures.pure.ts`) —
+ * the GoHighLevel account migration's twenty-eight functions, the owner's
+ * decision of 27 Sep 2026. A clone that does not hold them is the mirror of
+ * the case above: prime's baseline counts twenty-eight directories and three
+ * call edges the clone's tree does not have, and prime's ratchet counts
+ * twenty-eight declarations its merged config no longer carries. So the same
+ * two holds fire on `withheld` — the prime-only functions the clone's tree
+ * does not hold — and the same reconciles settle them. A clone still holding
+ * the feature passes nothing and keeps today's behaviour exactly.
  */
 
+import { describeWithheldFunctions } from "../primeOnlyFeatures.pure";
 import type { HeldPath } from "./syncExclusions.pure";
 
 /** The generated baseline: a static analysis of one repository's edge functions. */
@@ -90,22 +103,49 @@ export const SECURITY_INVENTORY_PATH = "docs/security/SECURITY_INVENTORY.json";
 export const FUNCTION_COUNT_RATCHET_PATH = "src/lib/security/auditRemediation.spec.ts";
 
 /**
+ * How this clone's function set differs from the prime's, as one clause.
+ *
+ * Written once — for both holds and for the pull request body — so the three
+ * cannot describe the same difference in three ways. The owned-only wording is
+ * exactly what the holds said before the withheld half existed, because an
+ * operator has read it on every CRM pass. Both lists are de-duplicated and
+ * sorted here, so a caller cannot make the sentence depend on its order.
+ */
+export function describeFunctionSetDifference(
+  cloneOwnedFunctions: readonly string[],
+  withheld: readonly string[],
+): string {
+  const owned = [...new Set(cloneOwnedFunctions)].sort();
+  const lacks = [...new Set(withheld)].sort();
+  const owns = `owns ${owned.length} edge function(s) the prime does not (${owned.join(", ")})`;
+  const without = `does not carry ${describeWithheldFunctions(lacks)}, which the prime keeps for itself`;
+  if (lacks.length === 0) return owns;
+  if (owned.length === 0) return without;
+  return `${owns} and ${without}`;
+}
+
+/**
  * Whether prime's baseline may be written over this clone's.
  *
  * `cloneOwnedFunctions` is what the config.toml and registry reconciles
  * carried forward — the names the clone declares and prime has no opinion
- * about. Empty means a mirror, and a mirror takes prime's baseline as it
+ * about. `withheld` is the prime-only functions this clone's tree does not
+ * hold. Both empty means a mirror, and a mirror takes prime's baseline as it
  * always has.
  */
-export function securityInventoryHold(cloneOwnedFunctions: readonly string[]): HeldPath | null {
+export function securityInventoryHold(
+  cloneOwnedFunctions: readonly string[],
+  withheld: readonly string[] = [],
+): HeldPath | null {
   const owned = [...new Set(cloneOwnedFunctions)].sort();
-  if (owned.length === 0) return null;
+  const lacks = [...new Set(withheld)].sort();
+  if (owned.length === 0 && lacks.length === 0) return null;
   return {
     path: SECURITY_INVENTORY_PATH,
     pattern: "(content: describes a different function set)",
     reason: "manual_reconcile",
     note:
-      `This clone owns ${owned.length} edge function(s) the prime does not (${owned.join(", ")}), ` +
+      `This clone ${describeFunctionSetDifference(owned, lacks)}, ` +
       `so the prime's security baseline is a static analysis of a different repository. The ` +
       `clone's own copy is kept. Where it later goes stale, \`npm run security:inventory\` ` +
       `regenerates it from this repository.`,
@@ -131,16 +171,26 @@ export function securityInventoryHold(cloneOwnedFunctions: readonly string[]): H
  * person's correction is not silently reverted; `reconcileFunctionCountRatchet`
  * is what closes the remaining gap.
  */
-export function functionCountRatchetHold(cloneOwnedFunctions: readonly string[]): HeldPath | null {
+export function functionCountRatchetHold(
+  cloneOwnedFunctions: readonly string[],
+  withheld: readonly string[] = [],
+): HeldPath | null {
   const owned = [...new Set(cloneOwnedFunctions)].sort();
-  if (owned.length === 0) return null;
+  const lacks = [...new Set(withheld)].sort();
+  if (owned.length === 0 && lacks.length === 0) return null;
+  const declares = `declares ${owned.length} the prime does not (${owned.join(", ")})`;
+  const omits =
+    `omits the declarations of ${describeWithheldFunctions(lacks)}, which the prime keeps ` +
+    `for itself`;
+  const difference =
+    lacks.length === 0 ? declares : owned.length === 0 ? omits : `${declares} and ${omits}`;
   return {
     path: FUNCTION_COUNT_RATCHET_PATH,
     pattern: "(content: a count of this repository's own functions)",
     reason: "manual_reconcile",
     note:
       `This spec asserts how many functions \`supabase/config.toml\` declares, and this clone ` +
-      `declares ${owned.length} the prime does not (${owned.join(", ")}). The prime's copy ` +
+      `${difference}. The prime's copy ` +
       `states the prime's count, so it is not brought across — the two differ by that one ` +
       `number and nothing else. Where the merged config later declares more, the assertion ` +
       `is the number to update.`,

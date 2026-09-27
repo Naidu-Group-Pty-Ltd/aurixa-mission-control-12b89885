@@ -12,6 +12,7 @@ import {
   reconcileFunctionCountRatchet,
   reconcileSecurityInventory,
 } from "./securityBaselineReconcile.pure";
+import { PRIME_ONLY_FEATURES } from "../primeOnlyFeatures.pure";
 
 /**
  * A repository whose shape is the one the two real ones have: prime holds two
@@ -486,5 +487,232 @@ describe("the reconcilers are the engine's, and the engine uses them", () => {
     expect(engine).not.toContain(`"${SECURITY_INVENTORY_PATH}"`);
     expect(engine).not.toContain(`"${FUNCTION_COUNT_RATCHET_PATH}"`);
     expect(engine).toContain("Not reconciled here:");
+  });
+});
+
+/*
+  A clone that does NOT hold what the prime keeps for itself
+  (`primeOnlyFeatures.pure.ts`). The generator attributes an edge to the
+  directory of its caller, so an edge a withheld function makes is one the
+  clone's tree cannot produce — and prime's baseline carries them.
+*/
+describe("a clone without the prime's own functions", () => {
+  const PRIME_ONLY = ["migration-dispatcher", "migration-job-control"];
+  const primeWithMigration = JSON.stringify(
+    {
+      ...JSON.parse(PRIME_INVENTORY),
+      functions_importing_shared_auth_modules: {
+        "auth.ts": ["alpha/index.ts", "migration-job-control/index.ts"],
+        "authz.ts": ["beta/index.ts"],
+      },
+      statically_derivable_inter_function_graph: [
+        "alpha->beta",
+        "migration-job-control->migration-dispatcher",
+        "migration-dispatcher->migration-dispatcher",
+      ],
+    },
+    null,
+    2,
+  );
+  /** The clone's own baseline, generated after its removal pull request. */
+  const cloneAfterRemoval = JSON.stringify(
+    { ...JSON.parse(CLONE_INVENTORY), statically_derivable_inter_function_graph: ["alpha->beta"] },
+    null,
+    2,
+  );
+
+  it("compares the graphs without the edges only a withheld function makes", () => {
+    const out = reconcile({
+      primeInventoryJson: primeWithMigration,
+      cloneInventoryJson: cloneAfterRemoval,
+      withheld: PRIME_ONLY,
+    });
+    expect(out.ok, out.ok ? "" : out.reason).toBe(true);
+    const merged = JSON.parse((out as { merged: string }).merged);
+    expect(merged.statically_derivable_inter_function_graph).toEqual(["alpha->beta"]);
+  });
+
+  it("refuses the same pair where nothing is withheld, as it always has", () => {
+    // The filter is the whole difference: prime's three edges against the
+    // clone's one is exactly the disagreement the graph rule refuses.
+    const out = reconcile({
+      primeInventoryJson: primeWithMigration,
+      cloneInventoryJson: cloneAfterRemoval,
+    });
+    expect(out.ok).toBe(false);
+    expect((out as { reason: string }).reason).toContain("call graph");
+  });
+
+  it("also settles a clone whose stored baseline still lists them", () => {
+    // Every clone's committed baseline predates its removal, so both inputs
+    // carry the edges on the first pass after the removal lands.
+    const out = reconcile({
+      primeInventoryJson: primeWithMigration,
+      cloneInventoryJson: primeWithMigration,
+      withheld: PRIME_ONLY,
+    });
+    expect(out.ok, out.ok ? "" : out.reason).toBe(true);
+    const merged = JSON.parse((out as { merged: string }).merged);
+    expect(merged.statically_derivable_inter_function_graph).toEqual(["alpha->beta"]);
+  });
+
+  it("keeps an edge INTO a withheld function from a function the clone still holds", () => {
+    // Its caller is on disk and still names the function, so the clone's own
+    // generator finds it. Only the caller decides.
+    const withIncoming = (inv: string) =>
+      JSON.stringify({
+        ...JSON.parse(inv),
+        statically_derivable_inter_function_graph: [
+          ...JSON.parse(inv).statically_derivable_inter_function_graph,
+          "beta->migration-dispatcher",
+        ],
+      });
+    const out = reconcile({
+      primeInventoryJson: withIncoming(primeWithMigration),
+      cloneInventoryJson: withIncoming(cloneAfterRemoval),
+      withheld: PRIME_ONLY,
+    });
+    expect(out.ok, out.ok ? "" : out.reason).toBe(true);
+    const merged = JSON.parse((out as { merged: string }).merged);
+    expect(merged.statically_derivable_inter_function_graph).toEqual([
+      "alpha->beta",
+      "beta->migration-dispatcher",
+    ]);
+  });
+
+  it("drops their files from the import map, because the merged tree does not hold them", () => {
+    const out = reconcile({
+      primeInventoryJson: primeWithMigration,
+      cloneInventoryJson: cloneAfterRemoval,
+      withheld: PRIME_ONLY,
+    });
+    const merged = JSON.parse((out as { merged: string }).merged);
+    expect(merged.functions_importing_shared_auth_modules["auth.ts"]).not.toContain(
+      "migration-job-control/index.ts",
+    );
+  });
+});
+
+describe("the ratchet note, for a clone that holds less than the prime", () => {
+  const SPEC = [
+    "describe('the config', () => {",
+    "  it('every function still declares verify_jwt explicitly', () => {",
+    "    const declared = [...CONFIG.matchAll(",
+    "      /\\[functions\\.([A-Za-z0-9_-]+)\\][^[]*?verify_jwt\\s*=\\s*(true|false)/gs)];",
+    "    expect(declared.length).toBe(2);",
+    "  });",
+    "});",
+    "",
+  ].join("\n");
+  const ALL_28 = PRIME_ONLY_FEATURES.find((f) => f.key === "ghl-account-migration")!.functions;
+  const note = (merged: string) =>
+    merged
+      .split("\n")
+      .filter((l) => l.trimStart().startsWith("//"))
+      .map((l) => l.trim().replace(/^\/\/ ?/, ""))
+      .join(" ");
+
+  it("writes the count this repository declares, and says why in a sentence", () => {
+    const out = reconcileFunctionCountRatchet({
+      primeSpec: SPEC,
+      mergedToml: PRIME_TOML,
+      cloneOwnedFunctions: [],
+      withheld: ALL_28,
+    });
+    expect(out.ok).toBe(true);
+    const merged = (out as { merged: string }).merged;
+    expect(merged).toContain("expect(declared.length).toBe(2);");
+    expect(note(merged)).toBe(
+      "Reconciled by the cascade. This deployment does not declare the GoHighLevel account " +
+        "migration (all 28 functions), which the prime keeps for itself, so the prime's number " +
+        "counts a different repository. The count below is this one's, taken from the config " +
+        "this same pass composed.",
+    );
+  });
+
+  it("names both differences where a clone has both", () => {
+    const out = reconcileFunctionCountRatchet({
+      primeSpec: SPEC,
+      mergedToml: CLONE_TOML,
+      cloneOwnedFunctions: ["crm-send-message"],
+      withheld: ALL_28,
+    });
+    const text = note((out as { merged: string }).merged);
+    expect(text).toContain("declares 1 edge function(s) the prime does not — crm-send-message —");
+    expect(text).toContain("and does not declare the GoHighLevel account migration");
+  });
+
+  it("writes exactly the sentence it always has for a clone that only owns more", () => {
+    // Every CRM pass has written this note; a withheld set of zero must not
+    // re-word it, or the clone's spec changes on a pass that changed nothing.
+    const owned = reconcileFunctionCountRatchet({
+      primeSpec: SPEC,
+      mergedToml: CLONE_TOML,
+      cloneOwnedFunctions: ["crm-send-message"],
+    }) as { merged: string };
+    const withEmpty = reconcileFunctionCountRatchet({
+      primeSpec: SPEC,
+      mergedToml: CLONE_TOML,
+      cloneOwnedFunctions: ["crm-send-message"],
+      withheld: [],
+    }) as { merged: string };
+    expect(withEmpty.merged).toBe(owned.merged);
+    expect(note(owned.merged)).toBe(
+      "Reconciled by the cascade. This deployment declares 1 edge function(s) the prime does " +
+        "not — crm-send-message — so the prime's number counts a different repository. The count " +
+        "below is this one's, taken from the config this same pass composed.",
+    );
+  });
+
+  it("writes a note the spec's own rule cannot count, and stays a fixed point", () => {
+    const once = reconcileFunctionCountRatchet({
+      primeSpec: SPEC,
+      mergedToml: PRIME_TOML,
+      cloneOwnedFunctions: [],
+      withheld: ALL_28,
+    }) as { merged: string };
+    expect(ratchetCount(once.merged, extractRatchetRule(SPEC)!)).toBe(0);
+    const twice = reconcileFunctionCountRatchet({
+      primeSpec: once.merged,
+      mergedToml: PRIME_TOML,
+      cloneOwnedFunctions: [],
+      withheld: ALL_28,
+    }) as { merged: string };
+    expect(twice.merged).toBe(once.merged);
+  });
+});
+
+describe("the engine hands the withheld set to both baselines", () => {
+  const engine = readFileSync(join(process.cwd(), "src/server/cascade-engine.server.ts"), "utf8");
+
+  it("passes it to the inventory and to the ratchet", () => {
+    const inv = engine.indexOf("reconcileSecurityInventory({");
+    expect(engine.slice(inv, engine.indexOf("})", inv))).toContain("withheld: withheldFunctions");
+    const rat = engine.indexOf("reconcileFunctionCountRatchet({");
+    expect(engine.slice(rat, engine.indexOf("})", rat))).toContain("withheld: withheldFunctions");
+  });
+
+  it("counts the inventory only over a tree it could read", () => {
+    // Without the clone's tree the "merged tree" is the delivery alone, and a
+    // baseline counted over it describes a repository that does not exist.
+    const at = engine.indexOf("reconcileSecurityInventory({");
+    expect(engine.slice(Math.max(0, at - 300), at)).toContain("cloneShaByPath !== null");
+  });
+
+  it("recounts once over the finished delivery, after the removals are final", () => {
+    const narrowed = engine.indexOf(
+      "if (deletesCrossing.size > 0 && deletionPlan.refusal === null) {",
+    );
+    const recount = engine.indexOf(
+      "if (inventoryRecount !== null && reconciledPaths.has(SECURITY_INVENTORY_PATH)) {",
+    );
+    const typeBaseline = engine.indexOf("let edgeBaselineNote: string | null = null;");
+    expect(narrowed).toBeGreaterThan(-1);
+    expect(recount).toBeGreaterThan(narrowed);
+    expect(typeBaseline).toBeGreaterThan(recount);
+    const block = engine.slice(recount, typeBaseline);
+    expect(block).toContain("for (const removed of deletesCrossing) finalTree.delete(removed);");
+    expect(block).toContain("withheld: withheldFunctions");
+    expect(block).not.toContain("pendingDeletes");
   });
 });

@@ -244,6 +244,35 @@ export function isPrimeOnlyCronJob(job: {
 }
 
 /**
+ * A withheld set named the way a person reads it: by feature, with a count.
+ *
+ * `the GoHighLevel account migration (all 28 functions)` rather than 28
+ * names, because this is written into hold notes and into a comment in a
+ * spec, where a list that long buries the sentence it sits in. A partial set
+ * names what is withheld, since a partial set is the case somebody has to
+ * look at. A name belonging to no feature is listed as itself.
+ */
+export function describeWithheldFunctions(names: Iterable<string>): string {
+  const wanted = new Set(names);
+  const parts: string[] = [];
+  for (const feature of PRIME_ONLY_FEATURES) {
+    const hit = feature.functions.filter((fn) => wanted.has(fn)).sort();
+    if (hit.length === 0) continue;
+    const total = feature.functions.length;
+    // Never re-cased: a title opens on a proper noun ("GoHighLevel").
+    const title = `the ${feature.title}`;
+    parts.push(
+      hit.length === total
+        ? `${title} (all ${total} functions)`
+        : `${title} (${hit.length} of ${total} functions: ${hit.join(", ")})`,
+    );
+  }
+  const loose = [...wanted].filter((fn) => !byFunction.has(fn)).sort();
+  if (loose.length > 0) parts.push(loose.join(", "));
+  return parts.join("; ");
+}
+
+/**
  * The prime-only functions a tree does not hold, sorted.
  *
  * A function counts as held when any file sits under its directory. This is

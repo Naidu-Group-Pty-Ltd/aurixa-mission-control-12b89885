@@ -112,6 +112,7 @@ import {
   declaredFunctionCount,
   reconcileConfigToml,
 } from "./cascade/configTomlReconcile.pure";
+import { describeWithheldFunctions, withheldPrimeOnlyFunctions } from "./primeOnlyFeatures.pure";
 import {
   SECURITY_REGISTRY_PATH,
   reconcileSecurityRegistry,
@@ -120,6 +121,7 @@ import {
   FUNCTION_COUNT_RATCHET_PATH,
   SECURITY_INVENTORY_PATH,
   cloneOnlyEdgeFunctions,
+  describeFunctionSetDifference,
   functionCountRatchetHold,
   securityInventoryHold,
 } from "./cascade/securityInventoryHold.pure";
@@ -132,6 +134,7 @@ import {
   describeKeptCounts,
   reconcileEdgeTypecheckBaseline,
 } from "./cascade/edgeTypecheckBaselineReconcile.pure";
+import { API_SURFACE_PATH, reconcileApiSurface } from "./cascade/apiSurfaceReconcile.pure";
 import {
   MAX_SUBJECTS_CARRIED,
   orphanSpecHoldAfterCarry,
@@ -2766,6 +2769,50 @@ export async function processClone(args: {
    * answer differently from the pass it rehearses.
    */
   const rehearsedWrites = new Set<string>();
+
+  // ── what the prime keeps for itself and this clone does not hold ────────
+  //
+  // `primeOnlyFeatures.pure.ts` names what no clone receives — the GoHighLevel
+  // account migration today. The write path holds its FILES; what is left is
+  // every file DERIVED from the function set that still names it: the
+  // declarations, the registry entries, the security baseline, the ratchet
+  // and the mobile surface. Each pump below takes out what this set names.
+  //
+  // Read off the clone's tree, never off the register alone: a clone still
+  // holding the feature (every clone did until its removal pull request)
+  // yields an empty set and keeps today's behaviour exactly. The tree is
+  // missing only where a module-scoped listing came back truncated, and then
+  // the clone's `supabase/functions` directory is listed instead — one
+  // request, and the generator's own unit of account. Where even that fails
+  // the set is empty, which is what every pass before this one used rather
+  // than a guess.
+  let withheldFunctions: string[] = [];
+  if (mode !== "notify") {
+    if (cloneShaByPath !== null) {
+      withheldFunctions = withheldPrimeOnlyFunctions(cloneShaByPath.keys());
+    } else {
+      try {
+        const { data } = await octokit.repos.getContent({
+          owner: cloneRef.owner,
+          repo: cloneRef.repo,
+          path: "supabase/functions",
+          ref: cloneRef.branch,
+        });
+        if (Array.isArray(data)) {
+          withheldFunctions = withheldPrimeOnlyFunctions(
+            data.filter((d) => d.type === "dir").map((d) => `supabase/functions/${d.name}/`),
+          );
+        }
+      } catch (e) {
+        console.warn(
+          `[cascade] prime-only function check skipped for clone ${clone.id}: ${
+            e instanceof Error ? e.message : String(e)
+          }`,
+        );
+      }
+    }
+  }
+
   if (mode !== "notify") {
     try {
       const [primeCfg, cloneCfg] = await Promise.all([
@@ -2777,6 +2824,7 @@ export async function processClone(args: {
           primeToml: primeCfg.content,
           cloneToml: cloneCfg.content,
           ownRef: ownProjectRef,
+          withheld: withheldFunctions,
         });
         if (verdict.ok) cloneOwnedFunctions = verdict.carriedForward;
         mergedToml = verdict.ok ? verdict.merged : cloneCfg.content;
@@ -2799,9 +2847,14 @@ export async function processClone(args: {
             ? ` · kept ${verdict.carriedForward.length} declaration(s) this clone owns ` +
               `(${verdict.carriedForward.join(", ")})`
             : "";
+          const leftOut = verdict.withheldDropped.length
+            ? ` · left out ${verdict.withheldDropped.length} declaration(s) for ` +
+              `${describeWithheldFunctions(verdict.withheldDropped)}, which the prime keeps ` +
+              `for itself`
+            : "";
           configReconcileNote =
             `${CONFIG_TOML_PATH} · ${now} function declaration(s), was ${was} · ` +
-            `project ${verdict.ownRef} unchanged${kept}`;
+            `project ${verdict.ownRef} unchanged${kept}${leftOut}`;
           reconcileWrites.add(CONFIG_TOML_PATH);
           if (dryRun) rehearsedWrites.add(CONFIG_TOML_PATH);
           if (!dryRun) {
@@ -2862,6 +2915,7 @@ export async function processClone(args: {
         const verdict = reconcileSecurityRegistry({
           primeJson: primeReg.content,
           cloneJson: cloneReg.content,
+          withheld: withheldFunctions,
         });
         // Either way prime's copy does not stand: it is replaced by the
         // reconciled one, or withheld for a person.
@@ -2951,9 +3005,25 @@ export async function processClone(args: {
   //
   // Gated on the holds' own trigger and no wider: this reconciles precisely
   // where today it withholds, and a clone owning nothing prime does not
-  // receives prime's copies exactly as it does now.
-  const inventoryHold = securityInventoryHold(cloneOwnedFunctions);
-  const ratchetHold = functionCountRatchetHold(cloneOwnedFunctions);
+  // receives prime's copies exactly as it does now. The trigger has a second
+  // half: a clone that does NOT hold what the prime keeps for itself
+  // (`withheldFunctions`) differs from prime's function set by subtraction,
+  // and prime's two numbers count what it does not have.
+  const inventoryHold = securityInventoryHold(cloneOwnedFunctions, withheldFunctions);
+  const ratchetHold = functionCountRatchetHold(cloneOwnedFunctions, withheldFunctions);
+  /**
+   * What the baseline was reconciled FROM, kept for the one recount this pass
+   * owes it once the delivery is final (below the deletion plan). Set only
+   * where the reconcile succeeded: a hold stands as it was decided.
+   */
+  let inventoryRecount: {
+    primeInventoryJson: string;
+    cloneInventoryJson: string;
+    mergedToml: string;
+    mergedRegistryJson: string;
+    cloneTree: ReadonlyMap<string, string>;
+    count: number;
+  } | null = null;
 
   if ((inventoryHold || ratchetHold) && mode === "notify") {
     // A notify pass writes nothing and reconciles nothing, so it reads
@@ -3053,9 +3123,17 @@ export async function processClone(args: {
     };
 
     if (inventoryHold) {
-      await settleBaseline(
-        inventoryHold,
-        primeInventory !== null && cloneInventory !== null && mergedToml && mergedRegistryJson
+      // The clone's own tree is what the count is taken over. Without it the
+      // "merged tree" is the delivery alone — a few dozen paths standing for
+      // several thousand — and the baseline would count a repository that
+      // does not exist. So a missing tree is an input that could not be read,
+      // and the hold stands.
+      const outcome =
+        cloneShaByPath !== null &&
+        primeInventory !== null &&
+        cloneInventory !== null &&
+        mergedToml &&
+        mergedRegistryJson
           ? reconcileSecurityInventory({
               primeInventoryJson: primeInventory,
               cloneInventoryJson: cloneInventory,
@@ -3063,9 +3141,27 @@ export async function processClone(args: {
               mergedRegistryJson,
               mergedTreePaths,
               deliveredPaths,
+              withheld: withheldFunctions,
             })
-          : null,
-      );
+          : null;
+      await settleBaseline(inventoryHold, outcome);
+      if (
+        outcome?.ok &&
+        cloneShaByPath !== null &&
+        primeInventory !== null &&
+        cloneInventory !== null &&
+        mergedToml &&
+        mergedRegistryJson
+      ) {
+        inventoryRecount = {
+          primeInventoryJson: primeInventory,
+          cloneInventoryJson: cloneInventory,
+          mergedToml,
+          mergedRegistryJson,
+          cloneTree: cloneShaByPath,
+          count: outcome.count,
+        };
+      }
     }
 
     if (ratchetHold) {
@@ -3076,8 +3172,110 @@ export async function processClone(args: {
               primeSpec: primeRatchetSpec,
               mergedToml,
               cloneOwnedFunctions,
+              withheld: withheldFunctions,
             })
           : null,
+      );
+    }
+  }
+
+  // ── the mobile API surface: generated from the two files just reconciled ─
+  //
+  // `mobile/api-surface.json` is written by `npm run mobile:api` from the
+  // security registry and `config.toml`, and the clone's `mobile:api:check`
+  // regenerates it and diffs. It travels as ordinary content, which is right
+  // while the clone's registry IS prime's — and wrong the moment the registry
+  // pump keeps an entry prime lacks or leaves out one prime keeps for itself:
+  // prime's surface then lists functions the clone's registry does not.
+  //
+  // So where prime's copy is in the delivery and the two function sets
+  // differ, it is REPLACED by the surface this clone's reconciled registry
+  // and config generate (`apiSurfaceReconcile.pure.ts`). Only where it is in
+  // the delivery: a surface the write path did not deliver is one an
+  // exclusion, a hold or an identical copy kept out, and this pass has no
+  // business writing it. A refusal is held and named, like the registry's.
+  let apiSurfaceNote: string | null = null;
+  if (
+    mode !== "notify" &&
+    (withheldFunctions.length > 0 || cloneOwnedFunctions.length > 0) &&
+    mergedToml &&
+    mergedRegistryJson &&
+    treeEntries.some((t) => t.path === API_SURFACE_PATH && t.sha !== null)
+  ) {
+    try {
+      const [primeSurface, cloneSurface, primeRegistry, primeConfig] = await Promise.all([
+        getFileContent(octokit, primeRef, API_SURFACE_PATH),
+        getFileContent(octokit, cloneRef, API_SURFACE_PATH),
+        getFileContent(octokit, primeRef, SECURITY_REGISTRY_PATH),
+        getFileContent(octokit, primeRef, CONFIG_TOML_PATH),
+      ]);
+      if (
+        primeSurface &&
+        primeRegistry &&
+        primeConfig &&
+        !primeSurface.binary &&
+        !primeRegistry.binary &&
+        !primeConfig.binary
+      ) {
+        const verdict = reconcileApiSurface({
+          primeSurfaceJson: primeSurface.content,
+          primeRegistryJson: primeRegistry.content,
+          primeToml: primeConfig.content,
+          mergedRegistryJson,
+          mergedToml,
+        });
+        // Either way prime's copy does not stand: it is replaced by the
+        // surface this clone generates, or withheld for a person.
+        dropFromTree(API_SURFACE_PATH);
+        if (!verdict.ok) {
+          const held = {
+            path: API_SURFACE_PATH,
+            pattern: "(content: generated from this clone's own registry)",
+            reason: "manual_reconcile" as const,
+            note:
+              `The mobile API surface was not brought across: ${verdict.reason}. ` +
+              `\`npm run mobile:api\` regenerates it from this repository.`,
+          };
+          partition.held.push(held);
+          needsReconcile.push(held);
+        } else {
+          reconciledPaths.add(API_SURFACE_PATH);
+          const cloneCopy = cloneSurface && !cloneSurface.binary ? cloneSurface.content : null;
+          if (verdict.merged !== cloneCopy) {
+            const leftOut = verdict.leftOut.length
+              ? ` · left out ${describeWithheldFunctions(verdict.leftOut)}`
+              : "";
+            const added = verdict.added.length
+              ? ` · kept ${verdict.added.length} this clone owns (${verdict.added.join(", ")})`
+              : "";
+            apiSurfaceNote = `${API_SURFACE_PATH} · ${verdict.count} function(s)${leftOut}${added}`;
+            reconcileWrites.add(API_SURFACE_PATH);
+            if (dryRun) rehearsedWrites.add(API_SURFACE_PATH);
+            if (!dryRun) {
+              const { data: surfaceBlob } = await octokit.git.createBlob({
+                owner: cloneRef.owner,
+                repo: cloneRef.repo,
+                content: Buffer.from(verdict.merged, "utf8").toString("base64"),
+                encoding: "base64",
+              });
+              treeEntries.push({
+                path: API_SURFACE_PATH,
+                mode: "100644",
+                type: "blob",
+                sha: surfaceBlob.sha,
+              });
+              deliveredSource[API_SURFACE_PATH] = verdict.merged;
+            }
+          }
+        }
+      }
+    } catch (e) {
+      // Never fails the pass: prime's copy stands where it was, which is what
+      // every pass before this one delivered.
+      console.warn(
+        `[cascade] ${API_SURFACE_PATH} reconcile skipped for clone ${clone.id}: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
       );
     }
   }
@@ -4110,6 +4308,55 @@ export async function processClone(args: {
     deletesCrossing = new Set(deletionPlan.deletes);
   }
 
+  // ── the security baseline, recounted over the tree this pass lands ─────
+  //
+  // `SECURITY_INVENTORY.json` was reconciled far above, from the delivery as
+  // it stood then: before the subject carry brought files in behind specs,
+  // and before the removals were final. Both change what the generator will
+  // find. A function prime deleted is a directory the clone no longer holds,
+  // and its imports leave the baseline with it; a carried file is prime's
+  // source, so prime's reading of it stands. Counted over the early delivery,
+  // the baseline describes a tree this proposal does not create — and the
+  // clone's own `security` job diffs exactly that.
+  //
+  // So it is asked once more, of the finished delivery less the finished
+  // removals, from the same four inputs. Nothing else is re-decided: a hold
+  // stays a hold, and a recount that refuses (it cannot — the inputs that
+  // decide a refusal are the ones already accepted) leaves the first answer
+  // standing rather than replacing a reasoned file with nothing.
+  if (inventoryRecount !== null && reconciledPaths.has(SECURITY_INVENTORY_PATH)) {
+    const finalDelivered = treeEntries.filter((e) => e.sha !== null).map((e) => e.path);
+    const finalTree = new Set([...inventoryRecount.cloneTree.keys(), ...finalDelivered]);
+    for (const removed of deletesCrossing) finalTree.delete(removed);
+    const recount = reconcileSecurityInventory({
+      primeInventoryJson: inventoryRecount.primeInventoryJson,
+      cloneInventoryJson: inventoryRecount.cloneInventoryJson,
+      mergedToml: inventoryRecount.mergedToml,
+      mergedRegistryJson: inventoryRecount.mergedRegistryJson,
+      mergedTreePaths: finalTree,
+      deliveredPaths: finalDelivered,
+      withheld: withheldFunctions,
+    });
+    if (recount.ok && recount.merged !== deliveredSource[SECURITY_INVENTORY_PATH]) {
+      dropFromTree(SECURITY_INVENTORY_PATH);
+      // Inline, as the type baseline below writes: the same entry serves a
+      // rehearsal and a real pass, and a rehearsal then shows the file the
+      // real pass would write.
+      treeEntries.push({
+        path: SECURITY_INVENTORY_PATH,
+        mode: "100644",
+        type: "blob",
+        content: recount.merged,
+      });
+      deliveredSource[SECURITY_INVENTORY_PATH] = recount.merged;
+      if (inventoryRecount.cloneTree.get(SECURITY_INVENTORY_PATH) === gitBlobSha(recount.merged)) {
+        reconcileWrites.delete(SECURITY_INVENTORY_PATH);
+      } else {
+        reconcileWrites.add(SECURITY_INVENTORY_PATH);
+      }
+    }
+  }
+
   // ── the Edge Function type baseline follows the files it counts ───────
   //
   // `supabase/functions-registry/**` is a repository invariant, so prime's
@@ -4552,11 +4799,20 @@ export async function processClone(args: {
       ? `\n\n### The security baselines were recomputed, not copied\n\n` +
         `\`${SECURITY_INVENTORY_PATH}\` and \`${FUNCTION_COUNT_RATCHET_PATH}\` each state how ` +
         `many edge functions a repository has, so prime's copies state PRIME'S count. This ` +
-        `deployment owns ${cloneOwnedFunctions.length} function(s) prime does not ` +
-        `(${cloneOwnedFunctions.join(", ")}), so both were computed from the \`config.toml\` and ` +
+        `deployment ${describeFunctionSetDifference(cloneOwnedFunctions, withheldFunctions)}, ` +
+        `so both were computed from the \`config.toml\` and ` +
         `security registry this same pass reconciled — the numbers describe the tree this ` +
         `proposal creates rather than either side's.\n\n` +
         baselineNotes.map((l) => `- ${l}`).join("\n")
+      : "") +
+    (apiSurfaceNote
+      ? `\n\n### The mobile API surface was generated here, not copied\n\n` +
+        `\`${API_SURFACE_PATH}\` is generated from the security registry and ` +
+        `\`config.toml\`, and this clone's function set is not prime's, so prime's copy lists ` +
+        `functions this repository's registry does not. What travelled is the surface this ` +
+        `clone's reconciled registry and config generate, composed the way ` +
+        `\`npm run mobile:api\` composes it and checked against prime's own file first.\n\n` +
+        `- ${apiSurfaceNote}`
       : "") +
     (edgeBaselineNote
       ? `\n\n### The Edge Function type baseline followed the files it counts\n\n` +

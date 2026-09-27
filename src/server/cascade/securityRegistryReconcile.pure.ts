@@ -47,6 +47,19 @@
  * Non-ASCII is escaped as `\uXXXX` because that is how both files are written;
  * `JSON.stringify` emits the literal character, which would reformat 96 KB of
  * file on the first cascade and bury the change nobody could then review.
+ *
+ * ## An entry for a function the prime keeps for itself is not carried
+ *
+ * `withheld` names the prime-only functions (`primeOnlyFeatures.pure.ts`) this
+ * clone's tree does not hold, and their entries are removed from prime's
+ * `functions` rather than delivered — the same rule `reconcileConfigToml`
+ * applies to their declarations, and for the same reason: the clone's own
+ * checker accepts an entry with no directory, so nothing would go red, and a
+ * registry naming twenty-eight functions the deployment does not have is the
+ * audited inventory saying something false. The clone's own entry for one of
+ * them is not carried forward either, and is the one loss the read-back
+ * excuses. A clone still holding the feature passes nothing and keeps every
+ * entry exactly as before.
  */
 
 /** The one path this module has an opinion about. */
@@ -61,6 +74,8 @@ export type SecurityRegistryReconcile =
       changed: boolean;
       /** Entries the clone holds that prime has none for. */
       carriedForward: string[];
+      /** Prime-only entries removed because this clone does not hold them. Sorted. */
+      withheldDropped: string[];
     }
   | { ok: false; reason: string };
 
@@ -135,27 +150,44 @@ export function entriesLostBy(cloneJson: string, candidate: string): string[] {
 export function reconcileSecurityRegistry(args: {
   primeJson: string;
   cloneJson: string;
+  /**
+   * Prime-only functions this clone's tree does not hold. Their entries are
+   * removed from prime's and never carried from the clone's. Omitted or empty
+   * keeps every entry.
+   */
+  withheld?: readonly string[];
 }): SecurityRegistryReconcile {
   const prime = parseFaithfully(args.primeJson, "the prime");
   if (!prime.ok) return prime;
   const clone = parseFaithfully(args.cloneJson, "this clone");
   if (!clone.ok) return clone;
+  const withheld = new Set(args.withheld ?? []);
 
   const primeFns = prime.value.functions as Record<string, unknown>;
   const cloneFns = clone.value.functions as Record<string, unknown>;
-  const carriedForward = Object.keys(cloneFns).filter((n) => !(n in primeFns));
+  const carriedForward = Object.keys(cloneFns).filter(
+    (n) => !Object.hasOwn(primeFns, n) && !withheld.has(n),
+  );
 
-  // Prime's document, with the clone's own entries appended to `functions`.
-  // Every other top-level key is prime's, the way config.toml's preamble is.
-  const mergedFunctions: Record<string, unknown> = { ...primeFns };
+  // Prime's document, less what this clone does not carry, with the clone's
+  // own entries appended to `functions`. Every other top-level key is prime's,
+  // the way config.toml's preamble is, and prime's key ORDER survives the
+  // removal because only the named keys are skipped.
+  const mergedFunctions: Record<string, unknown> = {};
+  const withheldDropped: string[] = [];
+  for (const [name, entry] of Object.entries(primeFns)) {
+    if (withheld.has(name)) withheldDropped.push(name);
+    else mergedFunctions[name] = entry;
+  }
   for (const name of carriedForward) mergedFunctions[name] = cloneFns[name];
   const merged = serialiseSecurityRegistry({ ...prime.value, functions: mergedFunctions });
 
   // Read the result back, for the thing this file decides. An entry the clone
   // declared and the result does not is a function the clone's own checker
   // will refuse — and it refuses the cascade's own delivery, not a mistake
-  // anybody made here.
-  const lost = entriesLostBy(args.cloneJson, merged);
+  // anybody made here. A withheld name is the one exception: the clone holds
+  // no directory for it, so its checker has nothing to require.
+  const lost = entriesLostBy(args.cloneJson, merged).filter((n) => !withheld.has(n));
   if (lost.length > 0) {
     return {
       ok: false,
@@ -165,5 +197,11 @@ export function reconcileSecurityRegistry(args: {
     };
   }
 
-  return { ok: true, merged, changed: merged !== args.cloneJson, carriedForward };
+  return {
+    ok: true,
+    merged,
+    changed: merged !== args.cloneJson,
+    carriedForward,
+    withheldDropped: withheldDropped.sort(),
+  };
 }

@@ -119,6 +119,15 @@ const STANDING: readonly StandingOrgan[] = [
   },
   {
     kind: "channel",
+    name: "PRIME_ONLY_FEATURES",
+    where: "primeOnlyFeatures.pure.ts",
+    does:
+      "Holds every write of a feature the prime keeps for itself — the GoHighLevel account " +
+      "migration — as `protected`, whatever this clone's own rules say. The pumps below take " +
+      "out whatever of it a clone that does not hold it would otherwise be told it has.",
+  },
+  {
+    kind: "channel",
     name: "securityInventoryHold",
     where: "securityInventoryHold.pure.ts",
     does: "Refuses the prime's security baseline where this clone holds edge functions the prime does not — the gate `reconcileSecurityInventory` runs behind, and the fallback when it cannot compute one.",
@@ -170,6 +179,12 @@ const STANDING: readonly StandingOrgan[] = [
     name: "reconcileFunctionCountRatchet",
     where: "securityBaselineReconcile.pure.ts",
     does: "Delivers the prime's function-count spec carrying this repository's own number, counted with the rule read out of that spec rather than restated.",
+  },
+  {
+    kind: "pump",
+    name: "reconcileApiSurface",
+    where: "apiSurfaceReconcile.pure.ts",
+    does: "Delivers the mobile API surface this clone's reconciled registry and config generate, composed the way `npm run mobile:api` composes it and proven first against the prime's own file.",
   },
   {
     kind: "pump",

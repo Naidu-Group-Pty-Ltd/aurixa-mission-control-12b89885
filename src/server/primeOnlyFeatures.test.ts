@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { isSafeRepoPath } from "@/lib/module-globs";
 import {
   PRIME_ONLY_FEATURES,
+  describeWithheldFunctions,
   isPrimeOnlyBucket,
   isPrimeOnlyCronJob,
   isPrimeOnlyFunction,
@@ -142,5 +143,49 @@ describe("cron jobs", () => {
       expect(isPrimeOnlyCronJob({ jobname, command }), jobname).toBe(false);
     }
     expect(primeOnlyCronReason({ jobname: null, command: null })).toBeNull();
+  });
+});
+
+describe("naming a withheld set in a sentence", () => {
+  // It is written into hold notes, a comment in the clone's own ratchet spec
+  // and the pull request body, so a regression here is a wrong sentence in
+  // three places at once.
+  it("names the whole feature by title and count, never as twenty-eight names", () => {
+    const text = describeWithheldFunctions(migration.functions);
+    expect(text).toBe("the GoHighLevel account migration (all 28 functions)");
+    expect(text).not.toContain("migration-dispatcher");
+  });
+
+  it("keeps the title's own casing", () => {
+    // A proper noun opens it, so lower-casing a title's first letter to fit
+    // it mid-sentence would print "goHighLevel".
+    expect(describeWithheldFunctions(["migration-dispatcher"])).toContain("GoHighLevel");
+  });
+
+  it("names a partial set member by member, because that is the case to look at", () => {
+    expect(describeWithheldFunctions(["migration-job-status", "migration-dispatcher"])).toBe(
+      "the GoHighLevel account migration (2 of 28 functions: migration-dispatcher, migration-job-status)",
+    );
+  });
+
+  it("does not depend on the order or repetition of what it is handed", () => {
+    const a = describeWithheldFunctions(["migration-job-status", "migration-dispatcher"]);
+    const b = describeWithheldFunctions([
+      "migration-dispatcher",
+      "migration-job-status",
+      "migration-dispatcher",
+    ]);
+    expect(b).toBe(a);
+  });
+
+  it("lists a name belonging to no feature as itself, after the features", () => {
+    expect(describeWithheldFunctions(["zeta-fn", "migration-dispatcher", "alpha-fn"])).toBe(
+      "the GoHighLevel account migration (1 of 28 functions: migration-dispatcher); alpha-fn, zeta-fn",
+    );
+    expect(describeWithheldFunctions(["alpha-fn"])).toBe("alpha-fn");
+  });
+
+  it("says nothing about an empty set", () => {
+    expect(describeWithheldFunctions([])).toBe("");
   });
 });
