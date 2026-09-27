@@ -688,3 +688,47 @@ describe("a pass that wrote nothing still reports its ceilings", () => {
     }
   });
 });
+
+describe("a prime-only feature is never written to a clone", () => {
+  const dispatcher = "supabase/functions/migration-dispatcher/index.ts";
+  const page = "src/pages/admin/GhlMigration.tsx";
+  const ordinary = "supabase/functions/ghl-calendar/index.ts";
+
+  it("holds a prime-only write as protected, with no clone row at all", () => {
+    const { write, held } = partitionCascadePaths([dispatcher, page, ordinary], []);
+    expect(write).toEqual([ordinary]);
+    expect(held.map((h) => h.path)).toEqual([dispatcher, page]);
+    for (const h of held) {
+      expect(h.reason).toBe("protected");
+      expect(h.pattern).toBe("(prime-only: ghl-account-migration)");
+      expect(h.note).toContain("Prime-only");
+    }
+  });
+
+  it("holds it ahead of any clone exclusion, so a row cannot release it", () => {
+    const rules: SyncExclusion[] = [
+      { pattern: "supabase/functions/**", reason: "manual_reconcile" },
+    ];
+    const { held } = partitionCascadePaths([dispatcher], rules);
+    expect(held[0].reason).toBe("protected");
+  });
+
+  it("is never reported and never offered for approval", () => {
+    const { held } = partitionCascadePaths([dispatcher, page], []);
+    expect(reportableHeld(held)).toHaveLength(0);
+    expect(approvableHeld(held)).toHaveLength(0);
+  });
+
+  it("does not hold a deletion: removing a carried copy is the rule working", () => {
+    const { write, held } = partitionCascadePaths([dispatcher, page], [], { purpose: "delete" });
+    expect(write).toEqual([dispatcher, page]);
+    expect(held).toHaveLength(0);
+  });
+
+  it("still applies the clone's own exclusions to a deletion", () => {
+    const rules: SyncExclusion[] = [{ pattern: "src/pages/**", reason: "protected" }];
+    const { write, held } = partitionCascadePaths([dispatcher, page], rules, { purpose: "delete" });
+    expect(write).toEqual([dispatcher]);
+    expect(held.map((h) => h.pattern)).toEqual(["src/pages/**"]);
+  });
+});

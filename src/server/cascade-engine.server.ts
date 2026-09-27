@@ -2111,6 +2111,7 @@ export async function processClone(args: {
   const deletionPartition = partitionCascadePaths(
     deletionCandidates.map((c) => c.path),
     exclusions,
+    { purpose: "delete" },
   );
   const probeable = new Set(deletionPartition.write);
   let deletionVerdicts: DeletionVerdict[] = [];

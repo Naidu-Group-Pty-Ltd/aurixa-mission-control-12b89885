@@ -47,10 +47,20 @@
  * callers use `requireExclusions`, which throws. The cascade failing loudly is
  * recoverable; a cascade that ran without its guard rails is not.
  *
- * Client-safe: no imports beyond the shared glob compiler, so the operator UI
- * can render the same partition the engine will perform.
+ * ## Prime-only features
+ *
+ * Some of the prime is never a clone's at all: `PRIME_ONLY_FEATURES` names it
+ * (the GoHighLevel account migration today). Every WRITE of such a path is held
+ * as `protected`, whatever the clone's own exclusions say, because a per-clone
+ * row would have to be remembered for every clone ever provisioned. A DELETION
+ * is not held (`purpose: "delete"`): a prime-only path still on a clone is one
+ * a cascade carried before this rule, and removing it is the rule working.
+ *
+ * Pure: no imports beyond the shared glob compiler and the prime-only register,
+ * which is itself pure.
  */
 import { globToRegex, isSafeRepoPath } from "@/lib/module-globs";
+import { primeOnlyFeatureForPath } from "@/server/primeOnlyFeatures.pure";
 
 /**
  * Why a path was withheld.
@@ -161,11 +171,19 @@ export function assertMirrorPolicy(cloneId: string, exclusions: readonly SyncExc
  * A path that is not a safe repo path is withheld regardless of the patterns.
  * `listTreeEntries` already filters those out; this is the second line, in the
  * place that decides what gets committed.
+ *
+ * A path belonging to a prime-only feature is held as `protected` on a write,
+ * before any exclusion is consulted, so no clone row can let it through and
+ * nothing reports or approves it. A deletion partition passes
+ * `{ purpose: "delete" }` and is not held by it: the path is already on the
+ * clone, and taking it off is exactly what the register wants.
  */
 export function partitionCascadePaths(
   candidates: readonly string[],
   exclusions: readonly SyncExclusion[],
+  opts: { purpose?: "write" | "delete" } = {},
 ): CascadePartition {
+  const holdPrimeOnly = (opts.purpose ?? "write") === "write";
   const ordered = [
     ...exclusions.filter((e) => e.reason === "protected"),
     ...exclusions.filter((e) => e.reason !== "protected"),
@@ -182,6 +200,16 @@ export function partitionCascadePaths(
         pattern: "(unsafe path)",
         reason: "protected",
         note: "Refused by isSafeRepoPath",
+      });
+      continue;
+    }
+    const primeOnly = holdPrimeOnly ? primeOnlyFeatureForPath(path) : null;
+    if (primeOnly) {
+      held.push({
+        path,
+        pattern: `(prime-only: ${primeOnly.key})`,
+        reason: "protected",
+        note: primeOnly.reason,
       });
       continue;
     }
