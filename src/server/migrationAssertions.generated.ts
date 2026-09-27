@@ -829,4 +829,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260926160000",
     assertions: [{ kind: "cron", jobname: "fleet-migration-drain-5min" }],
   },
+  {
+    migration: "20260927100000_clone_open_blockage_groups.sql",
+    version: "20260927100000",
+    assertions: [{ kind: "rpc", fn: "clone_open_blockage_groups" }],
+  },
 ];

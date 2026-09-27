@@ -14162,6 +14162,19 @@ export type Database = {
         Args: { _clone_id: string }
         Returns: boolean
       }
+      clone_open_blockage_groups: {
+        Args: { _clone_id: string; _known_classes: string[] }
+        Returns: {
+          class: string
+          detail: string
+          oldest_first_seen_at: string
+          open_count: number
+          owner: string
+          self_heals: boolean
+          total_lines: number
+          total_open: number
+        }[]
+      }
       clone_requires_backend: { Args: { _clone_id: string }; Returns: boolean }
       close_api_usage_period: {
         Args: { _period_start: string; _tenant_id: string }
