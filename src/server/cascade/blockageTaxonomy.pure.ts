@@ -464,13 +464,15 @@ export function classifyBlockages(facts: CloneBlockageFacts, now: Date): Detecte
         them went on to say "0 migration(s) wait behind it".
 
         So the sentence says what the clone's own record says, and no more:
-        how many of its migrations wait behind this version, or that none is
-        recorded as waiting. "Recorded", because the count is read from
-        `blockedBy`, which lists at most the first five holes behind each
-        migration held.
+        how many of its migrations are recorded as waiting behind this
+        version, or that none is. "Recorded" in BOTH readings, because the
+        count is read from `blockedBy`, which lists at most the first five
+        holes behind each migration held — a migration whose sixth hole is
+        this one is not counted here, so the count is a floor and never a
+        total (Codex, on this change).
       */
       (hole.heldCount > 0
-        ? `${facts.label} has ${hole.heldCount} migration(s) waiting behind ${hole.version}` +
+        ? `${facts.label} has ${hole.heldCount} migration(s) recorded as waiting behind ${hole.version}` +
           (hole.firstHeld ? `, starting with ${hole.firstHeld}` : "") +
           ": the prime's ledger does not record that migration, so this clone may not run it either, and what waits behind it stays held until it does. "
         : `The prime's ledger does not record ${hole.version}, so no clone may be sent it; nothing on ${facts.label} is recorded as waiting behind it. `) +

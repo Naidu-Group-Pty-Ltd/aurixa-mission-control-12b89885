@@ -1087,7 +1087,7 @@ describe("a migration the prime merged and never ran", () => {
     const [found] = classifyBlockages(heldBehindBuilderRanking, NOW);
     expect(found.detail).toContain("20261202090000");
     expect(found.detail).toContain(
-      "NPC Client Dashboard has 3 migration(s) waiting behind 20261202090000",
+      "NPC Client Dashboard has 3 migration(s) recorded as waiting behind 20261202090000",
     );
     expect(found.detail).toContain("20261203000000_seed_template_library_v14_tier_separation.sql");
     // The remedy is on the prime and it is a person's. The one thing an
