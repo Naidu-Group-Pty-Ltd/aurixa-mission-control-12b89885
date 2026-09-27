@@ -549,7 +549,8 @@ export function classifyBlockages(facts: CloneBlockageFacts, now: Date): Detecte
   for (const n of facts.blockedNotices) {
     const key = refusalKey(n);
     const prior = refusedSince.get(key);
-    if (prior === undefined || startsEarlier(n.createdAt, prior)) refusedSince.set(key, n.createdAt);
+    if (prior === undefined || startsEarlier(n.createdAt, prior))
+      refusedSince.set(key, n.createdAt);
   }
   // Oldest first, so a pull request with more than one open record is
   // described by its oldest, whose words and start then agree.
@@ -793,7 +794,9 @@ export function refusalRepoElsewhere(r: BlockedNotice, repoFullName: string | nu
  */
 export function refusalFingerprint(r: BlockedNotice, repoFullName: string | null): string {
   const elsewhere = refusalRepoElsewhere(r, repoFullName);
-  return elsewhere === null ? `ci_red:${r.title}` : `ci_red:${r.title} · ${elsewhere.toLowerCase()}`;
+  return elsewhere === null
+    ? `ci_red:${r.title}`
+    : `ci_red:${r.title} · ${elsewhere.toLowerCase()}`;
 }
 
 /**

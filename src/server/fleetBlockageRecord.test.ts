@@ -304,7 +304,7 @@ describe("what an operator is told", () => {
   });
 
   /*
-    The CRM independent, 27 Sep 2026: 189 holes, 50 noted oldest first, the
+    The CRM independent, 27 Sep 2026: 189 holes by version, 50 noted oldest first, the
     notes ending at 20260721160000 — and the two newest, the pair every mirror
     reports, in no note and in no sentence. A span read from the notes names
     the fiftieth-oldest as the newest, so the sentence is read from every hole

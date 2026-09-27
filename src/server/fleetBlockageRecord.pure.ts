@@ -176,9 +176,11 @@ export function holesNamedBy(stored: unknown): string[] {
  * rows. The true count travels in the sentence rather than being lost — the
  * number is the message, the list is not.
  *
- * Measured 27 Sep 2026: two holes on each mirror, and 189 on the CRM
- * independent, the one clone the cap binds. Every open row is rewritten by
- * the ledger on each pass, which is the cost this bound holds down.
+ * Measured 27 Sep 2026: two holes on each mirror, and on the CRM
+ * independent — the one clone the cap binds — 189 corpus versions that
+ * neither ledger records by version, the first 50 of them exactly the 50
+ * notes the lane filed. Every open row is rewritten by the ledger on each
+ * pass, which is the cost this bound holds down.
  *
  * THE NOTES ARE THE OLDEST, AND STAY THE OLDEST, because the ledger clears a
  * row the moment its version leaves the notes. Kept oldest first, a version
@@ -355,8 +357,7 @@ export function blockageDetailFor(args: {
       behind is not an invariant. This composes the qualified reading every
       time, and the holes, where there are any, ride it.
     */
-    const andHoles =
-      args.holes.length === 0 ? "" : `, and ${primeLedgerHoleSentence(args.holes)}`;
+    const andHoles = args.holes.length === 0 ? "" : `, and ${primeLedgerHoleSentence(args.holes)}`;
     composed =
       `Synced to ${args.syncedTo} so far — this pass stopped at its time budget with more ` +
       `to send${andHoles}`;
@@ -421,7 +422,8 @@ export function primeLedgerHoleSentence(holes: readonly string[]): string {
  * cap they are the wrong list to count from in both directions: the count
  * they give is the cap, and their last entry is the fiftieth-oldest hole
  * rather than the newest. Measured on the CRM independent, 27 Sep 2026: 189
- * holes, notes ending at 20260721160000, while the two newest —
+ * holes by version (the lane also clears by body, so its own count may be
+ * lower), notes ending at 20260721160000, while the two newest —
  * 20261219040000 and 20261219050000, the pair every mirror reports — were in
  * no note and in no sentence.
  *

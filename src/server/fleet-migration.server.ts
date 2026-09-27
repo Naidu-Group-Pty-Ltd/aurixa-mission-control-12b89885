@@ -2124,8 +2124,9 @@ export async function runFleetMigrationSync(
                               // clone reads while anything is held, and it used to be
                               // the one sentence with no count: the CRM independent
                               // read "2 migration(s) held back behind 20260703000000"
-                              // over 189 holes, 50 of them noted, the two newest in no
-                              // note at all. The span is taken from every hole.
+                              // over 189 holes by version, 50 of them noted, the two
+                              // newest in no note at all. The span is taken from every
+                              // hole.
                               `Synced to ${syncedTo} — ${blocked.length} migration(s) held back behind ` +
                               `${blocked[0].blockedBy?.[0] ?? "a withheld version"}, which the prime's ledger does not record` +
                               (primeLedgerHoles.length > 1
