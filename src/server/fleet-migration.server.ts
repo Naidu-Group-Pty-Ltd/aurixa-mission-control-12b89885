@@ -86,6 +86,7 @@ import {
   PRIME_LEDGER_HOLE_NOTE_CAP,
   blockageDetailFor,
   primeLedgerHoleSentence,
+  primeLedgerHoleSpan,
   reconcileBlockageRecord,
 } from "./fleetBlockageRecord.pure";
 
@@ -1939,8 +1940,9 @@ export async function runFleetMigrationSync(
             ? null
             : blockageDetailFor({
                 standing: inspected,
-                holes: blockage.holes,
-                total: primeLedgerHoles.length,
+                // Every hole, not the capped notes `blockage.holes` holds: the
+                // sentence names the count and both ends.
+                holes: primeLedgerHoles,
                 // A pass that changed nothing can still have stopped with more to
                 // send, so this is handed over rather than assumed: without it the
                 // retraction writes a bare "Synced to X" over a pause, which is
@@ -2117,8 +2119,18 @@ export async function runFleetMigrationSync(
                               // as healthy — the exact shape of report this module
                               // exists to stop. The first hole is named because it is
                               // the one to reconcile first.
+                              //
+                              // AND THE COUNT TRAVELS HERE TOO. This is the sentence a
+                              // clone reads while anything is held, and it used to be
+                              // the one sentence with no count: the CRM independent
+                              // read "2 migration(s) held back behind 20260703000000"
+                              // over 189 holes, 50 of them noted, the two newest in no
+                              // note at all. The span is taken from every hole.
                               `Synced to ${syncedTo} — ${blocked.length} migration(s) held back behind ` +
-                              `${blocked[0].blockedBy?.[0] ?? "a withheld version"}, which the prime's ledger does not record`
+                              `${blocked[0].blockedBy?.[0] ?? "a withheld version"}, which the prime's ledger does not record` +
+                              (primeLedgerHoles.length > 1
+                                ? `; in all it is short of ${primeLedgerHoleSpan(primeLedgerHoles)}`
+                                : "")
                             : pausedMidReplay
                               ? // Said before the level reading, because it is the
                                 // one case where "Synced to X" would be a claim
@@ -2177,10 +2189,7 @@ export async function runFleetMigrationSync(
                                   // produced no entry, no blockage row and no
                                   // sentence, and four such versions sat
                                   // unrecorded on the prime for days.
-                                  `Synced to ${syncedTo} — ${primeLedgerHoleSentence(
-                                    primeLedgerHoles.slice(0, PRIME_LEDGER_HOLE_NOTE_CAP),
-                                    primeLedgerHoles.length,
-                                  )}`
+                                  `Synced to ${syncedTo} — ${primeLedgerHoleSentence(primeLedgerHoles)}`
                                 : `Synced to ${syncedTo}`,
                 error_message: failures.length > 0 ? failures[0].error : null,
               }),

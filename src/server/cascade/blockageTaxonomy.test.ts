@@ -1051,7 +1051,9 @@ describe("a migration the prime merged and never ran", () => {
   it("names the prime version, the count behind it, and who clears it", () => {
     const [found] = classifyBlockages(heldBehindBuilderRanking, NOW);
     expect(found.detail).toContain("20261202090000");
-    expect(found.detail).toContain("3 migration(s) wait behind it");
+    expect(found.detail).toContain(
+      "NPC Client Dashboard has 3 migration(s) waiting behind 20261202090000",
+    );
     expect(found.detail).toContain("20261203000000_seed_template_library_v14_tier_separation.sql");
     // The remedy is on the prime and it is a person's. The one thing an
     // operator must not be invited to do is stamp the ledger instead.
@@ -1100,5 +1102,55 @@ describe("a migration the prime merged and never ran", () => {
 
   it("says nothing about a clone whose last pass was held behind nothing", () => {
     expect(classes(facts({ syncScope: "scoped" }))).toEqual([]);
+  });
+
+  /*
+    WHAT THE ROW SAYS ABOUT THE CLONE.
+
+    Every open hole row on 27 Sep 2026 — 58 of them — opened "<clone> is held
+    at the version before <hole>", over clones recorded at 20261226090000,
+    past every hole named. The barrier has been per-dependency since 22 Sep:
+    a hole holds the migrations that need what it creates, and the clone
+    advances past it. 55 of the 58 went on to say "0 migration(s) wait behind
+    it", contradicting their own first clause.
+  */
+  describe("the row says what the clone's record says, and no more", () => {
+    /** 20261219040000 on every mirror: a hole nothing on the clone waits behind. */
+    const withholdingNothing = facts({
+      syncScope: "scoped",
+      primeLedgerHoles: [{ version: "20261219040000", heldCount: 0, firstHeld: null }],
+    });
+
+    it("never claims a clone is held at a version it has passed", () => {
+      for (const f of [withholdingNothing, heldBehindBuilderRanking]) {
+        const [found] = classifyBlockages(f, NOW);
+        expect(found.detail).not.toContain("held at the version before");
+      }
+    });
+
+    it("says a hole that holds nothing holds nothing, as the record puts it", () => {
+      const [found] = classifyBlockages(withholdingNothing, NOW);
+      expect(found.detail).toContain(
+        "The prime's ledger does not record 20261219040000, so no clone may be sent it; " +
+          "nothing on NPC Client Dashboard is recorded as waiting behind it.",
+      );
+      expect(found.detail).not.toContain("0 migration(s)");
+    });
+
+    it("keeps the refusal and the pointer to the evidence, whatever is held", () => {
+      for (const f of [withholdingNothing, heldBehindBuilderRanking]) {
+        const [found] = classifyBlockages(f, NOW);
+        expect(found.detail).toContain("prime runs that file");
+        expect(found.detail).toContain("stamping the prime's ledger instead would send this clone");
+        expect(found.detail).toContain("Prime Ledger Reconciliation");
+        expect(found.fingerprint).toBe(`prime_ledger_hole:${f.primeLedgerHoles[0].version}`);
+      }
+    });
+
+    it("describes the class by the ledger and by what depends on it, not by 'everything after'", () => {
+      const what = BLOCKAGE_POLICY.prime_ledger_hole.what;
+      expect(what).not.toMatch(/held at the version before|everything after|has not run/);
+      expect(what).toContain("ledger does not record");
+    });
   });
 });

@@ -174,8 +174,21 @@ export function holesNamedBy(stored: unknown): string[] {
  * ledger opens one row per version and a person reads them, so a prime that is
  * three hundred versions behind its own repo should not open three hundred
  * rows. The true count travels in the sentence rather than being lost — the
- * number is the message, the list is not. Measured on this fleet the real
- * value is eleven.
+ * number is the message, the list is not.
+ *
+ * Measured 27 Sep 2026: two holes on each mirror, and 189 on the CRM
+ * independent, the one clone the cap binds. Every open row is rewritten by
+ * the ledger on each pass, which is the cost this bound holds down.
+ *
+ * THE NOTES ARE THE OLDEST, AND STAY THE OLDEST, because the ledger clears a
+ * row the moment its version leaves the notes. Kept oldest first, a version
+ * leaves when it stops being a hole — the prime records it, or the clone
+ * gains it — and never because a newer one arrived. A window at
+ * the newest end would move each time a migration merged and waited for its
+ * dispatch, stamping `cleared_at` on a hole that still stands and reopening
+ * it with a fresh start once the dispatch landed. What the notes cannot show
+ * past the cap, the sentence does: `primeLedgerHoleSpan` names the count and
+ * both ends, from every hole rather than from the notes.
  */
 export const PRIME_LEDGER_HOLE_NOTE_CAP = 50;
 
@@ -293,14 +306,12 @@ export function reconcileBlockageRecord(args: {
 export function blockageDetailFor(args: {
   /** The sentence currently on the row. */
   standing: string | null | undefined;
-  /** The holes this pass filed as notes — capped, so possibly not all of them. */
-  holes: readonly string[];
   /**
-   * How many holes the pass actually measured. Defaults to what it filed, and
-   * differs from it only past `PRIME_LEDGER_HOLE_NOTE_CAP` — where the count
-   * is the whole message and must not be the capped one.
+   * EVERY hole the pass measured — never the notes it filed, which are capped
+   * at `PRIME_LEDGER_HOLE_NOTE_CAP`. The sentence names the count and both
+   * ends, and past the cap the notes are wrong about all three.
    */
-  total?: number;
+  holes: readonly string[];
   /**
    * True when the replay stopped with more to send.
    *
@@ -345,14 +356,14 @@ export function blockageDetailFor(args: {
       time, and the holes, where there are any, ride it.
     */
     const andHoles =
-      args.holes.length === 0 ? "" : `, and ${primeLedgerHoleSentence(args.holes, args.total)}`;
+      args.holes.length === 0 ? "" : `, and ${primeLedgerHoleSentence(args.holes)}`;
     composed =
       `Synced to ${args.syncedTo} so far — this pass stopped at its time budget with more ` +
       `to send${andHoles}`;
   } else if (args.holes.length === 0) {
     composed = `Synced to ${args.syncedTo}`;
   } else {
-    composed = `Synced to ${args.syncedTo} — ${primeLedgerHoleSentence(args.holes, args.total)}`;
+    composed = `Synced to ${args.syncedTo} — ${primeLedgerHoleSentence(args.holes)}`;
   }
   /*
     NOTHING TO SAY IS AN ANSWER, AND IT IS THIS MODULE'S TO GIVE.
@@ -393,15 +404,35 @@ export function blockageDetailFor(args: {
  * on the clone would send an operator to repair a tenant that is behaving
  * exactly correctly — which is the mistake this whole area keeps making.
  */
-export function primeLedgerHoleSentence(holes: readonly string[], total?: number): string {
-  const first = holes[0] ?? "a version";
-  const rest = Math.max(total ?? holes.length, holes.length) - 1;
+export function primeLedgerHoleSentence(holes: readonly string[]): string {
+  const one = holes.length <= 1;
   return (
-    `the prime's ledger is short of ${first}` +
-    (rest > 0 ? ` and ${rest} other version(s)` : "") +
-    ", which this clone is level without; they cannot be sent to any clone until the " +
-    "prime records them"
+    `the prime's ledger is short of ${primeLedgerHoleSpan(holes)}, which this clone is level ` +
+    `without; ${one ? "it" : "they"} cannot be sent to any clone until the prime records ` +
+    (one ? "it" : "them")
   );
+}
+
+/**
+ * How many versions the prime's ledger is short of, and between which.
+ *
+ * TAKES EVERY HOLE, NEVER THE NOTES. The notes are capped at
+ * `PRIME_LEDGER_HOLE_NOTE_CAP` and kept oldest first, so on a clone past the
+ * cap they are the wrong list to count from in both directions: the count
+ * they give is the cap, and their last entry is the fiftieth-oldest hole
+ * rather than the newest. Measured on the CRM independent, 27 Sep 2026: 189
+ * holes, notes ending at 20260721160000, while the two newest —
+ * 20261219040000 and 20261219050000, the pair every mirror reports — were in
+ * no note and in no sentence.
+ *
+ * Both ends are named because they carry different remedies. The oldest is
+ * where a reconciliation starts; the newest is usually a file merged and not
+ * yet applied on the prime, which is a dispatch.
+ */
+export function primeLedgerHoleSpan(holes: readonly string[]): string {
+  if (holes.length === 0) return "a version";
+  if (holes.length === 1) return holes[0];
+  return `${holes.length} versions, ${holes[0]} to ${holes[holes.length - 1]}`;
 }
 
 function entriesOf(stored: unknown): AppliedRecordEntry[] {
