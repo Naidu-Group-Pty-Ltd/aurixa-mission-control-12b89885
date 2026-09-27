@@ -40,7 +40,11 @@ import {
 } from "./sharedVersionDelivery.pure";
 import { ledgerWriteRefusal } from "./migrationLedgerWrites.pure";
 import { mentionedVersionsOf } from "./migrationVersionMentions.pure";
-import { parseStoredSecretDigests, planSecretWrite } from "./secretWriteDiff.pure";
+import {
+  parseStoredSecretDigests,
+  planSecretWrite,
+  type SecretWriteResult,
+} from "./secretWriteDiff.pure";
 
 const MGMT_API = "https://api.supabase.com/v1";
 
@@ -4359,12 +4363,10 @@ export async function setCloneSecretValue(
 
 /**
  * What a secret write did. `written` names what was sent; `unchanged` names
- * what was left out because the project already held exactly that value. Names
- * only — never a value, never a digest.
+ * what was left out because the project already held exactly that value — the
+ * whole batch or none of it. Names only — never a value, never a digest.
  */
-export type SecretWriteResult =
-  | { ok: true; written: string[]; unchanged: string[] }
-  | { ok: false; error: string };
+export type { SecretWriteResult };
 
 /**
  * Long enough for a list the endpoint answers in well under a second, short
@@ -4404,9 +4406,10 @@ async function readStoredSecretDigests(projectRef: string): Promise<Map<string, 
  * function on the project, changed value or not, and the reconcile sweeps
  * re-assert what they own on every pass — eight redeploys of every function an
  * hour on each clone before this. The project's list reports a digest per
- * name, so an entry whose stored digest proves it already holds that value is
- * left out, and a batch whose every entry is held sends nothing at all. The
- * rules, and why nothing but a proof skips a write, are in
+ * name, so a batch whose every entry is proven already held sends nothing at
+ * all — and a batch with any entry that differs is sent whole, never filtered,
+ * so a pair cannot be split by a second writer between the read and the write.
+ * The rules, and why nothing but a proof skips a write, are in
  * `secretWriteDiff.pure.ts`.
  */
 export async function setCloneSecretValues(

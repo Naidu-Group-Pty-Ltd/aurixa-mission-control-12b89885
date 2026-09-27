@@ -1263,26 +1263,34 @@ export const setCloneBackendSecret = createServerFn({ method: "POST" })
       /* @vite-ignore */ "@/lib/_server-shims/backend-provisioning.server"
     );
     const res = await setCloneSecretValue(projectRef, data.name, data.value);
-    const now = new Date().toISOString();
-    await supabase.from("clone_backend_secrets").upsert(
-      {
-        clone_id: data.cloneId,
-        name: data.name,
-        status: res.ok ? "set" : "failed",
-        last_set_at: res.ok ? now : null,
-        last_error: res.ok ? null : res.error,
-        set_by: userId,
-      },
-      { onConflict: "clone_id,name" },
+    // A value the project already held is not sent (every send redeploys every
+    // function on the project), and is recorded as held without moving its set
+    // time — `secretLedger.pure.ts`.
+    const { recordSecretLedger } = await import(
+      /* @vite-ignore */ "@/lib/_server-shims/secretLedger.server"
     );
+    const ledgerErr = await recordSecretLedger(supabase, {
+      cloneId: data.cloneId,
+      names: [data.name],
+      result: res,
+      status: "set",
+      setBy: userId,
+      now: new Date().toISOString(),
+    });
+    if (ledgerErr) {
+      console.error("[backend-provisioning] secret ledger upsert failed:", ledgerErr);
+    }
+    const sent = res.ok && res.written.length > 0;
     await supabase.from("audit_log").insert({
       action: "clone_backend.secret_set",
       entity_type: "clone",
       entity_id: data.cloneId,
       actor_user_id: userId,
-      metadata: { name: data.name, ok: res.ok, error: res.ok ? null : res.error },
+      metadata: { name: data.name, ok: res.ok, sent, error: res.ok ? null : res.error },
     });
-    return res.ok ? { ok: true as const } : { ok: false as const, error: res.error };
+    return res.ok
+      ? { ok: true as const, alreadyHeld: !sent }
+      : { ok: false as const, error: res.error };
   });
 
 /**
@@ -1667,9 +1675,14 @@ export const pushCloneSecretForwardsNow = createServerFn({ method: "POST" })
       actorUserId: userId,
       // Names only. A value never reaches an audit row.
       metadata: res.ok
-        ? { written: res.written, outcomes: res.outcomes }
+        ? { written: res.written, unchanged: res.unchanged, outcomes: res.outcomes }
         : { reason: res.reason, error: res.error },
     });
     if (!res.ok) return { ok: false as const, error: res.error, reason: res.reason };
-    return { ok: true as const, written: res.written, outcomes: res.outcomes };
+    return {
+      ok: true as const,
+      written: res.written,
+      unchanged: res.unchanged,
+      outcomes: res.outcomes,
+    };
   });

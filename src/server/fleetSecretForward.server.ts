@@ -34,6 +34,7 @@ import {
 import { hasEnvValue } from "./cloneSecretForward.server";
 import { classifySecret } from "./prime-backend.server";
 import { CloneSecretTargetError, resolveCloneSecretTarget } from "./cloneAllowedOrigins.server";
+import { recordSecretLedger } from "./secretLedger.server";
 
 type Db = SupabaseClient<Database>;
 
@@ -84,7 +85,10 @@ export type FleetPushResult =
   | {
       ok: true;
       cloneId: string;
+      /** Names sent to the project on this push. */
       written: string[];
+      /** Names not sent because the project already held exactly that value. */
+      unchanged: string[];
       /** Withheld names that were still on the project, and are not now. */
       removed: string[];
       withoutValue: string[];
@@ -180,7 +184,7 @@ export async function pushFleetSecretForwards(
   if (names.length === 0 && withheldNames.size === 0) {
     // Reported as an empty write rather than as a successful one — the shape
     // every silent-success defect in this platform has taken.
-    return { ok: true, cloneId, written: [], removed: [], withoutValue, outcomes };
+    return { ok: true, cloneId, written: [], unchanged: [], removed: [], withoutValue, outcomes };
   }
 
   let projectRef: string;
@@ -194,36 +198,39 @@ export async function pushFleetSecretForwards(
   const removed = await enforceWithheld(supabase, cloneId, projectRef, withheldNames, opts);
 
   if (names.length === 0) {
-    return { ok: true, cloneId, written: [], removed, withoutValue, outcomes };
+    return { ok: true, cloneId, written: [], unchanged: [], removed, withoutValue, outcomes };
   }
 
   const { setCloneSecretValues } = await import("./backend-provisioning.server");
   const entries = names.map((name) => ({ name, value: process.env[name] as string }));
   const res = await setCloneSecretValues(projectRef, entries);
 
-  const now = new Date().toISOString();
   // Checked, not fired and forgotten. An unrecorded write leaves the operator's
   // secret list reading `missing` over a secret that is set, and every sweep
-  // re-writing it for ever with nothing saying why.
-  const { error: ledgerErr } = await supabase.from("clone_backend_secrets").upsert(
-    names.map((name) => ({
-      clone_id: cloneId,
-      name,
-      status: res.ok ? "inherited" : "failed",
-      last_set_at: res.ok ? now : null,
-      last_error: res.ok ? null : res.error,
-      set_by: opts.actorUserId ?? null,
-    })),
-    { onConflict: "clone_id,name" },
-  );
+  // re-writing it for ever with nothing saying why. Only a name actually SENT
+  // moves its set time (`secretLedger.pure.ts`).
+  const ledgerErr = await recordSecretLedger(supabase, {
+    cloneId,
+    names,
+    result: res,
+    status: "inherited",
+    setBy: opts.actorUserId ?? null,
+    now: new Date().toISOString(),
+  });
   if (ledgerErr) {
-    console.error(
-      `[fleet-secret-forward] ledger write failed for ${cloneId}: ${ledgerErr.message}`,
-    );
+    console.error(`[fleet-secret-forward] ledger write failed for ${cloneId}: ${ledgerErr}`);
   }
 
   if (!res.ok) return { ok: false, cloneId, reason: "write_failed", error: res.error };
-  return { ok: true, cloneId, written: names, removed, withoutValue, outcomes };
+  return {
+    ok: true,
+    cloneId,
+    written: res.written,
+    unchanged: res.unchanged,
+    removed,
+    withoutValue,
+    outcomes,
+  };
 }
 
 /**
@@ -293,8 +300,12 @@ async function enforceWithheld(
 
 export type FleetReconcileResult = {
   considered: number;
+  /** Clones a write was SENT to. */
   pushed: number;
+  /** Names sent. */
   written: number;
+  /** Names found already held, value for value — not sent, nothing redeployed. */
+  unchanged: number;
   /**
    * Withheld names found still on a project and taken off it, per clone.
    *
@@ -325,6 +336,7 @@ export async function reconcileFleetSecretForwards(supabase: Db): Promise<FleetR
     considered: 0,
     pushed: 0,
     written: 0,
+    unchanged: 0,
     removed: [],
     withoutValue: [],
     refused: [],
@@ -359,6 +371,7 @@ export async function reconcileFleetSecretForwards(supabase: Db): Promise<FleetR
       out.pushed += 1;
       out.written += res.written.length;
     }
+    out.unchanged += res.unchanged.length;
   }
 
   return out;

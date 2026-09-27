@@ -255,7 +255,11 @@ function CloneSecretsPage() {
               onSave={async (value) => {
                 const res = await setFn({ data: { cloneId, name: row.name, value } });
                 if (res?.ok) {
-                  toast.success(`${row.name} updated on clone project`);
+                  toast.success(
+                    res.alreadyHeld
+                      ? `${row.name} already held that value — nothing needed sending`
+                      : `${row.name} updated on clone project`,
+                  );
                   await refetch();
                   router.invalidate();
                 } else {
@@ -390,6 +394,12 @@ function ForwardedCredentialsPanel({
                 toast.error(res?.error ?? "Could not forward");
               } else if (res.written.length > 0) {
                 toast.success(`Forwarded ${res.written.join(", ")} to this clone`);
+              } else if (res.unchanged.length > 0) {
+                // Held value for value already, so nothing was sent — and
+                // nothing on the clone was redeployed for it.
+                toast.success(
+                  `This clone already holds ${res.unchanged.join(", ")} — nothing needed sending`,
+                );
               } else {
                 // Never a success toast over an empty write.
                 toast.error("Nothing was forwarded — see the reasons listed below");

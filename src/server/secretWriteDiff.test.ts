@@ -94,7 +94,7 @@ describe("planSecretWrite — only a proof skips a write", () => {
     });
   });
 
-  it("filters a batch, never splits it: every changed entry in one request, in the caller's order", () => {
+  it("sends the WHOLE batch, in the caller's order, when any entry differs — never the differing ones alone", () => {
     const batch = [
       { name: "A", value: "changed-a" },
       { name: "FOO", value: "bar" },
@@ -105,11 +105,48 @@ describe("planSecretWrite — only a proof skips a write", () => {
       batch,
       stored({ FOO: SHA256_BAR, A: SHA256_BAR, B: HMAC_BAR }),
     );
-    expect(plan.write).toEqual([
-      { name: "A", value: "changed-a" },
-      { name: "B", value: "changed-b" },
-    ]);
-    expect(plan.unchanged).toEqual(["FOO"]);
+    expect(plan).toEqual({ write: batch, unchanged: [], uncompared: null });
+  });
+
+  it("keeps a pair whole when a second writer moved the other half between the read and the write", () => {
+    // Read: the address is the one stored, the key is not. A filtered write
+    // would send the key alone — and if another caller had since replaced BOTH
+    // halves, this key would land beside that caller's address. Sent whole,
+    // the pair that stands is one writer's pair.
+    const pair = [
+      { name: "RESEND_API_KEY", value: "re_new" },
+      { name: "RESEND_FROM", value: "bar" },
+    ];
+    const plan = planSecretWrite(REF, pair, stored({ RESEND_FROM: SHA256_BAR }));
+    expect(plan.write).toEqual(pair);
+  });
+
+  it("skips a batch only when EVERY entry is proven held", () => {
+    const batch = [
+      { name: "FOO", value: "bar" },
+      { name: "BAZ", value: "bar" },
+    ];
+    const plan = planSecretWrite(REF, batch, stored({ FOO: SHA256_BAR, BAZ: HMAC_BAR }));
+    expect(plan).toEqual({ write: [], unchanged: ["FOO", "BAZ"], uncompared: null });
+  });
+
+  it("sends all or nothing, whatever the mix — a plan never carries part of its batch", () => {
+    const names = ["A", "B", "C"];
+    const values = ["bar", "other"];
+    for (let mask = 0; mask < 27; mask++) {
+      const entries = names.map((name, i) => ({
+        name,
+        value: values[Math.floor(mask / 3 ** i) % 3 === 0 ? 0 : 1],
+      }));
+      const held = Object.fromEntries(
+        names
+          .filter((_, i) => Math.floor(mask / 3 ** i) % 3 !== 2)
+          .map((name) => [name, SHA256_BAR]),
+      );
+      const plan = planSecretWrite(REF, entries, stored(held));
+      expect([0, entries.length]).toContain(plan.write.length);
+      expect(plan.write.length + plan.unchanged.length).toBe(entries.length);
+    }
   });
 
   it("returns copies, so a caller mutating the plan cannot mutate its input", () => {

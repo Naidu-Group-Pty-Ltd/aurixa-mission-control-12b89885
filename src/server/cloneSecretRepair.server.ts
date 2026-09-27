@@ -42,6 +42,7 @@ import {
   type CloneSecretTarget,
 } from "./cloneAllowedOrigins.server";
 import type { CloneSecretRefusal } from "./cloneSecretTarget.pure";
+import { recordSecretLedger } from "./secretLedger.server";
 import {
   decideJwtSecretRepair,
   type JwtRepairFacts,
@@ -61,6 +62,8 @@ export type JwtRepairFailure = CloneSecretRefusal | "not_readable" | "write_fail
 
 export type JwtRepairResult =
   | { ok: true; cloneId: string; projectRef: string; changed: true }
+  /** The project already held its own key, value for value — nothing was sent. */
+  | { ok: true; cloneId: string; projectRef: string; changed: false; alreadyHeld: true }
   | { ok: true; cloneId: string; changed: false; skipped: JwtRepairSkip }
   | { ok: false; cloneId: string; reason: JwtRepairFailure; error: string };
 
@@ -183,35 +186,44 @@ export async function repairCloneJwtSecret(
   }
 
   const res = await setCloneSecretValue(projectRef, JWT_SECRET_NAME, secret);
-  const now = new Date().toISOString();
 
   // Checked deliberately. If this upsert fails the secret is set on the clone's
   // project while the operator's secret list still reads `missing`, and the
   // sweep re-writes it every pass forever with nothing anywhere saying why.
-  const { error: trackErr } = await supabase.from("clone_backend_secrets").upsert(
-    {
-      clone_id: cloneId,
-      name: JWT_SECRET_NAME,
-      status: res.ok ? "set" : "failed",
-      last_set_at: res.ok ? now : null,
-      last_error: res.ok ? null : res.error,
-      set_by: opts?.actorUserId ?? null,
-    },
-    { onConflict: "clone_id,name" },
-  );
+  // A key the project already held is recorded as held without moving its set
+  // time (`secretLedger.pure.ts`).
+  const trackErr = await recordSecretLedger(supabase, {
+    cloneId,
+    names: [JWT_SECRET_NAME],
+    result: res,
+    status: "set",
+    setBy: opts?.actorUserId ?? null,
+    now: new Date().toISOString(),
+  });
   if (trackErr) {
     console.error("[jwt_secret] secret written but tracking row not updated", {
       cloneId,
       projectRef,
-      error: trackErr.message,
+      error: trackErr,
     });
   }
 
-  await recordEvent(supabase, cloneId, res.ok, res.ok ? null : res.error, opts?.actorUserId);
+  await recordEvent(
+    supabase,
+    cloneId,
+    res.ok,
+    res.ok ? null : res.error,
+    opts?.actorUserId,
+    res.ok ? res.written.length > 0 : false,
+  );
 
-  return res.ok
+  if (!res.ok) return { ok: false, cloneId, reason: "write_failed", error: res.error };
+  // `changed` only where the key was sent: one the project already held is a
+  // repair that found nothing to repair, and counting it as one would hide
+  // whether the write was skipped.
+  return res.written.length > 0
     ? { ok: true, cloneId, projectRef, changed: true }
-    : { ok: false, cloneId, reason: "write_failed", error: res.error };
+    : { ok: true, cloneId, projectRef, changed: false, alreadyHeld: true };
 }
 
 /** Stamp the ledger for an attempt that never reached the write. */
@@ -247,6 +259,8 @@ async function recordEvent(
   success: boolean,
   errorMessage: string | null,
   actorUserId?: string | null,
+  /** Whether the key was sent, or found already held. False for every failure. */
+  sent = false,
 ): Promise<void> {
   // `result` carries no value and never will: this is a signing key, and an
   // event row is read by more people than can read the project it came from.
@@ -257,7 +271,7 @@ async function recordEvent(
     success,
     error_message: errorMessage,
     actor_user_id: actorUserId ?? null,
-    result: { secret_name: JWT_SECRET_NAME, source: "project_postgrest_config" },
+    result: { secret_name: JWT_SECRET_NAME, source: "project_postgrest_config", sent },
   });
   if (error) {
     // The write already happened or already failed; losing the timeline row
@@ -272,6 +286,8 @@ async function recordEvent(
 export type JwtReconcileResult = {
   considered: number;
   repaired: number;
+  /** Clones whose project already held their own key — recorded, nothing sent. */
+  alreadyHeld: number;
   skipped: Record<string, number>;
   refused: { cloneId: string; reason: JwtRepairFailure }[];
 };
@@ -319,6 +335,7 @@ export async function reconcileCloneJwtSecrets(
   const out: JwtReconcileResult = {
     considered: candidates.length,
     repaired: 0,
+    alreadyHeld: 0,
     skipped: {},
     refused: [],
   };
@@ -367,6 +384,8 @@ export async function reconcileCloneJwtSecrets(
         out.refused.push({ cloneId: res.cloneId, reason: res.reason });
       } else if (res.changed) {
         out.repaired += 1;
+      } else if ("alreadyHeld" in res) {
+        out.alreadyHeld += 1;
       } else {
         // The repair re-decided and disagreed — a row that changed between the
         // bulk read and now. Counted where it landed, not where we predicted.

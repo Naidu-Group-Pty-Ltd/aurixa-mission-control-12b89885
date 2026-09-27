@@ -148,7 +148,6 @@ export const Route = createFileRoute("/api/public/integrations/secrets")({
         const { setCloneSecretValues } = await import("@/server/backend-provisioning.server");
         const res = await setCloneSecretValues(target.projectRef, plan.write);
 
-        const now = new Date().toISOString();
         const names = plan.write.map((s) => s.name);
 
         /*
@@ -157,24 +156,24 @@ export const Route = createFileRoute("/api/public/integrations/secrets")({
          * is `set`: the tenant supplied this value, so it is neither
          * `inherited` (forwarded from the prime) nor `withheld`. That
          * distinction is what stops a tenant's own key being billed to the
-         * prime — see `apiUsageBilling.pure.ts` on the clone side.
+         * prime — see `apiUsageBilling.pure.ts` on the clone side. A value the
+         * project already held is recorded as held without moving its set
+         * time (`secretLedger.pure.ts`).
          */
-        const { error: ledgerErr } = await supabaseAdmin.from("clone_backend_secrets").upsert(
-          names.map((name) => ({
-            clone_id: target.cloneId,
-            name,
-            status: res.ok ? "set" : "failed",
-            last_set_at: res.ok ? now : null,
-            last_error: res.ok ? null : res.error,
-          })),
-          { onConflict: "clone_id,name" },
-        );
+        const { recordSecretLedger } = await import("@/server/secretLedger.server");
+        const ledgerErr = await recordSecretLedger(supabaseAdmin, {
+          cloneId: target.cloneId,
+          names,
+          result: res,
+          status: "set",
+          now: new Date().toISOString(),
+        });
         if (ledgerErr) {
           console.error("[integrations.secrets] secrets written but ledger not updated", {
             cloneId: target.cloneId,
             projectRef: target.projectRef,
             names,
-            error: ledgerErr.message,
+            error: ledgerErr,
           });
         }
 
@@ -204,6 +203,8 @@ export const Route = createFileRoute("/api/public/integrations/secrets")({
           clone: target.cloneName,
           projectRef: target.projectRef,
           names,
+          sent: res.written,
+          unchanged: res.unchanged,
           refused: plan.refused.length,
           ledgerRecorded: !ledgerErr,
         });
@@ -211,7 +212,16 @@ export const Route = createFileRoute("/api/public/integrations/secrets")({
         return new Response(
           JSON.stringify({
             ok: true,
+            /*
+             * Every name the project now holds — sent or already held. The
+             * clone reads an empty `updated` as "Mission Control wrote none of
+             * the secrets" and answers its operator 400, so this keeps naming
+             * a value that was already there; `sent` and `unchanged` say which
+             * was which.
+             */
             updated: names,
+            sent: res.written,
+            unchanged: res.unchanged,
             // Names this side declined, so the page can show them beside the
             // ones that landed rather than reporting a clean success.
             refused: plan.refused,

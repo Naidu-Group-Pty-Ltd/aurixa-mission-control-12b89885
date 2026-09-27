@@ -26,6 +26,7 @@ import {
   type CloneSecretTarget,
 } from "./cloneAllowedOrigins.server";
 import type { CloneSecretRefusal } from "./cloneSecretTarget.pure";
+import { recordSecretLedger } from "./secretLedger.server";
 import {
   planSigningPair,
   decideSigningPairRepair,
@@ -219,26 +220,28 @@ export async function repairCloneSigningPair(
   }
 
   const res = await ensureCloneSigningPair(projectRef, serviceRoleKey);
-  const now = new Date().toISOString();
 
   // Checked deliberately: an unrecorded success re-runs the vault read on
   // every pass forever, and an unrecorded failure never starts its cool-off.
-  const { error: trackErr } = await supabase.from("clone_backend_secrets").upsert(
-    {
-      clone_id: cloneId,
-      name: ENV_INTERNAL_EDGE_SECRET,
-      status: res.ok ? "set" : "failed",
-      last_set_at: res.ok ? now : null,
-      last_error: res.ok ? null : `${res.stage}: ${res.error}`,
-      set_by: opts?.actorUserId ?? null,
-    },
-    { onConflict: "clone_id,name" },
-  );
+  // The row is written on every pass either way; only a pass that SENT the
+  // environment moves its set time (`secretLedger.pure.ts`).
+  const trackErr = await recordSecretLedger(supabase, {
+    cloneId,
+    names: [ENV_INTERNAL_EDGE_SECRET],
+    result: res.ok
+      ? res.outcome.envWritten
+        ? { ok: true, written: [ENV_INTERNAL_EDGE_SECRET], unchanged: [] }
+        : { ok: true, written: [], unchanged: [ENV_INTERNAL_EDGE_SECRET] }
+      : { ok: false, error: `${res.stage}: ${res.error}` },
+    status: "set",
+    setBy: opts?.actorUserId ?? null,
+    now: new Date().toISOString(),
+  });
   if (trackErr) {
     console.error("[signing_pair] pair written but tracking row not updated", {
       cloneId,
       projectRef,
-      error: trackErr.message,
+      error: trackErr,
     });
   }
 
@@ -252,7 +255,10 @@ export async function repairCloneSigningPair(
   );
 
   if (!res.ok) return { ok: false, cloneId, reason: res.stage, error: res.error };
-  const changed = res.outcome.vaultSecretWritten || res.outcome.vaultServiceKeyWritten;
+  // An environment that disagreed with the vault and was sent is a repair too;
+  // a pass over a pair that agrees changed nothing and sent nothing.
+  const changed =
+    res.outcome.vaultSecretWritten || res.outcome.vaultServiceKeyWritten || res.outcome.envWritten;
   return { ok: true, cloneId, projectRef, changed, outcome: res.outcome };
 }
 

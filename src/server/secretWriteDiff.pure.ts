@@ -47,10 +47,17 @@
  * settings (`secretDigestHex` in the CLI). Hex, compared without regard to
  * case.
  *
- * **A pair stays a pair.** The batch is filtered, never split: every entry
- * that differs goes in ONE request, and an entry left out is one the project
- * already holds, so a changed half never lands without its partner. The end
- * state is the one sending both would have produced.
+ * **A batch is sent whole or not at all.** The entries in one call were put
+ * together to arrive together — a key and the address it is scoped to, a pair
+ * of ids a vendor reads as one credential. When every entry is proven held,
+ * nothing is sent. When any entry differs, the WHOLE batch goes, exactly as
+ * asked, never the differing entries alone. Filtering would save nothing (one
+ * request redeploys the project once, whatever it carries) and it would break
+ * the pair under a second writer: between this read and this write another
+ * caller can replace both halves, and a filtered request would then land one
+ * half of this batch beside the other half of theirs. Sent whole, the last
+ * writer's pair is the one that stands, which is what every write did before
+ * this.
  *
  * Pure: no I/O. Hashing is computation, not a read.
  */
@@ -101,13 +108,24 @@ export function valueDigests(projectRef: string, value: string): readonly string
 }
 
 export type SecretWritePlan = {
-  /** What to send, in the caller's order. Empty means the project already holds all of it. */
+  /**
+   * What to send: every entry, in the caller's order, or nothing at all. Empty
+   * means the project already holds all of it.
+   */
   write: SecretEntry[];
-  /** Names left out because the project already holds exactly that value. */
+  /** Names left out because the project already holds exactly that value — all of them, or none. */
   unchanged: string[];
   /** Set when nothing was compared, and why. Everything asked for is then written. */
   uncompared: null | "list_unreadable" | "repeated_name";
 };
+
+/**
+ * What one secrets write did, by name. Values and digests never appear here:
+ * this is what callers log, count and put on timelines.
+ */
+export type SecretWriteResult =
+  | { ok: true; written: string[]; unchanged: string[] }
+  | { ok: false; error: string };
 
 export function planSecretWrite(
   projectRef: string,
@@ -117,22 +135,20 @@ export function planSecretWrite(
   if (stored === null) {
     return { write: [...entries], unchanged: [], uncompared: "list_unreadable" };
   }
-  // Two entries for one name leave "which one the platform keeps" to it; the
-  // batch is sent exactly as asked rather than filtered into a different one.
+  // Two entries for one name leave "which one the platform keeps" to it, so no
+  // digest can prove what the batch would leave behind; it is sent as asked.
   const names = new Set(entries.map((e) => e.name));
   if (names.size !== entries.length) {
     return { write: [...entries], unchanged: [], uncompared: "repeated_name" };
   }
 
-  const write: SecretEntry[] = [];
-  const unchanged: string[] = [];
-  for (const entry of entries) {
-    const held = stored.get(entry.name);
-    if (held !== undefined && valueDigests(projectRef, entry.value).includes(held)) {
-      unchanged.push(entry.name);
-    } else {
-      write.push(entry);
-    }
+  const held = (entry: SecretEntry): boolean => {
+    const digest = stored.get(entry.name);
+    return digest !== undefined && valueDigests(projectRef, entry.value).includes(digest);
+  };
+  // All or nothing — see "A batch is sent whole" above.
+  if (entries.every(held)) {
+    return { write: [], unchanged: entries.map((e) => e.name), uncompared: null };
   }
-  return { write, unchanged, uncompared: null };
+  return { write: [...entries], unchanged: [], uncompared: null };
 }

@@ -27,6 +27,7 @@ import {
   type CloneSecretTarget,
 } from "./cloneAllowedOrigins.server";
 import type { CloneSecretRefusal } from "./cloneSecretTarget.pure";
+import { recordSecretLedger } from "./secretLedger.server";
 import {
   ENV_MISSION_CONTROL_AGENCY_NAME,
   ENV_MISSION_CONTROL_CLONE_API_KEY,
@@ -54,6 +55,10 @@ export type MissionControlLinkOutcome = {
   keysRevoked: number;
   endpoint: "created" | "updated" | "reused";
   envNames: string[];
+  /** Of `envNames`, the ones SENT this pass — each send redeploys every function on the project. */
+  envWritten: string[];
+  /** Of `envNames`, the ones the project already held exactly as planned, so nothing was sent. */
+  envUnchanged: string[];
   why: string[];
 };
 
@@ -274,6 +279,8 @@ export async function ensureCloneMissionControlLink(
       endpoint:
         plan.endpoint.action === "create" ? "created" : plan.endpoint.action === "update" ? "updated" : "reused",
       envNames: Object.keys(values),
+      envWritten: env.written,
+      envUnchanged: env.unchanged,
       why: plan.why,
     },
   };
@@ -335,21 +342,19 @@ export async function repairCloneMissionControlLink(
     actorUserId: opts?.actorUserId ?? null,
     now: opts?.now,
   });
-  const now = new Date().toISOString();
-  const names = res.ok ? res.outcome.envNames : [...MISSION_CONTROL_LINK_ENV_NAMES];
-  const { error: trackErr } = await supabase.from("clone_backend_secrets").upsert(
-    names.map((name) => ({
-      clone_id: cloneId,
-      name,
-      status: res.ok ? "set" : "failed",
-      last_set_at: res.ok ? now : null,
-      last_error: res.ok ? null : `${res.stage}: ${res.error}`,
-      set_by: opts?.actorUserId ?? null,
-    })),
-    { onConflict: "clone_id,name" },
-  );
+  // Only a name actually SENT moves its set time (`secretLedger.pure.ts`).
+  const trackErr = await recordSecretLedger(supabase, {
+    cloneId,
+    names: res.ok ? res.outcome.envNames : [...MISSION_CONTROL_LINK_ENV_NAMES],
+    result: res.ok
+      ? { ok: true, written: res.outcome.envWritten, unchanged: res.outcome.envUnchanged }
+      : { ok: false, error: `${res.stage}: ${res.error}` },
+    status: "set",
+    setBy: opts?.actorUserId ?? null,
+    now: new Date().toISOString(),
+  });
   if (trackErr) {
-    console.error("[mission_control_link] written but tracking rows not updated", { cloneId, projectRef, error: trackErr.message });
+    console.error("[mission_control_link] written but tracking rows not updated", { cloneId, projectRef, error: trackErr });
   }
 
   await recordEvent(supabase, cloneId, res.ok, res.ok ? null : `${res.stage}: ${res.error}`, res.ok ? res.outcome : null, opts?.actorUserId);
@@ -359,7 +364,10 @@ export async function repairCloneMissionControlLink(
     ok: true,
     cloneId,
     projectRef,
-    changed: res.outcome.keyMinted || res.outcome.endpoint !== "reused",
+    changed:
+      res.outcome.keyMinted ||
+      res.outcome.endpoint !== "reused" ||
+      res.outcome.envWritten.length > 0,
     outcome: res.outcome,
   };
 }
