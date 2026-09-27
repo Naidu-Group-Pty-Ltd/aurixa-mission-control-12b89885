@@ -28,12 +28,16 @@
  * ## The rules
  *
  * **The vault is the source of truth, because the environment cannot be read
- * back.** The Management API lists secret NAMES and never returns a value, so
- * the only side that can say what the pair IS is the database. A pass that
- * finds a usable vault value reuses it and re-asserts the environment; a pass
- * that finds none mints one, writes the vault first, then the environment. If
- * the environment write fails, the next pass finds the vault value and tries
- * the environment again — it converges rather than rotating.
+ * back.** The Management API lists secret names with a DIGEST of each value,
+ * never the value, so the only side that can say what the pair IS is the
+ * database. A pass that finds a usable vault value reuses it and re-asserts
+ * the environment; a pass that finds none mints one, writes the vault first,
+ * then the environment. If the environment write fails, the next pass finds
+ * the vault value and tries the environment again — it converges rather than
+ * rotating. The digest cannot say what the value is, but it can say whether
+ * the environment already holds this one, so re-asserting a pair that agrees
+ * sends nothing (`secretWriteDiff.pure.ts`) — every write redeploys every
+ * function on the project.
  *
  * **Never rotate on a repair.** Before this, every repair pass minted a fresh
  * random for the environment (the generic generator has no memory), so even a
@@ -96,9 +100,11 @@ export type SigningPairPlan = {
   /** Create or update `supabase_service_role_key` in the vault. */
   writeVaultServiceKey: boolean;
   /**
-   * Always true. The environment is write-only, so it is re-asserted with the
-   * same value on every pass; that is what makes a failed write converge and
-   * what stops a repair from ever holding a different value from the vault.
+   * Always true. The environment's value cannot be read back, so it is
+   * re-asserted with the same value on every pass; that is what makes a failed
+   * write converge and what stops a repair from ever holding a different value
+   * from the vault. Re-asserting is not re-sending: the write goes out only
+   * where the stored digest shows the environment holds something else.
    */
   writeEnv: true;
   /** Why, in one line, for the status trail. Carries no secret material. */

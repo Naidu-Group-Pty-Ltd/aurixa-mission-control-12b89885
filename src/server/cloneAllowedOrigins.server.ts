@@ -36,6 +36,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import { cloneAllowedOrigins, type CloneOrigins } from "./backend-provisioning.server";
 import { ownProjectRef } from "./prime-backend.server";
+import { recordSecretLedger } from "./secretLedger.server";
 import {
   decideCloneSecretTarget,
   type CloneSecretRefusal,
@@ -324,34 +325,25 @@ export async function applyCloneAllowedOrigins(
 
   const { setCloneSecretValue } = await import("./backend-provisioning.server");
   const res = await setCloneSecretValue(target.projectRef, ALLOWED_ORIGINS_SECRET, value);
-  const now = new Date().toISOString();
 
-  // Checked on purpose, and worth a note: `check:discarded-errors` counts this
-  // statement as checked because the word `error` occurs inside it (in
-  // `res.error`, which is the SECRET WRITE's error, not this upsert's). The
-  // guard is pattern-based and that shape fools it. Tightening the pattern
-  // would reclassify statements across ninety-nine files at once, so the guard
-  // is left alone and this is simply written correctly.
-  //
-  // It matters: if this upsert fails, the secret is set on the clone's project
-  // while the operator's secret list still shows ALLOWED_ORIGINS as missing —
-  // a divergence with no signal anywhere.
-  const { error: trackErr } = await supabase.from("clone_backend_secrets").upsert(
-    {
-      clone_id: cloneId,
-      name: ALLOWED_ORIGINS_SECRET,
-      status: res.ok ? "set" : "failed",
-      last_set_at: res.ok ? now : null,
-      last_error: res.ok ? null : res.error,
-      set_by: opts?.actorUserId ?? null,
-    },
-    { onConflict: "clone_id,name" },
-  );
+  // Checked on purpose: if this record fails, the secret is set on the clone's
+  // project while the operator's secret list still shows ALLOWED_ORIGINS as
+  // missing — a divergence with no signal anywhere. A value the project
+  // already held is recorded as held without moving its set time
+  // (`secretLedger.pure.ts`).
+  const trackErr = await recordSecretLedger(supabase, {
+    cloneId,
+    names: [ALLOWED_ORIGINS_SECRET],
+    result: res,
+    status: "set",
+    setBy: opts?.actorUserId ?? null,
+    now: new Date().toISOString(),
+  });
   if (trackErr) {
     console.error("[allowed_origins] secret written but tracking row not updated", {
       cloneId,
       projectRef: target.projectRef,
-      error: trackErr.message,
+      error: trackErr,
     });
   }
 
@@ -366,7 +358,7 @@ export async function applyCloneAllowedOrigins(
   );
 
   return res.ok
-    ? { ok: true, cloneId, projectRef: target.projectRef, value, changed: true }
+    ? { ok: true, cloneId, projectRef: target.projectRef, value, changed: res.written.length > 0 }
     : { ok: false, cloneId, reason: "write_failed", error: res.error };
 }
 
