@@ -40,6 +40,7 @@ import {
 } from "./sharedVersionDelivery.pure";
 import { ledgerWriteRefusal } from "./migrationLedgerWrites.pure";
 import { mentionedVersionsOf } from "./migrationVersionMentions.pure";
+import { parseStoredSecretDigests, planSecretWrite } from "./secretWriteDiff.pure";
 
 const MGMT_API = "https://api.supabase.com/v1";
 
@@ -4352,8 +4353,41 @@ export async function setCloneSecretValue(
   projectRef: string,
   name: string,
   value: string,
-): Promise<{ ok: true } | { ok: false; error: string }> {
+): Promise<SecretWriteResult> {
   return setCloneSecretValues(projectRef, [{ name, value }]);
+}
+
+/**
+ * What a secret write did. `written` names what was sent; `unchanged` names
+ * what was left out because the project already held exactly that value. Names
+ * only — never a value, never a digest.
+ */
+export type SecretWriteResult =
+  | { ok: true; written: string[]; unchanged: string[] }
+  | { ok: false; error: string };
+
+/**
+ * Long enough for a list the endpoint answers in well under a second, short
+ * enough that a slow read cannot hold a sweep: on timeout the write goes ahead
+ * as if the list could not be read.
+ */
+const STORED_DIGEST_READ_TIMEOUT_MS = 10_000;
+
+/**
+ * Name → digest of every secret the project holds, or `null` when the list
+ * could not be read. Never throws: the read only ever SAVES a write.
+ */
+async function readStoredSecretDigests(projectRef: string): Promise<Map<string, string> | null> {
+  try {
+    const res = await fetch(`${MGMT_API}/projects/${projectRef}/secrets`, {
+      headers: headers(),
+      signal: AbortSignal.timeout(STORED_DIGEST_READ_TIMEOUT_MS),
+    });
+    if (!res.ok) return null;
+    return parseStoredSecretDigests((await res.json()) as unknown);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -4365,25 +4399,36 @@ export async function setCloneSecretValue(
  * is scoped to send from — must arrive together or not at all, because the
  * half-written state is indistinguishable from a healthy one at every surface
  * that reads it, and is exactly the state the first clone shipped in.
+ *
+ * And only what differs. Every POST to this endpoint redeploys every edge
+ * function on the project, changed value or not, and the reconcile sweeps
+ * re-assert what they own on every pass — eight redeploys of every function an
+ * hour on each clone before this. The project's list reports a digest per
+ * name, so an entry whose stored digest proves it already holds that value is
+ * left out, and a batch whose every entry is held sends nothing at all. The
+ * rules, and why nothing but a proof skips a write, are in
+ * `secretWriteDiff.pure.ts`.
  */
 export async function setCloneSecretValues(
   projectRef: string,
   entries: Array<{ name: string; value: string }>,
-): Promise<{ ok: true } | { ok: false; error: string }> {
-  if (entries.length === 0) return { ok: true };
+): Promise<SecretWriteResult> {
+  if (entries.length === 0) return { ok: true, written: [], unchanged: [] };
+  const plan = planSecretWrite(projectRef, entries, await readStoredSecretDigests(projectRef));
+  if (plan.write.length === 0) return { ok: true, written: [], unchanged: plan.unchanged };
   const res = await fetch(`${MGMT_API}/projects/${projectRef}/secrets`, {
     method: "POST",
     headers: headers(),
-    body: JSON.stringify(entries),
+    body: JSON.stringify(plan.write),
   });
   if (!res.ok) {
-    const names = entries.map((e) => e.name).join(", ");
+    const names = plan.write.map((e) => e.name).join(", ");
     return {
       ok: false,
       error: `secrets API ${res.status} writing ${names} — ${(await res.text()).slice(0, 300)}`,
     };
   }
-  return { ok: true };
+  return { ok: true, written: plan.write.map((e) => e.name), unchanged: plan.unchanged };
 }
 
 /**

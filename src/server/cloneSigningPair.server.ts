@@ -126,7 +126,9 @@ export async function ensureCloneSigningPair(
     }
   }
 
-  // Then the environment, with the SAME value.
+  // Then the environment, with the SAME value. Sent only where the project
+  // does not already hold it: a pass over a pair that agrees writes nothing,
+  // and so redeploys nothing (`secretWriteDiff.pure.ts`).
   const env = await setCloneSecretValues(projectRef, [
     { name: ENV_INTERNAL_EDGE_SECRET, value: plan.value },
   ]);
@@ -141,7 +143,7 @@ export async function ensureCloneSigningPair(
       source: plan.source,
       vaultSecretWritten: plan.writeVaultSecret,
       vaultServiceKeyWritten: plan.writeVaultServiceKey,
-      envWritten: true,
+      envWritten: env.written.length > 0,
       why: plan.why,
     },
   };
