@@ -150,7 +150,28 @@ describe("what an operator is shown", () => {
   });
 
   it("the panel draws the taxonomy's prose, not the row's raw detail alone", () => {
-    expect(panelCode).toContain("b.what");
+    expect(panelCode).toContain("g.what");
+  });
+
+  /*
+    ONE LINE PER CLASS, AND EVERY CLASS.
+
+    The card read the six oldest open rows and drew each one's class sentence.
+    On the CRM independent that was one sentence six times over 52 open rows,
+    with no word of the other forty-six — and ordered oldest first, a class
+    that opened later could not reach the card at all. The read now counts,
+    the rows are grouped by class, and the panel says when a read fell short.
+  */
+  it("the card counts every open row and draws every open class", () => {
+    expect(fn).toContain('count: "exact"');
+    expect(fn).toContain("groupCardBlockages(");
+    expect(fn).not.toMatch(/\.limit\(\s*6\s*\)/);
+    expect(fn).not.toContain("CARD_BLOCKAGE_LIMIT");
+    expect(panelCode).toContain("blockages.groups.map(");
+    expect(panelCode).toContain("g.count");
+    expect(panelCode).toContain("blockages.total - blockages.read");
+    // …and says so whenever the read fell short, on nothing but that.
+    expect(panelCode).toMatch(/\{unread > 0 && \(/);
   });
 });
 

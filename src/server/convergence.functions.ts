@@ -32,24 +32,34 @@ import {
   type ObservationRow,
 } from "@/server/cascade/convergenceReading.pure";
 import type { ConvergenceState } from "@/server/cascade/convergence.pure";
-import {
-  BLOCKAGE_POLICY,
-  type BlockageClass,
-  type BlockageOwner,
-} from "@/server/cascade/blockageTaxonomy.pure";
+import { groupCardBlockages, type CardBlockageGroup } from "@/server/cascade/cardBlockages.pure";
 
-/** How many open blockages the card will draw before it stops listing them. */
-export const CARD_BLOCKAGE_LIMIT = 6;
+/**
+ * How many open rows the card reads for one clone.
+ *
+ * A bound on one render's read, and never on what the card SAYS: the lines
+ * are one per class, the count beside each comes from what was read, and a
+ * read cut short says how many rows it did not reach. The largest class on
+ * any clone is `prime_ledger_hole`, fed by at most fifty notes
+ * (`PRIME_LEDGER_HOLE_NOTE_CAP`) and the few holes that held migrations
+ * name — 52 rows on the CRM independent — so a clone reaches this only
+ * through something new, which is exactly when a card that quietly stopped
+ * counting would mislead.
+ *
+ * It replaces a limit of six on the ROWS drawn, ordered oldest first. On the
+ * CRM independent that drew one class sentence six times over 52 open rows,
+ * and a class that opened after them — a red cascade PR — could not appear.
+ * See `cardBlockages.pure.ts`.
+ */
+export const CARD_BLOCKAGE_READ_LIMIT = 500;
 
-export type CardBlockage = {
-  id: string;
-  cls: BlockageClass;
-  owner: BlockageOwner;
-  /** The taxonomy's own operator prose. Never the class name. */
-  what: string;
-  detail: string;
-  firstSeenAt: string;
-  selfHeals: boolean;
+export type CardBlockages = {
+  /** One line per open class, oldest class first. */
+  groups: CardBlockageGroup[];
+  /** Every open row on this clone, as the database counted them. */
+  total: number;
+  /** How many of them this read reached. Fewer than `total` only past the bound. */
+  read: number;
 };
 
 export type CloneConvergenceView = {
@@ -59,7 +69,7 @@ export type CloneConvergenceView = {
    * Open blockages for this clone, or `null` when the ledger could not be
    * read — which is not the same as none, and is not drawn as none.
    */
-  blockages: CardBlockage[] | null;
+  blockages: CardBlockages | null;
 };
 
 export const readCloneConvergence = createServerFn({ method: "POST" })
@@ -85,11 +95,11 @@ export const readCloneConvergence = createServerFn({ method: "POST" })
         .maybeSingle(),
       supabase
         .from("clone_sync_blockages")
-        .select("id, class, owner, detail, first_seen_at, self_heals")
+        .select("id, class, owner, detail, first_seen_at, self_heals", { count: "exact" })
         .eq("clone_id", data.cloneId)
         .is("cleared_at", null)
         .order("first_seen_at", { ascending: true })
-        .limit(CARD_BLOCKAGE_LIMIT),
+        .limit(CARD_BLOCKAGE_READ_LIMIT),
     ]);
 
     const ledger: LedgerPosition = {
@@ -128,19 +138,24 @@ export const readCloneConvergence = createServerFn({ method: "POST" })
       ledger,
       // A failed blockage read is `null` and never `[]`: "nothing is blocking
       // this clone" is a claim, and a read that did not happen cannot make it.
-      blockages: blockages.error
-        ? null
-        : (blockages.data ?? []).map((b) => {
-            const cls = b.class as BlockageClass;
-            return {
-              id: b.id,
-              cls,
-              owner: b.owner as BlockageOwner,
-              what: BLOCKAGE_POLICY[cls]?.what ?? b.detail,
-              detail: b.detail,
-              firstSeenAt: b.first_seen_at,
-              selfHeals: b.self_heals,
-            };
-          }),
+      blockages: blockages.error ? null : cardBlockagesFrom(blockages.data ?? [], blockages.count),
     };
   });
+
+/**
+ * The card's reading of what was read.
+ *
+ * `total` is the database's own count where it gave one. A count it did not
+ * give is not zero rows beyond the read, and nothing here may claim more rows
+ * than it can show, so it falls back to what was read.
+ */
+function cardBlockagesFrom(
+  rows: Parameters<typeof groupCardBlockages>[0],
+  count: number | null,
+): CardBlockages {
+  return {
+    groups: groupCardBlockages(rows),
+    total: count !== null && count >= rows.length ? count : rows.length,
+    read: rows.length,
+  };
+}

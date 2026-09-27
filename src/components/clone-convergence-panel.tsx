@@ -234,9 +234,16 @@ function Body({ view }: { view: CloneConvergenceView }) {
  * Why it is not converging, where the ledger has an answer.
  *
  * A `stalled` badge with nothing under it is a dead end: the operator is told
- * there is a problem and given no way to find out what it is. These rows are
+ * there is a problem and given no way to find out what it is. These lines are
  * the taxonomy's own prose, and `owner` is what says whether waiting will fix
  * it.
+ *
+ * ONE LINE PER CLASS, AND THE COUNT IS PART OF THE LINE. The sentence is the
+ * class's, so two rows of one class drew the same words twice; the six oldest
+ * rows on the CRM independent were six copies of one sentence over 52 open
+ * rows, and a class that opened later never reached the card. Every open class
+ * is drawn now, with how many rows stand behind it and when the oldest was
+ * first seen.
  */
 function Blockages({ blockages }: { blockages: CloneConvergenceView["blockages"] }) {
   if (blockages === null) {
@@ -246,19 +253,28 @@ function Blockages({ blockages }: { blockages: CloneConvergenceView["blockages"]
       </p>
     );
   }
-  if (blockages.length === 0) return null;
+  if (blockages.groups.length === 0) return null;
 
+  const unread = blockages.total - blockages.read;
   return (
     <ul className="space-y-1.5 border-t border-border pt-2">
-      {blockages.map((b) => (
-        <li key={b.id} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+      {blockages.groups.map((g) => (
+        <li key={g.key} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
           <AlertTriangle className="h-3 w-3 shrink-0 translate-y-0.5 text-warning" />
-          <span className="flex-1 basis-64 text-xs text-foreground">{b.what}</span>
+          <span className="flex-1 basis-64 text-xs text-foreground">{g.what}</span>
           <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
-            {BLOCKAGE_OWNER_LABEL[b.owner]} · {formatDistanceToNow(b.firstSeenAt)}
+            {g.count > 1 ? `${g.count} open · ` : ""}
+            {BLOCKAGE_OWNER_LABEL[g.owner]} · {g.count > 1 ? "oldest " : ""}
+            {formatDistanceToNow(g.firstSeenAt)}
           </span>
         </li>
       ))}
+      {unread > 0 && (
+        <li className="font-mono text-[11px] text-warning">
+          {unread} more open blockage(s) were not read for this card, so the counts above leave them
+          out.
+        </li>
+      )}
     </ul>
   );
 }
