@@ -21,12 +21,17 @@ import {
   Check,
   Database,
   Rocket,
+  Link2,
+  Network,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { useServerFn } from "@tanstack/react-start";
 import { provisionClone } from "@/server/clone-provisioning.functions";
+import { getCrmLineageRoots } from "@/lib/crm-lineage.functions";
+import { CRM_MODES, CRM_MODE_COPY, type CrmMode } from "@/lib/crmMode.pure";
+import type { CrmParentJudgement } from "@/server/crmLineage.pure";
 import { enqueueEdgeJob } from "@/server/edge-provisioning.functions";
 // The same server functions the clone page's cards call. Imported rather than
 // reimplemented: `provisionTurnstileIdentity` and `advanceEmailIdentity` are
@@ -159,6 +164,43 @@ function NewClone() {
   // each section below renders the one capability it depends on, without
   // every section firing its own request.
   const readiness = useProvisioningReadiness();
+
+  // Which CRM the clone runs — a choice of PARENT, read through the judge
+  // provisioning refuses with (`crmLineage.pure.ts`), so a line offered here
+  // is one provisioning will accept and a line held back carries the words it
+  // would have been refused with. Nothing is chosen for the operator: a clone
+  // created on the wrong line runs the wrong CRM, and a default is how that
+  // happens without anybody deciding it.
+  const crmLineageFn = useServerFn(getCrmLineageRoots);
+  const [crmMode, setCrmMode] = useState<CrmMode | null>(null);
+  const [crmLineage, setCrmLineage] = useState<Record<CrmMode, CrmParentJudgement> | null>(null);
+  const [crmLineageState, setCrmLineageState] = useState<"loading" | "ready" | "failed">("loading");
+  const [crmLineageError, setCrmLineageError] = useState<string | null>(null);
+  const loadCrmLineage = async () => {
+    setCrmLineageState("loading");
+    setCrmLineageError(null);
+    try {
+      setCrmLineage(await crmLineageFn());
+      setCrmLineageState("ready");
+    } catch (e) {
+      // A failed read is not a line with no parent; it offers neither line
+      // and says it could not check, rather than which one is missing.
+      setCrmLineage(null);
+      setCrmLineageError(e instanceof Error ? e.message : String(e));
+      setCrmLineageState("failed");
+    }
+  };
+  useEffect(() => {
+    void loadCrmLineage();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  // A re-read that refuses the chosen line takes the choice back with it.
+  useEffect(() => {
+    if (crmMode && crmLineage && !crmLineage[crmMode].ok) setCrmMode(null);
+  }, [crmMode, crmLineage]);
+  const crmJudged = crmMode && crmLineage ? crmLineage[crmMode] : null;
+  const crmParent = crmJudged?.ok ? crmJudged.parent : null;
+
   const preflightFn = useServerFn(checkGithubAppPreflight);
   const [preflight, setPreflight] = useState<GithubPreflightResult | null>(null);
   const [preflightBusy, setPreflightBusy] = useState(false);
@@ -187,12 +229,19 @@ function NewClone() {
     if (!owner) return null;
     setPreflightBusy(true);
     try {
+      // The repository the clone is copied from is the chosen line's parent,
+      // so that is the one checked — not the prime, which no clone created
+      // here is copied from. Until a line is chosen only the installation is
+      // checked; choosing one re-runs this against its parent. Provisioning
+      // flags a parent as a template itself, which the preflight is told so
+      // an unflagged parent is not reported as a failure.
       const res = await preflightFn({
         data: {
           targetOwner: owner,
           method,
-          templateOwner: method === "template" ? (prime?.github_owner ?? null) : null,
-          templateRepo: method === "template" ? (prime?.github_repo ?? null) : null,
+          templateOwner: method === "template" ? (crmParent?.githubOwner ?? null) : null,
+          templateRepo: method === "template" ? (crmParent?.githubRepo ?? null) : null,
+          templateFlagSetByProvisioning: method === "template" && crmParent !== null,
         },
       });
       setPreflight(res);
@@ -228,7 +277,8 @@ function NewClone() {
     transferTarget,
     prime?.default_clone_org,
     prime?.github_owner,
-    prime?.github_repo,
+    crmParent?.githubOwner,
+    crmParent?.githubRepo,
   ]);
 
   // Isolated tenants ALWAYS need a dedicated backend — enforce it as the
@@ -240,6 +290,20 @@ function NewClone() {
   const submit = async () => {
     if (!name.trim()) {
       toast.error("Name is required");
+      return;
+    }
+    // Refused here as well as by the server, so a missing choice costs no
+    // preflight and the message points at the section that asks it.
+    if (!crmMode) {
+      toast.error("Choose which CRM this clone runs (section 1b).");
+      return;
+    }
+    if (!crmParent) {
+      toast.error(
+        crmJudged && !crmJudged.ok
+          ? crmJudged.reason
+          : "The CRM line's parent could not be read. Re-check it in section 1b.",
+      );
       return;
     }
     if (isolatedTenant && !dedicatedBackend) {
@@ -337,6 +401,10 @@ function NewClone() {
           backend: dedicatedBackend ? { region: backendRegion, adminEmail, adminPassword } : null,
           sendingDomain: armEmail ? sendingDomain.trim() || null : null,
           idempotencyKey,
+          // Which line, and therefore which parent the repository is copied
+          // from. The server re-reads and re-judges the parent rather than
+          // trusting the one shown here.
+          crmMode,
         },
       });
 
@@ -351,8 +419,8 @@ function NewClone() {
       } else {
         toast.success(
           method === "clone"
-            ? "Clone registered (independent — wire up the repo manually)"
-            : `Clone provisioned${result.githubUrl ? " on GitHub" : ""}`,
+            ? `Clone registered under ${crmParent.name} (${CRM_MODE_COPY[crmMode].title}) — wire up the repo manually`
+            : `Clone provisioned${result.githubUrl ? " on GitHub" : ""} — ${CRM_MODE_COPY[crmMode].title}, copied from ${crmParent.name}`,
         );
       }
 
@@ -473,7 +541,7 @@ function NewClone() {
         <p className="label-mono">provisioning</p>
         <h1 className="mt-1 font-display text-[2.125rem] leading-[1.05]">New clone</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Spin up a child instance of the prime codebase.
+          Spin up a new deployment on one of the fleet&apos;s two CRM lines.
         </p>
       </header>
 
@@ -496,6 +564,110 @@ function NewClone() {
               placeholder="client, eu-west, prod"
             />
           </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <Network className="h-4 w-4 text-primary" /> 1b · CRM
+          </CardTitle>
+          <CardDescription>
+            Which CRM will this clone run? The answer decides the parent clone its repository is
+            copied from, and every change it receives afterwards arrives through that parent.
+            Nothing is chosen for you.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="grid gap-3 md:grid-cols-2">
+            {CRM_MODES.map((mode) => {
+              const copy = CRM_MODE_COPY[mode];
+              const judged = crmLineage?.[mode] ?? null;
+              const usable = judged?.ok === true;
+              const active = crmMode === mode;
+              const Icon = mode === "independent" ? Database : Link2;
+              return (
+                <button
+                  key={mode}
+                  type="button"
+                  aria-pressed={active}
+                  // aria-disabled rather than disabled: a disabled button is
+                  // skipped by the keyboard and by a screen reader, and the
+                  // reason a line is held back is written inside it.
+                  aria-disabled={!usable}
+                  onClick={() => {
+                    if (usable) setCrmMode(mode);
+                  }}
+                  className={cn(
+                    "rounded-lg border p-4 text-left transition-all",
+                    active
+                      ? "border-primary bg-primary/5 shadow-[0_0_0_1px_var(--color-primary)]"
+                      : "border-border bg-card",
+                    usable && !active && "hover:border-primary/40",
+                    !usable && "cursor-not-allowed",
+                  )}
+                >
+                  <div className="flex items-center justify-between">
+                    <Icon
+                      className={cn("h-5 w-5", active ? "text-primary" : "text-muted-foreground")}
+                    />
+                    {active && <Check className="h-4 w-4 text-primary" />}
+                  </div>
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <span className="font-mono font-semibold">{copy.title}</span>
+                    <Badge variant="outline" className="font-mono text-[10px]">
+                      {copy.provider}
+                    </Badge>
+                  </div>
+                  <p className="mt-2 text-xs text-muted-foreground">{copy.summary}</p>
+                  <p className="mt-1 text-[11px] text-muted-foreground">{copy.consequence}</p>
+                  <div className="mt-3 border-t border-border pt-2 text-[11px]">
+                    {judged === null ? (
+                      crmLineageState === "loading" ? (
+                        <span className="inline-flex items-center gap-1 text-muted-foreground">
+                          <Loader2 className="h-3 w-3 animate-spin" /> Reading this line&apos;s
+                          parent…
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground">
+                          This line&apos;s parent could not be checked.
+                        </span>
+                      )
+                    ) : judged.ok ? (
+                      <span className="text-muted-foreground">
+                        Copied from{" "}
+                        <span className="font-medium text-foreground">{judged.parent.name}</span> ·{" "}
+                        <span className="font-mono">
+                          {judged.parent.githubOwner}/{judged.parent.githubRepo}
+                        </span>
+                      </span>
+                    ) : (
+                      <span className="text-destructive">{judged.reason}</span>
+                    )}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+          {crmLineageState === "failed" && (
+            <Alert variant="destructive">
+              <AlertTriangle className="h-4 w-4" />
+              <AlertTitle className="text-xs font-mono uppercase tracking-wider">
+                Could not check the CRM lines
+              </AlertTitle>
+              <AlertDescription className="text-xs">
+                {crmLineageError ?? "The read failed."} Neither line is offered until it can be
+                checked: a read that failed says nothing about which parent is missing.
+                <button
+                  type="button"
+                  onClick={() => void loadCrmLineage()}
+                  className="ml-2 font-mono text-[11px] underline underline-offset-2"
+                >
+                  re-check
+                </button>
+              </AlertDescription>
+            </Alert>
+          )}
         </CardContent>
       </Card>
 

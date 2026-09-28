@@ -66,7 +66,7 @@ export const BUILDER_PARTNER_DOCUMENT_NAME = "Builder Partner Agreement";
 /** How an envelope is traced back to the organisation it admits. */
 export const BUILDER_ORGANISATION_CUSTOM_FIELD = "mc_builder_organisation_id";
 
-/** The registered terms' private bucket (see the 20260928100000 migration). */
+/** The registered terms' private bucket (see the 20260928110000 migration). */
 export const BUILDER_PARTNER_TEMPLATE_BUCKET = "agreement-templates";
 
 /** The bucket's own ceiling, and DocuSign's comfortable document size. */

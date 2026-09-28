@@ -163,6 +163,50 @@ export function ciRunsIdentityGuard(yaml: string): boolean {
  */
 export const GITLEAKS_CONFIG_PATH = ".gitleaks.toml";
 
+/**
+ * The isolation spec a clone of the CRM-dependent line inherits, naming its
+ * PARENT'S project.
+ *
+ * `npc-client-dashboard` carries `backendIsolation.spec.ts`, which pins the
+ * deployment's own ref as a literal — `const OWN_PROJECT_REF = '<ref>'` — and
+ * asserts that `supabase/config.toml`, the fallback URL and the fallback key's
+ * `ref` claim all name it. The prime does not carry the file, so a clone
+ * created from the PRIME never received one; a clone created from a PARENT
+ * receives the parent's copy byte for byte. Step 2 above then points
+ * `config.toml` at the new project, and the spec, still naming the parent's,
+ * fails the new repository's first CI run on its own correct configuration.
+ *
+ * Measured on the two clones that descend from that parent: `npc-test-76b3b3`
+ * and `preflight-property-group` each had the literal corrected BY HAND after
+ * a cascade delivered the parent's (NPC Test #127, 23 Sep 2026). Provisioning
+ * is the one place that knows the new ref at the moment the copy lands, so it
+ * is rewritten here — the literal and nothing else. Unlike
+ * `shippedBackendIdentity.spec.ts` (step 8), this spec is not
+ * deployment-agnostic, which is exactly why it needs a writer.
+ */
+export const ISOLATION_SPEC_PATH = "src/lib/__tests__/backendIsolation.spec.ts";
+
+const OWN_PROJECT_REF_CONST = /(\bconst\s+OWN_PROJECT_REF\s*=\s*)(['"])([a-z]{20})\2/;
+
+/** The ref the isolation spec pins, or null when it declares none. */
+export function ownProjectRefConstOf(text: string): string | null {
+  return OWN_PROJECT_REF_CONST.exec(text)?.[3] ?? null;
+}
+
+/**
+ * Point the isolation spec's pinned ref at the clone.
+ *
+ * Only the declaration is touched, and only when it is a Supabase ref: every
+ * assertion in the spec reads the constant, and a literal elsewhere in the file
+ * is a fixture describing some OTHER project on purpose (the prime's ref, which
+ * the spec asserts this deployment does NOT name). Idempotent.
+ */
+export function rewriteOwnProjectRefConst(text: string, cloneRef: string): string {
+  return text.replace(OWN_PROJECT_REF_CONST, (_whole, head: string, quote: string) => {
+    return `${head}${quote}${cloneRef}${quote}`;
+  });
+}
+
 export const RETARGET_WORKFLOWS = [
   ".github/workflows/deploy-supabase-functions.yml",
   ".github/workflows/apply-migration.yml",
@@ -431,6 +475,46 @@ export async function retargetCloneRepo(
   } catch (e) {
     actions.push({
       target: CONFIG_TOML_PATH,
+      status: "failed",
+      detail: e instanceof Error ? e.message : String(e),
+    });
+  }
+
+  // 2b. The isolation spec a clone copied from a parent inherits naming the
+  //     parent's project. Absent is the ordinary case — the prime carries no
+  //     such spec, so neither does anything created from it.
+  try {
+    const f = await readFile(ISOLATION_SPEC_PATH);
+    if (!f) {
+      actions.push({ target: ISOLATION_SPEC_PATH, status: "absent" });
+    } else {
+      const pinned = ownProjectRefConstOf(f.text);
+      if (pinned === null) {
+        actions.push({
+          target: ISOLATION_SPEC_PATH,
+          status: "failed",
+          detail:
+            "The isolation spec declares no OWN_PROJECT_REF this step can read, so it could not be pointed at this deployment's project. Check it names this deployment before its first CI run.",
+        });
+      } else if (pinned === cloneProjectRef) {
+        actions.push({ target: ISOLATION_SPEC_PATH, status: "unchanged" });
+      } else {
+        await writeFile(
+          ISOLATION_SPEC_PATH,
+          rewriteOwnProjectRefConst(f.text, cloneProjectRef),
+          f.sha,
+          "chore(aurixa): pin the isolation spec to this deployment's own project",
+        );
+        actions.push({
+          target: ISOLATION_SPEC_PATH,
+          status: "rewritten",
+          detail: `${pinned} → ${cloneProjectRef}`,
+        });
+      }
+    }
+  } catch (e) {
+    actions.push({
+      target: ISOLATION_SPEC_PATH,
       status: "failed",
       detail: e instanceof Error ? e.message : String(e),
     });

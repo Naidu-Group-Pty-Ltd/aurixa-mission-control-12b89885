@@ -744,7 +744,7 @@ The agreements refresh (`/hooks/agreements-refresh`) runs
 ### Rolling it out
 
 1. Merge. `.github/workflows/apply-migrations.yml` hands
-   `supabase/migrations/20260928100000_builder_partner_agreements.sql` to the
+   `supabase/migrations/20260928110000_builder_partner_agreements.sql` to the
    migration queue. Confirm that run is green before the code is published. The
    migration is additive, and with no terms registered the console approves
    exactly as it did before.
@@ -776,7 +776,7 @@ The agreements refresh (`/hooks/agreements-refresh`) runs
 - `src/components/builders-network-agreements.tsx` and
   `src/lib/use-send-builder-agreement.ts` — the console's standing line, the
   drafting action and the approval dialog.
-- `supabase/migrations/20260928100000_builder_partner_agreements.sql`:
+- `supabase/migrations/20260928110000_builder_partner_agreements.sql`:
   - `builder_partner_agreement_templates` and its freeze trigger;
   - `activate_builder_partner_agreement_template`;
   - the `client_agreements` columns (`builder_organisation_id`, `template_id`,

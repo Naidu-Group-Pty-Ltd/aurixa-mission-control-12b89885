@@ -559,6 +559,41 @@ export async function listProjectEdgeFunctionSlugs(projectRef: string): Promise<
 }
 
 /**
+ * The project's deployed function slugs, or NULL when they could not be read.
+ *
+ * `listProjectEdgeFunctionSlugs` answers `[]` on a failed read, which is right
+ * for its callers — parity still computes the rest of its diff, and
+ * provisioning's skip list merely fetches more than it needed. It is wrong for
+ * a caller that decides from the answer whether a function is MISSING: there
+ * `[]` reads as "none live", and a Management API hiccup would be taken for a
+ * project that lost its functions. Kept beside that reader rather than
+ * changing it, for the reason `listProjectEdgeFunctionFreshness` gives.
+ */
+export async function readProjectEdgeFunctionSlugs(projectRef: string): Promise<string[] | null> {
+  try {
+    const res = await fetch(`${MGMT_API}/projects/${projectRef}/functions`, {
+      headers: headers(),
+    });
+    if (!res.ok) return null;
+    const raw = (await res.json()) as unknown;
+    if (!Array.isArray(raw)) return null;
+    return raw
+      .map((r) => {
+        const o = r as Record<string, unknown>;
+        return typeof o.slug === "string"
+          ? o.slug
+          : typeof o.name === "string"
+            ? (o.name as string)
+            : "";
+      })
+      .filter((s) => s.length > 0)
+      .sort();
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The clone's live functions, each with the moment it was last deployed.
  *
  * `listProjectEdgeFunctionSlugs` answers "which of these does the target

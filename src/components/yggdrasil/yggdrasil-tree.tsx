@@ -20,7 +20,7 @@ import { MembraneBand } from "./membrane-band";
 import { MembraneDetailPanel } from "./membrane-detail-panel";
 import { LateralBand } from "./lateral-band";
 import { LateralDetailPanel } from "./lateral-detail-panel";
-import { resolveMembrane } from "@/lib/cascade/membrane/fleetMembranes.pure";
+import { membraneOnEdge } from "@/lib/cascade/membrane/fleetMembranes.pure";
 import type { Membrane } from "@/lib/cascade/membrane/membrane.pure";
 import type { LateralBoundary } from "@/lib/cascade/membrane/lateralMembranes.pure";
 
@@ -209,15 +209,16 @@ export function YggdrasilTree({
   }, []);
 
   // One membrane per branch, resolved from the two repositories the branch
-  // joins. `resolveMembrane` never refuses an edge it has not measured, so a
+  // joins. `membraneOnEdge` never refuses an edge it has not measured, so a
   // clone provisioned tomorrow still draws a band with the standing organs on
-  // it rather than drawing nothing.
+  // it rather than drawing nothing — and where the child records its CRM, the
+  // band carries that CRM's routed-name channel, as the engine's does.
   const membranes = useMemo(
     () =>
       layout.branches.map((branch) => ({
         branch,
         edge: `${branch.fromRepo}->${branch.toRepo}`,
-        membrane: resolveMembrane(branch.fromRepo, branch.toRepo),
+        membrane: membraneOnEdge(branch.fromRepo, branch.toRepo, branch.toCrmMode),
       })),
     [layout.branches],
   );

@@ -12,6 +12,7 @@ import { fireTokenWebhook } from "./token-webhooks.server";
 import { armGate } from "./payment-gate.server";
 import type { Database } from "@/integrations/supabase/types";
 import type { ProvisionCloneInput, ProvisionCloneResult } from "./clone-provisioning.functions";
+import { crmChildFields, describeCrmPlacement, type CrmParent } from "./crmLineage.pure";
 
 /**
  * The whole clone-creation pipeline as a plain function, so it has exactly
@@ -74,10 +75,37 @@ export async function provisionCloneCore(
     return { ok: false, error: "Prime not configured — set it up in Settings first" };
   }
 
+  // ─── Which CRM, and therefore which tree ─────────────────────────────
+  //
+  // Judged BEFORE any repository exists. A CRM choice is a choice of PARENT:
+  // the new repository is copied from that line's parent clone and recorded
+  // as its mirror child, so everything it later receives arrives through
+  // that parent (see `crmLineage.pure.ts`). Every refusal here costs nothing
+  // — no repository, no row — and names which of its five causes it is.
+  //
+  // No choice keeps the path every clone had before this existed: created
+  // from the prime, module-scoped. The signed-agreement flow still takes it.
+  let crmParent: CrmParent | null = null;
+  if (data.crmMode) {
+    const { readCrmParent } = await import("./crmLineage.server");
+    const judged = await readCrmParent(supabase, data.crmMode);
+    if (!judged.ok) return { ok: false, error: judged.reason };
+    crmParent = judged.parent;
+  }
+
+  // The repository the new one is created FROM.
+  const source = crmParent
+    ? { owner: crmParent.githubOwner, repo: crmParent.githubRepo }
+    : { owner: prime.github_owner, repo: prime.github_repo };
+
   let githubOwner = data.targetOwner;
   let githubRepo = data.slug;
   let githubUrl: string | null = null;
   let lastSyncedSha: string | null = null;
+  // The branch the new repository actually has. GitHub copies the SOURCE's
+  // default branch name, so a clone of a parent is read back rather than
+  // assumed to share the prime's.
+  let createdDefaultBranch: string | null = null;
 
   // Real GitHub work for fork / template
   if (data.method === "fork" || data.method === "template") {
@@ -91,11 +119,41 @@ export async function provisionCloneCore(
       };
     }
 
+    // A parent is copied with `createUsingTemplate`, which needs the template
+    // FLAG on the source and answers 404 without it. The prime carries the
+    // flag already; the parents did not, because until now nothing was ever
+    // created from one. Set here, idempotently, before the one call that needs
+    // it — and refused by name when the App cannot, since the alternative is
+    // a creation that fails with "Not Found" and no reason.
+    if (crmParent && data.method === "template") {
+      const { ensureTemplateRepository } = await import("./crmLineage.server");
+      const flagged = await ensureTemplateRepository(octokit, source);
+      if (!flagged.ok) return { ok: false, error: flagged.reason };
+      if (flagged.changed) {
+        const { error: flagAuditErr } = await supabase.from("audit_log").insert({
+          action: "clone.parent_marked_template",
+          entity_type: "clone",
+          entity_id: crmParent.id,
+          actor_user_id: userId,
+          metadata: {
+            repository: `${source.owner}/${source.repo}`,
+            crm_mode: crmParent.mode,
+            reason: "A clone is created from this repository with createUsingTemplate.",
+          },
+        });
+        if (flagAuditErr) {
+          console.error(
+            `[provisionCloneCore] could not record marking ${source.owner}/${source.repo} as a template: ${flagAuditErr.message}`,
+          );
+        }
+      }
+    }
+
     try {
       if (data.method === "fork") {
         const { data: forked } = await octokit.repos.createFork({
-          owner: prime.github_owner,
-          repo: prime.github_repo,
+          owner: source.owner,
+          repo: source.repo,
           organization: data.targetOwner,
           name: data.slug,
           default_branch_only: true,
@@ -103,20 +161,24 @@ export async function provisionCloneCore(
         githubOwner = forked.owner.login;
         githubRepo = forked.name;
         githubUrl = forked.html_url;
+        createdDefaultBranch = forked.default_branch ?? null;
       } else {
         // template
         const { data: created } = await octokit.repos.createUsingTemplate({
-          template_owner: prime.github_owner,
-          template_repo: prime.github_repo,
+          template_owner: source.owner,
+          template_repo: source.repo,
           owner: data.targetOwner,
           name: data.slug,
           private: true,
           include_all_branches: false,
-          description: `Aurixa clone of ${prime.github_owner}/${prime.github_repo}`,
+          description: crmParent
+            ? `Aurixa clone (${crmParent.mode === "independent" ? "CRM independent" : "CRM dependent"}) of ${source.owner}/${source.repo}`
+            : `Aurixa clone of ${source.owner}/${source.repo}`,
         });
         githubOwner = created.owner.login;
         githubRepo = created.name;
         githubUrl = created.html_url;
+        createdDefaultBranch = created.default_branch ?? null;
       }
 
       // Record the baseline: the PRIME revision this clone's content was
@@ -142,23 +204,39 @@ export async function provisionCloneCore(
       // no recorded revision as owing every backend file, which is the safe
       // reading — so a prime that cannot be read is recorded as no baseline
       // rather than as somebody else's commit.
-      try {
-        const { data: br } = await octokit.repos.getBranch({
-          owner: prime.github_owner,
-          repo: prime.github_repo,
-          branch: prime.default_branch || "main",
-        });
-        lastSyncedSha = br.commit.sha;
-      } catch {
-        // The prime is unreadable this instant; a wrong baseline is worse
-        // than none, and the first cascade to merge writes the real one.
-        lastSyncedSha = null;
+      //
+      // A clone copied from a PARENT takes the parent's recorded prime commit
+      // instead, for the same reason: it is the prime revision the copied
+      // branch carries, and the parent's own branch head is a commit of the
+      // parent's repository that the prime has never heard of.
+      if (crmParent) {
+        lastSyncedSha = crmParent.lastSyncedSha;
+      } else {
+        try {
+          const { data: br } = await octokit.repos.getBranch({
+            owner: prime.github_owner,
+            repo: prime.github_repo,
+            branch: prime.default_branch || "main",
+          });
+          lastSyncedSha = br.commit.sha;
+        } catch {
+          // The prime is unreadable this instant; a wrong baseline is worse
+          // than none, and the first cascade to merge writes the real one.
+          lastSyncedSha = null;
+        }
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : "GitHub repo creation failed";
       return { ok: false, error: msg };
     }
   }
+
+  // The lineage a CRM choice records. Written for the `clone` method too,
+  // where no repository is created here: the operator wires one up by hand,
+  // and the recorded parent is what makes it receive the right tree once it
+  // exists — the arrangement `npc-client-dashboard` itself was registered
+  // with.
+  const lineage = crmParent ? crmChildFields(crmParent, createdDefaultBranch) : null;
 
   // ─── Which billing identity this clone spends against ────────────────
   //
@@ -194,7 +272,7 @@ export async function provisionCloneCore(
       github_owner: githubOwner,
       github_repo: githubRepo,
       github_url: githubUrl,
-      default_branch: prime.default_branch || "main",
+      default_branch: lineage?.default_branch ?? (prime.default_branch || "main"),
       cloudflare_enabled: data.cloudflareEnabled,
       // `in_sync` is a claim that this clone holds a known prime revision, so
       // it is only made where one was actually recorded. With no baseline the
@@ -210,6 +288,18 @@ export async function provisionCloneCore(
       isolated_tenant: data.isolatedTenant === true,
       idempotency_key: data.idempotencyKey ?? null,
       entitled_plan_slug: data.planSlug ?? null,
+      // The CRM line, written in the same insert as the row so no reader can
+      // see a clone with a parent and no mode, or a mode and no parent. A
+      // clone provisioned with no choice keeps the prime-sourced, module
+      // scope every clone had before the choice existed, and records no mode:
+      // NULL is "nobody said", never a default.
+      ...(lineage
+        ? {
+            parent_clone_id: lineage.parent_clone_id,
+            sync_scope: lineage.sync_scope,
+            crm_mode: lineage.crm_mode,
+          }
+        : {}),
     })
     .select()
     .single();
@@ -376,7 +466,17 @@ export async function provisionCloneCore(
     // Push only the file_globs from picked modules to the freshly-created
     // repo so it lands with the modules pre-populated. Fire-and-forget:
     // failure here is non-fatal — the operator can re-cascade from the UI.
-    if (data.method !== "clone" && githubUrl) {
+    //
+    // Not for a clone created under a CRM parent. It already holds its
+    // parent's WHOLE tree — every module's files included, since a mirror is
+    // the tree rather than a selection of it — so there is nothing for this
+    // cascade to add. And the one thing it could do is harm: were lineage
+    // routing ever off, it would read these globs from the PRIME, and the
+    // files a CRM line owns (the provider routing, the crm-* functions) are
+    // exactly the ones whose prime copy differs. The `clone_modules` rows
+    // above are still written: they are the entitlement record, not a
+    // delivery.
+    if (data.method !== "clone" && githubUrl && !lineage) {
       try {
         const { data: mods } = await supabase
           .from("modules")
@@ -624,6 +724,9 @@ export async function provisionCloneCore(
       modules: data.moduleIds,
       github_url: githubUrl,
       subdomain: reservedSubdomain,
+      crm_mode: lineage?.crm_mode ?? null,
+      parent_clone_id: lineage?.parent_clone_id ?? null,
+      created_from: `${source.owner}/${source.repo}`,
     },
   });
 
@@ -632,12 +735,19 @@ export async function provisionCloneCore(
     severity: "success",
     title: `Clone created: ${data.name}`,
     body:
-      data.method === "clone"
+      (data.method === "clone"
         ? `Registered as independent clone (no repo created)`
-        : `Provisioned via ${data.method} → ${githubOwner}/${githubRepo}`,
+        : `Provisioned via ${data.method} → ${githubOwner}/${githubRepo}`) +
+      (crmParent ? `. ${describeCrmPlacement(crmParent)}` : ""),
     clone_id: inserted.id,
     url: `/clones/${inserted.id}`,
-    metadata: { method: data.method, cloudflare: data.cloudflareEnabled, github_url: githubUrl },
+    metadata: {
+      method: data.method,
+      cloudflare: data.cloudflareEnabled,
+      github_url: githubUrl,
+      crm_mode: lineage?.crm_mode ?? null,
+      parent_clone_id: lineage?.parent_clone_id ?? null,
+    },
   });
 
   // No "API key issued" notification here any more, and no `new_key_secret`
