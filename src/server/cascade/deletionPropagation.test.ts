@@ -458,13 +458,20 @@ describe("the rules the engine has to keep", () => {
 
   it("checks references before it plans, and plans before it writes the tree", () => {
     const withholdAt = code.indexOf("withholdReferencedDeletions(");
-    const planAt = code.indexOf(
-      "planDeletions(deletionVerdicts, MAX_DELETIONS_PER_CASCADE, deletionApproved)",
-    );
+    const planAt = code.indexOf("planDeletions(deletionVerdicts, deletionCap, deletionOverCap)");
     const treeAt = code.indexOf("octokit.git.createTree(");
     expect(withholdAt).toBeGreaterThan(-1);
     expect(planAt).toBeGreaterThan(withholdAt);
     expect(treeAt).toBeGreaterThan(planAt);
+  });
+
+  it("plans a cascade under the cascade's own cap and approval — only a conversion differs", () => {
+    expect(code).toContain(
+      "const deletionCap = conversion ? MAX_CONVERSION_DELETIONS : MAX_DELETIONS_PER_CASCADE;",
+    );
+    expect(code).toContain(
+      "const deletionOverCap = conversion ? new Set<string>() : deletionApproved;",
+    );
   });
 
   it("closes the reference check over its own keeps — a withheld deletion is a survivor too", () => {

@@ -60,6 +60,7 @@ import { CRM_MODE_COPY, crmModeLabel, isCrmMode } from "@/lib/crmMode.pure";
 import type { CrmParent, CrmParentJudgement } from "./crmLineage.pure";
 import { crmChildFields } from "./crmLineage.pure";
 import type { DeletionPlan, DeletionVerdict } from "./cascade/deletionPropagation.pure";
+import type { SyncExclusion } from "./cascade/syncExclusions.pure";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Vocabulary
@@ -528,6 +529,78 @@ export function retiredFunctionsKept(
   plannedDeletes: ReadonlySet<string>,
 ): string[] {
   return retired.filter((slug) => !plannedDeletes.has(`supabase/functions/${slug}/index.ts`));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2b. The four files that ARE the line
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The browser files that decide which CRM a deployment talks to.
+ *
+ * On the independent line each routes through `src/lib/crm/crmProvider.ts`; on
+ * the dependent line each calls GoHighLevel's functions directly. They are the
+ * files a cascade once silently reverted on the independent head (`2fc9c46`),
+ * which is why a clone that runs the independent line holds them as
+ * `manual_reconcile` exclusions — and why those holds are the one exclusion a
+ * conversion must see past: delivering the other line's copy of exactly these
+ * files is what a conversion is for.
+ */
+export const CRM_ROUTING_FILES = [
+  "src/components/clients/ClientConversationsTab.tsx",
+  "src/hooks/useGHLCalendar.tsx",
+  "src/pages/ClientTracker.tsx",
+  "src/pages/Conversations.tsx",
+] as const;
+
+const ROUTING = new Set<string>(CRM_ROUTING_FILES);
+
+/**
+ * The clone's exclusions as a conversion applies them.
+ *
+ * A `manual_reconcile` row whose pattern is EXACTLY one of the routing files
+ * is released for the conversion: it protects the line the clone is leaving
+ * from the prime, and the conversion's whole purpose is to replace it. Nothing
+ * else is released — a `protected` row stays protected whatever the file, a
+ * glob that happens to cover a routing file is left alone (it was written
+ * about something wider), and every other hold stands exactly as a cascade
+ * would apply it.
+ */
+export function conversionExclusions(exclusions: readonly SyncExclusion[]): {
+  exclusions: SyncExclusion[];
+  released: string[];
+} {
+  const released: string[] = [];
+  const kept: SyncExclusion[] = [];
+  for (const row of exclusions) {
+    if (row.reason === "manual_reconcile" && ROUTING.has(row.pattern)) {
+      released.push(row.pattern);
+      continue;
+    }
+    kept.push(row);
+  }
+  return { exclusions: kept, released: released.sort() };
+}
+
+/**
+ * The exclusion rows a finished conversion takes off the clone.
+ *
+ * Only on arrival at the DEPENDENT line: the rows exist to stop a cascade
+ * reverting the independent routing, and once the clone receives the dependent
+ * line's tree through its new parent they would do the opposite — hold the
+ * independent copies against the line's own delivery for ever. Arriving at the
+ * independent line removes nothing: the new parent carries the independent
+ * copies, and a clone that recorded the holds anyway is protected, not harmed.
+ */
+export function routingHoldsToRetire(
+  exclusions: readonly SyncExclusion[],
+  toMode: CrmMode,
+): string[] {
+  if (toMode !== "dependent") return [];
+  return exclusions
+    .filter((row) => row.reason === "manual_reconcile" && ROUTING.has(row.pattern))
+    .map((row) => row.pattern)
+    .sort();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

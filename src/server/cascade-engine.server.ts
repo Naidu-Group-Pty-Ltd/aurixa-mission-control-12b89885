@@ -114,6 +114,21 @@ import {
 } from "./cascade/configTomlReconcile.pure";
 import { describeWithheldFunctions, withheldPrimeOnlyFunctions } from "./primeOnlyFeatures.pure";
 import {
+  MAX_CONVERSION_DELETIONS,
+  OPEN_CONVERSION_STATUSES,
+  conversionBranchName,
+  conversionCommitSubject,
+  conversionExclusions,
+  conversionLead,
+  conversionTitle,
+  decideConversionDeletion,
+  describeConversionDeletions,
+  describeRetiredFunctions,
+  functionsRetiredByConversion,
+  retiredFunctionsKept,
+} from "./crmConversion.pure";
+import type { CrmMode } from "@/lib/crmMode.pure";
+import {
   SECURITY_REGISTRY_PATH,
   reconcileSecurityRegistry,
 } from "./cascade/securityRegistryReconcile.pure";
@@ -233,6 +248,40 @@ export type ClonePlan = {
   onlyInClone: number;
   unprobedDeletions: number;
   summary: string;
+  /**
+   * A CRM conversion only: the edge functions the proposal takes out of the
+   * clone's tree, and the routing holds it saw past. Absent on a cascade.
+   */
+  conversion?: {
+    retiredFunctions: string[];
+    releasedHolds: string[];
+    refusal: string | null;
+  };
+};
+
+/**
+ * What turns `processClone` into a CRM conversion
+ * (`crmConversion.pure.ts`). The caller supplies the TARGET line's head as
+ * `primeRef`/`sourceSha`, the clone with `crm_mode` already set to the target
+ * (so the membrane is the target line's), and `provenance` naming the head and
+ * the prime commit it carries.
+ */
+export type ConversionDelivery = {
+  conversionId: string;
+  cloneName: string;
+  fromMode: CrmMode;
+  toMode: CrmMode;
+  /** The tree the clone is leaving — what removals are keyed on. */
+  leaving: { ref: RepoRef; label: string };
+  targetLabel: string;
+  cautions: string[];
+  /** Called with the proposal once it exists. Never on a dry run. */
+  onProposal?: (proposal: {
+    number: number;
+    url: string;
+    branch: string;
+    headSha: string;
+  }) => Promise<void> | void;
 };
 type SupabaseLike = SupabaseClient<Database>;
 
@@ -670,6 +719,32 @@ export async function executeCascade(
   /** Reasons, in the order the loop met them. Non-empty ⇒ the event is held. */
   const lineageHolds: string[] = [];
 
+  // ── CRM conversions: a clone changing line receives no cascade ──────────
+  //
+  // An open conversion is a pull request built from the TARGET line's tree;
+  // a cascade from the line the clone is leaving would propose the opposite
+  // at the same time, and whichever merged second would undo the other. So
+  // the cascade stands down for that clone — `skipped`, with the reason, and
+  // no pointer moved: the conversion's own finaliser sets the pointer to what
+  // it delivered, and the new line's next cascade carries on from there.
+  // A failed read holds nobody: the conversion's branch is one no cascade
+  // machinery recognises, so the worst a missed hold costs is a second pull
+  // request a person sees beside it.
+  const openConversions = new Map<string, number | null>();
+  if (cloneIds.length > 0) {
+    const { data: convRows, error: convErr } = await supabase
+      .from("clone_crm_conversions")
+      .select("clone_id, pr_number")
+      .in("clone_id", cloneIds)
+      .in("status", [...OPEN_CONVERSION_STATUSES]);
+    if (convErr) {
+      console.warn(
+        `[cascade] ${event.id}: could not read open CRM conversions: ${convErr.message}`,
+      );
+    }
+    for (const row of convRows ?? []) openConversions.set(row.clone_id, row.pr_number);
+  }
+
   // Bounded in time, and a stop is a pause rather than a death.
   //
   // A fleet event processes every queued clone in this one loop, inside one
@@ -751,6 +826,22 @@ export async function executeCascade(
         .eq("id", r.id);
       await supabase.from("clones").update({ sync_status: "failed" }).eq("id", clone.id);
       failed++;
+      continue;
+    }
+
+    if (openConversions.has(clone.id)) {
+      const pr = openConversions.get(clone.id);
+      await supabase
+        .from("cascade_results")
+        .update({
+          status: "skipped",
+          error_message:
+            `Held: a CRM conversion is open for ${clone.name}` +
+            `${pr ? ` (PR #${pr})` : ""}. Merging or closing it releases this clone.`,
+          completed_at: new Date().toISOString(),
+        })
+        .eq("id", r.id);
+      skipped++;
       continue;
     }
 
@@ -1543,8 +1634,18 @@ export async function processClone(args: {
     /** The PRIME commit this delivery carries, whatever repo it was read from. */
     deliveredSha: string;
   };
+  /**
+   * Build a CRM conversion instead of a cascade. See `ConversionDelivery`.
+   * Removals are keyed on the line the clone leaves, the proposal lives on a
+   * branch the cascade's own machinery never recognises, and it is proposed
+   * in `pr` mode whatever mode is asked — merging it is the conversion.
+   */
+  conversion?: ConversionDelivery;
 }): Promise<CascadeResultUpdate> {
-  const { octokit, primeRef, sourceSha, mode, clone, supabase, scopeFilter } = args;
+  const { octokit, primeRef, sourceSha, clone, supabase, scopeFilter } = args;
+  const conversion = args.conversion ?? null;
+  // A conversion is never merged by the platform, and never a drift notice.
+  const mode: Database["public"]["Enums"]["cascade_mode"] = conversion ? "pr" : args.mode;
   const dryRun = args.dryRun === true;
 
   /** What a label names. `prime` unless this clone read from its parent. */
@@ -1577,12 +1678,27 @@ export async function processClone(args: {
     .from("clone_sync_exclusions")
     .select("pattern, reason, note")
     .eq("clone_id", clone.id);
-  const exclusions = requireExclusions(
+  const recordedExclusions = requireExclusions(
     clone.id,
     exclusionRes.data as SyncExclusion[] | null,
     exclusionRes.error,
   );
-  if (isMirror) assertMirrorPolicy(clone.id, exclusions);
+  if (isMirror) assertMirrorPolicy(clone.id, recordedExclusions);
+  if (conversion && !isMirror) {
+    // `judgeConversion` refuses a module-scoped clone by name; this is the
+    // engine refusing to be the one that finds out otherwise.
+    throw new Error(
+      `A CRM conversion needs a mirror clone; ${clone.name} is ${clone.sync_scope ?? "unscoped"}`,
+    );
+  }
+  // A conversion sees past exactly the routing holds — the files the target
+  // line's copy of is the conversion. Every other exclusion stands.
+  const releasedRoutingHolds = conversion
+    ? conversionExclusions(recordedExclusions).released
+    : [];
+  const exclusions = conversion
+    ? conversionExclusions(recordedExclusions).exclusions
+    : recordedExclusions;
 
   // This clone's own Supabase project, for `backendIdentityHold` below.
   //
@@ -2302,7 +2418,33 @@ export async function processClone(args: {
   let deletionVerdicts: DeletionVerdict[] = [];
   let unprobedDeletions = 0;
   let probePaused = false;
-  if (probeable.size > 0) {
+  if (conversion && probeable.size > 0) {
+    // What a conversion removes is keyed on the line the clone LEAVES, never
+    // on the history of the one it joins: a file is removed only where the
+    // leaving line carries it with this clone's exact bytes.
+    const leavingTree = await listTreeEntries(octokit, conversion.leaving.ref);
+    let leavingHead = conversion.leaving.ref.branch;
+    try {
+      const { data: lb } = await octokit.repos.getBranch({
+        owner: conversion.leaving.ref.owner,
+        repo: conversion.leaving.ref.repo,
+        branch: conversion.leaving.ref.branch,
+      });
+      leavingHead = lb.commit.sha;
+    } catch {
+      // The label on a removal, not a verdict: the listing above already
+      // answered for the bytes.
+    }
+    const leaving = {
+      shaByPath: leavingTree.entries,
+      complete: !leavingTree.truncated,
+      headSha: leavingHead,
+      label: conversion.leaving.label,
+    };
+    deletionVerdicts = deletionCandidates
+      .filter((c) => probeable.has(c.path))
+      .map((c) => decideConversionDeletion(c, leaving));
+  } else if (probeable.size > 0) {
     let slowestChunkMs = 0;
     const probe = await probeDeletions({
       octokit,
@@ -2363,6 +2505,23 @@ export async function processClone(args: {
     };
   }
   const pendingDeletes = deletionVerdicts.filter((v) => v.act === "delete").map((v) => v.path);
+  /**
+   * A conversion's removals are refused whole past their own ceiling and
+   * never admitted by a cascade's bulk-deletion approval: that approval was
+   * given for a set the prime retired, not for a line change.
+   */
+  const deletionCap = conversion ? MAX_CONVERSION_DELETIONS : MAX_DELETIONS_PER_CASCADE;
+  const deletionOverCap = conversion ? new Set<string>() : deletionApproved;
+  /**
+   * The edge functions a conversion takes out of the clone's tree: decided
+   * from the removals before the reference check, and re-checked against the
+   * final plan below (`retiredFunctionsKept`). Every pump is handed them as
+   * withheld, so no declaration or registry entry survives its directory.
+   */
+  const retiredByConversion: string[] =
+    conversion && primeShaByPath
+      ? functionsRetiredByConversion(pendingDeletes, primeShaByPath.keys())
+      : [];
 
   // `sha: string` reuses an uploaded blob, `sha: null` DELETES the path, and
   // `content` inlines text for the chunked `createTree` chain — exactly one
@@ -2995,6 +3154,18 @@ export async function processClone(args: {
     }
   }
 
+  // What the two declaration files are reconciled WITHOUT: the functions the
+  // prime keeps for itself, and — on a conversion — the functions leaving
+  // with the line the clone leaves, so neither `config.toml` nor the
+  // registry carries a declaration forward for a directory this delivery
+  // removes. Kept apart from `withheldFunctions`, which every baseline reads
+  // as "the prime has it and this clone does not": a retired function is the
+  // other way round, and is taken out of `cloneOwnedFunctions` instead.
+  const declarationsWithheld: string[] =
+    retiredByConversion.length > 0
+      ? [...new Set([...withheldFunctions, ...retiredByConversion])].sort()
+      : withheldFunctions;
+
   if (mode !== "notify") {
     try {
       const [primeCfg, cloneCfg] = await Promise.all([
@@ -3006,7 +3177,7 @@ export async function processClone(args: {
           primeToml: primeCfg.content,
           cloneToml: cloneCfg.content,
           ownRef: ownProjectRef,
-          withheld: withheldFunctions,
+          withheld: declarationsWithheld,
         });
         if (verdict.ok) cloneOwnedFunctions = verdict.carriedForward;
         mergedToml = verdict.ok ? verdict.merged : cloneCfg.content;
@@ -3097,7 +3268,7 @@ export async function processClone(args: {
         const verdict = reconcileSecurityRegistry({
           primeJson: primeReg.content,
           cloneJson: cloneReg.content,
-          withheld: withheldFunctions,
+          withheld: declarationsWithheld,
         });
         // Either way prime's copy does not stand: it is replaced by the
         // reconciled one, or withheld for a person.
@@ -3166,6 +3337,10 @@ export async function processClone(args: {
   });
   if (ownedByTree !== null) {
     cloneOwnedFunctions = [...new Set([...cloneOwnedFunctions, ...ownedByTree])];
+  }
+  if (retiredByConversion.length > 0) {
+    const retired = new Set(retiredByConversion);
+    cloneOwnedFunctions = cloneOwnedFunctions.filter((name) => !retired.has(name));
   }
   // ── the two baselines that state this repository's own function set ────
   //
@@ -3669,7 +3844,7 @@ export async function processClone(args: {
   // Approvals are consulted only past the cap, and they are never evidence:
   // a path still has to earn its delete verdict from prime's history before
   // the approved set is even read. See `planDeletions`.
-  let deletionPlan = planDeletions(deletionVerdicts, MAX_DELETIONS_PER_CASCADE, deletionApproved);
+  let deletionPlan = planDeletions(deletionVerdicts, deletionCap, deletionOverCap);
   /** The removals planned before the channel ran: the most the narrowing can withhold. */
   const plannedBeforeTheChannel: ReadonlySet<string> = new Set(deletionPlan.deletes);
   /**
@@ -4486,7 +4661,7 @@ export async function processClone(args: {
     const landedNow = new Set(treeEntries.filter((t) => t.sha !== null).map((t) => t.path));
     const staying = new Map([...cloneKeptText].filter(([spec]) => !landedNow.has(spec)));
     await withholdStillReferenced(await deletionSurvivors(staying));
-    deletionPlan = planDeletions(deletionVerdicts, MAX_DELETIONS_PER_CASCADE, deletionApproved);
+    deletionPlan = planDeletions(deletionVerdicts, deletionCap, deletionOverCap);
     deletesCrossing = new Set(deletionPlan.deletes);
   }
 
@@ -4797,6 +4972,26 @@ export async function processClone(args: {
           .join("; ")}`
       : "";
 
+  // A conversion delivers its removals whole or not at all. A refused bulk
+  // plan, or an edge function whose directory the plan kept while its
+  // declarations were withheld, would leave a clone on the new line with a
+  // function the new line does not declare — so the proposal is refused and
+  // the conversion row says why.
+  const retiredStillKept = conversion
+    ? retiredFunctionsKept(retiredByConversion, new Set(deletionPlan.deletes))
+    : [];
+  const conversionRefusal: string | null = !conversion
+    ? null
+    : deletionPlan.refusal
+      ? `The removals the conversion needs were refused: ${deletionPlan.refusal}`
+      : retiredStillKept.length > 0
+        ? `The edge function(s) ${retiredStillKept.join(", ")} leave with the line this clone ` +
+          `leaves, but their files could not be removed (${deletionPlan.kept
+            .filter((k) => retiredStillKept.some((slug) => k.path.startsWith(`supabase/functions/${slug}/`)))
+            .map((k) => `${k.path}: ${k.why}`)
+            .join("; ") || "no byte-identical copy on the leaving line"}). Reconcile them by hand, then propose again.`
+        : null;
+
   for (const path of deletionPlan.deletes) {
     // `sha: null` is how a tree entry removes a path from `base_tree`.
     treeEntries.push({ path, mode: "100644" as const, type: "blob" as const, sha: null });
@@ -4865,7 +5060,26 @@ export async function processClone(args: {
     onlyInClone,
     unprobedDeletions,
     summary: fileSummary,
+    ...(conversion
+      ? {
+          conversion: {
+            retiredFunctions: retiredByConversion,
+            releasedHolds: releasedRoutingHolds,
+            refusal: conversionRefusal,
+          },
+        }
+      : {}),
   });
+
+  if (conversionRefusal) {
+    return {
+      status: "failed",
+      diff_summary: `CRM conversion refused: ${fileSummary}`,
+      files_changed: 0,
+      error_message: conversionRefusal,
+      completed_at: new Date().toISOString(),
+    };
+  }
 
   if (dryRun) {
     return {
@@ -4934,8 +5148,21 @@ export async function processClone(args: {
   // unchanged and deliberately so: `isEngineOnlyBranch` recognises an
   // unmodified proposal by this exact prefix, and a proposal the repair path
   // stops recognising is one that can never be rebuilt.
+  const conversionWording = conversion
+    ? {
+        cloneName: conversion.cloneName,
+        fromMode: conversion.fromMode,
+        toMode: conversion.toMode,
+        targetLabel: conversion.targetLabel,
+        leavingLabel: conversion.leaving.label,
+        sourceSha,
+        conversionId: conversion.conversionId,
+      }
+    : null;
   const message =
-    `chore(aurixa): cascade ${treeEntries.length} file(s) from ${sourceLabel}@${shortSha(sourceSha)}\n\n` +
+    (conversionWording
+      ? `${conversionCommitSubject(conversionWording, treeEntries.length)}\n\n`
+      : `chore(aurixa): cascade ${treeEntries.length} file(s) from ${sourceLabel}@${shortSha(sourceSha)}\n\n`) +
     treeEntries.map((t) => `- ${t.sha === null ? "DELETE " : ""}${t.path}`).join("\n");
 
   // What the pull request has to say beyond the file list. `manual_reconcile`
@@ -4946,7 +5173,16 @@ export async function processClone(args: {
     `\n\nScope: **${scopeLabel}**.\n\n` +
     `Files synchronized:\n\n` +
     treeEntries
-      .map((t) => `- \`${t.path}\`${t.sha === null ? " — **removed**, prime deleted it" : ""}`)
+      .map(
+        (t) =>
+          `- \`${t.path}\`${
+            t.sha === null
+              ? conversion
+                ? ` — **removed**, only ${conversion.leaving.label} carried it`
+                : " — **removed**, prime deleted it"
+              : ""
+          }`,
+      )
       .join("\n") +
     (staleHeld.length > 0
       ? `\n\n### ⚠ This cascade breaks a held file\n\n` +
@@ -5055,9 +5291,25 @@ export async function processClone(args: {
     (partition.held.length - needsReconcile.length > 0
       ? `\n\n_${partition.held.length - needsReconcile.length} further path(s) are owned by this clone and were withheld without comment._`
       : "") +
-    (describeDeletionPlan(deletionPlan)
-      ? `\n\n### What prime deleted\n\n${describeDeletionPlan(deletionPlan)}`
-      : "") +
+    (conversion
+      ? (describeConversionDeletions(deletionPlan, conversion.leaving.label)
+          ? `\n\n### What the line this clone leaves carried\n\n${describeConversionDeletions(
+              deletionPlan,
+              conversion.leaving.label,
+            )}`
+          : "") +
+        (describeRetiredFunctions(retiredByConversion, conversion.toMode)
+          ? `\n\n${describeRetiredFunctions(retiredByConversion, conversion.toMode)}`
+          : "") +
+        (releasedRoutingHolds.length > 0
+          ? `\n\n**Routing holds released for this proposal (${releasedRoutingHolds.length}).** ` +
+            `These files decide which CRM the deployment talks to, so the line this clone joins ` +
+            `delivers its own copy of each:\n` +
+            releasedRoutingHolds.map((p) => `- \`${p}\``).join("\n")
+          : "")
+      : describeDeletionPlan(deletionPlan)
+        ? `\n\n### What prime deleted\n\n${describeDeletionPlan(deletionPlan)}`
+        : "") +
     (unprobedDeletions > 0
       ? `\n\n_${unprobedDeletions} further clone-only path(s) were not checked against prime's history this run._`
       : "") +
@@ -5103,13 +5355,19 @@ export async function processClone(args: {
   // Failing to LIST is not failing to find: if the lookup errors we fall
   // through to opening a new pull request, because a duplicate is a tidiness
   // problem and a cascade that silently did not propose anything is not.
-  const intro =
-    mode === "auto_merge"
+  const intro = conversionWording
+    ? conversionLead(conversionWording, conversion?.cautions ?? [])
+    : mode === "auto_merge"
       ? "Auto-merge: this lands on green and waits otherwise."
       : `Automated cascade from **${primeRef.owner}/${primeRef.repo}@${shortSha(sourceSha)}**.`;
-  const title = `Aurixa cascade · ${sourceLabel}@${shortSha(sourceSha)} → ${treeEntries.length} file(s)`;
+  const title = conversionWording
+    ? conversionTitle(conversionWording, treeEntries.length)
+    : `Aurixa cascade · ${sourceLabel}@${shortSha(sourceSha)} → ${treeEntries.length} file(s)`;
 
-  const existing = await findOpenCascadePr(octokit, cloneRef);
+  // A conversion never reuses a cascade's proposal (it is not one, and moving
+  // its branch would put a line change into a pull request the merge drain
+  // lands on green). Its own slot is held by `clone_crm_conversions`.
+  const existing = conversion ? null : await findOpenCascadePr(octokit, cloneRef);
   let proposal: { number: number; url: string; nodeId: string | null; headSha: string } | null =
     null;
 
@@ -5181,8 +5439,12 @@ export async function processClone(args: {
     }
   }
 
+  let proposalBranch: string | null = null;
   if (!proposal) {
-    const branch = branchName(sourceSha);
+    const branch = conversion
+      ? conversionBranchName(conversion.toMode, sourceSha)
+      : branchName(sourceSha);
+    proposalBranch = branch;
     try {
       await octokit.git.createRef({
         owner: cloneRef.owner,
@@ -5222,6 +5484,17 @@ export async function processClone(args: {
   // `cascadeMergeDrain` owns it — writing it here is what left rows reading
   // "No check has reported on this pull request" long after every check had.
   const durableSummary = `PR #${proposal.number} ${existing ? "updated" : "opened"}: ${fileSummary}`;
+
+  if (conversion) {
+    // The conversion row learns its pull request before anything else can
+    // go wrong: a proposal nobody recorded is one the finaliser never sees.
+    await conversion.onProposal?.({
+      number: proposal.number,
+      url: proposal.url,
+      branch: proposalBranch ?? "",
+      headSha: proposal.headSha,
+    });
+  }
 
   // === auto_merge: always through a pull request, never past its checks ===
   //

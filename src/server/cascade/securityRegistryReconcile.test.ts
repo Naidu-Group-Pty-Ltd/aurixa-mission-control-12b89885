@@ -298,6 +298,6 @@ describe("a clone that does not hold what the prime keeps for itself", () => {
   it("is handed the set by the engine", () => {
     const engine = stripComments(readFileSync("src/server/cascade-engine.server.ts", "utf8"));
     const at = engine.indexOf("reconcileSecurityRegistry({");
-    expect(engine.slice(at, engine.indexOf("})", at))).toContain("withheld: withheldFunctions");
+    expect(engine.slice(at, engine.indexOf("})", at))).toContain("withheld: declarationsWithheld");
   });
 });

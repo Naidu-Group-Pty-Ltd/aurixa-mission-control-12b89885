@@ -8,6 +8,9 @@ import { LATERAL_BRANCH_PREFIX } from "./cascade/lateralExchange.pure";
 import { CASCADE_BRANCH_PREFIX } from "./cascadeMergeDrain.server";
 import {
   CONVERSION_BRANCH_PREFIX,
+  CRM_ROUTING_FILES,
+  conversionExclusions,
+  routingHoldsToRetire,
   CONVERSION_STATUSES,
   MAX_CONVERSION_DELETIONS,
   OPEN_CONVERSION_STATUSES,
@@ -627,5 +630,48 @@ describe("describeConversion", () => {
     expect(describeConversion({ ...row, status: "completed" })).toContain(
       "CRM dependent (GoHighLevel) → CRM independent (Native CRM)",
     );
+  });
+});
+
+describe("the routing files a conversion replaces", () => {
+  const rows = [
+    { pattern: "src/pages/Conversations.tsx", reason: "manual_reconcile" as const, note: null },
+    { pattern: "src/hooks/useGHLCalendar.tsx", reason: "protected" as const, note: null },
+    { pattern: "src/pages/**", reason: "manual_reconcile" as const, note: null },
+    { pattern: "src/App.tsx", reason: "manual_reconcile" as const, note: null },
+    { pattern: "src/pages/ClientTracker.tsx", reason: "manual_reconcile" as const, note: null },
+  ];
+
+  it("names exactly the four files that choose the CRM", () => {
+    expect([...CRM_ROUTING_FILES].sort()).toEqual([
+      "src/components/clients/ClientConversationsTab.tsx",
+      "src/hooks/useGHLCalendar.tsx",
+      "src/pages/ClientTracker.tsx",
+      "src/pages/Conversations.tsx",
+    ]);
+  });
+
+  it("releases only exact manual_reconcile holds on routing files", () => {
+    const out = conversionExclusions(rows);
+    expect(out.released).toEqual(["src/pages/ClientTracker.tsx", "src/pages/Conversations.tsx"]);
+    expect(out.exclusions.map((r) => r.pattern)).toEqual([
+      "src/hooks/useGHLCalendar.tsx",
+      "src/pages/**",
+      "src/App.tsx",
+    ]);
+  });
+
+  it("never releases a protected row, even on a routing file", () => {
+    const out = conversionExclusions(rows);
+    expect(out.exclusions.some((r) => r.reason === "protected")).toBe(true);
+    expect(out.released).not.toContain("src/hooks/useGHLCalendar.tsx");
+  });
+
+  it("retires the routing holds only on arrival at the dependent line", () => {
+    expect(routingHoldsToRetire(rows, "dependent")).toEqual([
+      "src/pages/ClientTracker.tsx",
+      "src/pages/Conversations.tsx",
+    ]);
+    expect(routingHoldsToRetire(rows, "independent")).toEqual([]);
   });
 });
