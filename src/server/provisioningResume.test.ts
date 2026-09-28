@@ -1246,6 +1246,9 @@ describe("every per-item step in the tail is budgeted, not just guarded in front
     // hidden; budget it before that strategy is made default again.
     applyPrimeMigrations: "legacy migration-replay path, not the default strategy",
     applyModuleMigrations: "legacy migration-replay path, not the default strategy",
+    // Bounded by the register: it acts only on the jobs `primeOnlyCronJobsIn`
+    // names. Measured 27 Sep 2026: one on each of the four clones.
+    sweepPrimeOnlyCronJobs: "bounded by the register — one job on each clone, measured",
   };
 
   it("discovers every per-item network loop in the module", () => {

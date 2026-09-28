@@ -317,15 +317,19 @@ describe("the registry describes the fleet as it is", () => {
     // before the pass, which is red on a file the cascade declined to write.
     // The Edge Function type baseline joined them when cascade #23 failed
     // `security` on a count describing prime's version of a file the clone
-    // kept its own copy of.
+    // kept its own copy of. The mobile API surface joined when the prime
+    // began keeping features for itself: it is generated from the registry,
+    // and a clone's registry stopped being the prime's.
     expect(pumps).toEqual([
       "reconcileConfigToml",
       "reconcileSecurityRegistry",
       "reconcileDeployWorkflow",
       "reconcileSecurityInventory",
       "reconcileFunctionCountRatchet",
+      "reconcileApiSurface",
       "reconcileEdgeTypecheckBaseline",
     ]);
+    expect(channels).toContain("PRIME_ONLY_FEATURES");
     expect(channels).toContain("backendIdentityHold");
     expect(channels).toContain("securityInventoryHold");
     expect(channels).toContain("judgingWorkflowHold");

@@ -85,6 +85,23 @@
  * bare TOML assignment; reusing it would have produced an assertion that always
  * passed. It is still applied as a second, independent check, so a project URL
  * appearing in this file in future is caught by one of the two.
+ *
+ * ## What the prime declares for itself alone is taken out
+ *
+ * The prime carries features no clone receives (`primeOnlyFeatures.pure.ts`):
+ * twenty-eight GoHighLevel account-migration functions, the owner's decision
+ * of 27 Sep 2026. Their directories are held by the write path, so a clone
+ * without them would otherwise be handed prime's file declaring twenty-eight
+ * functions it does not have — a gateway opinion about nothing, and a count
+ * the clone's own ratchet then has to be told about.
+ *
+ * So `withheld` names the prime-only functions the clone's tree does not hold,
+ * and their blocks are removed from prime's file rather than carried. It is
+ * the clone's TREE that decides, not the register alone: a clone still holding
+ * the feature keeps every declaration exactly as before, and nothing here
+ * removes a declaration for a function that is on disk. The read-back holds
+ * the other way too — a withheld block that survived the removal (a header
+ * this reader did not recognise) is refused rather than written.
  */
 
 import { backendRefsIn } from "./syncExclusions.pure";
@@ -107,6 +124,11 @@ export type ConfigTomlReconcile =
        * this file has to be legible as what it did.
        */
       carriedForward: string[];
+      /**
+       * Prime-only functions whose blocks were taken out of prime's file,
+       * because this clone does not hold them. Sorted.
+       */
+      withheldDropped: string[];
     }
   | { ok: false; reason: string };
 
@@ -149,8 +171,17 @@ export function reconcileConfigToml(args: {
   primeToml: string;
   cloneToml: string;
   ownRef: string | null;
+  /**
+   * Prime-only functions this clone's tree does not hold
+   * (`withheldPrimeOnlyFunctions`). Their blocks are removed from prime's
+   * file, and the clone's own block for one of them is not carried forward.
+   * Empty or omitted keeps every declaration, which is what a clone still
+   * holding the feature needs.
+   */
+  withheld?: readonly string[];
 }): ConfigTomlReconcile {
   const { primeToml, cloneToml, ownRef } = args;
+  const withheld = new Set(args.withheld ?? []);
 
   const primeId = projectIdLine(primeToml);
   const cloneId = projectIdLine(cloneToml);
@@ -194,11 +225,18 @@ export function reconcileConfigToml(args: {
   // carried across is prime's content everywhere else.
   let merged = primeToml.replace(primeId.line, cloneId.line);
 
-  // Then the clone's own function declarations. Prime wins every name the two
-  // share; this is only the set prime has no block for at all.
+  // Prime's declarations for what this clone does not carry come out, before
+  // anything of the clone's is appended — so a withheld name can only be
+  // removed from prime's text, never from the clone's own carried blocks.
   const primeNames = new Set(functionBlocksIn(primeToml).map((b) => b.name));
+  const withheldDropped = [...withheld].filter((n) => primeNames.has(n)).sort();
+  if (withheldDropped.length > 0) merged = dropFunctionBlocks(merged, withheld);
+
+  // Then the clone's own function declarations. Prime wins every name the two
+  // share; this is only the set prime has no block for at all — and never a
+  // prime-only function the clone does not hold, which it has no directory for.
   const cloneBlocks = functionBlocksIn(cloneToml);
-  const cloneOnly = cloneBlocks.filter((b) => !primeNames.has(b.name));
+  const cloneOnly = cloneBlocks.filter((b) => !primeNames.has(b.name) && !withheld.has(b.name));
   if (cloneOnly.length > 0) {
     const carried = cloneOnly.map((b) => b.text).join("\n\n");
     merged = `${merged.replace(/\n*$/, "")}\n\n${CLONE_OWNED_MARKER}\n\n${carried}\n`;
@@ -218,8 +256,10 @@ export function reconcileConfigToml(args: {
   // And the second read-back, for the second thing this file decides. A name
   // the clone declared and the result does not is a function whose gate just
   // changed to the CLI's default of `true` — refuse, and let a person see it,
-  // rather than write a file that closes a door nobody asked to close.
-  const lost = declarationsLostBy(cloneToml, merged);
+  // rather than write a file that closes a door nobody asked to close. A
+  // withheld name is the one exception, and only because this clone holds no
+  // directory for it: there is no door.
+  const lost = declarationsLostBy(cloneToml, merged).filter((n) => !withheld.has(n));
   if (lost.length > 0) {
     return {
       ok: false,
@@ -228,6 +268,23 @@ export function reconcileConfigToml(args: {
         `omitted \`[functions.X]\` block is read as \`verify_jwt = true\`, so writing it would ` +
         `gate ${lost.length === 1 ? "that function" : "those functions"} behind a JWT their ` +
         `callers may have no way to present`,
+    };
+  }
+  // The third, for the removal. Asked of the output rather than of the
+  // removal, and by the LOOSEST reading of a header: `[functions.x] # note`
+  // is not a block to `functionBlocksIn`, so the removal leaves it standing,
+  // while the clone's own inventory generator counts it. A declaration for a
+  // function the clone does not hold is exactly what the removal promised not
+  // to write.
+  const survived = [...merged.matchAll(/^\s*\[functions\.([^\]\s]+)\]/gm)]
+    .map((m) => m[1])
+    .filter((n) => withheld.has(n));
+  if (survived.length > 0) {
+    return {
+      ok: false,
+      reason:
+        `the reconciled file still declares ${[...new Set(survived)].join(", ")}, which this ` +
+        `clone does not hold and the prime keeps for itself`,
     };
   }
   const foreign = backendRefsIn(merged).filter((r) => r !== cloneId.value);
@@ -247,7 +304,53 @@ export function reconcileConfigToml(args: {
     ownRef: cloneId.value,
     changed: merged !== cloneToml,
     carriedForward: cloneOnly.map((b) => b.name),
+    withheldDropped,
   };
+}
+
+/**
+ * A config.toml with the named `[functions.X]` blocks taken out.
+ *
+ * A block here is its header, its keys, and any comment lines directly above
+ * the header with no blank line between — a comment written against a
+ * function goes with it. Comments after its last key are left alone: they sit
+ * above whatever comes next and are read as that section's. One blank line
+ * beside the block goes too, the one after it where there is one, so removing
+ * a block from a file of blank-separated blocks leaves blank-separated blocks.
+ *
+ * Measured on prime@387feb03 for the twenty-eight prime-only functions: 101
+ * lines removed — 28 headers, 45 keys, 28 blank lines, no comments — and not
+ * one line belonging to any other section.
+ *
+ * The file's trailing newline is kept exactly: it is set aside before the
+ * split and put back after, so removing a block that ends the file does not
+ * change how the file ends.
+ */
+export function dropFunctionBlocks(toml: string, names: ReadonlySet<string>): string {
+  if (names.size === 0) return toml;
+  const endsWithNewline = toml.endsWith("\n");
+  const lines = (endsWithNewline ? toml.slice(0, -1) : toml).split("\n");
+  const isSection = (line: string) => /^\s*\[/.test(line);
+  const isBlank = (line: string) => line.trim() === "";
+  const isComment = (line: string) => line.trim().startsWith("#");
+  const remove = new Set<number>();
+  for (let h = 0; h < lines.length; h += 1) {
+    const m = FUNCTION_HEADER.exec(lines[h]);
+    if (!m || !names.has(m[1])) continue;
+    let end = h + 1;
+    while (end < lines.length && !isSection(lines[end])) end += 1;
+    let last = h;
+    for (let i = h + 1; i < end; i += 1) {
+      if (!isBlank(lines[i]) && !isComment(lines[i])) last = i;
+    }
+    let start = h;
+    while (start - 1 >= 0 && isComment(lines[start - 1])) start -= 1;
+    for (let i = start; i <= last; i += 1) remove.add(i);
+    if (last + 1 < lines.length && isBlank(lines[last + 1])) remove.add(last + 1);
+    else if (start - 1 >= 0 && isBlank(lines[start - 1])) remove.add(start - 1);
+  }
+  const kept = lines.filter((_, i) => !remove.has(i)).join("\n");
+  return endsWithNewline ? `${kept}\n` : kept;
 }
 
 /** One `[functions.X]` block: its name, and its text exactly as written. */

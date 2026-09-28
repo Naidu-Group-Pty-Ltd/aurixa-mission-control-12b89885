@@ -40,8 +40,18 @@
  * cannot remove a function, and removing one from a tenant's project is
  * destructive in a way redeploying never is — it is somebody's decision, not a
  * consequence of a file no longer existing upstream.
+ *
+ * Nor does a change to what the prime keeps for itself
+ * (`primeOnlyFeatures.pure.ts`). The paths are read off the PRIME's history,
+ * not off what the cascade wrote, so its own feature's edits arrive here too:
+ * a function no clone is given would be named in a deploy plan, and an edit to
+ * one of its `_shared/` files would widen to every function on every clone —
+ * a fleet-wide redeploy for code none of them carries. `config.toml` still
+ * widens even where only the feature's own blocks moved, because telling that
+ * apart needs both revisions of the file, and a redeploy is never wrong.
  */
 import { isExcludedFunctionFile } from "@/server/prime-backend.server";
+import { isPrimeOnlyPath } from "@/server/primeOnlyFeatures.pure";
 
 const FUNCTIONS_PREFIX = "supabase/functions/";
 const MIGRATIONS_PREFIX = "supabase/migrations/";
@@ -104,6 +114,8 @@ export function cascadeBackendWork(paths: readonly string[]): CascadeBackendWork
     }
 
     if (!path.startsWith(FUNCTIONS_PREFIX)) continue;
+    // The prime's own feature: nothing a clone is given, so nothing it owes.
+    if (isPrimeOnlyPath(path)) continue;
 
     const rel = path.slice(FUNCTIONS_PREFIX.length);
     if (!rel || isExcludedFunctionFile(rel)) continue;

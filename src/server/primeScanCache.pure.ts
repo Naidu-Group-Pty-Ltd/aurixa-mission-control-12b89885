@@ -1,3 +1,5 @@
+import { isPrimeOnlyFunction } from "./primeOnlyFeatures.pure";
+
 /**
  * When a provisioning pass may skip the expensive half of the prime snapshot.
  *
@@ -69,4 +71,19 @@ export function scanIsCacheable(snapshot: {
     snapshot.sourceSha.length > 0 &&
     snapshot.secretNames.length > 0
   );
+}
+
+/**
+ * A cached declared-slug list, as a clone is contracted to carry it today.
+ *
+ * `prime_snapshot_scans` is keyed by commit, and a row scanned before the
+ * prime's own feature was held out of the function tree still lists its
+ * functions. Read as it stands, such a row names functions no clone is given,
+ * and `shouldSkipFunctionSource` would wait for them to go live on the clone
+ * before it trusted the cache again — every pass buying the fetch it exists to
+ * skip, for as long as the prime's head stays on that commit. The row is not
+ * rewritten; it is read through the same rule the tree walk applies.
+ */
+export function withoutPrimeOnlyFunctions(slugs: readonly string[]): string[] {
+  return slugs.filter((slug) => !isPrimeOnlyFunction(slug));
 }

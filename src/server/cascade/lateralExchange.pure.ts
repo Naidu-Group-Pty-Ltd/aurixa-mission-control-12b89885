@@ -1010,7 +1010,9 @@ export function planLateralDeletions(args: {
 
   // A path an exclusion claims is the destination's to keep, whoever deleted
   // it elsewhere — the same reason the vertical cascade never deletes one.
-  const partition = partitionCascadePaths([...byPath.keys()].sort(), destination.exclusions);
+  const partition = partitionCascadePaths([...byPath.keys()].sort(), destination.exclusions, {
+    purpose: "delete",
+  });
   for (const h of partition.held) {
     kept.push({ path: h.path, why: `Claimed on ${destination.repo} by \`${h.pattern}\`.` });
   }
