@@ -103,6 +103,7 @@ export const Route = createFileRoute("/agreements/")({
 const KIND_LABEL: Record<(typeof AGREEMENT_KINDS)[number], string> = {
   subscription: "Subscription",
   sla: "Service level",
+  builder_partner: "Builder Partner",
 };
 
 function AgreementsPage() {
@@ -219,12 +220,17 @@ function AgreementsPage() {
       <PageHeader
         eyebrow="client operations"
         title="Agreements"
-        description="Subscription Agreements and Service Level Agreements for leads — prepared here, signed via DocuSign, retained on the client record."
+        description="Subscription Agreements and Service Level Agreements for leads, and Builder Partner Agreements for builders joining the Builder Portal — prepared here, signed via DocuSign, retained on the record."
         actions={
           <>
             <Button variant="ghost" asChild>
               <Link to="/agreements/issuing-profile">
                 <SlidersHorizontal className="mr-2 h-4 w-4" /> Issuing profile
+              </Link>
+            </Button>
+            <Button variant="ghost" asChild>
+              <Link to="/agreements/builder-partner-terms">
+                <SlidersHorizontal className="mr-2 h-4 w-4" /> Builder Partner terms
               </Link>
             </Button>
             <Button variant="outline" onClick={() => setCreateOpen(true)}>

@@ -107,7 +107,7 @@ export type AgreementProvisionFacts = {
   client_name: string;
   client_org: string | null;
   created_by: string | null;
-  /** `sla` or `subscription`; absent on rows read before the column existed. */
+  /** `sla`, `subscription` or `builder_partner`; absent on rows read before the column existed. */
   document_kind?: string | null;
   /** Where the signed record was retained; subscription agreements need one. */
   signed_record_path?: string | null;
@@ -118,6 +118,7 @@ export type ProvisionDecision =
   | { action: "skip"; reason: ProvisionSkipReason; detail: string };
 
 export type ProvisionSkipReason =
+  | "builder_partner_never_provisions"
   | "not_armed"
   | "not_signed"
   | "already_done"
@@ -136,6 +137,20 @@ export type ProvisionSkipReason =
  * retriggers from the agreement row once the cause is fixed.
  */
 export function decideProvisionOnSignature(a: AgreementProvisionFacts): ProvisionDecision {
+  // A builder is admitted, never provisioned. A signed Builder Partner
+  // Agreement opens the Builder Portal on the network; a clone is a
+  // repository, a dedicated backend and a deployment for a CLIENT. The table
+  // refuses the arming too (client_agreements_builder_partner_no_clone_check),
+  // and this refuses first, whatever the row says — the operator's button
+  // included, which otherwise arms an un-armed agreement by being pressed.
+  if (a.document_kind === "builder_partner") {
+    return {
+      action: "skip",
+      reason: "builder_partner_never_provisions",
+      detail:
+        "A Builder Partner Agreement admits a builder to the Builder Portal; it never provisions a clone",
+    };
+  }
   if (!a.provision_on_signature) {
     return {
       action: "skip",

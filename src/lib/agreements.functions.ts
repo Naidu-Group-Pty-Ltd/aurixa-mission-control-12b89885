@@ -2,17 +2,20 @@
 // /agreements: raise an agreement for a lead or client, send it via
 // DocuSign, track it, download the signed document, void.
 //
-// Two kinds of agreement share one row and one lifecycle (`document_kind`):
-// the Service Level Agreement, a fixed PDF with a few prefilled tabs, and the
+// Three kinds of agreement share one row and one lifecycle (`document_kind`):
+// the Service Level Agreement, a fixed PDF with a few prefilled tabs; the
 // Subscription Agreement — the approved Launch, Growth or Scale offer, a Word
-// document Mission Control completes from a recorded offer. The subscription
-// half of this file prepares that offer; the DocuSign half is shared.
+// document Mission Control completes from a recorded offer; and the Builder
+// Partner Agreement a builder signs before the Builder Portal admits them
+// (prepared in `builderPartnerAgreements.functions.ts`). The subscription half
+// of this file prepares that offer; the DocuSign half is shared.
 import { createServerFn } from "@tanstack/react-start";
 import { asJson } from "@/lib/json-cast";
 import { z } from "zod";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import { requireAdmin, requireOperator } from "@/integrations/supabase/role-middleware";
+import { ADMIN_ROLES, hasAnyRole } from "@/integrations/supabase/roles";
 import {
   agreementColumnsFromOffer,
   issuingDay,
@@ -34,11 +37,29 @@ const uuid = z.string().uuid();
 export type AgreementRow = Database["public"]["Tables"]["client_agreements"]["Row"];
 
 /**
+ * The columns only a Builder Partner Agreement uses. The list never selects
+ * them: a database the migration has not reached lacks them, and that must
+ * cost the Builder Portal badges (`readBuilderAccess`), not the whole list.
+ */
+type BuilderPartnerColumn =
+  | "builder_organisation_id"
+  | "template_id"
+  | "grant_access_on_signature"
+  | "portal_access_status"
+  | "portal_access_detail"
+  | "portal_access_attempted_at"
+  | "portal_access_granted_at";
+
+/**
  * A row as the list carries it: everything but the working offer and the
  * issued snapshot, which only the offer's own page reads — a hundred of each
- * would be megabytes of JSON behind a table of names.
+ * would be megabytes of JSON behind a table of names — and the Builder
+ * Partner columns, which are read apart.
  */
-export type AgreementListRow = Omit<AgreementRow, "offer" | "issued_snapshot">;
+export type AgreementListRow = Omit<
+  AgreementRow,
+  "offer" | "issued_snapshot" | BuilderPartnerColumn
+>;
 
 const LIST_COLUMNS = [
   "id",
@@ -80,7 +101,7 @@ const LIST_COLUMNS = [
   "updated_at",
 ].join(", ");
 
-export const AGREEMENT_KINDS = ["sla", "subscription"] as const;
+export const AGREEMENT_KINDS = ["sla", "subscription", "builder_partner"] as const;
 
 export const AGREEMENT_STATUSES = [
   "draft",
@@ -137,8 +158,77 @@ export const listAgreements = createServerFn({ method: "POST" })
     }
     const { data: rows, error } = await q;
     if (error) throw error;
-    return { agreements: (rows ?? []) as unknown as AgreementListRow[] };
+    const agreements = (rows ?? []) as unknown as AgreementListRow[];
+    return { agreements, builderAccess: await readBuilderAccess(context.supabase, agreements) };
   });
+
+export type BuilderAccessFacts = {
+  builderOrganisationId: string | null;
+  portalAccessStatus: string | null;
+  grantAccessOnSignature: boolean;
+};
+
+/**
+ * Builder Portal access for the Builder Partner Agreements in a list, read
+ * apart from the list itself: a database the migration has not reached lacks
+ * these columns, and that must cost the badges, not the whole list.
+ */
+async function readBuilderAccess(
+  supabase: SupabaseClient<Database>,
+  rows: readonly AgreementListRow[],
+): Promise<Record<string, BuilderAccessFacts>> {
+  const ids = rows.filter((r) => r.document_kind === "builder_partner").map((r) => r.id);
+  if (!ids.length) return {};
+  const { data, error } = await supabase
+    .from("client_agreements")
+    .select("id, builder_organisation_id, portal_access_status, grant_access_on_signature")
+    .in("id", ids);
+  if (error) {
+    console.error("[agreements] builder access not read:", error.message);
+    return {};
+  }
+  const out: Record<string, BuilderAccessFacts> = {};
+  for (const row of data ?? []) {
+    out[row.id] = {
+      builderOrganisationId: row.builder_organisation_id,
+      portalAccessStatus: row.portal_access_status,
+      grantAccessOnSignature: row.grant_access_on_signature,
+    };
+  }
+  return out;
+}
+
+/**
+ * A Builder Partner Agreement decides who the Builder Portal admits, which only
+ * an admin decides: an operator may read one but never send, void or delete it.
+ * The database refuses a session's write to one as well; this says why first.
+ */
+async function assertAdminForBuilderPartner(
+  supabase: SupabaseClient<Database>,
+  userId: string,
+  agreementId: string,
+): Promise<void> {
+  const { data, error } = await supabase
+    .from("client_agreements")
+    .select("document_kind")
+    .eq("id", agreementId)
+    .maybeSingle();
+  if (error) throw error;
+  if (data?.document_kind !== "builder_partner") return;
+  const { data: roles, error: rolesError } = await supabase
+    .from("user_roles")
+    .select("role")
+    .eq("user_id", userId);
+  if (rolesError) throw rolesError;
+  if (
+    !hasAnyRole(
+      (roles ?? []).map((r) => r.role),
+      ADMIN_ROLES,
+    )
+  ) {
+    throw new Error("Only an admin can send, void or delete a Builder Partner Agreement.");
+  }
+}
 
 /**
  * A search box's text, reduced to what can sit inside a PostgREST `or()`
@@ -238,6 +328,7 @@ export const sendAgreement = createServerFn({ method: "POST" })
   .middleware([requireOperator])
   .inputValidator((input) => z.object({ id: uuid }).parse(input))
   .handler(async ({ data, context }) => {
+    await assertAdminForBuilderPartner(context.supabase, context.userId, data.id);
     const { sendAgreementEnvelope } = await import("@/server/agreements.server");
     return await sendAgreementEnvelope(data.id, { actorUserId: context.userId });
   });
@@ -263,7 +354,8 @@ export const voidAgreement = createServerFn({ method: "POST" })
   .inputValidator((input) =>
     z.object({ id: uuid, reason: z.string().max(500).default("") }).parse(input),
   )
-  .handler(async ({ data }) => {
+  .handler(async ({ data, context }) => {
+    await assertAdminForBuilderPartner(context.supabase, context.userId, data.id);
     const { voidEnvelope } = await import("@/server/agreements.server");
     await voidEnvelope(data.id, data.reason);
     return { ok: true };
@@ -275,6 +367,7 @@ export const deleteDraftAgreement = createServerFn({ method: "POST" })
   .handler(async ({ data, context }) => {
     // A draft is a status; an offer being sent is a draft with a claim, and a
     // sent offer is a record. Only a draft that was never issued may go.
+    await assertAdminForBuilderPartner(context.supabase, context.userId, data.id);
     const { data: deleted, error } = await context.supabase
       .from("client_agreements")
       .delete()
@@ -351,6 +444,11 @@ export const configureAgreementProvisioning = createServerFn({ method: "POST" })
       .maybeSingle();
     if (error) throw error;
     if (!agreement) throw new Error("agreement_not_found");
+    if (agreement.document_kind === "builder_partner") {
+      throw new Error(
+        "A Builder Partner Agreement admits a builder to the Builder Portal; it never provisions a clone.",
+      );
+    }
     if (
       agreement.provision_status === "provisioning" ||
       agreement.provision_status === "provisioned"

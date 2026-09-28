@@ -147,6 +147,7 @@ import { Route as BillingCancelRouteImport } from './routes/billing.cancel'
 import { Route as BillingApiUsageRouteImport } from './routes/billing.api-usage'
 import { Route as ApiHealthRouteImport } from './routes/api.health'
 import { Route as AgreementsIssuingProfileRouteImport } from './routes/agreements.issuing-profile'
+import { Route as AgreementsBuilderPartnerTermsRouteImport } from './routes/agreements.builder-partner-terms'
 import { Route as AgreementsAgreementIdRouteImport } from './routes/agreements.$agreementId'
 import { Route as VoiceStudioIndexRouteImport } from './routes/voice.studio.index'
 import { Route as CrmAccountsIndexRouteImport } from './routes/crm.accounts.index'
@@ -934,6 +935,12 @@ const AgreementsIssuingProfileRoute =
     path: '/agreements/issuing-profile',
     getParentRoute: () => rootRouteImport,
   } as any)
+const AgreementsBuilderPartnerTermsRoute =
+  AgreementsBuilderPartnerTermsRouteImport.update({
+    id: '/agreements/builder-partner-terms',
+    path: '/agreements/builder-partner-terms',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const AgreementsAgreementIdRoute = AgreementsAgreementIdRouteImport.update({
   id: '/agreements/$agreementId',
   path: '/agreements/$agreementId',
@@ -1378,6 +1385,7 @@ export interface FileRoutesByFullPath {
   '/slo': typeof SloRoute
   '/yggdrasil': typeof YggdrasilRoute
   '/agreements/$agreementId': typeof AgreementsAgreementIdRoute
+  '/agreements/builder-partner-terms': typeof AgreementsBuilderPartnerTermsRoute
   '/agreements/issuing-profile': typeof AgreementsIssuingProfileRoute
   '/api/health': typeof ApiHealthRoute
   '/billing/api-usage': typeof BillingApiUsageRoute
@@ -1591,6 +1599,7 @@ export interface FileRoutesByTo {
   '/slo': typeof SloRoute
   '/yggdrasil': typeof YggdrasilRoute
   '/agreements/$agreementId': typeof AgreementsAgreementIdRoute
+  '/agreements/builder-partner-terms': typeof AgreementsBuilderPartnerTermsRoute
   '/agreements/issuing-profile': typeof AgreementsIssuingProfileRoute
   '/api/health': typeof ApiHealthRoute
   '/billing/api-usage': typeof BillingApiUsageRoute
@@ -1806,6 +1815,7 @@ export interface FileRoutesById {
   '/slo': typeof SloRoute
   '/yggdrasil': typeof YggdrasilRoute
   '/agreements/$agreementId': typeof AgreementsAgreementIdRoute
+  '/agreements/builder-partner-terms': typeof AgreementsBuilderPartnerTermsRoute
   '/agreements/issuing-profile': typeof AgreementsIssuingProfileRoute
   '/api/health': typeof ApiHealthRoute
   '/billing/api-usage': typeof BillingApiUsageRoute
@@ -2022,6 +2032,7 @@ export interface FileRouteTypes {
     | '/slo'
     | '/yggdrasil'
     | '/agreements/$agreementId'
+    | '/agreements/builder-partner-terms'
     | '/agreements/issuing-profile'
     | '/api/health'
     | '/billing/api-usage'
@@ -2235,6 +2246,7 @@ export interface FileRouteTypes {
     | '/slo'
     | '/yggdrasil'
     | '/agreements/$agreementId'
+    | '/agreements/builder-partner-terms'
     | '/agreements/issuing-profile'
     | '/api/health'
     | '/billing/api-usage'
@@ -2449,6 +2461,7 @@ export interface FileRouteTypes {
     | '/slo'
     | '/yggdrasil'
     | '/agreements/$agreementId'
+    | '/agreements/builder-partner-terms'
     | '/agreements/issuing-profile'
     | '/api/health'
     | '/billing/api-usage'
@@ -2664,6 +2677,7 @@ export interface RootRouteChildren {
   SloRoute: typeof SloRoute
   YggdrasilRoute: typeof YggdrasilRoute
   AgreementsAgreementIdRoute: typeof AgreementsAgreementIdRoute
+  AgreementsBuilderPartnerTermsRoute: typeof AgreementsBuilderPartnerTermsRoute
   AgreementsIssuingProfileRoute: typeof AgreementsIssuingProfileRoute
   ApiHealthRoute: typeof ApiHealthRoute
   BillingApiUsageRoute: typeof BillingApiUsageRoute
@@ -3791,6 +3805,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AgreementsIssuingProfileRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/agreements/builder-partner-terms': {
+      id: '/agreements/builder-partner-terms'
+      path: '/agreements/builder-partner-terms'
+      fullPath: '/agreements/builder-partner-terms'
+      preLoaderRoute: typeof AgreementsBuilderPartnerTermsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/agreements/$agreementId': {
       id: '/agreements/$agreementId'
       path: '/agreements/$agreementId'
@@ -4461,6 +4482,7 @@ const rootRouteChildren: RootRouteChildren = {
   SloRoute: SloRoute,
   YggdrasilRoute: YggdrasilRoute,
   AgreementsAgreementIdRoute: AgreementsAgreementIdRoute,
+  AgreementsBuilderPartnerTermsRoute: AgreementsBuilderPartnerTermsRoute,
   AgreementsIssuingProfileRoute: AgreementsIssuingProfileRoute,
   ApiHealthRoute: ApiHealthRoute,
   BillingApiUsageRoute: BillingApiUsageRoute,

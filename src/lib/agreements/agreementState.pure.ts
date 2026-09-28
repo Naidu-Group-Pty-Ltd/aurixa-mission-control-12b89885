@@ -17,11 +17,14 @@ const BY_STATUS: Readonly<Record<string, Omit<AgreementState, "label">>> = {
   voided: { tone: "warning", spine: "warn" },
 };
 
+/** The kinds whose send is claimed before the envelope exists. */
+const CLAIMED_SEND_KINDS = new Set(["subscription", "builder_partner"]);
+
 /**
- * A subscription draft that has been claimed for sending is not an ordinary
- * draft: either the send is still running, or it stopped part-way and
- * pressing Send on the offer page finishes it. Everything else reads its
- * status.
+ * A subscription or Builder Partner draft that has been claimed for sending is
+ * not an ordinary draft: either the send is still running, or it stopped
+ * part-way and pressing Send on the agreement's page finishes it. Everything
+ * else reads its status.
  */
 export function agreementState(
   row: {
@@ -32,7 +35,7 @@ export function agreementState(
   },
   now: number,
 ): AgreementState {
-  if (row.document_kind === "subscription" && row.status === "draft") {
+  if (CLAIMED_SEND_KINDS.has(row.document_kind) && row.status === "draft") {
     const claim = sendClaimState(row, now);
     if (claim === "in_flight") return { label: "sending", tone: "info", spine: "live" };
     if (claim === "stale") return { label: "send interrupted", tone: "warning", spine: "warn" };

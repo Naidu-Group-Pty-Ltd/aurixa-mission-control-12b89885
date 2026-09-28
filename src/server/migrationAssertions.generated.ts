@@ -846,4 +846,29 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "column", table: "clone_backends", column: "clone_owned_functions" },
     ],
   },
+  {
+    migration: "20260928110000_builder_partner_agreements.sql",
+    version: "20260928110000",
+    assertions: [
+      {
+        kind: "check",
+        table: "client_agreements",
+        column: "document_kind",
+        value: "builder_partner",
+      },
+      { kind: "column", table: "client_agreements", column: "builder_organisation_id" },
+      { kind: "column", table: "client_agreements", column: "template_id" },
+      { kind: "column", table: "client_agreements", column: "grant_access_on_signature" },
+      { kind: "column", table: "client_agreements", column: "portal_access_status" },
+      { kind: "column", table: "client_agreements", column: "portal_access_granted_at" },
+      {
+        kind: "check",
+        table: "client_agreements",
+        column: "portal_access_status",
+        value: "granted",
+      },
+      { kind: "table", table: "builder_partner_agreement_templates" },
+      { kind: "rpc", fn: "activate_builder_partner_agreement_template" },
+    ],
+  },
 ];

@@ -18,6 +18,10 @@
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { notifyOperators } from "@/server/audit.server";
 import type { Database, Json } from "@/integrations/supabase/types";
+import {
+  AGREEMENT_ID_CUSTOM_FIELD,
+  pickRecoveredEnvelope,
+} from "@/lib/agreements/subscriptionIssue.pure";
 
 /* --------------------------------- config --------------------------------- */
 
@@ -326,6 +330,44 @@ export function buildEnvelopeDefinition(input: {
   };
 }
 
+/* --------------------------- recovering a lost send --------------------------- */
+
+export type EnvelopeLookup =
+  | { envelopeId: string; status: string; sentDateTime: string | null }
+  | null
+  | "unknown";
+
+/**
+ * Ask DocuSign whether an envelope for this agreement exists — the question
+ * that makes taking over a dead send safe. Every envelope a claimed send
+ * creates (a Subscription Agreement offer, a Builder Partner Agreement)
+ * carries its agreement id as a custom field for exactly this question.
+ * "unknown" when DocuSign could not be asked; a caller must then do nothing,
+ * because silence is not absence.
+ */
+export async function findEnvelopeForAgreement(
+  config: DocusignConfig,
+  token: string,
+  agreementId: string,
+  since: string,
+): Promise<EnvelopeLookup> {
+  const from = new Date(Date.parse(since) - 24 * 60 * 60_000);
+  const params = new URLSearchParams({
+    from_date: Number.isFinite(from.getTime()) ? from.toISOString() : since,
+    custom_field: `${AGREEMENT_ID_CUSTOM_FIELD}=${agreementId}`,
+  });
+  try {
+    const res = await fetch(
+      `${config.baseUrl}/v2.1/accounts/${config.accountId}/envelopes?${params.toString()}`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: "application/json" } },
+    );
+    if (!res.ok) return "unknown";
+    return pickRecoveredEnvelope(await res.json());
+  } catch {
+    return "unknown";
+  }
+}
+
 /* ------------------------------ status mapping ----------------------------- */
 
 /** Fold DocuSign's envelope status into the agreement lifecycle. */
@@ -398,7 +440,7 @@ export async function sendAgreementEnvelope(
 ): Promise<{
   envelopeId: string;
   status: string;
-  /** Subscription only: a lost send's envelope was found and recorded rather than a new one sent. */
+  /** Claimed kinds only (Subscription, Builder Partner): a lost send's envelope was found and recorded rather than a new one sent. */
   recovered?: boolean;
 }> {
   const config = docusignConfig();
@@ -420,6 +462,12 @@ export async function sendAgreementEnvelope(
   if (agreement.document_kind === "subscription") {
     const { sendSubscriptionEnvelope } = await import("./subscription-agreements.server");
     return await sendSubscriptionEnvelope(agreementId, opts);
+  }
+  // A Builder Partner Agreement is the registered terms plus a generated
+  // execution schedule, sent by the same claimed send; its own module issues it.
+  if (agreement.document_kind === "builder_partner") {
+    const { sendBuilderPartnerEnvelope } = await import("./builder-partner-agreements.server");
+    return await sendBuilderPartnerEnvelope(agreementId, opts);
   }
   const row = agreement as AgreementRow;
   if (row.docusign_envelope_id) throw new Error("agreement_already_sent");
@@ -532,6 +580,7 @@ export async function applyDocusignStatus(
   if (error) throw error;
   if (!agreement) throw new Error("agreement_not_found");
   const isSubscription = agreement.document_kind === "subscription";
+  const isBuilderPartner = agreement.document_kind === "builder_partner";
 
   const mapped = mapEnvelopeStatus(docusignStatus);
   const updates: Database["public"]["Tables"]["client_agreements"]["Update"] = {
@@ -551,22 +600,28 @@ export async function applyDocusignStatus(
   if (updateError) console.error("[agreements] status update failed:", updateError.message);
 
   if (transitioned && (mapped === "signed" || mapped === "declined")) {
-    const documentName = isSubscription
-      ? `${agreement.service_tier ?? ""} Subscription Agreement`.trim()
-      : "Service Level Agreement";
-    const party = isSubscription
-      ? `${agreement.client_org ?? agreement.client_name} (${agreement.client_name})`
-      : agreement.client_name;
+    const documentName = isBuilderPartner
+      ? "Builder Partner Agreement"
+      : isSubscription
+        ? `${agreement.service_tier ?? ""} Subscription Agreement`.trim()
+        : "Service Level Agreement";
+    const party =
+      isSubscription || isBuilderPartner
+        ? `${agreement.client_org ?? agreement.client_name} (${agreement.client_name})`
+        : agreement.client_name;
+    const referenceSuffix = !agreement.offer_reference
+      ? "."
+      : isBuilderPartner
+        ? ` (reference ${agreement.offer_reference}).`
+        : isSubscription
+          ? ` (offer ${agreement.offer_reference}).`
+          : ".";
     await notifyOperators({
       kind: mapped === "signed" ? "agreement_signed" : "agreement_declined",
       severity: mapped === "signed" ? "success" : "warning",
       title: mapped === "signed" ? "Agreement signed" : "Agreement declined",
-      body:
-        `${party}'s ${documentName} was ${mapped}` +
-        (isSubscription && agreement.offer_reference
-          ? ` (offer ${agreement.offer_reference}).`
-          : "."),
-      url: isSubscription ? `/agreements/${agreementId}` : "/agreements",
+      body: `${party}'s ${documentName} was ${mapped}${referenceSuffix}`,
+      url: isSubscription || isBuilderPartner ? `/agreements/${agreementId}` : "/agreements",
       metadata: { agreement_id: agreementId },
     }).catch((err) => console.error("[agreements] notify failed:", (err as Error).message));
   }
@@ -594,6 +649,16 @@ export async function applyDocusignStatus(
     }
   }
 
+  // A signed Builder Partner Agreement is retained, then — where an admin armed
+  // it — admits the builder to the Builder Portal. A builder is admitted, never
+  // provisioned, so nothing below this runs for one.
+  if (mapped === "signed" && isBuilderPartner) {
+    const { completeSignedBuilderPartnerAgreement } =
+      await import("./builder-partner-agreements.server");
+    await completeSignedBuilderPartnerAgreement(agreementId, { transitioned });
+    return { status: mapped, transitioned };
+  }
+
   if (mapped === "signed") {
     try {
       const { provisionCloneFromAgreement } = await import("./agreement-provisioning.server");
@@ -615,12 +680,22 @@ export async function downloadSignedPdf(agreementId: string): Promise<{
 }> {
   const { data: agreement, error } = await supabaseAdmin
     .from("client_agreements")
-    .select("id, client_name, client_org, docusign_envelope_id, document_kind, signed_record_path")
+    .select(
+      "id, client_name, client_org, docusign_envelope_id, document_kind, signed_record_path, offer_reference",
+    )
     .eq("id", agreementId)
     .maybeSingle();
   if (error) throw error;
   if (!agreement?.docusign_envelope_id) throw new Error("envelope_not_found");
   const isSubscription = agreement.document_kind === "subscription";
+  const isBuilderPartner = agreement.document_kind === "builder_partner";
+
+  if (isBuilderPartner && agreement.signed_record_path) {
+    const { readRetainedBuilderPartnerRecord } =
+      await import("./builder-partner-agreements.server");
+    const retained = await readRetainedBuilderPartnerRecord(agreementId);
+    if (retained) return retained;
+  }
 
   // The retained record is THE signed Subscription Agreement: served from the
   // records bucket, and only while it still hashes to what was recorded.
@@ -637,7 +712,7 @@ export async function downloadSignedPdf(agreementId: string): Promise<{
     throw new Error(`DocuSign not configured; missing: ${config.missing.join(", ")}`);
   const token = await getDocusignAccessToken(config);
   const res = await fetch(
-    `${config.baseUrl}/v2.1/accounts/${config.accountId}/envelopes/${agreement.docusign_envelope_id}/documents/combined${isSubscription ? "?certificate=true" : ""}`,
+    `${config.baseUrl}/v2.1/accounts/${config.accountId}/envelopes/${agreement.docusign_envelope_id}/documents/combined${isSubscription || isBuilderPartner ? "?certificate=true" : ""}`,
     { headers: { Authorization: `Bearer ${token}`, Accept: "application/pdf" } },
   );
   if (!res.ok) {
@@ -648,20 +723,31 @@ export async function downloadSignedPdf(agreementId: string): Promise<{
   const who = (agreement.client_org ?? agreement.client_name).replace(/[^a-z0-9]+/gi, "_");
   return {
     base64: bytesToBase64(bytes),
-    filename: isSubscription
-      ? `${who}_Subscription_Agreement_signed.pdf`
-      : `${agreement.client_name.replace(/[^a-z0-9]+/gi, "_")}_SLA_signed.pdf`,
+    filename: isBuilderPartner
+      ? `${who}_Builder_Partner_Agreement_signed.pdf`
+      : isSubscription
+        ? `${who}_Subscription_Agreement_signed.pdf`
+        : `${agreement.client_name.replace(/[^a-z0-9]+/gi, "_")}_SLA_signed.pdf`,
   };
 }
 
 export async function voidEnvelope(agreementId: string, reason: string): Promise<void> {
   const { data: agreement, error } = await supabaseAdmin
     .from("client_agreements")
-    .select("id, docusign_envelope_id")
+    .select("id, docusign_envelope_id, document_kind, status")
     .eq("id", agreementId)
     .maybeSingle();
   if (error) throw error;
   if (!agreement) throw new Error("agreement_not_found");
+  // A signed Builder Partner Agreement is the record a builder was admitted
+  // on. Voiding it would unmake that record, not the access; access is
+  // withdrawn by suspending the organisation on the Builders Network.
+  if (agreement.document_kind === "builder_partner" && agreement.status === "signed") {
+    throw new Error(
+      "A signed Builder Partner Agreement is kept as the record the builder was admitted on. " +
+        "To withdraw access, suspend the organisation on the Builders Network.",
+    );
+  }
 
   if (agreement.docusign_envelope_id) {
     const config = docusignConfig();

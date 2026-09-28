@@ -1,8 +1,8 @@
-# Agreements — Subscription Agreements and SLAs via DocuSign
+# Agreements — Subscription Agreements, SLAs and Builder Partner Agreements via DocuSign
 
-Leads sign two kinds of agreement from `/agreements`, through one DocuSign
-flow and one lifecycle — `draft → sent → delivered → signed / declined /
-voided`:
+Three kinds of agreement are prepared on `/agreements` and signed through one
+DocuSign flow and one lifecycle — `draft → sent → delivered → signed /
+declined / voided`. Leads sign two of them:
 
 - the **Subscription Agreement** — the approved Launch, Growth or Scale Word
   template, completed field by field from an offer the operator prepares in
@@ -12,9 +12,17 @@ voided`:
   tabs, raised against a CRM contact. See
   [The Service Level Agreement template](#the-service-level-agreement-template).
 
-Both live on `client_agreements`, told apart by `document_kind`. A signed or
-declined transition raises an operator notification, and either kind can
-provision the customer's clone on signature.
+Builders sign the third:
+
+- the **Builder Partner Agreement** — the terms an admin registers, plus an
+  Execution Schedule Mission Control generates, sent to a Builders Network
+  organisation before the Builder Portal opens to it. A signature admits the
+  builder; it never provisions anything. See
+  [Builder Partner Agreements](#builder-partner-agreements--before-the-builder-portal).
+
+All three live on `client_agreements`, told apart by `document_kind`. A signed
+or declined transition raises an operator notification. Either of the leads'
+kinds can provision the customer's clone on signature.
 
 The flow mirrors the prime repo's `manage-agency-agreements` module — the
 same JWT-grant auth, the same anchor-token envelope pattern — rebuilt for a
@@ -34,7 +42,7 @@ nothing pretends to send.
 | `DOCUSIGN_ACCOUNT_ID` | API Account ID (GUID) |
 | `DOCUSIGN_BASE_URL` | *(optional)* REST base; defaults to `https://demo.docusign.net/restapi`. Production accounts use the base URI shown in Apps & Keys, e.g. `https://au.docusign.net/restapi` |
 | `DOCUSIGN_OAUTH_HOST` | *(optional)* overrides the OAuth host; otherwise derived (demo → `account-d.docusign.com`, production → `account.docusign.com`) |
-| `DOCUSIGN_COUNTERSIGNER_NAME` / `DOCUSIGN_COUNTERSIGNER_EMAIL` | *(optional)* on an SLA, an Aurixa signatory routed **second**, after the client signs. On a Subscription Agreement the same address receives a **copy** (routing 2) and does not sign — the agreement's clause 1.2 requires no Aurixa countersignature. Omit both and the envelope is client-only |
+| `DOCUSIGN_COUNTERSIGNER_NAME` / `DOCUSIGN_COUNTERSIGNER_EMAIL` | *(optional)* on an SLA, an Aurixa signatory routed **second**, after the client signs. On a Subscription Agreement the same address receives a **copy** (routing 2) and does not sign — the agreement's clause 1.2 requires no Aurixa countersignature. On a Builder Partner Agreement the registered terms decide: it countersigns second when they require it, and receives a copy otherwise (terms that require it cannot be put in force without it). Omit both and the envelope is client-only |
 
 ## DocuSign console setup (one time)
 
@@ -445,6 +453,338 @@ being issued.
     accepted that could not be recorded, or a signed record that could not be
     retained.
 
+## Builder Partner Agreements — before the Builder Portal
+
+A builder signs the **Builder Partner Agreement** before the Builder Portal
+opens to them. It is the same document engine as the other two kinds: one
+`client_agreements` row (`document_kind = 'builder_partner'`), the same
+DocuSign account, lifecycle, refresh cron, Connect webhook and
+`agreement-records` bucket. Three things differ:
+
+- **who it is with** — an organisation on the Builders Network, not a lead;
+- **what a signature does** — it admits the builder to the Builder Portal on
+  the network, and it never provisions a clone;
+- **where its words come from** — a terms file an admin registers. The terms
+  are supplied separately and plugged in; nothing in this repository writes a
+  clause.
+
+### Where it sits in the builder pipeline
+
+```
+website waitlist → /api/public/builders/apply → network submit_access_request
+  → organisation (pending) + owner invitation                   [unchanged]
+  → Builder Partner Agreement: drafted, sent, signed, retained  [new]
+  → approve_organisation → Builder Portal access                [waits for the signature]
+```
+
+The waitlist pipeline is not touched. `src/routes/api.public.builders.apply.ts`,
+`src/server/builderApplyGuard.pure.ts` and the network's `submit_access_request`
+are unchanged, and nothing in them knows an agreement exists. That pipeline
+already stops short of access on purpose: `approve_organisation` is the only
+route from pending to `active`, and it has always been an admin's act on
+`/builders-network`. The agreement is added at that act, which is the one point
+where the pipeline already hands over to a person.
+
+`src/server/builderPartnerAccessGate.contract.test.ts` holds this in the
+source, in both directions:
+
+- the call sites of `approve_organisation` are derived, not listed, and there
+  are exactly two: the console's Approve and the grant from a signed agreement.
+  A third way to approve an organisation fails the test the day it is added;
+- the console reads the gate before it calls the network, refuses when the gate
+  refuses, and refuses when the gate cannot be read;
+- the grant claims the row, conditional on the agreement being signed, before
+  it calls the network;
+- reinstating a suspended organisation does not call the approval;
+- only the application route submits an application, and neither it nor its
+  guard imports or names anything agreement-shaped;
+- the agreement machinery's only write to the network is the approval.
+
+### The terms are plugged in
+
+The terms live on `/agreements/builder-partner-terms` (from `/agreements` →
+*Builder Partner terms*). An admin registers the file there with:
+
+- a name and a version label;
+- whether Aurixa countersigns;
+- the **execution statement**, the sentence the Execution Schedule prints
+  above the signatures (20–1,200 characters; a default that fits any terms is
+  offered).
+
+The file is read before anything is stored (`builderPartnerTermsFile.pure.ts`).
+Nothing reads a clause; the checks are that DocuSign will carry the file and
+that a builder can be bound to exactly it:
+
+- It is a PDF or a Word (`.docx`) document **by its own bytes**, up to 15 MB. A
+  name that claims the other type is refused, and so is a legacy `.doc`.
+- A PDF must open, must not be encrypted, and must have pages. DocuSign refuses
+  a protected PDF, and terms that failed at the send would stop every agreement.
+- A Word document is refused if it carries macros or other active content, if
+  it still has tracked changes in its body, headers, footers or notes, or if it
+  is a master document whose sections live in other files. The fingerprint
+  would not cover those sections.
+- Comments, a linked (rather than embedded) picture or template, and a
+  document with no text in it each raise a warning and stop nothing.
+
+A registered file is stored in the private `agreement-templates` bucket at
+`builder-partner/<sha256>.<ext>`: the path is its identity. It is checked
+against that digest every time it is sent or served.
+
+Terms move `staged → active → retired`.
+
+- **Registering stages them.** Nothing is sent under staged terms, and a staged
+  registration can be edited or deleted.
+- **Putting them in force** retires the terms that were in force. Only one set
+  is ever in force (a unique index, moved under an advisory lock by
+  `activate_builder_partner_agreement_template`). Mission Control refuses to put
+  terms in force while no agreement could be sent under them: DocuSign not
+  configured, or a countersignature required and no countersigner configured.
+  Terms in force make approval wait for a signature, and a signature nobody can
+  collect is an outage, not a control.
+- **Retiring** the terms in force asks why, in at least ten characters,
+  because with none in force approval stops waiting for a signature.
+- **Once in force, the terms are a record.** Their name, version,
+  countersignature and execution statement are printed on schedules that were
+  sent, so the database refuses to change them; only the notes can be edited.
+  A correction is a new registration of the same file. Terms that have been in
+  force are never deleted, and a retired set never returns to force.
+
+### The Execution Schedule
+
+The envelope carries two documents: the registered terms first, and the
+**Execution Schedule** second (`builderPartnerSchedule.pure.ts`). Mission
+Control writes the schedule, and it is the document DocuSign acts on. It
+states:
+
+- the agreement reference (`AUR-BPA-YYYYMMDD-XXXXXX`) and the issuing date;
+- the parties — Aurixa Systems Pty Ltd and the Builder Partner's particulars;
+- the terms, identified by name, version, file name, size, page count and
+  SHA-256 fingerprint;
+- the execution statement, and the signature blocks.
+
+Signing the schedule is what enters the agreement, and the fingerprint ties
+the signature to exactly the bytes that were sent. That is why any terms file
+works the day it is supplied, with no anchors to author and no fields to map.
+
+Four properties are guaranteed, and tested against the real PDF
+(`builderPartnerSchedule.test.ts` reads the text back out of the page streams):
+
+- **Deterministic.** The same input produces the same bytes, so the digest the
+  snapshot records can be proved by regenerating the page.
+- **Every anchor exactly once, and only those the envelope uses.** Anchors are
+  painted in the colour of their panel, and the envelope's tabs are STRICT. An
+  anchor that did not print refuses the envelope, rather than sending one with
+  nowhere to sign. The send also checks the painted anchors against the ones
+  it expects before anything leaves.
+- **A preview cannot be signed.** It paints no anchors, and it is marked as a
+  preview (masthead, watermark, footer) without moving the layout, so what a
+  reviewer approves is what the builder receives.
+- **The statement is never parted from the signatures.** They move to the next
+  page together when they do not fit.
+
+The builder's block asks for a title at signing only when the particulars do
+not state one. Aurixa's block is a countersignature when the terms require one;
+otherwise it says the agreement is entered when the builder signs and Aurixa
+receives a copy.
+
+### The flow
+
+1. **Draft it from `/builders-network`.** Each organisation there shows its
+   agreement standing, and *Send agreement* drafts one or opens the one in
+   flight. There is at most one open agreement per organisation, enforced by a
+   unique index. The draft is seeded from what the network already holds:
+   - from the organisation: its legal and trading names, ABN and contact email;
+   - from the website application: the contact's name and phone, and the
+     locality.
+
+   A street address, an ACN and the signatory's title are never guessed. An
+   organisation that is closed, unknown, or cannot be confirmed because the
+   network did not answer is not drafted for.
+2. **Complete the particulars** at `/agreements/<id>`. The page lists what
+   blocks a send and what is only worth a look, and the send refuses on the
+   same list (`particularsGaps`).
+   - Blockers: the legal name, the signatory's name and email, and any ABN,
+     ACN or notice email that fails its check.
+   - Warnings: no ABN, no address, no signatory title (DocuSign then asks the
+     signer for it), and an ABN that does not contain the ACN. That last one is
+     expected for a trust with a corporate trustee.
+3. **Check the documents.** *Terms* downloads the terms in force. *Preview
+   schedule* downloads the schedule the builder would receive, marked as a
+   preview.
+4. **Decide about access.** "Admit the builder automatically once signed" arms
+   the agreement, so that a signature is enough; see below. Only an admin can
+   arm an agreement, and only while it is open.
+5. **Send it.** *Send for signature* is the Subscription Agreement's claimed
+   send:
+   - **claim** — on `issued_at`, so a double click produces one envelope;
+   - **check** — the terms in force and the particulars again, and the network
+     once more: an organisation it has since closed or removed is refused, while
+     an unreachable network does not stop the send, because the approval it
+     leads to asks again;
+   - **snapshot** — `issued_snapshot` is written before the envelope exists. It
+     holds the particulars, the terms' identity and digest, the generated
+     schedule itself and its digest, who was sent what, and whether the
+     agreement was armed;
+   - **envelope** — the builder's signatory signs first. When the terms
+     require it, `DOCUSIGN_COUNTERSIGNER_*` countersigns second; otherwise that
+     address receives a copy. The hidden custom fields are `mc_agreement_id`,
+     `mc_offer_reference` and `mc_builder_organisation_id`.
+
+   An interrupted send is held for ten minutes, after which *Send* asks
+   DocuSign whether the earlier attempt created the envelope before it sends
+   anything.
+6. **Signed.** The combined signed PDF, with DocuSign's certificate of
+   completion, is copied into `agreement-records` at
+   `builder-partner/<agreement id>/<envelope id>-signed.pdf`, and its SHA-256
+   is recorded. Access follows, as below.
+
+A draft can be deleted and a sent agreement voided. A **signed** one cannot be
+voided: it is the record the builder was admitted on, and access is withdrawn
+by suspending the organisation on the Builders Network, not by unmaking the
+record.
+
+### Access: the gate at approval
+
+Approve on `/builders-network` asks the server, at that moment, whether the
+organisation may be admitted (`assessBuilderAccessGate`,
+`decideBuilderAccessGate`):
+
+1. **A signed agreement** satisfies the gate, whatever terms it was signed on.
+2. **With no terms in force the gate is not enforced.** Approval behaves
+   exactly as it did before this feature existed. This is also the state until
+   the terms arrive.
+3. **An admin may waive it, in words.** The dialog Approve opens offers to draft
+   the agreement (recommended) or to approve without one. The latter requires a
+   reason of at least ten characters.
+4. **Otherwise it refuses.** The refusal names the agreement in flight, with a
+   link, or asks for one to be drafted.
+
+A gate that cannot be read refuses: "Nothing was approved." A failed read is
+not a missing agreement, and approving on a guess is what the gate exists to
+stop.
+
+The basis goes with every approval. It is sent to the network as the approval's
+`reason`, where the network's activity log records it: the signed agreement's
+reference, the waiver's words, or that no terms were in force. Mission Control's
+audit log records it as `builders_network.organisation_approved`. So an
+approval can be explained from the record alone.
+
+Reinstating a suspended organisation is not gated. It restores an organisation
+that was admitted, agreement and all, before it was suspended.
+
+### Access: granted from a signature
+
+- **Armed.** Once the signed copy is retained, `grantBuilderPortalAccess`
+  approves the organisation on the network without waiting for anyone. The
+  admin decided in advance, when arming, that a signature is enough.
+- **Not armed.** An admin presses *Grant Builder Portal access* on the
+  agreement, or approves from the console, where the signed agreement now
+  satisfies the gate.
+
+Evidence comes before action. The automatic path needs the agreement armed,
+signed and its signed copy retained; the manual path needs only the signature,
+because pressing the button is the decision. Either way the attempt is
+**claimed on the row** (`portal_access_status = 'pending'`, conditional on the
+agreement being signed), so a signature, the sweep and the button cannot
+approve twice.
+
+The network's answer is recorded on the row:
+
+- `granted` — the builder is admitted. The organisation's metering account
+  (tenant `builders-network:<organisation id>`) is ensured, the same one the
+  console's Approve ensures.
+- `refused` — the network said no about this organisation: it is closed, gone,
+  or not awaiting approval (for example, suspended). This needs a person and is
+  **never retried automatically**.
+- `failed` — the cause is ours or transient: the console switched off, the
+  signing key missing, the network unreachable. The sweep retries it.
+
+A grant is always announced. A failure is announced once, never again on every
+sweep that retries it, and a failure an admin just caused by pressing the
+button is shown to them rather than broadcast.
+
+### The sweep
+
+The agreements refresh (`/hooks/agreements-refresh`) runs
+`sweepBuilderPartnerAgreements` on every run. It never throws, and it:
+
+- retains up to 25 signed records not yet copied out of DocuSign (only while
+  DocuSign is configured);
+- grants the armed access a signature could not;
+- retries grants that failed, and takes over a pending attempt older than ten
+  minutes;
+- creates any metering account a grant left missing. It reads the `tenants`
+  table itself for this, not a flag that could be wrong.
+
+### Rules that carry it
+
+- **Only an admin admits a builder.** Every server function that drafts,
+  saves, sends, arms, grants, voids or deletes a Builder Partner Agreement
+  checks for an admin, including the send, void and delete it shares with the
+  other kinds. `client_agreements` is writable by any operator session under
+  its RLS policy, so a trigger (`client_agreements_builder_partner_admin_only`)
+  refuses a Builder Partner write from any signed-in session that is not an
+  admin's. The terms registry and its bucket have no browser write path at all.
+- **A builder is admitted, never provisioned.** A check constraint refuses
+  arming a Builder Partner Agreement for provisioning.
+  `decideProvisionOnSignature` refuses it as `builder_partner_never_provisions`,
+  and the provisioning panel refuses the kind.
+- **An issued agreement is a record.** Once an envelope exists, the freeze
+  trigger refuses any change to the particulars, reference, snapshot, terms or
+  organisation. The keep trigger refuses deleting a sent or signed one, and a
+  retained signed record is written once.
+- **The terms are a file.** They are identified by digest and verified every
+  time they are sent or served, and an agreement records the terms it was
+  issued under (`template_id`, which cannot be deleted from under it).
+- **Absent schema is not a failure; a failed read is.** Until the migration is
+  applied, the registry reads as not installed and the gate as not enforced,
+  because a registry that does not exist holds no terms. Any other failed read
+  fails closed.
+
+### Rolling it out
+
+1. Merge. `.github/workflows/apply-migrations.yml` hands
+   `supabase/migrations/20260928110000_builder_partner_agreements.sql` to the
+   migration queue. Confirm that run is green before the code is published. The
+   migration is additive, and with no terms registered the console approves
+   exactly as it did before.
+2. When the terms arrive, an admin registers the file on
+   `/agreements/builder-partner-terms`, reads any warnings, and puts it in force.
+   From that moment Approve waits for a signed agreement or a written waiver.
+3. Before the first real builder, send one agreement to an internal address and
+   read both documents as DocuSign shows them. On the production account an
+   envelope is billable.
+
+### The pieces, for a Builder Partner Agreement
+
+- `src/lib/agreements/`:
+  - `builderPartner.pure.ts` — particulars, reference, terms checks, the
+    envelope, the snapshot, the access gate and the grant rules;
+  - `builderPartnerSchedule.pure.ts` — the Execution Schedule;
+  - `builderPartnerTermsFile.pure.ts` — reading an uploaded terms file.
+- `src/lib/buildersNetworkTenant.pure.ts` — the one spelling of an
+  organisation's metering tenant.
+- `src/server/builder-partner-agreements.server.ts` — the registry, drafting,
+  the send and its recovery, retention, the grant, the gate and the sweep.
+- `src/lib/builderPartnerAgreements.functions.ts` — the server functions, with
+  the send, refresh, download, void and delete in `agreements.functions.ts`.
+- `src/server/builders-network.functions.ts` — `approveNetworkOrganisation`,
+  gated.
+- `src/routes/agreements.builder-partner-terms.tsx` — the terms page.
+- `src/components/agreements/builder-partner-agreement.tsx` — the agreement
+  page.
+- `src/components/builders-network-agreements.tsx` and
+  `src/lib/use-send-builder-agreement.ts` — the console's standing line, the
+  drafting action and the approval dialog.
+- `supabase/migrations/20260928110000_builder_partner_agreements.sql`:
+  - `builder_partner_agreement_templates` and its freeze trigger;
+  - `activate_builder_partner_agreement_template`;
+  - the `client_agreements` columns (`builder_organisation_id`, `template_id`,
+    `grant_access_on_signature`, `portal_access_*`) and their checks;
+  - the one-open-agreement index;
+  - the widened freeze and keep triggers, and the admin-only trigger;
+  - the private `agreement-templates` bucket.
+
 ## The Service Level Agreement template
 
 The SLA every client sees is `public/agreements/aurixa-sla-template.pdf`:
@@ -501,9 +841,11 @@ client, so what was reviewed is what is signed.
   state, list/search, create (with CRM contact link), send, refresh,
   download, void, delete-draft — and the subscription functions listed
   under [The pieces, for a Subscription Agreement](#the-pieces-for-a-subscription-agreement).
+  The Builder Partner functions are in `builderPartnerAgreements.functions.ts`
+  ([The pieces, for a Builder Partner Agreement](#the-pieces-for-a-builder-partner-agreement)).
 - `src/routes/agreements.index.tsx` — the list: metrics, config and
   issuing-profile banners, filters, one lifecycle row per agreement of
-  either kind, the new-SLA dialog with CRM contact picker (shows journey
+  any kind, the new-SLA dialog with CRM contact picker (shows journey
   stage), void dialog.
 - `supabase/migrations/20260828010000_client_agreements.sql` —
   `client_agreements` (linked to `crm_contacts` / `crm_accounts`), RLS,
@@ -555,6 +897,9 @@ moves), which on the `signed` transition hands the agreement to
    retries retention of any signed Subscription Agreement whose record is
    not yet held, and releases retained, still-armed ones into provisioning —
    see [Signed: retention, then provisioning](#signed-retention-then-provisioning).
+   It does the same for Builder Partner Agreements, where what a retained,
+   armed signature releases is Builder Portal access — see
+   [The sweep](#the-sweep).
 2. **DocuSign Connect webhook** (`/api/public/hooks/docusign`) makes it
    instant. One extra secret (below). Fails closed: unconfigured → 503,
    bad HMAC → 401.
@@ -592,7 +937,9 @@ not a delivered request.** Read `net._http_response`, not
 
 - Every skip is a **named refusal** (`decideProvisionOnSignature`): not
   armed, not signed, already done, in flight, previous attempt failed,
-  no plan, no attributable creator.
+  no plan, no attributable creator — and, for a Builder Partner Agreement,
+  always (`builder_partner_never_provisions`): a builder is admitted to the
+  Builder Portal, never given a clone.
 - The agreement is **claimed by compare-and-set** on `provision_status`
   (`armed → provisioning`), so the webhook, the cron and the button land on
   one clone however they race — and under the claim, the clone insert
