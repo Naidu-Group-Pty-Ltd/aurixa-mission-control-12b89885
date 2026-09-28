@@ -1367,6 +1367,42 @@ that delivery passes WP-14 (316 errors against a baseline of 326, none new) and
 the three `verify` steps that were red. `strandedFunctionsAreWired` and
 `reExportBridgesAreWired` pin where each rule runs, as source.
 
+## A workflow arrived without the script it runs
+
+`.github/workflows/**` is an invariant, so the module-scoped clone receives
+every workflow `judgingWorkflow.pure.ts` does not hold, which means every
+scheduled and dispatch-only one. `.github/scripts/**` was in no glob.
+
+Measured 28 Sep 2026 on npc-crm-independent:
+
+- **Four workflows, none of their scripts.** `migration-drift.yml` (scheduled
+  daily), `builder-network-connection-remap.yml`,
+  `builder-network-sync-state.yml` and `builder-stock-mirror-state.yml` had all
+  arrived. None of the six scripts they call had.
+- **One stale script.** `apply-migration.mjs` was still the fork's copy.
+- **A failure that hid the gap.** All seven drift runs failed at *Require a
+  database route*, because the repository holds no database credential. Had
+  it held one, they would have failed one step later on a missing file.
+
+`REPOSITORY_INVARIANTS` now carries `.github/scripts/**`. Three things were
+checked first.
+
+- **Exclusions still win.** `apply-migration.yml` stays per-deployment. The
+  prime's `apply-migration.mjs` reads the same variables the clone's own
+  workflow passes (`FILE`, `RECORD_VERSION`, `TUPLES_PER_CHUNK`,
+  `PROJECT_REF`). It imports `scripts/lib/ledgerQuery.mjs` and
+  `scripts/security/ledgerRecord.mjs`, both already on the clone under
+  `scripts/**`. Every mirror already runs that pairing.
+- **Nothing is removed.** An invariant widens what is sent, never what is
+  deleted, so a script the clone authored stays.
+- **No lane names the prime.** Three lanes fell back to the prime's project
+  ref when none was given. On any clone's repository, a dispatch with a token
+  would have read the prime's database, and the remap lane would have written
+  to it. The prime now reads the ref from the checkout's own
+  `supabase/config.toml` (`scripts/lib/projectRef.mjs`), and
+  `scriptProjectRef.spec.ts` fails on a literal. That fix reaches the mirrors
+  and this clone on the next cascade.
+
 ## What this deliberately does not do
 
 - **It does not widen a clone's scope to a file the clone does not have.**

@@ -123,6 +123,19 @@ export const REPOSITORY_INVARIANTS: readonly RepositoryInvariant[] = [
       "verdict on the whole tree, which a module-scoped clone does not hold — see " +
       "judgingWorkflow.pure.ts.",
   },
+  {
+    pattern: ".github/scripts/**",
+    reason:
+      "What the workflows above RUN. A module-scoped clone keeps every scheduled and " +
+      "dispatch-only workflow, and each of those calls `node .github/scripts/<lane>.mjs`, so a " +
+      "clone that receives the workflow and not its script holds a workflow that fails at its " +
+      "first run step. Measured 28 Sep 2026 on npc-crm-independent, the fleet's only `modules` " +
+      "clone: migration-drift.yml (scheduled daily) and the three builder-network lanes had " +
+      "arrived and none of their six scripts had, and apply-migration.mjs was still the fork's " +
+      "copy. Exclusions still win. apply-migration.yml stays per-deployment, and the prime's " +
+      "apply-migration.mjs reads the same variables the clone's own workflow passes (FILE, " +
+      "RECORD_VERSION, TUPLES_PER_CHUNK, PROJECT_REF). Every mirror already runs that pairing.",
+  },
 
   // ── Toolchain configuration the build resolves against ────────────────────
   {
