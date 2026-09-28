@@ -49,6 +49,7 @@ import {
   primeOnlyBucketReason,
   primeOnlyCronJobsIn,
   primeOnlyCronReason,
+  primeOnlyFunctionsIn,
 } from "./primeOnlyFeatures.pure";
 
 const MGMT_API = "https://api.supabase.com/v1";
@@ -2080,6 +2081,149 @@ export async function sweepPrimeOnlyCronJobs(
         reason,
         error: err instanceof Error ? err.message : String(err),
       });
+    }
+  }
+  return sweep;
+}
+
+/**
+ * What one function sweep found on a project and did about it.
+ */
+export type PrimeOnlyFunctionSweep = {
+  deleted: Array<{ slug: string; reason: string }>;
+  failed: Array<{ slug: string; reason: string; error: string }>;
+  /**
+   * Found and left for the next pass, never attempted: the pass's delete cap
+   * was reached, or the Management API answered 429.
+   */
+  deferred: string[];
+  /** Why nothing was deleted although the sweep ran; null otherwise. */
+  skipped: string | null;
+};
+
+/**
+ * How many functions one pass deletes from one project. Twenty-eight deletes
+ * on each of four projects is 112 Management API calls in one invocation of a
+ * catch-up that still has its own work to do after the sweep. Ten a project is
+ * three half-hourly passes to clear a clone that holds all twenty-eight, and
+ * one pass for anything a later deploy puts back.
+ */
+export const PRIME_ONLY_FUNCTION_DELETES_PER_PASS = 10;
+
+/**
+ * Delete the prime's own Edge Functions from a project that is not the prime.
+ *
+ * Withholding a function (`primeOnlyFeatures.pure.ts`) stops the next deploy
+ * and does nothing about the last one. Every clone provisioned before the
+ * register existed was given all twenty-eight functions of the GoHighLevel
+ * account migration, and measured 28 Sep 2026 all four still ran them: code
+ * that moves a whole GoHighLevel account, deployed on four tenants' projects
+ * after the owner decided that none of them receives it.
+ *
+ * The same three rules as `sweepPrimeOnlyCronJobs`, for the same reasons.
+ *
+ * - It never acts on the prime. The prime's ref is compared before anything is
+ *   deleted, and a ref that cannot be resolved stops the sweep: a sweep that
+ *   cannot tell which project it is on does nothing.
+ * - It deletes exactly what it read, and only what the register names
+ *   (`primeOnlyFunctionsIn`), by exact name, so it cannot take an ordinary
+ *   function with it. A clone's own functions (a CRM's `crm-*`) are never
+ *   named there.
+ * - It never throws. A read that fails is `skipped` with its reason, never an
+ *   empty project, and one delete that fails does not stop the others.
+ * - It is bounded. At most `PRIME_ONLY_FUNCTION_DELETES_PER_PASS` deletes a
+ *   pass, and a 429 ends the pass; what is left is `deferred`, named, and
+ *   found again by the next pass, because the sweep reads before it acts.
+ *
+ * A function is code, not data: its source stays in the prime's tree, so a
+ * deletion loses nothing a redeploy could not put back. That is the difference
+ * from the feature's BUCKET, which this platform never deletes.
+ */
+export async function sweepPrimeOnlyFunctions(
+  targetRef: string,
+  opts: { primeRef?: string | null; maxDeletes?: number } = {},
+): Promise<PrimeOnlyFunctionSweep> {
+  const sweep: PrimeOnlyFunctionSweep = { deleted: [], failed: [], deferred: [], skipped: null };
+  const ref = (targetRef ?? "").trim();
+  if (!ref) {
+    sweep.skipped = "no project was named";
+    return sweep;
+  }
+  let slugs: string[];
+  try {
+    const res = await fetch(`${MGMT_API}/projects/${ref}/functions`, { headers: headers() });
+    if (!res.ok) {
+      sweep.skipped = `the deployed functions could not be read: HTTP ${res.status}`;
+      return sweep;
+    }
+    const raw = (await res.json()) as unknown;
+    if (!Array.isArray(raw)) {
+      sweep.skipped = "the deployed functions could not be read: the answer was not a list";
+      return sweep;
+    }
+    slugs = raw
+      .map((r) => {
+        const o = (r ?? {}) as Record<string, unknown>;
+        return typeof o.slug === "string" ? o.slug : typeof o.name === "string" ? o.name : "";
+      })
+      .filter((slug) => slug.length > 0);
+  } catch (err) {
+    sweep.skipped = `the deployed functions could not be read: ${err instanceof Error ? err.message : String(err)}`;
+    return sweep;
+  }
+  const found = primeOnlyFunctionsIn(slugs);
+  if (found.length === 0) return sweep;
+
+  let primeRef = (opts.primeRef ?? "").trim();
+  if (!primeRef) {
+    try {
+      const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+      const { resolvePrimeBackendRef } = await import("./prime-backend.server");
+      primeRef = (await resolvePrimeBackendRef(supabaseAdmin)).trim();
+    } catch (err) {
+      sweep.skipped =
+        `the prime's project could not be resolved, so this project cannot be ruled out as the ` +
+        `prime: ${err instanceof Error ? err.message : String(err)}`;
+      return sweep;
+    }
+  }
+  if (!primeRef || primeRef.toLowerCase() === ref.toLowerCase()) {
+    sweep.skipped = primeRef
+      ? "this is the prime's own project, and these functions are its own"
+      : "the prime's project is not known, so this project cannot be ruled out as the prime";
+    return sweep;
+  }
+  const cap = Math.max(1, Math.floor(opts.maxDeletes ?? PRIME_ONLY_FUNCTION_DELETES_PER_PASS));
+  for (let i = 0; i < found.length; i++) {
+    const { slug, reason } = found[i];
+    if (i >= cap) {
+      sweep.deferred = found.slice(i).map((f) => f.slug);
+      break;
+    }
+    try {
+      const res = await fetch(`${MGMT_API}/projects/${ref}/functions/${encodeURIComponent(slug)}`, {
+        method: "DELETE",
+        headers: headers(),
+      });
+      // The API asking us to slow down is about this pass, not this
+      // function: stop here and leave this one and the rest for the next.
+      if (res.status === 429) {
+        sweep.deferred = found.slice(i).map((f) => f.slug);
+        break;
+      }
+      // 404 is the outcome the sweep is for — the function is not deployed —
+      // reached by somebody else between the read and the delete.
+      if (res.ok || res.status === 404) {
+        sweep.deleted.push({ slug, reason });
+      } else {
+        sweep.failed.push({
+          slug,
+          reason,
+          error: `HTTP ${res.status} — ${(await res.text()).slice(0, 200)}`,
+        });
+      }
+    } catch (err) {
+      sweep.failed.push({ slug, reason, error: err instanceof Error ? err.message : String(err) });
     }
   }
   return sweep;

@@ -37,6 +37,37 @@ export const Route = createFileRoute("/hooks/backend-catchup")({
         beginGithubLane("backend-catchup");
 
         try {
+          // First, and not gated by the GitHub budget below because it reads
+          // nothing from GitHub: take the prime's own functions off every
+          // clone's project. Withholding them stops the next deploy and did
+          // nothing about the last one. It never fails the catch-up — a sweep
+          // that could not run is recorded and the catch-up goes on. See
+          // `primeOnlyFunctionSweep.server.ts`.
+          let primeOnlyFunctions: unknown = null;
+          try {
+            const { sweepPrimeOnlyFunctionsFromFleet, fleetFunctionSweepIsNoteworthy } =
+              await import("@/server/primeOnlyFunctionSweep.server");
+            const sweep = await sweepPrimeOnlyFunctionsFromFleet();
+            primeOnlyFunctions = sweep;
+            if (fleetFunctionSweepIsNoteworthy(sweep)) {
+              await writeAuditLog({
+                action: "prime_only_function_sweep",
+                entityType: "cron",
+                metadata: sweep as unknown as Record<string, unknown>,
+              });
+            }
+          } catch (sweepErr) {
+            const message =
+              sweepErr instanceof Error ? sweepErr.message : "prime-only function sweep failed";
+            primeOnlyFunctions = { refused: message };
+            console.error("[hooks/backend-catchup] prime-only function sweep", message);
+            await writeAuditLog({
+              action: "prime_only_function_sweep",
+              entityType: "cron",
+              metadata: { error: message },
+            });
+          }
+
           // Yields below the scan floor: the catch-up reads the prime's
           // repository on the installation budget the cascade runs on, and
           // its own planner settles — the half-hourly cadence absorbs a skip.
@@ -44,9 +75,10 @@ export const Route = createFileRoute("/hooks/backend-catchup")({
           const { readGitHubRemaining } = await import("@/server/githubAllowance.server");
           const spend = decideSpend({ role: "scan", remaining: await readGitHubRemaining() });
           if (!spend.proceed) {
-            return new Response(JSON.stringify({ success: true, skipped: spend.why }), {
-              headers: { "Content-Type": "application/json" },
-            });
+            return new Response(
+              JSON.stringify({ success: true, skipped: spend.why, primeOnlyFunctions }),
+              { headers: { "Content-Type": "application/json" } },
+            );
           }
           const { runBackendCatchup } = await import("@/server/backendCatchup.server");
           const report = await runBackendCatchup("backend catch-up sweep");
@@ -64,7 +96,7 @@ export const Route = createFileRoute("/hooks/backend-catchup")({
 
           // 200 with the refusals in the body: one clone with no Supabase
           // project is a state, not a failed sweep.
-          return new Response(JSON.stringify({ success: true, ...report }), {
+          return new Response(JSON.stringify({ success: true, ...report, primeOnlyFunctions }), {
             headers: { "Content-Type": "application/json" },
           });
         } catch (e) {
