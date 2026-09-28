@@ -10,6 +10,7 @@ import {
   primeOnlyCronReason,
   primeOnlyFeatureForPath,
   primeOnlyFunctionNames,
+  primeOnlyFunctionsIn,
   primeOnlyPathsIn,
   withheldPrimeOnlyFunctions,
 } from "./primeOnlyFeatures.pure";
@@ -96,6 +97,31 @@ describe("functions and buckets", () => {
     expect(isPrimeOnlyFunction("ghl-calendar")).toBe(false);
     expect(isPrimeOnlyBucket("ghl-marketing-dump")).toBe(true);
     expect(isPrimeOnlyBucket("listing-images")).toBe(false);
+  });
+
+  it("finds the prime's own functions among a project's deployed slugs, and nothing else", () => {
+    // What the half-hourly sweep deletes, so a look-alike here would be an
+    // ordinary function deleted from a clone: the ordinary GoHighLevel
+    // integration, a CRM clone's own functions and a future dispatcher.
+    const found = primeOnlyFunctionsIn([
+      "listings-cache",
+      "migration-job-status",
+      "ghl-calendar",
+      "crm-send-message",
+      "migration-dispatcher-v2",
+      " migration-dispatcher ",
+      "migration-dispatcher",
+    ]);
+    expect(found.map((f) => f.slug)).toEqual(["migration-dispatcher", "migration-job-status"]);
+    for (const f of found) expect(f.reason).toContain("GoHighLevel account migration");
+  });
+
+  it("finds all twenty-eight on a clone given every one, and none on a clone given none", () => {
+    expect(primeOnlyFunctionsIn(migration.functions).map((f) => f.slug)).toEqual(
+      [...migration.functions].sort(),
+    );
+    expect(primeOnlyFunctionsIn(["listings-cache", "crm-calendar"])).toEqual([]);
+    expect(primeOnlyFunctionsIn([])).toEqual([]);
   });
 
   it("finds the functions a tree no longer holds", () => {

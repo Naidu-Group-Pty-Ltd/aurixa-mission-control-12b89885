@@ -41,12 +41,15 @@ vi.mock("@/integrations/supabase/client.server", () => ({
 }));
 
 import {
+  PRIME_ONLY_FUNCTION_DELETES_PER_PASS,
   applyPrimeMigrations,
   replicateCronJobs,
   replicateStorageBuckets,
   sweepPrimeOnlyCronJobs,
+  sweepPrimeOnlyFunctions,
   type PrimeCronJob,
 } from "./backend-provisioning.server";
+import { PRIME_ONLY_FEATURES } from "./primeOnlyFeatures.pure";
 import {
   classifyEdgeFunctionShortfall,
   diffBuckets,
@@ -218,6 +221,209 @@ describe("sweepPrimeOnlyCronJobs — the prime's own jobs, taken off a clone", (
     const sweep = await sweepPrimeOnlyCronJobs(CLONE, { primeRef: PRIME });
     expect(sweep.failed.map((j) => j.jobid)).toEqual([38]);
     expect(sweep.unscheduled.map((j) => j.jobid)).toEqual([41]);
+  });
+});
+
+describe("sweepPrimeOnlyFunctions — the prime's own functions, taken off a clone", () => {
+  // Measured 28 Sep 2026: every clone provisioned before the register existed
+  // still ran all twenty-eight. Withholding stops the next deploy; this is
+  // what takes the last one off.
+  const LIST = /\/projects\/[a-z]+\/functions$/;
+  const register = [
+    ...(PRIME_ONLY_FEATURES.find((f) => f.key === "ghl-account-migration")?.functions ?? []),
+  ].sort();
+  const deployed = (slugs: readonly string[]) =>
+    slugs.map((slug, i) => ({ id: `fn-${i}`, slug, name: slug, status: "ACTIVE", version: 3 }));
+  const deletedOn = (api: ReturnType<typeof managementApi>) =>
+    api.requests
+      .filter((r) => r.method === "DELETE")
+      .map((r) => {
+        const [, ref, slug] = /\/projects\/([a-z]+)\/functions\/([a-z0-9-]+)$/.exec(r.url) ?? [];
+        return `${ref}:${slug}`;
+      });
+  const project = deployed([
+    "listings-cache",
+    "migration-dispatcher",
+    "ghl-calendar",
+    "crm-send-message",
+    "migration-job-status",
+  ]);
+
+  it("deletes the register's functions from the clone by exact name, and nothing else", async () => {
+    const api = managementApi([[LIST, project]]);
+    vi.stubGlobal("fetch", api.fetch);
+    const sweep = await sweepPrimeOnlyFunctions(CLONE, { primeRef: PRIME });
+    expect(sweep.skipped).toBeNull();
+    expect(sweep.failed).toEqual([]);
+    expect(sweep.deferred).toEqual([]);
+    expect(sweep.deleted.map((f) => f.slug)).toEqual([
+      "migration-dispatcher",
+      "migration-job-status",
+    ]);
+    expect(deletedOn(api)).toEqual([
+      `${CLONE}:migration-dispatcher`,
+      `${CLONE}:migration-job-status`,
+    ]);
+    // The read and the deletes both carry the platform's own token.
+    expect(api.fetch.mock.calls[0][0]).toBe(
+      `https://api.supabase.com/v1/projects/${CLONE}/functions`,
+    );
+  });
+
+  it("reads a function's name where the answer carries no slug", async () => {
+    const api = managementApi([[LIST, [{ id: "a", name: "migration-dispatcher" }, { id: "b" }]]]);
+    vi.stubGlobal("fetch", api.fetch);
+    const sweep = await sweepPrimeOnlyFunctions(CLONE, { primeRef: PRIME });
+    expect(sweep.deleted.map((f) => f.slug)).toEqual(["migration-dispatcher"]);
+  });
+
+  it("never acts on the prime's own project", async () => {
+    const api = managementApi([[LIST, project]]);
+    vi.stubGlobal("fetch", api.fetch);
+    const sweep = await sweepPrimeOnlyFunctions(PRIME, { primeRef: PRIME.toUpperCase() });
+    expect(sweep.deleted).toEqual([]);
+    expect(sweep.skipped).toMatch(/prime's own project/);
+    expect(deletedOn(api)).toEqual([]);
+  });
+
+  it("resolves the prime from prime_config when the caller did not name it", async () => {
+    const api = managementApi([[LIST, project]]);
+    vi.stubGlobal("fetch", api.fetch);
+    const sweep = await sweepPrimeOnlyFunctions(CLONE);
+    expect(primeConfig.read).toHaveBeenCalledTimes(1);
+    expect(sweep.deleted.map((f) => f.slug)).toEqual([
+      "migration-dispatcher",
+      "migration-job-status",
+    ]);
+  });
+
+  it("and refuses when prime_config names the project it is looking at", async () => {
+    primeConfig.read.mockImplementation(async () => ({
+      data: { supabase_project_ref: CLONE },
+      error: null,
+    }));
+    const api = managementApi([[LIST, project]]);
+    vi.stubGlobal("fetch", api.fetch);
+    const sweep = await sweepPrimeOnlyFunctions(CLONE);
+    expect(sweep.deleted).toEqual([]);
+    expect(deletedOn(api)).toEqual([]);
+  });
+
+  it("fails closed when the prime cannot be resolved — a sweep that cannot tell where it is does nothing", async () => {
+    primeConfig.read.mockImplementation(async () => ({
+      data: null,
+      error: { message: "connection refused" },
+    }));
+    const api = managementApi([[LIST, project]]);
+    vi.stubGlobal("fetch", api.fetch);
+    const sweep = await sweepPrimeOnlyFunctions(CLONE);
+    expect(sweep.deleted).toEqual([]);
+    expect(sweep.skipped).toMatch(/could not be resolved/);
+    expect(deletedOn(api)).toEqual([]);
+  });
+
+  it("does not ask for the prime when the clone runs none of them", async () => {
+    const api = managementApi([[LIST, deployed(["listings-cache", "crm-calendar"])]]);
+    vi.stubGlobal("fetch", api.fetch);
+    const sweep = await sweepPrimeOnlyFunctions(CLONE);
+    expect(sweep).toEqual({ deleted: [], failed: [], deferred: [], skipped: null });
+    expect(primeConfig.read).not.toHaveBeenCalled();
+    expect(api.requests).toHaveLength(1);
+  });
+
+  it("never throws when the functions cannot be read — and a failed read is not an empty project", async () => {
+    const api = managementApi([[LIST, new Response("boom", { status: 500 })]]);
+    vi.stubGlobal("fetch", api.fetch);
+    const sweep = await sweepPrimeOnlyFunctions(CLONE, { primeRef: PRIME });
+    expect(sweep.deleted).toEqual([]);
+    expect(sweep.skipped).toMatch(/could not be read: HTTP 500/);
+
+    const odd = managementApi([[LIST, { functions: project }]]);
+    vi.stubGlobal("fetch", odd.fetch);
+    expect((await sweepPrimeOnlyFunctions(CLONE, { primeRef: PRIME })).skipped).toMatch(
+      /not a list/,
+    );
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("socket hang up");
+      }),
+    );
+    expect((await sweepPrimeOnlyFunctions(CLONE, { primeRef: PRIME })).skipped).toMatch(
+      /socket hang up/,
+    );
+    expect((await sweepPrimeOnlyFunctions("  ", { primeRef: PRIME })).skipped).toMatch(
+      /no project was named/,
+    );
+  });
+
+  it("counts a 404 as done, records a delete it could not make, and still takes the rest", async () => {
+    const api = managementApi([
+      [
+        LIST,
+        deployed(["migration-dispatcher", "migration-job-status", "ghl-migrate-contacts-worker"]),
+      ],
+      [/\/functions\/migration-dispatcher$/, new Response("not found", { status: 404 })],
+      [/\/functions\/ghl-migrate-contacts-worker$/, new Response("locked", { status: 500 })],
+    ]);
+    vi.stubGlobal("fetch", api.fetch);
+    const sweep = await sweepPrimeOnlyFunctions(CLONE, { primeRef: PRIME });
+    expect(sweep.deleted.map((f) => f.slug)).toEqual([
+      "migration-dispatcher",
+      "migration-job-status",
+    ]);
+    expect(sweep.failed.map((f) => [f.slug, f.error])).toEqual([
+      ["ghl-migrate-contacts-worker", "HTTP 500 — locked"],
+    ]);
+  });
+
+  it("records a delete that threw, and still takes the rest", async () => {
+    const api = managementApi([[LIST, deployed(["migration-dispatcher", "migration-job-status"])]]);
+    const fetchOnce = vi.fn(async (url: unknown, init?: { method?: string }) => {
+      if (String(url).endsWith("/migration-dispatcher")) throw new Error("reset by peer");
+      return api.fetch(url, init);
+    });
+    vi.stubGlobal("fetch", fetchOnce);
+    const sweep = await sweepPrimeOnlyFunctions(CLONE, { primeRef: PRIME });
+    expect(sweep.failed.map((f) => [f.slug, f.error])).toEqual([
+      ["migration-dispatcher", "reset by peer"],
+    ]);
+    expect(sweep.deleted.map((f) => f.slug)).toEqual(["migration-job-status"]);
+  });
+
+  it("deletes at most a pass's worth and names the rest for the next pass", async () => {
+    expect(register).toHaveLength(28);
+    const api = managementApi([[LIST, deployed(register)]]);
+    vi.stubGlobal("fetch", api.fetch);
+    const sweep = await sweepPrimeOnlyFunctions(CLONE, { primeRef: PRIME });
+    expect(sweep.deleted).toHaveLength(PRIME_ONLY_FUNCTION_DELETES_PER_PASS);
+    expect(deletedOn(api)).toHaveLength(PRIME_ONLY_FUNCTION_DELETES_PER_PASS);
+    expect(sweep.deferred).toEqual(register.slice(PRIME_ONLY_FUNCTION_DELETES_PER_PASS));
+    expect([...sweep.deleted.map((f) => f.slug), ...sweep.deferred]).toEqual(register);
+
+    const two = managementApi([[LIST, deployed(register)]]);
+    vi.stubGlobal("fetch", two.fetch);
+    const capped = await sweepPrimeOnlyFunctions(CLONE, { primeRef: PRIME, maxDeletes: 2 });
+    expect(capped.deleted.map((f) => f.slug)).toEqual(register.slice(0, 2));
+    expect(capped.deferred).toHaveLength(26);
+  });
+
+  it("stops the pass on a 429 and leaves that function and the rest for the next", async () => {
+    const api = managementApi([
+      [LIST, deployed(["migration-job-status", "migration-dispatcher", "migration-job-control"])],
+      [/\/functions\/migration-job-control$/, new Response("slow down", { status: 429 })],
+    ]);
+    vi.stubGlobal("fetch", api.fetch);
+    const sweep = await sweepPrimeOnlyFunctions(CLONE, { primeRef: PRIME });
+    expect(sweep.deleted.map((f) => f.slug)).toEqual(["migration-dispatcher"]);
+    expect(sweep.failed).toEqual([]);
+    expect(sweep.deferred).toEqual(["migration-job-control", "migration-job-status"]);
+    // Nothing is asked after the API has said to slow down.
+    expect(deletedOn(api)).toEqual([
+      `${CLONE}:migration-dispatcher`,
+      `${CLONE}:migration-job-control`,
+    ]);
   });
 });
 

@@ -31,6 +31,11 @@
  * - Parity does not count their absence, and names what a clone still holds.
  * - What a migration schedules is swept after it applies, and by the cron
  *   step, from any project that is not the prime (`sweepPrimeOnlyCronJobs`).
+ * - What a clone's project still RUNS is deleted from it by the half-hourly
+ *   backend sweep, from any project that is not the prime
+ *   (`sweepPrimeOnlyFunctions`). Withholding a function only stops the next
+ *   deploy; every clone provisioned before this register existed was given all
+ *   twenty-eight, and nothing took them off again.
  *
  * ## What is deliberately NOT here
  *
@@ -278,6 +283,29 @@ export function primeOnlyCronJobsIn<T extends { jobname?: string | null; command
     if (reason) out.push({ job, reason });
   }
   return out;
+}
+
+/**
+ * The prime-only functions among a project's deployed slugs, each with its
+ * reason, sorted and de-duplicated.
+ *
+ * What `sweepPrimeOnlyFunctions` deletes and nothing else, so what is taken off
+ * a clone is decided by the same list as what is withheld from it. Matching is
+ * by exact function name, the rule `isPrimeOnlyFunction` applies: `ghl-calendar`
+ * and a future `migration-dispatcher-v2` are not caught.
+ */
+export function primeOnlyFunctionsIn(
+  slugs: Iterable<string>,
+): Array<{ slug: string; reason: string }> {
+  const found = new Map<string, string>();
+  for (const raw of slugs) {
+    const slug = (raw ?? "").trim();
+    const feature = byFunction.get(slug);
+    if (feature && !found.has(slug)) {
+      found.set(slug, `${feature.title}: the function belongs to the prime's own feature.`);
+    }
+  }
+  return [...found.keys()].sort().map((slug) => ({ slug, reason: found.get(slug) as string }));
 }
 
 /**

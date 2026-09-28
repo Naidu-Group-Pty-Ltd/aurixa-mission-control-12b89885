@@ -1249,6 +1249,12 @@ describe("every per-item step in the tail is budgeted, not just guarded in front
     // Bounded by the register: it acts only on the jobs `primeOnlyCronJobsIn`
     // names. Measured 27 Sep 2026: one on each of the four clones.
     sweepPrimeOnlyCronJobs: "bounded by the register — one job on each clone, measured",
+    // Bounded twice over: it acts only on the functions `primeOnlyFunctionsIn`
+    // names (28), and deletes at most PRIME_ONLY_FUNCTION_DELETES_PER_PASS
+    // (10) a pass, a 429 ending it early. It runs from the backend catch-up,
+    // never inside a provisioning invocation. Both bounds are pinned in
+    // primeOnlyProvisioning.test.ts.
+    sweepPrimeOnlyFunctions: "bounded by the register and by ten deletes a pass",
   };
 
   it("discovers every per-item network loop in the module", () => {
