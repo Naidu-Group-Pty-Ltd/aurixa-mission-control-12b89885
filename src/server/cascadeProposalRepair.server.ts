@@ -58,7 +58,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import type { getAppOctokit } from "./github-app.server";
-import { regenerateCloneProposal } from "./cascade-engine.server";
+import { prepareProposalRebuild, regenerateCloneProposal } from "./cascade-engine.server";
 import { notifyOperators, writeAuditLog } from "./audit.server";
 import {
   decideProposalRepair,
@@ -74,6 +74,14 @@ export const PROPOSAL_REPAIR_ACTION = "cascade_proposal_repair";
 
 /** How far back a proposal's earlier repairs are counted. */
 const ATTEMPT_WINDOW_HOURS = 6;
+
+/**
+ * The hold a repair records when the clone's SOURCE is not ready — a routed
+ * child whose parent does not carry the promised prime commit yet, or could
+ * not be read. Not one of `RepairAct`'s reasons, because it is not a judgement
+ * about the proposal branch at all.
+ */
+export const SOURCE_NOT_READY = "source_not_ready";
 
 export type ProposalRepairOutcome = {
   clone: string;
@@ -171,6 +179,40 @@ export async function repairConflictedProposal(args: {
     };
   }
 
+  // Where the rebuild reads from, decided BEFORE an attempt is counted.
+  //
+  // With lineage on, a child's proposal was built from its PARENT'S tree, so
+  // it is rebuilt from there too — and only while the parent carries the
+  // commit this proposal promised. A parent that does not yet is a wait, not
+  // a failure: counting it as an attempt would spend the proposal's repair
+  // budget on somebody else's merge queue. Said once, like every hold; and
+  // not raised with the operators, because the drain resolves a held
+  // conflict in the proposal's favour and there is nothing for them to do.
+  const prepared = await prepareProposalRebuild({
+    supabase,
+    octokit,
+    cloneId: clone.id,
+    sourceSha: event.source_sha,
+  });
+  if (prepared.kind === "hold") {
+    const alreadyTold = await alreadyReported(supabase, clone.id, prNumber, SOURCE_NOT_READY);
+    if (!alreadyTold) {
+      await writeAuditLog({
+        action: PROPOSAL_REPAIR_ACTION,
+        entityType: "clone",
+        entityId: clone.id,
+        metadata: { pr: prNumber, act: "hold", reason: SOURCE_NOT_READY, why: prepared.why },
+      });
+    }
+    return {
+      clone: clone.label,
+      pr: prNumber,
+      act: "hold",
+      reason: SOURCE_NOT_READY,
+      why: prepared.why,
+    };
+  }
+
   // Written BEFORE the rebuild, so a rebuild that crashes still counts as an
   // attempt. Counting only successes is how a failing repair runs for ever.
   await writeAuditLog({
@@ -183,6 +225,8 @@ export async function repairConflictedProposal(args: {
       attempt: attempts + 1,
       source_sha: event.source_sha,
       event_id: eventId,
+      // The repository the rebuild reads — the parent, for a routed child.
+      read_from: `${prepared.rebuild.source.ref.owner}/${prepared.rebuild.source.ref.repo}`,
       why: decision.why,
     },
   });
@@ -190,8 +234,7 @@ export async function repairConflictedProposal(args: {
   const patch = await regenerateCloneProposal({
     supabase,
     octokit,
-    cloneId: clone.id,
-    sourceSha: event.source_sha,
+    rebuild: prepared.rebuild,
     mode: event.mode,
   });
 

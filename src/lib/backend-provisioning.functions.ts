@@ -551,6 +551,44 @@ async function runBackendProvisioning(
     }
 
     /*
+     * The functions this clone carries and the prime does not, from the
+     * clone's OWN repository.
+     *
+     * Every function deployed above came from the prime's tree. A clone
+     * created under the CRM-independent parent also carries `crm-calendar`,
+     * `crm-inbound-message` and `crm-send-message`, built on a `_shared/crm/`
+     * the prime does not have — and without this its CRM front end would call
+     * three functions its project does not run. After the re-target, because
+     * the tree read here is the one the clone will build from.
+     *
+     * Non-fatal, like every per-clone step: a refusal is named in the status
+     * line and the half-hourly catch-up retries it. The prime's declared list
+     * is the snapshot's, read from the prime's tree on every pass; empty only
+     * on a reading nothing should act on, so the lane re-reads it then rather
+     * than refusing on the snapshot's word.
+     */
+    try {
+      const { deployCloneOwnedFunctions, describeCloneOwnedOutcome } = await import(
+        /* @vite-ignore */ "@/lib/_server-shims/cloneOwnedFunctions.server"
+      );
+      const owned = await deployCloneOwnedFunctions({
+        supabase,
+        octokit,
+        cloneId: input.cloneId,
+        primeDeclaredSlugs:
+          snapshot.declaredFunctionSlugs.length > 0 ? snapshot.declaredFunctionSlugs : null,
+        projectRef: result.projectRef,
+      });
+      await updateStatus("migrating", describeCloneOwnedOutcome(owned));
+    } catch (err) {
+      await updateStatus(
+        "migrating",
+        `Clone-owned functions step failed (${err instanceof Error ? err.message : String(err)}) — ` +
+          "the half-hourly catch-up will retry",
+      );
+    }
+
+    /*
      * Mint this clone's own model keys, now that its secret ledger exists.
      *
      * After the pipeline rather than inside it, because minting reads and

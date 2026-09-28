@@ -651,9 +651,16 @@ describe("the function tree a clone is built from leaves the prime's own feature
     // bundles are what it is GIVEN. A slug in the first that is never in the
     // second is a livelock: the pass that fetches no source waits for every
     // declared slug to be live on the clone.
+    //
+    // Four readers: `fetchDeclaredEdgeFunctionSlugs`, the snapshot's
+    // no-source branch, the snapshot's bundle build, and `readRepoFunctionTree`
+    // — the clone-owned lane's read of a CLONE's tree.
+    // That one filters too, because a clone still holding the prime's own
+    // feature must not have it redeployed by the lane that deploys what the
+    // clone carries while the prime-only sweep takes it off.
     const src = readFileSync("src/server/prime-backend.server.ts", "utf8");
     expect(src).not.toMatch(/\.filter\(\(b\) => b\.path\.startsWith\(FUNCTIONS_PREFIX\)\)/);
-    expect(src.split("isCloneFunctionPath(b.path)").length - 1).toBe(3);
+    expect(src.split("isCloneFunctionPath(b.path)").length - 1).toBe(4);
   });
 
   it("reads a scan cached before the feature was held back through the same rule", () => {

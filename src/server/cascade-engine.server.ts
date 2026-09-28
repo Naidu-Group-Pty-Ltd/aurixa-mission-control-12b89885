@@ -722,6 +722,8 @@ export async function executeCascade(
       last_synced_sha: string | null;
       /** Which clone this one receives from. NULL ⇒ prime. */
       parent_clone_id: string | null;
+      /** Which CRM it runs. NULL ⇒ not recorded; decides its membrane's routed-name channel. */
+      crm_mode: string | null;
     } | null;
 
     if (!clone) {
@@ -1223,42 +1225,158 @@ export async function executeCascade(
 }
 
 /**
- * Rebuild one clone's open cascade proposal on the branch as it now stands.
+ * Where ONE clone reads its tree from, for the two callers that act on a
+ * single clone outside the live pass: the proposal repair and the dry run.
  *
- * This is the repair path for a conflicted proposal, and it is deliberately
- * not a new mechanism: it runs the SAME `processClone` an ordinary cascade
- * runs, which reads the clone's current head, re-partitions against the
- * clone's exclusions, re-runs both held-file guards, finds the open proposal
- * and force-updates it. A conflict cannot survive that, because the rebuilt
- * commit's parent IS the branch head — see `cascade/proposalRepair.pure.ts`.
+ * The live pass resolves this inline, against parent rows it read once and
+ * keeps current as it delivers them. These two callers used to resolve
+ * nothing: both built `primeRef` straight from `prime_config`, so with lineage
+ * on, a repair of NPC Test's proposal would have been rebuilt from the PRIME'S
+ * tree rather than the Client Dashboard's — every exclusion, clone-owned file
+ * and membrane refusal on the parent's edge skipped, and force-pushed over a
+ * branch that had been built from the parent. One decision, `resolveCascadeSource`,
+ * now answers all three callers, and this is the network half of it for a
+ * single clone.
  *
- * It re-bases and never RE-SCOPES. `sourceSha` is the prime commit the
- * proposal already promised, so the rebuilt proposal delivers exactly what its
- * cascade event says it delivers. Quietly upgrading the payload to prime's
- * latest would be one CI run cheaper and would make `cascade_events.source_sha`
- * describe something that event never carried.
- *
- * The caller owns the safety check. `processClone` force-updates the proposal
- * branch, so calling this on a branch somebody has committed to destroys their
- * work — `decideProposalRepair` is what stands in front of it.
+ * It never falls back to prime. A parent that is not ready, not found or not
+ * readable is a HOLD, for the same reason the live pass holds: a source that
+ * cannot be read is not a source that is empty, and prime's tree is not what
+ * a routed child is configured to receive.
  */
-export async function regenerateCloneProposal(args: {
+export type CloneReadSource =
+  | {
+      kind: "read";
+      /** The repository whose tree the clone copies. */
+      ref: RepoRef;
+      /** The head of `ref`: prime's commit, or the parent's branch head. */
+      sha: string;
+      /** Set only when the parent supplies the tree. See `processClone`. */
+      provenance?: { label: string; deliveredSha: string };
+    }
+  | { kind: "hold"; why: string };
+
+export async function resolveCloneReadSource(args: {
+  supabase: SupabaseLike;
+  octokit: ReturnType<typeof getAppOctokit>;
+  prime: {
+    github_owner: string;
+    github_repo: string;
+    default_branch: string | null;
+    cascade_follows_lineage: boolean | null;
+  };
+  /** `clones.parent_clone_id` of the clone being built. NULL ⇒ prime. */
+  parentCloneId: string | null;
+  /** The PRIME commit this delivery carries, whichever repository is read. */
+  primeSha: string;
+}): Promise<CloneReadSource> {
+  const { supabase, octokit, prime, parentCloneId, primeSha } = args;
+  const followsLineage = prime.cascade_follows_lineage === true;
+
+  let parent: ParentCloneRow | null = null;
+  let parentReadFailed = false;
+  if (followsLineage && parentCloneId) {
+    const { data, error } = await supabase
+      .from("clones")
+      .select("id, name, github_owner, github_repo, default_branch, last_synced_sha")
+      .eq("id", parentCloneId)
+      .maybeSingle();
+    // Bound, never discarded: `resolveCascadeSource` reads a failed query as
+    // a hold, and only a checked error can tell it the read failed.
+    if (error) parentReadFailed = true;
+    parent = (data as ParentCloneRow | null) ?? null;
+  }
+
+  const decision = resolveCascadeSource({
+    followsLineage,
+    parentCloneId,
+    parent,
+    parentReadFailed,
+    primeSha,
+  });
+  if (decision.kind === "hold") return decision;
+  if (decision.kind === "prime") {
+    return {
+      kind: "read",
+      ref: {
+        owner: prime.github_owner,
+        repo: prime.github_repo,
+        branch: prime.default_branch || "main",
+      },
+      sha: primeSha,
+    };
+  }
+
+  try {
+    const { data: parentBranch } = await octokit.repos.getBranch({
+      owner: decision.ref.owner,
+      repo: decision.ref.repo,
+      branch: decision.ref.branch,
+    });
+    return {
+      kind: "read",
+      ref: decision.ref,
+      sha: parentBranch.commit.sha,
+      provenance: { label: decision.label, deliveredSha: primeSha },
+    };
+  } catch (e) {
+    return {
+      kind: "hold",
+      why:
+        `Could not read parent ${decision.ref.owner}/${decision.ref.repo}@` +
+        `${decision.ref.branch}: ${e instanceof Error ? e.message : "unknown"}`,
+    };
+  }
+}
+
+/**
+ * Everything a proposal rebuild reads before it may write: the clone, and the
+ * source its tree comes from. Built only by `prepareProposalRebuild`, so a
+ * rebuild cannot be asked for without the source having been resolved.
+ */
+export type ProposalRebuild = {
+  /** Where the rebuilt proposal reads its tree. The parent's, for a routed child. */
+  source: Extract<CloneReadSource, { kind: "read" }>;
+  clone: {
+    id: string;
+    name: string;
+    github_owner: string;
+    github_repo: string;
+    default_branch: string;
+    sync_scope: string | null;
+    crm_mode: string | null;
+  };
+};
+
+/**
+ * Read what a rebuild needs and decide where it reads from — WITHOUT writing
+ * anything, so the repair can ask it before counting an attempt.
+ *
+ * That ordering is the point of splitting it from the rebuild. The repair
+ * records its attempt before it rebuilds, so a crashing rebuild still counts
+ * and the loop guard still guards. A child whose parent does not carry the
+ * promised prime commit yet has not crashed; it is waiting, and counting the
+ * wait as an attempt would spend its repair budget on a parent's merge queue.
+ *
+ * `sourceSha` is the PRIME commit the proposal already promised. For a clone
+ * that reads prime it is also the commit read; for a routed child the parent
+ * must carry exactly that commit, or this is a hold — the same rule the live
+ * pass applies, through the same `resolveCascadeSource`.
+ */
+export async function prepareProposalRebuild(args: {
   supabase: SupabaseLike;
   octokit: ReturnType<typeof getAppOctokit>;
   cloneId: string;
   /** The prime SHA this proposal already promised. Never prime's latest. */
   sourceSha: string;
-  mode: Database["public"]["Enums"]["cascade_mode"];
-}): Promise<CascadeResultUpdate> {
-  const { supabase, octokit, cloneId, sourceSha, mode } = args;
+}): Promise<{ kind: "ready"; rebuild: ProposalRebuild } | { kind: "hold"; why: string }> {
+  const { supabase, octokit, cloneId, sourceSha } = args;
 
   const [primeRes, cloneRes] = await Promise.all([
     supabase.from("prime_config").select("*").limit(1).maybeSingle(),
-    supabase
-      .from("clones")
-      .select("id, name, github_owner, github_repo, default_branch, sync_scope")
-      .eq("id", cloneId)
-      .maybeSingle(),
+    // `*` rather than a column list: a column a deployment has not migrated
+    // yet (`crm_mode`, before 20260928100000) reads as absent rather than
+    // failing the whole repair with 42703.
+    supabase.from("clones").select("*").eq("id", cloneId).maybeSingle(),
   ]);
   if (primeRes.error) throw new Error(`Could not read prime config: ${primeRes.error.message}`);
   if (cloneRes.error) throw new Error(`Could not read clone ${cloneId}: ${cloneRes.error.message}`);
@@ -1272,23 +1390,79 @@ export async function regenerateCloneProposal(args: {
     throw new Error(`Clone ${cloneId} has no repository`);
   }
 
+  const source = await resolveCloneReadSource({
+    supabase,
+    octokit,
+    prime: {
+      github_owner: prime.github_owner,
+      github_repo: prime.github_repo,
+      default_branch: prime.default_branch,
+      cascade_follows_lineage: prime.cascade_follows_lineage ?? null,
+    },
+    parentCloneId: clone.parent_clone_id ?? null,
+    primeSha: sourceSha,
+  });
+  if (source.kind === "hold") return source;
+
+  return {
+    kind: "ready",
+    rebuild: {
+      source,
+      clone: {
+        id: clone.id,
+        name: clone.name ?? clone.github_repo,
+        github_owner: clone.github_owner,
+        github_repo: clone.github_repo,
+        default_branch: clone.default_branch || "main",
+        sync_scope: clone.sync_scope,
+        crm_mode: clone.crm_mode ?? null,
+      },
+    },
+  };
+}
+
+/**
+ * Rebuild one clone's open cascade proposal on the branch as it now stands.
+ *
+ * This is the repair path for a conflicted proposal, and it is deliberately
+ * not a new mechanism: it runs the SAME `processClone` an ordinary cascade
+ * runs, which reads the clone's current head, re-partitions against the
+ * clone's exclusions, re-runs both held-file guards, finds the open proposal
+ * and force-updates it. A conflict cannot survive that, because the rebuilt
+ * commit's parent IS the branch head — see `cascade/proposalRepair.pure.ts`.
+ *
+ * It re-bases and never RE-SCOPES. The rebuild delivers the prime commit the
+ * proposal already promised, not prime's latest: quietly upgrading the payload
+ * would be one CI run cheaper and would make `cascade_events.source_sha`
+ * describe something that event never carried.
+ *
+ * And it reads from where the live pass read. `rebuild.source` is the parent's
+ * branch for a routed child, carrying the promised commit, with `provenance`
+ * keeping the labels on the parent and the ledger on prime — the same three
+ * values the live loop hands `processClone`. Built from prime instead, a
+ * repair of NPC Test's proposal would force-push the prime's tree over a
+ * branch built from the Client Dashboard's.
+ *
+ * The caller owns the safety check. `processClone` force-updates the proposal
+ * branch, so calling this on a branch somebody has committed to destroys their
+ * work — `decideProposalRepair` is what stands in front of it.
+ */
+export async function regenerateCloneProposal(args: {
+  supabase: SupabaseLike;
+  octokit: ReturnType<typeof getAppOctokit>;
+  /** From `prepareProposalRebuild`, and only from there. */
+  rebuild: ProposalRebuild;
+  mode: Database["public"]["Enums"]["cascade_mode"];
+}): Promise<CascadeResultUpdate> {
+  const { supabase, octokit, rebuild, mode } = args;
+
   return processClone({
     octokit,
-    primeRef: {
-      owner: prime.github_owner,
-      repo: prime.github_repo,
-      branch: prime.default_branch || "main",
-    },
-    sourceSha,
+    primeRef: rebuild.source.ref,
+    sourceSha: rebuild.source.sha,
+    provenance: rebuild.source.provenance,
     mode,
-    clone: {
-      id: clone.id,
-      name: clone.name ?? clone.github_repo,
-      github_owner: clone.github_owner,
-      github_repo: clone.github_repo,
-      default_branch: clone.default_branch || "main",
-      sync_scope: clone.sync_scope,
-    },
+    clone: rebuild.clone,
     supabase,
     // A repair carries no scope filter of its own: the clone's own installed
     // modules and exclusions decide what it receives, exactly as on the run
@@ -1316,6 +1490,11 @@ export async function processClone(args: {
     github_repo: string;
     default_branch: string;
     sync_scope: string | null;
+    /**
+     * `clones.crm_mode`, when recorded. It decides the routed-name channel of
+     * this clone's membrane — see `membraneInto` — and nothing else here.
+     */
+    crm_mode?: string | null;
   };
   supabase: SupabaseLike;
   scopeFilter: Record<string, unknown> | null;
@@ -1382,8 +1561,11 @@ export async function processClone(args: {
   // routed by lineage, so a child's membrane is the one on ITS edge rather
   // than the one prime sits behind. An edge the registry does not name
   // resolves to the standing organs and no new opinion, so every clone that
-  // existed before this behaves exactly as it did.
-  const membrane = membraneInto(clone.github_repo, primeRef.repo);
+  // existed before this behaves exactly as it did — unless the clone RECORDS
+  // its CRM, which decides the routed-name channel whatever edge it sits on:
+  // a clone provisioned under a CRM line, or converted to the other one, has
+  // an edge nobody measured here.
+  const membrane = membraneInto(clone.github_repo, primeRef.repo, clone.crm_mode);
 
   // Read what this clone is allowed to receive BEFORE deciding anything else.
   //

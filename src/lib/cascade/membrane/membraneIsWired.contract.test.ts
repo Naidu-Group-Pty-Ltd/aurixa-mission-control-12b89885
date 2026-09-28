@@ -21,12 +21,14 @@ const dryrun = stripComments(readFileSync("src/server/cascade-dryrun.server.ts",
 
 describe("the engine asks the membrane", () => {
   it("keys the membrane on the DESTINATION, not on whatever ref a caller holds", () => {
-    // `processClone` has three callers and only one of them resolves lineage.
-    // The live cascade passes `primeRef: readRef` — already the PARENT'S
-    // repository for a routed child — while `cascade-dryrun.server.ts` and
-    // `regenerateCloneProposal` both build it straight from `prime.github_*`.
-    // Asking the destination takes the question away from the caller.
-    expect(engine).toContain("membraneInto(clone.github_repo, primeRef.repo)");
+    // `processClone` has three callers, and until lineage reached all three
+    // only one of them resolved it: `cascade-dryrun.server.ts` and
+    // `regenerateCloneProposal` built `primeRef` straight from `prime.github_*`.
+    // Asking the destination took the question away from the caller then, and
+    // still does — and the clone's RECORDED CRM rides along, because a clone
+    // provisioned under a CRM line or converted to the other one sits on an
+    // edge nobody measured.
+    expect(engine).toContain("membraneInto(clone.github_repo, primeRef.repo, clone.crm_mode)");
     expect(engine).not.toContain("resolveMembrane(primeRef.repo");
   });
 
@@ -37,13 +39,34 @@ describe("the engine asks the membrane", () => {
     expect(engine).toContain("primeRef: readRef");
   });
 
-  it("the two callers that resolve no lineage are still correct through it", () => {
-    // Asserted as the property rather than trusted: neither mentions lineage,
-    // and that is exactly why the membrane may not be keyed on their ref.
-    for (const src of [dryrun, engine.slice(engine.indexOf("regenerateCloneProposal"))]) {
-      expect(src).toContain("repo: prime.github_repo");
+  it("the two single-clone callers read the source the live pass would", () => {
+    // They used to resolve no lineage at all, and with lineage ON that was a
+    // live hazard rather than a label: a repair of NPC Test's conflicted
+    // proposal would have force-pushed the PRIME'S tree over a branch built
+    // from the Client Dashboard's. Both now ask the one resolver, and hand
+    // `processClone` what it answers — the ref, its head and the provenance.
+    const rebuild = engine.slice(engine.indexOf("export async function prepareProposalRebuild"));
+    expect(rebuild).toContain("resolveCloneReadSource(");
+    expect(dryrun).toContain("resolveCloneReadSource(");
+    for (const src of [
+      dryrun,
+      engine.slice(engine.indexOf("export async function regenerateCloneProposal")),
+    ]) {
+      expect(src).toMatch(/primeRef:\s*(rebuild\.)?source\.ref/);
+      expect(src).toMatch(/provenance:\s*(rebuild\.)?source\.provenance/);
+      // Never prime's ref, assembled on the spot.
+      expect(src.slice(0, src.indexOf("processClone({") + 400)).not.toMatch(
+        /primeRef:\s*\{\s*owner:\s*prime\.github_owner/,
+      );
     }
-    expect(dryrun).not.toContain("readRef");
+    // And the resolver never falls back to prime on a parent it could not
+    // read: every non-prime outcome is a hold or the parent's own branch.
+    const resolver = engine.slice(
+      engine.indexOf("export async function resolveCloneReadSource"),
+      engine.indexOf("export async function prepareProposalRebuild"),
+    );
+    expect(resolver).toContain("resolveCascadeSource({");
+    expect(resolver).toMatch(/catch \(e\) \{\s*return \{\s*kind: "hold"/);
   });
 
   it("consults it per file, with the text it is about to write", () => {

@@ -1758,6 +1758,7 @@ export type Database = {
           attempts: number
           chunk_cursor: Json | null
           clone_id: string
+          clone_owned_functions: Json | null
           created_at: string
           db_pass: string | null
           edge_functions: Json
@@ -1801,6 +1802,7 @@ export type Database = {
           attempts?: number
           chunk_cursor?: Json | null
           clone_id: string
+          clone_owned_functions?: Json | null
           created_at?: string
           db_pass?: string | null
           edge_functions?: Json
@@ -1844,6 +1846,7 @@ export type Database = {
           attempts?: number
           chunk_cursor?: Json | null
           clone_id?: string
+          clone_owned_functions?: Json | null
           created_at?: string
           db_pass?: string | null
           edge_functions?: Json
@@ -3821,6 +3824,7 @@ export type Database = {
           commits_behind: number
           contract_excluded_module_slugs: string[]
           created_at: string
+          crm_mode: string | null
           default_branch: string
           deploy_url: string | null
           drift_suggestions: Json
@@ -3867,6 +3871,7 @@ export type Database = {
           commits_behind?: number
           contract_excluded_module_slugs?: string[]
           created_at?: string
+          crm_mode?: string | null
           default_branch?: string
           deploy_url?: string | null
           drift_suggestions?: Json
@@ -3913,6 +3918,7 @@ export type Database = {
           commits_behind?: number
           contract_excluded_module_slugs?: string[]
           created_at?: string
+          crm_mode?: string | null
           default_branch?: string
           deploy_url?: string | null
           drift_suggestions?: Json
@@ -9421,6 +9427,8 @@ export type Database = {
           codex_scan_dedup_hours: number
           convergence_slo_minutes: number
           created_at: string
+          crm_dependent_parent_clone_id: string | null
+          crm_independent_parent_clone_id: string | null
           default_branch: string
           default_cascade_mode: Database["public"]["Enums"]["cascade_mode"]
           default_clone_org: string | null
@@ -9443,6 +9451,8 @@ export type Database = {
           codex_scan_dedup_hours?: number
           convergence_slo_minutes?: number
           created_at?: string
+          crm_dependent_parent_clone_id?: string | null
+          crm_independent_parent_clone_id?: string | null
           default_branch?: string
           default_cascade_mode?: Database["public"]["Enums"]["cascade_mode"]
           default_clone_org?: string | null
@@ -9465,6 +9475,8 @@ export type Database = {
           codex_scan_dedup_hours?: number
           convergence_slo_minutes?: number
           created_at?: string
+          crm_dependent_parent_clone_id?: string | null
+          crm_independent_parent_clone_id?: string | null
           default_branch?: string
           default_cascade_mode?: Database["public"]["Enums"]["cascade_mode"]
           default_clone_org?: string | null
@@ -9476,7 +9488,36 @@ export type Database = {
           supabase_project_ref?: string | null
           updated_at?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "prime_config_crm_dependent_parent_clone_id_fkey"
+            columns: ["crm_dependent_parent_clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "prime_config_crm_dependent_parent_clone_id_fkey"
+            columns: ["crm_dependent_parent_clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones_missing_isolated_backend"
+            referencedColumns: ["clone_id"]
+          },
+          {
+            foreignKeyName: "prime_config_crm_independent_parent_clone_id_fkey"
+            columns: ["crm_independent_parent_clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "prime_config_crm_independent_parent_clone_id_fkey"
+            columns: ["crm_independent_parent_clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones_missing_isolated_backend"
+            referencedColumns: ["clone_id"]
+          },
+        ]
       }
       prime_secret_forwards: {
         Row: {
