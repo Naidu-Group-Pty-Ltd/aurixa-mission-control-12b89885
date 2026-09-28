@@ -76,6 +76,14 @@ import {
   InviteOwnerDialog,
   OrganisationFormDialog,
 } from "@/components/builders-network-organisation-dialogs";
+import {
+  AgreementStanding,
+  ApprovalGateDialog,
+  type AgreementStandingRead,
+  type ApprovalGateRefusal,
+} from "@/components/builders-network-agreements";
+import { listBuilderAgreementStates } from "@/lib/builderPartnerAgreements.functions";
+import { useSendBuilderAgreement } from "@/lib/use-send-builder-agreement";
 
 /**
  * The Builders Network operator console (extraction plan §5).
@@ -87,6 +95,10 @@ import {
  * revocable switch the status strip reads. Approving an organisation also
  * ensures its per-organisation tenant (plan §10: metering identity is per
  * builder organisation), so the ledger exists from the day of approval.
+ *
+ * While Builder Partner Agreement terms are in force, Approve waits for the
+ * organisation's signed agreement — the server reads it at the moment of
+ * approval, and an admin may approve without one only by recording why.
  */
 export const Route = createFileRoute("/builders-network")({
   errorComponent: RouteError,
@@ -666,6 +678,24 @@ function BuildersNetworkConsole() {
   });
   const shadow = useQuery({ queryKey: ["bn-shadow"], queryFn: () => shadowFn() });
   const clones = useQuery({ queryKey: ["bn-clones"], queryFn: () => clonesFn() });
+  const agreementStatesFn = useServerFn(listBuilderAgreementStates);
+  const agreements = useQuery({
+    queryKey: ["bn-agreements"],
+    queryFn: () => agreementStatesFn(),
+  });
+  const standingFor = (organisationId: string): AgreementStandingRead => {
+    if (agreements.isPending) return { state: "loading" };
+    if (agreements.isError || !agreements.data) return { state: "unreadable" };
+    if (!agreements.data.installed) return { state: "not_installed" };
+    return {
+      state: "read",
+      termsInForce: agreements.data.terms.state === "in_force",
+      complete: agreements.data.complete,
+      entry: agreements.data.organisations[organisationId] ?? null,
+    };
+  };
+  const sendAgreement = useSendBuilderAgreement();
+  const [gateRefusal, setGateRefusal] = useState<ApprovalGateRefusal | null>(null);
 
   const [busyOrg, setBusyOrg] = useState<string | null>(null);
   // Null means the form is closed; `undefined` subject means "create".
@@ -696,6 +726,60 @@ function BuildersNetworkConsole() {
     void queryClient.invalidateQueries({ queryKey: ["bn-joins"] });
     void queryClient.invalidateQueries({ queryKey: ["bn-access-requests"] });
     void queryClient.invalidateQueries({ queryKey: ["bn-shadow"] });
+    void queryClient.invalidateQueries({ queryKey: ["bn-agreements"] });
+  };
+
+  /**
+   * Approve, with or without a recorded waiver. Returns a sentence to show
+   * when nothing was approved, or null when the network approved it.
+   *
+   * The server's gate decides every time, including when a waiver is sent:
+   * a gate asking for a signature opens the dialog rather than a toast,
+   * because the answer to "has not signed" is an act, not a message.
+   */
+  const approve = async (
+    organisationId: string,
+    legalName: string,
+    waiverReason: string | null,
+  ): Promise<string | null> => {
+    const result = await approveFn({
+      data: {
+        organisationId,
+        legalName,
+        ...(waiverReason ? { waiverReason } : {}),
+      },
+    });
+    if (!result.ok) {
+      if (result.kind === "network") return readNetworkFailure(result.error).sentence;
+      if (
+        !waiverReason &&
+        (result.error === "agreement_required" || result.error === "agreement_in_flight")
+      ) {
+        setGateRefusal({
+          organisationId,
+          legalName,
+          code: result.error,
+          detail: result.detail,
+          openAgreementId: result.openAgreementId,
+        });
+        return null;
+      }
+      return result.detail;
+    }
+    const basis =
+      result.basis === "signed"
+        ? " on their signed agreement"
+        : result.basis === "waived"
+          ? " without a signed agreement (reason recorded)"
+          : "";
+    const verb = result.alreadyActive ? "was already approved" : "approved";
+    toast.success(
+      result.tenant.ok
+        ? `${legalName} ${verb}${basis} — metering tenant ready`
+        : `${legalName} ${verb}${basis} — TENANT FAILED: ${result.tenant.error}`,
+    );
+    refreshAll();
+    return null;
   };
 
   const act = async (
@@ -705,15 +789,9 @@ function BuildersNetworkConsole() {
     setBusyOrg(organisation.id);
     try {
       if (action === "approve") {
-        const result = await approveFn({
-          data: { organisationId: organisation.id, legalName: organisation.legal_name },
-        });
-        if (!result.ok) throw new Error(result.error);
-        toast.success(
-          result.tenant.ok
-            ? `${organisation.legal_name} approved — metering tenant ready`
-            : `${organisation.legal_name} approved — TENANT FAILED: ${result.tenant.error}`,
-        );
+        const refusal = await approve(organisation.id, organisation.legal_name, null);
+        if (refusal) toast.error(refusal);
+        return;
       } else if (action === "suspend") {
         const reason = window.prompt(`Reason for suspending ${organisation.legal_name}?`)?.trim();
         if (!reason) return;
@@ -962,6 +1040,14 @@ function BuildersNetworkConsole() {
                         Suspended: {organisation.suspension_reason}
                       </p>
                     )}
+                    <div className="mt-1">
+                      <AgreementStanding
+                        organisationStatus={organisation.status}
+                        standing={standingFor(organisation.id)}
+                        busy={sendAgreement.busy === organisation.id}
+                        onSend={() => void sendAgreement.send(organisation.id)}
+                      />
+                    </div>
                   </div>
                   <StatusBadge value={organisation.status} />
                   <div className="flex gap-2">
@@ -1053,6 +1139,19 @@ function BuildersNetworkConsole() {
         onOpenChange={(next) => {
           if (!next) setOrgBeingSeeded(null);
         }}
+      />
+      <ApprovalGateDialog
+        refusal={gateRefusal}
+        onOpenChange={(next) => {
+          if (!next) setGateRefusal(null);
+        }}
+        onApprove={async (refusal, waiverReason) => {
+          const problem = await approve(refusal.organisationId, refusal.legalName, waiverReason);
+          if (!problem) setGateRefusal(null);
+          return problem;
+        }}
+        sending={gateRefusal !== null && sendAgreement.busy === gateRefusal.organisationId}
+        onSend={(organisationId) => void sendAgreement.send(organisationId)}
       />
 
       {/* ----------------------------------------------------- connections */}

@@ -49,6 +49,7 @@ import {
 } from "@/components/ui/dialog";
 import { AgreementProvisioningDialog } from "@/components/agreement-provisioning-dialog";
 import { OfferEditor } from "@/components/agreements/offer-editor";
+import { BuilderPartnerAgreementPage } from "@/components/agreements/builder-partner-agreement";
 import {
   OfferDocumentReview,
   OfferPrice,
@@ -175,6 +176,9 @@ function AgreementPage({ agreementId }: { agreementId: string }) {
   }
 
   const loaded = agreementQ.data;
+  if (loaded.agreement.document_kind === "builder_partner") {
+    return <BuilderPartnerAgreementPage agreementId={agreementId} />;
+  }
   if (loaded.agreement.document_kind !== "subscription") {
     return <ServiceLevelAgreement agreement={loaded.agreement} />;
   }

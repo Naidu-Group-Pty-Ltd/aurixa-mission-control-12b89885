@@ -42,15 +42,22 @@ export const Route = createFileRoute("/hooks/agreements-refresh")({
         const { docusignConfig, refreshEnvelopeStatus } =
           await import("@/server/agreements.server");
         const config = docusignConfig();
+        // Builder Partner Agreements: grants a signature could not make, and
+        // metering accounts a grant left missing, need no DocuSign — only
+        // retaining a signed record does. Never throws.
+        const { sweepBuilderPartnerAgreements } =
+          await import("@/server/builder-partner-agreements.server");
         if (!config.ready) {
           // Dormant, not broken: nothing to poll with until the DocuSign
           // secrets exist. A 200 keeps the cron ledger green — the missing
           // configuration is already surfaced on /agreements itself.
+          const builderPartner = await sweepBuilderPartnerAgreements({ retention: false });
           return new Response(
             JSON.stringify({
               success: true,
               skipped: "docusign_not_configured",
               missing: config.missing,
+              builder_partner: builderPartner,
             }),
             { headers: { "Content-Type": "application/json" } },
           );
@@ -154,6 +161,8 @@ export const Route = createFileRoute("/hooks/agreements-refresh")({
           }
         }
 
+        const builderPartner = await sweepBuilderPartnerAgreements({ retention: true });
+
         return new Response(
           JSON.stringify({
             success: true,
@@ -163,6 +172,7 @@ export const Route = createFileRoute("/hooks/agreements-refresh")({
             retained,
             released,
             ...(releaseDeferred ? { release_deferred: releaseDeferred } : {}),
+            builder_partner: builderPartner,
             failures,
           }),
           { headers: { "Content-Type": "application/json" } },

@@ -47,7 +47,6 @@ import {
   type CompletedDocument,
 } from "@/lib/agreements/docxPackage.pure";
 import {
-  AGREEMENT_ID_CUSTOM_FIELD,
   AGREEMENT_RECORDS_BUCKET,
   agreementColumnsFromOffer,
   buildIssuedSnapshot,
@@ -56,7 +55,6 @@ import {
   issuedDocumentName,
   issuingDay,
   looksLikePdf,
-  pickRecoveredEnvelope,
   previewDocumentName,
   provisioningSelectionFromOffer,
   selectionMatches,
@@ -83,9 +81,9 @@ import {
   agreementAssetUrl,
   bytesToBase64,
   docusignConfig,
+  findEnvelopeForAgreement,
   getDocusignAccessToken,
   mapEnvelopeStatus,
-  type DocusignConfig,
 } from "@/server/agreements.server";
 import { notifyOperators, writeAuditLog } from "@/server/audit.server";
 import { indexVersion } from "@/server/report-cost-index.server";
@@ -293,39 +291,6 @@ export async function downloadSubscriptionDocument(agreementId: string): Promise
 }
 
 /* ───────────────────────────── sending ───────────────────────────── */
-
-type EnvelopeLookup =
-  | { envelopeId: string; status: string; sentDateTime: string | null }
-  | null
-  | "unknown";
-
-/**
- * Ask DocuSign whether an envelope for this agreement exists — the question
- * that makes taking over a dead send safe. "unknown" when DocuSign could not
- * be asked; a caller must then do nothing, because silence is not absence.
- */
-async function findEnvelopeForAgreement(
-  config: DocusignConfig,
-  token: string,
-  agreementId: string,
-  since: string,
-): Promise<EnvelopeLookup> {
-  const from = new Date(Date.parse(since) - 24 * 60 * 60_000);
-  const params = new URLSearchParams({
-    from_date: Number.isFinite(from.getTime()) ? from.toISOString() : since,
-    custom_field: `${AGREEMENT_ID_CUSTOM_FIELD}=${agreementId}`,
-  });
-  try {
-    const res = await fetch(
-      `${config.baseUrl}/v2.1/accounts/${config.accountId}/envelopes?${params.toString()}`,
-      { headers: { Authorization: `Bearer ${token}`, Accept: "application/json" } },
-    );
-    if (!res.ok) return "unknown";
-    return pickRecoveredEnvelope(await res.json());
-  } catch {
-    return "unknown";
-  }
-}
 
 async function releaseClaim(agreementId: string, claimAt: string): Promise<void> {
   const { error } = await supabaseAdmin

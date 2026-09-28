@@ -715,6 +715,75 @@ export type Database = {
         }
         Relationships: []
       }
+      builder_partner_agreement_templates: {
+        Row: {
+          activated_at: string | null
+          activated_by: string | null
+          byte_size: number
+          countersignature_required: boolean
+          created_at: string
+          execution_statement: string
+          file_name: string
+          id: string
+          media_type: string
+          name: string
+          notes: string | null
+          page_count: number | null
+          retired_at: string | null
+          retired_by: string | null
+          sha256: string
+          status: string
+          storage_path: string
+          updated_at: string
+          uploaded_by: string | null
+          version_label: string
+        }
+        Insert: {
+          activated_at?: string | null
+          activated_by?: string | null
+          byte_size: number
+          countersignature_required?: boolean
+          created_at?: string
+          execution_statement: string
+          file_name: string
+          id?: string
+          media_type: string
+          name: string
+          notes?: string | null
+          page_count?: number | null
+          retired_at?: string | null
+          retired_by?: string | null
+          sha256: string
+          status?: string
+          storage_path: string
+          updated_at?: string
+          uploaded_by?: string | null
+          version_label: string
+        }
+        Update: {
+          activated_at?: string | null
+          activated_by?: string | null
+          byte_size?: number
+          countersignature_required?: boolean
+          created_at?: string
+          execution_statement?: string
+          file_name?: string
+          id?: string
+          media_type?: string
+          name?: string
+          notes?: string | null
+          page_count?: number | null
+          retired_at?: string | null
+          retired_by?: string | null
+          sha256?: string
+          status?: string
+          storage_path?: string
+          updated_at?: string
+          uploaded_by?: string | null
+          version_label?: string
+        }
+        Relationships: []
+      }
       builders_network_connections_shadow: {
         Row: {
           builder_org_label: string | null
@@ -1115,6 +1184,7 @@ export type Database = {
           account_id: string | null
           addon_slugs: string[]
           admin_email: string | null
+          builder_organisation_id: string | null
           client_email: string
           client_name: string
           client_org: string | null
@@ -1129,6 +1199,7 @@ export type Database = {
           docusign_status: string | null
           docusign_voided_at: string | null
           excluded_module_ids: string[]
+          grant_access_on_signature: boolean
           id: string
           issued_at: string | null
           issued_snapshot: Json | null
@@ -1139,6 +1210,10 @@ export type Database = {
           offer: Json | null
           offer_reference: string | null
           plan_slug: string | null
+          portal_access_attempted_at: string | null
+          portal_access_detail: string | null
+          portal_access_granted_at: string | null
+          portal_access_status: string | null
           provision_error: string | null
           provision_on_signature: boolean
           provision_region: string
@@ -1149,6 +1224,7 @@ export type Database = {
           signed_record_retained_at: string | null
           signed_record_sha256: string | null
           status: string
+          template_id: string | null
           updated_at: string
           void_reason: string | null
         }
@@ -1156,6 +1232,7 @@ export type Database = {
           account_id?: string | null
           addon_slugs?: string[]
           admin_email?: string | null
+          builder_organisation_id?: string | null
           client_email: string
           client_name: string
           client_org?: string | null
@@ -1170,6 +1247,7 @@ export type Database = {
           docusign_status?: string | null
           docusign_voided_at?: string | null
           excluded_module_ids?: string[]
+          grant_access_on_signature?: boolean
           id?: string
           issued_at?: string | null
           issued_snapshot?: Json | null
@@ -1180,6 +1258,10 @@ export type Database = {
           offer?: Json | null
           offer_reference?: string | null
           plan_slug?: string | null
+          portal_access_attempted_at?: string | null
+          portal_access_detail?: string | null
+          portal_access_granted_at?: string | null
+          portal_access_status?: string | null
           provision_error?: string | null
           provision_on_signature?: boolean
           provision_region?: string
@@ -1190,6 +1272,7 @@ export type Database = {
           signed_record_retained_at?: string | null
           signed_record_sha256?: string | null
           status?: string
+          template_id?: string | null
           updated_at?: string
           void_reason?: string | null
         }
@@ -1197,6 +1280,7 @@ export type Database = {
           account_id?: string | null
           addon_slugs?: string[]
           admin_email?: string | null
+          builder_organisation_id?: string | null
           client_email?: string
           client_name?: string
           client_org?: string | null
@@ -1211,6 +1295,7 @@ export type Database = {
           docusign_status?: string | null
           docusign_voided_at?: string | null
           excluded_module_ids?: string[]
+          grant_access_on_signature?: boolean
           id?: string
           issued_at?: string | null
           issued_snapshot?: Json | null
@@ -1221,6 +1306,10 @@ export type Database = {
           offer?: Json | null
           offer_reference?: string | null
           plan_slug?: string | null
+          portal_access_attempted_at?: string | null
+          portal_access_detail?: string | null
+          portal_access_granted_at?: string | null
+          portal_access_status?: string | null
           provision_error?: string | null
           provision_on_signature?: boolean
           provision_region?: string
@@ -1231,6 +1320,7 @@ export type Database = {
           signed_record_retained_at?: string | null
           signed_record_sha256?: string | null
           status?: string
+          template_id?: string | null
           updated_at?: string
           void_reason?: string | null
         }
@@ -1269,6 +1359,13 @@ export type Database = {
             isOneToOne: false
             referencedRelation: "clones_missing_isolated_backend"
             referencedColumns: ["clone_id"]
+          },
+          {
+            foreignKeyName: "client_agreements_template_id_fkey"
+            columns: ["template_id"]
+            isOneToOne: false
+            referencedRelation: "builder_partner_agreement_templates"
+            referencedColumns: ["id"]
           },
         ]
       }
@@ -14016,6 +14113,37 @@ export type Database = {
       acknowledge_plan_change: {
         Args: { _event_id: string; _tenant_id: string }
         Returns: Json
+      }
+      activate_builder_partner_agreement_template: {
+        Args: { p_actor: string; p_template_id: string }
+        Returns: {
+          activated_at: string | null
+          activated_by: string | null
+          byte_size: number
+          countersignature_required: boolean
+          created_at: string
+          execution_statement: string
+          file_name: string
+          id: string
+          media_type: string
+          name: string
+          notes: string | null
+          page_count: number | null
+          retired_at: string | null
+          retired_by: string | null
+          sha256: string
+          status: string
+          storage_path: string
+          updated_at: string
+          uploaded_by: string | null
+          version_label: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "builder_partner_agreement_templates"
+          isOneToOne: true
+          isSetofReturn: false
+        }
       }
       advance_tenant_billing_period: {
         Args: {
