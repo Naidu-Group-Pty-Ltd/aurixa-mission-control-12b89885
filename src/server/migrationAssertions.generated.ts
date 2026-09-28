@@ -834,4 +834,16 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260927100000",
     assertions: [{ kind: "rpc", fn: "clone_open_blockage_groups" }],
   },
+  {
+    migration: "20260928100000_clone_crm_mode.sql",
+    version: "20260928100000",
+    assertions: [
+      { kind: "column", table: "clones", column: "crm_mode" },
+      { kind: "check", table: "clones", column: "crm_mode", value: "dependent" },
+      { kind: "check", table: "clones", column: "crm_mode", value: "independent" },
+      { kind: "column", table: "prime_config", column: "crm_dependent_parent_clone_id" },
+      { kind: "column", table: "prime_config", column: "crm_independent_parent_clone_id" },
+      { kind: "column", table: "clone_backends", column: "clone_owned_functions" },
+    ],
+  },
 ];

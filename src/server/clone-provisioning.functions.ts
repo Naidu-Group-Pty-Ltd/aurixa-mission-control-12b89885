@@ -1,6 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { requireAdmin } from "@/integrations/supabase/role-middleware";
 import type { Database } from "@/integrations/supabase/types";
+import { isCrmMode, type CrmMode } from "@/lib/crmMode.pure";
 
 // Real clone provisioning. For 'fork' and 'template' methods, we actually
 // create the GitHub repo via the App; for 'clone' (independent), we just
@@ -82,6 +83,18 @@ export type ProvisionCloneInput = {
   // navigation-then-back) with the same key returns the existing clone row
   // instead of creating a second GitHub repo. (Audit finding #13.)
   idempotencyKey?: string | null;
+  /**
+   * Which CRM this clone runs, which decides the tree it is created FROM.
+   *
+   * `dependent` creates it from the CRM-dependent parent (GoHighLevel) and
+   * `independent` from the CRM-independent parent (the native CRM); the parent
+   * is the one `prime_config` names for that line, and the new clone is
+   * recorded as its mirror child so every later cascade reaches it through
+   * that parent. Absent keeps the path every clone had before the choice
+   * existed — created from the prime, module-scoped — which is what the
+   * signed-agreement flow still asks for.
+   */
+  crmMode?: CrmMode | null;
 };
 
 export type ProvisionCloneResult =
@@ -122,11 +135,18 @@ export const provisionClone = createServerFn({ method: "POST" })
         throw new Error("backend.adminPassword must be at least 8 characters");
       }
     }
+    // A mode this build does not know is refused rather than dropped: dropped,
+    // it would quietly provision from the prime — a clone with the wrong CRM,
+    // reported as a success.
+    if (input.crmMode != null && !isCrmMode(input.crmMode)) {
+      throw new Error("crmMode must be 'dependent' or 'independent'");
+    }
     return {
       ...input,
       billingUserId: trim(input.billingUserId) || null,
       billingStripeCustomerId: trim(input.billingStripeCustomerId) || null,
       idempotencyKey: trim(input.idempotencyKey) || null,
+      crmMode: input.crmMode ?? null,
     };
   })
 

@@ -7,6 +7,7 @@ import {
   SHIPPED_BACKEND_PAIR_PATHS,
   RESOLVER_MODULE_CANDIDATES,
   IDENTITY_GUARD_SPEC_PATH,
+  ISOLATION_SPEC_PATH,
   CI_WORKFLOW_PATH,
   declaresFallbackPair,
   ciRunsIdentityGuard,
@@ -19,6 +20,8 @@ import {
   stripWorkflowProjectRefDefault,
   supabaseRefOfJwt,
   workflowHasProjectRefDefault,
+  ownProjectRefConstOf,
+  rewriteOwnProjectRefConst,
 } from "./clone-repo-retarget.server";
 
 const PRIME = "dduzbchuswwbefdunfct";
@@ -500,5 +503,71 @@ describe("what provisioning tells the operator when a step fails", () => {
     const i = src.indexOf("const failedRetarget");
     const block = src.slice(i, i + 700);
     expect(block).toContain("updateStatus(");
+  });
+});
+
+describe("the isolation spec a clone copied from a parent inherits", () => {
+  // `npc-client-dashboard`'s spec pins its own ref as a literal. A clone
+  // created from that parent receives it naming the PARENT, and step 2 points
+  // config.toml at the new project — so without this rewrite the new
+  // repository's first CI run fails on its own correct configuration.
+  const CHILD = "abcdefghijklmnopqrst";
+  const SPEC = [
+    "/** The prime's project must never appear. */",
+    `const PRIME_REF = '${PRIME}';`,
+    `const OWN_PROJECT_REF = '${CLONE}';`,
+    "",
+    "it('config.toml names this project', () => {",
+    "  expect(config).toMatch(new RegExp(`^project_id\\s*=\\s*\"${OWN_PROJECT_REF}\"`, 'm'));",
+    "});",
+    "",
+  ].join("\n");
+
+  it("names the one path it touches", () => {
+    expect(ISOLATION_SPEC_PATH).toBe("src/lib/__tests__/backendIsolation.spec.ts");
+  });
+
+  it("reads the pinned ref", () => {
+    expect(ownProjectRefConstOf(SPEC)).toBe(CLONE);
+    expect(ownProjectRefConstOf(`const OWN_PROJECT_REF = "${CLONE}";`)).toBe(CLONE);
+    expect(ownProjectRefConstOf("const OTHER = 'x';")).toBeNull();
+    // Not a Supabase ref — nothing to rewrite, and nothing is guessed.
+    expect(ownProjectRefConstOf("const OWN_PROJECT_REF = process.env.REF;")).toBeNull();
+  });
+
+  it("rewrites the declaration and nothing else", () => {
+    const out = rewriteOwnProjectRefConst(SPEC, CHILD);
+    expect(ownProjectRefConstOf(out)).toBe(CHILD);
+    // The prime's literal is a fixture the spec asserts this deployment does
+    // NOT name. Rewriting it would delete the assertion.
+    expect(out).toContain(`const PRIME_REF = '${PRIME}';`);
+    expect(out).not.toContain(CLONE);
+    expect(out.split("\n").length).toBe(SPEC.split("\n").length);
+  });
+
+  it("keeps the quote style it found", () => {
+    expect(rewriteOwnProjectRefConst(`const OWN_PROJECT_REF = "${CLONE}";`, CHILD)).toBe(
+      `const OWN_PROJECT_REF = "${CHILD}";`,
+    );
+  });
+
+  it("is idempotent", () => {
+    const once = rewriteOwnProjectRefConst(SPEC, CHILD);
+    expect(rewriteOwnProjectRefConst(once, CHILD)).toBe(once);
+  });
+
+  it("runs after config.toml is pointed at the clone, and fails rather than guessing", () => {
+    const src = readFileSync("src/server/clone-repo-retarget.server.ts", "utf8");
+    const config = src.indexOf("// 2. config.toml");
+    const spec = src.indexOf("// 2b. The isolation spec");
+    const workflows = src.indexOf("// 3. The workflows");
+    expect(config).toBeGreaterThan(-1);
+    expect(spec).toBeGreaterThan(config);
+    expect(workflows).toBeGreaterThan(spec);
+    const step = src.slice(spec, workflows);
+    expect(step).toContain('status: "absent"');
+    expect(step).toContain('status: "unchanged"');
+    expect(step).toContain('status: "failed"');
+    expect(step).toContain("rewriteOwnProjectRefConst(f.text, cloneProjectRef)");
   });
 });

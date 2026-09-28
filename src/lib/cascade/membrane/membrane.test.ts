@@ -22,9 +22,12 @@ import type { Membrane } from "./membrane.pure";
 import {
   FLEET_MEMBRANES,
   PRIME_REPO,
+  crmLineMembrane,
   membraneInto,
+  membraneOnEdge,
   membranesTouching,
   resolveMembrane,
+  routedNameChannelFor,
 } from "./fleetMembranes.pure";
 import {
   reportableHeld,
@@ -785,7 +788,10 @@ describe("a subject named as segments of the spec's own directory", () => {
 
   it("reads `import.meta.dirname`, `resolve`, and a segment that carries its own slashes", () => {
     expect(
-      subjectsNamedBy('readFileSync(path.resolve(import.meta.dirname, "../..", "a.pure.ts"))', specPath),
+      subjectsNamedBy(
+        'readFileSync(path.resolve(import.meta.dirname, "../..", "a.pure.ts"))',
+        specPath,
+      ),
     ).toEqual(["src/a.pure.ts"]);
     expect(subjectsNamedBy("join(__dirname, `fixtures/nsw.json`)", specPath)).toEqual([
       "src/lib/__tests__/fixtures/nsw.json",
@@ -795,14 +801,20 @@ describe("a subject named as segments of the spec's own directory", () => {
   it("reads nothing after a base that is not the spec's own directory", () => {
     // `ROOT` could be anything; resolving it as the spec's directory would
     // name a file the spec never meant.
-    expect(subjectsNamedBy('readFileSync(join(ROOT, "..", "..", "App.tsx"))', specPath)).toEqual([]);
-    expect(subjectsNamedBy('readFileSync(join(here, "..", "..", "App.tsx"))', specPath)).toEqual([]);
+    expect(subjectsNamedBy('readFileSync(join(ROOT, "..", "..", "App.tsx"))', specPath)).toEqual(
+      [],
+    );
+    expect(subjectsNamedBy('readFileSync(join(here, "..", "..", "App.tsx"))', specPath)).toEqual(
+      [],
+    );
   });
 
   it("stops at the first argument that is not a plain literal", () => {
     // What the run holds before `name` is a directory, and a directory is no
     // subject. It never becomes half a path.
-    expect(subjectsNamedBy('readFileSync(join(__dirname, "..", name, "a.ts"))', specPath)).toEqual([]);
+    expect(subjectsNamedBy('readFileSync(join(__dirname, "..", name, "a.ts"))', specPath)).toEqual(
+      [],
+    );
     expect(
       subjectsNamedBy("readFileSync(join(__dirname, 'fixtures', `${name}.json`))", specPath),
     ).toEqual([]);
@@ -919,11 +931,12 @@ describe("a project ref is read in the shipped shapes, not as any long word", ()
 
 describe("the edge into a repository is decided by that repository", () => {
   it("gives a lineage-routed child its PARENT'S edge, whatever ref the caller held", () => {
-    // `cascade-dryrun` and `regenerateCloneProposal` build `primeRef` from
-    // `prime.github_*` and resolve no lineage. Under the old keying both
+    // `cascade-dryrun` and `regenerateCloneProposal` once built `primeRef`
+    // from `prime.github_*` and resolved no lineage. Under the old keying both
     // asked for a prime→child edge this fleet does not have and fell through
     // to the default — printing an edge that does not exist into a held row
-    // the repair path persists.
+    // the repair path persists. They read the parent now; the membrane still
+    // answers correctly for a caller that does not.
     for (const child of ["npc-test-76b3b3", "preflight-property-group"]) {
       const m = membraneInto(child, PRIME_REPO);
       expect(m.from).toBe("npc-client-dashboard");
@@ -963,6 +976,95 @@ describe("the edge into a repository is decided by that repository", () => {
       expect(seen.has(m.to), `${m.to} is the destination of two membranes`).toBe(false);
       seen.add(m.to);
     }
+  });
+});
+
+/** The routed-name channel on a membrane, or undefined where it says nothing. */
+const routedOf = (m: Membrane) => m.channels.find((c) => c.species === "routed_crm_name");
+
+describe("a clone that records its CRM crosses that CRM's boundary", () => {
+  const CRM_ROOT = "npc-crm-independent-6505dc";
+  const GHL_ROOT = "npc-client-dashboard";
+
+  it("a new clone under a CRM line gets that line's channel on an edge nobody measured", () => {
+    // Provisioning creates `<line's parent> → <new repo>`, which no registry
+    // entry names. With lineage off it would read the prime's tree through the
+    // default membrane, which has no opinion on routed names — the way a
+    // GoHighLevel name crosses back into a CRM-independent browser layer.
+    const independent = membraneInto("brand-new-clone", CRM_ROOT, "independent");
+    expect(independent.from).toBe(CRM_ROOT);
+    expect(independent.to).toBe("brand-new-clone");
+    expect(routedOf(independent)?.state).toBe("closed");
+    expect(routedOf(independent)?.within).toBe("src/**");
+    expect(independent.channels.some((c) => c.species === "spec")).toBe(true);
+    expect(independent.standing.length).toBeGreaterThan(0);
+
+    const dependent = membraneInto("brand-new-clone", GHL_ROOT, "dependent");
+    expect(dependent.from).toBe(GHL_ROOT);
+    expect(routedOf(dependent)?.state).toBe("open");
+  });
+
+  it("the channel it crosses IS the measured one, so the two lines cannot drift", () => {
+    // The same object, not an equal copy: a new CRM-independent clone is held
+    // to exactly the rule the measured edge into the CRM parent enforces.
+    expect(routedNameChannelFor("independent")).toBe(
+      routedOf(resolveMembrane(PRIME_REPO, CRM_ROOT)),
+    );
+    expect(routedNameChannelFor("dependent")).toBe(routedOf(resolveMembrane(PRIME_REPO, GHL_ROOT)));
+  });
+
+  it("keeps every measured edge wherever the recorded CRM agrees with it", () => {
+    for (const m of FLEET_MEMBRANES) {
+      const mode = routedOf(m)?.state === "closed" ? "independent" : "dependent";
+      expect(membraneInto(m.to, m.from, mode)).toBe(m);
+      expect(membraneOnEdge(m.from, m.to, mode)).toBe(m);
+    }
+  });
+
+  it("a converted clone leaves its measured edge behind", () => {
+    // NPC Test moved under the CRM-independent parent: its registered edge
+    // still names the GoHighLevel parent and an OPEN channel. The recorded CRM
+    // wins, and the edge printed is the one the bytes now cross.
+    const moved = membraneInto("npc-test-76b3b3", CRM_ROOT, "independent");
+    expect(moved.from).toBe(CRM_ROOT);
+    expect(routedOf(moved)?.state).toBe("closed");
+
+    // And the other way: the CRM parent itself, recorded as dependent.
+    const back = membraneInto(CRM_ROOT, PRIME_REPO, "dependent");
+    expect(routedOf(back)?.state).toBe("open");
+    expect(back).toEqual(crmLineMembrane(PRIME_REPO, CRM_ROOT, "dependent"));
+  });
+
+  it("an unrecorded or unknown CRM changes nothing", () => {
+    // NULL is its own answer and never a default: a clone registered before
+    // the column existed behaves exactly as it did.
+    for (const mode of [null, undefined, "", "hubspot"]) {
+      for (const m of FLEET_MEMBRANES) {
+        expect(membraneInto(m.to, PRIME_REPO, mode)).toBe(membraneInto(m.to, PRIME_REPO));
+        expect(membraneOnEdge(m.from, m.to, mode)).toBe(m);
+      }
+      expect(routedOf(membraneInto("brand-new-clone", GHL_ROOT, mode))).toBeUndefined();
+      expect(routedOf(membraneOnEdge(GHL_ROOT, "brand-new-clone", mode))).toBeUndefined();
+    }
+  });
+
+  it("the diagram never substitutes an edge with a different upstream", () => {
+    // A clone whose parent is filtered off the screen hangs from the trunk,
+    // and the diagram keys its selection on that branch's two ends — so the
+    // band must describe THAT branch, whatever the registry says about the
+    // clone's real parent.
+    const m = membraneOnEdge(PRIME_REPO, "npc-test-76b3b3", "independent");
+    expect(m.from).toBe(PRIME_REPO);
+    expect(m.to).toBe("npc-test-76b3b3");
+    expect(routedOf(m)?.state).toBe("closed");
+    expect(membraneOnEdge(PRIME_REPO, "npc-test-76b3b3", null)).toEqual(
+      resolveMembrane(PRIME_REPO, "npc-test-76b3b3"),
+    );
+  });
+
+  it("says which CRM it read in the rationale an operator is shown", () => {
+    expect(crmLineMembrane(CRM_ROOT, "x", "independent").rationale).toContain("CRM independent");
+    expect(crmLineMembrane(GHL_ROOT, "x", "dependent").rationale).toContain("CRM dependent");
   });
 });
 
