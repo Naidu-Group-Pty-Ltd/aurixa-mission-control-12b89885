@@ -27,11 +27,24 @@
  *   anywhere, rather than guessing project by project.
  * - **A read that failed is not a clone with nothing to delete.** Every
  *   refusal is named and returned.
+ *
+ * ## The CRM line's share
+ *
+ * The same pass takes off what a clone's recorded CRM line does not carry
+ * (`crmLineFeatures.pure.ts`): the GoHighLevel integration's functions AND
+ * its pg_cron jobs, on the independent line. The jobs are swept here as well
+ * as after provisioning's own applies, because the fleet migration lane
+ * applies migrations too and four of the prime's re-schedule them — measured
+ * 29 Sep 2026, all four were live on the independent line head. A clone
+ * recording no line has nothing swept for it but the prime's own functions,
+ * exactly as before.
  */
 
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import {
+  sweepPrimeOnlyCronJobs,
   sweepPrimeOnlyFunctions,
+  type PrimeOnlyCronSweep,
   type PrimeOnlyFunctionSweep,
 } from "@/server/backend-provisioning.server";
 
@@ -42,6 +55,11 @@ export type FleetFunctionSweepOutcome = {
   refused: string | null;
   /** What the project sweep did, when it was reached. */
   sweep: PrimeOnlyFunctionSweep | null;
+  /**
+   * What the CRM line's cron sweep did — only for a clone that records a
+   * line, and absent otherwise.
+   */
+  cronSweep?: PrimeOnlyCronSweep | null;
 };
 
 export type FleetFunctionSweepResult = {
@@ -50,6 +68,8 @@ export type FleetFunctionSweepResult = {
   failed: number;
   /** Found and left for the next pass. */
   deferred: number;
+  /** pg_cron jobs the CRM-line sweep unscheduled, fleet-wide. */
+  unscheduled?: number;
   outcomes: FleetFunctionSweepOutcome[];
   /** Fleet-level refusal: nothing was swept at all. */
   refused: string | null;
@@ -81,7 +101,8 @@ export async function sweepPrimeOnlyFunctionsFromFleet(): Promise<FleetFunctionS
     return result;
   }
 
-  const { data: clones, error: clonesErr } = await supabaseAdmin.from("clones").select("id, name");
+  // `*` so a deployment that has not migrated `crm_mode` reads it as absent.
+  const { data: clones, error: clonesErr } = await supabaseAdmin.from("clones").select("*");
   if (clonesErr) {
     result.refused = `could not list clones: ${clonesErr.message}`;
     return result;
@@ -101,7 +122,7 @@ export async function sweepPrimeOnlyFunctionsFromFleet(): Promise<FleetFunctionS
   }
 
   for (const clone of clones ?? []) {
-    const row = clone as { id: string; name?: string | null };
+    const row = clone as { id: string; name?: string | null; crm_mode?: string | null };
     result.considered += 1;
     const ref = refByClone.get(row.id);
     if (!ref) {
@@ -113,11 +134,23 @@ export async function sweepPrimeOnlyFunctionsFromFleet(): Promise<FleetFunctionS
       });
       continue;
     }
-    const sweep = await sweepPrimeOnlyFunctions(ref, { primeRef });
+    const crmMode = row.crm_mode ?? null;
+    const sweep = await sweepPrimeOnlyFunctions(ref, { primeRef, crmMode });
     result.deleted += sweep.deleted.length;
     result.failed += sweep.failed.length;
     result.deferred += sweep.deferred.length;
-    result.outcomes.push({ cloneId: row.id, cloneName: row.name ?? null, refused: null, sweep });
+    const cronSweep = crmMode ? await sweepPrimeOnlyCronJobs(ref, { primeRef, crmMode }) : null;
+    if (cronSweep) {
+      result.unscheduled = (result.unscheduled ?? 0) + cronSweep.unscheduled.length;
+      result.failed += cronSweep.failed.length;
+    }
+    result.outcomes.push({
+      cloneId: row.id,
+      cloneName: row.name ?? null,
+      refused: null,
+      sweep,
+      ...(cronSweep ? { cronSweep } : {}),
+    });
   }
   return result;
 }
@@ -128,6 +161,14 @@ export async function sweepPrimeOnlyFunctionsFromFleet(): Promise<FleetFunctionS
  * writes nothing.
  */
 export function fleetFunctionSweepIsNoteworthy(result: FleetFunctionSweepResult): boolean {
-  if (result.refused || result.deleted > 0 || result.failed > 0 || result.deferred > 0) return true;
-  return result.outcomes.some((o) => o.sweep?.skipped);
+  if (
+    result.refused ||
+    result.deleted > 0 ||
+    result.failed > 0 ||
+    result.deferred > 0 ||
+    (result.unscheduled ?? 0) > 0
+  ) {
+    return true;
+  }
+  return result.outcomes.some((o) => o.sweep?.skipped || o.cronSweep?.skipped);
 }

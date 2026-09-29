@@ -18,7 +18,7 @@ const engine = read("src/server/cascade-engine.server.ts");
 // repository invariants were added to the candidate set, so the anchor is the
 // call that BUILDS the candidates rather than the label describing them.
 const start = engine.indexOf("candidatePaths = await listFilesMatchingGlobs(");
-const end = engine.indexOf("const partition = partitionCascadePaths(candidatePaths, exclusions);");
+const end = engine.indexOf("const partition = partitionCascadePaths(candidatePaths, exclusions");
 const branch = engine.slice(start, end);
 
 describe("the slice this file reads exists", () => {

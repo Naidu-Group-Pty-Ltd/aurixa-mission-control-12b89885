@@ -152,10 +152,10 @@ describe("the two parents have different membranes, which is the point", () => {
     expect(permeate(independent, { path: chunk.path, text: ROUTED_TSX }).kind).toBe("crosses");
   });
 
-  it("is bounded to the browser layer, because the clone keeps all 37 functions", () => {
-    // Measured: npc-crm-independent holds 37 `ghl-*` edge functions and calls
-    // them when configured to. Closing the channel over `supabase/functions/**`
-    // would refuse the clone its own code.
+  it("is bounded to the browser layer, because edge source is not the channel's to hold", () => {
+    // The GoHighLevel functions are withheld from the independent line by
+    // class (crmLineFeatures.pure.ts) before a membrane is asked; what reaches
+    // here under `supabase/functions/**` is the clone's own carried code.
     const edge = { path: "supabase/functions/ghl-calendar/index.ts", text: BREACHED_TSX };
     expect(permeate(independent, edge).kind).toBe("crosses");
   });
@@ -522,8 +522,8 @@ describe("a channel's scope is a glob, not a prefix", () => {
   });
 
   it("does not reach the edge functions, which are where these functions LIVE", () => {
-    // The clone keeps all 37 GoHighLevel functions and calls them when
-    // configured to. Closing their own source would hold the feature itself.
+    // Withholding the integration is the CRM-line register's job, not the
+    // membrane's; closing edge source here would hold carried code too.
     expect(
       permeate(CLOSED, { path: "supabase/functions/send-ghl-message/index.ts", text: NAMED }).kind,
     ).toBe("crosses");

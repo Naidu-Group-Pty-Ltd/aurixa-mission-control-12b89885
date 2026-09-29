@@ -70,7 +70,7 @@
  * graphs differ and the pass refuses, as it does today.
  */
 
-import { describeWithheldFunctions } from "../primeOnlyFeatures.pure";
+import { withheldClause } from "../crmLineFeatures.pure";
 
 /** The file the generator writes and CI diffs. */
 export const SECURITY_INVENTORY_PATH = "docs/security/SECURITY_INVENTORY.json";
@@ -457,10 +457,7 @@ function ratchetNote(
     owned.length > 0
       ? `declares ${owned.length} edge function(s) the prime does not — ${owned.join(", ")} —`
       : "";
-  const omits =
-    withheld.length > 0
-      ? `does not declare ${describeWithheldFunctions(withheld)}, which the prime keeps for itself,`
-      : "";
+  const omits = withheld.length > 0 ? `does not declare ${withheldClause(withheld)},` : "";
   const difference = declares && omits ? `${declares} and ${omits}` : declares || omits;
   const sentence =
     `${RECONCILED_MARKER} This deployment ${difference} so the prime's number counts a ` +

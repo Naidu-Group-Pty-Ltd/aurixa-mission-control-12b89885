@@ -52,6 +52,7 @@ import {
   isPrimeOnlyCronJob,
   isPrimeOnlyFunction,
 } from "./primeOnlyFeatures.pure";
+import { crmLineCronReason, isCrmLineWithheldFunction } from "./crmLineFeatures.pure";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 
@@ -502,7 +503,7 @@ export function diffBuckets(prime: Snapshot, target: Snapshot) {
   };
 }
 
-export function diffCron(prime: Snapshot, target: Snapshot) {
+export function diffCron(prime: Snapshot, target: Snapshot, crmMode?: string | null) {
   const missing: string[] = [];
   const scheduleDrift: Array<{ jobname: string; prime: string; target: string }> = [];
   const activeDrift: Array<{ jobname: string; prime: boolean; target: boolean }> = [];
@@ -513,7 +514,10 @@ export function diffCron(prime: Snapshot, target: Snapshot) {
   for (const [name, pj] of prime.cronByName) {
     // The prime's own jobs are never replicated: each invokes a function no
     // clone is given. See `primeOnlyFeatures.pure.ts`.
-    if (isPrimeOnlyCronJob(pj)) {
+    // Likewise the jobs the clone's CRM line does not carry
+    // (`crmLineFeatures.pure.ts`): on the independent line the GoHighLevel
+    // jobs would fire into functions the project does not run.
+    if (isPrimeOnlyCronJob(pj) || crmLineCronReason(pj, crmMode)) {
       if (!target.cronByName.has(name)) withheld.push(name);
       continue;
     }
@@ -530,7 +534,7 @@ export function diffCron(prime: Snapshot, target: Snapshot) {
     }
   }
   for (const [name, tj] of target.cronByName) {
-    if (isPrimeOnlyCronJob(tj)) primeOnlyInTarget.push(name);
+    if (isPrimeOnlyCronJob(tj) || crmLineCronReason(tj, crmMode)) primeOnlyInTarget.push(name);
     else if (!prime.cronByName.has(name)) extra.push(name);
   }
 
@@ -577,6 +581,12 @@ export function classifyEdgeFunctionShortfall(
   primeSlugs: Iterable<string>,
   targetSlugs: Iterable<string>,
   declared: ReadonlySet<string> | null,
+  /**
+   * The clone's recorded CRM line. A function that line does not carry
+   * (`crmLineFeatures.pure.ts`) is withheld, exactly as the prime's own are,
+   * and one it still runs is reported beside them.
+   */
+  crmMode?: string | null,
 ): {
   missing: string[];
   undeclared: string[];
@@ -599,13 +609,14 @@ export function classifyEdgeFunctionShortfall(
     // out of what its repository declares for a clone, so read second they
     // would be reported as residue the repo had dropped, and with no declared
     // set as a gap that blocks. They are neither. See `primeOnlyFeatures.pure.ts`.
-    if (isPrimeOnlyFunction(slug)) withheld.push(slug);
+    if (isPrimeOnlyFunction(slug) || isCrmLineWithheldFunction(slug, crmMode)) withheld.push(slug);
     else if (declared && !declared.has(slug)) undeclared.push(slug);
     else missing.push(slug);
   }
   for (const slug of target) {
-    if (isPrimeOnlyFunction(slug)) primeOnlyPresent.push(slug);
-    else if (!prime.has(slug)) extra.push(slug);
+    if (isPrimeOnlyFunction(slug) || isCrmLineWithheldFunction(slug, crmMode)) {
+      primeOnlyPresent.push(slug);
+    } else if (!prime.has(slug)) extra.push(slug);
   }
   return {
     missing: missing.sort(),
@@ -620,11 +631,13 @@ function diffEdgeFunctions(
   prime: Snapshot,
   target: Snapshot,
   declared: ReadonlySet<string> | null,
+  crmMode?: string | null,
 ) {
   const { missing, undeclared, extra, withheld, primeOnlyPresent } = classifyEdgeFunctionShortfall(
     prime.edgeFnSet,
     target.edgeFnSet,
     declared,
+    crmMode,
   );
   return {
     prime_count: prime.edgeFnSet.size,
@@ -980,6 +993,12 @@ export type ComputeParityOptions = {
    */
   declaredEdgeFunctions?: readonly string[] | null;
   /**
+   * The target clone's recorded CRM line. What that line does not carry by
+   * class (`crmLineFeatures.pure.ts`) is reported as withheld rather than
+   * missing. Omit it and nothing more is withheld — see `readCloneCrmMode`.
+   */
+  crmMode?: string | null;
+  /**
    * The prime's generated migration object index, for classifying the surplus.
    * Omit it and every surplus object reads `undetermined` — never "the
    * tenant's own", which is the verdict that matters and the one an unread
@@ -1055,11 +1074,11 @@ export async function computeParity(
   const functions = diffFunctions(prime, target);
   const extensions = diffExtensions(prime, target);
   const buckets = diffBuckets(prime, target);
-  const cron = diffCron(prime, target);
+  const cron = diffCron(prime, target, opts?.crmMode ?? null);
   const declaredEdgeFns = opts?.declaredEdgeFunctions
     ? new Set<string>(opts.declaredEdgeFunctions)
     : null;
-  const edgeFns = diffEdgeFunctions(prime, target, declaredEdgeFns);
+  const edgeFns = diffEdgeFunctions(prime, target, declaredEdgeFns, opts?.crmMode ?? null);
   const secrets = diffSecrets(
     prime,
     target,
@@ -1249,4 +1268,23 @@ export async function computeParity(
     risk_level: risk,
     summary,
   };
+}
+
+/**
+ * A clone's recorded CRM line, for `computeParity`'s `crmMode`. Null when the
+ * column is absent, unset, or the read failed — which withholds nothing more,
+ * the reading every parity report before the register gave.
+ */
+export async function readCloneCrmMode(
+  supabase: { from: (t: "clones") => any },
+  cloneId: string | null | undefined,
+): Promise<string | null> {
+  if (!cloneId) return null;
+  try {
+    const { data } = await supabase.from("clones").select("*").eq("id", cloneId).maybeSingle();
+    const mode = (data as { crm_mode?: unknown } | null)?.crm_mode;
+    return typeof mode === "string" ? mode : null;
+  } catch {
+    return null;
+  }
 }

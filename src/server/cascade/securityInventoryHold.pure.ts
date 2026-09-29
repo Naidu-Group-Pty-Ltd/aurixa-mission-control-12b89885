@@ -79,7 +79,7 @@
  * the feature passes nothing and keeps today's behaviour exactly.
  */
 
-import { describeWithheldFunctions } from "../primeOnlyFeatures.pure";
+import { withheldClause } from "../crmLineFeatures.pure";
 import type { HeldPath } from "./syncExclusions.pure";
 
 /** The generated baseline: a static analysis of one repository's edge functions. */
@@ -118,7 +118,7 @@ export function describeFunctionSetDifference(
   const owned = [...new Set(cloneOwnedFunctions)].sort();
   const lacks = [...new Set(withheld)].sort();
   const owns = `owns ${owned.length} edge function(s) the prime does not (${owned.join(", ")})`;
-  const without = `does not carry ${describeWithheldFunctions(lacks)}, which the prime keeps for itself`;
+  const without = `does not carry ${withheldClause(lacks)}`;
   if (lacks.length === 0) return owns;
   if (owned.length === 0) return without;
   return `${owns} and ${without}`;
@@ -179,9 +179,7 @@ export function functionCountRatchetHold(
   const lacks = [...new Set(withheld)].sort();
   if (owned.length === 0 && lacks.length === 0) return null;
   const declares = `declares ${owned.length} the prime does not (${owned.join(", ")})`;
-  const omits =
-    `omits the declarations of ${describeWithheldFunctions(lacks)}, which the prime keeps ` +
-    `for itself`;
+  const omits = `omits the declarations of ${withheldClause(lacks)}`;
   const difference =
     lacks.length === 0 ? declares : owned.length === 0 ? omits : `${declares} and ${omits}`;
   return {

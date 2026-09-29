@@ -44,7 +44,7 @@ describe("a pass is bounded", () => {
       was killed. Both options already existed on the snapshot; the lane had
       simply never used either.
     */
-    expect(lane).toContain("skipFunctionSlugs: refreshed");
+    expect(lane).toMatch(/skipFunctionSlugs: [^\n]*\brefreshed\b/);
     expect(lane).toContain("functionLimit: EDGE_DEPLOY_BATCH");
   });
 

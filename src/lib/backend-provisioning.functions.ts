@@ -267,7 +267,7 @@ async function runBackendProvisioning(
     // Shadowing the raw snapshot on purpose: every consumer below reads
     // `snapshot`, so splicing here covers all of them rather than whichever
     // ones anyone remembered to update.
-    const snapshot: typeof rawSnapshot =
+    const splicedSnapshot: typeof rawSnapshot =
       skipFunctionSource && cachedSecretNames && cachedDeclaredSlugs
         ? {
             ...rawSnapshot,
@@ -275,6 +275,34 @@ async function runBackendProvisioning(
             declaredFunctionSlugs: cachedDeclaredSlugs,
           }
         : rawSnapshot;
+
+    // What this clone's CRM line does not carry is out of the snapshot from
+    // here on, so the deploy set, the declared contract and parity agree —
+    // the rule `withoutPrimeOnlyFunctions` applies to the prime's own
+    // feature (`crmLineFeatures.pure.ts`). `*` so a deployment without
+    // `crm_mode` reads it as absent and withholds nothing.
+    const { data: cloneLineRow } = await supabase
+      .from("clones")
+      .select("*")
+      .eq("id", input.cloneId)
+      .maybeSingle();
+    const crmMode = ((cloneLineRow as { crm_mode?: string | null } | null)?.crm_mode ?? null) as
+      | string
+      | null;
+    const { crmLineWithheldFunctionNames } = await import(
+      /* @vite-ignore */ "@/server/crmLineFeatures.pure"
+    );
+    const lineWithheld = new Set(crmLineWithheldFunctionNames(crmMode));
+    const snapshot: typeof rawSnapshot =
+      lineWithheld.size === 0
+        ? splicedSnapshot
+        : {
+            ...splicedSnapshot,
+            functions: (splicedSnapshot.functions ?? []).filter((fn) => !lineWithheld.has(fn.slug)),
+            declaredFunctionSlugs: splicedSnapshot.declaredFunctionSlugs.filter(
+              (slug) => !lineWithheld.has(slug),
+            ),
+          };
 
     // `existingRow` was read above the snapshot — it carries both the project
     // left behind by an earlier pass (resume onto it rather than orphaning it)
@@ -411,6 +439,7 @@ async function runBackendProvisioning(
     const result = await provisionCloneBackend(
       {
         cloneName: input.cloneName,
+        crmMode,
         region: input.region,
         adminEmail: input.adminEmail,
         adminPassword: input.adminPassword,
@@ -682,6 +711,7 @@ async function runBackendProvisioning(
         // tree, so it is complete even on a pass that fetched no bundle
         // source — see `declaredFunctionSlugs`.
         declaredEdgeFunctions: snapshot.declaredFunctionSlugs,
+        crmMode,
         // A credential this clone is supposed to lack is not a gap in its
         // parity — see `diffSecrets`, and the measured reading that sent an
         // operator to forward an Airtable token fleet-wide.

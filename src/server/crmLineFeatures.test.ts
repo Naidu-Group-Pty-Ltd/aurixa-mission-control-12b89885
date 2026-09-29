@@ -1,0 +1,218 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  CRM_LINE_FEATURES,
+  allCrmLineFunctionNames,
+  crmLineCronJobsIn,
+  crmLineCronReason,
+  crmLineFeatureForPath,
+  crmLineFunctionsIn,
+  crmLineWithheldFunctionNames,
+  describeWithheldAcrossRegisters,
+  isCrmLineWithheldFunction,
+  isCrmLineWithheldPath,
+  withheldClause,
+  withheldLineFunctions,
+} from "@/server/crmLineFeatures.pure";
+import { PRIME_ONLY_FEATURES, isPrimeOnlyFunction } from "@/server/primeOnlyFeatures.pure";
+import { partitionCascadePaths } from "@/server/cascade/syncExclusions.pure";
+import { cascadeBackendWork } from "@/server/cascadeBackendWork.pure";
+import { functionsToRestore, functionsToUndeploy } from "@/server/crmConversion.pure";
+
+const GHL = "supabase/functions/send-ghl-message/index.ts";
+
+describe("the CRM-line register", () => {
+  it("withholds the GoHighLevel integration from the independent line and from nothing else", () => {
+    expect(isCrmLineWithheldPath(GHL, "independent")).toBe(true);
+    expect(isCrmLineWithheldPath(GHL, "dependent")).toBe(false);
+    // Unknown or unrecorded withholds nothing: a register that guesses a
+    // line would strip a dependent clone of its CRM.
+    expect(isCrmLineWithheldPath(GHL, null)).toBe(false);
+    expect(isCrmLineWithheldPath(GHL, undefined)).toBe(false);
+    expect(isCrmLineWithheldPath(GHL, "hybrid")).toBe(false);
+  });
+
+  it("reaches every file under a withheld function and its named modules", () => {
+    expect(
+      crmLineFeatureForPath("supabase/functions/ghl-calendar/deno.json", "independent")?.key,
+    ).toBe("ghl-integration");
+    expect(
+      isCrmLineWithheldPath("supabase/functions/_shared/ghlConversationStore.ts", "independent"),
+    ).toBe(true);
+  });
+
+  it("leaves what the line carries: native storage, mixed modules and the crm-* routers", () => {
+    for (const path of [
+      "supabase/functions/crm-send-message/index.ts",
+      "supabase/functions/_shared/ghl-account.ts",
+      "supabase/functions/_shared/ghlConversationMap.pure.ts",
+      "supabase/migrations/20250101000000_ghl_conversations.sql",
+      "src/pages/Conversations.tsx",
+    ]) {
+      expect(isCrmLineWithheldPath(path, "independent")).toBe(false);
+    }
+  });
+
+  it("shares no function with the prime-only register", () => {
+    // One function answering to two registers would be undeployed on one
+    // line's reasoning and restored on the other's.
+    const primeOnly = new Set(PRIME_ONLY_FEATURES.flatMap((f) => f.functions));
+    for (const fn of allCrmLineFunctionNames()) expect(primeOnly.has(fn)).toBe(false);
+    for (const fn of allCrmLineFunctionNames()) expect(isPrimeOnlyFunction(fn)).toBe(false);
+  });
+
+  it("lists each function once and names only the independent line", () => {
+    for (const f of CRM_LINE_FEATURES) {
+      expect(new Set(f.functions).size).toBe(f.functions.length);
+      expect(f.withheldFrom).toBe("independent");
+    }
+    expect(crmLineWithheldFunctionNames("independent")).toContain("send-ghl-message");
+    expect(crmLineWithheldFunctionNames("dependent")).toEqual([]);
+    expect(isCrmLineWithheldFunction("sync-ghl-conversations", "independent")).toBe(true);
+    expect(isCrmLineWithheldFunction("crm-send-message", "independent")).toBe(false);
+  });
+});
+
+describe("crons on the independent line", () => {
+  it("catches a job by its name", () => {
+    expect(
+      crmLineCronReason(
+        { jobname: "import-clients-from-ghl-6h", command: "select 1" },
+        "independent",
+      ),
+    ).toMatch(/does not run import-clients-from-ghl-6h/);
+  });
+
+  it("catches a renamed job by the function it invokes", () => {
+    const command = "select public.cron_invoke_signed_function('sync-ghl-pipelines', '{}'::jsonb)";
+    expect(crmLineCronReason({ jobname: "nightly-thing", command }, "independent")).toMatch(
+      /sync-ghl-pipelines/,
+    );
+    const url =
+      "select net.http_post(url := 'https://x.supabase.co/functions/v1/sync-ghl-conversations')";
+    expect(crmLineCronReason({ jobname: "x", command: url }, "independent")).toMatch(
+      /calls sync-ghl-conversations/,
+    );
+  });
+
+  it("leaves every job alone on the dependent line and on an unrecorded one", () => {
+    const job = { jobname: "sync-ghl-pipelines-hourly", command: "" };
+    expect(crmLineCronReason(job, "dependent")).toBeNull();
+    expect(crmLineCronReason(job, null)).toBeNull();
+    expect(
+      crmLineCronJobsIn([job, { jobname: "other", command: "" }], "independent").map((h) => h.job),
+    ).toEqual([job]);
+  });
+
+  it("does not catch a job that only mentions GoHighLevel in passing", () => {
+    expect(
+      crmLineCronReason(
+        { jobname: "finance-portal-reminders-hourly", command: "select 'ghl'" },
+        "independent",
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("what a tree holds", () => {
+  it("names the line's functions a tree lacks", () => {
+    const tree = ["supabase/functions/send-ghl-message/index.ts", "src/a.ts"];
+    const lacks = withheldLineFunctions(tree, "independent");
+    expect(lacks).not.toContain("send-ghl-message");
+    expect(lacks).toContain("sync-ghl-conversations");
+    expect(withheldLineFunctions(tree, "dependent")).toEqual([]);
+  });
+
+  it("picks the withheld slugs out of a live list", () => {
+    expect(
+      crmLineFunctionsIn(["crm-send-message", "send-ghl-message"], "independent").map(
+        (h) => h.slug,
+      ),
+    ).toEqual(["send-ghl-message"]);
+  });
+});
+
+describe("how a withheld share is described", () => {
+  it("keeps the prime-only sentence byte-identical when no line name is present", () => {
+    expect(withheldClause(["loose-fn"])).toBe("loose-fn, which the prime keeps for itself");
+  });
+
+  it("never says the prime keeps the GoHighLevel integration for itself", () => {
+    const s = withheldClause(["send-ghl-message"]);
+    expect(s).toMatch(/withheld from the independent CRM line/);
+    expect(s).not.toMatch(/prime keeps/);
+    expect(describeWithheldAcrossRegisters(["send-ghl-message", "loose-fn"])).toMatch(
+      /loose-fn; the GoHighLevel integration/,
+    );
+  });
+});
+
+describe("the cascade honours the line", () => {
+  it("holds a line path on write and lets it be deleted", () => {
+    const write = partitionCascadePaths([GHL, "src/a.ts"], [], { crmMode: "independent" });
+    expect(write.held.map((h) => h.path)).toEqual([GHL]);
+    expect(write.held[0].pattern).toBe("(crm-line: ghl-integration)");
+    const del = partitionCascadePaths([GHL], [], { purpose: "delete", crmMode: "independent" });
+    expect(del.held).toEqual([]);
+  });
+
+  it("writes the same path to a dependent clone", () => {
+    expect(partitionCascadePaths([GHL], [], { crmMode: "dependent" }).held).toEqual([]);
+  });
+
+  it("owes no redeploy for a withheld function", () => {
+    expect(cascadeBackendWork([GHL], { crmMode: "independent" }).staleFunctions).toEqual([]);
+    expect(cascadeBackendWork([GHL], { crmMode: "dependent" }).staleFunctions).toEqual([
+      "send-ghl-message",
+    ]);
+  });
+});
+
+describe("a conversion moves the integration with the clone", () => {
+  const primeDeclared = ["send-ghl-message", "sync-ghl-pipelines", "crm-send-message"];
+
+  it("undeploys the integration when joining the independent line", () => {
+    expect(
+      functionsToUndeploy({
+        retired: [],
+        live: ["send-ghl-message", "crm-send-message"],
+        primeDeclared,
+        toMode: "independent",
+      }),
+    ).toEqual(["send-ghl-message"]);
+  });
+
+  it("undeploys only retired, non-prime functions when joining the dependent line", () => {
+    expect(
+      functionsToUndeploy({
+        retired: ["crm-only"],
+        live: ["crm-only", "send-ghl-message"],
+        primeDeclared,
+        toMode: "dependent",
+      }),
+    ).toEqual(["crm-only"]);
+  });
+
+  it("restores what the independent line withheld when joining the dependent line", () => {
+    expect(
+      functionsToRestore({
+        fromMode: "independent",
+        toMode: "dependent",
+        live: ["crm-send-message"],
+        primeDeclared,
+      }),
+    ).toEqual(["send-ghl-message", "sync-ghl-pipelines"]);
+    // Nothing to restore the other way, and never what is already live.
+    expect(
+      functionsToRestore({ fromMode: "dependent", toMode: "independent", live: [], primeDeclared }),
+    ).toEqual([]);
+    expect(
+      functionsToRestore({
+        fromMode: "independent",
+        toMode: "dependent",
+        live: ["send-ghl-message", "sync-ghl-pipelines"],
+        primeDeclared,
+      }),
+    ).toEqual([]);
+  });
+});

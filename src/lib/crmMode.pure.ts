@@ -71,11 +71,12 @@ export const CRM_MODE_COPY: Record<
     title: "CRM independent",
     provider: "Native CRM",
     summary:
-      "Clients, conversations and the calendar live in the clone's own database, routed through its " +
-      "provider table. The clone is created from the CRM-independent parent and receives every " +
-      "change through it.",
+      "A closed system: clients, conversations and the calendar live in the clone's own database. " +
+      "The clone is created from the CRM-independent parent and receives every change through it; " +
+      "the GoHighLevel integration is never deployed to it.",
     consequence:
-      "Carries its own crm-* edge functions; SMS needs the clone's own Twilio number and credentials.",
+      "Carries its own crm-* edge functions and none of GoHighLevel's; SMS needs the clone's own " +
+      "Twilio number and credentials.",
   },
 };
 

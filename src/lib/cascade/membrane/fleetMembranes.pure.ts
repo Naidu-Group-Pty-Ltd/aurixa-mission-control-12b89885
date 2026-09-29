@@ -29,12 +29,17 @@
  *   npc-client-dashboard         0 `crm-*` functions · 37 `ghl-*` · no crmProvider module
  *   npc-crm-independent-6505dc   3 `crm-*` functions · 37 `ghl-*` · crmProvider routing table
  *
- * Both hold the GoHighLevel edge functions. That is not the difference, and
- * reading it as one is how this gets built wrong: the CRM-independent
- * deployment keeps all 37 and routes to them when `CRM_PROVIDER=ghl`. What it
- * does not permit is a ROUTED name spelled outside `crmFunction()`, which is
- * the whole routing table. So the channel is closed `within: "src/**"` and
- * open everywhere else.
+ * The measurement above predates the independent line becoming a closed
+ * system. That line now carries NONE of the GoHighLevel integration — the 19
+ * functions, their four `_shared` modules, their tests and their crons are
+ * withheld by class in `src/server/crmLineFeatures.pure.ts`, keyed on the
+ * recorded mode, before any membrane is consulted. So this channel is not what
+ * keeps GoHighLevel off the line; the register is. What the channel still
+ * refuses is a ROUTED name spelled outside `crmFunction()` in the browser
+ * layer, which is the clone's own guard. It is closed `within: "src/**"` and
+ * open everywhere else, because a withheld function's own source never reaches
+ * the membrane at all, and a mixed function the line does carry (the three
+ * `crm-*` routers among them) is its own code.
  *
  * ## The channel mirrors the clone's own guard, and does not improve on it
  *
@@ -276,8 +281,9 @@ export const FLEET_MEMBRANES: readonly Membrane[] = [
     label: "Prime → NPC CRM Independent",
     rationale:
       "The one deployment with a CRM of its own: three `crm-*` edge functions and a routing table the " +
-      "browser layer must go through. It keeps all 37 GoHighLevel functions and calls them when " +
-      "configured to — what it refuses is a name spelled outside `crmFunction()`.",
+      "browser layer must go through. It carries none of the GoHighLevel integration — those " +
+      "functions, modules and crons are withheld by class for the independent line — and what the " +
+      "channel refuses is a name spelled outside `crmFunction()`.",
     channels: [ROUTED_NAME_CLOSED, SPEC_CHANNEL],
     standing: STANDING,
   },

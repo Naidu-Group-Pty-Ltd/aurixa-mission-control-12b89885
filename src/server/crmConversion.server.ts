@@ -36,6 +36,7 @@ import { repositoryInvariantGlobs } from "./cascade/repositoryInvariants.pure";
 import { processClone, type ClonePlan } from "./cascade-engine.server";
 import type { SyncExclusion } from "./cascade/syncExclusions.pure";
 import { judgeCrmParent, type CrmParent, type CrmParentRow } from "./crmLineage.pure";
+import { crmLineWithheldFunctionNames } from "./crmLineFeatures.pure";
 import {
   OPEN_CONVERSION_STATUSES,
   STALLED_PROPOSAL_MS,
@@ -43,6 +44,7 @@ import {
   deployHoldsConversion,
   finalisedCloneFields,
   frozenOnHead,
+  functionsToRestore,
   functionsToUndeploy,
   isConversionBranch,
   judgeConversion,
@@ -92,6 +94,13 @@ export interface ConversionFinishRecord {
   undeployFailed: Array<{ slug: string; error: string }>;
   undeployDeferred: string[];
   undeploySkipped: string | null;
+  /**
+   * The prime functions the line joined carries and the line left withheld
+   * (`functionsToRestore`), and what planning their deploy answered. Absent on
+   * a record written before the CRM-line register.
+   */
+  restored?: string[];
+  restoreOutcome?: string | null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -248,6 +257,7 @@ export async function gatherConversion(args: {
           clone,
           target: judgement.target,
           prime: cfg ?? null,
+          toMode,
         });
   return { judgement: judgeTargetFreshness(judgement, freshness, cloneName), clone };
 }
@@ -264,8 +274,10 @@ async function measureHeadFreshness(args: {
   clone: ConversionCloneRow;
   target: CrmParent;
   prime: { github_owner: string | null; github_repo: string | null } | null;
+  /** The line the clone would join — what it withholds is never frozen. */
+  toMode: string | null;
 }): Promise<{ kind: "measured"; frozen: string[] } | { kind: "unreadable"; why: string }> {
-  const { supabase, octokit, clone, target, prime } = args;
+  const { supabase, octokit, clone, target, prime, toMode } = args;
   const primeOwner = prime?.github_owner?.trim();
   const primeRepo = prime?.github_repo?.trim();
   if (!primeOwner || !primeRepo)
@@ -318,6 +330,7 @@ async function measureHeadFreshness(args: {
         headInstalledGlobs: installed.globs,
         invariantGlobs: repositoryInvariantGlobs(),
         exclusions: (exclusionRows ?? []) as SyncExclusion[],
+        toMode,
       }),
     };
   } catch (e) {
@@ -893,11 +906,20 @@ export async function finaliseConversion(args: {
 
   const plan = (row.plan ?? null) as unknown as ConversionPlanRecord | null;
   const retired = plan?.retiredFunctions ?? [];
+  const fromMode = typeof row.from_mode === "string" ? row.from_mode : null;
   let undeployed: string[] = [];
   let undeployFailed: Array<{ slug: string; error: string }> = [];
   let undeployDeferred: string[] = [];
   let undeploySkipped: string | null = null;
-  if (retired.length > 0) {
+  let restored: string[] = [];
+  let restoreOutcome: string | null = null;
+  // Both lines' withheld sets are consulted even when the proposal retired
+  // nothing: a line that withholds by class leaves functions to take off, and
+  // a line that carries them leaves functions to put back.
+  const lineWork =
+    crmLineWithheldFunctionNames(toMode).length > 0 ||
+    crmLineWithheldFunctionNames(fromMode).length > 0;
+  if (retired.length > 0 || lineWork) {
     const { resolvePrimeBackendRef, resolvePrimeSource, fetchDeclaredEdgeFunctionSlugs } =
       await import("./prime-backend.server");
     const { deleteProjectEdgeFunctions, readProjectEdgeFunctionSlugs } =
@@ -914,13 +936,25 @@ export async function finaliseConversion(args: {
     } else {
       const primeRef = (await resolvePrimeBackendRef(supabase).catch(() => "")).trim();
       const live = await readProjectEdgeFunctionSlugs(projectRef);
-      const toRemove = functionsToUndeploy({ retired, live, primeDeclared });
+      const toRemove = functionsToUndeploy({ retired, live, primeDeclared, toMode });
       if (toRemove.length > 0) {
         const res = await deleteProjectEdgeFunctions(projectRef, toRemove, { primeRef });
         undeployed = res.deleted;
         undeployFailed = res.failed;
         undeployDeferred = res.deferred;
         undeploySkipped = res.skipped;
+      }
+      // Put back what the line joined carries and the line left withheld.
+      // Through the deploy lane rather than inline: bundles are fetched and
+      // deployed under the lane's budget and its one-open-run rule.
+      restored = functionsToRestore({ fromMode, toMode, live, primeDeclared });
+      if (restored.length > 0) {
+        const { requestNamedFunctionDeploy } = await import("./backendSync.server");
+        restoreOutcome = await requestNamedFunctionDeploy({
+          cloneId: clone.id,
+          reason: `CRM conversion to the ${toMode} line restores what the ${fromMode ?? "previous"} line withheld`,
+          slugs: restored,
+        }).catch((e) => `not planned: ${message(e)}`);
       }
     }
   }
@@ -934,6 +968,7 @@ export async function finaliseConversion(args: {
     undeployFailed,
     undeployDeferred,
     undeploySkipped,
+    ...(restored.length > 0 ? { restored, restoreOutcome } : {}),
   };
   const leftovers: string[] = [];
   if (undeployFailed.length > 0 || undeployDeferred.length > 0) {
@@ -942,6 +977,12 @@ export async function finaliseConversion(args: {
         ...undeployFailed.map((f) => `${f.slug} (${f.error})`),
         ...undeployDeferred,
       ].join(", ")}. Remove them from the Supabase dashboard.`,
+    );
+  }
+  if (restoreOutcome && /^not planned|could not/.test(restoreOutcome)) {
+    leftovers.push(
+      `The functions this line carries were not queued for deployment (${restoreOutcome}): ` +
+        `${restored.join(", ")}. The half-hourly catch-up does not restore them by itself.`,
     );
   }
   if (routingHoldsLeft) {
