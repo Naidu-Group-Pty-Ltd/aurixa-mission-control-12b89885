@@ -107,6 +107,7 @@ export const CRM_LINE_FEATURES: readonly CrmLineFeature[] = [
       "src/lib/sync/__tests__/ghlBootstrapWindow.test.ts",
       "src/lib/sync/__tests__/ghlConversationPaging.test.ts",
       "src/pages/__tests__/crmConversations.spec.ts",
+      "src/lib/security/bulkConversationSync.security.test.ts",
     ],
     functions: [
       "backfill-lead-attributions",
