@@ -9,6 +9,7 @@ import {
   MAX_SHIM_HOPS,
   pathsTheDeliveryChanges,
   specSubjects,
+  steadyStatePumpPaths,
   specsBothSidesHoldDifferently,
   specsLeftBehind,
   subjectsOfKeptSpec,
@@ -853,5 +854,36 @@ describe("describeSpecsBroughtAcross — why a file outside this clone's scope i
       "REPORT_RULES.md` — carried beside `src/lib/reportDesign/__tests__/reportTypography.spec.ts`",
     );
     expect(text).toContain("which asserts about it");
+  });
+});
+
+describe("steadyStatePumpPaths — a pump that changed nothing is not a delivery", () => {
+  const baseline = "docs/security/SECURITY_INVENTORY.json";
+  const ratchet = "src/lib/security/auditRemediation.spec.ts";
+  it("names a decided path whose merge is the clone's own file", () => {
+    expect(
+      steadyStatePumpPaths({
+        entries: [
+          { path: baseline, sha: "x" },
+          { path: ratchet },
+          { path: "src/App.tsx", sha: "y" },
+        ],
+        reconciled: new Set([baseline, ratchet]),
+        reconcileWrites: new Set(),
+      }),
+    ).toEqual([ratchet, baseline].sort());
+  });
+  it("keeps a pump's real write, a verbatim write and a removal", () => {
+    expect(
+      steadyStatePumpPaths({
+        entries: [
+          { path: baseline, sha: "x" },
+          { path: "src/App.tsx", sha: "y" },
+          { path: "gone.ts", sha: null },
+        ],
+        reconciled: new Set([baseline, "gone.ts"]),
+        reconcileWrites: new Set([baseline]),
+      }),
+    ).toEqual([]);
   });
 });

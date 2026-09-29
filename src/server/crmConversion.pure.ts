@@ -61,6 +61,8 @@ import type { CrmParent, CrmParentJudgement } from "./crmLineage.pure";
 import { crmChildFields } from "./crmLineage.pure";
 import type { DeletionPlan, DeletionVerdict } from "./cascade/deletionPropagation.pure";
 import type { SyncExclusion } from "./cascade/syncExclusions.pure";
+import { partitionCascadePaths } from "./cascade/syncExclusions.pure";
+import { globToRegex, validateModuleGlobs } from "@/lib/module-globs";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Vocabulary
@@ -196,7 +198,8 @@ export type ConversionRefusalKind =
   | "cascade_open"
   | "target_parent"
   | "target_unsynced"
-  | "leaving_unknown";
+  | "leaving_unknown"
+  | "target_frozen";
 
 /** A readable reference to the tree the clone is leaving. */
 export interface LeavingRef {
@@ -344,10 +347,12 @@ export function judgeConversion(input: JudgeConversionInput): ConversionJudgemen
   const cautions: string[] = [];
   if (input.targetScope !== "mirror") {
     cautions.push(
-      `${target.name}, the ${CRM_MODE_COPY[toMode].title} head, is module-scoped: its tree carries ` +
-        `only the files of the modules it installed. ${name} becomes a copy of that tree, so every ` +
-        `file the head lacks and the line ${name} is leaving carries is removed with the rest — ` +
-        `each one is listed in the preview.`,
+      `${target.name}, the ${CRM_MODE_COPY[toMode].title} head, is module-scoped: cascades keep its ` +
+        `tree current only inside the modules it installed. ${name} becomes a copy of that tree. ` +
+        `Outside those modules the head is measured before anything is proposed, and a conversion ` +
+        `that would hand ${name} an older copy of a file the prime carries is refused; inside them, ` +
+        `a file the head has yet to receive arrives with its next cascade. Every file the head lacks ` +
+        `and the line ${name} is leaving carries is removed — each one is listed in the preview.`,
     );
   }
   if (clone.parent_clone_id === target.id) {
@@ -381,6 +386,133 @@ export function judgeConversion(input: JudgeConversionInput): ConversionJudgemen
 
 function refuse(kind: ConversionRefusalKind, reason: string): ConversionJudgement {
   return { ok: false, kind, reason };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 1b. Is the target head's tree current where the clone would copy it?
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The files a module-scoped head carries FROZEN — the prime has moved on, the
+ * head has not, and nothing ever will move it.
+ *
+ * A module-scoped head receives cascades for the files inside its installed
+ * modules (plus the repository invariants) and nothing else. Every other file
+ * in its tree is whatever it held on the day it stopped being a mirror. A
+ * conversion makes the clone a copy of the head's WHOLE tree, so each such
+ * file the clone holds at the prime's copy would be replaced by the head's
+ * older one, or removed where the head has none — and the clone then receives
+ * through that head, so no later cascade repairs it either.
+ *
+ * Measured on the acid run of 29 Sep 2026 (`npc-test-76b3b3` converted to
+ * the independent line): 21 files regressed from the prime's current copy to
+ * the head's stale one — `CLAUDE.md`, `CommercialIndustrialWorkspace.tsx`,
+ * `buildVersion.ts`, two stylesheets — and 17 the prime carries were removed,
+ * `address-service/**` and `urban-centre-register-ingest` among them. The only
+ * warning was a caution that mentioned removals.
+ *
+ * A path is frozen when, all at once:
+ *  - the prime carries it at the commit the head records (`last_synced_sha`),
+ *    or at the one the clone records, so a file only the line carries — its
+ *    own CRM functions — is not one;
+ *  - it is OUTSIDE the head's scope, so no cascade will ever bring it level
+ *    (inside the scope a difference is a cascade the head has yet to take,
+ *    which the next pass fixes on both);
+ *  - no exclusion of the head's or the clone's holds it, and it is not one of
+ *    the routing files that ARE the line — those differ by design;
+ *  - the head's copy differs from the prime's (presence counts), and
+ *  - the clone's copy differs from the head's: a file the conversion would
+ *    not change costs the clone nothing.
+ *
+ * The rule is asserted by effect — blob hashes of three real trees — never by
+ * reading configuration and inferring what a tree must hold.
+ */
+export interface FrozenOnHeadInput {
+  /**
+   * The prime's tree at every revision that matters: the head's recorded
+   * `last_synced_sha`, and the clone's where it differs. Measuring against the
+   * head's alone would make every head copy that matched an OLDER prime look
+   * current while the clone already carries a newer one — a file the prime
+   * changed in between would be reverted unannounced. A path frozen against
+   * any of them is frozen.
+   */
+  primeTrees: ReadonlyArray<ReadonlyMap<string, string>>;
+  /** The head's current tree. */
+  head: ReadonlyMap<string, string>;
+  /** The clone's current tree. */
+  clone: ReadonlyMap<string, string>;
+  /** The head's installed module globs — the invariants are added here. */
+  headInstalledGlobs: readonly string[];
+  /** Repository invariants every module-scoped clone also receives. */
+  invariantGlobs: readonly string[];
+  /** The head's exclusions and the clone's, together. */
+  exclusions: readonly SyncExclusion[];
+}
+
+export function frozenOnHead(input: FrozenOnHeadInput): string[] {
+  const scope = validateModuleGlobs([
+    ...input.headInstalledGlobs,
+    ...input.invariantGlobs,
+  ]).valid.map(globToRegex);
+  const candidates = new Set<string>();
+  for (const primeTree of input.primeTrees) {
+    for (const [path, primeSha] of primeTree) {
+      if (ROUTING.has(path) || candidates.has(path)) continue;
+      const headSha = input.head.get(path);
+      if (headSha === primeSha) continue;
+      if (input.clone.get(path) === headSha) continue;
+      if (scope.some((rx) => rx.test(path))) continue;
+      candidates.add(path);
+    }
+  }
+  // Held paths — an exclusion, a prime-only feature, an unsafe path — are the
+  // same ones a cascade would never write, so they are not the conversion's.
+  return partitionCascadePaths([...candidates], input.exclusions).write.sort();
+}
+
+/** How many frozen paths a refusal names before summarising the rest. */
+export const FROZEN_PATHS_LISTED = 12;
+
+/**
+ * The refusal a non-empty frozen set produces — or the judgement unchanged.
+ *
+ * Refused rather than cautioned: the loss is silent in the tree (a reviewer
+ * sees a routine-looking diff of older copies), permanent (the new parent will
+ * never deliver them) and hits the prime's own work, not the line's. The two
+ * remedies are both on the head, which is where the fault lies.
+ */
+export function judgeTargetFreshness(
+  judgement: ConversionJudgement,
+  reading:
+    | { kind: "not_applicable" }
+    | { kind: "measured"; frozen: readonly string[] }
+    | { kind: "unreadable"; why: string },
+  cloneName: string,
+): ConversionJudgement {
+  if (!judgement.ok || reading.kind === "not_applicable") return judgement;
+  const head = judgement.target.name;
+  if (reading.kind === "unreadable") {
+    return refuse(
+      "unreadable",
+      `Could not measure whether ${head}'s tree is current outside its modules (${reading.why}). ` +
+        `Nothing was proposed: a tree that could not be read is not a tree that is current, and ` +
+        `converting on a guess could replace ${cloneName}'s files with older copies. Try again.`,
+    );
+  }
+  const frozen = reading.frozen;
+  if (frozen.length === 0) return judgement;
+  const listed = frozen.slice(0, FROZEN_PATHS_LISTED).join(", ");
+  const more =
+    frozen.length > FROZEN_PATHS_LISTED ? ` and ${frozen.length - FROZEN_PATHS_LISTED} more` : "";
+  return refuse(
+    "target_frozen",
+    `${head}, the ${CRM_MODE_COPY[judgement.toMode].title} head, is module-scoped, and ${frozen.length} ` +
+      `file(s) the prime carries sit outside its modules where no cascade updates them: its copies ` +
+      `are older than the prime's, or missing. Converting ${cloneName} would replace its current ` +
+      `copies with those, and receiving through ${head} afterwards would never bring them back: ` +
+      `${listed}${more}. Make ${head} a mirror, or install modules that cover these files on it, ` +
+      `then convert.`,
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

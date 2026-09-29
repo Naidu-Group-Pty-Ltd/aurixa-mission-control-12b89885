@@ -28,11 +28,14 @@ import {
   describeConversionDeletions,
   describeRetiredFunctions,
   finalisedCloneFields,
+  frozenOnHead,
   functionsRetiredByConversion,
   functionsToUndeploy,
   isConversionBranch,
   isOpenConversionStatus,
   judgeConversion,
+  judgeTargetFreshness,
+  FROZEN_PATHS_LISTED,
   retiredFunctionsKept,
   type ConversionCloneRow,
   type ConversionWording,
@@ -771,5 +774,127 @@ describe("deployHoldsConversion", () => {
     expect(
       deployHoldsConversion({ act: "refused", why: "no project", failed: [] }, false),
     ).toBeNull();
+  });
+});
+
+describe("frozenOnHead — what a module-scoped head carries that no cascade refreshes", () => {
+  // The prime at the head's recorded commit, the head, and a clone that holds
+  // the prime's copies — the shape the acid run of 29 Sep 2026 measured.
+  const prime = new Map([
+    ["CLAUDE.md", "p-claude"],
+    ["address-service/Dockerfile", "p-docker"],
+    ["src/lib/crm/crmProvider.ts", "p-provider"],
+    ["src/pages/Conversations.tsx", "p-conversations"],
+    [".env.example", "p-env"],
+    ["package.json", "p-package"],
+    ["src/pages/Current.tsx", "p-current"],
+    ["src/pages/Unchanged.tsx", "p-same"],
+  ]);
+  const head = new Map([
+    ["CLAUDE.md", "h-claude-old"], // stale copy, outside the modules
+    // address-service/Dockerfile: missing on the head
+    ["src/lib/crm/crmProvider.ts", "h-provider"], // inside the modules: a cascade's business
+    ["src/pages/Conversations.tsx", "h-conversations"], // a routing file: differs by design
+    [".env.example", "h-env"], // held by an exclusion
+    ["package.json", "h-package"], // a repository invariant
+    ["src/pages/Current.tsx", "p-current"], // current
+    ["src/pages/Unchanged.tsx", "h-same"], // stale, but the clone already holds it
+    ["supabase/functions/crm-send-message/index.ts", "h-crm"], // the line's own
+  ]);
+  const cloneTree = new Map([
+    ["CLAUDE.md", "p-claude"],
+    ["address-service/Dockerfile", "p-docker"],
+    ["src/lib/crm/crmProvider.ts", "p-provider"],
+    ["src/pages/Conversations.tsx", "p-conversations"],
+    [".env.example", "p-env"],
+    ["package.json", "p-package"],
+    ["src/pages/Current.tsx", "p-current"],
+    ["src/pages/Unchanged.tsx", "h-same"],
+  ]);
+  const base = {
+    primeTrees: [prime],
+    head,
+    clone: cloneTree,
+    headInstalledGlobs: ["src/lib/crm/**"],
+    invariantGlobs: ["package.json"],
+    exclusions: [{ pattern: ".env.example", reason: "protected" as const }],
+  };
+
+  it("names exactly the stale and missing copies outside the head's scope", () => {
+    expect(frozenOnHead(base)).toEqual(["CLAUDE.md", "address-service/Dockerfile"]);
+  });
+
+  it("is empty when the head's modules cover every path", () => {
+    expect(frozenOnHead({ ...base, headInstalledGlobs: ["**"] })).toEqual([]);
+  });
+
+  it("never counts a file only the line carries", () => {
+    expect(frozenOnHead(base)).not.toContain("supabase/functions/crm-send-message/index.ts");
+  });
+
+  it("measures against the clone's newer prime too, not only the head's older one", () => {
+    // The head matched prime@P1; the clone already carries prime@P2's copy.
+    const p1 = new Map([["docs/guide.md", "g1"]]);
+    const p2 = new Map([["docs/guide.md", "g2"]]);
+    const measured = {
+      ...base,
+      head: new Map([["docs/guide.md", "g1"]]),
+      clone: new Map([["docs/guide.md", "g2"]]),
+    };
+    expect(frozenOnHead({ ...measured, primeTrees: [p1] })).toEqual([]);
+    expect(frozenOnHead({ ...measured, primeTrees: [p1, p2] })).toEqual(["docs/guide.md"]);
+  });
+
+  it("an exclusion on the CLONE holds a path too", () => {
+    expect(
+      frozenOnHead({
+        ...base,
+        exclusions: [...base.exclusions, { pattern: "CLAUDE.md", reason: "protected" }],
+      }),
+    ).toEqual(["address-service/Dockerfile"]);
+  });
+});
+
+describe("judgeTargetFreshness", () => {
+  const ok = judgeConversion(input());
+  it("passes a judgement through where the head is a mirror or nothing is frozen", () => {
+    expect(judgeTargetFreshness(ok, { kind: "not_applicable" }, "NPC Test")).toBe(ok);
+    expect(judgeTargetFreshness(ok, { kind: "measured", frozen: [] }, "NPC Test")).toBe(ok);
+  });
+
+  it("refuses a frozen head by name, listing the files and both remedies", () => {
+    const frozen = Array.from(
+      { length: FROZEN_PATHS_LISTED + 3 },
+      (_, i) => `docs/f${String(i).padStart(2, "0")}.md`,
+    );
+    const j = judgeTargetFreshness(ok, { kind: "measured", frozen }, "NPC Test");
+    expect(j.ok).toBe(false);
+    if (j.ok) return;
+    expect(j.kind).toBe("target_frozen");
+    expect(j.reason).toContain("docs/f00.md");
+    expect(j.reason).not.toContain(`docs/f${FROZEN_PATHS_LISTED}.md`);
+    expect(j.reason).toContain("and 3 more");
+    expect(j.reason).toContain("Make NPC CRM Independent a mirror");
+    expect(j.reason).toContain("install modules");
+  });
+
+  it("an unreadable measurement refuses rather than reading as a current head", () => {
+    const j = judgeTargetFreshness(
+      ok,
+      { kind: "unreadable", why: "GitHub truncated a tree listing" },
+      "NPC Test",
+    );
+    expect(j.ok).toBe(false);
+    if (!j.ok) {
+      expect(j.kind).toBe("unreadable");
+      expect(j.reason).toContain("truncated");
+    }
+  });
+
+  it("never turns a refusal into anything else", () => {
+    const refused = judgeConversion(input({ childCount: 2 }));
+    expect(
+      judgeTargetFreshness(refused, { kind: "measured", frozen: ["CLAUDE.md"] }, "NPC Test"),
+    ).toBe(refused);
   });
 });

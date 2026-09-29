@@ -30,7 +30,9 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database, Json } from "@/integrations/supabase/types";
 import { CRM_PARENT_COLUMN, isCrmMode, type CrmMode } from "@/lib/crmMode.pure";
-import type { getAppOctokit, RepoRef } from "./github-app.server";
+import { listTreeAt, listTreeEntries, type getAppOctokit, type RepoRef } from "./github-app.server";
+import { readInstalledGlobs } from "./cascade/installedGlobs.server";
+import { repositoryInvariantGlobs } from "./cascade/repositoryInvariants.pure";
 import { processClone, type ClonePlan } from "./cascade-engine.server";
 import type { SyncExclusion } from "./cascade/syncExclusions.pure";
 import { judgeCrmParent, type CrmParent, type CrmParentRow } from "./crmLineage.pure";
@@ -40,9 +42,11 @@ import {
   decideConversionStep,
   deployHoldsConversion,
   finalisedCloneFields,
+  frozenOnHead,
   functionsToUndeploy,
   isConversionBranch,
   judgeConversion,
+  judgeTargetFreshness,
   routingHoldsToRetire,
   settleWithoutProposal,
   type ConversionCloneRow,
@@ -230,7 +234,95 @@ export async function gatherConversion(args: {
     openConversion,
     openCascadePr,
   });
-  return { judgement, clone };
+  if (!judgement.ok || !clone) return { judgement, clone };
+
+  // A module-scoped head: is its tree current where the clone would copy it?
+  // Measured only once every cheaper refusal has passed — it reads three trees.
+  const cloneName = clone.name?.trim() || clone.github_repo || clone.id;
+  const freshness =
+    targetRow?.sync_scope === "mirror"
+      ? ({ kind: "not_applicable" } as const)
+      : await measureHeadFreshness({
+          supabase,
+          octokit,
+          clone,
+          target: judgement.target,
+          prime: cfg ?? null,
+        });
+  return { judgement: judgeTargetFreshness(judgement, freshness, cloneName), clone };
+}
+
+/**
+ * Reads what `frozenOnHead` decides from: the prime at the commit the head
+ * records and at the one the clone records, the head, the clone, the head's installed modules and both clones'
+ * exclusions. Any read that fails, or a tree listing GitHub truncated, is
+ * `unreadable` — never an empty frozen set, which would read as a current head.
+ */
+async function measureHeadFreshness(args: {
+  supabase: Db;
+  octokit: Octokit;
+  clone: ConversionCloneRow;
+  target: CrmParent;
+  prime: { github_owner: string | null; github_repo: string | null } | null;
+}): Promise<{ kind: "measured"; frozen: string[] } | { kind: "unreadable"; why: string }> {
+  const { supabase, octokit, clone, target, prime } = args;
+  const primeOwner = prime?.github_owner?.trim();
+  const primeRepo = prime?.github_repo?.trim();
+  if (!primeOwner || !primeRepo)
+    return { kind: "unreadable", why: "prime_config names no repository" };
+  if (!target.lastSyncedSha) return { kind: "unreadable", why: "the head records no prime commit" };
+  try {
+    const installed = await readInstalledGlobs(supabase, target.id);
+    if (installed.failed) return { kind: "unreadable", why: installed.failed };
+    const { data: exclusionRows, error: exclusionErr } = await supabase
+      .from("clone_sync_exclusions")
+      .select("pattern, reason, note")
+      .in("clone_id", [target.id, clone.id]);
+    if (exclusionErr) return { kind: "unreadable", why: `exclusions: ${exclusionErr.message}` };
+
+    // The head's revision, and the clone's where it differs: the clone may
+    // already carry a newer prime than the head it would copy.
+    const revisions = [
+      ...new Set([target.lastSyncedSha, clone.last_synced_sha].filter((x): x is string => !!x)),
+    ];
+    const primeTreesAt = revisions.map(async (sha) => {
+      const { data: commit } = await octokit.git.getCommit({
+        owner: primeOwner,
+        repo: primeRepo,
+        commit_sha: sha,
+      });
+      return listTreeAt(octokit, { owner: primeOwner, repo: primeRepo }, commit.tree.sha);
+    });
+    const [headTree, cloneTree, ...primeTrees] = await Promise.all([
+      listTreeEntries(octokit, {
+        owner: target.githubOwner,
+        repo: target.githubRepo,
+        branch: target.defaultBranch,
+      }),
+      listTreeEntries(octokit, {
+        owner: clone.github_owner ?? "",
+        repo: clone.github_repo ?? "",
+        branch: clone.default_branch || "main",
+      }),
+      ...primeTreesAt,
+    ]);
+    if (headTree.truncated || cloneTree.truncated || primeTrees.some((t) => t.truncated)) {
+      return { kind: "unreadable", why: "GitHub truncated a tree listing" };
+    }
+    return {
+      kind: "measured",
+      frozen: frozenOnHead({
+        primeTrees: primeTrees.map((t) => t.entries),
+        head: headTree.entries,
+        clone: cloneTree.entries,
+        headInstalledGlobs: installed.globs,
+        invariantGlobs: repositoryInvariantGlobs(),
+        exclusions: (exclusionRows ?? []) as SyncExclusion[],
+      }),
+    };
+  } catch (e) {
+    return { kind: "unreadable", why: message(e) };
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
