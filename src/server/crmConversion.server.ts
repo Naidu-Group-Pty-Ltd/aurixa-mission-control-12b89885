@@ -42,6 +42,7 @@ import {
   isConversionBranch,
   judgeConversion,
   routingHoldsToRetire,
+  settleWithoutProposal,
   type ConversionCloneRow,
   type ConversionJudgement,
   type ConversionPrReading,
@@ -78,6 +79,8 @@ export interface ConversionPlanRecord {
 export interface ConversionFinishRecord {
   at: string;
   routingHoldsRemoved: string[];
+  /** Why routing holds a dependent clone must not keep are still there, if they are. */
+  routingHoldsLeft: string | null;
   deployed: string;
   undeployed: string[];
   undeployFailed: Array<{ slug: string; error: string }>;
@@ -240,6 +243,11 @@ interface BuildOutcome {
   summary: string;
   plan: ConversionPlanRecord | null;
   headSha: string;
+  /** Set only by a pass that verified the revision (`processClone`'s own no-op rule). */
+  deliveredSha: string | null;
+  /** Old-line files the engine withheld from removal. */
+  keptDeletions: string[];
+  deletionRefusal: string | null;
 }
 
 async function buildProposal(args: {
@@ -341,6 +349,9 @@ async function buildProposal(args: {
     summary: (result.diff_summary as string | null | undefined) ?? "",
     plan,
     headSha,
+    deliveredSha: (result.delivered_sha as string | null | undefined) ?? null,
+    keptDeletions: p ? p.deletionKept.map((k) => k.path) : [],
+    deletionRefusal: p?.deletionRefusal ?? null,
   };
 }
 
@@ -512,10 +523,20 @@ export async function startCrmConversion(args: {
       summary: built.summary,
     };
   }
-  if (built.status !== "skipped") {
-    const why = built.error ?? (built.summary || "The proposal was refused.");
-    await record({ status: "failed", error: why });
-    return { ok: false, reason: why, conversionId };
+  // No pull request. Only a verified no-op with nothing withheld from the
+  // line being left may finish here — every other skip leaves the clone's
+  // tree and its record disagreeing (`settleWithoutProposal`).
+  const settle = settleWithoutProposal({
+    status: built.status,
+    deliveredSha: built.deliveredSha,
+    summary: built.summary,
+    error: built.error,
+    keptDeletions: built.keptDeletions,
+    deletionRefusal: built.deletionRefusal,
+  });
+  if (settle.act === "refuse") {
+    await record({ status: "failed", error: settle.why });
+    return { ok: false, reason: settle.why, conversionId };
   }
 
   // Nothing to deliver: the clone already carries the target line's tree.
@@ -697,11 +718,14 @@ export async function finaliseConversion(args: {
 
   // 2. The routing holds a dependent clone must not keep.
   let routingHoldsRemoved: string[] = [];
+  let routingHoldsLeft: string | null = null;
   const { data: exRows, error: exErr } = await supabase
     .from("clone_sync_exclusions")
     .select("pattern, reason, note")
     .eq("clone_id", clone.id);
-  if (!exErr) {
+  if (exErr) {
+    routingHoldsLeft = `the clone's exclusions could not be read (${exErr.message})`;
+  } else {
     const retire = routingHoldsToRetire((exRows ?? []) as SyncExclusion[], toMode);
     if (retire.length > 0) {
       const { error: delErr } = await supabase
@@ -710,7 +734,11 @@ export async function finaliseConversion(args: {
         .eq("clone_id", clone.id)
         .eq("reason", "manual_reconcile")
         .in("pattern", retire);
-      if (!delErr) routingHoldsRemoved = retire;
+      if (delErr) {
+        routingHoldsLeft = `${retire.join(", ")} could not be removed (${delErr.message})`;
+      } else {
+        routingHoldsRemoved = retire;
+      }
     }
   }
 
@@ -767,19 +795,28 @@ export async function finaliseConversion(args: {
   const finish: ConversionFinishRecord = {
     at: new Date().toISOString(),
     routingHoldsRemoved,
+    routingHoldsLeft,
     deployed: describeCloneOwnedOutcome(deployed),
     undeployed,
     undeployFailed,
     undeployDeferred,
     undeploySkipped,
   };
-  const leftover =
-    undeployFailed.length > 0 || undeployDeferred.length > 0
-      ? `Retired functions still on the project: ${[
-          ...undeployFailed.map((f) => `${f.slug} (${f.error})`),
-          ...undeployDeferred,
-        ].join(", ")}. Remove them from the Supabase dashboard.`
-      : null;
+  const leftovers: string[] = [];
+  if (undeployFailed.length > 0 || undeployDeferred.length > 0) {
+    leftovers.push(
+      `Retired functions still on the project: ${[
+        ...undeployFailed.map((f) => `${f.slug} (${f.error})`),
+        ...undeployDeferred,
+      ].join(", ")}. Remove them from the Supabase dashboard.`,
+    );
+  }
+  if (routingHoldsLeft) {
+    leftovers.push(
+      `Routing holds were not retired: ${routingHoldsLeft}. Remove them from the clone's exclusions.`,
+    );
+  }
+  const leftover = leftovers.length > 0 ? leftovers.join(" ") : null;
   const { error: doneErr } = await supabase
     .from("clone_crm_conversions")
     .update({
@@ -900,9 +937,15 @@ export async function drainCrmConversions(
         continue;
       }
     }
-    const done = await finaliseConversion({ supabase, octokit, conversionId: row.id });
-    if (done.ok) report.completed += 1;
-    else report.errors.push(`${row.id}: ${done.why}`);
+    // One conversion that throws must not stop the others: it stays `merged`
+    // and the next pass retries it (every finishing step is idempotent).
+    try {
+      const done = await finaliseConversion({ supabase, octokit, conversionId: row.id });
+      if (done.ok) report.completed += 1;
+      else report.errors.push(`${row.id}: ${done.why}`);
+    } catch (e) {
+      report.errors.push(`${row.id}: finishing threw: ${message(e)}`);
+    }
   }
   return report;
 }

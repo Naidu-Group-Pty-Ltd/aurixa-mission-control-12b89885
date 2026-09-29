@@ -819,6 +819,54 @@ export function functionsToUndeploy(input: {
     .sort();
 }
 
+/**
+ * What a conversion that opened no pull request may do.
+ *
+ * `processClone` answers `skipped` for several reasons, and only one of them
+ * means the clone already carries the target line's tree. A skip that carries
+ * no `delivered_sha` verified nothing. A skip whose old-line files were all
+ * WITHHELD from removal (kept because the clone edited or references them, or
+ * because the removal was over the cap) still has the leaving line's files in
+ * it; moving the record onto the new line would then claim a tree the
+ * repository does not have. Both refuse, and name what a person has to settle.
+ * The clone's own exclusions are not a reason to refuse: the engine counts a
+ * difference the clone chose to keep as delivered, and so does this.
+ */
+export function settleWithoutProposal(input: {
+  status: string;
+  deliveredSha: string | null | undefined;
+  summary: string;
+  error: string | null;
+  keptDeletions: readonly string[];
+  deletionRefusal: string | null;
+}): { act: "finish" } | { act: "refuse"; why: string } {
+  if (input.status !== "skipped") {
+    return { act: "refuse", why: input.error || input.summary || "The proposal was refused." };
+  }
+  if (input.deletionRefusal) {
+    return { act: "refuse", why: input.deletionRefusal };
+  }
+  if (input.keptDeletions.length > 0) {
+    const shown = input.keptDeletions.slice(0, 5).join(", ");
+    const more =
+      input.keptDeletions.length > 5 ? ` and ${input.keptDeletions.length - 5} more` : "";
+    return {
+      act: "refuse",
+      why:
+        `Nothing was proposed, but ${input.keptDeletions.length} file(s) from the line being ` +
+        `left are still in the clone and were withheld from removal: ${shown}${more}. ` +
+        `Settle them on the clone first; the conversion can then be proposed again.`,
+    };
+  }
+  if (!input.deliveredSha) {
+    return {
+      act: "refuse",
+      why: `Nothing was proposed and nothing was verified (${input.summary || "no reason given"}), so the clone was not moved.`,
+    };
+  }
+  return { act: "finish" };
+}
+
 /** One line an operator reads on the clone's page for a conversion row. */
 export function describeConversion(row: {
   status: string;

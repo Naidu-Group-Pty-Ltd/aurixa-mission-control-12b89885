@@ -250,6 +250,21 @@ describe("the drain", () => {
   });
 });
 
+describe("the drain, when finishing throws", () => {
+  it("records the error, leaves the conversion merged for the next pass, and does not stop", async () => {
+    owned.deployCloneOwnedFunctions.mockRejectedValueOnce(new Error("management api down"));
+    const db = fakeSupabase(world());
+    const report = await drainCrmConversions(
+      db.client,
+      fakeOctokit({ merged: true, state: "closed", merge_commit_sha: "merge" }),
+      NOW,
+    );
+    expect(report.completed).toBe(0);
+    expect(report.errors).toEqual(["conv: finishing threw: management api down"]);
+    expect(db.tables.clone_crm_conversions[0].status).toBe("merged");
+  });
+});
+
 describe("finishing", () => {
   it("removes nothing when the prime's own list cannot be read", async () => {
     prime.fetchDeclaredEdgeFunctionSlugs.mockResolvedValue(null);

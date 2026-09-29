@@ -7,6 +7,7 @@ import { ENGINE_COMMIT_PREFIX } from "./cascade/proposalRepair.pure";
 import { LATERAL_BRANCH_PREFIX } from "./cascade/lateralExchange.pure";
 import { CASCADE_BRANCH_PREFIX } from "./cascadeMergeDrain.server";
 import {
+  settleWithoutProposal,
   CONVERSION_BRANCH_PREFIX,
   CRM_ROUTING_FILES,
   conversionExclusions,
@@ -673,5 +674,51 @@ describe("the routing files a conversion replaces", () => {
       "src/pages/Conversations.tsx",
     ]);
     expect(routingHoldsToRetire(rows, "independent")).toEqual([]);
+  });
+});
+
+describe("settleWithoutProposal — a conversion that opened no pull request", () => {
+  const base = {
+    status: "skipped",
+    deliveredSha: "abc",
+    summary: "Already in sync",
+    error: null,
+    keptDeletions: [] as string[],
+    deletionRefusal: null,
+  };
+
+  it("finishes only a verified no-op with nothing withheld", () => {
+    expect(settleWithoutProposal(base)).toEqual({ act: "finish" });
+  });
+
+  it("refuses a skip that verified nothing", () => {
+    const r = settleWithoutProposal({
+      ...base,
+      deliveredSha: null,
+      summary: "No installed modules",
+    });
+    expect(r.act).toBe("refuse");
+    expect(r.act === "refuse" && r.why).toContain("No installed modules");
+  });
+
+  it("refuses when files from the line being left were withheld from removal", () => {
+    const kept = ["a", "b", "c", "d", "e", "f", "g"];
+    const r = settleWithoutProposal({ ...base, keptDeletions: kept });
+    expect(r.act).toBe("refuse");
+    expect(r.act === "refuse" && r.why).toContain("7 file(s)");
+    expect(r.act === "refuse" && r.why).toContain("and 2 more");
+  });
+
+  it("refuses on the bulk deletion refusal, in its own words", () => {
+    expect(settleWithoutProposal({ ...base, deletionRefusal: "Over the cap" })).toEqual({
+      act: "refuse",
+      why: "Over the cap",
+    });
+  });
+
+  it("refuses anything that was not a skip", () => {
+    expect(
+      settleWithoutProposal({ ...base, status: "failed", error: "Retired function kept" }),
+    ).toEqual({ act: "refuse", why: "Retired function kept" });
   });
 });
