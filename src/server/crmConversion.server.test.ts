@@ -67,6 +67,7 @@ function fakeSupabase(tables: Record<string, Row[]>) {
       select: () => q,
       eq: (c: string, v: unknown) => (filters.push([c, v]), q),
       in: (c: string, v: unknown[]) => (filters.push([c, v]), q),
+      is: (c: string, v: unknown) => (filters.push([c, v]), q),
       order: () => q,
       limit: () => q,
       update: (p: Row) => ((op = "update"), (patch = p), q),
@@ -80,9 +81,13 @@ function fakeSupabase(tables: Record<string, Row[]>) {
   return { client: { from } as never, writes, tables };
 }
 
-function fakeOctokit(pr: { merged?: boolean; state?: string; merge_commit_sha?: string } | Error) {
+function fakeOctokit(
+  pr: { merged?: boolean; state?: string; merge_commit_sha?: string } | Error,
+  open: Row[] = [],
+) {
   return {
     pulls: {
+      list: vi.fn(async () => ({ data: open })),
       get: vi.fn(async () => {
         if (pr instanceof Error) throw pr;
         return { data: { merged: false, state: "open", ...pr } };
@@ -91,7 +96,11 @@ function fakeOctokit(pr: { merged?: boolean; state?: string; merge_commit_sha?: 
     },
     git: { deleteRef: vi.fn(async () => ({})) },
   } as never as ReturnType<typeof import("./github-app.server").getAppOctokit> & {
-    pulls: { get: ReturnType<typeof vi.fn>; update: ReturnType<typeof vi.fn> };
+    pulls: {
+      get: ReturnType<typeof vi.fn>;
+      update: ReturnType<typeof vi.fn>;
+      list: ReturnType<typeof vi.fn>;
+    };
     git: { deleteRef: ReturnType<typeof vi.fn> };
   };
 }
@@ -156,7 +165,7 @@ function world(conversion: Row = {}) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  owned.deployCloneOwnedFunctions.mockResolvedValue({ act: "none" });
+  owned.deployCloneOwnedFunctions.mockResolvedValue({ act: "none", why: "", failed: [] });
   prime.resolvePrimeSource.mockResolvedValue({ owner: "o", repo: "prime", branch: "main" });
   prime.resolvePrimeBackendRef.mockResolvedValue("primeprimeprimeprime");
   prime.fetchDeclaredEdgeFunctionSlugs.mockResolvedValue(["airtable-proxy", "shared-with-prime"]);
@@ -210,6 +219,48 @@ describe("the drain", () => {
     const report = await drainCrmConversions(db.client, fakeOctokit({}), NOW);
     expect(report.failed).toBe(1);
     expect(db.tables.clone_crm_conversions[0].status).toBe("failed");
+  });
+
+  it("adopts the open conversion PR a stalled claim lost, rather than failing it", async () => {
+    const db = fakeSupabase(world({ pr_number: null, created_at: "2026-09-28T10:00:00Z" }));
+    const octokit = fakeOctokit({ state: "open" }, [
+      // Not this lane's, and older than the claim: neither can be the proposal.
+      {
+        number: 3,
+        html_url: "u3",
+        created_at: "2026-09-28T10:05:00Z",
+        head: { ref: "aurixa/cascade-abc" },
+      },
+      {
+        number: 4,
+        html_url: "u4",
+        created_at: "2026-09-28T09:00:00Z",
+        head: { ref: "aurixa/crm-conversion-dependent-old-x" },
+      },
+      {
+        number: 9,
+        html_url: "u9",
+        created_at: "2026-09-28T10:01:00Z",
+        head: { ref: "aurixa/crm-conversion-dependent-abc1234-y" },
+      },
+    ]);
+    const report = await drainCrmConversions(db.client, octokit, NOW);
+    expect(report.failed).toBe(0);
+    expect(report.waiting).toBe(1);
+    const row = db.tables.clone_crm_conversions[0];
+    expect(row.status).toBe("proposed");
+    expect(row.pr_number).toBe(9);
+    expect(row.branch).toBe("aurixa/crm-conversion-dependent-abc1234-y");
+  });
+
+  it("waits, rather than failing, when the clone's pull requests cannot be listed", async () => {
+    const db = fakeSupabase(world({ pr_number: null, created_at: "2026-09-28T10:00:00Z" }));
+    const octokit = fakeOctokit({});
+    octokit.pulls.list.mockRejectedValueOnce(new Error("rate limited"));
+    const report = await drainCrmConversions(db.client, octokit, NOW);
+    expect(report.failed).toBe(0);
+    expect(db.tables.clone_crm_conversions[0].status).toBe("proposed");
+    expect(report.errors[0]).toMatch(/could not list/);
   });
 
   it("finishes a merged conversion: moves the clone, drops its routing holds, retires its functions", async () => {
@@ -266,6 +317,59 @@ describe("the drain, when finishing throws", () => {
 });
 
 describe("finishing", () => {
+  it("stays merged, and is not completed, while the new line's functions fail to deploy", async () => {
+    owned.deployCloneOwnedFunctions.mockResolvedValue({
+      act: "deployed",
+      why: "",
+      failed: [{ slug: "crm-send-message", error: "boot failure" }],
+    });
+    const db = fakeSupabase(world({ status: "merged" }));
+    const done = await finaliseConversion({
+      supabase: db.client,
+      octokit: fakeOctokit({}),
+      conversionId: "conv",
+    });
+    expect(done.ok).toBe(false);
+    const row = db.tables.clone_crm_conversions[0];
+    expect(row.status).toBe("merged");
+    expect(row.error).toMatch(/crm-send-message \(boot failure\)/);
+    expect(project.deleteProjectEdgeFunctions).not.toHaveBeenCalled();
+  });
+
+  it("stays merged when the deploy is refused", async () => {
+    owned.deployCloneOwnedFunctions.mockResolvedValue({
+      act: "refused",
+      why: "the prime is not configured",
+      failed: [],
+    });
+    const db = fakeSupabase(world({ status: "merged" }));
+    const done = await finaliseConversion({
+      supabase: db.client,
+      octokit: fakeOctokit({}),
+      conversionId: "conv",
+    });
+    expect(done.ok).toBe(false);
+    expect(db.tables.clone_crm_conversions[0].status).toBe("merged");
+  });
+
+  it("completes a clone with no project yet: provisioning deploys the line later", async () => {
+    owned.deployCloneOwnedFunctions.mockResolvedValue({
+      act: "refused",
+      why: "the clone has no Supabase project yet",
+      failed: [],
+    });
+    const w = world({ status: "merged" });
+    w.clone_backends_safe = [];
+    const db = fakeSupabase(w);
+    const done = await finaliseConversion({
+      supabase: db.client,
+      octokit: fakeOctokit({}),
+      conversionId: "conv",
+    });
+    expect(done.ok).toBe(true);
+    expect(db.tables.clone_crm_conversions[0].status).toBe("completed");
+  });
+
   it("removes nothing when the prime's own list cannot be read", async () => {
     prime.fetchDeclaredEdgeFunctionSlugs.mockResolvedValue(null);
     const db = fakeSupabase(world({ status: "merged" }));

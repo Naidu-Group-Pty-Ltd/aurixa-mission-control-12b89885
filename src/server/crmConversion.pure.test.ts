@@ -7,6 +7,8 @@ import { ENGINE_COMMIT_PREFIX } from "./cascade/proposalRepair.pure";
 import { LATERAL_BRANCH_PREFIX } from "./cascade/lateralExchange.pure";
 import { CASCADE_BRANCH_PREFIX } from "./cascadeMergeDrain.server";
 import {
+  conversionWithoutDelivery,
+  deployHoldsConversion,
   settleWithoutProposal,
   CONVERSION_BRANCH_PREFIX,
   CRM_ROUTING_FILES,
@@ -720,5 +722,54 @@ describe("settleWithoutProposal — a conversion that opened no pull request", (
     expect(
       settleWithoutProposal({ ...base, status: "failed", error: "Retired function kept" }),
     ).toEqual({ act: "refuse", why: "Retired function kept" });
+  });
+});
+
+describe("conversionWithoutDelivery", () => {
+  it("lets a conversion that withheld nothing report its skip", () => {
+    expect(conversionWithoutDelivery({ refusal: null, kept: [] })).toBeNull();
+  });
+
+  it("does not count the clone's own files", () => {
+    expect(
+      conversionWithoutDelivery({
+        refusal: null,
+        kept: [{ path: "src/mine.ts", why: "own", reason: "clone_owns" }],
+      }),
+    ).toBeNull();
+  });
+
+  it("refuses when a leaving-line file was withheld from removal", () => {
+    const why = conversionWithoutDelivery({
+      refusal: null,
+      kept: [{ path: "src/crm.ts", why: "edited on the clone", reason: "edited" }],
+    });
+    expect(why).toMatch(/src\/crm\.ts \(edited on the clone\)/);
+  });
+
+  it("carries a refusal through unchanged", () => {
+    expect(conversionWithoutDelivery({ refusal: "over the cap", kept: [] })).toBe("over the cap");
+  });
+});
+
+describe("deployHoldsConversion", () => {
+  it("holds on a refusal and on any failed function", () => {
+    expect(deployHoldsConversion({ act: "refused", why: "down", failed: [] }, true)).toMatch(
+      /down/,
+    );
+    expect(
+      deployHoldsConversion(
+        { act: "deployed", why: "", failed: [{ slug: "a", error: "e" }] },
+        true,
+      ),
+    ).toMatch(/a \(e\)/);
+  });
+
+  it("releases a settled deploy, and a clone with no project yet", () => {
+    expect(deployHoldsConversion({ act: "deployed", why: "", failed: [] }, true)).toBeNull();
+    expect(deployHoldsConversion({ act: "skip", why: "", failed: [] }, true)).toBeNull();
+    expect(
+      deployHoldsConversion({ act: "refused", why: "no project", failed: [] }, false),
+    ).toBeNull();
   });
 });

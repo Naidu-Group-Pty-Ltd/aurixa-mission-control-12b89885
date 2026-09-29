@@ -121,6 +121,7 @@ import {
   conversionExclusions,
   conversionLead,
   conversionTitle,
+  conversionWithoutDelivery,
   decideConversionDeletion,
   describeConversionDeletions,
   describeRetiredFunctions,
@@ -830,18 +831,25 @@ export async function executeCascade(
     }
 
     if (openConversions.has(clone.id)) {
+      // Held exactly as a lineage hold is: left `queued` with its place kept,
+      // and the event paced rather than finished. Marking it `skipped` would
+      // consume this delivery for good — a conversion that is then cancelled,
+      // or whose target head predates this revision, would leave the clone
+      // without it until some later commit happened to make a new event.
       const pr = openConversions.get(clone.id);
-      await supabase
+      const why =
+        `a CRM conversion is open for ${clone.name}` +
+        `${pr ? ` (PR #${pr})` : ""}; merging or closing it releases this clone`;
+      lineageHolds.push(`${clone.name}: ${why}`);
+      const { error: holdError } = await supabase
         .from("cascade_results")
-        .update({
-          status: "skipped",
-          error_message:
-            `Held: a CRM conversion is open for ${clone.name}` +
-            `${pr ? ` (PR #${pr})` : ""}. Merging or closing it releases this clone.`,
-          completed_at: new Date().toISOString(),
-        })
+        .update({ error_message: `Held: ${why}.` })
         .eq("id", r.id);
-      skipped++;
+      if (holdError) {
+        throw new Error(
+          `cascade ${event.id}: could not record ${clone.name}'s conversion hold: ${holdError.message}`,
+        );
+      }
       continue;
     }
 
@@ -4862,10 +4870,53 @@ export async function processClone(args: {
       ? { progress: progress as unknown as Json }
       : {};
 
+  // A conversion delivers its removals whole or not at all. A refused bulk
+  // plan, or an edge function whose directory the plan kept while its
+  // declarations were withheld, would leave a clone on the new line with a
+  // function the new line does not declare — so the proposal is refused and
+  // the conversion row says why.
+  const retiredStillKept = conversion
+    ? retiredFunctionsKept(retiredByConversion, new Set(deletionPlan.deletes))
+    : [];
+  const conversionRefusal: string | null = !conversion
+    ? null
+    : deletionPlan.refusal
+      ? `The removals the conversion needs were refused: ${deletionPlan.refusal}`
+      : retiredStillKept.length > 0
+        ? `The edge function(s) ${retiredStillKept.join(", ")} leave with the line this clone ` +
+          `leaves, but their files could not be removed (${
+            deletionPlan.kept
+              .filter((k) =>
+                retiredStillKept.some((slug) => k.path.startsWith(`supabase/functions/${slug}/`)),
+              )
+              .map((k) => `${k.path}: ${k.why}`)
+              .join("; ") || "no byte-identical copy on the leaving line"
+          }). Reconcile them by hand, then propose again.`
+        : null;
+
+  // A conversion that writes nothing cannot report a skip on the two early
+  // returns below: neither emits a plan, and a skip with no plan reads to the
+  // conversion as a clean no-op that may move the record. Anything the
+  // leaving line left behind is a refusal instead (`conversionWithoutDelivery`).
+  const conversionUndelivered = (): Record<string, unknown> | null => {
+    if (!conversion) return null;
+    const why = conversionWithoutDelivery({ refusal: conversionRefusal, kept: deletionPlan.kept });
+    if (!why) return null;
+    return {
+      status: "failed",
+      diff_summary: "CRM conversion refused: nothing could be proposed",
+      files_changed: 0,
+      error_message: why,
+      completed_at: new Date().toISOString(),
+    };
+  };
+
   // A cascade whose only work is a removal is still work. Keying this on
   // `treeEntries` alone would report "already in sync" while the clone still
   // held a file prime deleted — which is the whole defect this is here for.
   if (treeEntries.length === 0 && pendingDeletes.length === 0) {
+    const refused = conversionUndelivered();
+    if (refused) return refused;
     // "Nothing to write" and "nothing differed" are different states, and the
     // second one is the one an operator can safely ignore. A mirror whose only
     // differences were all withheld must not report as in sync.
@@ -4970,35 +5021,13 @@ export async function processClone(args: {
           .join("; ")}`
       : "";
 
-  // A conversion delivers its removals whole or not at all. A refused bulk
-  // plan, or an edge function whose directory the plan kept while its
-  // declarations were withheld, would leave a clone on the new line with a
-  // function the new line does not declare — so the proposal is refused and
-  // the conversion row says why.
-  const retiredStillKept = conversion
-    ? retiredFunctionsKept(retiredByConversion, new Set(deletionPlan.deletes))
-    : [];
-  const conversionRefusal: string | null = !conversion
-    ? null
-    : deletionPlan.refusal
-      ? `The removals the conversion needs were refused: ${deletionPlan.refusal}`
-      : retiredStillKept.length > 0
-        ? `The edge function(s) ${retiredStillKept.join(", ")} leave with the line this clone ` +
-          `leaves, but their files could not be removed (${
-            deletionPlan.kept
-              .filter((k) =>
-                retiredStillKept.some((slug) => k.path.startsWith(`supabase/functions/${slug}/`)),
-              )
-              .map((k) => `${k.path}: ${k.why}`)
-              .join("; ") || "no byte-identical copy on the leaving line"
-          }). Reconcile them by hand, then propose again.`
-        : null;
-
   for (const path of deletionPlan.deletes) {
     // `sha: null` is how a tree entry removes a path from `base_tree`.
     treeEntries.push({ path, mode: "100644" as const, type: "blob" as const, sha: null });
   }
   if (treeEntries.length === 0) {
+    const refused = conversionUndelivered();
+    if (refused) return refused;
     // Every deletion this run found was withheld — by a reference, by an edit,
     // or by the bulk refusal — and nothing else differed. Saying "in sync"
     // here would be the original defect wearing a new hat.

@@ -36,7 +36,9 @@ import type { SyncExclusion } from "./cascade/syncExclusions.pure";
 import { judgeCrmParent, type CrmParent, type CrmParentRow } from "./crmLineage.pure";
 import {
   OPEN_CONVERSION_STATUSES,
+  STALLED_PROPOSAL_MS,
   decideConversionStep,
+  deployHoldsConversion,
   finalisedCloneFields,
   functionsToUndeploy,
   isConversionBranch,
@@ -350,7 +352,10 @@ async function buildProposal(args: {
     plan,
     headSha,
     deliveredSha: (result.delivered_sha as string | null | undefined) ?? null,
-    keptDeletions: p ? p.deletionKept.map((k) => k.path) : [],
+    // The clone's own files stay on either line and settle nothing.
+    keptDeletions: p
+      ? p.deletionKept.filter((k) => k.reason !== "clone_owns").map((k) => k.path)
+      : [],
     deletionRefusal: p?.deletionRefusal ?? null,
   };
 }
@@ -499,7 +504,36 @@ export async function startCrmConversion(args: {
       dryRun: false,
       onProposal: async (p) => {
         proposal = p;
-        await record({ pr_number: p.number, pr_url: p.url, branch: p.branch });
+        const link = { pr_number: p.number, pr_url: p.url, branch: p.branch };
+        // An open pull request the record does not name is one the drain
+        // cannot see: it would fail the row as stalled while the PR stayed
+        // mergeable. So the link is written or the PR is withdrawn — never
+        // left open behind a record that lost it.
+        if (!(await record(link)) || !(await record(link))) return;
+        let withdrawn = false;
+        const owner = clone.github_owner ?? "";
+        const repo = clone.github_repo ?? "";
+        try {
+          await octokit.pulls.update({
+            owner,
+            repo,
+            pull_number: p.number,
+            state: "closed",
+          });
+          withdrawn = true;
+          await octokit.git
+            .deleteRef({ owner, repo, ref: `heads/${p.branch}` })
+            .catch(() => undefined);
+        } catch {
+          /* reported below */
+        }
+        proposal = null;
+        throw new Error(
+          `pull request #${p.number} was opened but could not be recorded on the conversion, ` +
+            (withdrawn
+              ? "so it was closed again"
+              : `and closing it failed — close ${p.url} by hand before merging anything`),
+        );
       },
     });
   } catch (e) {
@@ -743,6 +777,15 @@ export async function finaliseConversion(args: {
   }
 
   // 3. Functions: deploy what the new line gives the clone; take off what it retired.
+  const { data: backend, error: backendErr } = await supabase
+    .from("clone_backends_safe")
+    .select("supabase_project_ref")
+    .eq("clone_id", clone.id)
+    .maybeSingle();
+  if (backendErr) {
+    return note(`could not read the clone's backend: ${backendErr.message}`, false);
+  }
+  const projectRef = (backend?.supabase_project_ref ?? "").trim();
   const { deployCloneOwnedFunctions, describeCloneOwnedOutcome } =
     await import("./cloneOwnedFunctions.server");
   const deployed = await deployCloneOwnedFunctions({
@@ -751,6 +794,10 @@ export async function finaliseConversion(args: {
     cloneId: clone.id,
     force: true,
   });
+  // Not completed until the new line's functions are on the project: the row
+  // stays `merged` and the drain retries (`deployHoldsConversion`).
+  const deployHeld = deployHoldsConversion(deployed, projectRef !== "");
+  if (deployHeld) return note(deployHeld, false);
 
   const plan = (row.plan ?? null) as unknown as ConversionPlanRecord | null;
   const retired = plan?.retiredFunctions ?? [];
@@ -763,12 +810,6 @@ export async function finaliseConversion(args: {
       await import("./prime-backend.server");
     const { deleteProjectEdgeFunctions, readProjectEdgeFunctionSlugs } =
       await import("./backend-provisioning.server");
-    const { data: backend } = await supabase
-      .from("clone_backends_safe")
-      .select("supabase_project_ref")
-      .eq("clone_id", clone.id)
-      .maybeSingle();
-    const projectRef = (backend?.supabase_project_ref ?? "").trim();
     const primeSource = await resolvePrimeSource(supabase).catch(() => null);
     const primeDeclared = primeSource
       ? await fetchDeclaredEdgeFunctionSlugs(octokit, primeSource)
@@ -897,9 +938,33 @@ export async function drainCrmConversions(
       }
     }
 
+    // A proposal the record lost (`startCrmConversion` could not write the
+    // link and could not close the PR either) is adopted before the row is
+    // failed as stalled: failing it would leave a mergeable PR nothing
+    // watches. Only an open conversion-lane PR opened after the row was
+    // claimed can be this row's, and the partial unique index allows one
+    // open conversion per clone.
+    let prNumber: number | null = row.pr_number;
+    if (
+      row.status === "proposed" &&
+      prNumber === null &&
+      now - Date.parse(row.created_at) > STALLED_PROPOSAL_MS
+    ) {
+      const adopted = await adoptOrphanProposal(supabase, octokit, row);
+      if (adopted.act === "unreadable") {
+        report.waiting += 1;
+        report.errors.push(`${row.id}: ${adopted.why}`);
+        continue;
+      }
+      if (adopted.act === "adopted") {
+        prNumber = adopted.prNumber;
+        reading = { kind: "open" };
+      }
+    }
+
     const step = decideConversionStep({
       status: row.status,
-      prNumber: row.pr_number,
+      prNumber,
       pr: reading,
       createdAt: Date.parse(row.created_at),
       now,
@@ -948,6 +1013,59 @@ export async function drainCrmConversions(
     }
   }
   return report;
+}
+
+type OrphanAdoption =
+  | { act: "none" }
+  | { act: "adopted"; prNumber: number }
+  | { act: "unreadable"; why: string };
+
+async function adoptOrphanProposal(
+  supabase: Db,
+  octokit: Octokit,
+  row: { id: string; clone_id: string; created_at: string },
+): Promise<OrphanAdoption> {
+  const { data: clone, error: cloneErr } = await supabase
+    .from("clones")
+    .select("github_owner, github_repo")
+    .eq("id", row.clone_id)
+    .maybeSingle();
+  if (cloneErr || !clone?.github_owner || !clone.github_repo) {
+    return {
+      act: "unreadable",
+      why: "the clone's repository could not be read to look for its proposal",
+    };
+  }
+  let open: { number: number; html_url: string; created_at: string; head: { ref: string } }[];
+  try {
+    const { data } = await octokit.pulls.list({
+      owner: clone.github_owner,
+      repo: clone.github_repo,
+      state: "open",
+      per_page: 100,
+    });
+    open = data as typeof open;
+  } catch (e) {
+    return { act: "unreadable", why: `could not list the clone's pull requests: ${message(e)}` };
+  }
+  const claimedAt = Date.parse(row.created_at);
+  const candidates = open.filter(
+    (pr) => isConversionBranch(pr.head.ref) && Date.parse(pr.created_at) >= claimedAt,
+  );
+  if (candidates.length !== 1) return { act: "none" };
+  const pr = candidates[0];
+  const { error } = await supabase
+    .from("clone_crm_conversions")
+    .update({ pr_number: pr.number, pr_url: pr.html_url, branch: pr.head.ref })
+    .eq("id", row.id)
+    .eq("status", "proposed")
+    .is("pr_number", null);
+  if (error)
+    return {
+      act: "unreadable",
+      why: `could not adopt pull request #${pr.number}: ${error.message}`,
+    };
+  return { act: "adopted", prNumber: pr.number };
 }
 
 /** Whether a drain pass is worth a line in the audit log. */

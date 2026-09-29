@@ -846,3 +846,62 @@ export function settleWithoutProposal(input: {
   }
   return { act: "finish" };
 }
+
+/**
+ * Whether the new line's function deploy leaves the conversion unfinished.
+ *
+ * A clone moved onto a line whose functions never reached its project is
+ * serving the old line's backend under the new line's record, so a refused or
+ * partly failed deploy keeps the conversion `merged` and the drain retries it
+ * (every finishing step is idempotent). A clone with no Supabase project yet
+ * is not held: provisioning deploys the line's functions when it creates one.
+ */
+export function deployHoldsConversion(
+  outcome: { act: string; why: string; failed: readonly { slug: string; error: string }[] },
+  hasProject: boolean,
+): string | null {
+  if (!hasProject) return null;
+  if (outcome.act === "refused") {
+    return (
+      `The clone is on its new line, but the line's edge functions could not be deployed ` +
+      `(${outcome.why}). Finishing is retried on the next pass.`
+    );
+  }
+  if (outcome.failed.length > 0) {
+    return (
+      `The clone is on its new line, but ${outcome.failed.length} edge function(s) failed to ` +
+      `deploy: ${outcome.failed.map((f) => `${f.slug} (${f.error})`).join(", ")}. Finishing is ` +
+      `retried on the next pass.`
+    );
+  }
+  return null;
+}
+
+/**
+ * Why a conversion pass that is about to write NOTHING must fail rather than
+ * report a skip. `processClone` returns early on "nothing to write" before it
+ * emits a plan, and a skip with no plan reads, to the caller, as a clean no-op
+ * — which would move the record onto the new line while the leaving line's
+ * files are still in the clone. So the engine asks this before either early
+ * return: a refused removal, or any leaving-line file withheld from removal,
+ * means the tree and the record would disagree. The clone's own files
+ * (`clone_owns`) are not a reason; they stay on either line.
+ */
+export function conversionWithoutDelivery(input: {
+  refusal: string | null;
+  kept: readonly { path: string; why: string; reason?: string }[];
+}): string | null {
+  if (input.refusal) return input.refusal;
+  const actionable = input.kept.filter((k) => k.reason !== "clone_owns");
+  if (actionable.length === 0) return null;
+  const shown = actionable
+    .slice(0, 5)
+    .map((k) => `${k.path} (${k.why})`)
+    .join("; ");
+  const more = actionable.length > 5 ? ` and ${actionable.length - 5} more` : "";
+  return (
+    `Nothing was proposed, but ${actionable.length} file(s) from the line being left are still ` +
+    `in the clone and were withheld from removal: ${shown}${more}. Settle them on the clone ` +
+    `first; the conversion can then be proposed again.`
+  );
+}
