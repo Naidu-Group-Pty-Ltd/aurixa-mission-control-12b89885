@@ -871,4 +871,22 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "rpc", fn: "activate_builder_partner_agreement_template" },
     ],
   },
+  {
+    migration: "20260928140000_clone_crm_conversions.sql",
+    version: "20260928140000",
+    assertions: [
+      { kind: "table", table: "clone_crm_conversions" },
+      { kind: "column", table: "clone_crm_conversions", column: "status" },
+      { kind: "column", table: "clone_crm_conversions", column: "from_mode" },
+      { kind: "column", table: "clone_crm_conversions", column: "to_mode" },
+      { kind: "column", table: "clone_crm_conversions", column: "pr_number" },
+      { kind: "column", table: "clone_crm_conversions", column: "plan" },
+      { kind: "column", table: "clone_crm_conversions", column: "delivered_sha" },
+      { kind: "check", table: "clone_crm_conversions", column: "status", value: "proposed" },
+      { kind: "check", table: "clone_crm_conversions", column: "status", value: "merged" },
+      { kind: "check", table: "clone_crm_conversions", column: "status", value: "completed" },
+      { kind: "check", table: "clone_crm_conversions", column: "status", value: "cancelled" },
+      { kind: "check", table: "clone_crm_conversions", column: "status", value: "failed" },
+    ],
+  },
 ];

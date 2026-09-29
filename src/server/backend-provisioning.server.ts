@@ -2264,6 +2264,68 @@ export async function sweepPrimeOnlyFunctions(
   return sweep;
 }
 
+/**
+ * Take named edge functions off a clone's project — a CRM conversion's one
+ * act of removal (`crmConversion.server.ts`), and nothing else's.
+ *
+ * The caller decides WHICH (`functionsToUndeploy`: only what the proposal
+ * retired, never a function the prime declares); this only refuses the one
+ * project no delete may ever reach, the prime's own, whose ref is required
+ * rather than looked up so a caller cannot forget to name it. A 404 is the
+ * outcome, and a 429 stops the pass with the rest named as deferred.
+ */
+export async function deleteProjectEdgeFunctions(
+  targetRef: string,
+  slugs: readonly string[],
+  opts: { primeRef: string },
+): Promise<{
+  deleted: string[];
+  failed: Array<{ slug: string; error: string }>;
+  deferred: string[];
+  skipped: string | null;
+}> {
+  const out = {
+    deleted: [] as string[],
+    failed: [] as Array<{ slug: string; error: string }>,
+    deferred: [] as string[],
+    skipped: null as string | null,
+  };
+  const ref = (targetRef ?? "").trim();
+  const primeRef = (opts.primeRef ?? "").trim();
+  if (!ref) {
+    out.skipped = "no project was named";
+    return out;
+  }
+  if (!primeRef || primeRef.toLowerCase() === ref.toLowerCase()) {
+    out.skipped = primeRef
+      ? "this is the prime's own project; nothing is deleted from it"
+      : "the prime's project is not known, so this project cannot be ruled out as the prime";
+    return out;
+  }
+  for (let i = 0; i < slugs.length; i++) {
+    const slug = slugs[i];
+    try {
+      const res = await fetch(`${MGMT_API}/projects/${ref}/functions/${encodeURIComponent(slug)}`, {
+        method: "DELETE",
+        headers: headers(),
+      });
+      if (res.status === 429) {
+        out.deferred = slugs.slice(i);
+        break;
+      }
+      if (res.ok || res.status === 404) out.deleted.push(slug);
+      else
+        out.failed.push({
+          slug,
+          error: `HTTP ${res.status} — ${(await res.text()).slice(0, 200)}`,
+        });
+    } catch (err) {
+      out.failed.push({ slug, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  return out;
+}
+
 // ─── G4: Required extensions + realtime publication parity ───────────
 /**
  * The floor: extensions a clone needs even if the prime somehow lacks them.

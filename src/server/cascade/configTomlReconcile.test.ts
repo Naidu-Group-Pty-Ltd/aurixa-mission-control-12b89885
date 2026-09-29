@@ -698,7 +698,16 @@ describe("how the engine passes the withheld set", () => {
   it("hands it to the config pump", () => {
     const at = engine.indexOf("reconcileConfigToml({");
     const call = engine.slice(at, engine.indexOf("})", at));
-    expect(call).toContain("withheld: withheldFunctions");
+    expect(call).toContain("withheld: declarationsWithheld");
+  });
+
+  it("builds the pump's set FROM it, adding only what a conversion retires", () => {
+    const at = engine.indexOf("const declarationsWithheld: string[] =");
+    const decl = engine.slice(at, engine.indexOf(";", at));
+    expect(at).toBeGreaterThan(-1);
+    expect(decl).toContain("...withheldFunctions");
+    expect(decl).toContain("...retiredByConversion");
+    expect(decl).toContain(": withheldFunctions");
   });
 
   it("never computes it on a notification pass, which reads nothing", () => {
