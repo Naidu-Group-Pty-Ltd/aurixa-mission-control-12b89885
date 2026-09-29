@@ -67,6 +67,7 @@ import {
   MAX_LEFT_BEHIND_PROBES,
   MAX_SHIM_HOPS,
   pathsTheDeliveryChanges,
+  steadyStatePumpPaths,
   specsBothSidesHoldDifferently,
   specsLeftBehind,
   subjectsOfKeptSpec,
@@ -4914,6 +4915,16 @@ export async function processClone(args: {
   // A cascade whose only work is a removal is still work. Keying this on
   // `treeEntries` alone would report "already in sync" while the clone still
   // held a file prime deleted — which is the whole defect this is here for.
+  // A pump's steady state is not a delivery: its merge IS the clone's file,
+  // and a tree of nothing else is the clone's tree (`steadyStatePumpPaths`).
+  for (const path of steadyStatePumpPaths({
+    entries: treeEntries,
+    reconciled: reconciledPaths,
+    reconcileWrites,
+  })) {
+    dropFromTree(path);
+  }
+
   if (treeEntries.length === 0 && pendingDeletes.length === 0) {
     const refused = conversionUndelivered();
     if (refused) return refused;
