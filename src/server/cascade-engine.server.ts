@@ -1693,9 +1693,7 @@ export async function processClone(args: {
   }
   // A conversion sees past exactly the routing holds — the files the target
   // line's copy of is the conversion. Every other exclusion stands.
-  const releasedRoutingHolds = conversion
-    ? conversionExclusions(recordedExclusions).released
-    : [];
+  const releasedRoutingHolds = conversion ? conversionExclusions(recordedExclusions).released : [];
   const exclusions = conversion
     ? conversionExclusions(recordedExclusions).exclusions
     : recordedExclusions;
@@ -4986,10 +4984,14 @@ export async function processClone(args: {
       ? `The removals the conversion needs were refused: ${deletionPlan.refusal}`
       : retiredStillKept.length > 0
         ? `The edge function(s) ${retiredStillKept.join(", ")} leave with the line this clone ` +
-          `leaves, but their files could not be removed (${deletionPlan.kept
-            .filter((k) => retiredStillKept.some((slug) => k.path.startsWith(`supabase/functions/${slug}/`)))
-            .map((k) => `${k.path}: ${k.why}`)
-            .join("; ") || "no byte-identical copy on the leaving line"}). Reconcile them by hand, then propose again.`
+          `leaves, but their files could not be removed (${
+            deletionPlan.kept
+              .filter((k) =>
+                retiredStillKept.some((slug) => k.path.startsWith(`supabase/functions/${slug}/`)),
+              )
+              .map((k) => `${k.path}: ${k.why}`)
+              .join("; ") || "no byte-identical copy on the leaving line"
+          }). Reconcile them by hand, then propose again.`
         : null;
 
   for (const path of deletionPlan.deletes) {
