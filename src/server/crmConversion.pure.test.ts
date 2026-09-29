@@ -812,7 +812,7 @@ describe("frozenOnHead — what a module-scoped head carries that no cascade ref
     ["src/pages/Unchanged.tsx", "h-same"],
   ]);
   const base = {
-    primeAtHead: prime,
+    primeTrees: [prime],
     head,
     clone: cloneTree,
     headInstalledGlobs: ["src/lib/crm/**"],
@@ -830,6 +830,19 @@ describe("frozenOnHead — what a module-scoped head carries that no cascade ref
 
   it("never counts a file only the line carries", () => {
     expect(frozenOnHead(base)).not.toContain("supabase/functions/crm-send-message/index.ts");
+  });
+
+  it("measures against the clone's newer prime too, not only the head's older one", () => {
+    // The head matched prime@P1; the clone already carries prime@P2's copy.
+    const p1 = new Map([["docs/guide.md", "g1"]]);
+    const p2 = new Map([["docs/guide.md", "g2"]]);
+    const measured = {
+      ...base,
+      head: new Map([["docs/guide.md", "g1"]]),
+      clone: new Map([["docs/guide.md", "g2"]]),
+    };
+    expect(frozenOnHead({ ...measured, primeTrees: [p1] })).toEqual([]);
+    expect(frozenOnHead({ ...measured, primeTrees: [p1, p2] })).toEqual(["docs/guide.md"]);
   });
 
   it("an exclusion on the CLONE holds a path too", () => {

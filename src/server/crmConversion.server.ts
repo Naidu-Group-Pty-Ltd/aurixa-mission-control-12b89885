@@ -254,7 +254,7 @@ export async function gatherConversion(args: {
 
 /**
  * Reads what `frozenOnHead` decides from: the prime at the commit the head
- * records, the head, the clone, the head's installed modules and both clones'
+ * records and at the one the clone records, the head, the clone, the head's installed modules and both clones'
  * exclusions. Any read that fails, or a tree listing GitHub truncated, is
  * `unreadable` — never an empty frozen set, which would read as a current head.
  */
@@ -280,13 +280,20 @@ async function measureHeadFreshness(args: {
       .in("clone_id", [target.id, clone.id]);
     if (exclusionErr) return { kind: "unreadable", why: `exclusions: ${exclusionErr.message}` };
 
-    const { data: primeCommit } = await octokit.git.getCommit({
-      owner: primeOwner,
-      repo: primeRepo,
-      commit_sha: target.lastSyncedSha,
+    // The head's revision, and the clone's where it differs: the clone may
+    // already carry a newer prime than the head it would copy.
+    const revisions = [
+      ...new Set([target.lastSyncedSha, clone.last_synced_sha].filter((x): x is string => !!x)),
+    ];
+    const primeTreesAt = revisions.map(async (sha) => {
+      const { data: commit } = await octokit.git.getCommit({
+        owner: primeOwner,
+        repo: primeRepo,
+        commit_sha: sha,
+      });
+      return listTreeAt(octokit, { owner: primeOwner, repo: primeRepo }, commit.tree.sha);
     });
-    const [primeTree, headTree, cloneTree] = await Promise.all([
-      listTreeAt(octokit, { owner: primeOwner, repo: primeRepo }, primeCommit.tree.sha),
+    const [headTree, cloneTree, ...primeTrees] = await Promise.all([
       listTreeEntries(octokit, {
         owner: target.githubOwner,
         repo: target.githubRepo,
@@ -297,14 +304,15 @@ async function measureHeadFreshness(args: {
         repo: clone.github_repo ?? "",
         branch: clone.default_branch || "main",
       }),
+      ...primeTreesAt,
     ]);
-    if (primeTree.truncated || headTree.truncated || cloneTree.truncated) {
+    if (headTree.truncated || cloneTree.truncated || primeTrees.some((t) => t.truncated)) {
       return { kind: "unreadable", why: "GitHub truncated a tree listing" };
     }
     return {
       kind: "measured",
       frozen: frozenOnHead({
-        primeAtHead: primeTree.entries,
+        primeTrees: primeTrees.map((t) => t.entries),
         head: headTree.entries,
         clone: cloneTree.entries,
         headInstalledGlobs: installed.globs,

@@ -413,7 +413,8 @@ function refuse(kind: ConversionRefusalKind, reason: string): ConversionJudgemen
  *
  * A path is frozen when, all at once:
  *  - the prime carries it at the commit the head records (`last_synced_sha`),
- *    so a file only the line carries — its own CRM functions — is not one;
+ *    or at the one the clone records, so a file only the line carries — its
+ *    own CRM functions — is not one;
  *  - it is OUTSIDE the head's scope, so no cascade will ever bring it level
  *    (inside the scope a difference is a cascade the head has yet to take,
  *    which the next pass fixes on both);
@@ -427,8 +428,15 @@ function refuse(kind: ConversionRefusalKind, reason: string): ConversionJudgemen
  * reading configuration and inferring what a tree must hold.
  */
 export interface FrozenOnHeadInput {
-  /** The prime's tree at the head's recorded `last_synced_sha`. */
-  primeAtHead: ReadonlyMap<string, string>;
+  /**
+   * The prime's tree at every revision that matters: the head's recorded
+   * `last_synced_sha`, and the clone's where it differs. Measuring against the
+   * head's alone would make every head copy that matched an OLDER prime look
+   * current while the clone already carries a newer one — a file the prime
+   * changed in between would be reverted unannounced. A path frozen against
+   * any of them is frozen.
+   */
+  primeTrees: ReadonlyArray<ReadonlyMap<string, string>>;
   /** The head's current tree. */
   head: ReadonlyMap<string, string>;
   /** The clone's current tree. */
@@ -446,18 +454,20 @@ export function frozenOnHead(input: FrozenOnHeadInput): string[] {
     ...input.headInstalledGlobs,
     ...input.invariantGlobs,
   ]).valid.map(globToRegex);
-  const candidates: string[] = [];
-  for (const [path, primeSha] of input.primeAtHead) {
-    if (ROUTING.has(path)) continue;
-    const headSha = input.head.get(path);
-    if (headSha === primeSha) continue;
-    if (input.clone.get(path) === headSha) continue;
-    if (scope.some((rx) => rx.test(path))) continue;
-    candidates.push(path);
+  const candidates = new Set<string>();
+  for (const primeTree of input.primeTrees) {
+    for (const [path, primeSha] of primeTree) {
+      if (ROUTING.has(path) || candidates.has(path)) continue;
+      const headSha = input.head.get(path);
+      if (headSha === primeSha) continue;
+      if (input.clone.get(path) === headSha) continue;
+      if (scope.some((rx) => rx.test(path))) continue;
+      candidates.add(path);
+    }
   }
   // Held paths — an exclusion, a prime-only feature, an unsafe path — are the
   // same ones a cascade would never write, so they are not the conversion's.
-  return partitionCascadePaths(candidates, input.exclusions).write.sort();
+  return partitionCascadePaths([...candidates], input.exclusions).write.sort();
 }
 
 /** How many frozen paths a refusal names before summarising the rest. */
