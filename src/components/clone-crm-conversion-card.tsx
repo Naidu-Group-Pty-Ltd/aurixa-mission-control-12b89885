@@ -7,7 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { CRM_MODE_COPY, crmModeLabel, isCrmMode, oppositeCrmMode } from "@/lib/crmMode.pure";
-import { describeConversion, isOpenConversionStatus } from "@/server/crmConversion.pure";
+import { describeConversion, isOpenConversionStatus } from "@/lib/crmConversionStatus.pure";
 import {
   cancelCrmConversion,
   listCrmConversions,
