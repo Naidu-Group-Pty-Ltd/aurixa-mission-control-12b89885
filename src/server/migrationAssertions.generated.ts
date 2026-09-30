@@ -871,4 +871,27 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "rpc", fn: "activate_builder_partner_agreement_template" },
     ],
   },
+  {
+    migration: "20260930100000_builder_portal_payment_link.sql",
+    version: "20260930100000",
+    assertions: [
+      { kind: "column", table: "client_agreements", column: "portal_payment_link_status" },
+      { kind: "column", table: "client_agreements", column: "portal_payment_link_attempts" },
+      { kind: "column", table: "client_agreements", column: "portal_payment_link_sent_at" },
+      { kind: "column", table: "client_agreements", column: "portal_subscription_id" },
+      { kind: "column", table: "client_agreements", column: "portal_subscription_status" },
+      {
+        kind: "check",
+        table: "client_agreements",
+        column: "portal_payment_link_status",
+        value: "held",
+      },
+      {
+        kind: "check",
+        table: "client_agreements",
+        column: "portal_subscription_status",
+        value: "active",
+      },
+    ],
+  },
 ];

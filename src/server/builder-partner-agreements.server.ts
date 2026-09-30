@@ -101,6 +101,12 @@ import {
 } from "@/server/agreements.server";
 import { notifyOperators, writeAuditLog } from "@/server/audit.server";
 import { callBuilderNetworkAdmin } from "@/server/buildersNetworkAdmin.server";
+import {
+  describeBuilderPortalPayment,
+  sendBuilderPortalPaymentLink,
+  sweepBuilderPortalPaymentLinks,
+  type BuilderPortalPaymentView,
+} from "@/server/builder-portal-payment.server";
 import { ensureTenant } from "@/server/clone-api-keys.server";
 
 const NOT_INSTALLED_MESSAGE =
@@ -1415,8 +1421,9 @@ export async function readRetainedBuilderPartnerRecord(
 
 /**
  * What a signature sets going: retain the record, then — if an admin armed
- * it — grant access. Called from the status fold; never throws, because the
- * fold has already recorded the signature and must not be undone by this.
+ * it — grant access, then email the builder the Portal subscription link.
+ * Called from the status fold; never throws, because the fold has already
+ * recorded the signature and must not be undone by this.
  */
 export async function completeSignedBuilderPartnerAgreement(
   agreementId: string,
@@ -1431,12 +1438,17 @@ export async function completeSignedBuilderPartnerAgreement(
         title: "Signed Builder Partner Agreement not yet retained",
         body:
           `The signed agreement could not be copied out of DocuSign (${retained.error}). Nothing is ` +
-          "granted on it until it is; the agreements sweep retries every run.",
+          "granted or sent on it until it is; the agreements sweep retries every run.",
         url: `/agreements/${agreementId}`,
         metadata: { agreement_id: agreementId },
       });
     }
     await grantBuilderPortalAccess(agreementId, { trigger: "signature", actorUserId: null });
+    // Evidence before action, as for the grant: the link waits for the
+    // retained record, and the sweep sends it once the record exists.
+    if (retained.ok) {
+      await sendBuilderPortalPaymentLink(agreementId, { trigger: "signature", actorUserId: null });
+    }
   } catch (err) {
     console.error("[builder-partner] completion failed:", err instanceof Error ? err.message : err);
   }
@@ -1789,6 +1801,8 @@ export type BuilderPartnerSweep = {
   granted: number;
   grantAttempts: number;
   tenantsRepaired: number;
+  paymentLinksSent: number;
+  paymentLinkAttempts: number;
   errors: string[];
 };
 
@@ -1808,6 +1822,8 @@ export async function sweepBuilderPartnerAgreements(opts: {
     granted: 0,
     grantAttempts: 0,
     tenantsRepaired: 0,
+    paymentLinksSent: 0,
+    paymentLinkAttempts: 0,
     errors: [],
   };
   const base = () =>
@@ -1890,6 +1906,14 @@ export async function sweepBuilderPartnerAgreements(opts: {
   } catch (err) {
     out.errors.push(err instanceof Error ? err.message : String(err));
   }
+
+  // The Portal subscription link a signature could not send — or a failed
+  // send with attempts left. Its own module, its own columns: a database the
+  // payment-link migration has not reached still sweeps everything above.
+  const links = await sweepBuilderPortalPaymentLinks();
+  out.paymentLinksSent = links.sent;
+  out.paymentLinkAttempts = links.attempts;
+  for (const e of links.errors) out.errors.push(`payment links: ${e}`);
   return out;
 }
 
@@ -1993,6 +2017,8 @@ export type BuilderPartnerAgreementView = {
   signedRecord: { retained: boolean; sha256: string | null };
   /** Whether the builder's metering account exists; null when it could not be read. */
   meteringAccount: boolean | null;
+  /** The Portal subscription link and the subscription it created; null when unreadable. */
+  portalPayment: BuilderPortalPaymentView | null;
   docusignReady: boolean;
   updatedAt: string;
 };
@@ -2056,6 +2082,7 @@ export async function describeBuilderPartnerAgreement(
     },
     signedRecord: { retained: Boolean(row.signed_record_path), sha256: row.signed_record_sha256 },
     meteringAccount,
+    portalPayment: await describeBuilderPortalPayment(row.id).catch(() => null),
     docusignReady: docusignConfig().ready,
     updatedAt: row.updated_at,
   };

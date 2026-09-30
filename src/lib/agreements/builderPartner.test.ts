@@ -34,6 +34,7 @@ import {
   registeredFileName,
   scheduleDocumentName,
   seedParticulars,
+  staleCrossReferences,
   STALE_GRANT_ATTEMPT_MS,
   TEMPLATE_MAX_BYTES,
   templateStoragePath,
@@ -115,7 +116,12 @@ describe("the reference", () => {
     const all = new Uint8Array(256).map((_, i) => i);
     let seen = "";
     for (let i = 0; i < 256; i += 6) {
-      seen += newBuilderPartnerReference(new Date(), () => all.slice(i, i + 6)).slice(-6);
+      // The suffix is what follows the last hyphen. `.slice(-6)` read into the
+      // date whenever the final call was handed fewer than six bytes, so the
+      // test failed on every day ending in 0 or 1.
+      seen += newBuilderPartnerReference(new Date(), () => all.slice(i, i + 6))
+        .split("-")
+        .pop();
     }
     expect(seen).not.toMatch(/[01OI]/);
   });
@@ -315,6 +321,90 @@ describe("a terms file", () => {
     });
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.warnings).toHaveLength(3);
+  });
+
+  /**
+   * BD1's shape: the fee is typed once, on "Your transaction-fee arrangement",
+   * inside a bookmark, and clause 14.3 quotes it through a REF field whose
+   * stored result is what DocuSign prints.
+   */
+  const feePage = (fee: string) =>
+    '<w:p><w:r><w:t xml:space="preserve">New Build Fee: </w:t></w:r>' +
+    '<w:bookmarkStart w:id="7" w:name="BD1_Fee_NewBuild_ExGST"/>' +
+    `<w:r><w:t>${fee}</w:t></w:r><w:bookmarkEnd w:id="7"/>` +
+    '<w:r><w:t xml:space="preserve"> excluding GST</w:t></w:r></w:p>';
+  const clause = (shown: string, instruction = " REF BD1_Fee_NewBuild_ExGST \\h ") =>
+    '<w:p><w:r><w:t xml:space="preserve">14.3 The New Build Fee is </w:t></w:r>' +
+    '<w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
+    `<w:r><w:instrText xml:space="preserve">${instruction}</w:instrText></w:r>` +
+    '<w:r><w:fldChar w:fldCharType="separate"/></w:r>' +
+    `<w:r><w:t>${shown}</w:t></w:r>` +
+    '<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>';
+  const story = (...paragraphs: string[]) =>
+    `<w:document><w:body>${paragraphs.join("")}</w:body></w:document>`;
+
+  it("in Word is accepted when every clause quoting the fee page says what it says", () => {
+    const facts = { ...clean, storyXml: [story(feePage("$6,000"), clause("$6,000"))] };
+    expect(staleCrossReferences(facts.storyXml)).toEqual([]);
+    expect(assessWordTerms(facts)).toEqual({ ok: true, warnings: [] });
+    // The formatting switches change nothing a reader sees.
+    expect(
+      staleCrossReferences([
+        story(feePage("$6,000"), clause("$6,000", " REF BD1_Fee_NewBuild_ExGST \\* MERGEFORMAT ")),
+      ]),
+    ).toEqual([]);
+    // Nor does a simple field, or a non-breaking space Word put in the result.
+    expect(
+      staleCrossReferences([
+        story(
+          feePage("$6,000"),
+          '<w:p><w:fldSimple w:instr=" REF BD1_Fee_NewBuild_ExGST \\h "><w:r><w:t>$6,000\u00a0</w:t></w:r></w:fldSimple></w:p>',
+        ),
+      ]),
+    ).toEqual([]);
+  });
+
+  it("in Word is refused when a fee changed on its page and not in the clause quoting it", () => {
+    const facts = { ...clean, storyXml: [story(feePage("$7,500"), clause("$6,000"))] };
+    expect(staleCrossReferences(facts.storyXml)).toEqual([
+      { bookmark: "BD1_Fee_NewBuild_ExGST", shown: "$6,000", source: "$7,500" },
+    ]);
+    const result = assessWordTerms(facts);
+    expect(result).toMatchObject({ ok: false });
+    if (!result.ok) {
+      expect(result.error).toMatch(/\$6,000/);
+      expect(result.error).toMatch(/\$7,500/);
+      expect(result.error).toMatch(/F9/);
+    }
+  });
+
+  it("in Word is refused when the quoted text was retyped over and its bookmark lost", () => {
+    const retyped = "<w:p><w:r><w:t>New Build Fee: $7,500 excluding GST</w:t></w:r></w:p>";
+    expect(staleCrossReferences([story(retyped, clause("$6,000"))])).toEqual([
+      { bookmark: "BD1_Fee_NewBuild_ExGST", shown: "$6,000", source: null },
+    ]);
+    expect(
+      assessWordTerms({ ...clean, storyXml: [story(retyped, clause("$6,000"))] }),
+    ).toMatchObject({ ok: false, error: expect.stringMatching(/no longer marked/) });
+  });
+
+  it("does not judge a reference that prints a number, a position or a changed case", () => {
+    // `\\n` prints the paragraph number the bookmark sits in, `\\p` "above" or
+    // "below": neither is the marked text, so neither can be compared with it.
+    for (const instruction of [
+      " REF BD1_Fee_NewBuild_ExGST \\n \\h ",
+      " REF BD1_Fee_NewBuild_ExGST \\p ",
+    ]) {
+      expect(staleCrossReferences([story(feePage("$6,000"), clause("14.3", instruction))])).toEqual(
+        [],
+      );
+    }
+    // A PAGEREF or any other field is not a quotation at all.
+    expect(
+      staleCrossReferences([
+        story(feePage("$6,000"), clause("3", " PAGEREF BD1_Fee_NewBuild_ExGST ")),
+      ]),
+    ).toEqual([]);
   });
 
   it("is stored by digest and named safely", () => {

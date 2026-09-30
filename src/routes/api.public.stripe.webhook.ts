@@ -33,6 +33,15 @@ import {
   settleGatePayment,
 } from "@/server/payment-gate.server";
 import { notifyOperators } from "@/server/audit.server";
+import {
+  isBuilderPortalSession,
+  isBuilderPortalSubscription,
+} from "@/lib/agreements/builderPortalPayment.pure";
+import {
+  recordBuilderPortalCheckout,
+  recordBuilderPortalCheckoutFailed,
+  recordBuilderPortalSubscription,
+} from "@/server/builder-portal-payment.server";
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -214,6 +223,16 @@ async function handleSetupSessionCompleted(session: Stripe.Checkout.Session) {
 async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
   if (session.mode === "setup") {
     await handleSetupSessionCompleted(session);
+    return;
+  }
+  // The Builder Portal subscription is sold through its own Payment Link, not
+  // our Checkout: its sessions carry no `mode`/`item_id` metadata, so
+  // `fulfillCheckout` would refuse them as `missing_metadata`. It belongs to a
+  // signed agreement, not to a tenant or a clone, and it is recorded there —
+  // on `completed` and again on `async_payment_succeeded`, each time with
+  // Stripe's live status for the subscription.
+  if (isBuilderPortalSession(session)) {
+    await recordBuilderPortalCheckout(session);
     return;
   }
   // Fulfil first; then finalise the attribution row. Permanent fulfilment
@@ -790,20 +809,36 @@ export const Route = createFileRoute("/api/public/stripe/webhook")({
               break;
             // The funds never cleared. Nothing was credited (fulfilment waits
             // for `paid`), so this only settles the purchases ledger.
-            case "checkout.session.async_payment_failed":
-              await finalizePurchaseFromSession(
-                event.data.object as Stripe.Checkout.Session,
-                "failed",
-                "async_payment_failed",
-              );
+            case "checkout.session.async_payment_failed": {
+              const session = event.data.object as Stripe.Checkout.Session;
+              if (isBuilderPortalSession(session)) {
+                await recordBuilderPortalCheckoutFailed(session);
+                break;
+              }
+              await finalizePurchaseFromSession(session, "failed", "async_payment_failed");
               break;
+            }
+            // A Builder Portal subscription is an agreement's, never a clone's
+            // seat: it is kept in step on the agreement and nowhere else.
             case "customer.subscription.created":
-            case "customer.subscription.updated":
-              await handleSubscriptionUpdated(event.data.object as Stripe.Subscription);
+            case "customer.subscription.updated": {
+              const sub = event.data.object as Stripe.Subscription;
+              if (isBuilderPortalSubscription(sub)) {
+                await recordBuilderPortalSubscription(sub);
+                break;
+              }
+              await handleSubscriptionUpdated(sub);
               break;
-            case "customer.subscription.deleted":
-              await handleSubscriptionDeleted(event.data.object as Stripe.Subscription);
+            }
+            case "customer.subscription.deleted": {
+              const sub = event.data.object as Stripe.Subscription;
+              if (isBuilderPortalSubscription(sub)) {
+                await recordBuilderPortalSubscription(sub);
+                break;
+              }
+              await handleSubscriptionDeleted(sub);
               break;
+            }
             case "invoice.paid":
             case "invoice.payment_succeeded":
               await handleInvoicePaid(event.data.object as Stripe.Invoice);

@@ -523,6 +523,21 @@ that a builder can be bound to exactly it:
   it still has tracked changes in its body, headers, footers or notes, or if it
   is a master document whose sections live in other files. The fingerprint
   would not cover those sections.
+- A Word document is also refused if a clause that **quotes another part of
+  it** through a cross-reference (a `REF` field) no longer says what that part
+  says (`staleCrossReferences`). A field prints the result Word stored the last
+  time fields were updated, and the copy DocuSign shows a signer prints that
+  stored result rather than recomputing it. So a fee edited on one page and not
+  updated in the clause quoting it would be signed as two different figures —
+  and the one in the clause is the one that binds. The refusal names the
+  bookmark, what the clause shows and what the quoted text now reads, and says
+  to press F9 in Word. A reference whose bookmark has gone (the marked text was
+  retyped over) is refused the same way. BD1 v1.2 is the case this was written
+  for: clauses 14.3 and 14.4 quote the New Build Fee and the Development Sale
+  Fee from "Your transaction-fee arrangement" through the bookmarks
+  `BD1_Fee_NewBuild_ExGST`, `BD1_Fee_NewBuild_IncGST`, `BD1_Fee_DevSale_ExGST`
+  and `BD1_Fee_DevSale_IncGST`, so the fee page is where a fee is changed and
+  the clauses follow it on F9.
 - Comments, a linked (rather than embedded) picture or template, and a
   document with no text in it each raise a warning and stop nothing.
 
@@ -703,6 +718,83 @@ A grant is always announced. A failure is announced once, never again on every
 sweep that retries it, and a failure an admin just caused by pressing the
 button is shown to them rather than broadcast.
 
+### The Portal subscription: a payment link on signing
+
+The agreement carries two kinds of fee, and only one of them is charged here.
+The **monthly Builder / Developer Portal subscription** starts when the
+agreement is signed and is paid through a Stripe **Payment Link**. The
+**Transaction Fees** — the New Build Fee and the Development Sale Fee on "Your
+transaction-fee arrangement" — are separate from it: each is earned only on its
+qualifying event and invoiced after it, which no link opened at signing can
+know. The email, the Stripe page and the confirmation all say so.
+
+The Stripe objects were created once, in live mode, in the account Mission
+Control's own key and webhook belong to, and are pinned in
+`builderPortalPayment.pure.ts`:
+
+| | |
+|---|---|
+| Product | `prod_VLz85NtQ6m8lgb` — Builder / Developer Portal |
+| Price | `price_1ULHAu3tNhf9apmH3iSluzRZ` — A$699.00 a month, GST inclusive (A$63.55 GST), automatic tax |
+| Payment Link | `plink_1ULHBH3tNhf9apmHbuT6AyZY` — `https://buy.stripe.com/00w00c5Ee22G1dZd8w0co1o` |
+
+The price is the catalog's own figure for the `builder-developer-portal`
+module (`aurixa-catalog.ts`), and a test holds the two equal. A price change is
+a new Stripe price and link, and the pinned ids, together. A negotiated
+monthly fee that differs from the catalog is not something this link can
+charge: send that builder a Stripe invoice instead, and do not send the link.
+
+**When it goes.** Once the signed agreement is **retained**
+(`completeSignedBuilderPartnerAgreement`, after the access grant), Mission
+Control emails the signatory their own copy of the link from the Graph mailbox
+the agreements already send from. The copy carries `client_reference_id =
+bpa_<agreement id>` and the signatory's address prefilled, so the webhook
+knows whose payment it was without guessing. `decidePaymentLinkDispatch`
+decides every send, automatic or manual:
+
+- nothing goes before the signature and the retained copy, to a missing or
+  invalid address, or to a builder who already has a live subscription;
+- a send is **claimed on the row** (`portal_payment_link_status = 'sending'`,
+  conditional on the status it read), so the signature, the sweep and the
+  button cannot send twice;
+- Graph's answer is recorded: `sent`; `failed` when Microsoft refused it or
+  asked us to wait (retried by the sweep, at most five sends); or
+  `unconfirmed` when Graph took the message without confirming it. An
+  **unconfirmed send is never repeated automatically** — a retry would mail a
+  builder the same demand for money twice. A `sending` claim older than
+  fifteen minutes belonged to an invocation that died, and becomes
+  `unconfirmed` for the same reason;
+- `held` is an agreement signed before this was built. The migration holds
+  those rather than letting the first sweep after deploy email every builder
+  who already signed.
+
+The agreement page has a **Portal subscription** section: the link's standing,
+the subscription's Stripe status, *Send payment link* (an admin's act, which
+confirms first and may send again after a sent, held, failed or unconfirmed
+link) and *Copy the builder's link*. Every send is in the audit log as
+`agreement.portal_payment_link_sent` or `agreement.portal_payment_link_not_sent`.
+
+**When it is paid.** The Stripe webhook routes the link's sessions and
+subscriptions to the agreement **before** anything else sees them — they carry
+none of the `mode` / `item_id` metadata self-serve checkout relies on, and
+`fulfillCheckout` would refuse them — and never into `clone_seat_entitlements`:
+
+- `checkout.session.completed` and `async_payment_succeeded` record the
+  subscription on the agreement with Stripe's **live** status, read at that
+  moment, because the session's and the subscription's own events arrive in no
+  fixed order. A session with no reference is matched by the signatory's email
+  only when exactly one signed agreement without a subscription has it, and the
+  notification says it was matched that way; anything else is left to a
+  person, never guessed;
+- a second subscription for an agreement that already has one is never
+  written over the first: it is reported, for a refund or a cancellation;
+- `customer.subscription.*` keeps the agreement's copy of Stripe's status in
+  step, and tells operators when it becomes past due, unpaid, cancelled or
+  expired. **Portal access is not changed automatically** by a payment or a
+  lapse — access follows the signature, and withdrawing it is still
+  suspending the organisation;
+- `async_payment_failed` tells operators the payment did not clear.
+
 ### The sweep
 
 The agreements refresh (`/hooks/agreements-refresh`) runs
@@ -714,7 +806,10 @@ The agreements refresh (`/hooks/agreements-refresh`) runs
 - retries grants that failed, and takes over a pending attempt older than ten
   minutes;
 - creates any metering account a grant left missing. It reads the `tenants`
-  table itself for this, not a flag that could be wrong.
+  table itself for this, not a flag that could be wrong;
+- sends the Portal payment link a signature could not (up to ten a run),
+  retries a failed send that has sends left, and turns a `sending` claim older
+  than fifteen minutes into `unconfirmed`.
 
 ### Rules that carry it
 
@@ -754,6 +849,12 @@ The agreements refresh (`/hooks/agreements-refresh`) runs
 3. Before the first real builder, send one agreement to an internal address and
    read both documents as DocuSign shows them. On the production account an
    envelope is billable.
+4. The Portal payment link needs
+   `supabase/migrations/20260930100000_builder_portal_payment_link.sql` applied.
+   Until it is, the page says the columns are not installed, nothing is sent,
+   and a Portal payment arriving at the webhook is left unprocessed so Stripe
+   retries it. The link is live: test it with a real card and refund, or send
+   it only to a real builder.
 
 ### The pieces, for a Builder Partner Agreement
 
@@ -761,11 +862,16 @@ The agreements refresh (`/hooks/agreements-refresh`) runs
   - `builderPartner.pure.ts` — particulars, reference, terms checks, the
     envelope, the snapshot, the access gate and the grant rules;
   - `builderPartnerSchedule.pure.ts` — the Execution Schedule;
-  - `builderPartnerTermsFile.pure.ts` — reading an uploaded terms file.
+  - `builderPartnerTermsFile.pure.ts` — reading an uploaded terms file;
+  - `builderPortalPayment.pure.ts` — the pinned Stripe objects, the builder's
+    own link, whether to send it, and the email.
 - `src/lib/buildersNetworkTenant.pure.ts` — the one spelling of an
   organisation's metering tenant.
 - `src/server/builder-partner-agreements.server.ts` — the registry, drafting,
   the send and its recovery, retention, the grant, the gate and the sweep.
+- `src/server/builder-portal-payment.server.ts` — sending the payment link,
+  and recording the subscription Stripe reports (called from
+  `src/routes/api.public.stripe.webhook.ts`).
 - `src/lib/builderPartnerAgreements.functions.ts` — the server functions, with
   the send, refresh, download, void and delete in `agreements.functions.ts`.
 - `src/server/builders-network.functions.ts` — `approveNetworkOrganisation`,
@@ -784,6 +890,9 @@ The agreements refresh (`/hooks/agreements-refresh`) runs
   - the one-open-agreement index;
   - the widened freeze and keep triggers, and the admin-only trigger;
   - the private `agreement-templates` bucket.
+- `supabase/migrations/20260930100000_builder_portal_payment_link.sql` — the
+  `portal_payment_link_*` and `portal_subscription_*` columns, their checks,
+  the one-agreement-per-subscription index, and the `held` backfill.
 
 ## The Service Level Agreement template
 

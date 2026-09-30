@@ -182,6 +182,22 @@ export const grantBuilderPartnerPortalAccess = createServerFn({ method: "POST" }
     });
   });
 
+/**
+ * Email the signatory the Portal subscription link now — the first time for an
+ * agreement signed before links went automatically, or again after a send that
+ * failed or was never confirmed. The page confirms before calling this.
+ */
+export const sendBuilderPartnerPaymentLink = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
+  .inputValidator((input) => z.object({ id: uuid }).parse(input))
+  .handler(async ({ data, context }) => {
+    const { sendBuilderPortalPaymentLink } = await import("@/server/builder-portal-payment.server");
+    return await sendBuilderPortalPaymentLink(data.id, {
+      trigger: "manual",
+      actorUserId: context.userId,
+    });
+  });
+
 export const downloadBuilderPartnerSchedule = createServerFn({ method: "POST" })
   .middleware([requireOperator])
   .inputValidator((input) => z.object({ id: uuid }).parse(input))
