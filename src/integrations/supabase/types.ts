@@ -2374,6 +2374,118 @@ export type Database = {
           },
         ]
       }
+      clone_crm_conversions: {
+        Row: {
+          branch: string | null
+          clone_id: string
+          completed_at: string | null
+          created_at: string
+          delivered_sha: string | null
+          error: string | null
+          from_mode: string
+          from_parent_clone_id: string | null
+          id: string
+          merge_sha: string | null
+          merged_at: string | null
+          plan: Json | null
+          pr_number: number | null
+          pr_url: string | null
+          requested_by: string | null
+          source_sha: string | null
+          status: string
+          to_mode: string
+          to_parent_clone_id: string | null
+          updated_at: string
+        }
+        Insert: {
+          branch?: string | null
+          clone_id: string
+          completed_at?: string | null
+          created_at?: string
+          delivered_sha?: string | null
+          error?: string | null
+          from_mode: string
+          from_parent_clone_id?: string | null
+          id?: string
+          merge_sha?: string | null
+          merged_at?: string | null
+          plan?: Json | null
+          pr_number?: number | null
+          pr_url?: string | null
+          requested_by?: string | null
+          source_sha?: string | null
+          status?: string
+          to_mode: string
+          to_parent_clone_id?: string | null
+          updated_at?: string
+        }
+        Update: {
+          branch?: string | null
+          clone_id?: string
+          completed_at?: string | null
+          created_at?: string
+          delivered_sha?: string | null
+          error?: string | null
+          from_mode?: string
+          from_parent_clone_id?: string | null
+          id?: string
+          merge_sha?: string | null
+          merged_at?: string | null
+          plan?: Json | null
+          pr_number?: number | null
+          pr_url?: string | null
+          requested_by?: string | null
+          source_sha?: string | null
+          status?: string
+          to_mode?: string
+          to_parent_clone_id?: string | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clone_crm_conversions_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "clone_crm_conversions_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones_missing_isolated_backend"
+            referencedColumns: ["clone_id"]
+          },
+          {
+            foreignKeyName: "clone_crm_conversions_from_parent_clone_id_fkey"
+            columns: ["from_parent_clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "clone_crm_conversions_from_parent_clone_id_fkey"
+            columns: ["from_parent_clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones_missing_isolated_backend"
+            referencedColumns: ["clone_id"]
+          },
+          {
+            foreignKeyName: "clone_crm_conversions_to_parent_clone_id_fkey"
+            columns: ["to_parent_clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "clone_crm_conversions_to_parent_clone_id_fkey"
+            columns: ["to_parent_clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones_missing_isolated_backend"
+            referencedColumns: ["clone_id"]
+          },
+        ]
+      }
       clone_custodial_acts: {
         Row: {
           act: string
@@ -3352,6 +3464,10 @@ export type Database = {
           stripe_customer_id: string | null
           stripe_payment_intent_id: string | null
           stripe_subscription_id: string | null
+          trial_extended_at: string | null
+          trial_extended_by: string | null
+          trial_extension_count: number
+          trial_extension_reason: string | null
           updated_at: string
         }
         Insert: {
@@ -3380,6 +3496,10 @@ export type Database = {
           stripe_customer_id?: string | null
           stripe_payment_intent_id?: string | null
           stripe_subscription_id?: string | null
+          trial_extended_at?: string | null
+          trial_extended_by?: string | null
+          trial_extension_count?: number
+          trial_extension_reason?: string | null
           updated_at?: string
         }
         Update: {
@@ -3408,6 +3528,10 @@ export type Database = {
           stripe_customer_id?: string | null
           stripe_payment_intent_id?: string | null
           stripe_subscription_id?: string | null
+          trial_extended_at?: string | null
+          trial_extended_by?: string | null
+          trial_extension_count?: number
+          trial_extension_reason?: string | null
           updated_at?: string
         }
         Relationships: [

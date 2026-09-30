@@ -6,7 +6,13 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { CloneGateActions } from "@/components/clone-gate-actions";
 import { getCloneGate } from "@/server/payment-gate.functions";
-import { describeGateReason, formatRemaining, gateTone } from "@/lib/clonePaymentGate.pure";
+import {
+  describeGateReason,
+  formatRemaining,
+  gateEventLabel,
+  gateTone,
+  trialExtensionsOf,
+} from "@/lib/clonePaymentGate.pure";
 import { cn } from "@/lib/utils";
 
 const TONE_CLASS = {
@@ -62,6 +68,7 @@ export function ClonePaymentGateCard({
   if (!data || !data.gate) return null;
 
   const tone = gateTone(data.state);
+  const extensions = trialExtensionsOf(data.gate);
   const refresh = () => {
     void qc.invalidateQueries({ queryKey: ["clone-gate", cloneId] });
     void qc.invalidateQueries({ queryKey: ["clone-payment-gates"] });
@@ -125,13 +132,23 @@ export function ClonePaymentGateCard({
                 : `${data.gate.check_count}× · ${when(data.gate.last_checked_at)}`}
             </dd>
           </div>
+          {/* Only once it has happened: "never extended" on every gate is a
+              row saying nothing. The reason is in the history below. */}
+          {extensions > 0 && (
+            <div className="flex justify-between gap-3">
+              <dt>Trial extended</dt>
+              <dd className="text-foreground">
+                {extensions}× · {when(data.gate.trial_extended_at)}
+              </dd>
+            </div>
+          )}
         </dl>
 
         <CloneGateActions
           cloneId={cloneId}
           cloneName={cloneName}
           state={data.state}
-          hasGate
+          gate={data.gate}
           graceHours={data.gate.grace_hours}
           paid={data.state.paid}
           onDone={refresh}
@@ -145,7 +162,7 @@ export function ClonePaymentGateCard({
             <ul className="mt-3 space-y-2 border-l border-border/50 pl-4">
               {data.events.slice(0, 12).map((e) => (
                 <li key={e.id} className="text-xs">
-                  <span className="label-mono mr-2">{e.kind.replace(/_/g, " ")}</span>
+                  <span className="label-mono mr-2">{gateEventLabel(e.kind)}</span>
                   <span className="text-muted-foreground">{when(e.created_at)}</span>
                   {e.status_before !== e.status_after && (
                     <span className="text-muted-foreground">

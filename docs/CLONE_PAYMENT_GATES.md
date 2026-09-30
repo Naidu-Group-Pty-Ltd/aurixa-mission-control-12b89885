@@ -174,13 +174,19 @@ Every act demands a reason of at least five characters, enforced in the dialog
 with the derived status either side of it.
 
 - **Platform default window** and the arming switch (`prime_config`).
+- **Extend the trial** — more time that ends by itself. The act to reach for
+  when a customer asks for another week; see
+  [Extending a trial](#extending-a-trial-30-sep-2026).
 - **Per-clone window**, measured from `armed_at` rather than from now — so
-  extending "72 hours" on a clone made yesterday means three days from
-  creation, which is what the customer was told. Restarting the clock from now
-  is a separate, explicit switch, because it is a larger act.
+  setting "72 hours" on a clone made yesterday means three days from creation,
+  which is what the customer was told. Restarting the clock from now is a
+  separate, explicit switch, because it is a larger act. This is for
+  correcting the terms a gate was armed with, not for giving more time: it
+  sets the deadline afresh, so it replaces any extension.
 - **Lock / unlock / clear the override.** Clear is offered only when there is
   an override to clear; a button that undoes a decision nobody made reads as a
-  third state.
+  third state. An unlock holds the workspace open with no end, so on a lapsed
+  trial the Unlock dialog offers the extension instead.
 - **Record a payment that arrived outside Stripe.** It writes the same
   `paid_at` stamp, so the unlock is the same act rather than a second kind of
   open, and it is attributed to `operator` so the ledger never claims Stripe
@@ -284,18 +290,108 @@ The link is rendered in a readonly input carrying a `value` — never a
 `placeholder`, which is the uncopyable-empty-box defect this fleet has already
 shipped twice.
 
+## Extending a trial (30 Sep 2026)
+
+When a trial ran out and the customer asked for another week, the console had
+two acts to offer and neither was that:
+
+- **Unlock** holds the workspace open with no end. Somebody then has to come
+  back and **Lock** it, and a close that depends on somebody remembering is a
+  gate that fails open — the failure [this whole design](#why-the-status-is-not-stored)
+  exists to avoid, reintroduced by hand.
+- **Window** sets a window measured from `armed_at`. Right for correcting the
+  original terms, wrong for this: on a lapsed trial the operator has to work
+  out how many hours since provisioning land a week from today.
+
+**Extend trial** moves `locks_at` later and writes nothing else about the
+window. The status stays derived: the workspace reopens because the new
+deadline is in the future, and it locks again **by itself** when that deadline
+passes, unless the activation payment lands first. Nothing is scheduled, so
+there is nothing to forget to schedule.
+
+The rule is `planTrialExtension` in `clonePaymentGate.pure.ts`, and it is the
+only copy of it. The dialog previews with it and the server act writes what it
+returns, both reading the row through the same `gateFactsOf`, so the deadline an
+operator reads before confirming is the deadline written.
+
+| Where the gate stands | Extending it by *N* hours |
+| --------------------- | ------------------------- |
+| Counting down | Adds *N* to the current deadline. The customer keeps the time they had left |
+| Lapsed, so locked | New deadline is *N* hours from the moment of confirming — a week they can use, not a week measured from a deadline already behind them. Reopens at once |
+| Held open by an operator | Clears the unlock and puts the gate back on the clock. This is the Unlock-then-remember routine, finished |
+| Held shut by an operator | Refused unless *Lift the operator lock* is switched on. A suspension and more time are two decisions, and the first is never undone as a side effect of the second |
+| Paid | Refused — there is no trial left |
+| No deadline | Refused — there is no clock. Putting a gate onto one takes time away from somebody who had no limit, which is the Window act |
+| New deadline over a year out | Refused, never clamped. A figure that silently becomes a smaller one is a date nobody chose |
+
+Three rules carry it.
+
+- **It only ever adds.** An act called "extend" that could bring a deadline
+  forward is one an operator cannot trust from its name; shortening is the
+  Window act's job. A contract test pins every `locks_at` the act writes to
+  `plan.locksAt`, and forbids it writing a payment fact or placing an override.
+- **It writes only onto the gate the operator was shown.** The console's copy
+  of a row can be a minute old — it re-reads every 60 seconds — and two
+  operators can answer the same ticket. The dialog sends back the deadline and
+  the override it planned from as `expected`, and the planner refuses
+  `gate_changed` if the row the act re-reads differs. The update itself is then
+  filtered on `paid_at IS NULL`, the old `locks_at` and the old override, so a
+  change landing between that read and the write updates nothing. Without
+  both, the second operator's "another week" would land on top of the first
+  one's, at a deadline nobody previewed. A refused dialog re-reads the gate so
+  "look again" shows what it is now.
+- **It is recorded as a decision.** A reason of at least five characters, like
+  every act here. The event log gets a `trial_extended` row — hours, what they
+  were added to, both deadlines, any override cleared, and which extension this
+  is — and the gate row keeps the latest one in `trial_extension_count`,
+  `trial_extended_at`, `trial_extended_by` and `trial_extension_reason`. The
+  columns exist because the console lists gates without reading their history,
+  and "extended twice, last Tuesday, because finance approval slipped" is what
+  an operator fielding *why am I locked again?* needs on the row.
+  `resolveGateState` never reads them, so no status can come to depend on
+  them, and a CHECK holds the four all empty or all set. The Window act's own
+  `extended` events are a different thing and read as "window changed".
+
+Operators are notified only when an extension changes whether the customer can
+work: a lapsed trial reopening sends `clone_gate_unlocked`. Moving the deadline
+of a workspace that was open anyway is on the gate's history, not news.
+
+**Nothing changes on the clone.** `GET /api/public/clones/gate` already hands
+it `locks_at`, and `usePaymentGate` re-reads the verdict every five minutes, on
+its deadline, and whenever the tab regains focus — so a reopened workspace
+opens within minutes, and its countdown banner counts to the new deadline.
+
+On the console it shows three ways: an **Extended trial** filter, the unpaid
+count's note (*n on an extended trial* — `isOnExtendedTrial`, one rule for the
+filter and the number beside it), and a line on each extended row. The clone
+card adds a *Trial extended* row, and its history reads the labels in
+`GATE_EVENT_LABEL`. The Window dialog points at the extension, and warns when
+saving would replace an extended deadline.
+
+### Before the migration applies
+
+`20260930100000_clone_gate_trial_extensions.sql` widens the event `kind` CHECK
+**first** — `logGateEvent` swallows a refused insert, so a CHECK that did not
+know `trial_extended` would let every extension happen with no history and
+nothing reporting it — and then adds the four columns. Code and migration ship
+separately. Until it has applied, the act answers `schema_pending` (PostgREST's
+`PGRST204`, or `42703` from Postgres) having written nothing, and every row
+reads as never extended through `trialExtensionsOf`.
+
 ## Files
 
 | File | What it is |
 | ---- | ---------- |
 | `supabase/migrations/20260831000000_clone_payment_gates.sql` | The tables, the defaults, and why there is no `status` column |
-| `src/lib/clonePaymentGate.pure.ts` | The state machine. The only thing that decides open or locked |
-| `src/server/payment-gate.server.ts` | Arm, override, window, settle, and `assertGateOpen` |
+| `supabase/migrations/20260930100000_clone_gate_trial_extensions.sql` | The `trial_extended` event and the latest extension's four columns |
+| `src/lib/clonePaymentGate.pure.ts` | The state machine. The only thing that decides open or locked — and `planTrialExtension`, the only thing that decides an extension |
+| `src/server/payment-gate.server.ts` | Arm, override, window, extend, settle, and `assertGateOpen` |
+| `src/server/payment-gate.server.test.ts` | The extension act against an in-memory table: what it writes, what it refuses, and the gate it will not write onto |
 | `src/server/payment-gate.functions.ts` | The operator RPCs |
 | `src/routes/api.public.clones.gate.ts` | What a clone asks about itself |
 | `src/server/gateCheckout.server.ts` | The one mint. Both the clone's CTA and the operator's link |
 | `src/routes/api.public.clones.gate.checkout.ts` | The CTA's destination. A thin mapping onto the mint |
-| `src/components/clone-gate-actions.tsx` | The operator's acts, Payment link among them |
+| `src/components/clone-gate-actions.tsx` | The operator's acts, Extend trial and Payment link among them |
 | `src/routes/billing.gates.tsx` | The console |
 | `src/components/clone-payment-gate-card.tsx` | The same state on the clone's own page |
 | `src/server/paymentGate.contract.test.ts` | The absences: no backfill, one status rule, 402 where it belongs |

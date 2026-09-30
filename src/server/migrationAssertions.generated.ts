@@ -872,8 +872,42 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     ],
   },
   {
-    migration: "20260930100000_builder_portal_payment_link.sql",
+    migration: "20260928140000_clone_crm_conversions.sql",
+    version: "20260928140000",
+    assertions: [
+      { kind: "table", table: "clone_crm_conversions" },
+      { kind: "column", table: "clone_crm_conversions", column: "status" },
+      { kind: "column", table: "clone_crm_conversions", column: "from_mode" },
+      { kind: "column", table: "clone_crm_conversions", column: "to_mode" },
+      { kind: "column", table: "clone_crm_conversions", column: "pr_number" },
+      { kind: "column", table: "clone_crm_conversions", column: "plan" },
+      { kind: "column", table: "clone_crm_conversions", column: "delivered_sha" },
+      { kind: "check", table: "clone_crm_conversions", column: "status", value: "proposed" },
+      { kind: "check", table: "clone_crm_conversions", column: "status", value: "merged" },
+      { kind: "check", table: "clone_crm_conversions", column: "status", value: "completed" },
+      { kind: "check", table: "clone_crm_conversions", column: "status", value: "cancelled" },
+      { kind: "check", table: "clone_crm_conversions", column: "status", value: "failed" },
+    ],
+  },
+  {
+    migration: "20260930100000_clone_gate_trial_extensions.sql",
     version: "20260930100000",
+    assertions: [
+      {
+        kind: "check",
+        table: "clone_payment_gate_events",
+        column: "kind",
+        value: "trial_extended",
+      },
+      { kind: "column", table: "clone_payment_gates", column: "trial_extension_count" },
+      { kind: "column", table: "clone_payment_gates", column: "trial_extended_at" },
+      { kind: "column", table: "clone_payment_gates", column: "trial_extended_by" },
+      { kind: "column", table: "clone_payment_gates", column: "trial_extension_reason" },
+    ],
+  },
+  {
+    migration: "20260930110000_builder_portal_payment_link.sql",
+    version: "20260930110000",
     assertions: [
       { kind: "column", table: "client_agreements", column: "portal_payment_link_status" },
       { kind: "column", table: "client_agreements", column: "portal_payment_link_attempts" },

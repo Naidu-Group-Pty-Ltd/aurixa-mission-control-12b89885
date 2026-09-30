@@ -340,6 +340,36 @@ export function pathsTheDeliveryChanges(args: {
 }
 
 /**
+ * The composed entries a pump decided and did NOT change — its steady state.
+ *
+ * `pathsTheDeliveryChanges` already leaves these out of every question about
+ * crossing, but the tree kept them: the security-baseline pump files its
+ * merge whether or not it differs from the clone's copy. A tree built over
+ * the clone's own `base_tree` from nothing but such entries IS the clone's
+ * tree, and the pass read its length as work — so every cascade to a mirror
+ * whose baselines were already reconciled opened a pull request carrying one
+ * commit and no change. Measured on the acid run of 29 Sep 2026: three passes
+ * in a row from `npc-client-dashboard` to `npc-test-76b3b3`, each a proposal
+ * over `SECURITY_INVENTORY.json` and `auditRemediation.spec.ts` whose tree
+ * was byte-identical to `main`'s.
+ *
+ * Dropping them changes no byte of what lands; it changes whether anything
+ * does. A removal (`sha: null`) is never one of these.
+ */
+export function steadyStatePumpPaths(args: {
+  entries: ReadonlyArray<{ path: string; sha?: string | null }>;
+  reconciled: ReadonlySet<string>;
+  reconcileWrites: ReadonlySet<string>;
+}): string[] {
+  const out = new Set<string>();
+  for (const e of args.entries) {
+    if (e.sha === null) continue;
+    if (args.reconciled.has(e.path) && !args.reconcileWrites.has(e.path)) out.add(e.path);
+  }
+  return [...out].sort();
+}
+
+/**
  * The specs this clone keeps at a different version from prime's.
  *
  * Both sides hold the path and the blobs differ — the only specs a delivery

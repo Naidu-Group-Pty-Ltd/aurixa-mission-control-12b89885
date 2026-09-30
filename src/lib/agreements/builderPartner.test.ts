@@ -113,16 +113,19 @@ describe("the reference", () => {
   });
 
   it("never uses the characters a person confuses aloud", () => {
-    const all = new Uint8Array(256).map((_, i) => i);
+    // Every byte value, six at a time, the last window wrapping round to the
+    // start. It used to come up four bytes short, so `.slice(-6)` read the
+    // issuing day's last digit and the test failed on every Sydney day ending
+    // in 0 or 1 — hence a day ending in 0, and the suffix read by its dash.
+    const issued = new Date("2026-09-30T02:00:00.000Z");
     let seen = "";
     for (let i = 0; i < 256; i += 6) {
-      // The suffix is what follows the last hyphen. `.slice(-6)` read into the
-      // date whenever the final call was handed fewer than six bytes, so the
-      // test failed on every day ending in 0 or 1.
-      seen += newBuilderPartnerReference(new Date(), () => all.slice(i, i + 6))
-        .split("-")
-        .pop();
+      const ref = newBuilderPartnerReference(issued, (n) =>
+        Uint8Array.from({ length: n }, (_, k) => (i + k) % 256),
+      );
+      seen += ref.slice(ref.lastIndexOf("-") + 1);
     }
+    expect(seen).toHaveLength(43 * 6);
     expect(seen).not.toMatch(/[01OI]/);
   });
 });

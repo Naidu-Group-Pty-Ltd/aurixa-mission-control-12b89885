@@ -91,7 +91,31 @@ export const Route = createFileRoute("/hooks/cascade-merge-drain")({
             });
           }
 
-          return new Response(JSON.stringify({ success: true, ...report }), {
+          // CRM conversions finish here too: a conversion is one pull request
+          // the platform never merges, and this is the pass that already
+          // reads pull requests every five minutes. Its failure is its own
+          // and never costs the cascade drain its report.
+          let conversions: Record<string, unknown> | null = null;
+          try {
+            const { drainCrmConversions, conversionDrainIsNews } =
+              await import("@/server/crmConversion.server");
+            const { getAppOctokit } = await import("@/server/github-app.server");
+            const convReport = await drainCrmConversions(supabaseAdmin, getAppOctokit());
+            conversions = convReport as unknown as Record<string, unknown>;
+            if (conversionDrainIsNews(convReport)) {
+              await writeAuditLog({
+                action: "crm_conversion_drain",
+                entityType: "cron",
+                metadata: conversions,
+              });
+            }
+          } catch (convErr) {
+            const why = convErr instanceof Error ? convErr.message : String(convErr);
+            console.error("[hooks/cascade-merge-drain] CRM conversions:", why);
+            conversions = { error: why };
+          }
+
+          return new Response(JSON.stringify({ success: true, ...report, conversions }), {
             headers: { "Content-Type": "application/json" },
           });
         } catch (e) {

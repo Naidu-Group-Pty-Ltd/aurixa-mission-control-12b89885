@@ -18,16 +18,28 @@ import { notifyOperators, writeAuditLog } from "@/server/audit.server";
 import { TIERS, tierHeadlineCents } from "@/lib/pricing/aurixa-catalog";
 import {
   computeLocksAt,
+  formatRemaining,
   GATE_DEFAULT_HOURS,
   gateEligibility,
+  gateFactsOf,
   normaliseGraceHours,
+  planTrialExtension,
   resolveGateState,
+  trialExtensionsOf,
+  type GateEventKind,
+  type GateFacts,
   type GateOverride,
   type GateState,
 } from "@/lib/clonePaymentGate.pure";
 
 export type GateRow = Tables<"clone_payment_gates">;
-export type GateEventKind = Tables<"clone_payment_gate_events">["kind"];
+/**
+ * The column is `text` to the generated types, so the vocabulary comes from
+ * the pure module instead: a kind the column's CHECK does not know is refused
+ * by the database and swallowed by `logGateEvent`, and the compiler is the
+ * cheapest place to stop one being written.
+ */
+export type { GateEventKind };
 
 export type GateView = {
   gate: GateRow | null;
@@ -35,14 +47,12 @@ export type GateView = {
 };
 
 /** Facts the resolver reads, projected off a row. One place, so no caller can
- *  hand the resolver a different shape of the same row. */
-export function factsOf(row: GateRow | null) {
-  if (!row) return null;
-  return {
-    manualOverride: (row.manual_override as GateOverride | null) ?? null,
-    paidAt: row.paid_at,
-    locksAt: row.locks_at,
-  };
+ *  hand the resolver a different shape of the same row — and that place is
+ *  `gateFactsOf` in the pure module, because the trial-extension dialog reads
+ *  the console's copy of the row in the browser and must read it exactly as
+ *  the act reads it here. */
+export function factsOf(row: GateRow | null): GateFacts | null {
+  return gateFactsOf(row);
 }
 
 export function viewOf(row: GateRow | null, now: Date = new Date()): GateView {
@@ -498,6 +508,211 @@ export async function setGateWindow(input: {
   }
 
   return { ok: true, gate: applied.after, state: after };
+}
+
+export type TrialExtensionResult =
+  | {
+      ok: true;
+      gate: GateRow;
+      state: GateState;
+      /** The deadline written, and the one it replaced. */
+      locksAt: string;
+      previousLocksAt: string;
+      base: "deadline" | "now";
+      /** The operator override this extension handed back to the clock. */
+      clearedOverride: GateOverride | null;
+    }
+  | { ok: false; error: string };
+
+/**
+ * Give an unpaid gate more time: move its deadline later and let it close by
+ * itself at the new one.
+ *
+ * This is the act the Unlock → remember → Lock routine was standing in for.
+ * `planTrialExtension` holds the whole rule — what it adds the hours to, what
+ * it refuses, what it does to an operator override — and the dialog previews
+ * with the same function, so the deadline written here is the one the
+ * operator read before confirming. Nothing is scheduled: the gate reopens
+ * because the new deadline is in the future, and it locks again because the
+ * resolver reads that deadline on every request. No worker can fail to close
+ * it, because no worker closes it.
+ *
+ * ## It writes only if the gate is still the one the operator was shown
+ *
+ * Twice over, because there are two gaps. `expected` is the gate as the
+ * dialog previewed it — the console's copy of the row, which can be a minute
+ * old — and the planner refuses a gate that has moved since, so the deadline
+ * written is the one the operator read rather than one planned on top of
+ * somebody else's extension. Then the update is filtered on the three facts
+ * the plan read — no payment, the same override, the same deadline — so a
+ * payment that lands, an operator who locks, or a second extension made in
+ * another tab between this read and this write updates nothing. Either gap
+ * reports `gate_changed`. The alternative is an extension silently undoing a
+ * lock somebody placed a second earlier, or two operators each adding a week;
+ * either way the row would say something nobody decided. `paid_at` is
+ * filtered on and never written, so this act cannot touch the one fact a
+ * payment owns.
+ *
+ * ## A database that has not been migrated refuses, and says so
+ *
+ * The bookkeeping columns arrive with the migration named above. Until it has
+ * applied, PostgREST refuses the write as an unknown column and this reports
+ * `schema_pending` — nothing was written, and the operator is told why rather
+ * than shown a raw schema-cache error.
+ */
+export async function extendGateTrial(input: {
+  cloneId: string;
+  hours: number | string;
+  /** Also lift an operator's standing lock. Never implied. */
+  liftOperatorLock?: boolean;
+  /** The gate as the operator was shown it. Required: an extension nobody
+   *  previewed has no deadline anybody agreed to. */
+  expected: { locksAt: string | null; manualOverride: GateOverride | null };
+  reason: string;
+  actorId: string;
+  cloneName?: string | null;
+}): Promise<TrialExtensionResult> {
+  const reason = input.reason.trim();
+  if (reason.length < 5) return { ok: false, error: "reason_required" };
+
+  const read = await readGate(input.cloneId);
+  if (!read.ok) return { ok: false, error: read.error };
+  if (!read.row) return { ok: false, error: "no_gate" };
+  const row = read.row;
+
+  const now = new Date();
+  const plan = planTrialExtension(
+    factsOf(row),
+    {
+      hours: input.hours,
+      liftOperatorLock: input.liftOperatorLock === true,
+      expected: input.expected,
+    },
+    now,
+  );
+  if (!plan.ok) return { ok: false, error: plan.refusal };
+
+  const extensionNumber = trialExtensionsOf(row) + 1;
+  const patch: TablesUpdate<"clone_payment_gates"> = {
+    locks_at: plan.locksAt,
+    trial_extension_count: extensionNumber,
+    trial_extended_at: now.toISOString(),
+    trial_extended_by: input.actorId,
+    trial_extension_reason: reason,
+    // Handing the gate back to the clock is part of the plan, not a side
+    // effect: an unlock always, a lock only when the operator asked by name.
+    ...(plan.clearsOverride !== null
+      ? {
+          manual_override: null,
+          manual_override_reason: null,
+          manual_override_by: null,
+          manual_override_at: null,
+        }
+      : {}),
+  };
+
+  const { data, error } = await supabaseAdmin
+    .from("clone_payment_gates")
+    .update(asRow<TablesUpdate<"clone_payment_gates">>(patch))
+    .eq("clone_id", input.cloneId)
+    // Lost-race guard: the three facts the plan was made from. Still unpaid,
+    // still the deadline it read...
+    .is("paid_at", null)
+    .eq("locks_at", plan.previousLocksAt)
+    // ...and still under the override it read. `is` for none and `eq` for
+    // one, because `= NULL` is never true in SQL and one operator cannot say
+    // both. The value is the row's own, which its CHECK confines to two words.
+    .filter("manual_override", row.manual_override === null ? "is" : "eq", row.manual_override)
+    .select("*")
+    .maybeSingle();
+
+  if (error) {
+    // 42703 from Postgres, PGRST204 from PostgREST's schema cache — the wire
+    // answer is the second, and both mean the columns are not there yet.
+    if (error.code === "PGRST204" || error.code === "42703") {
+      console.error("[gate] trial extension refused — migration not applied", {
+        cloneId: input.cloneId,
+        error: error.message,
+      });
+      return { ok: false, error: "schema_pending" };
+    }
+    return { ok: false, error: error.message };
+  }
+  if (!data) return { ok: false, error: "gate_changed" };
+
+  const updated = data as GateRow;
+  const after = resolveGateState(factsOf(updated), now);
+  // What the customer now has, which is not always the hours added: a lock
+  // lifted mid-trial keeps the time that was left as well.
+  const open = formatRemaining(after.msRemaining) ?? `${plan.hours} hours`;
+
+  await logGateEvent({
+    gateId: updated.id,
+    cloneId: input.cloneId,
+    kind: "trial_extended",
+    statusBefore: plan.before.status,
+    statusAfter: after.status,
+    reason,
+    actor: "operator",
+    actorId: input.actorId,
+    metadata: {
+      hours: plan.hours,
+      base: plan.base,
+      locks_at: plan.locksAt,
+      previous_locks_at: plan.previousLocksAt,
+      reason_before: plan.before.reason,
+      reason_after: after.reason,
+      cleared_override: plan.clearsOverride,
+      extension_number: extensionNumber,
+    },
+  });
+  await writeAuditLog({
+    action: "clone_gate.trial_extended",
+    entityType: "clone_payment_gate",
+    entityId: input.cloneId,
+    actorUserId: input.actorId,
+    metadata: {
+      hours: plan.hours,
+      base: plan.base,
+      locks_at: plan.locksAt,
+      previous_locks_at: plan.previousLocksAt,
+      cleared_override: plan.clearsOverride,
+      extension_number: extensionNumber,
+      reason,
+      status_after: after.status,
+    },
+  });
+
+  // Announced only when it changes whether the customer can work — a lapsed
+  // trial reopening — like every other act here. Moving the deadline of a
+  // workspace that was open anyway is on the gate's history, not news.
+  if (plan.before.status !== after.status) {
+    await notifyOperators({
+      kind: "clone_gate_unlocked",
+      severity: "success",
+      title: `Trial extended: ${input.cloneName ?? input.cloneId.slice(0, 8)}`,
+      body: `Reopened for ${open}; it locks again by itself unless the activation payment lands. Reason: ${reason}`,
+      cloneId: input.cloneId,
+      url: "/billing/gates",
+      metadata: {
+        hours: plan.hours,
+        locks_at: plan.locksAt,
+        previous_locks_at: plan.previousLocksAt,
+        cleared_override: plan.clearsOverride,
+        reason,
+      },
+    });
+  }
+
+  return {
+    ok: true,
+    gate: updated,
+    state: after,
+    locksAt: plan.locksAt,
+    previousLocksAt: plan.previousLocksAt,
+    base: plan.base,
+    clearedOverride: plan.clearsOverride,
+  };
 }
 
 // ── Payment ─────────────────────────────────────────────────────────────────

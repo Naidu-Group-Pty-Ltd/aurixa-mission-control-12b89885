@@ -483,7 +483,7 @@ describe("the engine looks for the specs a delivery leaves behind", () => {
       "if (pendingDeletes.length > 0) await withholdStillReferenced(await deletionSurvivors(new Map()));",
     );
     const plan = engine.indexOf(
-      "let deletionPlan = planDeletions(deletionVerdicts, MAX_DELETIONS_PER_CASCADE, deletionApproved);",
+      "let deletionPlan = planDeletions(deletionVerdicts, deletionCap, deletionOverCap);",
     );
     const read = engine.indexOf("const keptSpecSubjects = new Map<string, string[]>();");
     expect(withhold).toBeGreaterThan(engine.indexOf("reconcileDeployWorkflow({"));
@@ -515,7 +515,7 @@ describe("the engine looks for the specs a delivery leaves behind", () => {
     // Re-planned from verdicts that only ever lost a delete, and only where the
     // first plan was accepted: a refused set is never trimmed to fit the cap.
     expect(branch).toContain(
-      "deletionPlan = planDeletions(deletionVerdicts, MAX_DELETIONS_PER_CASCADE, deletionApproved);",
+      "deletionPlan = planDeletions(deletionVerdicts, deletionCap, deletionOverCap);",
     );
     // Before the channel, the kept specs are not survivors.
     const preLoop = engine.slice(

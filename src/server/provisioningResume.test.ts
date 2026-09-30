@@ -1255,6 +1255,12 @@ describe("every per-item step in the tail is budgeted, not just guarded in front
     // never inside a provisioning invocation. Both bounds are pinned in
     // primeOnlyProvisioning.test.ts.
     sweepPrimeOnlyFunctions: "bounded by the register and by ten deletes a pass",
+    // Bounded by the conversion that calls it: only the functions its own
+    // proposal retired and the project still runs, never one the prime
+    // declares (`functionsToUndeploy`) — three on the CRM-independent line.
+    // It runs from the conversion drain, never inside a provisioning
+    // invocation, and a 429 ends it early with the rest named.
+    deleteProjectEdgeFunctions: "bounded by one conversion's retired functions — three, measured",
   };
 
   it("discovers every per-item network loop in the module", () => {

@@ -532,12 +532,16 @@ that a builder can be bound to exactly it:
   and the one in the clause is the one that binds. The refusal names the
   bookmark, what the clause shows and what the quoted text now reads, and says
   to press F9 in Word. A reference whose bookmark has gone (the marked text was
-  retyped over) is refused the same way. BD1 v1.2 is the case this was written
-  for: clauses 14.3 and 14.4 quote the New Build Fee and the Development Sale
-  Fee from "Your transaction-fee arrangement" through the bookmarks
-  `BD1_Fee_NewBuild_ExGST`, `BD1_Fee_NewBuild_IncGST`, `BD1_Fee_DevSale_ExGST`
-  and `BD1_Fee_DevSale_IncGST`, so the fee page is where a fee is changed and
-  the clauses follow it on F9.
+  retyped over) is refused the same way. BD1 v1.3 is the case this was written
+  for: clauses 13.8, 14.3 and 14.4 and the Schedule 2 fee table (S2.2) quote
+  the New Build Fee and the Development Sale Fee from "Your transaction-fee
+  arrangement" through the bookmarks `BD1_Fee_NewBuild_ExGST`,
+  `BD1_Fee_NewBuild_IncGST`, `BD1_Fee_DevSale_ExGST` and
+  `BD1_Fee_DevSale_IncGST` — nine fields in all — so the fee page is where a
+  fee is changed and every quotation follows it on F9. The Execution
+  Schedule's "Fixed amount if selected" line is a plain-text content control,
+  which cannot hold a field, so it points to the fee page rather than stating a
+  figure.
 - Comments, a linked (rather than embedded) picture or template, and a
   document with no text in it each raise a warning and stop nothing.
 
@@ -850,7 +854,7 @@ The agreements refresh (`/hooks/agreements-refresh`) runs
    read both documents as DocuSign shows them. On the production account an
    envelope is billable.
 4. The Portal payment link needs
-   `supabase/migrations/20260930100000_builder_portal_payment_link.sql` applied.
+   `supabase/migrations/20260930110000_builder_portal_payment_link.sql` applied.
    Until it is, the page says the columns are not installed, nothing is sent,
    and a Portal payment arriving at the webhook is left unprocessed so Stripe
    retries it. The link is live: test it with a real card and refund, or send
@@ -890,7 +894,7 @@ The agreements refresh (`/hooks/agreements-refresh`) runs
   - the one-open-agreement index;
   - the widened freeze and keep triggers, and the admin-only trigger;
   - the private `agreement-templates` bucket.
-- `supabase/migrations/20260930100000_builder_portal_payment_link.sql` — the
+- `supabase/migrations/20260930110000_builder_portal_payment_link.sql` — the
   `portal_payment_link_*` and `portal_subscription_*` columns, their checks,
   the one-agreement-per-subscription index, and the `held` backfill.
 
