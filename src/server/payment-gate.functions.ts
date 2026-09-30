@@ -11,6 +11,7 @@ import { requireAdmin, requireOperator } from "@/integrations/supabase/role-midd
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import {
   defaultGateSettings,
+  extendGateTrial,
   factsOf,
   readGate,
   resolvePlanPricing,
@@ -23,6 +24,8 @@ import {
 import { mintGateActivationCheckout } from "./gateCheckout.server";
 import {
   gateEligibility,
+  isOnExtendedTrial,
+  normaliseExtensionHours,
   normaliseGraceHours,
   resolveGateState,
   type GateOverride,
@@ -61,6 +64,9 @@ export type GateListResult = {
     counting: number;
     paid: number;
     unpaid: number;
+    /** Unpaid gates running on a trial an operator has extended at least once
+     *  (`isOnExtendedTrial` — the console's filter counts the same rows). */
+    extended: number;
     ungatedPaidPlan: number;
   };
 };
@@ -130,6 +136,7 @@ export const listCloneGates = createServerFn({ method: "GET" })
         counting: rows.filter((r) => r.state.counting).length,
         paid: rows.filter((r) => r.state.paid).length,
         unpaid: rows.filter((r) => r.gate !== null && !r.state.paid).length,
+        extended: rows.filter(isOnExtendedTrial).length,
         ungatedPaidPlan: rows.filter((r) => r.ungatedPaidPlan).length,
       },
     };
@@ -255,6 +262,68 @@ export const setCloneGateWindow = createServerFn({ method: "POST" })
       cloneId: data.cloneId,
       graceHours: data.graceHours as number | null,
       restartClock: data.restartClock === true,
+      reason: data.reason,
+      actorId: context.userId,
+      cloneName: await cloneName(data.cloneId),
+    }),
+  );
+
+/**
+ * Give an unpaid gate more time — the trial extension (`extendGateTrial`).
+ *
+ * The act that replaces unlocking a lapsed gate by hand and remembering to lock
+ * it again: the deadline moves later and the gate closes by itself at the new
+ * one. Admin-only, like every act that decides whether a customer can work.
+ *
+ * The hours are refused at the door by the same rule the planner applies, so
+ * a malformed request never reaches the gate. `liftOperatorLock` is carried
+ * as a strict boolean: lifting a lock has to be asked for, never inferred
+ * from a truthy value. `expected` — the deadline and override the dialog
+ * previewed from — is required, because the act refuses to write a deadline
+ * planned from a gate the operator was not shown.
+ */
+export const extendCloneGateTrial = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
+  .inputValidator(
+    (data: {
+      cloneId: string;
+      hours: number | string;
+      liftOperatorLock?: boolean;
+      expected: { locksAt: string | null; manualOverride: GateOverride | null };
+      reason: string;
+    }) => {
+      if (!data?.cloneId) throw new Error("cloneId required");
+      const hours = normaliseExtensionHours(data.hours);
+      if (!hours.ok) throw new Error(`Invalid extension: ${hours.error}`);
+      if (!data.reason || data.reason.trim().length < 5) {
+        throw new Error("A reason of at least 5 characters is required");
+      }
+      const expected = data.expected;
+      if (!expected || typeof expected !== "object") {
+        throw new Error("expected required: the gate as the extension was previewed");
+      }
+      if (expected.locksAt !== null && typeof expected.locksAt !== "string") {
+        throw new Error("Invalid expected deadline");
+      }
+      const override = expected.manualOverride;
+      if (override !== null && override !== "locked" && override !== "unlocked") {
+        throw new Error("Invalid expected override");
+      }
+      return {
+        cloneId: data.cloneId,
+        hours: hours.hours,
+        liftOperatorLock: data.liftOperatorLock === true,
+        expected: { locksAt: expected.locksAt, manualOverride: override },
+        reason: data.reason,
+      };
+    },
+  )
+  .handler(async ({ data, context }) =>
+    extendGateTrial({
+      cloneId: data.cloneId,
+      hours: data.hours,
+      liftOperatorLock: data.liftOperatorLock,
+      expected: data.expected,
       reason: data.reason,
       actorId: context.userId,
       cloneName: await cloneName(data.cloneId),

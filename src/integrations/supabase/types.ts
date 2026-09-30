@@ -3428,6 +3428,10 @@ export type Database = {
           stripe_customer_id: string | null
           stripe_payment_intent_id: string | null
           stripe_subscription_id: string | null
+          trial_extended_at: string | null
+          trial_extended_by: string | null
+          trial_extension_count: number
+          trial_extension_reason: string | null
           updated_at: string
         }
         Insert: {
@@ -3456,6 +3460,10 @@ export type Database = {
           stripe_customer_id?: string | null
           stripe_payment_intent_id?: string | null
           stripe_subscription_id?: string | null
+          trial_extended_at?: string | null
+          trial_extended_by?: string | null
+          trial_extension_count?: number
+          trial_extension_reason?: string | null
           updated_at?: string
         }
         Update: {
@@ -3484,6 +3492,10 @@ export type Database = {
           stripe_customer_id?: string | null
           stripe_payment_intent_id?: string | null
           stripe_subscription_id?: string | null
+          trial_extended_at?: string | null
+          trial_extended_by?: string | null
+          trial_extension_count?: number
+          trial_extension_reason?: string | null
           updated_at?: string
         }
         Relationships: [

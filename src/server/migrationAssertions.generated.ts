@@ -889,4 +889,20 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "check", table: "clone_crm_conversions", column: "status", value: "failed" },
     ],
   },
+  {
+    migration: "20260930100000_clone_gate_trial_extensions.sql",
+    version: "20260930100000",
+    assertions: [
+      {
+        kind: "check",
+        table: "clone_payment_gate_events",
+        column: "kind",
+        value: "trial_extended",
+      },
+      { kind: "column", table: "clone_payment_gates", column: "trial_extension_count" },
+      { kind: "column", table: "clone_payment_gates", column: "trial_extended_at" },
+      { kind: "column", table: "clone_payment_gates", column: "trial_extended_by" },
+      { kind: "column", table: "clone_payment_gates", column: "trial_extension_reason" },
+    ],
+  },
 ];

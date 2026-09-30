@@ -96,7 +96,9 @@ describe("one module decides the status", () => {
   it("the gates table has no status column to store one in", () => {
     const create = migrations.find((m) => /create table[\s\S]*clone_payment_gates/i.test(m.text));
     expect(create).toBeDefined();
-    const body = /create table[^(]*clone_payment_gates\s*\(([\s\S]*?)\n\);/i.exec(create!.text)?.[1];
+    const body = /create table[^(]*clone_payment_gates\s*\(([\s\S]*?)\n\);/i.exec(
+      create!.text,
+    )?.[1];
     expect(body).toBeDefined();
     expect(/^\s*status\s+text/im.test(body!)).toBe(false);
   });
@@ -184,8 +186,7 @@ describe("the gate quotes what Stripe will charge", () => {
     // anybody — the quote is handed to `seatPlanForTier`, which refuses any
     // catalogue row whose price disagrees — it kills the pay button with
     // `plan_not_purchasable` on every clone armed with it.
-    const fn =
-      /export async function resolvePlanPricing[\s\S]*?\n}\n/.exec(gateServer)?.[0] ?? "";
+    const fn = /export async function resolvePlanPricing[\s\S]*?\n}\n/.exec(gateServer)?.[0] ?? "";
     expect(fn.length).toBeGreaterThan(0);
     expect(fn).toMatch(/tierHeadlineCents\(tier\)/);
     expect(fn).not.toMatch(/tier\.monthlyInclGstCents/);
@@ -194,14 +195,129 @@ describe("the gate quotes what Stripe will charge", () => {
   it("the two figures genuinely differ, so the choice is consequential", async () => {
     // If these ever coincide the assertion above is vacuous and somebody
     // should be told rather than reassured.
-    const { TIERS, tierHeadlineCents, tierBaseCents } = await import(
-      "@/lib/pricing/aurixa-catalog"
-    );
+    const { TIERS, tierHeadlineCents, tierBaseCents } =
+      await import("@/lib/pricing/aurixa-catalog");
     expect(TIERS.length).toBeGreaterThan(0);
     for (const tier of TIERS) {
       expect(tierHeadlineCents(tier)).toBeGreaterThan(tierBaseCents(tier));
       expect(tierHeadlineCents(tier)).not.toBe(tier.monthlyInclGstCents);
     }
+  });
+});
+
+describe("the event vocabulary is the column's", () => {
+  it("GATE_EVENT_KINDS is exactly the latest CHECK declared on clone_payment_gate_events.kind", async () => {
+    // `logGateEvent` swallows a refused insert on purpose, so a kind the
+    // column does not know is an act whose history silently never arrives.
+    // The vocabulary is declared in two places — a migration and the pure
+    // module — and this is what holds them together. The LATEST declaration
+    // wins, in filename order, because that is the order they apply in.
+    const { GATE_EVENT_KINDS } = await import("@/lib/clonePaymentGate.pure");
+    const declarations: Array<{ file: string; values: string[] }> = [];
+    const created =
+      /create\s+table[^(]*clone_payment_gate_events\s*\([\s\S]*?\bkind\s+text[^,]*?check\s*\(\s*kind\s+in\s*\(([^)]*)\)/i;
+    const replaced =
+      /add\s+constraint\s+clone_payment_gate_events_kind_check\s+check\s*\(\s*kind\s+in\s*\(([^)]*)\)/gi;
+    for (const m of [...migrations].sort((a, b) => a.file.localeCompare(b.file))) {
+      const lists = [created.exec(m.text)?.[1], ...[...m.text.matchAll(replaced)].map((x) => x[1])];
+      for (const list of lists) {
+        if (!list) continue;
+        declarations.push({
+          file: m.file,
+          values: [...list.matchAll(/'([^']+)'/g)].map((v) => v[1]),
+        });
+      }
+    }
+    expect(declarations.length).toBeGreaterThan(1);
+    const latest = declarations[declarations.length - 1];
+    expect([...latest.values].sort()).toEqual([...GATE_EVENT_KINDS].sort());
+  });
+});
+
+describe("a trial extension only ever gives time", () => {
+  const gateServer = readFileSync("src/server/payment-gate.server.ts", "utf8");
+  const rpcs = readFileSync("src/server/payment-gate.functions.ts", "utf8");
+  const act = /export async function extendGateTrial[\s\S]*?\n}\n/.exec(gateServer)?.[0] ?? "";
+
+  it("asks the planner for the deadline rather than computing one of its own", () => {
+    // The dialog previews with `planTrialExtension`; a second calculation here
+    // is how the date an operator confirmed and the date written come apart.
+    expect(act.length).toBeGreaterThan(0);
+    expect(act).toMatch(/planTrialExtension\(/);
+    expect(act).not.toMatch(/computeLocksAt\(/);
+    const deadlines = [...act.matchAll(/\blocks_at:\s*([^,\n]+)/g)].map((m) => m[1].trim());
+    expect(deadlines.length).toBeGreaterThan(0);
+    for (const written of deadlines) expect(written).toBe("plan.locksAt");
+  });
+
+  it("never writes a payment fact — a trial is not a payment", () => {
+    expect(act).not.toMatch(/\bpaid_at\s*:/);
+    expect(act).not.toMatch(/payment_source/);
+    expect(act).not.toMatch(/amount_paid_cents/);
+    expect(act).not.toMatch(/stripe_/);
+  });
+
+  it("can hand a gate back to the clock, and can never place an override", () => {
+    const writes = [...act.matchAll(/\bmanual_override(?:_\w+)?\s*:\s*([^,\n]+)/g)].map((m) =>
+      m[1].trim(),
+    );
+    expect(writes.length).toBe(4);
+    for (const value of writes) expect(value).toBe("null");
+  });
+
+  it("writes only onto the gate it planned from", () => {
+    expect(act).toMatch(/\.is\("paid_at", null\)/);
+    expect(act).toMatch(/\.eq\("locks_at", plan\.previousLocksAt\)/);
+    // `is` for no override and `eq` for one: `= NULL` is never true, so a
+    // plain `.eq` would refuse every gate with no override at all.
+    expect(act).toMatch(
+      /\.filter\("manual_override", row\.manual_override === null \? "is" : "eq", row\.manual_override\)/,
+    );
+    // And it is ONE awaited, error-checked statement, not a builder assembled
+    // across several — the shape `check:discarded-errors` can see is checked.
+    expect(act).toMatch(
+      /const \{ data, error \} = await supabaseAdmin\s*\.from\("clone_payment_gates"\)\s*\.update\(/,
+    );
+  });
+
+  it("is an admin act, like every other act that decides whether a customer works", () => {
+    const rpc = /export const extendCloneGateTrial[\s\S]*?\n {2}\);\n/.exec(rpcs)?.[0] ?? "";
+    expect(rpc.length).toBeGreaterThan(0);
+    expect(rpc).toMatch(/\.middleware\(\[requireAdmin\]\)/);
+    expect(rpc).toMatch(/extendGateTrial\(/);
+  });
+
+  it("plans from the gate the operator was shown, all the way from the dialog to the planner", () => {
+    // Dropped anywhere along the way, the act re-plans on whatever it reads:
+    // a colleague's extension a minute earlier gets a second one on top, and
+    // the deadline written is one nobody previewed. Each hop is a separate
+    // file, so each is pinned.
+    const rpc = /export const extendCloneGateTrial[\s\S]*?\n {2}\);\n/.exec(rpcs)?.[0] ?? "";
+    expect(rpc).toMatch(/expected:\s*data\.expected/);
+    expect(act).toMatch(/expected:\s*input\.expected/);
+    const dialog = readFileSync("src/components/clone-gate-actions.tsx", "utf8");
+    expect(dialog).toMatch(
+      /expected:\s*\{\s*locksAt:\s*trialFacts\.locksAt,\s*manualOverride:\s*trialFacts\.manualOverride\s*\}/,
+    );
+  });
+
+  it("the dialog previews with the act's own planner, over the act's own reading of the row", () => {
+    // Two calculations of one deadline is how the date an operator confirmed
+    // and the date written come apart; two readings of one row is how the
+    // preview and the act come to disagree about what the gate IS.
+    const dialog = readFileSync("src/components/clone-gate-actions.tsx", "utf8");
+    expect(dialog).toMatch(/planTrialExtension\(/);
+    expect(dialog).toMatch(/gateFactsOf\(gate\)/);
+    expect(dialog).not.toMatch(/computeLocksAt\(/);
+    expect(gateServer).toMatch(
+      /export function factsOf\([^)]*\)[^{]*\{\s*return gateFactsOf\(row\);\s*\}/,
+    );
+  });
+
+  it("the console's Extended trial filter and the count beside it are one rule", () => {
+    const route = readFileSync("src/routes/billing.gates.tsx", "utf8");
+    expect(route).toMatch(/isOnExtendedTrial\(r\)/);
+    expect(rpcs).toMatch(/extended:\s*rows\.filter\(isOnExtendedTrial\)\.length/);
   });
 });
 

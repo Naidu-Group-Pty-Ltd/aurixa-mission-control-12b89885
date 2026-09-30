@@ -28,7 +28,9 @@ import {
   describeGateReason,
   formatRemaining,
   gateTone,
+  isOnExtendedTrial,
   normaliseGraceHours,
+  trialExtensionsOf,
 } from "@/lib/clonePaymentGate.pure";
 import { cn } from "@/lib/utils";
 
@@ -62,13 +64,22 @@ const REASON_WORD: Record<string, string> = {
   grace_expired: "locked",
 };
 
-type Filter = "all" | "locked" | "counting" | "unpaid" | "paid" | "ungated" | "not_gated";
+type Filter =
+  | "all"
+  | "locked"
+  | "counting"
+  | "unpaid"
+  | "extended"
+  | "paid"
+  | "ungated"
+  | "not_gated";
 
 const FILTERS: Array<{ key: Filter; label: string }> = [
   { key: "all", label: "All clones" },
   { key: "locked", label: "Locked" },
   { key: "counting", label: "Counting down" },
   { key: "unpaid", label: "Unpaid" },
+  { key: "extended", label: "Extended trial" },
   { key: "paid", label: "Paid" },
   { key: "ungated", label: "Paid plan, no gate" },
   { key: "not_gated", label: "Not gated" },
@@ -114,6 +125,8 @@ function PaymentGatesPage() {
           return r.state.counting;
         case "unpaid":
           return r.gate !== null && !r.state.paid;
+        case "extended":
+          return isOnExtendedTrial(r);
         case "paid":
           return r.state.paid;
         case "ungated":
@@ -144,7 +157,16 @@ function PaymentGatesPage() {
             { label: "locked", value: s.locked, tone: "destructive", alarm: s.locked > 0 },
             { label: "counting down", value: s.counting, tone: "warning", alarm: s.counting > 0 },
             { label: "paid", value: s.paid, tone: "success", alarm: false },
-            { label: "unpaid", value: s.unpaid, tone: "warning", alarm: s.unpaid > 0 },
+            {
+              label: "unpaid",
+              value: s.unpaid,
+              tone: "warning",
+              alarm: s.unpaid > 0,
+              // A qualifier, not a second count: these are the unpaid gates
+              // somebody has already given more time, and the ones worth a
+              // follow-up before the new deadline comes round.
+              note: s.extended > 0 ? `${s.extended} on an extended trial` : undefined,
+            },
             {
               label: "gap",
               value: s.ungatedPaidPlan,
@@ -222,6 +244,7 @@ function GateRow({ row, onDone }: { row: GateListRow; onDone: () => void }) {
   const [busy, setBusy] = useState(false);
   const tone = gateTone(row.state);
   const gate = row.gate;
+  const extensions = trialExtensionsOf(gate);
 
   async function armNow() {
     setBusy(true);
@@ -336,6 +359,18 @@ function GateRow({ row, onDone }: { row: GateListRow; onDone: () => void }) {
               {gate.manual_override_reason}
             </p>
           )}
+
+          {/* On the row, because "why am I locked again?" is asked about a
+              workspace somebody already gave more time, and the answer —
+              how often, when, and what was agreed — is here without opening
+              the gate's history. */}
+          {gate && extensions > 0 && (
+            <p className="text-xs text-muted-foreground">
+              <span className="label-mono mr-2">trial extended ×{extensions}</span>
+              last {when(gate.trial_extended_at)}
+              {gate.trial_extension_reason ? ` — ${gate.trial_extension_reason}` : ""}
+            </p>
+          )}
         </div>
 
         <div className="shrink-0 lg:pl-4">
@@ -344,7 +379,7 @@ function GateRow({ row, onDone }: { row: GateListRow; onDone: () => void }) {
               cloneId={row.clone.id}
               cloneName={row.clone.name}
               state={row.state}
-              hasGate
+              gate={gate}
               graceHours={gate.grace_hours}
               paid={row.state.paid}
               onDone={onDone}
