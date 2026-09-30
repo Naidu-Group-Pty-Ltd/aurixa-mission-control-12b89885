@@ -12,6 +12,8 @@ import {
   TIERS,
   annualCents,
   annualPerMonthCents,
+  COMMITMENT_DISCOUNT_BPS,
+  commitmentDiscountCents,
   exGstCents,
   gstComponentCents,
   moduleBySlug,
@@ -100,22 +102,40 @@ describe("headline tier prices match the signed-off pricing model", () => {
   });
 });
 
-describe("annual billing takes 10% off twelve months", () => {
-  it("is 10%", () => {
-    expect(ANNUAL_DISCOUNT).toBe(0.1);
+describe("the annual plan is a 12-month commitment at 15% off the base", () => {
+  it("is 15%, held in basis points", () => {
+    expect(COMMITMENT_DISCOUNT_BPS).toBe(1500);
+    expect(ANNUAL_DISCOUNT).toBe(0.15);
+  });
+
+  it("takes the discount off each month, rounded to the cent", () => {
+    expect(commitmentDiscountCents($(849))).toBe($(127.35));
+    expect(commitmentDiscountCents($(999))).toBe($(149.85));
+    // A base that is not a whole number of dollars still rounds per month.
+    expect(commitmentDiscountCents(12_345)).toBe(1_852);
   });
 
   it("lands on exact cents for every tier", () => {
-    expect(annualCents($(849))).toBe($(9169.2));
-    expect(annualCents($(1249))).toBe($(13489.2));
-    expect(annualCents($(2549))).toBe($(27529.2));
+    expect(annualCents($(849))).toBe($(8659.8));
+    expect(annualCents($(1249))).toBe($(12739.8));
+    expect(annualCents($(2549))).toBe($(25999.8));
   });
 
-  it("is cheaper than paying monthly, by exactly a tenth", () => {
+  it("is twelve discounted months — the agreement's annual prepayment — for any base", () => {
+    // Clause 5.2 states the prepayment as twelve times the discounted monthly
+    // base. Discounting the year instead would differ by a cent on a base
+    // with odd cents, and the storefront and the agreement must not.
+    for (const base of [$(849), $(999), 12_345, 1, 7]) {
+      expect(annualCents(base)).toBe((base - commitmentDiscountCents(base)) * 12);
+    }
+    expect(annualCents(12_345)).toBe(125_916);
+  });
+
+  it("is cheaper than paying monthly, by exactly fifteen per cent of the year", () => {
     for (const tier of TIERS) {
       const monthly12 = tier.monthlyInclGstCents * 12;
       const annual = tierPriceCents(tier, { period: "annual" });
-      expect(monthly12 - annual).toBe(Math.round(monthly12 * 0.1));
+      expect(monthly12 - annual).toBe(Math.round(monthly12 * 0.15));
     }
   });
 
@@ -124,8 +144,9 @@ describe("annual billing takes 10% off twelve months", () => {
     expect(tierPriceCents(launch, { period: "annual", withAml: true })).toBe(annualCents($(999)));
   });
 
-  it("reports a sensible per-month equivalent", () => {
-    expect(annualPerMonthCents($(849))).toBe($(764.1));
+  it("reports the discounted base as its per-month equivalent", () => {
+    expect(annualPerMonthCents($(849))).toBe($(721.65));
+    expect(annualPerMonthCents($(999)) * 12).toBe(annualCents($(999)));
   });
 
   it("stays tax-inclusive, so GST still divides out of the annual total", () => {
@@ -331,9 +352,9 @@ describe("the headline price is the one the sheet titles each tier with", () => 
   // customers see and the number Stripe charges. The without-AML figure is the
   // documented alternative, not the headline.
   const headline = [
-    { slug: "launch", monthly: $(999), annual: $(10789.2) },
-    { slug: "growth", monthly: $(1399), annual: $(15109.2) },
-    { slug: "scale", monthly: $(2699), annual: $(29149.2) },
+    { slug: "launch", monthly: $(999), annual: $(10189.8) },
+    { slug: "growth", monthly: $(1399), annual: $(14269.8) },
+    { slug: "scale", monthly: $(2699), annual: $(27529.8) },
   ];
 
   for (const h of headline) {
@@ -357,10 +378,10 @@ describe("the headline price is the one the sheet titles each tier with", () => 
     }
   });
 
-  it("discounts the headline annual by 10% of twelve months", () => {
+  it("discounts the headline annual by 15% of twelve months", () => {
     for (const tier of TIERS) {
       const twelve = tierHeadlineCents(tier) * 12;
-      expect(tierHeadlineCents(tier, "annual")).toBe(Math.round(twelve * 0.9));
+      expect(tierHeadlineCents(tier, "annual")).toBe(Math.round(twelve * 0.85));
     }
   });
 

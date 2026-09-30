@@ -26,10 +26,15 @@ describe("the catch-up plans and never advances the baseline", () => {
   it("reads the baseline rather than inventing one", () => {
     // A clone with no recorded revision owes EVERY backend file, which is the
     // planner's own safe reading. Substituting the clone's own HEAD is the
-    // defect that once left two clones reading `failed` for a week.
+    // defect that once left two clones reading `failed` for a week — and so
+    // is substituting any column another lane also writes, which is what the
+    // repository baseline and `clone_backends.source_sha` both turned out to
+    // be. See `functionsBaseline.pure.ts`.
     const s = server();
-    expect(s).toContain("last_synced_sha");
-    expect(s).toContain("row.last_synced_sha ?? null");
+    expect(s).toContain("fromSha: functionsSha.get(row.id) ?? null");
+    // Named in the header's history, never read: no query selects it.
+    expect(s).not.toMatch(/\.select\([^)]*last_synced_sha/);
+    expect(s).not.toMatch(/row\.last_synced_sha/);
     expect(s).not.toMatch(/getBranch[\s\S]{0,400}clone/i);
   });
 

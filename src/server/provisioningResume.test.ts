@@ -1246,6 +1246,21 @@ describe("every per-item step in the tail is budgeted, not just guarded in front
     // hidden; budget it before that strategy is made default again.
     applyPrimeMigrations: "legacy migration-replay path, not the default strategy",
     applyModuleMigrations: "legacy migration-replay path, not the default strategy",
+    // Bounded by the register: it acts only on the jobs `primeOnlyCronJobsIn`
+    // names. Measured 27 Sep 2026: one on each of the four clones.
+    sweepPrimeOnlyCronJobs: "bounded by the register — one job on each clone, measured",
+    // Bounded twice over: it acts only on the functions `primeOnlyFunctionsIn`
+    // names (28), and deletes at most PRIME_ONLY_FUNCTION_DELETES_PER_PASS
+    // (10) a pass, a 429 ending it early. It runs from the backend catch-up,
+    // never inside a provisioning invocation. Both bounds are pinned in
+    // primeOnlyProvisioning.test.ts.
+    sweepPrimeOnlyFunctions: "bounded by the register and by ten deletes a pass",
+    // Bounded by the conversion that calls it: only the functions its own
+    // proposal retired and the project still runs, never one the prime
+    // declares (`functionsToUndeploy`) — three on the CRM-independent line.
+    // It runs from the conversion drain, never inside a provisioning
+    // invocation, and a 429 ends it early with the rest named.
+    deleteProjectEdgeFunctions: "bounded by one conversion's retired functions — three, measured",
   };
 
   it("discovers every per-item network loop in the module", () => {

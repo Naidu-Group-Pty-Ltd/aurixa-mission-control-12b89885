@@ -194,7 +194,9 @@ export function measureConvergence(input: {
     the far more dangerous way round: a 39 MB seed that has NOT crossed would
     be scored "not owed", and a clone genuinely missing fourteen files would
     measure as converged. The number here is now the one the engine actually
-    refuses at, which is GitHub's own blob ceiling and nothing of ours.
+    refuses at, which is GitHub's own blob ceiling and nothing of ours — as
+    measured, not as documented: a 100 MB reading scored three 42 MB seeds the
+    API refuses on every pass as owed (see `CASCADE_STREAM_MAX_FILE_BYTES`).
   */
   const sizes = input.primeSizes ?? null;
   const owedWritable: string[] = [];

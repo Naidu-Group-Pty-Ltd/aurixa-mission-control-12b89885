@@ -42,6 +42,9 @@ const lateralPanel = stripComments(
   readFileSync("src/components/yggdrasil/lateral-detail-panel.tsx", "utf8"),
 );
 
+/** Modules outside this directory a membrane module may import a value from. */
+const CLIENT_SAFE_LIBS = ["@/lib/module-globs", "@/lib/crmMode.pure"];
+
 const MEMBRANE_MODULES = [
   "src/lib/cascade/membrane/ionSpecies.pure.ts",
   "src/lib/cascade/membrane/membrane.pure.ts",
@@ -61,7 +64,15 @@ describe("the diagram draws the membranes", () => {
     const at = tree.indexOf("layout.branches.map((branch) => ({");
     expect(at).toBeGreaterThan(-1);
     const block = tree.slice(at, at + 400);
-    expect(block).toContain("resolveMembrane(branch.fromRepo, branch.toRepo)");
+    // Keyed on the branch's two ends, and on the CRM the child records: the
+    // band an operator reads must be the boundary the engine enforces, and
+    // the engine takes the recorded CRM as the routed-name channel's authority.
+    expect(block).toContain("membraneOnEdge(branch.fromRepo, branch.toRepo, branch.toCrmMode)");
+  });
+
+  it("carries the child's recorded CRM onto its branch", () => {
+    expect(layout).toContain("toCrmMode?: string | null;");
+    expect(layout).toContain("toCrmMode: clone.crm_mode ?? null");
   });
 
   it("draws them AFTER the branches and BEFORE the nodes", () => {
@@ -240,9 +251,19 @@ describe("the registry stays reachable from a browser", () => {
       ).test(src);
       if (isTypeOnly) continue;
       // Either a sibling in this directory, or a module that has declared
-      // itself client-safe. `@/lib/module-globs` says so in its own header.
-      expect(spec === "@/lib/module-globs" || spec.startsWith("./")).toBe(true);
+      // itself client-safe. `@/lib/module-globs` says so in its own header,
+      // and so does `@/lib/crmMode.pure` — the vocabulary the wizard draws,
+      // the server judges and the membrane reads.
+      expect(CLIENT_SAFE_LIBS.includes(spec) || spec.startsWith("./")).toBe(true);
     }
+  });
+
+  it.each(CLIENT_SAFE_LIBS)("%s still declares itself client-safe", (spec) => {
+    // The allow-list above trusts a header, so the header is asserted: a
+    // module that grows a server import has to drop the claim, and dropping
+    // it fails here rather than in `vite build` on somebody else's route.
+    const path = `src/lib/${spec.slice("@/lib/".length)}.ts`;
+    expect(readFileSync(path, "utf8")).toMatch(/client-safe/i);
   });
 
   it("the diagram reads the registry from lib, never from the server root", () => {

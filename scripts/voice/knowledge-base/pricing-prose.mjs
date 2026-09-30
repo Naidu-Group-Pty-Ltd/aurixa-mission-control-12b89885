@@ -118,8 +118,21 @@ export function tierInclusionLines() {
   }).filter(Boolean);
 }
 
+/**
+ * The commitment discount, as the Subscription Agreement states it: 15% off the
+ * plan for a 12-month commitment (clause 5.1), paid up front or in monthly
+ * instalments (5.2), and never on modules or credit packs (5.4). The figure is
+ * read from the catalog like every other; the terms around it are the
+ * agreement's own, which the pricing page states in the same words.
+ */
 export function annualSentence() {
-  return `Annual billing is available at ${Math.round(ANNUAL_DISCOUNT * 100)}% off, billed twelve months up front.`;
+  const pct = `${Math.round(ANNUAL_DISCOUNT * 100)}%`;
+  return (
+    `A 12-month commitment takes ${pct} off the plan's price. Paid up front it is the annual ` +
+    `price - twelve discounted months, billed at once - or it can be paid in twelve monthly ` +
+    `instalments under a Subscription Agreement. The discount is on the plan alone: add-on ` +
+    `modules and credit packs stay at their listed prices.`
+  );
 }
 
 /** One bullet per module, grouped by the catalog's own categories. */

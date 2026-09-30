@@ -627,7 +627,7 @@ export const SECTIONS = [
   h1("15. Billing and account questions"),
   h2("How is Aurixa billed?"),
   p(
-    "Plans are billed monthly, or twelve months up front at the annual discount. Add-on modules are billed as their own monthly subscriptions. Credit top-up packs and onboarding are one-off purchases. All published figures are in Australian dollars and include GST, so the amount quoted is the amount charged.",
+    "Plans are billed monthly, or as a 12-month commitment at the commitment discount - paid twelve months up front, or in monthly instalments under a Subscription Agreement. Add-on modules are billed as their own monthly subscriptions. Credit top-up packs and onboarding are one-off purchases. All published figures are in Australian dollars and include GST, so the amount quoted is the amount charged.",
   ),
   h2("Can we change plan?"),
   p(

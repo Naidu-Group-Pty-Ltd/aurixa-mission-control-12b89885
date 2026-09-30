@@ -78,6 +78,7 @@ import {
   type FleetPassMode,
   type MigrationSkipReason,
 } from "./fleetMigrationEligibility.pure";
+import { blockOvertakenBySequence } from "./blockSequence.pure";
 import { notifyOperators, writeAuditLog } from "./audit.server";
 import { chunkCursorFor } from "./chunkCursorStore.pure";
 import { ClaimLostError } from "./provisioningBudget";
@@ -85,6 +86,7 @@ import {
   PRIME_LEDGER_HOLE_NOTE_CAP,
   blockageDetailFor,
   primeLedgerHoleSentence,
+  primeLedgerHoleTally,
   reconcileBlockageRecord,
 } from "./fleetBlockageRecord.pure";
 
@@ -215,6 +217,29 @@ const CLAIM_RESERVE_MS = 15_000;
 const CLAIM_LOST = "claim lost mid-pass";
 
 /**
+ * How long the scheduled request waits for a pass to answer.
+ *
+ * `20260922150000_fleet_sync_http_patience.sql` set it for both of this lane's
+ * jobs, after every half-hourly sweep for six hours came back
+ * `Timeout of 60000 ms reached`. Named here because the budget below is
+ * derived from it, and `fleetPassIsBudgeted.contract.test.ts` reads the
+ * migration to hold the two in step: a budget computed from a patience the
+ * cron job no longer has is how a pass outlives the request that asked for it.
+ */
+const FLEET_HOOK_PATIENCE_MS = 150_000;
+
+/**
+ * What a pass leaves between its budget and that patience.
+ *
+ * The budget is checked BETWEEN units, so a pass can start one statement, or
+ * one small migration, just inside it — and must still write its verdict,
+ * release its claim and write the audit row before the request stops being
+ * waited on. A seed statement measured a few seconds; sixty leaves room for a
+ * slow one several times over, plus the writes.
+ */
+const FLEET_PASS_HEADROOM_MS = 60_000;
+
+/**
  * How long one pass may spend before it stops handing out work.
  *
  * THIS LANE HAD NO BUDGET AT ALL, and its comment beside `applyPrimeMigrations`
@@ -230,13 +255,23 @@ const CLAIM_LOST = "claim lost mid-pass";
  * same passes returned in about eight seconds, because a 403 arrives quickly —
  * the lane looked healthiest exactly while it could not do the work.
  *
- * Forty-five seconds, the same as the self-healing lane, and for the same
- * reason: pg_net gives up on the hook at sixty, and a pass has to survive long
- * enough to WRITE what it did. A budget that is spent is not a failure here —
- * the chunk cursor makes the next pass carry on from the statement after the
- * last one sent.
+ * It was forty-five seconds, because pg_net gave up on the hook at sixty. That
+ * reason went on 22 Sep, when the jobs were given 150 s, and the budget stayed
+ * where the old patience had put it. Measured 26 Sep 2026: every pass for an
+ * hour and a quarter took 47–53 s, served exactly ONE clone and sent exactly
+ * ONE seed statement. A pass pays its setup and a full read of the seed — the
+ * chunker holds all ~41 MB before it hands over a statement, see
+ * `seedChunking.pure.ts` — before it sends anything, and forty-five seconds
+ * left room for one. That is ~14 statements an hour across the fleet, ~3.5 per
+ * clone with four clones mid-seed, against ~42 a seed — while the prime
+ * released v21 and v22 two days apart. The fleet was falling behind the seeds.
+ *
+ * So the budget is the patience less the headroom, and the same read now pays
+ * for as many statements as the time allows. It is still a budget that is
+ * spent rather than a failure: the chunk cursor makes the next pass carry on
+ * from the statement after the last one sent.
  */
-const FLEET_PASS_BUDGET_MS = 45_000;
+const FLEET_PASS_BUDGET_MS = FLEET_HOOK_PATIENCE_MS - FLEET_PASS_HEADROOM_MS;
 
 export type FleetMigrationResult = {
   /** Clones eligible and claimed this run. */
@@ -269,8 +304,10 @@ export type FleetMigrationResult = {
    */
   excluded: number;
   /**
-   * Clones whose `migration_blocked` flag this run cleared, because their own
-   * ledger now records the version the block names.
+   * Clones whose `migration_blocked` flag this run cleared: their own ledger
+   * now records the version the block names, the block recorded an upstream
+   * refusal rather than anything the clone did, or the lane would now send an
+   * earlier version first (`blockSequence.pure.ts`).
    *
    * Reported rather than silent for the same reason `skipped` is. A block that
    * disappears with nothing saying so is indistinguishable from one nobody
@@ -557,7 +594,7 @@ export function beatWhileClaimHeld(
     after `CLAIM_DRAIN_MS` stays in `outstanding`, so the next call starts a
     fresh two-second race over the same promise. Every exit therefore spent up
     to four seconds rather than the two the constant names — and it is spent at
-    the END of a 45-second pass, out of the margin left for the audit write and
+    the END of a pass, out of the margin left for the audit write and
     the response. Raised by review, against my own claim.
 
     So the first call's promise is the answer to every later one. Later callers
@@ -987,7 +1024,9 @@ export async function runFleetMigrationSync(
   const batchSize = Math.max(1, opts?.batchSize ?? DEFAULT_BATCH);
   const mode: FleetPassMode = opts?.mode ?? "sweep";
   // Taken before the first read, so everything this pass spends is inside it.
-  const deadlineAt = Date.now() + Math.max(5_000, opts?.budgetMs ?? FLEET_PASS_BUDGET_MS);
+  const passStartedAt = Date.now();
+  const budgetMs = Math.max(5_000, opts?.budgetMs ?? FLEET_PASS_BUDGET_MS);
+  const deadlineAt = passStartedAt + budgetMs;
 
   const source = await resolvePrimeSource(supabase);
   if (!source) {
@@ -1043,7 +1082,7 @@ export async function runFleetMigrationSync(
   */
   // `migrations_applied` and `status_detail` are deliberately NOT here. They
   // were, for the blockage reconciliation — and reconciling from a row read
-  // before the claim and before up to 45 seconds of network work is how a
+  // before the claim and before up to a whole pass budget of network work is how a
   // concurrent writer's record gets replaced by a stale one. That pair is
   // re-read per clone at the moment it is written, so selecting it here would
   // be a snapshot nothing may use.
@@ -1089,6 +1128,13 @@ export async function runFleetMigrationSync(
     pass that follows.
   */
   const rehabilitated: string[] = [];
+  /*
+    The scoped corpus, when the sequence test below had to open it before the
+    queue was known. The replay reuses it rather than reading the prime twice
+    in one pass; left null on every pass that test does not run, which is
+    every drain tick and every sweep with no ordering block to test.
+  */
+  let earlyScoped: Awaited<ReturnType<typeof openScopedPrimeCorpus>> | null = null;
   for (const v of verdicts) {
     if (v.verdict.eligible) continue;
     if (v.verdict.reason !== "migration_blocked") continue;
@@ -1112,6 +1158,9 @@ export async function runFleetMigrationSync(
       would be wrong for this one.
     */
     const upstreamRefusal = blockIsUpstreamRefusal(v.row.migration_blocked_reason);
+    // Set when the block is discharged by the lane's own order rather than by
+    // the ledger — the third route, named in the log line below.
+    let overtaken: string | null = null;
 
     if (!upstreamRefusal) {
       const ledger = await readCloneMigrationLedger(ref);
@@ -1124,13 +1173,44 @@ export async function runFleetMigrationSync(
         );
         continue;
       }
-      if (
-        !blockIsDischarged(
-          v.row.migration_blocked_reason,
-          ledger.rows.map((r) => r.version),
-        )
-      ) {
-        continue;
+      const appliedVersions = ledger.rows.map((r) => r.version);
+      if (!blockIsDischarged(v.row.migration_blocked_reason, appliedVersions)) {
+        /*
+          A BLOCK THE LANE'S OWN ORDER CAUSED IS ASKED ONE MORE QUESTION.
+
+          The ledger test cannot discharge a block written because this lane
+          sent a migration before the one it depends on: the named version
+          enters the ledger only by running, and a blocked clone is sent
+          nothing — including the migration that would let it run. The
+          independent sat there from 22 Sep, blocked on the v15 template
+          refresh the lane had sent ahead of its seed. So the block is tested
+          against the order the lane would send NOW, from the same partition
+          and the same ledger the replay decides from. See
+          `blockSequence.pure.ts` for why it cannot loop.
+
+          Sweep passes only. The test needs the scoped corpus, and a drain tick
+          may open that only once it has a clone to serve — that is what keeps
+          an idle drain free (`fleetDrainCadence.test.ts`). A discharge waits
+          at most one sweep for it, and the corpus it opens is the one the
+          replay then uses.
+        */
+        if (mode !== "sweep") continue;
+        earlyScoped ??= await openScopedPrimeCorpus(supabase, source);
+        if (!earlyScoped.ok) {
+          console.error(
+            `[fleet-migration] could not open the prime's corpus to test ${v.row.clone_id}'s block against the lane's order:`,
+            earlyScoped.error,
+          );
+          continue;
+        }
+        const sequence = blockOvertakenBySequence({
+          reason: v.row.migration_blocked_reason,
+          metas: earlyScoped.metas,
+          runnableIds: earlyScoped.runnableIds,
+          cloneApplied: new Set(appliedVersions),
+        });
+        if (!sequence.discharged) continue;
+        overtaken = sequence.why;
       }
     }
 
@@ -1154,7 +1234,9 @@ export async function runFleetMigrationSync(
       `[fleet-migration] ${v.row.clone_id} rejoins the lane — ` +
         (upstreamRefusal
           ? "its block recorded an upstream quota refusal, not a schema rejection"
-          : "its ledger now records the version the block named"),
+          : overtaken
+            ? `the lane no longer sends the version its block named first: ${overtaken}`
+            : "its ledger now records the version the block named"),
     );
 
     v.row.migration_blocked_at = null;
@@ -1166,8 +1248,9 @@ export async function runFleetMigrationSync(
   const skipped = verdicts.filter((v) => !v.verdict.eligible);
   const excludedCount = skipped.length;
 
-  // Furthest behind first, ties broken by least progress on the seed in
-  // flight. The order lives in the pure module beside the eligibility rules
+  // Furthest behind first — by the file a clone is INSIDE where its cursor
+  // names one, not the version it last recorded — ties broken by least progress
+  // on that file. The order lives in the pure module beside the eligibility rules
   // because who is served first is the same kind of decision as who is served
   // at all — and because a comparator that returned 0 on a tie handed this
   // fleet's whole budget to one clone for as long as it was measured. See
@@ -1233,7 +1316,9 @@ export async function runFleetMigrationSync(
   // missing that version.
   // One implementation of the corpus-plus-scoping sequence, shared with the
   // per-clone sync button. See openScopedPrimeCorpus for what having two cost.
-  const scoped = await openScopedPrimeCorpus(supabase, source);
+  // Opened once per pass: the sequence test above may already have read it,
+  // and a read that failed there is asked again rather than inherited.
+  const scoped = earlyScoped?.ok ? earlyScoped : await openScopedPrimeCorpus(supabase, source);
   if (!scoped.ok) return { ...out, error: scoped.error };
   const { corpus, metas: scopedMetas, runnable, sourceSha } = scoped;
   out.withheld = scoped.withheld;
@@ -1712,8 +1797,8 @@ export async function runFleetMigrationSync(
         consecutive passes cannot name one clone's level differently.
 
         The RULE is shared; the READING it is applied to is each path's own
-        freshest. `backend` was read before the claim and before up to 45 s of
-        network work, and a manual sync can finish inside that window:
+        freshest. `backend` was read before the claim and before up to a pass
+        budget of network work, and a manual sync can finish inside that window:
         `applyPrimeMigrations` then finds the clone already level and returns a
         no-op, so `latestApplied` is null and this ladder falls through to a
         `migration_version` the sync has since moved. Composing from it writes
@@ -1773,7 +1858,7 @@ export async function runFleetMigrationSync(
         hole.
 
         READ FRESH. `backend` comes from the query at the top of the run,
-        before the claim and before up to 45 seconds of GitHub and clone
+        before the claim and before up to a pass budget of GitHub and clone
         work. Reconciling the ledger from THAT is how a concurrent manual
         sync's results get replaced by a stale array: the sync cycles
         `status_detail` from `Migrations up to date (X)` through
@@ -1855,8 +1940,9 @@ export async function runFleetMigrationSync(
             ? null
             : blockageDetailFor({
                 standing: inspected,
-                holes: blockage.holes,
-                total: primeLedgerHoles.length,
+                // Every hole, not the capped notes `blockage.holes` holds: the
+                // sentence names the count and both ends.
+                holes: primeLedgerHoles,
                 // A pass that changed nothing can still have stopped with more to
                 // send, so this is handed over rather than assumed: without it the
                 // retraction writes a bare "Synced to X" over a pause, which is
@@ -1866,7 +1952,7 @@ export async function runFleetMigrationSync(
                 // the version re-read a line above. Past `movedUnderUs` the two
                 // readings are equal, so this is not what stops a stale
                 // sentence — it is what keeps the composition reading the row
-                // it is guarded on, rather than one taken 45 s earlier whose
+                // it is guarded on, rather than one taken a pass budget earlier whose
                 // agreement has to be argued rather than seen.
                 syncedTo: syncedToFor(recorded),
               });
@@ -2033,8 +2119,19 @@ export async function runFleetMigrationSync(
                               // as healthy — the exact shape of report this module
                               // exists to stop. The first hole is named because it is
                               // the one to reconcile first.
+                              //
+                              // AND THE COUNT TRAVELS HERE TOO. This is the sentence a
+                              // clone reads while anything is held, and it used to be
+                              // the one sentence with no count: the CRM independent
+                              // read "2 migration(s) held back behind 20260703000000"
+                              // over 189 holes by version, 50 of them noted, the two
+                              // newest in no note at all. The tally is taken from every
+                              // hole, and it is THIS clone's: the partition skips what
+                              // the clone already holds, so it is never the prime's
+                              // whole gap and is not worded as one.
                               `Synced to ${syncedTo} — ${blocked.length} migration(s) held back behind ` +
-                              `${blocked[0].blockedBy?.[0] ?? "a withheld version"}, which the prime's ledger does not record`
+                              `${blocked[0].blockedBy?.[0] ?? "a withheld version"}, which the prime's ledger does not record` +
+                              primeLedgerHoleTally(primeLedgerHoles)
                             : pausedMidReplay
                               ? // Said before the level reading, because it is the
                                 // one case where "Synced to X" would be a claim
@@ -2093,10 +2190,7 @@ export async function runFleetMigrationSync(
                                   // produced no entry, no blockage row and no
                                   // sentence, and four such versions sat
                                   // unrecorded on the prime for days.
-                                  `Synced to ${syncedTo} — ${primeLedgerHoleSentence(
-                                    primeLedgerHoles.slice(0, PRIME_LEDGER_HOLE_NOTE_CAP),
-                                    primeLedgerHoles.length,
-                                  )}`
+                                  `Synced to ${syncedTo} — ${primeLedgerHoleSentence(primeLedgerHoles)}`
                                 : `Synced to ${syncedTo}`,
                 error_message: failures.length > 0 ? failures[0].error : null,
               }),
@@ -2256,6 +2350,15 @@ export async function runFleetMigrationSync(
       source_repo: `${source.owner}/${source.repo}`,
       source_sha: sourceSha,
       trigger: opts?.actorUserId ? "operator" : "schedule",
+      mode,
+      // How long the pass took against what it was allowed. The budget was
+      // raised from 45 s on 26 Sep on a measurement of passes that each sent
+      // one statement; this is the reading that says whether the change
+      // bought what it was for, and whether a pass ever nears the hook's
+      // patience.
+      elapsed_ms: Date.now() - passStartedAt,
+      budget_ms: budgetMs,
+      stopped_at_budget: out.stoppedAtBudget,
       processed: out.processed,
       advanced: out.advanced,
       up_to_date: out.upToDate,

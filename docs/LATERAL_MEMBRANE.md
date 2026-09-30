@@ -367,6 +367,42 @@ for real: no ledger row exists yet, so it runs, finds nothing to carry, opens
 no pull request, and writes one ledger row saying so. Parent-level work written
 from then on crosses as soon as a head moves, under the rules above.
 
+### 26 September: the independent was out of sync, and this lane was not why
+
+The report was that the independent had not been in sync since this membrane
+went in. Two facts settle whether this lane is the cause.
+
+- **The lane has never run.** The production deployment was published before
+  this lane was merged. Its diagram chunk draws the vertical membranes and no
+  arch, so no lateral pass has ever been attempted.
+- **It would have carried nothing if it had.** Re-measured over both parents'
+  heads, 32 files of parent-level work are candidates:
+  - four were once held by the prime, so they are the vertical lane's;
+  - 26 are held by rules the fleet already had;
+  - two pass the membranes' channels and are held by the spec gate.
+    `buildDeclaresItsBackend.spec.ts` (independent → dependent) asserts about
+    `src/integrations/supabase/env.ts` and `supabaseTarget.pure.ts`, which are
+    each parent's own backend identity. `routeExclusionGates.test.ts`
+    (dependent → independent) asserts about `src/App.tsx`, which the two
+    parents hold at different versions.
+
+Code both parents share reaches the independent through the vertical cascade,
+and that is what stopped. The independent's own history shows when:
+
+- the last cascade to merge by itself was #22, at 05:25 UTC on 23 September,
+  eighteen hours before this lane was merged;
+- #23 went in by hand, through a repair pull request (#25) carrying the three
+  files it could not deliver and this clone's own count in the Edge Function
+  type baseline;
+- #26 has not merged.
+
+The timing is a coincidence: the deployment that built both predates this
+lane. They were the two largest deliveries the independent had been sent (276
+files, then 254), and they met two defects in the vertical engine. The Edge
+Function type baseline one is fixed on `main` but not yet deployed. The other
+was a missing half of the spec channel, and it is in
+[*The other half*](./CASCADE_MEMBRANES.md#the-other-half-a-spec-the-clone-keeps-left-behind-by-its-subject).
+
 ## What is asserted
 
 | file                               | what it pins                                                                                                                                                                                                                                                            |

@@ -37,11 +37,10 @@ jobs:
         # lockfile, and every other workflow in this repository already prefers
         # it.
         #
-        # Note the repo also carries `bun.lock` and `bun.lockb`. No workflow
-        # uses them and `bun.lockb` predates the support-ticketing dependencies
-        # by three weeks, so anyone running `bun install` gets a tree that is
-        # missing packages the app now imports. Left in place because the
-        # generating platform's own toolchain was not verified from here.
+        # The repo also carries `bun.lockb`, and it is not a leftover: it is
+        # the lockfile Lovable publishes from. This step cannot see it, so a
+        # dependency added with npm alone passes here and fails only at the
+        # publish - see the `lovable-install` job below.
         run: npm ci --no-audit --no-fund
 
       # Runs before the typecheck it protects: a table missing from the
@@ -173,3 +172,29 @@ jobs:
       # tree — routeTreeGate.spec.ts pins this ordering for that reason.
       - name: Route tree is current
         run: npm run check:route-tree
+
+  # Lovable publishes Mission Control from `bun.lockb`, not from
+  # package-lock.json, and it installs with a frozen lockfile. Measured
+  # 26 Sep 2026: #280 added `@anthropic-ai/sdk` to package.json and
+  # package-lock.json only, and from that merge on no publish reached the
+  # live site - Lovable showed a generic build error - while every check in
+  # `verify` stayed green. `bun install --frozen-lockfile` passes at #279 and
+  # fails at #280, which is how the break was pinned.
+  #
+  # When you add or change a dependency, run `bun install` after npm and
+  # commit both lockfiles. `--dry-run` answers whether the lockfile would
+  # change without installing anything, and `--ignore-scripts` because no
+  # package's install script is needed to answer it. Bun is fetched from npm
+  # rather than through a setup action, so this adds no third-party action.
+  lovable-install:
+    name: Lovable install (bun.lockb)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: bun.lockb agrees with package.json
+        run: npx --yes bun@1.3.11 install --frozen-lockfile --ignore-scripts --dry-run

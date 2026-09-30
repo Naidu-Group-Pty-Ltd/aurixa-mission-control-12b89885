@@ -410,6 +410,82 @@ export async function getFileContent(
 }
 
 /**
+ * Read many blobs' text in a few GraphQL queries, keeping only exact ones.
+ *
+ * The batch counterpart to `getFileContent`, for a caller that already holds
+ * a tree listing: every blob is asked by the id the listing gave, eighty to a
+ * query, and a text is returned only where its git blob id equals that id —
+ * which proves it is the file byte for byte. Everything else is simply absent
+ * from the result, and the caller reads it per file as it always did. See
+ * `primeTextBatch.pure.ts` for why the cascade needs this and for each rule.
+ *
+ * Never throws for a batch it could not read: a query that fails leaves its
+ * entries unanswered, because "GraphQL could not tell us" and "read it the old
+ * way" are the same remedy. GraphQL answers that arrive beside an error are
+ * still judged, entry by entry, on the same id check.
+ */
+export async function readBlobTextsBatched(
+  octokit: Octokit,
+  ref: Pick<RepoRef, "owner" | "repo">,
+  wants: readonly import("@/server/cascade/primeTextBatch.pure").TextWant[],
+  opts?: {
+    /**
+     * The pass's budget, asked before each batch is STARTED with the slowest
+     * batch so far as the reserve. A batch not started is only unanswered: its
+     * entries are read per file, where the prepare loop paces itself. Text is
+     * never ledgered, so reading past the point the loop can use is waste.
+     */
+    isPastDeadline?: (reserveMs: number) => boolean;
+  },
+): Promise<Map<string, string>> {
+  const { planTextBatches, textBatchQuery, acceptTextAnswers, PRIME_TEXT_BATCH_CONCURRENCY } =
+    await import("@/server/cascade/primeTextBatch.pure");
+  const { mapWithConcurrencyUntil } = await import("@/lib/concurrency");
+  type Answers = Parameters<typeof acceptTextAnswers>[1];
+  const texts = new Map<string, string>();
+  let slowestBatchMs = 0;
+  await mapWithConcurrencyUntil(
+    planTextBatches(wants),
+    PRIME_TEXT_BATCH_CONCURRENCY,
+    async (batch) => {
+      const startedAt = Date.now();
+      let repository: Answers = undefined;
+      try {
+        const resp = (await octokit.graphql(textBatchQuery(batch), {
+          owner: ref.owner,
+          repo: ref.repo,
+        })) as { repository?: Answers } | null | undefined;
+        repository = resp?.repository ?? undefined;
+      } catch (error) {
+        // A GraphQL error arrives with whatever part of the answer GitHub did
+        // produce. Each text in it still has to pass the id check, so using it
+        // cannot deliver a wrong byte, and dropping it would re-read files
+        // that were answered. A fault REST shares (a spent quota, a revoked
+        // token) is raised BY NAME by the first per-file read that follows.
+        repository = (error as { data?: { repository?: Answers } } | null)?.data?.repository;
+      }
+      for (const [path, text] of acceptTextAnswers(batch, repository)) texts.set(path, text);
+      slowestBatchMs = Math.max(slowestBatchMs, Date.now() - startedAt);
+    },
+    () => opts?.isPastDeadline?.(slowestBatchMs) === true,
+  );
+  return texts;
+}
+
+/**
+ * A `RepoFile` for a text already proved to be the blob with this id.
+ *
+ * Only for texts `readBlobTextsBatched` returned, whose blob id was checked
+ * against the listing, so the UTF-8 encoding of `text` IS the file's bytes.
+ * That makes `binary` false by the same round-trip test `getFileContent`
+ * applies.
+ */
+export function repoFileFromExactText(sha: string, text: string): RepoFile {
+  const raw = Buffer.from(text, "utf8");
+  return { sha, content: text, base64: raw.toString("base64"), binary: false, bytes: raw.length };
+}
+
+/**
  * Copy one blob from prime into a clone WITHOUT reading it.
  *
  * The counterpart to `getFileContent`'s ceiling. That function refuses a file

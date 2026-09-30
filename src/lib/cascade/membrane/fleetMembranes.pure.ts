@@ -10,13 +10,21 @@
  * resolved to "admit everything" on a deployment nobody had seeded is the
  * failure this whole module exists to prevent.
  *
- * ## The CRM distinction is measured, not declared
+ * ## The CRM distinction was measured before it was recorded
  *
- * Mission Control's `clones` row records no CRM provider. `tags` is `[]` on
- * both parents and `entitled_module_slugs` is `[]` on the CRM-independent one,
- * so nothing in the database can answer the question this membrane turns on.
- * It is therefore recorded here WITH ITS EVIDENCE, measured 21 Sep 2026 by
- * reading the two repositories:
+ * When these edges were written Mission Control's `clones` row recorded no CRM
+ * provider. `tags` was `[]` on both parents and `entitled_module_slugs` `[]` on
+ * the CRM-independent one, so nothing in the database could answer the question
+ * this membrane turns on, and it was recorded here WITH ITS EVIDENCE, measured
+ * 21 Sep 2026 by reading the two repositories (below).
+ *
+ * `clones.crm_mode` now records it (migration `20260928100000_clone_crm_mode`,
+ * backfilled from exactly this evidence), because provisioning creates new
+ * clones under either line and a conversion moves a clone between them — and
+ * an edge list keyed on repository names cannot follow either. `membraneInto`
+ * therefore takes the recorded mode as the authority for the routed-name
+ * channel and keeps an edge below only where it agrees with it. The measured
+ * edges stay as the evidence and as the label an operator reads:
  *
  *   npc-client-dashboard         0 `crm-*` functions · 37 `ghl-*` · no crmProvider module
  *   npc-crm-independent-6505dc   3 `crm-*` functions · 37 `ghl-*` · crmProvider routing table
@@ -75,6 +83,7 @@
  */
 
 import type { Membrane, StandingOrgan } from "./membrane.pure";
+import { crmModeLabel, isCrmMode, type CrmMode } from "@/lib/crmMode.pure";
 
 /**
  * The prime's repository, which is the upstream side of the fleet's root edges.
@@ -116,6 +125,15 @@ const STANDING: readonly StandingOrgan[] = [
     name: "backendIdentityHold",
     where: "syncExclusions.pure.ts",
     does: "Refuses a shipped file naming a Supabase project that is not this deployment's.",
+  },
+  {
+    kind: "channel",
+    name: "PRIME_ONLY_FEATURES",
+    where: "primeOnlyFeatures.pure.ts",
+    does:
+      "Holds every write of a feature the prime keeps for itself — the GoHighLevel account " +
+      "migration — as `protected`, whatever this clone's own rules say. The pumps below take " +
+      "out whatever of it a clone that does not hold it would otherwise be told it has.",
   },
   {
     kind: "channel",
@@ -173,6 +191,12 @@ const STANDING: readonly StandingOrgan[] = [
   },
   {
     kind: "pump",
+    name: "reconcileApiSurface",
+    where: "apiSurfaceReconcile.pure.ts",
+    does: "Delivers the mobile API surface this clone's reconciled registry and config generate, composed the way `npm run mobile:api` composes it and proven first against the prime's own file.",
+  },
+  {
+    kind: "pump",
     name: "reconcileEdgeTypecheckBaseline",
     where: "edgeTypecheckBaselineReconcile.pure.ts",
     does: "Delivers the prime's Edge Function type baseline with this clone's own count kept for every counted file it keeps its own version of, because prime's number describes prime's file.",
@@ -206,7 +230,9 @@ const SPEC_CHANNEL = {
   note:
     "A spec crosses only with the subject it asserts about, so this delivery carries the subject " +
     "in behind it — judged by the same rules as any other file, and never releasing one another " +
-    "rule holds. Where a subject cannot travel, both stay, and the hold names which rule stopped it.",
+    "rule holds. The other way round too: a spec this clone keeps at an older version of prime's " +
+    "follows the file it tests across. Where either cannot travel, both stay, and the hold names " +
+    "which rule stopped it.",
 };
 
 /** A routed CRM name may be spelled anywhere in the browser layer. */
@@ -301,39 +327,114 @@ export function resolveMembrane(from: string, to: string): Membrane {
   };
 }
 
-/** Every membrane that touches a deployment, in and out. */
 /**
  * The membrane a DELIVERY to this repository crosses.
  *
  * Keyed on the destination, which is the only identifier every caller
  * reliably holds. `processClone` used to ask `resolveMembrane(primeRef.repo,
- * …)`, and that is right on the live cascade — `primeRef` is already the
- * PARENT'S repository for a clone routed by lineage — and wrong on the two
- * other callers, which build `primeRef` straight from `prime.github_*` and
- * resolve no lineage at all:
+ * …)`, which is right whenever `primeRef` is the ref the clone actually reads
+ * — the PARENT'S repository for a clone routed by lineage — and wrong the
+ * moment a caller hands it anything else. Two callers once did: the dry run
+ * and `regenerateCloneProposal` built `primeRef` straight from
+ * `prime.github_*`, so with lineage on (migration
+ * `20260920140000_switch_cascade_lineage_on.sql`) they resolved a
+ * PRIME→`npc-test-76b3b3` edge this fleet does not have, fell through to the
+ * default membrane, and `orphanSpecHold` printed that edge into a held row the
+ * repair path persists.
  *
- *   cascade-dryrun.server.ts:132   { owner: prime.github_owner, repo: prime.github_repo, … }
- *   cascade-engine.server.ts:1213  regenerateCloneProposal, same shape
- *
- * With lineage on (migration `20260920140000_switch_cascade_lineage_on.sql`),
- * `npc-test-76b3b3` and `preflight-property-group` are parented under
- * `npc-client-dashboard`, so those two callers resolved the PRIME→child edge
- * — which this fleet does not have — and fell through to the default
- * membrane. Behaviourally that is the same today, because the parent→child
- * membranes close nothing the default leaves open. What it does NOW is print
- * an edge that does not exist: `orphanSpecHold` interpolates
- * `${from}→${to}` into the held row's `pattern`, and the repair path
- * persists that row.
- *
- * Asking the DESTINATION removes the question from the caller. A repository
+ * Both callers now read the source the live pass would, through
+ * `resolveCloneReadSource` — and the membrane still does not trust them to.
+ * * Asking the DESTINATION removes the question from the caller. A repository
  * the registry does not describe falls back to the caller's own reading,
  * which is the default membrane — never a refusal, for the reason the
  * fallback exists at all.
  */
-export function membraneInto(repo: string, fallbackFrom: string): Membrane {
-  return membranesTouching(repo).inbound ?? resolveMembrane(fallbackFrom, repo);
+export function membraneInto(
+  repo: string,
+  fallbackFrom: string,
+  crmMode?: string | null,
+): Membrane {
+  const registered = membranesTouching(repo).inbound;
+  if (!isCrmMode(crmMode)) return registered ?? resolveMembrane(fallbackFrom, repo);
+
+  // A clone that RECORDS its CRM (`clones.crm_mode`) crosses the channel that
+  // CRM needs, whether or not an edge above names it. Two cases this closes:
+  //
+  //  - A clone provisioned under a CRM line after the registry was written.
+  //    Its edge is `<line's parent> → <new repo>`, which no entry above names,
+  //    and the default membrane has no opinion on routed names. With lineage
+  //    on that is harmless — a child reads its parent's tree, which already
+  //    passed the boundary above — but with `cascade_follows_lineage` off it
+  //    reads the prime's, and a CRM-independent clone would take GoHighLevel
+  //    names back into its browser layer through a membrane that never looked.
+  //  - A registered clone CONVERTED to the other CRM. The registry is keyed on
+  //    the destination and does not move with it, so the entry recorded for its
+  //    old line would keep describing a boundary it no longer has.
+  //
+  // A registered edge that already carries the right channel is used exactly
+  // as written: its label and rationale were measured, and a synthesized one
+  // says less.
+  if (registered && routedNameState(registered) === routedNameChannelFor(crmMode).state) {
+    return registered;
+  }
+  return crmLineMembrane(fallbackFrom, repo, crmMode);
 }
 
+/**
+ * The membrane on ONE drawn edge, for a reader that holds both ends.
+ *
+ * The diagram draws a branch between two nodes it placed, and its selection is
+ * keyed on exactly those two repositories — so unlike `membraneInto` this never
+ * substitutes a registered edge with a different upstream (a clone whose parent
+ * is filtered off the screen hangs from the trunk, and its band must still be
+ * the band on THAT branch). What it shares with `membraneInto` is the rule that
+ * a recorded CRM decides the routed-name channel, so the band an operator reads
+ * is the boundary the engine enforces.
+ */
+export function membraneOnEdge(from: string, to: string, crmMode?: string | null): Membrane {
+  const measured = resolveMembrane(from, to);
+  if (!isCrmMode(crmMode)) return measured;
+  if (routedNameState(measured) === routedNameChannelFor(crmMode).state) return measured;
+  return crmLineMembrane(from, to, crmMode);
+}
+
+/** The routed-name channel a clone recording `mode` crosses. */
+export function routedNameChannelFor(mode: CrmMode) {
+  return mode === "independent" ? ROUTED_NAME_CLOSED : ROUTED_NAME_OPEN;
+}
+
+/** Whether a membrane admits a routed CRM name, refuses one, or says nothing. */
+function routedNameState(m: Membrane): Membrane["channels"][number]["state"] | null {
+  return m.channels.find((c) => c.species === "routed_crm_name")?.state ?? null;
+}
+
+/**
+ * The boundary into a clone known by its recorded CRM rather than by an edge
+ * measured here.
+ *
+ * `from` is whatever the caller reads from — the parent's repository for a
+ * child the live cascade routed through its parent — so the edge this prints
+ * is the one the bytes actually cross.
+ */
+export function crmLineMembrane(from: string, to: string, mode: CrmMode): Membrane {
+  return {
+    from,
+    to,
+    label: `${from} → ${to}`,
+    rationale:
+      mode === "independent"
+        ? `Recorded as ${crmModeLabel(mode)}. It routes its CRM through \`crmFunction()\` like the ` +
+          "line's parent does, so a routed CRM function name may not be spelled anywhere else in " +
+          "its browser layer."
+        : `Recorded as ${crmModeLabel(mode)}. It holds no routing table, so a GoHighLevel function ` +
+          "name in the browser layer is an ordinary call and is what this deployment is supposed " +
+          "to say.",
+    channels: [routedNameChannelFor(mode), SPEC_CHANNEL],
+    standing: STANDING,
+  };
+}
+
+/** Every membrane that touches a deployment, in and out. */
 export function membranesTouching(repo: string): {
   inbound: Membrane | null;
   outbound: readonly Membrane[];

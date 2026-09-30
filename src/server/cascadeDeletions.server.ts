@@ -7,18 +7,27 @@
  * where the cascade goes and asks — one question per candidate, and a second
  * only when the answer was "prime removed it".
  *
- * ## One call, then a walk that usually stops immediately
+ * ## One listing per path, then every walk read in one request
  *
  * `listCommits({ path })` returns every commit that touched the path, newest
  * first, in one request. Because the path is absent from prime's head the first
  * of them is the removal, and the rest are the revisions prime held. Reading
  * the path at each gives those versions.
  *
- * The walk stops at the first version that matches the clone's copy, so a clone
- * that is current on the file pays one extra call and only a genuinely stale
- * one pays more. Whether the walk reached the END of the history travels with
- * the answer: without that, a blob missing from the list cannot be told apart
- * from one further back than we looked.
+ * The walk stops at the first version that matches the clone's copy. Whether
+ * it reached the END of the history travels with the answer: without that, a
+ * blob missing from the list cannot be told apart from one further back than
+ * we looked.
+ *
+ * The walk used to read one revision per contents call, in series, so a clone
+ * whose copy matched nothing recent paid ten round trips for one path. Every
+ * walk a probe asks is now read together, by GraphQL, once all its listings
+ * are in (`cascade/primeVersionBatch.pure.ts`). The listing still decides the
+ * walk, and the walk still reads newest first and stops at the first match, so
+ * a probe reports the same versions. A revision that request does not answer
+ * exactly (a link, a submodule, a directory, anything it failed to read) is
+ * read per contents call, as it always was, and a rate limit on that read is
+ * thrown, as it always was.
  *
  * The removing commit's own `files[]` carries a pre-image blob SHA and would
  * save the first of those calls. It is deliberately not used: on a merge commit
@@ -63,6 +72,14 @@ import {
   type SettledDeletionEvidence,
 } from "./cascade/deletionPropagation.pure";
 import { MAX_HOLD_RELEASE_PROBES, type HeldPathEvidence } from "./cascade/heldEvidence.pure";
+import {
+  planVersionBatches,
+  readVersionAnswers,
+  VERSION_BATCH_CONCURRENCY,
+  versionBatchQuery,
+  type VersionAnswer,
+  type VersionAsk,
+} from "./cascade/primeVersionBatch.pure";
 import { classifyGitHubFailure } from "./cascade/rateLimitDeferral.pure";
 import { mapWithConcurrency } from "@/lib/concurrency";
 
@@ -80,10 +97,10 @@ type Octo = ReturnType<typeof getAppOctokit>;
  * What prime's history says about one path.
  *
  * Walks back through the versions prime held, newest first, and stops the
- * moment one matches the clone's copy — so a file the clone is current on
- * costs one extra call and a stale one costs a few.
+ * moment one matches the clone's copy.
  *
- * Exported for the probe's own test; the engine calls `probeDeletions`.
+ * Exported for the probe's own test; the engine calls `probeDeletions`, which
+ * asks a chunk of paths through the same walk at once.
  */
 export async function probePrimeDeletion(
   octokit: Octo,
@@ -91,7 +108,36 @@ export async function probePrimeDeletion(
   path: string,
   cloneSha: string,
 ): Promise<DeletionEvidence> {
-  let commits: Array<{ sha: string }>;
+  const [only] = await deletionEvidenceFor(octokit, primeRef, [{ path, cloneSha }]);
+  return only.evidence;
+}
+
+/** The deletion probe's reading of each path's history, in the order given. */
+async function deletionEvidenceFor(
+  octokit: Octo,
+  primeRef: RepoRef,
+  candidates: ReadonlyArray<{ path: string; cloneSha: string }>,
+): Promise<DeletionCandidate[]> {
+  const evidence = await walkHistories(octokit, primeRef, candidates, (commits, versions) => ({
+    kind: "removed" as const,
+    deletedIn: commits[0].sha,
+    versions,
+    versionsExhaustive: commits.length <= MAX_VERSION_WALK,
+  }));
+  return candidates.map((c, i) => ({ path: c.path, cloneSha: c.cloneSha, evidence: evidence[i] }));
+}
+
+/** What a history says before any revision is read. */
+type Unwalked = { kind: "never_primes" } | { kind: "unsettled"; why: string };
+
+type PathHistory = Unwalked | { kind: "listed"; commits: Array<{ sha: string }> };
+
+/** The commits that touched `path` on prime's branch, newest first. */
+async function listPathCommits(
+  octokit: Octo,
+  primeRef: RepoRef,
+  path: string,
+): Promise<PathHistory> {
   try {
     const { data } = await octokit.repos.listCommits({
       owner: primeRef.owner,
@@ -102,31 +148,128 @@ export async function probePrimeDeletion(
       per_page: MAX_VERSION_WALK + 1,
     });
     if (!Array.isArray(data) || data.length === 0) return { kind: "never_primes" };
-    commits = data as Array<{ sha: string }>;
+    return { kind: "listed", commits: data as Array<{ sha: string }> };
   } catch (e) {
     // A rate limit is the window's answer, not the path's — see the header.
     if (classifyGitHubFailure(e).kind === "rate_limited") throw e;
     return { kind: "unsettled", why: reasonOf(e) };
   }
+}
 
-  const deletedIn = commits[0].sha;
-  // The walk is exhaustive when the page did not fill: GitHub returned every
-  // commit that touched this path, so a blob absent from the list is a blob
-  // prime never had here.
-  const versionsExhaustive = commits.length <= MAX_VERSION_WALK;
-  const walk = commits.slice(0, MAX_VERSION_WALK);
+/**
+ * Walk several paths' histories. Every listing comes first, four at a time,
+ * then ONE batched read of every walk, then each walk over what that read
+ * answered. `settle` turns a listed history and the versions its walk found
+ * into the evidence the caller wants. The results are in the order of
+ * `candidates`.
+ */
+async function walkHistories<E>(
+  octokit: Octo,
+  primeRef: RepoRef,
+  candidates: ReadonlyArray<{ path: string; cloneSha: string }>,
+  settle: (commits: ReadonlyArray<{ sha: string }>, versions: string[]) => E,
+): Promise<Array<E | Unwalked>> {
+  // Four at a time. The write path already runs eight concurrent content
+  // reads against the same secondary rate limit, and this runs before it in
+  // the same request — a cascade refused for hammering GitHub delivers
+  // nothing at all.
+  const histories = await mapWithConcurrency([...candidates], 4, (c) =>
+    listPathCommits(octokit, primeRef, c.path),
+  );
+  // One ask per path. A path listed twice keeps the first listing's answers,
+  // and a later listing that differs from it is read per revision instead.
+  const asked = new Map<string, readonly string[]>();
+  const asks: VersionAsk[] = [];
+  candidates.forEach((c, i) => {
+    const history = histories[i];
+    if (history.kind !== "listed" || asked.has(c.path)) return;
+    const commits = history.commits.slice(0, MAX_VERSION_WALK).map((commit) => commit.sha);
+    asked.set(c.path, commits);
+    asks.push({ path: c.path, commits });
+  });
+  const answered = await readVersionsBatched(octokit, primeRef, asks);
+  return mapWithConcurrency([...candidates.keys()], 4, async (i) => {
+    const c = candidates[i];
+    const history = histories[i];
+    if (history.kind !== "listed") return history;
+    const walk = history.commits.slice(0, MAX_VERSION_WALK);
+    const askedWith = asked.get(c.path);
+    const answers =
+      askedWith !== undefined &&
+      askedWith.length === walk.length &&
+      askedWith.every((sha, j) => sha === walk[j].sha)
+        ? answered.get(c.path)
+        : undefined;
+    const versions = await walkVersions(octokit, primeRef, c.path, walk, answers, c.cloneSha);
+    return settle(history.commits, versions);
+  });
+}
 
+/**
+ * Every walk in `asks`, as far as GraphQL answers it exactly — see
+ * `primeVersionBatch.pure.ts`. Never throws: a request that fails, a rate
+ * limit included, leaves its revisions unanswered, and `walkVersions` reads
+ * them per contents call, where a rate limit is thrown as it always was.
+ */
+async function readVersionsBatched(
+  octokit: Octo,
+  primeRef: RepoRef,
+  asks: readonly VersionAsk[],
+): Promise<Map<string, VersionAnswer[]>> {
+  const out = new Map<string, VersionAnswer[]>();
+  await mapWithConcurrency(planVersionBatches(asks), VERSION_BATCH_CONCURRENCY, async (batch) => {
+    const { query, paths } = versionBatchQuery(batch);
+    let repository: unknown;
+    let clean = true;
+    try {
+      const resp = (await octokit.graphql(query, {
+        owner: primeRef.owner,
+        repo: primeRef.repo,
+        ...paths,
+      })) as { repository?: unknown } | null | undefined;
+      repository = resp?.repository;
+    } catch (e) {
+      // What an erroring response still carried is used, but a null in it is
+      // not "prime held nothing here" (rule 2 of the pure module).
+      repository = (e as { data?: { repository?: unknown } } | null)?.data?.repository;
+      clean = false;
+      console.warn(
+        `[cascade] ${batch.length} history walk(s) fell back to per-revision reads: ` +
+          `${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+    for (const [path, answers] of readVersionAnswers(batch, repository, clean)) {
+      out.set(path, answers);
+    }
+  });
+  return out;
+}
+
+/**
+ * Read `walk` newest first and stop at the first version the clone holds.
+ * `answers` is what the batched read gave, by position. A revision it did not
+ * answer is read per contents call, in turn, exactly as the walk always read
+ * it.
+ */
+async function walkVersions(
+  octokit: Octo,
+  primeRef: RepoRef,
+  path: string,
+  walk: ReadonlyArray<{ sha: string }>,
+  answers: readonly VersionAnswer[] | undefined,
+  cloneSha: string,
+): Promise<string[]> {
   const versions: string[] = [];
-  for (const commit of walk) {
-    const sha = await blobAt(octokit, primeRef, path, commit.sha);
+  for (let i = 0; i < walk.length; i += 1) {
+    const known = answers?.[i];
+    const sha = known !== undefined ? known : await blobAt(octokit, primeRef, path, walk[i].sha);
     if (!sha) continue; // the removing commit itself, or an unreadable revision
     if (!versions.includes(sha)) versions.push(sha);
     // Early exit. Everything older is irrelevant once we know the clone holds
     // a version prime had.
-    if (sha === cloneSha) return { kind: "removed", deletedIn, versions, versionsExhaustive };
+    if (sha === cloneSha) break;
   }
-
-  return { kind: "removed", deletedIn, versions, versionsExhaustive };
+  return versions;
 }
 
 /** The blob prime held at `path` in `ref`, or null if it held none. */
@@ -213,19 +356,8 @@ export async function probeDeletions(args: {
     }
     const chunk = probing.slice(i, i + PROBE_CHUNK);
     const startedAt = Date.now();
-    // Four at a time. The write path already runs eight concurrent content
-    // reads against the same secondary rate limit, and this runs before it in
-    // the same request — a cascade refused for hammering GitHub delivers
-    // nothing at all.
-    const probed = await mapWithConcurrency<{ path: string; cloneSha: string }, DeletionCandidate>(
-      chunk,
-      4,
-      async (c) => ({
-        path: c.path,
-        cloneSha: c.cloneSha,
-        evidence: await probePrimeDeletion(args.octokit, args.primeRef, c.path, c.cloneSha),
-      }),
-    );
+    // Four listings at a time, then the chunk's walks in one request.
+    const probed = await deletionEvidenceFor(args.octokit, args.primeRef, chunk);
     out.push(...probed);
     await args.onChunk?.(probed, Date.now() - startedAt);
   }
@@ -250,7 +382,8 @@ function reasonOf(e: unknown): string {
 // held at this path?" — for a `manual_reconcile` path that differs upstream.
 // The mechanics are identical to `probePrimeDeletion`: one `listCommits` for
 // the path, then the blob at each revision, newest first, stopping at the
-// first match. Only the reading differs: on a live path the first commit is
+// first match, read with the other walks in one request (`walkHistories`).
+// Only the reading differs: on a live path the first commit is
 // the newest edit rather than the removal, so the answer carries no
 // `deletedIn` and the versions include prime's current content.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -262,41 +395,27 @@ export async function probePrimeVersions(
   path: string,
   cloneSha: string,
 ): Promise<HeldPathEvidence> {
-  let commits: Array<{ sha: string }>;
-  try {
-    const { data } = await octokit.repos.listCommits({
-      owner: primeRef.owner,
-      repo: primeRef.repo,
-      sha: primeRef.branch,
-      path,
-      per_page: MAX_VERSION_WALK + 1,
-    });
-    if (!Array.isArray(data) || data.length === 0) return { kind: "never_primes" };
-    commits = data as Array<{ sha: string }>;
-  } catch (e) {
-    // Same rule as the deletion probe: a window is deferred, never settled.
-    if (classifyGitHubFailure(e).kind === "rate_limited") throw e;
-    return { kind: "unsettled", why: reasonOf(e) };
-  }
+  const [only] = await heldEvidenceFor(octokit, primeRef, [{ path, cloneSha }]);
+  return only;
+}
 
-  const versionsExhaustive = commits.length <= MAX_VERSION_WALK;
-  const walk = commits.slice(0, MAX_VERSION_WALK);
-
-  const versions: string[] = [];
-  for (const commit of walk) {
-    const sha = await blobAt(octokit, primeRef, path, commit.sha);
-    if (!sha) continue;
-    if (!versions.includes(sha)) versions.push(sha);
-    if (sha === cloneSha) return { kind: "prime_versions", versions, versionsExhaustive };
-  }
-
-  return { kind: "prime_versions", versions, versionsExhaustive };
+/** The held-path probe's reading of each path's history, in the order given. */
+function heldEvidenceFor(
+  octokit: Octo,
+  primeRef: RepoRef,
+  candidates: ReadonlyArray<{ path: string; cloneSha: string }>,
+): Promise<HeldPathEvidence[]> {
+  return walkHistories(octokit, primeRef, candidates, (commits, versions) => ({
+    kind: "prime_versions" as const,
+    versions,
+    versionsExhaustive: commits.length <= MAX_VERSION_WALK,
+  }));
 }
 
 /**
- * Probe a bounded set of held paths, concurrently, at the same width as the
- * deletion probe and for the same reason: this runs inside the pass, before
- * the write path's own eight-wide content reads.
+ * Probe a bounded set of held paths, at the same width as the deletion probe
+ * and for the same reason: this runs inside the pass, before the write path's
+ * own eight-wide content reads. Their walks are read together, as there.
  */
 export async function probeHeldPaths(args: {
   octokit: Octo;
@@ -306,9 +425,6 @@ export async function probeHeldPaths(args: {
 }): Promise<Map<string, HeldPathEvidence>> {
   const max = args.maxProbes ?? MAX_HOLD_RELEASE_PROBES;
   const probing = args.candidates.slice(0, max);
-  const out = new Map<string, HeldPathEvidence>();
-  await mapWithConcurrency(probing, 4, async (c) => {
-    out.set(c.path, await probePrimeVersions(args.octokit, args.primeRef, c.path, c.cloneSha));
-  });
-  return out;
+  const evidence = await heldEvidenceFor(args.octokit, args.primeRef, probing);
+  return new Map(probing.map((c, i) => [c.path, evidence[i]]));
 }

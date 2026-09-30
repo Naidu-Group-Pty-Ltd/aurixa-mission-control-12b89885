@@ -199,6 +199,18 @@ describe("carryLaneFor", () => {
     expect(carryLaneFor(CASCADE_STREAM_MAX_FILE_BYTES + 1, CASCADE_MAX_FILE_BYTES)).toBe("refuse");
   });
 
+  it("sits between the largest blob GitHub has taken and the smallest it has refused", () => {
+    // Measured on npc-client-dashboard, 26 Sep 2026. v16 (41,780,944 bytes)
+    // landed byte-identical; v20 (42,195,218) was refused with HTTP 422 on
+    // every pass while the ceiling read 100 MB. Streaming a file the API will
+    // refuse spends the pass's window on work that cannot land, and holding
+    // one it would take sends a person to do the engine's job.
+    expect(carryLaneFor(41_780_944, CASCADE_MAX_FILE_BYTES)).toBe("stream");
+    expect(carryLaneFor(42_195_218, CASCADE_MAX_FILE_BYTES)).toBe("refuse");
+    expect(carryLaneFor(42_246_310, CASCADE_MAX_FILE_BYTES)).toBe("refuse");
+    expect(carryLaneFor(42_406_114, CASCADE_MAX_FILE_BYTES)).toBe("refuse");
+  });
+
   it("keeps the stream ceiling above the hold ceiling, or the lane is unreachable", () => {
     expect(CASCADE_STREAM_MAX_FILE_BYTES).toBeGreaterThan(CASCADE_MAX_FILE_BYTES);
   });

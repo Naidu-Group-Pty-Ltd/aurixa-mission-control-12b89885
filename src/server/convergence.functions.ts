@@ -32,25 +32,8 @@ import {
   type ObservationRow,
 } from "@/server/cascade/convergenceReading.pure";
 import type { ConvergenceState } from "@/server/cascade/convergence.pure";
-import {
-  BLOCKAGE_POLICY,
-  type BlockageClass,
-  type BlockageOwner,
-} from "@/server/cascade/blockageTaxonomy.pure";
-
-/** How many open blockages the card will draw before it stops listing them. */
-export const CARD_BLOCKAGE_LIMIT = 6;
-
-export type CardBlockage = {
-  id: string;
-  cls: BlockageClass;
-  owner: BlockageOwner;
-  /** The taxonomy's own operator prose. Never the class name. */
-  what: string;
-  detail: string;
-  firstSeenAt: string;
-  selfHeals: boolean;
-};
+import type { CardBlockages } from "@/server/cascade/cardBlockages.pure";
+import { readCardBlockages } from "@/server/cascade/cardBlockagesRead.server";
 
 export type CloneConvergenceView = {
   reading: ConvergenceCardReading;
@@ -59,7 +42,7 @@ export type CloneConvergenceView = {
    * Open blockages for this clone, or `null` when the ledger could not be
    * read — which is not the same as none, and is not drawn as none.
    */
-  blockages: CardBlockage[] | null;
+  blockages: CardBlockages | null;
 };
 
 export const readCloneConvergence = createServerFn({ method: "POST" })
@@ -83,13 +66,9 @@ export const readCloneConvergence = createServerFn({ method: "POST" })
         .select("sync_status, commits_behind")
         .eq("id", data.cloneId)
         .maybeSingle(),
-      supabase
-        .from("clone_sync_blockages")
-        .select("id, class, owner, detail, first_seen_at, self_heals")
-        .eq("clone_id", data.cloneId)
-        .is("cleared_at", null)
-        .order("first_seen_at", { ascending: true })
-        .limit(CARD_BLOCKAGE_LIMIT),
+      // Every open row in one statement, or past what one statement can
+      // carry, every known class counted. See `cardBlockagesRead.server.ts`.
+      readCardBlockages(supabase, data.cloneId),
     ]);
 
     const ledger: LedgerPosition = {
@@ -128,19 +107,6 @@ export const readCloneConvergence = createServerFn({ method: "POST" })
       ledger,
       // A failed blockage read is `null` and never `[]`: "nothing is blocking
       // this clone" is a claim, and a read that did not happen cannot make it.
-      blockages: blockages.error
-        ? null
-        : (blockages.data ?? []).map((b) => {
-            const cls = b.class as BlockageClass;
-            return {
-              id: b.id,
-              cls,
-              owner: b.owner as BlockageOwner,
-              what: BLOCKAGE_POLICY[cls]?.what ?? b.detail,
-              detail: b.detail,
-              firstSeenAt: b.first_seen_at,
-              selfHeals: b.self_heals,
-            };
-          }),
+      blockages: blockages.error ? null : blockages.data,
     };
   });

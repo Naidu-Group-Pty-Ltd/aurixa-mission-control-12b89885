@@ -52,6 +52,8 @@ import {
   runWithinBudget,
 } from "@/server/edgeDeployBatch.pure";
 import { planUpstreamDeferral, UPSTREAM_DEFERRAL_KEY } from "@/server/upstreamRefusal.pure";
+import { functionsRevisionOfSuccess } from "@/server/functionsBaseline.pure";
+import { MIGRATION_CLAIMABLE_STATUSES } from "@/server/fleetMigrationEligibility.pure";
 
 function secretsCleanFromVerification(verification: Json | null | undefined): boolean {
   if (verification && typeof verification === "object" && !Array.isArray(verification)) {
@@ -107,6 +109,38 @@ const EDGE_DEPLOY_BUDGET_MS = 45_000;
  * passes over three and a half hours, and not one migration landed.
  */
 const SQL_MIGRATION_BUDGET_MS = 45_000;
+
+/**
+ * How long one drain tick may spend executing runs, measured from the tick's
+ * start rather than from each run's.
+ *
+ * The two budgets above are PER RUN, taken at each lane's own entry, while the
+ * drain executes its due runs one after another inside ONE pg_net request that
+ * stops being waited on at sixty seconds. So a tick with two long runs due gave
+ * the first its forty-five seconds and then started the second at ~46 s with a
+ * fresh forty-five of its own — work the invocation could not live to finish.
+ * That pass was killed mid-batch, sat in `executing` until the stall reclaim
+ * twenty minutes later, and was charged an attempt for it. Measured 26 Sep
+ * 2026: the fleet's routine full redeploys ran 11–14 attempts and five to
+ * seven hours for ~414 bundles, and on 19 Sep two of them ran out of attempts
+ * entirely and parked with no bundle ever having failed.
+ *
+ * So the tick has one clock. Each lane runs to the SOONER of its own budget
+ * and this; a run the tick has no room left for is not started at all, and the
+ * least-recently-served order puts it first on the next tick, two minutes on.
+ * Forty-seven seconds gives the first run what it always had — the reclaim and
+ * the due-run read before it take about a second — and leaves the same margin
+ * for the steps after the loop.
+ */
+const DRAIN_TICK_BUDGET_MS = 47_000;
+
+/**
+ * Below this much of the tick, a run is left for the next one rather than
+ * started. A floor, not a measurement: a deploy pass spends several seconds on
+ * the snapshot before its first bundle, and a pass that cannot reach one moves
+ * nothing forward and is charged an attempt for the privilege.
+ */
+const MIN_RUN_WINDOW_MS = 15_000;
 /** Bodies fetched at once for the destructiveness gate. */
 const SQL_GATE_FETCH_CONCURRENCY = 6;
 
@@ -348,7 +382,17 @@ async function notifyAwaitingValidation(
   await ticketEvent(ticketId, "remediation.awaiting_validation", { actionType, reasons });
 }
 
-export async function executeRemediationRun(runId: string): Promise<{ status: string }> {
+export async function executeRemediationRun(
+  runId: string,
+  opts?: {
+    /**
+     * The latest moment this invocation may still be working. The drain
+     * passes its tick's; a person pressing "approve" passes none, and each
+     * lane keeps its own budget.
+     */
+    tickDeadlineAt?: number;
+  },
+): Promise<{ status: string }> {
   const { data: run } = await admin
     .from("remediation_runs")
     .select("*")
@@ -369,9 +413,9 @@ export async function executeRemediationRun(runId: string): Promise<{ status: st
       case "pr_merge":
         return await executePrMerge(run, approvedByHuman);
       case "sql_migration":
-        return await executeSqlMigration(run, approvedByHuman);
+        return await executeSqlMigration(run, approvedByHuman, opts?.tickDeadlineAt);
       case "edge_function_deploy":
-        return await executeEdgeFunctionDeploy(run);
+        return await executeEdgeFunctionDeploy(run, opts?.tickDeadlineAt);
       case "monitor_recovery":
         return await executeMonitorRecovery(run);
       case "rescan":
@@ -472,56 +516,6 @@ async function succeedRun(run: any, result: Record<string, unknown>): Promise<{ 
     ...result,
   });
   return { status: "succeeded" };
-}
-
-/**
- * Stamp the revision a clone's edge FUNCTIONS are now at.
- *
- * ## The silence this closes
- *
- * `clones.last_synced_sha` is the revision the clone's REPOSITORY content
- * reached, and the cascade advances it the moment a pull request merges —
- * whether or not the backend deploy that merge requested ever landed. The
- * catch-up sweep nevertheless read it as the backend's baseline, so a clone
- * whose deploy had stopped was diffed head-against-head and answered
- * `no_backend_work`, for ever.
- *
- * Measured 17 Sep 2026: `npc-client-dashboard` parked its deploy on 14 Sep
- * and `npc-test` on 15 Sep, both with `failed: []` — no bundle had errored;
- * the attempt budget went on prime-generation restarts and budget pauses.
- * The cascade then merged past both. Neither clone received a single edge
- * function for three days, while the fleet page read `in_sync`, every
- * cascade was green, and the sweep's own audit breadcrumb said there was no
- * backend work to do. `mission-control-announcements` shipped to the prime
- * on 16 Sep and reached one clone of three.
- *
- * Written only HERE, on the one path that can honestly claim it: a run
- * reaches `succeedRun` with `sourceMoved` false, so every bundle it counted
- * came from this single revision — and only where every bundle its last
- * pass tried landed, because a stamp over a failed bundle tells the next
- * catch-up that function is current and it is never planned again.
- *
- * Best-effort, and never the reason a completed deploy reports as failed —
- * but never silent either. A stamp that cannot be written leaves the next
- * catch-up planning from an OLDER revision, which costs a redeploy and can
- * never skip one; that is the safe direction, and it is said out loud.
- */
-async function recordBackendRevision(
-  cloneId: string | null | undefined,
-  sourceSha: string | null | undefined,
-): Promise<void> {
-  if (!cloneId || !sourceSha) return;
-  const { error } = await admin
-    .from("clone_backends")
-    .update({ source_sha: sourceSha })
-    .eq("clone_id", cloneId);
-  if (error) {
-    console.error(
-      "[edge_function_deploy] could not record the backend revision",
-      cloneId,
-      error.message,
-    );
-  }
 }
 
 // ── Lane: pr_merge ───────────────────────────────────────────────────────
@@ -909,21 +903,58 @@ async function clearFailedVerdict(
   }
 }
 
+/**
+ * Hand a run back because somebody else holds the clone's migration claim.
+ *
+ * Attempt-neutral — writing back the count from before this invocation undoes
+ * exactly its increment, the rule every other requeue here follows — because
+ * waiting for a worker that is doing this very job is not a failed attempt,
+ * and charging it would park a run for being polite. Due again after the
+ * monitor interval, by which time a fleet pass has long since released.
+ *
+ * And it keeps the approval it came in with. `approvedByHuman` is read from
+ * the status and nothing else, and a wait comes AFTER the destructiveness gate
+ * an operator's approval let the run past — so handing an approved run back
+ * `planned` sends it through that gate again, which parks it for the very
+ * approval it already has, with not one statement sent in between. The drain
+ * takes `approved` runs as well as `planned` ones, so the run is still due.
+ */
+async function waitForClaim(
+  run: { id: string; status?: string | null; attempts?: number | null },
+  why: string,
+): Promise<{ status: string }> {
+  await markRun(run.id, {
+    status: run.status === "approved" ? "approved" : "planned",
+    attempts: run.attempts ?? 0,
+    next_attempt_at: new Date(Date.now() + MONITOR_RETRY_MINUTES * 60_000).toISOString(),
+    last_error: `waiting: ${why}`.slice(0, 2000),
+  });
+  return { status: "waiting" };
+}
+
 async function executeSqlMigration(
   run: any,
   approvedByHuman: boolean,
+  tickDeadlineAt?: number,
 ): Promise<{ status: string }> {
   // Measured from lane entry, as the deploy lane measures: the corpus listing
-  // and the ledger reads spend the same invocation as the replay.
-  const deadlineAt = Date.now() + SQL_MIGRATION_BUDGET_MS;
+  // and the ledger reads spend the same invocation as the replay. And never
+  // past the drain's own tick — see `DRAIN_TICK_BUDGET_MS`.
+  const deadlineAt = Math.min(
+    Date.now() + SQL_MIGRATION_BUDGET_MS,
+    tickDeadlineAt ?? Number.POSITIVE_INFINITY,
+  );
 
   if (!run.clone_id) return parkRun(run, ["no clone scope — prime SQL is never self-applied"]);
 
-  const { data: backend } = await admin
+  const { data: backend, error: backendErr } = await admin
     .from("clone_backends")
     .select("supabase_project_ref, status")
     .eq("clone_id", run.clone_id)
     .maybeSingle();
+  // A read that FAILED is not a clone with no backend — skipping it would
+  // close the run over a database blip.
+  if (backendErr) throw new Error(`could not read the clone's backend: ${backendErr.message}`);
   if (!backend?.supabase_project_ref) {
     await markRun(run.id, {
       status: "skipped",
@@ -954,7 +985,8 @@ async function executeSqlMigration(
     could not be read is a transient fault worth retrying, not a decision a
     person has to take.
   */
-  const { openScopedPrimeCorpus } = await import("@/server/fleet-migration.server");
+  const { openScopedPrimeCorpus, beatWhileClaimHeld } =
+    await import("@/server/fleet-migration.server");
   const scoped = await openScopedPrimeCorpus(admin, source);
   if (!scoped.ok) throw new Error(scoped.error);
   // `runnableIds` is the scope's WHOLE versions — every file of each cleared —
@@ -1036,8 +1068,50 @@ async function executeSqlMigration(
     }
   }
 
-  const { results, latestApplied, stoppedEarly, chunksApplied, chunkCursor } =
-    await applyPrimeMigrations(
+  /*
+    ONE APPLIER AT A TIME, AND THE FLEET LANE'S CLAIM DECIDES WHICH.
+
+    This lane replays the same scoped migrations the fleet migration lane does,
+    and it used to do so without the claim that lane holds for every clone it
+    serves. Two appliers inside one schema at once is how a migration is sent
+    twice and fails the second time on a duplicate object the clone never
+    really lacked — and a failure recorded by the FLEET lane is a block that
+    holds the clone out of the fleet until somebody proves it discharged.
+
+    So this takes the same claim, with the same compare-and-swap, the same
+    fence and the same heartbeat — the fleet lane's own `beatWhileClaimHeld` —
+    and releases it the way that lane does, fenced on the timestamp it took.
+    Taken only now, after the scope and the gate, so the claim is held for the
+    replay and nothing else.
+
+    A claim somebody else holds is not a failure and costs no attempt: the
+    fleet lane is serving this clone, or the provisioning worker is inside it,
+    and the run waits its turn. A backend whose status the fleet lane may not
+    claim is treated the same way, because that is the provisioning worker's.
+  */
+  if (!(MIGRATION_CLAIMABLE_STATUSES as readonly string[]).includes(String(backend.status))) {
+    return waitForClaim(
+      run,
+      `the backend is ${backend.status} — the provisioning worker's, not this lane's`,
+    );
+  }
+  const claimedAt = new Date().toISOString();
+  const { data: claimed, error: claimErr } = await admin
+    .from("clone_backends")
+    .update({ worker_started_at: claimedAt, migration_heartbeat_at: claimedAt })
+    .eq("clone_id", run.clone_id)
+    .eq("status", backend.status)
+    .is("worker_started_at", null)
+    .select("clone_id");
+  // A claim that ERRORED is not a claim somebody else won.
+  if (claimErr) throw new Error(`could not claim the clone: ${claimErr.message}`);
+  if (!claimed || claimed.length === 0) {
+    return waitForClaim(run, "another pass holds this clone's migration claim");
+  }
+  const heartbeat = beatWhileClaimHeld(admin, run.clone_id, claimedAt);
+  let replay: Awaited<ReturnType<typeof applyPrimeMigrations>>;
+  try {
+    replay = await applyPrimeMigrations(
       backend.supabase_project_ref,
       runnable,
       // Alive, and which migration it is on — see `touchRun`.
@@ -1073,6 +1147,27 @@ async function executeSqlMigration(
           }),
       },
     );
+  } finally {
+    // Beats stopped BEFORE the release, as the fleet lane orders them, so no
+    // beat still in the air can stamp a claim this pass has let go.
+    await heartbeat.stop();
+    const { error: releaseErr } = await admin
+      .from("clone_backends")
+      .update({ worker_started_at: null })
+      .eq("clone_id", run.clone_id)
+      // Fenced: a claim reclaimed and re-taken by a successor is not ours to
+      // release.
+      .eq("worker_started_at", claimedAt);
+    if (releaseErr) {
+      // Not fatal — the fleet lane's stale-claim sweep frees it five minutes
+      // after the beats stop — but a clone skipped for that long should say why.
+      console.error("[sql_migration] could not release the clone's migration claim", {
+        cloneId: run.clone_id,
+        error: releaseErr.message,
+      });
+    }
+  }
+  const { results, latestApplied, stoppedEarly, chunksApplied, chunkCursor } = replay;
   // A HOLD is not a failure, and this lane said it was — the third site of the
   // same defect. `heldUpstreamLimited` carries `success: false`, so the throw
   // below wrote `migration 20261202000000_… failed` into `last_error` about a
@@ -1209,11 +1304,18 @@ async function deployWithinBudget(
 
 // ── Lane: edge_function_deploy ───────────────────────────────────────────
 
-async function executeEdgeFunctionDeploy(run: any): Promise<{ status: string }> {
+async function executeEdgeFunctionDeploy(
+  run: any,
+  tickDeadlineAt?: number,
+): Promise<{ status: string }> {
   // Measured from lane entry, not from the first deploy: a slow snapshot read
   // spends the same invocation, so budgeting only the deploy loop would let
-  // one pass overrun the ceiling it exists to respect.
-  const deadlineAt = Date.now() + EDGE_DEPLOY_BUDGET_MS;
+  // one pass overrun the ceiling it exists to respect. And never past the
+  // drain's own tick — see `DRAIN_TICK_BUDGET_MS`.
+  const deadlineAt = Math.min(
+    Date.now() + EDGE_DEPLOY_BUDGET_MS,
+    tickDeadlineAt ?? Number.POSITIVE_INFINITY,
+  );
 
   if (!run.clone_id)
     return parkRun(run, ["no clone scope — prime functions are not self-deployed"]);
@@ -1297,6 +1399,19 @@ async function executeEdgeFunctionDeploy(run: any): Promise<{ status: string }> 
   // so this pass is empty for the wrong reason — it hands the run back with
   // the new baseline recorded, and the next pass fetches the whole set again.
   if (batch.length === 0 && !generation.sourceMoved) {
+    // Nothing left to fetch with the tree held still: every bundle this run
+    // owed holds a copy on the clone newer than this generation began, so
+    // there is nothing for the run to do and it completes.
+    //
+    // It proves NO revision, though, and records none. "Newer than this
+    // generation" is read from the TARGET's timestamps, which say a copy
+    // landed, not where it came from: Lovable publishing the clone's own
+    // checkout, or the clone's CI, refreshes them exactly as this run does.
+    // This pass deployed nothing itself, so recording the snapshot's revision
+    // could tell the catch-up a function is at the prime's HEAD when it holds
+    // an older tree — and a baseline past a change never plans that change
+    // again. Recording none steps the catch-up back to the previous proof,
+    // which can only make its next diff wider: a redeploy, never a skip.
     return succeedRun(run, {
       deployed: refreshed.length,
       note:
@@ -1304,6 +1419,8 @@ async function executeEdgeFunctionDeploy(run: any): Promise<{ status: string }> 
           ? "every bundle this run owed is on the clone"
           : "no function bundles to deploy",
       source_sha: snapshot.sourceSha ?? null,
+      functions_revision: null,
+      revision_recorded: false,
       generation_at: generation.baselineAt,
     });
   }
@@ -1404,30 +1521,39 @@ async function executeEdgeFunctionDeploy(run: any): Promise<{ status: string }> 
     return { status: "resuming" };
   }
 
-  // The catch-up's from-baseline for FUNCTIONS. See `recordBackendRevision`
-  // for why the repository's own baseline could not serve as one.
+  // The catch-up's from-baseline for FUNCTIONS, recorded on the run that
+  // proves it — see `functionsBaseline.pure.ts`, which is also where the
+  // catch-up reads it back.
   //
-  // Only where every bundle this pass tried LANDED. A pass that ends the run
-  // with some bundles failed still completes it, and stamping then would say
-  // the failed functions are at this revision too: the next catch-up diffs
-  // from here, the failed functions have not changed since, and nothing ever
-  // plans them again. Left unstamped, the next catch-up plans from the older
-  // revision and owes them again — a redeploy, never a skip, which is the
-  // direction `recordBackendRevision` already takes when its write fails.
-  const revisionRecorded = failedDetail.length === 0;
-  if (revisionRecorded) {
-    await recordBackendRevision(run.clone_id, snapshot.sourceSha ?? null);
-  }
+  // It used to be stamped into `clone_backends.source_sha`, a column the fleet
+  // migration lane rewrites with the prime's HEAD on every pass. The stamp was
+  // right and the column was not the deploy lane's to keep it in: by the next
+  // sweep it said HEAD, the diff was empty, and two clones whose functions had
+  // not moved for a week were reported as owing nothing.
+  //
+  // Only where every bundle this pass tried LANDED. A run can end with some
+  // bundles failed; recording then would tell the next catch-up the failed
+  // functions are at this revision, and since they have not changed since,
+  // nothing would ever plan them again. Unrecorded, the catch-up plans from
+  // the previous proof and owes them again — a redeploy, never a skip.
+  const functionsRevision = functionsRevisionOfSuccess({
+    wanted,
+    deployedFromSha: snapshot.sourceSha,
+    plannedToSha: run.plan?.prime_sha,
+    failedBundles: failedDetail.length,
+  });
 
   return succeedRun(run, {
     deployed: refreshed.length + landed,
     failed: failedDetail,
     // The revision this run deployed FROM. A run reaches here only with
     // `sourceMoved` false, so every bundle it counts came from this one
-    // revision. Whether the clone's functions are all at it is
-    // `revision_recorded`: false when a bundle it owed did not land.
+    // revision. Which revision the clone's functions are PROVEN to be at is
+    // `functions_revision` — for a named run, the revision its slug list was
+    // computed up to, which is older than this one.
     source_sha: snapshot.sourceSha ?? null,
-    revision_recorded: revisionRecorded,
+    functions_revision: functionsRevision,
+    revision_recorded: functionsRevision !== null,
     generation_at: generation.baselineAt,
   });
 }
@@ -1610,6 +1736,8 @@ async function reclaimStalledRuns(): Promise<number> {
  *   5. Prune the ingest rate-limit ledger.
  */
 export async function sweepSupportRemediations(): Promise<SweepResult> {
+  // One clock for the whole tick — see `DRAIN_TICK_BUDGET_MS`.
+  const tickDeadlineAt = Date.now() + DRAIN_TICK_BUDGET_MS;
   const executed: SweepResult["executed"] = [];
 
   // 0. Reclaim runs a dead invocation left holding the row. Before step 1,
@@ -1642,7 +1770,14 @@ export async function sweepSupportRemediations(): Promise<SweepResult> {
     .order("created_at", { ascending: true })
     .limit(DRAIN_BATCH);
   for (const due of dueRuns ?? []) {
-    const outcome = await executeRemediationRun(due.id);
+    // Not started rather than started and killed: a pass begun without the
+    // time to finish dies in `executing`, waits twenty minutes for the stall
+    // reclaim and costs an attempt, where this one simply goes first next tick.
+    if (Date.now() + MIN_RUN_WINDOW_MS >= tickDeadlineAt) {
+      executed.push({ runId: due.id, action: due.action_type, status: "deferred_to_next_tick" });
+      continue;
+    }
+    const outcome = await executeRemediationRun(due.id, { tickDeadlineAt });
     executed.push({ runId: due.id, action: due.action_type, status: outcome.status });
   }
 

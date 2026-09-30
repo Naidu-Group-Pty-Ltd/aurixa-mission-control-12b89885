@@ -184,6 +184,28 @@ describe("the repository invariants", () => {
     }
   });
 
+  it("a workflow a module-scoped clone keeps arrives with the script it runs", () => {
+    // 28 Sep 2026, npc-crm-independent: `.github/workflows/**` had delivered
+    // migration-drift.yml (scheduled daily) and three dispatch-only builder
+    // lanes, and `.github/scripts/**` was in no glob, so each workflow called
+    // a script the clone did not hold. Named as the paths those workflows run,
+    // for the reason the test above names paths rather than patterns.
+    const matchers = validateModuleGlobs(repositoryInvariantGlobs()).valid.map(globToRegex);
+    const covered = (p: string) => matchers.some((m) => m.test(p));
+    for (const lane of [
+      ".github/scripts/migration-drift-facts.mjs",
+      ".github/scripts/builder-network-connection-remap.mjs",
+      ".github/scripts/builder-network-sync-state.mjs",
+      ".github/scripts/builder-stock-mirror-state.mjs",
+      ".github/scripts/apply-migration.mjs",
+    ]) {
+      expect(covered(lane), lane).toBe(true);
+    }
+    // The workflow that calls apply-migration.mjs stays the clone's own.
+    const excluded = new Set(DEFAULT_MIRROR_EXCLUSIONS.map((e) => e.pattern));
+    expect(excluded.has(".github/workflows/apply-migration.yml")).toBe(true);
+  });
+
   it("widens an installed set without duplicating a glob a module already claims", () => {
     const widened = globsForModuleScopedClone(["src/lib/integrations/**", "src/components/aml/**"]);
     expect(widened.filter((g) => g === "src/lib/integrations/**")).toHaveLength(1);

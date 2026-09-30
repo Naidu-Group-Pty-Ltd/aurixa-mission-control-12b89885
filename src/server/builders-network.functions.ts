@@ -22,6 +22,8 @@ import {
   operateSwitch,
 } from "./buildersNetworkAdmin.server";
 import { signingKeyPresent } from "./anthropicOidc.server";
+import { builderOrgTenantRef } from "@/lib/buildersNetworkTenant.pure";
+import { approvalBasisReason, type AccessGateDecision } from "@/lib/agreements/builderPartner.pure";
 
 export interface NetworkOverview {
   organisations: Record<string, number>;
@@ -65,10 +67,13 @@ export interface NetworkWorkspace {
   display_name: string | null;
 }
 
-/** The tenant external_ref for one builder organisation's ledger. */
-export function builderOrgTenantRef(organisationId: string): string {
-  return `builders-network:${organisationId}`;
-}
+/**
+ * The tenant external_ref for one builder organisation's ledger. Defined once
+ * in `buildersNetworkTenant.pure.ts`, because a signed Builder Partner
+ * Agreement armed to grant access approves an organisation too, and both
+ * paths must key the same tenant.
+ */
+export { builderOrgTenantRef };
 
 export const buildersNetworkStatus = createServerFn({ method: "GET" })
   .middleware([requireSupabaseAuth, requireAdmin])
@@ -125,17 +130,78 @@ export const listNetworkJoinRequests = createServerFn({ method: "GET" })
     };
   });
 
+/**
+ * What Approve answers. `kind` says WHOSE refusal it is, because the two send
+ * an operator to different remedies: the agreement gate's refusal is a
+ * sentence about this builder's paperwork (and carries the agreement in
+ * flight), the network's is a code the console reads through
+ * `readNetworkFailure`.
+ */
+export type ApproveOrganisationResult =
+  | {
+      ok: true;
+      status: string;
+      alreadyActive: boolean;
+      basis: "signed" | "waived" | "not_enforced";
+      tenant: { ok: true; tenantId: string } | { ok: false; error: string };
+    }
+  | {
+      ok: false;
+      kind: "agreement";
+      error:
+        | "agreement_required"
+        | "agreement_in_flight"
+        | "waiver_reason_too_short"
+        | "agreement_gate_unreadable";
+      detail: string;
+      openAgreementId: string | null;
+    }
+  | { ok: false; kind: "network"; error: string };
+
+/**
+ * Approve an organisation from the console. While Builder Partner Agreement
+ * terms are in force the approval waits for the organisation's signed
+ * agreement — or for an admin to waive it with a recorded reason — and the
+ * basis travels to the network as the approval's reason, where it is logged.
+ * The waitlist pipeline that created the organisation is not involved: this
+ * is the point it already hands to a person.
+ */
 export const approveNetworkOrganisation = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth, requireAdmin])
-  .inputValidator((data: { organisationId: string; legalName?: string }) => {
+  .inputValidator((data: { organisationId: string; legalName?: string; waiverReason?: string }) => {
     if (!data?.organisationId) throw new Error("organisationId required");
     return data;
   })
-  .handler(async ({ data }) => {
+  .handler(async ({ data, context }): Promise<ApproveOrganisationResult> => {
+    const { assessBuilderAccessGate, recordConsoleApproval } =
+      await import("./builder-partner-agreements.server");
+    let decision: AccessGateDecision;
+    try {
+      decision = await assessBuilderAccessGate(data.organisationId, data.waiverReason ?? null);
+    } catch (err) {
+      return {
+        ok: false,
+        kind: "agreement",
+        error: "agreement_gate_unreadable",
+        detail: `Whether this organisation has signed its Builder Partner Agreement could not be read (${err instanceof Error ? err.message : String(err)}). Nothing was approved.`,
+        openAgreementId: null,
+      };
+    }
+    if (!decision.allow) {
+      return {
+        ok: false,
+        kind: "agreement",
+        error: decision.reason,
+        detail: decision.detail,
+        openAgreementId: decision.openAgreement?.id ?? null,
+      };
+    }
+
     const result = await callBuilderNetworkAdmin("approve_organisation", {
       organisation_id: data.organisationId,
+      reason: approvalBasisReason(decision),
     });
-    if (!result.ok) return { ok: false as const, error: result.error };
+    if (!result.ok) return { ok: false, kind: "network", error: result.error };
 
     // Per-organisation metering identity (plan §10 decision): the ledger
     // exists from approval. A tenant failure does not UNDO the approval —
@@ -146,12 +212,34 @@ export const approveNetworkOrganisation = createServerFn({ method: "POST" })
       builderOrgTenantRef(data.organisationId),
       data.legalName ?? null,
     );
+    const tenantResult = tenant.ok
+      ? { ok: true as const, tenantId: tenant.tenantId }
+      : { ok: false as const, error: tenant.error };
+    const status = String(result.body.status ?? "active");
+    const alreadyActive = result.body.already_active === true;
+    // The approval has happened on the network. Failing to note it here must
+    // not report it to the operator as refused, so the note cannot throw out.
+    try {
+      await recordConsoleApproval({
+        organisationId: data.organisationId,
+        actorUserId: context.userId,
+        decision,
+        networkStatus: status,
+        alreadyActive,
+        tenant: tenantResult,
+      });
+    } catch (err) {
+      console.error(
+        "[builders-network] approval not recorded:",
+        err instanceof Error ? err.message : String(err),
+      );
+    }
     return {
-      ok: true as const,
-      status: String(result.body.status ?? "active"),
-      tenant: tenant.ok
-        ? { ok: true as const, tenantId: tenant.tenantId }
-        : { ok: false as const, error: tenant.error },
+      ok: true,
+      status,
+      alreadyActive,
+      basis: decision.basis,
+      tenant: tenantResult,
     };
   });
 
@@ -357,6 +445,8 @@ export const suspendNetworkOrganisation = createServerFn({ method: "POST" })
       : { ok: false as const, error: result.error };
   });
 
+// Reinstating is not gated on an agreement: it restores an organisation an
+// admin suspended, which was admitted — agreement and all — before that.
 export const reinstateNetworkOrganisation = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth, requireAdmin])
   .inputValidator((data: { organisationId: string }) => {

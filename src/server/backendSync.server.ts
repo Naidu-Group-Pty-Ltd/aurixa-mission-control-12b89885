@@ -33,15 +33,18 @@
  * mistake as a shared Turnstile widget.
  *
  * Mission Control already holds the credential and already does both jobs:
- * `deployEdgeFunction` posts bundles to the Management API, and
- * `executeSqlMigration` replays pending migrations under a destructiveness
- * gate. Nothing needed a new capability — only something to ask.
+ * `deployEdgeFunction` posts bundles to the Management API, and the fleet
+ * migration lane replays the prime's migrations under the clone's claim.
+ * Nothing needed a new capability — only something to ask.
  *
  * ## What this is not
  *
- * It is not a second deployer. It plans `remediation_runs` and the two existing
- * self-healing lanes do the work, so a cascade-driven catch-up and an
- * operator-driven repair execute through exactly one implementation.
+ * It is not a second deployer. It plans `edge_function_deploy` runs and the
+ * self-healing lane does the work, so a cascade-driven catch-up and an
+ * operator-driven repair execute through exactly one implementation. And it
+ * plans no migration run at all: the fleet migration lane already serves every
+ * clone, and a second applier beside it could only race it — see
+ * `handMigrationsToFleetLane`.
  *
  * It never throws, for the same reason `requestRedeployAfterPush` never
  * throws: the caller is mid-loop over every clone in a cascade, and a cascade
@@ -51,6 +54,10 @@
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { decideRemediation } from "@/lib/remediation-policy";
 import { cascadeBackendWork, hasBackendWork } from "@/server/cascadeBackendWork.pure";
+import {
+  slugsOwedAfterSupersession,
+  supersessionVerdict,
+} from "@/server/parkedDeploySupersession.pure";
 import type { CascadeBackendWork } from "@/server/cascadeBackendWork.pure";
 
 const admin = supabaseAdmin;
@@ -141,7 +148,7 @@ export async function requestBackendSyncAfterCascade(input: {
   if (work.migrationsOwed) {
     runs.push({
       action: "sql_migration",
-      outcome: await planMigrationCatchUp(input, work.reasons),
+      outcome: await handMigrationsToFleetLane(input),
     });
   }
 
@@ -272,6 +279,11 @@ async function workForCascade(
  * The one thing that does not absorb is the slug filter, which is pinned at
  * plan time — so a queued run for `a` and a new cascade touching `b` widens
  * the existing run rather than skipping `b`.
+ *
+ * And a PARKED run absorbs nothing, however open its status reads: the drain
+ * never takes it. One whose park records only exhaustion is retired and the
+ * work planned afresh; any other stays in front of a person and every plan
+ * says so. See `parkedDeploySupersession.pure.ts`.
  */
 async function planFunctionDeploy(
   input: { cloneId: string; reason: string; toSha: string },
@@ -280,7 +292,7 @@ async function planFunctionDeploy(
 ): Promise<string> {
   const { data: open, error } = await admin
     .from("remediation_runs")
-    .select("id, plan, status, updated_at")
+    .select("id, plan, status, updated_at, last_error, policy, result")
     .eq("clone_id", input.cloneId)
     .eq("action_type", "edge_function_deploy")
     .in("status", [...OPEN_RUN_STATUSES])
@@ -289,44 +301,133 @@ async function planFunctionDeploy(
     .maybeSingle();
   if (error) return `not planned — could not read open runs: ${error.message}`;
 
+  // What the run inserted below owes, what its plan reaches, and which parked
+  // runs it replaces. Adjusted only where a parked run is retired first.
+  let owed: readonly string[] | null = slugs;
+  let primeSha: string | null = input.toSha;
+  let supersedes: readonly string[] = [];
+  let retiredNote = "";
+
   if (open) {
-    /*
-     * `awaiting_validation` is "open" in the sense that the work is still
-     * ahead of the run — but it is ahead of a PERSON, not of the drain. The
-     * drain executes `planned` and `approved` only, so a parked run will
-     * never pick this work up on its own, and every later plan is folded
-     * into it.
-     *
-     * Saying that in the same words as a live run is what made this silent:
-     * measured 17 Sep 2026, `npc-client-dashboard` and `npc-test` each had a
-     * parked deploy carrying `failed: []`, and every sweep for three days
-     * reported their backend work as queued. It was queued behind nobody.
-     */
-    const parked =
+    const verdict =
       open.status === "awaiting_validation"
-        ? ` — BLOCKED: that run is parked for a human (since ${String(open.updated_at ?? "unknown").slice(0, 16)}) and the drain will never take it`
-        : "";
-    const existing = (open.plan as { slugs?: string[] | null } | null)?.slugs ?? null;
-    if (existing === null) return `already queued (that run covers every function)${parked}`;
-    if (slugs === null) {
+        ? supersessionVerdict({
+            id: open.id,
+            status: open.status,
+            last_error: open.last_error,
+            policy: open.policy,
+            result: open.result,
+            plan: open.plan,
+          })
+        : null;
+
+    if (verdict?.supersede) {
+      /*
+        RETIRED BEFORE THE FRESH RUN IS WRITTEN, AND ONLY IF IT IS STILL PARKED.
+
+        The compare-and-swap is the whole safety of this: an operator who
+        approved the run a moment ago wins, the retirement matches nothing, and
+        no second open run is created beside the one they released. Retired
+        rather than rejected or failed — nobody decided against the work and
+        nothing about it failed; it is replaced by the same work with a fresh
+        attempt budget. What it recorded is kept, with why it went.
+      */
+      const retiredAt = new Date().toISOString();
+      const previous =
+        open.result && typeof open.result === "object" && !Array.isArray(open.result)
+          ? (open.result as Record<string, unknown>)
+          : {};
+      const { data: retired, error: retireErr } = await admin
+        .from("remediation_runs")
+        .update({
+          status: "skipped",
+          completed_at: retiredAt,
+          result: {
+            ...previous,
+            superseded: { at: retiredAt, why: verdict.why, by: input.reason },
+          },
+        })
+        .eq("id", open.id)
+        .eq("status", "awaiting_validation")
+        .select("id");
+      if (retireErr) {
+        return `not planned — could not retire the parked run: ${retireErr.message}`;
+      }
+      if (!retired || retired.length === 0) {
+        return "not planned — the parked run changed state while it was being retired; the next plan reads it again";
+      }
+
+      const parkedSlugs = plannedSlugsOf(open.plan);
+      owed = slugsOwedAfterSupersession(parkedSlugs, slugs);
+      // A named run that inherits a named run's list inherits its REACH too.
+      // The parked list was a diff up to its own `prime_sha`; this plan's is a
+      // diff that may start after it, so the union is only proven up to the
+      // older of the two. Recorded older, the next catch-up owes the gap again
+      // — a redeploy, never a skip.
+      if (owed !== null && parkedSlugs !== null) {
+        const parkedReach = (open.plan as { prime_sha?: unknown } | null)?.prime_sha;
+        primeSha = typeof parkedReach === "string" ? parkedReach : null;
+      }
+      supersedes = verdict.chain;
+      retiredNote = ` (retired parked run ${open.id.slice(0, 8)}: ${verdict.why})`;
+    } else {
+      /*
+        `awaiting_validation` is "open" in the sense that the work is still
+        ahead of the run — but it is ahead of a PERSON, not of the drain. The
+        drain executes `planned` and `approved` only, so a parked run will
+        never pick this work up on its own, and every later plan is folded
+        into it.
+
+        Saying that in the same words as a live run is what made this silent:
+        measured 17 Sep 2026, `npc-client-dashboard` and `npc-test` each had a
+        parked deploy carrying `failed: []`, and every sweep for three days
+        reported their backend work as queued. It was queued behind nobody.
+      */
+      const parked =
+        open.status === "awaiting_validation"
+          ? ` — BLOCKED: that run is parked for a human (since ${String(open.updated_at ?? "unknown").slice(0, 16)}) and the drain will never take it` +
+            (verdict ? `; not retired automatically because ${verdict.why}` : "")
+          : "";
+      const existingPlan =
+        open.plan && typeof open.plan === "object" && !Array.isArray(open.plan)
+          ? (open.plan as Record<string, unknown>)
+          : {};
+      const existing = plannedSlugsOf(open.plan);
+      if (existing === null) return `already queued (that run covers every function)${parked}`;
+      /*
+        A WIDENING KEEPS WHAT THE PLAN ALREADY SAID.
+
+        It rewrote the plan as `{ slugs, source, reasons }` and so dropped
+        `prime_sha` — the revision a named run's list was computed up to, and
+        the only thing that lets its success record a revision at all. It is
+        kept, and NOT advanced to this plan's revision: this diff may start
+        after the open run's reach, so the union is proven only as far as the
+        older one. `trigger` and `supersedes` are provenance and are kept too.
+      */
+      if (slugs === null) {
+        const { error: wErr } = await admin
+          .from("remediation_runs")
+          .update({
+            plan: { ...existingPlan, slugs: null, source: "cascade", reasons: [...reasons] },
+          })
+          .eq("id", open.id);
+        return wErr
+          ? `could not widen the open run: ${wErr.message}`
+          : `widened the open run to every function${parked}`;
+      }
+      const union = [...new Set([...existing, ...slugs])].sort();
+      if (union.length === existing.length)
+        return `already queued (that run covers these functions)${parked}`;
       const { error: wErr } = await admin
         .from("remediation_runs")
-        .update({ plan: { slugs: null, source: "cascade", reasons: [...reasons] } })
+        .update({
+          plan: { ...existingPlan, slugs: union, source: "cascade", reasons: [...reasons] },
+        })
         .eq("id", open.id);
       return wErr
         ? `could not widen the open run: ${wErr.message}`
-        : `widened the open run to every function${parked}`;
+        : `widened the open run to ${union.length} functions${parked}`;
     }
-    const union = [...new Set([...existing, ...slugs])].sort();
-    if (union.length === existing.length)
-      return `already queued (that run covers these functions)${parked}`;
-    const { error: wErr } = await admin
-      .from("remediation_runs")
-      .update({ plan: { slugs: union, source: "cascade", reasons: [...reasons] } })
-      .eq("id", open.id);
-    return wErr
-      ? `could not widen the open run: ${wErr.message}`
-      : `widened the open run to ${union.length} functions${parked}`;
   }
 
   const decision = decideRemediation({
@@ -342,64 +443,107 @@ async function planFunctionDeploy(
     requires_human: decision.requiresHuman,
     policy: decision,
     plan: {
-      slugs: slugs === null ? null : [...slugs],
+      slugs: owed === null ? null : [...owed],
       source: "cascade",
       trigger: input.reason,
-      prime_sha: input.toSha,
+      ...(primeSha ? { prime_sha: primeSha } : {}),
       reasons: [...reasons],
+      ...(supersedes.length > 0 ? { supersedes: [...supersedes] } : {}),
     },
   });
-  if (insErr) return `not planned: ${insErr.message}`;
-  return slugs === null ? "planned for every function" : `planned for ${slugs.length} function(s)`;
+  if (insErr) return `not planned: ${insErr.message}${retiredNote}`;
+  return (
+    (owed === null ? "planned for every function" : `planned for ${owed.length} function(s)`) +
+    retiredNote
+  );
 }
 
-async function planMigrationCatchUp(
-  input: { cloneId: string; reason: string; toSha: string },
-  reasons: readonly string[],
-): Promise<string> {
-  const { data: open, error } = await admin
+/** A plan's slug list, read the way the deploy lane reads it: absent is every function. */
+function plannedSlugsOf(plan: unknown): string[] | null {
+  const slugs = (plan as { slugs?: unknown } | null)?.slugs;
+  return Array.isArray(slugs) ? slugs.filter((s): s is string => typeof s === "string") : null;
+}
+
+/** What a sweep or cascade reports for migrations it owes: whose they are. */
+const FLEET_LANE_OUTCOME =
+  "left to the fleet migration lane, which applies them on its next pass — no remediation run planned";
+
+/** Why an earlier cascade catch-up run was retired. Read by the run's own record. */
+const CATCH_UP_RETIRED =
+  "retired: a cascade's migrations are applied by the fleet migration lane, which holds the clone's claim while it applies — a second applier here could only race it";
+
+/**
+ * A cascade's migrations are the fleet migration lane's to apply, and this
+ * plans no run for them.
+ *
+ * ## Why this stopped planning `sql_migration` runs
+ *
+ * It planned one on every cascade that delivered a migration file, and the
+ * self-healing lane then replayed pending migrations onto the clone — the same
+ * work the fleet migration lane does every thirty minutes, through the same
+ * scope, but WITHOUT the clone's claim. Two appliers with one claim between
+ * them is the precondition for applying one migration twice at once, which is
+ * how a clone gets a duplicate-object failure it never really had, and with it
+ * a block that holds it out of the fleet.
+ *
+ * In practice it had also stopped doing anything: measured 26 Sep 2026, every
+ * clone held one PARKED catch-up run (three since 14 Sep, one since 23 Sep),
+ * and every later cascade was folded into it and reported as "already queued —
+ * BLOCKED". The migrations reached the clones through the fleet lane the whole
+ * time. What the parked runs still held was a hazard: approving one ran the
+ * replay with its destructiveness gate skipped and no claim at all.
+ *
+ * So the sweep retires those runs when it next finds migrations owed — only
+ * ones a cascade planned, and only while nothing is running them: an
+ * `executing` run is mid-pass and an `approved` one is a person's decision —
+ * and says whose the migrations are. The lane itself remains for a ticket or a
+ * person who asks for a catch-up explicitly, and now takes the fleet claim.
+ */
+async function handMigrationsToFleetLane(input: {
+  cloneId: string;
+  reason: string;
+}): Promise<string> {
+  const { data: earlier, error } = await admin
     .from("remediation_runs")
-    .select("id, status, updated_at")
+    .select("id, result")
     .eq("clone_id", input.cloneId)
     .eq("action_type", "sql_migration")
-    .in("status", [...OPEN_RUN_STATUSES])
-    .limit(1)
-    .maybeSingle();
-  if (error) return `not planned — could not read open runs: ${error.message}`;
-  // Nothing to widen: `mode: "catch_up"` has no filter to miss. The lane
-  // recomputes what is pending when it runs, so an open run already covers
-  // migrations this cascade delivered.
-  //
-  // Unless nobody is going to run it — a parked run is queued behind a
-  // person, and says so rather than reading like a healthy queue.
-  if (open)
-    return open.status === "awaiting_validation"
-      ? `already queued — BLOCKED: that run is parked for a human (since ${String(open.updated_at ?? "unknown").slice(0, 16)}) and the drain will never take it`
-      : "already queued";
+    .in("status", ["planned", "awaiting_validation"])
+    .eq("plan->>source", "cascade")
+    .eq("plan->>mode", "catch_up");
+  if (error) {
+    return `${FLEET_LANE_OUTCOME} (could not read earlier catch-up runs: ${error.message})`;
+  }
+  if (!earlier || earlier.length === 0) return FLEET_LANE_OUTCOME;
 
-  // The lane assesses every pending body immediately before applying it and
-  // parks the batch on the first destructive statement — a stronger check than
-  // one taken here, because the prime moves between planning and executing.
-  const decision = decideRemediation({
-    actionType: "sql_migration",
-    priority: CASCADE_PRIORITY,
-    sqlAssessedByLane: true,
-  });
-  const { error: insErr } = await admin.from("remediation_runs").insert({
-    ticket_id: null,
-    clone_id: input.cloneId,
-    action_type: "sql_migration",
-    priority: CASCADE_PRIORITY,
-    status: decision.autoExecute ? "planned" : "awaiting_validation",
-    requires_human: decision.requiresHuman,
-    policy: decision,
-    plan: {
-      mode: "catch_up",
-      source: "cascade",
-      trigger: input.reason,
-      prime_sha: input.toSha,
-      reasons: [...reasons],
-    },
-  });
-  return insErr ? `not planned: ${insErr.message}` : "planned";
+  const retiredAt = new Date().toISOString();
+  let retired = 0;
+  const problems: string[] = [];
+  for (const row of earlier) {
+    const previous =
+      row.result && typeof row.result === "object" && !Array.isArray(row.result)
+        ? (row.result as Record<string, unknown>)
+        : {};
+    const { data: done, error: retireErr } = await admin
+      .from("remediation_runs")
+      .update({
+        status: "skipped",
+        completed_at: retiredAt,
+        result: {
+          ...previous,
+          retired: { at: retiredAt, why: CATCH_UP_RETIRED, by: input.reason },
+        },
+      })
+      .eq("id", row.id)
+      // Still unstarted and undecided: a pass that claimed it or a person who
+      // approved it in the meantime wins.
+      .in("status", ["planned", "awaiting_validation"])
+      .select("id");
+    if (retireErr) problems.push(retireErr.message);
+    else retired += done?.length ?? 0;
+  }
+  return (
+    `${FLEET_LANE_OUTCOME}; retired ${retired} earlier catch-up run(s)` +
+    (problems.length > 0 ? ` (could not retire ${problems.length}: ${problems[0]})` : "")
+  );
 }

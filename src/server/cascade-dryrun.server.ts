@@ -27,7 +27,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import { getAppOctokit, type RepoRef } from "./github-app.server";
-import { processClone, type ClonePlan } from "./cascade-engine.server";
+import { processClone, resolveCloneReadSource, type ClonePlan } from "./cascade-engine.server";
 
 type SupabaseLike = SupabaseClient<Database>;
 
@@ -118,9 +118,9 @@ export async function runCascadeDryRun(
   const { data: prime } = await supabase.from("prime_config").select("*").limit(1).maybeSingle();
   if (!prime) return { ok: false, error: "Prime not configured" };
 
-  let clonesQuery = supabase
-    .from("clones")
-    .select("id, name, github_owner, github_repo, default_branch, sync_scope");
+  // `*` rather than a column list, so a column a deployment has not migrated
+  // yet (`crm_mode`) reads as absent rather than refusing the whole rehearsal.
+  let clonesQuery = supabase.from("clones").select("*");
   if (opts.cloneIds && opts.cloneIds.length > 0) {
     clonesQuery = clonesQuery.in("id", opts.cloneIds);
   }
@@ -170,16 +170,68 @@ export async function runCascadeDryRun(
     let plan: ClonePlan | null = null;
     let patchSummary = "";
 
+    // Where this clone would READ from — the same decision the live pass
+    // makes. With lineage on, a child receives its parent's tree, and only
+    // once the parent carries this prime commit. Rehearsing it against prime
+    // instead described a cascade that would never run: prime's whole tree,
+    // past every exclusion and membrane on the parent's edge.
+    const source = await resolveCloneReadSource({
+      supabase,
+      octokit,
+      prime: {
+        github_owner: prime.github_owner,
+        github_repo: prime.github_repo,
+        default_branch: prime.default_branch,
+        cascade_follows_lineage: prime.cascade_follows_lineage ?? null,
+      },
+      parentCloneId: clone.parent_clone_id ?? null,
+      primeSha: sourceSha,
+    });
+    if (source.kind === "hold") {
+      // A wait, not a refusal: the live pass leaves this clone queued until
+      // its parent has taken the commit, and then reads the parent's tree —
+      // which does not exist yet, so there is nothing honest to rehearse.
+      impacts.push({
+        cloneId: clone.id,
+        name: clone.name,
+        level: "yellow",
+        filesChanged: 0,
+        filesDeleted: 0,
+        filesInScope: 0,
+        installedModules: modCount,
+        filesHeld: 0,
+        needsReconcile: [],
+        oversizePaths: [],
+        breaks: [],
+        deletionsWithheld: [],
+        deletionRefusal: null,
+        refusedDeletionPaths: [],
+        holdReleases: [],
+        reason: `Waits for its parent: ${source.why}`,
+      });
+      continue;
+    }
+    const sourceLabel = source.provenance?.label ?? "prime";
+
     try {
       const patch = await processClone({
         octokit,
-        primeRef,
-        sourceSha,
+        primeRef: source.ref,
+        sourceSha: source.sha,
+        provenance: source.provenance,
         // `pr` rather than the event's mode on purpose: a dry run must never
         // take the notify branch, and mode changes nothing about WHAT the
         // cascade decides — only what it would then do with it.
         mode: "pr",
-        clone,
+        clone: {
+          id: clone.id,
+          name: clone.name,
+          github_owner: clone.github_owner,
+          github_repo: clone.github_repo,
+          default_branch: clone.default_branch || "main",
+          sync_scope: clone.sync_scope,
+          crm_mode: clone.crm_mode ?? null,
+        },
         supabase,
         scopeFilter: null,
         dryRun: true,
@@ -288,7 +340,7 @@ export async function runCascadeDryRun(
       reason:
         parts.length > 0
           ? `${parts.join(" · ")} (${settled.scope})`
-          : `Clone matches prime — nothing would be pushed (${settled.scope})`,
+          : `Clone matches ${sourceLabel} — nothing would be pushed (${settled.scope})`,
     });
   }
 

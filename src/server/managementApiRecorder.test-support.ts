@@ -6,8 +6,9 @@
  * The replay reaches a clone through one endpoint, `database/query`, so what a
  * clone was SENT is exactly the sequence of queries posted there. This
  * answers the three the replay asks before it sends anything — the tracking
- * tables, the ledger union, the table count — and records every query, so a
- * test can assert what reached the clone and what its ledger was told.
+ * tables, the ledger union, the table count — and the schedule read the
+ * prime-only sweep makes after it, and records every query, so a test can
+ * assert what reached the clone and what its ledger was told.
  *
  * It does not import the test runner: the caller installs `fetch` itself
  * (`vi.stubGlobal("fetch", api.fetch)`), which keeps this an ordinary module.
@@ -16,6 +17,14 @@
 const LEDGER_READ = /select version from supabase_migrations\.schema_migrations\s+union/i;
 const TABLE_COUNT = /from pg_tables/i;
 const TRACKING = /create schema if not exists supabase_migrations/i;
+/**
+ * The read `sweepPrimeOnlyCronJobs` makes after a replay sent something: the
+ * clone's schedule, asked for the prime's own jobs. Bookkeeping — nothing a
+ * clone is sent — and answered from `cronJobs`, so a test can plant one.
+ */
+export const CRON_SWEEP_READ = /select jobid, jobname, command from cron\.job/i;
+/** The write the sweep makes for each prime-only job it found. */
+export const CRON_UNSCHEDULE = /select cron\.unschedule\((\d+)::bigint\)/i;
 
 /** The write `recordReplayedVersion` makes after a version has run. */
 export const LEDGER_RECORD = /insert into supabase_migrations\.schema_migrations/i;
@@ -38,7 +47,13 @@ export type RecordingManagementApi = {
  * failure travels the replay's own path rather than a thrown stub's.
  */
 export function recordingManagementApi(
-  opts: { applied?: string[]; tables?: number; refuse?: (query: string) => boolean } = {},
+  opts: {
+    applied?: string[];
+    tables?: number;
+    refuse?: (query: string) => boolean;
+    /** The clone's `cron.job` rows, as the sweep reads them. Empty by default. */
+    cronJobs?: Array<{ jobid: number; jobname: string; command: string }>;
+  } = {},
 ): RecordingManagementApi {
   const sent: string[] = [];
   const answer = (body: unknown) =>
@@ -47,7 +62,12 @@ export function recordingManagementApi(
       headers: { "content-type": "application/json" },
     });
   const bookkeeping = (q: string) =>
-    TRACKING.test(q) || LEDGER_READ.test(q) || TABLE_COUNT.test(q) || LEDGER_RECORD.test(q);
+    TRACKING.test(q) ||
+    LEDGER_READ.test(q) ||
+    TABLE_COUNT.test(q) ||
+    LEDGER_RECORD.test(q) ||
+    CRON_SWEEP_READ.test(q) ||
+    CRON_UNSCHEDULE.test(q);
   return {
     sent,
     fetch: async (_url, init) => {
@@ -58,6 +78,7 @@ export function recordingManagementApi(
         return answer((opts.applied ?? []).map((version) => ({ version })));
       }
       if (TABLE_COUNT.test(query)) return answer([{ n: opts.tables ?? 0 }]);
+      if (CRON_SWEEP_READ.test(query)) return answer(opts.cronJobs ?? []);
       return answer([]);
     },
     bodies: () => sent.filter((q) => !bookkeeping(q)),

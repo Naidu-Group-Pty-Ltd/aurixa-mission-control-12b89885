@@ -222,7 +222,12 @@ export const BLOCKAGE_POLICY: Record<BlockageClass, BlockagePolicy> = {
     owner: "operator",
     selfHeals: false,
     conditionedOnDivergence: false,
-    what: "The prime has merged a migration it has not run, so this clone is held at the version before it — and so is everything after.",
+    /*
+      Said about the prime's LEDGER, never its schema, and about what depends
+      on the version, never "everything after": the barrier has been
+      per-dependency since 22 Sep 2026. See the row's own detail.
+    */
+    what: "The prime's ledger does not record a migration its repository carries, so no clone can be sent it — and a clone's migrations that may depend on it wait until it is recorded.",
   },
   unclassified: {
     /*
@@ -233,6 +238,15 @@ export const BLOCKAGE_POLICY: Record<BlockageClass, BlockagePolicy> = {
     conditionedOnDivergence: true,
     what: "This clone is not converging and nothing here can say why — which is itself the finding.",
   },
+};
+
+/** One unread `cascade_blocked` notice, as the ledger reads it back. */
+export type BlockedNotice = {
+  title: string;
+  body: string;
+  createdAt: string;
+  /** The pull request the notice names (`notifications.url`), when it names one. */
+  prUrl: string | null;
 };
 
 /** Everything one clone's classification is decided from. */
@@ -276,8 +290,18 @@ export type CloneBlockageFacts = {
   }>;
   /** Failed rows for this clone since its last successful one. */
   consecutiveFailures: number;
-  /** The drain's own standing-blockage notification, when one is unread. */
-  blockedNotice: { title: string; body: string; createdAt: string } | null;
+  /**
+   * Every UNREAD `cascade_blocked` notice the drain has raised for this clone.
+   *
+   * Each is the drain's own verdict on one pull request it read and refused to
+   * merge, carrying the URL it names. ALL of them, never only the newest: two
+   * refused pull requests are two standing refusals, and a reading that kept
+   * one notice per clone reported `ci_red` for the newest while the URL of the
+   * older still stood `unreconciled_proposal` down — so the older refused pull
+   * request had no finding at all. `standingRefusals` collapses them to one
+   * per pull request; `classifyBlockages` reports each.
+   */
+  blockedNotices: ReadonlyArray<BlockedNotice>;
   /**
    * Prime versions this clone's last migration pass was held behind.
    *
@@ -315,6 +339,23 @@ export type DetectedBlockage = {
 const ms = (iso: string | null) => (iso ? new Date(iso).getTime() : null);
 
 /**
+ * Whether start `a` is earlier than start `b`. An absent or unreadable start
+ * is never earlier than a readable one, so it can only ever be replaced.
+ */
+const startsEarlier = (a: string | null, b: string | null): boolean => {
+  const x = ms(a);
+  if (x === null || !Number.isFinite(x)) return false;
+  const y = ms(b);
+  return y === null || !Number.isFinite(y) || x < y;
+};
+
+/** A start for sorting: unreadable or absent sorts last. */
+const startOrder = (iso: string | null): number => {
+  const v = ms(iso);
+  return v !== null && Number.isFinite(v) ? v : Number.POSITIVE_INFINITY;
+};
+
+/**
  * How far out a deferral may legitimately be parked.
  *
  * `rateLimitDeferral` never places one past sixty-five minutes, on the
@@ -332,16 +373,38 @@ export function classifyBlockages(facts: CloneBlockageFacts, now: Date): Detecte
   const t = now.getTime();
   const sloMs = Math.max(1, facts.sloMinutes) * 60_000;
 
+  /*
+    ONE ROW PER IDENTITY, WHATEVER THE FACTS REPEAT.
+
+    The ledger keys its open set on the fingerprint, so a pass that detected
+    one fingerprint twice would open two rows, and every later pass would see
+    only one of them — the other stays open for ever with nothing able to
+    clear it. A repeat of an identity is the same condition, not a second one.
+
+    Its words are the first detection's, and every caller emits the most
+    current first. Its START is the earliest any detection reports: the
+    condition has existed since its first evidence, and a row opened on a
+    later one would understate how long it has stood (Codex's reading of the
+    first-wins guard, which kept whichever repeat the facts listed first).
+  */
+  const emitted = new Map<string, DetectedBlockage>();
   const add = (cls: BlockageClass, fingerprint: string, detail: string, since: string | null) => {
+    const prior = emitted.get(fingerprint);
+    if (prior) {
+      if (startsEarlier(since, prior.since)) prior.since = since;
+      return;
+    }
     const policy = BLOCKAGE_POLICY[cls];
-    found.push({
+    const detected: DetectedBlockage = {
       cls,
       owner: policy.owner,
       selfHeals: policy.selfHeals,
       fingerprint,
       detail,
       since,
-    });
+    };
+    emitted.set(fingerprint, detected);
+    found.push(detected);
   };
 
   /*
@@ -351,11 +414,11 @@ export function classifyBlockages(facts: CloneBlockageFacts, now: Date): Detecte
     everything behind it.
   */
   /*
-    A migration the prime merged and never ran.
+    A migration the prime's repository carries and its ledger does not record.
 
-    First alongside the unseeded policy, for the same reason: it blocks
-    everything behind it, and it is the clone's SCHEMA rather than one
-    delivery. One blockage per hole VERSION, fingerprinted on that version —
+    First alongside the unseeded policy, for a like reason: it holds whatever
+    of the clone's migrations needs it, and it is the clone's SCHEMA rather
+    than one delivery. One blockage per hole VERSION, fingerprinted on that version —
     so the row is stable across passes, and it discharges itself the moment
     the prime's ledger records the version and the next pass stops reporting
     `blockedBy`. Nobody has to remember to close it.
@@ -389,10 +452,31 @@ export function classifyBlockages(facts: CloneBlockageFacts, now: Date): Detecte
         lives, so an operator holding this row can find out which of the two
         they have rather than being told.
       */
-      `${facts.label} is held at the version before ${hole.version}: the prime's ledger does not record that migration, so this clone may not run it either. ` +
-        `${hole.heldCount} migration(s) wait behind it` +
-        (hole.firstHeld ? `, starting with ${hole.firstHeld}` : "") +
-        ". It clears when the prime runs that file — nothing here can, and stamping the prime's ledger instead would send this clone a migration whose prerequisite does not exist. " +
+      /*
+        AND WHAT IT KNOWS ABOUT THE CLONE.
+
+        It used to open "<clone> is held at the version before <hole>", which
+        was true of the blanket barrier and has not been true since the
+        barrier became per-dependency: a hole now holds only the migrations
+        that need what it creates, and the clone advances past it. Read on
+        27 Sep 2026, every one of the fleet's 58 open hole rows said it, over
+        clones recorded at 20261226090000 — past every hole named — and 55 of
+        them went on to say "0 migration(s) wait behind it".
+
+        So the sentence says what the clone's own record says, and no more:
+        how many of its migrations are recorded as waiting behind this
+        version, or that none is. "Recorded" in BOTH readings, because the
+        count is read from `blockedBy`, which lists at most the first five
+        holes behind each migration held — a migration whose sixth hole is
+        this one is not counted here, so the count is a floor and never a
+        total (Codex, on this change).
+      */
+      (hole.heldCount > 0
+        ? `${facts.label} has ${hole.heldCount} migration(s) recorded as waiting behind ${hole.version}` +
+          (hole.firstHeld ? `, starting with ${hole.firstHeld}` : "") +
+          ": the prime's ledger does not record that migration, so this clone may not run it either, and what waits behind it stays held until it does. "
+        : `The prime's ledger does not record ${hole.version}, so no clone may be sent it; nothing on ${facts.label} is recorded as waiting behind it. `) +
+        "It clears when the prime runs that file — nothing here can, and stamping the prime's ledger instead would send this clone a migration whose prerequisite does not exist. " +
         "Whether this prime ran it untracked is a separate reading, against its catalog rather than its ledger: Fleet Manager → Prime Ledger Reconciliation.",
       null,
     );
@@ -440,9 +524,47 @@ export function classifyBlockages(facts: CloneBlockageFacts, now: Date): Detecte
   /*
     An open proposal whose record is simply behind. Distinct from the above:
     the URL is right, so the drain CAN reach it and has not.
+
+    NOT A PROPOSAL THE DRAIN HAS JUST REFUSED.
+
+    Measured 27 Sep 2026: NPC Client Dashboard #264 and the independent's #29
+    each carried BOTH this class and `ci_red`, for one pull request. The drain
+    reads each of them every five minutes and holds it on the same failing
+    check, and its unread `cascade_blocked` notice is the record of exactly
+    that read. So the record is not behind: the pull request is open and red,
+    `ci_red` says so and names its owner, and this row said the opposite —
+    a stale record the machinery would heal — about a failure no machinery
+    can clear. Two findings about one row, one of them false. Where a notice
+    names the pull request, the drain's verdict stands alone; everywhere else
+    this class still fires, including a proposal whose checks never report.
   */
-  for (const p of facts.openProposals) {
+  const refusals = standingRefusals(facts.blockedNotices);
+  // Every key here belongs to a refusal the `ci_red` block below reports, so a
+  // proposal stood down in this loop is never left without a finding.
+  const refused = new Set(
+    refusals.map((r) => pullRequestKey(r.prUrl)).filter((k): k is string => k !== null),
+  );
+  // A refusal is described by its newest notice and dates from its OLDEST
+  // unread one: while any of them stands unread, the pull request has been
+  // refused since the first.
+  const refusedSince = new Map<string, string>();
+  for (const n of facts.blockedNotices) {
+    const key = refusalKey(n);
+    const prior = refusedSince.get(key);
+    if (prior === undefined || startsEarlier(n.createdAt, prior))
+      refusedSince.set(key, n.createdAt);
+  }
+  // Oldest first, so a pull request with more than one open record is
+  // described by its oldest, whose words and start then agree.
+  const proposalsOldestFirst = [...facts.openProposals].sort((a, b) => {
+    const x = startOrder(a.createdAt);
+    const y = startOrder(b.createdAt);
+    return x === y ? 0 : x < y ? -1 : 1;
+  });
+  for (const p of proposalsOldestFirst) {
     if (retargeted.includes(p)) continue;
+    const key = pullRequestKey(p.prUrl);
+    if (key !== null && refused.has(key)) continue;
     const age = t - (ms(p.createdAt) ?? t);
     if (age < sloMs) continue;
     add(
@@ -559,12 +681,17 @@ export function classifyBlockages(facts: CloneBlockageFacts, now: Date): Detecte
     second implementation of "may this merge", which is how one of them
     becomes wrong.
   */
-  if (facts.blockedNotice) {
+  for (const r of refusals) {
+    const elsewhere = refusalRepoElsewhere(r, facts.repoFullName);
+    const detail = firstParagraphs(r.body, 2);
     add(
       "ci_red",
-      `ci_red:${facts.blockedNotice.title}`,
-      firstParagraphs(facts.blockedNotice.body, 2),
-      facts.blockedNotice.createdAt,
+      refusalFingerprint(r, facts.repoFullName),
+      elsewhere === null
+        ? detail
+        : `This pull request is in ${elsewhere}, which ${facts.label} no longer cascades to, so ` +
+            `the drain leaves its notice unread and it stands until an operator reads it. ${detail}`,
+      refusedSince.get(refusalKey(r)) ?? r.createdAt,
     );
   }
 
@@ -628,6 +755,95 @@ export function parsePrRepo(prUrl: string | null): string | null {
   if (!prUrl) return null;
   const m = /github\.com\/([^/]+)\/([^/]+)\/pull\/\d+/i.exec(prUrl);
   return m ? `${m[1]}/${m[2]}` : null;
+}
+
+/**
+ * One pull request, however its URL is spelled: `owner/repo#number`, with the
+ * owner and repository compared without regard to case, as GitHub compares
+ * them. Null when the URL does not parse — an unparsed URL matches nothing,
+ * so it can never stand a finding down by accident.
+ */
+export function pullRequestKey(prUrl: string | null): string | null {
+  if (!prUrl) return null;
+  const m = /github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:[/?#]|$)/i.exec(prUrl);
+  return m ? `${m[1]}/${m[2]}#${Number(m[3])}`.toLowerCase() : null;
+}
+
+/**
+ * The repository a refusal's pull request is in, when that is NOT the one the
+ * clone record now names — the notices a clone re-pointed since still holds,
+ * which the drain leaves unread because it can judge only the clone's own
+ * repository. Null for a refusal in the clone's own repository, and for one
+ * whose URL does not parse.
+ */
+export function refusalRepoElsewhere(r: BlockedNotice, repoFullName: string | null): string | null {
+  const repo = parsePrRepo(r.prUrl);
+  if (repo === null) return null;
+  if (repoFullName !== null && repo.toLowerCase() === repoFullName.toLowerCase()) return null;
+  return repo;
+}
+
+/**
+ * A refusal's identity in the ledger.
+ *
+ * The title names the clone and the pull request's NUMBER, and a number is one
+ * pull request only within one repository. For a refusal in the clone's own
+ * repository — every refusal the drain raises — that is enough, and the
+ * identity is the title exactly as it has always been, so a standing row keeps
+ * its identity and its start. A refusal in any other repository carries the
+ * repository as well: its number can match one of the clone's own, and the
+ * two would otherwise share one fingerprint, which the ledger reports once.
+ */
+export function refusalFingerprint(r: BlockedNotice, repoFullName: string | null): string {
+  const elsewhere = refusalRepoElsewhere(r, repoFullName);
+  return elsewhere === null
+    ? `ci_red:${r.title}`
+    : `ci_red:${r.title} · ${elsewhere.toLowerCase()}`;
+}
+
+/**
+ * Which refusal a notice belongs to: its pull request, or its title where the
+ * URL does not parse (the title names the pull request as well). One rule, so
+ * the refusals `standingRefusals` keeps and the starts `classifyBlockages`
+ * gives them can never be grouped two different ways.
+ */
+export function refusalKey(n: BlockedNotice): string {
+  return pullRequestKey(n.prUrl) ?? `title:${n.title}`;
+}
+
+/**
+ * The standing refusals a clone's unread notices describe: the NEWEST notice
+ * for each pull request, newest first.
+ *
+ * The drain's dedupe key is the pull request AND its verdict, so a pull
+ * request whose failure changes shape gets a second notice while the first
+ * stays unread. Those are one refusal, and the newest verdict is the current
+ * one; two pull requests are two refusals, each owed its own finding. The
+ * refusal still dates from its oldest unread notice, which `classifyBlockages`
+ * reads through `refusalKey` rather than from the notice kept here.
+ *
+ * A notice whose URL does not parse is keyed on its title, which names the
+ * pull request as well, so it still counts as one refusal rather than none.
+ * Two pull requests with one number in two repositories are two refusals, and
+ * `refusalFingerprint` keeps their identities apart; a notice with no URL and
+ * one with a URL for the same pull request share a fingerprint and are
+ * reported once (see `add` in `classifyBlockages`).
+ */
+export function standingRefusals(notices: ReadonlyArray<BlockedNotice>): BlockedNotice[] {
+  const at = (iso: string) => {
+    const v = Date.parse(iso);
+    return Number.isFinite(v) ? v : 0;
+  };
+  const newestFirst = [...notices].sort((a, b) => at(b.createdAt) - at(a.createdAt));
+  const seen = new Set<string>();
+  const out: BlockedNotice[] = [];
+  for (const n of newestFirst) {
+    const key = refusalKey(n);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(n);
+  }
+  return out;
 }
 
 function firstParagraphs(body: string, n: number): string {

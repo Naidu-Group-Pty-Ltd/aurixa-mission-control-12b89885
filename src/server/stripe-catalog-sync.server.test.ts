@@ -109,13 +109,16 @@ describe("planCatalogSync", () => {
     }
   });
 
-  it("discounts the annual price by 10% of twelve months", () => {
+  // The amounts Apply mints for the annual plan: twelve months of the headline
+  // less clause 5.1's 15%, the same figures an agreement's annual prepayment
+  // states for the with-AML base.
+  it("prices the annual plan at twelve months of the base less 15%", () => {
     const yearly = (slug: string) =>
       plan.prices.find((p) => p.tierSlug === slug && p.interval === "year")!.unitAmount;
     expect(yearly("launch")).toBe(annualCents(99900));
-    expect(yearly("launch")).toBe(1078920);
-    expect(yearly("growth")).toBe(1510920);
-    expect(yearly("scale")).toBe(2914920);
+    expect(yearly("launch")).toBe(1018980);
+    expect(yearly("growth")).toBe(1426980);
+    expect(yearly("scale")).toBe(2752980);
   });
 
   it("carries the GST contained in each amount, never added to it", () => {

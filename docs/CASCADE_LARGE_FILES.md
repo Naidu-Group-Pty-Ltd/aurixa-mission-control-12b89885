@@ -101,11 +101,36 @@ no part of this process ever looked at, and it costs nothing.
 
 ## The ceiling that is left
 
-`CASCADE_STREAM_MAX_FILE_BYTES` is **100 MB, and it is GitHub's number, not
+`CASCADE_STREAM_MAX_FILE_BYTES` is **40 MiB, and it is GitHub's number, not
 ours**: past it the create-blob endpoint will not take the request, so there
 is nothing to make. Saying so is the point — a file over it is refused by the
 API rather than by a budget an operator could argue with, and the hold should
 send them to the only remedy that exists.
+
+It said 100 MB until 26 Sep 2026, read from the endpoint's documentation, and
+the documentation is wrong about it. Measured against `npc-client-dashboard`,
+where the lane had been carrying every seed since 22 Sep:
+
+| seed | bytes | create-blob |
+|---|---:|---|
+| v16 | 41,780,944 | taken, landed byte-identical |
+| v19 | 41,773,244 | taken, landed byte-identical |
+| v20 | 42,195,218 | HTTP 422, *"Sorry, your input was too large to process"* |
+| v21 | 42,246,310 | HTTP 422, every pass |
+| v22 | 42,406,114 | HTTP 422, every pass |
+
+40 MiB (41,943,040 bytes) sits between the largest file the endpoint has
+taken and the smallest it has refused. A number that is too high is not
+harmless headroom. At 100 MB each pass streamed about 127 MB into three
+certain refusals. It spent its window on work that could never land, and the
+hold told the operator the next pass would retry, so nobody moved the files.
+And the auditor imports the ceiling (below), so it counted all three as owed
+and would have escalated a healthy clone as stalled.
+
+A file past this ceiling can still be **pushed**: git takes a file up to
+100 MB. So the hold's remedy now depends on which side of that the file is. A
+42 MB seed names the push from a local clone, and only a file past 100 MB is
+told it has to become smaller or stay out of the tree.
 
 `CASCADE_STREAM_BYTES_PER_PASS` is 128 MB and is pacing rather than policy.
 `shouldStop` already reserves against the slowest file a pass has seen, and a
@@ -130,8 +155,8 @@ to that same hold. The floor is yesterday's behaviour.
 
 **The hold is not deleted, it is narrowed** — and it now says which of two
 states it is, because they send an operator opposite ways. Past GitHub's
-ceiling: nothing retries it, no approval releases it, the file has to become
-smaller or stay out of the tree. A carry that failed: the next pass tries
+ceiling: nothing retries it, no approval releases it, and a person pushes it
+by hand or the file becomes smaller. A carry that failed: the next pass tries
 again by itself, and telling somebody to copy it by hand there would have
 them racing the engine for the same path.
 

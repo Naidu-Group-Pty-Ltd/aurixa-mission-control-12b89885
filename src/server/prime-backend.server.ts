@@ -18,6 +18,7 @@ import type { RepoRef } from "./github-app.server";
 import { countGithubCall } from "./githubUsageMeter";
 import { pruneBundleToReachable } from "./functionBundlePrune.pure";
 import { isPrimeOnlySecret } from "./primeOnlySecrets.pure";
+import { isPrimeOnlyPath } from "./primeOnlyFeatures.pure";
 import { OversizedMigrationError, PrimeBodyUnavailableError } from "./oversizedMigration.pure";
 import { githubApiHeaders } from "./githubRequestHeaders.pure";
 import {
@@ -110,13 +111,16 @@ export type PrimeBackendSnapshot = {
    */
   functionSourceOmitted: boolean;
   /**
-   * Every slug the repository declares at this commit, from the tree walk.
+   * Every slug the repository declares FOR A CLONE at this commit, from the
+   * tree walk.
    *
    * Unlike `functions`, this is never narrowed by `skipFunctionSlugs`, by
    * `functionLimit` or by `includeFunctionSource: false` — see
    * `declaredFunctionSlugsFromPaths`. It is what a clone is CONTRACTED to
    * carry, which is not the same set as what the prime's project happens to
-   * be running.
+   * be running — and not the same set as the prime's own tree either: what the
+   * prime keeps for itself is left out where the tree is read
+   * (`isCloneFunctionPath`), so the contract and the deploy set agree.
    */
   declaredFunctionSlugs: string[];
   /**
@@ -242,6 +246,24 @@ export function declaredFunctionSlugsFromPaths(relPaths: string[]): string[] {
     if (pickEntrypoint(slug, [...ownPaths, ...sharedFiles])) out.push(slug);
   }
   return out.sort();
+}
+
+/**
+ * Whether a repository path is an edge-function file a CLONE is built from:
+ * under `supabase/functions/`, and not something the prime keeps for itself
+ * (`primeOnlyFeatures.pure.ts`).
+ *
+ * Asked once, where the prime's tree is read, rather than at each stage that
+ * reads it, because the three things built from that list have to agree. The
+ * declared slugs are what a clone is contracted to carry and the bundles are
+ * what it is given, and a slug in the first that is never in the second is a
+ * livelock: the pass that fetches no source pauses until every declared slug
+ * is live on the clone, and a prime-only one never would be. The secret scan
+ * reads the same files, and measured on prime@387feb03 no secret is read by
+ * prime-only code alone, so the scan names exactly what it named before.
+ */
+export function isCloneFunctionPath(repoPath: string): boolean {
+  return repoPath.startsWith(FUNCTIONS_PREFIX) && !isPrimeOnlyPath(repoPath);
 }
 
 /**
@@ -1651,7 +1673,7 @@ export async function fetchDeclaredEdgeFunctionSlugs(
     const { blobs } = await listSupabaseBlobs(octokit, ref);
     return declaredFunctionSlugsFromPaths(
       blobs
-        .filter((b) => b.path.startsWith(FUNCTIONS_PREFIX))
+        .filter((b) => isCloneFunctionPath(b.path))
         .map((b) => b.path.slice(FUNCTIONS_PREFIX.length)),
     );
   } catch {
@@ -1788,7 +1810,7 @@ export async function fetchPrimeBackendSnapshot(
     // declares — the two facts were never the same one.
     const declaredEarly = declaredFunctionSlugsFromPaths(
       blobs
-        .filter((b) => b.path.startsWith(FUNCTIONS_PREFIX))
+        .filter((b) => isCloneFunctionPath(b.path))
         .map((b) => b.path.slice(FUNCTIONS_PREFIX.length)),
     );
     const configBlobEarly = blobs.find((b) => b.path === CONFIG_TOML_PATH);
@@ -1808,7 +1830,9 @@ export async function fetchPrimeBackendSnapshot(
       functionSourceTruncated: false,
     };
   }
-  const functionBlobs = blobs.filter((b) => b.path.startsWith(FUNCTIONS_PREFIX));
+  // Everything below is built from this one list: the bundles, the secret
+  // scan and the declared slugs. See `isCloneFunctionPath`.
+  const functionBlobs = blobs.filter((b) => isCloneFunctionPath(b.path));
   const relPaths = functionBlobs.map((b) => b.path.slice(FUNCTIONS_PREFIX.length));
   const shaByRel = new Map(
     functionBlobs.map((b) => [b.path.slice(FUNCTIONS_PREFIX.length), b.sha]),
@@ -2012,4 +2036,171 @@ export async function fetchPrimeBackendSnapshot(
     functionSourceOmitted: false,
     functionSourceTruncated,
   };
+}
+
+// ─── A clone's OWN functions ─────────────────────────────────────────
+//
+// Everything above reads the PRIME. These read any repository — in practice a
+// clone's — for the functions it carries and the prime does not. See
+// `cloneOwnedFunctions.server.ts` for the lane and `cloneOwnedFunctions.pure.ts`
+// for its rules.
+//
+// Neither touches the two module caches. Each holds ONE entry — the prime's
+// tree listing and the prime's blob bodies at one commit — and a clone read
+// between two prime reads would evict it and cost the next prime read a full
+// re-walk and re-fetch, which is the expense those caches exist to avoid.
+
+/** A repository's edge-function tree at its branch head: paths and blob ids, no bodies. */
+export type RepoFunctionTree = {
+  /** "owner/repo" */
+  sourceRepo: string;
+  sourceRef: string;
+  sourceSha: string;
+  /**
+   * Every edge-function file a clone may be built from (`isCloneFunctionPath`),
+   * relative to `supabase/functions/`, with its blob id.
+   */
+  files: Array<{ rel: string; sha: string }>;
+  /** `supabase/config.toml` at the same commit, for `verify_jwt`; null when absent. */
+  configToml: string | null;
+  /** What the tree declares — `declaredFunctionSlugsFromPaths` over `files`. */
+  declaredFunctionSlugs: string[];
+};
+
+/**
+ * Read a repository's function tree. Two tree calls and one blob; no bundle
+ * body is fetched, which is what lets a sweep decide that nothing changed for
+ * the price of a listing.
+ */
+export async function readRepoFunctionTree(
+  octokit: Octokit,
+  ref: RepoRef,
+): Promise<RepoFunctionTree> {
+  const { blobs, commitSha } = await listSupabaseBlobsUncached(octokit, ref);
+  const files = blobs
+    .filter((b) => isCloneFunctionPath(b.path))
+    .map((b) => ({ rel: b.path.slice(FUNCTIONS_PREFIX.length), sha: b.sha }))
+    .sort((a, b) => a.rel.localeCompare(b.rel));
+  const configBlob = blobs.find((b) => b.path === CONFIG_TOML_PATH);
+  const configToml = configBlob
+    ? decodeBase64Utf8(await fetchBlobBase64(octokit, ref, configBlob.sha))
+    : null;
+  return {
+    sourceRepo: `${ref.owner}/${ref.repo}`,
+    sourceRef: ref.branch,
+    sourceSha: commitSha,
+    files,
+    configToml,
+    declaredFunctionSlugs: declaredFunctionSlugsFromPaths(files.map((f) => f.rel)),
+  };
+}
+
+/** What one named function's bundle is assembled from, before pruning. */
+export type FunctionBundlePlan = {
+  slug: string;
+  entrypointPath: string;
+  importMapPath: string | null;
+  verifyJwt: boolean;
+  /** The function's own files and the shared tree, each with its blob id. */
+  files: Array<{ rel: string; sha: string }>;
+};
+
+/**
+ * Plan the named functions' bundles from the tree alone — the same grouping,
+ * entrypoint and `verify_jwt` rules `fetchPrimeBackendSnapshot` applies to the
+ * prime. A slug the tree does not hold, or that has no runnable entrypoint, is
+ * left out, exactly as the prime's deploy set leaves it out.
+ */
+export function planFunctionBundles(
+  tree: RepoFunctionTree,
+  slugs: readonly string[],
+): FunctionBundlePlan[] {
+  const shaByRel = new Map(tree.files.map((f) => [f.rel, f.sha]));
+  const grouped = groupFunctionPaths(tree.files.map((f) => f.rel));
+  const fnConfig = parseFunctionConfig(tree.configToml);
+  const plans: FunctionBundlePlan[] = [];
+  for (const slug of [...new Set(slugs)].sort()) {
+    const own = grouped.slugs.get(slug);
+    if (!own) continue;
+    const bundlePaths = [...own, ...grouped.sharedFiles];
+    const entrypointPath = pickEntrypoint(slug, bundlePaths);
+    if (!entrypointPath) continue;
+    plans.push({
+      slug,
+      entrypointPath,
+      importMapPath: grouped.importMapPath,
+      verifyJwt: fnConfig.get(slug)?.verifyJwt ?? true,
+      files: bundlePaths.map((rel) => {
+        const sha = shaByRel.get(rel);
+        if (!sha) throw new Error(`Blob not found for ${rel}`);
+        return { rel, sha };
+      }),
+    });
+  }
+  return plans;
+}
+
+/**
+ * Fetch and assemble planned bundles, each pruned to what its entrypoint
+ * reaches — the rule every prime bundle follows, for the same 413 reason
+ * (see `functionBundlePrune.pure.ts`). Each distinct file is fetched once
+ * however many bundles carry it.
+ */
+export async function assembleFunctionBundles(
+  octokit: Octokit,
+  ref: RepoRef,
+  plans: readonly FunctionBundlePlan[],
+): Promise<PrimeEdgeFunction[]> {
+  const entries: Array<{ rel: string; sha: string }> = [];
+  const seen = new Set<string>();
+  for (const plan of plans) {
+    for (const f of plan.files) {
+      if (seen.has(f.rel)) continue;
+      seen.add(f.rel);
+      entries.push(f);
+    }
+  }
+  const contents = await fetchBlobTextsBatched(octokit, ref, entries);
+  const fileByPath = new Map<string, PrimeFunctionFile>();
+  for (const { rel } of entries) {
+    const contentBase64 = contents.get(rel);
+    if (contentBase64 === undefined) throw new Error(`Blob not found for ${rel}`);
+    fileByPath.set(rel, { path: rel, contentBase64 });
+  }
+  const textCache = new Map<string, string | null>();
+  const textOf = (rel: string): string | null => {
+    const hit = textCache.get(rel);
+    if (hit !== undefined) return hit;
+    const file = fileByPath.get(rel);
+    let text: string | null = null;
+    if (file && isTextFile(rel)) {
+      try {
+        text = decodeBase64Utf8(file.contentBase64);
+      } catch {
+        text = null;
+      }
+    }
+    textCache.set(rel, text);
+    return text;
+  };
+  return plans.map((plan) => {
+    const prune = pruneBundleToReachable({
+      entrypointPath: plan.entrypointPath,
+      files: plan.files.map((f) => ({ path: f.rel })),
+      importMapPath: plan.importMapPath,
+      textOf,
+    });
+    if (!prune.pruned) {
+      console.warn(
+        `[prime-backend] ${ref.owner}/${ref.repo} ${plan.slug}: carrying the whole shared tree — ${prune.reason ?? "unknown"}`,
+      );
+    }
+    return {
+      slug: plan.slug,
+      files: prune.keep.map((rel) => fileByPath.get(rel)!),
+      entrypointPath: plan.entrypointPath,
+      importMapPath: plan.importMapPath,
+      verifyJwt: plan.verifyJwt,
+    };
+  });
 }

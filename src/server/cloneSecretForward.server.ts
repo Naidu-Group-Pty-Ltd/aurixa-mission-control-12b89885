@@ -26,6 +26,7 @@ import { resolveCloneSecretTarget, CloneSecretTargetError } from "./cloneAllowed
 import type { CloneSecretRefusal } from "./cloneSecretTarget.pure";
 import { classifySecret } from "./prime-backend.server";
 import { namesToWrite, planCloneForwards, type ForwardOutcome } from "./cloneSecretForward.pure";
+import { recordSecretLedger } from "./secretLedger.server";
 
 type Db = SupabaseClient<Database>;
 
@@ -71,6 +72,11 @@ export type ForwardPushResult =
       cloneId: string;
       /** Names written to the clone's project on this push. */
       written: string[];
+      /**
+       * Names not sent because the project already held exactly that value —
+       * nothing needed writing, and nothing was redeployed for it.
+       */
+      unchanged: string[];
       /** Every authorised name and what happened to it. */
       outcomes: ForwardOutcome[];
     }
@@ -98,7 +104,7 @@ export async function pushCloneSecretForwards(
     // Nothing to write is not a failure — a clone whose every authorised name
     // is already fleet-wide reaches this legitimately — but it is reported as
     // an empty write rather than as a successful one.
-    return { ok: true, cloneId, written: [], outcomes: resolved.outcomes };
+    return { ok: true, cloneId, written: [], unchanged: [], outcomes: resolved.outcomes };
   }
 
   let projectRef: string;
@@ -113,37 +119,42 @@ export async function pushCloneSecretForwards(
   const entries = names.map((name) => ({ name, value: process.env[name] as string }));
   const res = await setCloneSecretValues(projectRef, entries);
 
-  const now = new Date().toISOString();
   // Checked, not fired and forgotten. An unrecorded write leaves the operator's
   // secret list reading `missing` over a secret that is set, and every sweep
-  // re-writing it for ever with nothing saying why.
-  const { error: ledgerErr } = await supabase.from("clone_backend_secrets").upsert(
-    names.map((name) => ({
-      clone_id: cloneId,
-      name,
-      status: res.ok ? "inherited" : "failed",
-      last_set_at: res.ok ? now : null,
-      last_error: res.ok ? null : res.error,
-      set_by: opts.actorUserId ?? null,
-    })),
-    { onConflict: "clone_id,name" },
-  );
+  // re-writing it for ever with nothing saying why. Only a name actually SENT
+  // moves its set time (`secretLedger.pure.ts`).
+  const ledgerErr = await recordSecretLedger(supabase, {
+    cloneId,
+    names,
+    result: res,
+    status: "inherited",
+    setBy: opts.actorUserId ?? null,
+    now: new Date().toISOString(),
+  });
   if (ledgerErr) {
-    console.error(
-      `[clone-secret-forward] ledger write failed for ${cloneId}: ${ledgerErr.message}`,
-    );
+    console.error(`[clone-secret-forward] ledger write failed for ${cloneId}: ${ledgerErr}`);
   }
 
   if (!res.ok) {
     return { ok: false, cloneId, reason: "write_failed", error: res.error };
   }
-  return { ok: true, cloneId, written: names, outcomes: resolved.outcomes };
+  return {
+    ok: true,
+    cloneId,
+    written: res.written,
+    unchanged: res.unchanged,
+    outcomes: resolved.outcomes,
+  };
 }
 
 export type ForwardReconcileResult = {
   considered: number;
+  /** Clones a write was SENT to. */
   pushed: number;
+  /** Names sent. */
   written: number;
+  /** Names found already held, value for value — not sent, nothing redeployed. */
+  unchanged: number;
   refused: Array<{ clone_id: string; reason: string; error: string }>;
 };
 
@@ -160,7 +171,13 @@ export type ForwardReconcileResult = {
  * calls. A `failed` row is NOT skipped — that is the state a retry is for.
  */
 export async function reconcileCloneSecretForwards(supabase: Db): Promise<ForwardReconcileResult> {
-  const out: ForwardReconcileResult = { considered: 0, pushed: 0, written: 0, refused: [] };
+  const out: ForwardReconcileResult = {
+    considered: 0,
+    pushed: 0,
+    written: 0,
+    unchanged: 0,
+    refused: [],
+  };
 
   const rows = await supabase.from("clone_secret_forwards").select("clone_id, name");
   if (rows.error) {
@@ -201,6 +218,7 @@ export async function reconcileCloneSecretForwards(supabase: Db): Promise<Forwar
       out.pushed += 1;
       out.written += res.written.length;
     }
+    out.unchanged += res.unchanged.length;
   }
   return out;
 }

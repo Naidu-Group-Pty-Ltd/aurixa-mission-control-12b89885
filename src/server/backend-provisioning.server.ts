@@ -40,6 +40,17 @@ import {
 } from "./sharedVersionDelivery.pure";
 import { ledgerWriteRefusal } from "./migrationLedgerWrites.pure";
 import { mentionedVersionsOf } from "./migrationVersionMentions.pure";
+import {
+  parseStoredSecretDigests,
+  planSecretWrite,
+  type SecretWriteResult,
+} from "./secretWriteDiff.pure";
+import {
+  primeOnlyBucketReason,
+  primeOnlyCronJobsIn,
+  primeOnlyCronReason,
+  primeOnlyFunctionsIn,
+} from "./primeOnlyFeatures.pure";
 
 const MGMT_API = "https://api.supabase.com/v1";
 
@@ -548,6 +559,41 @@ export async function listProjectEdgeFunctionSlugs(projectRef: string): Promise<
 }
 
 /**
+ * The project's deployed function slugs, or NULL when they could not be read.
+ *
+ * `listProjectEdgeFunctionSlugs` answers `[]` on a failed read, which is right
+ * for its callers — parity still computes the rest of its diff, and
+ * provisioning's skip list merely fetches more than it needed. It is wrong for
+ * a caller that decides from the answer whether a function is MISSING: there
+ * `[]` reads as "none live", and a Management API hiccup would be taken for a
+ * project that lost its functions. Kept beside that reader rather than
+ * changing it, for the reason `listProjectEdgeFunctionFreshness` gives.
+ */
+export async function readProjectEdgeFunctionSlugs(projectRef: string): Promise<string[] | null> {
+  try {
+    const res = await fetch(`${MGMT_API}/projects/${projectRef}/functions`, {
+      headers: headers(),
+    });
+    if (!res.ok) return null;
+    const raw = (await res.json()) as unknown;
+    if (!Array.isArray(raw)) return null;
+    return raw
+      .map((r) => {
+        const o = r as Record<string, unknown>;
+        return typeof o.slug === "string"
+          ? o.slug
+          : typeof o.name === "string"
+            ? (o.name as string)
+            : "";
+      })
+      .filter((s) => s.length > 0)
+      .sort();
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The clone's live functions, each with the moment it was last deployed.
  *
  * `listProjectEdgeFunctionSlugs` answers "which of these does the target
@@ -654,8 +700,15 @@ export async function getProjectAuthConfig(
  */
 export type BucketReplicationResult = {
   id: string;
-  status: "created" | "exists" | "failed" | "deferred";
+  /**
+   * `withheld` is a bucket the prime keeps for its own feature: not created
+   * here, not brought into step with the prime's configuration, and never
+   * copied into. See `primeOnlyFeatures.pure.ts`.
+   */
+  status: "created" | "exists" | "failed" | "deferred" | "withheld";
   error?: string;
+  /** Why the bucket itself was not replicated, when it was not. */
+  withheld?: string;
   objects_copied?: number;
   objects_failed?: number;
   objects_skipped?: number;
@@ -1135,6 +1188,16 @@ export async function replicateStorageBuckets(
   const targetUrl = getProjectUrl(targetRef);
 
   for (const bucket of primeBuckets) {
+    // The prime's own feature's bucket. A migration in the shared corpus
+    // creates it on every clone that applies the corpus — measured 27 Sep
+    // 2026, all four hold it, private and empty — so it is left exactly as a
+    // clone has it: not created where it is absent, not reconfigured where it
+    // differs, and never copied into. See `primeOnlyFeatures.pure.ts`.
+    const primeOnly = primeOnlyBucketReason(bucket.id);
+    if (primeOnly) {
+      results.push({ id: bucket.id, status: "withheld", withheld: `prime-only — ${primeOnly}` });
+      continue;
+    }
     let configResult: BucketReplicationResult;
     const already = onClone.get(bucket.id);
     if (already && sameConfig(already, bucket)) {
@@ -1819,6 +1882,18 @@ export async function replicateCronJobs(
 
   const results: CronJobReplicationResult[] = [];
   for (const job of primeJobs) {
+    // The prime's own jobs stay on the prime: each invokes a function no clone
+    // is given. See `primeOnlyFeatures.pure.ts`.
+    const primeOnly = primeOnlyCronReason(job);
+    if (primeOnly) {
+      results.push({
+        jobname: job.jobname,
+        status: "skipped",
+        rewrote_url: false,
+        reason: `prime-only — ${primeOnly}`,
+      });
+      continue;
+    }
     const hostRewrite = rewriteCronCommand(job.command, primeRef, cloneRef);
     const keyRewrite = rewriteEmbeddedAnonKey(
       hostRewrite.command,
@@ -1933,7 +2008,322 @@ export async function replicateCronJobs(
       });
     }
   }
+
+  // And the prime's own jobs ALREADY on the clone. Skipping them above keeps
+  // this step from scheduling one; it cannot take back what a migration
+  // scheduled, and the migrations that create the feature's tables schedule
+  // its dispatcher. Left for the next pass when the budget is spent — the
+  // step is re-entered after the pause, so nothing is lost by waiting.
+  if (!pastDeadline(deadlineAt)) {
+    const sweep = await sweepPrimeOnlyCronJobs(cloneRef, { primeRef });
+    for (const s of sweep.unscheduled) {
+      const reason = `prime-only — unscheduled from this clone: ${s.reason}`;
+      const seen = results.find((r) => r.jobname === s.jobname && r.status === "skipped");
+      if (seen) seen.reason = reason;
+      else results.push({ jobname: s.jobname, status: "skipped", rewrote_url: false, reason });
+    }
+    for (const f of sweep.failed) {
+      results.push({
+        jobname: f.jobname,
+        status: "failed",
+        rewrote_url: false,
+        error: `prime-only, and could not be unscheduled from this clone: ${f.error}`,
+      });
+    }
+  }
   return results;
+}
+
+/**
+ * What one sweep found on a project and did about it.
+ */
+export type PrimeOnlyCronSweep = {
+  unscheduled: Array<{ jobid: number; jobname: string; reason: string }>;
+  failed: Array<{ jobid: number; jobname: string; reason: string; error: string }>;
+  /** Why nothing was unscheduled although something was found; null otherwise. */
+  skipped: string | null;
+};
+
+/**
+ * Unschedule the prime's own pg_cron jobs from a project that is not the prime.
+ *
+ * The feature is the prime's (`primeOnlyFeatures.pure.ts`), but its tables are
+ * schema and every clone applies them — and the migrations that create them
+ * also schedule `migration-dispatcher-15s`, which invokes a function no clone
+ * is given. A clone that applied them calls a function it does not have every
+ * fifteen seconds, for ever: measured 27 Sep 2026, all four clones did.
+ *
+ * Three rules make it safe to run after every apply.
+ *
+ * - It never acts on the prime. The prime's ref is compared before anything is
+ *   unscheduled, and a ref that cannot be resolved stops the sweep: a sweep
+ *   that cannot tell which project it is on does nothing.
+ * - It removes exactly what it read, by `jobid`, and only what the register
+ *   names (`primeOnlyCronJobsIn`), so it cannot take an ordinary job with it.
+ * - It never throws. It is housekeeping after something else succeeded, and
+ *   that work must not be reported as failed because of it.
+ */
+export async function sweepPrimeOnlyCronJobs(
+  targetRef: string,
+  opts: { primeRef?: string | null } = {},
+): Promise<PrimeOnlyCronSweep> {
+  const sweep: PrimeOnlyCronSweep = { unscheduled: [], failed: [], skipped: null };
+  let raw: unknown;
+  try {
+    raw = await runSqlOnProject(targetRef, `select jobid, jobname, command from cron.job`);
+  } catch (err) {
+    sweep.skipped = `the schedule could not be read: ${err instanceof Error ? err.message : String(err)}`;
+    return sweep;
+  }
+  const rows = Array.isArray(raw) ? (raw as Array<Record<string, unknown>>) : [];
+  const jobs = rows
+    .map((r) => ({
+      jobid: Number(r?.jobid),
+      jobname: String(r?.jobname ?? ""),
+      command: String(r?.command ?? ""),
+    }))
+    .filter((j) => Number.isSafeInteger(j.jobid) && j.jobid > 0);
+  const found = primeOnlyCronJobsIn(jobs);
+  if (found.length === 0) return sweep;
+
+  let primeRef = (opts.primeRef ?? "").trim();
+  if (!primeRef) {
+    try {
+      const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+      const { resolvePrimeBackendRef } = await import("./prime-backend.server");
+      primeRef = (await resolvePrimeBackendRef(supabaseAdmin)).trim();
+    } catch (err) {
+      sweep.skipped =
+        `the prime's project could not be resolved, so this project cannot be ruled out as the ` +
+        `prime: ${err instanceof Error ? err.message : String(err)}`;
+      return sweep;
+    }
+  }
+  if (!primeRef || primeRef.toLowerCase() === targetRef.trim().toLowerCase()) {
+    sweep.skipped = primeRef
+      ? "this is the prime's own project, and these jobs are its own"
+      : "the prime's project is not known, so this project cannot be ruled out as the prime";
+    return sweep;
+  }
+  for (const { job, reason } of found) {
+    try {
+      await runSqlOnProject(targetRef, `select cron.unschedule(${job.jobid}::bigint);`);
+      sweep.unscheduled.push({ jobid: job.jobid, jobname: job.jobname, reason });
+    } catch (err) {
+      sweep.failed.push({
+        jobid: job.jobid,
+        jobname: job.jobname,
+        reason,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return sweep;
+}
+
+/**
+ * What one function sweep found on a project and did about it.
+ */
+export type PrimeOnlyFunctionSweep = {
+  deleted: Array<{ slug: string; reason: string }>;
+  failed: Array<{ slug: string; reason: string; error: string }>;
+  /**
+   * Found and left for the next pass, never attempted: the pass's delete cap
+   * was reached, or the Management API answered 429.
+   */
+  deferred: string[];
+  /** Why nothing was deleted although the sweep ran; null otherwise. */
+  skipped: string | null;
+};
+
+/**
+ * How many functions one pass deletes from one project. Twenty-eight deletes
+ * on each of four projects is 112 Management API calls in one invocation of a
+ * catch-up that still has its own work to do after the sweep. Ten a project is
+ * three half-hourly passes to clear a clone that holds all twenty-eight, and
+ * one pass for anything a later deploy puts back.
+ */
+export const PRIME_ONLY_FUNCTION_DELETES_PER_PASS = 10;
+
+/**
+ * Delete the prime's own Edge Functions from a project that is not the prime.
+ *
+ * Withholding a function (`primeOnlyFeatures.pure.ts`) stops the next deploy
+ * and does nothing about the last one. Every clone provisioned before the
+ * register existed was given all twenty-eight functions of the GoHighLevel
+ * account migration, and measured 28 Sep 2026 all four still ran them: code
+ * that moves a whole GoHighLevel account, deployed on four tenants' projects
+ * after the owner decided that none of them receives it.
+ *
+ * The same three rules as `sweepPrimeOnlyCronJobs`, for the same reasons.
+ *
+ * - It never acts on the prime. The prime's ref is compared before anything is
+ *   deleted, and a ref that cannot be resolved stops the sweep: a sweep that
+ *   cannot tell which project it is on does nothing.
+ * - It deletes exactly what it read, and only what the register names
+ *   (`primeOnlyFunctionsIn`), by exact name, so it cannot take an ordinary
+ *   function with it. A clone's own functions (a CRM's `crm-*`) are never
+ *   named there.
+ * - It never throws. A read that fails is `skipped` with its reason, never an
+ *   empty project, and one delete that fails does not stop the others.
+ * - It is bounded. At most `PRIME_ONLY_FUNCTION_DELETES_PER_PASS` deletes a
+ *   pass, and a 429 ends the pass; what is left is `deferred`, named, and
+ *   found again by the next pass, because the sweep reads before it acts.
+ *
+ * A function is code, not data: its source stays in the prime's tree, so a
+ * deletion loses nothing a redeploy could not put back. That is the difference
+ * from the feature's BUCKET, which this platform never deletes.
+ */
+export async function sweepPrimeOnlyFunctions(
+  targetRef: string,
+  opts: { primeRef?: string | null; maxDeletes?: number } = {},
+): Promise<PrimeOnlyFunctionSweep> {
+  const sweep: PrimeOnlyFunctionSweep = { deleted: [], failed: [], deferred: [], skipped: null };
+  const ref = (targetRef ?? "").trim();
+  if (!ref) {
+    sweep.skipped = "no project was named";
+    return sweep;
+  }
+  let slugs: string[];
+  try {
+    const res = await fetch(`${MGMT_API}/projects/${ref}/functions`, { headers: headers() });
+    if (!res.ok) {
+      sweep.skipped = `the deployed functions could not be read: HTTP ${res.status}`;
+      return sweep;
+    }
+    const raw = (await res.json()) as unknown;
+    if (!Array.isArray(raw)) {
+      sweep.skipped = "the deployed functions could not be read: the answer was not a list";
+      return sweep;
+    }
+    slugs = raw
+      .map((r) => {
+        const o = (r ?? {}) as Record<string, unknown>;
+        return typeof o.slug === "string" ? o.slug : typeof o.name === "string" ? o.name : "";
+      })
+      .filter((slug) => slug.length > 0);
+  } catch (err) {
+    sweep.skipped = `the deployed functions could not be read: ${err instanceof Error ? err.message : String(err)}`;
+    return sweep;
+  }
+  const found = primeOnlyFunctionsIn(slugs);
+  if (found.length === 0) return sweep;
+
+  let primeRef = (opts.primeRef ?? "").trim();
+  if (!primeRef) {
+    try {
+      const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+      const { resolvePrimeBackendRef } = await import("./prime-backend.server");
+      primeRef = (await resolvePrimeBackendRef(supabaseAdmin)).trim();
+    } catch (err) {
+      sweep.skipped =
+        `the prime's project could not be resolved, so this project cannot be ruled out as the ` +
+        `prime: ${err instanceof Error ? err.message : String(err)}`;
+      return sweep;
+    }
+  }
+  if (!primeRef || primeRef.toLowerCase() === ref.toLowerCase()) {
+    sweep.skipped = primeRef
+      ? "this is the prime's own project, and these functions are its own"
+      : "the prime's project is not known, so this project cannot be ruled out as the prime";
+    return sweep;
+  }
+  const cap = Math.max(1, Math.floor(opts.maxDeletes ?? PRIME_ONLY_FUNCTION_DELETES_PER_PASS));
+  for (let i = 0; i < found.length; i++) {
+    const { slug, reason } = found[i];
+    if (i >= cap) {
+      sweep.deferred = found.slice(i).map((f) => f.slug);
+      break;
+    }
+    try {
+      const res = await fetch(`${MGMT_API}/projects/${ref}/functions/${encodeURIComponent(slug)}`, {
+        method: "DELETE",
+        headers: headers(),
+      });
+      // The API asking us to slow down is about this pass, not this
+      // function: stop here and leave this one and the rest for the next.
+      if (res.status === 429) {
+        sweep.deferred = found.slice(i).map((f) => f.slug);
+        break;
+      }
+      // 404 is the outcome the sweep is for — the function is not deployed —
+      // reached by somebody else between the read and the delete.
+      if (res.ok || res.status === 404) {
+        sweep.deleted.push({ slug, reason });
+      } else {
+        sweep.failed.push({
+          slug,
+          reason,
+          error: `HTTP ${res.status} — ${(await res.text()).slice(0, 200)}`,
+        });
+      }
+    } catch (err) {
+      sweep.failed.push({ slug, reason, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  return sweep;
+}
+
+/**
+ * Take named edge functions off a clone's project — a CRM conversion's one
+ * act of removal (`crmConversion.server.ts`), and nothing else's.
+ *
+ * The caller decides WHICH (`functionsToUndeploy`: only what the proposal
+ * retired, never a function the prime declares); this only refuses the one
+ * project no delete may ever reach, the prime's own, whose ref is required
+ * rather than looked up so a caller cannot forget to name it. A 404 is the
+ * outcome, and a 429 stops the pass with the rest named as deferred.
+ */
+export async function deleteProjectEdgeFunctions(
+  targetRef: string,
+  slugs: readonly string[],
+  opts: { primeRef: string },
+): Promise<{
+  deleted: string[];
+  failed: Array<{ slug: string; error: string }>;
+  deferred: string[];
+  skipped: string | null;
+}> {
+  const out = {
+    deleted: [] as string[],
+    failed: [] as Array<{ slug: string; error: string }>,
+    deferred: [] as string[],
+    skipped: null as string | null,
+  };
+  const ref = (targetRef ?? "").trim();
+  const primeRef = (opts.primeRef ?? "").trim();
+  if (!ref) {
+    out.skipped = "no project was named";
+    return out;
+  }
+  if (!primeRef || primeRef.toLowerCase() === ref.toLowerCase()) {
+    out.skipped = primeRef
+      ? "this is the prime's own project; nothing is deleted from it"
+      : "the prime's project is not known, so this project cannot be ruled out as the prime";
+    return out;
+  }
+  for (let i = 0; i < slugs.length; i++) {
+    const slug = slugs[i];
+    try {
+      const res = await fetch(`${MGMT_API}/projects/${ref}/functions/${encodeURIComponent(slug)}`, {
+        method: "DELETE",
+        headers: headers(),
+      });
+      if (res.status === 429) {
+        out.deferred = slugs.slice(i);
+        break;
+      }
+      if (res.ok || res.status === 404) out.deleted.push(slug);
+      else
+        out.failed.push({
+          slug,
+          error: `HTTP ${res.status} — ${(await res.text()).slice(0, 200)}`,
+        });
+    } catch (err) {
+      out.failed.push({ slug, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  return out;
 }
 
 // ─── G4: Required extensions + realtime publication parity ───────────
@@ -2750,6 +3140,13 @@ export async function applyPrimeMigrations(
    * is present by construction.
    */
   primeLedgerHoles: string[];
+  /**
+   * The prime's own pg_cron jobs this pass found on the clone and took off it,
+   * after what it sent. Null when the sweep did not run: nothing reached the
+   * clone, or the budget stopped the pass and the next one will sweep. See
+   * `sweepPrimeOnlyCronJobs`.
+   */
+  primeOnlyCronSweep: PrimeOnlyCronSweep | null;
 }> {
   await runSqlOnProject(projectRef, TRACKING_TABLE_SQL);
 
@@ -2869,6 +3266,10 @@ export async function applyPrimeMigrations(
   let stoppedEarly = false;
   let chunkCursorDiscarded = false;
   let chunksApplied = 0;
+  // Whether any migration body was SENT this pass, failed or not — a file that
+  // fails part-way may already have committed what it scheduled. Not
+  // `latestApplied`, which a version the clone already held also sets.
+  let sentToClone = false;
   let chunkCursor: ChunkCursor | null = null;
   let position = 0;
   /*
@@ -3042,6 +3443,7 @@ export async function applyPrimeMigrations(
         break;
       }
       try {
+        sentToClone = true;
         await runSqlOnProject(projectRef, sql);
         await recordReplayedVersion(projectRef, unit.version, recordedName);
         for (const f of unit.members) {
@@ -3136,6 +3538,20 @@ export async function applyPrimeMigrations(
           });
           break;
         }
+        if (chunked.unresumable) {
+          // Held before its first statement went, exactly as a body with no
+          // stream is: this caller could not carry on from a pause, so it is
+          // not handed a part. `heldOversize` is the flag every caller already
+          // reads as "left for the chunking lane" — never as a failure.
+          results.push({
+            id: m.id,
+            name: m.name,
+            success: false,
+            heldOversize: true,
+            error: chunked.unresumable,
+          });
+          break;
+        }
         if (chunked.upstreamRefusal) {
           // A HOLD, not a pause. Both stop here and both keep the cursor, but
           // they are reported differently on purpose: a pause is this pass
@@ -3182,6 +3598,7 @@ export async function applyPrimeMigrations(
           });
           break;
         }
+        sentToClone = true;
         await runSqlOnProject(projectRef, sql);
       }
       await recordReplayedVersion(projectRef, m.id, recordedName);
@@ -3215,6 +3632,31 @@ export async function applyPrimeMigrations(
     }
   }
 
+  // What was just applied may have scheduled the prime's own jobs: the
+  // migrations that create its feature's tables also schedule the dispatcher,
+  // which invokes a function no clone is given. Swept only after something
+  // reached the clone — a pass that sent nothing scheduled nothing — and not
+  // when the budget stopped the pass, because the pass that continues it will
+  // sweep. See `sweepPrimeOnlyCronJobs`, which never throws and never acts on
+  // the prime.
+  const primeOnlyCronSweep =
+    (sentToClone || chunksApplied > 0) && !stoppedEarly
+      ? await sweepPrimeOnlyCronJobs(projectRef)
+      : null;
+  if (primeOnlyCronSweep && primeOnlyCronSweep.unscheduled.length > 0) {
+    console.info("[migrations] unscheduled the prime's own jobs from a clone", {
+      projectRef,
+      jobs: primeOnlyCronSweep.unscheduled.map((j) => j.jobname),
+    });
+  }
+  if (primeOnlyCronSweep && (primeOnlyCronSweep.failed.length > 0 || primeOnlyCronSweep.skipped)) {
+    console.warn("[migrations] the prime's own jobs could not be swept from a clone", {
+      projectRef,
+      failed: primeOnlyCronSweep.failed.map((j) => `${j.jobname}: ${j.error}`),
+      skipped: primeOnlyCronSweep.skipped,
+    });
+  }
+
   return {
     results,
     latestApplied,
@@ -3223,6 +3665,7 @@ export async function applyPrimeMigrations(
     chunkCursor,
     chunkCursorDiscarded,
     primeLedgerHoles,
+    primeOnlyCronSweep,
   };
 }
 
@@ -3252,6 +3695,11 @@ export type OversizeApplyOptions = {
   streamSql: (m: { id: string; name: string }) => Promise<AsyncIterable<string>>;
   /** Largest statement to send. Default `DEFAULT_SEED_STATEMENT_BYTES`. */
   maxStatementBytes?: number;
+  /**
+   * The most seed text one pass holds, in UTF-16 code units. Default
+   * `SEED_HELD_CHARS`; a test seam, like the statement size above.
+   */
+  maxHeldChars?: number;
   /** Where the previous pass stopped, if it stopped inside this migration. */
   cursor?: ChunkCursor | null;
   /**
@@ -3265,7 +3713,18 @@ export type OversizeApplyOptions = {
    * statement has been sent.
    */
   bodyIdentity?: (m: { id: string; name: string }) => string | null;
-  /** Called after every statement lands, so the run's heartbeat carries the cursor. */
+  /**
+   * Called after every statement lands, so the run's heartbeat carries the cursor.
+   *
+   * ITS PRESENCE IS ALSO WHAT MAKES A CALLER ONE THAT RESUMES. A caller that
+   * records no progress cannot carry on from a pause, so it is never handed
+   * part of a seed: a seed the pass's window cannot hold to the end is HELD
+   * before its first statement goes (see `unresumable` on `applyChunkedSeed`),
+   * and left to a lane that does record its place. Raised by review on #292 —
+   * the per-clone sync button would otherwise send one window of a 41 MB seed,
+   * ignore the pause, report the clone up to date, and start from statement 0
+   * on every press.
+   */
   onStatementDone?: (progress: {
     migrationId: string;
     name: string;
@@ -3288,6 +3747,24 @@ export type OversizeApplyOptions = {
  * magnitude in size, so the budget is bytes rather than rows.
  */
 export const DEFAULT_SEED_STATEMENT_BYTES = 1_000_000;
+
+/**
+ * How much seed text one pass builds and holds: eight million code units.
+ *
+ * NOT A THROUGHPUT KNOB. A pass sends statements until its budget is spent,
+ * and at the default statement size a pass's budget is spent after a handful —
+ * so this bounds what a pass HOLDS, and a pass that reaches the end of what it
+ * holds before its budget simply pauses and the next pass carries on from the
+ * cursor.
+ *
+ * Sized against the isolate rather than the seed. Eight million code units is
+ * at most 16 MB of heap, two bytes a character being the case the real seed is
+ * in (see `StatementWindow`): under an eighth of the 128 MB ceiling, beside the
+ * corpus, the clients and one statement's request and response. The whole
+ * queue it replaces measured 86.7 MB, and a pass sending its second statement
+ * beside that was killed every time it was tried.
+ */
+export const SEED_HELD_CHARS = 8_000_000;
 
 async function applyChunkedSeed(
   projectRef: string,
@@ -3328,6 +3805,15 @@ async function applyChunkedSeed(
    * `migrationLedgerWrites.pure.ts`.
    */
   ledgerWrite?: string;
+  /**
+   * Set when the caller records no progress (`onStatementDone` absent) and
+   * this pass's window does not reach the end of the seed. Nothing of the seed
+   * was sent: the replay HOLDS it, as it holds a body it has no stream for,
+   * because a caller that cannot resume would otherwise send a part, drop the
+   * cursor that says which part, and report the migration as though nothing
+   * were outstanding.
+   */
+  unresumable?: string;
 }> {
   const { readSeedShape, chunkSeedStatements, SeedShapeError, seedSkeleton } =
     await import("./seedChunking.pure");
@@ -3352,9 +3838,35 @@ async function applyChunkedSeed(
   const identityOf = () => (bodySha === null ? {} : { bodySha });
   const cursorIsForThisBody = cursorAppliesToBody(oversize.cursor, m.id, bodySha);
   const skip = cursorIsForThisBody ? (oversize.cursor?.statementsDone ?? 0) : 0;
-  let index = 0;
+  const maxHeldChars = oversize.maxHeldChars ?? SEED_HELD_CHARS;
+  /*
+    A POSITION, NOT A COUNT OF WHAT WAS HANDED OVER.
+
+    Every statement before `index` is in the clone. It starts at the cursor
+    because the chunker no longer hands this loop the statements before it —
+    it walks them, and builds nothing for them, which is most of the ~87 MB a
+    resumed pass used to hold (see `StatementWindow`). So the loop cannot
+    count its way to a position; it reads each statement's own.
+  */
+  let index = skip;
   let applied = 0;
   let slowestMs = 0;
+  /*
+    How many statements the whole seed comes to, from the chunker once its
+    second read has agreed with the first. It is what separates "the window
+    ran out" from "the seed ended" below — the loop sees both as the same
+    empty iterator, and only the second may be followed by a ledger row.
+    Typed wide on purpose: it is assigned in a callback, and a narrowed `null`
+    would read as permanently null after the loop.
+  */
+  let statementsInSeed = null as number | null;
+  /*
+    Whether the statements this pass is handed run to the END of the seed —
+    from the same report, and typed wide for the same reason. Only a caller
+    that cannot resume needs it: see the refusal at the head of the loop.
+  */
+  let windowFinishesSeed = false as boolean;
+  const resumable = oversize.onStatementDone !== undefined;
   /*
     ONE READ ON A RESUMED PASS.
 
@@ -3420,10 +3932,37 @@ async function applyChunkedSeed(
     }
     for await (const stmt of chunkSeedStatements(await oversize.streamSql(m), shape, {
       maxStatementBytes,
+      window: { skip, maxHeldChars },
+      onPlan: (plan) => {
+        statementsInSeed = plan.total;
+        windowFinishesSeed = skip + plan.held >= plan.total;
+      },
     })) {
-      if (index < skip) {
-        index += 1;
-        continue;
+      /*
+        A CALLER THAT CANNOT RESUME IS NEVER HANDED PART OF A SEED.
+
+        A pause is only a pause to a caller that stores the cursor it returns
+        and passes it back. To one that does not, it is a truncation: the
+        statements sent so far land, the position that says how far they
+        reached is dropped, the migration is neither a success nor a failure in
+        the caller's results — so "up to date" is what gets reported — and the
+        next attempt starts from statement 0 and stops in the same place. So
+        such a caller is held BEFORE the first statement goes, and the seed is
+        left to a lane that records its place. Asked here rather than before
+        the loop because this is the first moment the window's reach is known:
+        the chunker reports it once its second read has agreed with the first.
+      */
+      if (!resumable && !windowFinishesSeed) {
+        return {
+          applied: 0,
+          stoppedEarly: false,
+          cursor: null,
+          upstreamRefusal: null,
+          unresumable:
+            `${m.name} is ${statementsInSeed ?? "an unknown number of"} statement(s), more than one ` +
+            "pass can hold, and this caller records no place to resume from — so nothing of it " +
+            "was sent here; the chunking lane sends it a window at a time",
+        };
       }
       // At least one statement a pass, so a pass never comes back with the
       // cursor where it found it.
@@ -3435,9 +3974,21 @@ async function applyChunkedSeed(
           upstreamRefusal: null,
         };
       }
+      /*
+        The statement must be the NEXT one. The chunker hands over a contiguous
+        run starting at the cursor, and a gap here would record a position past
+        a statement the clone never received — so a gap is refused before it is
+        sent rather than trusted.
+      */
+      if (stmt.index !== index) {
+        throw new Error(
+          `${m.name}: the chunker handed over statement ${stmt.index + 1} where ${index + 1} was ` +
+            "next — refusing to send out of order",
+        );
+      }
       const startedAt = Date.now();
       await runSqlOnProject(projectRef, stmt.sql);
-      index += 1;
+      index = stmt.index + 1;
       applied += 1;
       slowestMs = Math.max(slowestMs, Date.now() - startedAt);
       await oversize.onStatementDone?.({
@@ -3530,7 +4081,19 @@ async function applyChunkedSeed(
     }
     throw e;
   }
-  if (cursorRanPastEnd(skip, index)) {
+  /*
+    THE CHUNKER REPORTS THE SEED'S LENGTH BEFORE IT HANDS ANYTHING OVER, OR IT
+    THROWS. Reaching here without a length is therefore a defect in that
+    contract, and it is refused rather than read as the seed finishing — the
+    reading that writes a ledger row for rows the clone does not hold.
+  */
+  if (statementsInSeed === null) {
+    throw new Error(
+      `${m.name}: the chunker finished without saying how many statements the seed has — ` +
+        "refusing to record it as sent",
+    );
+  }
+  if (cursorRanPastEnd(skip, statementsInSeed)) {
     /*
       A CURSOR THE FILE CANNOT SUPPORT IS NOT A REASON TO CALL THE SEED DONE.
 
@@ -3552,6 +4115,29 @@ async function applyChunkedSeed(
       applied: 0,
       stoppedEarly: true,
       cursor: { migrationId: m.id, statementsDone: 0, ...identityOf() },
+      upstreamRefusal: null,
+    };
+  }
+  if (index < statementsInSeed) {
+    /*
+      THE WINDOW RAN OUT BEFORE THE SEED DID.
+
+      Every statement this pass held has gone and there are more after them.
+      That is a pause exactly as the budget stop above is one — the cursor
+      moves to the next statement and the next pass carries on from it — and
+      NOT the end of the seed, which is what falling through would say: the
+      replay answers `stoppedEarly: false` by writing the migration's ledger
+      row, for a seed a window of which reached the clone.
+    */
+    return {
+      applied,
+      stoppedEarly: true,
+      cursor: {
+        migrationId: m.id,
+        statementsDone: index,
+        shape: shape ?? undefined,
+        ...identityOf(),
+      },
       upstreamRefusal: null,
     };
   }
@@ -4195,8 +4781,39 @@ export async function setCloneSecretValue(
   projectRef: string,
   name: string,
   value: string,
-): Promise<{ ok: true } | { ok: false; error: string }> {
+): Promise<SecretWriteResult> {
   return setCloneSecretValues(projectRef, [{ name, value }]);
+}
+
+/**
+ * What a secret write did. `written` names what was sent; `unchanged` names
+ * what was left out because the project already held exactly that value — the
+ * whole batch or none of it. Names only — never a value, never a digest.
+ */
+export type { SecretWriteResult };
+
+/**
+ * Long enough for a list the endpoint answers in well under a second, short
+ * enough that a slow read cannot hold a sweep: on timeout the write goes ahead
+ * as if the list could not be read.
+ */
+const STORED_DIGEST_READ_TIMEOUT_MS = 10_000;
+
+/**
+ * Name → digest of every secret the project holds, or `null` when the list
+ * could not be read. Never throws: the read only ever SAVES a write.
+ */
+async function readStoredSecretDigests(projectRef: string): Promise<Map<string, string> | null> {
+  try {
+    const res = await fetch(`${MGMT_API}/projects/${projectRef}/secrets`, {
+      headers: headers(),
+      signal: AbortSignal.timeout(STORED_DIGEST_READ_TIMEOUT_MS),
+    });
+    if (!res.ok) return null;
+    return parseStoredSecretDigests((await res.json()) as unknown);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -4208,25 +4825,37 @@ export async function setCloneSecretValue(
  * is scoped to send from — must arrive together or not at all, because the
  * half-written state is indistinguishable from a healthy one at every surface
  * that reads it, and is exactly the state the first clone shipped in.
+ *
+ * And only what differs. Every POST to this endpoint redeploys every edge
+ * function on the project, changed value or not, and the reconcile sweeps
+ * re-assert what they own on every pass — eight redeploys of every function an
+ * hour on each clone before this. The project's list reports a digest per
+ * name, so a batch whose every entry is proven already held sends nothing at
+ * all — and a batch with any entry that differs is sent whole, never filtered,
+ * so a pair cannot be split by a second writer between the read and the write.
+ * The rules, and why nothing but a proof skips a write, are in
+ * `secretWriteDiff.pure.ts`.
  */
 export async function setCloneSecretValues(
   projectRef: string,
   entries: Array<{ name: string; value: string }>,
-): Promise<{ ok: true } | { ok: false; error: string }> {
-  if (entries.length === 0) return { ok: true };
+): Promise<SecretWriteResult> {
+  if (entries.length === 0) return { ok: true, written: [], unchanged: [] };
+  const plan = planSecretWrite(projectRef, entries, await readStoredSecretDigests(projectRef));
+  if (plan.write.length === 0) return { ok: true, written: [], unchanged: plan.unchanged };
   const res = await fetch(`${MGMT_API}/projects/${projectRef}/secrets`, {
     method: "POST",
     headers: headers(),
-    body: JSON.stringify(entries),
+    body: JSON.stringify(plan.write),
   });
   if (!res.ok) {
-    const names = entries.map((e) => e.name).join(", ");
+    const names = plan.write.map((e) => e.name).join(", ");
     return {
       ok: false,
       error: `secrets API ${res.status} writing ${names} — ${(await res.text()).slice(0, 300)}`,
     };
   }
-  return { ok: true };
+  return { ok: true, written: plan.write.map((e) => e.name), unchanged: plan.unchanged };
 }
 
 /**
@@ -5321,7 +5950,7 @@ export async function provisionCloneBackend(
     }
     await onStatusUpdate?.(
       "migrating",
-      `All ${declared.length} edge functions the prime's repository declares are already on the project — nothing to deploy this pass`,
+      `All ${declared.length} edge functions the prime's repository declares for a clone are already on the project — nothing to deploy this pass`,
     );
     edgeFunctions = declared.map((slug) => ({ slug, success: true, skipped: true }));
   } else {

@@ -193,12 +193,15 @@ async function runBackendProvisioning(
     const cachedSecretNames = Array.isArray(cachedScan?.secret_names)
       ? (cachedScan.secret_names as string[])
       : null;
-    const cachedDeclaredSlugs = Array.isArray(cachedScan?.declared_function_slugs)
-      ? (cachedScan.declared_function_slugs as string[])
-      : null;
-    const { shouldSkipFunctionSource, scanIsCacheable } = await import(
+    const { shouldSkipFunctionSource, scanIsCacheable, withoutPrimeOnlyFunctions } = await import(
       /* @vite-ignore */ "@/lib/_server-shims/primeScanCache.pure"
     );
+    // Read through the rule the tree walk applies: a row scanned before the
+    // prime kept its own feature back still names it. See
+    // `withoutPrimeOnlyFunctions`.
+    const cachedDeclaredSlugs = Array.isArray(cachedScan?.declared_function_slugs)
+      ? withoutPrimeOnlyFunctions(cachedScan.declared_function_slugs as string[])
+      : null;
     const skipFunctionSource = shouldSkipFunctionSource({
       resumingSchema,
       cachedSecretNames,
@@ -545,6 +548,44 @@ async function runBackendProvisioning(
           `Repository re-target failed: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
+    }
+
+    /*
+     * The functions this clone carries and the prime does not, from the
+     * clone's OWN repository.
+     *
+     * Every function deployed above came from the prime's tree. A clone
+     * created under the CRM-independent parent also carries `crm-calendar`,
+     * `crm-inbound-message` and `crm-send-message`, built on a `_shared/crm/`
+     * the prime does not have — and without this its CRM front end would call
+     * three functions its project does not run. After the re-target, because
+     * the tree read here is the one the clone will build from.
+     *
+     * Non-fatal, like every per-clone step: a refusal is named in the status
+     * line and the half-hourly catch-up retries it. The prime's declared list
+     * is the snapshot's, read from the prime's tree on every pass; empty only
+     * on a reading nothing should act on, so the lane re-reads it then rather
+     * than refusing on the snapshot's word.
+     */
+    try {
+      const { deployCloneOwnedFunctions, describeCloneOwnedOutcome } = await import(
+        /* @vite-ignore */ "@/lib/_server-shims/cloneOwnedFunctions.server"
+      );
+      const owned = await deployCloneOwnedFunctions({
+        supabase,
+        octokit,
+        cloneId: input.cloneId,
+        primeDeclaredSlugs:
+          snapshot.declaredFunctionSlugs.length > 0 ? snapshot.declaredFunctionSlugs : null,
+        projectRef: result.projectRef,
+      });
+      await updateStatus("migrating", describeCloneOwnedOutcome(owned));
+    } catch (err) {
+      await updateStatus(
+        "migrating",
+        `Clone-owned functions step failed (${err instanceof Error ? err.message : String(err)}) — ` +
+          "the half-hourly catch-up will retry",
+      );
     }
 
     /*
@@ -1263,26 +1304,34 @@ export const setCloneBackendSecret = createServerFn({ method: "POST" })
       /* @vite-ignore */ "@/lib/_server-shims/backend-provisioning.server"
     );
     const res = await setCloneSecretValue(projectRef, data.name, data.value);
-    const now = new Date().toISOString();
-    await supabase.from("clone_backend_secrets").upsert(
-      {
-        clone_id: data.cloneId,
-        name: data.name,
-        status: res.ok ? "set" : "failed",
-        last_set_at: res.ok ? now : null,
-        last_error: res.ok ? null : res.error,
-        set_by: userId,
-      },
-      { onConflict: "clone_id,name" },
+    // A value the project already held is not sent (every send redeploys every
+    // function on the project), and is recorded as held without moving its set
+    // time — `secretLedger.pure.ts`.
+    const { recordSecretLedger } = await import(
+      /* @vite-ignore */ "@/lib/_server-shims/secretLedger.server"
     );
+    const ledgerErr = await recordSecretLedger(supabase, {
+      cloneId: data.cloneId,
+      names: [data.name],
+      result: res,
+      status: "set",
+      setBy: userId,
+      now: new Date().toISOString(),
+    });
+    if (ledgerErr) {
+      console.error("[backend-provisioning] secret ledger upsert failed:", ledgerErr);
+    }
+    const sent = res.ok && res.written.length > 0;
     await supabase.from("audit_log").insert({
       action: "clone_backend.secret_set",
       entity_type: "clone",
       entity_id: data.cloneId,
       actor_user_id: userId,
-      metadata: { name: data.name, ok: res.ok, error: res.ok ? null : res.error },
+      metadata: { name: data.name, ok: res.ok, sent, error: res.ok ? null : res.error },
     });
-    return res.ok ? { ok: true as const } : { ok: false as const, error: res.error };
+    return res.ok
+      ? { ok: true as const, alreadyHeld: !sent }
+      : { ok: false as const, error: res.error };
   });
 
 /**
@@ -1667,9 +1716,14 @@ export const pushCloneSecretForwardsNow = createServerFn({ method: "POST" })
       actorUserId: userId,
       // Names only. A value never reaches an audit row.
       metadata: res.ok
-        ? { written: res.written, outcomes: res.outcomes }
+        ? { written: res.written, unchanged: res.unchanged, outcomes: res.outcomes }
         : { reason: res.reason, error: res.error },
     });
     if (!res.ok) return { ok: false as const, error: res.error, reason: res.reason };
-    return { ok: true as const, written: res.written, outcomes: res.outcomes };
+    return {
+      ok: true as const,
+      written: res.written,
+      unchanged: res.unchanged,
+      outcomes: res.outcomes,
+    };
   });

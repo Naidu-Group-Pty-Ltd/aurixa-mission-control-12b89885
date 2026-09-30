@@ -5,6 +5,7 @@ import {
   declarationsLostBy,
   CONFIG_TOML_PATH,
   declaredFunctionCount,
+  dropFunctionBlocks,
   functionBlocksIn,
   reconcileConfigToml,
 } from "./configTomlReconcile.pure";
@@ -440,5 +441,278 @@ describe("the marker is prose, and prose may not read as a declaration", () => {
     const placeholder = CLONE_OWNED_MARKER.match(/\[functions\.(.{1,20}?)\]/)?.[1];
     expect(placeholder).toBeDefined();
     expect(placeholder).not.toMatch(/^[A-Za-z0-9_-]+$/);
+  });
+});
+
+/*
+  What the prime keeps for itself.
+
+  The prime declares the GoHighLevel account migration's functions; no clone
+  receives them (the owner's decision, 27 Sep 2026). Two of them stand in for
+  twenty-eight here. The first carries a comment written against it, the
+  second ends the file, and `didit-webhook` has a comment AFTER its last key —
+  which belongs to whatever follows, not to the block the removal takes.
+*/
+const PRIME_ONLY = ["migration-dispatcher", "migration-job-control"];
+
+const PRIME_WITH_MIGRATION = `${preamble(PRIME_REF)}
+[functions.aml-cases]
+verify_jwt = true
+
+# Invoked by pg_cron with a signed header, never by a browser.
+[functions.migration-dispatcher]
+verify_jwt = false
+
+[functions.didit-webhook]
+verify_jwt = false
+# Didit signs every delivery; the handler checks it.
+
+[functions.migration-job-control]
+verify_jwt = true
+`;
+
+/** A mirror as every clone is today: prime's file with its own project_id. */
+const MIRROR_WITH_MIGRATION = PRIME_WITH_MIGRATION.replace(PRIME_REF, CLONE_REF);
+
+describe("a clone that does not hold what the prime keeps for itself", () => {
+  const withheldReconcile = (cloneToml = MIRROR_WITH_MIGRATION) =>
+    reconcileConfigToml({
+      primeToml: PRIME_WITH_MIGRATION,
+      cloneToml,
+      ownRef: CLONE_REF,
+      withheld: PRIME_ONLY,
+    });
+
+  it("writes prime's file without those declarations, and nothing else removed", () => {
+    // Stated as the whole file, because the property is what the removal does
+    // NOT take: a comment beside a block, the blank line between two others.
+    const v = withheldReconcile();
+    expect(v.ok, v.ok ? "" : v.reason).toBe(true);
+    if (!v.ok) return;
+    expect(v.merged).toBe(`${preamble(CLONE_REF)}
+[functions.aml-cases]
+verify_jwt = true
+
+[functions.didit-webhook]
+verify_jwt = false
+# Didit signs every delivery; the handler checks it.
+`);
+    expect(v.withheldDropped).toEqual(PRIME_ONLY);
+    expect(v.changed).toBe(true);
+    expect(declaredFunctionCount(v.merged)).toBe(declaredFunctionCount(PRIME_WITH_MIGRATION) - 2);
+  });
+
+  it("keeps every declaration for a clone that still holds the feature", () => {
+    // The tree decides, never the register alone: until its removal pull
+    // request a clone holds all twenty-eight directories, the engine passes
+    // an empty set, and the file must be exactly what it was before this.
+    const without = reconcileConfigToml({
+      primeToml: PRIME_WITH_MIGRATION,
+      cloneToml: MIRROR_WITH_MIGRATION,
+      ownRef: CLONE_REF,
+    });
+    const empty = reconcileConfigToml({
+      primeToml: PRIME_WITH_MIGRATION,
+      cloneToml: MIRROR_WITH_MIGRATION,
+      ownRef: CLONE_REF,
+      withheld: [],
+    });
+    expect(without.ok && empty.ok).toBe(true);
+    if (!without.ok || !empty.ok) return;
+    expect(empty.merged).toBe(without.merged);
+    expect(empty.merged).toBe(MIRROR_WITH_MIGRATION);
+    expect(empty.withheldDropped).toEqual([]);
+    expect(empty.changed).toBe(false);
+  });
+
+  it("does not report the clone's own copies as declarations it lost", () => {
+    // The clone declared them (it is a mirror), and the result does not. The
+    // read-back would ordinarily refuse that as a gate silently closed — and
+    // here there is no gate, because the clone holds no directory behind it.
+    const v = withheldReconcile();
+    expect(v.ok).toBe(true);
+    expect(declarationsLostBy(MIRROR_WITH_MIGRATION, v.ok ? v.merged : "").sort()).toEqual(
+      PRIME_ONLY,
+    );
+  });
+
+  it("never carries the clone's own block for one of them forward", () => {
+    // A clone whose config still declares a prime-only function that the
+    // prime has since stopped declaring must not keep it as "its own": it
+    // holds no directory for it either.
+    const primeWithout = PRIME_WITH_MIGRATION.replace(
+      "\n[functions.migration-job-control]\nverify_jwt = true\n",
+      "",
+    );
+    const v = reconcileConfigToml({
+      primeToml: primeWithout,
+      cloneToml: MIRROR_WITH_MIGRATION,
+      ownRef: CLONE_REF,
+      withheld: PRIME_ONLY,
+    });
+    expect(v.ok, v.ok ? "" : v.reason).toBe(true);
+    if (!v.ok) return;
+    expect(v.carriedForward).toEqual([]);
+    expect(v.merged).not.toContain("migration-job-control");
+    expect(v.merged).not.toContain(CLONE_OWNED_MARKER);
+    // Only what prime declared is reported as dropped from prime's file.
+    expect(v.withheldDropped).toEqual(["migration-dispatcher"]);
+  });
+
+  it("still carries what the clone owns, beside what it does not hold", () => {
+    // The CRM clone is both at once: three functions of its own, and none of
+    // the twenty-eight.
+    const crmWithMigration = `${MIRROR_WITH_MIGRATION}
+[functions.crm-inbound-message]
+verify_jwt = false
+`;
+    const v = withheldReconcile(crmWithMigration);
+    expect(v.ok, v.ok ? "" : v.reason).toBe(true);
+    if (!v.ok) return;
+    expect(v.carriedForward).toEqual(["crm-inbound-message"]);
+    expect(v.withheldDropped).toEqual(PRIME_ONLY);
+    const names = functionBlocksIn(v.merged).map((b) => b.name);
+    expect(names).toEqual(["aml-cases", "didit-webhook", "crm-inbound-message"]);
+    expect(v.merged).toContain(CLONE_OWNED_MARKER);
+  });
+
+  it("is idempotent — a second pass over its own output removes nothing more", () => {
+    const first = withheldReconcile();
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const second = withheldReconcile(first.merged);
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.merged).toBe(first.merged);
+    expect(second.changed).toBe(false);
+  });
+
+  it("reports only the names the prime actually declared", () => {
+    const v = reconcileConfigToml({
+      primeToml: PRIME_WITH_MIGRATION,
+      cloneToml: MIRROR_WITH_MIGRATION,
+      ownRef: CLONE_REF,
+      withheld: [...PRIME_ONLY, "ghl-account-preview"],
+    });
+    expect(v.ok).toBe(true);
+    if (!v.ok) return;
+    expect(v.withheldDropped).toEqual(PRIME_ONLY);
+  });
+
+  it("refuses a result that still declares one, rather than writing it", () => {
+    // `[functions.x] # note` is not a header to this module's reader, so the
+    // removal cannot see it — while the clone's inventory generator counts
+    // it. The read-back is asked of the OUTPUT, by the loosest reading.
+    const annotated = PRIME_WITH_MIGRATION.replace(
+      "[functions.migration-job-control]",
+      "[functions.migration-job-control] # prime-only",
+    );
+    const v = reconcileConfigToml({
+      primeToml: annotated,
+      cloneToml: MIRROR_WITH_MIGRATION,
+      ownRef: CLONE_REF,
+      withheld: PRIME_ONLY,
+    });
+    expect(v.ok).toBe(false);
+    if (v.ok) return;
+    expect(v.reason).toContain("still declares migration-job-control");
+  });
+});
+
+describe("taking a function's blocks out of a config.toml", () => {
+  const names = (...n: string[]) => new Set(n);
+
+  it("returns the file untouched when nothing is named", () => {
+    expect(dropFunctionBlocks(PRIME_WITH_MIGRATION, names())).toBe(PRIME_WITH_MIGRATION);
+  });
+
+  it("takes a comment written against the block with it", () => {
+    const out = dropFunctionBlocks(PRIME_WITH_MIGRATION, names("migration-dispatcher"));
+    expect(out).not.toContain("Invoked by pg_cron");
+    expect(out).toContain("[functions.migration-job-control]");
+  });
+
+  it("leaves a comment after another block's last key where it is", () => {
+    const out = dropFunctionBlocks(PRIME_WITH_MIGRATION, names("migration-job-control"));
+    expect(out).toContain("# Didit signs every delivery; the handler checks it.\n");
+  });
+
+  it("leaves blank-separated blocks blank-separated", () => {
+    const out = dropFunctionBlocks(PRIME_WITH_MIGRATION, names(...PRIME_ONLY));
+    expect(out).not.toMatch(/\n\n\n/);
+    expect(out).toContain("verify_jwt = true\n\n[functions.didit-webhook]");
+  });
+
+  it("keeps how the file ends, with or without a trailing newline", () => {
+    const withNewline = dropFunctionBlocks(PRIME_WITH_MIGRATION, names("migration-job-control"));
+    expect(withNewline.endsWith("checks it.\n")).toBe(true);
+    const bare = PRIME_WITH_MIGRATION.replace(/\n$/, "");
+    const withoutNewline = dropFunctionBlocks(bare, names("migration-job-control"));
+    expect(withoutNewline.endsWith("checks it.")).toBe(true);
+  });
+
+  it("removes a block with no blank line on either side without touching its neighbours", () => {
+    const tight = [
+      "[functions.a]",
+      "verify_jwt = true",
+      "[functions.migration-dispatcher]",
+      "verify_jwt = false",
+      "[functions.b]",
+      "verify_jwt = false",
+    ].join("\n");
+    expect(dropFunctionBlocks(tight, names("migration-dispatcher"))).toBe(
+      ["[functions.a]", "verify_jwt = true", "[functions.b]", "verify_jwt = false"].join("\n"),
+    );
+  });
+
+  it("ends a block at the next section of any kind", () => {
+    const toml = [
+      "[functions.migration-dispatcher]",
+      "verify_jwt = false",
+      "",
+      "[edge_runtime]",
+      'policy = "oneshot"',
+      "",
+    ].join("\n");
+    expect(dropFunctionBlocks(toml, names("migration-dispatcher"))).toBe(
+      ["[edge_runtime]", 'policy = "oneshot"', ""].join("\n"),
+    );
+  });
+
+  it("does not take a function whose name only begins like a withheld one", () => {
+    const toml = "[functions.migration-dispatcher-v2]\nverify_jwt = false\n";
+    expect(dropFunctionBlocks(toml, names("migration-dispatcher"))).toBe(toml);
+  });
+});
+
+describe("how the engine passes the withheld set", () => {
+  const engine = stripComments(readFileSync("src/server/cascade-engine.server.ts", "utf8"));
+
+  it("reads it off the clone's tree before the first pump runs", () => {
+    const decided = engine.indexOf("withheldFunctions = withheldPrimeOnlyFunctions(");
+    const pump = engine.indexOf("reconcileConfigToml({");
+    expect(decided).toBeGreaterThan(-1);
+    expect(pump).toBeGreaterThan(decided);
+  });
+
+  it("hands it to the config pump", () => {
+    const at = engine.indexOf("reconcileConfigToml({");
+    const call = engine.slice(at, engine.indexOf("})", at));
+    expect(call).toContain("withheld: declarationsWithheld");
+  });
+
+  it("builds the pump's set FROM it, adding only what a conversion retires", () => {
+    const at = engine.indexOf("const declarationsWithheld: string[] =");
+    const decl = engine.slice(at, engine.indexOf(";", at));
+    expect(at).toBeGreaterThan(-1);
+    expect(decl).toContain("...withheldFunctions");
+    expect(decl).toContain("...retiredByConversion");
+    expect(decl).toContain(": withheldFunctions");
+  });
+
+  it("never computes it on a notification pass, which reads nothing", () => {
+    const decl = engine.indexOf("let withheldFunctions: string[] = [];");
+    const first = engine.indexOf("withheldFunctions = withheldPrimeOnlyFunctions(");
+    expect(engine.slice(decl, first)).toContain('if (mode !== "notify") {');
   });
 });

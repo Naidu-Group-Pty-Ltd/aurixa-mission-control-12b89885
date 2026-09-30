@@ -50,6 +50,12 @@ export interface TreeBranch {
   toId: string;
   fromRepo: string;
   toRepo: string;
+  /**
+   * The CRM the child records (`clones.crm_mode`), which decides the
+   * routed-name channel of the band drawn on this branch — the same rule the
+   * engine applies, so the diagram shows the boundary a cascade enforces.
+   */
+  toCrmMode?: string | null;
 }
 
 /**
@@ -371,6 +377,7 @@ export function useTreeLayout(
         toId: node.id,
         fromRepo: parentNode.githubRepo,
         toRepo: node.githubRepo,
+        toCrmMode: clone.crm_mode ?? null,
       });
 
       // Layout children

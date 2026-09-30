@@ -147,7 +147,7 @@ export const ACT_POLICY: Record<BlockageClass, ActPolicy> = {
   },
   prime_ledger_hole: {
     kind: "never",
-    why: "The prime has merged a migration it has not run. Nothing here may apply DDL to the prime, and stamping its ledger instead would send tenants a migration whose prerequisite state does not exist — the exact thing rule #71 forbids. It clears when the prime runs the file, or when somebody decides it should not exist.",
+    why: "The prime's ledger does not record a migration its repository carries. Nothing here may apply DDL to the prime, and stamping its ledger instead would send tenants a migration whose prerequisite state does not exist — the exact thing rule #71 forbids. It clears when the prime runs the file, or when somebody decides it should not exist.",
   },
   unclassified: {
     kind: "never",

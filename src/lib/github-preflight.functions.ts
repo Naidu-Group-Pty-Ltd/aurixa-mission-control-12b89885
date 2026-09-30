@@ -10,6 +10,7 @@ import { z } from "zod";
 import { requireAdmin } from "@/integrations/supabase/role-middleware";
 import { countGithubCall } from "@/server/githubUsageMeter";
 import { githubApiHeaders } from "@/server/githubRequestHeaders.pure";
+import { judgeTemplateSource, sameGithubAccount } from "@/lib/githubPreflightTemplate.pure";
 
 const InputSchema = z.object({
   targetOwner: z.string().trim().min(1),
@@ -19,6 +20,13 @@ const InputSchema = z.object({
   // G9: after clone-repo creation, verify the specific repo is reachable
   // by the installation (either "all" selection or explicitly selected).
   targetRepo: z.string().trim().optional().nullable(),
+  // The template is a CRM line's PARENT clone rather than the prime.
+  // Provisioning marks a parent as a template repository itself
+  // (`ensureTemplateRepository`) immediately before the one call that needs
+  // the flag, so an unflagged parent is not a failure here. What can fail is
+  // the marking, and that needs Administration: write — judged below where
+  // it can be.
+  templateFlagSetByProvisioning: z.boolean().optional(),
 });
 
 export type GithubPreflightResult = {
@@ -36,6 +44,14 @@ export type GithubPreflightResult = {
   targetRepoAccessible?: boolean | null;
   contentsWritePermission?: boolean | null;
   workflowsPermission?: boolean | null;
+  /** Administration: write — what marking a repository as a template needs. */
+  administrationPermission?: boolean | null;
+  /**
+   * The template is not yet flagged, and provisioning will flag it before
+   * copying from it. Only ever true on a CRM parent: the prime path does not
+   * set the flag, so there it stays a failure.
+   */
+  templateWillBeMarked?: boolean;
   message?: string;
   hint?: string;
   installUrl?: string;
@@ -143,6 +159,8 @@ export const checkGithubAppPreflight = createServerFn({ method: "POST" })
     const perms = install.permissions ?? {};
     const contentsWritePermission = perms.contents === "write" || perms.contents === "admin";
     const workflowsPermission = perms.workflows === "write" || perms.workflows === "admin";
+    const administrationPermission =
+      perms.administration === "write" || perms.administration === "admin";
     const repositorySelection = install.repository_selection ?? null;
 
     // Mint installation token once — reused for template + target repo checks.
@@ -196,10 +214,17 @@ export const checkGithubAppPreflight = createServerFn({ method: "POST" })
       targetRepoAccessible = r === null ? false : r.ok;
     }
 
-    const templateOk =
-      data.method === "template"
-        ? templateAccessible !== false && templateRepoIsTemplate !== false
-        : true;
+    // An unflagged CRM parent is flagged by provisioning itself; see
+    // `githubPreflightTemplate.pure.ts` for when that can be judged here.
+    const template = judgeTemplateSource({
+      method: data.method,
+      accessible: templateAccessible,
+      isTemplate: templateRepoIsTemplate,
+      flagSetByProvisioning: data.templateFlagSetByProvisioning === true,
+      inTargetAccount: sameGithubAccount(data.templateOwner, owner),
+      administrationPermission,
+    });
+    const templateOk = template.ok;
     const targetRepoOk = data.targetRepo ? targetRepoAccessible === true : true;
     const permsOk = contentsWritePermission !== false;
     const ok = templateOk && targetRepoOk && permsOk;
@@ -210,6 +235,11 @@ export const checkGithubAppPreflight = createServerFn({ method: "POST" })
       message = `App installed on ${accountType?.toLowerCase()} "${owner}" (installation #${installationId}${
         repositorySelection ? `, selection=${repositorySelection}` : ""
       }).`;
+      if (template.willBeMarked) {
+        message +=
+          ` ${data.templateOwner}/${data.templateRepo} is not yet marked as a template repository;` +
+          " provisioning marks it immediately before copying from it.";
+      }
     } else if (!permsOk) {
       message = "GitHub App installation is missing 'contents: write' permission.";
       hint = "Update the App's repository permissions and re-authorize the installation.";
@@ -223,6 +253,13 @@ export const checkGithubAppPreflight = createServerFn({ method: "POST" })
       message = "App installed, but the template repo is not accessible to this installation.";
       hint =
         "Open the Aurixa App installation on the target org and grant it access to the template repo.";
+    } else if (template.unmarkable) {
+      message =
+        `${data.templateOwner}/${data.templateRepo} is not marked as a template repository, and the ` +
+        "Aurixa App cannot mark it: that needs Administration: write, which this installation does not have.";
+      hint =
+        `In ${data.templateOwner}/${data.templateRepo}, Settings → General → check 'Template repository' ` +
+        "(once — it stays set), or grant the App Administration: write. Then re-check.";
     } else if (templateRepoIsTemplate === false) {
       message =
         "Repo exists, but it is not marked as a GitHub template. Enable 'Template repository' in its Settings.";
@@ -243,6 +280,8 @@ export const checkGithubAppPreflight = createServerFn({ method: "POST" })
       targetRepoAccessible,
       contentsWritePermission,
       workflowsPermission,
+      administrationPermission,
+      templateWillBeMarked: template.willBeMarked,
       message,
       hint,
     };

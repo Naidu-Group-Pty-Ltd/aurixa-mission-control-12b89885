@@ -328,7 +328,8 @@ export const NAV_SECTIONS: NavSection[] = [
         to: "/agreements",
         label: "Agreements",
         icon: FileSignature,
-        keywords: "sla service level agreement docusign contract sign envelope signature",
+        keywords:
+          "subscription offer launch growth scale sla service level agreement docusign contract sign envelope signature issuing profile",
       },
     ],
   },

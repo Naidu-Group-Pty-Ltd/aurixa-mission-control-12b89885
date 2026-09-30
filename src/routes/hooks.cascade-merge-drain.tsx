@@ -61,7 +61,7 @@ export const Route = createFileRoute("/hooks/cascade-merge-drain")({
           // until the end of time. It is in the response body, where somebody
           // asking gets an answer and nobody else is told twice.
           //
-          // `truncated` DOES trigger a write, and it is the one addition to
+          // `truncated` DOES trigger a write, and it was the first addition to
           // that rule. A run that stopped at its budget with clones still
           // unvisited is not a quiet fleet — it is the fleet outgrowing one
           // run — and the whole reason the old starvation went unnoticed for
@@ -69,6 +69,10 @@ export const Route = createFileRoute("/hooks/cascade-merge-drain")({
           // produced the identical silence. It is bounded, unlike
           // `foreignRepo`: it appears only while there is genuinely more work
           // than a run can hold, and stops the moment there is not.
+          //
+          // `noticesCleared` writes too: a standing alarm taken down because
+          // its pull request closed is a change to what an operator is being
+          // told, and it happens once per pull request, never on repeat.
           if (
             report.merged > 0 ||
             report.reconciled > 0 ||
@@ -76,6 +80,7 @@ export const Route = createFileRoute("/hooks/cascade-merge-drain")({
             report.advanced > 0 ||
             report.tidied > 0 ||
             report.repaired > 0 ||
+            report.noticesCleared > 0 ||
             report.failed > 0 ||
             report.truncated
           ) {
@@ -86,7 +91,31 @@ export const Route = createFileRoute("/hooks/cascade-merge-drain")({
             });
           }
 
-          return new Response(JSON.stringify({ success: true, ...report }), {
+          // CRM conversions finish here too: a conversion is one pull request
+          // the platform never merges, and this is the pass that already
+          // reads pull requests every five minutes. Its failure is its own
+          // and never costs the cascade drain its report.
+          let conversions: Record<string, unknown> | null = null;
+          try {
+            const { drainCrmConversions, conversionDrainIsNews } =
+              await import("@/server/crmConversion.server");
+            const { getAppOctokit } = await import("@/server/github-app.server");
+            const convReport = await drainCrmConversions(supabaseAdmin, getAppOctokit());
+            conversions = convReport as unknown as Record<string, unknown>;
+            if (conversionDrainIsNews(convReport)) {
+              await writeAuditLog({
+                action: "crm_conversion_drain",
+                entityType: "cron",
+                metadata: conversions,
+              });
+            }
+          } catch (convErr) {
+            const why = convErr instanceof Error ? convErr.message : String(convErr);
+            console.error("[hooks/cascade-merge-drain] CRM conversions:", why);
+            conversions = { error: why };
+          }
+
+          return new Response(JSON.stringify({ success: true, ...report, conversions }), {
             headers: { "Content-Type": "application/json" },
           });
         } catch (e) {

@@ -29,8 +29,11 @@ import {
   getFileContent,
   OversizeFileError,
   copyBlobByStream,
+  readBlobTextsBatched,
+  repoFileFromExactText,
   type RepoRef,
 } from "./github-app.server";
+import { isBatchableTextMode, type TextWant } from "./cascade/primeTextBatch.pure";
 import { cascadeEventStatus, summariseCascade } from "./cascade/prReconcile.pure";
 import type { CascadeBudget, CascadeRunResult } from "@/lib/cascadeRunOutcome";
 import {
@@ -59,6 +62,43 @@ import {
 } from "./cascade/deletionPropagation.pure";
 import { probeDeletions, probeHeldPaths } from "./cascadeDeletions.server";
 import {
+  describeSpecsBroughtAcross,
+  leftBehindSpecHold,
+  MAX_LEFT_BEHIND_PROBES,
+  MAX_SHIM_HOPS,
+  pathsTheDeliveryChanges,
+  steadyStatePumpPaths,
+  specsBothSidesHoldDifferently,
+  specsLeftBehind,
+  subjectsOfKeptSpec,
+  withLeftBehindNote,
+  type CarryBasis,
+  type LeftBehindCutShort,
+  type LeftBehindSpec,
+  type LeftBehindTouch,
+  type SpecSide,
+} from "./cascade/specsLeftBehind.pure";
+import { gitBlobSha } from "./cascade/gitBlobSha.pure";
+import {
+  MAX_STRANDED_PROBES,
+  decideStrandedRefresh,
+  describeStrandedFunctions,
+  strandedFilesToProbe,
+  strandedFunctionFiles,
+  strandedRefreshPaths,
+  strandedSuffixFor,
+  type StrandedVerdict,
+} from "./cascade/strandedFunctions.pure";
+import {
+  bridgeCandidates,
+  bridgeSuffixFor,
+  bridgesOwed,
+  describeBridges,
+  type OwedBridge,
+} from "./cascade/reExportBridges.pure";
+import { MAX_OUTSIDE_ROOT_PROBES, outsideRootCandidates } from "./cascade/outsideRootSubjects.pure";
+import { decodeBase64Utf8, fetchBlobTextsBatched } from "./prime-backend.server";
+import {
   decideHoldRelease,
   describeHoldReleases,
   holdReleaseSuffixFor,
@@ -73,6 +113,23 @@ import {
   declaredFunctionCount,
   reconcileConfigToml,
 } from "./cascade/configTomlReconcile.pure";
+import { describeWithheldFunctions, withheldPrimeOnlyFunctions } from "./primeOnlyFeatures.pure";
+import {
+  MAX_CONVERSION_DELETIONS,
+  OPEN_CONVERSION_STATUSES,
+  conversionBranchName,
+  conversionCommitSubject,
+  conversionExclusions,
+  conversionLead,
+  conversionTitle,
+  conversionWithoutDelivery,
+  decideConversionDeletion,
+  describeConversionDeletions,
+  describeRetiredFunctions,
+  functionsRetiredByConversion,
+  retiredFunctionsKept,
+} from "./crmConversion.pure";
+import type { CrmMode } from "@/lib/crmMode.pure";
 import {
   SECURITY_REGISTRY_PATH,
   reconcileSecurityRegistry,
@@ -81,6 +138,7 @@ import {
   FUNCTION_COUNT_RATCHET_PATH,
   SECURITY_INVENTORY_PATH,
   cloneOnlyEdgeFunctions,
+  describeFunctionSetDifference,
   functionCountRatchetHold,
   securityInventoryHold,
 } from "./cascade/securityInventoryHold.pure";
@@ -93,6 +151,7 @@ import {
   describeKeptCounts,
   reconcileEdgeTypecheckBaseline,
 } from "./cascade/edgeTypecheckBaselineReconcile.pure";
+import { API_SURFACE_PATH, reconcileApiSurface } from "./cascade/apiSurfaceReconcile.pure";
 import {
   MAX_SUBJECTS_CARRIED,
   orphanSpecHoldAfterCarry,
@@ -191,6 +250,40 @@ export type ClonePlan = {
   onlyInClone: number;
   unprobedDeletions: number;
   summary: string;
+  /**
+   * A CRM conversion only: the edge functions the proposal takes out of the
+   * clone's tree, and the routing holds it saw past. Absent on a cascade.
+   */
+  conversion?: {
+    retiredFunctions: string[];
+    releasedHolds: string[];
+    refusal: string | null;
+  };
+};
+
+/**
+ * What turns `processClone` into a CRM conversion
+ * (`crmConversion.pure.ts`). The caller supplies the TARGET line's head as
+ * `primeRef`/`sourceSha`, the clone with `crm_mode` already set to the target
+ * (so the membrane is the target line's), and `provenance` naming the head and
+ * the prime commit it carries.
+ */
+export type ConversionDelivery = {
+  conversionId: string;
+  cloneName: string;
+  fromMode: CrmMode;
+  toMode: CrmMode;
+  /** The tree the clone is leaving — what removals are keyed on. */
+  leaving: { ref: RepoRef; label: string };
+  targetLabel: string;
+  cautions: string[];
+  /** Called with the proposal once it exists. Never on a dry run. */
+  onProposal?: (proposal: {
+    number: number;
+    url: string;
+    branch: string;
+    headSha: string;
+  }) => Promise<void> | void;
 };
 type SupabaseLike = SupabaseClient<Database>;
 
@@ -628,6 +721,32 @@ export async function executeCascade(
   /** Reasons, in the order the loop met them. Non-empty ⇒ the event is held. */
   const lineageHolds: string[] = [];
 
+  // ── CRM conversions: a clone changing line receives no cascade ──────────
+  //
+  // An open conversion is a pull request built from the TARGET line's tree;
+  // a cascade from the line the clone is leaving would propose the opposite
+  // at the same time, and whichever merged second would undo the other. So
+  // the cascade stands down for that clone — `skipped`, with the reason, and
+  // no pointer moved: the conversion's own finaliser sets the pointer to what
+  // it delivered, and the new line's next cascade carries on from there.
+  // A failed read holds nobody: the conversion's branch is one no cascade
+  // machinery recognises, so the worst a missed hold costs is a second pull
+  // request a person sees beside it.
+  const openConversions = new Map<string, number | null>();
+  if (cloneIds.length > 0) {
+    const { data: convRows, error: convErr } = await supabase
+      .from("clone_crm_conversions")
+      .select("clone_id, pr_number")
+      .in("clone_id", cloneIds)
+      .in("status", [...OPEN_CONVERSION_STATUSES]);
+    if (convErr) {
+      console.warn(
+        `[cascade] ${event.id}: could not read open CRM conversions: ${convErr.message}`,
+      );
+    }
+    for (const row of convRows ?? []) openConversions.set(row.clone_id, row.pr_number);
+  }
+
   // Bounded in time, and a stop is a pause rather than a death.
   //
   // A fleet event processes every queued clone in this one loop, inside one
@@ -680,6 +799,8 @@ export async function executeCascade(
       last_synced_sha: string | null;
       /** Which clone this one receives from. NULL ⇒ prime. */
       parent_clone_id: string | null;
+      /** Which CRM it runs. NULL ⇒ not recorded; decides its membrane's routed-name channel. */
+      crm_mode: string | null;
     } | null;
 
     if (!clone) {
@@ -707,6 +828,29 @@ export async function executeCascade(
         .eq("id", r.id);
       await supabase.from("clones").update({ sync_status: "failed" }).eq("id", clone.id);
       failed++;
+      continue;
+    }
+
+    if (openConversions.has(clone.id)) {
+      // Held exactly as a lineage hold is: left `queued` with its place kept,
+      // and the event paced rather than finished. Marking it `skipped` would
+      // consume this delivery for good — a conversion that is then cancelled,
+      // or whose target head predates this revision, would leave the clone
+      // without it until some later commit happened to make a new event.
+      const pr = openConversions.get(clone.id);
+      const why =
+        `a CRM conversion is open for ${clone.name}` +
+        `${pr ? ` (PR #${pr})` : ""}; merging or closing it releases this clone`;
+      lineageHolds.push(`${clone.name}: ${why}`);
+      const { error: holdError } = await supabase
+        .from("cascade_results")
+        .update({ error_message: `Held: ${why}.` })
+        .eq("id", r.id);
+      if (holdError) {
+        throw new Error(
+          `cascade ${event.id}: could not record ${clone.name}'s conversion hold: ${holdError.message}`,
+        );
+      }
       continue;
     }
 
@@ -1181,42 +1325,158 @@ export async function executeCascade(
 }
 
 /**
- * Rebuild one clone's open cascade proposal on the branch as it now stands.
+ * Where ONE clone reads its tree from, for the two callers that act on a
+ * single clone outside the live pass: the proposal repair and the dry run.
  *
- * This is the repair path for a conflicted proposal, and it is deliberately
- * not a new mechanism: it runs the SAME `processClone` an ordinary cascade
- * runs, which reads the clone's current head, re-partitions against the
- * clone's exclusions, re-runs both held-file guards, finds the open proposal
- * and force-updates it. A conflict cannot survive that, because the rebuilt
- * commit's parent IS the branch head — see `cascade/proposalRepair.pure.ts`.
+ * The live pass resolves this inline, against parent rows it read once and
+ * keeps current as it delivers them. These two callers used to resolve
+ * nothing: both built `primeRef` straight from `prime_config`, so with lineage
+ * on, a repair of NPC Test's proposal would have been rebuilt from the PRIME'S
+ * tree rather than the Client Dashboard's — every exclusion, clone-owned file
+ * and membrane refusal on the parent's edge skipped, and force-pushed over a
+ * branch that had been built from the parent. One decision, `resolveCascadeSource`,
+ * now answers all three callers, and this is the network half of it for a
+ * single clone.
  *
- * It re-bases and never RE-SCOPES. `sourceSha` is the prime commit the
- * proposal already promised, so the rebuilt proposal delivers exactly what its
- * cascade event says it delivers. Quietly upgrading the payload to prime's
- * latest would be one CI run cheaper and would make `cascade_events.source_sha`
- * describe something that event never carried.
- *
- * The caller owns the safety check. `processClone` force-updates the proposal
- * branch, so calling this on a branch somebody has committed to destroys their
- * work — `decideProposalRepair` is what stands in front of it.
+ * It never falls back to prime. A parent that is not ready, not found or not
+ * readable is a HOLD, for the same reason the live pass holds: a source that
+ * cannot be read is not a source that is empty, and prime's tree is not what
+ * a routed child is configured to receive.
  */
-export async function regenerateCloneProposal(args: {
+export type CloneReadSource =
+  | {
+      kind: "read";
+      /** The repository whose tree the clone copies. */
+      ref: RepoRef;
+      /** The head of `ref`: prime's commit, or the parent's branch head. */
+      sha: string;
+      /** Set only when the parent supplies the tree. See `processClone`. */
+      provenance?: { label: string; deliveredSha: string };
+    }
+  | { kind: "hold"; why: string };
+
+export async function resolveCloneReadSource(args: {
+  supabase: SupabaseLike;
+  octokit: ReturnType<typeof getAppOctokit>;
+  prime: {
+    github_owner: string;
+    github_repo: string;
+    default_branch: string | null;
+    cascade_follows_lineage: boolean | null;
+  };
+  /** `clones.parent_clone_id` of the clone being built. NULL ⇒ prime. */
+  parentCloneId: string | null;
+  /** The PRIME commit this delivery carries, whichever repository is read. */
+  primeSha: string;
+}): Promise<CloneReadSource> {
+  const { supabase, octokit, prime, parentCloneId, primeSha } = args;
+  const followsLineage = prime.cascade_follows_lineage === true;
+
+  let parent: ParentCloneRow | null = null;
+  let parentReadFailed = false;
+  if (followsLineage && parentCloneId) {
+    const { data, error } = await supabase
+      .from("clones")
+      .select("id, name, github_owner, github_repo, default_branch, last_synced_sha")
+      .eq("id", parentCloneId)
+      .maybeSingle();
+    // Bound, never discarded: `resolveCascadeSource` reads a failed query as
+    // a hold, and only a checked error can tell it the read failed.
+    if (error) parentReadFailed = true;
+    parent = (data as ParentCloneRow | null) ?? null;
+  }
+
+  const decision = resolveCascadeSource({
+    followsLineage,
+    parentCloneId,
+    parent,
+    parentReadFailed,
+    primeSha,
+  });
+  if (decision.kind === "hold") return decision;
+  if (decision.kind === "prime") {
+    return {
+      kind: "read",
+      ref: {
+        owner: prime.github_owner,
+        repo: prime.github_repo,
+        branch: prime.default_branch || "main",
+      },
+      sha: primeSha,
+    };
+  }
+
+  try {
+    const { data: parentBranch } = await octokit.repos.getBranch({
+      owner: decision.ref.owner,
+      repo: decision.ref.repo,
+      branch: decision.ref.branch,
+    });
+    return {
+      kind: "read",
+      ref: decision.ref,
+      sha: parentBranch.commit.sha,
+      provenance: { label: decision.label, deliveredSha: primeSha },
+    };
+  } catch (e) {
+    return {
+      kind: "hold",
+      why:
+        `Could not read parent ${decision.ref.owner}/${decision.ref.repo}@` +
+        `${decision.ref.branch}: ${e instanceof Error ? e.message : "unknown"}`,
+    };
+  }
+}
+
+/**
+ * Everything a proposal rebuild reads before it may write: the clone, and the
+ * source its tree comes from. Built only by `prepareProposalRebuild`, so a
+ * rebuild cannot be asked for without the source having been resolved.
+ */
+export type ProposalRebuild = {
+  /** Where the rebuilt proposal reads its tree. The parent's, for a routed child. */
+  source: Extract<CloneReadSource, { kind: "read" }>;
+  clone: {
+    id: string;
+    name: string;
+    github_owner: string;
+    github_repo: string;
+    default_branch: string;
+    sync_scope: string | null;
+    crm_mode: string | null;
+  };
+};
+
+/**
+ * Read what a rebuild needs and decide where it reads from — WITHOUT writing
+ * anything, so the repair can ask it before counting an attempt.
+ *
+ * That ordering is the point of splitting it from the rebuild. The repair
+ * records its attempt before it rebuilds, so a crashing rebuild still counts
+ * and the loop guard still guards. A child whose parent does not carry the
+ * promised prime commit yet has not crashed; it is waiting, and counting the
+ * wait as an attempt would spend its repair budget on a parent's merge queue.
+ *
+ * `sourceSha` is the PRIME commit the proposal already promised. For a clone
+ * that reads prime it is also the commit read; for a routed child the parent
+ * must carry exactly that commit, or this is a hold — the same rule the live
+ * pass applies, through the same `resolveCascadeSource`.
+ */
+export async function prepareProposalRebuild(args: {
   supabase: SupabaseLike;
   octokit: ReturnType<typeof getAppOctokit>;
   cloneId: string;
   /** The prime SHA this proposal already promised. Never prime's latest. */
   sourceSha: string;
-  mode: Database["public"]["Enums"]["cascade_mode"];
-}): Promise<CascadeResultUpdate> {
-  const { supabase, octokit, cloneId, sourceSha, mode } = args;
+}): Promise<{ kind: "ready"; rebuild: ProposalRebuild } | { kind: "hold"; why: string }> {
+  const { supabase, octokit, cloneId, sourceSha } = args;
 
   const [primeRes, cloneRes] = await Promise.all([
     supabase.from("prime_config").select("*").limit(1).maybeSingle(),
-    supabase
-      .from("clones")
-      .select("id, name, github_owner, github_repo, default_branch, sync_scope")
-      .eq("id", cloneId)
-      .maybeSingle(),
+    // `*` rather than a column list: a column a deployment has not migrated
+    // yet (`crm_mode`, before 20260928100000) reads as absent rather than
+    // failing the whole repair with 42703.
+    supabase.from("clones").select("*").eq("id", cloneId).maybeSingle(),
   ]);
   if (primeRes.error) throw new Error(`Could not read prime config: ${primeRes.error.message}`);
   if (cloneRes.error) throw new Error(`Could not read clone ${cloneId}: ${cloneRes.error.message}`);
@@ -1230,23 +1490,79 @@ export async function regenerateCloneProposal(args: {
     throw new Error(`Clone ${cloneId} has no repository`);
   }
 
+  const source = await resolveCloneReadSource({
+    supabase,
+    octokit,
+    prime: {
+      github_owner: prime.github_owner,
+      github_repo: prime.github_repo,
+      default_branch: prime.default_branch,
+      cascade_follows_lineage: prime.cascade_follows_lineage ?? null,
+    },
+    parentCloneId: clone.parent_clone_id ?? null,
+    primeSha: sourceSha,
+  });
+  if (source.kind === "hold") return source;
+
+  return {
+    kind: "ready",
+    rebuild: {
+      source,
+      clone: {
+        id: clone.id,
+        name: clone.name ?? clone.github_repo,
+        github_owner: clone.github_owner,
+        github_repo: clone.github_repo,
+        default_branch: clone.default_branch || "main",
+        sync_scope: clone.sync_scope,
+        crm_mode: clone.crm_mode ?? null,
+      },
+    },
+  };
+}
+
+/**
+ * Rebuild one clone's open cascade proposal on the branch as it now stands.
+ *
+ * This is the repair path for a conflicted proposal, and it is deliberately
+ * not a new mechanism: it runs the SAME `processClone` an ordinary cascade
+ * runs, which reads the clone's current head, re-partitions against the
+ * clone's exclusions, re-runs both held-file guards, finds the open proposal
+ * and force-updates it. A conflict cannot survive that, because the rebuilt
+ * commit's parent IS the branch head — see `cascade/proposalRepair.pure.ts`.
+ *
+ * It re-bases and never RE-SCOPES. The rebuild delivers the prime commit the
+ * proposal already promised, not prime's latest: quietly upgrading the payload
+ * would be one CI run cheaper and would make `cascade_events.source_sha`
+ * describe something that event never carried.
+ *
+ * And it reads from where the live pass read. `rebuild.source` is the parent's
+ * branch for a routed child, carrying the promised commit, with `provenance`
+ * keeping the labels on the parent and the ledger on prime — the same three
+ * values the live loop hands `processClone`. Built from prime instead, a
+ * repair of NPC Test's proposal would force-push the prime's tree over a
+ * branch built from the Client Dashboard's.
+ *
+ * The caller owns the safety check. `processClone` force-updates the proposal
+ * branch, so calling this on a branch somebody has committed to destroys their
+ * work — `decideProposalRepair` is what stands in front of it.
+ */
+export async function regenerateCloneProposal(args: {
+  supabase: SupabaseLike;
+  octokit: ReturnType<typeof getAppOctokit>;
+  /** From `prepareProposalRebuild`, and only from there. */
+  rebuild: ProposalRebuild;
+  mode: Database["public"]["Enums"]["cascade_mode"];
+}): Promise<CascadeResultUpdate> {
+  const { supabase, octokit, rebuild, mode } = args;
+
   return processClone({
     octokit,
-    primeRef: {
-      owner: prime.github_owner,
-      repo: prime.github_repo,
-      branch: prime.default_branch || "main",
-    },
-    sourceSha,
+    primeRef: rebuild.source.ref,
+    sourceSha: rebuild.source.sha,
+    provenance: rebuild.source.provenance,
     mode,
-    clone: {
-      id: clone.id,
-      name: clone.name ?? clone.github_repo,
-      github_owner: clone.github_owner,
-      github_repo: clone.github_repo,
-      default_branch: clone.default_branch || "main",
-      sync_scope: clone.sync_scope,
-    },
+    clone: rebuild.clone,
     supabase,
     // A repair carries no scope filter of its own: the clone's own installed
     // modules and exclusions decide what it receives, exactly as on the run
@@ -1274,6 +1590,11 @@ export async function processClone(args: {
     github_repo: string;
     default_branch: string;
     sync_scope: string | null;
+    /**
+     * `clones.crm_mode`, when recorded. It decides the routed-name channel of
+     * this clone's membrane — see `membraneInto` — and nothing else here.
+     */
+    crm_mode?: string | null;
   };
   supabase: SupabaseLike;
   scopeFilter: Record<string, unknown> | null;
@@ -1322,8 +1643,18 @@ export async function processClone(args: {
     /** The PRIME commit this delivery carries, whatever repo it was read from. */
     deliveredSha: string;
   };
+  /**
+   * Build a CRM conversion instead of a cascade. See `ConversionDelivery`.
+   * Removals are keyed on the line the clone leaves, the proposal lives on a
+   * branch the cascade's own machinery never recognises, and it is proposed
+   * in `pr` mode whatever mode is asked — merging it is the conversion.
+   */
+  conversion?: ConversionDelivery;
 }): Promise<CascadeResultUpdate> {
-  const { octokit, primeRef, sourceSha, mode, clone, supabase, scopeFilter } = args;
+  const { octokit, primeRef, sourceSha, clone, supabase, scopeFilter } = args;
+  const conversion = args.conversion ?? null;
+  // A conversion is never merged by the platform, and never a drift notice.
+  const mode: Database["public"]["Enums"]["cascade_mode"] = conversion ? "pr" : args.mode;
   const dryRun = args.dryRun === true;
 
   /** What a label names. `prime` unless this clone read from its parent. */
@@ -1340,8 +1671,11 @@ export async function processClone(args: {
   // routed by lineage, so a child's membrane is the one on ITS edge rather
   // than the one prime sits behind. An edge the registry does not name
   // resolves to the standing organs and no new opinion, so every clone that
-  // existed before this behaves exactly as it did.
-  const membrane = membraneInto(clone.github_repo, primeRef.repo);
+  // existed before this behaves exactly as it did — unless the clone RECORDS
+  // its CRM, which decides the routed-name channel whatever edge it sits on:
+  // a clone provisioned under a CRM line, or converted to the other one, has
+  // an edge nobody measured here.
+  const membrane = membraneInto(clone.github_repo, primeRef.repo, clone.crm_mode);
 
   // Read what this clone is allowed to receive BEFORE deciding anything else.
   //
@@ -1353,12 +1687,25 @@ export async function processClone(args: {
     .from("clone_sync_exclusions")
     .select("pattern, reason, note")
     .eq("clone_id", clone.id);
-  const exclusions = requireExclusions(
+  const recordedExclusions = requireExclusions(
     clone.id,
     exclusionRes.data as SyncExclusion[] | null,
     exclusionRes.error,
   );
-  if (isMirror) assertMirrorPolicy(clone.id, exclusions);
+  if (isMirror) assertMirrorPolicy(clone.id, recordedExclusions);
+  if (conversion && !isMirror) {
+    // `judgeConversion` refuses a module-scoped clone by name; this is the
+    // engine refusing to be the one that finds out otherwise.
+    throw new Error(
+      `A CRM conversion needs a mirror clone; ${clone.name} is ${clone.sync_scope ?? "unscoped"}`,
+    );
+  }
+  // A conversion sees past exactly the routing holds — the files the target
+  // line's copy of is the conversion. Every other exclusion stands.
+  const releasedRoutingHolds = conversion ? conversionExclusions(recordedExclusions).released : [];
+  const exclusions = conversion
+    ? conversionExclusions(recordedExclusions).exclusions
+    : recordedExclusions;
 
   // This clone's own Supabase project, for `backendIdentityHold` below.
   //
@@ -1470,6 +1817,20 @@ export async function processClone(args: {
   let cloneShaByPath: ReadonlyMap<string, string> | null = null;
   /** Prime's blob SHA per path, when its listing was complete. */
   let primeShaByPath: ReadonlyMap<string, string> | null = null;
+  /**
+   * Prime's blob size and git mode per path, from the same listing. What lets
+   * prime's text be read a batch at a time by blob id — see
+   * `prefetchPrimeText` below. `null` exactly when `primeShaByPath` is.
+   */
+  let primeSizeByPath: ReadonlyMap<string, number> | null = null;
+  /**
+   * Every prime path a module-scoped clone's scope sends, BEFORE the tree
+   * narrowing: the installed globs plus the repository invariants. What a
+   * stranded Edge Function is stranded from. `null` on a mirror, whose scope
+   * is the whole tree.
+   */
+  let widenedScope: ReadonlySet<string> | null = null;
+  let primeModeByPath: ReadonlyMap<string, string> | null = null;
   if (isMirror) {
     const [primeTree, cloneTree] = await Promise.all([
       listTreeEntries(octokit, primeRef),
@@ -1489,6 +1850,8 @@ export async function processClone(args: {
     }
     cloneShaByPath = cloneTree.entries;
     primeShaByPath = primeTree.entries;
+    primeSizeByPath = primeTree.sizes;
+    primeModeByPath = primeTree.modes;
     for (const [path, sha] of cloneTree.entries) {
       if (!primeTree.entries.has(path)) {
         onlyInClone++;
@@ -1529,6 +1892,7 @@ export async function processClone(args: {
       primeRef,
       globsForModuleScopedClone(installedGlobs),
     );
+    widenedScope = new Set(candidatePaths);
     scopeLabel = `installed modules + ${REPOSITORY_INVARIANTS.length} repository invariant(s)`;
     /*
       Every prime path inside the INSTALLED globs — the module's whole section,
@@ -1577,6 +1941,8 @@ export async function processClone(args: {
       );
       cloneShaByPath = cloneTree.entries;
       primeShaByPath = primeTree.entries;
+      primeSizeByPath = primeTree.sizes;
+      primeModeByPath = primeTree.modes;
     }
 
     // The clone's own tree, read for one more reason: a module-scoped cascade
@@ -1608,6 +1974,218 @@ export async function processClone(args: {
       for (const path of primeInScope) primeDirectories.add(directoryOf(path));
     }
   }
+
+  // ── Recorded operator approvals for this clone ────────────────────────────
+  //
+  // Two of the engine's own refusals end in "a person has to decide", and
+  // `cascade_path_approvals` is where the decision lives: `overwrite` releases
+  // one held `manual_reconcile` path, `bulk_deletion` admits a deletion set
+  // past the cap. Read FAIL-SAFE, not fail-closed: an approval only ever
+  // WIDENS what a pass may do, so an unreadable table means no approvals and
+  // the pass runs exactly as it would have before the table existed.
+  const overwriteApproved = new Set<string>();
+  const deletionApproved = new Set<string>();
+  {
+    const approvalsRes = await supabase
+      .from("cascade_path_approvals")
+      .select("kind, path")
+      .eq("clone_id", clone.id)
+      .is("revoked_at", null)
+      .gt("expires_at", new Date().toISOString());
+    if (approvalsRes.error) {
+      console.warn(
+        `[cascade] approvals unreadable for clone ${clone.id} — proceeding with none: ${approvalsRes.error.message}`,
+      );
+    }
+    for (const row of (approvalsRes.data ?? []) as Array<{ kind: string; path: string }>) {
+      if (row.kind === "overwrite") overwriteApproved.add(row.path);
+      else if (row.kind === "bulk_deletion") deletionApproved.add(row.path);
+    }
+  }
+
+  // ── The pass's ledger, opened before the first paid question ─────────────
+  //
+  // What a previous pass already prepared and already settled, reusable
+  // wherever the fact it recorded still holds: a blob while prime still
+  // holds the blob it was made from, a probe answer while the clone still
+  // holds the blob it was asked about. Real path only: a rehearsal reuses
+  // nothing and records nothing. Constructed HERE — above the first paid
+  // question a pass asks, which is now the stranded-function walk and then
+  // the HOLD probes: re-walking the same held paths every pass was measured
+  // at ~90 calls and ~30 seconds of fixed cost, which pushed every working
+  // tick past the 60-second isolate window.
+  const resume = dryRun ? undefined : args.resume;
+  const priorProgress = resume ? readProgress(resume.progress) : null;
+  const known = resume ? resumableBlobs(priorProgress, primeShaByPath) : new Map<string, string>();
+  const knownEvidence = resume
+    ? resumableDeletionEvidence(priorProgress, cloneShaByPath ?? null)
+    : new Map<string, SettledDeletionEvidence>();
+  const knownHeldEvidence = resume
+    ? resumableHeldEvidence(priorProgress, cloneShaByPath ?? null)
+    : new Map<string, SettledHeldEvidence>();
+  const evidenceLedger: Record<string, DeletionEvidenceEntry> = {};
+  const heldLedger: Record<string, HeldEvidenceEntry> = {};
+  const progress: CascadeProgress = {
+    version: 1,
+    source_sha: sourceSha,
+    prepared: {},
+    deletion_evidence: evidenceLedger,
+    held_evidence: heldLedger,
+    // The write list is not final until the hold releases below have run;
+    // set once `primeFiles` exists.
+    total: 0,
+  };
+  for (const [path, blob] of known) {
+    const prime = primeShaByPath?.get(path);
+    if (prime) progress.prepared[path] = { blob, prime };
+  }
+  for (const [path, evidence] of knownEvidence) {
+    const clone = cloneShaByPath?.get(path);
+    if (clone) evidenceLedger[path] = { clone, evidence };
+  }
+  for (const [path, evidence] of knownHeldEvidence) {
+    const clone = cloneShaByPath?.get(path);
+    if (clone) heldLedger[path] = { clone, evidence };
+  }
+
+  // ── An Edge Function this clone carries is kept current ──────────────────
+  //
+  // `_shared/**` crosses on every module-scoped clone; a function's own
+  // directory crosses only where an installed module names it, and the
+  // catalogue does not name every function. So a function the clone was
+  // provisioned with and no module covers stands still while the shared layer
+  // it imports moves: on the independent at prime@cdff4f2 fourteen such files
+  // were behind, every one an unedited prime version, and two of the clone's
+  // own CI checks failed over seven of them. See `strandedFunctions.pure.ts`.
+  //
+  // HERE, and the placement is the argument: above the import closure, so a
+  // refreshed handler brings what it imports, and above
+  // `partitionCascadePaths`, so the exclusions hold it exactly as they would
+  // hold it inside a module. Only files the clone already holds, only where
+  // prime's history shows the clone's copy is a version prime held (or an
+  // operator approved overwriting it), and at most `MAX_STRANDED_PROBES`
+  // walks a pass — each settled answer goes into the same `held_evidence`
+  // ledger the hold releases use, so the next pass continues from it.
+  const strandedVerdicts: StrandedVerdict[] = [];
+  /**
+   * What this block settled about a stranded file's history, for the hold
+   * releases below: a refreshed file an approvable exclusion names is held by
+   * the partition and released there, on this same answer, rather than walked
+   * a second time in one pass.
+   */
+  const strandedEvidence = new Map<string, HeldPathEvidence>();
+  if (widenedScope !== null && primeShaByPath !== null && cloneShaByPath !== null) {
+    const behind = strandedFunctionFiles({
+      prime: primeShaByPath,
+      clone: cloneShaByPath,
+      inScope: widenedScope,
+    });
+    // A file an exclusion names meets that exclusion exactly as it would
+    // inside a module. A hold nothing can release (`protected`, `oversize`)
+    // is never written, so its history is not walked. A `manual_reconcile`
+    // hold is released only by `decideHoldRelease`, on the evidence or an
+    // operator's approval, so a refreshed file it names is still added below:
+    // the partition holds it and the hold releases decide it, as they do for
+    // a path in scope.
+    const holds = partitionCascadePaths(
+      behind.map((f) => f.path),
+      exclusions,
+    ).held;
+    const releasable = new Set(approvableHeld(holds).map((h) => h.path));
+    const neverWritten = new Set(holds.filter((h) => !releasable.has(h.path)).map((h) => h.path));
+    const stranded = behind.filter((f) => !neverWritten.has(f.path));
+    if (stranded.length > 0) {
+      const settled = new Set(
+        stranded
+          .filter((f) => overwriteApproved.has(f.path) || knownHeldEvidence.has(f.path))
+          .map((f) => f.path),
+      );
+      const asking = strandedFilesToProbe({
+        files: stranded,
+        settled,
+        max: MAX_STRANDED_PROBES,
+        rotation: probeRotationFor(sourceSha),
+      });
+      const evidence: Map<string, HeldPathEvidence> =
+        asking.length > 0
+          ? await probeHeldPaths({
+              octokit,
+              primeRef,
+              candidates: asking.map((f) => ({ path: f.path, cloneSha: f.cloneSha })),
+              maxProbes: asking.length,
+            })
+          : new Map();
+      for (const [path, answer] of evidence) {
+        if (answer.kind === "unsettled") continue;
+        strandedEvidence.set(path, answer);
+        const clone = cloneShaByPath.get(path);
+        if (clone) heldLedger[path] = { clone, evidence: answer };
+      }
+      for (const file of stranded) {
+        strandedVerdicts.push(
+          decideStrandedRefresh({
+            file,
+            evidence: knownHeldEvidence.get(file.path) ?? evidence.get(file.path) ?? null,
+            approved: overwriteApproved.has(file.path),
+          }),
+        );
+      }
+      const refreshed = strandedRefreshPaths(strandedVerdicts);
+      if (refreshed.length > 0) {
+        candidatePaths = [...candidatePaths, ...refreshed];
+        scopeLabel = `${scopeLabel} + ${refreshed.length} Edge Function file(s) kept current`;
+      }
+    }
+  }
+
+  /*
+    PRIME'S TEXT, READ ONCE AND EIGHTY AT A TIME.
+
+    The import closure reads every candidate module to learn what it imports,
+    and the prepare loop then reads the same files again to write them — one
+    contents request each, twice over. Replayed at prime@ded5d92 against
+    `npc-crm-independent-6505dc`, that was 836 of the pass's 884 GitHub calls:
+    351 by the closure before a single file was prepared, 408 by the prepare
+    loop after it. No tick could hold them. Every tick of the 26 Sep events
+    paused with no file prepared (0 of 390 at prime@c19ab0a, 0 of 399 at
+    prime@0e89502), and text travels inline in the tree write, so nothing a
+    tick read was ledgered and the next began from nothing. After three ticks
+    the drain retired the event.
+
+    So both readers draw from one cache, filled by GraphQL batches of the blob
+    ids this pass's own listing gave (`primeTextBatch.pure.ts`). A text enters
+    it only where its git blob id equals the listing's, which proves it is the
+    file byte for byte. A path the cache cannot answer — no complete listing, a
+    symbolic link, a file too large for GraphQL to serve whole, a blob that is
+    not UTF-8, a batch that failed — is read per file exactly as before, with
+    the oversize ceiling and the stream lane where they always were.
+  */
+  const exactPrimeText = new Map<string, { sha: string; text: string }>();
+  /** Every path a prefetch has considered, answered or not: asked once a pass. */
+  const primeTextConsidered = new Set<string>();
+  const prefetchPrimeText = async (
+    paths: Iterable<string>,
+    isPastDeadline?: (reserveMs: number) => boolean,
+  ): Promise<void> => {
+    const shas = primeShaByPath;
+    const sizes = primeSizeByPath;
+    const modes = primeModeByPath;
+    if (shas === null || sizes === null || modes === null) return;
+    const wants: TextWant[] = [];
+    for (const path of paths) {
+      if (primeTextConsidered.has(path)) continue;
+      primeTextConsidered.add(path);
+      const sha = shas.get(path);
+      if (sha === undefined || !isBatchableTextMode(modes.get(path))) continue;
+      wants.push({ path, sha, size: sizes.get(path) });
+    }
+    if (wants.length === 0) return;
+    const texts = await readBlobTextsBatched(octokit, primeRef, wants, { isPastDeadline });
+    for (const [path, text] of texts) {
+      const sha = shas.get(path);
+      if (sha !== undefined) exactPrimeText.set(path, { sha, text });
+    }
+  };
 
   /*
     A PAYLOAD MUST CONTAIN WHAT IT IMPORTS.
@@ -1664,24 +2242,30 @@ export async function processClone(args: {
     const WALKABLE = /\.[cm]?[jt]sx?$/;
     const primeText = new Map<string, string>();
     const readInto = async (paths: readonly string[]) => {
-      await mapWithConcurrency(
-        paths.filter((p) => WALKABLE.test(p) && !primeText.has(p)),
-        8,
-        async (path) => {
-          try {
-            const f = await getFileContent(octokit, primeRef, path, {
-              maxBytes: CASCADE_MAX_FILE_BYTES,
-            });
-            // Binary is never walked: a lossy reading of bytes that were never
-            // text cannot contain an import, and asking is how a guard starts
-            // reporting nonsense.
-            if (f && !f.binary) primeText.set(path, f.content);
-          } catch {
-            // Unreadable is carried, not fatal. Refusing the whole closure
-            // over one oversize blob would throw away every path it found.
-          }
-        },
-      );
+      const walkable = paths.filter((p) => WALKABLE.test(p) && !primeText.has(p));
+      // Never cut short by the budget: a closure that stops early lets a
+      // module cross without what it imports, which is the defect it exists to
+      // prevent. Batching is what makes finishing it affordable.
+      await prefetchPrimeText(walkable);
+      await mapWithConcurrency(walkable, 8, async (path) => {
+        const batched = exactPrimeText.get(path);
+        if (batched !== undefined) {
+          primeText.set(path, batched.text);
+          return;
+        }
+        try {
+          const f = await getFileContent(octokit, primeRef, path, {
+            maxBytes: CASCADE_MAX_FILE_BYTES,
+          });
+          // Binary is never walked: a lossy reading of bytes that were never
+          // text cannot contain an import, and asking is how a guard starts
+          // reporting nonsense.
+          if (f && !f.binary) primeText.set(path, f.content);
+        } catch {
+          // Unreadable is carried, not fatal. Refusing the whole closure
+          // over one oversize blob would throw away every path it found.
+        }
+      });
     };
 
     const closeOver = async (
@@ -1720,78 +2304,6 @@ export async function processClone(args: {
   // by a different route than the one this was written for.
   const partition = partitionCascadePaths(candidatePaths, exclusions);
 
-  // ── Recorded operator approvals for this clone ────────────────────────────
-  //
-  // Two of the engine's own refusals end in "a person has to decide", and
-  // `cascade_path_approvals` is where the decision lives: `overwrite` releases
-  // one held `manual_reconcile` path, `bulk_deletion` admits a deletion set
-  // past the cap. Read FAIL-SAFE, not fail-closed: an approval only ever
-  // WIDENS what a pass may do, so an unreadable table means no approvals and
-  // the pass runs exactly as it would have before the table existed.
-  const overwriteApproved = new Set<string>();
-  const deletionApproved = new Set<string>();
-  {
-    const approvalsRes = await supabase
-      .from("cascade_path_approvals")
-      .select("kind, path")
-      .eq("clone_id", clone.id)
-      .is("revoked_at", null)
-      .gt("expires_at", new Date().toISOString());
-    if (approvalsRes.error) {
-      console.warn(
-        `[cascade] approvals unreadable for clone ${clone.id} — proceeding with none: ${approvalsRes.error.message}`,
-      );
-    }
-    for (const row of (approvalsRes.data ?? []) as Array<{ kind: string; path: string }>) {
-      if (row.kind === "overwrite") overwriteApproved.add(row.path);
-      else if (row.kind === "bulk_deletion") deletionApproved.add(row.path);
-    }
-  }
-
-  // ── The pass's ledger, opened before the first paid question ─────────────
-  //
-  // What a previous pass already prepared and already settled, reusable
-  // wherever the fact it recorded still holds: a blob while prime still
-  // holds the blob it was made from, a probe answer while the clone still
-  // holds the blob it was asked about. Real path only: a rehearsal reuses
-  // nothing and records nothing. Constructed HERE — above the HOLD probes,
-  // which are the first paid question a pass asks: re-walking the same held
-  // paths every pass was measured at ~90 calls and ~30 seconds of fixed
-  // cost, which pushed every working tick past the 60-second isolate window.
-  const resume = dryRun ? undefined : args.resume;
-  const priorProgress = resume ? readProgress(resume.progress) : null;
-  const known = resume ? resumableBlobs(priorProgress, primeShaByPath) : new Map<string, string>();
-  const knownEvidence = resume
-    ? resumableDeletionEvidence(priorProgress, cloneShaByPath ?? null)
-    : new Map<string, SettledDeletionEvidence>();
-  const knownHeldEvidence = resume
-    ? resumableHeldEvidence(priorProgress, cloneShaByPath ?? null)
-    : new Map<string, SettledHeldEvidence>();
-  const evidenceLedger: Record<string, DeletionEvidenceEntry> = {};
-  const heldLedger: Record<string, HeldEvidenceEntry> = {};
-  const progress: CascadeProgress = {
-    version: 1,
-    source_sha: sourceSha,
-    prepared: {},
-    deletion_evidence: evidenceLedger,
-    held_evidence: heldLedger,
-    // The write list is not final until the hold releases below have run;
-    // set once `primeFiles` exists.
-    total: 0,
-  };
-  for (const [path, blob] of known) {
-    const prime = primeShaByPath?.get(path);
-    if (prime) progress.prepared[path] = { blob, prime };
-  }
-  for (const [path, evidence] of knownEvidence) {
-    const clone = cloneShaByPath?.get(path);
-    if (clone) evidenceLedger[path] = { clone, evidence };
-  }
-  for (const [path, evidence] of knownHeldEvidence) {
-    const clone = cloneShaByPath?.get(path);
-    if (clone) heldLedger[path] = { clone, evidence };
-  }
-
   // ── A hold protects WORK, not a path ──────────────────────────────────────
   //
   // A `manual_reconcile` hold whose clone copy is byte-identical to a version
@@ -1820,8 +2332,15 @@ export async function processClone(args: {
       // Evidence probes are bounded and only possible where the clone's blob
       // SHA is already known from the tree listing — a truncated listing
       // releases nothing, which is yesterday's behaviour.
+      // A stranded Edge Function the refresh above added was walked there, in
+      // this same pass, and its answer is reused rather than asked twice.
       const needsEvidence = releasable
-        .filter((h) => !overwriteApproved.has(h.path) && !knownHeldEvidence.has(h.path))
+        .filter(
+          (h) =>
+            !overwriteApproved.has(h.path) &&
+            !knownHeldEvidence.has(h.path) &&
+            !strandedEvidence.has(h.path),
+        )
         .map((h) => ({ path: h.path, cloneSha: cloneShaByPath?.get(h.path) ?? null }))
         .filter((c): c is { path: string; cloneSha: string } => c.cloneSha !== null)
         .slice(0, MAX_HOLD_RELEASE_PROBES);
@@ -1839,7 +2358,11 @@ export async function processClone(args: {
         const verdict = decideHoldRelease({
           held,
           cloneSha: cloneShaByPath?.get(held.path) ?? null,
-          evidence: knownHeldEvidence.get(held.path) ?? evidence.get(held.path) ?? null,
+          evidence:
+            knownHeldEvidence.get(held.path) ??
+            strandedEvidence.get(held.path) ??
+            evidence.get(held.path) ??
+            null,
           approved: overwriteApproved.has(held.path),
         });
         holdReleases.push(verdict);
@@ -1896,12 +2419,39 @@ export async function processClone(args: {
   const deletionPartition = partitionCascadePaths(
     deletionCandidates.map((c) => c.path),
     exclusions,
+    { purpose: "delete" },
   );
   const probeable = new Set(deletionPartition.write);
   let deletionVerdicts: DeletionVerdict[] = [];
   let unprobedDeletions = 0;
   let probePaused = false;
-  if (probeable.size > 0) {
+  if (conversion && probeable.size > 0) {
+    // What a conversion removes is keyed on the line the clone LEAVES, never
+    // on the history of the one it joins: a file is removed only where the
+    // leaving line carries it with this clone's exact bytes.
+    const leavingTree = await listTreeEntries(octokit, conversion.leaving.ref);
+    let leavingHead = conversion.leaving.ref.branch;
+    try {
+      const { data: lb } = await octokit.repos.getBranch({
+        owner: conversion.leaving.ref.owner,
+        repo: conversion.leaving.ref.repo,
+        branch: conversion.leaving.ref.branch,
+      });
+      leavingHead = lb.commit.sha;
+    } catch {
+      // The label on a removal, not a verdict: the listing above already
+      // answered for the bytes.
+    }
+    const leaving = {
+      shaByPath: leavingTree.entries,
+      complete: !leavingTree.truncated,
+      headSha: leavingHead,
+      label: conversion.leaving.label,
+    };
+    deletionVerdicts = deletionCandidates
+      .filter((c) => probeable.has(c.path))
+      .map((c) => decideConversionDeletion(c, leaving));
+  } else if (probeable.size > 0) {
     let slowestChunkMs = 0;
     const probe = await probeDeletions({
       octokit,
@@ -1962,6 +2512,23 @@ export async function processClone(args: {
     };
   }
   const pendingDeletes = deletionVerdicts.filter((v) => v.act === "delete").map((v) => v.path);
+  /**
+   * A conversion's removals are refused whole past their own ceiling and
+   * never admitted by a cascade's bulk-deletion approval: that approval was
+   * given for a set the prime retired, not for a line change.
+   */
+  const deletionCap = conversion ? MAX_CONVERSION_DELETIONS : MAX_DELETIONS_PER_CASCADE;
+  const deletionOverCap = conversion ? new Set<string>() : deletionApproved;
+  /**
+   * The edge functions a conversion takes out of the clone's tree: decided
+   * from the removals before the reference check, and re-checked against the
+   * final plan below (`retiredFunctionsKept`). Every pump is handed them as
+   * withheld, so no declaration or registry entry survives its directory.
+   */
+  const retiredByConversion: string[] =
+    conversion && primeShaByPath
+      ? functionsRetiredByConversion(pendingDeletes, primeShaByPath.keys())
+      : [];
 
   // `sha: string` reuses an uploaded blob, `sha: null` DELETES the path, and
   // `content` inlines text for the chunked `createTree` chain — exactly one
@@ -2209,24 +2776,33 @@ export async function processClone(args: {
     // return will not.
     filesRead += 1;
     let primeFile: Awaited<ReturnType<typeof getFileContent>>;
-    try {
-      primeFile = await getFileContent(octokit, primeRef, path, {
-        maxBytes: CASCADE_MAX_FILE_BYTES,
-      });
-    } catch (e) {
-      // NOT held first. One file past the read ceiling used to kill the whole
-      // pass — and the forty-seven beside it — on every attempt until the
-      // event ran out of claims, and holding it was the fix. But "cannot be
-      // held" is not "cannot be carried": the bytes never have to enter this
-      // isolate, and a file too large to read is streamed from prime's blob
-      // straight into the clone's, base64-encoded in flight. The hold below
-      // is what is left when that cannot be done — which is a file past
-      // GitHub's own ceiling, or a carry that failed. See
-      // `blobStreamCarry.pure.ts` and `CASCADE_MAX_FILE_BYTES`.
-      if (e instanceof OversizeFileError) {
-        return await carryOversizeByStream(e, path, fileStartedAt);
+    // Prime's text from this pass's batched read, where it proved exact — the
+    // same `RepoFile` the contents API would have given, at no request. The
+    // cache holds only files far below `CASCADE_MAX_FILE_BYTES`, so nothing it
+    // answers could have been refused as oversize.
+    const batched = exactPrimeText.get(path);
+    if (batched !== undefined) {
+      primeFile = repoFileFromExactText(batched.sha, batched.text);
+    } else {
+      try {
+        primeFile = await getFileContent(octokit, primeRef, path, {
+          maxBytes: CASCADE_MAX_FILE_BYTES,
+        });
+      } catch (e) {
+        // NOT held first. One file past the read ceiling used to kill the
+        // whole pass — and the forty-seven beside it — on every attempt until
+        // the event ran out of claims, and holding it was the fix. But "cannot
+        // be held" is not "cannot be carried": the bytes never have to enter
+        // this isolate, and a file too large to read is streamed from prime's
+        // blob straight into the clone's, base64-encoded in flight. The hold
+        // below is what is left when that cannot be done — which is a file
+        // past GitHub's own ceiling, or a carry that failed. See
+        // `blobStreamCarry.pure.ts` and `CASCADE_MAX_FILE_BYTES`.
+        if (e instanceof OversizeFileError) {
+          return await carryOversizeByStream(e, path, fileStartedAt);
+        }
+        throw e;
       }
-      throw e;
     }
     if (!primeFile) return null;
 
@@ -2392,6 +2968,14 @@ export async function processClone(args: {
     };
   };
 
+  // What the loop below will read, fetched first, a batch at a time: a file
+  // the ledger already holds as a blob is reused without a read, so it is not
+  // asked. Paced on the pass's budget — text is never ledgered, so a batch
+  // read past the point where the loop can use it would be thrown away.
+  await prefetchPrimeText(
+    primeFiles.filter((path) => isSpecPath(path) || !known.has(path)),
+    resume?.budget ? (reserveMs) => resume.budget!.isPastDeadline(reserveMs) : undefined,
+  );
   const { results: prepared, stopped: preparePaused } = await mapWithConcurrencyUntil<
     string,
     Prepared | null
@@ -2514,6 +3098,81 @@ export async function processClone(args: {
    * recorded: a held path is one a spec naming it should still strand on.
    */
   const reconciledPaths = new Set<string>();
+  /**
+   * The decided paths whose merge CHANGES the clone's file — the part of
+   * `reconciledPaths` that is a write. A pump's steady state writes the
+   * clone's own bytes back and is not here.
+   *
+   * The forward half reads `reconciledPaths`: a spec naming a pumped path is
+   * judged by the merge, not stranded on it. The reverse half asks what the
+   * delivery CHANGES, and reads this (`pathsTheDeliveryChanges`) — excluding
+   * every pumped path left a kept spec about a `config.toml` the pump really
+   * changed running its old assertions against the new merge.
+   */
+  const reconcileWrites = new Set<string>();
+  /**
+   * What a rehearsal's pumps would write. A dry run composes no entry for
+   * `config.toml`, the registry or the deploy workflow, so without this it
+   * would judge the kept specs against a delivery missing those writes and
+   * answer differently from the pass it rehearses.
+   */
+  const rehearsedWrites = new Set<string>();
+
+  // ── what the prime keeps for itself and this clone does not hold ────────
+  //
+  // `primeOnlyFeatures.pure.ts` names what no clone receives — the GoHighLevel
+  // account migration today. The write path holds its FILES; what is left is
+  // every file DERIVED from the function set that still names it: the
+  // declarations, the registry entries, the security baseline, the ratchet
+  // and the mobile surface. Each pump below takes out what this set names.
+  //
+  // Read off the clone's tree, never off the register alone: a clone still
+  // holding the feature (every clone did until its removal pull request)
+  // yields an empty set and keeps today's behaviour exactly. The tree is
+  // missing only where a module-scoped listing came back truncated, and then
+  // the clone's `supabase/functions` directory is listed instead — one
+  // request, and the generator's own unit of account. Where even that fails
+  // the set is empty, which is what every pass before this one used rather
+  // than a guess.
+  let withheldFunctions: string[] = [];
+  if (mode !== "notify") {
+    if (cloneShaByPath !== null) {
+      withheldFunctions = withheldPrimeOnlyFunctions(cloneShaByPath.keys());
+    } else {
+      try {
+        const { data } = await octokit.repos.getContent({
+          owner: cloneRef.owner,
+          repo: cloneRef.repo,
+          path: "supabase/functions",
+          ref: cloneRef.branch,
+        });
+        if (Array.isArray(data)) {
+          withheldFunctions = withheldPrimeOnlyFunctions(
+            data.filter((d) => d.type === "dir").map((d) => `supabase/functions/${d.name}/`),
+          );
+        }
+      } catch (e) {
+        console.warn(
+          `[cascade] prime-only function check skipped for clone ${clone.id}: ${
+            e instanceof Error ? e.message : String(e)
+          }`,
+        );
+      }
+    }
+  }
+
+  // What the two declaration files are reconciled WITHOUT: the functions the
+  // prime keeps for itself, and — on a conversion — the functions leaving
+  // with the line the clone leaves, so neither `config.toml` nor the
+  // registry carries a declaration forward for a directory this delivery
+  // removes. Kept apart from `withheldFunctions`, which every baseline reads
+  // as "the prime has it and this clone does not": a retired function is the
+  // other way round, and is taken out of `cloneOwnedFunctions` instead.
+  const declarationsWithheld: string[] =
+    retiredByConversion.length > 0
+      ? [...new Set([...withheldFunctions, ...retiredByConversion])].sort()
+      : withheldFunctions;
+
   if (mode !== "notify") {
     try {
       const [primeCfg, cloneCfg] = await Promise.all([
@@ -2525,6 +3184,7 @@ export async function processClone(args: {
           primeToml: primeCfg.content,
           cloneToml: cloneCfg.content,
           ownRef: ownProjectRef,
+          withheld: declarationsWithheld,
         });
         if (verdict.ok) cloneOwnedFunctions = verdict.carriedForward;
         mergedToml = verdict.ok ? verdict.merged : cloneCfg.content;
@@ -2547,9 +3207,16 @@ export async function processClone(args: {
             ? ` · kept ${verdict.carriedForward.length} declaration(s) this clone owns ` +
               `(${verdict.carriedForward.join(", ")})`
             : "";
+          const leftOut = verdict.withheldDropped.length
+            ? ` · left out ${verdict.withheldDropped.length} declaration(s) for ` +
+              `${describeWithheldFunctions(verdict.withheldDropped)}, which the prime keeps ` +
+              `for itself`
+            : "";
           configReconcileNote =
             `${CONFIG_TOML_PATH} · ${now} function declaration(s), was ${was} · ` +
-            `project ${verdict.ownRef} unchanged${kept}`;
+            `project ${verdict.ownRef} unchanged${kept}${leftOut}`;
+          reconcileWrites.add(CONFIG_TOML_PATH);
+          if (dryRun) rehearsedWrites.add(CONFIG_TOML_PATH);
           if (!dryRun) {
             const { data: cfgBlob } = await octokit.git.createBlob({
               owner: cloneRef.owner,
@@ -2608,6 +3275,7 @@ export async function processClone(args: {
         const verdict = reconcileSecurityRegistry({
           primeJson: primeReg.content,
           cloneJson: cloneReg.content,
+          withheld: declarationsWithheld,
         });
         // Either way prime's copy does not stand: it is replaced by the
         // reconciled one, or withheld for a person.
@@ -2625,6 +3293,10 @@ export async function processClone(args: {
           needsReconcile.push(held);
         } else {
           cloneOwnedFunctions = [...new Set([...cloneOwnedFunctions, ...verdict.carriedForward])];
+          if (verdict.changed) {
+            reconcileWrites.add(SECURITY_REGISTRY_PATH);
+            if (dryRun) rehearsedWrites.add(SECURITY_REGISTRY_PATH);
+          }
           if (verdict.changed && !dryRun) {
             const { data: regBlob } = await octokit.git.createBlob({
               owner: cloneRef.owner,
@@ -2673,6 +3345,10 @@ export async function processClone(args: {
   if (ownedByTree !== null) {
     cloneOwnedFunctions = [...new Set([...cloneOwnedFunctions, ...ownedByTree])];
   }
+  if (retiredByConversion.length > 0) {
+    const retired = new Set(retiredByConversion);
+    cloneOwnedFunctions = cloneOwnedFunctions.filter((name) => !retired.has(name));
+  }
   // ── the two baselines that state this repository's own function set ────
   //
   // `securityInventoryHold` and `functionCountRatchetHold` refuse prime's
@@ -2693,9 +3369,25 @@ export async function processClone(args: {
   //
   // Gated on the holds' own trigger and no wider: this reconciles precisely
   // where today it withholds, and a clone owning nothing prime does not
-  // receives prime's copies exactly as it does now.
-  const inventoryHold = securityInventoryHold(cloneOwnedFunctions);
-  const ratchetHold = functionCountRatchetHold(cloneOwnedFunctions);
+  // receives prime's copies exactly as it does now. The trigger has a second
+  // half: a clone that does NOT hold what the prime keeps for itself
+  // (`withheldFunctions`) differs from prime's function set by subtraction,
+  // and prime's two numbers count what it does not have.
+  const inventoryHold = securityInventoryHold(cloneOwnedFunctions, withheldFunctions);
+  const ratchetHold = functionCountRatchetHold(cloneOwnedFunctions, withheldFunctions);
+  /**
+   * What the baseline was reconciled FROM, kept for the one recount this pass
+   * owes it once the delivery is final (below the deletion plan). Set only
+   * where the reconcile succeeded: a hold stands as it was decided.
+   */
+  let inventoryRecount: {
+    primeInventoryJson: string;
+    cloneInventoryJson: string;
+    mergedToml: string;
+    mergedRegistryJson: string;
+    cloneTree: ReadonlyMap<string, string>;
+    count: number;
+  } | null = null;
 
   if ((inventoryHold || ratchetHold) && mode === "notify") {
     // A notify pass writes nothing and reconciles nothing, so it reads
@@ -2786,13 +3478,26 @@ export async function processClone(args: {
       }
       deliveredSource[held.path] = outcome.merged;
       reconciledPaths.add(held.path);
+      // A write only where the merge differs from the clone's copy, which the
+      // clone's tree already answers by blob id (`gitBlobSha.pure.ts`).
+      if (cloneShaByPath?.get(held.path) !== gitBlobSha(outcome.merged)) {
+        reconcileWrites.add(held.path);
+      }
       baselineNotes.push(`${held.path} · reconciled to ${outcome.count} function(s)`);
     };
 
     if (inventoryHold) {
-      await settleBaseline(
-        inventoryHold,
-        primeInventory !== null && cloneInventory !== null && mergedToml && mergedRegistryJson
+      // The clone's own tree is what the count is taken over. Without it the
+      // "merged tree" is the delivery alone — a few dozen paths standing for
+      // several thousand — and the baseline would count a repository that
+      // does not exist. So a missing tree is an input that could not be read,
+      // and the hold stands.
+      const outcome =
+        cloneShaByPath !== null &&
+        primeInventory !== null &&
+        cloneInventory !== null &&
+        mergedToml &&
+        mergedRegistryJson
           ? reconcileSecurityInventory({
               primeInventoryJson: primeInventory,
               cloneInventoryJson: cloneInventory,
@@ -2800,9 +3505,27 @@ export async function processClone(args: {
               mergedRegistryJson,
               mergedTreePaths,
               deliveredPaths,
+              withheld: withheldFunctions,
             })
-          : null,
-      );
+          : null;
+      await settleBaseline(inventoryHold, outcome);
+      if (
+        outcome?.ok &&
+        cloneShaByPath !== null &&
+        primeInventory !== null &&
+        cloneInventory !== null &&
+        mergedToml &&
+        mergedRegistryJson
+      ) {
+        inventoryRecount = {
+          primeInventoryJson: primeInventory,
+          cloneInventoryJson: cloneInventory,
+          mergedToml,
+          mergedRegistryJson,
+          cloneTree: cloneShaByPath,
+          count: outcome.count,
+        };
+      }
     }
 
     if (ratchetHold) {
@@ -2813,8 +3536,110 @@ export async function processClone(args: {
               primeSpec: primeRatchetSpec,
               mergedToml,
               cloneOwnedFunctions,
+              withheld: withheldFunctions,
             })
           : null,
+      );
+    }
+  }
+
+  // ── the mobile API surface: generated from the two files just reconciled ─
+  //
+  // `mobile/api-surface.json` is written by `npm run mobile:api` from the
+  // security registry and `config.toml`, and the clone's `mobile:api:check`
+  // regenerates it and diffs. It travels as ordinary content, which is right
+  // while the clone's registry IS prime's — and wrong the moment the registry
+  // pump keeps an entry prime lacks or leaves out one prime keeps for itself:
+  // prime's surface then lists functions the clone's registry does not.
+  //
+  // So where prime's copy is in the delivery and the two function sets
+  // differ, it is REPLACED by the surface this clone's reconciled registry
+  // and config generate (`apiSurfaceReconcile.pure.ts`). Only where it is in
+  // the delivery: a surface the write path did not deliver is one an
+  // exclusion, a hold or an identical copy kept out, and this pass has no
+  // business writing it. A refusal is held and named, like the registry's.
+  let apiSurfaceNote: string | null = null;
+  if (
+    mode !== "notify" &&
+    (withheldFunctions.length > 0 || cloneOwnedFunctions.length > 0) &&
+    mergedToml &&
+    mergedRegistryJson &&
+    treeEntries.some((t) => t.path === API_SURFACE_PATH && t.sha !== null)
+  ) {
+    try {
+      const [primeSurface, cloneSurface, primeRegistry, primeConfig] = await Promise.all([
+        getFileContent(octokit, primeRef, API_SURFACE_PATH),
+        getFileContent(octokit, cloneRef, API_SURFACE_PATH),
+        getFileContent(octokit, primeRef, SECURITY_REGISTRY_PATH),
+        getFileContent(octokit, primeRef, CONFIG_TOML_PATH),
+      ]);
+      if (
+        primeSurface &&
+        primeRegistry &&
+        primeConfig &&
+        !primeSurface.binary &&
+        !primeRegistry.binary &&
+        !primeConfig.binary
+      ) {
+        const verdict = reconcileApiSurface({
+          primeSurfaceJson: primeSurface.content,
+          primeRegistryJson: primeRegistry.content,
+          primeToml: primeConfig.content,
+          mergedRegistryJson,
+          mergedToml,
+        });
+        // Either way prime's copy does not stand: it is replaced by the
+        // surface this clone generates, or withheld for a person.
+        dropFromTree(API_SURFACE_PATH);
+        if (!verdict.ok) {
+          const held = {
+            path: API_SURFACE_PATH,
+            pattern: "(content: generated from this clone's own registry)",
+            reason: "manual_reconcile" as const,
+            note:
+              `The mobile API surface was not brought across: ${verdict.reason}. ` +
+              `\`npm run mobile:api\` regenerates it from this repository.`,
+          };
+          partition.held.push(held);
+          needsReconcile.push(held);
+        } else {
+          reconciledPaths.add(API_SURFACE_PATH);
+          const cloneCopy = cloneSurface && !cloneSurface.binary ? cloneSurface.content : null;
+          if (verdict.merged !== cloneCopy) {
+            const leftOut = verdict.leftOut.length
+              ? ` · left out ${describeWithheldFunctions(verdict.leftOut)}`
+              : "";
+            const added = verdict.added.length
+              ? ` · kept ${verdict.added.length} this clone owns (${verdict.added.join(", ")})`
+              : "";
+            apiSurfaceNote = `${API_SURFACE_PATH} · ${verdict.count} function(s)${leftOut}${added}`;
+            reconcileWrites.add(API_SURFACE_PATH);
+            if (dryRun) rehearsedWrites.add(API_SURFACE_PATH);
+            if (!dryRun) {
+              const { data: surfaceBlob } = await octokit.git.createBlob({
+                owner: cloneRef.owner,
+                repo: cloneRef.repo,
+                content: Buffer.from(verdict.merged, "utf8").toString("base64"),
+                encoding: "base64",
+              });
+              treeEntries.push({
+                path: API_SURFACE_PATH,
+                mode: "100644",
+                type: "blob",
+                sha: surfaceBlob.sha,
+              });
+              deliveredSource[API_SURFACE_PATH] = verdict.merged;
+            }
+          }
+        }
+      }
+    } catch (e) {
+      // Never fails the pass: prime's copy stands where it was, which is what
+      // every pass before this one delivered.
+      console.warn(
+        `[cascade] ${API_SURFACE_PATH} reconcile skipped for clone ${clone.id}: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
       );
     }
   }
@@ -2873,6 +3698,8 @@ export async function processClone(args: {
             (verdict.cloneWasHazardous
               ? " · the copy it replaces defaulted its deploy target to another deployment"
               : "");
+          reconcileWrites.add(DEPLOY_WORKFLOW_PATH);
+          if (dryRun) rehearsedWrites.add(DEPLOY_WORKFLOW_PATH);
           if (!dryRun) {
             const { data: wfBlob } = await octokit.git.createBlob({
               owner: cloneRef.owner,
@@ -2901,6 +3728,137 @@ export async function processClone(args: {
       );
     }
   }
+
+  // ── Which of prime's deletions this delivery makes ──────────────────────
+  //
+  // Decided HERE, before the spec channel, and the order is the fix. The
+  // channel's reverse half asks what the delivery CHANGES on the clone, and a
+  // removal is a change only once it is decided: `pendingDeletes` is the
+  // provisional list, and the reference check and the bulk cap below can each
+  // withhold any of it. Judged against the provisional list, a kept spec was
+  // replaced for a file that then stayed exactly as it was.
+  //
+  // Three kinds of file can still import what prime deleted. A HELD file,
+  // because the cascade cannot change it — `src/App.tsx` is `manual_reconcile`
+  // on the client-facing mirror and imports from the AML shell. A CLONE-ONLY
+  // file, because prime has never seen it. And a deletion this very check
+  // WITHHOLDS: a kept file is an old prime version, and an old prime version
+  // imports exactly what prime deleted beside it, because a decommission
+  // leaves in one commit. Everything else is either delivered by this run
+  // (prime's own content, which cannot import a path prime deleted) or
+  // byte-identical to prime's copy, which cannot either.
+  //
+  // One more kind is asked later, and only once: a spec this clone keeps at a
+  // different version from prime's. Whether it STAYS is the channel's to
+  // decide — a kept spec left behind by a removal is brought across with it
+  // where prime's history allows, and prime's copy cannot import the file
+  // prime deleted — so it is a survivor only once the channel has spoken.
+  // Counted here, it would withhold every removal it asserts about, and a spec
+  // is never brought across for a removal that does not happen: the deletion
+  // would be held for ever by the very spec it was meant to settle. Below the
+  // channel the specs that stayed narrow the plan, and narrowing only ever
+  // withholds, so no removal is made that the channel was not told about.
+  //
+  // Only read when there is a deletion to protect, so a run that deletes
+  // nothing spends nothing.
+  /** The clone's text of each file this pass has read, or null where it holds none. */
+  const cloneTexts = new Map<string, string | null>();
+  /**
+   * The clone's copy of a file, read once per pass for every question asked
+   * of it. Null where the clone holds none or it is binary. A read that FAILS
+   * throws and is not remembered: a read that failed is not a file with no
+   * imports.
+   */
+  const readCloneText = async (path: string): Promise<string | null> => {
+    const known = cloneTexts.get(path);
+    if (known !== undefined) return known;
+    const f = await getFileContent(octokit, cloneRef, path);
+    const text = f && !f.binary ? f.content : null;
+    cloneTexts.set(path, text);
+    return text;
+  };
+  /**
+   * What must survive a removal: the clone's copy of every held source and of
+   * the files only the clone holds, and `also`. A read that fails leaves the
+   * file out — it is not a file with no imports, but it is also not evidence
+   * against a deletion, and the bytes rule already stands.
+   */
+  const deletionSurvivors = async (
+    also: ReadonlyMap<string, string>,
+  ): Promise<Record<string, string>> => {
+    const deleting = new Set(deletionVerdicts.filter((v) => v.act === "delete").map((v) => v.path));
+    const heldSources = needsReconcile
+      .map((h) => h.path)
+      .filter((path) => /\.[cm]?tsx?$/.test(path));
+    const cloneOnlySources = deletionCandidates
+      .map((c) => c.path)
+      .filter((p) => !deleting.has(p) && /\.[cm]?tsx?$/.test(p))
+      .sort()
+      .slice(0, 60);
+    const surviving: Record<string, string> = Object.fromEntries(also);
+    await Promise.all(
+      [...new Set([...heldSources, ...cloneOnlySources])].map(async (path) => {
+        try {
+          const text = await readCloneText(path);
+          if (text !== null) surviving[path] = text;
+        } catch {
+          /* leave it out — see above */
+        }
+      }),
+    );
+    return surviving;
+  };
+  /**
+   * Withhold every deletion a survivor still imports, closed over its own
+   * keeps: a withheld deletion is itself a survivor, and one pass over the
+   * graph is not a closure. Measured 16 Sep 2026 on npc-client#189 — held
+   * `src/App.tsx` kept `BuilderPortalAdmin.tsx`, the dialog only that page
+   * imports was deleted, and the PR could not build. Each newly kept file's
+   * source joins the survivors and is scanned like the rest, until nothing
+   * more flips. Terminates: every iteration grows `surviving` or
+   * `unreadableSurvivors`, both bounded by the verdict list.
+   */
+  const withholdStillReferenced = async (surviving: Record<string, string>): Promise<void> => {
+    deletionVerdicts = withholdReferencedDeletions(deletionVerdicts, surviving);
+    const unreadableSurvivors = new Set<string>();
+    for (;;) {
+      const unread = deletionVerdicts
+        .filter((v) => v.act === "keep" && v.reason === "still_referenced")
+        .map((v) => v.path)
+        .filter((p) => !(p in surviving) && !unreadableSurvivors.has(p));
+      if (unread.length === 0) break;
+      await Promise.all(
+        unread.map(async (path) => {
+          try {
+            // A read that fails is not a file with no imports — inventing an
+            // empty one would ship the very break this check exists to stop.
+            // The path is only excused from the closure, never given content.
+            const text = await readCloneText(path);
+            if (text !== null) surviving[path] = text;
+            else unreadableSurvivors.add(path);
+          } catch (e) {
+            // A rate limit is the window, not this file: defer the clone
+            // rather than deliver a tree the unread survivor may contradict.
+            if (classifyGitHubFailure(e).kind === "rate_limited") throw e;
+            unreadableSurvivors.add(path);
+          }
+        }),
+      );
+      deletionVerdicts = withholdReferencedDeletions(deletionVerdicts, surviving);
+    }
+  };
+  if (pendingDeletes.length > 0) await withholdStillReferenced(await deletionSurvivors(new Map()));
+  // Approvals are consulted only past the cap, and they are never evidence:
+  // a path still has to earn its delete verdict from prime's history before
+  // the approved set is even read. See `planDeletions`.
+  let deletionPlan = planDeletions(deletionVerdicts, deletionCap, deletionOverCap);
+  /** The removals planned before the channel ran: the most the narrowing can withhold. */
+  const plannedBeforeTheChannel: ReadonlySet<string> = new Set(deletionPlan.deletes);
+  /**
+   * The removals this delivery makes. Every question the channel asks about a
+   * removal asks this set, never `pendingDeletes`.
+   */
+  let deletesCrossing: ReadonlySet<string> = new Set(deletionPlan.deletes);
 
   // ── The membrane's spec channel, over the FINISHED delivery ────────────
   //
@@ -2959,12 +3917,325 @@ export async function processClone(args: {
   // specs — and a CARRIED subject can itself be a spec, so the set of specs
   // grows by up to the same cap while the loop runs. Counting only the specs
   // present at the start bounded the loop below its own worst case.
-  const maxCarryRounds = MAX_SUBJECTS_CARRIED * 2 + Object.keys(deliveredSource).length + 1;
+  //
+  // ── …and the other direction: a spec this clone KEEPS, left behind ─────
+  //
+  // Everything above judges a spec the delivery CARRIES. The same sentence
+  // binds the other way round, and nothing asked it: a subject the delivery
+  // carries, asserted about by a spec it does NOT carry. On a mirror that
+  // cannot happen — every spec that is behind is a candidate and crosses with
+  // everything else — but on a module-scoped clone it is the common case, and
+  // cascade PR #26 to `npc-crm-independent-6505dc` failed `verify` on four
+  // specs the clone held at an older version while the files they test
+  // crossed. See `specsLeftBehind.pure.ts`.
+  //
+  // Read ONCE, here, for the specs both sides hold at different versions that
+  // the delivery is not already carrying: prime's copy and the clone's, since
+  // either may name what the other does not — each resolved against its OWN
+  // tree, with the modules it imports read from its own side, so a re-export
+  // shim is looked through where it lives and an import only the clone holds
+  // still names its subject. Batched by blob sha, eighty to a request. A read
+  // that fails skips this half for the pass — which is what every pass did
+  // before it — except a rate limit, which is the window's answer and defers
+  // the clone like any other.
+  //
+  // "Crossing" for this half is what the delivery CHANGES on the clone
+  // (`pathsTheDeliveryChanges`): prime's files written verbatim, a pump's
+  // merge where it differs from the clone's file, and the removals the
+  // finished deletion plan makes. Not `deliveredPaths`, which also counts
+  // every path a pump decided — including its steady state, where the merged
+  // file IS the clone's own and nothing is written; the first replay read that
+  // as a change and held the clone's own `crmConversations.spec.ts` under
+  // "this delivery updates supabase/config.toml" on a delivery that wrote no
+  // `config.toml` at all. And not every pumped path left out either, which was
+  // wrong the other way: a pump that does change `config.toml` changes it, and
+  // a spec asserting about it has to be judged.
+  const changedOnClone = () =>
+    pathsTheDeliveryChanges({
+      entries: treeEntries,
+      reconciled: reconciledPaths,
+      reconcileWrites,
+      rehearsed: rehearsedWrites,
+      removing: deletesCrossing,
+    });
+  const keptSpecSubjects = new Map<string, string[]>();
+  /** Prime's text of each kept spec, for what its version would bring with it. */
+  const primeKeptText = new Map<string, string>();
+  /** The clone's text of each kept spec: what stays wherever the spec does not move. */
+  const cloneKeptText = new Map<string, string>();
+  if (primeShaByPath !== null && cloneShaByPath !== null) {
+    const primeTree = primeShaByPath;
+    const cloneTree = cloneShaByPath;
+    const changedAtStart = changedOnClone();
+    // Nor a path a pump decided. It is the pump's, written or deliberately left
+    // as the clone's own, and carrying prime's raw copy in behind a subject
+    // would undo the reconcile inside its own pass.
+    const kept = specsBothSidesHoldDifferently({ primeSha: primeTree, cloneSha: cloneTree }).filter(
+      (path) => !changedAtStart.has(path) && !reconciledPaths.has(path),
+    );
+    if (kept.length > 0) {
+      const readTexts = async (
+        ref: RepoRef,
+        tree: ReadonlyMap<string, string>,
+        paths: string[],
+      ) => {
+        const entries = paths
+          .map((rel) => ({ rel, sha: tree.get(rel) }))
+          .filter((e): e is { rel: string; sha: string } => e.sha !== undefined);
+        const out = new Map<string, string>();
+        for (const [rel, b64] of await fetchBlobTextsBatched(octokit, ref, entries)) {
+          out.set(rel, decodeBase64Utf8(b64));
+        }
+        return out;
+      };
+      try {
+        const [primeSpecs, cloneSpecs] = await Promise.all([
+          readTexts(primeRef, primeTree, kept),
+          readTexts(cloneRef, cloneTree, kept),
+        ]);
+        // Each side's copy against its own tree, its modules read from its own
+        // repository. What this delivery carries is prime's and already in
+        // hand, and a module both sides hold at one blob is read once.
+        const treeOf = { prime: primeTree, clone: cloneTree } as const;
+        const refOf = { prime: primeRef, clone: cloneRef } as const;
+        const specsOf = { prime: primeSpecs, clone: cloneSpecs } as const;
+        const textBySha = new Map<string, string>();
+        const carried = new Map<string, string>(Object.entries(deliveredSource));
+        const moduleText = (side: SpecSide["side"], path: string): string | undefined => {
+          if (side === "prime" && carried.has(path)) return carried.get(path);
+          const sha = treeOf[side].get(path);
+          return sha === undefined ? undefined : textBySha.get(sha);
+        };
+        const sidesOf = (spec: string): SpecSide[] =>
+          (["prime", "clone"] as const).map((side) => ({
+            side,
+            text: specsOf[side].get(spec),
+            tree: treeOf[side],
+            readText: (path: string) => moduleText(side, path),
+          }));
+        const unreadable = { prime: new Set<string>(), clone: new Set<string>() };
+        // One read per hop and side, both sides at once: each round learns the
+        // modules the last one reached. The clone skips every blob prime is
+        // asking this round as well as every blob already in hand, so a blob
+        // the two share is read once, from prime. `readTexts` answers every
+        // path it is asked or throws, so prime's answers are in hand before
+        // the clone's paths are judged below, exactly as when the two sides
+        // took turns — which cost the independent's pass four seconds of the
+        // tick on a two-hop walk.
+        for (let hop = 0; hop <= MAX_SHIM_HOPS; hop += 1) {
+          const unread = { prime: new Set<string>(), clone: new Set<string>() };
+          for (const spec of kept) {
+            subjectsOfKeptSpec({
+              specPath: spec,
+              sides: sidesOf(spec),
+              onUnread: (side, path) => {
+                if (!unreadable[side].has(path)) unread[side].add(path);
+              },
+            });
+          }
+          if (unread.prime.size === 0 && unread.clone.size === 0) break;
+          const askingOf = (side: SpecSide["side"], alsoSkip: ReadonlySet<string>) =>
+            [...unread[side]]
+              .filter((path) => {
+                const sha = treeOf[side].get(path);
+                return sha !== undefined && !textBySha.has(sha) && !alsoSkip.has(sha);
+              })
+              .sort();
+          const primeAsking = askingOf("prime", new Set());
+          const primeAskingShas = new Set(primeAsking.map((path) => treeOf.prime.get(path)!));
+          const asking = { prime: primeAsking, clone: askingOf("clone", primeAskingShas) };
+          const [primeRead, cloneRead] = await Promise.all(
+            (["prime", "clone"] as const).map((side) =>
+              asking[side].length > 0
+                ? readTexts(refOf[side], treeOf[side], asking[side])
+                : Promise.resolve(new Map<string, string>()),
+            ),
+          );
+          const readOf = { prime: primeRead, clone: cloneRead } as const;
+          for (const side of ["prime", "clone"] as const) {
+            for (const path of unread[side]) {
+              const sha = treeOf[side].get(path);
+              const text = readOf[side].get(path);
+              if (sha !== undefined && text !== undefined) textBySha.set(sha, text);
+              if (moduleText(side, path) === undefined) unreadable[side].add(path);
+            }
+          }
+        }
+        for (const spec of kept) {
+          const subjects = subjectsOfKeptSpec({ specPath: spec, sides: sidesOf(spec) });
+          if (subjects.length > 0) keptSpecSubjects.set(spec, subjects);
+        }
+        for (const [spec, text] of primeSpecs) primeKeptText.set(spec, text);
+        // The clone's copies are the pass's clone reads too: the narrowing
+        // below asks the ones that stay what they import.
+        for (const [spec, text] of cloneSpecs) {
+          cloneKeptText.set(spec, text);
+          cloneTexts.set(spec, text);
+        }
+      } catch (e) {
+        if (classifyGitHubFailure(e).kind === "rate_limited") throw e;
+        console.warn(
+          `[cascade] the specs clone ${clone.id} keeps could not be read — a spec left behind by ` +
+            `its subject is not looked for this pass: ${e instanceof Error ? e.message : String(e)}`,
+        );
+        keptSpecSubjects.clear();
+        primeKeptText.clear();
+        cloneKeptText.clear();
+      }
+    }
+  }
+
+  // ── …and a spec's subject outside the content roots, on evidence ────────
+  //
+  // `strandedSubjects` reads a subject under five roots only, so a spec that
+  // asserts about a file anywhere else crosses without it. Outside those
+  // roots are the files a clone is expected to keep its own version of — its
+  // CI, its build, its per-deployment workflows — so a file there counts as a
+  // spec's subject only where prime's own history shows the clone's copy is
+  // byte-identical to a version prime held, or an operator approved
+  // overwriting it: carrying it then loses nothing of the clone's. A file the
+  // clone keeps its own version of stays the clone's. See
+  // `outsideRootSubjects.pure.ts`.
+  //
+  // One verdict per path per pass, asked only while something can still be
+  // carried, and at most `MAX_OUTSIDE_ROOT_PROBES` probes. A failed read is
+  // not a verdict. A file never asked about is not carried; what that means
+  // for its spec is decided where the spec is.
+  const outsideVerdicts = new Map<string, HoldRelease>();
+  /** Files outside the content roots carried beside a spec, and the specs that named them. */
+  const outsideCarriedFor = new Map<string, Set<string>>();
+  let outsideProbes = 0;
+  const outsideHeld = (path: string): HeldPath => ({
+    path,
+    pattern: "",
+    reason: "manual_reconcile",
+    note: null,
+  });
+  const judgeOutsideRoot = async (paths: readonly string[]): Promise<void> => {
+    const asking: Array<{ path: string; cloneSha: string }> = [];
+    for (const path of paths) {
+      if (outsideVerdicts.has(path)) continue;
+      const cloneSha = cloneShaByPath?.get(path);
+      if (cloneSha === undefined) continue;
+      const approved = overwriteApproved.has(path);
+      const known = knownHeldEvidence.get(path);
+      if (approved || known) {
+        outsideVerdicts.set(
+          path,
+          decideHoldRelease({
+            held: outsideHeld(path),
+            cloneSha,
+            evidence: known ?? null,
+            approved,
+          }),
+        );
+        continue;
+      }
+      asking.push({ path, cloneSha });
+    }
+    if (asking.length === 0 || shouldStop()) return;
+    const room = Math.max(0, MAX_OUTSIDE_ROOT_PROBES - outsideProbes);
+    const batch = asking.slice(0, room);
+    if (batch.length === 0) return;
+    outsideProbes += batch.length;
+    const evidence = await probeHeldPaths({
+      octokit,
+      primeRef,
+      candidates: batch,
+      maxProbes: batch.length,
+    });
+    for (const [path, answer] of evidence) {
+      if (answer.kind === "unsettled") continue;
+      const cloneSha = cloneShaByPath?.get(path) ?? null;
+      if (cloneSha) heldLedger[path] = { clone: cloneSha, evidence: answer };
+      outsideVerdicts.set(
+        path,
+        decideHoldRelease({ held: outsideHeld(path), cloneSha, evidence: answer, approved: false }),
+      );
+    }
+  };
+  /** Every spec seen left behind this pass: the crossing files it asserts about, and which go. */
+  const leftBehind = new Map<string, LeftBehindSpec>();
+  /**
+   * The kept specs the delivery leaves behind as it stands NOW. The one way
+   * this half asks, so no site can judge a spec against a different set: what
+   * the delivery changes, and which of those it removes.
+   */
+  const keptLeftBehind = (): LeftBehindSpec[] =>
+    specsLeftBehind({
+      kept: keptSpecSubjects,
+      crossing: changedOnClone(),
+      removing: deletesCrossing,
+    });
+  /**
+   * Every hold this half made or annotated, so each can be written again once
+   * the delivery is final. A note is written when its spec is judged, and the
+   * delivery still changes after that: a subject is held later in the pass, a
+   * removal is withheld once the specs that stay are known. Keyed by spec.
+   */
+  const reverseHolds = new Map<
+    string,
+    { current: HeldPath; rebuild: (touch: LeftBehindTouch) => HeldPath | null }
+  >();
+  /** Put `next` where `prev` stands in both lists, or take `prev` out of both. */
+  const replaceHold = (prev: HeldPath, next: HeldPath | null) => {
+    for (const list of [partition.held, needsReconcile]) {
+      const at = list.indexOf(prev);
+      if (at === -1) continue;
+      if (next) list[at] = next;
+      else list.splice(at, 1);
+    }
+  };
+  /** The evidence verdict per left-behind spec: may prime's copy replace the clone's? */
+  const leftBehindVerdicts = new Map<string, HoldRelease>();
+  /** A left-behind spec not judged this pass, and why. */
+  const leftBehindCut = new Map<string, LeftBehindCutShort>();
+  let leftBehindProbes = 0;
+
+  const maxCarryRounds =
+    MAX_SUBJECTS_CARRIED * 2 + Object.keys(deliveredSource).length + keptSpecSubjects.size + 1;
 
   // Imports owed by a subject the carry already brought across. Fed back in
   // as stranded paths, so they meet `planSubjectCarry`, the exclusions, the
   // ceiling and `prepareOne` on the terms every other candidate does.
   const importsOwed = new Set<string>();
+
+  // ── A bridge travels with the shared module it re-exports ─────────────
+  //
+  // `_shared/**` crosses on every module-scoped clone; the `src/` file that
+  // re-exports a shared module for the frontend crosses only where a glob
+  // names it or a delivered file imports it. PR #29 to the independent landed
+  // five new `_shared/reportDesign/` modules and three of their bridges stayed
+  // behind, failing the clone's own parity spec. See `reExportBridges.pure.ts`.
+  //
+  // The pool is decided by path and size alone and read in one batch; whether
+  // a bridge is OWED is asked of the delivery each round, like every other
+  // debt this loop settles, and it is carried by the same machinery.
+  const bridgePool: string[] =
+    widenedScope !== null &&
+    primeShaByPath !== null &&
+    cloneShaByPath !== null &&
+    primeSizeByPath !== null
+      ? bridgeCandidates({
+          prime: primeShaByPath,
+          primeSizes: primeSizeByPath,
+          clone: cloneShaByPath,
+        })
+      : [];
+  // Paced on the pass's budget, like the main pass's read and unlike the
+  // import closure's: a bridge whose text was not read is simply not owed
+  // this pass, which is yesterday's behaviour, and the next pass asks again.
+  // Measured on the independent at prime@cdff4f2 the pool was 18 files and
+  // 36 KB — one batch.
+  if (bridgePool.length > 0) {
+    await prefetchPrimeText(
+      bridgePool,
+      resume?.budget ? (reserveMs) => resume.budget!.isPastDeadline(reserveMs) : undefined,
+    );
+  }
+  /** Bridges this pass carried, by path, with the modules each re-exports. */
+  const bridgesCarried = new Map<string, OwedBridge>();
+  let bridgesOwedNow: OwedBridge[] = [];
   // Past the belt the carry stops being ATTEMPTED and the loop keeps going.
   // See where it is set.
   let carryingAllowed = true;
@@ -2972,6 +4243,7 @@ export async function processClone(args: {
   for (let round = 0; ; round += 1) {
     const deliveredPaths = new Set([...treeEntries.map((t) => t.path), ...reconciledPaths]);
     const strandedBySpec = new Map<string, string[]>();
+    const outsideNamedBy = new Map<string, string[]>();
     for (const [specPath, specText] of Object.entries(deliveredSource)) {
       const stranded = strandedSubjects({
         specPath,
@@ -2981,6 +4253,34 @@ export async function processClone(args: {
         crossing: deliveredPaths,
       });
       if (stranded.length > 0) strandedBySpec.set(specPath, stranded);
+      if (primeShaByPath !== null && cloneShaByPath !== null) {
+        const outside = outsideRootCandidates({
+          specPath,
+          specText,
+          primeSha: primeShaByPath,
+          cloneSha: cloneShaByPath,
+          crossing: deliveredPaths,
+        });
+        if (outside.length > 0) outsideNamedBy.set(specPath, outside);
+      }
+    }
+    // A file outside the content roots joins its spec's stranded subjects only
+    // on evidence, and is then carried or holds the spec exactly as one inside
+    // them does. One never asked about stays out, as it always has.
+    if (outsideNamedBy.size > 0) {
+      if (carryingAllowed) {
+        await judgeOutsideRoot([...new Set([...outsideNamedBy.values()].flat())].sort());
+      }
+      for (const [specPath, outside] of outsideNamedBy) {
+        const travelling = outside.filter((path) => outsideVerdicts.get(path)?.act === "release");
+        if (travelling.length === 0) continue;
+        strandedBySpec.set(specPath, [...(strandedBySpec.get(specPath) ?? []), ...travelling]);
+        for (const path of travelling) {
+          const naming = outsideCarriedFor.get(path) ?? new Set<string>();
+          naming.add(specPath);
+          outsideCarriedFor.set(path, naming);
+        }
+      }
     }
     // An import already delivered, or already put through the rules once, is
     // settled. Clearing them here is what makes the loop terminate: an owed
@@ -2989,11 +4289,161 @@ export async function processClone(args: {
     for (const owed of [...importsOwed]) {
       if (deliveredPaths.has(owed) || attemptedSubjects.has(owed)) importsOwed.delete(owed);
     }
-    if (strandedBySpec.size === 0 && (!carryingAllowed || importsOwed.size === 0)) break;
+    // A bridge is owed only onto a shared module this delivery lands (or one
+    // already prime's copy on the clone), so it is asked of the delivery as it
+    // stands THIS round: a module a rule held back is not in it, and a bridge
+    // onto it would re-export a file the clone does not have.
+    bridgesOwedNow =
+      bridgePool.length > 0 && primeShaByPath !== null && cloneShaByPath !== null
+        ? bridgesOwed({
+            candidates: bridgePool,
+            readPrime: (path) => exactPrimeText.get(path)?.text,
+            prime: primeShaByPath,
+            clone: cloneShaByPath,
+            delivered: deliveredPaths,
+          }).filter((b) => !attemptedSubjects.has(b.path))
+        : [];
+    // The other direction. A kept spec whose subject is crossing is carried
+    // in behind it on the same terms as a subject — `planSubjectCarry`, the
+    // exclusions, `prepareOne` — but only after prime's own history says the
+    // clone's copy is an older version of prime's, or an operator approved
+    // overwriting it. The spec is outside this clone's scope and no rule sent
+    // it, so replacing it must lose nothing of the clone's. Everything else is
+    // held for a person, naming the subject that crossed.
+    const owedSpecs: string[] = [];
+    if (keptSpecSubjects.size > 0) {
+      const heldNow = new Set(partition.held.map((h) => h.path));
+      const unjudged: Array<{ path: string; cloneSha: string }> = [];
+      const leftBehindNow = keptLeftBehind();
+      for (const lb of leftBehindNow) {
+        leftBehind.set(lb.spec, lb);
+        if (heldNow.has(lb.spec) || attemptedSubjects.has(lb.spec)) continue;
+        if (leftBehindVerdicts.has(lb.spec)) continue;
+        const cloneSha = cloneShaByPath?.get(lb.spec);
+        if (cloneSha === undefined) continue;
+        if (overwriteApproved.has(lb.spec) || knownHeldEvidence.has(lb.spec)) continue;
+        unjudged.push({ path: lb.spec, cloneSha });
+      }
+      // Asked only while something can still be carried: a verdict nobody can
+      // act on this pass is a request spent for nothing.
+      let evidence = new Map<string, HeldPathEvidence>();
+      if (carryingAllowed && unjudged.length > 0) {
+        if (shouldStop()) {
+          for (const u of unjudged) leftBehindCut.set(u.path, "budget");
+        } else {
+          const room = Math.max(0, MAX_LEFT_BEHIND_PROBES - leftBehindProbes);
+          const asking = unjudged.slice(0, room);
+          for (const u of unjudged.slice(room)) leftBehindCut.set(u.path, "probes");
+          if (asking.length > 0) {
+            leftBehindProbes += asking.length;
+            evidence = await probeHeldPaths({
+              octokit,
+              primeRef,
+              candidates: asking,
+              maxProbes: asking.length,
+            });
+            for (const [path, answer] of evidence) {
+              if (answer.kind === "unsettled") continue;
+              const clone = cloneShaByPath?.get(path);
+              if (clone) heldLedger[path] = { clone, evidence: answer };
+            }
+          }
+        }
+      }
+      const releasing: string[] = [];
+      for (const lb of leftBehindNow) {
+        if (heldNow.has(lb.spec) || attemptedSubjects.has(lb.spec)) continue;
+        let verdict = leftBehindVerdicts.get(lb.spec);
+        if (verdict === undefined) {
+          const approved = overwriteApproved.has(lb.spec);
+          const answer = knownHeldEvidence.get(lb.spec) ?? evidence.get(lb.spec) ?? null;
+          // Not judged this round and nothing on file: left for the sweep.
+          if (!approved && answer === null) continue;
+          verdict = decideHoldRelease({
+            held: { path: lb.spec, pattern: "", reason: "manual_reconcile", note: null },
+            cloneSha: cloneShaByPath?.get(lb.spec) ?? null,
+            evidence: answer,
+            approved,
+          });
+          leftBehindVerdicts.set(lb.spec, verdict);
+          leftBehindCut.delete(lb.spec);
+          if (verdict.act === "hold") {
+            const held = leftBehindSpecHold({
+              membrane,
+              spec: lb.spec,
+              touchedBy: lb.touchedBy,
+              removed: lb.removed,
+              why: verdict.why,
+            });
+            partition.held.push(held);
+            needsReconcile.push(held);
+            attemptedSubjects.add(lb.spec);
+            const why = verdict.why;
+            reverseHolds.set(lb.spec, {
+              current: held,
+              rebuild: (touch) =>
+                touch.touchedBy.length + (touch.withheld?.length ?? 0) === 0
+                  ? null
+                  : leftBehindSpecHold({ membrane, spec: lb.spec, ...touch, why }),
+            });
+            continue;
+          }
+        }
+        if (verdict.act === "release") releasing.push(lb.spec);
+      }
+      // Prime's copy may assert about a file outside the content roots that
+      // the clone holds at an older version and no delivery would carry —
+      // `reportTypography.spec.ts` reads a document under `.claude/`. Asked
+      // BEFORE the spec moves: once it has, a file nobody asked about would
+      // leave prime's newer assertions running against the older copy, which
+      // is worse than the older spec this replaces. What the answers bring is
+      // then carried beside the spec by the stranded-subject rule above.
+      if (releasing.length > 0) {
+        const outsideOf = new Map<string, string[]>();
+        for (const spec of releasing) {
+          const text = primeKeptText.get(spec);
+          outsideOf.set(
+            spec,
+            text !== undefined && primeShaByPath !== null && cloneShaByPath !== null
+              ? outsideRootCandidates({
+                  specPath: spec,
+                  specText: text,
+                  primeSha: primeShaByPath,
+                  cloneSha: cloneShaByPath,
+                  crossing: deliveredPaths,
+                })
+              : [],
+          );
+        }
+        if (carryingAllowed) {
+          await judgeOutsideRoot([...new Set([...outsideOf.values()].flat())].sort());
+        }
+        for (const spec of releasing) {
+          if ((outsideOf.get(spec) ?? []).some((path) => !outsideVerdicts.has(path))) {
+            leftBehindCut.set(spec, shouldStop() ? "budget" : "outside_probes");
+            continue;
+          }
+          leftBehindCut.delete(spec);
+          owedSpecs.push(spec);
+        }
+      }
+    }
+    if (
+      strandedBySpec.size === 0 &&
+      (!carryingAllowed ||
+        (importsOwed.size === 0 && owedSpecs.length === 0 && bridgesOwedNow.length === 0))
+    ) {
+      break;
+    }
 
     // Try to bring the subjects across before deciding the specs cannot go.
     const plan = planSubjectCarry({
-      stranded: [...[...strandedBySpec.values()].flat(), ...importsOwed],
+      stranded: [
+        ...[...strandedBySpec.values()].flat(),
+        ...importsOwed,
+        ...owedSpecs,
+        ...bridgesOwedNow.map((b) => b.path),
+      ],
       held: partition.held,
       attempted: attemptedSubjects,
       limit: Math.max(0, MAX_SUBJECTS_CARRIED - carriedSubjects.length),
@@ -3048,6 +4498,10 @@ export async function processClone(args: {
 
     if (carryingAllowed && gated.write.length > 0 && !carryStoppedOnBudget) {
       for (const subject of plan.carry) attemptedSubjects.add(subject);
+      await prefetchPrimeText(
+        gated.write.filter((path) => isSpecPath(path) || !known.has(path)),
+        resume?.budget ? (reserveMs) => resume.budget!.isPastDeadline(reserveMs) : undefined,
+      );
       const { results: carried, stopped } = await mapWithConcurrencyUntil<string, Prepared | null>(
         gated.write,
         8,
@@ -3074,6 +4528,10 @@ export async function processClone(args: {
       // round, which is correct and now says which rule stopped it.
       const written = absorbPrepared(carried);
       carriedSubjects.push(...written);
+      for (const path of written) {
+        const bridge = bridgesOwedNow.find((b) => b.path === path);
+        if (bridge) bridgesCarried.set(path, bridge);
+      }
       // A carried subject is a delivered module, so it answers to the import
       // closure like any other. Asking only at the top of the pass is how a
       // carried module arrives without what it imports, permanently: the
@@ -3130,8 +4588,18 @@ export async function processClone(args: {
                 ? "ceiling"
                 : null,
       });
-      partition.held.push(held);
-      needsReconcile.push(held);
+      // Brought in only because the clone's older copy was being left behind:
+      // that older copy is what stays, and the hold says so.
+      const lb = leftBehind.get(specPath);
+      const hold = lb ? withLeftBehindNote(held, lb) : held;
+      partition.held.push(hold);
+      needsReconcile.push(hold);
+      if (lb) {
+        reverseHolds.set(specPath, {
+          current: hold,
+          rebuild: (touch) => withLeftBehindNote(held, touch),
+        });
+      }
       delete deliveredSource[specPath];
       for (let i = treeEntries.length - 1; i >= 0; i -= 1) {
         if (treeEntries[i].path === specPath) treeEntries.splice(i, 1);
@@ -3149,6 +4617,108 @@ export async function processClone(args: {
     // least one spec and `deliveredSource` strictly shrinks, so it settles in
     // at most one round per spec.
     if (round >= maxCarryRounds) carryingAllowed = false;
+  }
+
+  // Every kept spec still left behind once the delivery is final, that no
+  // rule already holds, is held here — never shipped past. Two ways to reach
+  // this: prime's history cleared it and the carry stopped before it (the
+  // budget or a ceiling), or it was never judged at all (the budget, or the
+  // probe ceiling). Both clear on a later pass, and the note says which.
+  if (keptSpecSubjects.size > 0) {
+    const heldNow = new Set(partition.held.map((h) => h.path));
+    for (const lb of keptLeftBehind()) {
+      leftBehind.set(lb.spec, lb);
+      if (heldNow.has(lb.spec)) continue;
+      const cutShort: LeftBehindCutShort =
+        leftBehindCut.get(lb.spec) ?? (carryStoppedOnBudget ? "budget" : "ceiling");
+      const held = leftBehindSpecHold({
+        membrane,
+        spec: lb.spec,
+        touchedBy: lb.touchedBy,
+        removed: lb.removed,
+        cutShort,
+      });
+      partition.held.push(held);
+      needsReconcile.push(held);
+      reverseHolds.set(lb.spec, {
+        current: held,
+        rebuild: (touch) =>
+          touch.touchedBy.length + (touch.withheld?.length ?? 0) === 0
+            ? null
+            : leftBehindSpecHold({ membrane, spec: lb.spec, ...touch, cutShort }),
+      });
+    }
+  }
+
+  // ── …and the removals, once the specs that stay are known ───────────────
+  //
+  // A kept spec the channel did not bring across stays on the clone as it is,
+  // and a file it imports cannot be removed beneath it: the reference check's
+  // own rule, asked of the one kind of survivor it could not ask before the
+  // channel ran (see "Which of prime's deletions this delivery makes"). The
+  // held files are asked again as well, because the channel holds specs of
+  // its own.
+  //
+  // Narrowing only ever withholds. A plan the bulk cap refused has nothing to
+  // narrow, and a plan it accepted stays accepted with fewer paths in it —
+  // still under the cap, or still wholly approved — so no removal is made
+  // that the channel was not told about. What it withholds is named on every
+  // hold that asserts about it, below.
+  if (deletesCrossing.size > 0 && deletionPlan.refusal === null) {
+    const landedNow = new Set(treeEntries.filter((t) => t.sha !== null).map((t) => t.path));
+    const staying = new Map([...cloneKeptText].filter(([spec]) => !landedNow.has(spec)));
+    await withholdStillReferenced(await deletionSurvivors(staying));
+    deletionPlan = planDeletions(deletionVerdicts, deletionCap, deletionOverCap);
+    deletesCrossing = new Set(deletionPlan.deletes);
+  }
+
+  // ── the security baseline, recounted over the tree this pass lands ─────
+  //
+  // `SECURITY_INVENTORY.json` was reconciled far above, from the delivery as
+  // it stood then: before the subject carry brought files in behind specs,
+  // and before the removals were final. Both change what the generator will
+  // find. A function prime deleted is a directory the clone no longer holds,
+  // and its imports leave the baseline with it; a carried file is prime's
+  // source, so prime's reading of it stands. Counted over the early delivery,
+  // the baseline describes a tree this proposal does not create — and the
+  // clone's own `security` job diffs exactly that.
+  //
+  // So it is asked once more, of the finished delivery less the finished
+  // removals, from the same four inputs. Nothing else is re-decided: a hold
+  // stays a hold, and a recount that refuses (it cannot — the inputs that
+  // decide a refusal are the ones already accepted) leaves the first answer
+  // standing rather than replacing a reasoned file with nothing.
+  if (inventoryRecount !== null && reconciledPaths.has(SECURITY_INVENTORY_PATH)) {
+    const finalDelivered = treeEntries.filter((e) => e.sha !== null).map((e) => e.path);
+    const finalTree = new Set([...inventoryRecount.cloneTree.keys(), ...finalDelivered]);
+    for (const removed of deletesCrossing) finalTree.delete(removed);
+    const recount = reconcileSecurityInventory({
+      primeInventoryJson: inventoryRecount.primeInventoryJson,
+      cloneInventoryJson: inventoryRecount.cloneInventoryJson,
+      mergedToml: inventoryRecount.mergedToml,
+      mergedRegistryJson: inventoryRecount.mergedRegistryJson,
+      mergedTreePaths: finalTree,
+      deliveredPaths: finalDelivered,
+      withheld: withheldFunctions,
+    });
+    if (recount.ok && recount.merged !== deliveredSource[SECURITY_INVENTORY_PATH]) {
+      dropFromTree(SECURITY_INVENTORY_PATH);
+      // Inline, as the type baseline below writes: the same entry serves a
+      // rehearsal and a real pass, and a rehearsal then shows the file the
+      // real pass would write.
+      treeEntries.push({
+        path: SECURITY_INVENTORY_PATH,
+        mode: "100644",
+        type: "blob",
+        content: recount.merged,
+      });
+      deliveredSource[SECURITY_INVENTORY_PATH] = recount.merged;
+      if (inventoryRecount.cloneTree.get(SECURITY_INVENTORY_PATH) === gitBlobSha(recount.merged)) {
+        reconcileWrites.delete(SECURITY_INVENTORY_PATH);
+      } else {
+        reconcileWrites.add(SECURITY_INVENTORY_PATH);
+      }
+    }
   }
 
   // ── the Edge Function type baseline follows the files it counts ───────
@@ -3185,7 +4755,7 @@ export async function processClone(args: {
       if (primeBaseline && cloneBaseline && !primeBaseline.binary && !cloneBaseline.binary) {
         const crossing = new Set<string>([
           ...treeEntries.filter((t) => t.sha !== null).map((t) => t.path),
-          ...pendingDeletes,
+          ...deletesCrossing,
         ]);
         const verdict = reconcileEdgeTypecheckBaseline({
           primeJson: primeBaseline.content,
@@ -3226,6 +4796,67 @@ export async function processClone(args: {
     }
   }
 
+  // ── Every note this half wrote, written again from the finished delivery ─
+  //
+  // A note was written when its spec was judged, and three things can happen
+  // after that: a subject is held later in the pass, a removal is withheld by
+  // the narrowing above, and the type baseline keeps the clone's own file. So
+  // each is rewritten from what the delivery finally does. A withheld removal
+  // is named as withheld; a hold left with nothing to say is dropped, because
+  // nothing it asserts about changes and no removal waits on it — the spec
+  // simply stays, as it would have without this half.
+  if (reverseHolds.size > 0) {
+    const finalLeftBehind = new Map(keptLeftBehind().map((lb) => [lb.spec, lb]));
+    const withheldRemovals = [...plannedBeforeTheChannel].filter((p) => !deletesCrossing.has(p));
+    for (const [spec, entry] of reverseHolds) {
+      const lb = finalLeftBehind.get(spec);
+      const subjects = new Set(keptSpecSubjects.get(spec) ?? []);
+      const next = entry.rebuild({
+        touchedBy: lb?.touchedBy ?? [],
+        removed: lb?.removed ?? [],
+        withheld: withheldRemovals.filter((path) => subjects.has(path)).sort(),
+      });
+      replaceHold(entry.current, next);
+      if (next) entry.current = next;
+      else reverseHolds.delete(spec);
+    }
+  }
+
+  // Named in the pull request: a spec brought up to date with the file it
+  // tests, and a file outside the content roots carried beside the spec that
+  // asserts about it. Neither is in this clone's scope, so the diff would
+  // otherwise show them with no reason given. Only what actually landed, and
+  // named for what the delivery finally does: a file it was brought across
+  // for that the delivery no longer changes is said to be unchanged.
+  const basisOf = (verdict: HoldRelease | undefined): CarryBasis =>
+    verdict?.act === "release" && verdict.basis === "approved" ? "approved" : "unedited";
+  const landed = new Set(treeEntries.filter((t) => t.sha !== null).map((t) => t.path));
+  const finalChanged = changedOnClone();
+  const specsBroughtAcrossNote = describeSpecsBroughtAcross({
+    specs: [...leftBehindVerdicts]
+      .filter(([spec, verdict]) => verdict.act === "release" && landed.has(spec))
+      .map(([spec, verdict]) => {
+        const touchedBy = (keptSpecSubjects.get(spec) ?? []).filter(
+          (subject) => subject !== spec && finalChanged.has(subject),
+        );
+        return {
+          spec,
+          touchedBy,
+          removed: touchedBy.filter((subject) => deletesCrossing.has(subject)),
+          unchanged: (leftBehind.get(spec)?.touchedBy ?? []).filter((s) => !finalChanged.has(s)),
+          basis: basisOf(verdict),
+        };
+      }),
+    outside: [...outsideCarriedFor]
+      .filter(([path]) => landed.has(path))
+      .map(([path, naming]) => ({
+        path,
+        specs: [...naming].filter((spec) => landed.has(spec)).sort(),
+        basis: basisOf(outsideVerdicts.get(path)),
+      }))
+      .filter((o) => o.specs.length > 0),
+  });
+
   // The finished pass's own ledger, carried on the result row so the NEXT
   // pass — for whatever prime commit — reuses every blob prime still holds.
   // Real path only; a rehearsal records nothing.
@@ -3240,10 +4871,63 @@ export async function processClone(args: {
       ? { progress: progress as unknown as Json }
       : {};
 
+  // A conversion delivers its removals whole or not at all. A refused bulk
+  // plan, or an edge function whose directory the plan kept while its
+  // declarations were withheld, would leave a clone on the new line with a
+  // function the new line does not declare — so the proposal is refused and
+  // the conversion row says why.
+  const retiredStillKept = conversion
+    ? retiredFunctionsKept(retiredByConversion, new Set(deletionPlan.deletes))
+    : [];
+  const conversionRefusal: string | null = !conversion
+    ? null
+    : deletionPlan.refusal
+      ? `The removals the conversion needs were refused: ${deletionPlan.refusal}`
+      : retiredStillKept.length > 0
+        ? `The edge function(s) ${retiredStillKept.join(", ")} leave with the line this clone ` +
+          `leaves, but their files could not be removed (${
+            deletionPlan.kept
+              .filter((k) =>
+                retiredStillKept.some((slug) => k.path.startsWith(`supabase/functions/${slug}/`)),
+              )
+              .map((k) => `${k.path}: ${k.why}`)
+              .join("; ") || "no byte-identical copy on the leaving line"
+          }). Reconcile them by hand, then propose again.`
+        : null;
+
+  // A conversion that writes nothing cannot report a skip on the two early
+  // returns below: neither emits a plan, and a skip with no plan reads to the
+  // conversion as a clean no-op that may move the record. Anything the
+  // leaving line left behind is a refusal instead (`conversionWithoutDelivery`).
+  const conversionUndelivered = (): Record<string, unknown> | null => {
+    if (!conversion) return null;
+    const why = conversionWithoutDelivery({ refusal: conversionRefusal, kept: deletionPlan.kept });
+    if (!why) return null;
+    return {
+      status: "failed",
+      diff_summary: "CRM conversion refused: nothing could be proposed",
+      files_changed: 0,
+      error_message: why,
+      completed_at: new Date().toISOString(),
+    };
+  };
+
   // A cascade whose only work is a removal is still work. Keying this on
   // `treeEntries` alone would report "already in sync" while the clone still
   // held a file prime deleted — which is the whole defect this is here for.
+  // A pump's steady state is not a delivery: its merge IS the clone's file,
+  // and a tree of nothing else is the clone's tree (`steadyStatePumpPaths`).
+  for (const path of steadyStatePumpPaths({
+    entries: treeEntries,
+    reconciled: reconciledPaths,
+    reconcileWrites,
+  })) {
+    dropFromTree(path);
+  }
+
   if (treeEntries.length === 0 && pendingDeletes.length === 0) {
+    const refused = conversionUndelivered();
+    if (refused) return refused;
     // "Nothing to write" and "nothing differed" are different states, and the
     // second one is the one an operator can safely ignore. A mirror whose only
     // differences were all withheld must not report as in sync.
@@ -3297,15 +4981,10 @@ export async function processClone(args: {
   const heldSourcePaths = needsReconcile
     .map((h) => h.path)
     .filter((path) => /\.[cm]?tsx?$/.test(path));
-  // The clone's copies of its held files, kept beyond this block because the
-  // deletion reference check needs exactly the same sources: a held file is
-  // precisely a file the cascade cannot fix, so a held file importing a module
-  // this run wants to delete is the one way a deletion can break the build.
-  const heldFiles: Record<string, string> = {};
-  if (
-    heldSourcePaths.length > 0 &&
-    (Object.keys(deliveredSource).length > 0 || pendingDeletes.length > 0)
-  ) {
+  if (heldSourcePaths.length > 0 && Object.keys(deliveredSource).length > 0) {
+    // The clone's copies, through the pass's one clone reader: the deletion
+    // reference check has usually read them already.
+    const heldFiles: Record<string, string> = {};
     const heldFilesPrime: Record<string, string> = {};
     await Promise.all(
       heldSourcePaths.flatMap((path) => [
@@ -3313,8 +4992,8 @@ export async function processClone(args: {
         // warning; inventing an empty one would claim the cascade is safe.
         (async () => {
           try {
-            const f = await getFileContent(octokit, cloneRef, path);
-            if (f) heldFiles[path] = f.content;
+            const text = await readCloneText(path);
+            if (text !== null) heldFiles[path] = text;
           } catch {
             /* leave it out — see above */
           }
@@ -3353,84 +5032,13 @@ export async function processClone(args: {
           .join("; ")}`
       : "";
 
-  // ── Is anything still importing what this run wants to delete? ────────────
-  //
-  // Three kinds of file can be. A HELD file, because the cascade cannot
-  // change it — `src/App.tsx` is `manual_reconcile` on the client-facing
-  // mirror and imports from the AML shell. A CLONE-ONLY file, because prime
-  // has never seen it. And a deletion this very check WITHHOLDS: a kept file
-  // is an old prime version, and an old prime version imports exactly what
-  // prime deleted beside it, because a decommission leaves in one commit.
-  // Everything else is either delivered by this run (prime's own content,
-  // which cannot import a path prime deleted) or byte-identical to prime's
-  // copy, which cannot either.
-  //
-  // Only read when there is a deletion to protect, so a run that deletes
-  // nothing spends nothing.
-  if (pendingDeletes.length > 0) {
-    const deleting = new Set(pendingDeletes);
-    const cloneOnlySources = deletionCandidates
-      .map((c) => c.path)
-      .filter((p) => !deleting.has(p) && /\.[cm]?tsx?$/.test(p))
-      .sort()
-      .slice(0, 60);
-    const surviving: Record<string, string> = { ...heldFiles };
-    await Promise.all(
-      cloneOnlySources.map(async (path) => {
-        try {
-          const f = await getFileContent(octokit, cloneRef, path);
-          if (f && !f.binary) surviving[path] = f.content;
-        } catch {
-          /* A read that failed is not a file with no imports — but it is also
-             not evidence against a deletion. The bytes rule already stands. */
-        }
-      }),
-    );
-    deletionVerdicts = withholdReferencedDeletions(deletionVerdicts, surviving);
-    // The third kind, closed over: a withheld deletion is itself a survivor,
-    // and one pass over the graph is not a closure. Measured 16 Sep 2026 on
-    // npc-client#189 — held `src/App.tsx` kept `BuilderPortalAdmin.tsx`, the
-    // dialog only that page imports was deleted, and the PR could not build.
-    // Each newly kept file's source joins the survivors and is scanned like
-    // the rest, until nothing more flips. Terminates: every iteration grows
-    // `surviving` or `unreadable`, both bounded by the verdict list.
-    const unreadableSurvivors = new Set<string>();
-    for (;;) {
-      const unread = deletionVerdicts
-        .filter((v) => v.act === "keep" && v.reason === "still_referenced")
-        .map((v) => v.path)
-        .filter((p) => !(p in surviving) && !unreadableSurvivors.has(p));
-      if (unread.length === 0) break;
-      await Promise.all(
-        unread.map(async (path) => {
-          try {
-            const f = await getFileContent(octokit, cloneRef, path);
-            // A read that fails is not a file with no imports — inventing an
-            // empty one would ship the very break this check exists to stop.
-            // The path is only excused from the closure, never given content.
-            if (f && !f.binary) surviving[path] = f.content;
-            else unreadableSurvivors.add(path);
-          } catch (e) {
-            // A rate limit is the window, not this file: defer the clone
-            // rather than deliver a tree the unread survivor may contradict.
-            if (classifyGitHubFailure(e).kind === "rate_limited") throw e;
-            unreadableSurvivors.add(path);
-          }
-        }),
-      );
-      deletionVerdicts = withholdReferencedDeletions(deletionVerdicts, surviving);
-    }
-  }
-
-  // Approvals are consulted only past the cap, and they are never evidence:
-  // a path still has to earn its delete verdict from prime's history before
-  // the approved set is even read. See `planDeletions`.
-  const deletionPlan = planDeletions(deletionVerdicts, MAX_DELETIONS_PER_CASCADE, deletionApproved);
   for (const path of deletionPlan.deletes) {
     // `sha: null` is how a tree entry removes a path from `base_tree`.
     treeEntries.push({ path, mode: "100644" as const, type: "blob" as const, sha: null });
   }
   if (treeEntries.length === 0) {
+    const refused = conversionUndelivered();
+    if (refused) return refused;
     // Every deletion this run found was withheld — by a reference, by an edit,
     // or by the bulk refusal — and nothing else differed. Saying "in sync"
     // here would be the original defect wearing a new hat.
@@ -3457,7 +5065,20 @@ export async function processClone(args: {
   const reconcileSuffix = reconcileSuffixFor(needsReconcile.length);
   const releaseSuffix = holdReleaseSuffixFor(holdReleases);
   const deleteSuffix = deletionSuffixFor(deletionPlan);
-  const fileSummary = `${summaryFiles.join(", ")}${summarySuffix}${pinSuffix}${heldSuffix}${reconcileSuffix}${releaseSuffix}${deleteSuffix}${staleSuffix}${missingSuffix}`;
+  // What these two rules actually LANDED. A refreshed handler or a carried
+  // bridge is still a write that `prepareOne` can hold, and a summary that
+  // counted the intention would claim a file the delivery does not carry.
+  const landedWrites = new Set(treeEntries.filter((t) => t.sha !== null).map((t) => t.path));
+  // A refreshed file a `manual_reconcile` exclusion names was held by the
+  // partition and released by the hold releases, and is reported there, once,
+  // with why the hold gave way.
+  const releasedHolds = new Set(holdReleases.filter((r) => r.act === "release").map((r) => r.path));
+  const strandedReported = strandedVerdicts.filter(
+    (v) => v.act !== "refresh" || (landedWrites.has(v.path) && !releasedHolds.has(v.path)),
+  );
+  const bridgesReported = [...bridgesCarried.values()].filter((b) => landedWrites.has(b.path));
+  const carryOnSuffix = `${strandedSuffixFor(strandedReported)}${bridgeSuffixFor(bridgesReported)}`;
+  const fileSummary = `${summaryFiles.join(", ")}${summarySuffix}${pinSuffix}${heldSuffix}${reconcileSuffix}${releaseSuffix}${carryOnSuffix}${deleteSuffix}${staleSuffix}${missingSuffix}`;
 
   // The decision, complete, and the last point before anything is written.
   // Emitted on BOTH paths deliberately: a dry run that took a different route
@@ -3481,7 +5102,26 @@ export async function processClone(args: {
     onlyInClone,
     unprobedDeletions,
     summary: fileSummary,
+    ...(conversion
+      ? {
+          conversion: {
+            retiredFunctions: retiredByConversion,
+            releasedHolds: releasedRoutingHolds,
+            refusal: conversionRefusal,
+          },
+        }
+      : {}),
   });
+
+  if (conversionRefusal) {
+    return {
+      status: "failed",
+      diff_summary: `CRM conversion refused: ${fileSummary}`,
+      files_changed: 0,
+      error_message: conversionRefusal,
+      completed_at: new Date().toISOString(),
+    };
+  }
 
   if (dryRun) {
     return {
@@ -3550,8 +5190,21 @@ export async function processClone(args: {
   // unchanged and deliberately so: `isEngineOnlyBranch` recognises an
   // unmodified proposal by this exact prefix, and a proposal the repair path
   // stops recognising is one that can never be rebuilt.
+  const conversionWording = conversion
+    ? {
+        cloneName: conversion.cloneName,
+        fromMode: conversion.fromMode,
+        toMode: conversion.toMode,
+        targetLabel: conversion.targetLabel,
+        leavingLabel: conversion.leaving.label,
+        sourceSha,
+        conversionId: conversion.conversionId,
+      }
+    : null;
   const message =
-    `chore(aurixa): cascade ${treeEntries.length} file(s) from ${sourceLabel}@${shortSha(sourceSha)}\n\n` +
+    (conversionWording
+      ? `${conversionCommitSubject(conversionWording, treeEntries.length)}\n\n`
+      : `chore(aurixa): cascade ${treeEntries.length} file(s) from ${sourceLabel}@${shortSha(sourceSha)}\n\n`) +
     treeEntries.map((t) => `- ${t.sha === null ? "DELETE " : ""}${t.path}`).join("\n");
 
   // What the pull request has to say beyond the file list. `manual_reconcile`
@@ -3562,7 +5215,16 @@ export async function processClone(args: {
     `\n\nScope: **${scopeLabel}**.\n\n` +
     `Files synchronized:\n\n` +
     treeEntries
-      .map((t) => `- \`${t.path}\`${t.sha === null ? " — **removed**, prime deleted it" : ""}`)
+      .map(
+        (t) =>
+          `- \`${t.path}\`${
+            t.sha === null
+              ? conversion
+                ? ` — **removed**, only ${conversion.leaving.label} carried it`
+                : " — **removed**, prime deleted it"
+              : ""
+          }`,
+      )
       .join("\n") +
     (staleHeld.length > 0
       ? `\n\n### ⚠ This cascade breaks a held file\n\n` +
@@ -3597,11 +5259,20 @@ export async function processClone(args: {
       ? `\n\n### The security baselines were recomputed, not copied\n\n` +
         `\`${SECURITY_INVENTORY_PATH}\` and \`${FUNCTION_COUNT_RATCHET_PATH}\` each state how ` +
         `many edge functions a repository has, so prime's copies state PRIME'S count. This ` +
-        `deployment owns ${cloneOwnedFunctions.length} function(s) prime does not ` +
-        `(${cloneOwnedFunctions.join(", ")}), so both were computed from the \`config.toml\` and ` +
+        `deployment ${describeFunctionSetDifference(cloneOwnedFunctions, withheldFunctions)}, ` +
+        `so both were computed from the \`config.toml\` and ` +
         `security registry this same pass reconciled — the numbers describe the tree this ` +
         `proposal creates rather than either side's.\n\n` +
         baselineNotes.map((l) => `- ${l}`).join("\n")
+      : "") +
+    (apiSurfaceNote
+      ? `\n\n### The mobile API surface was generated here, not copied\n\n` +
+        `\`${API_SURFACE_PATH}\` is generated from the security registry and ` +
+        `\`config.toml\`, and this clone's function set is not prime's, so prime's copy lists ` +
+        `functions this repository's registry does not. What travelled is the surface this ` +
+        `clone's reconciled registry and config generate, composed the way ` +
+        `\`npm run mobile:api\` composes it and checked against prime's own file first.\n\n` +
+        `- ${apiSurfaceNote}`
       : "") +
     (edgeBaselineNote
       ? `\n\n### The Edge Function type baseline followed the files it counts\n\n` +
@@ -3630,6 +5301,29 @@ export async function processClone(args: {
         `never released.\n\n` +
         describeHoldReleases(holdReleases)
       : "") +
+    (describeStrandedFunctions(strandedReported)
+      ? `\n\n### Edge Functions this clone carries, kept current\n\n` +
+        `No installed module names these functions, so their own directories never cross — ` +
+        `but the shared layer they import crosses on every pass. Each file is one this clone ` +
+        `already holds, and it travels only where prime's own history shows the clone's copy ` +
+        `is a version prime held, so nothing of this clone's is lost. A function this clone ` +
+        `does not have is never added.\n\n` +
+        describeStrandedFunctions(strandedReported)
+      : "") +
+    (bridgesReported.length > 0
+      ? `\n\n### Bridges carried beside the shared modules they re-export\n\n` +
+        `Each file does nothing but re-export a module under \`supabase/functions/_shared/\` ` +
+        `that this delivery lands, or that is already prime's copy here. It adds no behaviour ` +
+        `and sits in a directory this clone already carries.\n\n` +
+        describeBridges(bridgesReported)
+      : "") +
+    (specsBroughtAcrossNote
+      ? `\n\n### Brought across beside the files they test\n\n` +
+        `A spec and the file it asserts about travel together or neither does. None of these ` +
+        `is in this clone's scope: each moved because a file it belongs with did, and only where ` +
+        `nothing of this clone's is lost — the same evidence a held path is released on.\n\n` +
+        specsBroughtAcrossNote
+      : "") +
     (needsReconcile.length > 0
       ? `\n\n### Needs a human — ${needsReconcile.length} file(s) changed upstream and were held back\n\n` +
         `These carry deliberate divergence on this clone, so the cascade will never overwrite them. ` +
@@ -3639,9 +5333,25 @@ export async function processClone(args: {
     (partition.held.length - needsReconcile.length > 0
       ? `\n\n_${partition.held.length - needsReconcile.length} further path(s) are owned by this clone and were withheld without comment._`
       : "") +
-    (describeDeletionPlan(deletionPlan)
-      ? `\n\n### What prime deleted\n\n${describeDeletionPlan(deletionPlan)}`
-      : "") +
+    (conversion
+      ? (describeConversionDeletions(deletionPlan, conversion.leaving.label)
+          ? `\n\n### What the line this clone leaves carried\n\n${describeConversionDeletions(
+              deletionPlan,
+              conversion.leaving.label,
+            )}`
+          : "") +
+        (describeRetiredFunctions(retiredByConversion, conversion.toMode)
+          ? `\n\n${describeRetiredFunctions(retiredByConversion, conversion.toMode)}`
+          : "") +
+        (releasedRoutingHolds.length > 0
+          ? `\n\n**Routing holds released for this proposal (${releasedRoutingHolds.length}).** ` +
+            `These files decide which CRM the deployment talks to, so the line this clone joins ` +
+            `delivers its own copy of each:\n` +
+            releasedRoutingHolds.map((p) => `- \`${p}\``).join("\n")
+          : "")
+      : describeDeletionPlan(deletionPlan)
+        ? `\n\n### What prime deleted\n\n${describeDeletionPlan(deletionPlan)}`
+        : "") +
     (unprobedDeletions > 0
       ? `\n\n_${unprobedDeletions} further clone-only path(s) were not checked against prime's history this run._`
       : "") +
@@ -3687,13 +5397,19 @@ export async function processClone(args: {
   // Failing to LIST is not failing to find: if the lookup errors we fall
   // through to opening a new pull request, because a duplicate is a tidiness
   // problem and a cascade that silently did not propose anything is not.
-  const intro =
-    mode === "auto_merge"
+  const intro = conversionWording
+    ? conversionLead(conversionWording, conversion?.cautions ?? [])
+    : mode === "auto_merge"
       ? "Auto-merge: this lands on green and waits otherwise."
       : `Automated cascade from **${primeRef.owner}/${primeRef.repo}@${shortSha(sourceSha)}**.`;
-  const title = `Aurixa cascade · ${sourceLabel}@${shortSha(sourceSha)} → ${treeEntries.length} file(s)`;
+  const title = conversionWording
+    ? conversionTitle(conversionWording, treeEntries.length)
+    : `Aurixa cascade · ${sourceLabel}@${shortSha(sourceSha)} → ${treeEntries.length} file(s)`;
 
-  const existing = await findOpenCascadePr(octokit, cloneRef);
+  // A conversion never reuses a cascade's proposal (it is not one, and moving
+  // its branch would put a line change into a pull request the merge drain
+  // lands on green). Its own slot is held by `clone_crm_conversions`.
+  const existing = conversion ? null : await findOpenCascadePr(octokit, cloneRef);
   let proposal: { number: number; url: string; nodeId: string | null; headSha: string } | null =
     null;
 
@@ -3765,8 +5481,12 @@ export async function processClone(args: {
     }
   }
 
+  let proposalBranch: string | null = null;
   if (!proposal) {
-    const branch = branchName(sourceSha);
+    const branch = conversion
+      ? conversionBranchName(conversion.toMode, sourceSha)
+      : branchName(sourceSha);
+    proposalBranch = branch;
     try {
       await octokit.git.createRef({
         owner: cloneRef.owner,
@@ -3806,6 +5526,17 @@ export async function processClone(args: {
   // `cascadeMergeDrain` owns it — writing it here is what left rows reading
   // "No check has reported on this pull request" long after every check had.
   const durableSummary = `PR #${proposal.number} ${existing ? "updated" : "opened"}: ${fileSummary}`;
+
+  if (conversion) {
+    // The conversion row learns its pull request before anything else can
+    // go wrong: a proposal nobody recorded is one the finaliser never sees.
+    await conversion.onProposal?.({
+      number: proposal.number,
+      url: proposal.url,
+      branch: proposalBranch ?? "",
+      headSha: proposal.headSha,
+    });
+  }
 
   // === auto_merge: always through a pull request, never past its checks ===
   //

@@ -107,6 +107,10 @@ export type AgreementProvisionFacts = {
   client_name: string;
   client_org: string | null;
   created_by: string | null;
+  /** `sla`, `subscription` or `builder_partner`; absent on rows read before the column existed. */
+  document_kind?: string | null;
+  /** Where the signed record was retained; subscription agreements need one. */
+  signed_record_path?: string | null;
 };
 
 export type ProvisionDecision =
@@ -114,11 +118,13 @@ export type ProvisionDecision =
   | { action: "skip"; reason: ProvisionSkipReason; detail: string };
 
 export type ProvisionSkipReason =
+  | "builder_partner_never_provisions"
   | "not_armed"
   | "not_signed"
   | "already_done"
   | "in_flight"
   | "failed_needs_operator"
+  | "acceptance_not_retained"
   | "no_plan"
   | "no_actor";
 
@@ -131,6 +137,20 @@ export type ProvisionSkipReason =
  * retriggers from the agreement row once the cause is fixed.
  */
 export function decideProvisionOnSignature(a: AgreementProvisionFacts): ProvisionDecision {
+  // A builder is admitted, never provisioned. A signed Builder Partner
+  // Agreement opens the Builder Portal on the network; a clone is a
+  // repository, a dedicated backend and a deployment for a CLIENT. The table
+  // refuses the arming too (client_agreements_builder_partner_no_clone_check),
+  // and this refuses first, whatever the row says — the operator's button
+  // included, which otherwise arms an un-armed agreement by being pressed.
+  if (a.document_kind === "builder_partner") {
+    return {
+      action: "skip",
+      reason: "builder_partner_never_provisions",
+      detail:
+        "A Builder Partner Agreement admits a builder to the Builder Portal; it never provisions a clone",
+    };
+  }
   if (!a.provision_on_signature) {
     return {
       action: "skip",
@@ -156,6 +176,18 @@ export function decideProvisionOnSignature(a: AgreementProvisionFacts): Provisio
       action: "skip",
       reason: "failed_needs_operator",
       detail: "A previous attempt failed — retrigger from the agreement once the cause is fixed",
+    };
+  }
+  // A Subscription Agreement says "We retain the accepted document and
+  // commercial snapshot before activating the purchase" (clause 1.2). The
+  // snapshot is written when the offer is issued; the signed record is copied
+  // out of DocuSign when it completes. Until that copy exists, nothing is
+  // provisioned from the signature.
+  if (a.document_kind === "subscription" && !a.signed_record_path) {
+    return {
+      action: "skip",
+      reason: "acceptance_not_retained",
+      detail: "The signed Subscription Agreement has not been retained yet",
     };
   }
   if (!a.plan_slug) {

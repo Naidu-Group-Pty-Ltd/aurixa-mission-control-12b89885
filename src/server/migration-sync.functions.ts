@@ -354,6 +354,12 @@ export const syncCloneMigrations = createServerFn({ method: "POST" })
             // callers cannot drift into disagreeing about which body a stream
             // is of.
             bodyIdentity: (m) => corpus.bodyIdentity(m),
+            // And no `onStatementDone`, deliberately: this route claims
+            // nothing and records no place, so it must not start a seed it
+            // cannot finish in one window. The replay HOLDS such a seed
+            // (`heldOversize`, reported below as "left for the chunking
+            // lane") rather than sending a part and reporting the clone level —
+            // and the fleet lane, which does record its place, carries it.
           },
         );
 

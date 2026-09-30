@@ -4,6 +4,7 @@ import {
   FUNCTION_COUNT_RATCHET_PATH,
   SECURITY_INVENTORY_PATH,
   cloneOnlyEdgeFunctions,
+  describeFunctionSetDifference,
   edgeFunctionNames,
   functionCountRatchetHold,
   securityInventoryHold,
@@ -11,6 +12,7 @@ import {
 import { REPOSITORY_INVARIANTS, repositoryInvariantGlobs } from "./repositoryInvariants.pure";
 import { approvableHeld, reportableHeld } from "./syncExclusions.pure";
 import { stripComments } from "../sourceComments.pure";
+import { PRIME_ONLY_FEATURES } from "../primeOnlyFeatures.pure";
 import { globToRegex, validateModuleGlobs } from "@/lib/module-globs";
 
 /**
@@ -79,7 +81,7 @@ describe("how the engine uses it", () => {
     // fires — a control that is present, reachable and always answers no.
     const config = engine.indexOf("reconcileConfigToml({");
     const registry = engine.indexOf("reconcileSecurityRegistry({");
-    const hold = engine.indexOf("securityInventoryHold(cloneOwnedFunctions)");
+    const hold = engine.indexOf("securityInventoryHold(cloneOwnedFunctions, withheldFunctions)");
     expect(config).toBeGreaterThan(-1);
     expect(registry).toBeGreaterThan(config);
     expect(hold).toBeGreaterThan(registry);
@@ -104,8 +106,14 @@ describe("how the engine uses it", () => {
   });
 
   it("offers the hold to both baselines, and to nothing else", () => {
-    const at = engine.indexOf("securityInventoryHold(cloneOwnedFunctions)");
-    const block = engine.slice(at, at + 4200);
+    // Bounded by the next pump rather than by a count of characters: the
+    // block grew once already, and a window that silently stops short of the
+    // second settle fails for a reason that has nothing to do with it.
+    const at = engine.indexOf("securityInventoryHold(cloneOwnedFunctions, withheldFunctions)");
+    const end = engine.indexOf("reconcileApiSurface({", at);
+    expect(at).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(at);
+    const block = engine.slice(at, end);
     expect(block).toMatch(/await settleBaseline\(\s*inventoryHold,/);
     expect(block).toMatch(/await settleBaseline\(\s*ratchetHold,/);
   });
@@ -244,7 +252,7 @@ describe("the engine reads the tree before it decides", () => {
   it("does it after both reconciles and before the hold", () => {
     const registry = engine.indexOf("reconcileSecurityRegistry({");
     const tree = engine.indexOf("const ownedByTree = cloneOnlyEdgeFunctions({");
-    const hold = engine.indexOf("securityInventoryHold(cloneOwnedFunctions)");
+    const hold = engine.indexOf("securityInventoryHold(cloneOwnedFunctions, withheldFunctions)");
     expect(tree).toBeGreaterThan(registry);
     expect(hold).toBeGreaterThan(tree);
   });
@@ -305,7 +313,7 @@ describe("how the engine uses the ratchet hold", () => {
 
   it("decides it from the same reconciled evidence, after both reconciles", () => {
     const registry = engine.indexOf("reconcileSecurityRegistry({");
-    const hold = engine.indexOf("functionCountRatchetHold(cloneOwnedFunctions)");
+    const hold = engine.indexOf("functionCountRatchetHold(cloneOwnedFunctions, withheldFunctions)");
     expect(registry).toBeGreaterThan(-1);
     expect(hold).toBeGreaterThan(registry);
   });
@@ -315,7 +323,7 @@ describe("how the engine uses the ratchet hold", () => {
     // listed as `modified` and the count was replaced anyway. It is settled
     // through the same `settleBaseline` the inventory is, which drops prime's
     // copy before it decides anything else.
-    const at = engine.indexOf("functionCountRatchetHold(cloneOwnedFunctions)");
+    const at = engine.indexOf("functionCountRatchetHold(cloneOwnedFunctions, withheldFunctions)");
     expect(at).toBeGreaterThan(-1);
     expect(engine.slice(at)).toMatch(/await settleBaseline\(\s*ratchetHold,/);
   });
@@ -336,5 +344,90 @@ describe("how the engine uses the ratchet hold", () => {
     expect(held).not.toBeNull();
     expect(reportableHeld([held!])).toHaveLength(1);
     expect(approvableHeld([held!])).toHaveLength(1);
+  });
+});
+
+/*
+  A clone can differ from the prime by holding LESS. The prime keeps the
+  GoHighLevel account migration for itself (`primeOnlyFeatures.pure.ts`), and
+  a clone without it is prime's function set less twenty-eight — so prime's
+  two numbers count functions its tree does not have.
+*/
+describe("a clone that does not hold what the prime keeps for itself", () => {
+  const WITHHELD = ["migration-job-status", "migration-dispatcher"];
+
+  it("holds both baselines on the withheld set alone", () => {
+    expect(securityInventoryHold([], WITHHELD)?.path).toBe(SECURITY_INVENTORY_PATH);
+    expect(functionCountRatchetHold([], WITHHELD)?.path).toBe(FUNCTION_COUNT_RATCHET_PATH);
+  });
+
+  it("still lets both travel where neither set has anything in it", () => {
+    expect(securityInventoryHold([], [])).toBeNull();
+    expect(functionCountRatchetHold([], [])).toBeNull();
+  });
+
+  it("says what the clone lacks, and still names the command that settles it", () => {
+    const inv = securityInventoryHold([], WITHHELD);
+    expect(inv?.note).toContain(
+      "does not carry the GoHighLevel account migration (2 of 28 functions: " +
+        "migration-dispatcher, migration-job-status), which the prime keeps for itself",
+    );
+    expect(inv?.note).toContain("npm run security:inventory");
+    expect(inv?.note).not.toContain("owns 0");
+    const ratchet = functionCountRatchetHold([], WITHHELD);
+    expect(ratchet?.note).toContain("omits the declarations of the GoHighLevel account migration");
+    expect(ratchet?.note).toContain("the number to update");
+    expect(ratchet?.note).not.toContain("declares 0");
+  });
+
+  it("names both differences where a clone has both", () => {
+    const inv = securityInventoryHold(["crm-send-message"], WITHHELD);
+    expect(inv?.note).toContain("owns 1 edge function(s) the prime does not (crm-send-message)");
+    expect(inv?.note).toContain(" and does not carry the GoHighLevel account migration");
+    const ratchet = functionCountRatchetHold(["crm-send-message"], WITHHELD);
+    expect(ratchet?.note).toContain("declares 1 the prime does not (crm-send-message) and omits");
+  });
+
+  it("writes the sentence it always has where nothing is withheld", () => {
+    // Every CRM pass has shown an operator this wording; a second argument of
+    // nothing must not re-word it.
+    expect(securityInventoryHold(["crm-calendar"], [])?.note).toBe(
+      securityInventoryHold(["crm-calendar"])?.note,
+    );
+    expect(securityInventoryHold(["crm-calendar"])?.note).toContain(
+      "This clone owns 1 edge function(s) the prime does not (crm-calendar), so the prime's",
+    );
+  });
+});
+
+describe("the one clause that describes the difference", () => {
+  it("is the owned-only wording when nothing is withheld", () => {
+    expect(describeFunctionSetDifference(["b", "a", "a"], [])).toBe(
+      "owns 2 edge function(s) the prime does not (a, b)",
+    );
+  });
+
+  it("names the feature, not twenty-eight functions, when the whole of it is missing", () => {
+    const migration = PRIME_ONLY_FEATURES.find((f) => f.key === "ghl-account-migration")!;
+    const text = describeFunctionSetDifference([], migration.functions);
+    expect(text).toBe(
+      "does not carry the GoHighLevel account migration (all 28 functions), which the prime " +
+        "keeps for itself",
+    );
+  });
+
+  it("joins the two halves with 'and', owned first", () => {
+    expect(describeFunctionSetDifference(["crm-calendar"], ["migration-dispatcher"])).toBe(
+      "owns 1 edge function(s) the prime does not (crm-calendar) and does not carry the " +
+        "GoHighLevel account migration (1 of 28 functions: migration-dispatcher), which the " +
+        "prime keeps for itself",
+    );
+  });
+
+  it("is what the pull request body says, so the three cannot drift", () => {
+    const engine = stripComments(readFileSync("src/server/cascade-engine.server.ts", "utf8"));
+    expect(engine).toContain(
+      "describeFunctionSetDifference(cloneOwnedFunctions, withheldFunctions)",
+    );
   });
 });

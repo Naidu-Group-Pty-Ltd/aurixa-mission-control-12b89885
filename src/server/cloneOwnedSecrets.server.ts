@@ -35,6 +35,7 @@ import {
   type CloneSecretTarget,
 } from "./cloneAllowedOrigins.server";
 import type { CloneSecretRefusal } from "./cloneSecretTarget.pure";
+import { recordSecretLedger } from "./secretLedger.server";
 import {
   OWNED_SECRET_SPECS,
   planOwnedSecrets,
@@ -98,6 +99,10 @@ export type OwnedSecretsOutcome = {
   reused: string[];
   skipped: OwnedSecretSkip[];
   why: string[];
+  /** Environment names SENT this pass — each send redeploys every function on the project. */
+  envWritten: string[];
+  /** Environment names the project already held exactly as planned, so nothing was sent. */
+  envUnchanged: string[];
 };
 
 export type EnsureOwnedSecretsResult =
@@ -174,13 +179,19 @@ export async function ensureOwnedSecrets(
     }
   }
 
-  // Then the environment, with the SAME values, in one request.
+  // Then the environment, with the SAME values, in one request — sent only
+  // where the project does not already hold them (`secretWriteDiff.pure.ts`),
+  // so a pass over a project that agrees redeploys nothing.
+  let envWritten: string[] = [];
+  let envUnchanged: string[] = [];
   if (plan.writes.length > 0) {
     const env = await setCloneSecretValues(
       projectRef,
       plan.writes.map((w) => ({ name: w.env, value: w.value })),
     );
     if (!env.ok) return { ok: false, stage: "env_write", error: env.error };
+    envWritten = env.written;
+    envUnchanged = env.unchanged;
   }
 
   return {
@@ -191,6 +202,8 @@ export async function ensureOwnedSecrets(
       reused: plan.writes.filter((w) => w.source === "mirror").map((w) => w.env),
       skipped: plan.skipped,
       why: plan.why,
+      envWritten,
+      envUnchanged,
     },
   };
 }
@@ -275,27 +288,29 @@ export async function repairCloneOwnedSecrets(
   const primeShape = opts?.primeShape === undefined ? await primeShapeForSweep(supabase) : opts.primeShape;
 
   const res = await ensureCloneOwnedSecrets(projectRef, primeShape);
-  const now = new Date().toISOString();
-  const written = res.ok ? Object.keys(res.values) : envNames;
-  const { error: trackErr } = await supabase.from("clone_backend_secrets").upsert(
-    written.map((name) => ({
-      clone_id: cloneId,
-      name,
-      status: res.ok ? "set" : "failed",
-      last_set_at: res.ok ? now : null,
-      last_error: res.ok ? null : `${res.stage}: ${res.error}`,
-      set_by: opts?.actorUserId ?? null,
-    })),
-    { onConflict: "clone_id,name" },
-  );
+  // Only a name actually SENT moves its set time (`secretLedger.pure.ts`); a
+  // failure at any stage records every owned name as failed, as before.
+  const trackErr = await recordSecretLedger(supabase, {
+    cloneId,
+    names: res.ok ? Object.keys(res.values) : envNames,
+    result: res.ok
+      ? { ok: true, written: res.outcome.envWritten, unchanged: res.outcome.envUnchanged }
+      : { ok: false, error: `${res.stage}: ${res.error}` },
+    status: "set",
+    setBy: opts?.actorUserId ?? null,
+    now: new Date().toISOString(),
+  });
   if (trackErr) {
-    console.error("[owned_secrets] written but tracking rows not updated", { cloneId, projectRef, error: trackErr.message });
+    console.error("[owned_secrets] written but tracking rows not updated", { cloneId, projectRef, error: trackErr });
   }
 
   await recordEvent(supabase, cloneId, res.ok, res.ok ? null : `${res.stage}: ${res.error}`, res.ok ? res.outcome : null, opts?.actorUserId);
 
   if (!res.ok) return { ok: false, cloneId, reason: res.stage, error: res.error };
-  return { ok: true, cloneId, projectRef, changed: res.outcome.minted.length > 0, outcome: res.outcome };
+  // A mint, or an environment that differed from its mirror and was sent, is a
+  // repair. A pass that found both sides agreeing changed nothing.
+  const changed = res.outcome.minted.length > 0 || res.outcome.envWritten.length > 0;
+  return { ok: true, cloneId, projectRef, changed, outcome: res.outcome };
 }
 
 async function recordEvent(

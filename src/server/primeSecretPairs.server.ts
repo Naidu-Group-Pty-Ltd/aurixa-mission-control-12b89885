@@ -78,5 +78,8 @@ export async function ensurePrimeSecretPairs(
   });
 
   if (!res.ok) return { ok: false, reason: res.stage, error: res.error };
-  return { ok: true, projectRef, changed: res.outcome.minted.length > 0, outcome: res.outcome };
+  // `envWritten` rides the audit row above, so each hourly pass says whether
+  // it sent anything — and a pass that sent nothing redeployed nothing.
+  const changed = res.outcome.minted.length > 0 || res.outcome.envWritten.length > 0;
+  return { ok: true, projectRef, changed, outcome: res.outcome };
 }

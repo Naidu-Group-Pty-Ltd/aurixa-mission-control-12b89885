@@ -52,7 +52,25 @@
  *
  * Nothing here guesses. Every refusal is named, and a named refusal costs a
  * pass the same red check it already had.
+ *
+ * ## What a clone does not hold is taken out of the graph first
+ *
+ * A clone without the prime-only features (`primeOnlyFeatures.pure.ts`) does
+ * not hold their directories, and the generator attributes an edge to the
+ * directory of its CALLER — so every edge a withheld function makes is one
+ * the clone's tree cannot produce. Measured on prime@387feb03: three, all
+ * from the GoHighLevel account migration
+ * (`ghl-legacy-wipe-orchestrator->ghl-legacy-wipe-worker`,
+ * `ghl-legacy-wipe-worker->ghl-legacy-wipe-worker`,
+ * `migration-job-control->migration-dispatcher`). They are removed from BOTH
+ * graphs before the two are compared, and the carried graph is prime's less
+ * them. An edge INTO a withheld function from a function the clone keeps
+ * stays: its caller is on disk and still names it. Nothing else is filtered,
+ * so a withheld shared module that contributed an edge would make the two
+ * graphs differ and the pass refuses, as it does today.
  */
+
+import { describeWithheldFunctions } from "../primeOnlyFeatures.pure";
 
 /** The file the generator writes and CI diffs. */
 export const SECURITY_INVENTORY_PATH = "docs/security/SECURITY_INVENTORY.json";
@@ -244,6 +262,12 @@ export function reconcileSecurityInventory(args: {
   mergedRegistryJson: string;
   mergedTreePaths: Iterable<string>;
   deliveredPaths: Iterable<string>;
+  /**
+   * Prime-only functions the merged tree does not hold. The edges they call
+   * out of are removed from both graphs before the comparison, and from the
+   * graph carried. Omitted or empty filters nothing.
+   */
+  withheld?: readonly string[];
 }): BaselineReconcile<string> {
   const primeParsed = parseJson(args.primeInventoryJson, "prime's security baseline");
   if (!primeParsed.ok) return primeParsed;
@@ -282,8 +306,14 @@ export function reconcileSecurityInventory(args: {
   // The graph is attributed to a caller rather than to a file, so a merged
   // tree that takes one file from each side cannot be partitioned. Carried
   // only where the split cannot matter — see the header.
-  const primeGraph = prime.statically_derivable_inter_function_graph as string[];
-  const cloneGraph = clone.statically_derivable_inter_function_graph as string[];
+  const withheld = new Set(args.withheld ?? []);
+  const callerHeld = (edge: string) => !withheld.has(edge.slice(0, edge.indexOf("->")));
+  const primeGraph = (prime.statically_derivable_inter_function_graph as string[]).filter(
+    callerHeld,
+  );
+  const cloneGraph = (clone.statically_derivable_inter_function_graph as string[]).filter(
+    callerHeld,
+  );
   const sameGraph =
     primeGraph.length === cloneGraph.length &&
     [...primeGraph].sort().join("\u0000") === [...cloneGraph].sort().join("\u0000");
@@ -418,11 +448,24 @@ function stripPriorNote(before: string): string {
  * changes when a function is added and a per-name layout makes a one-function
  * change look like a rewrite in the diff.
  */
-function ratchetNote(indent: string, owned: readonly string[]): string {
+function ratchetNote(
+  indent: string,
+  owned: readonly string[],
+  withheld: readonly string[],
+): string {
+  const declares =
+    owned.length > 0
+      ? `declares ${owned.length} edge function(s) the prime does not — ${owned.join(", ")} —`
+      : "";
+  const omits =
+    withheld.length > 0
+      ? `does not declare ${describeWithheldFunctions(withheld)}, which the prime keeps for itself,`
+      : "";
+  const difference = declares && omits ? `${declares} and ${omits}` : declares || omits;
   const sentence =
-    `${RECONCILED_MARKER} This deployment declares ${owned.length} edge function(s) the ` +
-    `prime does not — ${owned.join(", ")} — so the prime's number counts a different ` +
-    `repository. The count below is this one's, taken from the config this same pass composed.`;
+    `${RECONCILED_MARKER} This deployment ${difference} so the prime's number counts a ` +
+    `different repository. The count below is this one's, taken from the config this same ` +
+    `pass composed.`;
 
   const lines: string[] = [];
   let line = "";
@@ -446,8 +489,9 @@ function ratchetNote(indent: string, owned: readonly string[]): string {
  * across 245 lines, and holding freezes 244 lines of shared assertions to
  * protect one of them.
  *
- * Where the clone declares nothing the prime does not, the note is omitted and
- * the count is prime's own — so the result is prime's file byte for byte, and
+ * Where the clone declares nothing the prime does not and holds every function
+ * the prime keeps for itself, the note is omitted and the count is prime's
+ * own — so the result is prime's file byte for byte, and
  * "carry it unchanged" falls out of the general rule rather than being a
  * special case someone has to remember.
  */
@@ -455,6 +499,8 @@ export function reconcileFunctionCountRatchet(args: {
   primeSpec: string;
   mergedToml: string;
   cloneOwnedFunctions: readonly string[];
+  /** Prime-only functions this clone does not hold, named in the note. */
+  withheld?: readonly string[];
 }): BaselineReconcile<string> {
   const rule = extractRatchetRule(args.primeSpec);
   if (!rule) {
@@ -480,8 +526,9 @@ export function reconcileFunctionCountRatchet(args: {
   const indent = assertion[1];
   const count = ratchetCount(args.mergedToml, rule);
   const owned = [...new Set(args.cloneOwnedFunctions)].sort();
+  const withheld = [...new Set(args.withheld ?? [])].sort();
 
-  const note = owned.length > 0 ? ratchetNote(indent, owned) : "";
+  const note = owned.length > 0 || withheld.length > 0 ? ratchetNote(indent, owned, withheld) : "";
   const merged =
     stripPriorNote(args.primeSpec.slice(0, assertion.index)) +
     note +

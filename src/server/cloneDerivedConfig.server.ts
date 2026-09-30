@@ -19,6 +19,18 @@
  * Writes only what has moved since its own last write (read from the event it
  * records), never a value an operator set by hand for a name it does not own,
  * and only through `resolveCloneSecretTarget`.
+ *
+ * **The event records every value the clone now holds, not just the ones this
+ * pass sent.** It used to record only the names written, and "since its own
+ * last write" reads only the latest event — so a pass that moved ONE name left
+ * an event naming that one alone, the next pass read every other name as moved
+ * and wrote them, and the pass after read the first as moved again. Measured
+ * 27 Sep 2026: every clone alternated between writing `VAPID_SUBJECT_EMAIL`
+ * and writing the other ten names, on every pass, for as long as the pair had
+ * existed — and every write redeployed every function on the project. A name
+ * this pass did not send is one whose last recorded value is already the
+ * derived one, so the full set is what the project holds after either kind of
+ * pass.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
@@ -31,6 +43,7 @@ import {
 } from "./cloneAllowedOrigins.server";
 import type { CloneSecretRefusal } from "./cloneSecretTarget.pure";
 import { resolveMissionControlOrigin } from "./missionControlLink.pure";
+import { recordSecretLedger } from "./secretLedger.server";
 
 type Db = SupabaseClient<Database>;
 
@@ -39,7 +52,16 @@ const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e))
 export const DERIVED_CONFIG_EVENT_ACTION = "set_derived_deployment_config";
 
 export type ApplyDerivedConfigResult =
-  | { ok: true; cloneId: string; projectRef: string; written: string[]; changed: boolean }
+  | {
+      ok: true;
+      cloneId: string;
+      projectRef: string;
+      /** Names sent to the project on this pass. */
+      written: string[];
+      /** Names that had moved by the record but that the project already held — not sent. */
+      unchanged: string[];
+      changed: boolean;
+    }
   | {
       ok: false;
       cloneId: string;
@@ -111,43 +133,57 @@ export async function applyCloneDerivedConfig(
   }
   const toWrite = names.filter((n) => opts?.force || last[n] !== values[n]);
   if (toWrite.length === 0) {
-    return { ok: true, cloneId, projectRef: target.projectRef, written: [], changed: false };
+    return {
+      ok: true,
+      cloneId,
+      projectRef: target.projectRef,
+      written: [],
+      unchanged: [],
+      changed: false,
+    };
   }
 
   const res = await setCloneSecretValues(
     target.projectRef,
     toWrite.map((name) => ({ name, value: values[name] })),
   );
-  const now = new Date().toISOString();
-  const { error: trackErr } = await supabase.from("clone_backend_secrets").upsert(
-    toWrite.map((name) => ({
-      clone_id: cloneId,
-      name,
-      status: res.ok ? "set" : "failed",
-      last_set_at: res.ok ? now : null,
-      last_error: res.ok ? null : res.error,
-      set_by: opts?.actorUserId ?? null,
-    })),
-    { onConflict: "clone_id,name" },
-  );
+  const trackErr = await recordSecretLedger(supabase, {
+    cloneId,
+    names: toWrite,
+    result: res,
+    status: "set",
+    setBy: opts?.actorUserId ?? null,
+    now: new Date().toISOString(),
+  });
   if (trackErr) {
-    console.error("[derived_config] written but tracking rows not updated", { cloneId, error: trackErr.message });
+    console.error("[derived_config] written but tracking rows not updated", { cloneId, error: trackErr });
   }
 
   // The values are hostnames, URLs and a display name — safe on a timeline,
-  // and what the next pass compares against.
+  // and what the next pass compares against: EVERY derived value, because
+  // that is what the project holds now (see the header).
   await recordEvent(
     supabase,
     cloneId,
     opts?.providerSlug,
     res.ok,
     res.ok ? null : res.error,
-    { values: Object.fromEntries(toWrite.map((n) => [n, values[n]])) },
+    {
+      values: Object.fromEntries(names.map((n) => [n, values[n]])),
+      sent: res.ok ? res.written : [],
+    },
     opts?.actorUserId,
   );
 
   if (!res.ok) return { ok: false, cloneId, reason: "write_failed", error: res.error };
-  return { ok: true, cloneId, projectRef: target.projectRef, written: toWrite, changed: true };
+  return {
+    ok: true,
+    cloneId,
+    projectRef: target.projectRef,
+    written: res.written,
+    unchanged: res.unchanged,
+    changed: res.written.length > 0,
+  };
 }
 
 async function recordEvent(
@@ -156,7 +192,7 @@ async function recordEvent(
   providerSlug: string | null | undefined,
   success: boolean,
   errorMessage: string | null,
-  result: { values: Record<string, string> } | null,
+  result: { values: Record<string, string>; sent: string[] } | null,
   actorUserId?: string | null,
 ): Promise<void> {
   const { error } = await supabase.from("deployment_events").insert({

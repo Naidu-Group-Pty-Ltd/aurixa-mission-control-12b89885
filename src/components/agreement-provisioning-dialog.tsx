@@ -18,8 +18,24 @@ import { TierModulePicker, type TierSelection } from "@/components/tier-module-p
 import {
   configureAgreementProvisioning,
   getProvisioningCatalog,
-  type AgreementRow,
+  type AgreementListRow,
 } from "@/lib/agreements.functions";
+
+/** The columns the dialog reads — the list's row and the offer page's row both carry them. */
+export type ProvisioningAgreement = Pick<
+  AgreementListRow,
+  | "id"
+  | "document_kind"
+  | "client_name"
+  | "client_email"
+  | "plan_slug"
+  | "addon_slugs"
+  | "module_ids"
+  | "excluded_module_ids"
+  | "admin_email"
+  | "provision_on_signature"
+  | "provision_status"
+>;
 
 /**
  * The commercial selection that a signature will provision: tier plan,
@@ -31,13 +47,18 @@ import {
  * (`previewTierModules`), so what an agreement offers and what the wizard
  * offers cannot drift. Locked once provisioning has started: what a
  * signature provisions must be what the signature saw.
+ *
+ * On a Subscription Agreement the tier and add-ons are not chosen here at
+ * all: they are what the offer sells, written onto the row on every save, so
+ * this confirms them and arms the signature. Modules, exclusions and the
+ * admin address remain the operator's.
  */
 export function AgreementProvisioningDialog({
   agreement,
   onOpenChange,
   onSaved,
 }: {
-  agreement: AgreementRow | null;
+  agreement: ProvisioningAgreement | null;
   onOpenChange: (open: boolean) => void;
   onSaved: () => void;
 }) {
@@ -49,11 +70,17 @@ export function AgreementProvisioningDialog({
   });
 
   const modules = useMemo(
-    () => (catalogQ.data?.modules ?? []) as Array<{ id: string; slug: string; name: string; description?: string | null }>,
+    () =>
+      (catalogQ.data?.modules ?? []) as Array<{
+        id: string;
+        slug: string;
+        name: string;
+        description?: string | null;
+      }>,
     [catalogQ.data],
   );
   const byId = useMemo(() => new Map(modules.map((m) => [m.id, m])), [modules]);
-  const bySlug = useMemo(() => new Map(modules.map((m) => [m.slug, m])), [modules]);
+  const fromOffer = agreement?.document_kind === "subscription";
 
   const [selection, setSelection] = useState<TierSelection>({ planSlug: null, addonSlugs: [] });
   const [picked, setPicked] = useState<Set<string>>(new Set());
@@ -64,21 +91,21 @@ export function AgreementProvisioningDialog({
 
   useEffect(() => {
     if (!agreement) return;
-    setSelection({ planSlug: agreement.plan_slug ?? null, addonSlugs: agreement.addon_slugs ?? [] });
+    setSelection({
+      planSlug: agreement.plan_slug ?? null,
+      addonSlugs: agreement.addon_slugs ?? [],
+    });
     setExcludedIds(agreement.excluded_module_ids ?? []);
     setAdminEmail(agreement.admin_email ?? agreement.client_email);
     setArmed(agreement.provision_on_signature ?? true);
   }, [agreement]);
 
-  // The stored module ids become the picker's slug set once the catalog is
-  // loaded (and only then — mapping through an empty catalog would wipe a
-  // saved selection).
+  // The picker keys its selection by module id. The stored ids are loaded
+  // once the catalog is (and only then — filtering through an empty catalog
+  // would wipe a saved selection).
   useEffect(() => {
     if (!agreement || modules.length === 0) return;
-    const slugs = (agreement.module_ids ?? [])
-      .map((id) => byId.get(id)?.slug)
-      .filter((s): s is string => Boolean(s));
-    setPicked(new Set(slugs));
+    setPicked(new Set((agreement.module_ids ?? []).filter((id) => byId.has(id))));
   }, [agreement, modules, byId]);
 
   const locked =
@@ -92,9 +119,7 @@ export function AgreementProvisioningDialog({
     }
     setSaving(true);
     try {
-      const moduleIds = [...picked]
-        .map((slug) => bySlug.get(slug)?.id)
-        .filter((id): id is string => Boolean(id));
+      const moduleIds = [...picked].filter((id) => byId.has(id));
       const res = await configureAgreementProvisioning({
         data: {
           id: agreement.id,
@@ -126,14 +151,15 @@ export function AgreementProvisioningDialog({
         <DialogHeader>
           <DialogTitle>Provisioning on signature</DialogTitle>
           <DialogDescription>
-            {agreement?.client_name} — the moment DocuSign reports this agreement signed, Mission
-            Control provisions the clone from exactly this selection: repository, module set,
-            entitlements, dedicated backend, deployment.
+            {agreement?.client_name} — the moment DocuSign reports this agreement signed
+            {fromOffer ? " and the signed copy is retained" : ""}, Mission Control provisions the
+            clone from exactly this selection: repository, module set, entitlements, dedicated
+            backend, deployment.
           </DialogDescription>
         </DialogHeader>
 
         {locked && (
-          <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
+          <div className="border border-warning/40 bg-warning/10 p-3 text-sm">
             Provisioning has already{" "}
             {agreement?.provision_status === "provisioned" ? "completed" : "started"} — the
             selection is locked.
@@ -147,6 +173,11 @@ export function AgreementProvisioningDialog({
             onPickedChange={setPicked}
             selection={selection}
             onSelectionChange={setSelection}
+            selectionLockedReason={
+              fromOffer
+                ? "Set by the offer: a signature provisions the plan and add-ons this agreement sells. Change the offer to change them."
+                : undefined
+            }
           />
 
           <div className="space-y-2">
@@ -167,8 +198,8 @@ export function AgreementProvisioningDialog({
           <div className="space-y-2">
             <Label>Modules excluded (negotiated out)</Label>
             <p className="text-xs text-muted-foreground">
-              Contractual exclusions travel onto the clone and hold across every later plan
-              change — a tier upgrade can never re-install what the client bargained away.
+              Contractual exclusions travel onto the clone and hold across every later plan change —
+              a tier upgrade can never re-install what the client bargained away.
             </p>
             <div className="grid max-h-32 grid-cols-1 gap-1 overflow-y-auto rounded-md border border-border/60 p-2 sm:grid-cols-2">
               {modules.map((m) => (

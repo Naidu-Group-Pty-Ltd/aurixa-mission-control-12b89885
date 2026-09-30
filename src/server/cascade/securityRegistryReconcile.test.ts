@@ -179,3 +179,125 @@ describe("how the engine uses it", () => {
     expect(engine).not.toContain('"supabase/functions-registry/SECURITY_REGISTRY.json"');
   });
 });
+
+/*
+  What the prime keeps for itself (`primeOnlyFeatures.pure.ts`). Its entries
+  sit BETWEEN two ordinary ones on purpose: the merged registry keeps prime's
+  key order, and a removal that rebuilt the object would move the second one.
+*/
+const PRIME_WITH_MIGRATION = serialiseSecurityRegistry({
+  $comment: "Edge Function security registry (EDGE-001).",
+  functions: {
+    "aml-cases": entry("human-authenticated", "Shared — prime's wording."),
+    "migration-dispatcher": entry("internal", "Prime-only."),
+    "migration-job-control": entry("human-authenticated", "Prime-only."),
+    "didit-webhook": entry("webhook", "Shared."),
+  },
+});
+const MIRROR_WITH_MIGRATION = PRIME_WITH_MIGRATION;
+const PRIME_ONLY = ["migration-dispatcher", "migration-job-control"];
+
+describe("a clone that does not hold what the prime keeps for itself", () => {
+  const withheldReconcile = (cloneJson = MIRROR_WITH_MIGRATION) =>
+    reconcileSecurityRegistry({
+      primeJson: PRIME_WITH_MIGRATION,
+      cloneJson,
+      withheld: PRIME_ONLY,
+    });
+
+  it("takes prime's entries for them out, and keeps prime's order for the rest", () => {
+    const v = withheldReconcile();
+    expect(v.ok, v.ok ? "" : v.reason).toBe(true);
+    if (!v.ok) return;
+    expect(Object.keys(JSON.parse(v.merged).functions)).toEqual(["aml-cases", "didit-webhook"]);
+    expect(v.withheldDropped).toEqual(PRIME_ONLY);
+    expect(v.changed).toBe(true);
+  });
+
+  it("writes it in the same byte-exact shape as every other result", () => {
+    const v = withheldReconcile();
+    expect(v.ok).toBe(true);
+    if (!v.ok) return;
+    expect(serialiseSecurityRegistry(JSON.parse(v.merged))).toBe(v.merged);
+    expect(v.merged).not.toContain("migration-");
+  });
+
+  it("does not refuse over the clone's own entries for them", () => {
+    // A mirror holds all of prime's entries, these included, and the result
+    // does not. The read-back ordinarily refuses that — the clone's checker
+    // would demand the entry for a function on disk — and there is no
+    // function on disk here.
+    const v = withheldReconcile();
+    expect(v.ok).toBe(true);
+    expect(entriesLostBy(MIRROR_WITH_MIGRATION, v.ok ? v.merged : "").sort()).toEqual(PRIME_ONLY);
+  });
+
+  it("never carries the clone's own entry for one of them forward", () => {
+    const primeWithout = serialiseSecurityRegistry({
+      $comment: "Edge Function security registry (EDGE-001).",
+      functions: {
+        "aml-cases": entry("human-authenticated", "Shared — prime's wording."),
+        "didit-webhook": entry("webhook", "Shared."),
+      },
+    });
+    const v = reconcileSecurityRegistry({
+      primeJson: primeWithout,
+      cloneJson: MIRROR_WITH_MIGRATION,
+      withheld: PRIME_ONLY,
+    });
+    expect(v.ok, v.ok ? "" : v.reason).toBe(true);
+    if (!v.ok) return;
+    expect(v.carriedForward).toEqual([]);
+    expect(v.withheldDropped).toEqual([]);
+    expect(Object.keys(JSON.parse(v.merged).functions)).toEqual(["aml-cases", "didit-webhook"]);
+  });
+
+  it("still carries what the clone owns, beside what it does not hold", () => {
+    const crm = serialiseSecurityRegistry({
+      $comment: "Edge Function security registry (EDGE-001).",
+      functions: {
+        ...JSON.parse(MIRROR_WITH_MIGRATION).functions,
+        "crm-send-message": entry("webhook", "Native CRM outbound."),
+      },
+    });
+    const v = withheldReconcile(crm);
+    expect(v.ok, v.ok ? "" : v.reason).toBe(true);
+    if (!v.ok) return;
+    expect(v.carriedForward).toEqual(["crm-send-message"]);
+    expect(Object.keys(JSON.parse(v.merged).functions)).toEqual([
+      "aml-cases",
+      "didit-webhook",
+      "crm-send-message",
+    ]);
+  });
+
+  it("changes nothing for a clone that still holds the feature", () => {
+    const v = reconcileSecurityRegistry({
+      primeJson: PRIME_WITH_MIGRATION,
+      cloneJson: MIRROR_WITH_MIGRATION,
+      withheld: [],
+    });
+    expect(v.ok).toBe(true);
+    if (!v.ok) return;
+    expect(v.merged).toBe(MIRROR_WITH_MIGRATION);
+    expect(v.changed).toBe(false);
+    expect(v.withheldDropped).toEqual([]);
+  });
+
+  it("is idempotent — a second pass over its own output removes nothing more", () => {
+    const first = withheldReconcile();
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const second = withheldReconcile(first.merged);
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.merged).toBe(first.merged);
+    expect(second.changed).toBe(false);
+  });
+
+  it("is handed the set by the engine", () => {
+    const engine = stripComments(readFileSync("src/server/cascade-engine.server.ts", "utf8"));
+    const at = engine.indexOf("reconcileSecurityRegistry({");
+    expect(engine.slice(at, engine.indexOf("})", at))).toContain("withheld: declarationsWithheld");
+  });
+});

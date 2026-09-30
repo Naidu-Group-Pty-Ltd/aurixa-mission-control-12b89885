@@ -31,14 +31,14 @@
     "plus a re-run of apply-fleet-upgrade.py rather than a re-upload. The",
     "Markdown file in between (0af91eda...) never parsed and is not a rollback."
   ],
-  "file_id": "c14445c8-7057-4377-a246-1c8de9f645b4",
+  "file_id": "c8a3ea62-862f-48b5-b673-9fd1a272a3d2",
   "uploaded_as": "aurixa-voice-knowledge-base.txt",
   "mimetype": "text/plain",
   "status": "done",
-  "uploaded_at": "2026-09-23T19:40:56Z",
-  "bytes": 57784,
-  "md5": "692914a338bcc66157bbf5fdc5625657",
-  "sha256": "f7a7ce6b8ee67e663ad22acff1e076743ab63cd656de841b89e339d8800b18ba",
+  "uploaded_at": "2026-09-26T04:58:01Z",
+  "bytes": 58119,
+  "md5": "0ad70365f80557f40ce7c708ac3fb272",
+  "sha256": "2d32004fe0792111a69de2328dd405978dff5dfdef5a50c5ee4b7911119aeff2",
   "source": "scripts/voice/knowledge-base/aurixa-voice-knowledge-base.md",
-  "previous_file_id": "6b497eaa-671c-4e6f-892f-212c54e83619"
+  "previous_file_id": "c14445c8-7057-4377-a246-1c8de9f645b4"
 }
