@@ -90,6 +90,15 @@ vertical membranes draw runs opposite ways across it:
 | `hosting_ref`       | **closed** — another project's deployments             | **closed**                                              |
 | `spec`              | gated on its subject                                   | gated on its subject                                    |
 
+Behind the membrane, the destination's own rulebook applies its CRM line the
+way the vertical cascade does (`judgeLateralWrites` with the destination's
+`crm_mode` and the origin's). A feature the destination's line withholds is held
+`protected`. A file the line keeps in its own shape (`CRM_LINE_VARIANT_PATTERNS`
+in `crmLineFeatures.pure.ts`: the pages that route through `crmProvider.ts`,
+the agent whose calendar is `crm-calendar`) is held `manual_reconcile` when the
+origin runs the other line, and travels freely between two clones on the same
+line. A destination with no recorded line withholds nothing.
+
 Four species were added to `ionSpecies.pure.ts` for this. Three are facts about
 a PATH (`crm_routing_layer`, `edge_function`, `migration`) and one about text
 (`hosting_ref`, Vercel's `prj_…` / `team_…`). `backend_ref` is also widened for

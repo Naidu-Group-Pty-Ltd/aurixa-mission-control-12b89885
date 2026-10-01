@@ -432,6 +432,11 @@ export type LateralDestination = {
   /** The globs a module-scoped destination is offered; null for a mirror. */
   scopeGlobs: readonly string[] | null;
   exclusions: readonly SyncExclusion[];
+  /**
+   * The destination's recorded `crm_mode`. Absent or null withholds nothing,
+   * exactly as the vertical cascade treats an unrecorded mode.
+   */
+  crmMode?: string | null;
 };
 
 export type LateralWriteJudgement = {
@@ -476,12 +481,14 @@ export function lateralDestinations(args: {
   scope: "mirror" | "modules";
   installedGlobs: readonly string[];
   exclusions: readonly SyncExclusion[];
+  crmMode?: string | null;
 }): { writes: LateralDestination; deletes: LateralDestination } {
   const base = {
     repo: args.repo,
     tree: args.tree,
     scope: args.scope,
     exclusions: args.exclusions,
+    crmMode: args.crmMode ?? null,
   };
   if (args.scope === "mirror") {
     return { writes: { ...base, scopeGlobs: null }, deletes: { ...base, scopeGlobs: null } };
@@ -772,6 +779,14 @@ export function judgeLateralWrites(args: {
   originSizes: ReadonlyMap<string, number>;
   originText: ReadonlyMap<string, string | null>;
   destination: LateralDestination;
+  /**
+   * The ORIGIN's recorded `crm_mode`. Where it is not the destination's line,
+   * the origin's copy of a file the destination's line holds as its own is
+   * held, exactly as a delivery read from the prime would be: two siblings on
+   * different CRM lines differ in those files by design, and the exchange is
+   * for the work they share.
+   */
+  originCrmMode?: string | null;
   destinationText: ReadonlyMap<string, string | null>;
   deletingOnDestination: ReadonlySet<string>;
   /**
@@ -791,7 +806,13 @@ export function judgeLateralWrites(args: {
     else outOfScope.push(path);
   }
 
-  const partition = partitionCascadePaths(inScope, destination.exclusions);
+  // The destination's line, as the vertical cascade applies it: a feature the
+  // line does not carry never enters it, and the line's own copies are held
+  // against an origin on another line.
+  const partition = partitionCascadePaths(inScope, destination.exclusions, {
+    crmMode: destination.crmMode ?? null,
+    fromAnotherLine: (args.originCrmMode ?? null) !== (destination.crmMode ?? null),
+  });
   const held: HeldPath[] = [...partition.held];
   const unread: string[] = [];
   let write: string[] = [];

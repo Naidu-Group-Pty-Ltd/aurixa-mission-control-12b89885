@@ -370,6 +370,7 @@ function judge(args: {
   deleting?: string[];
   survivors?: Record<string, string> | null;
   membrane?: typeof INTO_IND;
+  originCrmMode?: string | null;
 }) {
   const originTree =
     args.originTree ??
@@ -386,6 +387,7 @@ function judge(args: {
     originSizes: new Map(Object.entries(args.sizes ?? {})),
     originText: new Map(Object.entries(args.texts)),
     destination: args.dest ?? destination(),
+    originCrmMode: args.originCrmMode,
     destinationText: new Map(Object.entries(args.destinationText ?? {})),
     deletingOnDestination: new Set(args.deleting ?? []),
     destinationSurvivors: args.survivors === undefined ? {} : args.survivors,
@@ -1440,5 +1442,42 @@ describe("a proposal a person has pushed to is never rebuilt over", () => {
     expect(engine).toBeTruthy();
     expect(LATERAL_COMMIT_PREFIX.startsWith(engine!)).toBe(false);
     expect(engine!.startsWith(LATERAL_COMMIT_PREFIX)).toBe(false);
+  });
+});
+
+describe("may it enter: the destination's CRM line", () => {
+  // Browser paths: the membrane closes the edge-function channel on its own,
+  // so a function would be held whatever the line said.
+  const AGENT = "src/pages/ClientTracker.tsx";
+  const SEND = "src/pages/__tests__/crmConversations.spec.ts";
+  const texts = { [AGENT]: "export {};\n", [SEND]: "export {};\n" };
+
+  it("holds the line's own copy against a sibling on the other line, and never lets a withheld feature in", () => {
+    const j = judge({
+      paths: [AGENT, SEND],
+      texts,
+      dest: destination({ crmMode: "independent" }),
+      originCrmMode: "dependent",
+    });
+    expect(j.write).toEqual([]);
+    const byPath = new Map(j.held.map((h) => [h.path, h]));
+    expect(byPath.get(AGENT)?.reason).toBe("manual_reconcile");
+    expect(byPath.get(AGENT)?.pattern).toMatch(/^\(crm-line variant: /);
+    expect(byPath.get(SEND)?.reason).toBe("protected");
+  });
+
+  it("lets the line's own copy travel between two clones on the same line", () => {
+    const j = judge({
+      paths: [AGENT],
+      texts,
+      dest: destination({ crmMode: "independent" }),
+      originCrmMode: "independent",
+    });
+    expect(j.write).toEqual([AGENT]);
+  });
+
+  it("changes nothing for a destination whose line is not recorded", () => {
+    const j = judge({ paths: [AGENT, SEND], texts, originCrmMode: "dependent" });
+    expect(j.write).toEqual([AGENT, SEND]);
   });
 });

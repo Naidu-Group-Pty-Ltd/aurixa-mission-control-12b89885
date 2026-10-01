@@ -221,12 +221,16 @@ describe("the engine asks the membrane", () => {
     // a different rule catching it by luck.
     const block = carryLoop();
     expect(block).toMatch(
-      /partitionCascadePaths\(\s*plan\.carry\s*,\s*exclusions\s*(?:,\s*\{[^}]*\}\s*)?\)/,
+      // The options are the delivery's own line options (`lineOpts`), the same
+      // object the first partition is given.
+      /partitionCascadePaths\(\s*plan\.carry\s*,\s*exclusions\s*(?:,\s*(?:\{[^}]*\}|lineOpts)\s*)?\)/,
     );
     // And what it carries is the WRITE half, never the whole plan.
     expect(block).toMatch(/mapWithConcurrencyUntil<[\s\S]{0,120}>\(\s*gated\.write\s*,/);
     // The same exclusions the first partition used, not a second list.
-    expect(engine).toMatch(/partitionCascadePaths\(candidatePaths,\s*exclusions(?:,\s*\{[^}]*\})?\)/);
+    expect(engine).toMatch(
+      /partitionCascadePaths\(candidatePaths,\s*exclusions(?:,\s*(?:\{[^}]*\}|lineOpts))?\)/,
+    );
   });
 
   it("reports what the path rules refused, and stops re-planning it", () => {

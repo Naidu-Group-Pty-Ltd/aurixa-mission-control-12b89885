@@ -1669,6 +1669,17 @@ export async function processClone(args: {
 
   const isMirror = clone.sync_scope === "mirror";
 
+  /**
+   * How the CRM line shapes this delivery's partition. The line's own copies
+   * are held only where the bytes come from the prime: a child of the line
+   * head reads the head and must receive them, and a conversion exists to
+   * deliver the other line's copy of exactly these files.
+   */
+  const lineOpts = {
+    crmMode: clone.crm_mode,
+    fromAnotherLine: !conversion && args.provenance === undefined,
+  };
+
   // ── The boundary this delivery crosses ───────────────────────────────────
   //
   // Keyed on the two repositories, which is what this function holds on both
@@ -2095,7 +2106,7 @@ export async function processClone(args: {
     const holds = partitionCascadePaths(
       behind.map((f) => f.path),
       exclusions,
-      { crmMode: clone.crm_mode },
+      lineOpts,
     ).held;
     const releasable = new Set(approvableHeld(holds).map((h) => h.path));
     const neverWritten = new Set(holds.filter((h) => !releasable.has(h.path)).map((h) => h.path));
@@ -2308,7 +2319,7 @@ export async function processClone(args: {
   // The guard rail. Applied in BOTH scopes: a module glob that grows to cover
   // `src/integrations/**` would otherwise reach the clone's backend identity
   // by a different route than the one this was written for.
-  const partition = partitionCascadePaths(candidatePaths, exclusions, { crmMode: clone.crm_mode });
+  const partition = partitionCascadePaths(candidatePaths, exclusions, lineOpts);
 
   // ── A hold protects WORK, not a path ──────────────────────────────────────
   //
@@ -4486,7 +4497,7 @@ export async function processClone(args: {
     // than the rule that governs it. Partitioning here is the same function
     // over the same exclusions, so a protected path is protected whether the
     // clone installs the module it lives in or not.
-    const gated = partitionCascadePaths(plan.carry, exclusions, { crmMode: clone.crm_mode });
+    const gated = partitionCascadePaths(plan.carry, exclusions, lineOpts);
     // Marked attempted whichever way they went: a subject the exclusions hold
     // is settled, and re-planning it every round would never terminate.
     for (const h of gated.held) attemptedSubjects.add(h.path);
