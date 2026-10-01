@@ -573,6 +573,153 @@ const REVISION_MARKUP = /<w:(ins|del|moveFrom|moveTo)\b/;
 const TEXT_RUN = /<w:t[\s>]/;
 const COMMENT_REFERENCE = /<w:commentReference\b/;
 
+const XML_ENTITIES: Record<string, string> = {
+  amp: "&",
+  lt: "<",
+  gt: ">",
+  quot: '"',
+  apos: "'",
+};
+
+function decodeXmlText(value: string): string {
+  return value.replace(/&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos);/gi, (_, entity: string) => {
+    if (entity[0] !== "#") return XML_ENTITIES[entity.toLowerCase()] ?? "";
+    const code =
+      entity[1] === "x" || entity[1] === "X"
+        ? Number.parseInt(entity.slice(2), 16)
+        : Number.parseInt(entity.slice(1), 10);
+    return Number.isFinite(code) ? String.fromCodePoint(code) : "";
+  });
+}
+
+/** What a reader sees of a stretch of story XML: its text runs, nothing else. */
+function visibleText(xml: string): string {
+  let out = "";
+  for (const m of xml.matchAll(/<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>/g)) out += decodeXmlText(m[1]);
+  return out;
+}
+
+/** Whitespace and non-breaking spaces do not make two readings of one figure differ. */
+function sameReading(a: string, b: string): boolean {
+  const norm = (s: string) => s.replace(/[\s\u00a0]+/g, " ").trim();
+  return norm(a) === norm(b);
+}
+
+type FieldReading = { instruction: string; result: string };
+
+/**
+ * Every field in a story with the result Word last stored for it. Complex
+ * fields (begin / instruction / separate / result / end) nest, and a nested
+ * field's result is part of its parent's; simple fields carry both at once.
+ */
+function fieldsOf(xml: string): FieldReading[] {
+  const out: FieldReading[] = [];
+  for (const m of xml.matchAll(
+    /<w:fldSimple\b[^>]*?\bw:instr="([^"]*)"[^>]*>([\s\S]*?)<\/w:fldSimple>/g,
+  )) {
+    out.push({ instruction: decodeXmlText(m[1]), result: visibleText(m[2]) });
+  }
+  const open: Array<FieldReading & { inResult: boolean }> = [];
+  const token =
+    /<w:fldChar\b[^>]*?\bw:fldCharType="(begin|separate|end)"[^>]*>|<w:instrText(?:\s[^>]*)?>([^<]*)<\/w:instrText>|<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>/g;
+  for (const m of xml.matchAll(token)) {
+    if (m[1] === "begin") open.push({ instruction: "", result: "", inResult: false });
+    else if (m[1] === "separate") {
+      const top = open[open.length - 1];
+      if (top) top.inResult = true;
+    } else if (m[1] === "end") {
+      const done = open.pop();
+      if (done) out.push({ instruction: done.instruction, result: done.result });
+    } else if (m[2] !== undefined) {
+      const top = open[open.length - 1];
+      if (top && !top.inResult) top.instruction += decodeXmlText(m[2]);
+    } else if (m[3] !== undefined) {
+      const text = decodeXmlText(m[3]);
+      for (const field of open) if (field.inResult) field.result += text;
+    }
+  }
+  return out;
+}
+
+/** Bookmark name → the text it marks, across every story. */
+function bookmarksOf(storyXml: readonly string[]): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const xml of storyXml) {
+    for (const m of xml.matchAll(/<w:bookmarkStart\b([^>]*?)\/?>/g)) {
+      const attrs = m[1] ?? "";
+      const id = /\bw:id="([^"]*)"/.exec(attrs)?.[1];
+      const name = /\bw:name="([^"]*)"/.exec(attrs)?.[1];
+      if (id === undefined || !name) continue;
+      const from = (m.index ?? 0) + m[0].length;
+      const end = new RegExp(`<w:bookmarkEnd\\b[^>]*?\\bw:id="${id.replace(/[^\w-]/g, "")}"`).exec(
+        xml.slice(from),
+      );
+      if (!end) continue;
+      out.set(decodeXmlText(name), visibleText(xml.slice(from, from + end.index)));
+    }
+  }
+  return out;
+}
+
+/**
+ * A REF field whose result can be compared with the text it quotes: no switch
+ * that turns the result into a paragraph number, a position or a changed case.
+ * `\h` (a hyperlink) and the two formatting-preservation switches change
+ * nothing a reader sees.
+ */
+function comparableRef(instruction: string): { bookmark: string } | null {
+  const m = /^\s*REF\s+(\S+)(.*)$/i.exec(instruction);
+  if (!m) return null;
+  const switches = m[2].replace(/\\\*\s*(CHARFORMAT|MERGEFORMAT)/gi, "").replace(/\\h\b/gi, "");
+  if (/\\/.test(switches)) return null;
+  return { bookmark: m[1].replace(/^"|"$/g, "") };
+}
+
+export type StaleCrossReference = {
+  bookmark: string;
+  /** What the clause prints: the result Word last stored for the field. */
+  shown: string;
+  /** What the text it quotes now reads; null when that text is no longer marked. */
+  source: string | null;
+};
+
+/**
+ * Clause text that quotes another part of the document through a REF field
+ * and has fallen out of step with it.
+ *
+ * A reference field prints the result Word stored the last time fields were
+ * updated, and a converted copy — the one DocuSign shows a signer — prints
+ * that stored result rather than recomputing it. So when the text a field
+ * quotes is edited (a fee on the transaction-fee page, say) and the fields are
+ * not updated, the document carries two different figures for one thing, and
+ * the one in the clause is the one that is signed. A field whose bookmark has
+ * gone — usually because the marked text was retyped over — is worse: it
+ * becomes "Error! Reference source not found" on the next update.
+ */
+export function staleCrossReferences(storyXml: readonly string[]): StaleCrossReference[] {
+  const bookmarks = bookmarksOf(storyXml);
+  const out: StaleCrossReference[] = [];
+  for (const xml of storyXml) {
+    for (const field of fieldsOf(xml)) {
+      const ref = comparableRef(field.instruction);
+      if (!ref) continue;
+      const source = bookmarks.get(ref.bookmark);
+      if (source === undefined) {
+        out.push({ bookmark: ref.bookmark, shown: field.result, source: null });
+      } else if (!sameReading(source, field.result)) {
+        out.push({ bookmark: ref.bookmark, shown: field.result, source });
+      }
+    }
+  }
+  return out;
+}
+
+function describeStaleReference(stale: StaleCrossReference): string {
+  return stale.source === null
+    ? `the reference to “${stale.bookmark}” shows “${stale.shown}”, but the text it quoted is no longer marked (it was probably retyped over)`
+    : `the reference to “${stale.bookmark}” shows “${stale.shown}”, but the text it quotes now reads “${stale.source}”`;
+}
+
 function relationshipsOf(xml: string): Array<{ type: string; external: boolean }> {
   const out: Array<{ type: string; external: boolean }> = [];
   for (const m of xml.matchAll(/<Relationship\b([^>]*?)\/?>/g)) {
@@ -588,7 +735,7 @@ function relationshipsOf(xml: string): Array<{ type: string; external: boolean }
 /**
  * Whether a Word document can be registered as the terms, read from its own
  * parts. A PDF is a fixed page; a Word document is a program's saved state,
- * and three things it can carry decide something.
+ * and four things it can carry decide something.
  *
  *  * **Active content is refused.** A macro project, an ActiveX control, or a
  *    macro-enabled document renamed to `.docx` is code, and the terms are text
@@ -596,6 +743,11 @@ function relationshipsOf(xml: string): Array<{ type: string; external: boolean }
  *  * **Tracked changes are refused.** A document with revisions in it holds two
  *    texts, and whichever one a converter shows is the one that gets signed.
  *    Terms are a settled text: the changes are accepted or rejected first.
+ *  * **A stale cross-reference is refused.** A clause that quotes another part
+ *    of the document through a REF field (BD1's clauses 14.3 and 14.4 quote
+ *    the fees on "Your transaction-fee arrangement") prints what Word last
+ *    stored, so the quoted text and the quote must agree when it is uploaded —
+ *    see `staleCrossReferences`.
  *  * **A master document is refused.** Its sections live in other files, so the
  *    fingerprint the Execution Schedule prints would not cover them.
  *
@@ -619,6 +771,17 @@ export function assessWordTerms(facts: WordPackageFacts): WordTermsAssessment {
       ok: false,
       error:
         "The document still has tracked changes in it. Accept or reject every change so the terms are one settled text, then upload it again.",
+    };
+  }
+  const stale = staleCrossReferences(facts.storyXml);
+  if (stale.length) {
+    const listed = stale.slice(0, 3).map(describeStaleReference).join("; ");
+    const more = stale.length > 3 ? `; and ${stale.length - 3} more` : "";
+    return {
+      ok: false,
+      error:
+        `Clause text that quotes another part of the document is out of step with it: ${listed}${more}. ` +
+        "The clause would be signed with the old figure. In Word, select all (Ctrl+A), press F9 to update fields, check the result, save, and upload again.",
     };
   }
   const relationships = relationshipsOf(facts.documentRelsXml ?? "");

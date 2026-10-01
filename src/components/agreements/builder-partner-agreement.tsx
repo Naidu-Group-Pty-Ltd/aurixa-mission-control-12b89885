@@ -15,7 +15,10 @@ import { toast } from "sonner";
 import {
   AlertTriangle,
   ArrowLeft,
+  Copy,
+  CreditCard,
   Download,
+  Mail,
   RefreshCw,
   Save,
   Send,
@@ -40,12 +43,18 @@ import {
   getBuilderPartnerAgreement,
   grantBuilderPartnerPortalAccess,
   saveBuilderPartnerParticulars,
+  sendBuilderPartnerPaymentLink,
   setBuilderPartnerGrantOnSignature,
+  setBuilderPartnerPaymentLinkEnabled,
 } from "@/lib/builderPartnerAgreements.functions";
 import {
   GRANT_ON_SIGNATURE_LABEL,
   type BuilderPartnerParticulars,
 } from "@/lib/agreements/builderPartner.pure";
+import {
+  BILL_THROUGH_LINK_LABEL,
+  subscriptionIsLive,
+} from "@/lib/agreements/builderPortalPayment.pure";
 import { PDF_MIME, saveBase64File } from "@/lib/agreements/saveFile";
 import { useUserRoles } from "@/lib/use-user-roles";
 
@@ -71,6 +80,25 @@ const ACCESS_LABEL: Record<string, string> = {
   refused: "Network refused access",
 };
 
+const PAYMENT_LINK_LABEL: Record<string, string> = {
+  sending: "Sending payment link",
+  sent: "Payment link sent",
+  failed: "Payment link not sent yet",
+  unconfirmed: "Send not confirmed",
+  held: "Held — signed before links were sent automatically",
+};
+
+const SUBSCRIPTION_LABEL: Record<string, string> = {
+  incomplete: "Awaiting payment",
+  incomplete_expired: "Payment expired",
+  trialing: "Trialing",
+  active: "Subscription active",
+  past_due: "Payment past due",
+  unpaid: "Unpaid",
+  canceled: "Subscription cancelled",
+  paused: "Subscription paused",
+};
+
 function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -89,7 +117,12 @@ export function BuilderPartnerAgreementPage({ agreementId }: { agreementId: stri
     refetchInterval: (q) => {
       const v = q.state.data;
       if (!v) return false;
-      if (v.sendState === "in_flight" || v.portalAccess.status === "pending") return 5_000;
+      if (
+        v.sendState === "in_flight" ||
+        v.portalAccess.status === "pending" ||
+        v.portalPayment?.link.status === "sending"
+      )
+        return 5_000;
       return v.status === "sent" || v.status === "delivered" ? 30_000 : false;
     },
   });
@@ -146,6 +179,28 @@ export function BuilderPartnerAgreementPage({ agreementId }: { agreementId: stri
       refresh();
     },
     onError: (err) => toast.error(message(err)),
+  });
+  const sendLink = useMutation({
+    mutationFn: () => sendBuilderPartnerPaymentLink({ data: { id: agreementId } }),
+    onSuccess: (r) => {
+      if (r.outcome === "sent") toast.success(`Payment link emailed to ${r.to}`);
+      else if (r.outcome === "unconfirmed") toast.warning(r.detail);
+      else toast.error(r.detail);
+      refresh();
+    },
+    onError: (err) => {
+      toast.error(message(err));
+      refresh();
+    },
+  });
+  const billLink = useMutation({
+    mutationFn: (enabled: boolean) =>
+      setBuilderPartnerPaymentLinkEnabled({ data: { id: agreementId, enabled } }),
+    onSuccess: refresh,
+    onError: (err) => {
+      toast.error(message(err));
+      refresh();
+    },
   });
   const download = useMutation({
     mutationFn: async (what: "schedule" | "terms" | "signed") => {
@@ -210,6 +265,20 @@ export function BuilderPartnerAgreementPage({ agreementId }: { agreementId: stri
   const access = view.portalAccess.status;
   const canGrant =
     admin && view.status === "signed" && access !== "granted" && access !== "pending";
+  const payment = view.portalPayment;
+  const linkStatus = payment?.link.status ?? null;
+  const subscriptionStatus = payment?.subscription.status ?? null;
+  // A builder on a negotiated monthly fee is invoiced in Stripe, never sent the link.
+  const linkEnabled = payment?.enabled !== false;
+  const canSendLink =
+    admin &&
+    Boolean(payment?.installed) &&
+    linkEnabled &&
+    view.status === "signed" &&
+    view.signedRecord.retained &&
+    linkStatus !== "sending" &&
+    !subscriptionIsLive(subscriptionStatus);
+  const linkAlreadyWent = linkStatus === "sent" || linkStatus === "unconfirmed";
 
   const confirmSend = async () => {
     const ok = await confirm({
@@ -227,6 +296,27 @@ export function BuilderPartnerAgreementPage({ agreementId }: { agreementId: stri
       confirmText: "Grant access",
     });
     if (ok) grant.mutate();
+  };
+  const confirmSendLink = async () => {
+    if (!payment) return;
+    const previous = linkAlreadyWent
+      ? ` A link was ${linkStatus === "sent" ? `sent${payment.link.sentAt ? ` on ${when(payment.link.sentAt)}` : ""}` : "possibly sent already"}; this sends another.`
+      : "";
+    const ok = await confirm({
+      title: linkAlreadyWent ? "Send the payment link again?" : "Send the payment link?",
+      description: `${view.particulars?.signatory.name ?? "The signatory"} (${view.particulars?.signatory.email ?? "their email"}) will be emailed their own Stripe link for the Builder / Developer Portal subscription: ${payment.price.sentence}.${previous}`,
+      confirmText: linkAlreadyWent ? "Send again" : "Send payment link",
+    });
+    if (ok) sendLink.mutate();
+  };
+  const copyLink = async () => {
+    if (!payment?.url) return;
+    try {
+      await navigator.clipboard.writeText(payment.url);
+      toast.success("The builder's payment link is copied");
+    } catch {
+      toast.error("The link could not be copied");
+    }
   };
   const confirmRemove = async (kind: "void" | "delete") => {
     const ok = await confirm({
@@ -446,6 +536,91 @@ export function BuilderPartnerAgreementPage({ agreementId }: { agreementId: stri
             Grant Builder Portal access
           </Button>
         ) : null}
+      </section>
+
+      <section className="space-y-3 rounded-lg border p-4">
+        <h2 className="flex items-center gap-2 font-medium">
+          <CreditCard className="h-4 w-4" /> Portal subscription
+        </h2>
+        {payment ? (
+          <>
+            {payment.installed ? (
+              <div className="flex items-center gap-3">
+                <Switch
+                  id="bill-through-link"
+                  checked={linkEnabled}
+                  disabled={!admin || billLink.isPending || linkStatus === "sending"}
+                  onCheckedChange={(enabled) => billLink.mutate(enabled)}
+                />
+                <Label htmlFor="bill-through-link">{BILL_THROUGH_LINK_LABEL}</Label>
+              </div>
+            ) : null}
+            <p className="text-sm text-muted-foreground">
+              {linkEnabled
+                ? `When the signed agreement has been retained, the signatory is emailed their own Stripe link for the monthly Portal subscription: ${payment.price.sentence}.`
+                : "This builder pays a negotiated monthly fee, invoiced in Stripe. No payment link is sent to them, automatically or from here."}{" "}
+              New Build and Development Sale fees are separate and are invoiced only when earned;
+              the link never charges them.
+            </p>
+            {!payment.installed ? (
+              <Notice tone="warn">
+                The payment-link migration has not been applied to this database yet, so no link is
+                sent.
+              </Notice>
+            ) : null}
+            {linkStatus ? (
+              <p className="text-sm">
+                <Badge variant={linkStatus === "sent" ? "default" : "outline"}>
+                  {PAYMENT_LINK_LABEL[linkStatus] ?? linkStatus}
+                </Badge>{" "}
+                {linkStatus === "sent"
+                  ? `${when(payment.link.sentAt) ?? ""}${payment.link.sentTo ? ` to ${payment.link.sentTo}` : ""}`
+                  : when(payment.link.attemptedAt)}
+                {payment.link.detail ? ` — ${payment.link.detail}` : ""}
+              </p>
+            ) : view.status === "signed" && payment.installed && linkEnabled ? (
+              <p className="text-sm text-muted-foreground">
+                {view.signedRecord.retained
+                  ? "The payment link has not been sent yet; the agreements sweep sends it."
+                  : "The payment link waits for the signed agreement to be retained."}
+              </p>
+            ) : null}
+            {subscriptionStatus ? (
+              <p className="text-sm">
+                <Badge variant={subscriptionStatus === "active" ? "default" : "outline"}>
+                  {SUBSCRIPTION_LABEL[subscriptionStatus] ?? subscriptionStatus}
+                </Badge>{" "}
+                {payment.subscription.id ? <code>{payment.subscription.id}</code> : null}
+                {payment.subscription.startedAt
+                  ? ` · started ${when(payment.subscription.startedAt)}`
+                  : ""}
+              </p>
+            ) : null}
+            <div className="flex flex-wrap gap-2">
+              {canSendLink ? (
+                <Button
+                  size="sm"
+                  onClick={() => void confirmSendLink()}
+                  disabled={sendLink.isPending}
+                >
+                  <Mail className="mr-1.5 h-4 w-4" />
+                  {linkStatus === null || linkStatus === "held"
+                    ? "Send payment link"
+                    : "Send payment link again"}
+                </Button>
+              ) : null}
+              {payment.url && view.status === "signed" && linkEnabled ? (
+                <Button size="sm" variant="outline" onClick={() => void copyLink()}>
+                  <Copy className="mr-1.5 h-4 w-4" /> Copy the builder's link
+                </Button>
+              ) : null}
+            </div>
+          </>
+        ) : (
+          <p className="text-sm text-muted-foreground">
+            The Portal subscription could not be read.
+          </p>
+        )}
       </section>
     </div>
   );

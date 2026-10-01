@@ -905,4 +905,28 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "column", table: "clone_payment_gates", column: "trial_extension_reason" },
     ],
   },
+  {
+    migration: "20260930110000_builder_portal_payment_link.sql",
+    version: "20260930110000",
+    assertions: [
+      { kind: "column", table: "client_agreements", column: "portal_payment_link_status" },
+      { kind: "column", table: "client_agreements", column: "portal_payment_link_enabled" },
+      { kind: "column", table: "client_agreements", column: "portal_payment_link_attempts" },
+      { kind: "column", table: "client_agreements", column: "portal_payment_link_sent_at" },
+      { kind: "column", table: "client_agreements", column: "portal_subscription_id" },
+      { kind: "column", table: "client_agreements", column: "portal_subscription_status" },
+      {
+        kind: "check",
+        table: "client_agreements",
+        column: "portal_payment_link_status",
+        value: "held",
+      },
+      {
+        kind: "check",
+        table: "client_agreements",
+        column: "portal_subscription_status",
+        value: "active",
+      },
+    ],
+  },
 ];

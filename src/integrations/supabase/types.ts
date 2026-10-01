@@ -1214,6 +1214,19 @@ export type Database = {
           portal_access_detail: string | null
           portal_access_granted_at: string | null
           portal_access_status: string | null
+          portal_checkout_session_id: string | null
+          portal_payment_link_attempted_at: string | null
+          portal_payment_link_attempts: number
+          portal_payment_link_detail: string | null
+          portal_payment_link_enabled: boolean
+          portal_payment_link_sent_at: string | null
+          portal_payment_link_sent_to: string | null
+          portal_payment_link_status: string | null
+          portal_subscription_customer_id: string | null
+          portal_subscription_id: string | null
+          portal_subscription_started_at: string | null
+          portal_subscription_status: string | null
+          portal_subscription_updated_at: string | null
           provision_error: string | null
           provision_on_signature: boolean
           provision_region: string
@@ -1262,6 +1275,19 @@ export type Database = {
           portal_access_detail?: string | null
           portal_access_granted_at?: string | null
           portal_access_status?: string | null
+          portal_checkout_session_id?: string | null
+          portal_payment_link_attempted_at?: string | null
+          portal_payment_link_attempts?: number
+          portal_payment_link_detail?: string | null
+          portal_payment_link_enabled?: boolean
+          portal_payment_link_sent_at?: string | null
+          portal_payment_link_sent_to?: string | null
+          portal_payment_link_status?: string | null
+          portal_subscription_customer_id?: string | null
+          portal_subscription_id?: string | null
+          portal_subscription_started_at?: string | null
+          portal_subscription_status?: string | null
+          portal_subscription_updated_at?: string | null
           provision_error?: string | null
           provision_on_signature?: boolean
           provision_region?: string
@@ -1310,6 +1336,19 @@ export type Database = {
           portal_access_detail?: string | null
           portal_access_granted_at?: string | null
           portal_access_status?: string | null
+          portal_checkout_session_id?: string | null
+          portal_payment_link_attempted_at?: string | null
+          portal_payment_link_attempts?: number
+          portal_payment_link_detail?: string | null
+          portal_payment_link_enabled?: boolean
+          portal_payment_link_sent_at?: string | null
+          portal_payment_link_sent_to?: string | null
+          portal_payment_link_status?: string | null
+          portal_subscription_customer_id?: string | null
+          portal_subscription_id?: string | null
+          portal_subscription_started_at?: string | null
+          portal_subscription_status?: string | null
+          portal_subscription_updated_at?: string | null
           provision_error?: string | null
           provision_on_signature?: boolean
           provision_region?: string

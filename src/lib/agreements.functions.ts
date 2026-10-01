@@ -48,7 +48,20 @@ type BuilderPartnerColumn =
   | "portal_access_status"
   | "portal_access_detail"
   | "portal_access_attempted_at"
-  | "portal_access_granted_at";
+  | "portal_access_granted_at"
+  | "portal_payment_link_enabled"
+  | "portal_payment_link_status"
+  | "portal_payment_link_attempts"
+  | "portal_payment_link_attempted_at"
+  | "portal_payment_link_sent_at"
+  | "portal_payment_link_sent_to"
+  | "portal_payment_link_detail"
+  | "portal_subscription_id"
+  | "portal_subscription_status"
+  | "portal_subscription_customer_id"
+  | "portal_checkout_session_id"
+  | "portal_subscription_started_at"
+  | "portal_subscription_updated_at";
 
 /**
  * A row as the list carries it: everything but the working offer and the
