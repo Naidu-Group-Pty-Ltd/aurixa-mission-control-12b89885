@@ -55,6 +55,7 @@
  * changes which one the deployment talks to and says so in the pull request.
  */
 
+import { crmLineWithheldFunctionNames } from "./crmLineFeatures.pure";
 import type { CrmMode } from "@/lib/crmMode.pure";
 import { CRM_MODE_COPY, crmModeLabel, isCrmMode } from "@/lib/crmMode.pure";
 import type { CrmParent, CrmParentJudgement } from "./crmLineage.pure";
@@ -447,6 +448,12 @@ export interface FrozenOnHeadInput {
   invariantGlobs: readonly string[];
   /** The head's exclusions and the clone's, together. */
   exclusions: readonly SyncExclusion[];
+  /**
+   * The line the clone is converting TO. A path that line does not carry
+   * (`crmLineFeatures.pure.ts`) differs from the prime by design, the way the
+   * routing files do, so it is never reported as frozen.
+   */
+  toMode?: string | null;
 }
 
 export function frozenOnHead(input: FrozenOnHeadInput): string[] {
@@ -467,7 +474,9 @@ export function frozenOnHead(input: FrozenOnHeadInput): string[] {
   }
   // Held paths — an exclusion, a prime-only feature, an unsafe path — are the
   // same ones a cascade would never write, so they are not the conversion's.
-  return partitionCascadePaths([...candidates], input.exclusions).write.sort();
+  return partitionCascadePaths([...candidates], input.exclusions, {
+    crmMode: input.toMode ?? null,
+  }).write.sort();
 }
 
 /** How many frozen paths a refusal names before summarising the rest. */
@@ -913,21 +922,59 @@ export function finalisedCloneFields(
  * The functions to take off the clone's project.
  *
  * Only what the proposal retired, only what the project actually runs, and
- * NEVER a function the prime declares: a prime function belongs to the prime's
- * own deploy lane, which decides what a clone's project runs, and a line that
- * lacks one is a line that is behind rather than one that retired it. When the
- * project's functions could not be read, every retired name is attempted — a
- * delete of a function that is not there answers 404, which is the outcome.
+ * never a function the prime declares — with ONE exception. A prime function
+ * belongs to the prime's own deploy lane, and a line that lacks one is
+ * usually a line that is behind rather than one that retired it. But a
+ * function the TARGET line does not carry by class (`crmLineFeatures.pure.ts`:
+ * the GoHighLevel integration, on the independent line) is not one the lane
+ * will ever deploy there again, and leaving it running is the defect the
+ * register exists to end — measured on the acid run of 29 Sep 2026, every
+ * GoHighLevel function stayed live on a clone converted to the independent
+ * line. Those are taken off whether or not the proposal named them.
+ *
+ * When the project's functions could not be read, every candidate is
+ * attempted — a delete of a function that is not there answers 404, which is
+ * the outcome.
  */
 export function functionsToUndeploy(input: {
   retired: readonly string[];
   live: readonly string[] | null;
   primeDeclared: readonly string[];
+  /** The line the clone converted TO. */
+  toMode?: string | null;
 }): string[] {
   const prime = new Set(input.primeDeclared);
   const live = input.live ? new Set(input.live) : null;
-  return input.retired
-    .filter((slug) => !prime.has(slug) && (live === null || live.has(slug)))
+  const lineWithheld = new Set(crmLineWithheldFunctionNames(input.toMode ?? null));
+  const candidates = new Set([...input.retired, ...lineWithheld]);
+  return [...candidates]
+    .filter(
+      (slug) => (!prime.has(slug) || lineWithheld.has(slug)) && (live === null || live.has(slug)),
+    )
+    .sort();
+}
+
+/**
+ * The functions a conversion must put BACK on the clone's project: what the
+ * line it joins carries and the line it left withheld by class. Converting to
+ * the dependent line returns the GoHighLevel integration, and nothing else
+ * would — the deploy lane redeploys only what a cascade CHANGED, so a
+ * function the prime has not touched since would stay absent for good.
+ *
+ * Only what the prime declares (a function the prime does not ship is not
+ * the prime's to restore), minus what the project already runs.
+ */
+export function functionsToRestore(input: {
+  fromMode: string | null | undefined;
+  toMode: string | null | undefined;
+  live: readonly string[] | null;
+  primeDeclared: readonly string[];
+}): string[] {
+  const prime = new Set(input.primeDeclared);
+  const keptOnTarget = new Set(crmLineWithheldFunctionNames(input.toMode ?? null));
+  const live = input.live ? new Set(input.live) : new Set<string>();
+  return crmLineWithheldFunctionNames(input.fromMode ?? null)
+    .filter((slug) => prime.has(slug) && !keptOnTarget.has(slug) && !live.has(slug))
     .sort();
 }
 
@@ -1036,4 +1083,19 @@ export function conversionWithoutDelivery(input: {
     `in the clone and were withheld from removal: ${shown}${more}. Settle them on the clone ` +
     `first; the conversion can then be proposed again.`
   );
+}
+
+/**
+ * Whether a restore request left the functions with no run that will deploy
+ * them.
+ *
+ * `requestNamedFunctionDeploy` answers in words. Three of them mean nothing
+ * will run: it was not planned, a read failed, or the slugs were folded into a
+ * run that is parked for a human (`— BLOCKED`), which the drain never takes.
+ * The last one reads like success ("already queued") until its tail, which is
+ * why it is matched by the word the planner writes for exactly that case.
+ */
+export function restoreOutcomeLeavesNothingRunnable(outcome: string | null): boolean {
+  if (!outcome) return false;
+  return /^not planned|could not|\bBLOCKED\b/.test(outcome);
 }

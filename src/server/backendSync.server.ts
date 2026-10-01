@@ -125,13 +125,25 @@ export async function requestBackendSyncAfterCascade(input: {
     .select("supabase_project_ref")
     .eq("clone_id", input.cloneId)
     .maybeSingle();
+  // The clone's CRM line decides what of the prime's function tree it owes at
+  // all (`crmLineFeatures.pure.ts`). `*` so a deployment that has not migrated
+  // `crm_mode` reads it as absent rather than failing the catch-up; a failed
+  // read is treated the same, which plans what every pass before this did.
+  const { data: cloneRow } = await admin
+    .from("clones")
+    .select("*")
+    .eq("id", input.cloneId)
+    .maybeSingle();
+  const crmMode = ((cloneRow as { crm_mode?: string | null } | null)?.crm_mode ?? null) as
+    | string
+    | null;
   // A read that FAILED is not a row that is ABSENT — reporting a database
   // fault as "this clone has no backend" would silently stop the whole fleet
   // catching up, and nothing would say so.
   if (backendErr) return { requested: false, reason: "db_error" };
   if (!backend?.supabase_project_ref) return { requested: false, reason: "no_backend_project" };
 
-  const work = await workForCascade(input.fromSha, input.toSha);
+  const work = await workForCascade(input.fromSha, input.toSha, crmMode);
   if (work === "prime_not_configured" || work === "compare_failed") {
     return { requested: false, reason: work };
   }
@@ -222,6 +234,7 @@ export type DeployerDeclaration = {
 async function workForCascade(
   fromSha: string | null,
   toSha: string,
+  crmMode: string | null,
 ): Promise<CascadeBackendWork | "prime_not_configured" | "compare_failed"> {
   // A clone that has never recorded a synced sha has no "before" to diff
   // against. Everything is stale by definition, and asking GitHub to compare
@@ -260,7 +273,10 @@ async function workForCascade(
         ],
       };
     }
-    return cascadeBackendWork(files.map((f) => f.filename));
+    return cascadeBackendWork(
+      files.map((f) => f.filename),
+      { crmMode },
+    );
   } catch (e) {
     console.error("[backend-sync] could not compare prime revisions:", e);
     return "compare_failed";
@@ -455,6 +471,29 @@ async function planFunctionDeploy(
   return (
     (owed === null ? "planned for every function" : `planned for ${owed.length} function(s)`) +
     retiredNote
+  );
+}
+
+/**
+ * Plan a deploy of NAMED prime functions onto a clone, outside a cascade.
+ *
+ * The one caller is a CRM conversion to a line that carries functions the
+ * line it left withheld (`functionsToRestore`): nothing in the prime changed,
+ * so no cascade diff would ever name them. It goes through the same
+ * one-open-run rule as a cascade's plan, so it widens a queued run rather
+ * than standing beside it, and it records no prime revision — a named list
+ * planned outside a diff proves none.
+ */
+export async function requestNamedFunctionDeploy(input: {
+  cloneId: string;
+  reason: string;
+  slugs: readonly string[];
+}): Promise<string> {
+  if (input.slugs.length === 0) return "nothing to deploy";
+  return planFunctionDeploy(
+    { cloneId: input.cloneId, reason: input.reason, toSha: "" },
+    [...input.slugs].sort(),
+    [input.reason],
   );
 }
 

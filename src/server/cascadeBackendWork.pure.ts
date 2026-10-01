@@ -52,6 +52,7 @@
  */
 import { isExcludedFunctionFile } from "@/server/prime-backend.server";
 import { isPrimeOnlyPath } from "@/server/primeOnlyFeatures.pure";
+import { isCrmLineWithheldPath } from "@/server/crmLineFeatures.pure";
 
 const FUNCTIONS_PREFIX = "supabase/functions/";
 const MIGRATIONS_PREFIX = "supabase/migrations/";
@@ -91,7 +92,16 @@ export function hasBackendWork(work: CascadeBackendWork): boolean {
  *
  * Paths are repo-relative, exactly as `ClonePlan.writes` carries them.
  */
-export function cascadeBackendWork(paths: readonly string[]): CascadeBackendWork {
+export function cascadeBackendWork(
+  paths: readonly string[],
+  /**
+   * The clone's recorded CRM line. What that line does not carry
+   * (`crmLineFeatures.pure.ts`) is nothing it owes, exactly as a prime-only
+   * path is not — including a withheld `_shared` module, which ships inside no
+   * bundle this clone deploys. Absent: nothing is skipped.
+   */
+  opts: { crmMode?: string | null } = {},
+): CascadeBackendWork {
   const slugs = new Set<string>();
   const reasons: string[] = [];
   let allFunctions = false;
@@ -116,6 +126,8 @@ export function cascadeBackendWork(paths: readonly string[]): CascadeBackendWork
     if (!path.startsWith(FUNCTIONS_PREFIX)) continue;
     // The prime's own feature: nothing a clone is given, so nothing it owes.
     if (isPrimeOnlyPath(path)) continue;
+    // What this clone's CRM line does not carry: likewise nothing it owes.
+    if (isCrmLineWithheldPath(path, opts.crmMode)) continue;
 
     const rel = path.slice(FUNCTIONS_PREFIX.length);
     if (!rel || isExcludedFunctionFile(rel)) continue;

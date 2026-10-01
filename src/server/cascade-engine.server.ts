@@ -113,7 +113,12 @@ import {
   declaredFunctionCount,
   reconcileConfigToml,
 } from "./cascade/configTomlReconcile.pure";
-import { describeWithheldFunctions, withheldPrimeOnlyFunctions } from "./primeOnlyFeatures.pure";
+import { withheldPrimeOnlyFunctions } from "./primeOnlyFeatures.pure";
+import {
+  describeWithheldAcrossRegisters,
+  withheldClause,
+  withheldLineFunctions,
+} from "./crmLineFeatures.pure";
 import {
   MAX_CONVERSION_DELETIONS,
   OPEN_CONVERSION_STATUSES,
@@ -2090,6 +2095,7 @@ export async function processClone(args: {
     const holds = partitionCascadePaths(
       behind.map((f) => f.path),
       exclusions,
+      { crmMode: clone.crm_mode },
     ).held;
     const releasable = new Set(approvableHeld(holds).map((h) => h.path));
     const neverWritten = new Set(holds.filter((h) => !releasable.has(h.path)).map((h) => h.path));
@@ -2302,7 +2308,7 @@ export async function processClone(args: {
   // The guard rail. Applied in BOTH scopes: a module glob that grows to cover
   // `src/integrations/**` would otherwise reach the clone's backend identity
   // by a different route than the one this was written for.
-  const partition = partitionCascadePaths(candidatePaths, exclusions);
+  const partition = partitionCascadePaths(candidatePaths, exclusions, { crmMode: clone.crm_mode });
 
   // ── A hold protects WORK, not a path ──────────────────────────────────────
   //
@@ -3137,7 +3143,10 @@ export async function processClone(args: {
   let withheldFunctions: string[] = [];
   if (mode !== "notify") {
     if (cloneShaByPath !== null) {
-      withheldFunctions = withheldPrimeOnlyFunctions(cloneShaByPath.keys());
+      // The prime-only share, then what the clone's CRM line does not carry.
+      withheldFunctions = withheldPrimeOnlyFunctions(cloneShaByPath.keys())
+        .concat(withheldLineFunctions(cloneShaByPath.keys(), clone.crm_mode))
+        .sort();
     } else {
       try {
         const { data } = await octokit.repos.getContent({
@@ -3147,9 +3156,12 @@ export async function processClone(args: {
           ref: cloneRef.branch,
         });
         if (Array.isArray(data)) {
-          withheldFunctions = withheldPrimeOnlyFunctions(
-            data.filter((d) => d.type === "dir").map((d) => `supabase/functions/${d.name}/`),
-          );
+          const dirs = data
+            .filter((d) => d.type === "dir")
+            .map((d) => `supabase/functions/${d.name}/`);
+          withheldFunctions = withheldPrimeOnlyFunctions(dirs)
+            .concat(withheldLineFunctions(dirs, clone.crm_mode))
+            .sort();
         }
       } catch (e) {
         console.warn(
@@ -3209,8 +3221,7 @@ export async function processClone(args: {
             : "";
           const leftOut = verdict.withheldDropped.length
             ? ` · left out ${verdict.withheldDropped.length} declaration(s) for ` +
-              `${describeWithheldFunctions(verdict.withheldDropped)}, which the prime keeps ` +
-              `for itself`
+              `${withheldClause(verdict.withheldDropped)}`
             : "";
           configReconcileNote =
             `${CONFIG_TOML_PATH} · ${now} function declaration(s), was ${was} · ` +
@@ -3607,7 +3618,7 @@ export async function processClone(args: {
           const cloneCopy = cloneSurface && !cloneSurface.binary ? cloneSurface.content : null;
           if (verdict.merged !== cloneCopy) {
             const leftOut = verdict.leftOut.length
-              ? ` · left out ${describeWithheldFunctions(verdict.leftOut)}`
+              ? ` · left out ${describeWithheldAcrossRegisters(verdict.leftOut)}`
               : "";
             const added = verdict.added.length
               ? ` · kept ${verdict.added.length} this clone owns (${verdict.added.join(", ")})`
@@ -4475,7 +4486,7 @@ export async function processClone(args: {
     // than the rule that governs it. Partitioning here is the same function
     // over the same exclusions, so a protected path is protected whether the
     // clone installs the module it lives in or not.
-    const gated = partitionCascadePaths(plan.carry, exclusions);
+    const gated = partitionCascadePaths(plan.carry, exclusions, { crmMode: clone.crm_mode });
     // Marked attempted whichever way they went: a subject the exclusions hold
     // is settled, and re-planning it every round would never terminate.
     for (const h of gated.held) attemptedSubjects.add(h.path);

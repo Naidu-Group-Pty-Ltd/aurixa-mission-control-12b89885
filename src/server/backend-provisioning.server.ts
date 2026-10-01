@@ -51,6 +51,7 @@ import {
   primeOnlyCronReason,
   primeOnlyFunctionsIn,
 } from "./primeOnlyFeatures.pure";
+import { crmLineCronJobsIn, crmLineCronReason, crmLineFunctionsIn } from "./crmLineFeatures.pure";
 
 const MGMT_API = "https://api.supabase.com/v1";
 
@@ -1835,6 +1836,13 @@ export async function replicateCronJobs(
    * took them, over and over — the same closed loop the tables stage had.
    */
   deadlineAt?: number | null,
+  /**
+   * The clone's recorded CRM line. A job reaching what that line does not
+   * carry (`crmLineFeatures.pure.ts`) is skipped, exactly as a prime-only job
+   * is: on the independent line the GoHighLevel jobs would fire into
+   * functions the project does not run. Absent: nothing more is skipped.
+   */
+  crmMode?: string | null,
 ): Promise<CronJobReplicationResult[]> {
   if (primeJobs.length === 0) return [];
   // Ensure pg_cron exists on the clone. Extension is idempotent.
@@ -1891,6 +1899,16 @@ export async function replicateCronJobs(
         status: "skipped",
         rewrote_url: false,
         reason: `prime-only — ${primeOnly}`,
+      });
+      continue;
+    }
+    const lineWithheld = crmLineCronReason(job, crmMode);
+    if (lineWithheld) {
+      results.push({
+        jobname: job.jobname,
+        status: "skipped",
+        rewrote_url: false,
+        reason: `CRM line — ${lineWithheld}`,
       });
       continue;
     }
@@ -2015,9 +2033,13 @@ export async function replicateCronJobs(
   // its dispatcher. Left for the next pass when the budget is spent — the
   // step is re-entered after the pause, so nothing is lost by waiting.
   if (!pastDeadline(deadlineAt)) {
-    const sweep = await sweepPrimeOnlyCronJobs(cloneRef, { primeRef });
+    // With the clone's CRM line, so a repair or resume also takes back a job
+    // the line withholds that an earlier pass or a migration scheduled —
+    // skipping it above only stops a NEW one.
+    const sweep = await sweepPrimeOnlyCronJobs(cloneRef, { primeRef, crmMode });
     for (const s of sweep.unscheduled) {
-      const reason = `prime-only — unscheduled from this clone: ${s.reason}`;
+      const kind = s.crmLine ? "CRM line" : "prime-only";
+      const reason = `${kind} — unscheduled from this clone: ${s.reason}`;
       const seen = results.find((r) => r.jobname === s.jobname && r.status === "skipped");
       if (seen) seen.reason = reason;
       else results.push({ jobname: s.jobname, status: "skipped", rewrote_url: false, reason });
@@ -2038,7 +2060,8 @@ export async function replicateCronJobs(
  * What one sweep found on a project and did about it.
  */
 export type PrimeOnlyCronSweep = {
-  unscheduled: Array<{ jobid: number; jobname: string; reason: string }>;
+  /** `crmLine` is true where the CRM-line register, not the prime-only one, caught the job. */
+  unscheduled: Array<{ jobid: number; jobname: string; reason: string; crmLine?: boolean }>;
   failed: Array<{ jobid: number; jobname: string; reason: string; error: string }>;
   /** Why nothing was unscheduled although something was found; null otherwise. */
   skipped: string | null;
@@ -2065,7 +2088,16 @@ export type PrimeOnlyCronSweep = {
  */
 export async function sweepPrimeOnlyCronJobs(
   targetRef: string,
-  opts: { primeRef?: string | null } = {},
+  opts: {
+    primeRef?: string | null;
+    /**
+     * The target clone's recorded CRM line. Given, the sweep also unschedules
+     * what that line does not carry (`crmLineFeatures.pure.ts`) — the four
+     * GoHighLevel jobs, on the independent line — under the same three rules.
+     * Absent: prime-only jobs alone, exactly as before.
+     */
+    crmMode?: string | null;
+  } = {},
 ): Promise<PrimeOnlyCronSweep> {
   const sweep: PrimeOnlyCronSweep = { unscheduled: [], failed: [], skipped: null };
   let raw: unknown;
@@ -2083,7 +2115,13 @@ export async function sweepPrimeOnlyCronJobs(
       command: String(r?.command ?? ""),
     }))
     .filter((j) => Number.isSafeInteger(j.jobid) && j.jobid > 0);
-  const found = primeOnlyCronJobsIn(jobs);
+  const found = [
+    ...primeOnlyCronJobsIn(jobs).map((hit) => ({ ...hit, crmLine: false })),
+    ...crmLineCronJobsIn(
+      jobs.filter((j) => !primeOnlyCronReason(j)),
+      opts.crmMode,
+    ).map((hit) => ({ ...hit, crmLine: true })),
+  ];
   if (found.length === 0) return sweep;
 
   let primeRef = (opts.primeRef ?? "").trim();
@@ -2105,10 +2143,15 @@ export async function sweepPrimeOnlyCronJobs(
       : "the prime's project is not known, so this project cannot be ruled out as the prime";
     return sweep;
   }
-  for (const { job, reason } of found) {
+  for (const { job, reason, crmLine } of found) {
     try {
       await runSqlOnProject(targetRef, `select cron.unschedule(${job.jobid}::bigint);`);
-      sweep.unscheduled.push({ jobid: job.jobid, jobname: job.jobname, reason });
+      sweep.unscheduled.push({
+        jobid: job.jobid,
+        jobname: job.jobname,
+        reason,
+        ...(crmLine ? { crmLine: true } : {}),
+      });
     } catch (err) {
       sweep.failed.push({
         jobid: job.jobid,
@@ -2176,7 +2219,16 @@ export const PRIME_ONLY_FUNCTION_DELETES_PER_PASS = 10;
  */
 export async function sweepPrimeOnlyFunctions(
   targetRef: string,
-  opts: { primeRef?: string | null; maxDeletes?: number } = {},
+  opts: {
+    primeRef?: string | null;
+    maxDeletes?: number;
+    /**
+     * The target clone's recorded CRM line. Given, the sweep also deletes the
+     * functions that line does not carry (`crmLineFeatures.pure.ts`), under
+     * the same rules and the same cap. Absent: prime-only functions alone.
+     */
+    crmMode?: string | null;
+  } = {},
 ): Promise<PrimeOnlyFunctionSweep> {
   const sweep: PrimeOnlyFunctionSweep = { deleted: [], failed: [], deferred: [], skipped: null };
   const ref = (targetRef ?? "").trim();
@@ -2206,7 +2258,12 @@ export async function sweepPrimeOnlyFunctions(
     sweep.skipped = `the deployed functions could not be read: ${err instanceof Error ? err.message : String(err)}`;
     return sweep;
   }
-  const found = primeOnlyFunctionsIn(slugs);
+  const primeOnlyFound = primeOnlyFunctionsIn(slugs);
+  const primeOnlySlugs = new Set(primeOnlyFound.map((f) => f.slug));
+  const found = [
+    ...primeOnlyFound,
+    ...crmLineFunctionsIn(slugs, opts.crmMode).filter((f) => !primeOnlySlugs.has(f.slug)),
+  ];
   if (found.length === 0) return sweep;
 
   let primeRef = (opts.primeRef ?? "").trim();
@@ -5404,6 +5461,13 @@ select
 
 export type ProvisionBackendInput = {
   cloneName: string;
+  /**
+   * The clone's recorded CRM line. What that line does not carry
+   * (`crmLineFeatures.pure.ts`) is never scheduled on its project. The
+   * functions are already out of `snapshot` — the caller reads the tree
+   * without them — so this governs the pg_cron step alone.
+   */
+  crmMode?: string | null;
   region?: string;
   adminEmail: string;
   /** Null only when `repair` is set, where no identity is seeded at all. */
@@ -6170,6 +6234,7 @@ export async function provisionCloneBackend(
         cloneAnonKey: anonKey,
       },
       input.deadlineAt,
+      input.crmMode ?? null,
     );
     const failed = cronJobs.filter((c) => c.status === "failed");
     if (failed.length > 0) {

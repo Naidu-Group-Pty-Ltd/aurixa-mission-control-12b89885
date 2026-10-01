@@ -56,11 +56,20 @@
  * is not held (`purpose: "delete"`): a prime-only path still on a clone is one
  * a cascade carried before this rule, and removing it is the rule working.
  *
- * Pure: no imports beyond the shared glob compiler and the prime-only register,
- * which is itself pure.
+ * ## CRM-line features
+ *
+ * The same rule, keyed on the clone's recorded `crm_mode`:
+ * `CRM_LINE_FEATURES` names what a line does not carry (the GoHighLevel
+ * integration, on the independent line). A write is held as `protected` with
+ * the pattern `(crm-line: <key>)`; a deletion is not held. An unrecorded mode
+ * holds nothing, so a caller that does not pass one behaves as before.
+ *
+ * Pure: no imports beyond the shared glob compiler and the two registers,
+ * which are themselves pure.
  */
 import { globToRegex, isSafeRepoPath } from "@/lib/module-globs";
 import { primeOnlyFeatureForPath } from "@/server/primeOnlyFeatures.pure";
+import { crmLineFeatureForPath } from "@/server/crmLineFeatures.pure";
 
 /**
  * Why a path was withheld.
@@ -181,9 +190,10 @@ export function assertMirrorPolicy(cloneId: string, exclusions: readonly SyncExc
 export function partitionCascadePaths(
   candidates: readonly string[],
   exclusions: readonly SyncExclusion[],
-  opts: { purpose?: "write" | "delete" } = {},
+  opts: { purpose?: "write" | "delete"; crmMode?: string | null } = {},
 ): CascadePartition {
   const holdPrimeOnly = (opts.purpose ?? "write") === "write";
+  const lineMode = holdPrimeOnly ? (opts.crmMode ?? null) : null;
   const ordered = [
     ...exclusions.filter((e) => e.reason === "protected"),
     ...exclusions.filter((e) => e.reason !== "protected"),
@@ -210,6 +220,16 @@ export function partitionCascadePaths(
         pattern: `(prime-only: ${primeOnly.key})`,
         reason: "protected",
         note: primeOnly.reason,
+      });
+      continue;
+    }
+    const lineFeature = lineMode ? crmLineFeatureForPath(path, lineMode) : null;
+    if (lineFeature) {
+      held.push({
+        path,
+        pattern: `(crm-line: ${lineFeature.key})`,
+        reason: "protected",
+        note: lineFeature.reason,
       });
       continue;
     }

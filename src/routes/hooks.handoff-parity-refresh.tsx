@@ -156,9 +156,11 @@ export const Route = createFileRoute("/hooks/handoff-parity-refresh")({
               results.details.push({ id: h.id, reason: "no_target_backend" });
               continue;
             }
+            const { readCloneCrmMode } = await import("@/server/handoff-parity.server");
             const parity = await computeParity(primeRef, targetRef, {
               declaredEdgeFunctions,
               migrationObjectIndex,
+              crmMode: await readCloneCrmMode(supabaseAdmin, h.clone_id),
             });
             const { data: row, error: insErr } = await supabaseAdmin
               .from("handoff_parity_reports")

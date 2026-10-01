@@ -47,8 +47,7 @@ describe("the refresh runs where its safety argument says", () => {
   const refresh = () => at("const strandedVerdicts: StrandedVerdict[] = [];");
   const closure = () =>
     at("const closureAdded = await closeOver(candidatePaths, new Set(candidatePaths));");
-  const partition = () =>
-    at("const partition = partitionCascadePaths(candidatePaths, exclusions);");
+  const partition = () => at("const partition = partitionCascadePaths(candidatePaths, exclusions");
 
   it("after the ledger and the approvals it reads", () => {
     expect(refresh()).toBeGreaterThan(ledger());

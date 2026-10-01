@@ -248,16 +248,34 @@ export function primeOnlyCronReason(job: {
       return `${rule.feature.title}: the job name matches ${rule.feature.cronJobs.join(", ")}.`;
     }
   }
-  const command = job.command ?? "";
-  for (const hit of command.matchAll(/functions\/v1\/([A-Za-z0-9_-]+)/g)) {
-    const feature = byFunction.get(hit[1]);
-    if (feature) return `${feature.title}: the job calls ${hit[1]}.`;
-  }
-  for (const target of signedInvocationTargets(command)) {
-    const feature = byFunction.get(target.trim());
-    if (feature) return `${feature.title}: the job invokes ${target.trim()}.`;
+  for (const call of functionsInvokedByCron(job.command ?? "")) {
+    const feature = byFunction.get(call.name);
+    if (feature) return `${feature.title}: the job ${call.how} ${call.name}.`;
   }
   return null;
+}
+
+/**
+ * Every edge function a pg_cron command reaches, in the order written: by URL
+ * (`functions/v1/<name>`, reported as "calls") and through
+ * `cron_invoke_signed_function('<name>', …)` (reported as "invokes").
+ *
+ * Exported so a second register — `crmLineFeatures.pure.ts` — reads a job
+ * exactly the way this one does. Two parsers of one command is how two sweeps
+ * come to disagree about which job reaches which function.
+ */
+export function functionsInvokedByCron(
+  command: string,
+): Array<{ name: string; how: "calls" | "invokes" }> {
+  const out: Array<{ name: string; how: "calls" | "invokes" }> = [];
+  for (const hit of (command ?? "").matchAll(/functions\/v1\/([A-Za-z0-9_-]+)/g)) {
+    out.push({ name: hit[1], how: "calls" });
+  }
+  for (const target of signedInvocationTargets(command ?? "")) {
+    const name = target.trim();
+    if (name) out.push({ name, how: "invokes" });
+  }
+  return out;
 }
 
 export function isPrimeOnlyCronJob(job: {

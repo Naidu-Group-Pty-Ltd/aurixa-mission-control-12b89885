@@ -1340,7 +1340,39 @@ async function executeEdgeFunctionDeploy(
   const source = await resolvePrimeSource(admin);
   if (!source) return parkRun(run, ["prime source repo is not configured"]);
 
-  const wanted: string[] | null = run.plan?.slugs ?? null;
+  // What this clone's CRM line does not carry is never deployed to it,
+  // whatever the plan names (`crmLineFeatures.pure.ts`): the independent line
+  // runs its CRM in its own Postgres, and a GoHighLevel function put back by
+  // this lane is the defect the register exists to end. `*` so a deployment
+  // without `crm_mode` reads it as absent and withholds nothing. A read that
+  // FAILED is not a clone with no mode: it throws, so the run retries rather
+  // than deploying the very functions the line withholds.
+  const { data: cloneRow, error: cloneErr } = await admin
+    .from("clones")
+    .select("*")
+    .eq("id", run.clone_id)
+    .maybeSingle();
+  if (cloneErr) throw new Error(`could not read the clone's CRM line: ${cloneErr.message}`);
+  const { crmLineWithheldFunctionNames } = await import("@/server/crmLineFeatures.pure");
+  const lineWithheld = crmLineWithheldFunctionNames(
+    (cloneRow as { crm_mode?: string | null } | null)?.crm_mode ?? null,
+  );
+  const lineWithheldSet = new Set(lineWithheld);
+
+  const plannedSlugs: string[] | null = run.plan?.slugs ?? null;
+  const wanted: string[] | null =
+    plannedSlugs === null ? null : plannedSlugs.filter((slug) => !lineWithheldSet.has(slug));
+  if (plannedSlugs !== null && plannedSlugs.length > 0 && wanted !== null && wanted.length === 0) {
+    // Deployed nothing, so it proves no revision — the empty batch's rule.
+    const nothingOwed = {
+      deployed: 0,
+      note: "every function this run named is withheld from the clone's CRM line",
+      withheld_by_crm_line: plannedSlugs,
+      functions_revision: null,
+      revision_recorded: false,
+    };
+    return succeedRun(run, nothingOwed);
+  }
 
   // What THIS run has already put on the clone — asked of the TARGET, never
   // of a diary the run keeps about itself. A pass that deployed sixty
@@ -1379,7 +1411,7 @@ async function executeEdgeFunctionDeploy(
   // that produced it and is sliced here instead.
   const snapshot = await fetchPrimeBackendSnapshot(getAppOctokit(), source, {
     includeMigrationSql: false,
-    skipFunctionSlugs: refreshed,
+    skipFunctionSlugs: lineWithheld.length > 0 ? [...refreshed, ...lineWithheld] : refreshed,
     ...(wanted === null ? { functionLimit: EDGE_DEPLOY_BATCH } : {}),
   });
 

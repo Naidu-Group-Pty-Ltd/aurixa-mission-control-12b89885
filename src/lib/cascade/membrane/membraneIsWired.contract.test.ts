@@ -220,11 +220,13 @@ describe("the engine asks the membrane", () => {
     // asked. `backendIdentityHold` would have caught the worst of it, which is
     // a different rule catching it by luck.
     const block = carryLoop();
-    expect(block).toMatch(/partitionCascadePaths\(\s*plan\.carry\s*,\s*exclusions\s*\)/);
+    expect(block).toMatch(
+      /partitionCascadePaths\(\s*plan\.carry\s*,\s*exclusions\s*(?:,\s*\{[^}]*\}\s*)?\)/,
+    );
     // And what it carries is the WRITE half, never the whole plan.
     expect(block).toMatch(/mapWithConcurrencyUntil<[\s\S]{0,120}>\(\s*gated\.write\s*,/);
     // The same exclusions the first partition used, not a second list.
-    expect(engine).toMatch(/partitionCascadePaths\(candidatePaths,\s*exclusions\)/);
+    expect(engine).toMatch(/partitionCascadePaths\(candidatePaths,\s*exclusions(?:,\s*\{[^}]*\})?\)/);
   });
 
   it("reports what the path rules refused, and stops re-planning it", () => {

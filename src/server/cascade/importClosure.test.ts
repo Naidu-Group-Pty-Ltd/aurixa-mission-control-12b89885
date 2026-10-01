@@ -253,7 +253,7 @@ describe("the engine wires it, and wires it in the one position that is safe", (
       the engine can write a file the cascade exists to hold back.
     */
     const closure = engine.indexOf("closeOverImports(");
-    const partition = engine.indexOf("partitionCascadePaths(candidatePaths, exclusions)");
+    const partition = engine.indexOf("partitionCascadePaths(candidatePaths, exclusions");
     expect(closure).toBeGreaterThan(-1);
     expect(partition).toBeGreaterThan(-1);
     expect(closure).toBeLessThan(partition);
