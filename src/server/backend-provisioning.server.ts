@@ -2033,9 +2033,13 @@ export async function replicateCronJobs(
   // its dispatcher. Left for the next pass when the budget is spent — the
   // step is re-entered after the pause, so nothing is lost by waiting.
   if (!pastDeadline(deadlineAt)) {
-    const sweep = await sweepPrimeOnlyCronJobs(cloneRef, { primeRef });
+    // With the clone's CRM line, so a repair or resume also takes back a job
+    // the line withholds that an earlier pass or a migration scheduled —
+    // skipping it above only stops a NEW one.
+    const sweep = await sweepPrimeOnlyCronJobs(cloneRef, { primeRef, crmMode });
     for (const s of sweep.unscheduled) {
-      const reason = `prime-only — unscheduled from this clone: ${s.reason}`;
+      const kind = s.crmLine ? "CRM line" : "prime-only";
+      const reason = `${kind} — unscheduled from this clone: ${s.reason}`;
       const seen = results.find((r) => r.jobname === s.jobname && r.status === "skipped");
       if (seen) seen.reason = reason;
       else results.push({ jobname: s.jobname, status: "skipped", rewrote_url: false, reason });
@@ -2056,7 +2060,8 @@ export async function replicateCronJobs(
  * What one sweep found on a project and did about it.
  */
 export type PrimeOnlyCronSweep = {
-  unscheduled: Array<{ jobid: number; jobname: string; reason: string }>;
+  /** `crmLine` is true where the CRM-line register, not the prime-only one, caught the job. */
+  unscheduled: Array<{ jobid: number; jobname: string; reason: string; crmLine?: boolean }>;
   failed: Array<{ jobid: number; jobname: string; reason: string; error: string }>;
   /** Why nothing was unscheduled although something was found; null otherwise. */
   skipped: string | null;
@@ -2111,11 +2116,11 @@ export async function sweepPrimeOnlyCronJobs(
     }))
     .filter((j) => Number.isSafeInteger(j.jobid) && j.jobid > 0);
   const found = [
-    ...primeOnlyCronJobsIn(jobs),
+    ...primeOnlyCronJobsIn(jobs).map((hit) => ({ ...hit, crmLine: false })),
     ...crmLineCronJobsIn(
       jobs.filter((j) => !primeOnlyCronReason(j)),
       opts.crmMode,
-    ),
+    ).map((hit) => ({ ...hit, crmLine: true })),
   ];
   if (found.length === 0) return sweep;
 
@@ -2138,10 +2143,15 @@ export async function sweepPrimeOnlyCronJobs(
       : "the prime's project is not known, so this project cannot be ruled out as the prime";
     return sweep;
   }
-  for (const { job, reason } of found) {
+  for (const { job, reason, crmLine } of found) {
     try {
       await runSqlOnProject(targetRef, `select cron.unschedule(${job.jobid}::bigint);`);
-      sweep.unscheduled.push({ jobid: job.jobid, jobname: job.jobname, reason });
+      sweep.unscheduled.push({
+        jobid: job.jobid,
+        jobname: job.jobname,
+        reason,
+        ...(crmLine ? { crmLine: true } : {}),
+      });
     } catch (err) {
       sweep.failed.push({
         jobid: job.jobid,

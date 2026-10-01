@@ -17,7 +17,11 @@ import {
 import { PRIME_ONLY_FEATURES, isPrimeOnlyFunction } from "@/server/primeOnlyFeatures.pure";
 import { partitionCascadePaths } from "@/server/cascade/syncExclusions.pure";
 import { cascadeBackendWork } from "@/server/cascadeBackendWork.pure";
-import { functionsToRestore, functionsToUndeploy } from "@/server/crmConversion.pure";
+import {
+  functionsToRestore,
+  functionsToUndeploy,
+  restoreOutcomeLeavesNothingRunnable,
+} from "@/server/crmConversion.pure";
 
 const GHL = "supabase/functions/send-ghl-message/index.ts";
 
@@ -214,5 +218,22 @@ describe("a conversion moves the integration with the clone", () => {
         primeDeclared,
       }),
     ).toEqual([]);
+  });
+
+  it("counts a restore folded into a parked run as nothing runnable", () => {
+    // "already queued" reads as success until its tail: the drain never takes
+    // a run parked for a human, so the functions stay absent indefinitely.
+    expect(
+      restoreOutcomeLeavesNothingRunnable(
+        "already queued in run abc — BLOCKED: that run is parked for a human (since 2026-09-29T10:00) and the drain will never take it",
+      ),
+    ).toBe(true);
+    expect(restoreOutcomeLeavesNothingRunnable("not planned: boom")).toBe(true);
+    expect(restoreOutcomeLeavesNothingRunnable("not planned — could not read open runs: x")).toBe(
+      true,
+    );
+    expect(restoreOutcomeLeavesNothingRunnable("queued run abc")).toBe(false);
+    expect(restoreOutcomeLeavesNothingRunnable("already queued in run abc")).toBe(false);
+    expect(restoreOutcomeLeavesNothingRunnable(null)).toBe(false);
   });
 });

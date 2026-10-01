@@ -1084,3 +1084,18 @@ export function conversionWithoutDelivery(input: {
     `first; the conversion can then be proposed again.`
   );
 }
+
+/**
+ * Whether a restore request left the functions with no run that will deploy
+ * them.
+ *
+ * `requestNamedFunctionDeploy` answers in words. Three of them mean nothing
+ * will run: it was not planned, a read failed, or the slugs were folded into a
+ * run that is parked for a human (`— BLOCKED`), which the drain never takes.
+ * The last one reads like success ("already queued") until its tail, which is
+ * why it is matched by the word the planner writes for exactly that case.
+ */
+export function restoreOutcomeLeavesNothingRunnable(outcome: string | null): boolean {
+  if (!outcome) return false;
+  return /^not planned|could not|\bBLOCKED\b/.test(outcome);
+}

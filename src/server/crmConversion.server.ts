@@ -45,6 +45,7 @@ import {
   finalisedCloneFields,
   frozenOnHead,
   functionsToRestore,
+  restoreOutcomeLeavesNothingRunnable,
   functionsToUndeploy,
   isConversionBranch,
   judgeConversion,
@@ -979,9 +980,9 @@ export async function finaliseConversion(args: {
       ].join(", ")}. Remove them from the Supabase dashboard.`,
     );
   }
-  if (restoreOutcome && /^not planned|could not/.test(restoreOutcome)) {
+  if (restoreOutcomeLeavesNothingRunnable(restoreOutcome)) {
     leftovers.push(
-      `The functions this line carries were not queued for deployment (${restoreOutcome}): ` +
+      `The functions this line carries have no run that will deploy them (${restoreOutcome}): ` +
         `${restored.join(", ")}. The half-hourly catch-up does not restore them by itself.`,
     );
   }

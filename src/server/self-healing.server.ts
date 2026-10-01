@@ -1344,12 +1344,15 @@ async function executeEdgeFunctionDeploy(
   // whatever the plan names (`crmLineFeatures.pure.ts`): the independent line
   // runs its CRM in its own Postgres, and a GoHighLevel function put back by
   // this lane is the defect the register exists to end. `*` so a deployment
-  // without `crm_mode` reads it as absent and withholds nothing.
-  const { data: cloneRow } = await admin
+  // without `crm_mode` reads it as absent and withholds nothing. A read that
+  // FAILED is not a clone with no mode: it throws, so the run retries rather
+  // than deploying the very functions the line withholds.
+  const { data: cloneRow, error: cloneErr } = await admin
     .from("clones")
     .select("*")
     .eq("id", run.clone_id)
     .maybeSingle();
+  if (cloneErr) throw new Error(`could not read the clone's CRM line: ${cloneErr.message}`);
   const { crmLineWithheldFunctionNames } = await import("@/server/crmLineFeatures.pure");
   const lineWithheld = crmLineWithheldFunctionNames(
     (cloneRow as { crm_mode?: string | null } | null)?.crm_mode ?? null,
