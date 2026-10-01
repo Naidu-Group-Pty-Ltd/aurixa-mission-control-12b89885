@@ -170,6 +170,7 @@ function row(over: Partial<AgreementRow> = {}): AgreementRow {
     portal_payment_link_detail: null,
     portal_payment_link_sent_at: null,
     portal_payment_link_sent_to: null,
+    portal_payment_link_enabled: true,
     portal_payment_link_status: null,
     portal_subscription_customer_id: null,
     portal_subscription_id: null,

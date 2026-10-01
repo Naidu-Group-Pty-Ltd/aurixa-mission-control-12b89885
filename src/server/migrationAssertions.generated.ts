@@ -910,6 +910,7 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20260930110000",
     assertions: [
       { kind: "column", table: "client_agreements", column: "portal_payment_link_status" },
+      { kind: "column", table: "client_agreements", column: "portal_payment_link_enabled" },
       { kind: "column", table: "client_agreements", column: "portal_payment_link_attempts" },
       { kind: "column", table: "client_agreements", column: "portal_payment_link_sent_at" },
       { kind: "column", table: "client_agreements", column: "portal_subscription_id" },

@@ -10,6 +10,10 @@
  *    run (the record was not retained yet, Graph was down, a claim went stale);
  *  - an ADMIN, from the agreement page, to send it again.
  *
+ * None of them sends to a builder the agreement page has switched off the
+ * link ("Bill through the payment link"): a builder on a negotiated monthly fee
+ * the link's one price cannot charge, who is invoiced in Stripe instead.
+ *
  * The send is claimed on the row before anything leaves, the same pattern as
  * the Subscription Agreement's send and the portal grant, so a signature and
  * a sweep arriving together cannot mail a builder twice. What Graph answered
@@ -48,7 +52,7 @@ import { defaultMailbox, isGraphConfigured, sendMail } from "@/server/graph-clie
 import { getStripe } from "@/server/stripe.server";
 
 const PAYMENT_SELECT =
-  "id, document_kind, status, offer_reference, client_name, client_email, client_org, signed_record_path, portal_payment_link_status, portal_payment_link_attempts, portal_payment_link_attempted_at, portal_payment_link_sent_at, portal_payment_link_sent_to, portal_payment_link_detail, portal_subscription_id, portal_subscription_status, portal_subscription_customer_id, portal_checkout_session_id, portal_subscription_started_at, portal_subscription_updated_at";
+  "id, document_kind, status, offer_reference, client_name, client_email, client_org, signed_record_path, portal_payment_link_enabled, portal_payment_link_status, portal_payment_link_attempts, portal_payment_link_attempted_at, portal_payment_link_sent_at, portal_payment_link_sent_to, portal_payment_link_detail, portal_subscription_id, portal_subscription_status, portal_subscription_customer_id, portal_checkout_session_id, portal_subscription_started_at, portal_subscription_updated_at";
 
 type PaymentRow = {
   id: string;
@@ -59,6 +63,7 @@ type PaymentRow = {
   client_email: string;
   client_org: string | null;
   signed_record_path: string | null;
+  portal_payment_link_enabled: boolean;
   portal_payment_link_status: string | null;
   portal_payment_link_attempts: number;
   portal_payment_link_attempted_at: string | null;
@@ -184,6 +189,8 @@ export async function sendBuilderPortalPaymentLink(
       .eq("id", agreementId)
       .eq("document_kind", BUILDER_PARTNER_KIND)
       .eq("status", "signed")
+      // Switched off between the read and here: nothing is claimed, nothing sent.
+      .eq("portal_payment_link_enabled", true)
       .filter(
         "portal_payment_link_status",
         row.portal_payment_link_status === null ? "is" : "eq",
@@ -202,7 +209,8 @@ export async function sendBuilderPortalPaymentLink(
       return {
         outcome: "skipped",
         reason: "raced",
-        detail: "Another send of this payment link started first.",
+        detail:
+          "Another send of this payment link started first, or the link was switched off for this builder.",
       };
     }
 
@@ -347,6 +355,63 @@ async function abandonStaleClaim(row: PaymentRow): Promise<void> {
   });
 }
 
+/* ───────────────────────────── billed through the link, or not ───────────────────────────── */
+
+/**
+ * Switch a builder on or off the payment link. Off is for a builder whose
+ * monthly fee was negotiated away from the link's one price: they are invoiced
+ * in Stripe instead, and no path sends them the link. It cannot change while a
+ * send is in flight, and the write is conditional on the send state it read,
+ * so a send claimed in between wins and this asks to be tried again — the
+ * claim is conditional on the switch the same way.
+ */
+export async function setBuilderPortalPaymentLinkEnabled(input: {
+  actorUserId: string;
+  agreementId: string;
+  enabled: boolean;
+}): Promise<void> {
+  const read = await readPaymentRow(input.agreementId);
+  if (read.kind === "not_installed") {
+    throw new Error("The payment-link columns are not installed on this database yet.");
+  }
+  if (read.kind === "absent") throw new Error("The Builder Partner Agreement was not found.");
+  if (read.kind === "failed") throw new Error(`The agreement could not be read: ${read.error}`);
+  const row = read.row;
+  if (row.portal_payment_link_enabled === input.enabled) return;
+  if (row.portal_payment_link_status === "sending") {
+    throw new Error("The payment link is being sent right now. Wait a moment and try again.");
+  }
+  const { data, error } = await supabaseAdmin
+    .from("client_agreements")
+    .update({ portal_payment_link_enabled: input.enabled })
+    .eq("id", row.id)
+    .eq("document_kind", BUILDER_PARTNER_KIND)
+    .eq("portal_payment_link_enabled", row.portal_payment_link_enabled)
+    .filter(
+      "portal_payment_link_status",
+      row.portal_payment_link_status === null ? "is" : "eq",
+      row.portal_payment_link_status,
+    )
+    .select("id");
+  if (error) throw new Error(`The setting could not be saved: ${error.message}`);
+  if (!data?.length) throw new Error("This agreement changed a moment ago. Refresh and try again.");
+  await writeAuditLog({
+    action: input.enabled
+      ? "agreement.portal_payment_link_enabled"
+      : "agreement.portal_payment_link_disabled",
+    entityType: "client_agreement",
+    entityId: row.id,
+    actorUserId: input.actorUserId,
+    metadata: {
+      document_kind: BUILDER_PARTNER_KIND,
+      reference: row.offer_reference,
+      link_status: row.portal_payment_link_status,
+      subscription_id: row.portal_subscription_id,
+      subscription_status: row.portal_subscription_status,
+    },
+  });
+}
+
 /* ───────────────────────────── the sweep ───────────────────────────── */
 
 export type PaymentLinkSweep = {
@@ -359,6 +424,9 @@ export type PaymentLinkSweep = {
 /**
  * The payment links the agreements refresh owes: a retained signature whose
  * link never went, a failed send with attempts left, and a claim gone stale.
+ * A builder switched off the link is never asked about at all; the decision
+ * would refuse them anyway, but a sweep that reads them every run would also
+ * crowd the builders it does owe out of its ten.
  */
 export async function sweepBuilderPortalPaymentLinks(): Promise<PaymentLinkSweep> {
   const out: PaymentLinkSweep = { installed: true, sent: 0, attempts: 0, errors: [] };
@@ -373,10 +441,12 @@ export async function sweepBuilderPortalPaymentLinks(): Promise<PaymentLinkSweep
     const staleBefore = new Date(Date.now() - STALE_PAYMENT_LINK_CLAIM_MS).toISOString();
     const queries = await Promise.all([
       base()
+        .eq("portal_payment_link_enabled", true)
         .filter("portal_payment_link_status", "is", null)
         .is("portal_subscription_id", null)
         .limit(10),
       base()
+        .eq("portal_payment_link_enabled", true)
         .eq("portal_payment_link_status", "failed")
         .lt("portal_payment_link_attempts", MAX_PAYMENT_LINK_ATTEMPTS)
         .limit(10),
@@ -517,13 +587,17 @@ export async function recordBuilderPortalCheckout(session: Stripe.Checkout.Sessi
     return;
   }
 
-  const decision = decideSubscriptionRecord(row.portal_subscription_id, subscriptionId);
+  const decision = decideSubscriptionRecord(
+    row.portal_subscription_id,
+    row.portal_subscription_status,
+    subscriptionId,
+  );
   if (decision.action === "duplicate") {
     await notifyOperators({
       kind: "agreement_attention",
       severity: "error",
       title: `Second Builder Portal subscription for ${partnerLabel(row)}`,
-      body: `The agreement already has subscription ${decision.existing}; checkout ${session.id} created ${subscriptionId}. Nothing was overwritten. Cancel and refund the one that should not exist in Stripe.`,
+      body: `The agreement already has subscription ${decision.existing} (${row.portal_subscription_status ?? "status unknown"}); checkout ${session.id} created ${subscriptionId}. Nothing was overwritten. Cancel and refund the one that should not exist in Stripe.`,
       url: `/agreements/${row.id}`,
       metadata: {
         agreement_id: row.id,
@@ -539,6 +613,7 @@ export async function recordBuilderPortalCheckout(session: Stripe.Checkout.Sessi
   const live = await getStripe().subscriptions.retrieve(subscriptionId);
   const status = isStripeSubscriptionStatus(live.status) ? live.status : null;
   const now = new Date().toISOString();
+  const starts = decision.action === "replace" || decision.first;
   const update = supabaseAdmin
     .from("client_agreements")
     .update({
@@ -547,12 +622,17 @@ export async function recordBuilderPortalCheckout(session: Stripe.Checkout.Sessi
       portal_subscription_customer_id: customerId,
       portal_checkout_session_id: session.id,
       portal_subscription_updated_at: now,
-      ...(decision.first ? { portal_subscription_started_at: now } : {}),
+      ...(starts ? { portal_subscription_started_at: now } : {}),
     })
     .eq("id", row.id);
-  const { data: written, error } = decision.first
-    ? await update.is("portal_subscription_id", null).select("id")
-    : await update.eq("portal_subscription_id", subscriptionId).select("id");
+  // Each write is conditional on the subscription it read, so two sessions
+  // arriving together cannot both win.
+  const { data: written, error } =
+    decision.action === "replace"
+      ? await update.eq("portal_subscription_id", decision.previous).select("id")
+      : decision.first
+        ? await update.is("portal_subscription_id", null).select("id")
+        : await update.eq("portal_subscription_id", subscriptionId).select("id");
   if (error) throw new Error(`builder subscription not recorded: ${error.message}`);
   if (!written?.length) {
     // Another event recorded a subscription between the read and the write.
@@ -561,6 +641,45 @@ export async function recordBuilderPortalCheckout(session: Stripe.Checkout.Sessi
     if (again.kind === "row" && again.row.portal_subscription_id !== subscriptionId) {
       throw new Error("builder subscription raced another record; retrying");
     }
+    return;
+  }
+
+  if (decision.action === "replace") {
+    await writeAuditLog({
+      action: "agreement.portal_subscription_replaced",
+      entityType: "client_agreement",
+      entityId: row.id,
+      metadata: {
+        document_kind: BUILDER_PARTNER_KIND,
+        reference: row.offer_reference,
+        subscription_id: subscriptionId,
+        previous_subscription_id: decision.previous,
+        previous_status: row.portal_subscription_status,
+        customer_id: customerId,
+        session_id: session.id,
+        status,
+        matched_by: target.via,
+        amount_total_cents: session.amount_total ?? null,
+        currency: session.currency ?? null,
+      },
+    });
+    await notifyOperators({
+      kind: "agreement_attention",
+      severity: target.via === "email" ? "warning" : "info",
+      title: `Builder Portal subscription restarted: ${partnerLabel(row)}`,
+      body:
+        `Subscription ${subscriptionId} is ${status ?? live.status} (${portalPrice().sentence}). It replaces ${decision.previous}, which had ended (${row.portal_subscription_status}).` +
+        (target.via === "email"
+          ? " The payment carried no agreement reference and was matched by the signatory's email address; confirm it is the right builder."
+          : ""),
+      url: `/agreements/${row.id}`,
+      metadata: {
+        agreement_id: row.id,
+        subscription_id: subscriptionId,
+        previous_subscription_id: decision.previous,
+        matched_by: target.via,
+      },
+    });
     return;
   }
 
@@ -657,6 +776,8 @@ export async function recordBuilderPortalSubscription(sub: Stripe.Subscription):
 
 export type BuilderPortalPaymentView = {
   installed: boolean;
+  /** Whether this builder is billed through the link; off for a negotiated fee, invoiced in Stripe. */
+  enabled: boolean;
   price: { monthlyInclGstCents: number; gstCents: number; sentence: string };
   /** The builder's own copy of the link — the same one the email carries. */
   url: string | null;
@@ -693,6 +814,7 @@ export async function describeBuilderPortalPayment(
   if (read.kind === "not_installed") {
     return {
       installed: false,
+      enabled: true,
       ...base,
       url: null,
       link: {
@@ -710,6 +832,7 @@ export async function describeBuilderPortalPayment(
   const row = read.row;
   return {
     installed: true,
+    enabled: row.portal_payment_link_enabled !== false,
     ...base,
     url: builderPortalPaymentUrl({ agreementId: row.id, email: row.client_email }),
     link: {

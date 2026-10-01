@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   agreementIdFromReference,
+  BILL_THROUGH_LINK_LABEL,
   BUILDER_PORTAL_PAYMENT,
   BUILDER_PORTAL_PAYMENT_PURPOSE,
   builderPortalPaymentUrl,
@@ -15,6 +16,7 @@ import {
   paymentReferenceFor,
   portalPrice,
   STALE_PAYMENT_LINK_CLAIM_MS,
+  subscriptionHasEnded,
   subscriptionIsLive,
   subscriptionNeedsAttention,
   type PaymentLinkRow,
@@ -141,13 +143,63 @@ describe("recognising what Stripe sends back", () => {
     expect(subscriptionNeedsAttention("incomplete", "active")).toBe(false);
   });
 
-  it("never writes a second subscription over the first", () => {
-    expect(decideSubscriptionRecord(null, "sub_1")).toEqual({ action: "record", first: true });
-    expect(decideSubscriptionRecord("sub_1", "sub_1")).toEqual({ action: "record", first: false });
-    expect(decideSubscriptionRecord("sub_1", "sub_2")).toEqual({
+  it("never writes a second subscription over a live first one", () => {
+    expect(decideSubscriptionRecord(null, null, "sub_1")).toEqual({
+      action: "record",
+      first: true,
+    });
+    expect(decideSubscriptionRecord("sub_1", "active", "sub_1")).toEqual({
+      action: "record",
+      first: false,
+    });
+    for (const status of ["incomplete", "trialing", "active", "past_due", "unpaid", "paused"]) {
+      expect(decideSubscriptionRecord("sub_1", status, "sub_2")).toEqual({
+        action: "duplicate",
+        existing: "sub_1",
+      });
+    }
+    // A status nobody recorded is treated as live: refusing costs a look,
+    // overwriting loses track of money being taken.
+    expect(decideSubscriptionRecord("sub_1", null, "sub_2")).toEqual({
       action: "duplicate",
       existing: "sub_1",
     });
+    expect(decideSubscriptionRecord("sub_1", "something_new", "sub_2")).toMatchObject({
+      action: "duplicate",
+    });
+  });
+
+  it("lets a new subscription replace one that has ended", () => {
+    for (const status of ["canceled", "incomplete_expired"]) {
+      expect(subscriptionHasEnded(status)).toBe(true);
+      expect(decideSubscriptionRecord("sub_1", status, "sub_2")).toEqual({
+        action: "replace",
+        previous: "sub_1",
+      });
+      // The ended one's own late events still only update itself.
+      expect(decideSubscriptionRecord("sub_1", status, "sub_1")).toEqual({
+        action: "record",
+        first: false,
+      });
+    }
+    expect(subscriptionHasEnded("past_due")).toBe(false);
+    expect(subscriptionHasEnded(null)).toBe(false);
+  });
+
+  it("every status is live, ended, or neither — never both", () => {
+    for (const s of [
+      "incomplete",
+      "incomplete_expired",
+      "trialing",
+      "active",
+      "past_due",
+      "canceled",
+      "unpaid",
+      "paused",
+    ]) {
+      expect(subscriptionIsLive(s) && subscriptionHasEnded(s)).toBe(false);
+      expect(subscriptionIsLive(s) || subscriptionHasEnded(s)).toBe(true);
+    }
   });
 });
 
@@ -230,6 +282,49 @@ describe("whether the link is sent", () => {
         sweep,
       ),
     ).toMatchObject({ action: "skip", reason: "gave_up" });
+  });
+
+  it("is never sent to a builder billed separately, by any path", () => {
+    for (const status of [null, "failed", "sent", "held", "unconfirmed"]) {
+      const r = row({ portal_payment_link_enabled: false, portal_payment_link_status: status });
+      for (const opts of [signature, sweep, manual]) {
+        expect(decidePaymentLinkDispatch(r, NOW, opts)).toMatchObject({
+          action: "skip",
+          reason: "billed_separately",
+        });
+      }
+    }
+    // The refusal names the switch to turn back on.
+    const refusal = decidePaymentLinkDispatch(
+      row({ portal_payment_link_enabled: false }),
+      NOW,
+      manual,
+    );
+    expect(refusal.action === "skip" && refusal.detail).toContain(`"${BILL_THROUGH_LINK_LABEL}"`);
+    // A claim that died is still settled as unconfirmed, never left as `sending`.
+    const stale = new Date(NOW - STALE_PAYMENT_LINK_CLAIM_MS - 1).toISOString();
+    expect(
+      decidePaymentLinkDispatch(
+        row({
+          portal_payment_link_enabled: false,
+          portal_payment_link_status: "sending",
+          portal_payment_link_attempted_at: stale,
+        }),
+        NOW,
+        sweep,
+      ),
+    ).toEqual({ action: "abandon_stale" });
+    // Absent reads as on: the column defaults to true.
+    expect(
+      decidePaymentLinkDispatch(row({ portal_payment_link_enabled: undefined }), NOW, sweep),
+    ).toEqual({
+      action: "send",
+    });
+    expect(
+      decidePaymentLinkDispatch(row({ portal_payment_link_enabled: true }), NOW, sweep),
+    ).toEqual({
+      action: "send",
+    });
   });
 
   it("leaves a sent, held or unconfirmed link to a person — who may send it again", () => {

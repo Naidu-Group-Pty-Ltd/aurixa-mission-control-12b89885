@@ -45,12 +45,16 @@ import {
   saveBuilderPartnerParticulars,
   sendBuilderPartnerPaymentLink,
   setBuilderPartnerGrantOnSignature,
+  setBuilderPartnerPaymentLinkEnabled,
 } from "@/lib/builderPartnerAgreements.functions";
 import {
   GRANT_ON_SIGNATURE_LABEL,
   type BuilderPartnerParticulars,
 } from "@/lib/agreements/builderPartner.pure";
-import { subscriptionIsLive } from "@/lib/agreements/builderPortalPayment.pure";
+import {
+  BILL_THROUGH_LINK_LABEL,
+  subscriptionIsLive,
+} from "@/lib/agreements/builderPortalPayment.pure";
 import { PDF_MIME, saveBase64File } from "@/lib/agreements/saveFile";
 import { useUserRoles } from "@/lib/use-user-roles";
 
@@ -189,6 +193,15 @@ export function BuilderPartnerAgreementPage({ agreementId }: { agreementId: stri
       refresh();
     },
   });
+  const billLink = useMutation({
+    mutationFn: (enabled: boolean) =>
+      setBuilderPartnerPaymentLinkEnabled({ data: { id: agreementId, enabled } }),
+    onSuccess: refresh,
+    onError: (err) => {
+      toast.error(message(err));
+      refresh();
+    },
+  });
   const download = useMutation({
     mutationFn: async (what: "schedule" | "terms" | "signed") => {
       if (what === "schedule") {
@@ -255,9 +268,12 @@ export function BuilderPartnerAgreementPage({ agreementId }: { agreementId: stri
   const payment = view.portalPayment;
   const linkStatus = payment?.link.status ?? null;
   const subscriptionStatus = payment?.subscription.status ?? null;
+  // A builder on a negotiated monthly fee is invoiced in Stripe, never sent the link.
+  const linkEnabled = payment?.enabled !== false;
   const canSendLink =
     admin &&
     Boolean(payment?.installed) &&
+    linkEnabled &&
     view.status === "signed" &&
     view.signedRecord.retained &&
     linkStatus !== "sending" &&
@@ -528,11 +544,23 @@ export function BuilderPartnerAgreementPage({ agreementId }: { agreementId: stri
         </h2>
         {payment ? (
           <>
+            {payment.installed ? (
+              <div className="flex items-center gap-3">
+                <Switch
+                  id="bill-through-link"
+                  checked={linkEnabled}
+                  disabled={!admin || billLink.isPending || linkStatus === "sending"}
+                  onCheckedChange={(enabled) => billLink.mutate(enabled)}
+                />
+                <Label htmlFor="bill-through-link">{BILL_THROUGH_LINK_LABEL}</Label>
+              </div>
+            ) : null}
             <p className="text-sm text-muted-foreground">
-              When the signed agreement has been retained, the signatory is emailed their own Stripe
-              link for the monthly Portal subscription: {payment.price.sentence}. New Build and
-              Development Sale fees are separate and are invoiced only when earned; this link never
-              charges them.
+              {linkEnabled
+                ? `When the signed agreement has been retained, the signatory is emailed their own Stripe link for the monthly Portal subscription: ${payment.price.sentence}.`
+                : "This builder pays a negotiated monthly fee, invoiced in Stripe. No payment link is sent to them, automatically or from here."}{" "}
+              New Build and Development Sale fees are separate and are invoiced only when earned;
+              the link never charges them.
             </p>
             {!payment.installed ? (
               <Notice tone="warn">
@@ -550,7 +578,7 @@ export function BuilderPartnerAgreementPage({ agreementId }: { agreementId: stri
                   : when(payment.link.attemptedAt)}
                 {payment.link.detail ? ` — ${payment.link.detail}` : ""}
               </p>
-            ) : view.status === "signed" && payment.installed ? (
+            ) : view.status === "signed" && payment.installed && linkEnabled ? (
               <p className="text-sm text-muted-foreground">
                 {view.signedRecord.retained
                   ? "The payment link has not been sent yet; the agreements sweep sends it."
@@ -581,7 +609,7 @@ export function BuilderPartnerAgreementPage({ agreementId }: { agreementId: stri
                     : "Send payment link again"}
                 </Button>
               ) : null}
-              {payment.url && view.status === "signed" ? (
+              {payment.url && view.status === "signed" && linkEnabled ? (
                 <Button size="sm" variant="outline" onClick={() => void copyLink()}>
                   <Copy className="mr-1.5 h-4 w-4" /> Copy the builder's link
                 </Button>

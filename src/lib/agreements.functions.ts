@@ -49,6 +49,7 @@ type BuilderPartnerColumn =
   | "portal_access_detail"
   | "portal_access_attempted_at"
   | "portal_access_granted_at"
+  | "portal_payment_link_enabled"
   | "portal_payment_link_status"
   | "portal_payment_link_attempts"
   | "portal_payment_link_attempted_at"

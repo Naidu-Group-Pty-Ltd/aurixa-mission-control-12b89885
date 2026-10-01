@@ -69,6 +69,7 @@ vi.mock("@/lib/builderPartnerAgreements.functions", () => {
     saveBuilderPartnerParticulars: fn(),
     sendBuilderPartnerPaymentLink: fn(),
     setBuilderPartnerGrantOnSignature: fn(),
+    setBuilderPartnerPaymentLinkEnabled: fn(),
   };
 });
 
@@ -87,6 +88,7 @@ const ID = "0b6f3a52-6d3e-4a8e-9f55-1c2d3e4f5a6b";
 function payment(
   over: {
     installed?: boolean;
+    enabled?: boolean;
     link?: Partial<BuilderPortalPaymentView["link"]>;
     subscription?: Partial<BuilderPortalPaymentView["subscription"]>;
   } = {},
@@ -94,6 +96,7 @@ function payment(
   const price = portalPrice();
   return {
     installed: over.installed ?? true,
+    enabled: over.enabled ?? true,
     price: {
       monthlyInclGstCents: price.monthlyInclGstCents,
       gstCents: price.gstCents,
@@ -255,8 +258,56 @@ describe("the Portal subscription on a Builder Partner Agreement", () => {
   it("says when the columns are not installed, and sends nothing", () => {
     const html = draw(view({ portalPayment: payment({ installed: false }) }));
     expect(html).toContain("has not been applied to this database yet");
+    expect(html).not.toContain("bill-through-link");
     expect(html).not.toContain("Send payment link");
     expect(html).not.toContain("Copy the builder");
+  });
+
+  it("bills through the link by default, behind a switch an admin can turn off", () => {
+    const html = draw(view());
+    expect(html).toContain("Bill through the payment link");
+    const tag = html.match(/<button[^>]*id="bill-through-link"[^>]*>/)?.[0] ?? "";
+    expect(tag).toContain('aria-checked="true"');
+    expect(tag).not.toMatch(/ disabled=""/);
+  });
+
+  it("sends nothing and offers nothing to a builder billed separately", () => {
+    const html = draw(view({ portalPayment: payment({ enabled: false }) }));
+    const tag = html.match(/<button[^>]*id="bill-through-link"[^>]*>/)?.[0] ?? "";
+    expect(tag).toContain('aria-checked="false"');
+    expect(html).toContain("negotiated monthly fee, invoiced in Stripe");
+    expect(html).not.toContain("Send payment link");
+    expect(html).not.toContain("Copy the builder");
+    expect(html).not.toContain("The payment link has not been sent yet");
+    // What already happened stays on the page.
+    const sent = draw(
+      view({
+        portalPayment: payment({
+          enabled: false,
+          link: { status: "sent", sentAt: "2026-09-30T01:01:02.000Z" },
+        }),
+      }),
+    );
+    expect(sent).toContain("Payment link sent");
+    expect(sent).not.toContain("Send payment link again");
+  });
+
+  it("cannot be switched while a send is in flight, or by an operator", () => {
+    const sending = draw(
+      view({
+        portalPayment: payment({
+          link: { status: "sending", attemptedAt: "2026-09-30T01:01:00.000Z" },
+        }),
+      }),
+    );
+    expect(sending.match(/<button[^>]*id="bill-through-link"[^>]*>/)?.[0]).toMatch(/ disabled=""/);
+    h.isAdmin = false;
+    try {
+      const html = draw(view());
+      expect(html.match(/<button[^>]*id="bill-through-link"[^>]*>/)?.[0]).toMatch(/ disabled=""/);
+    } finally {
+      h.isAdmin = true;
+    }
   });
 
   it("says the subscription could not be read rather than drawing nothing", () => {

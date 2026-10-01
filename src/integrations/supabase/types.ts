@@ -1218,6 +1218,7 @@ export type Database = {
           portal_payment_link_attempted_at: string | null
           portal_payment_link_attempts: number
           portal_payment_link_detail: string | null
+          portal_payment_link_enabled: boolean
           portal_payment_link_sent_at: string | null
           portal_payment_link_sent_to: string | null
           portal_payment_link_status: string | null
@@ -1278,6 +1279,7 @@ export type Database = {
           portal_payment_link_attempted_at?: string | null
           portal_payment_link_attempts?: number
           portal_payment_link_detail?: string | null
+          portal_payment_link_enabled?: boolean
           portal_payment_link_sent_at?: string | null
           portal_payment_link_sent_to?: string | null
           portal_payment_link_status?: string | null
@@ -1338,6 +1340,7 @@ export type Database = {
           portal_payment_link_attempted_at?: string | null
           portal_payment_link_attempts?: number
           portal_payment_link_detail?: string | null
+          portal_payment_link_enabled?: boolean
           portal_payment_link_sent_at?: string | null
           portal_payment_link_sent_to?: string | null
           portal_payment_link_status?: string | null

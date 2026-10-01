@@ -198,6 +198,26 @@ export const sendBuilderPartnerPaymentLink = createServerFn({ method: "POST" })
     });
   });
 
+/**
+ * Switch a builder on or off the Portal subscription link. Off is for a
+ * negotiated monthly fee the link's one price cannot charge: that builder is
+ * invoiced in Stripe, and neither the signature, the sweep nor the button
+ * sends them the link.
+ */
+export const setBuilderPartnerPaymentLinkEnabled = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
+  .inputValidator((input) => z.object({ id: uuid, enabled: z.boolean() }).parse(input))
+  .handler(async ({ data, context }) => {
+    const { setBuilderPortalPaymentLinkEnabled } =
+      await import("@/server/builder-portal-payment.server");
+    await setBuilderPortalPaymentLinkEnabled({
+      actorUserId: context.userId,
+      agreementId: data.id,
+      enabled: data.enabled,
+    });
+    return { ok: true as const };
+  });
+
 export const downloadBuilderPartnerSchedule = createServerFn({ method: "POST" })
   .middleware([requireOperator])
   .inputValidator((input) => z.object({ id: uuid }).parse(input))

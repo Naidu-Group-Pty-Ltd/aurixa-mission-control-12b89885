@@ -25,7 +25,7 @@
  * `client_reference_id` naming the agreement, so the webhook that hears about
  * the payment knows whose it was without guessing from an email address.
  *
- * ## Three rules
+ * ## Four rules
  *
  *  - **Evidence before action.** The link goes only once the signed agreement
  *    has been retained, the same condition every other act on a signature
@@ -35,6 +35,9 @@
  *    builder the same demand for money twice. `unconfirmed` waits for a person.
  *  - **Nothing here charges a Transaction Fee.** A link opened at signing
  *    cannot know a qualifying event has happened.
+ *  - **A negotiated fee is never sent the link.** The link has one price. A
+ *    builder on another monthly figure is switched off it on the agreement
+ *    page and invoiced in Stripe, and no path sends them the link.
  */
 import { gstComponentCents, moduleBySlug } from "@/lib/pricing/aurixa-catalog";
 import { escapeHtml } from "@/lib/email/mergeTemplate.pure";
@@ -87,6 +90,14 @@ const LIVE_SUBSCRIPTION = new Set<string>([
   "paused",
 ]);
 
+/**
+ * A subscription in one of these has ended and cannot be revived: Stripe never
+ * moves a `canceled` or `incomplete_expired` subscription anywhere else. A
+ * builder who pays again after one is starting a new subscription, not paying
+ * twice.
+ */
+const ENDED_SUBSCRIPTION = new Set<string>(["canceled", "incomplete_expired"]);
+
 /** A subscription arriving in one of these needs a person to look at the builder. */
 const ATTENTION_SUBSCRIPTION = new Set<string>([
   "past_due",
@@ -94,6 +105,9 @@ const ATTENTION_SUBSCRIPTION = new Set<string>([
   "canceled",
   "incomplete_expired",
 ]);
+
+/** The agreement page's switch, named once so the page and the refusal say the same words. */
+export const BILL_THROUGH_LINK_LABEL = "Bill through the payment link";
 
 /** Automatic sends a failed link gets before it waits for a person. */
 export const MAX_PAYMENT_LINK_ATTEMPTS = 5;
@@ -214,6 +228,10 @@ export function subscriptionIsLive(status: string | null | undefined): boolean {
   return Boolean(status && LIVE_SUBSCRIPTION.has(status));
 }
 
+export function subscriptionHasEnded(status: string | null | undefined): boolean {
+  return Boolean(status && ENDED_SUBSCRIPTION.has(status));
+}
+
 /** Whether a change to this status is one an operator should hear about. */
 export function subscriptionNeedsAttention(
   previous: string | null | undefined,
@@ -226,19 +244,36 @@ export function subscriptionNeedsAttention(
 
 export type SubscriptionRecordDecision =
   | { action: "record"; first: boolean }
+  | { action: "replace"; previous: string }
   | { action: "duplicate"; existing: string };
 
 /**
- * One agreement, one Portal subscription. A second subscription for the same
- * agreement (the builder paid twice, or somebody reused their link) is never
- * written over the first: it is reported so a person can refund or cancel.
+ * One agreement, one current Portal subscription.
+ *
+ *  - None recorded: this one is the first.
+ *  - The same one again: Stripe is repeating itself; record its latest state.
+ *  - The recorded one has ENDED (`canceled`, `incomplete_expired`): this one
+ *    replaces it. The builder cancelled or never finished paying, and was sent
+ *    the link again; refusing the new subscription would leave a builder who is
+ *    paying recorded as a builder who is not, and would let the sweep and the
+ *    button mail them the link a third time.
+ *  - The recorded one is still live: this is a second subscription for the
+ *    same agreement (the builder paid twice, or somebody reused their link). It
+ *    is never written over the first; it is reported so a person can refund or
+ *    cancel.
+ *
+ * A recorded subscription whose status is unknown counts as live: refusing a
+ * replacement costs a person one look, while overwriting a live subscription
+ * loses track of money being taken.
  */
 export function decideSubscriptionRecord(
   existing: string | null | undefined,
+  existingStatus: string | null | undefined,
   incoming: string,
 ): SubscriptionRecordDecision {
   if (!existing) return { action: "record", first: true };
   if (existing === incoming) return { action: "record", first: false };
+  if (subscriptionHasEnded(existingStatus)) return { action: "replace", previous: existing };
   return { action: "duplicate", existing };
 }
 
@@ -248,6 +283,13 @@ export type PaymentLinkRow = {
   status: string;
   signed_record_path: string | null;
   client_email: string | null;
+  /**
+   * Whether this builder is billed through the link at all. Off for a builder
+   * on a negotiated monthly fee the link's one price cannot charge; that
+   * builder is invoiced in Stripe and is never sent the link. Absent reads as
+   * on, which is the column's default.
+   */
+  portal_payment_link_enabled?: boolean | null;
   portal_payment_link_status: string | null;
   portal_payment_link_attempts: number | null;
   portal_payment_link_attempted_at: string | null;
@@ -261,6 +303,7 @@ export type PaymentLinkSkipReason =
   | "not_retained"
   | "no_address"
   | "already_subscribed"
+  | "billed_separately"
   | "in_flight"
   | "already_sent"
   | "unconfirmed"
@@ -275,7 +318,8 @@ export type PaymentLinkDecision =
 /**
  * Whether this invocation may email the link. Every automatic path asks this
  * and so does the admin's button; only `manual` may send a link again after
- * one went, and nothing may send while another send is in flight.
+ * one went, nothing may send while another send is in flight, and nothing at
+ * all sends to a builder the agreement says is billed separately.
  */
 export function decidePaymentLinkDispatch(
   row: PaymentLinkRow,
@@ -318,6 +362,15 @@ export function decidePaymentLinkDispatch(
       return skip("in_flight", "The payment link is being sent.");
     }
     return { action: "abandon_stale" };
+  }
+  // Checked after a stale claim is settled, so an abandoned send still becomes
+  // `unconfirmed`, and before `manual`: the button cannot send a link the
+  // agreement says this builder is not billed through.
+  if (row.portal_payment_link_enabled === false) {
+    return skip(
+      "billed_separately",
+      `This builder is not billed through the payment link (a negotiated monthly fee, invoiced in Stripe). Switch "${BILL_THROUGH_LINK_LABEL}" back on to send it.`,
+    );
   }
   if (opts.trigger === "manual") return { action: "send" };
 

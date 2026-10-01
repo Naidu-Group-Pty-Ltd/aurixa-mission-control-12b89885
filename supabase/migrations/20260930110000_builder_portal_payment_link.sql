@@ -1,4 +1,5 @@
 -- @asserts column:client_agreements.portal_payment_link_status
+-- @asserts column:client_agreements.portal_payment_link_enabled
 -- @asserts column:client_agreements.portal_payment_link_attempts
 -- @asserts column:client_agreements.portal_payment_link_sent_at
 -- @asserts column:client_agreements.portal_subscription_id
@@ -19,6 +20,8 @@
 -- send, and the subscription the payment created, on the agreement row the
 -- signature is already recorded on.
 --
+--   portal_payment_link_enabled  whether this builder is billed through the link
+--                                at all (off: a negotiated monthly fee, invoiced)
 --   portal_payment_link_status   sending | sent | failed | unconfirmed | held
 --   portal_payment_link_attempts automatic and manual sends, counted at claim
 --   portal_payment_link_*        when it was tried, when it went, to whom, why not
@@ -36,6 +39,7 @@
 -- not part of it.
 
 ALTER TABLE public.client_agreements
+  ADD COLUMN IF NOT EXISTS portal_payment_link_enabled BOOLEAN NOT NULL DEFAULT true,
   ADD COLUMN IF NOT EXISTS portal_payment_link_status TEXT
     CONSTRAINT client_agreements_portal_payment_link_status_check
     CHECK (portal_payment_link_status IS NULL
@@ -96,6 +100,8 @@ UPDATE public.client_agreements
    AND portal_payment_link_status IS NULL
    AND portal_subscription_id IS NULL;
 
+COMMENT ON COLUMN public.client_agreements.portal_payment_link_enabled IS
+  'Builder Partner Agreements only: whether the builder is billed through the Portal subscription payment link. Off for a negotiated monthly fee the link cannot charge; that builder is invoiced in Stripe and the link is never sent.';
 COMMENT ON COLUMN public.client_agreements.portal_payment_link_status IS
   'Builder Partner Agreements only: the Portal subscription payment link. sending (claimed), sent, failed (retried by the agreements sweep), unconfirmed (Graph did not confirm; never retried automatically) or held (signed before automatic sending; sent by an admin if owed).';
 COMMENT ON COLUMN public.client_agreements.portal_subscription_id IS

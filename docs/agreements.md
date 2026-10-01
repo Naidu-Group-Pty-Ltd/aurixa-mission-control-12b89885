@@ -744,9 +744,20 @@ Control's own key and webhook belong to, and are pinned in
 
 The price is the catalog's own figure for the `builder-developer-portal`
 module (`aurixa-catalog.ts`), and a test holds the two equal. A price change is
-a new Stripe price and link, and the pinned ids, together. A negotiated
-monthly fee that differs from the catalog is not something this link can
-charge: send that builder a Stripe invoice instead, and do not send the link.
+a new Stripe price and link, and the pinned ids, together.
+
+**A negotiated monthly fee.** The link has one price and cannot charge any
+other. A builder whose monthly fee was negotiated away from the catalog figure
+is switched off it on the agreement page — **Bill through the payment link**,
+on by default (`portal_payment_link_enabled`) — and invoiced in Stripe instead.
+Switched off, no path sends that builder the link: not the signature, not the
+sweep, and not the button, which is hidden and which the server refuses
+anyway (`billed_separately`). Switch it off **before the agreement is signed**,
+because the signature sends the link as soon as the signed copy is retained.
+It cannot be moved while a send is in flight. The write is conditional on the
+send state it read, and the send's claim is conditional on the switch, so a
+send and a switch arriving together cannot both win. Each change is in the
+audit log as `agreement.portal_payment_link_enabled` or `_disabled`.
 
 **When it goes.** Once the signed agreement is **retained**
 (`completeSignedBuilderPartnerAgreement`, after the access grant), Mission
@@ -757,7 +768,8 @@ knows whose payment it was without guessing. `decidePaymentLinkDispatch`
 decides every send, automatic or manual:
 
 - nothing goes before the signature and the retained copy, to a missing or
-  invalid address, or to a builder who already has a live subscription;
+  invalid address, to a builder who already has a live subscription, or to a
+  builder switched off the link (`billed_separately`), whoever asks;
 - a send is **claimed on the row** (`portal_payment_link_status = 'sending'`,
   conditional on the status it read), so the signature, the sweep and the
   button cannot send twice;
@@ -790,8 +802,16 @@ none of the `mode` / `item_id` metadata self-serve checkout relies on, and
   only when exactly one signed agreement without a subscription has it, and the
   notification says it was matched that way; anything else is left to a
   person, never guessed;
-- a second subscription for an agreement that already has one is never
-  written over the first: it is reported, for a refund or a cancellation;
+- a second subscription for an agreement whose recorded one is still live
+  (or whose status was never recorded) is never written over the first: it is
+  reported, for a refund or a cancellation;
+- a new subscription for an agreement whose recorded one has **ended**
+  (`canceled` or `incomplete_expired`, which Stripe never revives) replaces
+  it: the builder cancelled or never finished paying, and was sent the link
+  again. The write is conditional on the subscription it read, so two
+  sessions cannot both replace it. It is audited as
+  `agreement.portal_subscription_replaced`, naming the one it replaced, and
+  operators are told the subscription restarted;
 - `customer.subscription.*` keeps the agreement's copy of Stripe's status in
   step, and tells operators when it becomes past due, unpaid, cancelled or
   expired. **Portal access is not changed automatically** by a payment or a
@@ -895,8 +915,9 @@ The agreements refresh (`/hooks/agreements-refresh`) runs
   - the widened freeze and keep triggers, and the admin-only trigger;
   - the private `agreement-templates` bucket.
 - `supabase/migrations/20260930110000_builder_portal_payment_link.sql` — the
-  `portal_payment_link_*` and `portal_subscription_*` columns, their checks,
-  the one-agreement-per-subscription index, and the `held` backfill.
+  `portal_payment_link_*` and `portal_subscription_*` columns (among them
+  `portal_payment_link_enabled`, on by default), their checks, the
+  one-agreement-per-subscription index, and the `held` backfill.
 
 ## The Service Level Agreement template
 
