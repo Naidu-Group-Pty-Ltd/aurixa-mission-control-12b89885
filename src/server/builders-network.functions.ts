@@ -322,9 +322,12 @@ export const updateNetworkOrganisation = createServerFn({ method: "POST" })
   });
 
 /**
- * Closing is terminal and the network says so. Kept a separate call from
- * suspension rather than a status argument, because the two are not the same
- * decision and a dropdown that offers both invites the wrong one.
+ * Closing takes an organisation off the network. It writes only the
+ * organisation's status — every member, listing, document and connection is
+ * kept — and `reopenNetworkOrganisation` below brings it back. Kept a
+ * separate call from suspension rather than a status argument, because the
+ * two are not the same decision and a dropdown that offers both invites the
+ * wrong one.
  */
 export const closeNetworkOrganisation = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth, requireAdmin])
@@ -341,6 +344,43 @@ export const closeNetworkOrganisation = createServerFn({ method: "POST" })
     return result.ok
       ? { ok: true as const, status: String(result.body.status ?? "closed") }
       : { ok: false as const, error: result.error };
+  });
+
+/**
+ * Bring a closed organisation back.
+ *
+ * Closing used to be described as final, while the network had only ever
+ * written `status` and `is_active` on close — the organisation, its members,
+ * listings and connections were all still there, with no way to use them and
+ * a unique index refusing a replacement under the same ABN or name.
+ *
+ * The network decides where it comes back to, and never higher than it was:
+ * never approved → the approval queue (`pending_activation`); approved →
+ * `suspended`, or straight to `active` only when the operator asks for access
+ * back in the same act (`reinstate`). Not gated on an agreement, for the
+ * reason reinstating is not: the organisation was admitted before it was
+ * closed, and one that was not goes back through approval and its gate.
+ */
+export const reopenNetworkOrganisation = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth, requireAdmin])
+  .inputValidator((data: { organisationId: string; reason: string; reinstate?: boolean }) => {
+    if (!data?.organisationId) throw new Error("organisationId required");
+    if (!data?.reason?.trim()) throw new Error("reason required");
+    return data;
+  })
+  .handler(async ({ data }) => {
+    const result = await callBuilderNetworkAdmin("reopen_organisation", {
+      organisation_id: data.organisationId,
+      reason: data.reason.trim(),
+      reinstate: data.reinstate === true,
+    });
+    if (!result.ok) return { ok: false as const, error: result.error };
+    return {
+      ok: true as const,
+      status: String(result.body.status ?? ""),
+      alreadyOpen: result.body.already_open === true,
+      wasApproved: result.body.was_approved === true,
+    };
   });
 
 /**
@@ -375,10 +415,23 @@ export const inviteNetworkOrganisationOwner = createServerFn({ method: "POST" })
     // `String(undefined ?? "")` would have drawn an empty copy box, which is
     // the uncopyable-empty-box defect this codebase has paid for twice.
     const attached = result.body.outcome === "attached";
+    // And a THIRD case inside `invited`: the network mints a link but will
+    // not hand it to the operator when the account is a pending invitee of
+    // another organisation (its link would also open that one). It answers
+    // `invite_url: null` with `link_withheld: true`, and that null must stay
+    // a null — `String(null ?? "")` is the same empty copy box again.
+    const inviteUrl =
+      !attached && typeof result.body.invite_url === "string" && result.body.invite_url.trim()
+        ? result.body.invite_url
+        : null;
     return {
       ok: true as const,
       outcome: attached ? ("attached" as const) : ("invited" as const),
-      invite_url: attached ? null : String(result.body.invite_url ?? ""),
+      invite_url: inviteUrl,
+      link_withheld: !attached && (result.body.link_withheld === true || inviteUrl === null),
+      // The same person's waiting invitation issued again — the network now
+      // allows "mint another" — so any earlier link no longer works.
+      reissued: result.body.reissued === true,
       expires_at: attached ? null : String(result.body.expires_at ?? ""),
       expires_in_hours: attached ? null : Number(result.body.expires_in_hours ?? 0),
       organisation_legal_name: String(result.body.organisation_legal_name ?? ""),

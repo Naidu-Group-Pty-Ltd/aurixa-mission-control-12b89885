@@ -31,6 +31,7 @@ import {
   createNetworkOrganisation,
   updateNetworkOrganisation,
   closeNetworkOrganisation,
+  reopenNetworkOrganisation,
   inviteNetworkOrganisationOwner,
   ORGANISATION_FIELDS,
   AU_STATES,
@@ -38,8 +39,9 @@ import {
 } from "@/server/builders-network.functions";
 
 /**
- * The three acts the Builders Network console performs ON an organisation
- * rather than on the network: write it, close it, and seed its first owner.
+ * The four acts the Builders Network console performs ON an organisation
+ * rather than on the network: write it, close it, reopen it, and seed its
+ * first owner.
  *
  * They live beside the console rather than inside it because the route file
  * is already the status strip, the organisation register, the join queue, the
@@ -250,10 +252,18 @@ export function OrganisationFormDialog({
 }
 
 /**
- * Closing, which is the end and says so.
+ * Closing, which takes an organisation off the network and says what it keeps.
  *
- * Its own dialog rather than a status dropdown: suspension is reversible and
- * closing is not, and offering them in one control invites the wrong one.
+ * This dialog used to say closing was final — "a closed organisation cannot be
+ * reopened" — while the network had only ever written the organisation's
+ * status: every member, listing, document and connection survived it, and no
+ * control anywhere could bring them back. Closing is reversible now, through
+ * `ReopenOrganisationDialog`, and the copy says so rather than promising a
+ * finality nothing enforces.
+ *
+ * Its own dialog rather than a status dropdown: suspension and closure are
+ * different decisions (a suspended organisation is still on the network, a
+ * closed one is not), and offering them in one control invites the wrong one.
  */
 export function CloseOrganisationDialog({
   organisation,
@@ -296,9 +306,10 @@ export function CloseOrganisationDialog({
         <DialogHeader>
           <DialogTitle>Close {organisation?.legal_name}</DialogTitle>
           <DialogDescription>
-            Closing is final — a closed organisation cannot be reopened, approved or edited. Its
-            members lose access to the portal, and every record of what it did on the network is
-            kept. If you only need to stop it for now, suspend it instead.
+            Closing takes it off the network: its members lose access to the portal and it can no
+            longer be edited, approved or given an owner. Nothing is deleted — its members, listings
+            and every record of what it did on the network are kept, and it can be reopened from
+            this console. If you only need to stop it for now, suspend it instead.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-2">
@@ -320,7 +331,122 @@ export function CloseOrganisationDialog({
             disabled={busy || !reason.trim()}
           >
             {busy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden /> : null}
-            Close permanently
+            Close organisation
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/**
+ * Reopening a closed organisation.
+ *
+ * The network decides where it comes back to and never brings it back higher
+ * than it was: one that was never approved returns to the approval queue, and
+ * one that was approved returns SUSPENDED — unless the operator asks, here and
+ * in the same act, for its members' access back. Restoring access is a
+ * decision, not a side effect, which is why it is an unticked box rather than
+ * the default; and it is offered only where there is access to restore
+ * (`activated_at`), because an organisation that was never approved goes back
+ * through approval and everything that gates it.
+ */
+export function ReopenOrganisationDialog({
+  organisation,
+  onOpenChange,
+  onReopened,
+}: {
+  organisation: NetworkOrganisation | null;
+  onOpenChange: (next: boolean) => void;
+  onReopened: () => void;
+}) {
+  const reopenFn = useServerFn(reopenNetworkOrganisation);
+  const [reason, setReason] = useState("");
+  const [reinstate, setReinstate] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const wasApproved = Boolean(organisation?.activated_at);
+
+  useEffect(() => {
+    setReason("");
+    setReinstate(false);
+  }, [organisation]);
+
+  const confirm = async () => {
+    if (!organisation || !reason.trim()) return;
+    setBusy(true);
+    try {
+      const result = await reopenFn({
+        data: {
+          organisationId: organisation.id,
+          reason: reason.trim(),
+          reinstate: wasApproved && reinstate,
+        },
+      });
+      if (!result.ok) throw new Error(result.error);
+      // Each landing is said as what it means for the organisation, so the
+      // operator knows whether anything is still theirs to do.
+      const name = organisation.legal_name;
+      if (result.alreadyOpen) {
+        toast.info(`${name} was already open — nothing was changed`);
+      } else if (result.status === "active") {
+        toast.success(`${name} reopened — its members can sign in again`);
+      } else if (result.status === "suspended") {
+        toast.success(`${name} reopened as suspended — reinstate it to restore access`);
+      } else {
+        toast.success(`${name} reopened — it is back in the approval queue`);
+      }
+      onOpenChange(false);
+      onReopened();
+    } catch (error) {
+      toast.error(refusal(error, "The organisation could not be reopened."));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog open={organisation !== null} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Reopen {organisation?.legal_name}</DialogTitle>
+          <DialogDescription>
+            {wasApproved
+              ? "Brings it back with everything it had — members, listings and records. It returns suspended, so nobody can sign in to it until it is reinstated, unless you restore access below."
+              : "Brings it back with everything it had. It was never approved, so it returns to the approval queue and is approved the usual way."}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-2">
+          <Label htmlFor="reopen-reason">Reason</Label>
+          <Input
+            id="reopen-reason"
+            value={reason}
+            onChange={(event) => setReason(event.target.value)}
+            placeholder="Why is this organisation being reopened?"
+          />
+        </div>
+        {wasApproved ? (
+          <div className="flex items-start gap-2 pt-1">
+            <Checkbox
+              id="reopen-reinstate"
+              checked={reinstate}
+              onCheckedChange={(next) => setReinstate(next === true)}
+            />
+            <Label htmlFor="reopen-reinstate" className="text-sm font-normal leading-snug">
+              Restore access now
+              <span className="block text-xs text-muted-foreground">
+                Its members can sign in again straight away. Leave this unticked to reopen it
+                suspended and reinstate it when you are ready.
+              </span>
+            </Label>
+          </div>
+        ) : null}
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>
+            Cancel
+          </Button>
+          <Button onClick={() => void confirm()} disabled={busy || !reason.trim()}>
+            {busy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden /> : null}
+            Reopen organisation
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -331,13 +457,19 @@ export function CloseOrganisationDialog({
 /**
  * What the network answered, in the shape the dialog renders.
  *
- * `invite_url` is nullable because an ATTACH mints nothing: the person
+ * `invite_url` is nullable twice over. An ATTACH mints nothing: the person
  * already had an account, so ownership is granted and there is no credential
- * to hand over.
+ * to hand over. And an invitation can be minted and WITHHELD
+ * (`link_withheld`): when the address is still a pending invitee of another
+ * organisation, its link would open that organisation too, so the network
+ * sends it to the invitee by email rather than handing it to an operator.
  */
 type InviteResult = {
   outcome: "invited" | "attached";
   invite_url: string | null;
+  link_withheld: boolean;
+  /** The same person's waiting invitation, issued again: earlier links are dead. */
+  reissued: boolean;
   expires_at: string | null;
   expires_in_hours: number | null;
   email_requested: boolean;
@@ -432,13 +564,36 @@ export function InviteOwnerDialog({
                 {name.trim() || "They"} already had an account on the network, so no invitation was
                 needed — ownership of {organisation?.legal_name} is theirs now and it appears in
                 their organisation switcher next time they sign in. Their existing password still
-                works and nothing about their account was changed.
+                works and nothing about their account was changed. If they no longer know it, the
+                Builder Portal&rsquo;s &ldquo;Forgot password&rdquo; link sends them a new one.
+              </p>
+            ) : result.link_withheld || !result.invite_url ? (
+              // Minted, and deliberately not shown. Drawing an empty copy box
+              // here would be the uncopyable-empty-box defect again, and
+              // telling the operator to "send them the link" would ask for
+              // something they were never given.
+              <p className="text-sm">
+                The invitation for {name.trim() || "them"} was issued, but its link is not shown
+                here: {email.trim() || "this address"} already belongs to another organisation on
+                the network (a closed one counts), and a link in anyone else&rsquo;s hands could be
+                used to take over that account.
+                {/* Delivery is claimed only where it happened. A send that
+                    failed, or one nobody asked for, is said by the status
+                    line below — this paragraph must not contradict it. */}
+                {result.email_sent ? (
+                  <>
+                    {" "}
+                    It has gone to their own inbox instead, and when they accept it, ownership of{" "}
+                    {organisation?.legal_name} is theirs.
+                  </>
+                ) : null}
               </p>
             ) : (
               <>
                 <p className="text-sm">
                   Send this link to {name.trim() || "them"}. It is shown once — only its fingerprint
-                  is stored — so copy it now; if it is lost, mint another.
+                  is stored — so copy it now; if it is lost, use Invite owner again with the same
+                  address to mint another.
                 </p>
                 <div className="flex items-center gap-2">
                   <Input
@@ -468,18 +623,41 @@ export function InviteOwnerDialog({
                 </p>
               </>
             )}
+            {result.reissued ? (
+              <p className="text-xs text-muted-foreground">
+                This replaces the invitation issued to them before — any earlier link no longer
+                works.
+              </p>
+            ) : null}
             {/* Whether the email went is said outright either way. A send
                 that failed and a send nobody asked for are different
                 things to an operator holding a link. */}
             {result.email_requested ? (
               result.email_sent ? (
                 <p className="text-xs text-muted-foreground">Emailed to {email.trim()}.</p>
+              ) : result.link_withheld || (result.outcome === "invited" && !result.invite_url) ? (
+                // There is no link in the operator's hands to "pass on", so
+                // the failure names the act that IS available to them.
+                <p className="text-xs text-destructive">
+                  The email could not be sent, and the link is not shown here, so they have not
+                  received it. Once mail is working, use Invite owner again with the same address —
+                  that issues a fresh invitation and this one stops working.
+                </p>
               ) : (
                 <p className="text-xs text-destructive">
                   {EMAIL_FAILURE[result.email_failure ?? ""] ??
                     "The email could not be sent, so pass it on yourself."}
                 </p>
               )
+            ) : result.outcome === "invited" && (result.link_withheld || !result.invite_url) ? (
+              // Withheld and never emailed: nothing reached anybody, and with
+              // no line here the dialog would end on a paragraph that reads
+              // like a finished invitation.
+              <p className="text-xs text-destructive">
+                No email was sent, and the link is not shown here, so they have not received it. Use
+                Invite owner again with the same address and &ldquo;Email it to them&rdquo; ticked —
+                that issues a fresh invitation and this one stops working.
+              </p>
             ) : null}
           </div>
         ) : (

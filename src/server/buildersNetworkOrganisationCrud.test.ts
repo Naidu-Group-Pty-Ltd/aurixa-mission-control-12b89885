@@ -87,7 +87,7 @@ describe("the form cannot offer a save the network will refuse", () => {
 });
 
 describe("the console mounts what this file checks", () => {
-  it("renders all three dialogs from the module they live in", () => {
+  it("renders all four dialogs from the module they live in", () => {
     // The rules below are asserted against the dialogs' own file, so a
     // component that stopped being rendered would keep passing them. This
     // repo has shipped that exact defect: three builder-portal components
@@ -97,6 +97,7 @@ describe("the console mounts what this file checks", () => {
     for (const component of [
       "OrganisationFormDialog",
       "CloseOrganisationDialog",
+      "ReopenOrganisationDialog",
       "InviteOwnerDialog",
     ]) {
       // `<${component}` alone is satisfied by `<InviteOwnerDialogX`, so the
@@ -125,16 +126,65 @@ describe("closing", () => {
     expect(body).toMatch(/disabled=\{busy \|\| !reason\.trim\(\)\}/);
   });
 
-  it("tells the operator it cannot be undone, and names the reversible option", () => {
+  it("says what closing keeps and that it can be undone, and names suspension", () => {
+    // It used to say "Closing is final — a closed organisation cannot be
+    // reopened", while the network had only ever written the status: every
+    // member, listing and record survived, with no way back to them. A
+    // finality nothing enforces is a promise the operator plans around.
     const start = dialogSource.indexOf("function CloseOrganisationDialog");
-    const body = dialogSource.slice(start, start + 2600);
-    expect(body).toMatch(/cannot be reopened/i);
+    const end = dialogSource.indexOf("function ReopenOrganisationDialog");
+    const body = dialogSource.slice(start, end);
+    expect(body).not.toMatch(/cannot be reopened|Close permanently|Closing is final/i);
+    expect(body).toMatch(/Nothing is deleted/);
+    expect(body).toMatch(/can be\s+reopened/i);
     expect(body).toMatch(/suspend it instead/i);
   });
 
-  it("offers nothing at all on an organisation already closed", () => {
-    // Terminal means terminal: no edit, no invite, no second close.
+  it("offers a closed organisation nothing but Reopen", () => {
+    // Edit, invite and a second close all wait until it is open — the
+    // network refuses each on a closed row.
     expect(consoleSource).toMatch(/organisation\.status !== "closed" && \(/);
+    const at = consoleSource.indexOf('organisation.status === "closed" && (');
+    expect(at).toBeGreaterThan(-1);
+    const control = consoleSource.slice(at, at + 400);
+    expect(control).toMatch(/setOrgBeingReopened\(organisation\)/);
+    expect(control).toMatch(/Reopen/);
+    expect(control).not.toMatch(/openOrganisationForm|setOrgBeingSeeded|setOrgBeingClosed/);
+  });
+});
+
+describe("reopening", () => {
+  const dialogSource = read(DIALOGS);
+  const functions = read(FUNCTIONS);
+  const start = dialogSource.indexOf("function ReopenOrganisationDialog");
+  const body = dialogSource.slice(start, dialogSource.indexOf("type InviteResult", start));
+
+  it("is its own act on the network, and will not proceed without a reason", () => {
+    const at = functions.indexOf("export const reopenNetworkOrganisation");
+    expect(at).toBeGreaterThan(-1);
+    const fn = functions.slice(at, at + 1200);
+    expect(fn).toContain('callBuilderNetworkAdmin("reopen_organisation"');
+    expect(fn).toContain("reason required");
+    expect(body).toMatch(/disabled=\{busy \|\| !reason\.trim\(\)\}/);
+  });
+
+  it("restores access only when asked, and only where there was access to restore", () => {
+    // The network brings an approved organisation back SUSPENDED unless the
+    // operator asks for access back in the same act; one never approved goes
+    // back to the approval queue whatever is sent.
+    const fn = functions.slice(functions.indexOf("export const reopenNetworkOrganisation"));
+    expect(fn).toMatch(/reinstate: data\.reinstate === true/);
+    expect(body).toMatch(/const wasApproved = Boolean\(organisation\?\.activated_at\)/);
+    expect(body).toMatch(/reinstate: wasApproved && reinstate/);
+    expect(body).toMatch(/useState\(false\)/);
+    expect(body).toMatch(/\{wasApproved \? \(\s*<div[\s\S]{0,200}id="reopen-reinstate"/);
+  });
+
+  it("says where the organisation landed, so the operator knows what is left to do", () => {
+    expect(body).toMatch(/result\.status === "active"/);
+    expect(body).toMatch(/result\.status === "suspended"/);
+    expect(body).toMatch(/approval queue/);
+    expect(body).toMatch(/result\.alreadyOpen/);
   });
 });
 
@@ -182,7 +232,10 @@ describe("an account that already exists", () => {
     // `String(undefined ?? "")` would have drawn a copy box with nothing in
     // it — the uncopyable-empty-box defect this codebase has paid for twice.
     expect(read(FUNCTIONS)).toMatch(/const attached = result\.body\.outcome === "attached"/);
-    expect(read(FUNCTIONS)).toMatch(/invite_url: attached \? null :/);
+    expect(read(FUNCTIONS)).toMatch(
+      /const inviteUrl =\s*!attached && typeof result\.body\.invite_url === "string"/,
+    );
+    expect(read(FUNCTIONS)).toMatch(/invite_url: inviteUrl,/);
     expect(dialogSource).toMatch(/result\.outcome === "attached"/);
   });
 
@@ -193,6 +246,75 @@ describe("an account that already exists", () => {
     expect(branch).toMatch(/no invitation was\s+needed/i);
     // And no link is offered, because none exists.
     expect(branch).not.toContain("Copy the invite link");
+  });
+});
+
+/**
+ * A link minted and deliberately not handed over.
+ *
+ * When the address already belongs to another organisation (a closed one
+ * counts), the network sends the invitation to the invitee's own inbox and
+ * answers `invite_url: null, link_withheld: true`. The console used to turn
+ * that null into `""` and draw an empty box to copy it from.
+ */
+describe("an invitation whose link is withheld", () => {
+  const dialogSource = read(DIALOGS);
+
+  it("keeps the null a null on the way to the dialog", () => {
+    expect(read(FUNCTIONS)).not.toMatch(/String\(result\.body\.invite_url/);
+    expect(read(FUNCTIONS)).toMatch(
+      /link_withheld: !attached && \(result\.body\.link_withheld === true/,
+    );
+  });
+
+  it("explains instead of drawing a copy box", () => {
+    const at = dialogSource.indexOf("result.link_withheld || !result.invite_url ? (");
+    expect(at).toBeGreaterThan(-1);
+    const branch = dialogSource.slice(at, at + 900);
+    expect(branch).toMatch(/link is not shown/);
+    expect(branch).not.toContain("Copy the invite link");
+    expect(branch).not.toContain("navigator.clipboard");
+    // And it comes BEFORE the branch that draws the box.
+    expect(at).toBeLessThan(
+      dialogSource.indexOf('navigator.clipboard.writeText(result.invite_url ?? "")'),
+    );
+  });
+
+  it("claims delivery to the inbox only when the email went", () => {
+    // The paragraph said "It is sent only to their own inbox" whatever the
+    // send did, directly above a status line saying it could not be sent.
+    const at = dialogSource.indexOf("result.link_withheld || !result.invite_url ? (");
+    const branch = dialogSource.slice(at, dialogSource.indexOf("navigator.clipboard", at));
+    const sentGuard = branch.indexOf("result.email_sent ? (");
+    expect(sentGuard).toBeGreaterThan(-1);
+    expect(branch).not.toMatch(/It is sent only to their own inbox/);
+    // Every mention of the inbox sits behind the guard.
+    for (const m of branch.matchAll(/inbox/g)) {
+      expect(m.index!).toBeGreaterThan(sentGuard);
+    }
+  });
+
+  it("says nothing reached them when the link was withheld and no email was asked for", () => {
+    const at = dialogSource.indexOf(
+      ') : result.outcome === "invited" && (result.link_withheld || !result.invite_url) ? (',
+    );
+    expect(at).toBeGreaterThan(-1);
+    const branch = dialogSource.slice(at, at + 700);
+    expect(branch).toMatch(/No email was sent/);
+    expect(branch).toMatch(/Invite owner again/);
+  });
+
+  it("does not tell the operator to pass on a link they were never given", () => {
+    const at = dialogSource.indexOf("result.link_withheld || (result.outcome");
+    expect(at).toBeGreaterThan(-1);
+    const branch = dialogSource.slice(at, at + 600);
+    expect(branch).not.toMatch(/pass the link on yourself/);
+    expect(branch).toMatch(/Invite owner again/);
+  });
+
+  it("says when an earlier link stopped working", () => {
+    expect(read(FUNCTIONS)).toMatch(/reissued: result\.body\.reissued === true/);
+    expect(dialogSource).toMatch(/result\.reissued \? \(/);
   });
 });
 

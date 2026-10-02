@@ -22,6 +22,7 @@ import {
   Plug,
   Plus,
   RefreshCw,
+  RotateCcw,
   ShieldAlert,
   Snowflake,
   Trophy,
@@ -75,6 +76,7 @@ import {
   CloseOrganisationDialog,
   InviteOwnerDialog,
   OrganisationFormDialog,
+  ReopenOrganisationDialog,
 } from "@/components/builders-network-organisation-dialogs";
 import {
   AgreementStanding,
@@ -702,6 +704,7 @@ function BuildersNetworkConsole() {
   const [orgFormOpen, setOrgFormOpen] = useState(false);
   const [orgBeingEdited, setOrgBeingEdited] = useState<NetworkOrganisation | null>(null);
   const [orgBeingClosed, setOrgBeingClosed] = useState<NetworkOrganisation | null>(null);
+  const [orgBeingReopened, setOrgBeingReopened] = useState<NetworkOrganisation | null>(null);
   const [orgBeingSeeded, setOrgBeingSeeded] = useState<NetworkOrganisation | null>(null);
   // Hoisted so each button reads as the act it is, and so "create" and "edit"
   // cannot drift apart: they are the same form on a different subject.
@@ -1086,8 +1089,20 @@ function BuildersNetworkConsole() {
                         <PlayCircle className="mr-1 h-4 w-4" aria-hidden /> Reinstate
                       </Button>
                     )}
-                    {/* A closed organisation is terminal: nothing here may act
-                        on one, which is why every control below is withheld. */}
+                    {/* A closed organisation is acted on in one way only:
+                        reopening it, which brings back everything closing
+                        kept. Editing, inviting and closing it again wait
+                        until it is open, because the network refuses each
+                        of them on a closed row. */}
+                    {organisation.status === "closed" && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setOrgBeingReopened(organisation)}
+                      >
+                        <RotateCcw className="mr-1 h-4 w-4" aria-hidden /> Reopen
+                      </Button>
+                    )}
                     {organisation.status !== "closed" && (
                       <>
                         <Button
@@ -1133,6 +1148,13 @@ function BuildersNetworkConsole() {
           if (!next) setOrgBeingClosed(null);
         }}
         onClosed={refreshAll}
+      />
+      <ReopenOrganisationDialog
+        organisation={orgBeingReopened}
+        onOpenChange={(next) => {
+          if (!next) setOrgBeingReopened(null);
+        }}
+        onReopened={refreshAll}
       />
       <InviteOwnerDialog
         organisation={orgBeingSeeded}

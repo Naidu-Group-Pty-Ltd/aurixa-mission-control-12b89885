@@ -160,8 +160,20 @@ export const MIN_FILL_SECONDS = 3;
  */
 export const MAX_FILL_HOURS = 12;
 
-/** Per-IP burst ceiling, per minute. */
-export const APPLY_PER_IP_PER_MINUTE = 3;
+/**
+ * Per-IP burst ceiling, per minute.
+ *
+ * It was three, and three is less than an honest minute can need: the form
+ * answers a refusal it can name ("that ABN is already registered", a field
+ * the network will not accept) on the same page, and an applicant fixing it
+ * presses submit again within seconds — a second time if the first fix was
+ * not the right one, and two people behind one office address count as one
+ * caller. Five still refuses anything that is not a person at a keyboard,
+ * and the network bounds the same origin by the hour and the day behind it
+ * (`ORIGIN_WINDOWS` in aurixa-builders), so this layer does not have to be
+ * the strict one.
+ */
+export const APPLY_PER_IP_PER_MINUTE = 5;
 
 /**
  * Global ceiling, per minute, across every caller.

@@ -234,6 +234,15 @@ describe("the ceilings", () => {
     expect(APPLY_GLOBAL_PER_MINUTE).toBeLessThan(100);
   });
 
+  it("leaves one caller room to correct a refused application in the same minute", () => {
+    // At three a minute an applicant fixing the field the form had just
+    // named, twice, from an office shared with a colleague, was told to
+    // wait. The network bounds the hour and the day behind this, so the
+    // minute need not be the strict layer — but it must stay a burst limit.
+    expect(APPLY_PER_IP_PER_MINUTE).toBeGreaterThanOrEqual(5);
+    expect(APPLY_PER_IP_PER_MINUTE).toBeLessThanOrEqual(10);
+  });
+
   it("identifies the caller from the edge, never from the body", () => {
     const source = code(ROUTE);
     expect(source).toMatch(/cf-connecting-ip|x-forwarded-for/);
