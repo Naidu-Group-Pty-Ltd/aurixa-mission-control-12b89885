@@ -56,12 +56,14 @@
  * product half the independent line needs. So do the two shared modules they
  * import (`ghl-account.ts`, `ghlConversationMap.pure.ts`).
  *
- * **The browser.** A page that calls a withheld function is the line head's
- * own business: its copy differs from the prime's by design and is held per
- * clone (`clone_sync_exclusions`), and the head's `crmIndependence.spec.ts`
- * is what fails when a page spells a withheld name. Holding those pages here
- * by class would also hold them on the head's own children, which must
- * receive the head's variant.
+ * **The pages and functions the line carries in its own shape.** A page that
+ * routes through `crmProvider.ts`, an agent whose calendar is `crm-calendar`:
+ * those are not withheld, they are VARIANTS, and they are the second register
+ * at the foot of this module (`CRM_LINE_VARIANT_PATTERNS`). They are held as
+ * `manual_reconcile`, and only where a delivery's bytes come from outside the
+ * line, so the head's own children still receive the head's copy. The head's
+ * `crmIndependence.spec.ts` and `crmLineFeatures.spec.ts` are what fail when
+ * a page or a function spells a withheld name.
  *
  * Measured on prime@386e7a4: every function listed holds only `index.ts`;
  * the four shared modules are imported by nothing outside this set and the
@@ -344,3 +346,122 @@ export function withheldClause(names: Iterable<string>): string {
     rest.length > 0 ? `${describeWithheldFunctions(rest)}, which the prime keeps for itself` : "";
   return [restShare, lineShare].filter((p): p is string => Boolean(p)).join(", and ");
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The files the independent line holds as its OWN copy
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Paths whose copy on the independent line differs from the prime's BY DESIGN.
+ *
+ * The withheld features above are files the line does not carry at all. These
+ * are files it carries in a different shape: a page that routes through
+ * `crmProvider.ts` instead of calling GoHighLevel, an agent whose calendar is
+ * `crm-calendar`, an import that does not sync, and the specs and CI gates that
+ * hold those shapes in place. A cascade from the prime writes the prime's copy
+ * over each one, and nothing fails — the page compiles, it just calls a
+ * function this line no longer deploys. `2fc9c46` and `5517a62` on the head are
+ * that revert happening, seven files at a time, once per cascade.
+ *
+ * ## Held only where the bytes come from the PRIME
+ *
+ * The head reads from the prime; its children read from the head. A hold keyed
+ * on the line alone would stop the head's variant reaching the children, which
+ * is the one copy they are meant to have — which is why this was once left to
+ * per-clone rows. Keyed on the SOURCE as well, one list covers the head and
+ * leaves its children receiving it (`fromAnotherLine` in `partitionCascadePaths`).
+ *
+ * ## `manual_reconcile`, never `protected`
+ *
+ * A prime change to one of these files is real work the line may want, not an
+ * identity it must refuse. So the hold is a decision an operator can take
+ * (`approvableHeld`), and the evidence rule releases it by itself where the
+ * clone's copy is byte-identical to a version the prime held — a file the line
+ * has not actually changed protects nothing. A recorded exclusion row for the
+ * same path is asked FIRST, so a `protected` row is never weakened by this.
+ *
+ * A conversion delivers none of these holds: converting is the act of taking
+ * the other line's copy of exactly these files.
+ *
+ * Measured against prime@559c5ff on 1 Oct 2026: every exact path below differs
+ * from the prime's copy, and each was changed on the head by a commit whose
+ * purpose was the line (#7, #8, #15, `5517a62`, `2e7cf3f`, #56). The globs name
+ * what only the line carries, so a same-named prime file cannot land on it.
+ */
+export const CRM_LINE_VARIANT_PATTERNS: Readonly<Partial<Record<CrmMode, readonly string[]>>> = {
+  independent: [
+    // The CRM this deployment is, and everything that speaks for it.
+    "src/lib/crm/**",
+    "supabase/functions/_shared/crm/**",
+    "supabase/functions/crm-calendar/**",
+    "supabase/functions/crm-inbound-message/**",
+    "supabase/functions/crm-send-message/**",
+    "scripts/lib/crmLineFeatures.*",
+    ".github/workflows/decommission-crm-line-functions.yml",
+    "docs/crm/**",
+    // Pages and components that route through it.
+    "src/components/clients/ClientAppointmentsTab.tsx",
+    "src/components/clients/ClientBulkActions.tsx",
+    "src/components/clients/ClientCard.tsx",
+    "src/components/clients/ClientConversationsTab.tsx",
+    "src/components/clients/ExcelDropzone.tsx",
+    "src/components/clients/NativePipelineCreator.tsx",
+    "src/components/clients/add-client/StandardAddClientForm.tsx",
+    "src/components/marketing/LeadAttributionPanel.tsx",
+    "src/hooks/useGHLCalendar.tsx",
+    "src/lib/secureInvoke.ts",
+    "src/pages/ClientManagement.tsx",
+    "src/pages/ClientTracker.tsx",
+    "src/pages/Conversations.tsx",
+    "src/pages/finance-portal/FinancePortalClients.tsx",
+    // Server code that no longer reaches a withheld function.
+    "supabase/functions/ai-dashboard-agent/index.ts",
+    "supabase/functions/finance-portal-client-data/index.ts",
+    "supabase/functions/manage-automation-settings/index.ts",
+    // The specs and gates that hold the shapes above.
+    "src/components/clients/add-client/AddClientModal.test.tsx",
+    "src/lib/security/__tests__/phantomColumnWrites.spec.ts",
+    "src/lib/security/auditRemediation.spec.ts",
+    "src/lib/sync/__tests__/ghlConversationMap.test.ts",
+    "scripts/security/check-cron-caller-names.mjs",
+    "scripts/security/check-ghl-message-authz.mjs",
+    ".github/workflows/ci.yml",
+    "CLAUDE.md",
+  ],
+};
+
+const variantRules = new Map<CrmMode, { pattern: string; rx: RegExp }[]>();
+for (const [mode, patterns] of Object.entries(CRM_LINE_VARIANT_PATTERNS) as [
+  CrmMode,
+  readonly string[],
+][]) {
+  variantRules.set(
+    mode,
+    patterns.map((pattern) => ({ pattern, rx: globToRegex(pattern) })),
+  );
+}
+
+/** The variant pattern a path falls under on this line, or null. */
+export function crmLineVariantPattern(
+  path: string,
+  crmMode: string | null | undefined,
+): string | null {
+  if (crmMode !== "independent" && crmMode !== "dependent") return null;
+  const hit = variantRules.get(crmMode)?.find((r) => r.rx.test(path));
+  return hit?.pattern ?? null;
+}
+
+/**
+ * The other direction of the same rule. A lateral exchange from the line's
+ * head to a sibling on another line offers the head's OWN copies — the gates,
+ * the native functions, the variant source. They are true of the origin's
+ * line and false of the destination's, so they never cross: `protected`,
+ * because an overwrite approval or a byte-identical-to-prime release would
+ * put one line's wiring on another.
+ */
+export const CRM_LINE_ORIGIN_VARIANT_NOTE =
+  "Another CRM line's own copy: it describes that line, not this one, so it is never carried here.";
+
+export const CRM_LINE_VARIANT_NOTE =
+  "Independent CRM line: this clone's copy is the line's own, so the prime's does not overwrite it. " +
+  "Approve an overwrite here only to take the prime's version deliberately.";

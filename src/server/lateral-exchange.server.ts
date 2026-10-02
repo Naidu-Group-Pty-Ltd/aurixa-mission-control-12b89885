@@ -214,6 +214,8 @@ type CloneRow = {
   github_repo: string;
   default_branch: string | null;
   sync_scope: string | null;
+  /** Which CRM line it runs. NULL ⇒ not recorded, which withholds nothing. */
+  crm_mode: string | null;
 };
 
 type PrimeRow = {
@@ -323,7 +325,7 @@ async function readSetup(
   const [clonesRes, primeRes] = await Promise.all([
     supabase
       .from("clones")
-      .select("id, name, github_owner, github_repo, default_branch, sync_scope")
+      .select("id, name, github_owner, github_repo, default_branch, sync_scope, crm_mode")
       .in("github_repo", [...boundary.sides]),
     supabase
       .from("prime_config")
@@ -449,6 +451,7 @@ async function readDestinationRule(supabase: Db, side: SideState): Promise<Desti
     scope,
     installedGlobs: installed,
     exclusions,
+    crmMode: side.clone.crm_mode,
   });
   return { ok: true, writes, deletes };
 }
@@ -1128,6 +1131,7 @@ async function passDirection(p: {
     originSizes: from.tree.sizes,
     originText,
     destination: p.rule.writes,
+    originCrmMode: from.clone.crm_mode,
     destinationText,
     deletingOnDestination: new Set(offerDeletes.map((d) => d.path)),
     destinationSurvivors: survivors,

@@ -69,7 +69,12 @@
  */
 import { globToRegex, isSafeRepoPath } from "@/lib/module-globs";
 import { primeOnlyFeatureForPath } from "@/server/primeOnlyFeatures.pure";
-import { crmLineFeatureForPath } from "@/server/crmLineFeatures.pure";
+import {
+  CRM_LINE_ORIGIN_VARIANT_NOTE,
+  CRM_LINE_VARIANT_NOTE,
+  crmLineFeatureForPath,
+  crmLineVariantPattern,
+} from "@/server/crmLineFeatures.pure";
 
 /**
  * Why a path was withheld.
@@ -190,10 +195,35 @@ export function assertMirrorPolicy(cloneId: string, exclusions: readonly SyncExc
 export function partitionCascadePaths(
   candidates: readonly string[],
   exclusions: readonly SyncExclusion[],
-  opts: { purpose?: "write" | "delete"; crmMode?: string | null } = {},
+  opts: {
+    purpose?: "write" | "delete";
+    crmMode?: string | null;
+    /**
+     * True when this delivery's bytes come from outside the clone's own CRM
+     * line — the prime, or a lateral sibling on the other line — and it is not
+     * a CRM conversion. Only then are the line's own copies
+     * (`CRM_LINE_VARIANT_PATTERNS`) held: a child of the line head reads the
+     * head, and must receive them.
+     */
+    fromAnotherLine?: boolean;
+    /**
+     * The CRM mode of the line the bytes come FROM, where that is known and is
+     * another line (a lateral exchange). Its own copies never cross to this
+     * line, whatever this line's register says.
+     */
+    originCrmMode?: string | null;
+  } = {},
 ): CascadePartition {
   const holdPrimeOnly = (opts.purpose ?? "write") === "write";
   const lineMode = holdPrimeOnly ? (opts.crmMode ?? null) : null;
+  const variantMode = lineMode && opts.fromAnotherLine === true ? lineMode : null;
+  const originVariantMode =
+    holdPrimeOnly &&
+    opts.fromAnotherLine === true &&
+    opts.originCrmMode &&
+    opts.originCrmMode !== (opts.crmMode ?? null)
+      ? opts.originCrmMode
+      : null;
   const ordered = [
     ...exclusions.filter((e) => e.reason === "protected"),
     ...exclusions.filter((e) => e.reason !== "protected"),
@@ -233,6 +263,16 @@ export function partitionCascadePaths(
       });
       continue;
     }
+    const originVariant = originVariantMode ? crmLineVariantPattern(path, originVariantMode) : null;
+    if (originVariant) {
+      held.push({
+        path,
+        pattern: `(crm-line variant of ${originVariantMode}: ${originVariant})`,
+        reason: "protected",
+        note: CRM_LINE_ORIGIN_VARIANT_NOTE,
+      });
+      continue;
+    }
     const hit = compiled.find((e) => e.rx.test(path));
     if (hit) {
       held.push({
@@ -240,6 +280,18 @@ export function partitionCascadePaths(
         pattern: hit.pattern,
         reason: hit.reason,
         note: hit.note ?? null,
+      });
+      continue;
+    }
+    // After the recorded rows, so a `protected` row for the same path is
+    // never downgraded to a hold an operator can release.
+    const variant = variantMode ? crmLineVariantPattern(path, variantMode) : null;
+    if (variant) {
+      held.push({
+        path,
+        pattern: `(crm-line variant: ${variant})`,
+        reason: "manual_reconcile",
+        note: CRM_LINE_VARIANT_NOTE,
       });
       continue;
     }

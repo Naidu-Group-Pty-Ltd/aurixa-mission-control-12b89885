@@ -149,7 +149,7 @@ export async function sweepHeldFileDrift(supabase: Db): Promise<HeldFileDriftRep
 
   const { data, error } = await supabase
     .from("clones")
-    .select("id, name, github_owner, github_repo, default_branch, sync_scope")
+    .select("id, name, github_owner, github_repo, default_branch, sync_scope, crm_mode")
     .not("github_owner", "is", null)
     .not("github_repo", "is", null);
   // A candidate list that could not be READ is not an empty one.
@@ -165,6 +165,7 @@ export async function sweepHeldFileDrift(supabase: Db): Promise<HeldFileDriftRep
       github_repo: string | null;
       default_branch: string | null;
       sync_scope: string | null;
+      crm_mode: string | null;
     };
     if (!clone.github_owner || !clone.github_repo) continue;
     const label = clone.name ?? `${clone.github_owner}/${clone.github_repo}`;
@@ -182,6 +183,7 @@ export async function sweepHeldFileDrift(supabase: Db): Promise<HeldFileDriftRep
           github_repo: clone.github_repo,
           default_branch: clone.default_branch,
           sync_scope: clone.sync_scope,
+          crm_mode: clone.crm_mode,
         },
       });
       report.detail.push(outcome);
@@ -221,6 +223,7 @@ async function sweepOneClone(args: {
     github_repo: string;
     default_branch: string | null;
     sync_scope: string | null;
+    crm_mode: string | null;
   };
   label: string;
 }): Promise<CloneDriftOutcome> {
@@ -263,7 +266,14 @@ async function sweepOneClone(args: {
   }
   const clonePaths = new Set(tree.entries.keys());
 
-  const held = reportableHeld(partitionCascadePaths([...clonePaths], exclusions).held)
+  const held = reportableHeld(
+    partitionCascadePaths([...clonePaths], exclusions, {
+      // The prime's copy is what this sweep compares against, so the line's
+      // own copies are held exactly as a prime cascade holds them.
+      crmMode: clone.crm_mode,
+      fromAnotherLine: true,
+    }).held,
+  )
     .map((h) => h.path)
     .filter(isSource)
     // Sorted so the ceiling below takes the same paths every run. An unsorted

@@ -26,6 +26,22 @@ describe("measureConvergence", () => {
     expect(m).toMatchObject({ kind: "measured", owed: [], fingerprint: null, compared: 2 });
   });
 
+  it("never owes the independent line's own copy, nor a feature it withholds", () => {
+    const m = measureConvergence({
+      prime: tree({
+        "src/pages/ClientTracker.tsx": "PRIME",
+        "supabase/functions/send-ghl-message/index.ts": "PRIME",
+        "src/ok.ts": "PRIME",
+      }),
+      clone: tree({ "src/pages/ClientTracker.tsx": "LINE", "src/ok.ts": "OLD" }),
+      exclusions: NONE,
+      primeTruncated: false,
+      cloneTruncated: false,
+      crmMode: "independent",
+    });
+    expect(m.kind === "measured" && m.owed).toEqual(["src/ok.ts"]);
+  });
+
   it("owes a path whose blob differs, and one the clone does not hold", () => {
     const m = measureConvergence({
       prime: tree({ "src/a.ts": "aaa", "src/new.ts": "nnn" }),
