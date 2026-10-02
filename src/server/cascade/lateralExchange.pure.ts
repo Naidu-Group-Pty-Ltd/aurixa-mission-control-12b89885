@@ -812,6 +812,7 @@ export function judgeLateralWrites(args: {
   const partition = partitionCascadePaths(inScope, destination.exclusions, {
     crmMode: destination.crmMode ?? null,
     fromAnotherLine: (args.originCrmMode ?? null) !== (destination.crmMode ?? null),
+    originCrmMode: args.originCrmMode ?? null,
   });
   const held: HeldPath[] = [...partition.held];
   const unread: string[] = [];

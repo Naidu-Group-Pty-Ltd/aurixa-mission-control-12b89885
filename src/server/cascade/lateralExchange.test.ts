@@ -1476,6 +1476,17 @@ describe("may it enter: the destination's CRM line", () => {
     expect(j.write).toEqual([AGENT]);
   });
 
+  it("never carries the independent line's own copy to a sibling on another line", () => {
+    const j = judge({
+      paths: [AGENT],
+      texts,
+      dest: destination({ crmMode: "dependent" }),
+      originCrmMode: "independent",
+    });
+    expect(j.write).toEqual([]);
+    expect(j.held.map((h) => [h.path, h.reason])).toEqual([[AGENT, "protected"]]);
+  });
+
   it("changes nothing for a destination whose line is not recorded", () => {
     const j = judge({ paths: [AGENT, SEND], texts, originCrmMode: "dependent" });
     expect(j.write).toEqual([AGENT, SEND]);

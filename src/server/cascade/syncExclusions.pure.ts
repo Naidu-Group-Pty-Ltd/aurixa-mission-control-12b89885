@@ -70,6 +70,7 @@
 import { globToRegex, isSafeRepoPath } from "@/lib/module-globs";
 import { primeOnlyFeatureForPath } from "@/server/primeOnlyFeatures.pure";
 import {
+  CRM_LINE_ORIGIN_VARIANT_NOTE,
   CRM_LINE_VARIANT_NOTE,
   crmLineFeatureForPath,
   crmLineVariantPattern,
@@ -205,11 +206,24 @@ export function partitionCascadePaths(
      * head, and must receive them.
      */
     fromAnotherLine?: boolean;
+    /**
+     * The CRM mode of the line the bytes come FROM, where that is known and is
+     * another line (a lateral exchange). Its own copies never cross to this
+     * line, whatever this line's register says.
+     */
+    originCrmMode?: string | null;
   } = {},
 ): CascadePartition {
   const holdPrimeOnly = (opts.purpose ?? "write") === "write";
   const lineMode = holdPrimeOnly ? (opts.crmMode ?? null) : null;
   const variantMode = lineMode && opts.fromAnotherLine === true ? lineMode : null;
+  const originVariantMode =
+    holdPrimeOnly &&
+    opts.fromAnotherLine === true &&
+    opts.originCrmMode &&
+    opts.originCrmMode !== (opts.crmMode ?? null)
+      ? opts.originCrmMode
+      : null;
   const ordered = [
     ...exclusions.filter((e) => e.reason === "protected"),
     ...exclusions.filter((e) => e.reason !== "protected"),
@@ -246,6 +260,16 @@ export function partitionCascadePaths(
         pattern: `(crm-line: ${lineFeature.key})`,
         reason: "protected",
         note: lineFeature.reason,
+      });
+      continue;
+    }
+    const originVariant = originVariantMode ? crmLineVariantPattern(path, originVariantMode) : null;
+    if (originVariant) {
+      held.push({
+        path,
+        pattern: `(crm-line variant of ${originVariantMode}: ${originVariant})`,
+        reason: "protected",
+        note: CRM_LINE_ORIGIN_VARIANT_NOTE,
       });
       continue;
     }

@@ -144,6 +144,12 @@ export function measureConvergence(input: {
    * business at all. `null` for a mirror, whose section is the whole tree.
    */
   scopedTo?: ReadonlySet<string> | null;
+  /**
+   * The clone's CRM line. Measured against the prime, so the line's withheld
+   * features and its own copies are held exactly as a prime cascade holds
+   * them — never counted as owed.
+   */
+  crmMode?: string | null;
 }): ConvergenceMeasurement {
   const { prime, clone, exclusions, primeTruncated, cloneTruncated } = input;
 
@@ -167,7 +173,10 @@ export function measureConvergence(input: {
 
   // The engine's own partition, against this clone's own policy. One
   // implementation — see the header.
-  const { write, held } = partitionCascadePaths(differing, exclusions);
+  const { write, held } = partitionCascadePaths(differing, exclusions, {
+    crmMode: input.crmMode ?? null,
+    fromAnotherLine: true,
+  });
 
   /*
     A PATH THE CASCADE WOULD REFUSE IS NOT OWED.

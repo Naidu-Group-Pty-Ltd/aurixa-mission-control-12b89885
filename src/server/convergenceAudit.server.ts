@@ -123,7 +123,7 @@ export async function auditFleetConvergence(supabase: Db): Promise<ConvergenceAu
 
   const { data, error } = await supabase
     .from("clones")
-    .select("id, name, github_owner, github_repo, default_branch, sync_scope")
+    .select("id, name, github_owner, github_repo, default_branch, sync_scope, crm_mode")
     .not("github_owner", "is", null)
     .not("github_repo", "is", null);
   // A candidate list that could not be READ is not an empty one.
@@ -151,6 +151,7 @@ export async function auditFleetConvergence(supabase: Db): Promise<ConvergenceAu
       github_repo: string | null;
       default_branch: string | null;
       sync_scope: string | null;
+      crm_mode: string | null;
     };
     if (!clone.github_owner || !clone.github_repo) continue;
     const label = clone.name ?? `${clone.github_owner}/${clone.github_repo}`;
@@ -209,6 +210,7 @@ async function auditOneClone(args: {
     github_repo: string | null;
     default_branch: string | null;
     sync_scope: string | null;
+    crm_mode: string | null;
   };
   label: string;
   sloMinutes: number;
@@ -313,6 +315,7 @@ async function auditOneClone(args: {
     primeTruncated: primeTree.truncated,
     cloneTruncated: cloneTree.truncated,
     primeSizes: primeTree.sizes,
+    crmMode: clone.crm_mode,
   });
 
   const reading = judgeConvergence({ now: new Date(), measurement, prior, sloMinutes });

@@ -283,6 +283,30 @@ describe("the independent line's own copies", () => {
     expect(dependent.held).toEqual([]);
   });
 
+  it("never lets the line's own copies cross to a sibling on another line", () => {
+    // A lateral exchange from the independent head to a dependent sibling:
+    // the destination's register knows nothing of these paths, so the
+    // ORIGIN's register has to hold them, and an operator may not release it.
+    const p = partitionCascadePaths([AGENT, PROVIDER, "src/a.ts"], [], {
+      crmMode: "dependent",
+      fromAnotherLine: true,
+      originCrmMode: "independent",
+    });
+    expect(p.write).toEqual(["src/a.ts"]);
+    expect(p.held.map((h) => [h.path, h.reason])).toEqual([
+      [AGENT, "protected"],
+      [PROVIDER, "protected"],
+    ]);
+    expect(p.held[0]?.pattern).toMatch(/^\(crm-line variant of independent: /);
+
+    // Same line on both sides: nothing of the origin's is held.
+    const same = partitionCascadePaths([AGENT], [], {
+      crmMode: "independent",
+      originCrmMode: "independent",
+    });
+    expect(same.held).toEqual([]);
+  });
+
   it("never downgrades a recorded protected row", () => {
     const p = partitionCascadePaths(
       [AGENT],

@@ -451,6 +451,17 @@ export function crmLineVariantPattern(
   return hit?.pattern ?? null;
 }
 
+/**
+ * The other direction of the same rule. A lateral exchange from the line's
+ * head to a sibling on another line offers the head's OWN copies — the gates,
+ * the native functions, the variant source. They are true of the origin's
+ * line and false of the destination's, so they never cross: `protected`,
+ * because an overwrite approval or a byte-identical-to-prime release would
+ * put one line's wiring on another.
+ */
+export const CRM_LINE_ORIGIN_VARIANT_NOTE =
+  "Another CRM line's own copy: it describes that line, not this one, so it is never carried here.";
+
 export const CRM_LINE_VARIANT_NOTE =
   "Independent CRM line: this clone's copy is the line's own, so the prime's does not overwrite it. " +
   "Approve an overwrite here only to take the prime's version deliberately.";
