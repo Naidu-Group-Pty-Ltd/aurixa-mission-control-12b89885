@@ -283,6 +283,7 @@ describe("a refusal the operator can act on", () => {
       "organisation_already_has_members",
       "that_account_has_been_withdrawn",
       "a_closed_organisation_is_terminal",
+      "owner_seat_held_otherwise",
     ]) {
       const reading = readNetworkFailure(code);
       expect(reading.blocking, code).toBe("operator");
@@ -308,7 +309,8 @@ describe("no raw code reaches an operator", () => {
     // Was `toast.error(error.message)` — the network's own code, verbatim.
     expect(dialogs).toContain("readNetworkFailure");
     expect(dialogs).not.toMatch(/toast\.error\(\s*error instanceof Error \? error\.message/);
+    // Save, close, reopen and invite: one per act the network can refuse.
     const calls = [...dialogs.matchAll(/toast\.error\(refusal\(/g)];
-    expect(calls.length).toBe(3);
+    expect(calls.length).toBe(4);
   });
 });

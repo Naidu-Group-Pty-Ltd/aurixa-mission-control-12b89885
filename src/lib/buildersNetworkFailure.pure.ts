@@ -233,8 +233,9 @@ const NETWORK: Record<string, Authored> = {
   organisation_already_has_members: {
     short: "This organisation already has members",
     sentence:
-      "Seeding the first owner is offered only while an organisation has nobody in it. From then " +
-      "on its own owner invites their colleagues, which is not an operator\u2019s decision to make.",
+      "Seeding the first owner is offered only while an organisation has nobody in it \u2014 or " +
+      "to re-send the invitation to the same person while it is still waiting. From then on its " +
+      "own owner invites their colleagues, which is not an operator\u2019s decision to make.",
     remedy: null,
     blocking: "operator",
   },
@@ -246,11 +247,31 @@ const NETWORK: Record<string, Authored> = {
     remedy: null,
     blocking: "operator",
   },
+  // The code keeps its old name so a console and a network deployed at
+  // different times still understand each other. What it means changed: a
+  // closed organisation is no longer the end, it is reopened first.
   a_closed_organisation_is_terminal: {
     short: "That organisation is closed",
     sentence:
-      "Closing is final \u2014 a closed organisation cannot be edited, approved or given an owner. " +
-      "Create a new organisation instead.",
+      "A closed organisation cannot be edited, approved or given an owner while it is closed. " +
+      "Reopen it first \u2014 everything it had is still there.",
+    remedy: null,
+    blocking: "operator",
+  },
+  reopen_failed: {
+    short: "The organisation could not be reopened",
+    sentence:
+      "Nothing was changed. It may have been reopened by someone else a moment ago \u2014 refresh " +
+      "the register and check its status before trying again.",
+    remedy: null,
+    blocking: "network",
+  },
+  owner_seat_held_otherwise: {
+    short: "That person already has a different place here",
+    sentence:
+      "They already hold a seat in this organisation that is not a waiting owner seat \u2014 " +
+      "suspended, or in another role. That was somebody\u2019s decision, so the invitation does " +
+      "not overrule it; it is changed from inside the organisation.",
     remedy: null,
     blocking: "operator",
   },
@@ -307,27 +328,36 @@ const NETWORK: Record<string, Authored> = {
     remedy: null,
     blocking: "network",
   },
+  // These three no longer leave a half-made organisation behind: the
+  // network removes the one the application created when nobody was seated
+  // in it, so the applicant can simply submit again. An application refused
+  // before that change (or one whose removal could not be made) still has
+  // its organisation in the register, and Invite owner finishes it.
   owner_not_created: {
     short: "The owner account could not be created",
     sentence:
-      "The organisation was created and its owner account was not. Use Invite owner on that " +
-      "organisation to finish it.",
+      "The owner account was not created, so the organisation the application made was removed " +
+      "again and the applicant can submit the form once more. If it still appears in the " +
+      "register, use Invite owner on it to finish it.",
     remedy: null,
     blocking: "network",
   },
   owner_not_attached: {
     short: "The owner could not be joined to the organisation",
     sentence:
-      "The organisation and the owner account both exist and the membership between them was " +
-      "not written. Use Invite owner on that organisation to finish it.",
+      "The membership between the owner and the organisation was not written, so the " +
+      "organisation the application made was removed again and the applicant can submit the " +
+      "form once more. If it still appears in the register, use Invite owner on it to finish it.",
     remedy: null,
     blocking: "network",
   },
   invite_not_issued: {
     short: "The invitation could not be stamped on the account",
     sentence:
-      "The account exists and no invitation credential was recorded against it, so nothing was " +
-      "sent. Use Invite owner on that organisation to mint a fresh one.",
+      "No invitation credential was recorded against the account, so nothing was sent and the " +
+      "organisation the application made was removed again \u2014 the applicant can submit the " +
+      "form once more. If it still appears in the register, use Invite owner on it to mint a " +
+      "fresh one.",
     remedy: null,
     blocking: "network",
   },

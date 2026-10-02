@@ -1436,7 +1436,7 @@ export function describeApprovalCode(code: string): string {
     case "organisation_not_found":
       return "The Builders Network has no such organisation.";
     case "a_closed_organisation_is_terminal":
-      return "The organisation is closed on the Builders Network, and a closed organisation is never reopened.";
+      return "The organisation is closed on the Builders Network. Reopen it from the Builders Network console first — everything it had is kept.";
     case "not_approvable_from_current_status":
       return "The organisation is not awaiting approval on the Builders Network — it may be suspended. Review it from the Builders Network console.";
     case "operate_switch_off":
