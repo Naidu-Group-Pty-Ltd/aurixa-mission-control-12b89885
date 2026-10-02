@@ -576,8 +576,17 @@ export function InviteOwnerDialog({
                 The invitation for {name.trim() || "them"} was issued, but its link is not shown
                 here: {email.trim() || "this address"} already belongs to another organisation on
                 the network (a closed one counts), and a link in anyone else&rsquo;s hands could be
-                used to take over that account. It is sent only to their own inbox. When they accept
-                it, ownership of {organisation?.legal_name} is theirs.
+                used to take over that account.
+                {/* Delivery is claimed only where it happened. A send that
+                    failed, or one nobody asked for, is said by the status
+                    line below — this paragraph must not contradict it. */}
+                {result.email_sent ? (
+                  <>
+                    {" "}
+                    It has gone to their own inbox instead, and when they accept it, ownership of{" "}
+                    {organisation?.legal_name} is theirs.
+                  </>
+                ) : null}
               </p>
             ) : (
               <>
@@ -640,6 +649,15 @@ export function InviteOwnerDialog({
                     "The email could not be sent, so pass it on yourself."}
                 </p>
               )
+            ) : result.outcome === "invited" && (result.link_withheld || !result.invite_url) ? (
+              // Withheld and never emailed: nothing reached anybody, and with
+              // no line here the dialog would end on a paragraph that reads
+              // like a finished invitation.
+              <p className="text-xs text-destructive">
+                No email was sent, and the link is not shown here, so they have not received it. Use
+                Invite owner again with the same address and &ldquo;Email it to them&rdquo; ticked —
+                that issues a fresh invitation and this one stops working.
+              </p>
             ) : null}
           </div>
         ) : (

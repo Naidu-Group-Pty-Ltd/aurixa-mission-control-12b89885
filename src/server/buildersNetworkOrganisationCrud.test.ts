@@ -280,6 +280,30 @@ describe("an invitation whose link is withheld", () => {
     );
   });
 
+  it("claims delivery to the inbox only when the email went", () => {
+    // The paragraph said "It is sent only to their own inbox" whatever the
+    // send did, directly above a status line saying it could not be sent.
+    const at = dialogSource.indexOf("result.link_withheld || !result.invite_url ? (");
+    const branch = dialogSource.slice(at, dialogSource.indexOf("navigator.clipboard", at));
+    const sentGuard = branch.indexOf("result.email_sent ? (");
+    expect(sentGuard).toBeGreaterThan(-1);
+    expect(branch).not.toMatch(/It is sent only to their own inbox/);
+    // Every mention of the inbox sits behind the guard.
+    for (const m of branch.matchAll(/inbox/g)) {
+      expect(m.index!).toBeGreaterThan(sentGuard);
+    }
+  });
+
+  it("says nothing reached them when the link was withheld and no email was asked for", () => {
+    const at = dialogSource.indexOf(
+      ') : result.outcome === "invited" && (result.link_withheld || !result.invite_url) ? (',
+    );
+    expect(at).toBeGreaterThan(-1);
+    const branch = dialogSource.slice(at, at + 700);
+    expect(branch).toMatch(/No email was sent/);
+    expect(branch).toMatch(/Invite owner again/);
+  });
+
   it("does not tell the operator to pass on a link they were never given", () => {
     const at = dialogSource.indexOf("result.link_withheld || (result.outcome");
     expect(at).toBeGreaterThan(-1);
