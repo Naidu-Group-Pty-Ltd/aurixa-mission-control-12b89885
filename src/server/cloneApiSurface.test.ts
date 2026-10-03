@@ -123,6 +123,29 @@ describe("the engine replicates the project's API surface, not only its database
     expect(body).toContain("[...schemaDdl, ...tableDdl, ...defaultDdl]");
   });
 
+  it("converges function EXECUTE and view options AFTER the table grants", () => {
+    // pg_get_functiondef carries no ACL, so a function the engine writes starts
+    // callable by PUBLIC. The stage gives every shared function the prime's
+    // grantees, and does it last so a pause leaves the table grants in place.
+    const stage = intro.slice(intro.indexOf('enterStage("grants")'));
+    const body = stage.slice(0, stage.indexOf("        60,"));
+    expect(body).toContain("planClonePrivilegeConvergence(primeRef, cloneRef)");
+    expect(body.indexOf("[...schemaDdl, ...tableDdl, ...defaultDdl]")).toBeLessThan(
+      body.indexOf("privileges.statements"),
+    );
+  });
+
+  it("writes a view WITH its options, so security_invoker survives the copy", () => {
+    expect(intro).toContain("reloptions");
+    expect(intro).toContain("buildViewDdl(str(r.schema), str(r.name), str(r.def), r.options)");
+  });
+
+  it("takes the DDL apply helper away from the API roles every time it installs it", () => {
+    expect(intro).toContain(
+      "revoke execute on function aurixa.apply_ddl_batch(jsonb, text) from public, anon, authenticated;",
+    );
+  });
+
   it("replicates DEFAULT privileges, so a later cascaded table is not born unreachable", () => {
     expect(intro).toContain("defaultAcls:");
     expect(intro).toContain("pg_default_acl");
@@ -149,15 +172,19 @@ describe("a value a COLUMN refuses must not read as a write nobody attempted", (
     expect(drain).toContain("could NOT be queued");
     // The failure branch must be tested BEFORE the happy count, or a zero
     // enqueue with an error still renders as the reassuring line.
-    expect(drain.indexOf("txt.errors.length > 0")).toBeLessThan(
-      drain.indexOf("txt.enqueued > 0"),
-    );
+    expect(drain.indexOf("txt.errors.length > 0")).toBeLessThan(drain.indexOf("txt.enqueued > 0"));
   });
 
   it("the migration teaches the column every action the worker dispatches", () => {
     const sql = readFileSync(
-      join(__dirname, "..", "..", "supabase", "migrations",
-        "20260906180000_edge_job_verify_domain_txt_action.sql"),
+      join(
+        __dirname,
+        "..",
+        "..",
+        "supabase",
+        "migrations",
+        "20260906180000_edge_job_verify_domain_txt_action.sql",
+      ),
       "utf8",
     );
     const worker = readFileSync(join(__dirname, "..", "routes", "hooks.edge-drain.tsx"), "utf8");
@@ -177,11 +204,20 @@ describe("the two levers for a finished backend agree about attribution", () => 
     could not be converged onto the fixed engine — on the very pass carrying
     the exposed-schema repair its AML module needed.
   */
-  const retry = readFileSync(join(__dirname, "..", "routes", "hooks.backend-provisioning-retry.tsx"), "utf8");
-  const repair = readFileSync(join(__dirname, "..", "routes", "hooks.backend-provisioning-repair.tsx"), "utf8");
+  const retry = readFileSync(
+    join(__dirname, "..", "routes", "hooks.backend-provisioning-retry.tsx"),
+    "utf8",
+  );
+  const repair = readFileSync(
+    join(__dirname, "..", "routes", "hooks.backend-provisioning-repair.tsx"),
+    "utf8",
+  );
 
   it("neither hook refuses a row that records no enqueuer", () => {
-    for (const [name, src] of [["retry", retry], ["repair", repair]] as const) {
+    for (const [name, src] of [
+      ["retry", retry],
+      ["repair", repair],
+    ] as const) {
       expect(name && src).toBeTruthy();
       expect(src).not.toMatch(/if \(!row\.enqueued_by\) \{[\s\S]{0,400}?409,/);
     }

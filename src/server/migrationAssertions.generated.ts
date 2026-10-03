@@ -929,4 +929,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       },
     ],
   },
+  {
+    migration: "20261003100000_schedule_clone_privilege_reconcile.sql",
+    version: "20261003100000",
+    assertions: [{ kind: "cron", jobname: "clone-privilege-reconcile" }],
+  },
 ];

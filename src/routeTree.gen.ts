@@ -110,6 +110,7 @@ import { Route as HooksCloneSigningPairReconcileRouteImport } from './routes/hoo
 import { Route as HooksCloneSecretsReconcileRouteImport } from './routes/hooks.clone-secrets-reconcile'
 import { Route as HooksCloneSecretWithholdRouteImport } from './routes/hooks.clone-secret-withhold'
 import { Route as HooksCloneSecretForwardReconcileRouteImport } from './routes/hooks.clone-secret-forward-reconcile'
+import { Route as HooksClonePrivilegeReconcileRouteImport } from './routes/hooks.clone-privilege-reconcile'
 import { Route as HooksCloneJwtSecretReconcileRouteImport } from './routes/hooks.clone-jwt-secret-reconcile'
 import { Route as HooksCloneDeployerDeclarationReconcileRouteImport } from './routes/hooks.clone-deployer-declaration-reconcile'
 import { Route as HooksCascadeMergeDrainRouteImport } from './routes/hooks.cascade-merge-drain'
@@ -741,6 +742,12 @@ const HooksCloneSecretForwardReconcileRoute =
   HooksCloneSecretForwardReconcileRouteImport.update({
     id: '/hooks/clone-secret-forward-reconcile',
     path: '/hooks/clone-secret-forward-reconcile',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const HooksClonePrivilegeReconcileRoute =
+  HooksClonePrivilegeReconcileRouteImport.update({
+    id: '/hooks/clone-privilege-reconcile',
+    path: '/hooks/clone-privilege-reconcile',
     getParentRoute: () => rootRouteImport,
   } as any)
 const HooksCloneJwtSecretReconcileRoute =
@@ -1423,6 +1430,7 @@ export interface FileRoutesByFullPath {
   '/hooks/cascade-merge-drain': typeof HooksCascadeMergeDrainRoute
   '/hooks/clone-deployer-declaration-reconcile': typeof HooksCloneDeployerDeclarationReconcileRoute
   '/hooks/clone-jwt-secret-reconcile': typeof HooksCloneJwtSecretReconcileRoute
+  '/hooks/clone-privilege-reconcile': typeof HooksClonePrivilegeReconcileRoute
   '/hooks/clone-secret-forward-reconcile': typeof HooksCloneSecretForwardReconcileRoute
   '/hooks/clone-secret-withhold': typeof HooksCloneSecretWithholdRoute
   '/hooks/clone-secrets-reconcile': typeof HooksCloneSecretsReconcileRoute
@@ -1637,6 +1645,7 @@ export interface FileRoutesByTo {
   '/hooks/cascade-merge-drain': typeof HooksCascadeMergeDrainRoute
   '/hooks/clone-deployer-declaration-reconcile': typeof HooksCloneDeployerDeclarationReconcileRoute
   '/hooks/clone-jwt-secret-reconcile': typeof HooksCloneJwtSecretReconcileRoute
+  '/hooks/clone-privilege-reconcile': typeof HooksClonePrivilegeReconcileRoute
   '/hooks/clone-secret-forward-reconcile': typeof HooksCloneSecretForwardReconcileRoute
   '/hooks/clone-secret-withhold': typeof HooksCloneSecretWithholdRoute
   '/hooks/clone-secrets-reconcile': typeof HooksCloneSecretsReconcileRoute
@@ -1853,6 +1862,7 @@ export interface FileRoutesById {
   '/hooks/cascade-merge-drain': typeof HooksCascadeMergeDrainRoute
   '/hooks/clone-deployer-declaration-reconcile': typeof HooksCloneDeployerDeclarationReconcileRoute
   '/hooks/clone-jwt-secret-reconcile': typeof HooksCloneJwtSecretReconcileRoute
+  '/hooks/clone-privilege-reconcile': typeof HooksClonePrivilegeReconcileRoute
   '/hooks/clone-secret-forward-reconcile': typeof HooksCloneSecretForwardReconcileRoute
   '/hooks/clone-secret-withhold': typeof HooksCloneSecretWithholdRoute
   '/hooks/clone-secrets-reconcile': typeof HooksCloneSecretsReconcileRoute
@@ -2070,6 +2080,7 @@ export interface FileRouteTypes {
     | '/hooks/cascade-merge-drain'
     | '/hooks/clone-deployer-declaration-reconcile'
     | '/hooks/clone-jwt-secret-reconcile'
+    | '/hooks/clone-privilege-reconcile'
     | '/hooks/clone-secret-forward-reconcile'
     | '/hooks/clone-secret-withhold'
     | '/hooks/clone-secrets-reconcile'
@@ -2284,6 +2295,7 @@ export interface FileRouteTypes {
     | '/hooks/cascade-merge-drain'
     | '/hooks/clone-deployer-declaration-reconcile'
     | '/hooks/clone-jwt-secret-reconcile'
+    | '/hooks/clone-privilege-reconcile'
     | '/hooks/clone-secret-forward-reconcile'
     | '/hooks/clone-secret-withhold'
     | '/hooks/clone-secrets-reconcile'
@@ -2499,6 +2511,7 @@ export interface FileRouteTypes {
     | '/hooks/cascade-merge-drain'
     | '/hooks/clone-deployer-declaration-reconcile'
     | '/hooks/clone-jwt-secret-reconcile'
+    | '/hooks/clone-privilege-reconcile'
     | '/hooks/clone-secret-forward-reconcile'
     | '/hooks/clone-secret-withhold'
     | '/hooks/clone-secrets-reconcile'
@@ -2712,6 +2725,7 @@ export interface RootRouteChildren {
   HooksCascadeMergeDrainRoute: typeof HooksCascadeMergeDrainRoute
   HooksCloneDeployerDeclarationReconcileRoute: typeof HooksCloneDeployerDeclarationReconcileRoute
   HooksCloneJwtSecretReconcileRoute: typeof HooksCloneJwtSecretReconcileRoute
+  HooksClonePrivilegeReconcileRoute: typeof HooksClonePrivilegeReconcileRoute
   HooksCloneSecretForwardReconcileRoute: typeof HooksCloneSecretForwardReconcileRoute
   HooksCloneSecretWithholdRoute: typeof HooksCloneSecretWithholdRoute
   HooksCloneSecretsReconcileRoute: typeof HooksCloneSecretsReconcileRoute
@@ -3544,6 +3558,13 @@ declare module '@tanstack/react-router' {
       path: '/hooks/clone-secret-forward-reconcile'
       fullPath: '/hooks/clone-secret-forward-reconcile'
       preLoaderRoute: typeof HooksCloneSecretForwardReconcileRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/clone-privilege-reconcile': {
+      id: '/hooks/clone-privilege-reconcile'
+      path: '/hooks/clone-privilege-reconcile'
+      fullPath: '/hooks/clone-privilege-reconcile'
+      preLoaderRoute: typeof HooksClonePrivilegeReconcileRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/hooks/clone-jwt-secret-reconcile': {
@@ -4518,6 +4539,7 @@ const rootRouteChildren: RootRouteChildren = {
   HooksCloneDeployerDeclarationReconcileRoute:
     HooksCloneDeployerDeclarationReconcileRoute,
   HooksCloneJwtSecretReconcileRoute: HooksCloneJwtSecretReconcileRoute,
+  HooksClonePrivilegeReconcileRoute: HooksClonePrivilegeReconcileRoute,
   HooksCloneSecretForwardReconcileRoute: HooksCloneSecretForwardReconcileRoute,
   HooksCloneSecretWithholdRoute: HooksCloneSecretWithholdRoute,
   HooksCloneSecretsReconcileRoute: HooksCloneSecretsReconcileRoute,

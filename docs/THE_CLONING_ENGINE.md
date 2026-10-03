@@ -1698,3 +1698,93 @@ Four readings, in the order that isolates a fault:
    = 'DIDIT_API_KEY' GROUP BY 1`. `absorbed` rows must show a real cost and a
    zero charge. A `brokered` row appearing again means `absorbed` was cleared
    on the rate — and the tenant is being billed twice.
+
+---
+
+## A function's body travels; who may call it did not
+
+3 October 2026, measured with Supabase's own security advisor on every
+project in the fleet:
+
+| Project | SECURITY DEFINER callable by `anon` | by `authenticated` | Views running as owner |
+| --- | --- | --- | --- |
+| the prime | 4 | 16 | 0 |
+| `npc-crm-independent-6505dc` | 247 | 248 | 13 |
+| each of the other three clones | 238 | 239 | 10–11 |
+
+Among the exposed functions: `cron_service_role_headers`, which returns the
+project's internal edge secret (and the service-role key where the vault holds
+it); `bootstrap_cron_vault`, which overwrites those secrets; and
+`admin_set_aml_roles_for_user`, which grants any AML role to any user. The
+prime's own migrations revoke all three. The catalogue clone path never
+replays migrations, so those revokes never ran on a clone.
+
+Two causes, one in each of two stages.
+
+**The functions stage writes each function with `pg_get_functiondef`**, which
+renders the body and says nothing about its ACL. Postgres gives a new function
+EXECUTE to PUBLIC, so every function on every engine-built clone started
+callable by anyone holding that project's anon key. The grants stage carried
+table, schema and default privileges, and never function privileges.
+
+**The views stage wrote `create or replace view … as <definition>`**, and
+`create or replace` REPLACES a view's options with the ones the statement
+names. It named none, so `security_invoker` was stripped wherever the prime
+had set it. Those views then read their tables with the owner's rights, past
+every RLS policy on them.
+
+### What now holds it
+
+- **The views stage carries the options** (`buildViewDdl`), so a view built
+  from now on keeps `security_invoker`.
+- **The grants stage converges function EXECUTE and view options towards the
+  prime** (`planClonePrivilegeConvergence`). It reads both catalogues and plans
+  a GRANT or REVOKE of EXECUTE for every function both sides hold, plus an
+  `alter view … set/reset` for three named options. Nothing else can be
+  planned; the rules are in `routinePrivileges.pure.ts`.
+- **The apply helper is no longer callable from the API.**
+  `aurixa.apply_ddl_batch` is a SECURITY DEFINER function that executes
+  arbitrary DDL. It had exactly the default above, so the provisioner now
+  revokes it from `public`, `anon` and `authenticated` every time it installs
+  it.
+- **`/hooks/clone-privilege-reconcile` repairs the clones that already
+  exist** (`clonePrivilegeRepair.server.ts`, every 30 minutes). A clone whose
+  schema was verified before this never re-enters introspection, so the code
+  that now builds clones correctly would never have reached them. The target
+  comes from `resolveCloneSecretTarget`, which refuses the prime and Mission
+  Control's own project. Each pass re-derives the plan from both catalogues, so
+  an aligned clone costs two reads a side and writes nothing.
+
+### Five rules
+
+1. **The prime is the authority.** A shared function ends up with exactly the
+   API grantees the prime gives it, because that is the ACL the prime's own
+   traffic already runs on.
+2. **Only shared functions are touched.** A variant's own function (the CRM
+   line has several) is left as it is and reported when it is an exposed
+   SECURITY DEFINER (`cloneOnlyExposedDefiners`). Closing those is a change to
+   the variant's repository, not to the engine.
+3. **`service_role` is never revoked.** It is still GRANTED where the prime
+   grants it, which matters: revoking PUBLIC removes whatever service_role held
+   only through PUBLIC.
+4. **A function the clone's own policies, views or column defaults call is
+   never made less reachable.** RLS evaluates a policy as the querying role, so
+   a revoke there makes a table unreadable rather than a function private. Held
+   revokes are reported (`heldForReference`), not dropped silently.
+5. **Grants before revokes.** A pass the budget stops leaves a function with
+   more access than intended, never with less.
+
+### Checking it
+
+Dry-run first, with no writes, for one clone:
+
+```
+curl -X POST https://mission-control.aurixasystems.com.au/hooks/clone-privilege-reconcile \
+  -H "Authorization: Bearer $CRON_SECRET" -H "Content-Type: application/json" \
+  -d '{"dryRun": true, "cloneId": "<clone uuid>"}'
+```
+
+The answer names the grants, revokes and view statements it would apply, with
+a sample. After a real pass, the clone's security advisor should list no more
+anon-callable SECURITY DEFINER functions than the prime's 4, plus whatever is
+in `cloneOnlyExposedDefiners`.
