@@ -385,8 +385,9 @@ export function withheldClause(names: Iterable<string>): string {
  *
  * Measured against prime@559c5ff on 1 Oct 2026: every exact path below differs
  * from the prime's copy, and each was changed on the head by a commit whose
- * purpose was the line (#7, #8, #15, `5517a62`, `2e7cf3f`, #56). The globs name
- * what only the line carries, so a same-named prime file cannot land on it.
+ * purpose was the line (#7, #8, #15, `5517a62`, `2e7cf3f`, #56, and #58 for
+ * the palette, added 2 Oct 2026). The globs name what only the line carries,
+ * so a same-named prime file cannot land on it.
  */
 export const CRM_LINE_VARIANT_PATTERNS: Readonly<Partial<Record<CrmMode, readonly string[]>>> = {
   independent: [
@@ -414,6 +415,17 @@ export const CRM_LINE_VARIANT_PATTERNS: Readonly<Partial<Record<CrmMode, readonl
     "src/pages/ClientTracker.tsx",
     "src/pages/Conversations.tsx",
     "src/pages/finance-portal/FinancePortalClients.tsx",
+    // The line's own dashboard palette (head #58). The prime draws NPC's
+    // palette because its `whitelabel_settings` row stores it; this line's
+    // row was never written, so `linePalette.ts` fills the unset colours and
+    // these two read it. Neither changed on the prime, and the cascade of
+    // prime@ff0f69c still wrote the prime's copies back over both, because a
+    // file the line edited is a file that differs, and a file that differs is
+    // a delivery unless it is named here.
+    "src/branding/linePalette.ts",
+    "src/branding/__tests__/linePalette.spec.tsx",
+    "src/branding/BrandProvider.tsx",
+    "src/pages/WhiteLabel.tsx",
     // Server code that no longer reaches a withheld function.
     "supabase/functions/ai-dashboard-agent/index.ts",
     "supabase/functions/finance-portal-client-data/index.ts",
