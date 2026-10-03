@@ -479,6 +479,77 @@ function ratchetNote(
 }
 
 /**
+ * A row of a test table naming one function by itself: `'name',` on its own
+ * line, which is how `it.each([...])` lists the functions a check applies to.
+ */
+const TABLE_ROW = /^[ \t]*(['"])([A-Za-z0-9_-]+)\1,?[ \t]*$/;
+
+/**
+ * Prime's spec with the table rows that name a function this clone does not
+ * carry taken out.
+ *
+ * The spec asserts things ABOUT functions as well as counting them: F-02 lists
+ * the operator backfills that must keep `verify_jwt = true`, and one of them
+ * (`backfill-message-directions`) is a GoHighLevel function the independent
+ * line withholds. Carried as prime wrote it, the check looks for a
+ * `[functions.backfill-message-directions]` block the composed config
+ * deliberately leaves out, and `verify` goes red on a function the clone is
+ * right not to have. Measured on the cascade of prime@ff0f69c, 2 Oct 2026: the
+ * count was reconciled to 370 and the row came back with it.
+ *
+ * Narrow on purpose. Only a row that is a bare quoted name on its own line,
+ * inside a run of such rows opened by a line ending `[` and closed by a line
+ * starting `]`, is touched. A name anywhere else is prose or a different kind
+ * of assertion, which this cannot read and does not guess at. A table that
+ * would be left with no rows refuses, because an empty `it.each` is a check
+ * that silently stopped checking, and the caller then holds as before.
+ */
+export function dropWithheldTableRows(
+  spec: string,
+  withheld: readonly string[],
+): { ok: true; text: string; dropped: string[] } | { ok: false; reason: string } {
+  const names = new Set(withheld);
+  if (names.size === 0) return { ok: true, text: spec, dropped: [] };
+  const lines = spec.split("\n");
+  const keep: string[] = [];
+  const dropped: string[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const opens = i > 0 && lines[i - 1].trimEnd().endsWith("[") && TABLE_ROW.test(lines[i]);
+    if (!opens) {
+      keep.push(lines[i]);
+      i += 1;
+      continue;
+    }
+    let end = i;
+    while (end < lines.length && TABLE_ROW.test(lines[end])) end += 1;
+    const closes = end < lines.length && lines[end].trimStart().startsWith("]");
+    const run = lines.slice(i, end);
+    if (!closes) {
+      keep.push(...run);
+      i = end;
+      continue;
+    }
+    const survivors = run.filter((line) => !names.has((line.match(TABLE_ROW) ?? [])[2] ?? ""));
+    if (survivors.length === 0) {
+      return {
+        ok: false,
+        reason:
+          "every row of a table in the prime's ratchet spec names a function this clone does " +
+          "not carry, and an emptied table is a check that stopped checking",
+      };
+    }
+    for (const line of run) {
+      const name = (line.match(TABLE_ROW) ?? [])[2];
+      if (name && names.has(name)) dropped.push(name);
+    }
+    keep.push(...survivors);
+    i = end;
+  }
+  return { ok: true, text: keep.join("\n"), dropped };
+}
+
+/**
  * Prime's ratchet spec, carrying the count this repository actually declares.
  *
  * One number changes and everything else is prime's, which is the whole point
@@ -496,10 +567,18 @@ export function reconcileFunctionCountRatchet(args: {
   primeSpec: string;
   mergedToml: string;
   cloneOwnedFunctions: readonly string[];
-  /** Prime-only functions this clone does not hold, named in the note. */
+  /**
+   * Functions this clone does not hold: named in the note, and taken out of
+   * the spec's tables (`dropWithheldTableRows`).
+   */
   withheld?: readonly string[];
 }): BaselineReconcile<string> {
-  const rule = extractRatchetRule(args.primeSpec);
+  const withheld = [...new Set(args.withheld ?? [])].sort();
+  const pruned = dropWithheldTableRows(args.primeSpec, withheld);
+  if (!pruned.ok) return pruned;
+  const primeSpec = pruned.text;
+
+  const rule = extractRatchetRule(primeSpec);
   if (!rule) {
     return {
       ok: false,
@@ -509,7 +588,7 @@ export function reconcileFunctionCountRatchet(args: {
     };
   }
 
-  const assertions = [...args.primeSpec.matchAll(RATCHET_ASSERTION)];
+  const assertions = [...primeSpec.matchAll(RATCHET_ASSERTION)];
   if (assertions.length !== 1) {
     return {
       ok: false,
@@ -523,14 +602,13 @@ export function reconcileFunctionCountRatchet(args: {
   const indent = assertion[1];
   const count = ratchetCount(args.mergedToml, rule);
   const owned = [...new Set(args.cloneOwnedFunctions)].sort();
-  const withheld = [...new Set(args.withheld ?? [])].sort();
 
   const note = owned.length > 0 || withheld.length > 0 ? ratchetNote(indent, owned, withheld) : "";
   const merged =
-    stripPriorNote(args.primeSpec.slice(0, assertion.index)) +
+    stripPriorNote(primeSpec.slice(0, assertion.index)) +
     note +
     `${indent}expect(declared.length).toBe(${count});` +
-    args.primeSpec.slice((assertion.index ?? 0) + assertion[0].length);
+    primeSpec.slice((assertion.index ?? 0) + assertion[0].length);
 
   // Asserted on the COMPOSED file, not about the template. The splice has to
   // have landed where it meant to and disturbed nothing else, so: the rule is

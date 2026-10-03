@@ -10,6 +10,7 @@ import {
   isWalkedSourceFile,
   ratchetCount,
   reconcileFunctionCountRatchet,
+  dropWithheldTableRows,
   reconcileSecurityInventory,
 } from "./securityBaselineReconcile.pure";
 import { PRIME_ONLY_FEATURES } from "../primeOnlyFeatures.pure";
@@ -714,5 +715,81 @@ describe("the engine hands the withheld set to both baselines", () => {
     expect(block).toContain("for (const removed of deletesCrossing) finalTree.delete(removed);");
     expect(block).toContain("withheld: withheldFunctions");
     expect(block).not.toContain("pendingDeletes");
+  });
+});
+
+describe("the ratchet spec's tables, on a clone that withholds functions", () => {
+  // The shape of F-02 in `auditRemediation.spec.ts`: a table of functions a
+  // check applies to, one of which the independent CRM line does not carry.
+  const SPEC = [
+    "describe('F-02', () => {",
+    "  it.each([",
+    "    'email-body-backfill',",
+    "    'backfill-message-directions',",
+    "    'backfill-investment-scores',",
+    "  ])('%s is verify_jwt = true', (fn) => {",
+    "    expect(fn).toBeTruthy();",
+    "  });",
+    "});",
+    "describe('the config', () => {",
+    "  it('every function still declares verify_jwt explicitly', () => {",
+    "    const declared = [...CONFIG.matchAll(",
+    "      /\\[functions\\.([A-Za-z0-9_-]+)\\][^[]*?verify_jwt\\s*=\\s*(true|false)/gs)];",
+    "    expect(declared.length).toBe(2);",
+    "  });",
+    "});",
+    "",
+  ].join("\n");
+
+  it("takes out the row naming a withheld function, and only that row", () => {
+    const out = reconcileFunctionCountRatchet({
+      primeSpec: SPEC,
+      mergedToml: CLONE_TOML,
+      cloneOwnedFunctions: ["crm-send-message"],
+      withheld: ["backfill-message-directions"],
+    });
+    expect(out.ok).toBe(true);
+    const merged = (out as { merged: string }).merged;
+    expect(merged).not.toContain("'backfill-message-directions'");
+    expect(merged).toContain("    'email-body-backfill',\n    'backfill-investment-scores',\n  ])");
+    expect(merged).toContain("expect(declared.length).toBe(3);");
+  });
+
+  it("leaves the table alone where nothing in it is withheld", () => {
+    const out = dropWithheldTableRows(SPEC, ["ghl-calendar"]);
+    expect(out).toEqual({ ok: true, text: SPEC, dropped: [] });
+  });
+
+  it("does not touch a name outside a table", () => {
+    // Prose or another kind of assertion is not something this can read.
+    const prose = "// 'backfill-message-directions',\nconst x = ['backfill-message-directions'];\n";
+    const out = dropWithheldTableRows(prose, ["backfill-message-directions"]);
+    expect(out).toEqual({ ok: true, text: prose, dropped: [] });
+  });
+
+  it("refuses to empty a table, because an empty table stopped checking", () => {
+    const only = "it.each([\n  'backfill-message-directions',\n])('%s', () => {});\n";
+    expect(dropWithheldTableRows(only, ["backfill-message-directions"]).ok).toBe(false);
+    expect(
+      reconcileFunctionCountRatchet({
+        primeSpec: only + SPEC,
+        mergedToml: CLONE_TOML,
+        cloneOwnedFunctions: [],
+        withheld: ["backfill-message-directions"],
+      }).ok,
+    ).toBe(false);
+  });
+
+  it("is a fixed point with the rows taken out", () => {
+    const args = {
+      mergedToml: CLONE_TOML,
+      cloneOwnedFunctions: ["crm-send-message"],
+      withheld: ["backfill-message-directions"],
+    };
+    const once = reconcileFunctionCountRatchet({ primeSpec: SPEC, ...args }) as { merged: string };
+    const twice = reconcileFunctionCountRatchet({ primeSpec: once.merged, ...args }) as {
+      merged: string;
+    };
+    expect(twice.merged).toBe(once.merged);
   });
 });
