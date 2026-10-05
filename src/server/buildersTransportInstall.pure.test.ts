@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   cloneConnectionRow,
+  cloneInboundUrl,
   readTransportGrant,
   redactInstallOutcome,
   refuseBeforeSpending,
@@ -10,7 +11,8 @@ import {
 } from "./buildersTransportInstall.pure";
 
 const READY = { supabase_url: "https://x.supabase.co", service_role_key: "enc", status: "ready" };
-const LIVE = { clone_id: "clone-1", state: "invited" };
+const ORG = "7a1c2e3f-4b5d-4e6f-8a9b-0c1d2e3f4a5b";
+const LIVE = { clone_id: "clone-1", state: "invited", builder_org_ref: ORG };
 
 describe("refuseBeforeSpending", () => {
   it("passes a live connection on a ready backend", () => {
@@ -31,9 +33,19 @@ describe("refuseBeforeSpending", () => {
     expect(r?.message).toMatch(/new connection/i);
   });
 
+  it("refuses when the ledger names no builder organisation, before anything is spent", () => {
+    for (const builder_org_ref of [null, undefined, "", "acme-homes"]) {
+      const r = refuseBeforeSpending({
+        connection: { clone_id: "clone-1", state: "invited", builder_org_ref },
+        backend: READY,
+      });
+      expect(r?.reason).toBe("connection_unmapped");
+    }
+  });
+
   it("refuses when the ledger names no workspace", () => {
     const r = refuseBeforeSpending({
-      connection: { clone_id: null, state: "invited" },
+      connection: { clone_id: null, state: "invited", builder_org_ref: ORG },
       backend: READY,
     });
     expect(r?.reason).toBe("no_clone_on_connection");
@@ -72,7 +84,8 @@ describe("refuseBeforeSpending", () => {
     const inputs = [
       { connection: null, backend: READY },
       { connection: { clone_id: "c", state: "revoked" }, backend: READY },
-      { connection: { clone_id: null, state: "invited" }, backend: READY },
+      { connection: { clone_id: null, state: "invited", builder_org_ref: ORG }, backend: READY },
+      { connection: { clone_id: "c", state: "invited", builder_org_ref: null }, backend: READY },
       { connection: LIVE, backend: null },
       { connection: LIVE, backend: { ...READY, status: "failed" } },
       { connection: LIVE, backend: { ...READY, service_role_key: null } },
@@ -123,8 +136,13 @@ describe("cloneConnectionRow", () => {
     hmacSecret: "s",
     networkInboundUrl: "https://n.example/x",
     builderOrgLabel: "Acme Homes",
+    builderOrganisationId: ORG,
     scopes: ["stock:publish"],
     now: "2026-09-19T00:00:00.000Z",
+  });
+
+  it("names the builder organisation, which is the connection's identity on the workspace", () => {
+    expect(row.builder_organisation_id).toBe(ORG);
   });
 
   it("is active, because the network accepted before it would provision", () => {
@@ -143,6 +161,7 @@ describe("cloneConnectionRow", () => {
       hmacSecret: "s",
       networkInboundUrl: "https://n/x",
       builderOrgLabel: null,
+      builderOrganisationId: ORG,
       scopes: null,
       now: "2026-09-19T00:00:00.000Z",
     });
@@ -151,6 +170,23 @@ describe("cloneConnectionRow", () => {
 
   it("never invents a network_connection_id of its own", () => {
     expect(row.network_connection_id).toBe("conn-1");
+  });
+});
+
+describe("cloneInboundUrl", () => {
+  it("derives the workspace's inbound door from its backend origin", () => {
+    expect(cloneInboundUrl("https://abc.supabase.co")).toBe(
+      "https://abc.supabase.co/functions/v1/builder-network-inbound",
+    );
+    expect(cloneInboundUrl("https://abc.supabase.co///")).toBe(
+      "https://abc.supabase.co/functions/v1/builder-network-inbound",
+    );
+  });
+
+  it("refuses anything that is not a bare https origin", () => {
+    for (const bad of ["http://abc.supabase.co", "https://abc.supabase.co/rest", "", "abc"]) {
+      expect(cloneInboundUrl(bad)).toBeNull();
+    }
   });
 });
 
@@ -221,6 +257,28 @@ describe("installCloneNetworkTransport", () => {
     const ask = h.indexOf("callBuilderNetworkAdmin");
     expect(probe).toBeGreaterThan(-1);
     expect(ask).toBeGreaterThan(probe);
+  });
+
+  it("asks the free questions before the one-shot one: rivals, then the address, then the secret", () => {
+    const h = handler();
+    const probe = h.indexOf("builder_network_connections?select=id&limit=0");
+    const rivals = h.indexOf("&builder_organisation_id=eq.");
+    const address = h.indexOf('callBuilderNetworkAdmin("set_inbound_url"');
+    const spend = h.indexOf("callBuilderNetworkAdmin(operation");
+    expect(probe).toBeGreaterThan(-1);
+    expect(rivals).toBeGreaterThan(probe);
+    expect(address).toBeGreaterThan(rivals);
+    expect(spend).toBeGreaterThan(address);
+    // The address is derived from the backend, never typed.
+    expect(h).toContain("cloneInboundUrl(cloneUrl)");
+  });
+
+  it("writes the organisation into the workspace row and the audit, with the acting operator", () => {
+    const h = handler();
+    expect(h).toMatch(/cloneConnectionRow\(\{[\s\S]*builderOrganisationId,/);
+    const audit = h.slice(h.indexOf("writeAuditLog"));
+    expect(audit).toContain("actorUserId: context.userId");
+    expect(audit).toContain("builder_organisation_id: builderOrganisationId");
   });
 
   it("refuses on Mission Control's own state before either", () => {

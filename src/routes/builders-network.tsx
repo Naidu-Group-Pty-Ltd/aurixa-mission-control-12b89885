@@ -70,6 +70,7 @@ import {
   type NetworkSignalReading,
 } from "@/server/builders-network.functions";
 import { installCloneNetworkTransport } from "@/server/buildersTransportInstall.functions";
+import { setWorkspaceConnectionScope } from "@/server/buildersWorkspaceScope.functions";
 import { readNetworkFailure } from "@/lib/buildersNetworkFailure.pure";
 import { AccessRequestsPanel } from "@/components/builders-network-access-requests";
 import {
@@ -670,6 +671,8 @@ function BuildersNetworkConsole() {
   const revokeConnFn = useServerFn(revokeNetworkConnection);
   const transportFn = useServerFn(setNetworkConnectionTransport);
   const installFn = useServerFn(installCloneNetworkTransport);
+  const scopeFn = useServerFn(setWorkspaceConnectionScope);
+  const [scoping, setScoping] = useState<string | null>(null);
 
   const status = useQuery({ queryKey: ["bn-status"], queryFn: () => statusFn() });
   const organisations = useQuery({ queryKey: ["bn-orgs"], queryFn: () => orgsFn({ data: {} }) });
@@ -1349,6 +1352,67 @@ function BuildersNetworkConsole() {
                           ? "Installing…"
                           : "Install on workspace"}
                       </Button>
+                      {/*
+                       * The workspace's grant of the Compliance Passport to
+                       * this organisation. It is written on the network AND
+                       * on the workspace's own row, because each checks its
+                       * own copy; withdrawing removes the workspace's copy
+                       * first, which alone stops every read.
+                       */}
+                      {(() => {
+                        const holds = (connection.scopes ?? []).includes("aml:reliance");
+                        const id = connection.network_connection_id;
+                        return (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={scoping === id}
+                            onClick={async () => {
+                              const go = window.confirm(
+                                holds
+                                  ? "Withdraw the Compliance Passport from this organisation? Its " +
+                                      "portal stops reading it at the next request."
+                                  : "Let this organisation's portal read the Compliance Passport " +
+                                      "this workspace has shared with it? Only matters this " +
+                                      "workspace links to the organisation are ever served, read-only.",
+                              );
+                              if (!go) return;
+                              setScoping(id);
+                              try {
+                                const result = await scopeFn({
+                                  data: {
+                                    connectionId: id,
+                                    scopeKey: "aml:reliance",
+                                    grant: !holds,
+                                  },
+                                });
+                                if (result.ok) {
+                                  toast.success(
+                                    holds
+                                      ? "Compliance Passport withdrawn"
+                                      : "Compliance Passport granted",
+                                  );
+                                  refreshAll();
+                                } else {
+                                  // The act's own sentence, with the remedy beside it.
+                                  toast.error(
+                                    result.error,
+                                    result.remedy ? { description: result.remedy } : undefined,
+                                  );
+                                }
+                              } finally {
+                                setScoping(null);
+                              }
+                            }}
+                          >
+                            {scoping === id
+                              ? "Saving…"
+                              : holds
+                                ? "Withdraw Compliance Passport"
+                                : "Grant Compliance Passport"}
+                          </Button>
+                        );
+                      })()}
                       <Button
                         size="sm"
                         variant="outline"

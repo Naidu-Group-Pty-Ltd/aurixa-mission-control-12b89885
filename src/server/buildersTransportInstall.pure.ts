@@ -55,7 +55,10 @@ export type InstallRefusal =
   | { reason: "clone_backend_not_ready"; message: string; status: string }
   | { reason: "clone_credentials_incomplete"; message: string }
   | { reason: "clone_unwritable"; message: string; detail: string }
-  | { reason: "connection_revoked"; message: string };
+  | { reason: "connection_revoked"; message: string }
+  | { reason: "connection_unmapped"; message: string };
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** What the caller knows about the clone side before anything is spent. */
 export interface CloneTarget {
@@ -73,7 +76,11 @@ export interface CloneTarget {
  * happens next.
  */
 export function refuseBeforeSpending(input: {
-  connection: { clone_id: string | null; state: string | null } | null;
+  connection: {
+    clone_id: string | null;
+    state: string | null;
+    builder_org_ref?: string | null;
+  } | null;
   backend: {
     supabase_url: string | null;
     service_role_key: string | null;
@@ -100,6 +107,22 @@ export function refuseBeforeSpending(input: {
     return {
       reason: "no_clone_on_connection",
       message: "The shadow ledger holds no workspace for this connection.",
+    };
+  }
+  /*
+   * The workspace keys every builder read on the ORGANISATION its row names:
+   * a row with no `builder_organisation_id` halts the stock sync as an
+   * identity mismatch and answers E4 `e4_connection_unmapped`. So a row this
+   * act could only write without one is a spent secret buying a dead
+   * connection — refused while refusing is still free.
+   */
+  if (!UUID_RE.test(String(input.connection.builder_org_ref ?? ""))) {
+    return {
+      reason: "connection_unmapped",
+      message:
+        "The shadow ledger does not name the builder organisation this connection serves, so " +
+        "the workspace row could not say whose connection it is. Mint the connection from " +
+        "this console, which records the organisation.",
     };
   }
   if (!input.backend) {
@@ -142,12 +165,19 @@ export function cloneConnectionRow(input: {
   hmacSecret: string;
   networkInboundUrl: string;
   builderOrgLabel: string | null;
+  /**
+   * The network's organisation id, as `create_connection` was given it. The
+   * workspace compares it with every payload and every E4 assertion, so it is
+   * the connection's identity on this side and is never left null.
+   */
+  builderOrganisationId: string;
   scopes: string[] | null;
   now: string;
 }): Record<string, unknown> {
   return {
     network_connection_id: input.networkConnectionId,
     builder_org_label: input.builderOrgLabel,
+    builder_organisation_id: input.builderOrganisationId,
     state: "active",
     scopes: input.scopes ?? [],
     outbound_hmac_secret: input.hmacSecret,
@@ -155,6 +185,21 @@ export function cloneConnectionRow(input: {
     accepted_at: input.now,
     updated_at: input.now,
   };
+}
+
+/**
+ * Where the network delivers to this workspace — its `builder-network-inbound`
+ * door, derived from the backend Mission Control already holds rather than
+ * typed by an operator. The compliance broker derives the workspace's
+ * `aml-reliance` address from this same URL and refuses any other shape, so a
+ * mistyped one is not a cosmetic fault.
+ */
+export function cloneInboundUrl(supabaseUrl: string): string | null {
+  const base = String(supabaseUrl ?? "")
+    .trim()
+    .replace(/\/+$/, "");
+  if (!/^https:\/\/[^/]+$/.test(base)) return null;
+  return `${base}/functions/v1/builder-network-inbound`;
 }
 
 /**

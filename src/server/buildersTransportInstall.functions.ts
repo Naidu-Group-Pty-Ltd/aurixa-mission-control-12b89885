@@ -27,6 +27,7 @@ import { decryptSecret } from "./crypto.server";
 import { writeAuditLog } from "./audit.server";
 import {
   cloneConnectionRow,
+  cloneInboundUrl,
   readTransportGrant,
   redactInstallOutcome,
   refuseBeforeSpending,
@@ -66,10 +67,10 @@ export const installCloneNetworkTransport = createServerFn({ method: "POST" })
     if (!data?.connectionId) throw new Error("connectionId required");
     return { connectionId: data.connectionId, rotate: data.rotate === true };
   })
-  .handler(async ({ data }): Promise<InstallOutcome> => {
+  .handler(async ({ data, context }): Promise<InstallOutcome> => {
     const { data: shadow } = await supabaseAdmin
       .from("builders_network_connections_shadow")
-      .select("clone_id, network_connection_id, builder_org_label, scopes, state")
+      .select("clone_id, network_connection_id, builder_org_ref, builder_org_label, scopes, state")
       .eq("network_connection_id", data.connectionId)
       .maybeSingle();
 
@@ -82,7 +83,13 @@ export const installCloneNetworkTransport = createServerFn({ method: "POST" })
       : { data: null };
 
     const refusal = refuseBeforeSpending({
-      connection: shadow ? { clone_id: shadow.clone_id, state: shadow.state } : null,
+      connection: shadow
+        ? {
+            clone_id: shadow.clone_id,
+            state: shadow.state,
+            builder_org_ref: shadow.builder_org_ref,
+          }
+        : null,
       backend: backendRes.data ?? null,
     });
     if (refusal) return redactInstallOutcome({ ok: false, error: refusal.message });
@@ -135,6 +142,70 @@ export const installCloneNetworkTransport = createServerFn({ method: "POST" })
       });
     }
 
+    /*
+     * One live row per builder organisation is a constraint on the workspace
+     * (`builder_network_connections_org_live_key`). A second one would fail
+     * the install AFTER the secret was spent, so it is asked first, while
+     * the answer is free.
+     */
+    const builderOrganisationId = String(shadow!.builder_org_ref);
+    let rivals: Response;
+    try {
+      rivals = await fetch(
+        `${cloneUrl}/rest/v1/builder_network_connections?select=network_connection_id` +
+          `&builder_organisation_id=eq.${encodeURIComponent(builderOrganisationId)}` +
+          `&state=neq.revoked`,
+        { headers: cloneHeaders },
+      );
+    } catch (e) {
+      return redactInstallOutcome({
+        ok: false,
+        error: `This workspace's database is unreachable: ${e instanceof Error ? e.message : "network error"}.`,
+      });
+    }
+    const rivalRows = rivals.ok
+      ? ((await rivals.json().catch(() => null)) as Array<{ network_connection_id: string }> | null)
+      : null;
+    if (!rivalRows) {
+      return redactInstallOutcome({
+        ok: false,
+        error: `This workspace could not say which connections it already holds (HTTP ${rivals.status}).`,
+      });
+    }
+    if (rivalRows.some((r) => r.network_connection_id !== data.connectionId)) {
+      return redactInstallOutcome({
+        ok: false,
+        error:
+          "This workspace already holds a live connection for that builder organisation. A " +
+          "workspace keeps at most one per organisation; revoke the other before installing this one.",
+      });
+    }
+
+    /*
+     * The network's half of the address: where IT delivers to this
+     * workspace. Derived from the backend rather than typed, and set before
+     * the secret is asked for, because it is free to repeat and a connection
+     * with a secret and nowhere to deliver is a half-built one.
+     */
+    const inboundUrl = cloneInboundUrl(cloneUrl);
+    if (!inboundUrl) {
+      return redactInstallOutcome({
+        ok: false,
+        error:
+          "This workspace's backend address is not an https origin, so the network has nowhere to deliver.",
+      });
+    }
+    const addressed = await callBuilderNetworkAdmin("set_inbound_url", {
+      connection_id: data.connectionId,
+      inbound_url: inboundUrl,
+    });
+    if (!addressed.ok) {
+      return redactInstallOutcome({
+        ok: false,
+        error: `The network did not record where to deliver: ${String(addressed.error)}`,
+      });
+    }
+
     const operation = data.rotate ? "rotate_transport" : "provision_transport";
     const result = await callBuilderNetworkAdmin(operation, {
       connection_id: data.connectionId,
@@ -162,6 +233,7 @@ export const installCloneNetworkTransport = createServerFn({ method: "POST" })
       hmacSecret: grant.secret,
       networkInboundUrl: grant.inboundUrl,
       builderOrgLabel: shadow!.builder_org_label ?? null,
+      builderOrganisationId,
       scopes: (shadow!.scopes as string[] | null) ?? null,
       now,
     });
@@ -220,9 +292,15 @@ export const installCloneNetworkTransport = createServerFn({ method: "POST" })
         : "builders_network_transport_installed",
       entityType: "builders_network_connection",
       entityId: data.connectionId,
+      actorUserId: context.userId,
       // Never the secret. What an operator audits is which workspace was
-      // joined to which connection, and when.
-      metadata: { clone_id: shadow!.clone_id, network_connection_id: data.connectionId },
+      // joined to which connection, for which organisation, and when.
+      metadata: {
+        clone_id: shadow!.clone_id,
+        network_connection_id: data.connectionId,
+        builder_organisation_id: builderOrganisationId,
+        network_inbound_url_set: true,
+      },
     });
 
     return redactInstallOutcome({
