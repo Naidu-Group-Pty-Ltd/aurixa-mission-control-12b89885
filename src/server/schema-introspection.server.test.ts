@@ -19,6 +19,7 @@ import {
   reconcile,
   MAX_FUNCTION_PASSES,
   buildGrantDdl,
+  buildViewDdl,
 } from "./schema-introspection.server";
 
 describe("read-only source-query assertion", () => {
@@ -308,5 +309,21 @@ describe("view convergence", () => {
     expect(shouldRunAnotherFunctionPass([4, 2], 3)).toBe(true);
     expect(shouldRunAnotherFunctionPass([4, 2, 2], 3)).toBe(false);
     expect(shouldRunAnotherFunctionPass([0], 3)).toBe(false);
+  });
+});
+
+describe("buildViewDdl", () => {
+  // `create or replace view` REPLACES a view's options with those the
+  // statement names, so a statement naming none strips security_invoker.
+  it("carries the prime's options into the statement", () => {
+    expect(buildViewDdl("public", "client_overview", "select 1", "{security_invoker=true}")).toBe(
+      `create or replace view "public"."client_overview" with (security_invoker=true) as select 1`,
+    );
+  });
+
+  it("names no options where the prime's view has none", () => {
+    expect(buildViewDdl("aml", "v", "select 1", null)).toBe(
+      `create or replace view "aml"."v" as select 1`,
+    );
   });
 });

@@ -252,6 +252,20 @@ describe("the independent line's own copies", () => {
     expect(crmLineVariantPattern("src/pages/Dashboard.tsx", "independent")).toBeNull();
   });
 
+  it("holds the four files the prime@f0ea76e cascade would have reverted", () => {
+    // Head #64 proposed the prime's copy of exactly these four, and nothing
+    // else. Each must resolve to a row of its own, not to a broader glob.
+    for (const path of [
+      "src/pages/CallLogs.tsx",
+      "src/components/finance-portal/ClientCommsInboxTab.tsx",
+      "supabase/functions/request-lead-magnet/index.ts",
+      "supabase/functions/finance-portal-client-comms/index.ts",
+    ]) {
+      expect(crmLineVariantPattern(path, "independent"), path).toBe(path);
+      expect(crmLineVariantPattern(path, "dependent"), path).toBeNull();
+    }
+  });
+
   it("does not list a path the line withholds outright", () => {
     // A withheld feature is `protected`; listing it here too would read as a
     // hold an operator could release.

@@ -28,6 +28,17 @@ import {
   parseResumeMarker,
   pastDeadline,
 } from "./provisioningBudget";
+import {
+  parseGrantees,
+  planRoutineAclConvergence,
+  planViewOptionConvergence,
+  referencedFunctionNames,
+  variantReferenceTexts,
+  viewWithClause,
+  type RoutineAcl,
+  type RoutineAclPlan,
+  type ViewOptions,
+} from "./routinePrivileges.pure";
 
 /** Schemas replicated onto a clone. `aml` is not optional — the prime keeps 106 tables there. */
 export const REPLICATED_SCHEMAS = ["public", "aml"] as const;
@@ -399,6 +410,18 @@ export function buildGrantDdl(
 }
 
 /**
+ * A view, WITH its options.
+ *
+ * `create or replace view` REPLACES a view's options with the ones the
+ * statement names, so leaving them off does not leave them alone — it strips
+ * `security_invoker` from a view that had it, and the view then reads its
+ * tables with the owner's rights, past every RLS policy on them.
+ */
+export function buildViewDdl(schema: string, name: string, def: string, options: unknown): string {
+  return `create or replace view ${quoteIdent(schema)}.${quoteIdent(name)}${viewWithClause(options)} as ${def}`;
+}
+
+/**
  * A privilege on the SCHEMA itself, which is a different grant from a
  * privilege on the tables inside it and was never replicated.
  *
@@ -500,6 +523,10 @@ begin
   return jsonb_build_object('applied', ok, 'failures', failures);
 end;
 $fn$;
+-- It executes whatever it is handed, so nobody but the Management API's own
+-- role may call it — the same default this module now converges everywhere else.
+revoke all on schema aurixa from public;
+revoke execute on function aurixa.apply_ddl_batch(jsonb, text) from public, anon, authenticated;
 `.trim();
 
 export type BatchApplyResult = { applied: number; failed: number; errors: string[] };
@@ -630,8 +657,19 @@ const Q = {
                          join pg_namespace n on n.oid = ic.relnamespace
                          where n.nspname in (${SCHEMA_LIST})`,
 
-  views: `select schemaname as schema, viewname as name, definition as def
-          from pg_views where schemaname in (${SCHEMA_LIST}) order by 1, 2`,
+  /*
+    The OPTIONS ride with the definition. `create or replace view` replaces a
+    view's options with whatever the statement names, so a definition written
+    without them strips `security_invoker` — measured on every clone, 10 to 13
+    views each reading their tables with the owner's rights. See
+    `routinePrivileges.pure.ts`.
+  */
+  views: `select v.schemaname as schema, v.viewname as name, v.definition as def,
+                 coalesce(c.reloptions::text, '{}') as options
+            from pg_views v
+            join pg_namespace n on n.nspname = v.schemaname
+            join pg_class c on c.relnamespace = n.oid and c.relname = v.viewname and c.relkind = 'v'
+           where v.schemaname in (${SCHEMA_LIST}) order by 1, 2`,
 
   matviews: `select n.nspname as schema, c.relname as name, pg_get_viewdef(c.oid, true) as def
              from pg_class c join pg_namespace n on n.oid = c.relnamespace
@@ -696,7 +734,90 @@ const Q = {
                  where n.nspname in (${SCHEMA_LIST})
                    and r.rolname in (${API_ROLE_LIST})
                  order by 1, 2, 3, 4, 5`,
+
+  /**
+   * Who may EXECUTE each function — the ACL `pg_get_functiondef` never
+   * renders. A NULL `proacl` is the default ACL, which grants PUBLIC, so it is
+   * expanded with `acldefault` rather than read as "nobody".
+   */
+  routineAcls: `select quote_ident(n.nspname) || '.' || quote_ident(p.proname)
+                         || '(' || pg_get_function_identity_arguments(p.oid) || ')' as signature,
+                       lower(p.proname) as name,
+                       p.prosecdef as security_definer,
+                       coalesce((select string_agg(g, ',' order by g) from (
+                           select distinct case when a.grantee = 0 then 'PUBLIC' else r.rolname end as g
+                             from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+                             left join pg_roles r on r.oid = a.grantee
+                            where a.privilege_type = 'EXECUTE'
+                              and (a.grantee = 0 or r.rolname in (${API_ROLE_LIST}))) s), '') as grantees
+                  from pg_proc p
+                  join pg_namespace n on n.oid = p.pronamespace
+                  left join pg_depend d on d.objid = p.oid and d.deptype = 'e'
+                 where n.nspname in (${SCHEMA_LIST})
+                   and p.prokind in ('f', 'p')
+                   and d.objid is null
+                 order by 1`,
+
+  /** `security_invoker` and its siblings, per view. */
+  viewOptions: `select quote_ident(n.nspname) || '.' || quote_ident(c.relname) as view,
+                       coalesce(c.reloptions::text, '{}') as options
+                  from pg_class c
+                  join pg_namespace n on n.oid = c.relnamespace
+                 where c.relkind = 'v' and n.nspname in (${SCHEMA_LIST})
+                 order by 1`,
+
+  /**
+   * Everything on a project that can CALL a function as the querying role: RLS
+   * policies, view and materialised-view definitions, column defaults and
+   * generated columns, CHECK constraints, index expressions, and trigger
+   * definitions (a WHEN clause is evaluated as the caller). Read on both
+   * sides, and only what the clone holds and the prime does not can hold a
+   * revoke back (rule 4 in `routinePrivileges.pure.ts`). Deliberately
+   * generous: a name too many only keeps a function reachable.
+   */
+  referenceTexts: `select qual as t from pg_policies where schemaname in (${SCHEMA_LIST})
+                   union all
+                   select with_check from pg_policies where schemaname in (${SCHEMA_LIST})
+                   union all
+                   select definition from pg_views where schemaname in (${SCHEMA_LIST})
+                   union all
+                   select pg_get_viewdef(c.oid) from pg_class c
+                     join pg_namespace n on n.oid = c.relnamespace
+                    where c.relkind = 'm' and n.nspname in (${SCHEMA_LIST})
+                   union all
+                   select pg_get_expr(ad.adbin, ad.adrelid) from pg_attrdef ad
+                     join pg_class c on c.oid = ad.adrelid
+                     join pg_namespace n on n.oid = c.relnamespace
+                    where n.nspname in (${SCHEMA_LIST})
+                   union all
+                   select pg_get_constraintdef(con.oid) from pg_constraint con
+                     join pg_namespace n on n.oid = con.connamespace
+                    where con.contype = 'c' and n.nspname in (${SCHEMA_LIST})
+                   union all
+                   select indexdef from pg_indexes where schemaname in (${SCHEMA_LIST})
+                   union all
+                   select pg_get_triggerdef(t.oid) from pg_trigger t
+                     join pg_class c on c.oid = t.tgrelid
+                     join pg_namespace n on n.oid = c.relnamespace
+                    where not t.tgisinternal and n.nspname in (${SCHEMA_LIST})`,
 };
+
+/**
+ * The bodies of the functions a CLONE holds and the prime does not — a
+ * variant's own. One of those running as the caller needs EXECUTE on whatever
+ * it calls, and that is the one call site the prime's own grants cannot vouch
+ * for. Read only for the signatures named, because reading every body on a
+ * 600-function project to find three is a payload nobody needs.
+ */
+function cloneOnlyBodiesQuery(signatures: readonly string[]): string {
+  return `select p.prosrc as t
+            from pg_proc p
+            join pg_namespace n on n.oid = p.pronamespace
+           where n.nspname in (${SCHEMA_LIST})
+             and quote_ident(n.nspname) || '.' || quote_ident(p.proname)
+                 || '(' || pg_get_function_identity_arguments(p.oid) || ')'
+                 in (${signatures.map((sig) => sqlLiteral(sig)).join(", ")})`;
+}
 
 /** Count queries used for reconciliation — run identically on both sides. */
 const COUNTS: Record<StageName, string> = {
@@ -861,7 +982,30 @@ const DIGESTS: Partial<Record<StageName, string>> = {
                cross join lateral aclexplode(n.nspacl) a
                join pg_roles r on r.oid = a.grantee
               where n.nspname in (${SCHEMA_LIST})
-                and r.rolname in (${API_ROLE_LIST})) x`,
+                and r.rolname in (${API_ROLE_LIST})
+             union all
+             -- Function EXECUTE and view options are converged by this stage
+             -- too, so an equal digest has to mean they are equal as well —
+             -- or a clone whose TABLE grants match is skipped while every
+             -- function on it is still callable by anon.
+             select 'routine ' || quote_ident(n.nspname) || '.' || quote_ident(p.proname)
+                    || '(' || pg_get_function_identity_arguments(p.oid) || ') '
+                    || case when a.grantee = 0 then 'PUBLIC' else r.rolname end
+               from pg_proc p
+               join pg_namespace n on n.oid = p.pronamespace
+               left join pg_depend d on d.objid = p.oid and d.deptype = 'e'
+               cross join lateral aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+               left join pg_roles r on r.oid = a.grantee
+              where n.nspname in (${SCHEMA_LIST})
+                and p.prokind in ('f', 'p')
+                and d.objid is null
+                and a.privilege_type = 'EXECUTE'
+                and (a.grantee = 0 or r.rolname in (${API_ROLE_LIST}))
+             union all
+             select 'view ' || n.nspname || '.' || c.relname || ' ' || coalesce(c.reloptions::text, '{}')
+               from pg_class c
+               join pg_namespace n on n.oid = c.relnamespace
+              where c.relkind = 'v' and n.nspname in (${SCHEMA_LIST})) x`,
 };
 
 /** A stage is reconciled when the clone holds at least as many objects as the prime. */
@@ -1565,9 +1709,8 @@ export async function replicateSchemaByIntrospection(
   else if (STAGE_SEQUENCE.indexOf("views") >= startIndex) {
     await say("Replicating views...");
     const viewRows = await query(primeRef, Q.views);
-    const viewStmts = viewRows.map(
-      (r) =>
-        `create or replace view ${quoteIdent(str(r.schema))}.${quoteIdent(str(r.name))} as ${str(r.def)}`,
+    const viewStmts = viewRows.map((r) =>
+      buildViewDdl(str(r.schema), str(r.name), str(r.def), r.options),
     );
     const viewHistory: number[] = [];
     let viewApply: BatchApplyResult = { applied: 0, failed: 0, errors: [] };
@@ -1762,7 +1905,25 @@ export async function replicateSchemaByIntrospection(
             )
             .filter((d): d is string => d !== null);
 
-          return [...schemaDdl, ...tableDdl, ...defaultDdl];
+          // 4. Who may EXECUTE each function, and whose rights each view reads
+          //    with — after every function and view exists, and LAST, so a
+          //    pause leaves the table grants above already in place.
+          //    A catalogue that cannot be read here is not a reason to fail a
+          //    provision: the table grants still land, and the scheduled
+          //    `/hooks/clone-privilege-reconcile` sweep plans this again from
+          //    both catalogues within the half hour.
+          const privileges = await planClonePrivilegeConvergence(primeRef, cloneRef).catch(
+            (e: unknown) => {
+              console.warn(
+                "[schema-introspection] privilege convergence deferred to the sweep:",
+                e instanceof Error ? e.message : String(e),
+              );
+              return { statements: [] as string[] };
+            },
+          );
+
+          const apiSurface = [...schemaDdl, ...tableDdl, ...defaultDdl];
+          return [...apiSurface, ...privileges.statements];
         },
         60,
       ),
@@ -1786,6 +1947,148 @@ export async function replicateSchemaByIntrospection(
     shortStages,
     partial,
   };
+}
+
+// ─── Function EXECUTE and view options ───────────────────────────────
+
+export type PrivilegeConvergencePlan = {
+  /** Grants, then revokes, then view options — the order they must apply in. */
+  statements: string[];
+  routines: Omit<RoutineAclPlan, "grants" | "revokes"> & { grants: number; revokes: number };
+  views: { statements: number; invokerRestored: number };
+};
+
+function toRoutineAcls(rows: Array<Record<string, unknown>>): RoutineAcl[] {
+  return rows
+    .map((r) => ({
+      signature: str(r.signature),
+      name: str(r.name).toLowerCase(),
+      securityDefiner: r.security_definer === true || str(r.security_definer) === "true",
+      grantees: parseGrantees(r.grantees),
+    }))
+    .filter((r) => r.signature.length > 0);
+}
+
+function toViewOptions(rows: Array<Record<string, unknown>>): ViewOptions[] {
+  return rows.map((r) => ({ view: str(r.view), options: r.options })).filter((v) => v.view);
+}
+
+/**
+ * What it takes to give a clone the prime's function EXECUTE grants and view
+ * options. Reads both sides; writes nothing. See `routinePrivileges.pure.ts`
+ * for the rules.
+ *
+ * A clone whose catalogue cannot be read is NOT treated as holding nothing
+ * here, unlike the table grants above: an empty clone side would plan zero
+ * statements, which is safe, but would also report a clean fleet, which is
+ * not true. So it throws and the caller reports the clone as unreadable.
+ */
+export async function planClonePrivilegeConvergence(
+  primeRef: string,
+  cloneRef: string,
+): Promise<PrivilegeConvergencePlan> {
+  const [primeRoutines, cloneRoutines, primeViews, cloneViews, primeRefs, cloneRefs] =
+    await Promise.all([
+      query(primeRef, Q.routineAcls),
+      query(cloneRef, Q.routineAcls),
+      query(primeRef, Q.viewOptions),
+      query(cloneRef, Q.viewOptions),
+      query(primeRef, Q.referenceTexts),
+      query(cloneRef, Q.referenceTexts),
+    ]);
+  const prime = toRoutineAcls(primeRoutines);
+  const clone = toRoutineAcls(cloneRoutines);
+
+  const texts = (rows: Array<Record<string, unknown>>) =>
+    rows.map((r) => (r.t == null ? null : str(r.t)));
+  const referenced = referencedFunctionNames(
+    variantReferenceTexts(texts(primeRefs), texts(cloneRefs)),
+  );
+  const primeSigs = new Set(prime.map((r) => r.signature));
+  const cloneOnly = clone.filter((r) => !primeSigs.has(r.signature)).map((r) => r.signature);
+  if (cloneOnly.length) {
+    // A variant's own function calls shared ones as its caller; whatever it
+    // calls must stay reachable however the prime has it.
+    for (const sigs of chunk(cloneOnly, 200)) {
+      const bodies = await query(cloneRef, cloneOnlyBodiesQuery(sigs));
+      for (const n of referencedFunctionNames(bodies.map((b) => (b.t == null ? null : str(b.t))))) {
+        referenced.add(n);
+      }
+    }
+  }
+
+  const routinePlan = planRoutineAclConvergence({ prime, clone, referencedOnClone: referenced });
+  const viewPlan = planViewOptionConvergence({
+    prime: toViewOptions(primeViews),
+    clone: toViewOptions(cloneViews),
+  });
+
+  const { grants, revokes, ...routineReport } = routinePlan;
+  return {
+    statements: [...grants, ...revokes, ...viewPlan.statements],
+    routines: { ...routineReport, grants: grants.length, revokes: revokes.length },
+    views: { statements: viewPlan.statements.length, invokerRestored: viewPlan.invokerRestored },
+  };
+}
+
+export type PrivilegeConvergenceResult = {
+  cloneRef: string;
+  dryRun: boolean;
+  plan: Omit<PrivilegeConvergencePlan, "statements">;
+  /** Up to 20 planned statements, for an operator reading a dry run. */
+  sample: string[];
+  applied: number;
+  failed: number;
+  errors: string[];
+};
+
+/**
+ * Bring an EXISTING clone's function EXECUTE grants and view options into line
+ * with the prime's.
+ *
+ * Provisioning does this in its grants stage, but a clone whose schema was
+ * verified before that existed never re-enters introspection
+ * (`schema_verified_at`), so nothing would ever reach it. This is the one
+ * function both paths' work comes down to, so they cannot drift apart.
+ *
+ * Every statement is idempotent and the plan is re-derived from both
+ * catalogues on every call, so a pass the budget interrupts loses nothing: the
+ * next one plans only what is still different.
+ */
+export async function convergeClonePrivileges(
+  cloneRef: string,
+  options: { primeRef: string; deadlineAt?: number | null; dryRun?: boolean },
+): Promise<PrivilegeConvergenceResult> {
+  const { primeRef } = options;
+  if (primeRef === cloneRef) throw new Error("Refusing to converge the prime onto itself");
+  const own = ownProjectRef();
+  if (own && (cloneRef.toLowerCase() === own || primeRef.toLowerCase() === own)) {
+    throw new Error(
+      `Refusing to converge privileges involving this deployment's own project (${own}).`,
+    );
+  }
+
+  const plan = await planClonePrivilegeConvergence(primeRef, cloneRef);
+  const { statements, ...report } = plan;
+  const result: PrivilegeConvergenceResult = {
+    cloneRef,
+    dryRun: Boolean(options.dryRun),
+    plan: report,
+    sample: statements.slice(0, 20),
+    applied: 0,
+    failed: 0,
+    errors: [],
+  };
+  if (options.dryRun || statements.length === 0) return result;
+
+  await ensureApplyHelper(cloneRef);
+  const applied = await applyStatements(cloneRef, "privileges", statements, 100, (about) => {
+    if (pastDeadline(options.deadlineAt)) throw new BudgetPause(about);
+  });
+  result.applied = applied.applied;
+  result.failed = applied.failed;
+  result.errors = applied.errors;
+  return result;
 }
 
 // ─── Emptiness verification ──────────────────────────────────────────

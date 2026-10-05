@@ -73,6 +73,39 @@ export function jsonResponse(body: unknown, status = 200): Response {
 }
 
 /**
+ * The tenant already holding this clone's billing id, when it is THIS clone's.
+ * `null` means "nobody holds it — provision". A holder belonging to another
+ * clone is refused rather than adopted or duplicated: crediting it would move
+ * one workspace's purchases into another's balance.
+ */
+async function adoptCloneBillingHolder(
+  cloneId: string | null,
+  billingUserId: string | null,
+): Promise<
+  { ok: true; tenantId: string; billingUserId: string } | { ok: false; error: string } | null
+> {
+  if (!cloneId || !billingUserId) return null;
+  const holder = await supabaseAdmin
+    .from("tenants")
+    .select("id, clone_id")
+    .eq("billing_user_id", billingUserId)
+    .maybeSingle();
+  // A lookup that FAILED is not "nobody holds it": provisioning on the strength
+  // of it is exactly the duplicate this guards against.
+  if (holder.error) return { ok: false, error: holder.error.message };
+  if (!holder.data) return null;
+  if (holder.data.clone_id === cloneId) {
+    return { ok: true, tenantId: holder.data.id, billingUserId };
+  }
+  return {
+    ok: false,
+    error:
+      `billing id "${billingUserId}" belongs to a tenant of another clone ` +
+      `(${holder.data.clone_id ?? "none"}); set a distinct billing id on this clone.`,
+  };
+}
+
+/**
  * Ensure a tenant row exists for (clone_id, external_ref). Assigns the
  * default active billing plan if none is set, and returns the tenant id.
  */
@@ -167,6 +200,27 @@ export async function ensureTenant(
     };
   }
 
+  /*
+    A clone that already has a tenant holding its billing id meters through
+    THAT tenant, whatever external_ref the caller names.
+
+    A clone's token client asks for `prime:<its project ref>`, and provisioning
+    creates the clone's tenant under the clone's id and stamps the clone's
+    billing id on it. `tenants_billing_user_id_uidx` is unique across the whole
+    table, so inserting a second tenant carrying the same id is 23505 every
+    time. Measured 3 Oct 2026: NPC Test, Preflight Property Group and NPC CRM
+    Independent had no `prime:` tenant at all, and every reserve and balance
+    call they made answered 500. Only NPC Client Dashboard metered, because its
+    `prime:` tenant predates its billing id.
+
+    Adopting is also what keeps the money in one place. A clone with one tenant
+    has every purchase credited to it (`resolveCloneBillingTenant`), so a
+    second, empty `prime:` tenant would have split spending from top-ups — the
+    defect `billing-tenant.server.ts` exists to heal.
+  */
+  const adopted = await adoptCloneBillingHolder(cloneId, cloneBillingUserId);
+  if (adopted) return adopted;
+
   // Auto-provision tenant on cheapest active plan
   const plan = await supabaseAdmin
     .from("billing_plans")
@@ -196,7 +250,15 @@ export async function ensureTenant(
     })
     .select("id")
     .single();
-  if (insert.error) return { ok: false, error: insert.error.message };
+  if (insert.error) {
+    // Another request created the holder between the lookup above and this
+    // insert. Adopt it rather than report the race as a fault.
+    if (insert.error.code === "23505") {
+      const raced = await adoptCloneBillingHolder(cloneId, cloneBillingUserId);
+      if (raced) return raced;
+    }
+    return { ok: false, error: insert.error.message };
+  }
 
   // Seed monthly allowance via grant if plan has one
   const allowance = plan.data?.monthly_allowance ?? 0;
