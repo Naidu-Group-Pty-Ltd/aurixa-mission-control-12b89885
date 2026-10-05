@@ -388,6 +388,13 @@ export function withheldClause(names: Iterable<string>): string {
  * purpose was the line (#7, #8, #15, `5517a62`, `2e7cf3f`, #56, and #58 for
  * the palette, added 2 Oct 2026). The globs name what only the line carries,
  * so a same-named prime file cannot land on it.
+ *
+ * The four paths added on 5 Oct 2026 came from head #63, which made the
+ * lead magnet, the finance portal's client messages and the call log native.
+ * The cascade of prime@f0ea76e (head #64) proposed the prime's copy of all
+ * four, and they were the whole of what it proposed. Head #65 put the line's
+ * copies back by hand before #64 landed. Without these rows every later
+ * cascade proposes the same four reverts.
  */
 export const CRM_LINE_VARIANT_PATTERNS: Readonly<Partial<Record<CrmMode, readonly string[]>>> = {
   independent: [
@@ -415,6 +422,10 @@ export const CRM_LINE_VARIANT_PATTERNS: Readonly<Partial<Record<CrmMode, readonl
     "src/pages/ClientTracker.tsx",
     "src/pages/Conversations.tsx",
     "src/pages/finance-portal/FinancePortalClients.tsx",
+    // Head #63: the call log draws no GoHighLevel clean-up, and the finance
+    // portal's inbox offers no WhatsApp, because this line has no sender for it.
+    "src/pages/CallLogs.tsx",
+    "src/components/finance-portal/ClientCommsInboxTab.tsx",
     // The line's own dashboard palette (head #58). The prime draws NPC's
     // palette because its `whitelabel_settings` row stores it; this line's
     // row was never written, so `linePalette.ts` fills the unset colours and
@@ -430,6 +441,10 @@ export const CRM_LINE_VARIANT_PATTERNS: Readonly<Partial<Record<CrmMode, readonl
     "supabase/functions/ai-dashboard-agent/index.ts",
     "supabase/functions/finance-portal-client-data/index.ts",
     "supabase/functions/manage-automation-settings/index.ts",
+    // Head #63: a lead-magnet lead is filed in this CRM, and a finance
+    // partner's message goes out through Twilio and the portal email.
+    "supabase/functions/request-lead-magnet/index.ts",
+    "supabase/functions/finance-portal-client-comms/index.ts",
     // The specs and gates that hold the shapes above.
     "src/components/clients/add-client/AddClientModal.test.tsx",
     "src/lib/security/__tests__/phantomColumnWrites.spec.ts",
