@@ -24,6 +24,15 @@ describe("the six portal apps", () => {
     }
   });
 
+  it("is ready exactly where the workspace's exchange is (the prime's NATIVE_READY_PORTALS)", () => {
+    // A literal at each end, as with BACKEND_DEPLOYED_BY: the prime's
+    // session.pure.ts answers PORTAL_NOT_READY for every other portal, so a
+    // link MC handed out for one would fail at the exchange.
+    expect(MOBILE_PORTALS.filter((p) => PORTAL_APPS[p].nativeSessionReady)).toEqual([
+      "command-centre",
+    ]);
+  });
+
   it("states a blocker exactly where the native session is not ready", () => {
     for (const p of MOBILE_PORTALS) {
       expect(PORTAL_APPS[p].nativeSessionReady).toBe(PORTAL_APPS[p].blocker === null);

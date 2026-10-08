@@ -75,8 +75,10 @@ export const PORTAL_APPS: Readonly<Record<MobilePortal, PortalApp>> = {
     androidPackage: "au.com.aurixasystems.client",
     iosBundleId: "au.com.aurixasystems.client",
     bucket: "mobile-releases-client",
-    nativeSessionReady: true,
-    blocker: null,
+    nativeSessionReady: false,
+    blocker:
+      "The workspace's native exchange answers the Command Centre only today; the " +
+      "client portal's session needs its own principal mapping before an app can hold one.",
   },
   finance: {
     portal: "finance",
@@ -84,8 +86,10 @@ export const PORTAL_APPS: Readonly<Record<MobilePortal, PortalApp>> = {
     androidPackage: "au.com.aurixasystems.finance",
     iosBundleId: "au.com.aurixasystems.finance",
     bucket: "mobile-releases-finance",
-    nativeSessionReady: true,
-    blocker: null,
+    nativeSessionReady: false,
+    blocker:
+      "The workspace's native exchange answers the Command Centre only today; the " +
+      "finance portal's session needs its own principal mapping before an app can hold one.",
   },
   solicitor: {
     portal: "solicitor",

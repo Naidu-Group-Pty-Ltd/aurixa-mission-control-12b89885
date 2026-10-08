@@ -113,7 +113,7 @@ export async function registerRelease(
     .eq("channel", d.channel)
     .eq("build_number", d.build_number)
     .maybeSingle();
-  if (existing.error) return refuse(503, "UNAVAILABLE", existing.error.message);
+  if (existing.error) return refuse(503, "UNAVAILABLE", "The release registry could not be read.");
 
   let releaseId: string;
   let existed = false;
@@ -158,7 +158,8 @@ export async function registerRelease(
       })
       .select("id")
       .single();
-    if (insertError) return refuse(503, "UNAVAILABLE", insertError.message);
+    if (insertError)
+      return refuse(503, "UNAVAILABLE", "The release registry could not complete that request.");
     releaseId = inserted.id;
     await writeAuditLog({
       action: "mobile_release.registered",
@@ -178,12 +179,7 @@ export async function registerRelease(
   const up = await supabase.storage
     .from(where.bucket)
     .createSignedUploadUrl(where.path, { upsert: true });
-  if (up.error || !up.data)
-    return refuse(
-      503,
-      "UNAVAILABLE",
-      `The upload URL could not be made: ${up.error?.message ?? "no answer"}`,
-    );
+  if (up.error || !up.data) return refuse(503, "UNAVAILABLE", "The upload URL could not be made.");
   return {
     ok: true,
     release_id: releaseId,
@@ -210,13 +206,13 @@ export async function markUploaded(
     .select("id, platform, storage_bucket, storage_path, size_bytes, state")
     .eq("id", releaseId)
     .maybeSingle();
-  if (error) return refuse(503, "UNAVAILABLE", error.message);
+  if (error) return refuse(503, "UNAVAILABLE", "The release could not be read.");
   if (!rel) return refuse(404, "NOT_FOUND", "No release has that id.");
   if (rel.platform !== "android" || !rel.storage_bucket || !rel.storage_path)
     return refuse(409, "CONFLICT", "Only an Android release carries a package.");
   const dir = rel.storage_path.slice(0, rel.storage_path.lastIndexOf("/"));
   const listed = await supabase.storage.from(rel.storage_bucket).list(dir, { limit: 10 });
-  if (listed.error) return refuse(503, "UNAVAILABLE", listed.error.message);
+  if (listed.error) return refuse(503, "UNAVAILABLE", "The uploaded package could not be found.");
   const obj = (listed.data ?? []).find((o) => o.name === "artifact");
   if (!obj) return refuse(409, "CONFLICT", "The package is not in storage yet.");
   const size = Number((obj.metadata as { size?: number } | null)?.size ?? NaN);
@@ -232,7 +228,8 @@ export async function markUploaded(
     .from("mobile_releases")
     .update({ uploaded_at: at })
     .eq("id", rel.id);
-  if (stampError) return refuse(503, "UNAVAILABLE", stampError.message);
+  if (stampError)
+    return refuse(503, "UNAVAILABLE", "The release registry could not complete that request.");
   return { ok: true, uploaded_at: at };
 }
 
@@ -253,7 +250,7 @@ export async function moveReleaseState(
     .select("*")
     .eq("id", input.releaseId)
     .maybeSingle();
-  if (error) return refuse(503, "UNAVAILABLE", error.message);
+  if (error) return refuse(503, "UNAVAILABLE", "The release could not be read.");
   if (!rel) return refuse(404, "NOT_FOUND", "No release has that id.");
   const from = rel.state as ReleaseState;
   const move = moveRelease(from, input.action, {
@@ -283,7 +280,8 @@ export async function moveReleaseState(
     .eq("state", from)
     .select("id")
     .maybeSingle();
-  if (moveError) return refuse(503, "UNAVAILABLE", moveError.message);
+  if (moveError)
+    return refuse(503, "UNAVAILABLE", "The release registry could not complete that request.");
   if (!moved) return refuse(409, "CONFLICT", "The release changed while it was being moved.");
 
   if (input.action === "promote") {
@@ -297,7 +295,7 @@ export async function moveReleaseState(
       },
       { onConflict: "release_id" },
     );
-    if (r.error) return refuse(503, "UNAVAILABLE", r.error.message);
+    if (r.error) return refuse(503, "UNAVAILABLE", "The release could not be moved.");
   } else if (input.action === "pause") {
     // A pause is a safety act: the state moved, and the rollout row is what
     // stops new download tickets, so a failure here is reported, never hidden.
@@ -305,13 +303,15 @@ export async function moveReleaseState(
       .from("mobile_release_rollouts")
       .update({ paused_at: now, pause_reason: (input.reason ?? "").trim() })
       .eq("release_id", rel.id);
-    if (pauseError) return refuse(503, "UNAVAILABLE", pauseError.message);
+    if (pauseError)
+      return refuse(503, "UNAVAILABLE", "The release registry could not complete that request.");
   } else if (input.action === "resume") {
     const { error: resumeError } = await supabase
       .from("mobile_release_rollouts")
       .update({ paused_at: null, pause_reason: null })
       .eq("release_id", rel.id);
-    if (resumeError) return refuse(503, "UNAVAILABLE", resumeError.message);
+    if (resumeError)
+      return refuse(503, "UNAVAILABLE", "The release registry could not complete that request.");
   }
   await writeAuditLog({
     action: `mobile_release.${input.action}`,
@@ -347,7 +347,7 @@ export async function listReleases(
     .limit(200);
   if (portal) q = q.eq("portal", portal);
   const { data, error } = await q;
-  if (error) return refuse(503, "UNAVAILABLE", error.message);
+  if (error) return refuse(503, "UNAVAILABLE", "The releases could not be listed.");
   const ids = (data ?? []).map((r) => r.id);
   const [rollouts, reports] = await Promise.all([
     ids.length
@@ -603,7 +603,7 @@ export async function recordInstallReport(
     outcome: input.outcome,
     detail: typeof input.detail === "string" ? input.detail.slice(0, 500) : null,
   });
-  if (error) return refuse(503, "UNAVAILABLE", error.message);
+  if (error) return refuse(503, "UNAVAILABLE", "The report could not be recorded.");
   return { ok: true };
 }
 

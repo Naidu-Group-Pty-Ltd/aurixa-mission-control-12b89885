@@ -103,3 +103,17 @@ describe("the public gateway pages never reach server code", () => {
     });
   }
 });
+
+describe("no database or vendor text reaches an answer", () => {
+  // A refusal carries a fixed sentence. The driver's own words are logged
+  // where an operator reads them, never handed to whoever asked.
+  const sources = readdirSync(join(process.cwd(), "src/server/mobile")).filter(
+    (f) => f.endsWith(".ts") && !f.includes(".test."),
+  );
+  for (const f of sources) {
+    it(`${f} never refuses with an error's message`, () => {
+      const text = read(`src/server/mobile/${f}`);
+      expect(text).not.toMatch(/refuse\([^;]*\b(?:\w*[Ee]rror|err|e)\.message/);
+    });
+  }
+});

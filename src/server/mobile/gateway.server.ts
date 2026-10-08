@@ -159,7 +159,7 @@ export async function createGrant(
         .maybeSingle();
       if (again.data) return { ok: true, grant: again.data, existed: true };
     }
-    return refuse(503, "UNAVAILABLE", `The grant could not be written: ${error.message}`);
+    return refuse(503, "UNAVAILABLE", "The grant could not be written.");
   }
   await writeAuditLog({
     action: "mobile_grant.created",
@@ -192,7 +192,7 @@ export async function revokeGrant(
     .neq("status", "revoked")
     .select("clone_id, grant_ref")
     .maybeSingle();
-  if (error) return refuse(503, "UNAVAILABLE", error.message);
+  if (error) return refuse(503, "UNAVAILABLE", "The grant could not be revoked.");
   if (!data) return refuse(404, "NOT_FOUND", "No live grant has that id.");
   // Unspent tickets die with the grant. A claim refuses a revoked grant
   // anyway, so a write that failed here is logged rather than reported.
@@ -285,7 +285,7 @@ export async function issueAccessLink(
     .eq("status", grant.status)
     .select("id")
     .maybeSingle();
-  if (moveError) return refuse(503, "UNAVAILABLE", moveError.message);
+  if (moveError) return refuse(503, "UNAVAILABLE", "The gateway could not complete that request.");
   if (!moved) return refuse(409, "CONFLICT", "The grant changed while the link was issued.");
 
   // One live link per grant: an earlier link still in somebody's inbox must
@@ -296,12 +296,7 @@ export async function issueAccessLink(
     .eq("grant_id", grant.id)
     .is("consumed_at", null)
     .gt("expires_at", now.toISOString());
-  if (supersedeError)
-    return refuse(
-      503,
-      "UNAVAILABLE",
-      `Earlier links could not be withdrawn: ${supersedeError.message}`,
-    );
+  if (supersedeError) return refuse(503, "UNAVAILABLE", "Earlier links could not be withdrawn.");
 
   const ticket = newActivationTicket();
   const expiresAt = ticketExpiry(input.kind, now).toISOString();
@@ -313,8 +308,7 @@ export async function issueAccessLink(
     delivered_to_email: deliverTo,
     issued_by: input.actorUserId,
   });
-  if (recordError)
-    return refuse(503, "UNAVAILABLE", `The link could not be recorded: ${recordError.message}`);
+  if (recordError) return refuse(503, "UNAVAILABLE", "The link could not be recorded.");
 
   const link = buildGatewayLink(grant.grant_ref, ticket, mobileGatewayOrigin());
   if (deliverTo) {
@@ -338,7 +332,8 @@ export async function issueAccessLink(
         .update({ expires_at: now.toISOString() })
         .eq("ticket_hash", await sha256Hex(ticket));
       if (expireError) console.warn("[mobile] unsent ticket not expired:", expireError.message);
-      return refuse(502, "EMAIL_FAILED", `The email could not be sent: ${msg(e)}`);
+      console.error("[mobile] access email failed:", msg(e));
+      return refuse(502, "EMAIL_FAILED", "The email could not be sent.");
     }
   }
   await writeAuditLog({
