@@ -60,11 +60,19 @@ import { getAppOctokit } from "./github-app.server";
 import { mapWithConcurrencyUntil } from "@/lib/concurrency";
 import {
   CHECKS_PERMISSION_REMEDY,
+  checkNeverStarted,
   checksUnreadable,
   decideCascadeMerge,
   REQUIRED_CHECKS,
   reclassifyAgainstBase,
+  type CheckRun,
 } from "./cascade/autoMergeGate.pure";
+import {
+  describeNeverStartedRerun,
+  planNeverStartedRerun,
+  rerunForbidden,
+} from "./cascade/neverStartedRerun.pure";
+import { describeGitHubFailure } from "./cascade/githubServerError.pure";
 import {
   cascadeEventStatus,
   countResults,
@@ -770,8 +778,24 @@ async function handleOne(args: {
         conclusion: c.conclusion,
         started_at: c.started_at,
         completed_at: c.completed_at,
+        details_url: c.details_url,
       }));
       verdict = decideCascadeMerge(headChecks, REQUIRED_CHECKS);
+
+      /*
+        CHECKS GITHUB NEVER STARTED ARE RE-RUN HERE, A FEW TIMES PER HEAD.
+
+        Fixing an Actions spending limit starts no job GitHub already
+        declined, so a head held for billing stayed held after billing
+        recovered — twenty-seven hours on both parent clones in October 2026,
+        until a person pressed re-run. See `cascade/neverStartedRerun.pure.ts`.
+        The outcome rides on the hold's own reason, which is rewritten on
+        every pass, so nothing accumulates.
+      */
+      if (!verdict.merge && verdict.reason === "never_started") {
+        const rerun = await rerunDeclinedChecks(octokit, owner, repo, pr.head.sha, headChecks);
+        verdict = { ...verdict, why: `${verdict.why} ${rerun}` };
+      }
 
       /*
         A RED BASE IS NOT A BAD PROPOSAL.
@@ -1066,6 +1090,52 @@ async function clearNoticesForClosedProposals(args: {
     console.error("[merge-drain] standing-notice sweep failed:", e);
   }
   return cleared;
+}
+
+/**
+ * Re-run, within the bound `planNeverStartedRerun` sets, the GitHub Actions
+ * runs whose every failed job on this head never started, and say what was
+ * done. Never throws: a refusal is reported in the hold's words, because the
+ * hold is already the right state for the pull request either way.
+ */
+async function rerunDeclinedChecks(
+  octokit: ReturnType<typeof getAppOctokit>,
+  owner: string,
+  repo: string,
+  headSha: string,
+  headChecks: ReadonlyArray<CheckRun & { details_url?: string | null }>,
+): Promise<string> {
+  const declined = headChecks.filter(checkNeverStarted);
+  // Every attempt leaves its own check runs on the head; the latest-only read
+  // above cannot count them, so the count is read here, on this path alone.
+  let allRuns: Array<{ name: string }> | null = null;
+  try {
+    const { data } = await octokit.checks.listForRef({
+      owner,
+      repo,
+      ref: headSha,
+      filter: "all",
+      per_page: 100,
+    });
+    allRuns = (data.check_runs ?? []).map((c) => ({ name: c.name }));
+  } catch {
+    // No count, no bound: the planner re-runs nothing and says why.
+    allRuns = null;
+  }
+  const plan = planNeverStartedRerun({ declined, allRuns });
+  if (plan.act !== "rerun") return describeNeverStartedRerun(plan);
+  for (const runId of plan.runIds) {
+    try {
+      await octokit.actions.reRunWorkflowFailedJobs({ owner, repo, run_id: runId });
+    } catch (e) {
+      return describeNeverStartedRerun(plan, {
+        ok: false,
+        forbidden: rerunForbidden(e),
+        why: describeGitHubFailure(e),
+      });
+    }
+  }
+  return describeNeverStartedRerun(plan, { ok: true });
 }
 
 /**
