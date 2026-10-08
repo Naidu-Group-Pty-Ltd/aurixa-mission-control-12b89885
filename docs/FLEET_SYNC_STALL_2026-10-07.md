@@ -173,6 +173,15 @@ That fix is overwritten the moment prime moves again. The cascade re-proposes
 with the same three gaps. **The durable fix for the CRM line is deploying the
 five changes above.**
 
+**Outcome.** This branch merged as Mission Control #315 and was deployed on
+8 Oct. The reconcile into #81's branch (npc-crm-independent-6505dc#82, merged
+there as `5b539fb`) took #81 green, and the drain merged it. The drain also
+merged npc-client-dashboard#319, npc-test-76b3b3#198 and
+preflight-property-group#196, and all four clones read `in_sync` at prime
+`040e0ae`. Each later prime push tests the durable fix. The CRM line's pull
+request should arrive mergeable with no hand reconcile, apart from a head
+variant the push itself changes.
+
 ---
 
 ## What this does not fix
@@ -191,8 +200,43 @@ five changes above.**
 - **Stale rows already written.** The 133 stale notes and the oversized reasons
   are corrected on each row's next pass, not by a migration. Rows stranded in
   `pushing` by the outage were not swept.
-- **The CRM line's `agent-speech` function.** Whether it belongs in that line's
-  scope is a decision for the owner. Nothing here carries it.
+- **Two Borrowing Capacity files the CRM line does not scope.**
+  `SnapshotDownloadButton.tsx` and `live-document/SnapshotDocumentEditor.tsx`
+  match no installed module, so a prime change to either never reaches the CRM
+  line. They were left out of the scope change below until the owner decides.
+
+---
+
+## The CRM line's scope, decided on 8 Oct
+
+Reconciling #81 found two gaps in the CRM line's module scope. Neither is a
+fault in the cascade. A module-scoped clone carries only paths its installed
+modules name (`clone_modules` → `modules.file_globs`), plus the repository
+invariants and the import closure. A path outside every module is never a
+candidate. Module scope lives only in the `modules` table, so both gaps were
+closed there rather than in code.
+
+- **`agent-speech`.** The owner decided that the CRM line carries it. The
+  `agent` module owns `supabase/functions/agent-speech/**` in both
+  `file_globs` and `backend_file_globs`. It also owns `src/lib/agent/useSpeech.ts`
+  and `src/lib/agent/__tests__/aurixaVoice.spec.ts`. The function reached the
+  CRM line with #81 at prime `040e0ae`.
+- **The Borrowing Capacity and Portfolio Analysis Review pages.** These were
+  outside every installed module:
+  - the two pages;
+  - their workspaces (`borrowing-capacity/workspace/**`,
+    `clients/portfolio-review/**`);
+  - the route helpers (`workspaceRoute.ts`, `portfolioReviewRoute.ts`,
+    `invalidateClientQueries.ts`);
+  - the page contracts and specs beside them.
+
+  A prime change to any of them never reached the CRM line. The `client`
+  module now owns all thirteen paths, taking it from 149 globs to 162. Each was
+  identical to prime at `040e0ae` except
+  `borrowing-capacity/workspace/__tests__/workspaceText.spec.ts`, which the
+  CRM line never received. Its subject is in scope, so the next cascade
+  carries the spec beside it. `useUnsavedChangesGuard.ts` was already owned by
+  `template-builder` and was not added twice.
 
 ---
 
