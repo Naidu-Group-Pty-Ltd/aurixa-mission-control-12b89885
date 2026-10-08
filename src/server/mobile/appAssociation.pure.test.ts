@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   appleAppSiteAssociation,
   assetLinks,
+  certificateRecognised,
   normaliseCertFingerprints,
 } from "./appAssociation.pure";
 import { MOBILE_PORTALS } from "./portals.pure";
@@ -28,5 +29,22 @@ describe("app association files", () => {
     expect(aasa.applinks.details[0].components).toEqual([
       { "/": "/a/*", comment: "Aurixa access links" },
     ]);
+  });
+});
+
+describe("certificateRecognised", () => {
+  const hex = "ab".repeat(32);
+  it("accepts a lowercase hex certificate recorded with colons", () => {
+    expect(certificateRecognised(hex, normaliseCertFingerprints(hex.match(/../g)!.join(":")))).toBe(
+      true,
+    );
+  });
+  it("refuses everything when nothing is recorded", () => {
+    expect(certificateRecognised(hex, [])).toBe(false);
+  });
+  it("refuses a different certificate and a missing one", () => {
+    const recorded = normaliseCertFingerprints("cd".repeat(32));
+    expect(certificateRecognised(hex, recorded)).toBe(false);
+    expect(certificateRecognised(null, recorded)).toBe(false);
   });
 });

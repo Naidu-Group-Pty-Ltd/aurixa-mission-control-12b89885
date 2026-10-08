@@ -54,3 +54,18 @@ export function appleAppSiteAssociation(teamId: string | undefined) {
     },
   };
 }
+
+/**
+ * Whether a release's signing certificate is one Mission Control vouches for.
+ *
+ * The same list `assetlinks.json` publishes, so a package the registry
+ * accepts is one the OS will also hand access links to. An empty list
+ * accepts nothing: until a person records the release keystore, no Android
+ * candidate can be registered at all, rather than one signed by a key the
+ * gateway has never seen.
+ */
+export function certificateRecognised(certSha256Hex: string | null, recorded: string[]): boolean {
+  if (!certSha256Hex) return false;
+  const [normalised] = normaliseCertFingerprints(certSha256Hex);
+  return normalised !== undefined && recorded.includes(normalised);
+}

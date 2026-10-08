@@ -28,6 +28,10 @@
  *   number is the only way back, and `moveRelease` has no "demote".
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { certificateRecognised, normaliseCertFingerprints } from "./appAssociation.pure";
+
+/** The release keystore certificates, as `assetlinks.json` publishes them. */
+export const ANDROID_CERT_ENV = "MOBILE_ANDROID_CERT_SHA256";
 import type { Database } from "@/integrations/supabase/types";
 import { writeAuditLog } from "../audit.server";
 import { timingSafeEqualStr } from "../cron-auth.server";
@@ -102,6 +106,19 @@ export async function registerRelease(
   const check = validateDescriptor(input);
   if (!check.ok) return refuse(400, "INVALID_REQUEST", check.errors.join("; "));
   const d = check.descriptor;
+  if (
+    d.platform === "android" &&
+    !certificateRecognised(
+      d.signing_cert_sha256,
+      normaliseCertFingerprints(process.env[ANDROID_CERT_ENV]),
+    )
+  ) {
+    return refuse(
+      400,
+      "CERT_UNRECOGNISED",
+      `The package is not signed by a certificate recorded in ${ANDROID_CERT_ENV}.`,
+    );
+  }
   const where = artefactLocation(d);
 
   const existing = await supabase
