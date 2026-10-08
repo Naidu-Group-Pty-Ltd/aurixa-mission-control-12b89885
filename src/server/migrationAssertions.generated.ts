@@ -934,4 +934,24 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20261003100000",
     assertions: [{ kind: "cron", jobname: "clone-privilege-reconcile" }],
   },
+  {
+    migration: "20261008100000_mobile_gateway.sql",
+    version: "20261008100000",
+    assertions: [
+      { kind: "table", table: "clone_mobile_gateways" },
+      { kind: "table", table: "mobile_access_grants" },
+      { kind: "table", table: "mobile_activation_tickets" },
+      { kind: "table", table: "mobile_releases" },
+      { kind: "table", table: "mobile_release_rollouts" },
+      { kind: "table", table: "mobile_download_tickets" },
+      { kind: "table", table: "mobile_install_reports" },
+      { kind: "table", table: "clone_mobile_release_subscriptions" },
+      {
+        kind: "check",
+        table: "platform_hosting_config",
+        column: "reserved_slugs",
+        value: "mobile",
+      },
+    ],
+  },
 ];

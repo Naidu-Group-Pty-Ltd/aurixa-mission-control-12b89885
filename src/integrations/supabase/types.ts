@@ -3327,6 +3327,115 @@ export type Database = {
         }
         Relationships: []
       }
+      clone_mobile_gateways: {
+        Row: {
+          clone_id: string
+          cohort_enabled: boolean
+          created_at: string
+          credential_hash: string
+          credential_prefix: string
+          delivered_env_at: string | null
+          delivered_project_ref: string | null
+          exception_granted_at: string | null
+          exception_granted_by: string | null
+          exception_reason: string | null
+          gateway_id: string
+          last_seen_at: string | null
+          legacy_clone: boolean
+          licensed_portals: string[]
+          revoked_at: string | null
+          status: string
+          trial_extension_hours: number
+          trial_started_at: string
+          updated_at: string
+        }
+        Insert: {
+          clone_id: string
+          cohort_enabled?: boolean
+          created_at?: string
+          credential_hash: string
+          credential_prefix: string
+          delivered_env_at?: string | null
+          delivered_project_ref?: string | null
+          exception_granted_at?: string | null
+          exception_granted_by?: string | null
+          exception_reason?: string | null
+          gateway_id: string
+          last_seen_at?: string | null
+          legacy_clone?: boolean
+          licensed_portals?: string[]
+          revoked_at?: string | null
+          status?: string
+          trial_extension_hours?: number
+          trial_started_at?: string
+          updated_at?: string
+        }
+        Update: {
+          clone_id?: string
+          cohort_enabled?: boolean
+          created_at?: string
+          credential_hash?: string
+          credential_prefix?: string
+          delivered_env_at?: string | null
+          delivered_project_ref?: string | null
+          exception_granted_at?: string | null
+          exception_granted_by?: string | null
+          exception_reason?: string | null
+          gateway_id?: string
+          last_seen_at?: string | null
+          legacy_clone?: boolean
+          licensed_portals?: string[]
+          revoked_at?: string | null
+          status?: string
+          trial_extension_hours?: number
+          trial_started_at?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clone_mobile_gateways_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: true
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      clone_mobile_release_subscriptions: {
+        Row: {
+          channel: string
+          clone_id: string
+          created_at: string
+          enabled: boolean
+          portal: string
+          updated_at: string
+        }
+        Insert: {
+          channel?: string
+          clone_id: string
+          created_at?: string
+          enabled?: boolean
+          portal: string
+          updated_at?: string
+        }
+        Update: {
+          channel?: string
+          clone_id?: string
+          created_at?: string
+          enabled?: boolean
+          portal?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clone_mobile_release_subscriptions_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       clone_modules: {
         Row: {
           clone_id: string
@@ -8613,6 +8722,367 @@ export type Database = {
           last_satisfied_at?: string | null
           migration?: string
           status?: string
+        }
+        Relationships: []
+      }
+      mobile_access_grants: {
+        Row: {
+          bound_at: string | null
+          clone_id: string
+          created_at: string
+          created_by: string | null
+          device_install_id: string | null
+          device_thumbprint: string | null
+          grant_ref: string
+          id: string
+          key_hash: string | null
+          last_claimed_at: string | null
+          portal: string
+          principal_email: string | null
+          principal_kind: string
+          principal_ref: string
+          revoked_at: string | null
+          revoked_reason: string | null
+          status: string
+          updated_at: string
+        }
+        Insert: {
+          bound_at?: string | null
+          clone_id: string
+          created_at?: string
+          created_by?: string | null
+          device_install_id?: string | null
+          device_thumbprint?: string | null
+          grant_ref: string
+          id?: string
+          key_hash?: string | null
+          last_claimed_at?: string | null
+          portal: string
+          principal_email?: string | null
+          principal_kind?: string
+          principal_ref: string
+          revoked_at?: string | null
+          revoked_reason?: string | null
+          status?: string
+          updated_at?: string
+        }
+        Update: {
+          bound_at?: string | null
+          clone_id?: string
+          created_at?: string
+          created_by?: string | null
+          device_install_id?: string | null
+          device_thumbprint?: string | null
+          grant_ref?: string
+          id?: string
+          key_hash?: string | null
+          last_claimed_at?: string | null
+          portal?: string
+          principal_email?: string | null
+          principal_kind?: string
+          principal_ref?: string
+          revoked_at?: string | null
+          revoked_reason?: string | null
+          status?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "mobile_access_grants_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      mobile_activation_tickets: {
+        Row: {
+          assertion_jti: string | null
+          consumed_at: string | null
+          consumed_install_id: string | null
+          created_at: string
+          delivered_to_email: string | null
+          expires_at: string
+          grant_id: string
+          id: string
+          issued_by: string | null
+          kind: string
+          ticket_hash: string
+        }
+        Insert: {
+          assertion_jti?: string | null
+          consumed_at?: string | null
+          consumed_install_id?: string | null
+          created_at?: string
+          delivered_to_email?: string | null
+          expires_at: string
+          grant_id: string
+          id?: string
+          issued_by?: string | null
+          kind: string
+          ticket_hash: string
+        }
+        Update: {
+          assertion_jti?: string | null
+          consumed_at?: string | null
+          consumed_install_id?: string | null
+          created_at?: string
+          delivered_to_email?: string | null
+          expires_at?: string
+          grant_id?: string
+          id?: string
+          issued_by?: string | null
+          kind?: string
+          ticket_hash?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "mobile_activation_tickets_grant_id_fkey"
+            columns: ["grant_id"]
+            isOneToOne: false
+            referencedRelation: "mobile_access_grants"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      mobile_download_tickets: {
+        Row: {
+          clone_id: string | null
+          consumed_at: string | null
+          created_at: string
+          expires_at: string
+          grant_id: string | null
+          id: string
+          install_id: string | null
+          release_id: string
+          ticket_hash: string
+        }
+        Insert: {
+          clone_id?: string | null
+          consumed_at?: string | null
+          created_at?: string
+          expires_at: string
+          grant_id?: string | null
+          id?: string
+          install_id?: string | null
+          release_id: string
+          ticket_hash: string
+        }
+        Update: {
+          clone_id?: string | null
+          consumed_at?: string | null
+          created_at?: string
+          expires_at?: string
+          grant_id?: string | null
+          id?: string
+          install_id?: string | null
+          release_id?: string
+          ticket_hash?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "mobile_download_tickets_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "mobile_download_tickets_grant_id_fkey"
+            columns: ["grant_id"]
+            isOneToOne: false
+            referencedRelation: "mobile_access_grants"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "mobile_download_tickets_release_id_fkey"
+            columns: ["release_id"]
+            isOneToOne: false
+            referencedRelation: "mobile_releases"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      mobile_install_reports: {
+        Row: {
+          build_number: number
+          clone_id: string
+          detail: string | null
+          id: string
+          install_id: string
+          outcome: string
+          platform: string
+          portal: string
+          release_id: string | null
+          reported_at: string
+        }
+        Insert: {
+          build_number: number
+          clone_id: string
+          detail?: string | null
+          id?: string
+          install_id: string
+          outcome: string
+          platform: string
+          portal: string
+          release_id?: string | null
+          reported_at?: string
+        }
+        Update: {
+          build_number?: number
+          clone_id?: string
+          detail?: string | null
+          id?: string
+          install_id?: string
+          outcome?: string
+          platform?: string
+          portal?: string
+          release_id?: string | null
+          reported_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "mobile_install_reports_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "mobile_install_reports_release_id_fkey"
+            columns: ["release_id"]
+            isOneToOne: false
+            referencedRelation: "mobile_releases"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      mobile_release_rollouts: {
+        Row: {
+          id: string
+          pause_reason: string | null
+          paused_at: string | null
+          percentage: number
+          release_id: string
+          started_at: string
+          started_by: string | null
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          pause_reason?: string | null
+          paused_at?: string | null
+          percentage?: number
+          release_id: string
+          started_at?: string
+          started_by?: string | null
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          pause_reason?: string | null
+          paused_at?: string | null
+          percentage?: number
+          release_id?: string
+          started_at?: string
+          started_by?: string | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "mobile_release_rollouts_release_id_fkey"
+            columns: ["release_id"]
+            isOneToOne: true
+            referencedRelation: "mobile_releases"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      mobile_releases: {
+        Row: {
+          apple_custom_app_url: string | null
+          approved_at: string | null
+          approved_by: string | null
+          build_number: number
+          channel: string
+          content_sha256: string | null
+          created_at: string
+          critical: boolean
+          environment: string
+          id: string
+          min_os: string | null
+          min_supported_build: number | null
+          platform: string
+          portal: string
+          promoted_at: string | null
+          release_notes: string | null
+          signing_cert_sha256: string | null
+          size_bytes: number | null
+          source_sha: string
+          state: string
+          storage_bucket: string | null
+          storage_path: string | null
+          updated_at: string
+          uploaded_at: string | null
+          version: string
+          withdrawn_at: string | null
+        }
+        Insert: {
+          apple_custom_app_url?: string | null
+          approved_at?: string | null
+          approved_by?: string | null
+          build_number: number
+          channel?: string
+          content_sha256?: string | null
+          created_at?: string
+          critical?: boolean
+          environment?: string
+          id?: string
+          min_os?: string | null
+          min_supported_build?: number | null
+          platform: string
+          portal: string
+          promoted_at?: string | null
+          release_notes?: string | null
+          signing_cert_sha256?: string | null
+          size_bytes?: number | null
+          source_sha: string
+          state?: string
+          storage_bucket?: string | null
+          storage_path?: string | null
+          updated_at?: string
+          uploaded_at?: string | null
+          version: string
+          withdrawn_at?: string | null
+        }
+        Update: {
+          apple_custom_app_url?: string | null
+          approved_at?: string | null
+          approved_by?: string | null
+          build_number?: number
+          channel?: string
+          content_sha256?: string | null
+          created_at?: string
+          critical?: boolean
+          environment?: string
+          id?: string
+          min_os?: string | null
+          min_supported_build?: number | null
+          platform?: string
+          portal?: string
+          promoted_at?: string | null
+          release_notes?: string | null
+          signing_cert_sha256?: string | null
+          size_bytes?: number | null
+          source_sha?: string
+          state?: string
+          storage_bucket?: string | null
+          storage_path?: string | null
+          updated_at?: string
+          uploaded_at?: string | null
+          version?: string
+          withdrawn_at?: string | null
         }
         Relationships: []
       }

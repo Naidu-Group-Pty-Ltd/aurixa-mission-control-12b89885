@@ -192,13 +192,18 @@ export async function signCloneAssertion(input: {
   audience: string;
   nowSeconds?: number;
   claims?: Record<string, unknown>;
+  /** Shorter than the default where a relying party demands it (activation: 60s). */
+  lifetimeSeconds?: number;
+  /** Supplied where the caller records the id before handing the token out. */
+  jti?: string;
 }): Promise<string> {
   const registered = identityClaims({
     issuer: cloneIssuerUrl(),
     subject: input.subject,
     audience: input.audience,
     nowSeconds: input.nowSeconds ?? Math.floor(Date.now() / 1000),
-    jti: crypto.randomUUID(),
+    jti: input.jti ?? crypto.randomUUID(),
+    lifetimeSeconds: input.lifetimeSeconds,
   });
   return sign(
     mergeAssertionClaims(input.claims ?? {}, registered as unknown as Record<string, unknown>),
