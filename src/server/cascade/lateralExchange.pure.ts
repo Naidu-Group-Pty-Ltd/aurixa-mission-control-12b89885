@@ -84,6 +84,7 @@ import {
 } from "./syncExclusions.pure";
 import { judgingWorkflowHold } from "./judgingWorkflow.pure";
 import { importsOf, resolveSpecifier, type TreeIndex } from "./importClosure.pure";
+import { subjectsImportedBy } from "./specImportSubjects.pure";
 import { exportedNamesOf, findStaleHeldReferences, namedImportsOf } from "./heldFileStaleness.pure";
 import {
   MAX_DELETIONS_PER_CASCADE,
@@ -901,6 +902,11 @@ export function judgeLateralWrites(args: {
           primeSha: originTree,
           cloneSha: destination.tree,
           crossing,
+          // A spec that imports a module the two parents hold differently
+          // asserts about the origin's copy. `lateralImportHold` below sees
+          // only a target that is absent or no longer exports a name, so a
+          // changed function body would otherwise cross unseen.
+          imported: subjectsImportedBy(text, path, originTree),
         });
         const absent = absentSubjects({
           specText: text,

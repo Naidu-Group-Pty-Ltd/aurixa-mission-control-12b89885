@@ -42,6 +42,12 @@ import {
   describePause,
 } from "./cascade/rateLimitDeferral.pure";
 import {
+  describeGitHubFailure,
+  describeServerDeferral,
+  planServerFailure,
+  retryAnchor,
+} from "./cascade/githubServerError.pure";
+import {
   describeLineageHold,
   LINEAGE_HOLD_RETRY_MS,
   orderByLineageDepth,
@@ -157,6 +163,8 @@ import {
   reconcileEdgeTypecheckBaseline,
 } from "./cascade/edgeTypecheckBaselineReconcile.pure";
 import { API_SURFACE_PATH, reconcileApiSurface } from "./cascade/apiSurfaceReconcile.pure";
+import { generatedArtefactsOwed } from "./cascade/generatedArtefacts.pure";
+import { subjectsImportedBy } from "./cascade/specImportSubjects.pure";
 import {
   MAX_SUBJECTS_CARRIED,
   orphanSpecHoldAfterCarry,
@@ -167,6 +175,7 @@ import {
 import { membraneInto } from "@/lib/cascade/membrane/fleetMembranes.pure";
 import { isSpecPath } from "@/lib/cascade/membrane/ionSpecies.pure";
 import { refreshCarrierRows } from "./cascade/carrierRefresh.server";
+import { settledRowPatch, stampFailedAgainst } from "./cascade/carrierRefresh.pure";
 import {
   DEPLOY_WORKFLOW_PATH,
   readsDeployerDeclaration,
@@ -558,7 +567,26 @@ export async function executeCascade(
       if (!held) return { ok: false, error: "claim superseded — nothing written" };
       return { ok: true, status: "deferred", until: failure.until, done: 0, total: 0 };
     }
-    const msg = `Cannot read prime ${primeRef.owner}/${primeRef.repo}@${primeRef.branch}: ${e instanceof Error ? e.message : "unknown"}`;
+    // A GitHub server error here is the same bounded moment the per-clone loop
+    // retries, one step earlier — and the costliest place to fail, because a
+    // failed event settles every row under it. Nothing is written between two
+    // attempts at this read, so its count rides on the event's own summary.
+    const branch = `${primeRef.owner}/${primeRef.repo}@${primeRef.branch}`;
+    const server = planServerFailure({ e, anchor: branch, priorMessage: event.summary });
+    if (server?.act === "defer") {
+      const held = await updateEvent(
+        {
+          status: "pending",
+          worker_started_at: null,
+          next_attempt_at: server.until,
+          summary: server.rowMessage,
+        },
+        "hold the event after a GitHub server error on the prime read",
+      );
+      if (!held) return { ok: false, error: "claim superseded — nothing written" };
+      return { ok: true, status: "deferred", until: server.until, done: 0, total: 0 };
+    }
+    const msg = `Cannot read prime ${branch}: ${server ? server.rowMessage : describeGitHubFailure(e)}`;
     await updateEvent(
       { status: "failed", completed_at: new Date().toISOString(), summary: msg },
       "record the failed prime read",
@@ -769,6 +797,17 @@ export async function executeCascade(
   let stoppedEarly = false;
   let progressed = false;
   let deferred: { until: string; detail: string } | null = null;
+  // Rows a GitHub server error put back to `queued` this pass. Unlike a rate
+  // limit the loop goes on: a 502 is one request's answer, not the
+  // installation's, and the other clones' requests are their own.
+  // `githubServerError.pure.ts` carries the measurement and the bound.
+  const serverDeferrals: Array<{
+    clone: string;
+    status: number;
+    retry: number;
+    of: number;
+    until: string;
+  }> = [];
 
   // Parents first, so a pass can deliver a parent and then its child in the
   // same run rather than holding the child for the next tick. With lineage off
@@ -827,7 +866,10 @@ export async function executeCascade(
         .from("cascade_results")
         .update({
           status: "failed",
-          error_message: `Pin validation failed: ${pinErrors.join("; ")}`,
+          error_message: stampFailedAgainst(
+            sourceSha,
+            `Pin validation failed: ${pinErrors.join("; ")}`,
+          ),
           completed_at: new Date().toISOString(),
         })
         .eq("id", r.id);
@@ -1010,7 +1052,13 @@ export async function executeCascade(
       // listing, and a blob GitHub has since garbage-collected fails the
       // tree write, which clears the list below and the pass after that
       // re-prepares fresh.
-      await supabase.from("cascade_results").update(patch).eq("id", r.id);
+      // Settled before it is written: a failure names the head it failed
+      // against, which is what bounds the carrier's re-offer of it, and a
+      // delivery drops the note an earlier hold or deferral left on the row.
+      await supabase
+        .from("cascade_results")
+        .update(settledRowPatch(patch, sourceSha))
+        .eq("id", r.id);
 
       // Read off the patch, not off `passRows`: those rows were fetched
       // before this loop and still carry the pre-run `diff_summary`.
@@ -1154,22 +1202,58 @@ export async function executeCascade(
         deferred = { until: failure.until, detail: failure.detail };
         break;
       }
-      failed++;
-      await supabase
-        .from("cascade_results")
-        .update({
-          status: "failed",
-          error_message: e instanceof Error ? e.message : String(e),
-          completed_at: new Date().toISOString(),
-          // A tree write that names a blob GitHub no longer holds means the
-          // reuse list has outlived its objects (unreferenced blobs are
-          // eventually collected). The list caused the failure, so the list
-          // goes with it — the next pass re-prepares fresh instead of failing
-          // on the same stale SHA for ever.
-          ...(isStaleObjectError(e) ? { progress: null } : {}),
-        })
-        .eq("id", r.id);
-      await supabase.from("clones").update({ sync_status: "failed" }).eq("id", clone.id);
+      // A GitHub server error is a moment too, but a bounded one. Measured on
+      // carrier 15d4574f, 7 Oct 2026: both of the fleet's parents were failed
+      // with an EMPTY message — Octokit's message for a 5xx with no body —
+      // and a failed row on an unsettled carrier is visited by nothing, so the
+      // whole fleet waited fourteen hours for a person. The row goes back to
+      // `queued` and the event waits out the window; the count rides on the
+      // row's own message, against this head, and the last retry fails it.
+      const server = planServerFailure({
+        e,
+        anchor: retryAnchor(sourceSha),
+        priorMessage: r.error_message,
+      });
+      if (server?.act === "defer") {
+        const { error: requeueError } = await supabase
+          .from("cascade_results")
+          .update({ status: "queued", started_at: null, error_message: server.rowMessage })
+          .eq("id", r.id);
+        if (requeueError) {
+          throw new Error(
+            `cascade ${event.id}: could not requeue ${clone.name} after GitHub answered ${server.status}: ${requeueError.message}`,
+          );
+        }
+        serverDeferrals.push({
+          clone: clone.name,
+          status: server.status,
+          retry: server.retry,
+          of: server.of,
+          until: server.until,
+        });
+      } else {
+        failed++;
+        await supabase
+          .from("cascade_results")
+          .update({
+            status: "failed",
+            // The status and the route, never only `e.message`: that is empty
+            // for a GitHub 5xx with no body, and an empty failure is no record.
+            error_message: stampFailedAgainst(
+              sourceSha,
+              server ? server.rowMessage : describeGitHubFailure(e),
+            ),
+            completed_at: new Date().toISOString(),
+            // A tree write that names a blob GitHub no longer holds means the
+            // reuse list has outlived its objects (unreferenced blobs are
+            // eventually collected). The list caused the failure, so the list
+            // goes with it — the next pass re-prepares fresh instead of failing
+            // on the same stale SHA for ever.
+            ...(isStaleObjectError(e) ? { progress: null } : {}),
+          })
+          .eq("id", r.id);
+        await supabase.from("clones").update({ sync_status: "failed" }).eq("id", clone.id);
+      }
     }
     attempted++;
     slowestMs = Math.max(slowestMs, Date.now() - cloneStartedAt);
@@ -1180,9 +1264,16 @@ export async function executeCascade(
   // it stopped, so the row is never a silent `running` and never a false
   // `completed`. The counts below are NOT written: a partial tally rendered as
   // a final one is how "1 of 3" comes to read as the whole fleet.
-  if (deferred || stoppedEarly || lineageHolds.length > 0) {
+  if (deferred || stoppedEarly || lineageHolds.length > 0 || serverDeferrals.length > 0) {
     const done = succeeded + opened + failed + skipped;
     const total = queuedRows.length;
+    // The latest window any server-deferred row named, so none is tried again
+    // inside its own window. A rate limit outranks it below: that one is the
+    // installation's, and the loop stopped for it.
+    const serverUntil =
+      serverDeferrals.length > 0
+        ? serverDeferrals.map((d) => d.until).reduce((a, b) => (b > a ? b : a))
+        : null;
 
     // A lineage hold is PACED, not retried on the next tick, and it reports as
     // a deferral rather than a pause. Both halves matter: the drain spends an
@@ -1194,8 +1285,15 @@ export async function executeCascade(
     // A budget pause still wins where both happened: that pass has work it can
     // do right now, and waiting five minutes to do it would be slower for no
     // reason.
+    //
+    // A server deferral sits between them. A budget pause outranks it for the
+    // same reason it outranks a lineage hold — the other clones have work now —
+    // and the retry it costs the deferred row early is still counted, so the
+    // bound holds. It outranks a lineage hold: the held children are waiting
+    // on that very row.
+    const serverHeld = !deferred && !stoppedEarly ? serverUntil : null;
     const lineageUntil =
-      lineageHolds.length > 0 && !deferred && !stoppedEarly
+      lineageHolds.length > 0 && !deferred && !stoppedEarly && !serverHeld
         ? new Date(Date.now() + LINEAGE_HOLD_RETRY_MS).toISOString()
         : null;
 
@@ -1203,25 +1301,27 @@ export async function executeCascade(
       ? describeDeferral({ until: deferred.until, detail: deferred.detail, done, total })
       : stoppedEarly
         ? describePause({ done, total })
-        : describeLineageHold({
-            held: lineageHolds.length,
-            done,
-            total,
-            firstReason: lineageHolds[0],
-            until: lineageUntil!,
-          });
+        : serverHeld
+          ? describeServerDeferral({ until: serverHeld, deferrals: serverDeferrals, done, total })
+          : describeLineageHold({
+              held: lineageHolds.length,
+              done,
+              total,
+              firstReason: lineageHolds[0],
+              until: lineageUntil!,
+            });
+    const heldUntil = deferred?.until ?? serverHeld ?? lineageUntil;
     const held = await updateEvent(
       {
         status: "pending",
         worker_started_at: null,
-        next_attempt_at: deferred ? deferred.until : (lineageUntil ?? new Date().toISOString()),
+        next_attempt_at: heldUntil ?? new Date().toISOString(),
         summary: withRefreshNote(summary),
       },
       "hold the event for its next pass",
     );
     if (!held) return { ok: false, error: "claim superseded — nothing written" };
-    if (deferred) return { ok: true, status: "deferred", until: deferred.until, done, total };
-    if (lineageUntil) return { ok: true, status: "deferred", until: lineageUntil, done, total };
+    if (heldUntil) return { ok: true, status: "deferred", until: heldUntil, done, total };
     return { ok: true, status: "resuming", done, total, progressed };
   }
 
@@ -1791,8 +1891,12 @@ export async function processClone(args: {
     });
     cloneBranchSha = br.commit.sha;
   } catch (e) {
+    // The original rides as the cause: its status and route are what a
+    // failed row records (`describeGitHubFailure`) and what decides whether a
+    // GitHub server error is retried (`planServerFailure`).
     throw new Error(
       `Clone ${cloneRef.owner}/${cloneRef.repo}@${cloneRef.branch} unreachable: ${e instanceof Error ? e.message : "unknown"}`,
+      { cause: e },
     );
   }
 
@@ -3408,6 +3512,7 @@ export async function processClone(args: {
     mergedToml: string;
     mergedRegistryJson: string;
     cloneTree: ReadonlyMap<string, string>;
+    primeTree: ReadonlyMap<string, string> | null;
     count: number;
   } | null = null;
 
@@ -3528,6 +3633,9 @@ export async function processClone(args: {
               mergedTreePaths,
               deliveredPaths,
               withheld: withheldFunctions,
+              primeTree: primeShaByPath,
+              cloneTree: cloneShaByPath,
+              rewrittenPaths: reconciledPaths,
             })
           : null;
       await settleBaseline(inventoryHold, outcome);
@@ -3545,6 +3653,7 @@ export async function processClone(args: {
           mergedToml,
           mergedRegistryJson,
           cloneTree: cloneShaByPath,
+          primeTree: primeShaByPath,
           count: outcome.count,
         };
       }
@@ -3576,17 +3685,35 @@ export async function processClone(args: {
   //
   // So where prime's copy is in the delivery and the two function sets
   // differ, it is REPLACED by the surface this clone's reconciled registry
-  // and config generate (`apiSurfaceReconcile.pure.ts`). Only where it is in
-  // the delivery: a surface the write path did not deliver is one an
-  // exclusion, a hold or an identical copy kept out, and this pass has no
-  // business writing it. A refusal is held and named, like the registry's.
+  // and config generate (`apiSurfaceReconcile.pure.ts`). A refusal is held
+  // and named, like the registry's.
+  //
+  // It also runs where prime's copy is NOT in the delivery but the clone
+  // holds a surface and no rule holds it. The surface is generated from the
+  // two files above, and those travel on every pass whatever happens to the
+  // surface. A module-scoped clone installs no glob over `mobile/**`, so
+  // prime's copy never crosses, while the registry and `config.toml` it is
+  // generated from always do. Measured 8 Oct 2026 on cascade #81 to
+  // `npc-crm-independent-6505dc`: a delivered registry left the clone's
+  // committed surface describing the registry before it, and
+  // `mobile:api:check` failed `verify` on a file this pass never touched.
+  // Composing the clone's own surface is exactly what `npm run mobile:api`
+  // would write there, and nothing is written when it already matches.
   let apiSurfaceNote: string | null = null;
+  const apiSurfaceDelivered = treeEntries.some(
+    (t) => t.path === API_SURFACE_PATH && t.sha !== null,
+  );
+  const apiSurfaceStaleOnClone =
+    !apiSurfaceDelivered &&
+    cloneShaByPath?.has(API_SURFACE_PATH) === true &&
+    primeShaByPath?.has(API_SURFACE_PATH) === true &&
+    !partition.held.some((h) => h.path === API_SURFACE_PATH);
   if (
     mode !== "notify" &&
-    (withheldFunctions.length > 0 || cloneOwnedFunctions.length > 0) &&
     mergedToml &&
     mergedRegistryJson &&
-    treeEntries.some((t) => t.path === API_SURFACE_PATH && t.sha !== null)
+    ((apiSurfaceDelivered && (withheldFunctions.length > 0 || cloneOwnedFunctions.length > 0)) ||
+      apiSurfaceStaleOnClone)
   ) {
     try {
       const [primeSurface, cloneSurface, primeRegistry, primeConfig] = await Promise.all([
@@ -3613,7 +3740,15 @@ export async function processClone(args: {
         // Either way prime's copy does not stand: it is replaced by the
         // surface this clone generates, or withheld for a person.
         dropFromTree(API_SURFACE_PATH);
-        if (!verdict.ok) {
+        if (!verdict.ok && !apiSurfaceDelivered) {
+          // Nothing of prime's was crossing, so nothing is withheld: the
+          // clone's surface stays exactly as it was, which is what every pass
+          // before this one left. A hold here would name a file this pass
+          // never touched, on every pass, wherever the reconcile refuses.
+          console.warn(
+            `[cascade] ${API_SURFACE_PATH} left as the clone has it for clone ${clone.id}: ${verdict.reason}`,
+          );
+        } else if (!verdict.ok) {
           const held = {
             path: API_SURFACE_PATH,
             pattern: "(content: generated from this clone's own registry)",
@@ -4273,6 +4408,7 @@ export async function processClone(args: {
         primeSha: primeShaByPath,
         cloneSha: cloneShaByPath,
         crossing: deliveredPaths,
+        imported: primeShaByPath ? subjectsImportedBy(specText, specPath, primeShaByPath) : [],
       });
       if (stranded.length > 0) strandedBySpec.set(specPath, stranded);
       if (primeShaByPath !== null && cloneShaByPath !== null) {
@@ -4450,10 +4586,36 @@ export async function processClone(args: {
         }
       }
     }
+    // A generated file travels with the files it is generated from. Asked of
+    // the delivery as it stands THIS round, like a bridge: a source a rule held
+    // back is not in it, and prime's artefact would then describe a source the
+    // clone does not have. Only writes of PRIME'S OWN content count as a
+    // source landing, so a pumped file — reconciled into a clone-specific
+    // version — never qualifies. See `generatedArtefacts.pure.ts`.
+    const artefactsOwedNow =
+      primeShaByPath !== null && cloneShaByPath !== null
+        ? generatedArtefactsOwed({
+            prime: primeShaByPath,
+            clone: cloneShaByPath,
+            deliveredAtPrime: new Set(
+              treeEntries
+                .filter((t) => t.sha !== null && !reconciledPaths.has(t.path))
+                .map((t) => t.path),
+            ),
+            removed: new Set([
+              ...treeEntries.filter((t) => t.sha === null).map((t) => t.path),
+              ...deletesCrossing,
+            ]),
+            held: new Set(partition.held.map((h) => h.path)),
+          }).filter((path) => !attemptedSubjects.has(path))
+        : [];
     if (
       strandedBySpec.size === 0 &&
       (!carryingAllowed ||
-        (importsOwed.size === 0 && owedSpecs.length === 0 && bridgesOwedNow.length === 0))
+        (importsOwed.size === 0 &&
+          owedSpecs.length === 0 &&
+          bridgesOwedNow.length === 0 &&
+          artefactsOwedNow.length === 0))
     ) {
       break;
     }
@@ -4465,6 +4627,7 @@ export async function processClone(args: {
         ...importsOwed,
         ...owedSpecs,
         ...bridgesOwedNow.map((b) => b.path),
+        ...artefactsOwedNow,
       ],
       held: partition.held,
       attempted: attemptedSubjects,
@@ -4722,6 +4885,9 @@ export async function processClone(args: {
       mergedTreePaths: finalTree,
       deliveredPaths: finalDelivered,
       withheld: withheldFunctions,
+      primeTree: inventoryRecount.primeTree,
+      cloneTree: inventoryRecount.cloneTree,
+      rewrittenPaths: reconciledPaths,
     });
     if (recount.ok && recount.merged !== deliveredSource[SECURITY_INVENTORY_PATH]) {
       dropFromTree(SECURITY_INVENTORY_PATH);

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  attributeGraphByCaller,
   FUNCTION_COUNT_RATCHET_PATH,
   SECURITY_INVENTORY_PATH,
   configDeclaredFunctionNames,
@@ -791,5 +792,180 @@ describe("the ratchet spec's tables, on a clone that withholds functions", () =>
       merged: string;
     };
     expect(twice.merged).toBe(once.merged);
+  });
+});
+
+describe("given both trees, the graph is attributed caller by caller", () => {
+  const F = (p: string) => `supabase/functions/${p}`;
+  /** Prime's tree: its two functions and one shared module. */
+  const PRIME_TREE = new Map([
+    [F("alpha/index.ts"), "alpha-prime"],
+    [F("beta/index.ts"), "beta-prime"],
+    [F("_shared/auth.ts"), "auth-shared"],
+    ["src/main.tsx", "main-prime"],
+  ]);
+  /** The clone's tree: older copies of those, and a function of its own. */
+  const CLONE_TREE = new Map([
+    [F("alpha/index.ts"), "alpha-old"],
+    [F("beta/index.ts"), "beta-old"],
+    [F("crm-send-message/index.ts"), "crm-clone"],
+    [F("_shared/auth.ts"), "auth-shared"],
+    ["src/main.tsx", "main-clone"],
+  ]);
+  const withGraph = (inventory: string, graph: string[]) =>
+    JSON.stringify(
+      { ...JSON.parse(inventory), statically_derivable_inter_function_graph: graph },
+      null,
+      2,
+    );
+  const graphOf = (out: ReturnType<typeof reconcileSecurityInventory>) => {
+    expect(out.ok, out.ok ? "" : out.reason).toBe(true);
+    return JSON.parse((out as { merged: string }).merged)
+      .statically_derivable_inter_function_graph as string[];
+  };
+  const withTrees = (over: Partial<Parameters<typeof reconcileSecurityInventory>[0]> = {}) =>
+    reconcile({ primeTree: PRIME_TREE, cloneTree: CLONE_TREE, ...over });
+
+  it("carries the edge of a function only the clone holds (cascade #81)", () => {
+    // The clone's CRM function calls one of prime's. The two graphs differ
+    // for good, and the identical-graph rule refused every pass for it.
+    const clone = withGraph(CLONE_INVENTORY, ["alpha->beta", "crm-send-message->alpha"]);
+    expect(reconcile({ cloneInventoryJson: clone }).ok).toBe(false);
+    expect(graphOf(withTrees({ cloneInventoryJson: clone }))).toEqual([
+      "alpha->beta",
+      "crm-send-message->alpha",
+    ]);
+  });
+
+  it("takes prime's edges for a caller this pass writes entirely at prime's version", () => {
+    const prime = withGraph(PRIME_INVENTORY, ["alpha->beta", "alpha->crm-send-message"]);
+    expect(graphOf(withTrees({ primeInventoryJson: prime }))).toEqual([
+      "alpha->beta",
+      "alpha->crm-send-message",
+    ]);
+  });
+
+  it("takes the clone's edges for a caller this pass leaves alone", () => {
+    // beta is not delivered: the clone keeps its own copy, and its edge.
+    const prime = withGraph(PRIME_INVENTORY, ["alpha->beta"]);
+    const clone = withGraph(CLONE_INVENTORY, ["alpha->beta", "beta->crm-send-message"]);
+    expect(
+      graphOf(
+        withTrees({
+          primeInventoryJson: prime,
+          cloneInventoryJson: clone,
+          deliveredPaths: [F("alpha/index.ts")],
+        }),
+      ),
+    ).toEqual(["alpha->beta", "beta->crm-send-message"]);
+  });
+
+  it("never credits prime with a file a pump rewrote", () => {
+    const prime = withGraph(PRIME_INVENTORY, ["alpha->beta", "alpha->crm-send-message"]);
+    const out = withTrees({ primeInventoryJson: prime, rewrittenPaths: [F("alpha/index.ts")] });
+    expect(out.ok).toBe(false);
+    expect((out as { reason: string }).reason).toContain("`alpha`");
+  });
+
+  it("counts a blob both sides hold identically as either side's", () => {
+    // alpha is not delivered, but the clone already holds prime's copy, so
+    // prime's edge stands even where the clone's stored baseline lacks it.
+    const prime = withGraph(PRIME_INVENTORY, ["alpha->beta", "alpha->crm-send-message"]);
+    const out = withTrees({
+      primeInventoryJson: prime,
+      cloneTree: new Map([...CLONE_TREE, [F("alpha/index.ts"), "alpha-prime"]]),
+      deliveredPaths: [F("beta/index.ts")],
+    });
+    expect(graphOf(out)).toEqual(["alpha->beta", "alpha->crm-send-message"]);
+  });
+
+  it("carries a mixed caller where both sides record the same edges for it", () => {
+    // `_shared` takes a module from each side on every clone that keeps one
+    // of its own. Both record the same edge, so the split cannot matter.
+    const both = ["_shared->beta", "alpha->beta"];
+    const out = withTrees({
+      primeInventoryJson: withGraph(PRIME_INVENTORY, both),
+      cloneInventoryJson: withGraph(CLONE_INVENTORY, [...both, "crm-send-message->alpha"]),
+      primeTree: new Map([...PRIME_TREE, [F("_shared/new.ts"), "new-prime"]]),
+      cloneTree: new Map([...CLONE_TREE, [F("_shared/crm.ts"), "crm-shared"]]),
+      mergedTreePaths: [...MERGED_TREE, F("_shared/new.ts"), F("_shared/crm.ts")],
+      deliveredPaths: [...DELIVERED, F("_shared/new.ts")],
+    });
+    expect(graphOf(out)).toEqual(["_shared->beta", "alpha->beta", "crm-send-message->alpha"]);
+  });
+
+  it("refuses a mixed caller the two sides disagree about, naming it", () => {
+    const out = withTrees({
+      primeInventoryJson: withGraph(PRIME_INVENTORY, ["_shared->beta", "alpha->beta"]),
+      cloneInventoryJson: withGraph(CLONE_INVENTORY, ["alpha->beta"]),
+      primeTree: new Map([...PRIME_TREE, [F("_shared/new.ts"), "new-prime"]]),
+      cloneTree: new Map([...CLONE_TREE, [F("_shared/crm.ts"), "crm-shared"]]),
+      mergedTreePaths: [...MERGED_TREE, F("_shared/new.ts"), F("_shared/crm.ts")],
+      deliveredPaths: [...DELIVERED, F("_shared/new.ts")],
+    });
+    expect(out.ok).toBe(false);
+    expect((out as { reason: string }).reason).toContain("`_shared`");
+    expect((out as { reason: string }).reason).toContain("both the prime and this clone");
+  });
+
+  it("carries nothing for a function the clone does not hold and this pass does not deliver", () => {
+    // Prime's `gamma` is outside this clone's scope: its edge describes a
+    // file the merged tree does not have.
+    const prime = withGraph(PRIME_INVENTORY, ["alpha->beta", "gamma->alpha"]);
+    const out = withTrees({
+      primeInventoryJson: prime,
+      primeTree: new Map([...PRIME_TREE, [F("gamma/index.ts"), "gamma-prime"]]),
+    });
+    expect(graphOf(out)).toEqual(["alpha->beta"]);
+  });
+
+  it("drops a withheld function's edges whether or not its files are still on the clone", () => {
+    const prime = withGraph(PRIME_INVENTORY, ["alpha->beta", "migration-dispatcher->alpha"]);
+    const withDispatcher = new Map([...PRIME_TREE, [F("migration-dispatcher/index.ts"), "md"]]);
+    const out = withTrees({
+      primeInventoryJson: prime,
+      primeTree: withDispatcher,
+      withheld: ["migration-dispatcher"],
+    });
+    expect(graphOf(out)).toEqual(["alpha->beta"]);
+  });
+
+  it("still refuses differing graphs given only one of the trees", () => {
+    const clone = withGraph(CLONE_INVENTORY, ["alpha->beta", "crm-send-message->alpha"]);
+    for (const over of [{ primeTree: PRIME_TREE }, { cloneTree: CLONE_TREE }]) {
+      const out = reconcile({ cloneInventoryJson: clone, ...over });
+      expect(out.ok).toBe(false);
+      expect((out as { reason: string }).reason).toContain("call graph");
+    }
+  });
+
+  it("is the generator's answer re-filed, so the output stays sorted", () => {
+    const out = attributeGraphByCaller({
+      primeGraph: ["beta->alpha"],
+      cloneGraph: ["crm-send-message->alpha", "alpha->beta"],
+      primeTree: PRIME_TREE,
+      cloneTree: CLONE_TREE,
+      mergedPaths: MERGED_TREE,
+      deliveredFiles: new Set([F("beta/index.ts")]),
+      rewritten: new Set(),
+    });
+    expect(out).toEqual({
+      ok: true,
+      graph: ["alpha->beta", "beta->alpha", "crm-send-message->alpha"],
+    });
+  });
+
+  it("is reached from both engine call sites with both trees and the rewritten paths", () => {
+    const engine = readFileSync(join(process.cwd(), "src/server/cascade-engine.server.ts"), "utf8");
+    const calls = engine
+      .split("reconcileSecurityInventory({")
+      .slice(1)
+      .map((c) => c.slice(0, c.indexOf("})")));
+    expect(calls).toHaveLength(2);
+    for (const call of calls) {
+      expect(call).toMatch(/primeTree: /);
+      expect(call).toMatch(/cloneTree: /);
+      expect(call).toContain("rewrittenPaths: reconciledPaths");
+    }
   });
 });

@@ -40,6 +40,20 @@
  * exactly the vocabulary it writes — it never tries to parse the engine's
  * prose, because a summary this could not parse would be a summary it deleted.
  *
+ * ## The outcome sentence is ONE sentence
+ *
+ * The strip finds the end of the outcome at its first full stop, so an open
+ * reason that runs to two sentences leaves its second behind as "detail" —
+ * and the next pass puts a new outcome in front of it. Measured 8 Oct 2026:
+ * 162 merged rows carried 3.97 million characters between them. The worst
+ * was 46,422 characters: `This proposal did not cause them: … Fix the base
+ * branch first; …` 279 times, in front of a one-file summary. 26 rows carried
+ * that remedy and 146 the billing one, because the `base_broken` and
+ * `never_started` verdicts are each three sentences. The open reason is now written as one
+ * sentence (`openSentence`), and the trailing sentences of every verdict this
+ * codebase composes are recognised as its own output, so the rows that grew
+ * shrink on their next pass.
+ *
  * ## Why a closed-unmerged pull request is `skipped`
  *
  * `cascade_result_status` has no value for "a person declined this", and
@@ -49,8 +63,15 @@
  * purpose. `skipped` is what the engine already writes for a cascade that
  * correctly did not land, and the summary says in words what happened.
  *
- * Client-safe: pure, no imports.
+ * Client-safe: pure. Its one import is the gate's own vocabulary, which is
+ * pure too.
  */
+
+import {
+  BASE_BROKEN_REMEDY,
+  CHECKS_PERMISSION_REMEDY,
+  NEVER_STARTED_REMEDY,
+} from "./autoMergeGate.pure";
 
 /** Terminal-enough facts about a pull request, from one `pulls.get`. */
 export type PullRequestFacts = {
@@ -107,7 +128,49 @@ export function parsePrRepo(url: string | null | undefined): { owner: string; re
  * will strip. Anything else in a summary is the engine's, and is kept.
  */
 const OUTCOME_PREFIX =
-  /^(?:Merged(?: as [0-9a-f]{7,40})?\.|Closed without merging — this proposal was declined\.|Open · [^.]*\.)\s+/;
+  /^(?:Merged(?: as [0-9a-f]{7,40})?\.|Closed without merging — this proposal was declined\.|Open · .*?\.(?=\s|$))(?:\s+|$)/;
+
+/**
+ * The outcome sentence for a pull request that is still open: one sentence,
+ * whatever the reason handed in.
+ *
+ * `OUTCOME_PREFIX` ends an open outcome at its first full stop followed by a
+ * space, so that is exactly what the reason may not contain. Every internal
+ * sentence break becomes a clause break, and runs of whitespace one space,
+ * which keeps every word a reader needs — the remedy included — and leaves
+ * the strip exact. A full stop inside a word (`foo.ts`, `1.5`) is kept.
+ */
+export function openSentence(reason: string | null | undefined): string {
+  const text = (reason ?? "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\.+$/, "")
+    .replace(/\.\s+/g, "; ");
+  return `Open · ${text || "awaiting checks"}.`;
+}
+
+const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * Every trailing run of sentences of `text`, longest first: for a three-
+ * sentence constant, the whole of it, its last two, and its last one.
+ */
+function sentenceTails(text: string): string[] {
+  const starts = [0];
+  for (const m of text.matchAll(/\.\s+/g)) starts.push((m.index ?? 0) + m[0].length);
+  return starts.map((at) => text.slice(at));
+}
+
+/**
+ * The multi-sentence remedies `decideCascadeMerge` and `reclassifyAgainstBase`
+ * append to a verdict. An open reason that carried one was cut at its first
+ * full stop by the old strip, so any trailing run of their sentences in a
+ * summary is this codebase's own writing, stranded there — see "The outcome
+ * sentence is ONE sentence" above.
+ */
+const STRANDED_TAILS = [BASE_BROKEN_REMEDY, NEVER_STARTED_REMEDY, CHECKS_PERMISSION_REMEDY]
+  .flatMap(sentenceTails)
+  .map(escapeRegExp);
 
 /**
  * The reasons the ENGINE used to bake into a summary, before the durable and
@@ -134,6 +197,10 @@ const LEGACY_REASON_PREFIX = new RegExp(
       "Not merging — .*? ha(?:s|ve) not reported yet\\.",
       "Not merging — \\d+ check\\(s\\) failing: .*?\\.",
       "Not merging yet — \\d+ check\\(s\\) still running: .*?\\.",
+      // `base_broken` and `never_started`, whose first sentences the drain
+      // passed as an open reason before `openSentence` existed.
+      "Not merging — \\d+ check\\(s\\) failing \\(.*?\\), and every one of them is ALSO failing on `[^`]*`\\.",
+      "Not merging — \\d+ check\\(s\\) failed without running \\(.*?\\): .*?\\.",
       "All \\d+ check\\(s\\) passed\\.",
       // The colon forms the engine used on its own returns.
       "Queued for auto-merge once checks pass:",
@@ -144,8 +211,9 @@ const LEGACY_REASON_PREFIX = new RegExp(
       // The one exported constant, matched on its opening clause so a later
       // rewording of its tail cannot leave half a sentence behind.
       "The GitHub App cannot read check runs on this repository\\..*?merged unseen\\.",
+      ...STRANDED_TAILS,
     ].join("|") +
-    ")\\s+",
+    ")(?:\\s+|$)",
 );
 
 /**
@@ -161,12 +229,14 @@ export function durableSummary(summary: string | null | undefined): string {
   let s = summary.trim();
   // A loop, not a single strip: a row written by an earlier version of this
   // could carry two, and leaving one behind would contradict the one in front.
-  for (let i = 0; i < 6; i++) {
-    const next = s.replace(OUTCOME_PREFIX, "").replace(LEGACY_REASON_PREFIX, "");
-    if (next === s) break;
-    s = next.trim();
+  // It runs to a fixed point rather than a count — the rows it has to repair
+  // carry hundreds — and it terminates because every pattern matches at least
+  // one character, so each pass that changes anything is strictly shorter.
+  for (;;) {
+    const next = s.replace(OUTCOME_PREFIX, "").replace(LEGACY_REASON_PREFIX, "").trim();
+    if (next === s) return s;
+    s = next;
   }
-  return s;
 }
 
 /**
@@ -209,11 +279,10 @@ export function reconcileResultToPr(input: {
     };
   }
 
-  // An open pull request keeps its status and gets a current reason. The full
-  // stop is part of the vocabulary above, so a reason carrying one of its own
-  // would strip badly next pass — hence the trim.
-  const reason = (input.openReason ?? "").trim().replace(/\.+$/, "");
-  const summary = join(`Open · ${reason || "awaiting checks"}.`, detail);
+  // An open pull request keeps its status and gets a current reason, as ONE
+  // sentence, because the strip above ends an open outcome at its first full
+  // stop and anything after it would be carried forward as detail.
+  const summary = join(openSentence(input.openReason), detail);
   return {
     status: "pr_opened",
     commitSha: null,

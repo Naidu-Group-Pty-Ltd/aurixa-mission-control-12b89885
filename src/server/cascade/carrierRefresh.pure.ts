@@ -70,14 +70,15 @@
  * only on a carrier that is still mid-flight — `pending`, never completed —
  * whose rows the engine already expects later passes to re-stamp.
  *
- * **A row that failed.** A failure is the drain's attempt accounting and
- * `requeueDroppedClone`'s judgement; silently re-queueing it here would
- * refund an attempt every pass and the ceiling that retires a bad event would
- * never be reached.
+ * **A row that failed against the head it is about to deliver.** A failed
+ * row IS re-offered, once per prime head and never more; see "A row that
+ * failed" below for why it has to be and what bounds it.
  *
- * **A row that delivered nothing.** `delivered_sha` is null on a skip that
- * decided about no content — a clone that was not found, a pin that failed
- * validation — and re-queueing one re-runs a refusal rather than a delivery.
+ * **A skip that delivered nothing.** `delivered_sha` is null on a skip that
+ * decided about no content, such as a clone that was not found, and
+ * re-queueing one re-runs a refusal rather than a delivery. A pin that failed
+ * validation is written `failed`, not skipped, and is offered once per head
+ * like any failure: a pin is something a person edits.
  *
  * **Anything but a `commit` carrier.** A `manual` event is an operator's
  * explicit act and a `scheduled` one is a policy's; nothing stands down into
@@ -86,7 +87,45 @@
  * module rather than prime's head and is excluded for the same reason
  * `eventFold` excludes it.
  *
- * Client-safe: pure, no imports.
+ * ## A row that failed
+ *
+ * This module first refused every failed row, on the reasoning that a failure
+ * belongs to the drain's attempt accounting and to `requeueDroppedClone`.
+ * Neither ever sees it on a carrier that is still mid-flight, and that refusal
+ * was the second deadlock of the same shape.
+ *
+ * Carrier 15d4574f, measured 7–8 Oct 2026. At 16:53Z on 7 Oct both parent
+ * rows — `npc-client-dashboard` (e40b1d34) and `npc-crm-independent`
+ * (282695be) — failed with an EMPTY error message, while the pull requests
+ * they had opened (#315 and #81) stayed open. `executeCascade` reads only
+ * `queued` rows, so the event never visited them again. Their children were
+ * held by lineage, because neither parent's `last_synced_sha` could now reach
+ * the head. A held event goes back to `pending` every five minutes and the
+ * hold is refunded as a deferral, so the carrier never settled. A carrier that
+ * never settles is never judged by `requeueDroppedClone`, which acts on a
+ * settled partial event alone, and the drift beacon stays silent while a
+ * claimable carrier waits. Three more prime pushes folded into it. Four
+ * clones were held for fourteen hours behind one fault that left no words,
+ * until a person re-armed the two rows by hand at 06:58Z on 8 Oct, and every
+ * component reported normal operation throughout.
+ *
+ * So a failed row on a mid-flight carrier is re-offered, and **the bound is
+ * the head it failed against**. No column records that head, so every place
+ * the engine writes a failed row composes its message through
+ * `stampFailedAgainst`, which leads it with `Failed against prime@<sha>`, and
+ * this module reads it back through `failedAgainst`. A row that failed against
+ * the head this pass is about to deliver is left alone, so a deterministic
+ * failure costs one attempt per prime commit — exactly what the fleet paid
+ * before carriers could hold — and never one per five-minute tick. A row
+ * failed against an older head, or written before the stamp existed, is owed
+ * one attempt at the current head, and that attempt stamps it.
+ *
+ * A failed row needs no `delivered_sha` to qualify, unlike a delivered one: a
+ * failure is precisely a pass that delivered nothing, and the rule that
+ * excludes an empty `delivered_sha` is about skips that decided about no
+ * content, which a failure never did.
+ *
+ * Client-safe: pure, no imports of runtime code.
  */
 
 import type { ReconciledStatus } from "./prReconcile.pure";
@@ -99,6 +138,12 @@ export type CarrierResultRow = {
   status: string;
   /** The prime head the pass that wrote this row delivered. */
   delivered_sha: string | null;
+  /**
+   * Read only on a failed row, for the head it failed against
+   * (`failedAgainst`). Optional so a caller that reads no failed rows need
+   * not select it; absent reads as unstamped.
+   */
+  error_message?: string | null;
 };
 
 /** The carrier, as much of it as this decision reads. */
@@ -137,8 +182,10 @@ export type CarrierRefreshDecision =
  * added to the pipeline without this module being made to have an opinion
  * about it.
  *
- * `failed` is deliberately absent; see the module header. It is not a
- * `ReconciledStatus` either, which is the same statement from the other side.
+ * `failed` is deliberately absent: it is not a delivery and it is not a
+ * `ReconciledStatus`. A failed row is re-offered by its own rule, bounded by
+ * the head it failed against rather than the head it delivered; see "A row
+ * that failed" in the module header.
  */
 const DELIVERED: Record<ReconciledStatus, true> = {
   succeeded: true,
@@ -157,6 +204,88 @@ function scopeIsEmpty(scopeFilter: unknown): boolean {
 
 function shortSha(sha: string): string {
   return sha.slice(0, 7);
+}
+
+/** `Failed against prime@<7–40 hex> — `, at the start of a message. */
+const FAILED_AGAINST_STAMP = /^Failed against prime@([0-9a-f]{7,40}) — /;
+
+/** What a failure with no words of its own says, so the stamp never ends on a dash. */
+export const UNEXPLAINED_FAILURE = "no message was returned with the failure";
+
+/**
+ * A failed row's `error_message`, led by the prime head the pass that failed
+ * was delivering. The one composer every failed-row write goes through; see
+ * "A row that failed" in the module header.
+ *
+ * Idempotent, and it never stacks: an earlier stamp is replaced rather than
+ * prefixed, so a row that fails against three heads in turn names the last.
+ * An empty message is replaced with `UNEXPLAINED_FAILURE` rather than left
+ * blank, because a blank failure is what nobody could diagnose on 15d4574f.
+ * With no head resolved there is nothing true to stamp, and the message is
+ * returned unstamped — which this module reads as owed one re-offer.
+ */
+export function stampFailedAgainst(head: string, message: string | null | undefined): string {
+  let rest = (message ?? "").trim();
+  for (let m = rest.match(FAILED_AGAINST_STAMP); m; m = rest.match(FAILED_AGAINST_STAMP)) {
+    rest = rest.slice(m[0].length).trim();
+  }
+  const body = rest || UNEXPLAINED_FAILURE;
+  const sha = head.trim();
+  return sha ? `Failed against prime@${shortSha(sha)} — ${body}` : body;
+}
+
+/**
+ * The prime head a failed row's message says it failed against, as the
+ * stamp spelt it (a prefix of the full SHA), or null where it carries none.
+ */
+export function failedAgainst(errorMessage: string | null | undefined): string | null {
+  const m = (errorMessage ?? "").trim().match(FAILED_AGAINST_STAMP);
+  return m ? m[1] : null;
+}
+
+/**
+ * The patch a finished pass writes onto its row, settled for the two things
+ * the row's `error_message` must say.
+ *
+ * **A failure names the head it failed against** (`stampFailedAgainst`),
+ * because that is the only record of which head a failed row has had its
+ * attempt at.
+ *
+ * **A delivery carries no note an earlier pass left.** A row held by lineage
+ * or deferred by a rate limit is written `Held: …` or `Deferred until …` and
+ * stays `queued`; the pass that later delivers it wrote no `error_message`,
+ * so the old note survived beside a success. Measured on 8 Oct 2026, 133
+ * `succeeded` rows still read "Parent NPC Client Dashboard carries prime@…;
+ * this pass delivers prime@…. Reading its branch now would hand this clone
+ * the older tree while the event claimed the newer one.", and 14 more still
+ * read "Deferred until …". Each stopped being true the moment its row
+ * delivered. A patch that names its own `error_message` keeps it.
+ *
+ * Every other status passes through untouched: `queued` is a pause whose
+ * note is current.
+ */
+export function settledRowPatch<P extends { status?: unknown; error_message?: string | null }>(
+  patch: P,
+  head: string,
+): P & { error_message?: string | null } {
+  if (patch.status === "failed") {
+    const message = typeof patch.error_message === "string" ? patch.error_message : null;
+    return { ...patch, error_message: stampFailedAgainst(head, message) };
+  }
+  if (
+    typeof patch.status === "string" &&
+    DELIVERED_STATUSES.has(patch.status) &&
+    !("error_message" in patch)
+  ) {
+    return { ...patch, error_message: null };
+  }
+  return patch;
+}
+
+/** Whether a failed row has already had its attempt at `head`. */
+function failedAgainstHead(row: CarrierResultRow, head: string): boolean {
+  const stamped = failedAgainst(row.error_message);
+  return stamped !== null && head.startsWith(stamped);
 }
 
 /**
@@ -207,21 +336,49 @@ export function planCarrierRefresh(input: {
   const stale = input.rows.filter(
     (r) => DELIVERED_STATUSES.has(r.status) && Boolean(r.delivered_sha) && r.delivered_sha !== head,
   );
-  if (stale.length === 0) {
-    return { kind: "none", why: `every delivered row already names prime@${shortSha(head)}` };
+  const failed = input.rows.filter((r) => r.status === "failed" && !failedAgainstHead(r, head));
+  if (stale.length === 0 && failed.length === 0) {
+    return {
+      kind: "none",
+      why: `every delivered row already names prime@${shortSha(head)} and no failed row is owed an attempt at it`,
+    };
   }
 
-  const clones = stale.map((r) => r.clone_name?.trim() || "an unnamed clone");
-  const behind = [...new Set(stale.map((r) => shortSha(r.delivered_sha as string)))].sort();
+  const name = (r: CarrierResultRow) => r.clone_name?.trim() || "an unnamed clone";
+  const reasons: string[] = [];
+  if (stale.length > 0) {
+    const behind = [...new Set(stale.map((r) => shortSha(r.delivered_sha as string)))].sort();
+    reasons.push(
+      `${stale.length} clone(s) were delivered prime@${behind.join(", prime@")} by an earlier ` +
+        `pass of this carrier and are re-offered prime@${shortSha(head)}: a commit cascade stands ` +
+        `every later push down on the promise that it delivers prime's head at run time, and a ` +
+        `finished row is one this event would otherwise never visit again.`,
+    );
+  }
+  if (failed.length > 0) {
+    const against = [
+      ...new Set(
+        failed.map((r) => failedAgainst(r.error_message)).filter((v): v is string => v !== null),
+      ),
+    ]
+      .map(shortSha)
+      .sort();
+    const when =
+      against.length > 0
+        ? `against prime@${against.join(", prime@")}`
+        : "before the head was recorded";
+    reasons.push(
+      `${failed.length} clone(s) failed ${when} and are offered prime@${shortSha(head)} once: ` +
+        `a failed row on a carrier that has not settled is visited by nothing else, and a ` +
+        `parent left there holds every clone below it.`,
+    );
+  }
+  const rows = [...stale, ...failed];
   return {
     kind: "refresh",
-    rowIds: stale.map((r) => r.id),
-    clones,
-    why:
-      `${stale.length} clone(s) were delivered prime@${behind.join(", prime@")} by an earlier ` +
-      `pass of this carrier and are re-offered prime@${shortSha(head)}: a commit cascade stands ` +
-      `every later push down on the promise that it delivers prime's head at run time, and a ` +
-      `finished row is one this event would otherwise never visit again.`,
+    rowIds: rows.map((r) => r.id),
+    clones: rows.map(name),
+    why: reasons.join(" "),
   };
 }
 

@@ -542,9 +542,10 @@ describe("the engine looks for the specs a delivery leaves behind", () => {
     expect(block).toMatch(/for \(const spec of releasing\) \{[\s\S]*?owedSpecs\.push\(spec\);/);
     // And what is owed meets the plan — the exclusions, the ceiling, `prepareOne`.
     // A re-export bridge (`reExportBridges.pure.ts`) joins the same list after
-    // the owed specs, for the same reason.
+    // the owed specs, for the same reason, and so does a generated artefact
+    // whose sources all landed (`generatedArtefacts.pure.ts`).
     expect(block).toMatch(
-      /stranded:\s*\[[\s\S]*?\.\.\.importsOwed,\s*\.\.\.owedSpecs,\s*\.\.\.bridgesOwedNow\.map\(\(b\) => b\.path\),?\s*\]/,
+      /stranded:\s*\[[\s\S]*?\.\.\.importsOwed,\s*\.\.\.owedSpecs,\s*\.\.\.bridgesOwedNow\.map\(\(b\) => b\.path\),\s*\.\.\.artefactsOwedNow,?\s*\]/,
     );
   });
 

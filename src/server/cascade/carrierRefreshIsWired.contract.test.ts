@@ -97,3 +97,51 @@ describe("nothing downstream reads the pre-refresh set", () => {
     expect(reads).toHaveLength(2);
   });
 });
+
+describe("every failed result row names the head it failed against", () => {
+  // The re-offer of a failed row is bounded by `failedAgainst`, which reads
+  // the stamp. A failed row written without one is read as never attempted at
+  // any head, and is re-offered on every claim of a held carrier: the bound
+  // turns into a five-minute retry loop with nothing reporting it.
+  /** Each `.from("cascade_results")…update({ … })` object literal, as written. */
+  const resultUpdates = (() => {
+    const found: string[] = [];
+    const marker = /\.from\("cascade_results"\)\s*\.update\(\{/g;
+    for (const m of code.matchAll(marker)) {
+      let depth = 1;
+      let at = (m.index ?? 0) + m[0].length;
+      const start = at;
+      for (; at < code.length && depth > 0; at++) {
+        if (code[at] === "{") depth++;
+        else if (code[at] === "}") depth--;
+      }
+      found.push(code.slice(start, at));
+    }
+    return found;
+  })();
+
+  it("finds the literal writes at all, so the next assertion cannot pass vacuously", () => {
+    expect(resultUpdates.filter((u) => /status: "failed"/.test(u)).length).toBeGreaterThanOrEqual(
+      2,
+    );
+  });
+
+  it("stamps every literal failed write", () => {
+    for (const update of resultUpdates.filter((u) => /status: "failed"/.test(u))) {
+      expect(update).toMatch(/error_message: stampFailedAgainst\(\s*sourceSha,/);
+    }
+  });
+
+  it("settles the patch a pass returns before writing it, failure or delivery", () => {
+    // `processClone` returns its own failures (a refused conversion, a pull
+    // request that could not be opened) as a patch. The finished-pass write is
+    // where they reach the row.
+    expect(code).toContain(".update(settledRowPatch(patch, sourceSha))");
+    // The one raw patch write to a result row left is the pause, whose
+    // status is `queued`.
+    const raw = [...code.matchAll(/\.from\("cascade_results"\)\s*\.update\(patch\)/g)];
+    expect(raw).toHaveLength(1);
+    const pause = raw[0].index ?? 0;
+    expect(code.slice(Math.max(0, pause - 600), pause)).toContain('patch.status === "queued"');
+  });
+});

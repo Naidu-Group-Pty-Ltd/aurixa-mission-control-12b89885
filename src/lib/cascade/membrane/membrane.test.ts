@@ -194,6 +194,7 @@ describe("a spec travels with its subject or not at all", () => {
 
   it("strands the spec on the two subjects measured on 21 Sep 2026", () => {
     const stranded = strandedSubjects({
+      imported: [],
       specPath,
       specText: SPEC,
       primeSha: new Map([
@@ -216,6 +217,7 @@ describe("a spec travels with its subject or not at all", () => {
 
   it("says nothing when the subject travels with it", () => {
     const stranded = strandedSubjects({
+      imported: [],
       specPath,
       specText: SPEC,
       primeSha: new Map([["supabase/functions/market-sales-ingest/index.ts", "new"]]),
@@ -228,6 +230,7 @@ describe("a spec travels with its subject or not at all", () => {
   it("says nothing when the subject did not change upstream", () => {
     // An unchanged subject cannot contradict an updated spec.
     const stranded = strandedSubjects({
+      imported: [],
       specPath,
       specText: SPEC,
       primeSha: new Map([["supabase/functions/market-sales-ingest/index.ts", "same"]]),
@@ -241,6 +244,7 @@ describe("a spec travels with its subject or not at all", () => {
     // A spec for a feature that is not installed is a different defect, and
     // holding the spec for it would be a guess about scope.
     const stranded = strandedSubjects({
+      imported: [],
       specPath,
       specText: SPEC,
       primeSha: new Map([["supabase/functions/market-sales-ingest/index.ts", "new"]]),
@@ -254,6 +258,7 @@ describe("a spec travels with its subject or not at all", () => {
     // A tree that could not be read is not a tree with nothing in it.
     expect(
       strandedSubjects({
+        imported: [],
         specPath,
         specText: SPEC,
         primeSha: null,
@@ -266,6 +271,7 @@ describe("a spec travels with its subject or not at all", () => {
   it("has no opinion about a file that is not a spec", () => {
     expect(
       strandedSubjects({
+        imported: [],
         specPath: "src/lib/reports/thing.ts",
         specText: SPEC,
         primeSha: new Map([["supabase/functions/market-sales-ingest/index.ts", "new"]]),
@@ -546,6 +552,7 @@ describe("a subject absent from the clone is out of scope, not stranded", () => 
     // clone, at their older versions; both are outside its installed-module
     // globs, so the specs arrived and the subjects did not."
     const stranded = strandedSubjects({
+      imported: [],
       specPath: "src/lib/reports/__tests__/x.spec.ts",
       specText: 'readFileSync("src/lib/reports/x.ts")',
       primeSha: PRIME,
@@ -558,6 +565,7 @@ describe("a subject absent from the clone is out of scope, not stranded", () => 
   it("says nothing when the subject is crossing beside it", () => {
     expect(
       strandedSubjects({
+        imported: [],
         specPath: "src/lib/reports/__tests__/x.spec.ts",
         specText: 'readFileSync("src/lib/reports/x.ts")',
         primeSha: PRIME,
@@ -570,6 +578,7 @@ describe("a subject absent from the clone is out of scope, not stranded", () => 
   it("says nothing when the clone's copy already agrees with prime's", () => {
     expect(
       strandedSubjects({
+        imported: [],
         specPath: "src/lib/reports/__tests__/x.spec.ts",
         specText: 'readFileSync("src/lib/reports/x.ts")',
         primeSha: PRIME,
@@ -591,6 +600,7 @@ describe("a subject absent from the clone is out of scope, not stranded", () => 
     // channel acts on.
     expect(
       strandedSubjects({
+        imported: [],
         specPath: "src/lib/reports/__tests__/x.spec.ts",
         specText: 'readFileSync("src/lib/never/here.ts")',
         primeSha: PRIME,
@@ -610,6 +620,7 @@ describe("a subject absent from the clone is out of scope, not stranded", () => 
     ] as const) {
       expect(
         strandedSubjects({
+          imported: [],
           specPath: "src/lib/reports/__tests__/x.spec.ts",
           specText: 'readFileSync("src/lib/reports/x.ts")',
           primeSha: prime,
@@ -623,6 +634,7 @@ describe("a subject absent from the clone is out of scope, not stranded", () => 
   it("is silent on a file that is not a spec at all", () => {
     expect(
       strandedSubjects({
+        imported: [],
         specPath: "src/lib/reports/x.ts",
         specText: 'readFileSync("src/lib/reports/y.ts")',
         primeSha: new Map([["src/lib/reports/y.ts", "aaa"]]),
@@ -721,6 +733,7 @@ describe("a subject named relative to the spec", () => {
 
   it("strands the spec on the subject cascade #23 delivered it without", () => {
     const stranded = strandedSubjects({
+      imported: [],
       specPath,
       specText: SPEC,
       primeSha: new Map([["supabase/functions/market-sales-ingest/index.ts", "new"]]),
@@ -771,6 +784,7 @@ describe("a subject named as segments of the spec's own directory", () => {
 
   it("strands the spec on the subject cascade #264 delivered it without", () => {
     const stranded = strandedSubjects({
+      imported: [],
       specPath,
       specText: SPEC,
       primeSha: new Map([
@@ -1277,5 +1291,66 @@ describe("orphanSpecHoldAfterCarry", () => {
     });
     expect(after.path).toBe("src/x.spec.ts");
     expect(after.reason).toBe("manual_reconcile");
+  });
+});
+
+describe("a subject the spec imports, handed in by the server", () => {
+  // The membrane is drawn in a browser, so the resolver lives on the server
+  // (`specImportSubjects.pure.ts`) and its answer arrives as `imported`. It is
+  // judged by exactly the rule a named subject is.
+  const specPath = "src/lib/aml/regulatedActs.test.ts";
+  const SPEC = 'import { isElevationRefusal } from "@/lib/secureInvoke";';
+
+  it("strands the spec on an imported module the clone holds at an older version", () => {
+    expect(
+      strandedSubjects({
+        specPath,
+        specText: SPEC,
+        primeSha: new Map([["src/lib/secureInvoke.ts", "prime"]]),
+        cloneSha: new Map([["src/lib/secureInvoke.ts", "clone"]]),
+        crossing: new Set([specPath]),
+        imported: ["src/lib/secureInvoke.ts"],
+      }),
+    ).toEqual(["src/lib/secureInvoke.ts"]);
+  });
+
+  it("is judged by the same three conditions as a named subject", () => {
+    const base = {
+      specPath,
+      specText: SPEC,
+      primeSha: new Map([["src/lib/secureInvoke.ts", "prime"]]),
+      cloneSha: new Map([["src/lib/secureInvoke.ts", "clone"]]),
+      crossing: new Set([specPath]),
+      imported: ["src/lib/secureInvoke.ts"],
+    };
+    // Crossing beside it.
+    expect(
+      strandedSubjects({ ...base, crossing: new Set([specPath, "src/lib/secureInvoke.ts"]) }),
+    ).toEqual([]);
+    // Not on the clone.
+    expect(strandedSubjects({ ...base, cloneSha: new Map() })).toEqual([]);
+    // The same on both sides.
+    expect(
+      strandedSubjects({ ...base, cloneSha: new Map([["src/lib/secureInvoke.ts", "prime"]]) }),
+    ).toEqual([]);
+  });
+
+  it("refuses an imported path outside the subject rule, and the spec itself", () => {
+    expect(
+      strandedSubjects({
+        specPath,
+        specText: SPEC,
+        primeSha: new Map([
+          ["vite.config.ts", "p"],
+          [specPath, "p"],
+        ]),
+        cloneSha: new Map([
+          ["vite.config.ts", "c"],
+          [specPath, "c"],
+        ]),
+        crossing: new Set(),
+        imported: ["vite.config.ts", specPath, "src/../vite.config.ts"],
+      }),
+    ).toEqual([]);
   });
 });

@@ -383,19 +383,45 @@ describe("how the engine uses it", () => {
     expect(block).toMatch(/mergedRegistryJson,\s*mergedToml,/);
   });
 
-  it("acts only where the two function sets differ and prime's copy is being delivered", () => {
+  it("acts where prime's copy is delivered and the two function sets differ", () => {
     const block = pump();
     expect(block).toContain('mode !== "notify"');
-    expect(block).toContain("(withheldFunctions.length > 0 || cloneOwnedFunctions.length > 0)");
     expect(block).toMatch(
-      /treeEntries\.some\(\(t\) => t\.path === API_SURFACE_PATH && t\.sha !== null\)/,
+      /const apiSurfaceDelivered = treeEntries\.some\(\s*\(t\) => t\.path === API_SURFACE_PATH && t\.sha !== null,?\s*\);/,
     );
+    expect(block).toContain(
+      "(apiSurfaceDelivered && (withheldFunctions.length > 0 || cloneOwnedFunctions.length > 0))",
+    );
+  });
+
+  it("acts where prime's copy is NOT delivered, only on a surface the clone holds and no rule holds", () => {
+    // Cascade #81, 8 Oct 2026: the registry crossed into a module-scoped
+    // clone, `mobile/**` is inside none of its globs, and the committed
+    // surface was left describing the registry before it.
+    const block = pump();
+    const stale = block.slice(block.indexOf("const apiSurfaceStaleOnClone ="));
+    expect(stale).toMatch(/^const apiSurfaceStaleOnClone =\s*!apiSurfaceDelivered &&/);
+    expect(stale).toContain("cloneShaByPath?.has(API_SURFACE_PATH) === true");
+    expect(stale).toContain("primeShaByPath?.has(API_SURFACE_PATH) === true");
+    expect(stale).toContain("!partition.held.some((h) => h.path === API_SURFACE_PATH)");
+    expect(block).toMatch(/\|\|\s*apiSurfaceStaleOnClone\)/);
+  });
+
+  it("holds nothing for a refusal where prime's copy was not crossing", () => {
+    // A hold there would name a file the pass never touched, on every pass.
+    const block = pump();
+    const quiet = block.indexOf("if (!verdict.ok && !apiSurfaceDelivered) {");
+    const held = block.indexOf("} else if (!verdict.ok) {");
+    expect(quiet).toBeGreaterThan(-1);
+    expect(held).toBeGreaterThan(quiet);
+    expect(block.slice(quiet, held)).not.toContain("partition.held.push");
+    expect(block.slice(quiet, held)).not.toContain("needsReconcile.push");
   });
 
   it("drops prime's copy either way, and holds a refusal for a person", () => {
     const block = pump();
     const drop = block.indexOf("dropFromTree(API_SURFACE_PATH)");
-    const refused = block.indexOf("if (!verdict.ok) {", drop);
+    const refused = block.indexOf("} else if (!verdict.ok) {", drop);
     expect(drop).toBeGreaterThan(-1);
     expect(refused).toBeGreaterThan(drop);
     expect(block).toContain('reason: "manual_reconcile" as const');

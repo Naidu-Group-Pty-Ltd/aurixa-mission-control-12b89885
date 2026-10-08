@@ -43,12 +43,43 @@
  * attributed to a DIRECTORY rather than to a file, so a merged tree taking one
  * file from each side cannot be partitioned edge by edge.
  *
- * It is therefore carried only where prime's graph and the clone's are
- * IDENTICAL, which is the one case where the answer cannot depend on the
- * split. Measured 21 Sep 2026 against `npc-crm-independent`: 69 edges each,
- * no edge in one and not the other, while the imports differ by exactly two
- * pairs and both are for functions only the clone has. Where they differ at
- * all this refuses and the caller holds, which is today's behaviour exactly.
+ * Given only the two inventories, it is carried only where prime's graph and
+ * the clone's are IDENTICAL, which is the one case where the answer cannot
+ * depend on the split. Measured 21 Sep 2026 against `npc-crm-independent`:
+ * 69 edges each, no edge in one and not the other, while the imports differ
+ * by exactly two pairs and both are for functions only the clone has. Where
+ * they differ at all this refuses and the caller holds.
+ *
+ * ## Given both trees, the graph is attributed caller by caller
+ *
+ * That refusal stopped being the rare case. Measured 8 Oct 2026 on cascade
+ * #81 to `npc-crm-independent-6505dc`: the clone holds CRM functions prime
+ * does not, so the two graphs differ for good. Every pass refused, and the
+ * clone's `security` job failed on counts this module had already computed
+ * correctly.
+ *
+ * The generator names an edge's caller by the first directory under
+ * `supabase/functions/`, so an edge is a fact about ONE directory. A
+ * directory whose every walked file in the merged tree carries prime's
+ * content, with exactly prime's set of files, produces exactly prime's edges
+ * for that caller. The same holds for the clone. So where both trees are
+ * passed, each caller is attributed alone:
+ *
+ *   - entirely prime's: prime's edges for it;
+ *   - entirely the clone's: the clone's edges for it;
+ *   - mixed, where both sides record the same edges for it: those edges.
+ *     This is the identical-graph rule above, applied to one caller rather
+ *     than to the whole graph, and it is what carries `_shared`. That
+ *     directory is mixed on every clone that keeps a module of its own, and
+ *     on `npc-crm-independent-6505dc` both sides record the same two edges
+ *     for it. With neither side holding an edge, it is "none";
+ *   - mixed otherwise: refused, naming the caller.
+ *
+ * A file whose blob is the same on both sides counts as either side's. This
+ * is still the generator's own answer, re-filed per caller rather than per
+ * path. Nothing is read or parsed that the generator did not already write.
+ * Run over cascade #81's real trees (prime@72da9a5 onto the clone's main),
+ * it wrote the document the generator wrote on that branch, byte for byte.
  *
  * Nothing here guesses. Every refusal is named, and a named refusal costs a
  * pass the same red check it already had.
@@ -248,6 +279,119 @@ function partitionImports(args: {
   return out;
 }
 
+/** The generator's caller for an edge: the text before `->`. */
+function edgeCaller(edge: string): string {
+  const at = edge.indexOf("->");
+  return at === -1 ? edge : edge.slice(0, at);
+}
+
+/**
+ * The generator's caller for a walked file: the first segment under
+ * `supabase/functions/`, `_shared` included.
+ */
+function fileCaller(path: string): string {
+  return path.slice(EDGE_FUNCTIONS_PREFIX.length).split("/")[0];
+}
+
+/**
+ * The merged graph, caller by caller, or a refusal naming the first caller
+ * that cannot be attributed. See "Given both trees" in the header.
+ */
+export function attributeGraphByCaller(args: {
+  primeGraph: readonly string[];
+  cloneGraph: readonly string[];
+  primeTree: ReadonlyMap<string, string>;
+  cloneTree: ReadonlyMap<string, string>;
+  /** Every path the clone holds once the pass lands. */
+  mergedPaths: readonly string[];
+  /** Walked source files this pass writes. */
+  deliveredFiles: ReadonlySet<string>;
+  /** Delivered paths whose content is neither side's. */
+  rewritten: ReadonlySet<string>;
+}): { ok: true; graph: string[] } | { ok: false; reason: string } {
+  const { primeTree, cloneTree, deliveredFiles, rewritten } = args;
+
+  const filesBy = (paths: Iterable<string>) => {
+    const by = new Map<string, Set<string>>();
+    for (const path of paths) {
+      if (!isWalkedSourceFile(path)) continue;
+      const caller = fileCaller(path);
+      const set = by.get(caller) ?? new Set<string>();
+      set.add(path);
+      by.set(caller, set);
+    }
+    return by;
+  };
+  const edgesBy = (graph: readonly string[]) => {
+    const by = new Map<string, string[]>();
+    for (const edge of graph) {
+      const caller = edgeCaller(edge);
+      by.set(caller, [...(by.get(caller) ?? []), edge]);
+    }
+    return by;
+  };
+  const primeFiles = filesBy(primeTree.keys());
+  const cloneFiles = filesBy(cloneTree.keys());
+  const mergedFiles = filesBy(args.mergedPaths);
+  const primeEdges = edgesBy(args.primeGraph);
+  const cloneEdges = edgesBy(args.cloneGraph);
+
+  const sameSet = (a: ReadonlySet<string>, b: ReadonlySet<string>) =>
+    a.size === b.size && [...a].every((x) => b.has(x));
+  const sameEdges = (a: readonly string[], b: readonly string[]) =>
+    a.length === b.length && [...a].sort().join("\u0000") === [...b].sort().join("\u0000");
+  const empty = new Set<string>();
+
+  // Whose content a file in the merged tree carries. A delivered file is
+  // prime's unless a pump composed it; an untouched one is the clone's. A
+  // blob both sides hold identically is either side's.
+  const carriesPrime = (path: string): boolean => {
+    if (deliveredFiles.has(path)) return !rewritten.has(path);
+    const onClone = cloneTree.get(path);
+    return onClone !== undefined && onClone === primeTree.get(path);
+  };
+  const carriesClone = (path: string): boolean => {
+    if (!deliveredFiles.has(path)) return true;
+    if (rewritten.has(path)) return false;
+    const onPrime = primeTree.get(path);
+    return onPrime !== undefined && onPrime === cloneTree.get(path);
+  };
+
+  const callers = new Set<string>([
+    ...primeFiles.keys(),
+    ...cloneFiles.keys(),
+    ...mergedFiles.keys(),
+    ...primeEdges.keys(),
+    ...cloneEdges.keys(),
+  ]);
+  const graph: string[] = [];
+  for (const caller of [...callers].sort()) {
+    const merged = mergedFiles.get(caller) ?? empty;
+    const fromPrime = primeEdges.get(caller) ?? [];
+    const fromClone = cloneEdges.get(caller) ?? [];
+    if (sameSet(merged, primeFiles.get(caller) ?? empty) && [...merged].every(carriesPrime)) {
+      graph.push(...fromPrime);
+      continue;
+    }
+    if (sameSet(merged, cloneFiles.get(caller) ?? empty) && [...merged].every(carriesClone)) {
+      graph.push(...fromClone);
+      continue;
+    }
+    if (sameEdges(fromPrime, fromClone)) {
+      graph.push(...fromPrime);
+      continue;
+    }
+    return {
+      ok: false,
+      reason:
+        `\`${caller}\` takes source files from both the prime and this clone, and the ` +
+        "inter-function call graph records it as one caller — so which side supplied each " +
+        "file decides its edges and this pass cannot tell",
+    };
+  }
+  return { ok: true, graph };
+}
+
 /**
  * The regenerated baseline, or a named refusal.
  *
@@ -268,6 +412,18 @@ export function reconcileSecurityInventory(args: {
    * graph carried. Omitted or empty filters nothing.
    */
   withheld?: readonly string[];
+  /**
+   * Prime's and the clone's blob sha by path. Given both, the graph is
+   * attributed caller by caller (see the header); omitted, it is carried
+   * only where the two graphs are identical.
+   */
+  primeTree?: ReadonlyMap<string, string> | null;
+  cloneTree?: ReadonlyMap<string, string> | null;
+  /**
+   * Delivered paths whose content is neither side's, because a pump
+   * composed it. Such a file is never attributed to prime.
+   */
+  rewrittenPaths?: Iterable<string>;
 }): BaselineReconcile<string> {
   const primeParsed = parseJson(args.primeInventoryJson, "prime's security baseline");
   if (!primeParsed.ok) return primeParsed;
@@ -304,20 +460,42 @@ export function reconcileSecurityInventory(args: {
   }
 
   // The graph is attributed to a caller rather than to a file, so a merged
-  // tree that takes one file from each side cannot be partitioned. Carried
-  // only where the split cannot matter — see the header.
+  // tree that takes one file from each side cannot be partitioned edge by
+  // edge. See the header for what is carried, and where.
   const withheld = new Set(args.withheld ?? []);
-  const callerHeld = (edge: string) => !withheld.has(edge.slice(0, edge.indexOf("->")));
+  const callerHeld = (edge: string) => !withheld.has(edgeCaller(edge));
   const primeGraph = (prime.statically_derivable_inter_function_graph as string[]).filter(
     callerHeld,
   );
   const cloneGraph = (clone.statically_derivable_inter_function_graph as string[]).filter(
     callerHeld,
   );
+
+  const mergedPaths = [...args.mergedTreePaths];
+  const mergedFiles = new Set(
+    mergedPaths.filter(isWalkedSourceFile).map((p) => p.slice(EDGE_FUNCTIONS_PREFIX.length)),
+  );
+  const deliveredFiles = new Set([...args.deliveredPaths].filter(isWalkedSourceFile));
+
   const sameGraph =
     primeGraph.length === cloneGraph.length &&
     [...primeGraph].sort().join("\u0000") === [...cloneGraph].sort().join("\u0000");
-  if (!sameGraph) {
+  let graph: string[];
+  if (sameGraph) {
+    graph = [...primeGraph];
+  } else if (args.primeTree && args.cloneTree) {
+    const attributed = attributeGraphByCaller({
+      primeGraph,
+      cloneGraph,
+      primeTree: args.primeTree,
+      cloneTree: args.cloneTree,
+      mergedPaths,
+      deliveredFiles,
+      rewritten: new Set(args.rewrittenPaths ?? []),
+    });
+    if (!attributed.ok) return attributed;
+    graph = attributed.graph;
+  } else {
     return {
       ok: false,
       reason:
@@ -326,12 +504,6 @@ export function reconcileSecurityInventory(args: {
         "this pass cannot tell",
     };
   }
-
-  const mergedPaths = [...args.mergedTreePaths];
-  const mergedFiles = new Set(
-    mergedPaths.filter(isWalkedSourceFile).map((p) => p.slice(EDGE_FUNCTIONS_PREFIX.length)),
-  );
-  const deliveredFiles = new Set([...args.deliveredPaths].filter(isWalkedSourceFile));
 
   const counts = registryCounts(registryRoot.functions);
   const merged: SecurityInventory = {
@@ -349,7 +521,7 @@ export function reconcileSecurityInventory(args: {
       mergedFiles,
       deliveredFiles,
     }),
-    statically_derivable_inter_function_graph: [...primeGraph].sort(),
+    statically_derivable_inter_function_graph: graph.sort(),
   };
 
   // The generator's own serialisation, to the trailing newline: the check is

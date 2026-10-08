@@ -167,17 +167,17 @@ describe("the invocation budget", () => {
 describe("handing the event back", () => {
   const hold = sliceFrom(
     engine,
-    "if (deferred || stoppedEarly || lineageHolds.length > 0) {",
+    "if (deferred || stoppedEarly || lineageHolds.length > 0 || serverDeferrals.length > 0) {",
     3_500,
   );
 
   it("is pending again with the moment it may be claimed, and the claim released", () => {
     expect(hold).toMatch(/status: "pending",\s*worker_started_at: null,/);
-    // Three paces, one shape: a rate limit waits on GitHub's window, a
-    // lineage hold on a parent's merge, and a budget pause resumes at once.
-    expect(hold).toMatch(
-      /next_attempt_at: deferred\s*\?\s*deferred\.until\s*:\s*\(lineageUntil \?\? new Date\(\)\.toISOString\(\)\)/,
-    );
+    // Four paces, one shape: a rate limit waits on GitHub's window, a server
+    // error on its own bounded window, a lineage hold on a parent's merge, and
+    // a budget pause resumes at once.
+    expect(hold).toMatch(/const heldUntil = deferred\?\.until \?\? serverHeld \?\? lineageUntil;/);
+    expect(hold).toMatch(/next_attempt_at: heldUntil \?\? new Date\(\)\.toISOString\(\)/);
   });
 
   it("is checked, because an event left `running` is the stall this replaces", () => {
@@ -190,13 +190,15 @@ describe("handing the event back", () => {
   it("returns before the final tally is written", () => {
     // `summariseCascade` + `status: finalStatus` come AFTER this block: a
     // partial count must never be recorded as the whole fleet's outcome.
-    const returnAt = hold.indexOf("if (deferred) return");
+    const returnAt = hold.indexOf("if (heldUntil) return");
     expect(returnAt).toBeGreaterThan(-1);
     const afterHold = engine.slice(
-      engine.indexOf("if (deferred || stoppedEarly || lineageHolds.length > 0) {"),
+      engine.indexOf(
+        "if (deferred || stoppedEarly || lineageHolds.length > 0 || serverDeferrals.length > 0) {",
+      ),
     );
     expect(afterHold.indexOf("summariseCascade({")).toBeGreaterThan(
-      afterHold.indexOf("if (deferred) return"),
+      afterHold.indexOf("if (heldUntil) return"),
     );
   });
 
@@ -206,6 +208,7 @@ describe("handing the event back", () => {
     );
     expect(hold).toContain("describePause({ done, total })");
     expect(hold).toContain("describeLineageHold({");
+    expect(hold).toContain("describeServerDeferral({");
   });
 
   it("paces a lineage hold rather than retrying it on the next tick", () => {
@@ -215,7 +218,7 @@ describe("handing the event back", () => {
     // event whose parent proposal was open and healthy inside three minutes.
     expect(hold).toContain("LINEAGE_HOLD_RETRY_MS");
     expect(hold).toContain(
-      'if (lineageUntil) return { ok: true, status: "deferred", until: lineageUntil, done, total };',
+      'if (heldUntil) return { ok: true, status: "deferred", until: heldUntil, done, total };',
     );
   });
 
@@ -223,6 +226,14 @@ describe("handing the event back", () => {
     // That pass has work it can do right now; waiting five minutes to do it
     // would be slower for no reason.
     expect(hold).toMatch(/lineageHolds\.length > 0 && !deferred && !stoppedEarly/);
+  });
+
+  it("orders a server deferral below a rate limit and a pause, above a lineage hold", () => {
+    // A rate limit is the installation's window and stopped the loop; a pause
+    // has work to do now. A lineage hold waits on the very row a server error
+    // deferred, so it takes that row's window rather than its own.
+    expect(hold).toMatch(/const serverHeld = !deferred && !stoppedEarly \? serverUntil : null;/);
+    expect(hold).toMatch(/lineageHolds\.length > 0 && !deferred && !stoppedEarly && !serverHeld/);
   });
 });
 
@@ -245,7 +256,7 @@ describe("the order the pass walks", () => {
     // `total` is what the event promised, and a held row is still promised.
     const hold = sliceFrom(
       engine,
-      "if (deferred || stoppedEarly || lineageHolds.length > 0) {",
+      "if (deferred || stoppedEarly || lineageHolds.length > 0 || serverDeferrals.length > 0) {",
       400,
     );
     expect(hold).toContain("const total = queuedRows.length;");
