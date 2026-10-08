@@ -11,6 +11,7 @@ import {
   Pencil,
   Plus,
   RefreshCw,
+  Smartphone,
   Trash2,
   Waves,
   X,
@@ -307,6 +308,12 @@ function CloneDetail() {
             onClick={() => navigate({ to: "/clones/$cloneId/secrets", params: { cloneId } })}
           >
             <KeyRound className="mr-1.5 h-4 w-4" /> Secrets
+          </Button>
+          <Button
+            variant="outline"
+            onClick={() => navigate({ to: "/clones/$cloneId/mobile", params: { cloneId } })}
+          >
+            <Smartphone className="mr-1.5 h-4 w-4" /> Mobile
           </Button>
           <Button variant="outline" onClick={() => setEditOpen(true)}>
             <Pencil className="mr-1.5 h-4 w-4" /> Edit

@@ -39,6 +39,7 @@ import { Route as AuthRouteImport } from './routes/auth'
 import { Route as AuditLogRouteImport } from './routes/audit-log'
 import { Route as ApprovalsRouteImport } from './routes/approvals'
 import { Route as AnnouncementsRouteImport } from './routes/announcements'
+import { Route as AccessRouteImport } from './routes/access'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as SettingsIndexRouteImport } from './routes/settings.index'
 import { Route as SecurityIndexRouteImport } from './routes/security.index'
@@ -68,6 +69,7 @@ import { Route as SecurityScansRouteImport } from './routes/security.scans'
 import { Route as SecurityIntakeRouteImport } from './routes/security.intake'
 import { Route as ModulesBuilderRouteImport } from './routes/modules.builder'
 import { Route as ModulesSlugRouteImport } from './routes/modules.$slug'
+import { Route as MobileReleasesRouteImport } from './routes/mobile.releases'
 import { Route as JoinTokenRouteImport } from './routes/join.$token'
 import { Route as HooksWarmHealthRouteImport } from './routes/hooks.warm-health'
 import { Route as HooksVoiceStudioPlanRouteImport } from './routes/hooks.voice-studio-plan'
@@ -82,6 +84,7 @@ import { Route as HooksSupportRemediationDrainRouteImport } from './routes/hooks
 import { Route as HooksRunSchedulesRouteImport } from './routes/hooks.run-schedules'
 import { Route as HooksReferenceDataSyncRouteImport } from './routes/hooks.reference-data-sync'
 import { Route as HooksPrimeSecretPairsRouteImport } from './routes/hooks.prime-secret-pairs'
+import { Route as HooksMobileGatewayReconcileRouteImport } from './routes/hooks.mobile-gateway-reconcile'
 import { Route as HooksMigrationEnqueueRouteImport } from './routes/hooks.migration-enqueue'
 import { Route as HooksMigrationDriftRouteImport } from './routes/hooks.migration-drift'
 import { Route as HooksLeadStageEmailsRouteImport } from './routes/hooks.lead-stage-emails'
@@ -150,12 +153,16 @@ import { Route as ApiHealthRouteImport } from './routes/api.health'
 import { Route as AgreementsIssuingProfileRouteImport } from './routes/agreements.issuing-profile'
 import { Route as AgreementsBuilderPartnerTermsRouteImport } from './routes/agreements.builder-partner-terms'
 import { Route as AgreementsAgreementIdRouteImport } from './routes/agreements.$agreementId'
+import { Route as AGrantRefRouteImport } from './routes/a.$grantRef'
+import { Route as DotwellKnownAssetlinksDotjsonRouteImport } from './routes/[.]well-known.assetlinks[.]json'
+import { Route as DotwellKnownAppleAppSiteAssociationRouteImport } from './routes/[.]well-known.apple-app-site-association'
 import { Route as VoiceStudioIndexRouteImport } from './routes/voice.studio.index'
 import { Route as CrmAccountsIndexRouteImport } from './routes/crm.accounts.index'
 import { Route as VoiceStudioProjectIdRouteImport } from './routes/voice.studio.$projectId'
 import { Route as EmailCampaignsCampaignIdRouteImport } from './routes/email.campaigns.$campaignId'
 import { Route as CrmAccountsAccountIdRouteImport } from './routes/crm.accounts.$accountId'
 import { Route as ClonesCloneIdSecretsRouteImport } from './routes/clones.$cloneId.secrets'
+import { Route as ClonesCloneIdMobileRouteImport } from './routes/clones.$cloneId.mobile'
 import { Route as ClientsHandoffTokenRouteImport } from './routes/clients.handoff.$token'
 import { Route as ApiPublicPurchasesRouteImport } from './routes/api.public.purchases'
 import { Route as ApiPublicVoiceWebhookRouteImport } from './routes/api.public.voice.webhook'
@@ -192,6 +199,12 @@ import { Route as ApiPublicSeatsListRouteImport } from './routes/api.public.seat
 import { Route as ApiPublicSeatsEntitlementRouteImport } from './routes/api.public.seats.entitlement'
 import { Route as ApiPublicSeatsCommitRouteImport } from './routes/api.public.seats.commit'
 import { Route as ApiPublicPricingCatalogRouteImport } from './routes/api.public.pricing.catalog'
+import { Route as ApiPublicMobileMagicLinkRouteImport } from './routes/api.public.mobile.magic-link'
+import { Route as ApiPublicMobileJwksRouteImport } from './routes/api.public.mobile.jwks'
+import { Route as ApiPublicMobileInstallReportRouteImport } from './routes/api.public.mobile.install-report'
+import { Route as ApiPublicMobileGrantStatusRouteImport } from './routes/api.public.mobile.grant-status'
+import { Route as ApiPublicMobileDownloadRequestRouteImport } from './routes/api.public.mobile.download-request'
+import { Route as ApiPublicMobileClaimRouteImport } from './routes/api.public.mobile.claim'
 import { Route as ApiPublicListingsOperationRouteImport } from './routes/api.public.listings.$operation'
 import { Route as ApiPublicLeadsCaptureRouteImport } from './routes/api.public.leads.capture'
 import { Route as ApiPublicIntegrationsSecretsRouteImport } from './routes/api.public.integrations.secrets'
@@ -216,11 +229,15 @@ import { Route as ApiPublicBillingInvoicePdfRouteImport } from './routes/api.pub
 import { Route as ApiPublicBillingHandoffRouteImport } from './routes/api.public.billing.handoff'
 import { Route as ApiPublicAnthropicJwksRouteImport } from './routes/api.public.anthropic.jwks'
 import { Route as ApiPublicAnthropicIdentityRouteImport } from './routes/api.public.anthropic.identity'
+import { Route as ApiAdminMobileReleasesRouteImport } from './routes/api.admin.mobile.releases'
 import { Route as ApiPublicStripeWebhookCloneIdRouteImport } from './routes/api.public.stripe.webhook.$cloneId'
 import { Route as ApiPublicSeatsDevicesReleaseRouteImport } from './routes/api.public.seats.devices.release'
 import { Route as ApiPublicSeatsDevicesRegisterRouteImport } from './routes/api.public.seats.devices.register'
 import { Route as ApiPublicSeatsDevicesListRouteImport } from './routes/api.public.seats.devices.list'
 import { Route as ApiPublicSeatsDevicesHeartbeatRouteImport } from './routes/api.public.seats.devices.heartbeat'
+import { Route as ApiPublicMobileReleasesCurrentRouteImport } from './routes/api.public.mobile.releases.current'
+import { Route as ApiPublicMobileGrantsGrantRefRouteImport } from './routes/api.public.mobile.grants.$grantRef'
+import { Route as ApiPublicMobileDownloadTicketRouteImport } from './routes/api.public.mobile.download.$ticket'
 import { Route as ApiPublicClonesGateCheckoutRouteImport } from './routes/api.public.clones.gate.checkout'
 import { Route as ApiPublicVoiceTTenantKeyWebhookRouteImport } from './routes/api.public.voice.t.$tenantKey.webhook'
 
@@ -374,6 +391,11 @@ const AnnouncementsRoute = AnnouncementsRouteImport.update({
   path: '/announcements',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AccessRoute = AccessRouteImport.update({
+  id: '/access',
+  path: '/access',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
@@ -521,6 +543,11 @@ const ModulesSlugRoute = ModulesSlugRouteImport.update({
   path: '/$slug',
   getParentRoute: () => ModulesRoute,
 } as any)
+const MobileReleasesRoute = MobileReleasesRouteImport.update({
+  id: '/mobile/releases',
+  path: '/mobile/releases',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const JoinTokenRoute = JoinTokenRouteImport.update({
   id: '/join/$token',
   path: '/join/$token',
@@ -594,6 +621,12 @@ const HooksPrimeSecretPairsRoute = HooksPrimeSecretPairsRouteImport.update({
   path: '/hooks/prime-secret-pairs',
   getParentRoute: () => rootRouteImport,
 } as any)
+const HooksMobileGatewayReconcileRoute =
+  HooksMobileGatewayReconcileRouteImport.update({
+    id: '/hooks/mobile-gateway-reconcile',
+    path: '/hooks/mobile-gateway-reconcile',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const HooksMigrationEnqueueRoute = HooksMigrationEnqueueRouteImport.update({
   id: '/hooks/migration-enqueue',
   path: '/hooks/migration-enqueue',
@@ -953,6 +986,23 @@ const AgreementsAgreementIdRoute = AgreementsAgreementIdRouteImport.update({
   path: '/agreements/$agreementId',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AGrantRefRoute = AGrantRefRouteImport.update({
+  id: '/a/$grantRef',
+  path: '/a/$grantRef',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DotwellKnownAssetlinksDotjsonRoute =
+  DotwellKnownAssetlinksDotjsonRouteImport.update({
+    id: '/.well-known/assetlinks.json',
+    path: '/.well-known/assetlinks.json',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const DotwellKnownAppleAppSiteAssociationRoute =
+  DotwellKnownAppleAppSiteAssociationRouteImport.update({
+    id: '/.well-known/apple-app-site-association',
+    path: '/.well-known/apple-app-site-association',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const VoiceStudioIndexRoute = VoiceStudioIndexRouteImport.update({
   id: '/voice/studio/',
   path: '/voice/studio/',
@@ -982,6 +1032,11 @@ const CrmAccountsAccountIdRoute = CrmAccountsAccountIdRouteImport.update({
 const ClonesCloneIdSecretsRoute = ClonesCloneIdSecretsRouteImport.update({
   id: '/secrets',
   path: '/secrets',
+  getParentRoute: () => ClonesCloneIdRoute,
+} as any)
+const ClonesCloneIdMobileRoute = ClonesCloneIdMobileRouteImport.update({
+  id: '/mobile',
+  path: '/mobile',
   getParentRoute: () => ClonesCloneIdRoute,
 } as any)
 const ClientsHandoffTokenRoute = ClientsHandoffTokenRouteImport.update({
@@ -1182,6 +1237,40 @@ const ApiPublicPricingCatalogRoute = ApiPublicPricingCatalogRouteImport.update({
   path: '/api/public/pricing/catalog',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiPublicMobileMagicLinkRoute =
+  ApiPublicMobileMagicLinkRouteImport.update({
+    id: '/api/public/mobile/magic-link',
+    path: '/api/public/mobile/magic-link',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicMobileJwksRoute = ApiPublicMobileJwksRouteImport.update({
+  id: '/api/public/mobile/jwks',
+  path: '/api/public/mobile/jwks',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiPublicMobileInstallReportRoute =
+  ApiPublicMobileInstallReportRouteImport.update({
+    id: '/api/public/mobile/install-report',
+    path: '/api/public/mobile/install-report',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicMobileGrantStatusRoute =
+  ApiPublicMobileGrantStatusRouteImport.update({
+    id: '/api/public/mobile/grant-status',
+    path: '/api/public/mobile/grant-status',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicMobileDownloadRequestRoute =
+  ApiPublicMobileDownloadRequestRouteImport.update({
+    id: '/api/public/mobile/download-request',
+    path: '/api/public/mobile/download-request',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicMobileClaimRoute = ApiPublicMobileClaimRouteImport.update({
+  id: '/api/public/mobile/claim',
+  path: '/api/public/mobile/claim',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiPublicListingsOperationRoute =
   ApiPublicListingsOperationRouteImport.update({
     id: '/api/public/listings/$operation',
@@ -1316,6 +1405,11 @@ const ApiPublicAnthropicIdentityRoute =
     path: '/api/public/anthropic/identity',
     getParentRoute: () => rootRouteImport,
   } as any)
+const ApiAdminMobileReleasesRoute = ApiAdminMobileReleasesRouteImport.update({
+  id: '/api/admin/mobile/releases',
+  path: '/api/admin/mobile/releases',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiPublicStripeWebhookCloneIdRoute =
   ApiPublicStripeWebhookCloneIdRouteImport.update({
     id: '/$cloneId',
@@ -1346,6 +1440,24 @@ const ApiPublicSeatsDevicesHeartbeatRoute =
     path: '/api/public/seats/devices/heartbeat',
     getParentRoute: () => rootRouteImport,
   } as any)
+const ApiPublicMobileReleasesCurrentRoute =
+  ApiPublicMobileReleasesCurrentRouteImport.update({
+    id: '/api/public/mobile/releases/current',
+    path: '/api/public/mobile/releases/current',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicMobileGrantsGrantRefRoute =
+  ApiPublicMobileGrantsGrantRefRouteImport.update({
+    id: '/api/public/mobile/grants/$grantRef',
+    path: '/api/public/mobile/grants/$grantRef',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicMobileDownloadTicketRoute =
+  ApiPublicMobileDownloadTicketRouteImport.update({
+    id: '/api/public/mobile/download/$ticket',
+    path: '/api/public/mobile/download/$ticket',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiPublicClonesGateCheckoutRoute =
   ApiPublicClonesGateCheckoutRouteImport.update({
     id: '/checkout',
@@ -1361,6 +1473,7 @@ const ApiPublicVoiceTTenantKeyWebhookRoute =
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/access': typeof AccessRoute
   '/announcements': typeof AnnouncementsRoute
   '/approvals': typeof ApprovalsRoute
   '/audit-log': typeof AuditLogRoute
@@ -1391,6 +1504,9 @@ export interface FileRoutesByFullPath {
   '/settings': typeof SettingsRouteWithChildren
   '/slo': typeof SloRoute
   '/yggdrasil': typeof YggdrasilRoute
+  '/.well-known/apple-app-site-association': typeof DotwellKnownAppleAppSiteAssociationRoute
+  '/.well-known/assetlinks.json': typeof DotwellKnownAssetlinksDotjsonRoute
+  '/a/$grantRef': typeof AGrantRefRoute
   '/agreements/$agreementId': typeof AgreementsAgreementIdRoute
   '/agreements/builder-partner-terms': typeof AgreementsBuilderPartnerTermsRoute
   '/agreements/issuing-profile': typeof AgreementsIssuingProfileRoute
@@ -1459,6 +1575,7 @@ export interface FileRoutesByFullPath {
   '/hooks/lead-stage-emails': typeof HooksLeadStageEmailsRoute
   '/hooks/migration-drift': typeof HooksMigrationDriftRoute
   '/hooks/migration-enqueue': typeof HooksMigrationEnqueueRoute
+  '/hooks/mobile-gateway-reconcile': typeof HooksMobileGatewayReconcileRoute
   '/hooks/prime-secret-pairs': typeof HooksPrimeSecretPairsRoute
   '/hooks/reference-data-sync': typeof HooksReferenceDataSyncRoute
   '/hooks/run-schedules': typeof HooksRunSchedulesRoute
@@ -1473,6 +1590,7 @@ export interface FileRoutesByFullPath {
   '/hooks/voice-studio-plan': typeof HooksVoiceStudioPlanRoute
   '/hooks/warm-health': typeof HooksWarmHealthRoute
   '/join/$token': typeof JoinTokenRoute
+  '/mobile/releases': typeof MobileReleasesRoute
   '/modules/$slug': typeof ModulesSlugRoute
   '/modules/builder': typeof ModulesBuilderRoute
   '/security/intake': typeof SecurityIntakeRoute
@@ -1503,12 +1621,14 @@ export interface FileRoutesByFullPath {
   '/settings/': typeof SettingsIndexRoute
   '/api/public/purchases': typeof ApiPublicPurchasesRoute
   '/clients/handoff/$token': typeof ClientsHandoffTokenRoute
+  '/clones/$cloneId/mobile': typeof ClonesCloneIdMobileRoute
   '/clones/$cloneId/secrets': typeof ClonesCloneIdSecretsRoute
   '/crm/accounts/$accountId': typeof CrmAccountsAccountIdRoute
   '/email/campaigns/$campaignId': typeof EmailCampaignsCampaignIdRoute
   '/voice/studio/$projectId': typeof VoiceStudioProjectIdRoute
   '/crm/accounts/': typeof CrmAccountsIndexRoute
   '/voice/studio/': typeof VoiceStudioIndexRoute
+  '/api/admin/mobile/releases': typeof ApiAdminMobileReleasesRoute
   '/api/public/anthropic/identity': typeof ApiPublicAnthropicIdentityRoute
   '/api/public/anthropic/jwks': typeof ApiPublicAnthropicJwksRoute
   '/api/public/billing/handoff': typeof ApiPublicBillingHandoffRoute
@@ -1533,6 +1653,12 @@ export interface FileRoutesByFullPath {
   '/api/public/integrations/secrets': typeof ApiPublicIntegrationsSecretsRoute
   '/api/public/leads/capture': typeof ApiPublicLeadsCaptureRoute
   '/api/public/listings/$operation': typeof ApiPublicListingsOperationRoute
+  '/api/public/mobile/claim': typeof ApiPublicMobileClaimRoute
+  '/api/public/mobile/download-request': typeof ApiPublicMobileDownloadRequestRoute
+  '/api/public/mobile/grant-status': typeof ApiPublicMobileGrantStatusRoute
+  '/api/public/mobile/install-report': typeof ApiPublicMobileInstallReportRoute
+  '/api/public/mobile/jwks': typeof ApiPublicMobileJwksRoute
+  '/api/public/mobile/magic-link': typeof ApiPublicMobileMagicLinkRoute
   '/api/public/pricing/catalog': typeof ApiPublicPricingCatalogRoute
   '/api/public/seats/commit': typeof ApiPublicSeatsCommitRoute
   '/api/public/seats/entitlement': typeof ApiPublicSeatsEntitlementRoute
@@ -1568,6 +1694,9 @@ export interface FileRoutesByFullPath {
   '/api/public/verification/$operation': typeof ApiPublicVerificationOperationRoute
   '/api/public/voice/webhook': typeof ApiPublicVoiceWebhookRoute
   '/api/public/clones/gate/checkout': typeof ApiPublicClonesGateCheckoutRoute
+  '/api/public/mobile/download/$ticket': typeof ApiPublicMobileDownloadTicketRoute
+  '/api/public/mobile/grants/$grantRef': typeof ApiPublicMobileGrantsGrantRefRoute
+  '/api/public/mobile/releases/current': typeof ApiPublicMobileReleasesCurrentRoute
   '/api/public/seats/devices/heartbeat': typeof ApiPublicSeatsDevicesHeartbeatRoute
   '/api/public/seats/devices/list': typeof ApiPublicSeatsDevicesListRoute
   '/api/public/seats/devices/register': typeof ApiPublicSeatsDevicesRegisterRoute
@@ -1577,6 +1706,7 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/access': typeof AccessRoute
   '/announcements': typeof AnnouncementsRoute
   '/approvals': typeof ApprovalsRoute
   '/audit-log': typeof AuditLogRoute
@@ -1606,6 +1736,9 @@ export interface FileRoutesByTo {
   '/security-partners': typeof SecurityPartnersRoute
   '/slo': typeof SloRoute
   '/yggdrasil': typeof YggdrasilRoute
+  '/.well-known/apple-app-site-association': typeof DotwellKnownAppleAppSiteAssociationRoute
+  '/.well-known/assetlinks.json': typeof DotwellKnownAssetlinksDotjsonRoute
+  '/a/$grantRef': typeof AGrantRefRoute
   '/agreements/$agreementId': typeof AgreementsAgreementIdRoute
   '/agreements/builder-partner-terms': typeof AgreementsBuilderPartnerTermsRoute
   '/agreements/issuing-profile': typeof AgreementsIssuingProfileRoute
@@ -1674,6 +1807,7 @@ export interface FileRoutesByTo {
   '/hooks/lead-stage-emails': typeof HooksLeadStageEmailsRoute
   '/hooks/migration-drift': typeof HooksMigrationDriftRoute
   '/hooks/migration-enqueue': typeof HooksMigrationEnqueueRoute
+  '/hooks/mobile-gateway-reconcile': typeof HooksMobileGatewayReconcileRoute
   '/hooks/prime-secret-pairs': typeof HooksPrimeSecretPairsRoute
   '/hooks/reference-data-sync': typeof HooksReferenceDataSyncRoute
   '/hooks/run-schedules': typeof HooksRunSchedulesRoute
@@ -1688,6 +1822,7 @@ export interface FileRoutesByTo {
   '/hooks/voice-studio-plan': typeof HooksVoiceStudioPlanRoute
   '/hooks/warm-health': typeof HooksWarmHealthRoute
   '/join/$token': typeof JoinTokenRoute
+  '/mobile/releases': typeof MobileReleasesRoute
   '/modules/$slug': typeof ModulesSlugRoute
   '/modules/builder': typeof ModulesBuilderRoute
   '/security/intake': typeof SecurityIntakeRoute
@@ -1718,12 +1853,14 @@ export interface FileRoutesByTo {
   '/settings': typeof SettingsIndexRoute
   '/api/public/purchases': typeof ApiPublicPurchasesRoute
   '/clients/handoff/$token': typeof ClientsHandoffTokenRoute
+  '/clones/$cloneId/mobile': typeof ClonesCloneIdMobileRoute
   '/clones/$cloneId/secrets': typeof ClonesCloneIdSecretsRoute
   '/crm/accounts/$accountId': typeof CrmAccountsAccountIdRoute
   '/email/campaigns/$campaignId': typeof EmailCampaignsCampaignIdRoute
   '/voice/studio/$projectId': typeof VoiceStudioProjectIdRoute
   '/crm/accounts': typeof CrmAccountsIndexRoute
   '/voice/studio': typeof VoiceStudioIndexRoute
+  '/api/admin/mobile/releases': typeof ApiAdminMobileReleasesRoute
   '/api/public/anthropic/identity': typeof ApiPublicAnthropicIdentityRoute
   '/api/public/anthropic/jwks': typeof ApiPublicAnthropicJwksRoute
   '/api/public/billing/handoff': typeof ApiPublicBillingHandoffRoute
@@ -1748,6 +1885,12 @@ export interface FileRoutesByTo {
   '/api/public/integrations/secrets': typeof ApiPublicIntegrationsSecretsRoute
   '/api/public/leads/capture': typeof ApiPublicLeadsCaptureRoute
   '/api/public/listings/$operation': typeof ApiPublicListingsOperationRoute
+  '/api/public/mobile/claim': typeof ApiPublicMobileClaimRoute
+  '/api/public/mobile/download-request': typeof ApiPublicMobileDownloadRequestRoute
+  '/api/public/mobile/grant-status': typeof ApiPublicMobileGrantStatusRoute
+  '/api/public/mobile/install-report': typeof ApiPublicMobileInstallReportRoute
+  '/api/public/mobile/jwks': typeof ApiPublicMobileJwksRoute
+  '/api/public/mobile/magic-link': typeof ApiPublicMobileMagicLinkRoute
   '/api/public/pricing/catalog': typeof ApiPublicPricingCatalogRoute
   '/api/public/seats/commit': typeof ApiPublicSeatsCommitRoute
   '/api/public/seats/entitlement': typeof ApiPublicSeatsEntitlementRoute
@@ -1783,6 +1926,9 @@ export interface FileRoutesByTo {
   '/api/public/verification/$operation': typeof ApiPublicVerificationOperationRoute
   '/api/public/voice/webhook': typeof ApiPublicVoiceWebhookRoute
   '/api/public/clones/gate/checkout': typeof ApiPublicClonesGateCheckoutRoute
+  '/api/public/mobile/download/$ticket': typeof ApiPublicMobileDownloadTicketRoute
+  '/api/public/mobile/grants/$grantRef': typeof ApiPublicMobileGrantsGrantRefRoute
+  '/api/public/mobile/releases/current': typeof ApiPublicMobileReleasesCurrentRoute
   '/api/public/seats/devices/heartbeat': typeof ApiPublicSeatsDevicesHeartbeatRoute
   '/api/public/seats/devices/list': typeof ApiPublicSeatsDevicesListRoute
   '/api/public/seats/devices/register': typeof ApiPublicSeatsDevicesRegisterRoute
@@ -1793,6 +1939,7 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/access': typeof AccessRoute
   '/announcements': typeof AnnouncementsRoute
   '/approvals': typeof ApprovalsRoute
   '/audit-log': typeof AuditLogRoute
@@ -1823,6 +1970,9 @@ export interface FileRoutesById {
   '/settings': typeof SettingsRouteWithChildren
   '/slo': typeof SloRoute
   '/yggdrasil': typeof YggdrasilRoute
+  '/.well-known/apple-app-site-association': typeof DotwellKnownAppleAppSiteAssociationRoute
+  '/.well-known/assetlinks.json': typeof DotwellKnownAssetlinksDotjsonRoute
+  '/a/$grantRef': typeof AGrantRefRoute
   '/agreements/$agreementId': typeof AgreementsAgreementIdRoute
   '/agreements/builder-partner-terms': typeof AgreementsBuilderPartnerTermsRoute
   '/agreements/issuing-profile': typeof AgreementsIssuingProfileRoute
@@ -1891,6 +2041,7 @@ export interface FileRoutesById {
   '/hooks/lead-stage-emails': typeof HooksLeadStageEmailsRoute
   '/hooks/migration-drift': typeof HooksMigrationDriftRoute
   '/hooks/migration-enqueue': typeof HooksMigrationEnqueueRoute
+  '/hooks/mobile-gateway-reconcile': typeof HooksMobileGatewayReconcileRoute
   '/hooks/prime-secret-pairs': typeof HooksPrimeSecretPairsRoute
   '/hooks/reference-data-sync': typeof HooksReferenceDataSyncRoute
   '/hooks/run-schedules': typeof HooksRunSchedulesRoute
@@ -1905,6 +2056,7 @@ export interface FileRoutesById {
   '/hooks/voice-studio-plan': typeof HooksVoiceStudioPlanRoute
   '/hooks/warm-health': typeof HooksWarmHealthRoute
   '/join/$token': typeof JoinTokenRoute
+  '/mobile/releases': typeof MobileReleasesRoute
   '/modules/$slug': typeof ModulesSlugRoute
   '/modules/builder': typeof ModulesBuilderRoute
   '/security/intake': typeof SecurityIntakeRoute
@@ -1935,12 +2087,14 @@ export interface FileRoutesById {
   '/settings/': typeof SettingsIndexRoute
   '/api/public/purchases': typeof ApiPublicPurchasesRoute
   '/clients/handoff/$token': typeof ClientsHandoffTokenRoute
+  '/clones/$cloneId/mobile': typeof ClonesCloneIdMobileRoute
   '/clones/$cloneId/secrets': typeof ClonesCloneIdSecretsRoute
   '/crm/accounts/$accountId': typeof CrmAccountsAccountIdRoute
   '/email/campaigns/$campaignId': typeof EmailCampaignsCampaignIdRoute
   '/voice/studio/$projectId': typeof VoiceStudioProjectIdRoute
   '/crm/accounts/': typeof CrmAccountsIndexRoute
   '/voice/studio/': typeof VoiceStudioIndexRoute
+  '/api/admin/mobile/releases': typeof ApiAdminMobileReleasesRoute
   '/api/public/anthropic/identity': typeof ApiPublicAnthropicIdentityRoute
   '/api/public/anthropic/jwks': typeof ApiPublicAnthropicJwksRoute
   '/api/public/billing/handoff': typeof ApiPublicBillingHandoffRoute
@@ -1965,6 +2119,12 @@ export interface FileRoutesById {
   '/api/public/integrations/secrets': typeof ApiPublicIntegrationsSecretsRoute
   '/api/public/leads/capture': typeof ApiPublicLeadsCaptureRoute
   '/api/public/listings/$operation': typeof ApiPublicListingsOperationRoute
+  '/api/public/mobile/claim': typeof ApiPublicMobileClaimRoute
+  '/api/public/mobile/download-request': typeof ApiPublicMobileDownloadRequestRoute
+  '/api/public/mobile/grant-status': typeof ApiPublicMobileGrantStatusRoute
+  '/api/public/mobile/install-report': typeof ApiPublicMobileInstallReportRoute
+  '/api/public/mobile/jwks': typeof ApiPublicMobileJwksRoute
+  '/api/public/mobile/magic-link': typeof ApiPublicMobileMagicLinkRoute
   '/api/public/pricing/catalog': typeof ApiPublicPricingCatalogRoute
   '/api/public/seats/commit': typeof ApiPublicSeatsCommitRoute
   '/api/public/seats/entitlement': typeof ApiPublicSeatsEntitlementRoute
@@ -2000,6 +2160,9 @@ export interface FileRoutesById {
   '/api/public/verification/$operation': typeof ApiPublicVerificationOperationRoute
   '/api/public/voice/webhook': typeof ApiPublicVoiceWebhookRoute
   '/api/public/clones/gate/checkout': typeof ApiPublicClonesGateCheckoutRoute
+  '/api/public/mobile/download/$ticket': typeof ApiPublicMobileDownloadTicketRoute
+  '/api/public/mobile/grants/$grantRef': typeof ApiPublicMobileGrantsGrantRefRoute
+  '/api/public/mobile/releases/current': typeof ApiPublicMobileReleasesCurrentRoute
   '/api/public/seats/devices/heartbeat': typeof ApiPublicSeatsDevicesHeartbeatRoute
   '/api/public/seats/devices/list': typeof ApiPublicSeatsDevicesListRoute
   '/api/public/seats/devices/register': typeof ApiPublicSeatsDevicesRegisterRoute
@@ -2011,6 +2174,7 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/access'
     | '/announcements'
     | '/approvals'
     | '/audit-log'
@@ -2041,6 +2205,9 @@ export interface FileRouteTypes {
     | '/settings'
     | '/slo'
     | '/yggdrasil'
+    | '/.well-known/apple-app-site-association'
+    | '/.well-known/assetlinks.json'
+    | '/a/$grantRef'
     | '/agreements/$agreementId'
     | '/agreements/builder-partner-terms'
     | '/agreements/issuing-profile'
@@ -2109,6 +2276,7 @@ export interface FileRouteTypes {
     | '/hooks/lead-stage-emails'
     | '/hooks/migration-drift'
     | '/hooks/migration-enqueue'
+    | '/hooks/mobile-gateway-reconcile'
     | '/hooks/prime-secret-pairs'
     | '/hooks/reference-data-sync'
     | '/hooks/run-schedules'
@@ -2123,6 +2291,7 @@ export interface FileRouteTypes {
     | '/hooks/voice-studio-plan'
     | '/hooks/warm-health'
     | '/join/$token'
+    | '/mobile/releases'
     | '/modules/$slug'
     | '/modules/builder'
     | '/security/intake'
@@ -2153,12 +2322,14 @@ export interface FileRouteTypes {
     | '/settings/'
     | '/api/public/purchases'
     | '/clients/handoff/$token'
+    | '/clones/$cloneId/mobile'
     | '/clones/$cloneId/secrets'
     | '/crm/accounts/$accountId'
     | '/email/campaigns/$campaignId'
     | '/voice/studio/$projectId'
     | '/crm/accounts/'
     | '/voice/studio/'
+    | '/api/admin/mobile/releases'
     | '/api/public/anthropic/identity'
     | '/api/public/anthropic/jwks'
     | '/api/public/billing/handoff'
@@ -2183,6 +2354,12 @@ export interface FileRouteTypes {
     | '/api/public/integrations/secrets'
     | '/api/public/leads/capture'
     | '/api/public/listings/$operation'
+    | '/api/public/mobile/claim'
+    | '/api/public/mobile/download-request'
+    | '/api/public/mobile/grant-status'
+    | '/api/public/mobile/install-report'
+    | '/api/public/mobile/jwks'
+    | '/api/public/mobile/magic-link'
     | '/api/public/pricing/catalog'
     | '/api/public/seats/commit'
     | '/api/public/seats/entitlement'
@@ -2218,6 +2395,9 @@ export interface FileRouteTypes {
     | '/api/public/verification/$operation'
     | '/api/public/voice/webhook'
     | '/api/public/clones/gate/checkout'
+    | '/api/public/mobile/download/$ticket'
+    | '/api/public/mobile/grants/$grantRef'
+    | '/api/public/mobile/releases/current'
     | '/api/public/seats/devices/heartbeat'
     | '/api/public/seats/devices/list'
     | '/api/public/seats/devices/register'
@@ -2227,6 +2407,7 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/access'
     | '/announcements'
     | '/approvals'
     | '/audit-log'
@@ -2256,6 +2437,9 @@ export interface FileRouteTypes {
     | '/security-partners'
     | '/slo'
     | '/yggdrasil'
+    | '/.well-known/apple-app-site-association'
+    | '/.well-known/assetlinks.json'
+    | '/a/$grantRef'
     | '/agreements/$agreementId'
     | '/agreements/builder-partner-terms'
     | '/agreements/issuing-profile'
@@ -2324,6 +2508,7 @@ export interface FileRouteTypes {
     | '/hooks/lead-stage-emails'
     | '/hooks/migration-drift'
     | '/hooks/migration-enqueue'
+    | '/hooks/mobile-gateway-reconcile'
     | '/hooks/prime-secret-pairs'
     | '/hooks/reference-data-sync'
     | '/hooks/run-schedules'
@@ -2338,6 +2523,7 @@ export interface FileRouteTypes {
     | '/hooks/voice-studio-plan'
     | '/hooks/warm-health'
     | '/join/$token'
+    | '/mobile/releases'
     | '/modules/$slug'
     | '/modules/builder'
     | '/security/intake'
@@ -2368,12 +2554,14 @@ export interface FileRouteTypes {
     | '/settings'
     | '/api/public/purchases'
     | '/clients/handoff/$token'
+    | '/clones/$cloneId/mobile'
     | '/clones/$cloneId/secrets'
     | '/crm/accounts/$accountId'
     | '/email/campaigns/$campaignId'
     | '/voice/studio/$projectId'
     | '/crm/accounts'
     | '/voice/studio'
+    | '/api/admin/mobile/releases'
     | '/api/public/anthropic/identity'
     | '/api/public/anthropic/jwks'
     | '/api/public/billing/handoff'
@@ -2398,6 +2586,12 @@ export interface FileRouteTypes {
     | '/api/public/integrations/secrets'
     | '/api/public/leads/capture'
     | '/api/public/listings/$operation'
+    | '/api/public/mobile/claim'
+    | '/api/public/mobile/download-request'
+    | '/api/public/mobile/grant-status'
+    | '/api/public/mobile/install-report'
+    | '/api/public/mobile/jwks'
+    | '/api/public/mobile/magic-link'
     | '/api/public/pricing/catalog'
     | '/api/public/seats/commit'
     | '/api/public/seats/entitlement'
@@ -2433,6 +2627,9 @@ export interface FileRouteTypes {
     | '/api/public/verification/$operation'
     | '/api/public/voice/webhook'
     | '/api/public/clones/gate/checkout'
+    | '/api/public/mobile/download/$ticket'
+    | '/api/public/mobile/grants/$grantRef'
+    | '/api/public/mobile/releases/current'
     | '/api/public/seats/devices/heartbeat'
     | '/api/public/seats/devices/list'
     | '/api/public/seats/devices/register'
@@ -2442,6 +2639,7 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/'
+    | '/access'
     | '/announcements'
     | '/approvals'
     | '/audit-log'
@@ -2472,6 +2670,9 @@ export interface FileRouteTypes {
     | '/settings'
     | '/slo'
     | '/yggdrasil'
+    | '/.well-known/apple-app-site-association'
+    | '/.well-known/assetlinks.json'
+    | '/a/$grantRef'
     | '/agreements/$agreementId'
     | '/agreements/builder-partner-terms'
     | '/agreements/issuing-profile'
@@ -2540,6 +2741,7 @@ export interface FileRouteTypes {
     | '/hooks/lead-stage-emails'
     | '/hooks/migration-drift'
     | '/hooks/migration-enqueue'
+    | '/hooks/mobile-gateway-reconcile'
     | '/hooks/prime-secret-pairs'
     | '/hooks/reference-data-sync'
     | '/hooks/run-schedules'
@@ -2554,6 +2756,7 @@ export interface FileRouteTypes {
     | '/hooks/voice-studio-plan'
     | '/hooks/warm-health'
     | '/join/$token'
+    | '/mobile/releases'
     | '/modules/$slug'
     | '/modules/builder'
     | '/security/intake'
@@ -2584,12 +2787,14 @@ export interface FileRouteTypes {
     | '/settings/'
     | '/api/public/purchases'
     | '/clients/handoff/$token'
+    | '/clones/$cloneId/mobile'
     | '/clones/$cloneId/secrets'
     | '/crm/accounts/$accountId'
     | '/email/campaigns/$campaignId'
     | '/voice/studio/$projectId'
     | '/crm/accounts/'
     | '/voice/studio/'
+    | '/api/admin/mobile/releases'
     | '/api/public/anthropic/identity'
     | '/api/public/anthropic/jwks'
     | '/api/public/billing/handoff'
@@ -2614,6 +2819,12 @@ export interface FileRouteTypes {
     | '/api/public/integrations/secrets'
     | '/api/public/leads/capture'
     | '/api/public/listings/$operation'
+    | '/api/public/mobile/claim'
+    | '/api/public/mobile/download-request'
+    | '/api/public/mobile/grant-status'
+    | '/api/public/mobile/install-report'
+    | '/api/public/mobile/jwks'
+    | '/api/public/mobile/magic-link'
     | '/api/public/pricing/catalog'
     | '/api/public/seats/commit'
     | '/api/public/seats/entitlement'
@@ -2649,6 +2860,9 @@ export interface FileRouteTypes {
     | '/api/public/verification/$operation'
     | '/api/public/voice/webhook'
     | '/api/public/clones/gate/checkout'
+    | '/api/public/mobile/download/$ticket'
+    | '/api/public/mobile/grants/$grantRef'
+    | '/api/public/mobile/releases/current'
     | '/api/public/seats/devices/heartbeat'
     | '/api/public/seats/devices/list'
     | '/api/public/seats/devices/register'
@@ -2659,6 +2873,7 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  AccessRoute: typeof AccessRoute
   AnnouncementsRoute: typeof AnnouncementsRoute
   ApprovalsRoute: typeof ApprovalsRoute
   AuditLogRoute: typeof AuditLogRoute
@@ -2689,6 +2904,9 @@ export interface RootRouteChildren {
   SettingsRoute: typeof SettingsRouteWithChildren
   SloRoute: typeof SloRoute
   YggdrasilRoute: typeof YggdrasilRoute
+  DotwellKnownAppleAppSiteAssociationRoute: typeof DotwellKnownAppleAppSiteAssociationRoute
+  DotwellKnownAssetlinksDotjsonRoute: typeof DotwellKnownAssetlinksDotjsonRoute
+  AGrantRefRoute: typeof AGrantRefRoute
   AgreementsAgreementIdRoute: typeof AgreementsAgreementIdRoute
   AgreementsBuilderPartnerTermsRoute: typeof AgreementsBuilderPartnerTermsRoute
   AgreementsIssuingProfileRoute: typeof AgreementsIssuingProfileRoute
@@ -2754,6 +2972,7 @@ export interface RootRouteChildren {
   HooksLeadStageEmailsRoute: typeof HooksLeadStageEmailsRoute
   HooksMigrationDriftRoute: typeof HooksMigrationDriftRoute
   HooksMigrationEnqueueRoute: typeof HooksMigrationEnqueueRoute
+  HooksMobileGatewayReconcileRoute: typeof HooksMobileGatewayReconcileRoute
   HooksPrimeSecretPairsRoute: typeof HooksPrimeSecretPairsRoute
   HooksReferenceDataSyncRoute: typeof HooksReferenceDataSyncRoute
   HooksRunSchedulesRoute: typeof HooksRunSchedulesRoute
@@ -2768,6 +2987,7 @@ export interface RootRouteChildren {
   HooksVoiceStudioPlanRoute: typeof HooksVoiceStudioPlanRoute
   HooksWarmHealthRoute: typeof HooksWarmHealthRoute
   JoinTokenRoute: typeof JoinTokenRoute
+  MobileReleasesRoute: typeof MobileReleasesRoute
   SecurityIntakeRoute: typeof SecurityIntakeRoute
   SecurityScansRoute: typeof SecurityScansRoute
   SupportTicketsRoute: typeof SupportTicketsRoute
@@ -2786,6 +3006,7 @@ export interface RootRouteChildren {
   VoiceStudioProjectIdRoute: typeof VoiceStudioProjectIdRoute
   CrmAccountsIndexRoute: typeof CrmAccountsIndexRoute
   VoiceStudioIndexRoute: typeof VoiceStudioIndexRoute
+  ApiAdminMobileReleasesRoute: typeof ApiAdminMobileReleasesRoute
   ApiPublicAnthropicIdentityRoute: typeof ApiPublicAnthropicIdentityRoute
   ApiPublicAnthropicJwksRoute: typeof ApiPublicAnthropicJwksRoute
   ApiPublicBillingHandoffRoute: typeof ApiPublicBillingHandoffRoute
@@ -2810,6 +3031,12 @@ export interface RootRouteChildren {
   ApiPublicIntegrationsSecretsRoute: typeof ApiPublicIntegrationsSecretsRoute
   ApiPublicLeadsCaptureRoute: typeof ApiPublicLeadsCaptureRoute
   ApiPublicListingsOperationRoute: typeof ApiPublicListingsOperationRoute
+  ApiPublicMobileClaimRoute: typeof ApiPublicMobileClaimRoute
+  ApiPublicMobileDownloadRequestRoute: typeof ApiPublicMobileDownloadRequestRoute
+  ApiPublicMobileGrantStatusRoute: typeof ApiPublicMobileGrantStatusRoute
+  ApiPublicMobileInstallReportRoute: typeof ApiPublicMobileInstallReportRoute
+  ApiPublicMobileJwksRoute: typeof ApiPublicMobileJwksRoute
+  ApiPublicMobileMagicLinkRoute: typeof ApiPublicMobileMagicLinkRoute
   ApiPublicPricingCatalogRoute: typeof ApiPublicPricingCatalogRoute
   ApiPublicSeatsCommitRoute: typeof ApiPublicSeatsCommitRoute
   ApiPublicSeatsEntitlementRoute: typeof ApiPublicSeatsEntitlementRoute
@@ -2844,6 +3071,9 @@ export interface RootRouteChildren {
   ApiPublicUsageReportRoute: typeof ApiPublicUsageReportRoute
   ApiPublicVerificationOperationRoute: typeof ApiPublicVerificationOperationRoute
   ApiPublicVoiceWebhookRoute: typeof ApiPublicVoiceWebhookRoute
+  ApiPublicMobileDownloadTicketRoute: typeof ApiPublicMobileDownloadTicketRoute
+  ApiPublicMobileGrantsGrantRefRoute: typeof ApiPublicMobileGrantsGrantRefRoute
+  ApiPublicMobileReleasesCurrentRoute: typeof ApiPublicMobileReleasesCurrentRoute
   ApiPublicSeatsDevicesHeartbeatRoute: typeof ApiPublicSeatsDevicesHeartbeatRoute
   ApiPublicSeatsDevicesListRoute: typeof ApiPublicSeatsDevicesListRoute
   ApiPublicSeatsDevicesRegisterRoute: typeof ApiPublicSeatsDevicesRegisterRoute
@@ -3063,6 +3293,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AnnouncementsRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/access': {
+      id: '/access'
+      path: '/access'
+      fullPath: '/access'
+      preLoaderRoute: typeof AccessRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/': {
       id: '/'
       path: '/'
@@ -3266,6 +3503,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ModulesSlugRouteImport
       parentRoute: typeof ModulesRoute
     }
+    '/mobile/releases': {
+      id: '/mobile/releases'
+      path: '/mobile/releases'
+      fullPath: '/mobile/releases'
+      preLoaderRoute: typeof MobileReleasesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/join/$token': {
       id: '/join/$token'
       path: '/join/$token'
@@ -3362,6 +3606,13 @@ declare module '@tanstack/react-router' {
       path: '/hooks/prime-secret-pairs'
       fullPath: '/hooks/prime-secret-pairs'
       preLoaderRoute: typeof HooksPrimeSecretPairsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/mobile-gateway-reconcile': {
+      id: '/hooks/mobile-gateway-reconcile'
+      path: '/hooks/mobile-gateway-reconcile'
+      fullPath: '/hooks/mobile-gateway-reconcile'
+      preLoaderRoute: typeof HooksMobileGatewayReconcileRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/hooks/migration-enqueue': {
@@ -3840,6 +4091,27 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AgreementsAgreementIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/a/$grantRef': {
+      id: '/a/$grantRef'
+      path: '/a/$grantRef'
+      fullPath: '/a/$grantRef'
+      preLoaderRoute: typeof AGrantRefRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/.well-known/assetlinks.json': {
+      id: '/.well-known/assetlinks.json'
+      path: '/.well-known/assetlinks.json'
+      fullPath: '/.well-known/assetlinks.json'
+      preLoaderRoute: typeof DotwellKnownAssetlinksDotjsonRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/.well-known/apple-app-site-association': {
+      id: '/.well-known/apple-app-site-association'
+      path: '/.well-known/apple-app-site-association'
+      fullPath: '/.well-known/apple-app-site-association'
+      preLoaderRoute: typeof DotwellKnownAppleAppSiteAssociationRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/voice/studio/': {
       id: '/voice/studio/'
       path: '/voice/studio'
@@ -3880,6 +4152,13 @@ declare module '@tanstack/react-router' {
       path: '/secrets'
       fullPath: '/clones/$cloneId/secrets'
       preLoaderRoute: typeof ClonesCloneIdSecretsRouteImport
+      parentRoute: typeof ClonesCloneIdRoute
+    }
+    '/clones/$cloneId/mobile': {
+      id: '/clones/$cloneId/mobile'
+      path: '/mobile'
+      fullPath: '/clones/$cloneId/mobile'
+      preLoaderRoute: typeof ClonesCloneIdMobileRouteImport
       parentRoute: typeof ClonesCloneIdRoute
     }
     '/clients/handoff/$token': {
@@ -4134,6 +4413,48 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicPricingCatalogRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/mobile/magic-link': {
+      id: '/api/public/mobile/magic-link'
+      path: '/api/public/mobile/magic-link'
+      fullPath: '/api/public/mobile/magic-link'
+      preLoaderRoute: typeof ApiPublicMobileMagicLinkRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/mobile/jwks': {
+      id: '/api/public/mobile/jwks'
+      path: '/api/public/mobile/jwks'
+      fullPath: '/api/public/mobile/jwks'
+      preLoaderRoute: typeof ApiPublicMobileJwksRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/mobile/install-report': {
+      id: '/api/public/mobile/install-report'
+      path: '/api/public/mobile/install-report'
+      fullPath: '/api/public/mobile/install-report'
+      preLoaderRoute: typeof ApiPublicMobileInstallReportRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/mobile/grant-status': {
+      id: '/api/public/mobile/grant-status'
+      path: '/api/public/mobile/grant-status'
+      fullPath: '/api/public/mobile/grant-status'
+      preLoaderRoute: typeof ApiPublicMobileGrantStatusRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/mobile/download-request': {
+      id: '/api/public/mobile/download-request'
+      path: '/api/public/mobile/download-request'
+      fullPath: '/api/public/mobile/download-request'
+      preLoaderRoute: typeof ApiPublicMobileDownloadRequestRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/mobile/claim': {
+      id: '/api/public/mobile/claim'
+      path: '/api/public/mobile/claim'
+      fullPath: '/api/public/mobile/claim'
+      preLoaderRoute: typeof ApiPublicMobileClaimRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/listings/$operation': {
       id: '/api/public/listings/$operation'
       path: '/api/public/listings/$operation'
@@ -4302,6 +4623,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicAnthropicIdentityRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/admin/mobile/releases': {
+      id: '/api/admin/mobile/releases'
+      path: '/api/admin/mobile/releases'
+      fullPath: '/api/admin/mobile/releases'
+      preLoaderRoute: typeof ApiAdminMobileReleasesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/stripe/webhook/$cloneId': {
       id: '/api/public/stripe/webhook/$cloneId'
       path: '/$cloneId'
@@ -4335,6 +4663,27 @@ declare module '@tanstack/react-router' {
       path: '/api/public/seats/devices/heartbeat'
       fullPath: '/api/public/seats/devices/heartbeat'
       preLoaderRoute: typeof ApiPublicSeatsDevicesHeartbeatRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/mobile/releases/current': {
+      id: '/api/public/mobile/releases/current'
+      path: '/api/public/mobile/releases/current'
+      fullPath: '/api/public/mobile/releases/current'
+      preLoaderRoute: typeof ApiPublicMobileReleasesCurrentRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/mobile/grants/$grantRef': {
+      id: '/api/public/mobile/grants/$grantRef'
+      path: '/api/public/mobile/grants/$grantRef'
+      fullPath: '/api/public/mobile/grants/$grantRef'
+      preLoaderRoute: typeof ApiPublicMobileGrantsGrantRefRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/mobile/download/$ticket': {
+      id: '/api/public/mobile/download/$ticket'
+      path: '/api/public/mobile/download/$ticket'
+      fullPath: '/api/public/mobile/download/$ticket'
+      preLoaderRoute: typeof ApiPublicMobileDownloadTicketRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/public/clones/gate/checkout': {
@@ -4434,10 +4783,12 @@ const SettingsRouteWithChildren = SettingsRoute._addFileChildren(
 )
 
 interface ClonesCloneIdRouteChildren {
+  ClonesCloneIdMobileRoute: typeof ClonesCloneIdMobileRoute
   ClonesCloneIdSecretsRoute: typeof ClonesCloneIdSecretsRoute
 }
 
 const ClonesCloneIdRouteChildren: ClonesCloneIdRouteChildren = {
+  ClonesCloneIdMobileRoute: ClonesCloneIdMobileRoute,
   ClonesCloneIdSecretsRoute: ClonesCloneIdSecretsRoute,
 }
 
@@ -4472,6 +4823,7 @@ const ApiPublicStripeWebhookRouteWithChildren =
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  AccessRoute: AccessRoute,
   AnnouncementsRoute: AnnouncementsRoute,
   ApprovalsRoute: ApprovalsRoute,
   AuditLogRoute: AuditLogRoute,
@@ -4502,6 +4854,10 @@ const rootRouteChildren: RootRouteChildren = {
   SettingsRoute: SettingsRouteWithChildren,
   SloRoute: SloRoute,
   YggdrasilRoute: YggdrasilRoute,
+  DotwellKnownAppleAppSiteAssociationRoute:
+    DotwellKnownAppleAppSiteAssociationRoute,
+  DotwellKnownAssetlinksDotjsonRoute: DotwellKnownAssetlinksDotjsonRoute,
+  AGrantRefRoute: AGrantRefRoute,
   AgreementsAgreementIdRoute: AgreementsAgreementIdRoute,
   AgreementsBuilderPartnerTermsRoute: AgreementsBuilderPartnerTermsRoute,
   AgreementsIssuingProfileRoute: AgreementsIssuingProfileRoute,
@@ -4568,6 +4924,7 @@ const rootRouteChildren: RootRouteChildren = {
   HooksLeadStageEmailsRoute: HooksLeadStageEmailsRoute,
   HooksMigrationDriftRoute: HooksMigrationDriftRoute,
   HooksMigrationEnqueueRoute: HooksMigrationEnqueueRoute,
+  HooksMobileGatewayReconcileRoute: HooksMobileGatewayReconcileRoute,
   HooksPrimeSecretPairsRoute: HooksPrimeSecretPairsRoute,
   HooksReferenceDataSyncRoute: HooksReferenceDataSyncRoute,
   HooksRunSchedulesRoute: HooksRunSchedulesRoute,
@@ -4582,6 +4939,7 @@ const rootRouteChildren: RootRouteChildren = {
   HooksVoiceStudioPlanRoute: HooksVoiceStudioPlanRoute,
   HooksWarmHealthRoute: HooksWarmHealthRoute,
   JoinTokenRoute: JoinTokenRoute,
+  MobileReleasesRoute: MobileReleasesRoute,
   SecurityIntakeRoute: SecurityIntakeRoute,
   SecurityScansRoute: SecurityScansRoute,
   SupportTicketsRoute: SupportTicketsRoute,
@@ -4600,6 +4958,7 @@ const rootRouteChildren: RootRouteChildren = {
   VoiceStudioProjectIdRoute: VoiceStudioProjectIdRoute,
   CrmAccountsIndexRoute: CrmAccountsIndexRoute,
   VoiceStudioIndexRoute: VoiceStudioIndexRoute,
+  ApiAdminMobileReleasesRoute: ApiAdminMobileReleasesRoute,
   ApiPublicAnthropicIdentityRoute: ApiPublicAnthropicIdentityRoute,
   ApiPublicAnthropicJwksRoute: ApiPublicAnthropicJwksRoute,
   ApiPublicBillingHandoffRoute: ApiPublicBillingHandoffRoute,
@@ -4624,6 +4983,12 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPublicIntegrationsSecretsRoute: ApiPublicIntegrationsSecretsRoute,
   ApiPublicLeadsCaptureRoute: ApiPublicLeadsCaptureRoute,
   ApiPublicListingsOperationRoute: ApiPublicListingsOperationRoute,
+  ApiPublicMobileClaimRoute: ApiPublicMobileClaimRoute,
+  ApiPublicMobileDownloadRequestRoute: ApiPublicMobileDownloadRequestRoute,
+  ApiPublicMobileGrantStatusRoute: ApiPublicMobileGrantStatusRoute,
+  ApiPublicMobileInstallReportRoute: ApiPublicMobileInstallReportRoute,
+  ApiPublicMobileJwksRoute: ApiPublicMobileJwksRoute,
+  ApiPublicMobileMagicLinkRoute: ApiPublicMobileMagicLinkRoute,
   ApiPublicPricingCatalogRoute: ApiPublicPricingCatalogRoute,
   ApiPublicSeatsCommitRoute: ApiPublicSeatsCommitRoute,
   ApiPublicSeatsEntitlementRoute: ApiPublicSeatsEntitlementRoute,
@@ -4660,6 +5025,9 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPublicUsageReportRoute: ApiPublicUsageReportRoute,
   ApiPublicVerificationOperationRoute: ApiPublicVerificationOperationRoute,
   ApiPublicVoiceWebhookRoute: ApiPublicVoiceWebhookRoute,
+  ApiPublicMobileDownloadTicketRoute: ApiPublicMobileDownloadTicketRoute,
+  ApiPublicMobileGrantsGrantRefRoute: ApiPublicMobileGrantsGrantRefRoute,
+  ApiPublicMobileReleasesCurrentRoute: ApiPublicMobileReleasesCurrentRoute,
   ApiPublicSeatsDevicesHeartbeatRoute: ApiPublicSeatsDevicesHeartbeatRoute,
   ApiPublicSeatsDevicesListRoute: ApiPublicSeatsDevicesListRoute,
   ApiPublicSeatsDevicesRegisterRoute: ApiPublicSeatsDevicesRegisterRoute,

@@ -89,3 +89,15 @@ describe("ticket lifetimes and state", () => {
     expect(ticketState(spent, issued, null)).toBe("used");
   });
 });
+
+describe("gateway keys", () => {
+  it("round-trips and refuses malformed keys", async () => {
+    const { newGatewayKey, parseGatewayKey, newGrantRef } = await import("./tickets.pure");
+    const ref = newGrantRef();
+    const key = newGatewayKey(ref);
+    expect(parseGatewayKey(key)).toEqual({ grantRef: ref, key });
+    expect(parseGatewayKey(`${ref}.short`)).toBeNull();
+    expect(parseGatewayKey("mga_nope.aaaa")).toBeNull();
+    expect(parseGatewayKey(42)).toBeNull();
+  });
+});

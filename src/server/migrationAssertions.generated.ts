@@ -954,4 +954,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       },
     ],
   },
+  {
+    migration: "20261008100100_schedule_mobile_gateway_reconcile.sql",
+    version: "20261008100100",
+    assertions: [{ kind: "cron", jobname: "mobile-gateway-reconcile-30min" }],
+  },
 ];

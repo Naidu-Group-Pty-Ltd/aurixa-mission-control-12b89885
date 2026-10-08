@@ -57,6 +57,7 @@ import {
   Users,
   Waves,
   PhoneCall,
+  Smartphone,
 } from "lucide-react";
 
 export type NavItem = {
@@ -96,6 +97,12 @@ export const NAV_SECTIONS: NavSection[] = [
         label: "Deployments",
         icon: Rocket,
         keywords: "vercel hosting domains build live subdomain",
+      },
+      {
+        to: "/mobile/releases",
+        label: "Mobile Releases",
+        icon: Smartphone,
+        keywords: "app apk ios android update rollout gateway",
       },
       { to: "/modules", label: "Modules", icon: Boxes, shortcut: "m" },
       {
@@ -277,7 +284,8 @@ export const NAV_SECTIONS: NavSection[] = [
         to: "/voice/studio",
         label: "Cloning Studio",
         icon: Wand2,
-        keywords: "clone voice agents plan recipe book documents deploy client vapi org knowledge base",
+        keywords:
+          "clone voice agents plan recipe book documents deploy client vapi org knowledge base",
       },
     ],
   },

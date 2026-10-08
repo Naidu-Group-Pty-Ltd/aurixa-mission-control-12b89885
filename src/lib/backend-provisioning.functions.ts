@@ -462,6 +462,18 @@ async function runBackendProvisioning(
             actorUserId: userId,
           });
         },
+        // Step 5h. The seeded administrator is the gateway's first principal,
+        // keyed by email so birth and the sweep write the identical grant.
+        linkMobileGateway: async (ref: string) => {
+          const { ensureCloneMobileGateway } = await import(
+            /* @vite-ignore */ "@/lib/_server-shims/cloneMobileGateway.server"
+          );
+          return ensureCloneMobileGateway(supabase, input.cloneId, ref, {
+            adminEmail: input.adminEmail ?? null,
+            actorUserId: userId,
+            atBirth: !(input.repair ?? false),
+          });
+        },
         cloneOrigins,
         schemaStrategy: input.schemaStrategy ?? "introspection",
         primeBackendRef,

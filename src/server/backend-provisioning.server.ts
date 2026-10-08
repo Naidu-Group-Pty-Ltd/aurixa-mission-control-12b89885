@@ -5515,6 +5515,18 @@ export type ProvisionBackendInput = {
     projectRef: string,
   ) => Promise<import("./cloneMissionControlLink.server").EnsureMissionControlLinkResult>;
   /**
+   * Step 5h: connects this clone to the mobile gateway and the release
+   * registry — the gateway row and its credential, the six release
+   * subscriptions, the seeded superadmin's Command Centre grant, and the
+   * environment the clone's mobile functions read. Supplied by the caller for
+   * the same reason as the link: it writes Mission Control's own tables. The
+   * mobile-gateway-reconcile sweep runs the SAME function, so a clone whose
+   * step failed here converges there, never through a second injection.
+   */
+  linkMobileGateway?: (
+    projectRef: string,
+  ) => Promise<import("./mobile/cloneMobileGateway.server").EnsureMobileGatewayResult>;
+  /**
    * Secrets another step has already written to this project, with the time
    * it did (ISO): the Turnstile identity's secret and its fail-closed flag,
    * the email identity's key and sender. Recorded `set` at that time rather
@@ -5640,6 +5652,8 @@ export type ProvisionBackendResult = {
   ownedSecrets?: import("./cloneOwnedSecrets.server").OwnedSecretsOutcome | null;
   /** The Mission Control link step. Null when no linker was supplied or it failed. */
   missionControlLink?: import("./cloneMissionControlLink.server").MissionControlLinkOutcome | null;
+  /** Step 5h, the mobile gateway. Null when no linker was supplied or it failed. */
+  mobileGateway?: import("./mobile/cloneMobileGateway.server").MobileGatewayOutcome | null;
   storageBuckets: BucketReplicationResult[];
   authConfig: AuthConfigResult;
   cronJobs: CronJobReplicationResult[];
@@ -6508,6 +6522,36 @@ export async function provisionCloneBackend(
     },
   );
 
+  // Step 5h: the mobile gateway. AFTER the secrets batch, so nothing the
+  // batch decides can stand between the clone and the names written here, and
+  // never fatal: the reconcile sweep runs the same function.
+  pauseIfDue("connecting the mobile gateway");
+  let mobileGateway: import("./mobile/cloneMobileGateway.server").MobileGatewayOutcome | null =
+    null;
+  if (input.linkMobileGateway) {
+    try {
+      await onStatusUpdate?.(
+        "migrating",
+        "Connecting this clone to the mobile gateway and release registry...",
+      );
+      const gw = await input.linkMobileGateway(projectRef);
+      if (gw.ok) {
+        mobileGateway = gw.outcome;
+        await onStatusUpdate?.("migrating", `Mobile gateway: ${gw.outcome.why.join("; ")}`);
+      } else {
+        await onStatusUpdate?.(
+          "migrating",
+          `Mobile gateway not connected (${gw.stage}: ${gw.error}) — the mobile-gateway-reconcile sweep repairs it`,
+        );
+      }
+    } catch (err) {
+      await onStatusUpdate?.(
+        "migrating",
+        `Mobile gateway step skipped: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
   // Step 7: Seed admin — UNLESS this is a repair.
   //
   // A convergence pass may not touch the tenant's own credential. The seed
@@ -6537,6 +6581,7 @@ export async function provisionCloneBackend(
       secretShells,
       ownedSecrets,
       missionControlLink,
+      mobileGateway,
       storageBuckets,
       authConfig: authConfigResult,
       cronJobs,
@@ -6589,6 +6634,7 @@ export async function provisionCloneBackend(
     secretShells,
     ownedSecrets,
     missionControlLink,
+    mobileGateway,
     storageBuckets,
     authConfig: authConfigResult,
     cronJobs,

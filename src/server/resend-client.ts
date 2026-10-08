@@ -200,3 +200,40 @@ export const resendApi = {
 
   deleteApiKey: (id: string) => resend<void>(`/api-keys/${id}`, { method: "DELETE" }),
 };
+
+/**
+ * Mail Aurixa Systems sends AS ITSELF — the mobile gateway's access links.
+ *
+ * Every other send in this codebase belongs to a clone and goes out on that
+ * clone's own domain-scoped key. This one is the platform speaking about the
+ * platform, so it uses the master key and the platform's own verified sending
+ * domain. The From address is overridable for staging; it must be on a domain
+ * the master key's team has verified, or Resend refuses it (which surfaces as
+ * a `ResendError`, never a silent drop).
+ */
+export const PLATFORM_FROM_DEFAULT = "Aurixa Systems <access@mail.aurixasystems.com.au>";
+
+export function platformFromAddress(): string {
+  return (process.env.AURIXA_PLATFORM_EMAIL_FROM ?? PLATFORM_FROM_DEFAULT).trim();
+}
+
+export async function sendPlatformEmail(input: {
+  to: string;
+  subject: string;
+  html: string;
+  text: string;
+  /** Resend idempotency key — a retried request then sends once. */
+  idempotencyKey?: string;
+}): Promise<{ id: string }> {
+  return resend<{ id: string }>("/emails", {
+    method: "POST",
+    headers: input.idempotencyKey ? { "Idempotency-Key": input.idempotencyKey } : undefined,
+    body: JSON.stringify({
+      from: platformFromAddress(),
+      to: [input.to],
+      subject: input.subject,
+      html: input.html,
+      text: input.text,
+    }),
+  });
+}

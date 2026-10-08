@@ -7,6 +7,10 @@ export const Route = createFileRoute("/")({
 
 function Index() {
   const { session, loading } = useAuth();
+  // The mobile gateway host has no console: its front page is the access form.
+  if (typeof window !== "undefined" && window.location.hostname.startsWith("mobile.")) {
+    return <Navigate to="/access" />;
+  }
   if (loading) {
     return (
       <div className="flex min-h-dvh items-center justify-center">
