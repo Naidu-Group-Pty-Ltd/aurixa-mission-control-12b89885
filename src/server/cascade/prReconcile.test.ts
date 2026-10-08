@@ -3,12 +3,20 @@ import {
   cascadeEventStatus,
   countResults,
   durableSummary,
+  openSentence,
   parsePrNumber,
   parsePrRepo,
   reconcileResultToPr,
   summariseCascade,
 } from "./prReconcile.pure";
 import { RECONCILE_MARKER, summaryOwesReconcile } from "./syncExclusions.pure";
+import {
+  BASE_BROKEN_REMEDY,
+  CHECKS_PERMISSION_REMEDY,
+  NEVER_STARTED_REMEDY,
+  decideCascadeMerge,
+  reclassifyAgainstBase,
+} from "./autoMergeGate.pure";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -252,6 +260,127 @@ describe("the durable half of a summary", () => {
         currentSummary: null,
       }).diffSummary,
     ).toBe("Merged as abc1234.");
+  });
+});
+
+describe("an open reason that runs to more than one sentence", () => {
+  // Measured 8 Oct 2026: 162 merged rows, 3.97 million characters. The old
+  // strip ended an open outcome at its first full stop, so a three-sentence
+  // verdict left two behind as "detail" and every pass stacked another copy.
+  const quick = (name: string) => ({
+    name,
+    status: "completed",
+    conclusion: "failure",
+    started_at: "2026-09-04T05:35:00Z",
+    completed_at: "2026-09-04T05:35:04Z",
+  });
+  const slow = (name: string) => ({ ...quick(name), completed_at: "2026-09-04T05:41:00Z" });
+  const neverStarted = decideCascadeMerge([quick("verify"), quick("security")]);
+  const baseBroken = reclassifyAgainstBase(
+    decideCascadeMerge([slow("verify"), slow("security")]),
+    [slow("verify"), slow("security")],
+    [slow("verify"), slow("security")],
+    "main",
+  );
+  if (neverStarted.merge || baseBroken.merge) throw new Error("unreachable");
+
+  const pass = (summary: string | null, why: string) =>
+    reconcileResultToPr({
+      pr: { state: "open", merged: false },
+      currentSummary: summary,
+      openReason: why,
+    }).diffSummary;
+
+  it("are really the verdicts the drain hands in", () => {
+    expect(neverStarted.reason).toBe("never_started");
+    expect(neverStarted.why).toContain(NEVER_STARTED_REMEDY);
+    expect(baseBroken.reason).toBe("base_broken");
+    expect(baseBroken.why).toContain(BASE_BROKEN_REMEDY);
+  });
+
+  for (const [label, why] of [
+    ["never_started", neverStarted.why],
+    ["base_broken", baseBroken.why],
+    ["checks unreadable", CHECKS_PERMISSION_REMEDY],
+  ] as const) {
+    it(`is written as one sentence, every word kept (${label})`, () => {
+      const sentence = openSentence(why);
+      // One full stop followed by a space or the end, and it is the last one.
+      expect(sentence.match(/\.(?=\s|$)/g)).toEqual(["."]);
+      expect(sentence.endsWith(".")).toBe(true);
+      const words = (t: string) => t.replace(/[.;]/g, " ").split(/\s+/).filter(Boolean);
+      expect(words(sentence)).toEqual(["Open", "·", ...words(why)]);
+    });
+
+    it(`is stable across passes, and the file list survives (${label})`, () => {
+      let summary: string = REAL_SUMMARY;
+      for (let i = 0; i < 12; i++) summary = pass(summary, why);
+      expect(summary).toBe(`${openSentence(why)} ${REAL_SUMMARY}`);
+      expect(
+        reconcileResultToPr({
+          pr: { state: "open", merged: false },
+          currentSummary: summary,
+          openReason: why,
+        }).changed,
+      ).toBe(false);
+    });
+
+    it(`leaves nothing of itself once merged (${label})`, () => {
+      const merged = reconcileResultToPr({
+        pr: { state: "closed", merged: true, mergeCommitSha: "5d4f73d" },
+        currentSummary: pass(REAL_SUMMARY, why),
+      });
+      expect(merged.diffSummary).toBe(`Merged as 5d4f73d. ${REAL_SUMMARY}`);
+    });
+  }
+
+  it("shrinks a row the old strip let grow, to its outcome and its file list", () => {
+    // Verbatim shape of row 8aee2e6c (279 copies) and ecec745f (two remedies,
+    // interleaved), as the old strip left them.
+    const files =
+      "PR #13 opened: docs/reports/SECTION_OWNERSHIP_MATRIX.md · 2 withheld · 1 need reconciling";
+    const grown = `Merged as 5d4f73d. ${`${BASE_BROKEN_REMEDY} `.repeat(279)}${files}`;
+    expect(durableSummary(grown)).toBe(files);
+    const mixed =
+      `Merged as 51fc8bc. ${`${BASE_BROKEN_REMEDY} `.repeat(22)}` +
+      `${`${NEVER_STARTED_REMEDY} `.repeat(137)}${files}`;
+    expect(durableSummary(mixed)).toBe(files);
+    const stillOpen =
+      `${"Open · Not merging — 2 check(s) failing (verify, security), and every one of them is ALSO failing on `main`. "}` +
+      `${`${BASE_BROKEN_REMEDY} `.repeat(5)}${files}`;
+    expect(durableSummary(stillOpen)).toBe(files);
+  });
+
+  it("recognises every trailing run of their sentences, and nothing shorter", () => {
+    const files = "CLAUDE.md · 19 withheld";
+    const sentences = CHECKS_PERMISSION_REMEDY.split(/(?<=\.)\s+/);
+    expect(sentences.length).toBeGreaterThan(1);
+    for (let i = 0; i < sentences.length; i++) {
+      expect(durableSummary(`${sentences.slice(i).join(" ")} ${files}`)).toBe(files);
+    }
+    // A sentence of ours that is not the END of one of these constants is
+    // not something the old strip could have stranded, so it is kept.
+    const head = BASE_BROKEN_REMEDY.split(/(?<=\.)\s+/)[0];
+    expect(durableSummary(`${head} ${files}`)).toBe(`${head} ${files}`);
+  });
+
+  it("keeps a full stop inside a word, which is not a sentence break", () => {
+    const sentence = openSentence("Not merging yet — 1 check(s) still running: lint.ts");
+    expect(sentence).toBe("Open · Not merging yet — 1 check(s) still running: lint.ts.");
+    expect(durableSummary(`${sentence} ${REAL_SUMMARY}`)).toBe(REAL_SUMMARY);
+  });
+
+  it("strips an outcome that has no file list behind it", () => {
+    // Previously `\s+` was required after the outcome, so a bare one was kept
+    // as detail and the next pass wrote `Merged as x. Merged as x.`.
+    expect(durableSummary("Merged as abc1234.")).toBe("");
+    expect(durableSummary(openSentence(BASE_BROKEN_REMEDY))).toBe("");
+    const bare = reconcileResultToPr({
+      pr: { state: "open", merged: false },
+      currentSummary: openSentence("verify is still running"),
+      openReason: "verify is still running",
+    });
+    expect(bare.changed).toBe(false);
   });
 });
 

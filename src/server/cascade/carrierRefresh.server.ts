@@ -13,10 +13,14 @@
  * check has reported on this pull request" long after every check had. The
  * refresh's story belongs to the pass, and the pass's summary is where it goes.
  *
- * **It clears `progress` and nothing else.** `progress` is a pass's own file
- * cursor over a tree that has just changed underneath it, so carrying it into
- * a delivery of a different head would resume a walk of a tree that no longer
- * exists. `pr_url`, `delivered_sha` and `commit_sha` are left exactly as the
+ * **It clears `progress` and `error_message`, and nothing else.** `progress`
+ * is a pass's own file cursor over a tree that has just changed underneath
+ * it, so carrying it into a delivery of a different head would resume a walk
+ * of a tree that no longer exists. `error_message` describes the attempt this
+ * re-offer supersedes, and a `queued` row's message is read as its current
+ * state: a failure left on it would report a row that is waiting as one that
+ * failed. The next failure writes a fresh stamp, so the bound it carried is
+ * not lost. `pr_url`, `delivered_sha` and `commit_sha` are left exactly as the
  * earlier pass wrote them: the proposal they name is still open and the next
  * pass finds it, updates it in place and re-stamps all three. Blanking them
  * would lose the standing proposal for the seconds between the update and the
@@ -71,7 +75,7 @@ export async function refreshCarrierRows(
 
   const { data, error } = await supabase
     .from("cascade_results")
-    .select("id, status, delivered_sha, clones(name)")
+    .select("id, status, delivered_sha, error_message, clones(name)")
     .eq("cascade_event_id", args.eventId);
   if (error) {
     console.error(`[cascade] could not read ${args.eventId}'s rows to refresh:`, error.message);
@@ -82,6 +86,7 @@ export async function refreshCarrierRows(
     id: string;
     status: string;
     delivered_sha: string | null;
+    error_message: string | null;
     clones: { name: string | null } | null;
   };
   const rows: CarrierResultRow[] = ((data ?? []) as unknown as Joined[]).map((r) => ({
@@ -89,6 +94,7 @@ export async function refreshCarrierRows(
     clone_name: r.clones?.name ?? null,
     status: String(r.status),
     delivered_sha: r.delivered_sha ?? null,
+    error_message: r.error_message ?? null,
   }));
 
   const decision: CarrierRefreshDecision = planCarrierRefresh({
@@ -100,7 +106,7 @@ export async function refreshCarrierRows(
 
   const { error: writeError } = await supabase
     .from("cascade_results")
-    .update({ status: "queued", completed_at: null, progress: null })
+    .update({ status: "queued", completed_at: null, progress: null, error_message: null })
     .in("id", decision.rowIds);
   if (writeError) {
     console.error(

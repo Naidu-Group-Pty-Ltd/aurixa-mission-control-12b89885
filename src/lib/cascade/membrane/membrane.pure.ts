@@ -325,6 +325,16 @@ export function specDirectorySegmentPaths(text: string, specPath: string): strin
 const SUBJECT_PATH = /^(?:src|supabase|docs|scripts|public)\/[A-Za-z0-9_./-]+\.[A-Za-z0-9]+$/;
 
 /**
+ * Whether a path is one the subject rule accepts: under a content root, with
+ * a file extension, and never climbing out with `..`. Exported so a subject
+ * found another way — `subjectsImportedBy`, on the server — answers to the
+ * same rule as one this module reads.
+ */
+export function isSubjectPath(path: string): boolean {
+  return SUBJECT_PATH.test(path) && !path.split("/").includes("..");
+}
+
+/**
  * A literal relative to a spec, as the repository path it names — or null.
  *
  * Resolved segment by segment against the spec's own directory, the way
@@ -378,14 +388,36 @@ export function strandedSubjects(args: {
   cloneSha: ReadonlyMap<string, string> | null;
   /** Every path this delivery is writing. */
   crossing: ReadonlySet<string>;
+  /**
+   * The repository files the spec IMPORTS, resolved against prime's tree by
+   * `subjectsImportedBy` (`src/server/cascade/specImportSubjects.pure.ts`).
+   *
+   * A spec that imports a module asserts about it exactly as much as one that
+   * names its path, and more often, because it calls the functions. Cascade
+   * #81 on `npc-crm-independent-6505dc` (8 Oct 2026) is the case: the spec
+   * reached `isElevationRefusal` as `from "@/lib/secureInvoke"`, which no
+   * literal rule here reads, crossed without the module it called, and
+   * failed `verify`.
+   *
+   * It is passed in rather than computed here because resolving a specifier
+   * is the import closure's job, and this module is drawn in a browser,
+   * which must never import a server module for a value. It is required, so
+   * every caller decides.
+   */
+  imported: readonly string[];
 }): string[] {
-  const { specPath, specText, primeSha, cloneSha, crossing } = args;
+  const { specPath, specText, primeSha, cloneSha, crossing, imported } = args;
   if (!isSpecPath(specPath)) return [];
   // A tree that could not be listed is not a tree with nothing in it. With no
   // evidence about what differs, the conservative answer is to change nothing.
   if (!primeSha || !cloneSha) return [];
 
-  return subjectsNamedBy(specText, specPath).filter((subject) => {
+  const subjects = new Set([
+    ...subjectsNamedBy(specText, specPath),
+    ...imported.filter((path) => path !== specPath && isSubjectPath(path)),
+  ]);
+
+  return [...subjects].sort().filter((subject) => {
     // Crossing beside it. Nothing is stranded.
     if (crossing.has(subject)) return false;
 

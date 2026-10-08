@@ -8,8 +8,12 @@
 import { describe, expect, it } from "vitest";
 import {
   DELIVERED_STATUSES,
+  UNEXPLAINED_FAILURE,
   describeCarrierRefresh,
+  failedAgainst,
   planCarrierRefresh,
+  settledRowPatch,
+  stampFailedAgainst,
   type CarrierEventFacts,
   type CarrierResultRow,
 } from "./carrierRefresh.pure";
@@ -128,20 +132,152 @@ describe("the cost is bounded by prime moving, not by the tick", () => {
   });
 });
 
-describe("what it will not touch", () => {
-  it("never re-queues a failed row", () => {
-    // `requeueDroppedClone` owns this, and its attempt accounting depends on
-    // the row staying failed: an in-place retry refunds every pass and the
-    // ceiling that retires a bad event is never reached.
-    const d = planCarrierRefresh({
-      event: CARRIER,
-      rows: [row({ status: "failed" })],
-      head: HEAD,
-    });
-    expect(d.kind).toBe("none");
+describe("a failed row is offered each prime head once", () => {
+  const failed = (over: Partial<CarrierResultRow> = {}) =>
+    row({ status: "failed", delivered_sha: null, ...over });
+
+  it("is not a delivery, and is never mistaken for one", () => {
     expect(DELIVERED_STATUSES.has("failed")).toBe(false);
   });
 
+  it("re-offers a failure written before the stamp existed, once", () => {
+    // The legacy row has no head on it at all. It is owed one attempt at the
+    // current head, and that attempt stamps it.
+    const d = planCarrierRefresh({
+      event: CARRIER,
+      rows: [failed({ error_message: "" })],
+      head: HEAD,
+    });
+    expect(d.kind).toBe("refresh");
+    if (d.kind !== "refresh") return;
+    expect(d.rowIds).toEqual(["row-1"]);
+    expect(d.why).toContain("before the head was recorded");
+    expect(d.why).toContain(`prime@${HEAD.slice(0, 7)}`);
+  });
+
+  it("re-offers a failure stamped against an older head", () => {
+    const d = planCarrierRefresh({
+      event: CARRIER,
+      rows: [failed({ error_message: stampFailedAgainst(OLD, "Bad Gateway") })],
+      head: HEAD,
+    });
+    expect(d.kind).toBe("refresh");
+    if (d.kind !== "refresh") return;
+    expect(d.why).toContain(`failed against prime@${OLD.slice(0, 7)}`);
+  });
+
+  it("leaves a failure stamped against the head it is about to deliver", () => {
+    // This is the bound. A deterministic failure costs one attempt per prime
+    // commit, never one per five-minute claim of a held carrier.
+    const d = planCarrierRefresh({
+      event: CARRIER,
+      rows: [failed({ error_message: stampFailedAgainst(HEAD, "Bad Gateway") })],
+      head: HEAD,
+    });
+    expect(d.kind).toBe("none");
+  });
+
+  it("needs no delivered head: a failure is a pass that delivered nothing", () => {
+    const d = planCarrierRefresh({ event: CARRIER, rows: [failed()], head: HEAD });
+    expect(d.kind).toBe("refresh");
+  });
+
+  it("offers a failed row nothing on a carrier this module has no opinion about", () => {
+    for (const event of [
+      { ...CARRIER, completed_at: "2026-10-07T17:00:00Z" },
+      { ...CARRIER, trigger: "manual" },
+      { ...CARRIER, scope_filter: { module: "aml" } },
+    ]) {
+      expect(planCarrierRefresh({ event, rows: [failed()], head: HEAD }).kind).toBe("none");
+    }
+  });
+
+  it("names a re-offered failure beside a re-offered delivery in one sentence", () => {
+    const d = planCarrierRefresh({
+      event: CARRIER,
+      rows: [
+        row({ id: "a", clone_name: "npc-client-dashboard", status: "pr_opened" }),
+        failed({ id: "b", clone_name: "npc-crm-independent" }),
+      ],
+      head: HEAD,
+    });
+    expect(d.kind).toBe("refresh");
+    if (d.kind !== "refresh") return;
+    expect(d.rowIds).toEqual(["a", "b"]);
+    expect(describeCarrierRefresh(d)).toMatch(
+      /^Re-offered to npc-client-dashboard, npc-crm-independent — 1 clone\(s\) were delivered/,
+    );
+  });
+});
+
+describe("the stamp a failed row carries", () => {
+  it("leads the message with the head, short", () => {
+    expect(stampFailedAgainst(HEAD, "Bad Gateway")).toBe(
+      `Failed against prime@${HEAD.slice(0, 7)} — Bad Gateway`,
+    );
+    expect(failedAgainst(stampFailedAgainst(HEAD, "Bad Gateway"))).toBe(HEAD.slice(0, 7));
+  });
+
+  it("says something where the failure said nothing", () => {
+    // Both 15d4574f parent rows carried an empty message.
+    for (const empty of ["", "   ", null, undefined]) {
+      expect(stampFailedAgainst(HEAD, empty)).toBe(
+        `Failed against prime@${HEAD.slice(0, 7)} — ${UNEXPLAINED_FAILURE}`,
+      );
+    }
+  });
+
+  it("is idempotent, and a later head replaces an earlier one rather than stacking", () => {
+    const once = stampFailedAgainst(OLD, "Bad Gateway");
+    expect(stampFailedAgainst(OLD, once)).toBe(once);
+    expect(stampFailedAgainst(HEAD, once)).toBe(stampFailedAgainst(HEAD, "Bad Gateway"));
+    expect(stampFailedAgainst(HEAD, stampFailedAgainst(OLD, ""))).toBe(
+      stampFailedAgainst(HEAD, ""),
+    );
+  });
+
+  it("stamps nothing it cannot vouch for", () => {
+    expect(stampFailedAgainst("  ", "Bad Gateway")).toBe("Bad Gateway");
+    expect(failedAgainst("Bad Gateway")).toBeNull();
+    expect(failedAgainst(null)).toBeNull();
+    // A message that merely mentions a head is not a stamp.
+    expect(failedAgainst(`Pin points at prime@${OLD.slice(0, 7)}`)).toBeNull();
+  });
+});
+
+describe("the patch a finished pass writes", () => {
+  it("stamps a failure with the head it failed against", () => {
+    expect(settledRowPatch({ status: "failed", error_message: "" }, HEAD)).toEqual({
+      status: "failed",
+      error_message: `Failed against prime@${HEAD.slice(0, 7)} — ${UNEXPLAINED_FAILURE}`,
+    });
+    expect(settledRowPatch({ status: "failed" }, HEAD).error_message).toContain(
+      UNEXPLAINED_FAILURE,
+    );
+  });
+
+  it("clears the note a hold or a deferral left on a row that has since delivered", () => {
+    for (const status of DELIVERED_STATUSES) {
+      expect(settledRowPatch({ status, files_changed: 3 }, HEAD)).toEqual({
+        status,
+        files_changed: 3,
+        error_message: null,
+      });
+    }
+  });
+
+  it("keeps a message a delivery names for itself", () => {
+    const patch = { status: "skipped", error_message: "Nothing to deliver for this scope" };
+    expect(settledRowPatch(patch, HEAD)).toBe(patch);
+  });
+
+  it("leaves a pause exactly as it is", () => {
+    const patch = { status: "queued", progress: { prepared: {} } };
+    expect(settledRowPatch(patch, HEAD)).toBe(patch);
+  });
+});
+
+describe("what it will not touch", () => {
   it("never touches a row that is still live", () => {
     for (const status of ["queued", "pushing"]) {
       const d = planCarrierRefresh({
@@ -153,9 +289,9 @@ describe("what it will not touch", () => {
     }
   });
 
-  it("never re-queues a row that decided about no content", () => {
-    // "Clone not found", a pin that failed validation: `delivered_sha` is
-    // null, and re-offering one re-runs a refusal rather than a delivery.
+  it("never re-queues a skip that decided about no content", () => {
+    // "Clone not found": `delivered_sha` is null, and re-offering one re-runs
+    // a refusal rather than a delivery.
     const d = planCarrierRefresh({
       event: CARRIER,
       rows: [row({ delivered_sha: null })],
@@ -245,5 +381,70 @@ describe("the fleet freeze of 20 September 2026", () => {
     // become a reason to re-buy the parents' trees every five minutes.
     const caughtUp = rows.map((r) => (r.delivered_sha ? { ...r, delivered_sha: HEAD } : r));
     expect(planCarrierRefresh({ event: CARRIER, rows: caughtUp, head: HEAD }).kind).toBe("none");
+  });
+});
+
+describe("carrier 15d4574f, 7–8 October 2026", () => {
+  /*
+    prime@14a3280's carrier, created 00:03Z on 7 Oct. At 16:53Z, three
+    minutes after prime@d4b3be7 folded into it, a pass failed both parent rows
+    with an empty error message while their proposals (#315, #81) stayed open.
+    The children were held behind them, the carrier went back to `pending`
+    every five minutes, and three more prime pushes folded into it before a
+    person re-armed the parents by hand at 06:58Z on 8 Oct. The state below is
+    the carrier as the claim after prime@44ec13d found it. `delivered_sha` on
+    the failed rows is what the CRM row still records; a failed row's
+    re-offer does not read it.
+  */
+  const AT_FAILURE = "d4b3be7e512deea6ee183444f75a7a8fa54b41c2";
+  const NOW = "44ec13daf32b5b7f3821c001311554bbdac7d45f";
+  const legacy: CarrierResultRow[] = [
+    {
+      id: "e40b1d34",
+      clone_name: "NPC Client Dashboard",
+      status: "failed",
+      delivered_sha: "1dc42834a9738d07fe09380b20bac5e7a43c5e0c",
+      error_message: "",
+    },
+    {
+      id: "282695be",
+      clone_name: "NPC CRM Independent",
+      status: "failed",
+      delivered_sha: "1dc42834a9738d07fe09380b20bac5e7a43c5e0c",
+      error_message: "",
+    },
+    {
+      id: "bf6d1f53",
+      clone_name: "Preflight Property Group",
+      status: "queued",
+      delivered_sha: null,
+    },
+    { id: "b7dd327b", clone_name: "NPC Test", status: "queued", delivered_sha: null },
+  ];
+
+  it("re-offers both parents, which the old rule left failed for fourteen hours", () => {
+    const d = planCarrierRefresh({ event: CARRIER, rows: legacy, head: NOW });
+    expect(d.kind).toBe("refresh");
+    if (d.kind !== "refresh") return;
+    expect(d.rowIds).toEqual(["e40b1d34", "282695be"]);
+  });
+
+  it("had the stamp existed, offers them the next head and not the one they failed at", () => {
+    const stamped = legacy.map((r) =>
+      r.status === "failed" ? { ...r, error_message: stampFailedAgainst(AT_FAILURE, "") } : r,
+    );
+    expect(planCarrierRefresh({ event: CARRIER, rows: stamped, head: AT_FAILURE }).kind).toBe(
+      "none",
+    );
+    expect(planCarrierRefresh({ event: CARRIER, rows: stamped, head: NOW }).kind).toBe("refresh");
+  });
+
+  it("settles after one attempt at the head: the retry that fails again is not retried this head", () => {
+    const retried = legacy.map((r) =>
+      r.status === "failed"
+        ? { ...r, ...settledRowPatch({ status: "failed", error_message: "Bad Gateway" }, NOW) }
+        : r,
+    );
+    expect(planCarrierRefresh({ event: CARRIER, rows: retried, head: NOW }).kind).toBe("none");
   });
 });

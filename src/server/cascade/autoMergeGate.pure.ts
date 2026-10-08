@@ -259,6 +259,15 @@ export const CHECKS_PERMISSION_REMEDY =
   "merged unseen.";
 
 /**
+ * What a run failing only where its base fails asks of a person. Exported so
+ * that `prReconcile.pure.ts` can recognise its own earlier writing of it — a
+ * literal at each end is how the two come to disagree.
+ */
+export const BASE_BROKEN_REMEDY =
+  "This proposal did not cause them: any pull request opened against this branch inherits " +
+  "the same result. Fix the base branch first; the cascade has nothing to change.";
+
+/**
  * A failure the PROPOSAL did not cause.
  *
  * ## Why this exists
@@ -321,8 +330,6 @@ export function reclassifyAgainstBase(
     reason: "base_broken",
     why:
       `Not merging — ${headFailures.length} check(s) failing (${headFailures.join(", ")}), and ` +
-      `every one of them is ALSO failing on \`${baseRef}\`. This proposal did not cause them: ` +
-      `any pull request opened against this branch inherits the same result. Fix the base branch ` +
-      `first; the cascade has nothing to change.`,
+      `every one of them is ALSO failing on \`${baseRef}\`. ${BASE_BROKEN_REMEDY}`,
   };
 }

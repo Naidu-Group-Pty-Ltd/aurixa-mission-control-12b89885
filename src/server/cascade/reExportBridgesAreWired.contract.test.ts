@@ -57,7 +57,7 @@ describe("inside the loop", () => {
 
   it("cannot stop while a bridge is owed", () => {
     expect(loop).toMatch(
-      /importsOwed\.size === 0 && owedSpecs\.length === 0 && bridgesOwedNow\.length === 0/,
+      /importsOwed\.size === 0 &&\s*owedSpecs\.length === 0 &&\s*bridgesOwedNow\.length === 0/,
     );
   });
 
