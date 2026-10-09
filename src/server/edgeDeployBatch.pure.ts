@@ -77,6 +77,111 @@ export function refreshedSince(
 }
 
 /**
+ * The order a pass offers a clone's bundles in: the copy the clone has held
+ * longest goes first.
+ *
+ * ## The defect this closes
+ *
+ * A whole-fleet pass takes a prefix of the deployable set, and the prefix
+ * was alphabetical; a named list is sliced from the same order. That holds
+ * while a generation lasts: what one pass lands, the next skips, so the
+ * walk moves on. It starves the end of the alphabet as soon as generations
+ * stop lasting. `planDeployGeneration` restarts one on every prime merge,
+ * the restart empties the skip list, and an alphabetical prefix starts
+ * again at `abs-data-service`.
+ *
+ * Measured 8 Oct 2026 (UTC) on NPC Test:
+ *
+ * - The prime merged twenty times that day.
+ * - A pass landed about 2.3 bundles, because its snapshot read spends most
+ *   of the 45 s budget.
+ * - The clone got a pass every eight minutes, so reaching the 220th of 395
+ *   bundles takes about thirteen hours with no merge in between.
+ * - From the 19:54 restart to 21:03, nine passes took the first twenty-one
+ *   bundles, `abs-data-service` to `agent-task-runner`.
+ * - `manage-agency-agreements`, the 220th, still held the copy deployed on
+ *   6 Oct. `property-team`, added to the prime at 13:14 that day, was on no
+ *   clone at all.
+ *
+ * Nothing reported it. Every pass landed bundles, and landing bundles is
+ * what this lane counts as progress.
+ *
+ * ## The rule
+ *
+ * **Order by what the clone holds, never by name.** A missing bundle comes
+ * first, then the copy with the oldest `updated_at`, and the name breaks
+ * ties. The order is read from the TARGET, the same read `refreshedSince`
+ * takes, so it survives a restart the skip list does not. What a pass
+ * landed is now the clone's newest copy and goes to the back. The copy the
+ * clone has held longest comes next, whatever the prime did meanwhile.
+ *
+ * No deploy and no restart moves a bundle further back. What a pass lands
+ * goes behind it, and a restart changes only the skip list. Two things can
+ * still keep it waiting. A function the prime adds goes to the front,
+ * because the clone holds no copy of it. And a bundle the clone refuses on
+ * every pass works its way to the front and stays there, because its copy
+ * never gets newer.
+ *
+ * That last case has a cost. Once nothing staler is left, the refused
+ * bundle takes the first deploy of every pass, close to half of what a pass
+ * carries. A pass with time for only that deploy lands nothing, so it
+ * throws and spends an attempt. The alphabetical walk paid the same, but
+ * only once it reached the bundle, and between merges it reached only the
+ * first names. In return the failure is no longer hidden behind a walk that
+ * never gets there. Passes record it in `failed`, and `supersessionVerdict`
+ * sends a park that records a failed bundle to a person rather than to a
+ * fresh run that would meet the same failure. A run those short passes fail
+ * keeps what it deployed: those copies are now the clone's newest, so the
+ * next run the catch-up plans starts on other bundles. An alphabetical run
+ * started on the same first names again.
+ *
+ * It changes WHICH bundles a pass carries, never WHETHER the run has
+ * finished. Completion is still the skip list's answer against the
+ * generation's baseline, and truncation is still measured over the
+ * deployable set. Reordering that set changes neither its size nor its
+ * members.
+ *
+ * `listProjectEdgeFunctionFreshness` answers an empty map when the read
+ * fails. Every key is then equal, and equal keys keep the snapshot's
+ * alphabetical order, which is the order the lane used before.
+ */
+export function stalestFirst(freshness: ReadonlyMap<string, number>): (slug: string) => number {
+  return (slug) => {
+    const updatedMs = freshness.get(slug);
+    return typeof updatedMs === "number" && Number.isFinite(updatedMs)
+      ? updatedMs
+      : Number.NEGATIVE_INFINITY;
+  };
+}
+
+/**
+ * `items` in ascending `deployOrder`, keeping the given order between equal
+ * keys. Without a `deployOrder` they come back as they arrived.
+ *
+ * The tie-break is the old order, made explicit rather than left to the
+ * engine's sort, because it is what makes an unreadable clone safe: every
+ * key equal means exactly the order the lane used before.
+ *
+ * A key that is not a number (`NaN`) sorts first, as a missing copy does.
+ * A comparator handed `NaN` is not a total order, and given one an engine
+ * may return any permutation at all.
+ */
+export function inDeployOrder<T extends { readonly slug: string }>(
+  items: readonly T[],
+  deployOrder?: (slug: string) => number,
+): T[] {
+  if (!deployOrder) return [...items];
+  const keyed = items.map((item, index) => {
+    const key = deployOrder(item.slug);
+    return { item, index, key: Number.isNaN(key) ? Number.NEGATIVE_INFINITY : key };
+  });
+  // Compared, never subtracted: two missing copies would be `-Infinity`
+  // minus `-Infinity`, which is `NaN`.
+  keyed.sort((a, b) => (a.key === b.key ? a.index - b.index : a.key < b.key ? -1 : 1));
+  return keyed.map((entry) => entry.item);
+}
+
+/**
  * Where a run's "already delivered" mark starts — its GENERATION.
  *
  * ## The defect this closes

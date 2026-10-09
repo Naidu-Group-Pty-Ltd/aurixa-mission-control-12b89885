@@ -17,6 +17,11 @@ export default tseslint.config(
       "**/routeTree.gen.ts",
       "src/integrations/supabase/types.ts",
       "src/vendor/**",
+      // Held byte-identical to the prime's supabase/functions/_shared/marketing/
+      // and pinned by MARKETING_ENGINE.lock.json, so it is formatted the
+      // prime's way; marketingEngineLock.test.ts checks its bytes and purity,
+      // and `tsc` still type-checks it here.
+      "src/lib/marketing/engine/**",
     ],
   },
   {

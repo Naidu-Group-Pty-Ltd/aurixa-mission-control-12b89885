@@ -119,6 +119,53 @@ describe("progress is read off the target", () => {
   });
 });
 
+describe("a pass deploys the copies the clone has held longest first", () => {
+  /** The snapshot call alone, so a pin cannot be satisfied by a later line. */
+  const snapshotCall = lane.slice(
+    lane.indexOf("fetchPrimeBackendSnapshot("),
+    lane.indexOf("const fetched ="),
+  );
+
+  it("anchors the snapshot call on something the source actually contains", () => {
+    // Sliced by string, as everything here is: an anchor that stops matching
+    // leaves an empty slice, and every `not.toMatch` below passes over nothing.
+    expect(lane.indexOf("fetchPrimeBackendSnapshot(")).toBeGreaterThan(-1);
+    expect(lane.indexOf("const fetched =")).toBeGreaterThan(
+      lane.indexOf("fetchPrimeBackendSnapshot("),
+    );
+    expect(snapshotCall.length).toBeGreaterThan(100);
+  });
+
+  it("hands the snapshot the clone's own staleness as the deploy order", () => {
+    /*
+      Measured 8–9 Oct 2026 on all four clones: the redeploy walk reached
+      somewhere between the 112th and 133rd of ~395 bundles and then began
+      again at `abs-data-service`. A prime merge restarts the generation, the
+      skip list empties, and a cap taken in name order keeps the same prefix
+      again, so nothing past the middle of the alphabet was ever redeployed.
+      Ordered by the clone's own `updated_at`, whatever a pass lands goes to
+      the back of the queue and stays there across the restart.
+    */
+    expect(snapshotCall).toContain("deployOrder: stalestFirst(freshness)");
+  });
+
+  it("orders by the same reading of the clone the skip list is taken from", () => {
+    // One read decides both what is skipped and what goes first. A second
+    // read could disagree with the first, and the run's own row is not a
+    // reading of the clone at all.
+    expect(lane.match(/listProjectEdgeFunctionFreshness\(/g) ?? []).toHaveLength(1);
+    expect(lane).toContain("refreshedSince(freshness, generation.baselineAt)");
+    expect(lane).not.toMatch(/stalestFirst\([^)]*run\.result/);
+  });
+
+  it("orders a named list as well as the whole fleet", () => {
+    // The order sits outside the conditional spread that adds the cap. A named
+    // list is sliced in the snapshot's order (`planEdgeDeployPass`), so its
+    // order decides which of the wanted bundles a pass carries too.
+    expect(snapshotCall).not.toMatch(/wanted === null \?[^}]*deployOrder/);
+  });
+});
+
 describe("a partial deployment may not call itself complete", () => {
   it("hands the run back to the queue instead of succeeding", () => {
     const resumeAt = lane.indexOf('status: "planned"');

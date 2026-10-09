@@ -17,6 +17,7 @@ import type { MigrationObjectIndex } from "./surplusOrigin.pure";
 import type { RepoRef } from "./github-app.server";
 import { countGithubCall } from "./githubUsageMeter";
 import { pruneBundleToReachable } from "./functionBundlePrune.pure";
+import { inDeployOrder } from "./edgeDeployBatch.pure";
 import { isPrimeOnlySecret } from "./primeOnlySecrets.pure";
 import { isPrimeOnlyPath } from "./primeOnlyFeatures.pure";
 import { OversizedMigrationError, PrimeBodyUnavailableError } from "./oversizedMigration.pure";
@@ -1778,6 +1779,23 @@ export async function fetchPrimeBackendSnapshot(
      * deployed is skipped next time, so the remaining set only shrinks.
      */
     functionLimit?: number;
+    /**
+     * Which bundles come first, and so which ones the cap keeps. Lower keys
+     * come first, and equal keys keep alphabetical order. Without one the
+     * order is alphabetical, as before.
+     *
+     * Alphabetical is only safe while the skip list keeps growing. The
+     * redeploy lane's skip list empties every time the prime merges, so an
+     * alphabetical cap began at `abs-data-service` again on every merge and
+     * never reached the end of the alphabet. That lane passes the clone's own
+     * staleness here (`stalestFirst` in `edgeDeployBatch.pure.ts`, which
+     * records the measurement).
+     *
+     * It changes which bundles are returned and in what order. It never
+     * changes how many: truncation is still measured over the whole
+     * deployable set.
+     */
+    deployOrder?: (slug: string) => number;
   },
 ): Promise<PrimeBackendSnapshot> {
   const { blobs, commitSha } = await listSupabaseBlobs(octokit, ref);
@@ -1870,10 +1888,16 @@ export async function fetchPrimeBackendSnapshot(
   }
   // What this pass may DEPLOY: minus whatever the project already holds.
   const skip = new Set(opts?.skipFunctionSlugs ?? []);
-  const deployable = allBundles.filter((b) => !skip.has(b.slug));
-  // Sorted above, so the cap takes a STABLE prefix: the same functions are
-  // deployed first on every pass, and a pass never re-fetches what the last
-  // one landed.
+  // In the caller's order, else alphabetical (`allBundles` is sorted above).
+  // Either way the order is deterministic, so a pass never re-fetches what
+  // the last one landed: that is skipped, not merely reordered. But "the same
+  // prefix on every pass" holds only while the skip list grows, and the
+  // redeploy lane's empties on every prime merge. That lane orders by the
+  // clone's own staleness rather than by name — see `deployOrder`.
+  const deployable = inDeployOrder(
+    allBundles.filter((b) => !skip.has(b.slug)),
+    opts?.deployOrder,
+  );
   const limit = opts?.functionLimit;
   const functionSourceTruncated = typeof limit === "number" && deployable.length > limit;
   const selected = functionSourceTruncated ? deployable.slice(0, limit) : deployable;
