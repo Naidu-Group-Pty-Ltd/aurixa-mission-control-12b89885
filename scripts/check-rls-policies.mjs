@@ -57,6 +57,12 @@ const SERVICE_ROLE_ONLY = new Set([
   // A policy here would hand a browser the ciphertext of a client's key.
   "voice_studio_vapi_credentials",
   "voice_tenant_configs",
+  // Mission Control's own advertising and YouTube credentials, encrypted by
+  // the application (20261009100000_marketing_module.sql). Read only by the
+  // Marketing module's server functions, which hold the service role and show
+  // a fingerprint; the migration REVOKEs the default grants. A policy here
+  // would hand a browser the ciphertext of an advertising token.
+  "marketing_connections",
 ]);
 
 const sql = readdirSync(MIGRATIONS)

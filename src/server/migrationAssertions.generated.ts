@@ -934,4 +934,18 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20261003100000",
     assertions: [{ kind: "cron", jobname: "clone-privilege-reconcile" }],
   },
+  {
+    migration: "20261009100000_marketing_module.sql",
+    version: "20261009100000",
+    assertions: [
+      { kind: "table", table: "marketing_connections" },
+      { kind: "table", table: "marketing_channel_snapshots" },
+      { kind: "table", table: "marketing_reports" },
+    ],
+  },
+  {
+    migration: "20261009100100_schedule_marketing_snapshots.sql",
+    version: "20261009100100",
+    assertions: [{ kind: "cron", jobname: "marketing-snapshots-daily" }],
+  },
 ];

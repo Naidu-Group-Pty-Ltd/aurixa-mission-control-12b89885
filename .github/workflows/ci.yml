@@ -154,6 +154,15 @@ jobs:
       - name: Voice fleet prompts match their generator
         run: npm run check:voice-prompts
 
+      # The Marketing module's engine (src/lib/marketing/engine) is held byte-
+      # identical to the prime's supabase/functions/_shared/marketing and pinned
+      # by MARKETING_ENGINE.lock.json, the same file in both repositories (see
+      # docs/MARKETING.md). marketingEngineLock.test.ts checks it too; this step
+      # names the failure before the suite does, because an engine edited here
+      # and not in the prime is two engines that agree until the day they don't.
+      - name: Marketing engine matches its lock
+        run: node scripts/marketing/engine-lock.mjs --check
+
       - name: Typecheck
         run: npm run typecheck
 

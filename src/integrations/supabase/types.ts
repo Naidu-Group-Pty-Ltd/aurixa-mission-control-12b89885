@@ -8583,6 +8583,120 @@ export type Database = {
           },
         ]
       }
+      marketing_channel_snapshots: {
+        Row: {
+          account_ref: string
+          captured_at: string
+          channel: string
+          currency: string | null
+          id: string
+          metrics: Json
+          snapshot_date: string
+          source: string
+        }
+        Insert: {
+          account_ref: string
+          captured_at?: string
+          channel: string
+          currency?: string | null
+          id?: string
+          metrics?: Json
+          snapshot_date: string
+          source?: string
+        }
+        Update: {
+          account_ref?: string
+          captured_at?: string
+          channel?: string
+          currency?: string | null
+          id?: string
+          metrics?: Json
+          snapshot_date?: string
+          source?: string
+        }
+        Relationships: []
+      }
+      marketing_connections: {
+        Row: {
+          account_name: string | null
+          created_at: string
+          fingerprints: Json
+          last_checked_at: string | null
+          last_error: string | null
+          secrets_enc: Json
+          settings: Json
+          source: string
+          updated_at: string
+          updated_by: string | null
+          verified_at: string | null
+        }
+        Insert: {
+          account_name?: string | null
+          created_at?: string
+          fingerprints?: Json
+          last_checked_at?: string | null
+          last_error?: string | null
+          secrets_enc?: Json
+          settings?: Json
+          source: string
+          updated_at?: string
+          updated_by?: string | null
+          verified_at?: string | null
+        }
+        Update: {
+          account_name?: string | null
+          created_at?: string
+          fingerprints?: Json
+          last_checked_at?: string | null
+          last_error?: string | null
+          secrets_enc?: Json
+          settings?: Json
+          source?: string
+          updated_at?: string
+          updated_by?: string | null
+          verified_at?: string | null
+        }
+        Relationships: []
+      }
+      marketing_reports: {
+        Row: {
+          channel: string
+          content: string
+          created_at: string
+          created_by: string | null
+          facts: Json
+          id: string
+          kind: string
+          model: string | null
+          range_since: string
+          range_until: string
+        }
+        Insert: {
+          channel: string
+          content: string
+          created_at?: string
+          created_by?: string | null
+          facts?: Json
+          id?: string
+          kind: string
+          model?: string | null
+          range_since: string
+          range_until: string
+        }
+        Update: {
+          channel?: string
+          content?: string
+          created_at?: string
+          created_by?: string | null
+          facts?: Json
+          id?: string
+          kind?: string
+          model?: string | null
+          range_since?: string
+          range_until?: string
+        }
+        Relationships: []
+      }
       migration_assertion_checks: {
         Row: {
           assertion: string

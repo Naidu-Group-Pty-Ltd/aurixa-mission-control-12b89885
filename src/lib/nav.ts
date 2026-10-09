@@ -53,6 +53,7 @@ import {
   Tags,
   Target,
   TreePine,
+  TrendingUp,
   UserPlus,
   Users,
   Waves,
@@ -277,7 +278,8 @@ export const NAV_SECTIONS: NavSection[] = [
         to: "/voice/studio",
         label: "Cloning Studio",
         icon: Wand2,
-        keywords: "clone voice agents plan recipe book documents deploy client vapi org knowledge base",
+        keywords:
+          "clone voice agents plan recipe book documents deploy client vapi org knowledge base",
       },
     ],
   },
@@ -354,6 +356,14 @@ export const NAV_SECTIONS: NavSection[] = [
   {
     heading: "Growth",
     items: [
+      {
+        to: "/marketing",
+        label: "Marketing",
+        icon: TrendingUp,
+        shortcut: "u",
+        keywords:
+          "ads advertising meta facebook instagram youtube google ads tiktok campaigns spend leads attribution utm roi brief digest",
+      },
       { to: "/handoffs", label: "Handoffs", icon: ArrowRightLeft, keywords: "client transfer" },
       { to: "/partner-portal", label: "Partner Portal", icon: Handshake, keywords: "resellers" },
     ],
