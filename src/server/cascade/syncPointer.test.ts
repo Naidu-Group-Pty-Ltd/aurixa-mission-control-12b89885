@@ -138,7 +138,7 @@ describe("the engine stamps delivery on every terminal claim about a revision", 
   });
 
   it("the already-proposed skip defers through its pr_url rather than stamping now", () => {
-    const at = engine.indexOf("Already proposed — PR #");
+    const at = engine.indexOf("diff_summary: alreadyProposedSummary(");
     expect(at).toBeGreaterThan(-1);
     const patch = engine.slice(at - 200, at + 1000);
     expect(patch).toContain("pr_url: existing.url");

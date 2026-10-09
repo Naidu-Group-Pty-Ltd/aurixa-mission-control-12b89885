@@ -77,9 +77,10 @@ import {
   cascadeEventStatus,
   countResults,
   durableSummary,
+  ALREADY_PROPOSED_PREFIX,
   parsePrNumber,
   parsePrRepo,
-  reconcileResultToPr,
+  reconcileRecordedResult,
   summariseCascade,
   type PullRequestFacts,
 } from "./cascade/prReconcile.pure";
@@ -224,6 +225,8 @@ type ResultRow = {
   id: string;
   clone_id: string;
   cascade_event_id: string;
+  /** `pr_opened`, or `skipped` on a deferred proposal — see the work list. */
+  status: string;
   pr_url: string | null;
   diff_summary: string | null;
 };
@@ -307,15 +310,33 @@ export async function drainCascadeMerges(
   // enumerated only open ones could never find it.
   const unreconciled = await supabase
     .from("cascade_results")
-    .select("id, clone_id, cascade_event_id, pr_url, diff_summary")
+    .select("id, clone_id, cascade_event_id, status, pr_url, diff_summary")
     .eq("status", "pr_opened")
     .not("pr_url", "is", null)
     .order("created_at", { ascending: false });
   if (unreconciled.error) {
     throw new Error(`Could not read cascade results: ${unreconciled.error.message}`);
   }
+  // And every cascade that found its exact tree already proposed by an open
+  // pull request it did not open. Its delivery waits on that pull request
+  // landing, so the pull request is what settles it — and until this read
+  // existed nothing did, and a clone whose newest cascade was one of these
+  // read `behind` over content it carried. Read separately rather than as one
+  // `.or()` string, and listed AFTER the proposals', so a pull request's
+  // first row is still the cascade that opened it wherever one is recorded.
+  // See `isDeferredProposal` in `cascade/prReconcile.pure.ts`.
+  const deferred = await supabase
+    .from("cascade_results")
+    .select("id, clone_id, cascade_event_id, status, pr_url, diff_summary")
+    .eq("status", "skipped")
+    .not("pr_url", "is", null)
+    .like("diff_summary", `${ALREADY_PROPOSED_PREFIX}%`)
+    .order("created_at", { ascending: false });
+  if (deferred.error) {
+    throw new Error(`Could not read deferred cascade results: ${deferred.error.message}`);
+  }
   const rowsByClone = new Map<string, ResultRow[]>();
-  for (const row of (unreconciled.data ?? []) as ResultRow[]) {
+  for (const row of [...(unreconciled.data ?? []), ...(deferred.data ?? [])] as ResultRow[]) {
     const list = rowsByClone.get(row.clone_id);
     if (list) list.push(row);
     else rowsByClone.set(row.clone_id, [row]);
@@ -683,7 +704,10 @@ async function handleOne(args: {
   // answers null until it has, so an unknown state falls through to the
   // ordinary path rather than being read as a conflict.
   if (facts.state === "open" && pr.mergeable === false) {
-    const eventId = rows[0]?.cascade_event_id ?? null;
+    // The cascade that OPENED this proposal, never one that found it already
+    // open: a deferred row's event is somebody else's, and a repair rebuilds
+    // and rewrites the rows of the event it is handed.
+    const eventId = rows.find((r) => r.status === "pr_opened")?.cascade_event_id ?? null;
     if (eventId) {
       const repair = await repairConflictedProposal({
         supabase,
@@ -1159,10 +1183,12 @@ async function writeReconciliation(
   // cascades landed the moment it merged — leaving the rest at `pr_opened`
   // would replace one stale record with ten.
   for (const row of rows) {
-    const decision = reconcileResultToPr({
+    const decision = reconcileRecordedResult({
+      status: row.status,
       pr: facts,
       currentSummary: row.diff_summary,
       openReason,
+      prUrl: row.pr_url,
     });
     if (!decision.changed) continue;
 

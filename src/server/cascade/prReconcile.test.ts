@@ -1,11 +1,15 @@
 import { describe, it, expect } from "vitest";
 import {
+  ALREADY_PROPOSED_PREFIX,
+  alreadyProposedSummary,
   cascadeEventStatus,
   countResults,
   durableSummary,
+  isDeferredProposal,
   openSentence,
   parsePrNumber,
   parsePrRepo,
+  reconcileRecordedResult,
   reconcileResultToPr,
   summariseCascade,
 } from "./prReconcile.pure";
@@ -496,5 +500,161 @@ describe("several rows sharing one pull request", () => {
     expect(b.diffSummary).toContain("beta.ts");
     expect(a.status).toBe("succeeded");
     expect(b.status).toBe("succeeded");
+  });
+});
+
+describe("a cascade that found its tree already proposed is settled by that pull request", () => {
+  // Measured 9 Oct 2026: 163 of these rows across the four clones, every one
+  // still `skipped`, because the drain's work list was `pr_opened` rows alone.
+  const PR_URL = "https://github.com/Naidu-Group-Pty-Ltd/npc-test-76b3b3/pull/207";
+  const SUMMARY = alreadyProposedSummary(207, 98);
+  const deferredRow = { status: "skipped", pr_url: PR_URL, diff_summary: SUMMARY };
+
+  it("the engine's sentence is the one the drain recognises", () => {
+    expect(SUMMARY).toBe("Already proposed — PR #207 carries this exact tree (98 file(s))");
+    expect(SUMMARY.startsWith(ALREADY_PROPOSED_PREFIX)).toBe(true);
+    expect(isDeferredProposal(deferredRow)).toBe(true);
+  });
+
+  it("only a skipped row naming a pull request and opening with the sentence is deferred", () => {
+    expect(isDeferredProposal({ ...deferredRow, status: "pr_opened" })).toBe(false);
+    expect(isDeferredProposal({ ...deferredRow, status: "succeeded" })).toBe(false);
+    expect(isDeferredProposal({ ...deferredRow, pr_url: null })).toBe(false);
+    expect(isDeferredProposal({ ...deferredRow, pr_url: "" })).toBe(false);
+    expect(
+      isDeferredProposal({ ...deferredRow, diff_summary: "In sync — nothing to cascade" }),
+    ).toBe(false);
+    // A declined one has already been settled, and leaves the work list.
+    expect(
+      isDeferredProposal({
+        ...deferredRow,
+        diff_summary: `Closed without merging — this proposal was declined. ${SUMMARY}`,
+      }),
+    ).toBe(false);
+  });
+
+  it("merged: it becomes `succeeded`, keeps its sentence as detail, and moves the pointer", () => {
+    const r = reconcileRecordedResult({
+      status: "skipped",
+      prUrl: PR_URL,
+      pr: { state: "closed", merged: true, mergeCommitSha: "f1e2d3c4b5a6" },
+      currentSummary: SUMMARY,
+    });
+    expect(r).toEqual({
+      status: "succeeded",
+      commitSha: "f1e2d3c",
+      diffSummary: `Merged as f1e2d3c. ${SUMMARY}`,
+      advanceClone: true,
+      changed: true,
+    });
+  });
+
+  it("declined: it stays `skipped`, says so, and is no longer deferred", () => {
+    const r = reconcileRecordedResult({
+      status: "skipped",
+      prUrl: PR_URL,
+      pr: { state: "closed", merged: false },
+      currentSummary: SUMMARY,
+    });
+    expect(r.status).toBe("skipped");
+    expect(r.changed).toBe(true);
+    expect(r.advanceClone).toBe(false);
+    expect(r.diffSummary).toBe(`Closed without merging — this proposal was declined. ${SUMMARY}`);
+    expect(isDeferredProposal({ ...deferredRow, diff_summary: r.diffSummary })).toBe(false);
+  });
+
+  it("still open: left exactly as it is, never turned into a second open proposal", () => {
+    // The pull request is counted under the row of the cascade that opened
+    // it. Rewriting this one to `pr_opened` would count it twice.
+    const r = reconcileRecordedResult({
+      status: "skipped",
+      prUrl: PR_URL,
+      pr: { state: "open", merged: false },
+      currentSummary: SUMMARY,
+      openReason: "verify is still running",
+    });
+    expect(r.changed).toBe(false);
+    expect(r.status).toBe("skipped");
+    expect(r.advanceClone).toBe(false);
+  });
+
+  it("is idempotent: a settled row is never settled again", () => {
+    const merged = reconcileRecordedResult({
+      status: "skipped",
+      prUrl: PR_URL,
+      pr: { state: "closed", merged: true, mergeCommitSha: "f1e2d3c" },
+      currentSummary: SUMMARY,
+    });
+    const again = reconcileRecordedResult({
+      status: merged.status,
+      prUrl: PR_URL,
+      pr: { state: "closed", merged: true, mergeCommitSha: "f1e2d3c" },
+      currentSummary: merged.diffSummary,
+    });
+    expect(again.changed).toBe(false);
+    const declined = reconcileRecordedResult({
+      status: "skipped",
+      prUrl: PR_URL,
+      pr: { state: "closed", merged: false },
+      currentSummary: SUMMARY,
+    });
+    const declinedAgain = reconcileRecordedResult({
+      status: declined.status,
+      prUrl: PR_URL,
+      pr: { state: "closed", merged: false },
+      currentSummary: declined.diffSummary,
+    });
+    expect(declinedAgain.changed).toBe(false);
+  });
+
+  it("any other skipped row is not a pull request's to change, whatever it names", () => {
+    const r = reconcileRecordedResult({
+      status: "skipped",
+      prUrl: PR_URL,
+      pr: { state: "closed", merged: true, mergeCommitSha: "f1e2d3c" },
+      currentSummary: "Closed without merging — this proposal was declined. PR #207 opened: a.ts",
+    });
+    expect(r.changed).toBe(false);
+  });
+
+  it("a `pr_opened` row is reconciled exactly as before", () => {
+    const input = {
+      pr: { state: "open" as const, merged: false },
+      currentSummary: "PR #207 opened: a.ts",
+      openReason: "verify is still running",
+    };
+    expect(reconcileRecordedResult({ status: "pr_opened", prUrl: PR_URL, ...input })).toEqual(
+      reconcileResultToPr(input),
+    );
+  });
+
+  describe("the wiring", () => {
+    const drain = readFileSync(
+      join(process.cwd(), "src/server/cascadeMergeDrain.server.ts"),
+      "utf8",
+    );
+    const engine = readFileSync(join(process.cwd(), "src/server/cascade-engine.server.ts"), "utf8");
+
+    it("the engine writes the sentence through the shared helper, not a literal", () => {
+      expect(engine).toContain(
+        "diff_summary: alreadyProposedSummary(existing.number, treeEntries.length)",
+      );
+      expect(engine).not.toContain("Already proposed — PR #");
+    });
+
+    it("the drain reads deferred rows by the shared prefix, and settles every row through the dispatcher", () => {
+      expect(drain).toContain('.eq("status", "skipped")');
+      expect(drain).toContain('.like("diff_summary", `${ALREADY_PROPOSED_PREFIX}%`)');
+      expect(drain).not.toContain("Already proposed — PR #");
+      const writer = drain.slice(drain.indexOf("async function writeReconciliation"));
+      expect(writer.slice(0, 1600)).toContain("reconcileRecordedResult({");
+      expect(drain).not.toMatch(/\breconcileResultToPr\(/);
+    });
+
+    it("a repair is handed the event that OPENED the proposal, never a deferred row's", () => {
+      expect(drain).toContain(
+        'const eventId = rows.find((r) => r.status === "pr_opened")?.cascade_event_id ?? null;',
+      );
+    });
   });
 });

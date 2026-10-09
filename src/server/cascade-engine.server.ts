@@ -34,7 +34,11 @@ import {
   type RepoRef,
 } from "./github-app.server";
 import { isBatchableTextMode, type TextWant } from "./cascade/primeTextBatch.pure";
-import { cascadeEventStatus, summariseCascade } from "./cascade/prReconcile.pure";
+import {
+  alreadyProposedSummary,
+  cascadeEventStatus,
+  summariseCascade,
+} from "./cascade/prReconcile.pure";
 import type { CascadeBudget, CascadeRunResult } from "@/lib/cascadeRunOutcome";
 import {
   classifyGitHubFailure,
@@ -5620,14 +5624,16 @@ export async function processClone(args: {
       return {
         status: "skipped",
         pr_url: existing.url,
-        diff_summary: `Already proposed — PR #${existing.number} carries this exact tree (${treeEntries.length} file(s))`,
+        diff_summary: alreadyProposedSummary(existing.number, treeEntries.length),
         files_changed: treeEntries.length,
         completed_at: new Date().toISOString(),
         // Tree-verified for THIS revision, but conditional on the standing
         // proposal: the pointer must not advance until it lands. `pr_url`
         // is what defers it — the engine's own stamp passes this row over,
-        // and when the drain merges the pull request, reconciliation flips
-        // every row naming it to `succeeded`, where `advanceClone` reads
+        // and when the pull request merges, the merge drain (which finds
+        // this row by the sentence `alreadyProposedSummary` writes, and
+        // settles it through `reconcileRecordedResult`) flips every row
+        // naming it to `succeeded`, where `advanceClone` reads
         // the newest event's delivered head. That is how a proposal cut
         // for an older head and re-verified against a newer one stamps the
         // newer one.
