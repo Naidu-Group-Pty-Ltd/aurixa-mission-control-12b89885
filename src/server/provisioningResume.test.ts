@@ -841,7 +841,7 @@ describe("the edge-function fetch is budgeted like everything else", () => {
        set is built — the expensive half of the economy, the Management API
        calls, is what it exists to save. It deliberately no longer narrows the
        fetch, because the fetch is what the secret scan reads (next test). */
-    const skipAt = src.indexOf("const deployable = allBundles.filter((b) => !skip.has(b.slug));");
+    const skipAt = src.indexOf("allBundles.filter((b) => !skip.has(b.slug))");
     const fetchAt = src.indexOf("fetchBlobTextsForCommit(octokit, ref, commitSha, neededEntries)");
     expect(skipAt).toBeGreaterThan(-1);
     expect(skipAt).toBeLessThan(fetchAt);
@@ -866,7 +866,12 @@ describe("the edge-function fetch is budgeted like everything else", () => {
     // prime's secret set is a property of the PRIME at this commit and cannot
     // depend on how far this clone has got.
     expect(src).toMatch(/for \(const bundle of allBundles\) \{/);
-    expect(src).toMatch(/const deployable = allBundles\.filter\(\(b\) => !skip\.has\(b\.slug\)\)/);
+    // `deployable` is `allBundles` minus `skip`, in the caller's order. The
+    // order decides which bundles the cap keeps and nothing else: the scan
+    // still reads `allBundles`, so reordering cannot narrow it.
+    expect(src).toMatch(
+      /const deployable = inDeployOrder\(\s*allBundles\.filter\(\(b\) => !skip\.has\(b\.slug\)\),\s*opts\?\.deployOrder,\s*\);/,
+    );
     expect(src).toMatch(
       /const selected = functionSourceTruncated \? deployable\.slice\(0, limit\) : deployable/,
     );
