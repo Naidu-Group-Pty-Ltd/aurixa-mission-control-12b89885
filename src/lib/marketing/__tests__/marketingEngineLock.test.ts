@@ -24,8 +24,11 @@ describe("the marketing engine lock", () => {
       readFileSync(join(ENGINE_DIR, "MARKETING_ENGINE.lock.json"), "utf8"),
     ) as {
       engineVersion: string;
-      files: Record<string, string>;
+      files: Record<string, { sha256: string }>;
     };
+    const recorded = Object.fromEntries(
+      Object.entries(lock.files).map(([f, entry]) => [f, entry.sha256]),
+    );
     const actual = Object.fromEntries(
       engineFiles().map((f) => [
         f,
@@ -34,7 +37,7 @@ describe("the marketing engine lock", () => {
           .digest("hex"),
       ]),
     );
-    expect(actual).toEqual(lock.files);
+    expect(actual).toEqual(recorded);
     const version = createHash("sha256")
       .update(
         engineFiles()
@@ -44,6 +47,20 @@ describe("the marketing engine lock", () => {
       .digest("hex")
       .slice(0, 16);
     expect(version).toBe(lock.engineVersion);
+  });
+
+  // The lock travels to every clone the engine is cascaded to, and each clone
+  // scans its working tree with its OWN `.gitleaks.toml`; this repository's
+  // remediation guard scans with the default rules. A filename carrying `Api`
+  // and a 64-hex digest on one line is a credential to generic-api-key, and no
+  // exception written here reaches a clone's config.
+  it("never puts a digest on the same line as an engine filename", () => {
+    const lines = readFileSync(join(ENGINE_DIR, "MARKETING_ENGINE.lock.json"), "utf8").split("\n");
+    for (const line of lines) {
+      expect(line, "a filename and its digest share a line").not.toMatch(
+        /\.pure\.ts"\s*:\s*"[0-9a-f]{64}"/,
+      );
+    }
   });
 
   it("keeps every engine file pure: relative engine imports only, no runtime globals", () => {
