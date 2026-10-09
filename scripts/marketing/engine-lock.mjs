@@ -10,6 +10,16 @@
  * engine change is finished when both repositories hold the new bytes and the
  * same `engineVersion`.
  *
+ * Each digest sits under its own `sha256` key, never beside its filename. The
+ * lock travels to every clone the prime's engine is cascaded to, and each
+ * clone scans its own working tree with its own `.gitleaks.toml`, which the
+ * cascade never delivers. `generic-api-key` reads a filename carrying `Api`
+ * (`googleApi.pure.ts`) as a credential name and a digest on the same line as
+ * its value, here too: the remediation workflow's secret-leak guard scans
+ * this tree with the default rules. The shape has to pass every scanner as it
+ * stands. `engineVersion` is computed from the names and digests alone, so
+ * the shape does not move it.
+ *
  *   node scripts/marketing/engine-lock.mjs           # rewrite the lock
  *   node scripts/marketing/engine-lock.mjs --check   # exit 1 on drift
  */
@@ -38,7 +48,10 @@ export function engineDigests(dir) {
     .update(files.map((f) => `${f}:${entries[f]}`).join("\n"))
     .digest("hex")
     .slice(0, 16);
-  return { engineVersion, files: entries };
+  return {
+    engineVersion,
+    files: Object.fromEntries(files.map((f) => [f, { sha256: entries[f] }])),
+  };
 }
 
 function render(lock) {

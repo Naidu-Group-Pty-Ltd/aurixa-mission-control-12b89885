@@ -27,7 +27,12 @@ its own leads (`waitlist_leads`) and its own deals (`crm_deals`).
   Prettier and ESLint because it is formatted the prime's way; `tsc` still
   checks it. **Change it in both repositories in the same piece of work** and
   run `node scripts/marketing/engine-lock.mjs` in each — the `engineVersion`
-  must match.
+  must match. Each digest sits under its own `sha256` key, never on its
+  filename's line. The prime cascades the lock to every clone, and each clone
+  scans its tree with its own `.gitleaks.toml`, which the cascade holds as
+  `protected`. `generic-api-key` read `googleApi.pure.ts` and a digest on
+  one line as a credential, and that held the CRM clone's first delivery of
+  this engine on a red `security` check.
 - **Server** — `src/server/marketing/`: `connections.server.ts` (encrypted
   credentials), `vendor.server.ts` (the one place a request is performed;
   retries a dropped connection or a 5xx, never a 429), `reads.server.ts` (Meta,
