@@ -24,6 +24,7 @@ import { Route as OversightRouteImport } from './routes/oversight'
 import { Route as NotificationsRouteImport } from './routes/notifications'
 import { Route as ModulesRouteImport } from './routes/modules'
 import { Route as MetricsRouteImport } from './routes/metrics'
+import { Route as MarketingRouteImport } from './routes/marketing'
 import { Route as LeadsRouteImport } from './routes/leads'
 import { Route as HealthRouteImport } from './routes/health'
 import { Route as HandoffsRouteImport } from './routes/handoffs'
@@ -42,6 +43,7 @@ import { Route as AnnouncementsRouteImport } from './routes/announcements'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as SettingsIndexRouteImport } from './routes/settings.index'
 import { Route as SecurityIndexRouteImport } from './routes/security.index'
+import { Route as MarketingIndexRouteImport } from './routes/marketing.index'
 import { Route as EmailIndexRouteImport } from './routes/email.index'
 import { Route as CrmIndexRouteImport } from './routes/crm.index'
 import { Route as AgreementsIndexRouteImport } from './routes/agreements.index'
@@ -68,6 +70,12 @@ import { Route as SecurityScansRouteImport } from './routes/security.scans'
 import { Route as SecurityIntakeRouteImport } from './routes/security.intake'
 import { Route as ModulesBuilderRouteImport } from './routes/modules.builder'
 import { Route as ModulesSlugRouteImport } from './routes/modules.$slug'
+import { Route as MarketingYoutubeRouteImport } from './routes/marketing.youtube'
+import { Route as MarketingTiktokRouteImport } from './routes/marketing.tiktok'
+import { Route as MarketingMetaRouteImport } from './routes/marketing.meta'
+import { Route as MarketingConnectionsRouteImport } from './routes/marketing.connections'
+import { Route as MarketingBriefsRouteImport } from './routes/marketing.briefs'
+import { Route as MarketingAttributionRouteImport } from './routes/marketing.attribution'
 import { Route as JoinTokenRouteImport } from './routes/join.$token'
 import { Route as HooksWarmHealthRouteImport } from './routes/hooks.warm-health'
 import { Route as HooksVoiceStudioPlanRouteImport } from './routes/hooks.voice-studio-plan'
@@ -84,6 +92,7 @@ import { Route as HooksReferenceDataSyncRouteImport } from './routes/hooks.refer
 import { Route as HooksPrimeSecretPairsRouteImport } from './routes/hooks.prime-secret-pairs'
 import { Route as HooksMigrationEnqueueRouteImport } from './routes/hooks.migration-enqueue'
 import { Route as HooksMigrationDriftRouteImport } from './routes/hooks.migration-drift'
+import { Route as HooksMarketingSnapshotsRouteImport } from './routes/hooks.marketing-snapshots'
 import { Route as HooksLeadStageEmailsRouteImport } from './routes/hooks.lead-stage-emails'
 import { Route as HooksHeldFileDriftRouteImport } from './routes/hooks.held-file-drift'
 import { Route as HooksHandoffParityRefreshRouteImport } from './routes/hooks.handoff-parity-refresh'
@@ -299,6 +308,11 @@ const MetricsRoute = MetricsRouteImport.update({
   path: '/metrics',
   getParentRoute: () => rootRouteImport,
 } as any)
+const MarketingRoute = MarketingRouteImport.update({
+  id: '/marketing',
+  path: '/marketing',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const LeadsRoute = LeadsRouteImport.update({
   id: '/leads',
   path: '/leads',
@@ -388,6 +402,11 @@ const SecurityIndexRoute = SecurityIndexRouteImport.update({
   id: '/security/',
   path: '/security/',
   getParentRoute: () => rootRouteImport,
+} as any)
+const MarketingIndexRoute = MarketingIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => MarketingRoute,
 } as any)
 const EmailIndexRoute = EmailIndexRouteImport.update({
   id: '/email/',
@@ -521,6 +540,36 @@ const ModulesSlugRoute = ModulesSlugRouteImport.update({
   path: '/$slug',
   getParentRoute: () => ModulesRoute,
 } as any)
+const MarketingYoutubeRoute = MarketingYoutubeRouteImport.update({
+  id: '/youtube',
+  path: '/youtube',
+  getParentRoute: () => MarketingRoute,
+} as any)
+const MarketingTiktokRoute = MarketingTiktokRouteImport.update({
+  id: '/tiktok',
+  path: '/tiktok',
+  getParentRoute: () => MarketingRoute,
+} as any)
+const MarketingMetaRoute = MarketingMetaRouteImport.update({
+  id: '/meta',
+  path: '/meta',
+  getParentRoute: () => MarketingRoute,
+} as any)
+const MarketingConnectionsRoute = MarketingConnectionsRouteImport.update({
+  id: '/connections',
+  path: '/connections',
+  getParentRoute: () => MarketingRoute,
+} as any)
+const MarketingBriefsRoute = MarketingBriefsRouteImport.update({
+  id: '/briefs',
+  path: '/briefs',
+  getParentRoute: () => MarketingRoute,
+} as any)
+const MarketingAttributionRoute = MarketingAttributionRouteImport.update({
+  id: '/attribution',
+  path: '/attribution',
+  getParentRoute: () => MarketingRoute,
+} as any)
 const JoinTokenRoute = JoinTokenRouteImport.update({
   id: '/join/$token',
   path: '/join/$token',
@@ -602,6 +651,11 @@ const HooksMigrationEnqueueRoute = HooksMigrationEnqueueRouteImport.update({
 const HooksMigrationDriftRoute = HooksMigrationDriftRouteImport.update({
   id: '/hooks/migration-drift',
   path: '/hooks/migration-drift',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksMarketingSnapshotsRoute = HooksMarketingSnapshotsRouteImport.update({
+  id: '/hooks/marketing-snapshots',
+  path: '/hooks/marketing-snapshots',
   getParentRoute: () => rootRouteImport,
 } as any)
 const HooksLeadStageEmailsRoute = HooksLeadStageEmailsRouteImport.update({
@@ -1376,6 +1430,7 @@ export interface FileRoutesByFullPath {
   '/handoffs': typeof HandoffsRouteWithChildren
   '/health': typeof HealthRoute
   '/leads': typeof LeadsRoute
+  '/marketing': typeof MarketingRouteWithChildren
   '/metrics': typeof MetricsRoute
   '/modules': typeof ModulesRouteWithChildren
   '/notifications': typeof NotificationsRoute
@@ -1457,6 +1512,7 @@ export interface FileRoutesByFullPath {
   '/hooks/handoff-parity-refresh': typeof HooksHandoffParityRefreshRoute
   '/hooks/held-file-drift': typeof HooksHeldFileDriftRoute
   '/hooks/lead-stage-emails': typeof HooksLeadStageEmailsRoute
+  '/hooks/marketing-snapshots': typeof HooksMarketingSnapshotsRoute
   '/hooks/migration-drift': typeof HooksMigrationDriftRoute
   '/hooks/migration-enqueue': typeof HooksMigrationEnqueueRoute
   '/hooks/prime-secret-pairs': typeof HooksPrimeSecretPairsRoute
@@ -1473,6 +1529,12 @@ export interface FileRoutesByFullPath {
   '/hooks/voice-studio-plan': typeof HooksVoiceStudioPlanRoute
   '/hooks/warm-health': typeof HooksWarmHealthRoute
   '/join/$token': typeof JoinTokenRoute
+  '/marketing/attribution': typeof MarketingAttributionRoute
+  '/marketing/briefs': typeof MarketingBriefsRoute
+  '/marketing/connections': typeof MarketingConnectionsRoute
+  '/marketing/meta': typeof MarketingMetaRoute
+  '/marketing/tiktok': typeof MarketingTiktokRoute
+  '/marketing/youtube': typeof MarketingYoutubeRoute
   '/modules/$slug': typeof ModulesSlugRoute
   '/modules/builder': typeof ModulesBuilderRoute
   '/security/intake': typeof SecurityIntakeRoute
@@ -1499,6 +1561,7 @@ export interface FileRoutesByFullPath {
   '/agreements/': typeof AgreementsIndexRoute
   '/crm/': typeof CrmIndexRoute
   '/email/': typeof EmailIndexRoute
+  '/marketing/': typeof MarketingIndexRoute
   '/security/': typeof SecurityIndexRoute
   '/settings/': typeof SettingsIndexRoute
   '/api/public/purchases': typeof ApiPublicPurchasesRoute
@@ -1672,6 +1735,7 @@ export interface FileRoutesByTo {
   '/hooks/handoff-parity-refresh': typeof HooksHandoffParityRefreshRoute
   '/hooks/held-file-drift': typeof HooksHeldFileDriftRoute
   '/hooks/lead-stage-emails': typeof HooksLeadStageEmailsRoute
+  '/hooks/marketing-snapshots': typeof HooksMarketingSnapshotsRoute
   '/hooks/migration-drift': typeof HooksMigrationDriftRoute
   '/hooks/migration-enqueue': typeof HooksMigrationEnqueueRoute
   '/hooks/prime-secret-pairs': typeof HooksPrimeSecretPairsRoute
@@ -1688,6 +1752,12 @@ export interface FileRoutesByTo {
   '/hooks/voice-studio-plan': typeof HooksVoiceStudioPlanRoute
   '/hooks/warm-health': typeof HooksWarmHealthRoute
   '/join/$token': typeof JoinTokenRoute
+  '/marketing/attribution': typeof MarketingAttributionRoute
+  '/marketing/briefs': typeof MarketingBriefsRoute
+  '/marketing/connections': typeof MarketingConnectionsRoute
+  '/marketing/meta': typeof MarketingMetaRoute
+  '/marketing/tiktok': typeof MarketingTiktokRoute
+  '/marketing/youtube': typeof MarketingYoutubeRoute
   '/modules/$slug': typeof ModulesSlugRoute
   '/modules/builder': typeof ModulesBuilderRoute
   '/security/intake': typeof SecurityIntakeRoute
@@ -1714,6 +1784,7 @@ export interface FileRoutesByTo {
   '/agreements': typeof AgreementsIndexRoute
   '/crm': typeof CrmIndexRoute
   '/email': typeof EmailIndexRoute
+  '/marketing': typeof MarketingIndexRoute
   '/security': typeof SecurityIndexRoute
   '/settings': typeof SettingsIndexRoute
   '/api/public/purchases': typeof ApiPublicPurchasesRoute
@@ -1808,6 +1879,7 @@ export interface FileRoutesById {
   '/handoffs': typeof HandoffsRouteWithChildren
   '/health': typeof HealthRoute
   '/leads': typeof LeadsRoute
+  '/marketing': typeof MarketingRouteWithChildren
   '/metrics': typeof MetricsRoute
   '/modules': typeof ModulesRouteWithChildren
   '/notifications': typeof NotificationsRoute
@@ -1889,6 +1961,7 @@ export interface FileRoutesById {
   '/hooks/handoff-parity-refresh': typeof HooksHandoffParityRefreshRoute
   '/hooks/held-file-drift': typeof HooksHeldFileDriftRoute
   '/hooks/lead-stage-emails': typeof HooksLeadStageEmailsRoute
+  '/hooks/marketing-snapshots': typeof HooksMarketingSnapshotsRoute
   '/hooks/migration-drift': typeof HooksMigrationDriftRoute
   '/hooks/migration-enqueue': typeof HooksMigrationEnqueueRoute
   '/hooks/prime-secret-pairs': typeof HooksPrimeSecretPairsRoute
@@ -1905,6 +1978,12 @@ export interface FileRoutesById {
   '/hooks/voice-studio-plan': typeof HooksVoiceStudioPlanRoute
   '/hooks/warm-health': typeof HooksWarmHealthRoute
   '/join/$token': typeof JoinTokenRoute
+  '/marketing/attribution': typeof MarketingAttributionRoute
+  '/marketing/briefs': typeof MarketingBriefsRoute
+  '/marketing/connections': typeof MarketingConnectionsRoute
+  '/marketing/meta': typeof MarketingMetaRoute
+  '/marketing/tiktok': typeof MarketingTiktokRoute
+  '/marketing/youtube': typeof MarketingYoutubeRoute
   '/modules/$slug': typeof ModulesSlugRoute
   '/modules/builder': typeof ModulesBuilderRoute
   '/security/intake': typeof SecurityIntakeRoute
@@ -1931,6 +2010,7 @@ export interface FileRoutesById {
   '/agreements/': typeof AgreementsIndexRoute
   '/crm/': typeof CrmIndexRoute
   '/email/': typeof EmailIndexRoute
+  '/marketing/': typeof MarketingIndexRoute
   '/security/': typeof SecurityIndexRoute
   '/settings/': typeof SettingsIndexRoute
   '/api/public/purchases': typeof ApiPublicPurchasesRoute
@@ -2026,6 +2106,7 @@ export interface FileRouteTypes {
     | '/handoffs'
     | '/health'
     | '/leads'
+    | '/marketing'
     | '/metrics'
     | '/modules'
     | '/notifications'
@@ -2107,6 +2188,7 @@ export interface FileRouteTypes {
     | '/hooks/handoff-parity-refresh'
     | '/hooks/held-file-drift'
     | '/hooks/lead-stage-emails'
+    | '/hooks/marketing-snapshots'
     | '/hooks/migration-drift'
     | '/hooks/migration-enqueue'
     | '/hooks/prime-secret-pairs'
@@ -2123,6 +2205,12 @@ export interface FileRouteTypes {
     | '/hooks/voice-studio-plan'
     | '/hooks/warm-health'
     | '/join/$token'
+    | '/marketing/attribution'
+    | '/marketing/briefs'
+    | '/marketing/connections'
+    | '/marketing/meta'
+    | '/marketing/tiktok'
+    | '/marketing/youtube'
     | '/modules/$slug'
     | '/modules/builder'
     | '/security/intake'
@@ -2149,6 +2237,7 @@ export interface FileRouteTypes {
     | '/agreements/'
     | '/crm/'
     | '/email/'
+    | '/marketing/'
     | '/security/'
     | '/settings/'
     | '/api/public/purchases'
@@ -2322,6 +2411,7 @@ export interface FileRouteTypes {
     | '/hooks/handoff-parity-refresh'
     | '/hooks/held-file-drift'
     | '/hooks/lead-stage-emails'
+    | '/hooks/marketing-snapshots'
     | '/hooks/migration-drift'
     | '/hooks/migration-enqueue'
     | '/hooks/prime-secret-pairs'
@@ -2338,6 +2428,12 @@ export interface FileRouteTypes {
     | '/hooks/voice-studio-plan'
     | '/hooks/warm-health'
     | '/join/$token'
+    | '/marketing/attribution'
+    | '/marketing/briefs'
+    | '/marketing/connections'
+    | '/marketing/meta'
+    | '/marketing/tiktok'
+    | '/marketing/youtube'
     | '/modules/$slug'
     | '/modules/builder'
     | '/security/intake'
@@ -2364,6 +2460,7 @@ export interface FileRouteTypes {
     | '/agreements'
     | '/crm'
     | '/email'
+    | '/marketing'
     | '/security'
     | '/settings'
     | '/api/public/purchases'
@@ -2457,6 +2554,7 @@ export interface FileRouteTypes {
     | '/handoffs'
     | '/health'
     | '/leads'
+    | '/marketing'
     | '/metrics'
     | '/modules'
     | '/notifications'
@@ -2538,6 +2636,7 @@ export interface FileRouteTypes {
     | '/hooks/handoff-parity-refresh'
     | '/hooks/held-file-drift'
     | '/hooks/lead-stage-emails'
+    | '/hooks/marketing-snapshots'
     | '/hooks/migration-drift'
     | '/hooks/migration-enqueue'
     | '/hooks/prime-secret-pairs'
@@ -2554,6 +2653,12 @@ export interface FileRouteTypes {
     | '/hooks/voice-studio-plan'
     | '/hooks/warm-health'
     | '/join/$token'
+    | '/marketing/attribution'
+    | '/marketing/briefs'
+    | '/marketing/connections'
+    | '/marketing/meta'
+    | '/marketing/tiktok'
+    | '/marketing/youtube'
     | '/modules/$slug'
     | '/modules/builder'
     | '/security/intake'
@@ -2580,6 +2685,7 @@ export interface FileRouteTypes {
     | '/agreements/'
     | '/crm/'
     | '/email/'
+    | '/marketing/'
     | '/security/'
     | '/settings/'
     | '/api/public/purchases'
@@ -2674,6 +2780,7 @@ export interface RootRouteChildren {
   HandoffsRoute: typeof HandoffsRouteWithChildren
   HealthRoute: typeof HealthRoute
   LeadsRoute: typeof LeadsRoute
+  MarketingRoute: typeof MarketingRouteWithChildren
   MetricsRoute: typeof MetricsRoute
   ModulesRoute: typeof ModulesRouteWithChildren
   NotificationsRoute: typeof NotificationsRoute
@@ -2752,6 +2859,7 @@ export interface RootRouteChildren {
   HooksHandoffParityRefreshRoute: typeof HooksHandoffParityRefreshRoute
   HooksHeldFileDriftRoute: typeof HooksHeldFileDriftRoute
   HooksLeadStageEmailsRoute: typeof HooksLeadStageEmailsRoute
+  HooksMarketingSnapshotsRoute: typeof HooksMarketingSnapshotsRoute
   HooksMigrationDriftRoute: typeof HooksMigrationDriftRoute
   HooksMigrationEnqueueRoute: typeof HooksMigrationEnqueueRoute
   HooksPrimeSecretPairsRoute: typeof HooksPrimeSecretPairsRoute
@@ -2958,6 +3066,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof MetricsRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/marketing': {
+      id: '/marketing'
+      path: '/marketing'
+      fullPath: '/marketing'
+      preLoaderRoute: typeof MarketingRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/leads': {
       id: '/leads'
       path: '/leads'
@@ -3083,6 +3198,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/security/'
       preLoaderRoute: typeof SecurityIndexRouteImport
       parentRoute: typeof rootRouteImport
+    }
+    '/marketing/': {
+      id: '/marketing/'
+      path: '/'
+      fullPath: '/marketing/'
+      preLoaderRoute: typeof MarketingIndexRouteImport
+      parentRoute: typeof MarketingRoute
     }
     '/email/': {
       id: '/email/'
@@ -3266,6 +3388,48 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ModulesSlugRouteImport
       parentRoute: typeof ModulesRoute
     }
+    '/marketing/youtube': {
+      id: '/marketing/youtube'
+      path: '/youtube'
+      fullPath: '/marketing/youtube'
+      preLoaderRoute: typeof MarketingYoutubeRouteImport
+      parentRoute: typeof MarketingRoute
+    }
+    '/marketing/tiktok': {
+      id: '/marketing/tiktok'
+      path: '/tiktok'
+      fullPath: '/marketing/tiktok'
+      preLoaderRoute: typeof MarketingTiktokRouteImport
+      parentRoute: typeof MarketingRoute
+    }
+    '/marketing/meta': {
+      id: '/marketing/meta'
+      path: '/meta'
+      fullPath: '/marketing/meta'
+      preLoaderRoute: typeof MarketingMetaRouteImport
+      parentRoute: typeof MarketingRoute
+    }
+    '/marketing/connections': {
+      id: '/marketing/connections'
+      path: '/connections'
+      fullPath: '/marketing/connections'
+      preLoaderRoute: typeof MarketingConnectionsRouteImport
+      parentRoute: typeof MarketingRoute
+    }
+    '/marketing/briefs': {
+      id: '/marketing/briefs'
+      path: '/briefs'
+      fullPath: '/marketing/briefs'
+      preLoaderRoute: typeof MarketingBriefsRouteImport
+      parentRoute: typeof MarketingRoute
+    }
+    '/marketing/attribution': {
+      id: '/marketing/attribution'
+      path: '/attribution'
+      fullPath: '/marketing/attribution'
+      preLoaderRoute: typeof MarketingAttributionRouteImport
+      parentRoute: typeof MarketingRoute
+    }
     '/join/$token': {
       id: '/join/$token'
       path: '/join/$token'
@@ -3376,6 +3540,13 @@ declare module '@tanstack/react-router' {
       path: '/hooks/migration-drift'
       fullPath: '/hooks/migration-drift'
       preLoaderRoute: typeof HooksMigrationDriftRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/marketing-snapshots': {
+      id: '/hooks/marketing-snapshots'
+      path: '/hooks/marketing-snapshots'
+      fullPath: '/hooks/marketing-snapshots'
+      preLoaderRoute: typeof HooksMarketingSnapshotsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/hooks/lead-stage-emails': {
@@ -4380,6 +4551,30 @@ const HandoffsRouteWithChildren = HandoffsRoute._addFileChildren(
   HandoffsRouteChildren,
 )
 
+interface MarketingRouteChildren {
+  MarketingAttributionRoute: typeof MarketingAttributionRoute
+  MarketingBriefsRoute: typeof MarketingBriefsRoute
+  MarketingConnectionsRoute: typeof MarketingConnectionsRoute
+  MarketingMetaRoute: typeof MarketingMetaRoute
+  MarketingTiktokRoute: typeof MarketingTiktokRoute
+  MarketingYoutubeRoute: typeof MarketingYoutubeRoute
+  MarketingIndexRoute: typeof MarketingIndexRoute
+}
+
+const MarketingRouteChildren: MarketingRouteChildren = {
+  MarketingAttributionRoute: MarketingAttributionRoute,
+  MarketingBriefsRoute: MarketingBriefsRoute,
+  MarketingConnectionsRoute: MarketingConnectionsRoute,
+  MarketingMetaRoute: MarketingMetaRoute,
+  MarketingTiktokRoute: MarketingTiktokRoute,
+  MarketingYoutubeRoute: MarketingYoutubeRoute,
+  MarketingIndexRoute: MarketingIndexRoute,
+}
+
+const MarketingRouteWithChildren = MarketingRoute._addFileChildren(
+  MarketingRouteChildren,
+)
+
 interface ModulesRouteChildren {
   ModulesSlugRoute: typeof ModulesSlugRoute
   ModulesBuilderRoute: typeof ModulesBuilderRoute
@@ -4487,6 +4682,7 @@ const rootRouteChildren: RootRouteChildren = {
   HandoffsRoute: HandoffsRouteWithChildren,
   HealthRoute: HealthRoute,
   LeadsRoute: LeadsRoute,
+  MarketingRoute: MarketingRouteWithChildren,
   MetricsRoute: MetricsRoute,
   ModulesRoute: ModulesRouteWithChildren,
   NotificationsRoute: NotificationsRoute,
@@ -4566,6 +4762,7 @@ const rootRouteChildren: RootRouteChildren = {
   HooksHandoffParityRefreshRoute: HooksHandoffParityRefreshRoute,
   HooksHeldFileDriftRoute: HooksHeldFileDriftRoute,
   HooksLeadStageEmailsRoute: HooksLeadStageEmailsRoute,
+  HooksMarketingSnapshotsRoute: HooksMarketingSnapshotsRoute,
   HooksMigrationDriftRoute: HooksMigrationDriftRoute,
   HooksMigrationEnqueueRoute: HooksMigrationEnqueueRoute,
   HooksPrimeSecretPairsRoute: HooksPrimeSecretPairsRoute,
