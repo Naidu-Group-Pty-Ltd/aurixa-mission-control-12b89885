@@ -299,6 +299,97 @@ function join(reason: string, detail: string): string {
   return detail ? `${reason} ${detail}` : reason;
 }
 
+/*
+  A PROPOSAL SOMEBODY ELSE ALREADY OPENED.
+
+  When a cascade finds an open pull request already carrying its exact tree,
+  the engine opens nothing. It records `skipped`, naming that pull request in
+  `pr_url`, and the row's `delivered_sha` is deliberately NOT stamped onto the
+  clone yet: the content is not on the clone's default branch until the pull
+  request lands. The engine's own comment, and `syncPointer.pure.ts`, both said
+  reconciliation flips such a row to `succeeded` when it merges.
+
+  Nothing did. The merge drain's work list was `pr_opened` rows alone, so a
+  `skipped` row stayed `skipped` for ever. Measured 9 Oct 2026: 163 of them
+  across the four clones, 152 on pull requests in the clone's own repository.
+  When the NEWEST cascade for a clone was one of these, its pull request
+  merged and the clone's pointer stayed at the previous revision, reading
+  `behind` over content it carried, until some later cascade happened to land.
+
+  So the drain reads these rows too, recognised by the one sentence the engine
+  writes for them (named once, here, because a literal at each end is how two
+  ends drift), and settles them through `reconcileRecordedResult`.
+*/
+
+/** How the engine's summary opens on a cascade that found its tree already proposed. */
+export const ALREADY_PROPOSED_PREFIX = "Already proposed — PR #";
+
+/** The engine's summary for that cascade. The only writer of the sentence. */
+export function alreadyProposedSummary(prNumber: number, files: number): string {
+  return `${ALREADY_PROPOSED_PREFIX}${prNumber} carries this exact tree (${files} file(s))`;
+}
+
+/**
+ * A `skipped` row that is waiting on a pull request it did not open, rather
+ * than a cascade that correctly did not land. Only these, and `pr_opened`
+ * rows, are a pull request's to settle.
+ */
+export function isDeferredProposal(row: {
+  status: string | null;
+  pr_url: string | null;
+  diff_summary: string | null;
+}): boolean {
+  return (
+    row.status === "skipped" &&
+    typeof row.pr_url === "string" &&
+    row.pr_url.length > 0 &&
+    typeof row.diff_summary === "string" &&
+    row.diff_summary.startsWith(ALREADY_PROPOSED_PREFIX)
+  );
+}
+
+/**
+ * Bring any recorded cascade result up to date with the pull request it names.
+ *
+ * A `pr_opened` row is `reconcileResultToPr`'s, exactly as before. A deferred
+ * proposal (`isDeferredProposal`) differs in one place: while its pull request
+ * is still OPEN it is left alone. It must not become `pr_opened`, because the
+ * pull request is already counted under the row of the cascade that opened it,
+ * and counting it twice would tell an event summary there were two proposals.
+ * Once the pull request merges it is `succeeded`, and once it is declined it
+ * keeps `skipped` with the declined sentence in front, which also takes it off
+ * the work list for good. Any other row is not a pull request's to change.
+ */
+export function reconcileRecordedResult(input: {
+  /** The row's status as it stands. */
+  status: string | null;
+  pr: PullRequestFacts;
+  currentSummary: string | null;
+  openReason?: string | null;
+  /** The row's `pr_url`, which a deferred proposal must carry. */
+  prUrl?: string | null;
+}): ResultReconciliation {
+  const { status, pr, currentSummary } = input;
+  const unchanged: ResultReconciliation = {
+    status: status === "succeeded" || status === "pr_opened" ? status : "skipped",
+    commitSha: null,
+    diffSummary: (currentSummary ?? "").trim(),
+    advanceClone: false,
+    changed: false,
+  };
+
+  if (status === "pr_opened") return reconcileResultToPr(input);
+
+  const deferred = isDeferredProposal({
+    status,
+    pr_url: input.prUrl ?? null,
+    diff_summary: currentSummary,
+  });
+  if (!deferred) return unchanged;
+  if (!pr.merged && pr.state === "open") return unchanged;
+  return reconcileResultToPr(input);
+}
+
 export type CascadeCounts = {
   succeeded: number;
   opened: number;
