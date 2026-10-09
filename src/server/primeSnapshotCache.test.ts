@@ -114,3 +114,74 @@ describe("the tree cache cannot outlive a sweep", () => {
     expect(fn.slice(0, 600)).toMatch(/const key = `\$\{ref\.owner\}\/\$\{ref\.repo\}@\$\{commitSha\}`/);
   });
 });
+
+describe("the deploy order decides which bundles the cap keeps, never how many", () => {
+  // The redeploy lane passes the clone's own staleness as `deployOrder`
+  // (`stalestFirst` in `edgeDeployBatch.pure.ts`). These pin what the snapshot
+  // does with it: the order chooses WHICH bundles a capped pass carries and in
+  // what order, and nothing else about the snapshot moves.
+  const betaFirst = (slug: string) => (slug === "beta" ? 0 : 1);
+  const opts = { includeMigrationSql: false };
+
+  it("without an order, the cap keeps the alphabetical prefix", async () => {
+    const { octokit } = fakePrime("commit-a");
+    const snap = await fetchPrimeBackendSnapshot(octokit as never, REF, {
+      ...opts,
+      functionLimit: 1,
+    });
+    expect(snap.functions.map((f) => f.slug)).toEqual(["alpha"]);
+    expect(snap.functionSourceTruncated).toBe(true);
+  });
+
+  it("with an order, the cap keeps the bundle the order puts first", async () => {
+    const { octokit } = fakePrime("commit-a");
+    const snap = await fetchPrimeBackendSnapshot(octokit as never, REF, {
+      ...opts,
+      functionLimit: 1,
+      deployOrder: betaFirst,
+    });
+    expect(snap.functions.map((f) => f.slug)).toEqual(["beta"]);
+    // Truncation is still measured over the whole deployable set.
+    expect(snap.functionSourceTruncated).toBe(true);
+  });
+
+  it("uncapped, every bundle comes back, in the order asked", async () => {
+    const { octokit } = fakePrime("commit-a");
+    const snap = await fetchPrimeBackendSnapshot(octokit as never, REF, {
+      ...opts,
+      deployOrder: betaFirst,
+    });
+    expect(snap.functions.map((f) => f.slug)).toEqual(["beta", "alpha"]);
+    expect(snap.functionSourceTruncated).toBe(false);
+  });
+
+  it("cannot bring back a bundle the project already holds", async () => {
+    // A skipped bundle is skipped, not reordered: putting it first does not
+    // make the pass carry it.
+    const { octokit } = fakePrime("commit-a");
+    const snap = await fetchPrimeBackendSnapshot(octokit as never, REF, {
+      ...opts,
+      functionLimit: 1,
+      skipFunctionSlugs: ["beta"],
+      deployOrder: betaFirst,
+    });
+    expect(snap.functions.map((f) => f.slug)).toEqual(["alpha"]);
+    expect(snap.functionSourceTruncated).toBe(false);
+  });
+
+  it("leaves the contracted set, the secret scan and the commit exactly as they were", async () => {
+    const { octokit } = fakePrime("commit-a");
+    const plain = await fetchPrimeBackendSnapshot(octokit as never, REF, {
+      ...opts,
+      functionLimit: 1,
+    });
+    const ordered = await fetchPrimeBackendSnapshot(octokit as never, REF, {
+      ...opts,
+      functionLimit: 1,
+      deployOrder: betaFirst,
+    });
+    expect(ordered.declaredFunctionSlugs).toEqual(plain.declaredFunctionSlugs);
+    expect(ordered.secretNames).toEqual(plain.secretNames);
+    expect(ordered.sourceSha).toBe(plain.sourceSha);
+  });
+});

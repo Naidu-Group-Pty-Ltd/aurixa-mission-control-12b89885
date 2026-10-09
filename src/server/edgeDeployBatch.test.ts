@@ -5,11 +5,13 @@
 import { describe, expect, it } from "vitest";
 import {
   countLanded,
+  inDeployOrder,
   planDeployGeneration,
   planEdgeDeployPass,
   planEdgeDeployResume,
   refreshedSince,
   runWithinBudget,
+  stalestFirst,
 } from "./edgeDeployBatch.pure";
 
 const LIMIT = 60;
@@ -533,5 +535,453 @@ describe("planEdgeDeployResume — a restarted generation outranks a finished pa
     expect(
       planEdgeDeployResume({ ...base, stoppedEarly: true, sourceMoved: false }),
     ).toEqual({ kind: "requeue", attemptNeutral: true });
+  });
+});
+
+describe("stalestFirst — the copy the clone has held longest goes first", () => {
+  const order = (freshness: ReadonlyMap<string, number>, names: readonly string[]) =>
+    inDeployOrder(
+      names.map((slug) => ({ slug })),
+      stalestFirst(freshness),
+    ).map((b) => b.slug);
+
+  it("puts the oldest copy first and the newest last", () => {
+    const freshness = new Map([
+      ["alpha", Date.parse("2026-10-08T12:00:00Z")],
+      ["beta", Date.parse("2026-10-06T09:00:00Z")],
+      ["gamma", Date.parse("2026-10-07T18:00:00Z")],
+    ]);
+    expect(order(freshness, ["alpha", "beta", "gamma"])).toEqual(["beta", "gamma", "alpha"]);
+  });
+
+  it("puts a bundle the clone does not hold before every copy it does", () => {
+    // `property-team`: added to the prime on 8 Oct 2026, on no clone at all.
+    const freshness = new Map([["abs-data-service", Date.parse("2026-09-01T00:00:00Z")]]);
+    expect(order(freshness, ["abs-data-service", "property-team"])).toEqual([
+      "property-team",
+      "abs-data-service",
+    ]);
+  });
+
+  it("reads an unusable stamp as a missing copy", () => {
+    const freshness = new Map([
+      ["alpha", Number.NaN],
+      ["beta", Number.POSITIVE_INFINITY],
+      ["gamma", 5],
+    ]);
+    expect(order(freshness, ["gamma", "alpha", "beta"])).toEqual(["alpha", "beta", "gamma"]);
+  });
+
+  it("keeps the snapshot's own order when the clone could not be read", () => {
+    // `listProjectEdgeFunctionFreshness` answers an empty map on a failed
+    // read, so every key is equal and the lane deploys as it did before.
+    const names = slugs(12);
+    expect(order(new Map(), names)).toEqual(names);
+  });
+});
+
+describe("inDeployOrder — a reorder that cannot lose or invent a bundle", () => {
+  const items = slugs(5).map((slug) => ({ slug }));
+  const names = (out: readonly { slug: string }[]) => out.map((b) => b.slug);
+
+  it("returns the given order, in a new array, when there is no deploy order", () => {
+    const out = inDeployOrder(items);
+    expect(out).toEqual(items);
+    expect(out).not.toBe(items);
+  });
+
+  it("sorts ascending by key and leaves its input alone", () => {
+    const key = new Map([
+      ["fn-000", 3],
+      ["fn-001", 1],
+      ["fn-002", 4],
+      ["fn-003", 0],
+      ["fn-004", 2],
+    ]);
+    const before = names(items);
+    expect(names(inDeployOrder(items, (slug) => key.get(slug) ?? 0))).toEqual([
+      "fn-003",
+      "fn-001",
+      "fn-004",
+      "fn-000",
+      "fn-002",
+    ]);
+    expect(names(items)).toEqual(before);
+  });
+
+  it("keeps the given order between equal keys, however many there are", () => {
+    // Forty equal keys: the order between them is the old one by rule, not
+    // whatever the engine's sort happens to do with them.
+    const many = slugs(40).map((slug) => ({ slug }));
+    const out = inDeployOrder(many, (slug) => (slug === "fn-020" ? 1 : 0));
+    expect(names(out)).toEqual([...slugs(40).filter((s) => s !== "fn-020"), "fn-020"]);
+  });
+
+  it("sorts a key that is not a number first, as a missing copy", () => {
+    const out = inDeployOrder(items, (slug) => (slug === "fn-003" ? Number.NaN : 1));
+    expect(names(out)).toEqual(["fn-003", "fn-000", "fn-001", "fn-002", "fn-004"]);
+  });
+
+  it("ties two missing copies rather than comparing them to NaN", () => {
+    const out = inDeployOrder(items, (slug) =>
+      slug === "fn-001" || slug === "fn-004" ? Number.NEGATIVE_INFINITY : 0,
+    );
+    expect(names(out)).toEqual(["fn-001", "fn-004", "fn-000", "fn-002", "fn-003"]);
+  });
+
+  it("returns every bundle it was given, once, in ascending key order", () => {
+    const fleet = slugs(395).map((slug) => ({ slug }));
+    const key = (slug: string) => (Number(slug.slice(3)) * 37) % 395;
+    const out = inDeployOrder(fleet, key);
+    expect(out).toHaveLength(fleet.length);
+    expect(new Set(names(out))).toEqual(new Set(names(fleet)));
+    for (let i = 1; i < out.length; i++) {
+      expect(key(out[i].slug)).toBeGreaterThan(key(out[i - 1].slug));
+    }
+  });
+});
+
+describe("the deploy order across a run's passes — the lane's decisions against a model clone", () => {
+  /*
+   * Every decision here is the lane's own, wired the way
+   * `executeEdgeFunctionDeploy` wires it: `planDeployGeneration`,
+   * `refreshedSince`, `inDeployOrder` over `stalestFirst`, the snapshot's cap,
+   * `planEdgeDeployPass`, `runWithinBudget`, `countLanded` and
+   * `planEdgeDeployResume`. What is modelled is only what the lane reads from
+   * outside (the clone's stamps, the prime's HEAD, the clock) and the two
+   * things it writes back:
+   *
+   * - a bundle that lands stamps the clone with the time it landed;
+   * - a pass whose every deploy failed throws, and `executeRemediationRun`
+   *   keeps that pass's attempt and writes no result, then marks the run
+   *   `failed` once the attempt reaches `max_attempts`.
+   *
+   * `slots` is how many deploys a pass has time for. Measured 8 Oct 2026 on
+   * NPC Test, the snapshot read left time for about two, a clone got a pass
+   * every eight minutes, and the prime merged twenty times that day, about
+   * once every nine passes.
+   */
+  const PASS_MS = 8 * 60_000;
+  const MAX_ATTEMPTS = 30;
+  const START_MS = Date.parse("2026-10-08T00:00:00.000Z");
+  const FLEET = slugs(395);
+
+  type Outcome = { readonly kind: "complete" | "park" | "failed"; readonly pass: number };
+
+  /** Stamps on which the alphabet and staleness disagree: fn-i is (37i mod n) minutes older. */
+  const scrambled = (bundles: readonly string[] = FLEET) =>
+    new Map(
+      bundles.map((slug, i) => [
+        slug,
+        START_MS - 86_400_000 - ((i * 37) % bundles.length) * 60_000,
+      ]),
+    );
+
+  /** Stamps on which the alphabet and staleness agree: fn-000 is the oldest copy. */
+  const alphabetical = (bundles: readonly string[] = FLEET) =>
+    new Map(bundles.map((slug, i) => [slug, START_MS - 86_400_000 + i * 60_000]));
+
+  /** `stamps` with `slug` made the oldest copy the clone holds. */
+  const withStalest = (stamps: Map<string, number>, slug: string) =>
+    stamps.set(slug, START_MS - 30 * 86_400_000);
+
+  async function simulate(input: {
+    readonly ordered: boolean;
+    readonly passes: number;
+    readonly slots: number | ((pass: number) => number);
+    /** A prime merge every this many passes; 0 holds the prime still. */
+    readonly mergeEvery: number;
+    /** The clone's stamps, updated in place, so a later run sees what this one left. */
+    readonly freshness: Map<string, number>;
+    readonly startMs?: number;
+    /** Bundles the clone refuses on every deploy. */
+    readonly refused?: ReadonlySet<string>;
+    /** A function the prime adds, by the pass it first appears on. */
+    readonly addedAt?: ReadonlyMap<number, string>;
+  }) {
+    const startMs = input.startMs ?? START_MS;
+    const runStartedAt = new Date(startMs).toISOString();
+    const prime = [...FLEET];
+    const firstLanded = new Map<string, number>();
+    let lastGenerationAt: string | null = null;
+    let lastSourceSha: string | null = null;
+    let attempts = 0;
+    let restarts = 0;
+    const end = (outcome: Outcome | null, passes: number) => ({
+      firstLanded,
+      outcome,
+      restarts,
+      endedMs: startMs + passes * PASS_MS,
+    });
+
+    for (let p = 0; p < input.passes; p++) {
+      const nowMs = startMs + p * PASS_MS;
+      const slots = typeof input.slots === "number" ? input.slots : input.slots(p);
+      const added = input.addedAt?.get(p);
+      if (added) {
+        prime.push(added);
+        prime.sort((a, b) => a.localeCompare(b));
+      }
+
+      const observedSourceSha = `sha-${input.mergeEvery > 0 ? Math.floor(p / input.mergeEvery) : 0}`;
+      const generation = planDeployGeneration({
+        runStartedAt,
+        lastGenerationAt,
+        lastSourceSha,
+        observedSourceSha,
+        now: new Date(nowMs).toISOString(),
+      });
+      if (generation.sourceMoved) restarts += 1;
+
+      // The snapshot: skip what this generation delivered, order, then cap.
+      const skip = new Set(refreshedSince(input.freshness, generation.baselineAt));
+      const deployable = inDeployOrder(
+        prime.filter((slug) => !skip.has(slug)).map((slug) => ({ slug })),
+        input.ordered ? stalestFirst(input.freshness) : undefined,
+      );
+      const truncated = deployable.length > LIMIT;
+      const pass = planEdgeDeployPass({
+        wanted: null,
+        fetched: (truncated ? deployable.slice(0, LIMIT) : deployable).map((b) => b.slug),
+        truncated,
+        batchLimit: LIMIT,
+      });
+      if (pass.batch.length === 0 && !generation.sourceMoved) {
+        return end({ kind: "complete", pass: p }, p + 1);
+      }
+
+      let tried = 0;
+      const { results, stoppedEarly } = await runWithinBudget<
+        string,
+        { slug: string; error?: string }
+      >({
+        items: pass.batch,
+        runOne: async (slug) => {
+          tried += 1;
+          if (input.refused?.has(slug)) return [{ slug, error: "refused" }];
+          input.freshness.set(slug, nowMs + tried * 1_000);
+          if (!firstLanded.has(slug)) firstLanded.set(slug, p);
+          return [{ slug }];
+        },
+        isPastDeadline: () => tried >= slots,
+      });
+
+      const failures = results.filter((r) => r.error);
+      if (failures.length > 0 && failures.length === results.length) {
+        // The lane throws. The attempt this pass took is kept, and nothing
+        // is written to the result, so the next pass reads the same
+        // generation this one did.
+        if (attempts + 1 >= MAX_ATTEMPTS) return end({ kind: "failed", pass: p }, p + 1);
+        attempts += 1;
+        continue;
+      }
+
+      const resume = planEdgeDeployResume({
+        landed: countLanded(results),
+        moreRemain: pass.moreRemain,
+        stoppedEarly,
+        attempts,
+        maxAttempts: MAX_ATTEMPTS,
+        sourceMoved: generation.sourceMoved,
+      });
+      if (resume.kind !== "requeue") return end({ kind: resume.kind, pass: p }, p + 1);
+      if (!resume.attemptNeutral) attempts += 1;
+      lastGenerationAt = generation.baselineAt;
+      lastSourceSha = observedSourceSha;
+    }
+    return end(null, input.passes);
+  }
+
+  it("reaches the end of the alphabet while the prime keeps merging", async () => {
+    /*
+      The measured shape: two deploys a pass, a merge every nine passes. By
+      name, every merge sends the walk back to `fn-000`, so the same eighteen
+      bundles are deployed over and over and the 220th never is. Stalest
+      first, a merge changes only the skip list, and the walk goes on from
+      the copy the clone has held longest.
+    */
+    const byName = await simulate({
+      ordered: false,
+      passes: 360,
+      slots: 2,
+      mergeEvery: 9,
+      freshness: scrambled(),
+    });
+    expect([...byName.firstLanded.keys()].sort()).toEqual(slugs(18));
+    expect(byName.firstLanded.has("fn-219")).toBe(false);
+
+    const stalest = await simulate({
+      ordered: true,
+      passes: 360,
+      slots: 2,
+      mergeEvery: 9,
+      freshness: scrambled(),
+    });
+    expect(stalest.firstLanded.size).toBe(FLEET.length);
+    expect(Math.max(...stalest.firstLanded.values())).toBe(197);
+    // The 192nd-oldest copy, at two deploys a pass.
+    expect(stalest.firstLanded.get("fn-219")).toBe(95);
+  });
+
+  it("changes which bundles a pass carries, never when the run ends", async () => {
+    for (const ordered of [false, true]) {
+      // Merging: every restart is charged an attempt, so the thirty-first
+      // parks the run whatever it deployed.
+      const merging = await simulate({
+        ordered,
+        passes: 360,
+        slots: 2,
+        mergeEvery: 9,
+        freshness: scrambled(),
+      });
+      expect(merging.outcome).toEqual({ kind: "park", pass: 279 });
+      expect(merging.restarts).toBe(31);
+
+      // Still: the whole fleet, two a pass, then complete.
+      const still = await simulate({
+        ordered,
+        passes: 360,
+        slots: 2,
+        mergeEvery: 0,
+        freshness: scrambled(),
+      });
+      expect(still.outcome).toEqual({ kind: "complete", pass: 197 });
+      expect(still.firstLanded.size).toBe(FLEET.length);
+    }
+  });
+
+  it("deploys a function the prime adds on the pass it appears", async () => {
+    // A new function has no copy on the clone, so it is the stalest of all.
+    const added = "fn-312b";
+    const run = (ordered: boolean) =>
+      simulate({
+        ordered,
+        passes: 360,
+        slots: 2,
+        mergeEvery: 9,
+        freshness: scrambled(),
+        addedAt: new Map([[54, added]]),
+      });
+    expect((await run(false)).firstLanded.has(added)).toBe(false);
+    expect((await run(true)).firstLanded.get(added)).toBe(54);
+  });
+
+  describe("a bundle the clone refuses on every pass", () => {
+    const alternating = (p: number) => (p % 2 === 0 ? 2 : 1);
+
+    it("deploys exactly as before when the alphabet already put it first", async () => {
+      const refused = new Set(["fn-000"]);
+      for (const ordered of [false, true]) {
+        const run = await simulate({
+          ordered,
+          passes: 500,
+          slots: 2,
+          mergeEvery: 0,
+          freshness: alphabetical(),
+          refused,
+        });
+        expect(run.outcome).toEqual({ kind: "complete", pass: 393 });
+        expect(run.firstLanded.size).toBe(FLEET.length - 1);
+      }
+    });
+
+    it("finishes the run the alphabet would have failed", async () => {
+      /*
+        Last by name, it is reached only when nothing else is left, and from
+        then on every pass is that one deploy, refused: a pass that lands
+        nothing throws, and thirty of them fail the run. First by staleness,
+        it shares every pass with a bundle that lands, and the pass that
+        lands the last of those completes the run with it recorded as failed.
+      */
+      const refused = new Set(["fn-394"]);
+      const run = (ordered: boolean) =>
+        simulate({
+          ordered,
+          passes: 500,
+          slots: 2,
+          mergeEvery: 0,
+          freshness: withStalest(scrambled(), "fn-394"),
+          refused,
+        });
+      const byName = await run(false);
+      expect(byName.outcome).toEqual({ kind: "failed", pass: 226 });
+      expect(byName.firstLanded.size).toBe(FLEET.length - 1);
+      const stalest = await run(true);
+      expect(stalest.outcome).toEqual({ kind: "complete", pass: 393 });
+      expect(stalest.firstLanded.size).toBe(FLEET.length - 1);
+    });
+
+    it("costs a pass with time for one deploy the run's attempt", async () => {
+      /*
+        The trade this order makes, stated where it can be checked. Once the
+        refused bundle is the stalest it takes the first deploy of every
+        pass. A pass with time for one deploy then lands nothing, throws and
+        is charged, so with every other pass that short the run fails after
+        sixty passes, having landed thirty bundles. By name the refused
+        bundle is last, so the same run lands everything else and completes.
+      */
+      const refused = new Set(["fn-394"]);
+      const run = (ordered: boolean) =>
+        simulate({
+          ordered,
+          passes: 500,
+          slots: alternating,
+          mergeEvery: 0,
+          freshness: withStalest(scrambled(), "fn-394"),
+          refused,
+        });
+      const byName = await run(false);
+      expect(byName.outcome).toEqual({ kind: "complete", pass: 262 });
+      expect(byName.firstLanded.size).toBe(FLEET.length - 1);
+      const stalest = await run(true);
+      expect(stalest.outcome).toEqual({ kind: "failed", pass: 59 });
+      expect(stalest.firstLanded.size).toBe(30);
+    });
+
+    it("carries a failed run's progress into the next run, where the alphabet starts again", async () => {
+      /*
+        The same failure with the refused bundle first by name as well, so
+        the first run is identical either way: thirty bundles, then failed.
+        The catch-up sweep then plans a fresh run, whose generation begins
+        after everything the first one deployed. By name it deploys the same
+        thirty again and fails again, every run. Stalest first, the thirty it
+        just deployed are now the clone's newest copies, so the next run
+        deploys the next thirty, and the fourteenth reaches the last.
+      */
+      const refused = new Set(["fn-000"]);
+      const runsUntilCovered = async (ordered: boolean) => {
+        const freshness = alphabetical();
+        const everLanded = new Set<string>();
+        const perRun: string[][] = [];
+        let startMs = START_MS;
+        while (perRun.length < 20 && everLanded.size < FLEET.length - 1) {
+          const run = await simulate({
+            ordered,
+            passes: 500,
+            slots: alternating,
+            mergeEvery: 0,
+            freshness,
+            refused,
+            startMs,
+          });
+          expect(run.outcome).toEqual({ kind: "failed", pass: 59 });
+          perRun.push([...run.firstLanded.keys()]);
+          for (const slug of run.firstLanded.keys()) everLanded.add(slug);
+          startMs = run.endedMs + 30 * 60_000;
+        }
+        return { perRun, everLanded: everLanded.size };
+      };
+
+      const byName = await runsUntilCovered(false);
+      expect(byName.perRun).toHaveLength(20);
+      expect(byName.everLanded).toBe(30);
+      expect(byName.perRun[1]).toEqual(byName.perRun[0]);
+
+      const stalest = await runsUntilCovered(true);
+      expect(stalest.perRun[0]).toEqual(byName.perRun[0]);
+      expect(stalest.perRun[1].filter((slug) => stalest.perRun[0].includes(slug))).toEqual([]);
+      expect(stalest.perRun).toHaveLength(14);
+      expect(stalest.everLanded).toBe(FLEET.length - 1);
+    });
   });
 });

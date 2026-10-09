@@ -50,6 +50,7 @@ import {
   planEdgeDeployResume,
   refreshedSince,
   runWithinBudget,
+  stalestFirst,
 } from "@/server/edgeDeployBatch.pure";
 import { planUpstreamDeferral, UPSTREAM_DEFERRAL_KEY } from "@/server/upstreamRefusal.pure";
 import { functionsRevisionOfSuccess } from "@/server/functionsBaseline.pure";
@@ -1409,9 +1410,19 @@ async function executeEdgeFunctionDeploy(
   // then read its own empty batch as "nothing left to do" — succeeding on a
   // deployment it never performed. A named list is bounded by the cascade
   // that produced it and is sliced here instead.
+  //
+  // `deployOrder` decides which bundles a pass carries, and it is set for
+  // BOTH kinds of run: the whole-fleet cap keeps a prefix, and a named list
+  // is sliced and then deployed until the budget runs out, so its order picks
+  // which bundles land too. The copy the clone has held longest goes first.
+  // The order is read from the same `freshness` as the skip list, so it does
+  // not reset when the generation restarts. Ordered by name, the walk began
+  // at `abs-data-service` again on every prime merge and never reached the
+  // end of the alphabet. See `stalestFirst`.
   const snapshot = await fetchPrimeBackendSnapshot(getAppOctokit(), source, {
     includeMigrationSql: false,
     skipFunctionSlugs: lineWithheld.length > 0 ? [...refreshed, ...lineWithheld] : refreshed,
+    deployOrder: stalestFirst(freshness),
     ...(wanted === null ? { functionLimit: EDGE_DEPLOY_BATCH } : {}),
   });
 
