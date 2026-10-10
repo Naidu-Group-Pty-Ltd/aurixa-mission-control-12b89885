@@ -418,6 +418,69 @@ yet**. Nothing below has been built.
 
 ---
 
+## E. From the audit of the five CRM-independent pages (10 Oct 2026)
+
+Full findings and evidence: [`audits/2026-10-10-crm-independent-pages.md`](./audits/2026-10-10-crm-independent-pages.md).
+The pages are independent in code today. These are what is left.
+
+### E1. A GoHighLevel key on an independent-line project flips the server
+
+- **Status:** open; high. Fix proposed (F1 to F4), not made.
+- If a `GOHIGHLEVEL_API_KEY` / `GOHIGHLEVEL_LOCATION_ID` pair is present, the
+  server resolves its CRM as GoHighLevel. Then:
+  - Calendar and CRM Conversations refuse (409);
+  - the call webhook and five other carried functions start calling
+    GoHighLevel.
+- Three routes can put a pair there, and none is refused:
+  - the clone's own Integrations page;
+  - Mission Control's per-clone secret forward;
+  - a conversion from the dependent line, which keeps the old secrets.
+- **To decide:** approve F1 to F4.
+
+### E2. The membrane does not cover secrets
+
+- **Status:** open; high.
+- The line register withholds functions, crons and files by `crm_mode`, but
+  no secret names. E1 is the consequence.
+- **To decide:** approve F4: add `GOHIGHLEVEL_*` to the line register,
+  refused on forward, removed on conversion, reported by the sweep.
+
+### E3. Call logs never match a caller to the deployment's own clients
+
+- **Status:** open; medium.
+- On this line, a caller's name comes only from Vapi or the AI summary. The
+  webhook looks only in GoHighLevel.
+- **To decide:** approve F2 (match by phone against `clients`, no GoHighLevel
+  on this line).
+
+### E4. Client-portal self-booking has no native path
+
+- **Status:** open; medium.
+- `portal-book-appointment` books only into GoHighLevel's calendar. On this
+  line, a client cannot book themselves into this deployment's Calendar from
+  the portal.
+- **To decide:** approve F5.
+
+### E5. The note "All" wording promises a CRM copy
+
+- **Status:** open; low.
+- "Both portals and the CRM" names a copy this line never makes, and two
+  components still fire a refused `sync-notes-to-ghl` call.
+- **To decide:** approve F6. The wording is a prime module, so the fix is
+  made at the prime.
+
+### E6. Three things the audit could not measure from here
+
+- **Status:** open.
+  - Whether the head's project currently holds `GOHIGHLEVEL_*` secrets.
+  - Whether any per-clone secret-forward row names them for an independent
+    clone.
+  - Whether any child of the independent head exists yet.
+- **To do:** read the head project's secret names in the Supabase dashboard,
+  and the `clone_secret_forwards` rows on Mission Control.
+
+---
+
 ## D. Tasks waiting on the owner
 
 Carried from earlier work. Each one is also recorded where it was found.
@@ -444,3 +507,5 @@ Carried from earlier work. Each one is also recorded where it was found.
 | D18 | Decide C12 and C16. | above |
 | D19 | Decide C17 to C19 (which clones get voice agents; existing clones' custody; the dependent template's source). | above |
 | D20 | After the next cascade into the CRM-independent clone, check it carried held files cleanly (C21). | C21 |
+| D21 | Decide E1 to E5 (approve fixes F1 to F6 from the five-page audit). | E, `audits/2026-10-10-crm-independent-pages.md` |
+| D22 | Check E6: the head project's secret names, and any GoHighLevel per-clone forward rows. | E6 |
