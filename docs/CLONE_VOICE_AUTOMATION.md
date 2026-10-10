@@ -148,3 +148,39 @@ registration above is the seam that step will fill.
 widens live link keys onto it. Until a key has been widened, the route also
 accepts `integrations:write` (already on every link key), so the feature works
 from the first deploy.
+
+## Calls and the clone's Call Logs page
+
+The NPC CRM Independent stack's 13 CI assistants report their calls to the
+CLONE's own `vapi-call-webhook` (project `qvuwrvwzjyigptmnijyb`), so the calls
+appear on that deployment's Call Logs page. They authenticate with a Vapi Bearer
+credential in org B (`49187eb8`) that sends `x-vapi-secret`. It was wired on
+10 Oct 2026 from the clone repository (`voice-agents/crm-independent/vapi/wire_call_logs.py`;
+its `docs/integrations/VOICE_AGENT_CALL_LOGS.md`). The credential holds a
+placeholder until the owner sets one value in both halves: the clone's
+`VAPI_WEBHOOK_SECRET`, a `tenant_scoped` secret, and the credential's token.
+
+Not automated here, for the same reason stack creation is not: wiring a new
+tenant's agents to their Call Logs page belongs to the build step that creates
+their Vapi objects. Registration is the seam.
+
+## Open decisions (recorded 10 Oct 2026, owner to decide)
+
+1. **A Make key per clone.** `MAKE_API_TOKEN` is one token, on the team that
+   holds the stacks. Today that is the prime's Make team, 2731020. Technically a
+   clone's stack should not be reachable by the prime's Make key. Whether each
+   tenant gets its own Make team, organisation or key is a pending business
+   decision. Keeping the token here and never on a clone means either answer
+   needs no change on the clone side. A per-tenant answer would add a token per
+   registration (`clone_voice_automation` already records the zone and team per
+   clone).
+2. **Gmail on the CRM-dependent line.** Gmail is built and selectable on the
+   independent line (this programme). The owner wants it on the dependent line
+   too. There the agents book through the original GoHighLevel tools, with no
+   Make notifier to bind a mailbox into, so it needs its own design. Not started.
+3. **The CI agents' Vapi org.** They live in org B, Aurixa's own org. Voice
+   Studio refuses Aurixa's key for any client fleet (`voice-studio/credentials.server.ts`).
+   Until they move to a tenant-owned org, the clone holds no `VAPI_API_KEY`:
+   org B's key is org-wide and would reach the prime's assistants. Its Call Logs
+   page therefore lacks agent names and recording re-signing. This is the same
+   question as item 1, for Vapi.
