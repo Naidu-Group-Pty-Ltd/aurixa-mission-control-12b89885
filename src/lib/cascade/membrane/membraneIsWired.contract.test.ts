@@ -585,13 +585,20 @@ describe("the engine looks for the specs a delivery leaves behind", () => {
 
   it("holds a spec the evidence refused, for a person, rather than dropping it", () => {
     const block = reverseHalf();
-    expect(block).toMatch(
-      /if \(verdict\.act === "hold"\) \{\s*const held = leftBehindSpecHold\(\{/,
-    );
     const at = block.indexOf('if (verdict.act === "hold") {');
-    const branch = block.slice(at, at + 500);
+    expect(at).toBeGreaterThan(-1);
+    const branch = block.slice(at, at + 1600);
+    // A held spec is first offered the line variant's three-way merge
+    // (`variantMerge.pure.ts`): merged, it travels as the merge; anything
+    // else is held exactly as before — and only a spec the merge found
+    // CURRENT is spared the "need reconciling" count, because it owes nothing.
+    expect(branch).toContain("await tryVariantMerge(lb.spec)");
+    expect(branch).toMatch(
+      /if \(mergedAs === "write"\) \{[^}]*releasing\.push\(lb\.spec\);\s*continue;/,
+    );
+    expect(branch).toMatch(/const held = leftBehindSpecHold\(\{/);
     expect(branch).toContain("partition.held.push(held)");
-    expect(branch).toContain("needsReconcile.push(held)");
+    expect(branch).toContain('if (mergedAs !== "current") needsReconcile.push(held);');
     expect(branch).toContain("attemptedSubjects.add(lb.spec)");
   });
 
