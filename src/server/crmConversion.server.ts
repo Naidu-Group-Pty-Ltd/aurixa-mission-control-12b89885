@@ -36,7 +36,7 @@ import { repositoryInvariantGlobs } from "./cascade/repositoryInvariants.pure";
 import { processClone, type ClonePlan } from "./cascade-engine.server";
 import type { SyncExclusion } from "./cascade/syncExclusions.pure";
 import { judgeCrmParent, type CrmParent, type CrmParentRow } from "./crmLineage.pure";
-import { crmLineWithheldFunctionNames } from "./crmLineFeatures.pure";
+import { crmLineSecretTransition, crmLineWithheldFunctionNames } from "./crmLineFeatures.pure";
 import {
   OPEN_CONVERSION_STATUSES,
   STALLED_PROPOSAL_MS,
@@ -102,6 +102,13 @@ export interface ConversionFinishRecord {
    */
   restored?: string[];
   restoreOutcome?: string | null;
+  /**
+   * What the conversion did to the project's environment: the joined line's
+   * withheld credentials removed, its pins written, the left line's pins
+   * removed (`crmLineSecretTransition`). Absent on a record written before
+   * credentials followed the line.
+   */
+  secrets?: string;
   /**
    * What happened to the clone's voice agents: the stack of the line it left
    * parked (scenarios switched off, nothing deleted), the one for the line it
@@ -967,6 +974,14 @@ export async function finaliseConversion(args: {
     }
   }
 
+  // 3b. The environment follows the line too. Never fatal — the conversion has
+  // happened, and on the independent line the fleet sweep removes a withheld
+  // credential on its next pass whatever this step managed — but a step that
+  // did not finish is said in the record.
+  const secrets = projectRef
+    ? await convertLineSecrets({ supabase, cloneId: clone.id, projectRef, fromMode, toMode })
+    : { summary: "not changed: the clone has no Supabase project recorded", leftover: null };
+
   // 4. The voice agents follow the line, exactly as the code did: park the
   // stack of the line left, open or resume the one joined. Never throws — the
   // conversion has happened — and the voice-stack drain re-checks the line on
@@ -976,6 +991,7 @@ export async function finaliseConversion(args: {
 
   const finish: ConversionFinishRecord = {
     voiceStack,
+    secrets: secrets.summary,
     at: new Date().toISOString(),
     routingHoldsRemoved,
     routingHoldsLeft,
@@ -1001,6 +1017,7 @@ export async function finaliseConversion(args: {
         `${restored.join(", ")}. The half-hourly catch-up does not restore them by itself.`,
     );
   }
+  if (secrets.leftover) leftovers.push(secrets.leftover);
   if (routingHoldsLeft) {
     leftovers.push(
       `Routing holds were not retired: ${routingHoldsLeft}. Remove them from the clone's exclusions.`,
@@ -1018,6 +1035,103 @@ export async function finaliseConversion(args: {
     .eq("id", conversionId);
   if (doneErr) return { ok: false, why: `could not record completion: ${doneErr.message}` };
   return { ok: true, finish };
+}
+
+/**
+ * Make the project's environment agree with the line the clone joined.
+ *
+ * Reads what the project holds, then deletes, writes and records exactly what
+ * `crmLineSecretTransition` decides. `listProjectSecretNames` answers `[]` for
+ * a transport failure as it does for an empty project, so a failed read
+ * removes nothing — the conservative direction.
+ */
+async function convertLineSecrets(args: {
+  supabase: Db;
+  cloneId: string;
+  projectRef: string;
+  fromMode: string | null;
+  toMode: CrmMode;
+}): Promise<{ summary: string; leftover: string | null }> {
+  const { supabase, cloneId, projectRef, fromMode, toMode } = args;
+  const { listProjectSecretNames, deleteCloneSecretValues, setCloneSecretValues } =
+    await import("./backend-provisioning.server");
+  const present = await listProjectSecretNames(projectRef);
+  const plan = crmLineSecretTransition({ fromMode, toMode, present });
+  const done: string[] = [];
+  const failed: string[] = [];
+  const now = new Date().toISOString();
+
+  if (plan.remove.length > 0) {
+    const del = await deleteCloneSecretValues(projectRef, plan.remove);
+    if (del.ok) {
+      done.push(`removed ${plan.remove.join(", ")}`);
+      if (plan.withhold.length > 0) {
+        const { error } = await supabase.from("clone_backend_secrets").upsert(
+          plan.withhold.map((name) => ({
+            clone_id: cloneId,
+            name,
+            status: "withheld",
+            last_set_at: now,
+            last_error: null,
+          })),
+          { onConflict: "clone_id,name" },
+        );
+        if (error)
+          failed.push(`recording ${plan.withhold.join(", ")} as withheld (${error.message})`);
+      }
+    } else {
+      failed.push(`removing ${plan.remove.join(", ")} (${del.error})`);
+    }
+  }
+
+  const pins = Object.entries(plan.pin).map(([name, value]) => ({ name, value }));
+  if (pins.length > 0) {
+    const res = await setCloneSecretValues(projectRef, pins);
+    const { recordSecretLedger } = await import("./secretLedger.server");
+    const ledgerErr = await recordSecretLedger(supabase, {
+      cloneId,
+      names: pins.map((p) => p.name),
+      result: res,
+      status: "set",
+      now,
+    });
+    if (res.ok) done.push(`set ${pins.map((p) => p.name).join(", ")}`);
+    else failed.push(`setting ${pins.map((p) => p.name).join(", ")} (${res.error})`);
+    if (ledgerErr) failed.push(`recording ${pins.map((p) => p.name).join(", ")} (${ledgerErr})`);
+  }
+
+  if (plan.forgetWithheld.length > 0) {
+    const { error } = await supabase
+      .from("clone_backend_secrets")
+      .delete()
+      .eq("clone_id", cloneId)
+      .eq("status", "withheld")
+      .in("name", plan.forgetWithheld);
+    if (error)
+      failed.push(
+        `clearing the withheld record of ${plan.forgetWithheld.join(", ")} (${error.message})`,
+      );
+  }
+  if (plan.forgetAny.length > 0) {
+    const { error } = await supabase
+      .from("clone_backend_secrets")
+      .delete()
+      .eq("clone_id", cloneId)
+      .in("name", plan.forgetAny);
+    if (error)
+      failed.push(`clearing the record of ${plan.forgetAny.join(", ")} (${error.message})`);
+  }
+
+  const summary = done.length > 0 ? done.join("; ") : "nothing to change";
+  const leftover =
+    failed.length > 0
+      ? `The project's environment does not yet match the ${toMode} line: ${failed.join("; ")}. ` +
+        "Correct it from the clone's secret list."
+      : null;
+  return {
+    summary: failed.length > 0 ? `${summary}; failed: ${failed.join("; ")}` : summary,
+    leftover,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

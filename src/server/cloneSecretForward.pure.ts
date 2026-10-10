@@ -55,6 +55,7 @@
  */
 
 import type { SecretClass } from "./prime-backend.server";
+import { crmLineSecretRefusal } from "./crmLineFeatures.pure";
 
 /** What will happen to one authorised name on one push. */
 export type ForwardOutcome =
@@ -81,6 +82,12 @@ export type ForwardFacts = {
   readonly fleetInherit: boolean | null;
   /** Whether Mission Control's own environment holds a non-empty value. */
   readonly presentInEnv: boolean;
+  /**
+   * The clone's recorded CRM line. A line's withheld credential is refused
+   * straight after the class refusals (`crmLineSecretRefusal`). Absent or
+   * unknown withholds nothing, as for every other line rule.
+   */
+  readonly crmMode?: string | null;
 };
 
 const CLASS_REFUSAL: Partial<Record<SecretClass, string>> = {
@@ -128,13 +135,18 @@ export function classRefusalFor(secretClass: SecretClass): string | undefined {
  * Decide what a push does with one authorised name.
  *
  * The order is the guarantee: class first, so no arrangement of rows can
- * forward a signing key; then fleet policy, so a deliberate "do not forward"
- * is not quietly overridden per clone; then the value, which is the only
- * question left once the name is allowed to travel at all.
+ * forward a signing key; then the clone's CRM line, so a per-clone row cannot
+ * put a GoHighLevel key on the line that carries none; then fleet policy, so a
+ * deliberate "do not forward" is not quietly overridden per clone; then the
+ * value, which is the only question left once the name is allowed to travel
+ * at all.
  */
 export function decideForward(facts: ForwardFacts): ForwardOutcome {
   const classRefusal = classRefusalFor(facts.secretClass);
   if (classRefusal) return { act: "refuse", name: facts.name, why: classRefusal };
+
+  const lineRefusal = crmLineSecretRefusal(facts.name, facts.crmMode);
+  if (lineRefusal) return { act: "refuse", name: facts.name, why: lineRefusal };
 
   if (facts.fleetInherit === false) {
     return {
@@ -206,6 +218,8 @@ export function planCloneForwards(input: {
   readonly fleet: ReadonlyMap<string, boolean>;
   readonly classOf: (name: string) => SecretClass;
   readonly envHas: (name: string) => boolean;
+  /** The clone's recorded CRM line — see `ForwardFacts.crmMode`. */
+  readonly crmMode?: string | null;
 }): ForwardOutcome[] {
   return input.authorised.map((name) =>
     decideForward({
@@ -213,6 +227,7 @@ export function planCloneForwards(input: {
       secretClass: input.classOf(name),
       fleetInherit: input.fleet.has(name) ? (input.fleet.get(name) as boolean) : null,
       presentInEnv: input.envHas(name),
+      crmMode: input.crmMode,
     }),
   );
 }
@@ -248,7 +263,7 @@ export type FleetForwardOutcome =
   | { readonly act: "forward"; readonly name: string }
   /** Fleet policy declines this name. Never written. */
   | { readonly act: "not_inherited"; readonly name: string; readonly why: string }
-  /** Refused on class, ahead of every other question. */
+  /** Refused on class, or on the clone's CRM line, ahead of every other question. */
   | { readonly act: "refuse"; readonly name: string; readonly why: string }
   /** Mission Control's own environment holds nothing under this name. */
   | { readonly act: "no_value"; readonly name: string; readonly why: string }
@@ -288,6 +303,8 @@ export type FleetForwardFacts = {
    * secret list would then show a credential the project does not have.
    */
   readonly withheldOnClone: boolean;
+  /** The clone's recorded CRM line — see `ForwardFacts.crmMode`. */
+  readonly crmMode?: string | null;
 };
 
 /**
@@ -305,6 +322,12 @@ export type FleetForwardFacts = {
 export function decideFleetForward(facts: FleetForwardFacts): FleetForwardOutcome {
   const classRefusal = classRefusalFor(facts.secretClass);
   if (classRefusal) return { act: "refuse", name: facts.name, why: classRefusal };
+
+  // Ahead of fleet policy, for the reason it is ahead of it per clone: a
+  // fleet row marked `inherit` must not be the way a line's withheld
+  // credential reaches it.
+  const lineRefusal = crmLineSecretRefusal(facts.name, facts.crmMode);
+  if (lineRefusal) return { act: "refuse", name: facts.name, why: lineRefusal };
 
   if (!facts.inherit) {
     return {
@@ -360,6 +383,8 @@ export function planFleetForwards(input: {
   readonly settled: ReadonlySet<string>;
   /** The names this clone's ledger records as deliberately withheld. */
   readonly withheld?: ReadonlySet<string>;
+  /** The clone's recorded CRM line — see `ForwardFacts.crmMode`. */
+  readonly crmMode?: string | null;
 }): FleetForwardOutcome[] {
   const withheld = input.withheld ?? new Set<string>();
   return [...input.fleet.keys()].sort().map((name) =>
@@ -370,6 +395,7 @@ export function planFleetForwards(input: {
       presentInEnv: input.envHas(name),
       settledOnClone: input.settled.has(name),
       withheldOnClone: withheld.has(name),
+      crmMode: input.crmMode,
     }),
   );
 }

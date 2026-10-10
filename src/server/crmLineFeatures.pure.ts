@@ -50,11 +50,15 @@
  * hole as a barrier. The prefix is historical, not a dependency.
  *
  * **Mixed functions.** `check-integration-secrets`, `finance-portal-client-
- * comms`, `manage-lead-magnets`, `portal-book-appointment`,
- * `request-lead-magnet`, `vapi-call-webhook` and `cleanup-call-log-names`
- * each carry a GoHighLevel half that stands down when no key is set, and a
- * product half the independent line needs. So do the two shared modules they
- * import (`ghl-account.ts`, `ghlConversationMap.pure.ts`).
+ * comms`, `manage-lead-magnets` and `request-lead-magnet` each carry a
+ * GoHighLevel half that stands down on this line, and a product half the
+ * independent line needs. So do the two shared modules they import
+ * (`ghl-account.ts`, `ghlConversationMap.pure.ts`). `portal-book-appointment`,
+ * `vapi-call-webhook` and `cleanup-call-log-names` were in this list until the
+ * audit of 10 Oct 2026 (`docs/audits/2026-10-10-crm-independent-pages.md`);
+ * the line now carries its own copy of each, with no GoHighLevel half at all,
+ * and they are variants below. The head's `ghlReachRatchet.test.ts` names
+ * every carried function that can still reach GoHighLevel, with why.
  *
  * **The pages and functions the line carries in its own shape.** A page that
  * routes through `crmProvider.ts`, an agent whose calendar is `crm-calendar`:
@@ -348,6 +352,148 @@ export function withheldClause(names: Iterable<string>): string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// The secrets a line does not hold
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Credentials a line must never hold, by line.
+ *
+ * Withholding the functions, crons and files above left the vendor's
+ * CREDENTIALS free to travel, and on the independent line a credential was
+ * the switch: until the head made its server native-only, a GoHighLevel key
+ * pair on the project turned the server's CRM to GoHighLevel while the bundle
+ * stayed native, and Calendar and Conversations refused every request. The
+ * audit of 10 Oct 2026 found three routes a pair could arrive by, none of
+ * which read the line: the clone's own Integrations page (closed on the head),
+ * a per-clone forward from here, and a conversion that left the dependent
+ * line's keys on the project (H2 in `docs/audits/2026-10-10-crm-independent-pages.md`).
+ *
+ * So every route by which Mission Control writes a vendor credential onto a
+ * clone asks `crmLineSecretRefusal` — the per-clone forward, the fleet sweep,
+ * provisioning, the tenant Integrations broker and the operator's "set
+ * secret" — and the fleet sweep removes any of these it finds on a project
+ * of this line, as it removes a `withheld` name. A conversion INTO the line
+ * removes them too; a conversion out of it clears the ledger's record of
+ * having removed them, so the other line's sweep does not keep taking off a
+ * credential that line needs.
+ *
+ * Nothing is listed for the dependent line: it requires GoHighLevel and holds
+ * nothing back. An unrecorded or unknown mode withholds nothing, as for the
+ * functions.
+ */
+export const CRM_LINE_WITHHELD_SECRETS: Readonly<Partial<Record<CrmMode, readonly string[]>>> = {
+  independent: [
+    "GOHIGHLEVEL_API_KEY",
+    "GOHIGHLEVEL_LOCATION_ID",
+    "GOHIGHLEVEL_API_KEY_NEW",
+    "GOHIGHLEVEL_LOCATION_ID_NEW",
+    // The legacy Integrations card's field keys, which a broker request can
+    // carry under their own spelling.
+    "GHL_API_KEY",
+    "GHL_LOCATION_ID",
+    // The inbound webhook's signing secret, for `ghl-webhook-receiver`, a
+    // function this line does not carry.
+    "GHL_WEBHOOK_SECRET",
+  ],
+};
+
+/** The secret names this line does not hold. */
+export function crmLineWithheldSecretNames(crmMode: string | null | undefined): string[] {
+  if (crmMode !== "independent" && crmMode !== "dependent") return [];
+  return [...(CRM_LINE_WITHHELD_SECRETS[crmMode] ?? [])];
+}
+
+/**
+ * Why a clone on this line may not hold this secret, or undefined.
+ *
+ * Asked by every writer straight after the class refusals, so no arrangement
+ * of rows, fleet policy or values can put a line's withheld credential back.
+ */
+export function crmLineSecretRefusal(
+  name: string,
+  crmMode: string | null | undefined,
+): string | undefined {
+  if (!crmLineWithheldSecretNames(crmMode).includes(name)) return undefined;
+  return (
+    `This clone is on the ${crmMode} CRM line, whose CRM is its own and carries no GoHighLevel ` +
+    "integration, so it never holds a GoHighLevel credential. Convert the clone to the dependent " +
+    "line if it should run its CRM through GoHighLevel."
+  );
+}
+
+/**
+ * The environment a line pins on its projects, by line.
+ *
+ * `CRM_PROVIDER` is what the deployment's own server reads. The independent
+ * head answers `native` whatever it holds, so the pin changes nothing there;
+ * it is written so the project states its line rather than inheriting it.
+ * Written when a clone converts INTO the line and removed when it converts
+ * out. The dependent line's code (the prime's) does not read the variable at
+ * all; it is removed so a project's environment never names a line the clone
+ * has left.
+ */
+export const CRM_LINE_PINNED_SECRETS: Readonly<
+  Partial<Record<CrmMode, Readonly<Record<string, string>>>>
+> = {
+  independent: { CRM_PROVIDER: "native" },
+};
+
+/** The pins a line writes on conversion into it. */
+export function crmLinePinnedSecrets(crmMode: string | null | undefined): Record<string, string> {
+  if (crmMode !== "independent" && crmMode !== "dependent") return {};
+  return { ...(CRM_LINE_PINNED_SECRETS[crmMode] ?? {}) };
+}
+
+/** What a CRM conversion does to the project's environment, decided once. */
+export type CrmLineSecretTransition = {
+  /** Names to delete from the project: present, and not the joined line's to hold. */
+  remove: string[];
+  /** Of `remove`, the ones the joined line withholds — stamped `withheld` in the ledger. */
+  withhold: string[];
+  /** Names to write, with their values: the joined line's pins. */
+  pin: Record<string, string>;
+  /**
+   * Ledger rows to forget: the left line's withheld credentials (status
+   * `withheld` only, so the joined line's sweep does not keep taking off a key
+   * it needs) and the left line's pins (any status, since the value is gone).
+   */
+  forgetWithheld: string[];
+  forgetAny: string[];
+};
+
+/**
+ * The environment half of a conversion.
+ *
+ * `present` is what the project is observed to hold. Nothing is removed that
+ * was not observed, and nothing the joined line holds is removed; a left
+ * line's pin is removed unless the joined line pins the same name.
+ */
+export function crmLineSecretTransition(args: {
+  fromMode: string | null | undefined;
+  toMode: string | null | undefined;
+  present: readonly string[];
+}): CrmLineSecretTransition {
+  const present = new Set(args.present);
+  const joinedWithholds = new Set(crmLineWithheldSecretNames(args.toMode));
+  const joinedPins = crmLinePinnedSecrets(args.toMode);
+  const leftPins = Object.keys(crmLinePinnedSecrets(args.fromMode)).filter(
+    (name) => !(name in joinedPins),
+  );
+
+  const withhold = [...joinedWithholds].filter((name) => present.has(name)).sort();
+  const unpin = leftPins.filter((name) => present.has(name)).sort();
+  return {
+    remove: [...withhold, ...unpin],
+    withhold,
+    pin: joinedPins,
+    forgetWithheld: crmLineWithheldSecretNames(args.fromMode)
+      .filter((name) => !joinedWithholds.has(name))
+      .sort(),
+    forgetAny: leftPins.sort(),
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // The files the independent line holds as its OWN copy
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -437,6 +583,18 @@ export const CRM_LINE_VARIANT_PATTERNS: Readonly<Partial<Record<CrmMode, readonl
     "src/branding/__tests__/linePalette.spec.tsx",
     "src/branding/BrandProvider.tsx",
     "src/pages/WhiteLabel.tsx",
+    // The audit of 10 Oct 2026 (`docs/audits/2026-10-10-crm-independent-pages.md`):
+    // a call is named from this deployment's clients, a portal client books
+    // into the native calendar, the Integrations page and its write endpoint
+    // offer and accept no GoHighLevel credential, and a shared note copies to
+    // no vendor. Each differs from the prime's copy by design.
+    "supabase/functions/vapi-call-webhook/index.ts",
+    "supabase/functions/cleanup-call-log-names/index.ts",
+    "src/components/call-logs/CleanupContactNames.tsx",
+    "supabase/functions/portal-book-appointment/index.ts",
+    "src/pages/Integrations.tsx",
+    "supabase/functions/update-integration-secret/index.ts",
+    "supabase/functions/_shared/clients/noteWords.pure.ts",
     // Server code that no longer reaches a withheld function.
     "supabase/functions/ai-dashboard-agent/index.ts",
     "supabase/functions/finance-portal-client-data/index.ts",

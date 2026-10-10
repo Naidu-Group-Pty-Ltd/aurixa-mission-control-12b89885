@@ -57,11 +57,18 @@ export async function resolveCloneForwardOutcomes(
   if (fleet.error) return { ok: false, error: fleet.error.message };
   const fleetInherit = new Map((fleet.data ?? []).map((r) => [r.name, r.inherit]));
 
+  // The clone's CRM line decides which credentials it may never hold. A failed
+  // read is not "no line": read as absent, a GoHighLevel row would forward onto
+  // the independent line for as long as the read is broken.
+  const clone = await supabase.from("clones").select("crm_mode").eq("id", cloneId).maybeSingle();
+  if (clone.error) return { ok: false, error: clone.error.message };
+
   const outcomes = planCloneForwards({
     authorised: (rows.data ?? []).map((r) => r.name),
     fleet: fleetInherit,
     classOf: classifySecret,
     envHas: hasEnvValue,
+    crmMode: clone.data?.crm_mode ?? null,
   });
   return { ok: true, outcomes };
 }

@@ -421,63 +421,67 @@ yet**. Nothing below has been built.
 ## E. From the audit of the five CRM-independent pages (10 Oct 2026)
 
 Full findings and evidence: [`audits/2026-10-10-crm-independent-pages.md`](./audits/2026-10-10-crm-independent-pages.md).
-The pages are independent in code today. These are what is left.
+The owner approved all six fixes on 10 Oct 2026 and they were made the same
+day (head `npc-crm-independent-6505dc` and Mission Control). E1 to E6 are kept
+as a record; E7 is what is left.
 
 ### E1. A GoHighLevel key on an independent-line project flips the server
 
-- **Status:** open; high. Fix proposed (F1 to F4), not made.
-- If a `GOHIGHLEVEL_API_KEY` / `GOHIGHLEVEL_LOCATION_ID` pair is present, the
-  server resolves its CRM as GoHighLevel. Then:
-  - Calendar and CRM Conversations refuse (409);
-  - the call webhook and five other carried functions start calling
-    GoHighLevel.
-- Three routes can put a pair there, and none is refused:
-  - the clone's own Integrations page;
-  - Mission Control's per-clone secret forward;
-  - a conversion from the dependent line, which keeps the old secrets.
-- **To decide:** approve F1 to F4.
+- **Status:** resolved by F1 (head) and F3/F4 (the three routes).
+- The head's server now answers `native` whatever its environment holds, and
+  reports a GoHighLevel pair as a secret to remove. The Integrations page,
+  Mission Control's per-clone forward and a conversion into the line all
+  refuse or remove the credentials.
 
 ### E2. The membrane does not cover secrets
 
-- **Status:** open; high.
-- The line register withholds functions, crons and files by `crm_mode`, but
-  no secret names. E1 is the consequence.
-- **To decide:** approve F4: add `GOHIGHLEVEL_*` to the line register,
-  refused on forward, removed on conversion, reported by the sweep.
+- **Status:** resolved by F4.
+- `CRM_LINE_WITHHELD_SECRETS` in `crmLineFeatures.pure.ts` is asked by every
+  route that writes a vendor credential onto a clone. The fleet sweep removes
+  any it finds on an independent project and stamps it `withheld`.
 
 ### E3. Call logs never match a caller to the deployment's own clients
 
-- **Status:** open; medium.
-- On this line, a caller's name comes only from Vapi or the AI summary. The
-  webhook looks only in GoHighLevel.
-- **To decide:** approve F2 (match by phone against `clients`, no GoHighLevel
-  on this line).
+- **Status:** resolved by F2. A caller is matched among the deployment's own
+  clients by phone; a number two clients share names nobody.
 
 ### E4. Client-portal self-booking has no native path
 
-- **Status:** open; medium.
-- `portal-book-appointment` books only into GoHighLevel's calendar. On this
-  line, a client cannot book themselves into this deployment's Calendar from
-  the portal.
-- **To decide:** approve F5.
+- **Status:** resolved by F5. The portal books into the native calendar under
+  the staff Calendar's own rules, only into a calendar the portal offers.
 
 ### E5. The note "All" wording promises a CRM copy
 
-- **Status:** open; low.
-- "Both portals and the CRM" names a copy this line never makes, and two
-  components still fire a refused `sync-notes-to-ghl` call.
-- **To decide:** approve F6. The wording is a prime module, so the fix is
-  made at the prime.
+- **Status:** resolved by F6, as a line variant of `noteWords.pure.ts` rather
+  than a prime change (the prime's wording is true on the prime). Saving or
+  editing a note no longer calls `sync-notes-to-ghl` on this line.
 
 ### E6. Three things the audit could not measure from here
 
-- **Status:** open.
-  - Whether the head's project currently holds `GOHIGHLEVEL_*` secrets.
-  - Whether any per-clone secret-forward row names them for an independent
-    clone.
-  - Whether any child of the independent head exists yet.
-- **To do:** read the head project's secret names in the Supabase dashboard,
-  and the `clone_secret_forwards` rows on Mission Control.
+- **Status:** the first two no longer need a person. The fleet sweep removes
+  a GoHighLevel credential from an independent project on its next pass and
+  reports it in `removed`; a per-clone forward row naming one is refused with
+  the line's reason. The third (whether a child of the head exists) stays
+  open and changes nothing here: a child inherits every fix from the head.
+
+### E7. What the fixes leave
+
+- **Status:** open; low. None of it is behind the five pages.
+- `manage-lead-magnets`' `list_pipelines` (Marketing page) still asks
+  GoHighLevel for pipelines and has no native branch. With no credential on
+  this line it answers an empty list with an error string, so the lead-magnet
+  editor offers no pipeline to route a lead to. The native lead capture
+  (`request-lead-magnet`) files leads already; the pipeline picker is the
+  missing half. **To decide:** read native pipelines there on this line.
+- Deleting a note from the client card (`ActiveClientCard.tsx`) still calls
+  `sync-notes-to-ghl` unconditionally. The call is refused in the browser
+  before a request leaves (`crm_function_not_carried`) and logs one console
+  line; nothing is sent. Gating it would make one more prime file a line
+  variant, so it was left. **To decide:** whether that is worth a variant.
+- The head's `ghlReachRatchet.test.ts` names these, with
+  `finance-portal-client-comms` and `request-lead-magnet`, which take their
+  native branch on this line, as the only carried functions that can still
+  reach GoHighLevel.
 
 ---
 
@@ -507,5 +511,6 @@ Carried from earlier work. Each one is also recorded where it was found.
 | D18 | Decide C12 and C16. | above |
 | D19 | Decide C17 to C19 (which clones get voice agents; existing clones' custody; the dependent template's source). | above |
 | D20 | After the next cascade into the CRM-independent clone, check it carried held files cleanly (C21). | C21 |
-| D21 | Decide E1 to E5 (approve fixes F1 to F6 from the five-page audit). | E, `audits/2026-10-10-crm-independent-pages.md` |
-| D22 | Check E6: the head project's secret names, and any GoHighLevel per-clone forward rows. | E6 |
+| D21 | ~~Decide E1 to E5~~ Done 10 Oct 2026: all six fixes approved and made. | E |
+| D22 | ~~Check E6~~ No longer needed: the fleet sweep removes and reports any GoHighLevel credential on an independent project. | E6 |
+| D23 | Decide E7 (lead-magnet pipelines on this line; the client card's note-delete call). | E7 |

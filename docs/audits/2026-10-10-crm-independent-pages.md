@@ -16,9 +16,13 @@ rules through the membrane?
   Integrations page, Mission Control's per-clone secret forward, and a CRM
   conversion from the dependent line. The membrane withholds this line's
   functions, crons and files, but not its secrets.
-- See H1 and H2. The fixes are proposed below, not made.
+- See H1 and H2. **All six fixes were made the same day** (see "Fixes" at
+  the foot): the head's server is native whatever its environment holds, and
+  Mission Control now withholds the line's credentials on every route that
+  writes one and removes any it finds.
 
-Owner decisions this raises are parked in `OPEN_QUESTIONS.md` as E1 to E6.
+The owner decisions this raised are recorded in `OPEN_QUESTIONS.md` as E1 to
+E6, now resolved; E7 records what is left.
 
 ## Method
 
@@ -213,19 +217,24 @@ notification and dormant: it fires only for a client carrying a
   clone;
 - whether any child of the independent head exists yet.
 
-Mission Control's database is not reachable from here.
+Mission Control's database is not reachable from here. Since F4 the first
+two no longer need a person: the fleet sweep removes any such secret from an
+independent project on its next pass and reports it in `removed`, and a
+per-clone row naming one is refused with the line's reason.
 
-## Proposed fixes (not made; awaiting the owner)
+## Fixes (made 10 Oct 2026, on the owner's instruction)
 
-| # | Where | Change |
+| # | Where | What was done |
 |---|---|---|
-| F1 | head, `_shared/crm/crmProvider.pure.ts` (already a line variant) | On this line the server is native whatever the environment holds. A present GoHighLevel pair is reported as an anomaly, never acted on. This closes H1's effect on Calendar and Conversations. |
-| F2 | head, `vapi-call-webhook`, `cleanup-call-log-names` (made line variants) | No GoHighLevel lookup on this line. Match the caller to this deployment's own `clients` by phone (closes M2). |
-| F3 | head, Integrations card registry and the integration-secret allow-list (made line variants) | Do not offer the GoHighLevel cards on this line, and refuse `GOHIGHLEVEL_*` at the server. |
-| F4 | Mission Control | Add secrets to the line register. The per-clone forward refuses `GOHIGHLEVEL_*` for an independent clone. Conversion to the independent line deletes them and sets `CRM_PROVIDER=native`. The sweep reports any it finds. Closes H2. |
-| F5 | head, `portal-book-appointment` (made a line variant) | A native path: slots and bookings from this deployment's own calendar, as `crm-calendar` reads them (closes M1). |
-| F6 | prime, `noteWords.pure.ts`; head, the two note components | Line-neutral wording for "All", and drop the two dead `sync-notes-to-ghl` calls on this line. |
+| F1 | head, `_shared/crm/crmProvider.pure.ts` | `resolveCrmProviderFromEnv` answers `native` whatever the environment holds. A `CRM_PROVIDER` naming anything else, and a GoHighLevel pair, are each reported as a warning naming the secret to remove (`ghlCredentialsIgnored`), never obeyed. Closes H1's effect on Calendar and Conversations. |
+| F2 | head, `vapi-call-webhook`, `cleanup-call-log-names`, `CleanupContactNames.tsx`, `CallLogs.tsx` | No GoHighLevel lookup. A caller is matched among this deployment's clients by phone (`_shared/crm/callerMatch.pure.ts`, `callerLookup.ts`): the national number is compared, a number two clients share names nobody, and a failed read names nobody rather than reporting "no match". The clean-up is drawn again, worded for this line. Closes M2. |
+| F3 | head, `Integrations.tsx`, `update-integration-secret` | The two GoHighLevel cards are not drawn, and the write endpoint refuses every GoHighLevel secret name before its allow-list (`_shared/crm/lineWithheldIntegrations.pure.ts`). The registry and the generated allow-list are untouched, so they stay byte-identical with the prime. |
+| F4 | Mission Control | `CRM_LINE_WITHHELD_SECRETS` in `crmLineFeatures.pure.ts`, asked by every route that writes a vendor credential onto a clone: the per-clone forward, the fleet sweep, provisioning, the tenant Integrations broker and the operator's "set secret". The fleet sweep removes any it finds on an independent project and stamps it `withheld`. A conversion into the line removes them and pins `CRM_PROVIDER=native`; a conversion out removes the pin and forgets the `withheld` record, so the dependent clone's sweep does not keep taking off keys its CRM needs (`crmLineSecretTransition`). Closes H2. |
+| F5 | head, `portal-book-appointment` | Native: slots and bookings from this deployment's own calendar through the staff Calendar's own reads and conflict rule (`_shared/crm/calendarReads.ts`, now shared with `crm-calendar`, and `portalBooking.pure.ts`). A client books only into a calendar the portal settings offer, only inside published hours, never over a booking and never in the past. The four actions answer in the shapes the portal pages already parse, so neither page changed. Closes M1. |
+| F6 | head, `_shared/clients/noteWords.pure.ts` | "All" reads "Command Center and both portals", and `copiesToGoHighLevel` answers false, so neither note component calls `sync-notes-to-ghl` on save or edit. Made a **line variant** rather than a prime change: the prime's wording is true on the prime, and the prime is not edited from this work. |
 
-Every head file F2, F3 and F5 make a variant must also be added to
-`CRM_LINE_VARIANT_PATTERNS` in Mission Control, in the same change. Otherwise
-the next prime cascade puts the GoHighLevel copy back.
+Every head file F2, F3, F5 and F6 changed is in `CRM_LINE_VARIANT_PATTERNS`,
+so a prime cascade cannot put the GoHighLevel copy back.
+`ghlReachRatchet.test.ts` on the head lists every carried function that can
+still reach GoHighLevel, with why, and fails on a new one; three remain, none
+behind the five pages (E7 in `OPEN_QUESTIONS.md`).
