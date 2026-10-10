@@ -238,3 +238,26 @@ so a prime cascade cannot put the GoHighLevel copy back.
 `ghlReachRatchet.test.ts` on the head lists every carried function that can
 still reach GoHighLevel, with why, and fails on a new one; three remain, none
 behind the five pages (E7 in `OPEN_QUESTIONS.md`).
+
+## After the fixes: what checking they went live found
+
+Checking the project after the head merged (head #107) found that a
+function the line keeps in its own shape never reached the line's project.
+Mission Control's rolling `edge_function_deploy` lane builds every function
+the prime declares from the prime's repository. So the live
+`manage-automation-settings` on `qvuwrvwzjyigptmnijyb` was the prime's copy,
+with no `createPipeline`, and the same was true of every other held variant
+of a shared function. Only the clone-owned `crm-*` functions came from the
+clone's tree.
+
+Fixed in Mission Control (E8 in `OPEN_QUESTIONS.md`):
+
+- `crmLineVariantFunctionNames` derives the line's own functions from
+  `CRM_LINE_VARIANT_PATTERNS`;
+- the clone-owned lane deploys them from the clone's tree;
+- the prime-tree lane and provisioning skip them;
+- a conversion off the line puts the prime's copies back.
+
+The same check found the cascade's variant merge starved (C21). It was
+capped at 12 held paths taken in list order, so it never reached the agent.
+Now the cap is 32 and the most consequential paths go first.

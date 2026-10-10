@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   decideVariantMerge,
   matchLines,
+  MAX_VARIANT_MERGES,
+  orderVariantMergeCandidates,
   primeRevisionNamedBy,
   threeWayMerge,
   variantBaseFrom,
@@ -176,5 +178,33 @@ describe("the verdict for one held path", () => {
     });
     expect(v).toMatchObject({ act: "hold" });
     if (v.act === "hold") expect(v.why).toContain("prime@36fae6b");
+  });
+});
+
+describe("which held paths a pass merges first", () => {
+  it("offers function entrypoints first, then source, then the rest, stably", () => {
+    const held = [
+      ".github/workflows/ci.yml",
+      "scripts/security/check-ghl-message-authz.mjs",
+      "src/pages/CallLogs.tsx",
+      "supabase/functions/_shared/clients/noteWords.pure.ts",
+      "supabase/functions/ai-dashboard-agent/index.ts",
+      "CLAUDE.md",
+      "supabase/functions/request-lead-magnet/index.ts",
+    ].map((path) => ({ path }));
+    expect(orderVariantMergeCandidates(held).map((h) => h.path)).toEqual([
+      "supabase/functions/ai-dashboard-agent/index.ts",
+      "supabase/functions/request-lead-magnet/index.ts",
+      "src/pages/CallLogs.tsx",
+      "supabase/functions/_shared/clients/noteWords.pure.ts",
+      ".github/workflows/ci.yml",
+      "scripts/security/check-ghl-message-authz.mjs",
+      "CLAUDE.md",
+    ]);
+  });
+
+  it("asks about every held path #104 carried, the agent included", () => {
+    // Twenty-six held on #104, the agent twenty-second in list order.
+    expect(MAX_VARIANT_MERGES).toBeGreaterThanOrEqual(26);
   });
 });

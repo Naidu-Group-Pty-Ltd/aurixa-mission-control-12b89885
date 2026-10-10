@@ -55,7 +55,7 @@
  * changes which one the deployment talks to and says so in the pull request.
  */
 
-import { crmLineWithheldFunctionNames } from "./crmLineFeatures.pure";
+import { crmLineVariantFunctionNames, crmLineWithheldFunctionNames } from "./crmLineFeatures.pure";
 import type { CrmMode } from "@/lib/crmMode.pure";
 import { CRM_MODE_COPY, crmModeLabel, isCrmMode } from "@/lib/crmMode.pure";
 import type { CrmParent, CrmParentJudgement } from "./crmLineage.pure";
@@ -963,6 +963,12 @@ export function functionsToUndeploy(input: {
  *
  * Only what the prime declares (a function the prime does not ship is not
  * the prime's to restore), minus what the project already runs.
+ *
+ * And the functions the line it left kept in its OWN shape
+ * (`crmLineVariantFunctionNames`), whether or not they are live: live, they
+ * are the old line's copy, built from the clone's tree. Nothing else would
+ * replace them — the prime's lane skipped them while the clone was on that
+ * line, and redeploys only what a cascade changes.
  */
 export function functionsToRestore(input: {
   fromMode: string | null | undefined;
@@ -973,9 +979,14 @@ export function functionsToRestore(input: {
   const prime = new Set(input.primeDeclared);
   const keptOnTarget = new Set(crmLineWithheldFunctionNames(input.toMode ?? null));
   const live = input.live ? new Set(input.live) : new Set<string>();
-  return crmLineWithheldFunctionNames(input.fromMode ?? null)
-    .filter((slug) => prime.has(slug) && !keptOnTarget.has(slug) && !live.has(slug))
-    .sort();
+  const withheld = crmLineWithheldFunctionNames(input.fromMode ?? null).filter(
+    (slug) => prime.has(slug) && !keptOnTarget.has(slug) && !live.has(slug),
+  );
+  const targetVariants = new Set(crmLineVariantFunctionNames(input.toMode ?? null));
+  const variants = crmLineVariantFunctionNames(input.fromMode ?? null).filter(
+    (slug) => prime.has(slug) && !targetVariants.has(slug) && !keptOnTarget.has(slug),
+  );
+  return [...new Set([...withheld, ...variants])].sort();
 }
 
 /**

@@ -18,8 +18,10 @@
  *
  * ## What it will not do
  *
- * - **Deploy a function the prime declares.** That one is the prime's lane's,
- *   whatever the clone's copy says.
+ * - **Deploy a function the prime declares**, unless the clone's CRM line
+ *   keeps it in its own shape (`crmLineVariantFunctionNames`). That one is
+ *   this lane's, and the prime's lane skips it; every other one is the
+ *   prime's lane's, whatever the clone's copy says.
  * - **Act without knowing the prime's list.** An unread prime list makes every
  *   function the clone declares look like its own; the lane refuses rather
  *   than deploying four hundred functions from a clone's copy.
@@ -52,6 +54,7 @@ import {
   readOwnedRecord,
   type OwnedFunctionResult,
 } from "./cloneOwnedFunctions.pure";
+import { crmLineVariantFunctionNames } from "./crmLineFeatures.pure";
 
 type Db = SupabaseClient<Database>;
 type Octokit = ReturnType<typeof getAppOctokit>;
@@ -144,6 +147,7 @@ export async function deployCloneOwnedFunctions(args: {
       github_owner?: string | null;
       github_repo?: string | null;
       default_branch?: string | null;
+      crm_mode?: string | null;
     };
     if (!c.github_owner || !c.github_repo) {
       return outcome(
@@ -229,7 +233,11 @@ export async function deployCloneOwnedFunctions(args: {
         `could not read ${cloneRef.owner}/${cloneRef.repo}@${cloneRef.branch}: ${message(e)}`,
       );
     }
-    const owned = ownedFunctionSlugs(tree.declaredFunctionSlugs, primeDeclared);
+    const owned = ownedFunctionSlugs(
+      tree.declaredFunctionSlugs,
+      primeDeclared,
+      crmLineVariantFunctionNames(c.crm_mode ?? null),
+    );
     const plans = planFunctionBundles(tree, owned);
     const digest = ownedFunctionsDigest(plans);
     const live = await readProjectEdgeFunctionSlugs(projectRef);

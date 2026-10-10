@@ -289,16 +289,22 @@ async function runBackendProvisioning(
     const crmMode = ((cloneLineRow as { crm_mode?: string | null } | null)?.crm_mode ?? null) as
       | string
       | null;
-    const { crmLineWithheldFunctionNames } = await import(
+    const { crmLineVariantFunctionNames, crmLineWithheldFunctionNames } = await import(
       /* @vite-ignore */ "@/server/crmLineFeatures.pure"
     );
     const lineWithheld = new Set(crmLineWithheldFunctionNames(crmMode));
+    // The line's own copies are carried, so they stay declared, but their
+    // bundles come from the clone's tree (`deployCloneOwnedFunctions`, run
+    // once the repository points at the new project), never the prime's.
+    const lineVariants = new Set(crmLineVariantFunctionNames(crmMode));
     const snapshot: typeof rawSnapshot =
-      lineWithheld.size === 0
+      lineWithheld.size === 0 && lineVariants.size === 0
         ? splicedSnapshot
         : {
             ...splicedSnapshot,
-            functions: (splicedSnapshot.functions ?? []).filter((fn) => !lineWithheld.has(fn.slug)),
+            functions: (splicedSnapshot.functions ?? []).filter(
+              (fn) => !lineWithheld.has(fn.slug) && !lineVariants.has(fn.slug),
+            ),
             declaredFunctionSlugs: splicedSnapshot.declaredFunctionSlugs.filter(
               (slug) => !lineWithheld.has(slug),
             ),

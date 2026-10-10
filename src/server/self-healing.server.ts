@@ -1354,10 +1354,20 @@ async function executeEdgeFunctionDeploy(
     .eq("id", run.clone_id)
     .maybeSingle();
   if (cloneErr) throw new Error(`could not read the clone's CRM line: ${cloneErr.message}`);
-  const { crmLineWithheldFunctionNames } = await import("@/server/crmLineFeatures.pure");
-  const lineWithheld = crmLineWithheldFunctionNames(
-    (cloneRow as { crm_mode?: string | null } | null)?.crm_mode ?? null,
-  );
+  const { crmLineVariantFunctionNames, crmLineWithheldFunctionNames } =
+    await import("@/server/crmLineFeatures.pure");
+  const cloneCrmMode = (cloneRow as { crm_mode?: string | null } | null)?.crm_mode ?? null;
+  // Two kinds of function this lane never writes on a clone of a CRM line:
+  // what the line does not carry, and what it carries in its own shape. The
+  // second is deployed from the CLONE's tree by the clone-owned lane
+  // (`cloneOwnedFunctions.server.ts`); written from the prime's tree here, it
+  // overwrote the line's copy on the project — the live
+  // `manage-automation-settings` on the CRM-independent head was the prime's,
+  // with no pipeline creation, on 10 Oct 2026.
+  const lineWithheld = [
+    ...crmLineWithheldFunctionNames(cloneCrmMode),
+    ...crmLineVariantFunctionNames(cloneCrmMode),
+  ];
   const lineWithheldSet = new Set(lineWithheld);
 
   const plannedSlugs: string[] | null = run.plan?.slugs ?? null;
@@ -1367,7 +1377,7 @@ async function executeEdgeFunctionDeploy(
     // Deployed nothing, so it proves no revision — the empty batch's rule.
     const nothingOwed = {
       deployed: 0,
-      note: "every function this run named is withheld from the clone's CRM line",
+      note: "every function this run named is withheld from the clone's CRM line or deployed from its own tree",
       withheld_by_crm_line: plannedSlugs,
       functions_revision: null,
       revision_recorded: false,
