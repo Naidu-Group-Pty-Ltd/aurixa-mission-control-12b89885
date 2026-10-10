@@ -948,4 +948,25 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20261009100100",
     assertions: [{ kind: "cron", jobname: "marketing-snapshots-daily" }],
   },
+  {
+    migration: "20261009120000_clone_voice_automation.sql",
+    version: "20261009120000",
+    assertions: [
+      { kind: "table", table: "clone_voice_automation" },
+      { kind: "table", table: "clone_voice_automation_revisions" },
+      { kind: "table", table: "clone_voice_automation_connections" },
+      { kind: "check", table: "clone_voice_automation", column: "apply_status", value: "blocked" },
+      {
+        kind: "check",
+        table: "clone_voice_automation_connections",
+        column: "kind",
+        value: "gmail",
+      },
+    ],
+  },
+  {
+    migration: "20261009120100_schedule_voice_automation_drain.sql",
+    version: "20261009120100",
+    assertions: [{ kind: "cron", jobname: "voice-automation-drain" }],
+  },
 ];

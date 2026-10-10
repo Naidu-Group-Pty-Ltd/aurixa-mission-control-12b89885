@@ -1,0 +1,305 @@
+{
+ "name": "NPC CI - Booking Email Notifier",
+ "flow": [
+  {
+   "id": 1,
+   "module": "gateway:CustomWebHook",
+   "version": 1,
+   "parameters": {
+    "hook": 2911149,
+    "maxResults": 1
+   },
+   "mapper": {},
+   "metadata": {
+    "designer": {
+     "x": 0,
+     "y": 0
+    }
+   }
+  },
+  {
+   "id": 2,
+   "module": "datastore:GetRecord",
+   "version": 1,
+   "parameters": {
+    "datastore": 168061
+   },
+   "mapper": {
+    "key": "default",
+    "returnWrapped": false
+   },
+   "metadata": {
+    "designer": {
+     "x": 300,
+     "y": 0
+    }
+   }
+  },
+  {
+   "id": 3,
+   "module": "datastore:GetRecord",
+   "version": 1,
+   "parameters": {
+    "datastore": 168112
+   },
+   "mapper": {
+    "key": "notifier",
+    "returnWrapped": false
+   },
+   "metadata": {
+    "designer": {
+     "x": 600,
+     "y": 0
+    }
+   }
+  },
+  {
+   "id": 4,
+   "module": "code:ExecuteCode",
+   "version": 1,
+   "parameters": {},
+   "mapper": {
+    "language": "javascript",
+    "inputFormat": "string",
+    "codeStringJavascript": "{{3.code}}",
+    "input": [
+     {
+      "name": "__fn",
+      "value": "notify_build"
+     },
+     {
+      "name": "raw",
+      "value": "{{1.value}}"
+     },
+     {
+      "name": "cfg_secret",
+      "value": "{{2.adapter_secret}}"
+     },
+     {
+      "name": "cfg_admin_email",
+      "value": "{{2.admin_email}}"
+     },
+     {
+      "name": "cfg_business_name",
+      "value": "{{2.business_name}}"
+     },
+     {
+      "name": "cfg_notify_client",
+      "value": "{{2.notify_client}}"
+     },
+     {
+      "name": "cfg_redirect",
+      "value": "{{2.email_redirect_to}}"
+     },
+     {
+      "name": "cfg_zoom_link",
+      "value": "{{2.zoom_link}}"
+     },
+     {
+      "name": "cfg_tz",
+      "value": "{{2.timezone}}"
+     }
+    ]
+   },
+   "metadata": {
+    "designer": {
+     "x": 900,
+     "y": 0
+    }
+   }
+  },
+  {
+   "id": 5,
+   "module": "builtin:BasicRouter",
+   "version": 1,
+   "mapper": null,
+   "metadata": {
+    "designer": {
+     "x": 1200,
+     "y": 0
+    }
+   },
+   "routes": [
+    {
+     "flow": [
+      {
+       "id": 6,
+       "module": "gateway:WebhookRespond",
+       "version": 1,
+       "parameters": {},
+       "mapper": {
+        "body": "{{4.result.response}}",
+        "status": "200",
+        "headers": [
+         {
+          "key": "Content-Type",
+          "value": "application/json"
+         }
+        ]
+       },
+       "metadata": {
+        "designer": {
+         "x": 1500,
+         "y": 0
+        }
+       }
+      }
+     ]
+    },
+    {
+     "flow": [
+      {
+       "id": 7,
+       "module": "microsoft-email:createAndSendAMessage",
+       "version": 2,
+       "parameters": {
+        "__IMTCONN__": 10496840
+       },
+       "mapper": {
+        "subject": "{{4.result.admin_subject}}",
+        "toRecipients": [
+         {
+          "address": "{{4.result.admin_to}}"
+         }
+        ],
+        "content": "{{4.result.admin_html}}",
+        "contentType": "html",
+        "attachments": [
+         {
+          "filename": "{{4.result.ics_name}}",
+          "data": "{{toBinary(4.result.ics)}}"
+         }
+        ]
+       },
+       "metadata": {
+        "designer": {
+         "x": 1500,
+         "y": 300
+        }
+       },
+       "filter": {
+        "name": "admin",
+        "conditions": [
+         [
+          {
+           "a": "{{4.result.valid}}",
+           "o": "text:equal",
+           "b": "yes"
+          },
+          {
+           "a": "{{2.email_provider}}",
+           "o": "text:equal",
+           "b": "outlook"
+          }
+         ]
+        ]
+       },
+       "onerror": [
+        {
+         "id": 79,
+         "module": "builtin:Ignore",
+         "version": 1,
+         "parameters": {},
+         "mapper": {},
+         "metadata": {
+          "designer": {
+           "x": 1500,
+           "y": 500
+          }
+         }
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "flow": [
+      {
+       "id": 8,
+       "module": "microsoft-email:createAndSendAMessage",
+       "version": 2,
+       "parameters": {
+        "__IMTCONN__": 10496840
+       },
+       "mapper": {
+        "subject": "{{4.result.client_subject}}",
+        "toRecipients": [
+         {
+          "address": "{{4.result.client_to}}"
+         }
+        ],
+        "content": "{{4.result.client_html}}",
+        "contentType": "html",
+        "attachments": [
+         {
+          "filename": "{{4.result.ics_name}}",
+          "data": "{{toBinary(4.result.ics)}}"
+         }
+        ]
+       },
+       "metadata": {
+        "designer": {
+         "x": 1500,
+         "y": 600
+        }
+       },
+       "filter": {
+        "name": "client",
+        "conditions": [
+         [
+          {
+           "a": "{{4.result.valid}}",
+           "o": "text:equal",
+           "b": "yes"
+          },
+          {
+           "a": "{{4.result.send_client}}",
+           "o": "text:equal",
+           "b": "yes"
+          },
+          {
+           "a": "{{2.email_provider}}",
+           "o": "text:equal",
+           "b": "outlook"
+          }
+         ]
+        ]
+       },
+       "onerror": [
+        {
+         "id": 89,
+         "module": "builtin:Ignore",
+         "version": 1,
+         "parameters": {},
+         "mapper": {},
+         "metadata": {
+          "designer": {
+           "x": 1500,
+           "y": 800
+          }
+         }
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "metadata": {
+  "instant": true,
+  "version": 1,
+  "scenario": {
+   "dlq": false,
+   "slots": null,
+   "dataloss": false,
+   "maxErrors": 3,
+   "autoCommit": true,
+   "roundtrips": 1,
+   "sequential": false,
+   "confidential": false,
+   "freshVariables": false,
+   "autoCommitTriggerLast": true
+  }
+ }
+}

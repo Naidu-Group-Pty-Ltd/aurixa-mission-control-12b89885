@@ -4074,6 +4074,252 @@ export type Database = {
           },
         ]
       }
+      clone_voice_automation: {
+        Row: {
+          adapter_scenario_id: number
+          applied_at: string | null
+          applied_revision: number | null
+          applied_settings: Json | null
+          apply_attempts: number
+          apply_blocks: Json
+          apply_error: string | null
+          apply_lease_until: string | null
+          apply_status: string
+          cfg_data_store_id: number
+          cfg_record_key: string
+          clone_id: string
+          created_at: string
+          created_by: string | null
+          drift: Json
+          drift_checked_at: string | null
+          handed_off_at: string | null
+          id: string
+          last_bindings: Json
+          locked_fields: string[]
+          make_team_id: number
+          make_zone: string
+          next_attempt_at: string | null
+          notifier_scenario_id: number
+          revision: number
+          schema_version: number
+          settings: Json
+          stack_scenario_ids: Json
+          updated_at: string
+          updated_by_kind: string
+          updated_by_label: string | null
+        }
+        Insert: {
+          adapter_scenario_id: number
+          applied_at?: string | null
+          applied_revision?: number | null
+          applied_settings?: Json | null
+          apply_attempts?: number
+          apply_blocks?: Json
+          apply_error?: string | null
+          apply_lease_until?: string | null
+          apply_status?: string
+          cfg_data_store_id: number
+          cfg_record_key?: string
+          clone_id: string
+          created_at?: string
+          created_by?: string | null
+          drift?: Json
+          drift_checked_at?: string | null
+          handed_off_at?: string | null
+          id?: string
+          last_bindings?: Json
+          locked_fields?: string[]
+          make_team_id: number
+          make_zone: string
+          next_attempt_at?: string | null
+          notifier_scenario_id: number
+          revision?: number
+          schema_version?: number
+          settings: Json
+          stack_scenario_ids?: Json
+          updated_at?: string
+          updated_by_kind?: string
+          updated_by_label?: string | null
+        }
+        Update: {
+          adapter_scenario_id?: number
+          applied_at?: string | null
+          applied_revision?: number | null
+          applied_settings?: Json | null
+          apply_attempts?: number
+          apply_blocks?: Json
+          apply_error?: string | null
+          apply_lease_until?: string | null
+          apply_status?: string
+          cfg_data_store_id?: number
+          cfg_record_key?: string
+          clone_id?: string
+          created_at?: string
+          created_by?: string | null
+          drift?: Json
+          drift_checked_at?: string | null
+          handed_off_at?: string | null
+          id?: string
+          last_bindings?: Json
+          locked_fields?: string[]
+          make_team_id?: number
+          make_zone?: string
+          next_attempt_at?: string | null
+          notifier_scenario_id?: number
+          revision?: number
+          schema_version?: number
+          settings?: Json
+          stack_scenario_ids?: Json
+          updated_at?: string
+          updated_by_kind?: string
+          updated_by_label?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clone_voice_automation_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: true
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "clone_voice_automation_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: true
+            referencedRelation: "clones_missing_isolated_backend"
+            referencedColumns: ["clone_id"]
+          },
+        ]
+      }
+      clone_voice_automation_connections: {
+        Row: {
+          account_label: string | null
+          authorized_at: string | null
+          clone_id: string
+          connection_name: string | null
+          created_at: string
+          credential_id: string | null
+          credential_request_id: string | null
+          id: string
+          kind: string
+          last_checked_at: string | null
+          last_error: string | null
+          make_connection_id: number | null
+          public_uri_enc: string | null
+          requested_at: string
+          requested_by_label: string | null
+          source: string
+          state: string
+          updated_at: string
+        }
+        Insert: {
+          account_label?: string | null
+          authorized_at?: string | null
+          clone_id: string
+          connection_name?: string | null
+          created_at?: string
+          credential_id?: string | null
+          credential_request_id?: string | null
+          id?: string
+          kind: string
+          last_checked_at?: string | null
+          last_error?: string | null
+          make_connection_id?: number | null
+          public_uri_enc?: string | null
+          requested_at?: string
+          requested_by_label?: string | null
+          source?: string
+          state?: string
+          updated_at?: string
+        }
+        Update: {
+          account_label?: string | null
+          authorized_at?: string | null
+          clone_id?: string
+          connection_name?: string | null
+          created_at?: string
+          credential_id?: string | null
+          credential_request_id?: string | null
+          id?: string
+          kind?: string
+          last_checked_at?: string | null
+          last_error?: string | null
+          make_connection_id?: number | null
+          public_uri_enc?: string | null
+          requested_at?: string
+          requested_by_label?: string | null
+          source?: string
+          state?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clone_voice_automation_connections_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "clone_voice_automation_connections_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones_missing_isolated_backend"
+            referencedColumns: ["clone_id"]
+          },
+        ]
+      }
+      clone_voice_automation_revisions: {
+        Row: {
+          actor_kind: string
+          actor_label: string | null
+          actor_user_id: string | null
+          changes: Json
+          clone_id: string
+          created_at: string
+          id: string
+          revision: number
+          settings: Json
+        }
+        Insert: {
+          actor_kind: string
+          actor_label?: string | null
+          actor_user_id?: string | null
+          changes?: Json
+          clone_id: string
+          created_at?: string
+          id?: string
+          revision: number
+          settings: Json
+        }
+        Update: {
+          actor_kind?: string
+          actor_label?: string | null
+          actor_user_id?: string | null
+          changes?: Json
+          clone_id?: string
+          created_at?: string
+          id?: string
+          revision?: number
+          settings?: Json
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clone_voice_automation_revisions_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "clone_voice_automation_revisions_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones_missing_isolated_backend"
+            referencedColumns: ["clone_id"]
+          },
+        ]
+      }
       clones: {
         Row: {
           billing_stripe_customer_id: string | null
