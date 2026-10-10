@@ -125,17 +125,21 @@ ids, and the first settings). Registration refuses a clone that is not on the
 independent line, and applies immediately. The NPC CRM Independent stack is
 registered by the migration.
 
-Not automated yet, and recorded here so nobody assumes it is: **creating** a new
-tenant's stack (cloning the nine scenarios, five data stores and hooks, and
-re-pointing the Vapi tools) is still a build step outside Mission Control. The
-registration above is the seam that step will fill.
+Creating a new tenant's stack is now automated: see
+[`CLONE_VOICE_STACKS.md`](./CLONE_VOICE_STACKS.md). A stack built there clones
+the nine scenarios, five data stores and hooks into the tenant's own folder,
+copies the agents into the clone's own Vapi org, and then registers itself here
+through the same `registerStack` seam (step `voice_automation_register`). So
+from that point a built stack is configured exactly like the hand-built one.
+**Register stack** stays for a stack built by hand.
 
 ## What an operator must configure
 
 - `MAKE_API_TOKEN` on Mission Control: a Make API token on the team that holds the
   stacks, with scopes `scenarios:read`, `scenarios:write`, `datastores:read`,
   `datastores:write`, `connections:read`, `connections:write`,
-  `credential-requests:read`, `credential-requests:write`. Until it is set,
+  `credential-requests:read`, `credential-requests:write`. Building new stacks
+  (`CLONE_VOICE_STACKS.md`) also needs `hooks:read` and `hooks:write`. Until it is set,
   every apply is BLOCKED with `make_not_configured` (said on both cards), and
   nothing reaches the voice agents.
 - `CREDENTIALS_ENC_KEY` (already used by Voice Studio): without it the
@@ -165,6 +169,12 @@ tenant's agents to their Call Logs page belongs to the build step that creates
 their Vapi objects. Registration is the seam.
 
 ## Open decisions (recorded 10 Oct 2026, owner to decide)
+
+These are carried, with the technical answers the owner asked for, in
+[`OPEN_QUESTIONS.md`](./OPEN_QUESTIONS.md): item 1 is A2, item 2 is A1, and
+item 3 is C8 (every clone now gets its own Vapi org; see
+[`CLONE_VOICE_STACKS.md`](./CLONE_VOICE_STACKS.md)). The text below is kept as
+it was recorded.
 
 1. **A Make key per clone.** `MAKE_API_TOKEN` is one token, on the team that
    holds the stacks. Today that is the prime's Make team, 2731020. Technically a

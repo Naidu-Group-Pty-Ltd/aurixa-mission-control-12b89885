@@ -80,6 +80,7 @@ import { Route as JoinTokenRouteImport } from './routes/join.$token'
 import { Route as HooksWarmHealthRouteImport } from './routes/hooks.warm-health'
 import { Route as HooksVoiceStudioPlanRouteImport } from './routes/hooks.voice-studio-plan'
 import { Route as HooksVoiceStudioDeployRouteImport } from './routes/hooks.voice-studio-deploy'
+import { Route as HooksVoiceStackDrainRouteImport } from './routes/hooks.voice-stack-drain'
 import { Route as HooksVoiceOutboundDispatchRouteImport } from './routes/hooks.voice-outbound-dispatch'
 import { Route as HooksVoiceCallDrainRouteImport } from './routes/hooks.voice-call-drain'
 import { Route as HooksVoiceAutomationDrainRouteImport } from './routes/hooks.voice-automation-drain'
@@ -590,6 +591,11 @@ const HooksVoiceStudioPlanRoute = HooksVoiceStudioPlanRouteImport.update({
 const HooksVoiceStudioDeployRoute = HooksVoiceStudioDeployRouteImport.update({
   id: '/hooks/voice-studio-deploy',
   path: '/hooks/voice-studio-deploy',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksVoiceStackDrainRoute = HooksVoiceStackDrainRouteImport.update({
+  id: '/hooks/voice-stack-drain',
+  path: '/hooks/voice-stack-drain',
   getParentRoute: () => rootRouteImport,
 } as any)
 const HooksVoiceOutboundDispatchRoute =
@@ -1540,6 +1546,7 @@ export interface FileRoutesByFullPath {
   '/hooks/voice-automation-drain': typeof HooksVoiceAutomationDrainRoute
   '/hooks/voice-call-drain': typeof HooksVoiceCallDrainRoute
   '/hooks/voice-outbound-dispatch': typeof HooksVoiceOutboundDispatchRoute
+  '/hooks/voice-stack-drain': typeof HooksVoiceStackDrainRoute
   '/hooks/voice-studio-deploy': typeof HooksVoiceStudioDeployRoute
   '/hooks/voice-studio-plan': typeof HooksVoiceStudioPlanRoute
   '/hooks/warm-health': typeof HooksWarmHealthRoute
@@ -1765,6 +1772,7 @@ export interface FileRoutesByTo {
   '/hooks/voice-automation-drain': typeof HooksVoiceAutomationDrainRoute
   '/hooks/voice-call-drain': typeof HooksVoiceCallDrainRoute
   '/hooks/voice-outbound-dispatch': typeof HooksVoiceOutboundDispatchRoute
+  '/hooks/voice-stack-drain': typeof HooksVoiceStackDrainRoute
   '/hooks/voice-studio-deploy': typeof HooksVoiceStudioDeployRoute
   '/hooks/voice-studio-plan': typeof HooksVoiceStudioPlanRoute
   '/hooks/warm-health': typeof HooksWarmHealthRoute
@@ -1993,6 +2001,7 @@ export interface FileRoutesById {
   '/hooks/voice-automation-drain': typeof HooksVoiceAutomationDrainRoute
   '/hooks/voice-call-drain': typeof HooksVoiceCallDrainRoute
   '/hooks/voice-outbound-dispatch': typeof HooksVoiceOutboundDispatchRoute
+  '/hooks/voice-stack-drain': typeof HooksVoiceStackDrainRoute
   '/hooks/voice-studio-deploy': typeof HooksVoiceStudioDeployRoute
   '/hooks/voice-studio-plan': typeof HooksVoiceStudioPlanRoute
   '/hooks/warm-health': typeof HooksWarmHealthRoute
@@ -2222,6 +2231,7 @@ export interface FileRouteTypes {
     | '/hooks/voice-automation-drain'
     | '/hooks/voice-call-drain'
     | '/hooks/voice-outbound-dispatch'
+    | '/hooks/voice-stack-drain'
     | '/hooks/voice-studio-deploy'
     | '/hooks/voice-studio-plan'
     | '/hooks/warm-health'
@@ -2447,6 +2457,7 @@ export interface FileRouteTypes {
     | '/hooks/voice-automation-drain'
     | '/hooks/voice-call-drain'
     | '/hooks/voice-outbound-dispatch'
+    | '/hooks/voice-stack-drain'
     | '/hooks/voice-studio-deploy'
     | '/hooks/voice-studio-plan'
     | '/hooks/warm-health'
@@ -2674,6 +2685,7 @@ export interface FileRouteTypes {
     | '/hooks/voice-automation-drain'
     | '/hooks/voice-call-drain'
     | '/hooks/voice-outbound-dispatch'
+    | '/hooks/voice-stack-drain'
     | '/hooks/voice-studio-deploy'
     | '/hooks/voice-studio-plan'
     | '/hooks/warm-health'
@@ -2899,6 +2911,7 @@ export interface RootRouteChildren {
   HooksVoiceAutomationDrainRoute: typeof HooksVoiceAutomationDrainRoute
   HooksVoiceCallDrainRoute: typeof HooksVoiceCallDrainRoute
   HooksVoiceOutboundDispatchRoute: typeof HooksVoiceOutboundDispatchRoute
+  HooksVoiceStackDrainRoute: typeof HooksVoiceStackDrainRoute
   HooksVoiceStudioDeployRoute: typeof HooksVoiceStudioDeployRoute
   HooksVoiceStudioPlanRoute: typeof HooksVoiceStudioPlanRoute
   HooksWarmHealthRoute: typeof HooksWarmHealthRoute
@@ -3484,6 +3497,13 @@ declare module '@tanstack/react-router' {
       path: '/hooks/voice-studio-deploy'
       fullPath: '/hooks/voice-studio-deploy'
       preLoaderRoute: typeof HooksVoiceStudioDeployRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/voice-stack-drain': {
+      id: '/hooks/voice-stack-drain'
+      path: '/hooks/voice-stack-drain'
+      fullPath: '/hooks/voice-stack-drain'
+      preLoaderRoute: typeof HooksVoiceStackDrainRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/hooks/voice-outbound-dispatch': {
@@ -4818,6 +4838,7 @@ const rootRouteChildren: RootRouteChildren = {
   HooksVoiceAutomationDrainRoute: HooksVoiceAutomationDrainRoute,
   HooksVoiceCallDrainRoute: HooksVoiceCallDrainRoute,
   HooksVoiceOutboundDispatchRoute: HooksVoiceOutboundDispatchRoute,
+  HooksVoiceStackDrainRoute: HooksVoiceStackDrainRoute,
   HooksVoiceStudioDeployRoute: HooksVoiceStudioDeployRoute,
   HooksVoiceStudioPlanRoute: HooksVoiceStudioPlanRoute,
   HooksWarmHealthRoute: HooksWarmHealthRoute,

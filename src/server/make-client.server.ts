@@ -325,3 +325,287 @@ export async function verifyConnection(zone: MakeZone, connectionId: number): Pr
   })) as { verified?: boolean };
   return json?.verified === true;
 }
+
+// ---------------------------------------------------------------------------
+// Building a tenant's stack (`voice-stack.server.ts`)
+//
+// Every create below answers with the new object's id and nothing else the
+// caller did not ask for. The stack's ledger records each id the moment it
+// exists, so a tick that runs out of time never creates the same object twice.
+
+/** A hook as Make reports it. The URL is not a secret: it is what Vapi calls. */
+export type MakeHook = { id: number; url: string; name: string | null; scenarioId: number | null };
+
+export async function getHook(zone: MakeZone, hookId: number): Promise<MakeHook | null> {
+  try {
+    const json = (await makeFetch(zone, "hook.get", `/hooks/${hookId}`)) as {
+      hook?: { id?: number; url?: string; name?: string; scenarioId?: number | null };
+    };
+    const h = json?.hook;
+    if (!h || typeof h.id !== "number" || typeof h.url !== "string") return null;
+    return {
+      id: h.id,
+      url: h.url,
+      name: h.name ?? null,
+      scenarioId: typeof h.scenarioId === "number" ? h.scenarioId : null,
+    };
+  } catch (e) {
+    if (e instanceof MakeApiError && e.status === 404) return null;
+    throw e;
+  }
+}
+
+export async function createWebhook(
+  zone: MakeZone,
+  input: { teamId: number; name: string },
+): Promise<MakeHook> {
+  const json = (await makeFetch(zone, "hook.create", "/hooks", {
+    method: "POST",
+    body: {
+      name: input.name,
+      teamId: input.teamId,
+      typeName: "gateway-webhook",
+      method: false,
+      header: false,
+      stringify: false,
+    },
+  })) as { hook?: { id?: number; url?: string; name?: string } };
+  const h = json?.hook;
+  if (!h || typeof h.id !== "number" || typeof h.url !== "string")
+    throw new MakeApiError("hook.create", 200, "incomplete_answer");
+  return { id: h.id, url: h.url, name: h.name ?? input.name, scenarioId: null };
+}
+
+export async function createScenarioFolder(
+  zone: MakeZone,
+  input: { teamId: number; name: string },
+): Promise<number> {
+  const json = (await makeFetch(zone, "folder.create", "/scenarios-folders", {
+    method: "POST",
+    body: { name: input.name, teamId: input.teamId },
+  })) as { scenarioFolder?: { id?: number } };
+  const id = json?.scenarioFolder?.id;
+  if (typeof id !== "number") throw new MakeApiError("folder.create", 200, "incomplete_answer");
+  return id;
+}
+
+/** A data store's own facts. Never its records. */
+export type MakeDataStore = {
+  id: number;
+  name: string | null;
+  datastructureId: number | null;
+  teamId: number | null;
+  maxSizeMB: number | null;
+};
+
+export async function getDataStore(
+  zone: MakeZone,
+  dataStoreId: number,
+): Promise<MakeDataStore | null> {
+  try {
+    const json = (await makeFetch(zone, "datastore.get", `/data-stores/${dataStoreId}`)) as {
+      dataStore?: {
+        id?: number;
+        name?: string;
+        datastructureId?: number;
+        teamId?: number;
+        maxSize?: number;
+      };
+    };
+    const d = json?.dataStore;
+    if (!d || typeof d.id !== "number") return null;
+    return {
+      id: d.id,
+      name: d.name ?? null,
+      datastructureId: typeof d.datastructureId === "number" ? d.datastructureId : null,
+      teamId: typeof d.teamId === "number" ? d.teamId : null,
+      // Make reports bytes; stores are sized in MB.
+      maxSizeMB:
+        typeof d.maxSize === "number" ? Math.max(1, Math.round(d.maxSize / 1048576)) : null,
+    };
+  } catch (e) {
+    if (e instanceof MakeApiError && e.status === 404) return null;
+    throw e;
+  }
+}
+
+export async function createDataStore(
+  zone: MakeZone,
+  input: { teamId: number; name: string; datastructureId: number; maxSizeMB: number },
+): Promise<number> {
+  const json = (await makeFetch(zone, "datastore.create", "/data-stores", {
+    method: "POST",
+    body: {
+      name: input.name,
+      teamId: input.teamId,
+      datastructureId: input.datastructureId,
+      maxSizeMB: input.maxSizeMB,
+    },
+  })) as { dataStore?: { id?: number } };
+  const id = json?.dataStore?.id;
+  if (typeof id !== "number") throw new MakeApiError("datastore.create", 200, "incomplete_answer");
+  return id;
+}
+
+/**
+ * Every record of a store that holds NO secret — a code library. Refused by
+ * name for a store the caller marked as carrying one: the CFG record's
+ * endpoint answers with the whole record, secret included, and only
+ * `readManagedCfg` / `readCfgFields` may touch it.
+ */
+export async function listRecordsOfPlainStore(
+  zone: MakeZone,
+  dataStoreId: number,
+  opts: { maxRecords?: number } = {},
+): Promise<{ key: string; data: Record<string, unknown> }[]> {
+  const max = Math.max(1, Math.min(opts.maxRecords ?? 500, 2000));
+  const out: { key: string; data: Record<string, unknown> }[] = [];
+  const pageSize = 100;
+  for (let offset = 0; offset < max; offset += pageSize) {
+    const json = (await makeFetch(zone, "records.list", `/data-stores/${dataStoreId}/data`, {
+      query: { "pg[limit]": String(pageSize), "pg[offset]": String(offset) },
+    })) as { records?: { key?: string; data?: unknown }[] };
+    const records = json?.records ?? [];
+    for (const r of records) {
+      if (typeof r.key === "string" && r.data && typeof r.data === "object")
+        out.push({ key: r.key, data: r.data as Record<string, unknown> });
+    }
+    if (records.length < pageSize) return out;
+  }
+  if (out.length >= max) throw new MakeApiError("records.list", 200, "too_many_records");
+  return out;
+}
+
+/** Create or replace one record. The echoed record is discarded unread. */
+export async function putRecord(
+  zone: MakeZone,
+  dataStoreId: number,
+  key: string,
+  data: Record<string, unknown>,
+): Promise<void> {
+  await makeFetch(
+    zone,
+    "record.put",
+    `/data-stores/${dataStoreId}/data/${encodeURIComponent(key)}`,
+    {
+      method: "PUT",
+      body: data,
+    },
+  );
+}
+
+/**
+ * Named CFG fields, projected at the read. A field the stack keeps secret is
+ * refused before the request is made, so it cannot be asked for by mistake.
+ */
+export async function readCfgFields(
+  zone: MakeZone,
+  dataStoreId: number,
+  key: string,
+  fields: readonly string[],
+  secretFields: readonly string[],
+): Promise<Record<string, unknown> | null> {
+  const asked = fields.filter((f) => secretFields.includes(f));
+  if (asked.length > 0)
+    throw new MakeApiError("cfg.read_fields", 0, `secret_field:${asked.join(",")}`);
+  const pageSize = 100;
+  for (let offset = 0; offset < 1000; offset += pageSize) {
+    const json = (await makeFetch(zone, "cfg.read_fields", `/data-stores/${dataStoreId}/data`, {
+      query: { "pg[limit]": String(pageSize), "pg[offset]": String(offset) },
+    })) as { records?: { key?: string; data?: unknown }[] };
+    const records = json?.records ?? [];
+    const hit = records.find((r) => r.key === key);
+    if (hit) {
+      const data = (hit.data && typeof hit.data === "object" ? hit.data : {}) as Record<
+        string,
+        unknown
+      >;
+      // Projected HERE, as readManagedCfg does: nothing else leaves this line.
+      const out: Record<string, unknown> = {};
+      for (const f of fields) if (f in data) out[f] = data[f];
+      return out;
+    }
+    if (records.length < pageSize) return null;
+  }
+  return null;
+}
+
+/** The scenario's own facts the stack cloner reads, with its blueprint. */
+export type MakeScenarioReading = {
+  id: number;
+  name: string | null;
+  teamId: number | null;
+  folderId: number | null;
+  hookId: number | null;
+  isActive: boolean;
+  isInvalid: boolean;
+  scheduling: Record<string, unknown> | null;
+  blueprint: Blueprint;
+};
+
+export async function getScenarioWithBlueprint(
+  zone: MakeZone,
+  scenarioId: number,
+): Promise<MakeScenarioReading | null> {
+  let json: { scenario?: Record<string, unknown> };
+  try {
+    json = (await makeFetch(zone, "scenario.get", `/scenarios/${scenarioId}`)) as typeof json;
+  } catch (e) {
+    if (e instanceof MakeApiError && e.status === 404) return null;
+    throw e;
+  }
+  const s = json?.scenario;
+  if (!s || typeof s.id !== "number") return null;
+  const blueprint = await getScenarioBlueprint(zone, scenarioId);
+  return {
+    id: s.id,
+    name: typeof s.name === "string" ? s.name : null,
+    teamId: typeof s.teamId === "number" ? s.teamId : null,
+    folderId: typeof s.folderId === "number" ? s.folderId : null,
+    hookId: typeof s.hookId === "number" ? s.hookId : null,
+    isActive: !!s.isActive,
+    isInvalid: !!s.isinvalid,
+    scheduling:
+      s.scheduling && typeof s.scheduling === "object"
+        ? (s.scheduling as Record<string, unknown>)
+        : null,
+    blueprint,
+  };
+}
+
+/** Create a scenario, inactive, in a folder. Answers its id and validity. */
+export async function createScenario(
+  zone: MakeZone,
+  input: {
+    teamId: number;
+    folderId: number | null;
+    blueprint: Blueprint;
+    scheduling: Record<string, unknown> | null;
+  },
+): Promise<{ id: number; isInvalid: boolean }> {
+  const json = (await makeFetch(zone, "scenario.create", "/scenarios", {
+    method: "POST",
+    query: { confirmed: "true" },
+    body: {
+      teamId: input.teamId,
+      ...(input.folderId ? { folderId: input.folderId } : {}),
+      blueprint: JSON.stringify(input.blueprint),
+      scheduling: JSON.stringify(input.scheduling ?? { type: "immediately" }),
+    },
+  })) as { scenario?: { id?: number; isinvalid?: boolean } };
+  const id = json?.scenario?.id;
+  if (typeof id !== "number") throw new MakeApiError("scenario.create", 200, "incomplete_answer");
+  return { id, isInvalid: !!json?.scenario?.isinvalid };
+}
+
+/** Start (activate) a scenario, then read back that it is active. */
+export async function startScenario(zone: MakeZone, scenarioId: number): Promise<ScenarioState> {
+  await makeFetch(zone, "scenario.start", `/scenarios/${scenarioId}/start`, { method: "POST" });
+  return getScenarioState(zone, scenarioId);
+}
+
+/** Stop (deactivate) a scenario. Never deletes it: a parked stack can be resumed. */
+export async function stopScenario(zone: MakeZone, scenarioId: number): Promise<ScenarioState> {
+  await makeFetch(zone, "scenario.stop", `/scenarios/${scenarioId}/stop`, { method: "POST" });
+  return getScenarioState(zone, scenarioId);
+}

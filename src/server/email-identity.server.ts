@@ -385,6 +385,62 @@ async function syncIdentityDns(
 }
 
 /**
+ * Install further Resend records for a clone's sending domain — the
+ * RECEIVING MX record a clone's Vapi custody turns on — through the same zone
+ * resolution, plan and Cloudflare writer the sending records use, so there is
+ * one DNS path rather than two. Names are made absolute against the sending
+ * domain first, exactly as the sending records are.
+ *
+ * `via` is `cloudflare` when every record is in place, `manual` when they fall
+ * outside any zone this platform may write (determined), and null when this
+ * attempt settled nothing and should be retried.
+ */
+export async function installSendingDomainRecords(
+  supabase: Db,
+  cloneId: string,
+  sendingDomain: string,
+  records: ResendDnsRecord[],
+): Promise<{ via: "cloudflare" | "manual" | null; detail: string; records: ResendDnsRecord[] }> {
+  const absolute = withAbsoluteRecordNames(records, sendingDomain);
+  if (absolute.length === 0)
+    return { via: null, detail: "no records to install", records: absolute };
+  const [clone, fleet] = await Promise.all([
+    readCloneHostFacts(supabase, cloneId),
+    readFleetZone(supabase),
+  ]);
+  const zone = resolveEmailDnsZone({
+    cloneCloudflareEnabled: clone.cloudflare_enabled,
+    cloneZoneId: clone.cloudflare_zone_id,
+    fleetZoneId: fleet?.cloudflare_zone_id ?? null,
+    fleetZoneName: fleet?.cloudflare_zone_name ?? null,
+  });
+  if (!zone)
+    return { via: "manual", detail: "no DNS zone this platform may write", records: absolute };
+  try {
+    let zoneName = zone.zoneName;
+    if (!zoneName) {
+      const { cloudflareApi } = await import("./cloudflare/client");
+      zoneName = (await cloudflareApi.getZone(zone.zoneId)).name;
+    }
+    const plan = planDnsInstallation(absolute, zoneName);
+    if (plan.manual.length > 0)
+      return {
+        via: "manual",
+        detail: `${plan.manual.length} record(s) outside zone ${zoneName}`,
+        records: absolute,
+      };
+    const res = await syncDnsViaCloudflare(zone.zoneId, plan.auto);
+    return { via: res.installed ? "cloudflare" : null, detail: res.detail, records: absolute };
+  } catch (e) {
+    return {
+      via: null,
+      detail: `Cloudflare DNS installation failed: ${msg(e)}`,
+      records: absolute,
+    };
+  }
+}
+
+/**
  * Write `RESEND_FROM_EMAIL` to a clone that already holds its key.
  *
  * The repair half of the pairing. Every identity provisioned before the key

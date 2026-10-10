@@ -12,8 +12,10 @@
  * ## Which key this is
  *
  * This is the platform's MASTER key (full access on the platform's Resend
- * team). It is used for exactly two kinds of call: managing domains, and
- * minting per-clone keys. It is never written to any clone. What a clone
+ * team). It is used for three kinds of call: managing domains, minting
+ * per-clone keys, and reading the mail a clone's domain RECEIVES — the inbox
+ * behind each clone's Vapi login (`clone-vapi-custody.server.ts`). It is never
+ * written to any clone. What a clone
  * receives is the OUTPUT of `createApiKey` — a `sending_access` key scoped by
  * `domain_id` to that clone's own verified domain, which cannot list domains,
  * mint keys, or send as anybody else.
@@ -115,6 +117,25 @@ export type ResendDomain = {
 
 export type ResendApiKeySummary = { id: string; name: string; created_at: string };
 
+/**
+ * One received email as the list endpoint answers it (`GET /emails/receiving`).
+ * Metadata only: the body is a separate read, and only for mail Mission Control
+ * has a reason to open (`getReceivedEmail`).
+ */
+export type ResendReceivedEmail = {
+  id: string;
+  to: string[] | string | null;
+  from: string | null;
+  subject: string | null;
+  created_at: string;
+};
+
+/** One received email with its content (`GET /emails/receiving/{id}`). */
+export type ResendReceivedEmailContent = ResendReceivedEmail & {
+  text?: string | null;
+  html?: string | null;
+};
+
 /** One page of a Resend list endpoint. `has_more` is absent on an unpaginated answer. */
 export type ResendPage<T> = { data: T[]; has_more?: boolean };
 
@@ -179,6 +200,50 @@ export const resendApi = {
     resend<{ object: string; id: string }>(`/domains/${id}/verify`, { method: "POST" }),
 
   deleteDomain: (id: string) => resend<void>(`/domains/${id}`, { method: "DELETE" }),
+
+  /**
+   * Turn a domain's sending or receiving on or off. Omitted capabilities keep
+   * their value, and Resend refuses a body that would leave neither enabled.
+   * Receiving needs an MX record at the domain's root, which Resend lists
+   * among the domain's records once receiving is on (`getDomain`).
+   */
+  setDomainCapabilities: (
+    id: string,
+    capabilities: { sending?: "enabled" | "disabled"; receiving?: "enabled" | "disabled" },
+  ) =>
+    resend<{ object: string; id: string }>(`/domains/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ capabilities }),
+    }),
+
+  /**
+   * Received mail on the platform team, newest first, walked to the end or to
+   * `maxPages` pages. `complete: false` means the walk stopped early and the
+   * absence of a message is unknown, never "none arrived".
+   */
+  listReceivedEmails: async (opts: { maxPages?: number } = {}) => {
+    const items: ResendReceivedEmail[] = [];
+    let after: string | null = null;
+    const pages = Math.max(1, Math.min(opts.maxPages ?? 5, MAX_LIST_PAGES));
+    for (let page = 0; page < pages; page++) {
+      const q = new URLSearchParams({ limit: "100" });
+      if (after) q.set("after", after);
+      const res = await resend<ResendPage<ResendReceivedEmail>>(
+        `/emails/receiving?${q.toString()}`,
+      );
+      const data = Array.isArray(res?.data) ? res.data : [];
+      items.push(...data);
+      if (res?.has_more !== true) return { items, complete: true };
+      const last = data[data.length - 1]?.id;
+      if (!last || last === after) return { items, complete: false };
+      after = last;
+    }
+    return { items, complete: false };
+  },
+
+  /** One received email with its text and HTML. */
+  getReceivedEmail: (id: string) =>
+    resend<ResendReceivedEmailContent>(`/emails/receiving/${encodeURIComponent(id)}`),
 
   /**
    * Mint an API key. With `permission: "sending_access"` and a `domain_id`,

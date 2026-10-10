@@ -4074,6 +4074,332 @@ export type Database = {
           },
         ]
       }
+      clone_ghl_voice_credentials: {
+        Row: {
+          api_key_enc: string
+          clone_id: string
+          created_at: string
+          id: string
+          key_fingerprint: string
+          last_error: string | null
+          location_id: string
+          location_name: string | null
+          set_by: string | null
+          updated_at: string
+          verified_at: string | null
+        }
+        Insert: {
+          api_key_enc: string
+          clone_id: string
+          created_at?: string
+          id?: string
+          key_fingerprint: string
+          last_error?: string | null
+          location_id: string
+          location_name?: string | null
+          set_by?: string | null
+          updated_at?: string
+          verified_at?: string | null
+        }
+        Update: {
+          api_key_enc?: string
+          clone_id?: string
+          created_at?: string
+          id?: string
+          key_fingerprint?: string
+          last_error?: string | null
+          location_id?: string
+          location_name?: string | null
+          set_by?: string | null
+          updated_at?: string
+          verified_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clone_ghl_voice_credentials_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: true
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      clone_vapi_custody: {
+        Row: {
+          clone_id: string
+          created_at: string
+          id: string
+          key_fingerprint: string | null
+          key_set_by: string | null
+          key_verified_at: string | null
+          last_error: string | null
+          login_email: string | null
+          password_enc: string | null
+          password_set_at: string | null
+          private_key_enc: string | null
+          public_key: string | null
+          receiving_enabled_at: string | null
+          receiving_records: Json
+          receiving_records_installed_via: string | null
+          resend_domain_id: string | null
+          sending_domain: string | null
+          signed_up_at: string | null
+          signed_up_by: string | null
+          suspended_at: string | null
+          suspended_reason: string | null
+          updated_at: string
+          vapi_org_id: string | null
+          vapi_org_name: string | null
+        }
+        Insert: {
+          clone_id: string
+          created_at?: string
+          id?: string
+          key_fingerprint?: string | null
+          key_set_by?: string | null
+          key_verified_at?: string | null
+          last_error?: string | null
+          login_email?: string | null
+          password_enc?: string | null
+          password_set_at?: string | null
+          private_key_enc?: string | null
+          public_key?: string | null
+          receiving_enabled_at?: string | null
+          receiving_records?: Json
+          receiving_records_installed_via?: string | null
+          resend_domain_id?: string | null
+          sending_domain?: string | null
+          signed_up_at?: string | null
+          signed_up_by?: string | null
+          suspended_at?: string | null
+          suspended_reason?: string | null
+          updated_at?: string
+          vapi_org_id?: string | null
+          vapi_org_name?: string | null
+        }
+        Update: {
+          clone_id?: string
+          created_at?: string
+          id?: string
+          key_fingerprint?: string | null
+          key_set_by?: string | null
+          key_verified_at?: string | null
+          last_error?: string | null
+          login_email?: string | null
+          password_enc?: string | null
+          password_set_at?: string | null
+          private_key_enc?: string | null
+          public_key?: string | null
+          receiving_enabled_at?: string | null
+          receiving_records?: Json
+          receiving_records_installed_via?: string | null
+          resend_domain_id?: string | null
+          sending_domain?: string | null
+          signed_up_at?: string | null
+          signed_up_by?: string | null
+          suspended_at?: string | null
+          suspended_reason?: string | null
+          updated_at?: string
+          vapi_org_id?: string | null
+          vapi_org_name?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clone_vapi_custody_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: true
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      clone_voice_stack_ledger: {
+        Row: {
+          attempts: number
+          created_at: string
+          detail: string | null
+          external_id: string | null
+          external_ref: string | null
+          id: string
+          next_attempt_at: string | null
+          payload_sha: string | null
+          secret_enc: string | null
+          stack_id: string
+          status: string
+          step_key: string
+          updated_at: string
+        }
+        Insert: {
+          attempts?: number
+          created_at?: string
+          detail?: string | null
+          external_id?: string | null
+          external_ref?: string | null
+          id?: string
+          next_attempt_at?: string | null
+          payload_sha?: string | null
+          secret_enc?: string | null
+          stack_id: string
+          status: string
+          step_key: string
+          updated_at?: string
+        }
+        Update: {
+          attempts?: number
+          created_at?: string
+          detail?: string | null
+          external_id?: string | null
+          external_ref?: string | null
+          id?: string
+          next_attempt_at?: string | null
+          payload_sha?: string | null
+          secret_enc?: string | null
+          stack_id?: string
+          status?: string
+          step_key?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clone_voice_stack_ledger_stack_id_fkey"
+            columns: ["stack_id"]
+            isOneToOne: false
+            referencedRelation: "clone_voice_stacks"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      clone_voice_stacks: {
+        Row: {
+          blocks: Json
+          call_log_secret_enc: string | null
+          call_log_url: string | null
+          clone_id: string
+          clone_label: string | null
+          created_at: string
+          crm_mode: string
+          discovery: Json | null
+          id: string
+          identity_replacements: Json
+          last_error: string | null
+          lease_until: string | null
+          live_at: string | null
+          make_folder_id: number | null
+          make_team_id: number | null
+          make_zone: string | null
+          operator_notified_at: string | null
+          parked_at: string | null
+          parked_reason: string | null
+          status: string
+          steps_done: number
+          steps_total: number
+          template_version: number | null
+          updated_at: string
+          vapi_org_id: string | null
+          warnings: Json
+        }
+        Insert: {
+          blocks?: Json
+          call_log_secret_enc?: string | null
+          call_log_url?: string | null
+          clone_id: string
+          clone_label?: string | null
+          created_at?: string
+          crm_mode: string
+          discovery?: Json | null
+          id?: string
+          identity_replacements?: Json
+          last_error?: string | null
+          lease_until?: string | null
+          live_at?: string | null
+          make_folder_id?: number | null
+          make_team_id?: number | null
+          make_zone?: string | null
+          operator_notified_at?: string | null
+          parked_at?: string | null
+          parked_reason?: string | null
+          status?: string
+          steps_done?: number
+          steps_total?: number
+          template_version?: number | null
+          updated_at?: string
+          vapi_org_id?: string | null
+          warnings?: Json
+        }
+        Update: {
+          blocks?: Json
+          call_log_secret_enc?: string | null
+          call_log_url?: string | null
+          clone_id?: string
+          clone_label?: string | null
+          created_at?: string
+          crm_mode?: string
+          discovery?: Json | null
+          id?: string
+          identity_replacements?: Json
+          last_error?: string | null
+          lease_until?: string | null
+          live_at?: string | null
+          make_folder_id?: number | null
+          make_team_id?: number | null
+          make_zone?: string | null
+          operator_notified_at?: string | null
+          parked_at?: string | null
+          parked_reason?: string | null
+          status?: string
+          steps_done?: number
+          steps_total?: number
+          template_version?: number | null
+          updated_at?: string
+          vapi_org_id?: string | null
+          warnings?: Json
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clone_voice_stacks_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      voice_stack_templates: {
+        Row: {
+          created_at: string
+          crm_mode: string
+          disabled_reason: string | null
+          enabled: boolean
+          manifest: Json
+          notes: string | null
+          updated_at: string
+          updated_by: string | null
+          version: number
+        }
+        Insert: {
+          created_at?: string
+          crm_mode: string
+          disabled_reason?: string | null
+          enabled?: boolean
+          manifest: Json
+          notes?: string | null
+          updated_at?: string
+          updated_by?: string | null
+          version?: number
+        }
+        Update: {
+          created_at?: string
+          crm_mode?: string
+          disabled_reason?: string | null
+          enabled?: boolean
+          manifest?: Json
+          notes?: string | null
+          updated_at?: string
+          updated_by?: string | null
+          version?: number
+        }
+        Relationships: []
+      }
       clone_voice_automation: {
         Row: {
           adapter_scenario_id: number

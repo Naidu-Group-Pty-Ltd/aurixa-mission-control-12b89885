@@ -1,0 +1,626 @@
+{
+ "name": "NPC CI - Calendar Adapter (Outlook / Google / Internal)",
+ "flow": [
+  {
+   "id": 1,
+   "module": "gateway:CustomWebHook",
+   "version": 1,
+   "parameters": {
+    "hook": 2911007,
+    "maxResults": 1
+   },
+   "mapper": {},
+   "metadata": {
+    "designer": {
+     "x": 0,
+     "y": 0
+    }
+   }
+  },
+  {
+   "id": 2,
+   "module": "datastore:GetRecord",
+   "version": 1,
+   "parameters": {
+    "datastore": 168061
+   },
+   "mapper": {
+    "key": "default",
+    "returnWrapped": false
+   },
+   "metadata": {
+    "designer": {
+     "x": 300,
+     "y": 0
+    }
+   }
+  },
+  {
+   "id": 3,
+   "module": "code:ExecuteCode",
+   "version": 1,
+   "parameters": {},
+   "mapper": {
+    "language": "javascript",
+    "inputFormat": "string",
+    "codeStringJavascript": "function J(v) { if (v === null || v === undefined || v === '') return null; if (typeof v === 'object') return v; try { return JSON.parse(String(v)); } catch (e) { return null; } }\nfunction S(v) { if (v === null || v === undefined) return ''; if (typeof v === 'object') return ''; const s = String(v).trim(); if (!s || s.startsWith('{{') || s === 'null' || s === 'undefined') return ''; return s; }\nfunction parseTime(v) {\n  if (v === null || v === undefined || v === '') return NaN;\n  if (typeof v === 'number') return v < 1e11 ? v * 1000 : v;\n  const s = String(v).trim();\n  if (/^\\d{10,13}$/.test(s)) { const n = Number(s); return n < 1e11 ? n * 1000 : n; }\n  const t = Date.parse(s); return Number.isFinite(t) ? t : NaN;\n}\nconst req = J(input.raw) || {};\nconst fail = (status, error) => ({ route: 'error', status: String(status), body: JSON.stringify({ ok: false, error }) });\nif (!S(input.secret) || S(req.secret) !== S(input.secret)) return fail(401, 'unauthorized');\nconst op = S(req.op).toLowerCase();\nif (!['busy', 'create', 'delete', 'find'].includes(op)) return fail(400, 'unknown_op');\nconst provider = (S(input.provider) || 'internal').toLowerCase();\nconst now = Date.now();\nlet ws = parseTime(req.window_start_iso || req.window_start_ms);\nlet we = parseTime(req.window_end_iso || req.window_end_ms);\nif (op === 'find') { if (!Number.isFinite(ws)) ws = now - 86400000; if (!Number.isFinite(we)) we = now + 120 * 86400000; }\nif (op === 'busy' && (!Number.isFinite(ws) || !Number.isFinite(we) || we <= ws)) return fail(400, 'invalid_window');\nconst ev = req.event || {};\nconst evStart = parseTime(ev.start_iso), evEnd = parseTime(ev.end_iso);\nif (op === 'create' && (!Number.isFinite(evStart) || !Number.isFinite(evEnd) || evEnd <= evStart)) return fail(400, 'invalid_event_time');\nconst eventId = S(req.event_id);\nif (op === 'delete' && !eventId) return fail(400, 'missing_event_id');\nconst iso = ms => new Date(ms).toISOString();\nconst graphDt = ms => new Date(ms).toISOString().slice(0, 19);\nconst enc = encodeURIComponent;\nconst out = { route: provider, op, provider, method: 'GET', url: '', body_json: '', window_start_ms: ws, window_end_ms: we, query: S(req.query), event_id: eventId, transaction_id: S(ev.transaction_id), req_json: JSON.stringify(req) };\nconst attendees = Array.isArray(ev.attendees) ? ev.attendees.filter(a => a && S(a.email)) : [];\nif (provider === 'outlook') {\n  const base = (S(input.outlook_base) || '/v1.0/me/calendar').replace(/\\/+$/, '');\n  if (op === 'busy' || op === 'find') {\n    out.url = base + '/calendarView?startDateTime=' + enc(iso(ws)) + '&endDateTime=' + enc(iso(we)) + '&$top=250&$select=' + enc(op === 'busy' ? 'subject,start,end,showAs,isCancelled' : 'subject,start,end,bodyPreview,showAs,isCancelled,location');\n  } else if (op === 'create') {\n    out.method = 'POST'; out.url = base + '/events';\n    const b = { subject: S(ev.subject) || 'Appointment', body: { contentType: 'HTML', content: String(ev.body_html || '') }, start: { dateTime: graphDt(evStart), timeZone: 'UTC' }, end: { dateTime: graphDt(evEnd), timeZone: 'UTC' }, showAs: 'busy', isReminderOn: true, reminderMinutesBeforeStart: 15 };\n    if (S(ev.location)) b.location = { displayName: S(ev.location) };\n    if (S(ev.transaction_id)) b.transactionId = S(ev.transaction_id);\n    if (attendees.length) b.attendees = attendees.map(a => ({ emailAddress: { address: S(a.email), name: S(a.name) || S(a.email) }, type: 'required' }));\n    out.body_json = JSON.stringify(b);\n  } else if (op === 'delete') {\n    out.method = 'DELETE'; out.url = base + '/events/' + enc(eventId);\n  }\n} else if (provider === 'google') {\n  const cal = S(input.google_cal) || 'primary';\n  const ce = enc(cal);\n  if (op === 'busy') {\n    out.method = 'POST'; out.url = '/v3/freeBusy';\n    out.body_json = JSON.stringify({ timeMin: iso(ws), timeMax: iso(we), timeZone: 'UTC', items: [{ id: cal }] });\n  } else if (op === 'find') {\n    out.url = '/v3/calendars/' + ce + '/events?singleEvents=true&orderBy=startTime&maxResults=100&timeMin=' + enc(iso(ws)) + '&timeMax=' + enc(iso(we));\n  } else if (op === 'create') {\n    out.method = 'POST'; out.url = '/v3/calendars/' + ce + '/events?sendUpdates=' + (attendees.length ? 'all' : 'none');\n    const b = { summary: S(ev.subject) || 'Appointment', description: String(ev.body_html || ''), start: { dateTime: iso(evStart), timeZone: 'UTC' }, end: { dateTime: iso(evEnd), timeZone: 'UTC' }, reminders: { useDefault: true } };\n    const gid = S(ev.transaction_id).toLowerCase();\n    if (/^[a-v0-9]{5,1024}$/.test(gid)) b.id = gid;\n    if (S(ev.location)) b.location = S(ev.location);\n    if (attendees.length) b.attendees = attendees.map(a => ({ email: S(a.email), displayName: S(a.name) || undefined }));\n    out.body_json = JSON.stringify(b);\n  } else if (op === 'delete') {\n    out.method = 'DELETE'; out.url = '/v3/calendars/' + ce + '/events/' + enc(eventId) + '?sendUpdates=none';\n  }\n} else {\n  out.route = op === 'busy' ? 'internal_busy' : 'internal_other';\n  out.provider = 'internal';\n}\nout.plan_json = JSON.stringify(out);\nreturn out;\n",
+    "input": [
+     {
+      "name": "raw",
+      "value": "{{1.value}}"
+     },
+     {
+      "name": "provider",
+      "value": "{{2.provider}}"
+     },
+     {
+      "name": "secret",
+      "value": "{{2.adapter_secret}}"
+     },
+     {
+      "name": "outlook_base",
+      "value": "{{2.outlook_calendar_base}}"
+     },
+     {
+      "name": "google_cal",
+      "value": "{{2.google_calendar_id}}"
+     }
+    ]
+   },
+   "metadata": {
+    "designer": {
+     "x": 600,
+     "y": 0
+    }
+   }
+  },
+  {
+   "id": 4,
+   "module": "builtin:BasicRouter",
+   "version": 1,
+   "mapper": null,
+   "metadata": {
+    "designer": {
+     "x": 900,
+     "y": 0
+    }
+   },
+   "routes": [
+    {
+     "flow": [
+      {
+       "id": 5,
+       "module": "gateway:WebhookRespond",
+       "version": 1,
+       "parameters": {},
+       "mapper": {
+        "body": "{{3.result.body}}",
+        "status": "200",
+        "headers": [
+         {
+          "key": "Content-Type",
+          "value": "application/json"
+         }
+        ]
+       },
+       "metadata": {
+        "designer": {
+         "x": 1200,
+         "y": 0
+        }
+       },
+       "filter": {
+        "name": "route = error",
+        "conditions": [
+         [
+          {
+           "a": "{{3.result.route}}",
+           "o": "text:equal",
+           "b": "error"
+          }
+         ]
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "flow": [
+      {
+       "id": 6,
+       "module": "microsoft-calendar:makeApiCall",
+       "version": 2,
+       "parameters": {
+        "__IMTCONN__": 10496840
+       },
+       "mapper": {
+        "url": "{{3.result.url}}",
+        "method": "{{3.result.method}}",
+        "headers": [
+         {
+          "key": "Content-Type",
+          "value": "application/json"
+         },
+         {
+          "key": "Prefer",
+          "value": "outlook.timezone=\"UTC\""
+         }
+        ],
+        "qs": [],
+        "body": "{{3.result.body_json}}"
+       },
+       "metadata": {
+        "designer": {
+         "x": 1200,
+         "y": 300
+        }
+       },
+       "filter": {
+        "name": "route = outlook",
+        "conditions": [
+         [
+          {
+           "a": "{{3.result.route}}",
+           "o": "text:equal",
+           "b": "outlook"
+          }
+         ]
+        ]
+       },
+       "onerror": [
+        {
+         "id": 7,
+         "module": "gateway:WebhookRespond",
+         "version": 1,
+         "parameters": {},
+         "mapper": {
+          "body": "{\"ok\":false,\"error\":\"provider_call_failed\",\"provider\":\"outlook\",\"op\":\"{{3.result.op}}\"}",
+          "status": "200",
+          "headers": [
+           {
+            "key": "Content-Type",
+            "value": "application/json"
+           }
+          ]
+         },
+         "metadata": {
+          "designer": {
+           "x": 1200,
+           "y": 500
+          }
+         }
+        },
+        {
+         "id": 8,
+         "module": "builtin:Ignore",
+         "version": 1,
+         "parameters": {},
+         "mapper": {},
+         "metadata": {
+          "designer": {
+           "x": 1350,
+           "y": 500
+          }
+         }
+        }
+       ]
+      },
+      {
+       "id": 9,
+       "module": "code:ExecuteCode",
+       "version": 1,
+       "parameters": {},
+       "mapper": {
+        "language": "javascript",
+        "inputFormat": "string",
+        "codeStringJavascript": "function J(v) { if (v === null || v === undefined || v === '') return null; if (typeof v === 'object') return v; try { return JSON.parse(String(v)); } catch (e) { return null; } }\nfunction S(v) { if (v === null || v === undefined) return ''; if (typeof v === 'object') return ''; const s = String(v).trim(); if (!s || s.startsWith('{{') || s === 'null' || s === 'undefined') return ''; return s; }\nfunction num(v, d) { const n = Number(v); return Number.isFinite(n) ? n : d; }\nfunction parseTime(v) {\n  if (v === null || v === undefined || v === '') return NaN;\n  if (typeof v === 'number') return v < 1e11 ? v * 1000 : v;\n  const s = String(v).trim();\n  if (/^\\d{10,13}$/.test(s)) { const n = Number(s); return n < 1e11 ? n * 1000 : n; }\n  const t = Date.parse(s); return Number.isFinite(t) ? t : NaN;\n}\nconst plan = J(input.plan) || {};\nconst status = num(input.status, 0);\nlet body = input.body;\nif (typeof body === 'string') { const p = J(body); body = p === null ? body : p; }\nbody = body || {};\nconst op = plan.op, provider = plan.provider;\nconst res = { ok: false, op, provider, status };\nconst okStatus = status >= 200 && status < 300;\nconst msOf = (x, utc) => { if (!x) return NaN; if (typeof x === 'string') return parseTime(x); const dt = S(x.dateTime) || S(x.date); if (!dt) return NaN; if (/Z$|[+-]\\d\\d:\\d\\d$/.test(dt)) return parseTime(dt); return parseTime(dt + (utc ? 'Z' : '')); };\nconst errText = () => { const e = body && body.error; if (!e) return typeof body === 'string' ? body.slice(0, 300) : 'http_' + status; return (e.code || e.status || '') + ': ' + (e.message || JSON.stringify(e)).slice(0, 300); };\nif (op === 'busy') {\n  if (!okStatus) { res.error = errText(); }\n  else if (provider === 'outlook') {\n    res.ok = true;\n    res.busy = (body.value || []).filter(e => !e.isCancelled && String(e.showAs || 'busy').toLowerCase() !== 'free').map(e => ({ s: msOf(e.start, true), e: msOf(e.end, true) })).filter(b => Number.isFinite(b.s) && Number.isFinite(b.e));\n    if (body['@odata.nextLink']) res.truncated = true;\n  } else if (provider === 'google') {\n    const cals = body.calendars || {}; const key = Object.keys(cals)[0]; const c = key ? cals[key] : {};\n    if (c && c.errors && c.errors.length) { res.error = 'freebusy: ' + JSON.stringify(c.errors).slice(0, 300); }\n    else { res.ok = true; res.busy = ((c && c.busy) || []).map(b => ({ s: parseTime(b.start), e: parseTime(b.end) })).filter(b => Number.isFinite(b.s) && Number.isFinite(b.e)); }\n  }\n} else if (op === 'create') {\n  if (okStatus && body && body.id) { res.ok = true; res.event_id = body.id; res.web_link = body.webLink || body.htmlLink || ''; }\n  else if (provider === 'google' && status === 409 && plan.transaction_id) { res.ok = true; res.event_id = String(plan.transaction_id).toLowerCase(); res.duplicate = true; }\n  else { res.error = errText(); }\n} else if (op === 'delete') {\n  if (okStatus) { res.ok = true; res.deleted = true; }\n  else if (status === 404 || status === 410) { res.ok = true; res.deleted = false; res.already_gone = true; }\n  else { res.error = errText(); }\n} else if (op === 'find') {\n  if (!okStatus) { res.error = errText(); }\n  else {\n    const q = S(plan.query).toLowerCase();\n    const qDigits = q.replace(/\\D/g, '');\n    const tokens = q.split(/[^a-z0-9]+/).filter(t => t.length >= 2 && !/^\\d+$/.test(t));\n    let items = provider === 'outlook' ? (body.value || []).filter(e => !e.isCancelled).map(e => ({ id: e.id, subject: e.subject || '', start_ms: msOf(e.start, true), end_ms: msOf(e.end, true), text: (e.subject || '') + ' ' + (e.bodyPreview || '') + ' ' + ((e.location || {}).displayName || '') }))\n      : (body.items || []).filter(e => e.status !== 'cancelled').map(e => ({ id: e.id, subject: e.summary || '', start_ms: msOf(e.start, false), end_ms: msOf(e.end, false), text: (e.summary || '') + ' ' + (e.description || '') + ' ' + (e.location || '') }));\n    if (q) {\n      items = items.filter(it => { const t = it.text.toLowerCase(); const td = t.replace(/\\D/g, ''); const nameHit = tokens.length && tokens.every(tok => t.includes(tok)); const phoneHit = qDigits.length >= 8 && td.includes(qDigits.slice(-9)); return nameHit || phoneHit; });\n    }\n    res.ok = true;\n    res.events = items.filter(it => Number.isFinite(it.start_ms)).map(it => ({ id: it.id, subject: it.subject, start_ms: it.start_ms, end_ms: it.end_ms }));\n  }\n}\nreturn { body: JSON.stringify(res), ok: res.ok };\n",
+        "input": [
+         {
+          "name": "plan",
+          "value": "{{3.result.plan_json}}"
+         },
+         {
+          "name": "status",
+          "value": "{{6.statusCode}}"
+         },
+         {
+          "name": "body",
+          "value": "{{6.body}}"
+         },
+         {
+          "name": "google_cal",
+          "value": "{{2.google_calendar_id}}"
+         }
+        ]
+       },
+       "metadata": {
+        "designer": {
+         "x": 1500,
+         "y": 300
+        }
+       }
+      },
+      {
+       "id": 10,
+       "module": "gateway:WebhookRespond",
+       "version": 1,
+       "parameters": {},
+       "mapper": {
+        "body": "{{9.result.body}}",
+        "status": "200",
+        "headers": [
+         {
+          "key": "Content-Type",
+          "value": "application/json"
+         }
+        ]
+       },
+       "metadata": {
+        "designer": {
+         "x": 1800,
+         "y": 300
+        }
+       }
+      }
+     ]
+    },
+    {
+     "flow": [
+      {
+       "id": 11,
+       "module": "google-calendar:makeApiCall",
+       "version": 5,
+       "parameters": {
+        "__IMTCONN__": 10770538
+       },
+       "mapper": {
+        "url": "{{3.result.url}}",
+        "method": "{{3.result.method}}",
+        "headers": [
+         {
+          "key": "Content-Type",
+          "value": "application/json"
+         }
+        ],
+        "qs": [],
+        "body": "{{3.result.body_json}}"
+       },
+       "metadata": {
+        "designer": {
+         "x": 1200,
+         "y": 600
+        }
+       },
+       "filter": {
+        "name": "route = google",
+        "conditions": [
+         [
+          {
+           "a": "{{3.result.route}}",
+           "o": "text:equal",
+           "b": "google"
+          }
+         ]
+        ]
+       },
+       "onerror": [
+        {
+         "id": 12,
+         "module": "gateway:WebhookRespond",
+         "version": 1,
+         "parameters": {},
+         "mapper": {
+          "body": "{\"ok\":false,\"error\":\"provider_call_failed\",\"provider\":\"google\",\"op\":\"{{3.result.op}}\"}",
+          "status": "200",
+          "headers": [
+           {
+            "key": "Content-Type",
+            "value": "application/json"
+           }
+          ]
+         },
+         "metadata": {
+          "designer": {
+           "x": 1200,
+           "y": 800
+          }
+         }
+        },
+        {
+         "id": 13,
+         "module": "builtin:Ignore",
+         "version": 1,
+         "parameters": {},
+         "mapper": {},
+         "metadata": {
+          "designer": {
+           "x": 1350,
+           "y": 800
+          }
+         }
+        }
+       ]
+      },
+      {
+       "id": 14,
+       "module": "code:ExecuteCode",
+       "version": 1,
+       "parameters": {},
+       "mapper": {
+        "language": "javascript",
+        "inputFormat": "string",
+        "codeStringJavascript": "function J(v) { if (v === null || v === undefined || v === '') return null; if (typeof v === 'object') return v; try { return JSON.parse(String(v)); } catch (e) { return null; } }\nfunction S(v) { if (v === null || v === undefined) return ''; if (typeof v === 'object') return ''; const s = String(v).trim(); if (!s || s.startsWith('{{') || s === 'null' || s === 'undefined') return ''; return s; }\nfunction num(v, d) { const n = Number(v); return Number.isFinite(n) ? n : d; }\nfunction parseTime(v) {\n  if (v === null || v === undefined || v === '') return NaN;\n  if (typeof v === 'number') return v < 1e11 ? v * 1000 : v;\n  const s = String(v).trim();\n  if (/^\\d{10,13}$/.test(s)) { const n = Number(s); return n < 1e11 ? n * 1000 : n; }\n  const t = Date.parse(s); return Number.isFinite(t) ? t : NaN;\n}\nconst plan = J(input.plan) || {};\nconst status = num(input.status, 0);\nlet body = input.body;\nif (typeof body === 'string') { const p = J(body); body = p === null ? body : p; }\nbody = body || {};\nconst op = plan.op, provider = plan.provider;\nconst res = { ok: false, op, provider, status };\nconst okStatus = status >= 200 && status < 300;\nconst msOf = (x, utc) => { if (!x) return NaN; if (typeof x === 'string') return parseTime(x); const dt = S(x.dateTime) || S(x.date); if (!dt) return NaN; if (/Z$|[+-]\\d\\d:\\d\\d$/.test(dt)) return parseTime(dt); return parseTime(dt + (utc ? 'Z' : '')); };\nconst errText = () => { const e = body && body.error; if (!e) return typeof body === 'string' ? body.slice(0, 300) : 'http_' + status; return (e.code || e.status || '') + ': ' + (e.message || JSON.stringify(e)).slice(0, 300); };\nif (op === 'busy') {\n  if (!okStatus) { res.error = errText(); }\n  else if (provider === 'outlook') {\n    res.ok = true;\n    res.busy = (body.value || []).filter(e => !e.isCancelled && String(e.showAs || 'busy').toLowerCase() !== 'free').map(e => ({ s: msOf(e.start, true), e: msOf(e.end, true) })).filter(b => Number.isFinite(b.s) && Number.isFinite(b.e));\n    if (body['@odata.nextLink']) res.truncated = true;\n  } else if (provider === 'google') {\n    const cals = body.calendars || {}; const key = Object.keys(cals)[0]; const c = key ? cals[key] : {};\n    if (c && c.errors && c.errors.length) { res.error = 'freebusy: ' + JSON.stringify(c.errors).slice(0, 300); }\n    else { res.ok = true; res.busy = ((c && c.busy) || []).map(b => ({ s: parseTime(b.start), e: parseTime(b.end) })).filter(b => Number.isFinite(b.s) && Number.isFinite(b.e)); }\n  }\n} else if (op === 'create') {\n  if (okStatus && body && body.id) { res.ok = true; res.event_id = body.id; res.web_link = body.webLink || body.htmlLink || ''; }\n  else if (provider === 'google' && status === 409 && plan.transaction_id) { res.ok = true; res.event_id = String(plan.transaction_id).toLowerCase(); res.duplicate = true; }\n  else { res.error = errText(); }\n} else if (op === 'delete') {\n  if (okStatus) { res.ok = true; res.deleted = true; }\n  else if (status === 404 || status === 410) { res.ok = true; res.deleted = false; res.already_gone = true; }\n  else { res.error = errText(); }\n} else if (op === 'find') {\n  if (!okStatus) { res.error = errText(); }\n  else {\n    const q = S(plan.query).toLowerCase();\n    const qDigits = q.replace(/\\D/g, '');\n    const tokens = q.split(/[^a-z0-9]+/).filter(t => t.length >= 2 && !/^\\d+$/.test(t));\n    let items = provider === 'outlook' ? (body.value || []).filter(e => !e.isCancelled).map(e => ({ id: e.id, subject: e.subject || '', start_ms: msOf(e.start, true), end_ms: msOf(e.end, true), text: (e.subject || '') + ' ' + (e.bodyPreview || '') + ' ' + ((e.location || {}).displayName || '') }))\n      : (body.items || []).filter(e => e.status !== 'cancelled').map(e => ({ id: e.id, subject: e.summary || '', start_ms: msOf(e.start, false), end_ms: msOf(e.end, false), text: (e.summary || '') + ' ' + (e.description || '') + ' ' + (e.location || '') }));\n    if (q) {\n      items = items.filter(it => { const t = it.text.toLowerCase(); const td = t.replace(/\\D/g, ''); const nameHit = tokens.length && tokens.every(tok => t.includes(tok)); const phoneHit = qDigits.length >= 8 && td.includes(qDigits.slice(-9)); return nameHit || phoneHit; });\n    }\n    res.ok = true;\n    res.events = items.filter(it => Number.isFinite(it.start_ms)).map(it => ({ id: it.id, subject: it.subject, start_ms: it.start_ms, end_ms: it.end_ms }));\n  }\n}\nreturn { body: JSON.stringify(res), ok: res.ok };\n",
+        "input": [
+         {
+          "name": "plan",
+          "value": "{{3.result.plan_json}}"
+         },
+         {
+          "name": "status",
+          "value": "{{11.statusCode}}"
+         },
+         {
+          "name": "body",
+          "value": "{{11.body}}"
+         },
+         {
+          "name": "google_cal",
+          "value": "{{2.google_calendar_id}}"
+         }
+        ]
+       },
+       "metadata": {
+        "designer": {
+         "x": 1500,
+         "y": 600
+        }
+       }
+      },
+      {
+       "id": 15,
+       "module": "gateway:WebhookRespond",
+       "version": 1,
+       "parameters": {},
+       "mapper": {
+        "body": "{{14.result.body}}",
+        "status": "200",
+        "headers": [
+         {
+          "key": "Content-Type",
+          "value": "application/json"
+         }
+        ]
+       },
+       "metadata": {
+        "designer": {
+         "x": 1800,
+         "y": 600
+        }
+       }
+      }
+     ]
+    },
+    {
+     "flow": [
+      {
+       "id": 16,
+       "module": "datastore:SearchRecord",
+       "version": 1,
+       "parameters": {
+        "datastore": 168064,
+        "continueWhenNoRes": true,
+        "limit": 500
+       },
+       "mapper": {
+        "filter": [
+         [
+          {
+           "a": "status",
+           "o": "text:equal",
+           "b": "confirmed"
+          },
+          {
+           "a": "start_ms",
+           "o": "number:less",
+           "b": "{{3.result.window_end_ms}}"
+          },
+          {
+           "a": "end_ms",
+           "o": "number:greater",
+           "b": "{{3.result.window_start_ms}}"
+          }
+         ],
+         [
+          {
+           "a": "status",
+           "o": "text:equal",
+           "b": "booked"
+          },
+          {
+           "a": "start_ms",
+           "o": "number:less",
+           "b": "{{3.result.window_end_ms}}"
+          },
+          {
+           "a": "end_ms",
+           "o": "number:greater",
+           "b": "{{3.result.window_start_ms}}"
+          }
+         ]
+        ]
+       },
+       "metadata": {
+        "designer": {
+         "x": 1200,
+         "y": 900
+        }
+       },
+       "filter": {
+        "name": "route = internal_busy",
+        "conditions": [
+         [
+          {
+           "a": "{{3.result.route}}",
+           "o": "text:equal",
+           "b": "internal_busy"
+          }
+         ]
+        ]
+       }
+      },
+      {
+       "id": 17,
+       "module": "builtin:BasicAggregator",
+       "version": 1,
+       "parameters": {
+        "feeder": 16
+       },
+       "mapper": {
+        "start_ms": "{{ifempty(16.start_ms; 16.data.start_ms)}}",
+        "end_ms": "{{ifempty(16.end_ms; 16.data.end_ms)}}",
+        "status": "{{ifempty(16.status; 16.data.status)}}",
+        "booking_id": "{{ifempty(16.booking_id; 16.data.booking_id)}}"
+       },
+       "metadata": {
+        "designer": {
+         "x": 1500,
+         "y": 900
+        }
+       }
+      },
+      {
+       "id": 18,
+       "module": "code:ExecuteCode",
+       "version": 1,
+       "parameters": {},
+       "mapper": {
+        "language": "javascript",
+        "inputFormat": "string",
+        "codeStringJavascript": "function J(v) { if (v === null || v === undefined || v === '') return null; if (typeof v === 'object') return v; try { return JSON.parse(String(v)); } catch (e) { return null; } }\nfunction S(v) { if (v === null || v === undefined) return ''; if (typeof v === 'object') return ''; const s = String(v).trim(); if (!s || s.startsWith('{{') || s === 'null' || s === 'undefined') return ''; return s; }\nfunction num(v, d) { const n = Number(v); return Number.isFinite(n) ? n : d; }\nconst plan = J(input.plan) || {};\nlet recs = input.records; if (typeof recs === 'string') recs = J(recs) || [];\nif (!Array.isArray(recs)) recs = [];\nconst res = { ok: true, op: plan.op, provider: 'internal', status: 200 };\nif (plan.op === 'busy') {\n  res.busy = recs.map(r => ({ s: num(r.start_ms, NaN), e: num(r.end_ms, NaN), status: S(r.status) })).filter(b => Number.isFinite(b.s) && Number.isFinite(b.e) && (!b.status || b.status === 'booked' || b.status === 'confirmed') && b.s < plan.window_end_ms && b.e > plan.window_start_ms).map(b => ({ s: b.s, e: b.e }));\n} else if (plan.op === 'create') {\n  res.event_id = 'internal-' + (S(plan.transaction_id) || Date.now().toString(32));\n} else if (plan.op === 'delete') {\n  res.deleted = true;\n} else if (plan.op === 'find') {\n  res.events = [];\n}\nreturn { body: JSON.stringify(res) };\n",
+        "input": [
+         {
+          "name": "plan",
+          "value": "{{3.result.plan_json}}"
+         },
+         {
+          "name": "records",
+          "value": "{{17.array}}"
+         }
+        ]
+       },
+       "metadata": {
+        "designer": {
+         "x": 1800,
+         "y": 900
+        }
+       }
+      },
+      {
+       "id": 19,
+       "module": "gateway:WebhookRespond",
+       "version": 1,
+       "parameters": {},
+       "mapper": {
+        "body": "{{18.result.body}}",
+        "status": "200",
+        "headers": [
+         {
+          "key": "Content-Type",
+          "value": "application/json"
+         }
+        ]
+       },
+       "metadata": {
+        "designer": {
+         "x": 2100,
+         "y": 900
+        }
+       }
+      }
+     ]
+    },
+    {
+     "flow": [
+      {
+       "id": 20,
+       "module": "code:ExecuteCode",
+       "version": 1,
+       "parameters": {},
+       "mapper": {
+        "language": "javascript",
+        "inputFormat": "string",
+        "codeStringJavascript": "function J(v) { if (v === null || v === undefined || v === '') return null; if (typeof v === 'object') return v; try { return JSON.parse(String(v)); } catch (e) { return null; } }\nfunction S(v) { if (v === null || v === undefined) return ''; if (typeof v === 'object') return ''; const s = String(v).trim(); if (!s || s.startsWith('{{') || s === 'null' || s === 'undefined') return ''; return s; }\nfunction num(v, d) { const n = Number(v); return Number.isFinite(n) ? n : d; }\nconst plan = J(input.plan) || {};\nlet recs = input.records; if (typeof recs === 'string') recs = J(recs) || [];\nif (!Array.isArray(recs)) recs = [];\nconst res = { ok: true, op: plan.op, provider: 'internal', status: 200 };\nif (plan.op === 'busy') {\n  res.busy = recs.map(r => ({ s: num(r.start_ms, NaN), e: num(r.end_ms, NaN), status: S(r.status) })).filter(b => Number.isFinite(b.s) && Number.isFinite(b.e) && (!b.status || b.status === 'booked' || b.status === 'confirmed') && b.s < plan.window_end_ms && b.e > plan.window_start_ms).map(b => ({ s: b.s, e: b.e }));\n} else if (plan.op === 'create') {\n  res.event_id = 'internal-' + (S(plan.transaction_id) || Date.now().toString(32));\n} else if (plan.op === 'delete') {\n  res.deleted = true;\n} else if (plan.op === 'find') {\n  res.events = [];\n}\nreturn { body: JSON.stringify(res) };\n",
+        "input": [
+         {
+          "name": "plan",
+          "value": "{{3.result.plan_json}}"
+         },
+         {
+          "name": "records",
+          "value": "[]"
+         }
+        ]
+       },
+       "metadata": {
+        "designer": {
+         "x": 1200,
+         "y": 1200
+        }
+       },
+       "filter": {
+        "name": "route = internal_other",
+        "conditions": [
+         [
+          {
+           "a": "{{3.result.route}}",
+           "o": "text:equal",
+           "b": "internal_other"
+          }
+         ]
+        ]
+       }
+      },
+      {
+       "id": 21,
+       "module": "gateway:WebhookRespond",
+       "version": 1,
+       "parameters": {},
+       "mapper": {
+        "body": "{{20.result.body}}",
+        "status": "200",
+        "headers": [
+         {
+          "key": "Content-Type",
+          "value": "application/json"
+         }
+        ]
+       },
+       "metadata": {
+        "designer": {
+         "x": 1500,
+         "y": 1200
+        }
+       }
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "metadata": {
+  "instant": true,
+  "version": 1,
+  "scenario": {
+   "dlq": false,
+   "slots": null,
+   "dataloss": false,
+   "maxErrors": 3,
+   "autoCommit": true,
+   "roundtrips": 1,
+   "sequential": false,
+   "confidential": false,
+   "freshVariables": false,
+   "autoCommitTriggerLast": true
+  }
+ }
+}

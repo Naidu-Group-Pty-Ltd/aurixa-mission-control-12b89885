@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { StatusPill } from "@/components/status-pill";
 import type { TreeNode } from "./use-tree-layout";
+import { VoiceLine } from "./voice-line";
 import { membranesTouching } from "@/lib/cascade/membrane/fleetMembranes.pure";
 import {
   lateralsTouching,
@@ -314,6 +315,17 @@ export function YggdrasilNodePanel({ node, allNodes, onClose }: Props) {
               {laterals.map((boundary) => (
                 <LateralLine key={boundary.id} repo={node.githubRepo} boundary={boundary} />
               ))}
+            </div>
+          </div>
+        ) : null}
+
+        {node.id !== "__trunk__" ? (
+          <div className="border-t border-border/30 pt-3">
+            <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
+              Voice line
+            </p>
+            <div className="mt-1.5">
+              <VoiceLine cloneId={node.id} />
             </div>
           </div>
         ) : null}
