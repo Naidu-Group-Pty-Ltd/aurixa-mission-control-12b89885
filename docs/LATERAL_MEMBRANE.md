@@ -99,6 +99,13 @@ the agent whose calendar is `crm-calendar`) is held `manual_reconcile` when the
 origin runs the other line, and travels freely between two clones on the same
 line. A destination with no recorded line withholds nothing.
 
+The line withholds credentials as well (`CRM_LINE_WITHHELD_SECRETS`, the
+GoHighLevel keys on the independent line). No exchange carries a secret value,
+so this is not a membrane rule: it is enforced where values are written —
+every forward, provisioning, the tenant broker, the operator's "set secret" —
+and by the fleet sweep, which removes one it finds. See
+`docs/audits/2026-10-10-crm-independent-pages.md`.
+
 Four species were added to `ionSpecies.pure.ts` for this. Three are facts about
 a PATH (`crm_routing_layer`, `edge_function`, `migration`) and one about text
 (`hosting_ref`, Vercel's `prj_…` / `team_…`). `backend_ref` is also widened for

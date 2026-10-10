@@ -26,8 +26,14 @@ vi.mock("./prime-backend.server", () => prime);
 const project = vi.hoisted(() => ({
   deleteProjectEdgeFunctions: vi.fn(),
   readProjectEdgeFunctionSlugs: vi.fn(),
+  listProjectSecretNames: vi.fn(),
+  deleteCloneSecretValues: vi.fn(),
+  setCloneSecretValues: vi.fn(),
 }));
 vi.mock("./backend-provisioning.server", () => project);
+
+const ledger = vi.hoisted(() => ({ recordSecretLedger: vi.fn(async () => null) }));
+vi.mock("./secretLedger.server", () => ledger);
 
 vi.mock("./cascade-engine.server", () => ({ processClone: vi.fn() }));
 
@@ -37,7 +43,7 @@ const { cancelCrmConversion, drainCrmConversions, finaliseConversion } =
 type Row = Record<string, unknown>;
 type Write = {
   table: string;
-  op: "update" | "delete";
+  op: "update" | "delete" | "upsert";
   patch?: Row;
   filters: Array<[string, unknown]>;
 };
@@ -71,6 +77,11 @@ function fakeSupabase(tables: Record<string, Row[]>) {
       order: () => q,
       limit: () => q,
       update: (p: Row) => ((op = "update"), (patch = p), q),
+      upsert: async (rows: Row[]) => {
+        writes.push({ table, op: "upsert", patch: { rows }, filters: [] });
+        tables[table] = [...(tables[table] ?? []), ...rows];
+        return { data: null, error: null };
+      },
       delete: () => ((op = "delete"), q),
       maybeSingle: async () => ({ data: rows()[0] ?? null, error: null }),
       then: (resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) =>
@@ -175,6 +186,15 @@ beforeEach(() => {
     "crm-send-message",
     "shared-with-prime",
   ]);
+  project.listProjectSecretNames.mockResolvedValue([]);
+  project.deleteCloneSecretValues.mockResolvedValue({ ok: true });
+  project.setCloneSecretValues.mockImplementation(
+    async (_ref: string, entries: Array<{ name: string }>) => ({
+      ok: true,
+      written: entries.map((e) => e.name),
+      unchanged: [],
+    }),
+  );
   project.deleteProjectEdgeFunctions.mockImplementation(async (_ref: string, slugs: string[]) => ({
     deleted: slugs,
     failed: [],
@@ -313,6 +333,101 @@ describe("the drain, when finishing throws", () => {
     expect(report.completed).toBe(0);
     expect(report.errors).toEqual(["conv: finishing threw: management api down"]);
     expect(db.tables.clone_crm_conversions[0].status).toBe("merged");
+  });
+});
+
+describe("the environment follows the line", () => {
+  it("leaving the independent line removes its pin and forgets its withheld record", async () => {
+    project.listProjectSecretNames.mockResolvedValue(["CRM_PROVIDER", "RESEND_API_KEY"]);
+    const w = world({ status: "merged" });
+    w.clone_backend_secrets = [
+      { clone_id: "clone", name: "GOHIGHLEVEL_API_KEY", status: "withheld" },
+      { clone_id: "clone", name: "CRM_PROVIDER", status: "set" },
+      { clone_id: "clone", name: "RESEND_API_KEY", status: "inherited" },
+    ];
+    const db = fakeSupabase(w);
+    const done = await finaliseConversion({
+      supabase: db.client,
+      octokit: fakeOctokit({}),
+      conversionId: "conv",
+    });
+    expect(done.ok).toBe(true);
+    expect(project.deleteCloneSecretValues).toHaveBeenCalledWith("clonerefclonerefclon", [
+      "CRM_PROVIDER",
+    ]);
+    expect(project.setCloneSecretValues).not.toHaveBeenCalled();
+    // The dependent clone's fleet sweep would otherwise keep taking off the
+    // GoHighLevel keys its CRM now needs.
+    expect(db.tables.clone_backend_secrets.map((r) => r.name)).toEqual(["RESEND_API_KEY"]);
+    if (done.ok) expect(done.finish.secrets).toBe("removed CRM_PROVIDER");
+  });
+
+  it("joining it removes the observed GoHighLevel keys, records them withheld, and pins native", async () => {
+    project.listProjectSecretNames.mockResolvedValue([
+      "GOHIGHLEVEL_API_KEY",
+      "GOHIGHLEVEL_LOCATION_ID",
+      "RESEND_API_KEY",
+    ]);
+    const w = world({
+      status: "merged",
+      from_mode: "dependent",
+      to_mode: "independent",
+      to_parent_clone_id: "crm-head",
+      plan: { retiredFunctions: [] },
+    });
+    w.clones.push({
+      id: "crm-head",
+      name: "npc-crm-independent",
+      github_owner: "Naidu-Group-Pty-Ltd",
+      github_repo: "npc-crm-independent-6505dc",
+      github_url: null,
+      default_branch: "main",
+      last_synced_sha: "headsha",
+      crm_mode: "independent",
+      sync_scope: "modules",
+      parent_clone_id: null,
+    });
+    const db = fakeSupabase(w);
+    const done = await finaliseConversion({
+      supabase: db.client,
+      octokit: fakeOctokit({}),
+      conversionId: "conv",
+    });
+    expect(done.ok).toBe(true);
+    expect(project.deleteCloneSecretValues).toHaveBeenCalledWith("clonerefclonerefclon", [
+      "GOHIGHLEVEL_API_KEY",
+      "GOHIGHLEVEL_LOCATION_ID",
+    ]);
+    const stamped = db.writes.find((x) => x.table === "clone_backend_secrets" && x.op === "upsert");
+    expect((stamped?.patch as { rows: Row[] }).rows.map((r) => [r.name, r.status])).toEqual([
+      ["GOHIGHLEVEL_API_KEY", "withheld"],
+      ["GOHIGHLEVEL_LOCATION_ID", "withheld"],
+    ]);
+    expect(project.setCloneSecretValues).toHaveBeenCalledWith("clonerefclonerefclon", [
+      { name: "CRM_PROVIDER", value: "native" },
+    ]);
+    if (done.ok) {
+      expect(done.finish.secrets).toBe(
+        "removed GOHIGHLEVEL_API_KEY, GOHIGHLEVEL_LOCATION_ID; set CRM_PROVIDER",
+      );
+    }
+  });
+
+  it("says so, and still completes, when the project would not take the change", async () => {
+    project.listProjectSecretNames.mockResolvedValue(["CRM_PROVIDER"]);
+    project.deleteCloneSecretValues.mockResolvedValue({ ok: false, error: "503" });
+    const db = fakeSupabase(world({ status: "merged" }));
+    const done = await finaliseConversion({
+      supabase: db.client,
+      octokit: fakeOctokit({}),
+      conversionId: "conv",
+    });
+    expect(done.ok).toBe(true);
+    const row = db.tables.clone_crm_conversions[0];
+    expect(row.status).toBe("completed");
+    expect(row.error).toMatch(
+      /environment does not yet match the dependent line: removing CRM_PROVIDER \(503\)/,
+    );
   });
 });
 

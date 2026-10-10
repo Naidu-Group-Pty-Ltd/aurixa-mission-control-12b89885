@@ -342,6 +342,15 @@ async function runBackendProvisioning(
       .eq("id", input.cloneId)
       .maybeSingle();
 
+    // The credentials this clone's CRM line never holds are left out of both
+    // sets below (`crmLineSecretRefusal`), read off the same `crmMode` the
+    // withheld functions were. A clone whose line could not be read withholds
+    // nothing here, as for the functions; the fleet sweep then removes any
+    // such credential within one pass (`fleetSecretForward.server.ts`).
+    const { crmLineSecretRefusal } = await import(
+      /* @vite-ignore */ "@/server/crmLineFeatures.pure"
+    );
+
     // Resolve which secret names are safe to forward from the prime env into
     // this clone (empty shells cause 500s at first function invocation).
     // Read the whole fleet list, not just the inheriting half: the per-clone
@@ -353,6 +362,7 @@ async function runBackendProvisioning(
     const forwardRows = (forwardAll ?? []).filter((r) => r.inherit);
     const inheritedSecrets: Record<string, string> = {};
     for (const row of forwardRows ?? []) {
+      if (crmLineSecretRefusal(row.name, crmMode)) continue;
       const val = process.env[row.name];
       if (typeof val === "string" && val.length > 0) inheritedSecrets[row.name] = val;
     }
@@ -385,6 +395,7 @@ async function runBackendProvisioning(
         fleet: new Map((forwardAll ?? []).map((r) => [r.name, r.inherit])),
         classOf: classifySecret,
         envHas: hasEnvValue,
+        crmMode,
       });
       for (const name of namesToWrite(planned)) {
         inheritedSecrets[name] = process.env[name] as string;
@@ -1330,6 +1341,25 @@ export const setCloneBackendSecret = createServerFn({ method: "POST" })
       // "backend not provisioned", "target is the prime", "could not tell".
       return { ok: false as const, error: e instanceof Error ? e.message : String(e) };
     }
+    // The clone's CRM line: an operator cannot put a GoHighLevel credential on
+    // the line that carries none, any more than a forward can. A read that
+    // failed refuses rather than reading as "no line".
+    const { data: lineRow, error: lineErr } = await supabase
+      .from("clones")
+      .select("crm_mode")
+      .eq("id", data.cloneId)
+      .maybeSingle();
+    if (lineErr) {
+      return {
+        ok: false as const,
+        error: `The clone's CRM line could not be read: ${lineErr.message}`,
+      };
+    }
+    const { crmLineSecretRefusal } = await import(
+      /* @vite-ignore */ "@/server/crmLineFeatures.pure"
+    );
+    const lineRefusal = crmLineSecretRefusal(data.name, lineRow?.crm_mode ?? null);
+    if (lineRefusal) return { ok: false as const, error: lineRefusal };
     const { setCloneSecretValue } = await import(
       /* @vite-ignore */ "@/lib/_server-shims/backend-provisioning.server"
     );

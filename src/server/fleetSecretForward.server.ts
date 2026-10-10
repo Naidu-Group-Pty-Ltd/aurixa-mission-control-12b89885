@@ -35,6 +35,7 @@ import { hasEnvValue } from "./cloneSecretForward.server";
 import { classifySecret } from "./prime-backend.server";
 import { CloneSecretTargetError, resolveCloneSecretTarget } from "./cloneAllowedOrigins.server";
 import { recordSecretLedger } from "./secretLedger.server";
+import { crmLineWithheldSecretNames } from "./crmLineFeatures.pure";
 
 type Db = SupabaseClient<Database>;
 
@@ -164,6 +165,22 @@ export async function pushFleetSecretForwards(
     (ledger.data ?? []).filter((r) => NOT_ON_THE_PROJECT.has(r.status ?? "")).map((r) => r.name),
   );
 
+  /*
+   * The clone's CRM line, and the credentials it never holds.
+   *
+   * Read, never guessed, and a failed read stops this clone's pass: read as
+   * "no line", a fleet row would forward a GoHighLevel key onto the
+   * independent line and the removal below would not run. The line's names
+   * join the removal set, so one that reached the project by any route — a
+   * forward made before this rule, a conversion that left the other line's
+   * keys behind, a hand edit in the Supabase dashboard — is taken off and
+   * stamped `withheld`, exactly as a withdrawn credential is.
+   */
+  const clone = await supabase.from("clones").select("crm_mode").eq("id", cloneId).maybeSingle();
+  if (clone.error) return { ok: false, cloneId, reason: "unreadable", error: clone.error.message };
+  const crmMode = clone.data?.crm_mode ?? null;
+  for (const name of crmLineWithheldSecretNames(crmMode)) withheldNames.add(name);
+
   const outcomes = planFleetForwards({
     fleet: new Map((fleet.data ?? []).map((r) => [r.name, r.inherit])),
     classOf: classifySecret,
@@ -177,6 +194,7 @@ export async function pushFleetSecretForwards(
     // so it needs its own channel or this sweep writes it straight back within
     // thirty minutes.
     withheld: withheldNames,
+    crmMode,
   });
 
   const names = fleetNamesToWrite(outcomes);
@@ -236,9 +254,9 @@ export async function pushFleetSecretForwards(
 /**
  * Make a withheld name true on the project, not merely recorded in a ledger.
  *
- * Deletes only names this clone's ledger already says are withheld — a
- * decision taken elsewhere, enforced here — and only those the project is
- * observed to hold.
+ * Deletes only names this clone's ledger already says are withheld, or that
+ * its CRM line never holds (`crmLineWithheldSecretNames`) — decisions taken
+ * elsewhere, enforced here — and only those the project is observed to hold.
  *
  * `listProjectSecretNames` answers `[]` for a transport failure exactly as it
  * does for a project holding none, so an empty answer removes nothing. That is

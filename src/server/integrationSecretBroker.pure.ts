@@ -65,6 +65,8 @@
  * would be protecting the wrong side of the meter.
  */
 
+import { crmLineSecretRefusal } from "./crmLineFeatures.pure";
+
 /**
  * Exact names no tenant may set on its own project through this broker.
  *
@@ -245,6 +247,29 @@ export function planIntegrationSecretWrite(body: unknown): IntegrationSecretPlan
   }
 
   return { write, refused, fatal: null };
+}
+
+/**
+ * Take out of a plan every name the calling clone's CRM line never holds.
+ *
+ * Separate from `planIntegrationSecretWrite` because the plan is decided from
+ * the body alone, before the caller's clone is resolved, and the line is a
+ * fact about the clone. The head of the independent line already refuses
+ * these names on its own write endpoint; this is Mission Control's half,
+ * which holds for a deployment running an older copy of that endpoint.
+ */
+export function withCrmLineRefusals(
+  plan: IntegrationSecretPlan,
+  crmMode: string | null | undefined,
+): IntegrationSecretPlan {
+  const write: IntegrationSecretPlan["write"] = [];
+  const refused = [...plan.refused];
+  for (const entry of plan.write) {
+    const why = crmLineSecretRefusal(entry.name, crmMode);
+    if (why) refused.push({ name: entry.name, reason: why });
+    else write.push(entry);
+  }
+  return { ...plan, write, refused };
 }
 
 /** The header that names Mission Control as the one who said no. */

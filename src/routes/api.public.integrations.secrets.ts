@@ -38,6 +38,7 @@ import {
   planIntegrationSecretWrite,
   refusalHeaders,
   relayHeaders,
+  withCrmLineRefusals,
 } from "@/server/integrationSecretBroker.pure";
 
 /** A refusal this endpoint makes, marked as ours. */
@@ -145,10 +146,37 @@ export const Route = createFileRoute("/api/public/integrations/secrets")({
           throw e;
         }
 
-        const { setCloneSecretValues } = await import("@/server/backend-provisioning.server");
-        const res = await setCloneSecretValues(target.projectRef, plan.write);
+        /*
+         * The clone's CRM line: a GoHighLevel credential is refused on the
+         * line that carries none. Read after the target, because the line is
+         * a fact about the clone the key resolved to, and a failed read is a
+         * 503 rather than "no line" — read as absent it would let the key in.
+         */
+        const lineRead = await supabaseAdmin
+          .from("clones")
+          .select("crm_mode")
+          .eq("id", target.cloneId)
+          .maybeSingle();
+        if (lineRead.error) {
+          return refuse(
+            "unreadable",
+            { message: `The clone's CRM line could not be read: ${lineRead.error.message}` },
+            503,
+          );
+        }
+        const linePlan = withCrmLineRefusals(plan, lineRead.data?.crm_mode ?? null);
+        if (linePlan.write.length === 0) {
+          return refuse(
+            "no_writable_secrets",
+            { message: "Every name in this request was refused.", refused: linePlan.refused },
+            400,
+          );
+        }
 
-        const names = plan.write.map((s) => s.name);
+        const { setCloneSecretValues } = await import("@/server/backend-provisioning.server");
+        const res = await setCloneSecretValues(target.projectRef, linePlan.write);
+
+        const names = linePlan.write.map((s) => s.name);
 
         /*
          * The ledger is what the clone page reads, so a secret written here
@@ -193,7 +221,7 @@ export const Route = createFileRoute("/api/public/integrations/secrets")({
               ok: false,
               error: "write_failed",
               message: res.error,
-              refused: plan.refused,
+              refused: linePlan.refused,
             }),
             { status: 502, headers: relayHeaders() },
           );
@@ -205,7 +233,7 @@ export const Route = createFileRoute("/api/public/integrations/secrets")({
           names,
           sent: res.written,
           unchanged: res.unchanged,
-          refused: plan.refused.length,
+          refused: linePlan.refused.length,
           ledgerRecorded: !ledgerErr,
         });
 
@@ -224,7 +252,7 @@ export const Route = createFileRoute("/api/public/integrations/secrets")({
             unchanged: res.unchanged,
             // Names this side declined, so the page can show them beside the
             // ones that landed rather than reporting a clean success.
-            refused: plan.refused,
+            refused: linePlan.refused,
             ledgerRecorded: !ledgerErr,
           }),
           { status: 200, headers: relayHeaders() },
