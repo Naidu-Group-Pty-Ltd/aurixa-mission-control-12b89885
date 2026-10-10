@@ -60,20 +60,20 @@ rather than pretending the boundary began with this module.
 
 ## Eleven organs, nine of which already existed
 
-| organ                           | kind     | what it refuses or transforms                                                                                           |
-| ------------------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `clone_sync_exclusions`         | channel  | per-path rules recorded against this clone                                                                              |
-| `REPOSITORY_INVARIANTS`         | channel  | thirteen fleet-wide patterns a module may not own                                                                       |
-| `backendIdentityHold`           | channel  | a shipped file naming somebody else's Supabase project                                                                  |
-| `securityInventoryHold`         | channel  | the prime's security baseline where this clone holds functions the prime does not — the gate the pump below runs behind |
-| `judgingWorkflowHold`           | channel  | a workflow that judges the whole repository, on a clone that receives part of one                                       |
-| `withholdReferencedDeletions`   | channel  | a deletion while a surviving file still imports what it would remove                                                    |
-| `reconcileConfigToml`           | **pump** | the prime's config carrying this clone's `project_id` and declarations                                                  |
-| `reconcileSecurityRegistry`     | **pump** | the prime's registry keeping this clone's own entries                                                                   |
-| `reconcileDeployWorkflow`       | **pump** | the prime's deploy workflow keeping this clone's project references                                                     |
-| `reconcileSecurityInventory`    | **pump** | a baseline counted from the config and registry this same pass reconciled                                               |
-| `reconcileFunctionCountRatchet` | **pump** | the prime's function-count spec carrying this repository's own number                                                   |
-| `reconcileEdgeTypecheckBaseline` | **pump** | the prime's Edge Function type baseline keeping this clone's count for every file it keeps its own version of          |
+| organ                            | kind     | what it refuses or transforms                                                                                           |
+| -------------------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `clone_sync_exclusions`          | channel  | per-path rules recorded against this clone                                                                              |
+| `REPOSITORY_INVARIANTS`          | channel  | thirteen fleet-wide patterns a module may not own                                                                       |
+| `backendIdentityHold`            | channel  | a shipped file naming somebody else's Supabase project                                                                  |
+| `securityInventoryHold`          | channel  | the prime's security baseline where this clone holds functions the prime does not — the gate the pump below runs behind |
+| `judgingWorkflowHold`            | channel  | a workflow that judges the whole repository, on a clone that receives part of one                                       |
+| `withholdReferencedDeletions`    | channel  | a deletion while a surviving file still imports what it would remove                                                    |
+| `reconcileConfigToml`            | **pump** | the prime's config carrying this clone's `project_id` and declarations                                                  |
+| `reconcileSecurityRegistry`      | **pump** | the prime's registry keeping this clone's own entries                                                                   |
+| `reconcileDeployWorkflow`        | **pump** | the prime's deploy workflow keeping this clone's project references                                                     |
+| `reconcileSecurityInventory`     | **pump** | a baseline counted from the config and registry this same pass reconciled                                               |
+| `reconcileFunctionCountRatchet`  | **pump** | the prime's function-count spec carrying this repository's own number                                                   |
+| `reconcileEdgeTypecheckBaseline` | **pump** | the prime's Edge Function type baseline keeping this clone's count for every file it keeps its own version of           |
 
 ## The two new channels
 
@@ -173,7 +173,7 @@ allowed to make.
 That is one direction of the rule: a spec the delivery carries. The other
 direction is a spec the clone keeps, left behind by a subject that crosses. It
 is what turned the independent's `verify` red, and it is in
-[*The other half*](#the-other-half-a-spec-the-clone-keeps-left-behind-by-its-subject).
+[_The other half_](#the-other-half-a-spec-the-clone-keeps-left-behind-by-its-subject).
 It widens nothing either, because every spec it moves is one the clone already
 holds.
 
@@ -314,16 +314,16 @@ this codebase already takes in a dozen places.
 
 ## What is asserted
 
-| file                               | what it pins                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `membrane.test.ts`                 | permeation, the routing rule's reach, the glob scoping, the orphan-spec rule and the project-ref detector — over verbatim breached source from `ClientConversationsTab.tsx`, and against the shipped `backendRefsIn` itself rather than a restatement of it                                                                                                                                                                                                                                                                                                                                                              |
+| file                               | what it pins                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `membrane.test.ts`                 | permeation, the routing rule's reach, the glob scoping, the orphan-spec rule and the project-ref detector — over verbatim breached source from `ClientConversationsTab.tsx`, and against the shipped `backendRefsIn` itself rather than a restatement of it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `membraneIsWired.contract.test.ts` | that the engine resolves a membrane from `primeRef.repo`, asks it per file, ACTS on a refusal, judges specs against the finished delivery rather than the candidates, and takes a held spec back out of it; for the other half, that a kept spec is judged against what the delivery CHANGES on the clone (a pump's merge only where it writes, a removal only from the finished plan, settled before the channel and narrowed after it), with each copy read against its own tree, is replaced only on a release verdict with its files outside the content roots judged first, is held for a person otherwise, and is named in the pull request; and that a file outside the roots joins a spec's subjects only on a release verdict, within its probe ceiling |
-| `carryGate.contract.test.ts`       | what the subject carry may do and may not undo — that its refusals meet `reportableHeld`, that a carried subject owes its import closure, that the loop is bounded above its own worst case (including the specs the other half brings), and that the stranded list it hands back includes the specs it still owes                                                                                                                                                                                                                                                                                                       |
-| `specsLeftBehind.test.ts`          | what counts as a kept spec's subject (a path it names inside or outside the content roots, a module it imports, a module a barrel re-exports, never the transitive graph), each copy against its own tree; what counts as crossing (a pump's merge only where it writes, a removal only from the finished plan); which kept specs a crossing file leaves behind (never one that is itself crossing); the hold, removal, withheld and cut-short wording; and the lines the pull request prints for what this half moved                                                                                                                                                                                                                                                            |
-| `outsideRootSubjects.test.ts`      | what the reader outside the content roots reads, over the verbatim `reportTypography.spec.ts` lines, and what it refuses (a bare root file, a comment, a directory, a `..` climb, an absolute path); that it and `subjectsNamedBy` split the tree at `SUBJECT_ROOTS` with no path read by both or by neither; and which files are worth a question to prime's history                                                                                                                                                                                                                                                    |
-| `membraneGeometry.test.ts`         | the band's placement, against an independent evaluation of the drawn cubic                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `membraneBandRenders.test.ts`      | what the component actually EMITS — the placement survives, and no animated transform shares its element                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `membraneIsDrawn.contract.test.ts` | that the band and the panel are rendered, in the right layer, keyed on the edge                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `carryGate.contract.test.ts`       | what the subject carry may do and may not undo — that its refusals meet `reportableHeld`, that a carried subject owes its import closure, that the loop is bounded above its own worst case (including the specs the other half brings), and that the stranded list it hands back includes the specs it still owes                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `specsLeftBehind.test.ts`          | what counts as a kept spec's subject (a path it names inside or outside the content roots, a module it imports, a module a barrel re-exports, never the transitive graph), each copy against its own tree; what counts as crossing (a pump's merge only where it writes, a removal only from the finished plan); which kept specs a crossing file leaves behind (never one that is itself crossing); the hold, removal, withheld and cut-short wording; and the lines the pull request prints for what this half moved                                                                                                                                                                                                                                           |
+| `outsideRootSubjects.test.ts`      | what the reader outside the content roots reads, over the verbatim `reportTypography.spec.ts` lines, and what it refuses (a bare root file, a comment, a directory, a `..` climb, an absolute path); that it and `subjectsNamedBy` split the tree at `SUBJECT_ROOTS` with no path read by both or by neither; and which files are worth a question to prime's history                                                                                                                                                                                                                                                                                                                                                                                            |
+| `membraneGeometry.test.ts`         | the band's placement, against an independent evaluation of the drawn cubic                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `membraneBandRenders.test.ts`      | what the component actually EMITS — the placement survives, and no animated transform shares its element                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `membraneIsDrawn.contract.test.ts` | that the band and the panel are rendered, in the right layer, keyed on the edge                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 
 Every assertion in the three contract tests was proven non-vacuous by
 planting the defect it describes and watching it fail.
@@ -573,7 +573,7 @@ operator approved overwriting it. Even then it goes through `planSubjectCarry`,
 the same partition and `prepareOne`, so a `.github/workflows/…` file still
 meets the judging-workflow rule and a protected path stays protected. The `..`,
 `.` and absolute-path refusals are the same on that side. See
-[*A subject outside the content roots, on evidence*](#a-subject-outside-the-content-roots-on-evidence).
+[_A subject outside the content roots, on evidence_](#a-subject-outside-the-content-roots-on-evidence).
 
 **A subject an existing rule already holds is never released by this.**
 `planSubjectCarry` is handed the live partition and returns its refusals
@@ -834,8 +834,8 @@ backfill. See the next section.
 
 ## The other half: a spec the clone keeps, left behind by its subject
 
-The spec channel rests on one sentence: *a spec and its subject travel together
-or neither does.* Everything above enforces one direction of it — a spec the
+The spec channel rests on one sentence: _a spec and its subject travel together
+or neither does._ Everything above enforces one direction of it — a spec the
 delivery CARRIES brings its subject in behind it or is held. Nothing looked the
 other way: a subject the delivery carries, asserted about by a spec it does
 NOT carry.
@@ -875,7 +875,7 @@ the finished deletion plan makes. Not the forward half's `deliveredPaths`,
 which also counts every path a pump decided, including a pump's steady state
 where the merged file IS the clone's own and nothing is written. The first
 replay read that as a change and held the clone's own `crmConversations.spec.ts`
-under *"this delivery updates supabase/config.toml"* on a delivery that wrote
+under _"this delivery updates supabase/config.toml"_ on a delivery that wrote
 no `config.toml` at all. The correction then went too far and left every pumped
 path out, so a kept spec about a `config.toml` the pump really did change was
 never judged and its old assertions ran against the new merge. A pump that
@@ -940,7 +940,7 @@ The replay then found the case both halves had been blind to.
 current version reads `.claude/skills/npc-services-design/reports/REPORT_RULES.md`
 and checks the document against the fonts the code exports. The clone held that
 document one version behind prime's, so three of its eighty tests failed:
-*"Cinzel is installed; the doc says otherwise."* `subjectsNamedBy` reads five
+_"Cinzel is installed; the doc says otherwise."_ `subjectsNamedBy` reads five
 roots — `src`, `supabase`, `docs`, `scripts`, `public` — and `.claude` is not
 one. The same gap exists for any spec a delivery carries by any route; the
 reverse half is only where it first cost a red check.
@@ -993,7 +993,7 @@ tests, with `App.tsx` listed beside it. A hold never blocks a merge; it is a
 line in the pull request.
 
 The pull request now names every file this half moved and why, under
-*"Brought across beside the files they test"*, because none of them is in the
+_"Brought across beside the files they test"_, because none of them is in the
 clone's scope and a reader of the diff would otherwise meet them unexplained.
 
 Rebuilt at prime@6053a39 after the three corrections above — removals from the
@@ -1167,8 +1167,8 @@ documents prime changed in its last 40 commits, 12 had never reached the one
 module-scoped clone — 6 stale, 6 absent. The other three clones are mirrors
 and receive the whole tree, so `docs/` matching on 1443 of 1444 files there
 is mirror residue and says nothing about delivery. That single clone's `main`
-is one squashed commit whose title reads *"Restore the CRM security
-declarations and deliver the two documents the cascade asserted about"* — the
+is one squashed commit whose title reads _"Restore the CRM security
+declarations and deliver the two documents the cascade asserted about"_ — the
 same defect, patched by hand, before anyone named it.
 
 **Nothing on any clone is lost by widening.** The one document the fleet
@@ -1211,8 +1211,8 @@ count.
 A count is the wrong unit for this hold. `protected` differs for ever by design
 and an operator can read past it; `oversize` is a file prime **has**, the clone
 **lacks**, and no cascade will ever deliver, because `CASCADE_MAX_FILE_BYTES` is
-a ceiling rather than a decision. Folded into *"all 23 differing path(s) are
-withheld by this clone's exclusion policy"*, the two are indistinguishable — and
+a ceiling rather than a decision. Folded into _"all 23 differing path(s) are
+withheld by this clone's exclusion policy"_, the two are indistinguishable — and
 the one that matters is the one that disappears.
 
 Measured 21 Sep 2026, firing a manual pass at all three mirrors: every one
@@ -1380,8 +1380,8 @@ Measured 28 Sep 2026 on npc-crm-independent:
   `builder-network-sync-state.yml` and `builder-stock-mirror-state.yml` had all
   arrived. None of the six scripts they call had.
 - **One stale script.** `apply-migration.mjs` was still the fork's copy.
-- **A failure that hid the gap.** All seven drift runs failed at *Require a
-  database route*, because the repository holds no database credential. Had
+- **A failure that hid the gap.** All seven drift runs failed at _Require a
+  database route_, because the repository holds no database credential. Had
   it held one, they would have failed one step later on a missing file.
 
 `REPOSITORY_INVARIANTS` now carries `.github/scripts/**`. Three things were
@@ -1403,6 +1403,79 @@ checked first.
   `scriptProjectRef.spec.ts` fails on a literal. That fix reaches the mirrors
   and this clone on the next cascade.
 
+## A held copy follows prime; a reconcile is never thrown away
+
+Measured on the CRM-independent line, 10 Oct 2026. Eight of the eleven
+cascades from #82 to #104 needed a hand reconcile of the same held file,
+`supabase/functions/ai-dashboard-agent/index.ts`. Every one of those reconciles
+recorded that the line's own difference from prime was "the same 235 lines
+before and after". The files around the held file kept crossing: the agent's
+policy, projection and authorisation modules, and the specs that read it. So
+each prime change to the agent left the clone red until somebody ran a
+three-way merge by hand. Three changes take that work off a person, and each
+stays a hold wherever it cannot be exact.
+
+**A held line variant is three-way merged** (`cascade/variantMerge.pure.ts`,
+`cascade/variantMergeRead.server.ts`).
+
+- **Which paths are asked:** after `decideHoldRelease`, every `manual_reconcile`
+  hold the evidence did not release, plus every kept spec the reverse half
+  would hold. At most `MAX_VARIANT_MERGES` paths per pass.
+- **The base** is the prime revision the line's own history names for the
+  file: the newest commit touching the path that names exactly one
+  `prime@<sha>`. Every reconcile and every statement commit already names one.
+- **It is never `clones.last_synced_sha`.** A held file lags the pointer by
+  definition. Merging against a base newer than the file's real one would read
+  prime's later changes as the line having deleted them.
+- **Outcomes:**
+  - A clean merge that changes the file is **written**. It meets every content
+    hold in `prepareOne`, so a GoHighLevel name prime added inside a merged
+    agent is still blocked by the membrane.
+  - A clean merge that changes nothing makes the file **current**. It stays
+    held, but no longer counts as "need reconciling". A deliberate variant is
+    not owed work, and reporting it as owed every pass is what made the fleet
+    tree read red when nothing was wrong.
+  - **Held for a person, exactly as before:** one conflicting hunk, an
+    ambiguous or missing base, a binary file, or a failed read.
+- **Validated** against the six held agent specs of cascade #104: identical,
+  byte for byte, to `git merge-file`. On the agent itself it found the same four
+  conflicting hunks (the calendar `source` label), in 193 ms for a
+  15,000-line file.
+
+**A refresh never destroys a commit it did not write**
+(`cascade/refreshOverHumanWork.pure.ts`). The in-place refresh used to
+force-move the proposal's branch whatever was on it. A reconcile pushed onto a
+cascade branch was discarded by the next prime revision that changed the tree,
+which is why every reconcile went to a second pull request instead.
+
+- **Clean case:** the human's work is read as a tree difference against the
+  branch's last statement. Each changed path is kept on top of the new
+  statement, in a merge commit (the branch head and the new statement are its
+  parents).
+- **Deferred:** if the new statement changed a path the human also changed,
+  the proposal is left exactly as it is. The same happens when the human
+  commits include a merge of another branch, or when a listing is truncated.
+  The proposal lands as it stands, and the next pass proposes the rest.
+- The engine's preserving merge does not start with `ENGINE_COMMIT_PREFIX`.
+  So `isEngineOnlyBranch` still reads such a branch as carrying human work,
+  and the conflict repair still refuses to regenerate it.
+
+**A declared function travels with its source**
+(`cascade/declaredFunctionSources.pure.ts`).
+
+- **The problem:** `reconcileConfigToml` brings prime's declarations on every
+  pass, while a function's directory crosses only through a module glob. That
+  left a clone declaring functions it had no code for:
+  - `agent-speech` (#82);
+  - `agent-realtime-session` and `urban-centre-register-ingest` (#104).
+    Each was called by code that did cross.
+- **The fix:** after the config pump, every function the final `config.toml`
+  declares, with no directory on the clone and none in this delivery, owes
+  prime's files for it.
+- **The guard:** they are fed to the subject carry as owed imports, so the
+  partition still applies. A withheld CRM-line function is still withheld;
+  only a MISSING one is carried.
+
 ## What this deliberately does not do
 
 - **It does not widen a clone's scope to a file the clone does not have.**
@@ -1422,7 +1495,7 @@ checked first.
   `!plan` branch still publishes `filesHeld: 0`, `oversizePaths: []` and
   `level: "green"` for a clone with two dozen held paths — a false zero beside a
   true sentence. Closing it properly means emitting `onPlan` from the skip, and
-  the skip returns *above* where `deletionPlan`, `staleHeld` and `missingHeld`
+  the skip returns _above_ where `deletionPlan`, `staleHeld` and `missingHeld`
   are decided: a plan emitted there would have to invent those three, which is
   the same class of lie one field along. It wants the skip moved below them, or
   a narrower published shape, and either is a change to the plan contract rather

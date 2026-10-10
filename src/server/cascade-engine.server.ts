@@ -25,6 +25,7 @@ import { readInstalledGlobs } from "./cascade/installedGlobs.server";
 import {
   getAppOctokit,
   listFilesMatchingGlobs,
+  listTreeAt,
   listTreeEntries,
   getFileContent,
   OversizeFileError,
@@ -118,6 +119,21 @@ import {
   type SettledHeldEvidence,
 } from "./cascade/heldEvidence.pure";
 import { judgingWorkflowHold } from "./cascade/judgingWorkflow.pure";
+import {
+  describeVariantMerges,
+  MAX_VARIANT_MERGES,
+  variantMergeSuffixFor,
+  type VariantMergeOutcome,
+} from "./cascade/variantMerge.pure";
+import { mergeHeldVariant } from "./cascade/variantMergeRead.server";
+import { declaredFunctionSourcesOwed } from "./cascade/declaredFunctionSources.pure";
+import {
+  carriesHumanWork,
+  lastStatement,
+  planRefreshOverHumanWork,
+  PRESERVING_MERGE_PREFIX,
+  type BranchCommit,
+} from "./cascade/refreshOverHumanWork.pure";
 import {
   CONFIG_TOML_PATH,
   declaredFunctionCount,
@@ -2500,9 +2516,84 @@ export async function processClone(args: {
     }
   }
 
+  // ── A held line variant follows prime by a three-way merge ──────────────
+  //
+  // What `decideHoldRelease` would not release is still the clone's work, and
+  // most of it only needs prime's later changes merged in — the CRM line's
+  // agent was merged by hand on eight of eleven cascades, cleanly every time.
+  // `variantMerge.pure.ts` has the rule: the base is the prime revision the
+  // line's own history names for the file, a clean merge is written, a merge
+  // that changes nothing settles the file as current, and anything else —
+  // a conflict, no named base, a failed read — holds it for a person exactly
+  // as before. The merged text replaces prime's in `prepareOne`, so it meets
+  // every content hold (the membrane, the backend identity, the judging
+  // workflow) like any other write. Not on a conversion: a line change is a
+  // replacement by design, never a merge.
+  const variantMerges = new Map<
+    string,
+    { text: string; base: string; fromPrime: number; fromClone: number }
+  >();
+  const variantOutcomes: VariantMergeOutcome[] = [];
+  const variantCurrent = new Set<string>();
+  let variantMergesAsked = 0;
+  const PUMPED_PATHS = new Set([
+    CONFIG_TOML_PATH,
+    SECURITY_REGISTRY_PATH,
+    SECURITY_INVENTORY_PATH,
+    FUNCTION_COUNT_RATCHET_PATH,
+    API_SURFACE_PATH,
+    DEPLOY_WORKFLOW_PATH,
+    EDGE_TYPECHECK_BASELINE_PATH,
+  ]);
+  const tryVariantMerge = async (path: string): Promise<"write" | "current" | "hold"> => {
+    // A file a reconcile pump composes is the pump's, never a merge's: the
+    // pump rewrites it from both sides below, and two writers of one path is
+    // how a summary comes to name a merge the tree does not carry.
+    if (PUMPED_PATHS.has(path)) return "hold";
+    const asked = variantOutcomes.find((o) => o.path === path);
+    if (asked) return asked.verdict.act;
+    if (conversion || variantMergesAsked >= MAX_VARIANT_MERGES) return "hold";
+    variantMergesAsked += 1;
+    const verdict = await mergeHeldVariant({
+      octokit,
+      cloneRef,
+      primeRef,
+      path,
+      maxBytes: CASCADE_MAX_FILE_BYTES,
+    });
+    variantOutcomes.push({ path, verdict });
+    if (verdict.act === "write") {
+      variantMerges.set(path, {
+        text: verdict.text,
+        base: verdict.base,
+        fromPrime: verdict.fromPrime,
+        fromClone: verdict.fromClone,
+      });
+    } else if (verdict.act === "current") {
+      variantCurrent.add(path);
+    }
+    return verdict.act;
+  };
+  {
+    const merging = approvableHeld(partition.held).slice(0, MAX_VARIANT_MERGES);
+    const merged = new Set<string>();
+    for (const held of merging) {
+      // The pass's own deadline, asked directly: `shouldStop` is defined with
+      // the prepare loop below and counts files that loop has read.
+      if (resume?.budget?.isPastDeadline(0)) break;
+      if ((await tryVariantMerge(held.path)) === "write") merged.add(held.path);
+    }
+    if (merged.size > 0) {
+      partition.write = [...partition.write, ...merged];
+      partition.held = partition.held.filter((h) => !merged.has(h.path));
+    }
+  }
+
   const primeFiles = partition.write;
   progress.total = primeFiles.length;
-  const needsReconcile = reportableHeld(partition.held);
+  // A held variant the merge found current owes nobody anything: it differs
+  // from prime only by the line's own work, which is what being a variant is.
+  const needsReconcile = reportableHeld(partition.held).filter((h) => !variantCurrent.has(h.path));
 
   if (mode === "notify" && !dryRun) {
     const body =
@@ -2883,7 +2974,9 @@ export async function processClone(args: {
     // never re-asked. Specs are a small share of any cascade; the saving
     // this gives up is a file read, and what it buys is a verdict about the
     // delivery that is actually being made.
-    const reusable = isSpecPath(path) ? undefined : known.get(path);
+    // Nor a merged variant: the ledger's blob is prime's copy, and what this
+    // path carries is the merge of prime's copy into the clone's.
+    const reusable = isSpecPath(path) || variantMerges.has(path) ? undefined : known.get(path);
     if (reusable !== undefined) {
       return {
         kind: "blob",
@@ -2930,6 +3023,13 @@ export async function processClone(args: {
       }
     }
     if (!primeFile) return null;
+
+    // A held variant merged above travels as the merge, never as prime's copy,
+    // and meets every content hold below exactly as prime's text would.
+    const variantMerge = variantMerges.get(path);
+    if (variantMerge) {
+      primeFile = repoFileFromExactText(gitBlobSha(variantMerge.text), variantMerge.text);
+    }
 
     // A mirror already knows this path differs -- the blob SHAs said so -- and
     // re-reading the clone's copy to confirm it would double the request count
@@ -3242,6 +3342,15 @@ export async function processClone(args: {
    * answer differently from the pass it rehearses.
    */
   const rehearsedWrites = new Set<string>();
+  // A merged line variant is a decided path whose write changes the clone's
+  // file, exactly as a pump's is — never prime's raw copy, which the subject
+  // carry below must not deliver over it.
+  for (const path of variantMerges.keys()) {
+    if (dryRun || treeEntries.some((t) => t.path === path && t.sha !== null)) {
+      reconciledPaths.add(path);
+      reconcileWrites.add(path);
+    }
+  }
 
   // ── what the prime keeps for itself and this clone does not hold ────────
   //
@@ -4360,6 +4469,19 @@ export async function processClone(args: {
   // as stranded paths, so they meet `planSubjectCarry`, the exclusions, the
   // ceiling and `prepareOne` on the terms every other candidate does.
   const importsOwed = new Set<string>();
+  // A function the final `config.toml` declares travels with its source
+  // (`declaredFunctionSources.pure.ts`): owed exactly like an import, so a
+  // withheld function is still withheld by the partition the carry applies.
+  if (mergedToml !== null && primeShaByPath !== null && cloneShaByPath !== null) {
+    for (const owed of declaredFunctionSourcesOwed({
+      toml: mergedToml,
+      prime: primeShaByPath,
+      clone: cloneShaByPath,
+      delivering: new Set(treeEntries.filter((t) => t.sha !== null).map((t) => t.path)),
+    })) {
+      importsOwed.add(owed);
+    }
+  }
 
   // ── A bridge travels with the shared module it re-exports ─────────────
   //
@@ -4530,6 +4652,17 @@ export async function processClone(args: {
           leftBehindVerdicts.set(lb.spec, verdict);
           leftBehindCut.delete(lb.spec);
           if (verdict.act === "hold") {
+            // The spec is the line's own copy of prime's — the same three-way
+            // merge as a held variant. Merged, it travels like a released
+            // spec, as the merge (`prepareOne`); current, it is held and owes
+            // nothing; anything else is held for a person as before.
+            const mergedAs = carryingAllowed ? await tryVariantMerge(lb.spec) : "hold";
+            if (mergedAs === "write") {
+              // Its verdict stays the evidence's `hold`: the spec is reported
+              // with the merges (`describeVariantMerges`), not as a release.
+              releasing.push(lb.spec);
+              continue;
+            }
             const held = leftBehindSpecHold({
               membrane,
               spec: lb.spec,
@@ -4538,7 +4671,7 @@ export async function processClone(args: {
               why: verdict.why,
             });
             partition.held.push(held);
-            needsReconcile.push(held);
+            if (mergedAs !== "current") needsReconcile.push(held);
             attemptedSubjects.add(lb.spec);
             const why = verdict.why;
             reverseHolds.set(lb.spec, {
@@ -5270,7 +5403,8 @@ export async function processClone(args: {
   );
   const bridgesReported = [...bridgesCarried.values()].filter((b) => landedWrites.has(b.path));
   const carryOnSuffix = `${strandedSuffixFor(strandedReported)}${bridgeSuffixFor(bridgesReported)}`;
-  const fileSummary = `${summaryFiles.join(", ")}${summarySuffix}${pinSuffix}${heldSuffix}${reconcileSuffix}${releaseSuffix}${carryOnSuffix}${deleteSuffix}${staleSuffix}${missingSuffix}`;
+  const variantSuffix = variantMergeSuffixFor(variantOutcomes, landedWrites);
+  const fileSummary = `${summaryFiles.join(", ")}${summarySuffix}${pinSuffix}${heldSuffix}${reconcileSuffix}${releaseSuffix}${variantSuffix}${carryOnSuffix}${deleteSuffix}${staleSuffix}${missingSuffix}`;
 
   // The decision, complete, and the last point before anything is written.
   // Emitted on BOTH paths deliberately: a dry run that took a different route
@@ -5484,6 +5618,18 @@ export async function processClone(args: {
         `refused rather than carried.\n\n` +
         `- ${deployWorkflowNote}`
       : "") +
+    (variantOutcomes.length > 0
+      ? `\n\n### This line's own copies, merged with prime\n\n` +
+        `These files are held because this line's copy carries work prime does not. Each was ` +
+        `three-way merged: the base is the prime revision this line's own history names for the ` +
+        `file, a hunk only one side changed takes that side, and one hunk both sides changed ` +
+        `differently leaves the whole file held for a person. A merged file still meets every ` +
+        `content hold. See \`variantMerge.pure.ts\` in Mission Control.\n\n` +
+        describeVariantMerges(
+          variantOutcomes,
+          new Set(treeEntries.filter((t) => t.sha !== null).map((t) => t.path)),
+        )
+      : "") +
     (holdReleases.some((r) => r.act === "release")
       ? `\n\n### Released from hold — the clone had done no work these holds protect\n\n` +
         `A \`manual_reconcile\` hold is honoured only where the clone's copy carries work that ` +
@@ -5642,15 +5788,135 @@ export async function processClone(args: {
       };
     }
 
+    // A refresh never destroys a commit it did not write
+    // (`refreshOverHumanWork.pure.ts`). A branch carrying somebody's
+    // reconcile is moved FORWARD, by a merge that keeps their paths on top of
+    // the new statement, or it is left exactly as it is.
+    let refreshHead = newCommit.sha;
+    let refreshForce = true;
+    let preservedNote = "";
+    {
+      let commits: BranchCommit[] | null = null;
+      try {
+        const { data } = await octokit.pulls.listCommits({
+          owner: cloneRef.owner,
+          repo: cloneRef.repo,
+          pull_number: existing.number,
+          per_page: 100,
+        });
+        commits = data.map((c) => ({
+          sha: c.sha,
+          message: c.commit.message,
+          parents: c.parents.length,
+        }));
+      } catch {
+        commits = null;
+      }
+      const deferred = (why: string) => ({
+        status: "skipped" as const,
+        pr_url: existing.url,
+        diff_summary: `Proposal #${existing.number} carries this clone's own commits; its refresh was deferred: ${why}`,
+        files_changed: treeEntries.length,
+        completed_at: new Date().toISOString(),
+        ...finalProgress,
+      });
+      if (commits === null || commits.length >= 100) {
+        // Unread, or more than one page: the branch's own work cannot be
+        // told apart from the engine's, so it is not moved.
+        if (commits === null || carriesHumanWork(commits)) {
+          return deferred("its commits could not be read in full");
+        }
+      } else if (carriesHumanWork(commits)) {
+        const statementCommit = lastStatement(commits);
+        let statementTree: string | null = null;
+        if (statementCommit) {
+          try {
+            const { data } = await octokit.git.getCommit({
+              owner: cloneRef.owner,
+              repo: cloneRef.repo,
+              commit_sha: statementCommit.sha,
+            });
+            statementTree = data.tree.sha;
+          } catch {
+            statementTree = null;
+          }
+        }
+        // The new statement is the old one: prime added nothing since the
+        // proposal was last refreshed, and the reconcile on it stands.
+        if (statementTree === newTree.sha) {
+          return deferred("prime has added nothing since its last statement");
+        }
+        const read = async (tree: string | null) => {
+          if (!tree) return null;
+          try {
+            return await listTreeAt(octokit, cloneRef, tree);
+          } catch {
+            return null;
+          }
+        };
+        const [statementListing, headListing, nextListing] = await Promise.all([
+          read(statementTree),
+          read(existingTreeSha),
+          read(newTree.sha),
+        ]);
+        const plan = planRefreshOverHumanWork({
+          commits,
+          statement: statementListing,
+          head: headListing,
+          next: nextListing,
+        });
+        if (plan.kind === "defer") return deferred(plan.why);
+        if (plan.kind === "merge") {
+          try {
+            const { data: mergedTree } = await octokit.git.createTree({
+              owner: cloneRef.owner,
+              repo: cloneRef.repo,
+              base_tree: newTree.sha,
+              tree: plan.overlay.map((o) => ({
+                path: o.path,
+                mode: o.mode as "100644" | "100755" | "040000" | "160000" | "120000",
+                type: "blob" as const,
+                sha: o.sha,
+              })),
+            });
+            const { data: merge } = await octokit.git.createCommit({
+              owner: cloneRef.owner,
+              repo: cloneRef.repo,
+              message:
+                `${PRESERVING_MERGE_PREFIX} (${sourceLabel}@${shortSha(sourceSha)})\n\n` +
+                `Keeps ${plan.preserved.length} path(s) this proposal's own commits changed, on top of ` +
+                `the refreshed statement. See refreshOverHumanWork.pure.ts in Mission Control.`,
+              tree: mergedTree.sha,
+              parents: [existing.headSha, newCommit.sha],
+            });
+            refreshHead = merge.sha;
+            refreshForce = false;
+            preservedNote =
+              `\n\n_Refreshed by a merge that keeps the ${plan.preserved.length} path(s) this ` +
+              `proposal's own commits changed: ${plan.preserved
+                .slice(0, 10)
+                .map((p) => `\`${p}\``)
+                .join(", ")}${plan.preserved.length > 10 ? ", …" : ""}._`;
+          } catch (e) {
+            return deferred(
+              `the preserving merge could not be written (${e instanceof Error ? e.message : "unknown"})`,
+            );
+          }
+        }
+      }
+    }
+
     try {
       await octokit.git.updateRef({
         owner: cloneRef.owner,
         repo: cloneRef.repo,
         ref: `heads/${existing.branch}`,
-        sha: newCommit.sha,
-        // Its only writer is this engine, and the new commit sits on the
-        // clone's current default branch rather than on the old proposal.
-        force: true,
+        sha: refreshHead,
+        // Forced only where the branch is entirely the engine's own
+        // statements, and the new commit sits on the clone's current default
+        // branch rather than on the old proposal. A preserving merge descends
+        // from the branch head, so it moves forward without force.
+        force: refreshForce,
       });
       const { data: updated } = await octokit.pulls.update({
         owner: cloneRef.owner,
@@ -5659,14 +5925,15 @@ export async function processClone(args: {
         title,
         body: cascadeBody(
           `${intro}\n\n` +
-            `_This pull request was updated in place rather than replaced, so one proposal tracks prime._`,
+            `_This pull request was updated in place rather than replaced, so one proposal tracks prime._` +
+            preservedNote,
         ),
       });
       proposal = {
         number: existing.number,
         url: existing.url,
         nodeId: updated.node_id ?? null,
-        headSha: newCommit.sha,
+        headSha: refreshHead,
       };
     } catch {
       // Branch deleted under an open pull request, or a race. Fall through and

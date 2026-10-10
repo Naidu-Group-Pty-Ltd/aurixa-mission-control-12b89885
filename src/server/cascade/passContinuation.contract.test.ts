@@ -417,7 +417,11 @@ describe("a pass resumes inside a clone", () => {
     // Reuse also sets `content: null`, which takes the file out of
     // `deliveredSource` — the set that channel reads — so a banked spec would
     // cross having been judged against a partial delivery and never re-asked.
-    expect(process).toContain("const reusable = isSpecPath(path) ? undefined : known.get(path);");
+    // Nor a held variant merged this pass: the ledger's blob is prime's copy,
+    // and the path carries the merge (`variantMerge.pure.ts`).
+    expect(process).toContain(
+      "const reusable = isSpecPath(path) || variantMerges.has(path) ? undefined : known.get(path);",
+    );
   });
 
   it("reuses only on the real path, and only against prime's listing", () => {
