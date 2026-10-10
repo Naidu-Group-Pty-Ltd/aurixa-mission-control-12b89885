@@ -407,14 +407,17 @@ yet**. Nothing below has been built.
 
 ### C21. Watch the CRM-independent cascade (#104) after the membrane fix
 
-- **Status:** open; watch.
-- The cascade PR #104 into the CRM-independent clone was refreshed to
-  prime@caddfbf (262 files) before the reconcile PR #106 merged, and it still
-  carried the held agent files.
-- Mission Control PR #322 should now carry held variants through
-  automatically.
-- If #104, or the next cascade, still goes red on held files, #322 is not
-  taking effect. That is a Mission Control fix, not a clone one.
+- **Status:** done (10 Oct 2026); the watch found a defect, fixed.
+- #104 was refreshed to prime@22e04d8 at 21:04 and went red on `security`
+  (`missing policy: log_client_activity`) and on the agent specs. #322's
+  three-way merge of held variants never ran on the file that mattered:
+  `MAX_VARIANT_MERGES` was 12 and held paths were taken in list order. #104
+  held 26, and `ai-dashboard-agent/index.ts` was 22nd.
+- **Fixed:** the cap is 32 (`variantMerge.pure.ts`), and held paths are
+  offered most consequential first (`orderVariantMergeCandidates`: Edge
+  Function entrypoints, then source, then workflows, scripts and docs).
+- #104 itself was landed by hand on the head (head PR #108): the agent
+  three-way merged cleanly, and three agent specs took prime's copies.
 
 ---
 
@@ -466,22 +469,38 @@ as a record; E7 is what is left.
 
 ### E7. What the fixes leave
 
-- **Status:** open; low. None of it is behind the five pages.
-- `manage-lead-magnets`' `list_pipelines` (Marketing page) still asks
-  GoHighLevel for pipelines and has no native branch. With no credential on
-  this line it answers an empty list with an error string, so the lead-magnet
-  editor offers no pipeline to route a lead to. The native lead capture
-  (`request-lead-magnet`) files leads already; the pipeline picker is the
-  missing half. **To decide:** read native pipelines there on this line.
-- Deleting a note from the client card (`ActiveClientCard.tsx`) still calls
-  `sync-notes-to-ghl` unconditionally. The call is refused in the browser
-  before a request leaves (`crm_function_not_carried`) and logs one console
-  line; nothing is sent. Gating it would make one more prime file a line
-  variant, so it was left. **To decide:** whether that is worth a variant.
-- The head's `ghlReachRatchet.test.ts` names these, with
-  `finance-portal-client-comms` and `request-lead-magnet`, which take their
-  native branch on this line, as the only carried functions that can still
-  reach GoHighLevel.
+- **Status:** done (10 Oct 2026, head PR #108).
+- `manage-lead-magnets` `list_pipelines` answers with the Client Tracker's
+  own pipelines on this line (`nativePipelineChoices.pure.ts`), so a lead
+  magnet can route a lead onto this CRM's board.
+- The client card's note delete asks GoHighLevel only about a note copied
+  there (`ghl_note_id`), so it makes no call on this line.
+- Both files are held as line variants. Every carried function that can
+  still reach GoHighLevel now takes its native branch on this line
+  (`ghlReachRatchet.test.ts` on the head).
+
+### E8. The line's own functions never reached its project
+
+- **Status:** done (10 Oct 2026); found while checking that the fixes went
+  live.
+- Mission Control's rolling `edge_function_deploy` lane builds every
+  function the prime declares from the PRIME's repository. So a function the
+  independent line keeps in its own shape was held in the repository and
+  overwritten on the project. Measured on `qvuwrvwzjyigptmnijyb`: the live
+  `manage-automation-settings` was the prime's copy, with no
+  `createPipeline`, so the Client Tracker could not create a pipeline. The
+  same was true of `vapi-call-webhook`, `portal-book-appointment`,
+  `request-lead-magnet` and the rest. Only the clone-owned `crm-*` functions
+  came from the clone.
+- **Fixed:** `crmLineVariantFunctionNames` derives the line's own functions
+  from the variant patterns (13 on the independent line). The clone-owned
+  lane deploys them from the clone's tree, the prime-tree lane and
+  provisioning skip them, and a conversion off the line restores the prime's
+  copies.
+- **How it goes live:** after this merges and Mission Control redeploys, the
+  next `backend-catchup` tick (`:20` and `:50` past the hour) sees the
+  owned set change and deploys all 14 from the head's tree. Verify on the
+  project that `manage-automation-settings` contains `createPipeline`.
 
 ---
 
@@ -513,4 +532,64 @@ Carried from earlier work. Each one is also recorded where it was found.
 | D20 | After the next cascade into the CRM-independent clone, check it carried held files cleanly (C21). | C21 |
 | D21 | ~~Decide E1 to E5~~ Done 10 Oct 2026: all six fixes approved and made. | E |
 | D22 | ~~Check E6~~ No longer needed: the fleet sweep removes and reports any GoHighLevel credential on an independent project. | E6 |
-| D23 | Decide E7 (lead-magnet pipelines on this line; the client card's note-delete call). | E7 |
+| D23 | ~~Decide E7~~ Done 10 Oct 2026 (head #108). | E7 |
+
+---
+
+## F. What only the owner can do (consolidated 10 Oct 2026)
+
+Everything above that needs a person, in one list and in priority order.
+Nothing here can be done from a session: each needs a login, a credential
+nobody else may see, money, or a decision. "Unblocks" says what starts
+working when it is done.
+
+### Do first: things that are broken or exposed today
+
+| # | Action | Where | Unblocks | Ref |
+|---|---|---|---|---|
+| F1 | Rotate the Vapi private key written in plain text in inactive Make scenario 5978090, then delete it from the scenario. Never paste it anywhere. | Vapi dashboard → API keys; Make → scenario 5978090 | Closes a live credential exposure | D9 |
+| F2 | Rotate `adapter_secret` on CFG record 168061 (it appeared in a transcript), then store the new value only in the record. | Make → data store 168061, record `cfg`, field `adapter_secret` | Closes a credential exposure | D8 |
+| F3 | Set ONE value in BOTH halves of the NPC CRM Independent call-log pairing: the clone's Integrations → Vapi → Webhook Secret, and the token of Vapi credential "NPC CRM Independent call logs" (`49187eb8`) in org B. Until they match, every call is refused and `webhook_rejections` says which half is missing. | Clone dashboard Integrations page; Vapi dashboard org B → Credentials | Calls landing on the clone's Call Logs | D2 |
+| F4 | Set `MAKE_API_TOKEN` on Mission Control: a Make API token on team 2731020 with `scenarios`, `datastores`, `connections`, `credential-requests` and `hooks`, read and write. | Mission Control hosting env vars | Voice-automation applies; every clone voice stack build | D1 |
+| F5 | Make sure `RESEND_MASTER_API_KEY` and `CREDENTIALS_ENC_KEY` are set on Mission Control. | Mission Control hosting env vars | Per-clone Vapi custody (inbox + encrypted login) | D12 |
+
+### Then: go-live of the NPC CRM Independent voice agents
+
+| # | Action | Where | Ref |
+|---|---|---|---|
+| F6 | Authorise Make credential request `98f5f77d` with the calendar that should hold NPC CI bookings. | The link Make emails / Make → Credential requests | D7 |
+| F7 | Test the CI squad with Talk (org B, squad "NPC CI Sales Force"), and check `property@npcservices.com.au` for the 9 Oct test mails and their `.ics` files. | Vapi dashboard; the mailbox | D5, D6 |
+| F8 | When satisfied: clear `email_redirect_to` on CFG 168061 (this is the go-live switch; until then every customer mail goes to `property@npcservices.com.au`), and delete the old Vapi proxy (scenario 6560898, hook 2910906) and the gated proxy (scenario 6571056, hook 2914419, store 168760, structure 529586). | Make | D8 |
+| F9 | Check credits on Make OpenAI connection 10496826 (the availability classifier on every independent stack). | OpenAI billing for that key | D10 |
+
+### Per clone, when a clone is sold voice agents
+
+| # | Action | Ref |
+|---|---|---|
+| F10 | Sign the clone's Vapi org up once from the clone card's guided steps (Mission Control shows the login and reads Vapi's verification mail), create the org, and paste the org id and private key. | D15, B3 |
+| F11 | Fund that Vapi org (payment method or credits), or decide who pays. | C7 |
+| F12 | CRM-dependent clones: enter the tenant's GoHighLevel private-integration token and location id on the clone card, and send the tenant the authorisation link it produces. | D16, C16 |
+| F13 | Enter the tenant's business name, website and phone replacements on the clone card, so no NPC wording reaches their agents. | D17, C4 |
+| F14 | For a clone that existed before custody: press **Advance** on its Voice stack card. | C18 |
+
+### Decisions (nothing is built until you answer)
+
+| # | Decide | Ref |
+|---|---|---|
+| F15 | Gmail on the dependent line: connect Gmail inside GoHighLevel (recommended) or add a Make notifier. | A1 / D3 |
+| F16 | A Make key per clone: stay on one Aurixa team (recommended for now), one team per clone, or one organisation per clone. | A2 / D4 |
+| F17 | Confirm the Vapi login address (`voice-agents@send.<clone-host>`), whether a clone's backend may hold its own org's Vapi key, and that a guided one-time Vapi signup per clone is acceptable. | B1–B3 |
+| F18 | Tenant prompts: a substitution table (built) or a Voice Studio plan per tenant. | C4 |
+| F19 | When to move the independent head's agents out of Aurixa's org B into their own org (needs a new template manifest). | C8, C15 |
+| F20 | Whether a tenant may change its own `VAPI_WEBHOOK_SECRET` once a stack owns it (if not, it is withheld from their Integrations page). | C12 |
+| F21 | Which clones get voice agents (only those that bought the add-on?), and whether to back-fill custody for existing clones. | C17, C18 |
+| F22 | The CRM-dependent template: build a dedicated dependent template (fixes the broken booking scenario, lets a pasted GoHighLevel key run the whole line, adds cancel/reschedule) or keep copying NPC's live stack. Until decided, dependent-line voice stacks stay disabled. | C1, C2, C16, C19, C20 |
+| F23 | Publish the `voice-agents` add-on catalog row, so a signed agreement opens a Voice Studio project. | D11 |
+| F24 | Twilio numbers per clone, the outbound launcher and post-call reports (deferred by you). | D13, C3, C9 |
+
+### Not yours to do; recorded so nobody waits on them
+
+- C11: Make's refusal when a scenario's connection is unbound is measured
+  automatically on the first real clone build.
+- C21, E7, E8: done in code on 10 Oct 2026.
+

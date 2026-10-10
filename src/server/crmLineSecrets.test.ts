@@ -16,9 +16,11 @@ import {
   crmLinePinnedSecrets,
   crmLineSecretRefusal,
   crmLineSecretTransition,
+  crmLineVariantFunctionNames,
   crmLineVariantPattern,
   crmLineWithheldSecretNames,
 } from "./crmLineFeatures.pure";
+import { ownedFunctionSlugs } from "./cloneOwnedFunctions.pure";
 import {
   decideFleetForward,
   decideForward,
@@ -270,10 +272,55 @@ describe("the head's own copies from the audit", () => {
       "src/pages/Integrations.tsx",
       "supabase/functions/update-integration-secret/index.ts",
       "supabase/functions/_shared/clients/noteWords.pure.ts",
+      "supabase/functions/manage-lead-magnets/index.ts",
+      "src/components/clients/ActiveClientCard.tsx",
     ]) {
       expect(CRM_LINE_VARIANT_PATTERNS.independent, path).toContain(path);
       expect(crmLineVariantPattern(path, "independent"), path).toBe(path);
       expect(crmLineVariantPattern(path, "dependent"), path).toBeNull();
     }
+  });
+});
+
+describe("the line's own functions are deployed from the clone's tree", () => {
+  it("are named by the variant patterns, never by `_shared`", () => {
+    const names = crmLineVariantFunctionNames("independent");
+    for (const slug of [
+      "vapi-call-webhook",
+      "cleanup-call-log-names",
+      "portal-book-appointment",
+      "update-integration-secret",
+      "manage-automation-settings",
+      "manage-lead-magnets",
+      "request-lead-magnet",
+      "finance-portal-client-comms",
+      "ai-dashboard-agent",
+      "crm-calendar",
+    ]) {
+      expect(names, slug).toContain(slug);
+    }
+    expect(names.some((n) => n.startsWith("_"))).toBe(false);
+    expect(crmLineVariantFunctionNames("dependent")).toEqual([]);
+    expect(crmLineVariantFunctionNames(null)).toEqual([]);
+  });
+
+  it("are owned by the clone-tree lane, and only on that line", () => {
+    const declared = ["vapi-call-webhook", "healthcheck-ping", "crm-calendar"];
+    const prime = ["vapi-call-webhook", "healthcheck-ping"];
+    expect(ownedFunctionSlugs(declared, prime, crmLineVariantFunctionNames("independent"))).toEqual(
+      ["crm-calendar", "vapi-call-webhook"],
+    );
+    expect(ownedFunctionSlugs(declared, prime, crmLineVariantFunctionNames("dependent"))).toEqual([
+      "crm-calendar",
+    ]);
+  });
+
+  it("are skipped by the prime-tree lane and by provisioning's prime bundles", () => {
+    const lane = read("src/server/self-healing.server.ts");
+    expect(lane).toContain("...crmLineVariantFunctionNames(cloneCrmMode)");
+    const prov = read("src/lib/backend-provisioning.functions.ts");
+    expect(prov).toContain("!lineVariants.has(fn.slug)");
+    const owned = read("src/server/cloneOwnedFunctions.server.ts");
+    expect(owned).toContain("crmLineVariantFunctionNames(c.crm_mode ?? null)");
   });
 });

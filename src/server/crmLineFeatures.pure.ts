@@ -595,6 +595,11 @@ export const CRM_LINE_VARIANT_PATTERNS: Readonly<Partial<Record<CrmMode, readonl
     "src/pages/Integrations.tsx",
     "supabase/functions/update-integration-secret/index.ts",
     "supabase/functions/_shared/clients/noteWords.pure.ts",
+    // E7 of the same audit: a lead magnet's pipeline picker reads this CRM's own
+    // pipelines, and the client card's note delete asks GoHighLevel only about
+    // a note copied there.
+    "supabase/functions/manage-lead-magnets/index.ts",
+    "src/components/clients/ActiveClientCard.tsx",
     // Server code that no longer reaches a withheld function.
     "supabase/functions/ai-dashboard-agent/index.ts",
     "supabase/functions/finance-portal-client-data/index.ts",
@@ -634,6 +639,39 @@ export function crmLineVariantPattern(
   if (crmMode !== "independent" && crmMode !== "dependent") return null;
   const hit = variantRules.get(crmMode)?.find((r) => r.rx.test(path));
   return hit?.pattern ?? null;
+}
+
+/**
+ * The edge functions this line deploys from the CLONE's own tree.
+ *
+ * Every function the prime also declares used to be deployed onto a clone
+ * from the PRIME's repository, by the rolling `edge_function_deploy` lane —
+ * held variant or not. So a function the line keeps in its own shape was
+ * held in the repository and overwritten on the PROJECT: measured
+ * 10 Oct 2026 on `qvuwrvwzjyigptmnijyb`, the live `manage-automation-settings`
+ * was the prime's copy, with no `createPipeline`, so the Client Tracker could
+ * not create a pipeline, and `vapi-call-webhook`, `portal-book-appointment`,
+ * `request-lead-magnet` and the rest ran the prime's GoHighLevel code on the
+ * line that carries none. The repository's membrane held; the backend's did
+ * not.
+ *
+ * A function is the line's own when a variant pattern names a path inside
+ * its directory. Those are built from the clone's tree by the clone-owned
+ * lane (`cloneOwnedFunctions.server.ts`) and skipped by the prime-tree lane,
+ * so exactly one lane writes each. Derived from the patterns rather than
+ * listed, so a variant added there is deployed from the clone the same day.
+ * `_shared/**` is not a function. Measured on the head the same day: every
+ * function that imports `_shared/crm/**` or the line's `noteWords` is one of
+ * these, so the line's shared modules reach the project only through them.
+ */
+export function crmLineVariantFunctionNames(crmMode: string | null | undefined): string[] {
+  if (crmMode !== "independent" && crmMode !== "dependent") return [];
+  const out = new Set<string>();
+  for (const pattern of CRM_LINE_VARIANT_PATTERNS[crmMode] ?? []) {
+    const m = /^supabase\/functions\/([^/*?[\]{}]+)\//.exec(pattern);
+    if (m && !m[1].startsWith("_")) out.add(m[1]);
+  }
+  return [...out].sort();
 }
 
 /**

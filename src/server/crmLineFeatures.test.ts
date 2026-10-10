@@ -207,8 +207,11 @@ describe("a conversion moves the integration with the clone", () => {
         live: ["crm-send-message"],
         primeDeclared,
       }),
-    ).toEqual(["send-ghl-message", "sync-ghl-pipelines"]);
-    // Nothing to restore the other way, and never what is already live.
+      // This fixture has the prime declare `crm-send-message`, which the
+      // independent line keeps as its own: leaving the line restores the
+      // prime's copy of it too, live or not.
+    ).toEqual(["crm-send-message", "send-ghl-message", "sync-ghl-pipelines"]);
+    // Nothing to restore the other way, and never a withheld function already live.
     expect(
       functionsToRestore({ fromMode: "dependent", toMode: "independent", live: [], primeDeclared }),
     ).toEqual([]);
@@ -219,7 +222,20 @@ describe("a conversion moves the integration with the clone", () => {
         live: ["send-ghl-message", "sync-ghl-pipelines"],
         primeDeclared,
       }),
-    ).toEqual([]);
+    ).toEqual(["crm-send-message"]);
+  });
+
+  it("puts the prime's copy back over the line's own copy of a shared function", () => {
+    // Live, `vapi-call-webhook` is the independent line's copy, built from the
+    // clone's tree; nothing else replaces it once the clone is dependent.
+    expect(
+      functionsToRestore({
+        fromMode: "independent",
+        toMode: "dependent",
+        live: ["vapi-call-webhook", "manage-automation-settings"],
+        primeDeclared: ["vapi-call-webhook", "manage-automation-settings", "healthcheck-ping"],
+      }),
+    ).toEqual(["manage-automation-settings", "vapi-call-webhook"]);
   });
 
   it("counts a restore folded into a parked run as nothing runnable", () => {

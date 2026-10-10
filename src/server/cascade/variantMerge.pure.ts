@@ -367,10 +367,37 @@ export function decideVariantMerge(args: {
 /**
  * Held paths one pass asks about. Each is at most four requests (the line's
  * history of the file, the named revision, three file reads less what is
- * cached), so twelve is ~fifty requests at worst — and the CRM line holds
- * fewer than twelve paths that actually differ on any one cascade.
+ * cached), so thirty-two is ~130 requests at worst, and the pass's own
+ * deadline still stops the loop.
+ *
+ * It was twelve, on the premise that the CRM line holds fewer than twelve
+ * paths that differ on any one cascade. Measured on #104 into
+ * `npc-crm-independent-6505dc` (prime@22e04d8, 10 Oct 2026): twenty-six, with
+ * `ai-dashboard-agent/index.ts` twenty-second. The budget ran out on
+ * workflows, gate scripts and components, the agent was never merged, and
+ * every agent module and spec the same cascade delivered went red against
+ * the line's stale copy. The merge was clean when run by hand.
  */
-export const MAX_VARIANT_MERGES = 12;
+export const MAX_VARIANT_MERGES = 32;
+
+/**
+ * The order held paths are offered to the merge, most consequential first:
+ * an Edge Function's entrypoint (what a project runs, and what delivered
+ * modules and specs are wired into), then other source under `src/` and
+ * `supabase/`, then everything else (workflows, scripts, docs). Stable
+ * within each rank, so the same held list is always asked in the same order.
+ */
+export function orderVariantMergeCandidates<T extends { path: string }>(held: readonly T[]): T[] {
+  const rank = (path: string): number => {
+    if (/^supabase\/functions\/[^/_][^/]*\/index\.ts$/.test(path)) return 0;
+    if (path.startsWith("supabase/functions/") || path.startsWith("src/")) return 1;
+    return 2;
+  };
+  return held
+    .map((h, i) => ({ h, i, r: rank(h.path) }))
+    .sort((a, b) => a.r - b.r || a.i - b.i)
+    .map((x) => x.h);
+}
 
 export type VariantMergeOutcome = { path: string; verdict: VariantMergeVerdict };
 

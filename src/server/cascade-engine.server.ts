@@ -122,6 +122,7 @@ import { judgingWorkflowHold } from "./cascade/judgingWorkflow.pure";
 import {
   describeVariantMerges,
   MAX_VARIANT_MERGES,
+  orderVariantMergeCandidates,
   variantMergeSuffixFor,
   type VariantMergeOutcome,
 } from "./cascade/variantMerge.pure";
@@ -2575,7 +2576,12 @@ export async function processClone(args: {
     return verdict.act;
   };
   {
-    const merging = approvableHeld(partition.held).slice(0, MAX_VARIANT_MERGES);
+    // Most consequential first, so a budget that runs out never runs out on a
+    // workflow while the agent waits (#104, 10 Oct 2026).
+    const merging = orderVariantMergeCandidates(approvableHeld(partition.held)).slice(
+      0,
+      MAX_VARIANT_MERGES,
+    );
     const merged = new Set<string>();
     for (const held of merging) {
       // The pass's own deadline, asked directly: `shouldStop` is defined with

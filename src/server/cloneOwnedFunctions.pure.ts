@@ -19,12 +19,16 @@
  *
  * ## The rules
  *
- * - **Owned is clone-declared minus prime-declared.** Both are read from a
- *   tree with `isCloneFunctionPath`, so what the prime keeps for itself is in
- *   neither. A function the prime also declares is never deployed from the
- *   clone's repository, however the two copies differ: that one belongs to
- *   the prime's lane, and two lanes writing one function is how a project
- *   ends up running whichever wrote last.
+ * - **Owned is clone-declared minus prime-declared, plus the line's own.**
+ *   Both lists are read from a tree with `isCloneFunctionPath`, so what the
+ *   prime keeps for itself is in neither. A function the prime also declares
+ *   belongs to the prime's lane, EXCEPT one the clone's CRM line keeps in its
+ *   own shape (`crmLineVariantFunctionNames`): that one is built from the
+ *   clone's tree here and skipped by the prime's lane, so each function still
+ *   has exactly one writer — two lanes writing one function is how a project
+ *   ends up running whichever wrote last. Until 10 Oct 2026 the variant went
+ *   to the prime's lane too, and the line's own copy never reached its
+ *   project.
  * - **A large owned set is refused, not deployed.** A clone owning more than
  *   `MAX_OWNED_FUNCTIONS` means the prime's declared list was misread or the
  *   clone has diverged by hundreds of functions — either way deploying them
@@ -92,13 +96,19 @@ export type OwnedBundlePlan = {
   files: ReadonlyArray<{ rel: string; sha: string }>;
 };
 
-/** The slugs the clone declares that the prime does not, sorted and distinct. */
+/**
+ * The slugs this clone deploys from its own tree, sorted and distinct: those
+ * it declares and the prime does not, and those its CRM line keeps as its own
+ * (`lineVariants`) that it actually declares.
+ */
 export function ownedFunctionSlugs(
   cloneDeclared: readonly string[],
   primeDeclared: readonly string[],
+  lineVariants: readonly string[] = [],
 ): string[] {
   const prime = new Set(primeDeclared);
-  return [...new Set(cloneDeclared)].filter((s) => !prime.has(s)).sort();
+  const variants = new Set(lineVariants);
+  return [...new Set(cloneDeclared)].filter((s) => !prime.has(s) || variants.has(s)).sort();
 }
 
 /**
