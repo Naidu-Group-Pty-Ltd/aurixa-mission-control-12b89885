@@ -1,0 +1,118 @@
+{
+ "name": "NPC CI Sales Force",
+ "members": [
+  {
+   "assistantId": "215286a3-0dcf-47a0-a845-5d6c2b0134d8",
+   "assistantOverrides": {
+    "metadata": {
+     "position": {
+      "x": 237.34521448871288,
+      "y": 427.4425751045537
+     }
+    },
+    "tools:append": [
+     {
+      "type": "handoff",
+      "async": false,
+      "function": {
+       "name": "handoff_to_assistant"
+      },
+      "messages": [
+       {
+        "type": "request-start",
+        "content": "Please hold on while I hand you over to the relevant agent to book your call",
+        "blocking": true
+       }
+      ],
+      "destinations": [
+       {
+        "type": "assistant",
+        "assistantId": "23d3cdb3-afbf-46ed-b71f-7b55e2947dcc",
+        "assistantName": "NPC CI Opt In Follow Up Inbound",
+        "description": "When user asks to book a new discovery call",
+        "variableExtractionPlan": {
+         "schema": {
+          "type": "object",
+          "required": [],
+          "properties": {
+           "firstName": {
+            "type": "string"
+           }
+          }
+         }
+        }
+       },
+       {
+        "type": "assistant",
+        "assistantId": "f08a7b8f-d687-45ab-8a19-d3e4efc054eb",
+        "assistantName": "NPC CI Strategy Session Inbound",
+        "description": "When user asks to book a new strategy session",
+        "variableExtractionPlan": {
+         "schema": {
+          "type": "object",
+          "required": [],
+          "properties": {
+           "firstName": {
+            "type": "string"
+           }
+          }
+         }
+        }
+       },
+       {
+        "type": "assistant",
+        "assistantId": "598e8e6f-16de-432a-bdd7-6b1e89bb708e",
+        "assistantName": "NPC CI IFC Inbound",
+        "description": "When user asks to book a new initial finance consult a.k.a IFC",
+        "variableExtractionPlan": {
+         "schema": {
+          "type": "object",
+          "required": [],
+          "properties": {
+           "firstName": {
+            "type": "string"
+           }
+          }
+         }
+        }
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "assistantId": "23d3cdb3-afbf-46ed-b71f-7b55e2947dcc",
+   "assistantOverrides": {
+    "metadata": {
+     "position": {
+      "x": 711.4278688524591,
+      "y": 92.12315573770486
+     }
+    }
+   }
+  },
+  {
+   "assistantId": "f08a7b8f-d687-45ab-8a19-d3e4efc054eb",
+   "assistantOverrides": {
+    "metadata": {
+     "position": {
+      "x": 708.8274468453475,
+      "y": 394.48551857441134
+     }
+    }
+   }
+  },
+  {
+   "assistantId": "598e8e6f-16de-432a-bdd7-6b1e89bb708e",
+   "assistantOverrides": {
+    "metadata": {
+     "position": {
+      "x": 716.587458275248,
+      "y": 712.8696377821774
+     }
+    }
+   }
+  }
+ ]
+}

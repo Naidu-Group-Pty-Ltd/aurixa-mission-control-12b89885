@@ -1,0 +1,64 @@
+{
+  "name": "Vapi - GHL Contact Resolver v4 CANONICAL VARIABLES (Search First, Create Only If Needed)",
+  "flow": [
+    { "id": 1, "mapper": {}, "module": "gateway:CustomWebHook", "version": 1, "parameters": { "hook": 2705107, "maxResults": 1 } },
+    {
+      "id": 9,
+      "mapper": { "limit": "10", "search": "{{1.message.customer.number}}" },
+      "module": "highlevel:searchContacts",
+      "version": 1,
+      "parameters": { "__IMTCONN__": 10496865 }
+    },
+    {
+      "id": 3,
+      "mapper": null,
+      "module": "builtin:BasicRouter",
+      "version": 1,
+      "parameters": {},
+      "routes": [
+        {
+          "flow": [
+            {
+              "id": 8,
+              "filter": { "name": "No contact found and no caller name supplied", "conditions": [[{ "a": "{{9.id}}", "o": "notexist" }]] },
+              "mapper": { "body": "{\"contactState\":\"NEEDS_NAME\"}", "status": "200" },
+              "module": "gateway:WebhookRespond",
+              "version": 1,
+              "parameters": {}
+            }
+          ]
+        },
+        {
+          "flow": [
+            {
+              "id": 10,
+              "mapper": { "phone": "{{get(1.message.toolCallList; 1)}}{{.function.arguments.phone}}", "timezone": "Australia/Sydney" },
+              "module": "highlevel:createAContact",
+              "version": 1,
+              "parameters": { "__IMTCONN__": 10496865 }
+            },
+            {
+              "id": 12,
+              "mapper": { "key": "{{1.message.customer.number}}", "data": { "contactId": "{{10.id}}" }, "overwrite": true },
+              "module": "datastore:AddRecord",
+              "version": 1,
+              "parameters": { "datastore": 133627 }
+            }
+          ]
+        },
+        {
+          "flow": [
+            {
+              "id": 11,
+              "mapper": { "key": "{{1.message.customer.number}}", "data": { "contactId": "{{9.id}}" }, "overwrite": true },
+              "module": "datastore:AddRecord",
+              "version": 1,
+              "parameters": { "datastore": 133627 }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "metadata": { "instant": true, "version": 1, "scenario": { "dlq": false, "slots": null, "maxErrors": 3, "autoCommit": true, "roundtrips": 1, "sequential": false, "confidential": false, "freshVariables": false, "autoCommitTriggerLast": true } }
+}

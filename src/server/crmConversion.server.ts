@@ -102,6 +102,13 @@ export interface ConversionFinishRecord {
    */
   restored?: string[];
   restoreOutcome?: string | null;
+  /**
+   * What happened to the clone's voice agents: the stack of the line it left
+   * parked (scenarios switched off, nothing deleted), the one for the line it
+   * joined opened or resumed (`onCrmLineChanged`). Absent on a record written
+   * before voice stacks followed the line.
+   */
+  voiceStack?: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -960,7 +967,15 @@ export async function finaliseConversion(args: {
     }
   }
 
+  // 4. The voice agents follow the line, exactly as the code did: park the
+  // stack of the line left, open or resume the one joined. Never throws — the
+  // conversion has happened — and the voice-stack drain re-checks the line on
+  // every pass, so a failure here is caught there.
+  const { onCrmLineChanged } = await import("./voice-stack.server");
+  const voiceStack = await onCrmLineChanged({ cloneId: clone.id, fromMode, toMode });
+
   const finish: ConversionFinishRecord = {
+    voiceStack,
     at: new Date().toISOString(),
     routingHoldsRemoved,
     routingHoldsLeft,

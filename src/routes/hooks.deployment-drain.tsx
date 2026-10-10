@@ -553,6 +553,21 @@ async function step(row: DeploymentRow): Promise<StepOutcome> {
         emailNote = e instanceof Error ? e.message : String(e);
       }
 
+      // This clone's OWN Vapi organisation — custody STARTED here, beside the
+      // email identity it lives on: once the sending domain is registered,
+      // receiving is turned on for it and a Vapi login is minted on
+      // `voice-agents@<sending domain>`. The voice-stack drain carries it on
+      // from there. Best-effort for the same reason as the two above: a clone
+      // that cannot get one still reaches production, saying so on its voice
+      // panel. Started only — never on a domain that is not registered yet.
+      let vapiCustodyNote = "not attempted";
+      try {
+        const { startVapiCustodyIfDue } = await import("@/server/clone-vapi-custody.server");
+        vapiCustodyNote = await startVapiCustodyIfDue(row.clone_id);
+      } catch (e) {
+        vapiCustodyNote = e instanceof Error ? e.message : String(e);
+      }
+
       // This clone's OWN billing identity, published here for the same reason
       // the widget above is: Vite inlines `VITE_*` at BUILD time, so an id
       // that arrives after `deploying` is an id the bundle does not have.
@@ -634,6 +649,7 @@ async function step(row: DeploymentRow): Promise<StepOutcome> {
           ...(synced as Record<string, unknown>),
           turnstile: turnstileNote,
           email: emailNote,
+          vapiCustody: vapiCustodyNote,
           ...billingResult,
         },
       };

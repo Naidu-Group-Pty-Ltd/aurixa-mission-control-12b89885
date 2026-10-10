@@ -159,36 +159,57 @@ function orphanedServerExports(raw: Map<string, string> = allSources()): string[
   return orphans.sort();
 }
 
+// The scan of the real tree reads every source file under `src/` and takes
+// about five seconds on its own — the whole of vitest's default per-test
+// timeout, so under a full parallel run it timed out rather than failed. It is
+// computed ONCE for the three tests that read the real tree, and each of them
+// states its own timeout, because whichever runs first pays for the scan.
+let realTreeScan: string[] | null = null;
+const realTreeOrphans = (): string[] => (realTreeScan ??= orphanedServerExports());
+const SCAN_TIMEOUT_MS = 60_000;
+
 describe("every exported server function is reached by something", () => {
-  it("has no orphan the freeze does not name", () => {
-    const frozen = new Set(FROZEN);
-    const fresh = orphanedServerExports().filter((o) => !frozen.has(o));
-    expect(
-      fresh,
-      "A new exported server function has no caller anywhere. An unused export " +
-        "typechecks, lints and builds — this is the only gate that can see it. " +
-        "Wire it, or delete it, or add it to FROZEN with what it is and why.",
-    ).toEqual([]);
-  });
+  it(
+    "has no orphan the freeze does not name",
+    () => {
+      const frozen = new Set(FROZEN);
+      const fresh = realTreeOrphans().filter((o) => !frozen.has(o));
+      expect(
+        fresh,
+        "A new exported server function has no caller anywhere. An unused export " +
+          "typechecks, lints and builds — this is the only gate that can see it. " +
+          "Wire it, or delete it, or add it to FROZEN with what it is and why.",
+      ).toEqual([]);
+    },
+    SCAN_TIMEOUT_MS,
+  );
 
-  it("names nothing that has stopped being an orphan", () => {
-    const orphans = new Set(orphanedServerExports());
-    const stale = FROZEN.filter((f) => !orphans.has(f));
-    expect(
-      stale,
-      "These are in FROZEN and now have callers. Delete the lines: a ratchet " +
-        "that keeps names it has outgrown stops being read.",
-    ).toEqual([]);
-  });
+  it(
+    "names nothing that has stopped being an orphan",
+    () => {
+      const orphans = new Set(realTreeOrphans());
+      const stale = FROZEN.filter((f) => !orphans.has(f));
+      expect(
+        stale,
+        "These are in FROZEN and now have callers. Delete the lines: a ratchet " +
+          "that keeps names it has outgrown stops being read.",
+      ).toEqual([]);
+    },
+    SCAN_TIMEOUT_MS,
+  );
 
-  it("the function this whole exercise was about is not among them", () => {
-    // The instance `fleetBlockageRecord.test.ts` names by hand. If this ever
-    // comes back, the report has been unmounted rather than merely changed.
-    const orphans = orphanedServerExports();
-    expect(orphans).not.toContain(
-      "src/server/primeLedgerReconciliation.server.ts:buildPrimeLedgerReconciliation",
-    );
-  });
+  it(
+    "the function this whole exercise was about is not among them",
+    () => {
+      // The instance `fleetBlockageRecord.test.ts` names by hand. If this ever
+      // comes back, the report has been unmounted rather than merely changed.
+      const orphans = realTreeOrphans();
+      expect(orphans).not.toContain(
+        "src/server/primeLedgerReconciliation.server.ts:buildPrimeLedgerReconciliation",
+      );
+    },
+    SCAN_TIMEOUT_MS,
+  );
 
   it("is derived rather than listed, so it can see a name nobody wrote down", () => {
     // The guard on the guard. A scan that found nothing to judge would pass

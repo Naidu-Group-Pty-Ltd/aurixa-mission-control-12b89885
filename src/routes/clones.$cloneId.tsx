@@ -36,6 +36,7 @@ import { CloneAccessCredentialsCard } from "@/components/clone-access-credential
 import { CloneTurnstileCard } from "@/components/clone-turnstile-card";
 import { CloneCrmConversionCard } from "@/components/clone-crm-conversion-card";
 import { CloneVoiceAutomationCard } from "@/components/clone-voice-automation-card";
+import { CloneVoiceStackCard } from "@/components/clone-voice-stack-card";
 import { CloneAnthropicCard } from "@/components/clone-anthropic-card";
 import { CloneBrandMarksCard } from "@/components/clone-brand-marks-card";
 import { CloneBackendDeployCard } from "@/components/clone-backend-deploy-card";
@@ -358,6 +359,12 @@ function CloneDetail() {
         cloneId={cloneId}
         crmMode={(clone as { crm_mode?: string | null }).crm_mode}
       />
+      {/*
+        Beside the calendar-and-email card, because that card configures the
+        agents this one builds: the stack is the Vapi org, the Make scenarios
+        and the tools; the automation card is which calendar they book into.
+      */}
+      <CloneVoiceStackCard cloneId={cloneId} />
       <CloneHealthCard cloneId={cloneId} />
       <Suspense
         fallback={

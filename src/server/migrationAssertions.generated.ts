@@ -969,4 +969,21 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20261009120100",
     assertions: [{ kind: "cron", jobname: "voice-automation-drain" }],
   },
+  {
+    migration: "20261011090000_clone_voice_stacks.sql",
+    version: "20261011090000",
+    assertions: [
+      { kind: "table", table: "clone_vapi_custody" },
+      { kind: "table", table: "clone_ghl_voice_credentials" },
+      { kind: "table", table: "voice_stack_templates" },
+      { kind: "table", table: "clone_voice_stacks" },
+      { kind: "table", table: "clone_voice_stack_ledger" },
+      { kind: "check", table: "clone_voice_stacks", column: "crm_mode", value: "independent" },
+    ],
+  },
+  {
+    migration: "20261011090100_schedule_voice_stack_drain.sql",
+    version: "20261011090100",
+    assertions: [{ kind: "cron", jobname: "voice-stack-drain" }],
+  },
 ];

@@ -1,0 +1,100 @@
+{
+ "type": "function",
+ "async": false,
+ "function": {
+  "name": "npc_ci_check_availability",
+  "description": "Check open appointment times with NPC Services. Always call this before offering or booking any time. Put what the caller wants to book, in their own words, in booking_intent_text, and the day or time they asked for in preferred_date_text. The result gives intent_index, available_slots (each with startTime and endTime) and a message telling you what to say. Offer only times from available_slots, never invent one. If needs_clarification is true, ask clarification_question and call again.",
+  "parameters": {
+   "type": "object",
+   "properties": {
+    "booking_intent_text": {
+     "type": "string",
+     "description": "What the caller wants to book, in their words, including phone or Zoom if they said so."
+    },
+    "appointment_type": {
+     "type": "string",
+     "enum": [
+      "discovery_call",
+      "strategy_session_phone",
+      "strategy_session_zoom",
+      "initial_finance_consult_phone",
+      "initial_finance_consult_zoom"
+     ],
+     "description": "Only when the type is already confirmed. Leave empty if unsure; the tool classifies booking_intent_text."
+    },
+    "preferred_date_text": {
+     "type": "string",
+     "description": "The day or time the caller asked for, in their words, e.g. 'next Tuesday afternoon'. Empty if none."
+    },
+    "earliest_time": {
+     "type": "string",
+     "description": "Earliest local start the caller accepts, 24-hour HH:MM. Optional."
+    },
+    "latest_time": {
+     "type": "string",
+     "description": "Latest local time the caller accepts, 24-hour HH:MM. Optional."
+    },
+    "search_reason": {
+     "type": "string",
+     "description": "Why you are searching (first search, caller rejected the offered times, re-check before booking)."
+    },
+    "caller_context": {
+     "type": "string",
+     "description": "Short context about the caller relevant to the booking."
+    },
+    "startDateMs": {
+     "type": "string",
+     "description": "Optional. Unix milliseconds of the day to search, used only when preferred_date_text names no date."
+    },
+    "endDateMs": {
+     "type": "string",
+     "description": "Accepted for compatibility; ignored."
+    },
+    "timezone": {
+     "type": "string",
+     "description": "Accepted for compatibility; ignored."
+    },
+    "duration_minutes": {
+     "type": "number",
+     "description": "Accepted for compatibility; ignored."
+    }
+   },
+   "required": [
+    "booking_intent_text"
+   ]
+  }
+ },
+ "messages": [
+  {
+   "type": "request-start",
+   "content": "Let me check the available times for you.",
+   "blocking": false
+  }
+ ],
+ "server": {
+  "url": "https://hook.us2.make.com/templateavailabilityhookfixture",
+  "timeoutSeconds": 30
+ },
+ "parameters": [
+  {
+   "key": "phone",
+   "value": "{{ customer.number }}"
+  },
+  {
+   "key": "customer_number",
+   "value": "{{ customer.number }}"
+  },
+  {
+   "key": "called_number",
+   "value": "{{ phoneNumber.number }}"
+  },
+  {
+   "key": "vapi_call_id",
+   "value": "{{ call.id }}"
+  },
+  {
+   "key": "call_type",
+   "value": "{{ call.type }}"
+  }
+ ]
+}

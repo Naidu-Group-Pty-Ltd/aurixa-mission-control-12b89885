@@ -63,6 +63,18 @@ const SERVICE_ROLE_ONLY = new Set([
   // a fingerprint; the migration REVOKEs the default grants. A policy here
   // would hand a browser the ciphertext of an advertising token.
   "marketing_connections",
+  // The clone voice stacks (20261011090000_clone_voice_stacks.sql): each
+  // clone's Vapi login and private key, its GoHighLevel token, the minted
+  // call-log and adapter secrets, and the build ledger that holds them — all
+  // encrypted by the application and read only by Mission Control's server on
+  // the service role. The migration REVOKEs the default grants; the operator
+  // card shows fingerprints. A policy here would hand a browser the ciphertext
+  // of a tenant's voice credentials.
+  "clone_vapi_custody",
+  "clone_ghl_voice_credentials",
+  "voice_stack_templates",
+  "clone_voice_stacks",
+  "clone_voice_stack_ledger",
 ]);
 
 const sql = readdirSync(MIGRATIONS)
