@@ -356,6 +356,66 @@ yet**. Nothing below has been built.
   - It is the owner's call because it means a new template, never an edit of
     NPC's originals.
 
+### C17. Nothing decides WHICH clones get voice agents
+
+- **Status:** open; needs an owner decision.
+- The drain opens a stack row for every clone that has a CRM line recorded,
+  line heads aside. Any such clone is then built once its Vapi org is active
+  and its requirements are met. That includes test and preflight clones.
+- Nothing ties a build to a purchase. The `voice-agents` add-on (D11) is not
+  read anywhere in the stack builder.
+- In practice, the manual Vapi sign-up (D15) is the only gate today: a clone
+  nobody signs up for is never built. Its card simply reads "Waiting on
+  requirements".
+- **To decide:** whether a stack should be built only for clones that bought
+  the voice-agents add-on (or a plan that includes it). If so, the gate is
+  one more block in `judgeStackProvision`.
+
+### C18. Clones that already exist do not start custody on their own
+
+- **Status:** recorded; needs an operator action per clone.
+- Custody starts automatically when a NEW clone's deployment reaches its
+  email identity (`startVapiCustodyIfDue` in the deployment drain).
+- Clones deployed before this change have no custody row, so the drain has
+  nothing to carry forward for them. An operator starts each one with
+  **Advance** on the clone's Voice stack card.
+- **To decide:** whether to backfill custody for every existing clone that
+  has a verified sending domain, or start them one by one as each is sold
+  voice agents (ties to C17).
+
+### C19. The dependent template is NPC's live production stack
+
+- **Status:** open; confirm.
+- The dependent seed names NPC's own production GoHighLevel scenarios
+  (5978159, 5978179, 5978434, 5978425, 5978051), its hooks, its store 133627,
+  its 13 agents and squad `13c37e4c` in org B.
+- Every dependent clone would be copied from what NPC itself runs today.
+  Nothing NPC runs is ever edited, but a change NPC makes to its own agents
+  reaches the next dependent clone built.
+- The independent line instead copies a dedicated head clone (NPC CRM
+  Independent). Its agents were built for that purpose.
+- **To confirm:** that the dependent template should be NPC's live stack, or
+  build a dedicated dependent template (it would also fix C1 and C16).
+
+### C20. Switching the dependent template on is a database edit
+
+- **Status:** recorded.
+- `voice_stack_templates.enabled` for the dependent line is `false`, with
+  C1's reason, and no screen changes it. Once the template change in
+  C1/C16/C19 is made, enabling it is an update of that row (and a new
+  manifest if the ids change). Done by a migration, so it is reviewed.
+
+### C21. Watch the CRM-independent cascade (#104) after the membrane fix
+
+- **Status:** open; watch.
+- The cascade PR #104 into the CRM-independent clone was refreshed to
+  prime@caddfbf (262 files) before the reconcile PR #106 merged, and it still
+  carried the held agent files.
+- Mission Control PR #322 should now carry held variants through
+  automatically.
+- If #104, or the next cascade, still goes red on held files, #322 is not
+  taking effect. That is a Mission Control fix, not a clone one.
+
 ---
 
 ## D. Tasks waiting on the owner
@@ -382,3 +442,5 @@ Carried from earlier work. Each one is also recorded where it was found.
 | D16 | For each CRM-dependent clone: enter the tenant's GoHighLevel private-integration token and location id on the clone card, then send the tenant the GoHighLevel authorisation link it produces. | `CLONE_VOICE_STACKS.md`, C16 |
 | D17 | For each clone: enter the tenant's business name, website and phone replacements on the clone card, so no NPC wording reaches their agents (C4). | `CLONE_VOICE_STACKS.md` |
 | D18 | Decide C12 and C16. | above |
+| D19 | Decide C17 to C19 (which clones get voice agents; existing clones' custody; the dependent template's source). | above |
+| D20 | After the next cascade into the CRM-independent clone, check it carried held files cleanly (C21). | C21 |
