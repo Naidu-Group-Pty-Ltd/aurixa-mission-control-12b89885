@@ -82,6 +82,7 @@ import { Route as HooksVoiceStudioPlanRouteImport } from './routes/hooks.voice-s
 import { Route as HooksVoiceStudioDeployRouteImport } from './routes/hooks.voice-studio-deploy'
 import { Route as HooksVoiceOutboundDispatchRouteImport } from './routes/hooks.voice-outbound-dispatch'
 import { Route as HooksVoiceCallDrainRouteImport } from './routes/hooks.voice-call-drain'
+import { Route as HooksVoiceAutomationDrainRouteImport } from './routes/hooks.voice-automation-drain'
 import { Route as HooksVerificationSelftestRouteImport } from './routes/hooks.verification-selftest'
 import { Route as HooksVercelRouteImport } from './routes/hooks.vercel'
 import { Route as HooksTurnstileReconcileRouteImport } from './routes/hooks.turnstile-reconcile'
@@ -168,6 +169,7 @@ import { Route as ClonesCloneIdSecretsRouteImport } from './routes/clones.$clone
 import { Route as ClientsHandoffTokenRouteImport } from './routes/clients.handoff.$token'
 import { Route as ApiPublicPurchasesRouteImport } from './routes/api.public.purchases'
 import { Route as ApiPublicVoiceWebhookRouteImport } from './routes/api.public.voice.webhook'
+import { Route as ApiPublicVoiceAutomationOperationRouteImport } from './routes/api.public.voice-automation.$operation'
 import { Route as ApiPublicVerificationOperationRouteImport } from './routes/api.public.verification.$operation'
 import { Route as ApiPublicUsageReportRouteImport } from './routes/api.public.usage.report'
 import { Route as ApiPublicTokensReserveRouteImport } from './routes/api.public.tokens.reserve'
@@ -601,6 +603,12 @@ const HooksVoiceCallDrainRoute = HooksVoiceCallDrainRouteImport.update({
   path: '/hooks/voice-call-drain',
   getParentRoute: () => rootRouteImport,
 } as any)
+const HooksVoiceAutomationDrainRoute =
+  HooksVoiceAutomationDrainRouteImport.update({
+    id: '/hooks/voice-automation-drain',
+    path: '/hooks/voice-automation-drain',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const HooksVerificationSelftestRoute =
   HooksVerificationSelftestRouteImport.update({
     id: '/hooks/verification-selftest',
@@ -1053,6 +1061,12 @@ const ApiPublicVoiceWebhookRoute = ApiPublicVoiceWebhookRouteImport.update({
   path: '/api/public/voice/webhook',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiPublicVoiceAutomationOperationRoute =
+  ApiPublicVoiceAutomationOperationRouteImport.update({
+    id: '/api/public/voice-automation/$operation',
+    path: '/api/public/voice-automation/$operation',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiPublicVerificationOperationRoute =
   ApiPublicVerificationOperationRouteImport.update({
     id: '/api/public/verification/$operation',
@@ -1523,6 +1537,7 @@ export interface FileRoutesByFullPath {
   '/hooks/turnstile-reconcile': typeof HooksTurnstileReconcileRoute
   '/hooks/vercel': typeof HooksVercelRoute
   '/hooks/verification-selftest': typeof HooksVerificationSelftestRoute
+  '/hooks/voice-automation-drain': typeof HooksVoiceAutomationDrainRoute
   '/hooks/voice-call-drain': typeof HooksVoiceCallDrainRoute
   '/hooks/voice-outbound-dispatch': typeof HooksVoiceOutboundDispatchRoute
   '/hooks/voice-studio-deploy': typeof HooksVoiceStudioDeployRoute
@@ -1629,6 +1644,7 @@ export interface FileRoutesByFullPath {
   '/api/public/tokens/reserve': typeof ApiPublicTokensReserveRoute
   '/api/public/usage/report': typeof ApiPublicUsageReportRoute
   '/api/public/verification/$operation': typeof ApiPublicVerificationOperationRoute
+  '/api/public/voice-automation/$operation': typeof ApiPublicVoiceAutomationOperationRoute
   '/api/public/voice/webhook': typeof ApiPublicVoiceWebhookRoute
   '/api/public/clones/gate/checkout': typeof ApiPublicClonesGateCheckoutRoute
   '/api/public/seats/devices/heartbeat': typeof ApiPublicSeatsDevicesHeartbeatRoute
@@ -1746,6 +1762,7 @@ export interface FileRoutesByTo {
   '/hooks/turnstile-reconcile': typeof HooksTurnstileReconcileRoute
   '/hooks/vercel': typeof HooksVercelRoute
   '/hooks/verification-selftest': typeof HooksVerificationSelftestRoute
+  '/hooks/voice-automation-drain': typeof HooksVoiceAutomationDrainRoute
   '/hooks/voice-call-drain': typeof HooksVoiceCallDrainRoute
   '/hooks/voice-outbound-dispatch': typeof HooksVoiceOutboundDispatchRoute
   '/hooks/voice-studio-deploy': typeof HooksVoiceStudioDeployRoute
@@ -1852,6 +1869,7 @@ export interface FileRoutesByTo {
   '/api/public/tokens/reserve': typeof ApiPublicTokensReserveRoute
   '/api/public/usage/report': typeof ApiPublicUsageReportRoute
   '/api/public/verification/$operation': typeof ApiPublicVerificationOperationRoute
+  '/api/public/voice-automation/$operation': typeof ApiPublicVoiceAutomationOperationRoute
   '/api/public/voice/webhook': typeof ApiPublicVoiceWebhookRoute
   '/api/public/clones/gate/checkout': typeof ApiPublicClonesGateCheckoutRoute
   '/api/public/seats/devices/heartbeat': typeof ApiPublicSeatsDevicesHeartbeatRoute
@@ -1972,6 +1990,7 @@ export interface FileRoutesById {
   '/hooks/turnstile-reconcile': typeof HooksTurnstileReconcileRoute
   '/hooks/vercel': typeof HooksVercelRoute
   '/hooks/verification-selftest': typeof HooksVerificationSelftestRoute
+  '/hooks/voice-automation-drain': typeof HooksVoiceAutomationDrainRoute
   '/hooks/voice-call-drain': typeof HooksVoiceCallDrainRoute
   '/hooks/voice-outbound-dispatch': typeof HooksVoiceOutboundDispatchRoute
   '/hooks/voice-studio-deploy': typeof HooksVoiceStudioDeployRoute
@@ -2078,6 +2097,7 @@ export interface FileRoutesById {
   '/api/public/tokens/reserve': typeof ApiPublicTokensReserveRoute
   '/api/public/usage/report': typeof ApiPublicUsageReportRoute
   '/api/public/verification/$operation': typeof ApiPublicVerificationOperationRoute
+  '/api/public/voice-automation/$operation': typeof ApiPublicVoiceAutomationOperationRoute
   '/api/public/voice/webhook': typeof ApiPublicVoiceWebhookRoute
   '/api/public/clones/gate/checkout': typeof ApiPublicClonesGateCheckoutRoute
   '/api/public/seats/devices/heartbeat': typeof ApiPublicSeatsDevicesHeartbeatRoute
@@ -2199,6 +2219,7 @@ export interface FileRouteTypes {
     | '/hooks/turnstile-reconcile'
     | '/hooks/vercel'
     | '/hooks/verification-selftest'
+    | '/hooks/voice-automation-drain'
     | '/hooks/voice-call-drain'
     | '/hooks/voice-outbound-dispatch'
     | '/hooks/voice-studio-deploy'
@@ -2305,6 +2326,7 @@ export interface FileRouteTypes {
     | '/api/public/tokens/reserve'
     | '/api/public/usage/report'
     | '/api/public/verification/$operation'
+    | '/api/public/voice-automation/$operation'
     | '/api/public/voice/webhook'
     | '/api/public/clones/gate/checkout'
     | '/api/public/seats/devices/heartbeat'
@@ -2422,6 +2444,7 @@ export interface FileRouteTypes {
     | '/hooks/turnstile-reconcile'
     | '/hooks/vercel'
     | '/hooks/verification-selftest'
+    | '/hooks/voice-automation-drain'
     | '/hooks/voice-call-drain'
     | '/hooks/voice-outbound-dispatch'
     | '/hooks/voice-studio-deploy'
@@ -2528,6 +2551,7 @@ export interface FileRouteTypes {
     | '/api/public/tokens/reserve'
     | '/api/public/usage/report'
     | '/api/public/verification/$operation'
+    | '/api/public/voice-automation/$operation'
     | '/api/public/voice/webhook'
     | '/api/public/clones/gate/checkout'
     | '/api/public/seats/devices/heartbeat'
@@ -2647,6 +2671,7 @@ export interface FileRouteTypes {
     | '/hooks/turnstile-reconcile'
     | '/hooks/vercel'
     | '/hooks/verification-selftest'
+    | '/hooks/voice-automation-drain'
     | '/hooks/voice-call-drain'
     | '/hooks/voice-outbound-dispatch'
     | '/hooks/voice-studio-deploy'
@@ -2753,6 +2778,7 @@ export interface FileRouteTypes {
     | '/api/public/tokens/reserve'
     | '/api/public/usage/report'
     | '/api/public/verification/$operation'
+    | '/api/public/voice-automation/$operation'
     | '/api/public/voice/webhook'
     | '/api/public/clones/gate/checkout'
     | '/api/public/seats/devices/heartbeat'
@@ -2870,6 +2896,7 @@ export interface RootRouteChildren {
   HooksTurnstileReconcileRoute: typeof HooksTurnstileReconcileRoute
   HooksVercelRoute: typeof HooksVercelRoute
   HooksVerificationSelftestRoute: typeof HooksVerificationSelftestRoute
+  HooksVoiceAutomationDrainRoute: typeof HooksVoiceAutomationDrainRoute
   HooksVoiceCallDrainRoute: typeof HooksVoiceCallDrainRoute
   HooksVoiceOutboundDispatchRoute: typeof HooksVoiceOutboundDispatchRoute
   HooksVoiceStudioDeployRoute: typeof HooksVoiceStudioDeployRoute
@@ -2951,6 +2978,7 @@ export interface RootRouteChildren {
   ApiPublicTokensReserveRoute: typeof ApiPublicTokensReserveRoute
   ApiPublicUsageReportRoute: typeof ApiPublicUsageReportRoute
   ApiPublicVerificationOperationRoute: typeof ApiPublicVerificationOperationRoute
+  ApiPublicVoiceAutomationOperationRoute: typeof ApiPublicVoiceAutomationOperationRoute
   ApiPublicVoiceWebhookRoute: typeof ApiPublicVoiceWebhookRoute
   ApiPublicSeatsDevicesHeartbeatRoute: typeof ApiPublicSeatsDevicesHeartbeatRoute
   ApiPublicSeatsDevicesListRoute: typeof ApiPublicSeatsDevicesListRoute
@@ -3470,6 +3498,13 @@ declare module '@tanstack/react-router' {
       path: '/hooks/voice-call-drain'
       fullPath: '/hooks/voice-call-drain'
       preLoaderRoute: typeof HooksVoiceCallDrainRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/voice-automation-drain': {
+      id: '/hooks/voice-automation-drain'
+      path: '/hooks/voice-automation-drain'
+      fullPath: '/hooks/voice-automation-drain'
+      preLoaderRoute: typeof HooksVoiceAutomationDrainRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/hooks/verification-selftest': {
@@ -4072,6 +4107,13 @@ declare module '@tanstack/react-router' {
       path: '/api/public/voice/webhook'
       fullPath: '/api/public/voice/webhook'
       preLoaderRoute: typeof ApiPublicVoiceWebhookRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/voice-automation/$operation': {
+      id: '/api/public/voice-automation/$operation'
+      path: '/api/public/voice-automation/$operation'
+      fullPath: '/api/public/voice-automation/$operation'
+      preLoaderRoute: typeof ApiPublicVoiceAutomationOperationRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/public/verification/$operation': {
@@ -4773,6 +4815,7 @@ const rootRouteChildren: RootRouteChildren = {
   HooksTurnstileReconcileRoute: HooksTurnstileReconcileRoute,
   HooksVercelRoute: HooksVercelRoute,
   HooksVerificationSelftestRoute: HooksVerificationSelftestRoute,
+  HooksVoiceAutomationDrainRoute: HooksVoiceAutomationDrainRoute,
   HooksVoiceCallDrainRoute: HooksVoiceCallDrainRoute,
   HooksVoiceOutboundDispatchRoute: HooksVoiceOutboundDispatchRoute,
   HooksVoiceStudioDeployRoute: HooksVoiceStudioDeployRoute,
@@ -4856,6 +4899,8 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPublicTokensReserveRoute: ApiPublicTokensReserveRoute,
   ApiPublicUsageReportRoute: ApiPublicUsageReportRoute,
   ApiPublicVerificationOperationRoute: ApiPublicVerificationOperationRoute,
+  ApiPublicVoiceAutomationOperationRoute:
+    ApiPublicVoiceAutomationOperationRoute,
   ApiPublicVoiceWebhookRoute: ApiPublicVoiceWebhookRoute,
   ApiPublicSeatsDevicesHeartbeatRoute: ApiPublicSeatsDevicesHeartbeatRoute,
   ApiPublicSeatsDevicesListRoute: ApiPublicSeatsDevicesListRoute,

@@ -35,6 +35,7 @@ import { CloneEmailIdentityCard } from "@/components/clone-email-identity-card";
 import { CloneAccessCredentialsCard } from "@/components/clone-access-credentials-card";
 import { CloneTurnstileCard } from "@/components/clone-turnstile-card";
 import { CloneCrmConversionCard } from "@/components/clone-crm-conversion-card";
+import { CloneVoiceAutomationCard } from "@/components/clone-voice-automation-card";
 import { CloneAnthropicCard } from "@/components/clone-anthropic-card";
 import { CloneBrandMarksCard } from "@/components/clone-brand-marks-card";
 import { CloneBackendDeployCard } from "@/components/clone-backend-deploy-card";
@@ -350,6 +351,10 @@ function CloneDetail() {
 
       <CloneSyncStatusCard clone={clone} />
       <CloneCrmConversionCard
+        cloneId={cloneId}
+        crmMode={(clone as { crm_mode?: string | null }).crm_mode}
+      />
+      <CloneVoiceAutomationCard
         cloneId={cloneId}
         crmMode={(clone as { crm_mode?: string | null }).crm_mode}
       />

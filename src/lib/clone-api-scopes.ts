@@ -20,6 +20,7 @@ export type CloneApiScope = {
     | "verification"
     | "listings"
     | "integrations"
+    | "automation"
     | "anthropic"
     | "builders";
   label: string;
@@ -90,6 +91,19 @@ export const CLONE_API_SCOPES: CloneApiScope[] = [
       "service-role key, and this scope is how the operator plane acts there without one. Off by " +
       "default, and it does nothing until the network exists to honour it.",
     default: false,
+  },
+  {
+    value: "automation:configure",
+    group: "automation",
+    label: "Voice agents — configure calendar and email",
+    description:
+      "Let this workspace read and change its voice agents' calendar and email settings (which " +
+      "calendar they book into, which mailbox confirms a booking, business hours, who is told) and " +
+      "start connecting its own Outlook or Google account. On by default: the settings live in a " +
+      "Make.com stack whose API token reaches every tenant's scenarios in the team, so the token is " +
+      "never forwarded — Mission Control validates each change and applies it to THIS clone's stack " +
+      "alone, and refuses fields its operator has locked.",
+    default: true,
   },
   {
     value: "integrations:write",
