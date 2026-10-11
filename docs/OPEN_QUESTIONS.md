@@ -501,6 +501,15 @@ as a record; E7 is what is left.
   next `backend-catchup` tick (`:20` and `:50` past the hour) sees the
   owned set change and deploys all 14 from the head's tree. Verify on the
   project that `manage-automation-settings` contains `createPipeline`.
+- **Not live yet (measured 10 Oct 2026, 23:28 UTC):** #325 and head #108 are
+  merged, and the `backend-catchup` tick at 23:21 redeployed only the four
+  clone-owned `crm-*` / `voice-automation-settings` functions. The 13 line
+  variants were not touched, and `manage-lead-magnets` was overwritten with
+  the prime's copy again at 22:41 by the per-function lane. The reason is that
+  **the published Mission Control app is behind `main`**: the
+  `/hooks/voice-stack-drain` route #323 added answers 404 on
+  `mission-control.aurixasystems.com.au`, while `/hooks/deployment-drain`
+  answers 401. So #323, #324 and #325 are merged and not running. See F0.
 
 ---
 
@@ -547,6 +556,7 @@ working when it is done.
 
 | # | Action | Where | Unblocks | Ref |
 |---|---|---|---|---|
+| F0 | **Publish Mission Control** from Lovable (project "Aurixa Systems Mission Control", which has synced `main` at f3e0fbb). The published app predates #323, so #323, #324 and #325 are merged and not running. That means no line secret refusals (F4 of the audit), and no deploy of the line's own functions (E8): Client Tracker pipeline creation, the lead-magnet pipelines, Call Logs caller matching and portal booking all stay on the prime's copies on the CRM-independent head. **Publishing also starts #323's voice-stack sweep** (pg_cron, every 5 minutes, already scheduled). It opens a `clone_voice_stacks` row for every clone with a CRM line and advances any that are due. Building in Make and Vapi stays blocked without F4/F5 and each clone's signup (F10). Settle F21 (which clones get voice agents) first if no stack should be opened yet. **Until the publish, every cascade refresh to the head writes the prime's copies over the line's own files.** Cascade #104 did this at prime@4b9ae04 to nine of them. The line's guard tests stop it merging, and head #109 repaired that instance by hand. | Lovable → Mission Control → Publish | E8, the audit's F4, #323 | E8 |
 | F1 | Rotate the Vapi private key written in plain text in inactive Make scenario 5978090, then delete it from the scenario. Never paste it anywhere. | Vapi dashboard → API keys; Make → scenario 5978090 | Closes a live credential exposure | D9 |
 | F2 | Rotate `adapter_secret` on CFG record 168061 (it appeared in a transcript), then store the new value only in the record. | Make → data store 168061, record `cfg`, field `adapter_secret` | Closes a credential exposure | D8 |
 | F3 | Set ONE value in BOTH halves of the NPC CRM Independent call-log pairing: the clone's Integrations → Vapi → Webhook Secret, and the token of Vapi credential "NPC CRM Independent call logs" (`49187eb8`) in org B. Until they match, every call is refused and `webhook_rejections` says which half is missing. | Clone dashboard Integrations page; Vapi dashboard org B → Credentials | Calls landing on the clone's Call Logs | D2 |
@@ -591,5 +601,5 @@ working when it is done.
 
 - C11: Make's refusal when a scenario's connection is unbound is measured
   automatically on the first real clone build.
-- C21, E7, E8: done in code on 10 Oct 2026.
+- C21, E7, E8: done in code on 10 Oct 2026. E8 and the audit's F4 go live only once Mission Control is published (F0).
 

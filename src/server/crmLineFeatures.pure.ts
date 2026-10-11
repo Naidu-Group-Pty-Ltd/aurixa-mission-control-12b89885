@@ -592,6 +592,9 @@ export const CRM_LINE_VARIANT_PATTERNS: Readonly<Partial<Record<CrmMode, readonl
     "supabase/functions/cleanup-call-log-names/index.ts",
     "src/components/call-logs/CleanupContactNames.tsx",
     "supabase/functions/portal-book-appointment/index.ts",
+    // The prime's CA-3 test drives that function against GoHighLevel; the
+    // line's copy drives the native booking (head #109).
+    "supabase/functions/portal-book-appointment/calendar-id-refusal.test.ts",
     "src/pages/Integrations.tsx",
     "supabase/functions/update-integration-secret/index.ts",
     "supabase/functions/_shared/clients/noteWords.pure.ts",

@@ -274,6 +274,7 @@ describe("the head's own copies from the audit", () => {
       "supabase/functions/_shared/clients/noteWords.pure.ts",
       "supabase/functions/manage-lead-magnets/index.ts",
       "src/components/clients/ActiveClientCard.tsx",
+      "supabase/functions/portal-book-appointment/calendar-id-refusal.test.ts",
     ]) {
       expect(CRM_LINE_VARIANT_PATTERNS.independent, path).toContain(path);
       expect(crmLineVariantPattern(path, "independent"), path).toBe(path);
