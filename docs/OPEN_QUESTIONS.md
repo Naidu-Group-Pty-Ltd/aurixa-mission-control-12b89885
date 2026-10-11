@@ -358,7 +358,8 @@ yet**. Nothing below has been built.
 
 ### C17. Nothing decides WHICH clones get voice agents
 
-- **Status:** open; needs an owner decision.
+- **Status:** open; needs an owner decision. Live since Mission Control was
+  published on 11 Oct 2026 (F0): the 5-minute drain now runs.
 - The drain opens a stack row for every clone that has a CRM line recorded,
   line heads aside. Any such clone is then built once its Vapi org is active
   and its requirements are met. That includes test and preflight clones.
@@ -418,6 +419,19 @@ yet**. Nothing below has been built.
   Function entrypoints, then source, then workflows, scripts and docs).
 - #104 itself was landed by hand on the head (head PR #108): the agent
   three-way merged cleanly, and three agent specs took prime's copies.
+- **The watch then found a second fault (10 Oct, 22:57 UTC).** #104 was
+  refreshed to prime@4b9ae04 by a Mission Control whose published app still
+  predated #324, so it held none of the line's variant patterns. It wrote the
+  prime's GoHighLevel copies over nine of the line's own files (Call Logs,
+  portal booking, Integrations, the note wording, the lead-magnet pipelines,
+  the client card). The line's guard tests failed `verify`, so it never
+  merged. Head PR #109 landed it by hand: the nine line copies kept, the
+  prime's CA-3 calendar-id rule ported into the native booking, and the agent
+  three-way merged again. #104 closed as merged with it (11 Oct, 00:43 UTC).
+- **What keeps it from recurring:** the published Mission Control now carries
+  the variant patterns (F0), and MC #326 holds the line's own copy of
+  `portal-book-appointment/calendar-id-refusal.test.ts`, because the prime's
+  version asserts GoHighLevel calls.
 
 ---
 
@@ -426,7 +440,7 @@ yet**. Nothing below has been built.
 Full findings and evidence: [`audits/2026-10-10-crm-independent-pages.md`](./audits/2026-10-10-crm-independent-pages.md).
 The owner approved all six fixes on 10 Oct 2026 and they were made the same
 day (head `npc-crm-independent-6505dc` and Mission Control). E1 to E6 are kept
-as a record; E7 is what is left.
+as a record. E7 to E11 are what checking the fixes went live found.
 
 ### E1. A GoHighLevel key on an independent-line project flips the server
 
@@ -510,6 +524,74 @@ as a record; E7 is what is left.
   `/hooks/voice-stack-drain` route #323 added answers 404 on
   `mission-control.aurixasystems.com.au`, while `/hooks/deployment-drain`
   answers 401. So #323, #324 and #325 are merged and not running. See F0.
+- **Live (measured 11 Oct 2026, 00:51–00:52 UTC).** Mission Control was
+  published, `/hooks/voice-stack-drain` answers 401, and the `backend-catchup`
+  tick at 00:50 redeployed all 14 of the line's own functions from the head's
+  `main` (b4c4dee). Each deployed bundle was read back from the project and
+  compared file by file with the head's tree: every file of every function is
+  byte-identical (ai-dashboard-agent v1320, 153 files; cleanup-call-log-names
+  v1266; crm-calendar, crm-inbound-message and crm-send-message v28;
+  finance-portal-client-comms and finance-portal-client-data v1242;
+  manage-automation-settings v1223, with `createPipeline`;
+  manage-lead-magnets v1222; portal-book-appointment v1210;
+  request-lead-magnet v1206; update-integration-secret v1201;
+  vapi-call-webhook v1200; voice-automation-settings v5). None logged a boot
+  error.
+
+### E9. The head's `aml` schema was not exposed to the API
+
+- **Status:** fixed (11 Oct 2026, 00:56 UTC); takes effect when PostgREST next
+  re-reads its config (about 18 minutes, per `THE_CLONING_ENGINE.md`).
+- Found in the head's logs while checking E8: `aml-verification-processor`
+  answered 500 `Invalid schema: aml` on every one of its 1,440 runs a day, and
+  `aml-idv-retention` failed the same way. The `aml` schema exists on
+  `qvuwrvwzjyigptmnijyb` with all 113 tables, but the project's exposed-schema
+  list did not name it. This is the fault `projectSettingsParity.pure.ts`
+  describes; `replicateApiConfig` fixes it for a NEW clone, and this head was
+  provisioned before that.
+- **Fixed:** the head's `authenticator` role now carries
+  `pgrst.db_schemas = public, graphql_public, aml`, exactly the prime's value.
+  Exposure grants nothing new: on both projects only `service_role` holds
+  USAGE on `aml`, and `anon` and `authenticated` do not.
+- **Not checked here:** other clones. Mission Control's parity report marks a
+  missing exposed schema as blocking for every clone.
+
+### E10. The head runs an old copy of `finance-portal-briefing-runner`
+
+- **Status:** recorded; no action needed. It fixes itself.
+- It answered 500 twice on 10 Oct: `ReferenceError: verifyRequiredCronSecret
+  is not defined`. The deployed copy is from 9 Oct, 23:51 UTC. The prime fixed
+  the function on 10 Oct, 11:51 UTC (61c8dc94), and the head's tree carries the
+  fix. It is a prime-lane function, so it arrives when the rolling
+  `edge_function_deploy` lane reaches it (about 2.3 bundles every 8 minutes,
+  stalest first). Until then the runner fails twice a day.
+
+### E11. What the line keeps differently from the prime, after #109
+
+- **Status:** recorded; each item is deliberate.
+- **The agent's `create_client`** sends Add Client's request with no
+  GoHighLevel sync and no pipeline stage, because this line's Add Client has
+  neither. The shared reader (`clientRecordAsk.pure.ts`) defaults the sync on,
+  so the line turns it off and refuses a named stage
+  (`agentCreateClient.test.ts`).
+- **Portal booking** refuses a malformed calendar id first, as the prime does
+  (CA-3), and then books natively. The line carries its own version of the
+  prime's refusal test.
+- **Specs not carried:**
+  - `clients.spec.tsx`: it imports `parityRegister.ts`, which this line does
+    not carry, and it asserts the GoHighLevel sync;
+  - `serviceRoleWrites.spec.ts`: never in the line's scope.
+- **Twelve agent specs are the line's own.** `borrowingCapacitySave`,
+  `comparisonAsk`, `distribution`, `financeShare`, `marketIntelligence`,
+  `namedOnTheCard`, `playbookAndSchedule`, `portalPublication`,
+  `portfolioAnalysis`, `portfolioSend`, `subReports` and `templateChoice`
+  match no version the prime held. The cascade holds them, and a prime change
+  to any of them is reconciled by hand. All pass on the head today.
+- **The edge typecheck baseline** is the prime's, so it still allows the
+  prime's counts on `portal-book-appointment` (3) and `vapi-call-webhook` (9).
+  The line's copies have 0 and 8. The gate passes; it is only looser than it
+  needs to be on those two files. Holding the baseline as a variant would
+  block the prime's own baseline updates, so it is not held.
 
 ---
 
@@ -520,7 +602,7 @@ Carried from earlier work. Each one is also recorded where it was found.
 | # | Task | Where it is recorded |
 |---|---|---|
 | D1 | Set `MAKE_API_TOKEN` on Mission Control: a Make API token on team 2731020 with scopes `scenarios:read/write`, `datastores:read/write`, `connections:read/write`, `credential-requests:read/write`, `hooks:read/write` (a new stack reuses the template's data structures, so no data-structures scope). Until then voice-automation applies and stack provisioning are blocked, and say so. | `CLONE_VOICE_AUTOMATION.md`, `CLONE_VOICE_STACKS.md` |
-| D2 | Set one secret value in both halves for the NPC CRM Independent clone's call logs: the clone's Integrations → Vapi → Webhook Secret, and the token of Vapi credential "NPC CRM Independent call logs" (`49187eb8`) in org B. New clones provisioned by this build get both halves minted automatically. | clone repo `docs/integrations/VOICE_AGENT_CALL_LOGS.md` |
+| D2 | Set one secret value in both halves for the NPC CRM Independent clone's call logs (still missing on 11 Oct: the clone's last refusal reads `secret_not_configured`): the clone's Integrations → Vapi → Webhook Secret, and the token of Vapi credential "NPC CRM Independent call logs" (`49187eb8`) in org B. New clones provisioned by this build get both halves minted automatically. | clone repo `docs/integrations/VOICE_AGENT_CALL_LOGS.md` |
 | D3 | Choose between the A1 options (Gmail on the dependent line). | A1 |
 | D4 | Choose between the A2 options (per-clone Make key). | A2 |
 | D5 | Test the CI squad with Talk in the Vapi dashboard (org B, squad "NPC CI Sales Force"). | clone repo `voice-agents/crm-independent/HANDOFF.md` §00.6 |
@@ -538,10 +620,11 @@ Carried from earlier work. Each one is also recorded where it was found.
 | D17 | For each clone: enter the tenant's business name, website and phone replacements on the clone card, so no NPC wording reaches their agents (C4). | `CLONE_VOICE_STACKS.md` |
 | D18 | Decide C12 and C16. | above |
 | D19 | Decide C17 to C19 (which clones get voice agents; existing clones' custody; the dependent template's source). | above |
-| D20 | After the next cascade into the CRM-independent clone, check it carried held files cleanly (C21). | C21 |
+| D20 | ~~After the next cascade into the CRM-independent clone, check it carried held files cleanly~~ Done 11 Oct 2026: it had not, and head #109 landed it (C21). | C21 |
 | D21 | ~~Decide E1 to E5~~ Done 10 Oct 2026: all six fixes approved and made. | E |
 | D22 | ~~Check E6~~ No longer needed: the fleet sweep removes and reports any GoHighLevel credential on an independent project. | E6 |
 | D23 | ~~Decide E7~~ Done 10 Oct 2026 (head #108). | E7 |
+| D24 | ~~Publish Mission Control~~ Done 11 Oct 2026 (F0). | E8 |
 
 ---
 
@@ -556,12 +639,12 @@ working when it is done.
 
 | # | Action | Where | Unblocks | Ref |
 |---|---|---|---|---|
-| F0 | **Publish Mission Control** from Lovable (project "Aurixa Systems Mission Control", which has synced `main` at f3e0fbb). The published app predates #323, so #323, #324 and #325 are merged and not running. That means no line secret refusals (F4 of the audit), and no deploy of the line's own functions (E8): Client Tracker pipeline creation, the lead-magnet pipelines, Call Logs caller matching and portal booking all stay on the prime's copies on the CRM-independent head. **Publishing also starts #323's voice-stack sweep** (pg_cron, every 5 minutes, already scheduled). It opens a `clone_voice_stacks` row for every clone with a CRM line and advances any that are due. Building in Make and Vapi stays blocked without F4/F5 and each clone's signup (F10). Settle F21 (which clones get voice agents) first if no stack should be opened yet. **Until the publish, every cascade refresh to the head writes the prime's copies over the line's own files.** Cascade #104 did this at prime@4b9ae04 to nine of them. The line's guard tests stop it merging, and head #109 repaired that instance by hand. | Lovable → Mission Control → Publish | E8, the audit's F4, #323 | E8 |
+| F0 | ~~**Publish Mission Control**~~ Done 11 Oct 2026. The line's 14 own functions are live from the head's tree (E8), the line secret refusals are live, and the voice-stack drain runs. | Lovable | — | E8 |
 | F1 | Rotate the Vapi private key written in plain text in inactive Make scenario 5978090, then delete it from the scenario. Never paste it anywhere. | Vapi dashboard → API keys; Make → scenario 5978090 | Closes a live credential exposure | D9 |
 | F2 | Rotate `adapter_secret` on CFG record 168061 (it appeared in a transcript), then store the new value only in the record. | Make → data store 168061, record `cfg`, field `adapter_secret` | Closes a credential exposure | D8 |
-| F3 | Set ONE value in BOTH halves of the NPC CRM Independent call-log pairing: the clone's Integrations → Vapi → Webhook Secret, and the token of Vapi credential "NPC CRM Independent call logs" (`49187eb8`) in org B. Until they match, every call is refused and `webhook_rejections` says which half is missing. | Clone dashboard Integrations page; Vapi dashboard org B → Credentials | Calls landing on the clone's Call Logs | D2 |
+| F3 | Set ONE value in BOTH halves of the NPC CRM Independent call-log pairing (measured 11 Oct: the clone's half is still unset, `webhook_rejections` reads `secret_not_configured`, last seen 10 Oct 16:27 UTC): the clone's Integrations → Vapi → Webhook Secret, and the token of Vapi credential "NPC CRM Independent call logs" (`49187eb8`) in org B. Until they match, every call is refused and `webhook_rejections` says which half is missing. | Clone dashboard Integrations page; Vapi dashboard org B → Credentials | Calls landing on the clone's Call Logs | D2 |
 | F4 | Set `MAKE_API_TOKEN` on Mission Control: a Make API token on team 2731020 with `scenarios`, `datastores`, `connections`, `credential-requests` and `hooks`, read and write. | Mission Control hosting env vars | Voice-automation applies; every clone voice stack build | D1 |
-| F5 | Make sure `RESEND_MASTER_API_KEY` and `CREDENTIALS_ENC_KEY` are set on Mission Control. | Mission Control hosting env vars | Per-clone Vapi custody (inbox + encrypted login) | D12 |
+| F5 | Make sure `RESEND_MASTER_API_KEY` is set on Mission Control. `CREDENTIALS_ENC_KEY` is set (measured 11 Oct: `/api/health` reports `credential_encryption: ok`). | Mission Control hosting env vars | Per-clone Vapi custody (inbox + encrypted login) | D12 |
 
 ### Then: go-live of the NPC CRM Independent voice agents
 
@@ -601,5 +684,10 @@ working when it is done.
 
 - C11: Make's refusal when a scenario's connection is unbound is measured
   automatically on the first real clone build.
-- C21, E7, E8: done in code on 10 Oct 2026. E8 and the audit's F4 go live only once Mission Control is published (F0).
+- C21, E7, E8: done. E8 and the audit's F4 are live since Mission Control was
+  published (11 Oct 2026); every line function was read back and matches the
+  head.
+- E9: fixed on the head; confirm `aml-verification-processor` answers 200
+  once PostgREST reloads.
+- E10: fixes itself when the prime's deploy lane reaches the function.
 
