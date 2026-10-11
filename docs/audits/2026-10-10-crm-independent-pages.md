@@ -261,3 +261,22 @@ Fixed in Mission Control (E8 in `OPEN_QUESTIONS.md`):
 The same check found the cascade's variant merge starved (C21). It was
 capped at 12 held paths taken in list order, so it never reached the agent.
 Now the cap is 32 and the most consequential paths go first.
+
+## Live, 11 Oct 2026
+
+Mission Control was published on 11 Oct 2026. Its `backend-catchup` tick at
+00:50 UTC redeployed the line's 14 own functions from the head's `main`
+(b4c4dee). Each was read back from `qvuwrvwzjyigptmnijyb` and compared file
+by file with the head's tree, and every file matched. So every fix in this
+audit is now what the project runs, `createPipeline` included.
+
+The same check turned up three more things, recorded in `OPEN_QUESTIONS.md`:
+
+- **C21.** The cascade refresh at prime@4b9ae04 ran before the publish, and
+  wrote the prime's copies over nine of the line's files. The guard tests
+  stopped it merging, and head #109 landed it.
+- **E9.** The head's `aml` schema was not exposed to the API. It now carries
+  the prime's exposed-schema setting, and the verification processor answers
+  200.
+- **E10.** One prime-lane function on the head is a day behind the prime. It
+  arrives on the lane's own schedule.
