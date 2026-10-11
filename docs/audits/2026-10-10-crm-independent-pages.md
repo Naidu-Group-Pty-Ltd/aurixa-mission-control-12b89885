@@ -276,6 +276,7 @@ The same check turned up three more things, recorded in `OPEN_QUESTIONS.md`:
   wrote the prime's copies over nine of the line's files. The guard tests
   stopped it merging, and head #109 landed it.
 - **E9.** The head's `aml` schema was not exposed to the API. It now carries
-  the prime's exposed-schema setting.
+  the prime's exposed-schema setting, and the verification processor answers
+  200.
 - **E10.** One prime-lane function on the head is a day behind the prime. It
   arrives on the lane's own schedule.

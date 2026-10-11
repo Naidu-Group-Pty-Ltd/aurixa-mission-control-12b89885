@@ -540,8 +540,8 @@ as a record. E7 to E11 are what checking the fixes went live found.
 
 ### E9. The head's `aml` schema was not exposed to the API
 
-- **Status:** fixed (11 Oct 2026, 00:56 UTC); takes effect when PostgREST next
-  re-reads its config (about 18 minutes, per `THE_CLONING_ENGINE.md`).
+- **Status:** fixed and verified (11 Oct 2026). The processor answered 200 at
+  01:19 UTC, its first success on this project.
 - Found in the head's logs while checking E8: `aml-verification-processor`
   answered 500 `Invalid schema: aml` on every one of its 1,440 runs a day, and
   `aml-idv-retention` failed the same way. The `aml` schema exists on
@@ -551,10 +551,23 @@ as a record. E7 to E11 are what checking the fixes went live found.
   provisioned before that.
 - **Fixed:** the head's `authenticator` role now carries
   `pgrst.db_schemas = public, graphql_public, aml`, exactly the prime's value.
+  It took two steps, and the second is easy to miss:
+  - **The setting** was written at 00:56. PostgREST took it up on its own
+    schedule, about 15 minutes later. The error then changed to
+    `Could not find the table 'aml.verification_checks' in the schema cache`,
+    although the table exists.
+  - **A schema-cache reload** (`NOTIFY pgrst, 'reload schema'`) at 01:18 then
+    let the processor answer 200 from the next run. A config reload alone
+    adds the schema but leaves the cache without its tables.
   Exposure grants nothing new: on both projects only `service_role` holds
   USAGE on `aml`, and `anon` and `authenticated` do not.
 - **Not checked here:** other clones. Mission Control's parity report marks a
-  missing exposed schema as blocking for every clone.
+  missing exposed schema as blocking for every clone. The same two steps fix
+  each one.
+- **The line's functions stayed put.** At 01:17 UTC the 14 line functions
+  were still at their 00:51–00:52 versions, while the prime's per-function
+  lane went on deploying `market-*` functions around them. So that lane now
+  leaves the line's own functions alone, as #325 intended.
 
 ### E10. The head runs an old copy of `finance-portal-briefing-runner`
 
@@ -687,7 +700,6 @@ working when it is done.
 - C21, E7, E8: done. E8 and the audit's F4 are live since Mission Control was
   published (11 Oct 2026); every line function was read back and matches the
   head.
-- E9: fixed on the head; confirm `aml-verification-processor` answers 200
-  once PostgREST reloads.
+- E9: fixed and verified on the head (200 at 01:19 UTC).
 - E10: fixes itself when the prime's deploy lane reaches the function.
 
