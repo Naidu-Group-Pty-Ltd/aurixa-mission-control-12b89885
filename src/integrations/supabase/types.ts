@@ -7982,6 +7982,279 @@ export type Database = {
           },
         ]
       }
+      email_warmup_mailboxes: {
+        Row: {
+          active_days: number
+          consecutive_failures: number
+          created_at: string
+          created_by: string | null
+          display_name: string | null
+          id: string
+          important_rate: number
+          increase_per_day: number
+          last_active_on: string | null
+          last_error: string | null
+          last_error_at: string | null
+          mailbox: string
+          max_per_day: number
+          next_send_at: string | null
+          organisation_id: string | null
+          prepared_at: string | null
+          removed_at: string | null
+          removed_by: string | null
+          reply_rate: number
+          start_per_day: number
+          status: string
+          status_reason: string | null
+          tenant_id: string | null
+          tidy_sent: boolean
+          timezone: string
+          updated_at: string
+          warmup_folder_id: string | null
+          weekdays_only: boolean
+          window_end: string
+          window_start: string
+        }
+        Insert: {
+          active_days?: number
+          consecutive_failures?: number
+          created_at?: string
+          created_by?: string | null
+          display_name?: string | null
+          id?: string
+          important_rate?: number
+          increase_per_day?: number
+          last_active_on?: string | null
+          last_error?: string | null
+          last_error_at?: string | null
+          mailbox: string
+          max_per_day?: number
+          next_send_at?: string | null
+          organisation_id?: string | null
+          prepared_at?: string | null
+          removed_at?: string | null
+          removed_by?: string | null
+          reply_rate?: number
+          start_per_day?: number
+          status?: string
+          status_reason?: string | null
+          tenant_id?: string | null
+          tidy_sent?: boolean
+          timezone?: string
+          updated_at?: string
+          warmup_folder_id?: string | null
+          weekdays_only?: boolean
+          window_end?: string
+          window_start?: string
+        }
+        Update: {
+          active_days?: number
+          consecutive_failures?: number
+          created_at?: string
+          created_by?: string | null
+          display_name?: string | null
+          id?: string
+          important_rate?: number
+          increase_per_day?: number
+          last_active_on?: string | null
+          last_error?: string | null
+          last_error_at?: string | null
+          mailbox?: string
+          max_per_day?: number
+          next_send_at?: string | null
+          organisation_id?: string | null
+          prepared_at?: string | null
+          removed_at?: string | null
+          removed_by?: string | null
+          reply_rate?: number
+          start_per_day?: number
+          status?: string
+          status_reason?: string | null
+          tenant_id?: string | null
+          tidy_sent?: boolean
+          timezone?: string
+          updated_at?: string
+          warmup_folder_id?: string | null
+          weekdays_only?: boolean
+          window_end?: string
+          window_start?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "email_warmup_mailboxes_tenant_id_fkey"
+            columns: ["tenant_id"]
+            isOneToOne: false
+            referencedRelation: "microsoft_tenants"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      email_warmup_messages: {
+        Row: {
+          action_attempts: number
+          check_attempts: number
+          created_at: string
+          depth: number
+          engage_at: string | null
+          engaged_at: string | null
+          error: string | null
+          filed_at: string | null
+          flagged_at: string | null
+          focused: boolean | null
+          id: string
+          internet_message_id: string | null
+          landed_at: string | null
+          next_check_at: string | null
+          parent_id: string | null
+          placement: string | null
+          recipient_address: string
+          recipient_id: string
+          recipient_item_id: string | null
+          replied_at: string | null
+          reply_due_at: string | null
+          rescued_at: string | null
+          sender_address: string
+          sender_filed_at: string | null
+          sender_id: string
+          sender_item_id: string | null
+          sent_at: string | null
+          sent_confirmed_at: string | null
+          status: string
+          subject: string
+          thread_id: string
+          will_flag: boolean
+          will_reply: boolean
+        }
+        Insert: {
+          action_attempts?: number
+          check_attempts?: number
+          created_at?: string
+          depth?: number
+          engage_at?: string | null
+          engaged_at?: string | null
+          error?: string | null
+          filed_at?: string | null
+          flagged_at?: string | null
+          focused?: boolean | null
+          id?: string
+          internet_message_id?: string | null
+          landed_at?: string | null
+          next_check_at?: string | null
+          parent_id?: string | null
+          placement?: string | null
+          recipient_address: string
+          recipient_id: string
+          recipient_item_id?: string | null
+          replied_at?: string | null
+          reply_due_at?: string | null
+          rescued_at?: string | null
+          sender_address: string
+          sender_filed_at?: string | null
+          sender_id: string
+          sender_item_id?: string | null
+          sent_at?: string | null
+          sent_confirmed_at?: string | null
+          status?: string
+          subject: string
+          thread_id: string
+          will_flag?: boolean
+          will_reply?: boolean
+        }
+        Update: {
+          action_attempts?: number
+          check_attempts?: number
+          created_at?: string
+          depth?: number
+          engage_at?: string | null
+          engaged_at?: string | null
+          error?: string | null
+          filed_at?: string | null
+          flagged_at?: string | null
+          focused?: boolean | null
+          id?: string
+          internet_message_id?: string | null
+          landed_at?: string | null
+          next_check_at?: string | null
+          parent_id?: string | null
+          placement?: string | null
+          recipient_address?: string
+          recipient_id?: string
+          recipient_item_id?: string | null
+          replied_at?: string | null
+          reply_due_at?: string | null
+          rescued_at?: string | null
+          sender_address?: string
+          sender_filed_at?: string | null
+          sender_id?: string
+          sender_item_id?: string | null
+          sent_at?: string | null
+          sent_confirmed_at?: string | null
+          status?: string
+          subject?: string
+          thread_id?: string
+          will_flag?: boolean
+          will_reply?: boolean
+        }
+        Relationships: [
+          {
+            foreignKeyName: "email_warmup_messages_parent_id_fkey"
+            columns: ["parent_id"]
+            isOneToOne: false
+            referencedRelation: "email_warmup_messages"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "email_warmup_messages_recipient_id_fkey"
+            columns: ["recipient_id"]
+            isOneToOne: false
+            referencedRelation: "email_warmup_mailboxes"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "email_warmup_messages_sender_id_fkey"
+            columns: ["sender_id"]
+            isOneToOne: false
+            referencedRelation: "email_warmup_mailboxes"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      email_warmup_settings: {
+        Row: {
+          allow_same_organisation: boolean
+          id: boolean
+          last_tick_at: string | null
+          last_tick_note: string | null
+          lease_token: string | null
+          lease_until: string | null
+          paused: boolean
+          updated_at: string
+          updated_by: string | null
+        }
+        Insert: {
+          allow_same_organisation?: boolean
+          id?: boolean
+          last_tick_at?: string | null
+          last_tick_note?: string | null
+          lease_token?: string | null
+          lease_until?: string | null
+          paused?: boolean
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Update: {
+          allow_same_organisation?: boolean
+          id?: boolean
+          last_tick_at?: string | null
+          last_tick_note?: string | null
+          lease_token?: string | null
+          lease_until?: string | null
+          paused?: boolean
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Relationships: []
+      }
       feedback_submissions: {
         Row: {
           additional_comments: string | null
@@ -15167,6 +15440,30 @@ export type Database = {
           tenant_id: string | null
         }
         Relationships: []
+      }
+      email_warmup_daily: {
+        Row: {
+          day: string | null
+          inbox: number | null
+          junk: number | null
+          mailbox_id: string | null
+          missing: number | null
+          other: number | null
+          received: number | null
+          replied: number | null
+          replies_sent: number | null
+          rescued: number | null
+          sent: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "email_warmup_messages_sender_id_fkey"
+            columns: ["mailbox_id"]
+            isOneToOne: false
+            referencedRelation: "email_warmup_mailboxes"
+            referencedColumns: ["id"]
+          },
+        ]
       }
     }
     Functions: {

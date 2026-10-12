@@ -81,6 +81,7 @@
   --color-chart-3: var(--chart-3);
   --color-chart-4: var(--chart-4);
   --color-chart-5: var(--chart-5);
+  --color-chart-muted: var(--chart-muted);
   --color-sidebar: var(--sidebar);
   --color-sidebar-foreground: var(--sidebar-foreground);
   --color-sidebar-primary: var(--sidebar-primary);
@@ -164,6 +165,9 @@
   --chart-3: oklch(0.82 0.17 80);
   --chart-4: oklch(0.66 0.24 25);
   --chart-5: oklch(0.72 0.14 290);
+  /* De-emphasis neutral for context marks beside a highlighted one. Checked
+     against --destructive for colour-blind separation (dataviz validator). */
+  --chart-muted: oklch(0.45 0.015 250);
 
   --sidebar: oklch(0.18 0.02 250);
   --sidebar-foreground: oklch(0.92 0.01 240);
@@ -219,6 +223,7 @@
   --chart-3: oklch(0.6 0.14 65);
   --chart-4: oklch(0.55 0.22 25);
   --chart-5: oklch(0.55 0.18 290);
+  --chart-muted: oklch(0.74 0.012 250);
 
   --border: oklch(0 0 0 / 18%);
   --border-strong: oklch(0 0 0 / 34%);

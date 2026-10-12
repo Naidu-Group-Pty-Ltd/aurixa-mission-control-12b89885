@@ -1020,4 +1020,17 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "column", table: "email_campaign_sending_mailboxes", column: "tenant_id" },
     ],
   },
+  {
+    migration: "20261012130000_email_warmup.sql",
+    version: "20261012130000",
+    assertions: [
+      { kind: "table", table: "email_warmup_settings" },
+      { kind: "table", table: "email_warmup_mailboxes" },
+      { kind: "table", table: "email_warmup_messages" },
+      { kind: "table", table: "email_warmup_daily" },
+      { kind: "rows", table: "email_warmup_settings", atLeast: 1 },
+      { kind: "check", table: "email_warmup_messages", column: "status", value: "missing" },
+      { kind: "cron", jobname: "email-warmup-2min" },
+    ],
+  },
 ];

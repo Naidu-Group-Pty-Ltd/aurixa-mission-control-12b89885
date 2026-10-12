@@ -107,6 +107,7 @@ import { Route as HooksFleetDriftRouteImport } from './routes/hooks.fleet-drift'
 import { Route as HooksFeedbackForwardRetryRouteImport } from './routes/hooks.feedback-forward-retry'
 import { Route as HooksExpireReservationsRouteImport } from './routes/hooks.expire-reservations'
 import { Route as HooksEntitlementDrainRouteImport } from './routes/hooks.entitlement-drain'
+import { Route as HooksEmailWarmupRouteImport } from './routes/hooks.email-warmup'
 import { Route as HooksEmailIdentityDrainRouteImport } from './routes/hooks.email-identity-drain'
 import { Route as HooksEmailCampaignDispatchRouteImport } from './routes/hooks.email-campaign-dispatch'
 import { Route as HooksEmailBounceScanRouteImport } from './routes/hooks.email-bounce-scan'
@@ -140,6 +141,7 @@ import { Route as HandoffsNewRouteImport } from './routes/handoffs.new'
 import { Route as HandoffsHandoffIdRouteImport } from './routes/handoffs.$handoffId'
 import { Route as FleetEdgeRouteImport } from './routes/fleet.edge'
 import { Route as FleetDeploymentsRouteImport } from './routes/fleet.deployments'
+import { Route as EmailWarmupRouteImport } from './routes/email.warmup'
 import { Route as EmailSuppressionsRouteImport } from './routes/email.suppressions'
 import { Route as CrmTicketsRouteImport } from './routes/crm.tickets'
 import { Route as CrmJourneyRouteImport } from './routes/crm.journey'
@@ -737,6 +739,11 @@ const HooksEntitlementDrainRoute = HooksEntitlementDrainRouteImport.update({
   path: '/hooks/entitlement-drain',
   getParentRoute: () => rootRouteImport,
 } as any)
+const HooksEmailWarmupRoute = HooksEmailWarmupRouteImport.update({
+  id: '/hooks/email-warmup',
+  path: '/hooks/email-warmup',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const HooksEmailIdentityDrainRoute = HooksEmailIdentityDrainRouteImport.update({
   id: '/hooks/email-identity-drain',
   path: '/hooks/email-identity-drain',
@@ -912,6 +919,11 @@ const FleetEdgeRoute = FleetEdgeRouteImport.update({
 const FleetDeploymentsRoute = FleetDeploymentsRouteImport.update({
   id: '/fleet/deployments',
   path: '/fleet/deployments',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const EmailWarmupRoute = EmailWarmupRouteImport.update({
+  id: '/email/warmup',
+  path: '/email/warmup',
   getParentRoute: () => rootRouteImport,
 } as any)
 const EmailSuppressionsRoute = EmailSuppressionsRouteImport.update({
@@ -1487,6 +1499,7 @@ export interface FileRoutesByFullPath {
   '/crm/journey': typeof CrmJourneyRoute
   '/crm/tickets': typeof CrmTicketsRoute
   '/email/suppressions': typeof EmailSuppressionsRoute
+  '/email/warmup': typeof EmailWarmupRoute
   '/fleet/deployments': typeof FleetDeploymentsRoute
   '/fleet/edge': typeof FleetEdgeRoute
   '/handoffs/$handoffId': typeof HandoffsHandoffIdRoute
@@ -1520,6 +1533,7 @@ export interface FileRoutesByFullPath {
   '/hooks/email-bounce-scan': typeof HooksEmailBounceScanRoute
   '/hooks/email-campaign-dispatch': typeof HooksEmailCampaignDispatchRoute
   '/hooks/email-identity-drain': typeof HooksEmailIdentityDrainRoute
+  '/hooks/email-warmup': typeof HooksEmailWarmupRoute
   '/hooks/entitlement-drain': typeof HooksEntitlementDrainRoute
   '/hooks/expire-reservations': typeof HooksExpireReservationsRoute
   '/hooks/feedback-forward-retry': typeof HooksFeedbackForwardRetryRoute
@@ -1713,6 +1727,7 @@ export interface FileRoutesByTo {
   '/crm/journey': typeof CrmJourneyRoute
   '/crm/tickets': typeof CrmTicketsRoute
   '/email/suppressions': typeof EmailSuppressionsRoute
+  '/email/warmup': typeof EmailWarmupRoute
   '/fleet/deployments': typeof FleetDeploymentsRoute
   '/fleet/edge': typeof FleetEdgeRoute
   '/handoffs/$handoffId': typeof HandoffsHandoffIdRoute
@@ -1746,6 +1761,7 @@ export interface FileRoutesByTo {
   '/hooks/email-bounce-scan': typeof HooksEmailBounceScanRoute
   '/hooks/email-campaign-dispatch': typeof HooksEmailCampaignDispatchRoute
   '/hooks/email-identity-drain': typeof HooksEmailIdentityDrainRoute
+  '/hooks/email-warmup': typeof HooksEmailWarmupRoute
   '/hooks/entitlement-drain': typeof HooksEntitlementDrainRoute
   '/hooks/expire-reservations': typeof HooksExpireReservationsRoute
   '/hooks/feedback-forward-retry': typeof HooksFeedbackForwardRetryRoute
@@ -1942,6 +1958,7 @@ export interface FileRoutesById {
   '/crm/journey': typeof CrmJourneyRoute
   '/crm/tickets': typeof CrmTicketsRoute
   '/email/suppressions': typeof EmailSuppressionsRoute
+  '/email/warmup': typeof EmailWarmupRoute
   '/fleet/deployments': typeof FleetDeploymentsRoute
   '/fleet/edge': typeof FleetEdgeRoute
   '/handoffs/$handoffId': typeof HandoffsHandoffIdRoute
@@ -1975,6 +1992,7 @@ export interface FileRoutesById {
   '/hooks/email-bounce-scan': typeof HooksEmailBounceScanRoute
   '/hooks/email-campaign-dispatch': typeof HooksEmailCampaignDispatchRoute
   '/hooks/email-identity-drain': typeof HooksEmailIdentityDrainRoute
+  '/hooks/email-warmup': typeof HooksEmailWarmupRoute
   '/hooks/entitlement-drain': typeof HooksEntitlementDrainRoute
   '/hooks/expire-reservations': typeof HooksExpireReservationsRoute
   '/hooks/feedback-forward-retry': typeof HooksFeedbackForwardRetryRoute
@@ -2172,6 +2190,7 @@ export interface FileRouteTypes {
     | '/crm/journey'
     | '/crm/tickets'
     | '/email/suppressions'
+    | '/email/warmup'
     | '/fleet/deployments'
     | '/fleet/edge'
     | '/handoffs/$handoffId'
@@ -2205,6 +2224,7 @@ export interface FileRouteTypes {
     | '/hooks/email-bounce-scan'
     | '/hooks/email-campaign-dispatch'
     | '/hooks/email-identity-drain'
+    | '/hooks/email-warmup'
     | '/hooks/entitlement-drain'
     | '/hooks/expire-reservations'
     | '/hooks/feedback-forward-retry'
@@ -2398,6 +2418,7 @@ export interface FileRouteTypes {
     | '/crm/journey'
     | '/crm/tickets'
     | '/email/suppressions'
+    | '/email/warmup'
     | '/fleet/deployments'
     | '/fleet/edge'
     | '/handoffs/$handoffId'
@@ -2431,6 +2452,7 @@ export interface FileRouteTypes {
     | '/hooks/email-bounce-scan'
     | '/hooks/email-campaign-dispatch'
     | '/hooks/email-identity-drain'
+    | '/hooks/email-warmup'
     | '/hooks/entitlement-drain'
     | '/hooks/expire-reservations'
     | '/hooks/feedback-forward-retry'
@@ -2626,6 +2648,7 @@ export interface FileRouteTypes {
     | '/crm/journey'
     | '/crm/tickets'
     | '/email/suppressions'
+    | '/email/warmup'
     | '/fleet/deployments'
     | '/fleet/edge'
     | '/handoffs/$handoffId'
@@ -2659,6 +2682,7 @@ export interface FileRouteTypes {
     | '/hooks/email-bounce-scan'
     | '/hooks/email-campaign-dispatch'
     | '/hooks/email-identity-drain'
+    | '/hooks/email-warmup'
     | '/hooks/entitlement-drain'
     | '/hooks/expire-reservations'
     | '/hooks/feedback-forward-retry'
@@ -2854,6 +2878,7 @@ export interface RootRouteChildren {
   CrmJourneyRoute: typeof CrmJourneyRoute
   CrmTicketsRoute: typeof CrmTicketsRoute
   EmailSuppressionsRoute: typeof EmailSuppressionsRoute
+  EmailWarmupRoute: typeof EmailWarmupRoute
   FleetDeploymentsRoute: typeof FleetDeploymentsRoute
   FleetEdgeRoute: typeof FleetEdgeRoute
   HooksAgreementsRefreshRoute: typeof HooksAgreementsRefreshRoute
@@ -2885,6 +2910,7 @@ export interface RootRouteChildren {
   HooksEmailBounceScanRoute: typeof HooksEmailBounceScanRoute
   HooksEmailCampaignDispatchRoute: typeof HooksEmailCampaignDispatchRoute
   HooksEmailIdentityDrainRoute: typeof HooksEmailIdentityDrainRoute
+  HooksEmailWarmupRoute: typeof HooksEmailWarmupRoute
   HooksEntitlementDrainRoute: typeof HooksEntitlementDrainRoute
   HooksExpireReservationsRoute: typeof HooksExpireReservationsRoute
   HooksFeedbackForwardRetryRoute: typeof HooksFeedbackForwardRetryRoute
@@ -3688,6 +3714,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof HooksEntitlementDrainRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/hooks/email-warmup': {
+      id: '/hooks/email-warmup'
+      path: '/hooks/email-warmup'
+      fullPath: '/hooks/email-warmup'
+      preLoaderRoute: typeof HooksEmailWarmupRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/hooks/email-identity-drain': {
       id: '/hooks/email-identity-drain'
       path: '/hooks/email-identity-drain'
@@ -3917,6 +3950,13 @@ declare module '@tanstack/react-router' {
       path: '/fleet/deployments'
       fullPath: '/fleet/deployments'
       preLoaderRoute: typeof FleetDeploymentsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/email/warmup': {
+      id: '/email/warmup'
+      path: '/email/warmup'
+      fullPath: '/email/warmup'
+      preLoaderRoute: typeof EmailWarmupRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/email/suppressions': {
@@ -4780,6 +4820,7 @@ const rootRouteChildren: RootRouteChildren = {
   CrmJourneyRoute: CrmJourneyRoute,
   CrmTicketsRoute: CrmTicketsRoute,
   EmailSuppressionsRoute: EmailSuppressionsRoute,
+  EmailWarmupRoute: EmailWarmupRoute,
   FleetDeploymentsRoute: FleetDeploymentsRoute,
   FleetEdgeRoute: FleetEdgeRoute,
   HooksAgreementsRefreshRoute: HooksAgreementsRefreshRoute,
@@ -4812,6 +4853,7 @@ const rootRouteChildren: RootRouteChildren = {
   HooksEmailBounceScanRoute: HooksEmailBounceScanRoute,
   HooksEmailCampaignDispatchRoute: HooksEmailCampaignDispatchRoute,
   HooksEmailIdentityDrainRoute: HooksEmailIdentityDrainRoute,
+  HooksEmailWarmupRoute: HooksEmailWarmupRoute,
   HooksEntitlementDrainRoute: HooksEntitlementDrainRoute,
   HooksExpireReservationsRoute: HooksExpireReservationsRoute,
   HooksFeedbackForwardRetryRoute: HooksFeedbackForwardRetryRoute,

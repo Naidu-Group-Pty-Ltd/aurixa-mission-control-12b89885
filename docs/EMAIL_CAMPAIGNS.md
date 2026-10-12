@@ -446,6 +446,14 @@ secret that was just replaced.
 Lead-stage emails, payment links and CRM journeys still send through the
 deployment's own tenant only.
 
+### Warming a mailbox up first
+
+A new domain or mailbox has no sending reputation, and a campaign is a poor
+way to earn one. **Email Campaigns → Warmup** runs an Instantly-style warmup
+pool across your tenants' mailboxes — see [EMAIL_WARMUP.md](EMAIL_WARMUP.md). A
+campaign whose sending mailbox is warming gets a readiness warning while it is
+in its first two weeks, or while its warmup mail is landing in spam.
+
 ### The bounce scan follows the mailboxes that actually sent
 
 Once a campaign can move between mailboxes, reading only the mailboxes campaigns

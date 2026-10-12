@@ -264,6 +264,9 @@ export function tenantErrorMessage(raw: string): string {
   if (raw.includes("microsoft_tenant_in_use")) {
     return "a running campaign sends through this tenant — pause it, or move it to another tenant, first";
   }
+  if (raw.includes("microsoft_tenant_warming")) {
+    return "mailboxes in this tenant are enrolled in email warmup — remove them from warmup first";
+  }
   if (raw.includes("microsoft_tenant_not_found"))
     return "that tenant does not exist or was removed";
   if (raw.includes("microsoft_tenants_fingerprint_live")) {

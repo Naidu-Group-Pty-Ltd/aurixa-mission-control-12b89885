@@ -214,14 +214,14 @@ export function refusalPauseReason(
 }
 
 /**
- * The application permissions a client-credentials token carries, from its
- * `roles` claim. `null` when the token is not a readable JWT.
+ * A JWT's payload, or null when the token is not a readable JWT.
  *
  * Decoded, never verified: the token came straight from Microsoft's token
  * endpoint over TLS a moment ago, and nothing here grants anything on the
- * strength of it — it only decides which sentence the page shows.
+ * strength of it — it only decides which sentence the page shows, or which
+ * organisation a tenant belongs to.
  */
-export function tokenRoles(token: string): string[] | null {
+function tokenPayload(token: string): Record<string, unknown> | null {
   const parts = String(token ?? "").split(".");
   if (parts.length !== 3) return null;
   try {
@@ -229,12 +229,33 @@ export function tokenRoles(token: string): string[] | null {
     const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
     const binary = atob(padded);
     const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
-    const payload = JSON.parse(new TextDecoder().decode(bytes)) as { roles?: unknown };
-    if (!Array.isArray(payload.roles)) return [];
-    return payload.roles.filter((role): role is string => typeof role === "string");
+    const payload = JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+    return payload && typeof payload === "object" ? (payload as Record<string, unknown>) : null;
   } catch {
     return null;
   }
+}
+
+/**
+ * The application permissions a client-credentials token carries, from its
+ * `roles` claim. `null` when the token is not a readable JWT.
+ */
+export function tokenRoles(token: string): string[] | null {
+  const payload = tokenPayload(token);
+  if (!payload) return null;
+  if (!Array.isArray(payload.roles)) return [];
+  return payload.roles.filter((role): role is string => typeof role === "string");
+}
+
+/**
+ * The directory a token was issued by — its `tid` claim, lower-cased — or
+ * null. The one name for an organisation that does not depend on how its
+ * tenant was entered: an ID and any of its domains all issue the same `tid`,
+ * and so do two app registrations in the same directory.
+ */
+export function tokenTenantId(token: string): string | null {
+  const tid = tokenPayload(token)?.tid;
+  return typeof tid === "string" && tid.trim() ? tid.trim().toLowerCase() : null;
 }
 
 export type GraphCapabilities = {

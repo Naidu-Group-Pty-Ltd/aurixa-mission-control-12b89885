@@ -48,6 +48,16 @@ import {
 import { mayChoose, sameMailbox, type MailboxAccess } from "@/lib/email/mailboxes.pure";
 import { sameTenant } from "@/lib/email/microsoftTenants.pure";
 import {
+  HEALTH_WINDOW_DAYS,
+  campaignWarmupAdvice,
+  daysBefore,
+  healthScore,
+  localDate,
+  rampDay,
+  totalsBetween,
+  type WarmupDay,
+} from "@/lib/email/warmupPlan.pure";
+import {
   campaignRulesFromRow,
   describeSchedule,
   formatInZone,
@@ -488,6 +498,46 @@ export type Readiness = {
   schedule: { description: string; openNow: boolean; nextOpening: string | null };
 };
 
+/** What the warmup pool says about a campaign's sending mailbox, or null. Advisory: a read that fails says nothing. */
+async function warmupAdviceFor(
+  supabase: SupabaseClient<Database>,
+  address: string | null,
+): Promise<string | null> {
+  if (!address) return null;
+  const { data: warming, error } = await supabase
+    .from("email_warmup_mailboxes")
+    .select("id, status, active_days, last_active_on, timezone")
+    .eq("mailbox", address)
+    .neq("status", "removed")
+    .maybeSingle();
+  if (error) {
+    console.error("[email] could not read the warmup pool for readiness:", error.message);
+    return null;
+  }
+  if (!warming) return null;
+  const today = localDate(new Date(), warming.timezone || "Australia/Sydney");
+  const from = daysBefore(today, HEALTH_WINDOW_DAYS - 1);
+  const { data: days, error: daysError } = await supabase
+    .from("email_warmup_daily")
+    .select("*")
+    .eq("mailbox_id", warming.id)
+    .gte("day", from);
+  if (daysError) {
+    console.error("[email] could not read warmup figures for readiness:", daysError.message);
+    return null;
+  }
+  return campaignWarmupAdvice({
+    address,
+    status: warming.status,
+    rampDay: rampDay({
+      activeDays: warming.active_days,
+      lastActiveOn: warming.last_active_on,
+      today,
+    }),
+    health: healthScore(totalsBetween((days ?? []) as Partial<WarmupDay>[], from, today)),
+  });
+}
+
 /** The column profile an import carried, whatever shape the jsonb holds. */
 export function importedColumns(value: unknown): { key?: string; isDimension?: boolean }[] {
   return Array.isArray(value) ? (value as { key?: string; isDimension?: boolean }[]) : [];
@@ -568,6 +618,13 @@ async function assessReadiness(
         "this application's token does not carry Mail.Read — the bounce scan may not be able to read the mailbox, and a bounce it cannot read never reaches the do-not-send register",
       );
     }
+  }
+
+  // A sending mailbox that is still young in its warmup, or whose warmup mail
+  // lands in spam, is a warning about where this campaign's mail will land.
+  if (effectiveMailbox) {
+    const advice = await warmupAdviceFor(supabase, emailKey(effectiveMailbox));
+    if (advice) warnings.push(advice);
   }
 
   // Which fields the attached lists can actually supply — read from each

@@ -9,6 +9,7 @@ import {
   AlertTriangle,
   Ban,
   CheckCircle2,
+  Flame,
   Info,
   Mail,
   Plus,
@@ -152,6 +153,12 @@ function EmailCampaignsPage() {
                 campaignsQuery.dataUpdatedAt ? new Date(campaignsQuery.dataUpdatedAt) : null
               }
             />
+            <Button variant="outline" asChild>
+              <Link to="/email/warmup">
+                <Flame className="mr-2 h-4 w-4" />
+                Warmup
+              </Link>
+            </Button>
             <Button variant="outline" asChild>
               <Link to="/email/suppressions">
                 <ShieldOff className="mr-2 h-4 w-4" />

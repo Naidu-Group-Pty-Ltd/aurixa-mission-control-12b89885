@@ -34,6 +34,7 @@ import {
   LayoutDashboard,
   Mail,
   MailX,
+  Flame,
   Megaphone,
   Newspaper,
   Palette,
@@ -344,6 +345,13 @@ export const NAV_SECTIONS: NavSection[] = [
         icon: Mail,
         keywords:
           "email campaign scheduler bulk send list upload spreadsheet csv xlsx microsoft graph outlook mailbox merge quota",
+      },
+      {
+        to: "/email/warmup",
+        label: "Email Warmup",
+        icon: Flame,
+        keywords:
+          "warmup warm up deliverability reputation inbox placement spam rescue instantly lemwarm mailbox ramp microsoft",
       },
       {
         to: "/email/suppressions",

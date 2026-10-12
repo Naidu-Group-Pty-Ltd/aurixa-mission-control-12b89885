@@ -7,8 +7,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   accessToken,
+  createDraftMessage,
   deliverMessage,
+  ensureMailFolder,
+  findMessageByInternetId,
   forgetToken,
+  getMailboxMessage,
+  moveMailboxMessage,
+  organisationOf,
+  sendDraftMessage,
   listDirectoryUsers,
   probeMailboxes,
   type GraphMessage,
@@ -323,5 +330,107 @@ describe("tokens — one per tenant", () => {
     await expect(accessToken(partner)).rejects.toThrow(
       /rejected the application credentials for Partner: the client secret is wrong/,
     );
+  });
+});
+
+describe("warmup operations", () => {
+  const config = {
+    tenantId: "Partner.Example",
+    clientId: "client",
+    clientSecret: "secret",
+    mailbox: null,
+    key: "tenant:w:v1",
+    label: "Partner",
+  };
+
+  it("asks for immutable ids on every call", async () => {
+    route = () => json(201, { id: "AAMk-immutable=", internetMessageId: "<m1@x>" });
+    const created = await createDraftMessage("a@x.test", message, config);
+    expect(created).toEqual({ id: "AAMk-immutable=", internetMessageId: "<m1@x>" });
+    expect(calls[0].headers.prefer).toBe('IdType="ImmutableId"');
+    expect(paths()).toEqual(["POST /v1.0/users/a%40x.test/messages"]);
+  });
+
+  it("finds a message by its Message-ID in one folder, quoting it for OData", async () => {
+    route = () => json(200, { value: [{ id: "found", isRead: false }] });
+    const item = await findMessageByInternetId("b@y.test", "junkemail", "<o'brien@x>", config);
+    expect(item?.id).toBe("found");
+    const url = new URL(calls[0].url);
+    expect(url.pathname).toBe("/v1.0/users/b%40y.test/mailFolders/junkemail/messages");
+    expect(url.searchParams.get("$filter")).toBe("internetMessageId eq '<o''brien@x>'");
+
+    route = () => json(200, { value: [] });
+    expect(await findMessageByInternetId("b@y.test", null, "<none@x>", config)).toBeNull();
+    expect(new URL(calls[1].url).pathname).toBe("/v1.0/users/b%40y.test/messages");
+  });
+
+  it("reads a gone message as null, and other failures as errors with their status", async () => {
+    route = () => json(404, { error: { code: "ErrorItemNotFound", message: "gone" } });
+    expect(await getMailboxMessage("a@x.test", "id-1", config)).toBeNull();
+
+    route = () => json(403, { error: { code: "ErrorAccessDenied", message: "Access is denied." } });
+    await expect(getMailboxMessage("a@x.test", "id-1", config)).rejects.toMatchObject({
+      status: 403,
+      code: "ErrorAccessDenied",
+    });
+  });
+
+  it("sends a draft and classifies the answer like any send", async () => {
+    route = () => new Response(null, { status: 202 });
+    expect(await sendDraftMessage("a@x.test", "draft/1", config)).toMatchObject({ kind: "sent" });
+    expect(paths()).toEqual(["POST /v1.0/users/a%40x.test/messages/draft%2F1/send"]);
+
+    route = () => new Error("connection reset");
+    expect(await sendDraftMessage("a@x.test", "draft-2", config)).toMatchObject({
+      kind: "unconfirmed",
+    });
+  });
+
+  it("does not retry a write that failed on the way back", async () => {
+    route = () => json(503, { error: { message: "busy" } });
+    await expect(moveMailboxMessage("a@x.test", "m1", "inbox", config)).rejects.toMatchObject({
+      status: 503,
+    });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("finds the warmup folder, or creates it, surviving a race to create it", async () => {
+    route = () => json(200, { value: [{ id: "folder-1" }] });
+    expect(await ensureMailFolder("a@x.test", "Warmup", config)).toBe("folder-1");
+    expect(calls).toHaveLength(1);
+
+    calls = [];
+    let lists = 0;
+    route = (call) => {
+      if (call.method === "GET")
+        return json(200, { value: lists++ === 0 ? [] : [{ id: "theirs" }] });
+      return json(409, { error: { code: "ErrorFolderExists", message: "exists" } });
+    };
+    expect(await ensureMailFolder("a@x.test", "Warmup", config)).toBe("theirs");
+    expect(paths()).toEqual([
+      "GET /v1.0/users/a%40x.test/mailFolders",
+      "POST /v1.0/users/a%40x.test/mailFolders",
+      "GET /v1.0/users/a%40x.test/mailFolders",
+    ]);
+  });
+
+  it("names the organisation by the directory that issued the token", async () => {
+    const payload = btoa(JSON.stringify({ tid: "8F1C2D3E-4A5B-4C6D-8E7F-901234567890" }))
+      .replace(/=+$/, "")
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => json(200, { access_token: `h.${payload}.s`, expires_in: 3600 })),
+    );
+    expect(await organisationOf({ ...config, key: "tenant:jwt:v1" })).toBe(
+      "8f1c2d3e-4a5b-4c6d-8e7f-901234567890",
+    );
+    // A token that is not a JWT falls back to the configured tenant.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => json(200, { access_token: "opaque", expires_in: 3600 })),
+    );
+    expect(await organisationOf({ ...config, key: "tenant:opaque:v1" })).toBe("partner.example");
   });
 });

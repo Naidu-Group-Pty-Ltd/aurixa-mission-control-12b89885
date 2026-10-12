@@ -60,6 +60,20 @@
  * use (`probeMailboxes`, one inbox-folder read each, batched twenty to a
  * request). `src/lib/email/mailboxes.pure.ts` says why "can read its inbox" is
  * the test.
+ *
+ * ## Warmup
+ *
+ * The warmup engine (`src/server/email-warmup.server.ts`) does more to a
+ * mailbox than send from it: it builds each message as a draft and sends that,
+ * finds the copy that arrived in the recipient's mailbox, moves it out of Junk,
+ * marks it read, flags it, files it into a folder and replies to it. Every one
+ * of those calls asks for IMMUTABLE ids (`Prefer: IdType="ImmutableId"`): an
+ * ordinary Outlook id changes when an item moves folder, and a warmup message
+ * moves — Drafts to Sent Items, Junk to Inbox, Inbox to the warmup folder —
+ * while the engine still has to find it again hours later. An immutable id
+ * survives every one of those moves for as long as the item stays in its
+ * mailbox; a draft keeps its id when it is sent and lands in Sent Items, which
+ * is how the engine learns that a send really left.
  */
 import { withRetry, isTransientHttpError } from "@/lib/with-retry";
 import {
@@ -70,7 +84,7 @@ import {
   uploadRanges,
   type DeliveryPath,
 } from "@/lib/email/attachments.pure";
-import { tokenRoles, type DirectoryUser } from "@/lib/email/mailboxes.pure";
+import { tokenRoles, tokenTenantId, type DirectoryUser } from "@/lib/email/mailboxes.pure";
 import { explainTokenRefusal } from "@/lib/email/microsoftTenants.pure";
 
 const GRAPH_BASE = "https://graph.microsoft.com/v1.0";
@@ -894,4 +908,288 @@ async function probeBatch(addresses: string[], given?: GraphConfig): Promise<Mai
       code: entry?.body?.error?.code ?? null,
     };
   });
+}
+
+// ── Warmup: acting on a mailbox's messages ──────────────────────────────────
+
+/** Ids that survive a move between folders — see "Warmup" in the header. */
+const IMMUTABLE_IDS = { Prefer: 'IdType="ImmutableId"' } as const;
+
+/**
+ * Any Graph call that is not a send. Answers the parsed body, or null for an
+ * empty one. Throws `GraphError` — with status 0 and code "network" when no
+ * answer came back. Reads are retried like `graphGet`; writes are not, so a
+ * write that failed on the way back is the caller's to judge.
+ */
+async function graphCall<T>(
+  method: "GET" | "POST" | "PATCH" | "DELETE",
+  path: string,
+  body: unknown,
+  config: GraphConfig,
+): Promise<T | null> {
+  const once = async (): Promise<T | null> => {
+    const token = await accessToken(config);
+    let response: Response;
+    try {
+      response = await fetch(`${GRAPH_BASE}${path}`, {
+        method,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          ...IMMUTABLE_IDS,
+          ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+    } catch (error) {
+      throw new GraphError(error instanceof Error ? error.message : String(error), 0, "network");
+    }
+    if (response.status === 401) forgetToken(config);
+    if (!response.ok) {
+      const { code, text } = await readGraphError(response);
+      throw new GraphError(text || `Graph ${response.status}`, response.status, code);
+    }
+    if (response.status === 204) return null;
+    const text = await response.text();
+    return text ? (JSON.parse(text) as T) : null;
+  };
+  if (method !== "GET") return once();
+  return withRetry(once, {
+    attempts: 3,
+    shouldRetry: (error) =>
+      error instanceof GraphError
+        ? error.status === 429 || error.status >= 500 || error.status === 0
+        : false,
+  });
+}
+
+const userPath = (mailbox: string) => `/users/${encodeURIComponent(mailbox)}`;
+const messagePath = (mailbox: string, id: string) =>
+  `${userPath(mailbox)}/messages/${encodeURIComponent(id)}`;
+
+/** One of a mailbox's messages, as much of it as the warmup reads. */
+export type MailboxItem = {
+  id: string;
+  internetMessageId?: string | null;
+  isDraft?: boolean;
+  isRead?: boolean;
+  inferenceClassification?: "focused" | "other" | null;
+  subject?: string | null;
+  body?: { contentType?: string; content?: string } | null;
+};
+
+/** Create a message as a draft in a mailbox. Sends nothing. */
+export async function createDraftMessage(
+  mailbox: string,
+  message: GraphMessage,
+  config: GraphConfig,
+): Promise<{ id: string; internetMessageId: string | null }> {
+  const created = await graphCall<MailboxItem>(
+    "POST",
+    `${userPath(mailbox)}/messages`,
+    message,
+    config,
+  );
+  if (!created?.id)
+    throw new GraphError("Microsoft created a draft but did not say which", 0, null);
+  return { id: created.id, internetMessageId: created.internetMessageId ?? null };
+}
+
+/**
+ * Send a draft. Classified exactly as `sendMail` is — see the header: a
+ * failure after the request left is `unconfirmed`, never retried.
+ */
+export async function sendDraftMessage(
+  mailbox: string,
+  id: string,
+  config: GraphConfig,
+): Promise<SendOutcome> {
+  const token = await accessToken(config);
+  let response: Response;
+  try {
+    response = await fetch(`${GRAPH_BASE}${messagePath(mailbox, id)}/send`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, ...IMMUTABLE_IDS },
+    });
+  } catch (error) {
+    return { kind: "unconfirmed", message: error instanceof Error ? error.message : String(error) };
+  }
+  return classifySendResponse(response, config);
+}
+
+/** A message by its (immutable) id, or null when the mailbox no longer has it. */
+export async function getMailboxMessage(
+  mailbox: string,
+  id: string,
+  config: GraphConfig,
+): Promise<MailboxItem | null> {
+  try {
+    return await graphCall<MailboxItem>(
+      "GET",
+      `${messagePath(mailbox, id)}?$select=id,internetMessageId,isDraft,isRead,subject`,
+      undefined,
+      config,
+    );
+  } catch (error) {
+    if (error instanceof GraphError && error.status === 404) return null;
+    throw error;
+  }
+}
+
+/** OData string literal: single quotes doubled. */
+const odataString = (value: string) => `'${value.replace(/'/g, "''")}'`;
+
+/**
+ * The copy of a message, by its Internet Message-ID, in one well-known folder
+ * of a mailbox — or anywhere in it when `folder` is null. Null when it is not
+ * there.
+ */
+export async function findMessageByInternetId(
+  mailbox: string,
+  folder: "inbox" | "junkemail" | null,
+  internetMessageId: string,
+  config: GraphConfig,
+): Promise<MailboxItem | null> {
+  const query = new URLSearchParams({
+    $filter: `internetMessageId eq ${odataString(internetMessageId)}`,
+    $select: "id,internetMessageId,isRead,inferenceClassification,subject",
+    $top: "2",
+  });
+  const base = folder ? `${userPath(mailbox)}/mailFolders/${folder}` : userPath(mailbox);
+  const page = await graphCall<{ value?: MailboxItem[] }>(
+    "GET",
+    `${base}/messages?${query.toString()}`,
+    undefined,
+    config,
+  );
+  return page?.value?.[0] ?? null;
+}
+
+/** Change a message's flags: read, flagged, Focused/Other, or a draft's body. */
+export async function updateMailboxMessage(
+  mailbox: string,
+  id: string,
+  patch: {
+    isRead?: boolean;
+    flag?: { flagStatus: "flagged" | "notFlagged" | "complete" };
+    inferenceClassification?: "focused" | "other";
+    body?: { contentType: "HTML" | "Text"; content: string };
+  },
+  config: GraphConfig,
+): Promise<void> {
+  await graphCall("PATCH", messagePath(mailbox, id), patch, config);
+}
+
+/**
+ * Move a message to a folder — a folder id, or a well-known name such as
+ * "inbox". Answers the moved message's id, which with immutable ids is the
+ * same id.
+ */
+export async function moveMailboxMessage(
+  mailbox: string,
+  id: string,
+  destinationId: string,
+  config: GraphConfig,
+): Promise<string> {
+  const moved = await graphCall<MailboxItem>(
+    "POST",
+    `${messagePath(mailbox, id)}/move`,
+    { destinationId },
+    config,
+  );
+  return moved?.id ?? id;
+}
+
+/** Delete a message. Used for a draft that will not be sent. */
+export async function deleteMailboxMessage(
+  mailbox: string,
+  id: string,
+  config: GraphConfig,
+): Promise<void> {
+  try {
+    await graphCall("DELETE", messagePath(mailbox, id), undefined, config);
+  } catch (error) {
+    if (error instanceof GraphError && error.status === 404) return;
+    throw error;
+  }
+}
+
+/**
+ * Create a reply draft to a message, with Microsoft's own quoted copy of the
+ * original in its body and "RE:" on its subject. Sends nothing.
+ */
+export async function createReplyDraft(
+  mailbox: string,
+  id: string,
+  config: GraphConfig,
+): Promise<{
+  id: string;
+  internetMessageId: string | null;
+  subject: string | null;
+  bodyHtml: string;
+}> {
+  const draft = await graphCall<MailboxItem>(
+    "POST",
+    `${messagePath(mailbox, id)}/createReply`,
+    {},
+    config,
+  );
+  if (!draft?.id)
+    throw new GraphError("Microsoft created a reply draft but did not say which", 0, null);
+  return {
+    id: draft.id,
+    internetMessageId: draft.internetMessageId ?? null,
+    subject: draft.subject ?? null,
+    bodyHtml: draft.body?.content ?? "",
+  };
+}
+
+/**
+ * The id of a top-level mail folder with this name, created when the mailbox
+ * has none. Needs Mail.ReadWrite — which makes it the warmup's test that it
+ * may change this mailbox at all.
+ */
+export async function ensureMailFolder(
+  mailbox: string,
+  displayName: string,
+  config: GraphConfig,
+): Promise<string> {
+  const find = async () => {
+    const query = new URLSearchParams({
+      $filter: `displayName eq ${odataString(displayName)}`,
+      $select: "id,displayName",
+    });
+    const page = await graphCall<{ value?: { id: string }[] }>(
+      "GET",
+      `${userPath(mailbox)}/mailFolders?${query.toString()}`,
+      undefined,
+      config,
+    );
+    return page?.value?.[0]?.id ?? null;
+  };
+  const existing = await find();
+  if (existing) return existing;
+  try {
+    const created = await graphCall<{ id?: string }>(
+      "POST",
+      `${userPath(mailbox)}/mailFolders`,
+      { displayName },
+      config,
+    );
+    if (created?.id) return created.id;
+  } catch (error) {
+    // Created by somebody else between the look and the create.
+    if (!(error instanceof GraphError && error.status === 409)) throw error;
+  }
+  const again = await find();
+  if (!again) throw new GraphError(`the "${displayName}" folder could not be created`, 0, null);
+  return again;
+}
+
+/**
+ * The Microsoft organisation a tenant's credentials belong to: the directory
+ * its token was issued by. Falls back to the configured tenant id when the
+ * token cannot be read.
+ */
+export async function organisationOf(config: GraphConfig): Promise<string> {
+  return tokenTenantId(await accessToken(config)) ?? config.tenantId.trim().toLowerCase();
 }
