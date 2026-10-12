@@ -48,14 +48,39 @@
  * back in the queue and the campaign stops with the reason on it. Three
  * refusals in a row of any kind do the same, because a fault this file has no
  * name for looks exactly like that.
+ *
+ * And three follow from what actually calls this. pg_net delivers the
+ * "every minute" tick in bursts — one to four calls at once, roughly every
+ * minute and a half, and about one cron start in eleven never happens at all
+ * (measured; see migration 20261012110000).
+ *
+ * **One pass per campaign at a time.** A pass takes a lease on the campaign
+ * with one conditional UPDATE; the other calls in a burst leave it alone.
+ * Without it they all read the same `last_message_at` and none of them waited
+ * out the gap for the others.
+ *
+ * **A pass long enough to cover the wait for the next one.** It keeps starting
+ * messages for up to 90 seconds, waiting out the gap between them, so a
+ * campaign sends at its own pace rather than one message per burst — and
+ * re-checks the campaign's status and window before each one, because in that
+ * time an operator may pause it or its window may close.
+ *
+ * **Every pass writes down what it decided.** `last_tick_at`,
+ * `last_tick_note` and `next_send_at` are what let the page say "waiting for
+ * the window to open at 09:00 tomorrow" instead of only "running" — which is
+ * exactly what a working campaign outside its hours used to look like, and
+ * exactly what a stalled scheduler looked like too.
  */
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import type { Json } from "@/integrations/supabase/types";
 import {
+  campaignRulesFromRow,
   claimQuota,
+  nextSendTime,
   planTick,
   quotaBlocking,
   startOfZonedDay,
+  windowState,
   type CampaignRules,
   type QuotaRule,
 } from "@/lib/email/campaignRules.pure";
@@ -77,8 +102,31 @@ import {
   type PreparedAttachments,
 } from "@/server/email-attachments.server";
 
-/** Wall clock one invocation may spend. Well inside a Worker's allowance. */
-const DEFAULT_BUDGET_MS = 20_000;
+/**
+ * How long a pass may keep STARTING messages. One pass has to cover the gap
+ * between the ticks that actually arrive — pg_net delivers them in bursts
+ * roughly a minute and a half apart, not one a minute — so that a campaign
+ * with a 60-second gap sends at its own pace instead of one message per burst.
+ * The hook's HTTP timeout is 115 s (migration 20261012110000); the last
+ * message starts by 90 s and a draft send with large files finishes well inside
+ * the rest, because a caller that disconnects cancels the Worker, and a
+ * cancellation mid-send is how a contact is stranded as `claimed`.
+ */
+const DEFAULT_BUDGET_MS = 90_000;
+/**
+ * How long a pass owns a campaign. Longer than the longest pass, so a pass
+ * that dies holding it delays the campaign by this much and no more.
+ */
+const LEASE_MS = 150_000;
+/**
+ * A contact `claimed` this long ago is not in flight: no pass lives longer
+ * than the lease. Whether its message left is unknowable, so it becomes
+ * `unconfirmed` — never resent automatically — instead of `claimed` for ever,
+ * which would also stop the campaign ever completing.
+ */
+const STALE_CLAIM_MS = 10 * 60_000;
+/** Campaigns worked at once in one pass, so one waiting out its gap does not hold up the rest. */
+const CAMPAIGN_CONCURRENCY = 4;
 /** Candidates read per message, so quota-blocked contacts can be stepped over. */
 const CANDIDATE_MULTIPLIER = 4;
 const MAX_CANDIDATES = 2000;
@@ -93,6 +141,10 @@ export type DispatchSummary = {
   unconfirmed: number;
   completed: number;
   paused: number;
+  /** Campaigns another pass was already working — normal when ticks arrive in bursts. */
+  leased: number;
+  /** Contacts found stranded as `claimed` and recorded as unconfirmed. */
+  stranded: number;
   skipped: string[];
 };
 
@@ -132,19 +184,7 @@ type RecipientRow = {
 
 /** A campaign row → the ruleset the pure planner reads. */
 export function rulesFor(campaign: CampaignRow): CampaignRules {
-  return {
-    timezone: campaign.timezone || "Australia/Sydney",
-    sendDays: campaign.send_days?.length ? campaign.send_days : [1, 2, 3, 4, 5, 6, 7],
-    windowStart: campaign.window_start,
-    windowEnd: campaign.window_end,
-    maxMessagesPerDay: campaign.max_messages_per_day,
-    maxRecipientsPerDay: campaign.max_recipients_per_day,
-    recipientsPerMessage: campaign.recipients_per_message,
-    minGapSeconds: campaign.min_gap_seconds,
-    maxMessagesPerRun: campaign.max_messages_per_run,
-    startsAt: campaign.starts_at,
-    endsAt: campaign.ends_at,
-  };
+  return campaignRulesFromRow(campaign);
 }
 
 async function countRecipients(
@@ -201,7 +241,10 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 /**
  * One pass over every running campaign.
  *
- * Called by `/hooks/email-campaign-dispatch` on a one-minute schedule.
+ * Called by `/hooks/email-campaign-dispatch` on a one-minute schedule — which
+ * on this deployment arrives as bursts of one to four calls every minute and
+ * a half or so (see the migration that added the lease). Each campaign is
+ * worked by whichever call takes its lease; the others leave it alone.
  */
 export async function dispatchDueCampaigns(
   options: { budgetMs?: number; now?: Date } = {},
@@ -216,6 +259,8 @@ export async function dispatchDueCampaigns(
     unconfirmed: 0,
     completed: 0,
     paused: 0,
+    leased: 0,
+    stranded: 0,
     skipped: [],
   };
 
@@ -243,32 +288,46 @@ export async function dispatchDueCampaigns(
     .limit(25);
   if (campaignError) throw campaignError;
 
-  for (const campaign of (campaigns ?? []) as unknown as CampaignRow[]) {
-    if (Date.now() - startedAt > budgetMs) {
-      summary.skipped.push(`${campaign.name}: out of time this tick`);
-      break;
+  // The injected clock (tests), advanced by real elapsed time, so a pass that
+  // waits out a gap judges the window at the moment it sends, not when it began.
+  const base = options.now ?? new Date();
+  const clock = () => new Date(base.getTime() + (Date.now() - startedAt));
+  const deadline = startedAt + budgetMs;
+
+  const queue = [...((campaigns ?? []) as unknown as CampaignRow[])];
+  const worker = async () => {
+    for (let campaign = queue.shift(); campaign; campaign = queue.shift()) {
+      if (Date.now() > deadline) {
+        summary.skipped.push(`${campaign.name}: out of time this tick`);
+        continue;
+      }
+      try {
+        const outcome = await runCampaignTick(campaign, { clock, deadline });
+        if (outcome.leased) {
+          summary.leased += 1;
+          continue;
+        }
+        summary.campaigns += 1;
+        summary.messages += outcome.messages;
+        summary.recipients += outcome.recipients;
+        summary.failed += outcome.failed;
+        summary.unconfirmed += outcome.unconfirmed;
+        summary.stranded += outcome.stranded;
+        if (outcome.completed) summary.completed += 1;
+        if (outcome.paused) summary.paused += 1;
+        if (outcome.note) summary.skipped.push(`${campaign.name}: ${outcome.note}`);
+      } catch (error) {
+        // One campaign's fault must not stop the others: they share nothing but
+        // this loop.
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`[email] campaign ${campaign.id} failed this tick:`, message);
+        summary.skipped.push(`${campaign.name}: ${message}`);
+      }
     }
-    try {
-      const outcome = await runCampaignTick(campaign, {
-        now: options.now ?? new Date(),
-        deadline: startedAt + budgetMs,
-      });
-      summary.campaigns += 1;
-      summary.messages += outcome.messages;
-      summary.recipients += outcome.recipients;
-      summary.failed += outcome.failed;
-      summary.unconfirmed += outcome.unconfirmed;
-      if (outcome.completed) summary.completed += 1;
-      if (outcome.paused) summary.paused += 1;
-      if (outcome.note) summary.skipped.push(`${campaign.name}: ${outcome.note}`);
-    } catch (error) {
-      // One campaign's fault must not stop the others: they share nothing but
-      // this loop.
-      const message = error instanceof Error ? error.message : String(error);
-      console.error(`[email] campaign ${campaign.id} failed this tick:`, message);
-      summary.skipped.push(`${campaign.name}: ${message}`);
-    }
-  }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(CAMPAIGN_CONCURRENCY, queue.length) }, () => worker()),
+  );
 
   return summary;
 }
@@ -280,8 +339,13 @@ type TickOutcome = {
   unconfirmed: number;
   completed: boolean;
   paused: boolean;
+  /** Another pass held the campaign; this one did nothing to it. */
+  leased: boolean;
+  stranded: number;
   note: string | null;
 };
+
+type TickContext = { clock: () => Date; deadline: number };
 
 /**
  * Stop a running campaign and say why. Only a `running` campaign is touched,
@@ -310,10 +374,171 @@ async function pauseCampaign(campaignId: string, reason: string): Promise<boolea
   return true;
 }
 
-async function runCampaignTick(
+/**
+ * Take the campaign for this pass, or learn that another pass has it.
+ *
+ * One conditional UPDATE: it succeeds only when no lease is held or the one
+ * held has run out, and only for a campaign still running. pg_net routinely
+ * delivers two to four ticks at once, and before this every one of them read
+ * the same `last_message_at` — so none of them waited out the gap for the
+ * others, and each counted the same "sent today". The row the update returns
+ * also carries the freshest `last_message_at`, written by whichever pass came
+ * before.
+ */
+async function acquireLease(
+  campaignId: string,
+): Promise<{ token: string; lastMessageAt: string | null } | null> {
+  const token = crypto.randomUUID();
+  const now = new Date();
+  const { data, error } = await supabaseAdmin
+    .from("email_campaigns")
+    .update({
+      dispatch_lease_until: new Date(now.getTime() + LEASE_MS).toISOString(),
+      dispatch_lease_token: token,
+    })
+    .eq("id", campaignId)
+    .eq("status", "running")
+    .or(`dispatch_lease_until.is.null,dispatch_lease_until.lt."${now.toISOString()}"`)
+    .select("id, last_message_at");
+  if (error) throw error;
+  const row = (data ?? [])[0] as { last_message_at: string | null } | undefined;
+  return row ? { token, lastMessageAt: row.last_message_at ?? null } : null;
+}
+
+/**
+ * Hand the campaign back, and write down what this pass decided: the
+ * heartbeat the page reads to say why a running campaign is or is not
+ * sending, and when it next will.
+ */
+async function releaseLease(
+  campaignId: string,
+  token: string,
+  heartbeat: { note: string | null; nextSendAt: Date | null },
+): Promise<void> {
+  const { error } = await supabaseAdmin
+    .from("email_campaigns")
+    .update({
+      dispatch_lease_until: null,
+      dispatch_lease_token: null,
+      last_tick_at: new Date().toISOString(),
+      last_tick_note: heartbeat.note ? heartbeat.note.slice(0, 500) : null,
+      next_send_at: heartbeat.nextSendAt ? heartbeat.nextSendAt.toISOString() : null,
+    })
+    .eq("id", campaignId)
+    .eq("dispatch_lease_token", token);
+  if (error) console.error(`[email] could not release campaign ${campaignId}:`, error.message);
+}
+
+/**
+ * Contacts stranded as `claimed` by a pass that never finished, recorded as
+ * `unconfirmed`. Safe because the lease is held: no pass that could still be
+ * sending to them is alive. Never back to `pending` — the message may have left.
+ */
+async function expireStrandedClaims(campaignId: string, now: Date): Promise<number> {
+  const cutoff = new Date(now.getTime() - STALE_CLAIM_MS).toISOString();
+  const { data, error } = await supabaseAdmin
+    .from("email_campaign_recipients")
+    .update({
+      status: "unconfirmed",
+      last_error:
+        "the dispatcher stopped part-way through sending to this contact, so whether the message left is unknown",
+    })
+    .eq("campaign_id", campaignId)
+    .eq("status", "claimed")
+    .lt("claimed_at", cutoff)
+    .select("id");
+  if (error) {
+    console.error(`[email] could not expire stranded claims for ${campaignId}:`, error.message);
+    return 0;
+  }
+  const { error: messageError } = await supabaseAdmin
+    .from("email_campaign_messages")
+    .update({
+      status: "unconfirmed",
+      error: "the dispatcher stopped before it recorded what Microsoft answered",
+    })
+    .eq("campaign_id", campaignId)
+    .eq("status", "sending")
+    .lt("queued_at", cutoff);
+  if (messageError) {
+    console.error(
+      `[email] could not expire stranded messages for ${campaignId}:`,
+      messageError.message,
+    );
+  }
+  return (data ?? []).length;
+}
+
+/**
+ * Why this pass must stop before its next message, or null. Asked after any
+ * wait: a pass can run for a minute and a half, and in that time an operator
+ * may pause the campaign or its window may close. `final` when the campaign
+ * itself stopped — then there is no next message to promise.
+ */
+async function reasonToStop(
+  campaignId: string,
+  rules: CampaignRules,
+  now: Date,
+): Promise<{ reason: string; final: boolean } | null> {
+  const { data, error } = await supabaseAdmin
+    .from("email_campaigns")
+    .select("status")
+    .eq("id", campaignId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data || data.status !== "running") {
+    return { reason: `stopped: the campaign is now ${data?.status ?? "gone"}`, final: true };
+  }
+  const window = windowState(rules, now);
+  return window.open ? null : { reason: window.detail, final: false };
+}
+
+async function runCampaignTick(campaign: CampaignRow, context: TickContext): Promise<TickOutcome> {
+  const lease = await acquireLease(campaign.id);
+  if (!lease) {
+    return {
+      messages: 0,
+      recipients: 0,
+      failed: 0,
+      unconfirmed: 0,
+      completed: false,
+      paused: false,
+      leased: true,
+      stranded: 0,
+      note: null,
+    };
+  }
+
+  let outcome: TickOutcome | null = null;
+  let nextSendAt: Date | null = null;
+  try {
+    const worked = await workCampaign(
+      { ...campaign, last_message_at: lease.lastMessageAt },
+      context,
+    );
+    outcome = worked.outcome;
+    nextSendAt = worked.nextSendAt;
+    return outcome;
+  } finally {
+    const note = outcome
+      ? [
+          outcome.messages > 0
+            ? `sent ${outcome.messages} message${outcome.messages === 1 ? "" : "s"}`
+            : null,
+          outcome.note,
+        ]
+          .filter(Boolean)
+          .join("; ") || "nothing to do"
+      : "the pass failed — see the dispatcher's log";
+    await releaseLease(campaign.id, lease.token, { note, nextSendAt });
+  }
+}
+
+/** Everything one pass does with a campaign it holds the lease on. */
+async function workCampaign(
   campaign: CampaignRow,
-  context: { now: Date; deadline: number },
-): Promise<TickOutcome> {
+  context: TickContext,
+): Promise<{ outcome: TickOutcome; nextSendAt: Date | null }> {
   const outcome: TickOutcome = {
     messages: 0,
     recipients: 0,
@@ -321,11 +546,16 @@ async function runCampaignTick(
     unconfirmed: 0,
     completed: false,
     paused: false,
+    leased: false,
+    stranded: 0,
     note: null,
   };
 
   const rules = rulesFor(campaign);
-  const dayStart = startOfZonedDay(context.now, rules.timezone);
+  const startedNow = context.clock();
+  const dayStart = startOfZonedDay(startedNow, rules.timezone);
+
+  outcome.stranded = await expireStrandedClaims(campaign.id, new Date());
 
   const pendingCount = await countRecipients(campaign.id, (q) => q.eq("status", "pending"));
   if (pendingCount === 0) {
@@ -341,7 +571,7 @@ async function runCampaignTick(
       else outcome.completed = true;
     }
     outcome.note = "nothing left to send";
-    return outcome;
+    return { outcome, nextSendAt: null };
   }
 
   const messagesTodayResult = await supabaseAdmin
@@ -351,22 +581,26 @@ async function runCampaignTick(
     .eq("status", "sent")
     .gte("sent_at", dayStart.toISOString());
   if (messagesTodayResult.error) throw messagesTodayResult.error;
+  let messagesToday = messagesTodayResult.count ?? 0;
 
-  const recipientsToday = await countRecipients(campaign.id, (q) =>
+  let recipientsToday = await countRecipients(campaign.id, (q) =>
     q.eq("status", "sent").gte("sent_at", dayStart.toISOString()),
   );
+  let lastMessageAt = campaign.last_message_at;
+  const whenNext = () =>
+    nextSendTime({ rules, now: context.clock(), lastMessageAt, messagesToday, recipientsToday });
 
   const plan = planTick({
     rules,
-    now: context.now,
-    lastMessageAt: campaign.last_message_at,
-    messagesToday: messagesTodayResult.count ?? 0,
+    now: startedNow,
+    lastMessageAt,
+    messagesToday,
     recipientsToday,
     pendingCount,
   });
   if (!plan.canSend) {
     outcome.note = plan.blockedBy;
-    return outcome;
+    return { outcome, nextSendAt: whenNext() };
   }
 
   const { data: quotaRows, error: quotaError } = await supabaseAdmin
@@ -393,7 +627,7 @@ async function runCampaignTick(
   const mailbox = campaign.from_mailbox?.trim() || defaultMailbox();
   if (!mailbox) {
     outcome.note = "no sending mailbox is configured";
-    return outcome;
+    return { outcome, nextSendAt: null };
   }
 
   // Before anything is claimed — see the header.
@@ -403,13 +637,14 @@ async function runCampaignTick(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     outcome.note = `its attachments could not be prepared, so nothing was claimed: ${message}`;
-    return outcome;
+    return { outcome, nextSendAt: null };
   }
 
   const origin = resolveMissionControlOrigin({ PUBLIC_APP_URL: process.env.PUBLIC_APP_URL });
   let recipientsLeft = plan.recipientAllowance;
   let delayMs = plan.initialDelayMs;
   let refusalsInARow = 0;
+  let stopped = false;
   // Contacts a quota has stepped over this tick, so the next page does not
   // hand back the same ones for ever.
   const stepOver = new Set<string>();
@@ -417,11 +652,23 @@ async function runCampaignTick(
   for (let message = 0; message < plan.messageAllowance; message++) {
     if (recipientsLeft <= 0) break;
     if (Date.now() + delayMs > context.deadline) {
-      outcome.note = outcome.note ?? "ran out of time before the next message";
+      // Not a fault: the next pass picks up where this one stopped, and the
+      // heartbeat says when that will be.
+      outcome.note = outcome.note ?? "waiting out the gap until the next pass";
       break;
     }
     if (delayMs > 0) await sleep(delayMs);
     delayMs = rules.minGapSeconds * 1000;
+
+    // The world may have moved while this pass waited or sent.
+    if (message > 0 || plan.initialDelayMs > 0) {
+      const stop = await reasonToStop(campaign.id, rules, context.clock());
+      if (stop) {
+        outcome.note = stop.reason;
+        stopped = stop.final;
+        break;
+      }
+    }
 
     const wanted = Math.min(perMessage, recipientsLeft);
     const chosen = await chooseRecipients(campaign.id, wanted, quotas, usage, taken, stepOver);
@@ -441,12 +688,16 @@ async function runCampaignTick(
       recipients: chosen,
       attachments,
     });
+    // `last_message_at` is stamped for every attempt; so is this pass's copy.
+    lastMessageAt = new Date().toISOString();
 
     outcome.messages += 1;
     if (sent.kind === "sent") {
       refusalsInARow = 0;
       outcome.recipients += chosen.length;
       recipientsLeft -= chosen.length;
+      messagesToday += 1;
+      recipientsToday += chosen.length;
       for (const recipient of chosen) claimQuota(quotas, taken, recipient.attributes_norm ?? {});
     } else if (sent.kind === "failed") {
       outcome.failed += chosen.length;
@@ -455,6 +706,7 @@ async function runCampaignTick(
         const reason = `${REFUSALS_BEFORE_PAUSE} messages in a row were refused by Microsoft — the last said: ${sent.detail}. Paused so the rest of the list is not refused the same way; the refused contacts can be retried from the Audience tab.`;
         outcome.paused = await pauseCampaign(campaign.id, reason);
         outcome.note = reason;
+        stopped = true;
         break;
       }
     } else if (sent.kind === "unconfirmed") {
@@ -466,6 +718,7 @@ async function runCampaignTick(
       outcome.messages -= 1;
       outcome.paused = sent.paused;
       outcome.note = sent.detail;
+      stopped = true;
       break;
     } else if (sent.kind === "deferred") {
       // Nothing was sent and the claim was released; whatever went wrong
@@ -482,7 +735,8 @@ async function runCampaignTick(
     }
   }
 
-  return outcome;
+  // A campaign that stopped (paused, here or by an operator) has no next message.
+  return { outcome, nextSendAt: stopped ? null : whenNext() };
 }
 
 /**

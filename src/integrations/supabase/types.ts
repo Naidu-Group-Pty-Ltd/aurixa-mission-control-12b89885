@@ -7644,16 +7644,21 @@ export type Database = {
           created_at: string
           created_by: string | null
           description: string | null
+          dispatch_lease_token: string | null
+          dispatch_lease_until: string | null
           ends_at: string | null
           from_mailbox: string | null
           from_name: string | null
           id: string
           last_message_at: string | null
+          last_tick_at: string | null
+          last_tick_note: string | null
           max_messages_per_day: number | null
           max_messages_per_run: number
           max_recipients_per_day: number | null
           min_gap_seconds: number
           name: string
+          next_send_at: string | null
           paused_reason: string | null
           recipients_per_message: number
           reply_to: string | null
@@ -7674,16 +7679,21 @@ export type Database = {
           created_at?: string
           created_by?: string | null
           description?: string | null
+          dispatch_lease_token?: string | null
+          dispatch_lease_until?: string | null
           ends_at?: string | null
           from_mailbox?: string | null
           from_name?: string | null
           id?: string
           last_message_at?: string | null
+          last_tick_at?: string | null
+          last_tick_note?: string | null
           max_messages_per_day?: number | null
           max_messages_per_run?: number
           max_recipients_per_day?: number | null
           min_gap_seconds?: number
           name: string
+          next_send_at?: string | null
           paused_reason?: string | null
           recipients_per_message?: number
           reply_to?: string | null
@@ -7704,16 +7714,21 @@ export type Database = {
           created_at?: string
           created_by?: string | null
           description?: string | null
+          dispatch_lease_token?: string | null
+          dispatch_lease_until?: string | null
           ends_at?: string | null
           from_mailbox?: string | null
           from_name?: string | null
           id?: string
           last_message_at?: string | null
+          last_tick_at?: string | null
+          last_tick_note?: string | null
           max_messages_per_day?: number | null
           max_messages_per_run?: number
           max_recipients_per_day?: number | null
           min_gap_seconds?: number
           name?: string
+          next_send_at?: string | null
           paused_reason?: string | null
           recipients_per_message?: number
           reply_to?: string | null

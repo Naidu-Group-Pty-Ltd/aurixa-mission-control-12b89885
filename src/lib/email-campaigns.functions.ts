@@ -46,6 +46,12 @@ import {
   type DeliveryPath,
 } from "@/lib/email/attachments.pure";
 import { mayChoose, sameMailbox, type MailboxAccess } from "@/lib/email/mailboxes.pure";
+import {
+  campaignRulesFromRow,
+  describeSchedule,
+  formatInZone,
+  nextWindowOpening,
+} from "@/lib/email/campaignRules.pure";
 
 const uuid = z.string().uuid();
 
@@ -366,11 +372,13 @@ export const setCampaignStatus = createServerFn({ method: "POST" })
       .parse(input),
   )
   .handler(async ({ data, context }) => {
+    let firstSendAt: string | null = null;
     if (data.status === "running") {
       const readiness = await assessReadiness(context.supabase, data.id);
       if (readiness.blocking.length > 0) {
         throw new Error(`This campaign cannot start yet: ${readiness.blocking.join("; ")}`);
       }
+      firstSendAt = readiness.schedule.nextOpening;
     }
 
     const patch: Database["public"]["Tables"]["email_campaigns"]["Update"] = {
@@ -413,7 +421,9 @@ export const setCampaignStatus = createServerFn({ method: "POST" })
       metadata: { reason: data.reason ?? null },
     });
 
-    return { ok: true };
+    // Starting outside the window is allowed and common; the page says when
+    // the first message will go rather than leaving "running" to explain it.
+    return { ok: true, firstSendAt };
   });
 
 // ── Readiness ───────────────────────────────────────────────────────────────
@@ -428,6 +438,8 @@ export type Readiness = {
   /** The mailbox the next message would leave from, and whether it can. */
   mailbox: { address: string | null; isDefault: boolean; access: MailboxAccess | null };
   attachments: { count: number; totalBytes: number; path: DeliveryPath };
+  /** The campaign's calendar, and when it next lets a message go. */
+  schedule: { description: string; openNow: boolean; nextOpening: string | null };
 };
 
 /** The column profile an import carried, whatever shape the jsonb holds. */
@@ -554,6 +566,25 @@ async function assessReadiness(
     warnings.push("no reply-to address is set, so replies go to the sending mailbox");
   }
 
+  // The calendar. A campaign started outside its window is working exactly as
+  // written and sends nothing until the window opens — which, said nowhere,
+  // reads as a broken scheduler. So it is said here, before Start, with the
+  // time the first message will actually go.
+  const rules = campaignRulesFromRow(campaign);
+  const now = new Date();
+  const opening = nextWindowOpening(rules, now);
+  const openNow = opening != null && opening.getTime() <= now.getTime();
+  const description = describeSchedule(rules);
+  if (!opening) {
+    blocking.push(
+      `its calendar never opens again (${description}${campaign.ends_at ? `, ending ${formatInZone(new Date(campaign.ends_at as string), rules.timezone)}` : ""}) — change the sending days or the end date on the Rules tab`,
+    );
+  } else if (!openNow && campaign.status !== "running") {
+    warnings.push(
+      `the sending window is closed right now (${description}) — once started, the first message goes out ${formatInZone(opening, rules.timezone)}`,
+    );
+  }
+
   const { data: attachmentRows, error: attachmentError } = await supabase
     .from("email_campaign_attachments")
     .select("file_name, size_bytes, content_id, content_type")
@@ -591,6 +622,11 @@ async function assessReadiness(
       count: (attachmentRows ?? []).length,
       totalBytes: attached.totalBytes,
       path: attached.path,
+    },
+    schedule: {
+      description,
+      openNow,
+      nextOpening: opening ? opening.toISOString() : null,
     },
   };
 }

@@ -998,4 +998,16 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "table", table: "email_campaign_sending_mailboxes" },
     ],
   },
+  {
+    migration: "20261012110000_email_dispatch_lease_and_heartbeat.sql",
+    version: "20261012110000",
+    assertions: [
+      { kind: "column", table: "email_campaigns", column: "dispatch_lease_until" },
+      { kind: "column", table: "email_campaigns", column: "dispatch_lease_token" },
+      { kind: "column", table: "email_campaigns", column: "last_tick_at" },
+      { kind: "column", table: "email_campaigns", column: "last_tick_note" },
+      { kind: "column", table: "email_campaigns", column: "next_send_at" },
+      { kind: "cron", jobname: "email-campaign-dispatch-1min" },
+    ],
+  },
 ];

@@ -175,15 +175,193 @@ export function windowState(rules: CampaignRules, now: Date): WindowState {
   const at = parts.minutesOfDay;
   // A window whose end is before its start wraps past midnight, which is a
   // legitimate thing to ask for and reads as an empty window if not handled.
-  const open = start <= end ? at >= start && at < end : at >= start || at < end;
+  // One whose start EQUALS its end — 00:00–00:00 — is the whole day: read as
+  // half-open it would be a window that never opens, and a running campaign
+  // that sends nothing for ever, which nobody setting that value meant.
+  const open =
+    start === end ? true : start < end ? at >= start && at < end : at >= start || at < end;
   if (!open) {
     return {
       open: false,
       reason: "outside_hours",
-      detail: `outside the ${rules.windowStart}–${rules.windowEnd} window`,
+      detail: `outside the ${String(rules.windowStart).slice(0, 5)}–${String(rules.windowEnd).slice(0, 5)} window (${rules.timezone})`,
     };
   }
   return { open: true };
+}
+
+/** The columns of an `email_campaigns` row the rules are read from. */
+export type CampaignRuleColumns = {
+  timezone: string | null;
+  send_days: number[] | null;
+  window_start: string;
+  window_end: string;
+  max_messages_per_day: number | null;
+  max_recipients_per_day: number | null;
+  recipients_per_message: number;
+  min_gap_seconds: number;
+  max_messages_per_run: number;
+  starts_at: string | null;
+  ends_at: string | null;
+};
+
+/**
+ * A campaign row → its ruleset. One reading, used by the dispatcher and by the
+ * page, so "when will this send" has the same answer in both places.
+ */
+export function campaignRulesFromRow(row: CampaignRuleColumns): CampaignRules {
+  return {
+    timezone: row.timezone || "Australia/Sydney",
+    sendDays: row.send_days?.length ? row.send_days : [1, 2, 3, 4, 5, 6, 7],
+    windowStart: row.window_start,
+    windowEnd: row.window_end,
+    maxMessagesPerDay: row.max_messages_per_day,
+    maxRecipientsPerDay: row.max_recipients_per_day,
+    recipientsPerMessage: row.recipients_per_message,
+    minGapSeconds: row.min_gap_seconds,
+    maxMessagesPerRun: row.max_messages_per_run,
+    startsAt: row.starts_at,
+    endsAt: row.ends_at,
+  };
+}
+
+/** A calendar date in a zone, `days` after the one an instant falls on. */
+function zonedDatePlus(
+  from: ZonedParts,
+  days: number,
+): { year: number; month: number; day: number } {
+  const date = new Date(Date.UTC(from.year, from.month - 1, from.day + days));
+  return { year: date.getUTCFullYear(), month: date.getUTCMonth() + 1, day: date.getUTCDate() };
+}
+
+/**
+ * The first instant at or after `from` that the campaign's calendar allows a
+ * send, or null when it never will (its end date has passed, or no day is
+ * selected).
+ *
+ * Every candidate is a wall-clock boundary in the CAMPAIGN'S zone — the start
+ * of each day's window, and midnight for a window that wraps past it —
+ * converted to an instant for that specific date, and then confirmed with
+ * `windowState` itself. Confirming rather than assuming is what keeps this
+ * honest across daylight saving: on the night a zone's clocks jump, a
+ * wall-clock time can name no instant at all, or two.
+ */
+export function nextWindowOpening(rules: CampaignRules, from: Date, horizonDays = 9): Date | null {
+  const startsAt = rules.startsAt ? Date.parse(rules.startsAt) : null;
+  const endsAt = rules.endsAt ? Date.parse(rules.endsAt) : null;
+  let at = from;
+  if (startsAt != null && Number.isFinite(startsAt) && at.getTime() < startsAt) {
+    at = new Date(startsAt);
+  }
+  if (endsAt != null && Number.isFinite(endsAt) && at.getTime() > endsAt) return null;
+  if (windowState(rules, at).open) return at;
+
+  const start = minutesOfClock(rules.windowStart);
+  const end = minutesOfClock(rules.windowEnd);
+  const wraps = end < start;
+  const base = zonedParts(at, rules.timezone);
+  const candidates: Date[] = [];
+  for (let offset = 0; offset <= horizonDays; offset++) {
+    const date = zonedDatePlus(base, offset);
+    const clocks = [start, ...(wraps || start === end ? [0] : [])];
+    for (const minutes of clocks) {
+      candidates.push(
+        zonedTimeToInstant(
+          rules.timezone,
+          date.year,
+          date.month,
+          date.day,
+          Math.floor(minutes / 60),
+          minutes % 60,
+        ),
+      );
+    }
+  }
+  candidates.sort((a, b) => a.getTime() - b.getTime());
+  for (const candidate of candidates) {
+    if (candidate.getTime() <= at.getTime()) continue;
+    if (endsAt != null && candidate.getTime() > endsAt) return null;
+    if (windowState(rules, candidate).open) return candidate;
+  }
+  return null;
+}
+
+/**
+ * When the next message may go, all rules considered: the calendar, the gap
+ * since the last message, and today's caps. `now` when it may go now.
+ *
+ * This is what the page shows as "next message", and what the dispatcher
+ * records after every pass — so "running, and nothing is happening" always
+ * comes with the reason and the time it ends.
+ */
+export function nextSendTime(input: {
+  rules: CampaignRules;
+  now: Date;
+  lastMessageAt: string | null;
+  messagesToday: number;
+  recipientsToday: number;
+}): Date | null {
+  const { rules, now } = input;
+  let earliest = now.getTime();
+  if (rules.minGapSeconds > 0 && input.lastMessageAt) {
+    const due = Date.parse(input.lastMessageAt) + rules.minGapSeconds * 1000;
+    if (Number.isFinite(due) && due > earliest) earliest = due;
+  }
+  const capSpent =
+    (rules.maxMessagesPerDay != null && input.messagesToday >= rules.maxMessagesPerDay) ||
+    (rules.maxRecipientsPerDay != null && input.recipientsToday >= rules.maxRecipientsPerDay);
+  if (capSpent) {
+    const today = zonedParts(now, rules.timezone);
+    const tomorrow = zonedDatePlus(today, 1);
+    const midnight = zonedTimeToInstant(
+      rules.timezone,
+      tomorrow.year,
+      tomorrow.month,
+      tomorrow.day,
+    );
+    if (midnight.getTime() > earliest) earliest = midnight.getTime();
+  }
+  return nextWindowOpening(rules, new Date(earliest));
+}
+
+const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+/** `[1,2,3,4,5]` → "Mon–Fri"; `[1,3,5]` → "Mon, Wed, Fri"; all seven → "every day". */
+export function describeSendDays(days: number[] | null | undefined): string {
+  const set = [
+    ...new Set((days?.length ? days : [1, 2, 3, 4, 5, 6, 7]).filter((d) => d >= 1 && d <= 7)),
+  ].sort((a, b) => a - b);
+  if (set.length === 7) return "every day";
+  if (set.length === 0) return "no days";
+  const contiguous = set.every((day, index) => index === 0 || day === set[index - 1] + 1);
+  if (contiguous && set.length >= 3)
+    return `${DAY_NAMES[set[0] - 1]}–${DAY_NAMES[set[set.length - 1] - 1]}`;
+  return set.map((day) => DAY_NAMES[day - 1]).join(", ");
+}
+
+/** "Mon–Fri, 09:00–17:00 Australia/Sydney" — the calendar in one line. */
+export function describeSchedule(rules: CampaignRules): string {
+  const start = String(rules.windowStart ?? "").slice(0, 5);
+  const end = String(rules.windowEnd ?? "").slice(0, 5);
+  const hours = minutesOfClock(start) === minutesOfClock(end) ? "all day" : `${start}–${end}`;
+  return `${describeSendDays(rules.sendDays)}, ${hours} ${rules.timezone}`;
+}
+
+/** An instant as the campaign's own clock reads it: "Tue 13 Oct, 09:00". */
+export function formatInZone(date: Date, timeZone: string): string {
+  try {
+    return new Intl.DateTimeFormat("en-AU", {
+      timeZone,
+      weekday: "short",
+      day: "numeric",
+      month: "short",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    }).format(date);
+  } catch {
+    return date.toISOString();
+  }
 }
 
 export type TickPlan = {

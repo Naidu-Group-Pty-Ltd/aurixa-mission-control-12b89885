@@ -40,6 +40,12 @@ import {
 import { useConfirm } from "@/components/confirm-dialog";
 import { ListDropzone } from "@/components/email/list-dropzone";
 import {
+  campaignRulesFromRow,
+  formatInZone,
+  nextWindowOpening,
+  type CampaignRuleColumns,
+} from "@/lib/email/campaignRules.pure";
+import {
   createCampaign,
   deleteList,
   listCampaigns,
@@ -204,6 +210,9 @@ function EmailCampaignsPage() {
                     {campaign.last_message_at
                       ? ` · last sent ${formatDistanceToNow(new Date(campaign.last_message_at as string), { addSuffix: true })}`
                       : ""}
+                    {campaign.status === "running"
+                      ? waitingNote(campaign as unknown as CampaignRuleColumns)
+                      : ""}
                   </p>
                 </div>
                 {counts.unconfirmed ? (
@@ -289,6 +298,20 @@ type Capabilities = {
   readWrite: boolean | null;
   directory: boolean | null;
 } | null;
+
+/**
+ * " · waiting for its window — next Tue 13 Oct, 09:00" for a running campaign
+ * whose calendar is closed now, so the list does not show a campaign that is
+ * correctly waiting as one that is silently doing nothing.
+ */
+function waitingNote(row: CampaignRuleColumns): string {
+  const rules = campaignRulesFromRow(row);
+  const now = new Date();
+  const opening = nextWindowOpening(rules, now);
+  if (!opening) return " · its calendar never opens again";
+  if (opening.getTime() <= now.getTime()) return "";
+  return ` · waiting for its window — next ${formatInZone(opening, rules.timezone)}`;
+}
 
 function MailboxStrip({
   status,
