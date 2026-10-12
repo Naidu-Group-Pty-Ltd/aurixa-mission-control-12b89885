@@ -421,6 +421,12 @@ secret does:
   A default mailbox, if given, is probed the same way.
 - **Blank keeps the stored value.** Editing a tenant with the secret left empty
   changes nothing about the secret, exactly as leaving a deployment secret alone.
+- **An edit lands whole or not at all.** New credentials and the tenant's
+  details are two writes (the Vault, then the row). A name another tenant
+  already has is refused before either. If the row still cannot be saved once
+  new credentials are in, the previous credentials are put back, so a refused
+  edit leaves the tenant as it was. If even that fails, the error says so and
+  asks for the tenant to be saved again.
 - **One row per app registration.** A SHA-256 of `tenant:client` is unique among
   live tenants, and the deployment's own registration cannot be added twice.
 - **Removal destroys the Vault secret** and keeps the row (`removed_at`) so the

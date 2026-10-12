@@ -236,6 +236,25 @@ async function assertNotRegistered(
   }
 }
 
+/**
+ * Refuse a name another live tenant already has — asked before anything is
+ * stored, so a clash cannot leave new credentials in the Vault behind a
+ * rename that failed. The unique index stays the authority; this is so a
+ * person's typo never gets as far as it.
+ */
+async function assertNameFree(label: string, exceptId: string): Promise<void> {
+  const { data, error } = await supabaseAdmin
+    .from("microsoft_tenants")
+    .select("id, label")
+    .is("removed_at", null)
+    .neq("id", exceptId);
+  if (error) throw error;
+  const wanted = label.trim().toLowerCase();
+  if ((data ?? []).some((other) => other.label.trim().toLowerCase() === wanted)) {
+    throw new Error(tenantErrorMessage("microsoft_tenants_label_live"));
+  }
+}
+
 // ── Listing ──────────────────────────────────────────────────────────────────
 
 export type TenantSummary = {
@@ -416,6 +435,11 @@ export type TenantChange = Partial<Omit<TenantInput, "defaultMailbox" | "secretE
  * Change a tenant. Credentials are replaced only when new values are given —
  * a secret left blank keeps the stored one, exactly as a deployment secret
  * does — and replaced credentials are tried before they are stored.
+ *
+ * The Vault and the row are two writes. A new name is checked before either,
+ * and if the row still cannot be saved once new credentials are in, the
+ * previous ones are put back: a refused change leaves the tenant as it was,
+ * not sending with a secret its hints do not describe.
  */
 export async function updateTenant(
   tenantId: string,
@@ -448,6 +472,9 @@ export async function updateTenant(
     updated_at: new Date().toISOString(),
   };
   if (change.label !== undefined) patch.label = change.label.trim();
+  if (patch.label !== undefined && patch.label.toLowerCase() !== row.label.trim().toLowerCase()) {
+    await assertNameFree(patch.label, tenantId);
+  }
   if (change.secretExpiresOn !== undefined)
     patch.secret_expires_on = change.secretExpiresOn || null;
   const mailbox =
@@ -460,8 +487,20 @@ export async function updateTenant(
 
   let verification: Verification | null = null;
   let credentials: TenantCredentials | null = null;
+  // What the Vault held before, to put back if the row cannot follow.
+  let previous: TenantCredentials | null = null;
   if (newCredentialValues) {
+    // Read from the Vault, not this isolate's minute-old copy: these are the
+    // values blank fields keep and a failed save puts back.
+    forgetTenantConfig(tenantId);
     const current = await graphConfigFor(tenantId);
+    previous = current
+      ? {
+          tenantId: current.tenantId,
+          clientId: current.clientId,
+          clientSecret: current.clientSecret,
+        }
+      : null;
     const merged = {
       directoryTenantId: change.directoryTenantId?.trim() || current?.tenantId || "",
       clientId: change.clientId?.trim() || current?.clientId || "",
@@ -517,7 +556,30 @@ export async function updateTenant(
     .from("microsoft_tenants")
     .update(patch)
     .eq("id", tenantId);
-  if (updateError) throw new Error(tenantErrorMessage(updateError.message));
+  if (updateError) {
+    const reason = tenantErrorMessage(updateError.message);
+    // The row could not follow the Vault. Put the old credentials back, so
+    // "nothing was saved" stays true and the hints describe what is in use.
+    if (credentials) {
+      const restored = previous
+        ? await supabaseAdmin.rpc("microsoft_tenant_credentials_put", {
+            p_tenant: tenantId,
+            p_credentials: JSON.stringify(previous),
+          })
+        : { error: { message: "there were no previous credentials to restore" } };
+      forgetTenantConfig(tenantId);
+      if (restored.error) {
+        console.error(
+          "[tenants] could not restore credentials after a failed update:",
+          restored.error.message,
+        );
+        throw new Error(
+          `the new credentials were stored but the tenant's details could not be (${reason}), and the previous credentials could not be put back — save the tenant again`,
+        );
+      }
+    }
+    throw new Error(reason);
+  }
   forgetTenantConfig(tenantId);
 
   // The names of what changed, never a value: the secret is in this object.
