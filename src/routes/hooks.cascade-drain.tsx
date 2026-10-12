@@ -757,7 +757,10 @@ async function redeliverHead(input: {
       const rows = audits ?? [];
       const newest = rows[0];
       const meta =
-        newest && newest.metadata && typeof newest.metadata === "object" && !Array.isArray(newest.metadata)
+        newest &&
+        newest.metadata &&
+        typeof newest.metadata === "object" &&
+        !Array.isArray(newest.metadata)
           ? (newest.metadata as Record<string, unknown>)
           : null;
       prior = {
@@ -793,7 +796,10 @@ async function redeliverHead(input: {
     if (!verdict.redeliver) {
       // Silent on the ordinary answers — a delivered head, or one in flight —
       // and loud on the ones an operator would want to see in the logs.
-      if (verdict.why !== "the head's event delivered" && !verdict.why.startsWith("a delivery is already")) {
+      if (
+        verdict.why !== "the head's event delivered" &&
+        !verdict.why.startsWith("a delivery is already")
+      ) {
         console.log(
           `[cascade-drain] prime@${input.headSha.slice(0, 7)} not redelivered: ${verdict.why}`,
         );
@@ -857,7 +863,7 @@ async function redeliverHead(input: {
       // An event with no rows would complete "(of 0)" and read as delivered.
       // Close it as failed so the next redelivery (after the cooldown) asks
       // again rather than believing it.
-      await admin
+      const { error: closeErr } = await admin
         .from("cascade_events")
         .update({
           status: "failed",
@@ -867,6 +873,14 @@ async function redeliverHead(input: {
         .eq("id", newId)
         .eq("status", "pending")
         .is("worker_started_at", null);
+      if (closeErr) {
+        // Left pending with no rows, the claim below completes it "(of 0)".
+        // Say so, so the stranded head is visible in the logs.
+        console.error(
+          "[cascade-drain] head redelivery could not close its empty event:",
+          closeErr.message,
+        );
+      }
       console.error("[cascade-drain] head redelivery rows insert failed:", rowsErr.message);
       return null;
     }
