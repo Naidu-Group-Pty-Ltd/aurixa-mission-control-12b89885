@@ -9,6 +9,7 @@ import {
   AlertTriangle,
   ArrowLeft,
   CheckCircle2,
+  Clock,
   Info,
   Paperclip,
   Pause,
@@ -52,6 +53,14 @@ import { useConfirm } from "@/components/confirm-dialog";
 import { cn } from "@/lib/utils";
 import { auStateSiblings, type ColumnProfile } from "@/lib/email/listProfile.pure";
 import { humanBytes } from "@/lib/email/attachments.pure";
+import {
+  campaignRulesFromRow,
+  describeSchedule,
+  formatInZone,
+  nextSendTime,
+  windowState,
+  type CampaignRuleColumns,
+} from "@/lib/email/campaignRules.pure";
 import { MailboxPicker } from "@/components/email/mailbox-picker";
 import { AttachmentPanel, type AttachmentListRow } from "@/components/email/attachment-panel";
 import {
@@ -143,8 +152,18 @@ function CampaignWorkspace() {
   const status = useMutation({
     mutationFn: (next: "running" | "paused" | "cancelled" | "draft") =>
       setCampaignStatus({ data: { id: campaignId, status: next } }),
-    onSuccess: () => {
-      toast.success("Campaign updated");
+    onSuccess: (result, next) => {
+      const first = result.firstSendAt ? new Date(result.firstSendAt) : null;
+      const timezone = (detail.data?.campaign?.timezone as string) || "Australia/Sydney";
+      if (next === "running" && first && first.getTime() > Date.now() + 60_000) {
+        // Started outside the window: say when it will actually begin, because
+        // "running" with nothing going out reads as broken.
+        toast.success("Campaign started", {
+          description: `The sending window is closed right now. The first message goes out ${formatInZone(first, timezone)} (${timezone}).`,
+        });
+      } else {
+        toast.success(next === "running" ? "Campaign started" : "Campaign updated");
+      }
       void qc.invalidateQueries({ queryKey: ["email"] });
     },
     onError: (error: Error) =>
@@ -208,6 +227,8 @@ function CampaignWorkspace() {
         }
       />
 
+      <DispatchStatus campaign={campaign as unknown as DispatchCampaign} />
+
       <ReadinessPanel
         readiness={readiness.data}
         status={campaign.status as string}
@@ -270,6 +291,133 @@ function CampaignWorkspace() {
           <ActivityPanel messages={detail.data?.messages ?? []} />
         </TabsContent>
       </Tabs>
+    </div>
+  );
+}
+
+type DispatchCampaign = CampaignRuleColumns & {
+  status: string;
+  last_message_at: string | null;
+  last_tick_at: string | null;
+  last_tick_note: string | null;
+  next_send_at: string | null;
+};
+
+/** Older than this, a running campaign's heartbeat means the scheduler has stopped reaching it. */
+const HEARTBEAT_STALE_MS = 8 * 60_000;
+
+/**
+ * What the dispatcher is doing with this campaign, and when the next message
+ * goes. Running with nothing going out is how a campaign outside its window
+ * looks, and also how a stalled scheduler looks; this says which.
+ *
+ * The calendar is read here from the campaign's own rules, so it is right even
+ * before the dispatcher has run; the dispatcher's heartbeat adds what only it
+ * knows — a cap spent today, a throttle, and whether it is reaching the
+ * campaign at all.
+ */
+function DispatchStatus({ campaign }: { campaign: DispatchCampaign }) {
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(new Date()), 30_000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const rules = campaignRulesFromRow(campaign);
+  const schedule = describeSchedule(rules);
+  const pace =
+    rules.minGapSeconds > 0
+      ? `at most one message every ${rules.minGapSeconds} s`
+      : "no pause between messages";
+
+  if (campaign.status !== "running") {
+    if (campaign.status === "completed" || campaign.status === "cancelled") return null;
+    return (
+      <div className="glass-inset spine spine-idle flex items-start gap-3 px-4 py-3">
+        <Clock className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+        <p className="text-sm text-muted-foreground">
+          Sends {schedule}, {pace}.
+        </p>
+      </div>
+    );
+  }
+
+  const open = windowState(rules, now).open;
+  const fromRules = nextSendTime({
+    rules,
+    now,
+    lastMessageAt: campaign.last_message_at,
+    messagesToday: 0,
+    recipientsToday: 0,
+  });
+  // The dispatcher's answer also knows today's caps; prefer it while it is
+  // fresh and later than what the calendar alone would say.
+  const recorded = campaign.next_send_at ? new Date(campaign.next_send_at) : null;
+  const heartbeat = campaign.last_tick_at ? new Date(campaign.last_tick_at) : null;
+  const fresh = heartbeat != null && now.getTime() - heartbeat.getTime() < HEARTBEAT_STALE_MS;
+  const next =
+    fresh && recorded && (!fromRules || recorded.getTime() > fromRules.getTime())
+      ? recorded
+      : fromRules;
+  const nextLabel = next
+    ? next.getTime() - now.getTime() < 90_000
+      ? "now"
+      : `${formatInZone(next, rules.timezone)} (${formatDistanceToNow(next, { addSuffix: true })})`
+    : null;
+
+  const stale = !fresh;
+  return (
+    <div className="space-y-2">
+      <div
+        className={cn(
+          "glass-inset spine flex items-start gap-3 px-4 py-3",
+          open ? "spine-live" : "spine-idle",
+        )}
+      >
+        <Clock className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+        <div className="space-y-1 text-sm text-muted-foreground">
+          <p>
+            {open ? (
+              <>
+                <span className="text-foreground">Sending</span> — {schedule}, {pace}.
+              </>
+            ) : (
+              <>
+                <span className="text-foreground">Waiting for the sending window</span> — {schedule}
+                . Nothing is sent outside it.
+              </>
+            )}{" "}
+            {nextLabel ? (
+              <>
+                Next message: <span className="text-foreground">{nextLabel}</span>.
+              </>
+            ) : (
+              "The calendar never opens again — change the days or the end date on the Rules tab."
+            )}
+          </p>
+          <p className="font-mono text-[11px]">
+            {campaign.last_message_at
+              ? `last message ${formatDistanceToNow(new Date(campaign.last_message_at), { addSuffix: true })}`
+              : "nothing sent yet"}
+            {heartbeat
+              ? ` · dispatcher checked ${formatDistanceToNow(heartbeat, { addSuffix: true })}${campaign.last_tick_note ? `: ${campaign.last_tick_note}` : ""}`
+              : " · the dispatcher has not reached this campaign yet"}
+          </p>
+        </div>
+      </div>
+      {stale && heartbeat ? (
+        <div className="glass-inset spine spine-warn flex items-start gap-3 px-4 py-3">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
+          <p className="text-sm text-muted-foreground">
+            <span className="text-foreground">
+              The dispatcher has not reached this campaign for {formatDistanceToNow(heartbeat)}.
+            </span>{" "}
+            It is called once a minute by the database scheduler (pg_cron through pg_net); a gap
+            this long means that scheduler is backed up or stopped. Nothing is lost or repeated —
+            sending resumes where it stopped once the dispatcher runs again.
+          </p>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -703,7 +851,8 @@ function RulesEditor({
         </div>
         <p className="font-mono text-[11px] text-muted-foreground">
           The window is the campaign's own clock, not the server's — 09:00 here means 09:00 there,
-          across daylight saving.
+          across daylight saving. The same time for From and Until means all day. Nothing is sent
+          outside the window: a campaign started after it closes waits for it to open again.
         </p>
       </div>
 

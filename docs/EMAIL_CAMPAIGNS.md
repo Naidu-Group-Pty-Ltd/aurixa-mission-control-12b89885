@@ -484,7 +484,7 @@ about whether a message was created. Only the reads retry.
 
 | job                            | cadence          | what it does                           |
 | ------------------------------ | ---------------- | -------------------------------------- |
-| `email-campaign-dispatch-1min` | every minute     | claims, sends, records                 |
+| `email-campaign-dispatch-1min` | every minute     | leases, claims, sends, records         |
 | `email-bounce-scan-15min`      | every 15 minutes | reads the mailbox for delivery reports |
 
 Both read `cron_secret` from the vault **inside** the command string, per
@@ -498,9 +498,68 @@ failure after a claim leaves rows marked `claimed` with nothing to release them
 and a queue that looks like it is working; taken first, it costs one tick and
 touches no recipient.
 
-Each tick runs to a wall-clock budget (20s) and honours a sub-minute gap by
-waiting inside itself, so a five-second cadence does not need a five-second
-cron.
+### What actually calls the dispatcher
+
+The job is scheduled every minute, but that is not how the calls arrive. pg_net
+sends this deployment's hook calls in **batches**, and starts the next batch only
+when the slowest request in the current one has answered — and other
+every-minute hooks here allow up to 290 seconds. Measured on 12 Oct 2026 over two
+hours: 61 batches, **41 to 262 seconds apart (median about 100)**, each carrying
+**one to four** dispatcher calls at once. pg_cron also failed to start about one
+run in eleven (`job startup timeout`: eleven every-minute jobs against six
+worker processes). Look at it yourself with:
+
+```sql
+select created, count(*) filter (where position('"unconfirmed"' in content) > 0) as dispatch_calls
+from net._http_response where created > now() - interval '1 hour'
+group by created order by created;
+```
+
+The dispatcher was written for one call a minute, one after another. Against
+bursts it had three faults, all fixed in `20261012110000`:
+
+- **Calls in a burst worked the same campaign at once.** Each read the same
+  `last_message_at`, so none waited out the gap for the others. Now a pass takes
+  a **lease** on the campaign (`dispatch_lease_until` / `dispatch_lease_token`,
+  one conditional UPDATE) and the other calls leave it alone. A pass that dies
+  holding it delays the campaign by at most the lease (150 s).
+- **A pass lasted 20 seconds.** With the default 60-second gap that is one
+  message per burst — roughly half the campaign's own pace. Now a pass keeps
+  starting messages for up to **90 seconds**, waiting out the gap between them,
+  and re-checks the campaign's status and window before each one, because in
+  that time an operator may pause it or its window may close. The hook's HTTP
+  timeout is 115 s: a Worker whose caller disconnects is cancelled, and a
+  cancellation mid-send is the one way to strand a contact.
+- **Nothing said why a running campaign was not sending.** Every pass now writes
+  `last_tick_at`, `last_tick_note` and `next_send_at` (the window opening, the end
+  of the gap, or tomorrow once a daily cap is spent). The campaign page shows it
+  — "Waiting for the sending window — Mon–Fri, 09:00–17:00 Australia/Sydney. Next
+  message: Tue 13 Oct, 09:00" — and warns when the heartbeat is more than eight
+  minutes old, which is the scheduler stalling rather than the campaign waiting.
+  Readiness warns, before Start, when the window is closed right now, and says
+  when the first message will go.
+
+The case that found these: a test campaign started at 16:57 Sydney with the
+default 09:00–17:00 Mon–Fri window sent one message at 16:58:51, then waited —
+correctly — for 09:00 the next morning, while the page said only "running".
+
+### Contacts stranded as `claimed`
+
+A pass that dies mid-send (a cancelled Worker, a crash) leaves its contacts
+`claimed`, and before this nothing ever moved them: the campaign could not
+complete, and nobody was told. Each pass now records any contact claimed more
+than ten minutes ago as **`unconfirmed`** — never `pending`, because the message
+may have left — and its message row likewise. Ten minutes is well past the
+lease, so no live pass can still be sending to them. Releasing them stays a
+person's decision, on the Audience tab.
+
+### The calendar, precisely
+
+The window is half-open (09:00–17:00 sends at 16:59, not at 17:00), in the
+campaign's own zone across daylight saving, and may wrap past midnight. **An
+equal start and end means all day**; read as half-open it would be a window that
+never opens. `nextWindowOpening` and `nextSendTime` in `campaignRules.pure.ts`
+are what the page and the dispatcher both use to say when the next message goes.
 
 ---
 

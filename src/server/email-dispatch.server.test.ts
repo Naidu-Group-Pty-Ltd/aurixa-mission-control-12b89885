@@ -24,7 +24,8 @@ const db = vi.hoisted(() => ({
 }));
 
 vi.mock("@/integrations/supabase/client.server", () => {
-  type Filter = (row: Record<string, unknown>) => boolean;
+  type Row = Record<string, unknown>;
+  type Filter = (row: Row) => boolean;
 
   class Query implements PromiseLike<unknown> {
     private op: "select" | "update" | "insert" = "select";
@@ -72,6 +73,24 @@ vi.mock("@/integrations/supabase/client.server", () => {
     }
     gte(column: string, value: string) {
       this.filters.push((row) => row[column] != null && String(row[column]) >= value);
+      return this;
+    }
+    lt(column: string, value: string) {
+      this.filters.push((row) => row[column] != null && String(row[column]) < value);
+      return this;
+    }
+    /** Only the shape the lease uses: `col.is.null,col.lt."<iso>"`. */
+    or(expression: string) {
+      const terms = (expression.match(/(?:[^,"]|"[^"]*")+/g) ?? []).map((term) => {
+        const [column, operator, ...rest] = term.split(".");
+        const value = rest.join(".").replace(/^"|"$/g, "");
+        if (operator === "is" && value === "null") return (row: Row) => row[column] == null;
+        if (operator === "lt") {
+          return (row: Row) => row[column] != null && String(row[column]) < value;
+        }
+        throw new Error(`fake: unsupported or() term ${term}`);
+      });
+      this.filters.push((row) => terms.some((test) => test(row)));
       return this;
     }
     in(column: string, values: unknown[]) {
@@ -439,5 +458,167 @@ describe("sends that may or may not have left", () => {
       status: "unconfirmed",
       graph_draft_id: "d-9",
     });
+  });
+});
+
+describe("one pass per campaign, however many ticks arrive", () => {
+  it("lets only one of two simultaneous ticks work the campaign", async () => {
+    // pg_net delivers ticks in bursts; two calls landing together must not
+    // both read the same last_message_at and both send.
+    db.tables.email_campaigns = [campaign({ min_gap_seconds: 60 })];
+    const [first, second] = await Promise.all([
+      dispatchDueCampaigns({ now: NOW, budgetMs: 1000 }),
+      dispatchDueCampaigns({ now: NOW, budgetMs: 1000 }),
+    ]);
+    expect(first.leased + second.leased).toBe(1);
+    // The gap is 60 s and the budget 1 s: exactly one message between them.
+    expect(db.deliveries).toHaveLength(1);
+    const row = db.tables.email_campaigns[0];
+    expect(row.dispatch_lease_until).toBeNull();
+    expect(row.dispatch_lease_token).toBeNull();
+  });
+
+  it("leaves a campaign alone while another pass holds an unexpired lease", async () => {
+    db.tables.email_campaigns = [
+      campaign({
+        dispatch_lease_until: new Date(Date.now() + 60_000).toISOString(),
+        dispatch_lease_token: "someone-else",
+      }),
+    ];
+    const summary = await dispatchDueCampaigns({ now: NOW });
+    expect(summary).toMatchObject({ leased: 1, campaigns: 0, messages: 0 });
+    expect(db.deliveries).toEqual([]);
+    // Not ours to release.
+    expect(db.tables.email_campaigns[0].dispatch_lease_token).toBe("someone-else");
+  });
+
+  it("takes over a lease its holder never released", async () => {
+    db.tables.email_campaigns = [
+      campaign({
+        dispatch_lease_until: new Date(Date.now() - 1000).toISOString(),
+        dispatch_lease_token: "died",
+      }),
+    ];
+    const summary = await dispatchDueCampaigns({ now: NOW });
+    expect(summary.leased).toBe(0);
+    expect(summary.messages).toBe(4);
+  });
+});
+
+describe("a pass that covers the wait for the next one", () => {
+  it("waits out the gap inside the pass and keeps sending, spaced by it", async () => {
+    db.tables.email_campaigns = [campaign({ min_gap_seconds: 1 })];
+    const started = Date.now();
+    const times: number[] = [];
+    const deliveries = db.deliveries;
+    const push = deliveries.push.bind(deliveries);
+    deliveries.push = (...items) => {
+      times.push(Date.now() - started);
+      return push(...items);
+    };
+
+    const summary = await dispatchDueCampaigns({ now: NOW, budgetMs: 2500 });
+
+    // t ≈ 0, 1 s, 2 s; a fourth would start after the 2.5 s budget.
+    expect(summary.messages).toBe(3);
+    for (let i = 1; i < times.length; i++) {
+      expect(times[i] - times[i - 1]).toBeGreaterThanOrEqual(950);
+    }
+    expect(statuses()).toEqual(["rcpt-1:sent", "rcpt-2:sent", "rcpt-3:sent", "rcpt-4:pending"]);
+    const row = db.tables.email_campaigns[0];
+    expect(row.last_tick_note).toMatch(/sent 3 messages; waiting out the gap/);
+    // The next message is due one gap after the last one.
+    expect(Date.parse(String(row.next_send_at)) - Date.parse(String(row.last_message_at))).toBe(
+      1000,
+    );
+  }, 10_000);
+
+  it("stops mid-pass when an operator pauses the campaign", async () => {
+    db.tables.email_campaigns = [campaign({ min_gap_seconds: 1 })];
+    const deliveries = db.deliveries;
+    const push = deliveries.push.bind(deliveries);
+    deliveries.push = (...items) => {
+      db.tables.email_campaigns[0].status = "paused";
+      return push(...items);
+    };
+
+    const summary = await dispatchDueCampaigns({ now: NOW, budgetMs: 5000 });
+
+    expect(summary.messages).toBe(1);
+    const row = db.tables.email_campaigns[0];
+    expect(row.last_tick_note).toMatch(/stopped: the campaign is now paused/);
+    expect(row.next_send_at).toBeNull();
+  }, 10_000);
+
+  it("stops mid-pass when the window closes, and records when it reopens", async () => {
+    // 23:58:59.4 UTC with a window ending at 23:59: the first message goes,
+    // the second would be due after the close.
+    db.tables.email_campaigns = [campaign({ min_gap_seconds: 1 })];
+    const summary = await dispatchDueCampaigns({
+      now: new Date("2026-10-12T23:58:59.400Z"),
+      budgetMs: 5000,
+    });
+
+    expect(summary.messages).toBe(1);
+    const row = db.tables.email_campaigns[0];
+    expect(row.last_tick_note).toMatch(/outside the 00:00–23:59 window \(UTC\)/);
+    // Tomorrow's 00:00 UTC opening.
+    expect(row.next_send_at).toBe("2026-10-13T00:00:00.000Z");
+  }, 10_000);
+});
+
+describe("what a pass leaves behind", () => {
+  it("records why it did not send and when it next will", async () => {
+    // Monday 12 Oct 2026, 19:03 Sydney: the case that prompted this.
+    db.tables.email_campaigns = [
+      campaign({
+        timezone: "Australia/Sydney",
+        send_days: [1, 2, 3, 4, 5],
+        window_start: "09:00:00",
+        window_end: "17:00:00",
+        min_gap_seconds: 60,
+      }),
+    ];
+    await dispatchDueCampaigns({ now: new Date("2026-10-12T08:03:00Z") });
+
+    expect(db.deliveries).toEqual([]);
+    const row = db.tables.email_campaigns[0];
+    expect(row.last_tick_note).toBe("outside the 09:00–17:00 window (Australia/Sydney)");
+    expect(row.next_send_at).toBe("2026-10-12T22:00:00.000Z"); // Tue 09:00 Sydney
+    expect(row.last_tick_at).toEqual(expect.any(String));
+  });
+
+  it("records a contact stranded as claimed by a pass that never finished as unconfirmed", async () => {
+    const stale = new Date(Date.now() - 20 * 60_000).toISOString();
+    Object.assign(db.tables.email_campaign_recipients[0], { status: "claimed", claimed_at: stale });
+    db.tables.email_campaign_messages.push({
+      id: "msg-stranded",
+      campaign_id: "camp-1",
+      status: "sending",
+      queued_at: stale,
+    });
+
+    const summary = await dispatchDueCampaigns({ now: NOW });
+
+    expect(summary.stranded).toBe(1);
+    // Never back to pending: the message may have left.
+    expect(statuses()[0]).toBe("rcpt-1:unconfirmed");
+    expect(db.tables.email_campaign_messages[0]).toMatchObject({
+      id: "msg-stranded",
+      status: "unconfirmed",
+    });
+    // The other three went out as usual.
+    expect(summary.messages).toBe(3);
+  });
+
+  it("lets a campaign complete once a stranded claim is resolved", async () => {
+    db.tables.email_campaign_recipients = recipients(1).map((row) => ({
+      ...row,
+      status: "claimed",
+      claimed_at: new Date(Date.now() - 20 * 60_000).toISOString(),
+    }));
+    const summary = await dispatchDueCampaigns({ now: NOW });
+    expect(summary.completed).toBe(1);
+    expect(db.tables.email_campaigns[0].status).toBe("completed");
   });
 });
