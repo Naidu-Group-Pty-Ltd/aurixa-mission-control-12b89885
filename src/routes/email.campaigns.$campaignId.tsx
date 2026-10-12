@@ -62,6 +62,7 @@ import {
   type CampaignRuleColumns,
 } from "@/lib/email/campaignRules.pure";
 import { MailboxPicker } from "@/components/email/mailbox-picker";
+import { TenantSelect } from "@/components/email/tenant-select";
 import { AttachmentPanel, type AttachmentListRow } from "@/components/email/attachment-panel";
 import {
   attachListToCampaign,
@@ -433,6 +434,7 @@ function ReadinessPanel({
         warnings: string[];
         batchSize: number;
         pending: number;
+        tenant?: { id: string | null; label: string };
         mailbox?: { address: string | null; isDefault: boolean };
         attachments?: { count: number; totalBytes: number };
       }
@@ -463,6 +465,7 @@ function ReadinessPanel({
           Ready to send — {readiness.pending.toLocaleString()} contacts waiting,{" "}
           {readiness.batchSize === 1 ? "one at a time" : `${readiness.batchSize} to a message`}
           {readiness.mailbox?.address ? `, from ${readiness.mailbox.address}` : ""}
+          {readiness.tenant?.id ? ` through ${readiness.tenant.label}` : ""}
           {files
             ? `, with ${files} attachment${files === 1 ? "" : "s"} (${humanBytes(readiness.attachments?.totalBytes ?? 0)})`
             : ""}
@@ -508,8 +511,13 @@ function MessageEditor({
   const [body, setBody] = useState((campaign.body_template as string) ?? "");
   const [bodyFormat, setBodyFormat] = useState((campaign.body_format as string) ?? "html");
   const [fromName, setFromName] = useState((campaign.from_name as string) ?? "");
+  const [tenantId, setTenantId] = useState<string | null>(
+    (campaign.tenant_id as string | null) ?? null,
+  );
+  const [tenantLabel, setTenantLabel] = useState<string | undefined>(undefined);
   const [fromMailbox, setFromMailbox] = useState((campaign.from_mailbox as string) ?? "");
   const [replyTo, setReplyTo] = useState((campaign.reply_to as string) ?? "");
+  const running = campaign.status === "running";
 
   const save = useMutation({
     mutationFn: () =>
@@ -520,6 +528,7 @@ function MessageEditor({
           bodyTemplate: body,
           bodyFormat: bodyFormat as "html" | "text",
           fromName: fromName || null,
+          tenantId,
           fromMailbox: fromMailbox || null,
           replyTo: replyTo || null,
         },
@@ -540,7 +549,35 @@ function MessageEditor({
     <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_22rem]">
       <div className="space-y-6">
         <div className="glass space-y-5 p-5">
-          <div className="grid gap-4 sm:grid-cols-3">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="from-tenant">Microsoft tenant</Label>
+              <TenantSelect
+                id="from-tenant"
+                value={tenantId}
+                disabled={running}
+                disabledReason="Pause the campaign to change the tenant it sends through."
+                onChange={(next, label) => {
+                  if (next === tenantId) return;
+                  setTenantId(next);
+                  setTenantLabel(label);
+                  // A mailbox belongs to one tenant: start from the new one's default.
+                  setFromMailbox("");
+                }}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="from-mailbox">Send from</Label>
+              <MailboxPicker
+                id="from-mailbox"
+                value={fromMailbox}
+                onChange={setFromMailbox}
+                tenantId={tenantId}
+                tenantLabel={tenantLabel}
+              />
+            </div>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-2">
               <Label htmlFor="from-name">Sender name</Label>
               <Input
@@ -549,10 +586,6 @@ function MessageEditor({
                 onChange={(event) => setFromName(event.target.value)}
                 placeholder="Aurixa Systems"
               />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="from-mailbox">Send from</Label>
-              <MailboxPicker id="from-mailbox" value={fromMailbox} onChange={setFromMailbox} />
             </div>
             <div className="space-y-2">
               <Label htmlFor="reply-to">Reply to</Label>

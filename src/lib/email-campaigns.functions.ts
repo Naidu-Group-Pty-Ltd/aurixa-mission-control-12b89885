@@ -46,6 +46,7 @@ import {
   type DeliveryPath,
 } from "@/lib/email/attachments.pure";
 import { mayChoose, sameMailbox, type MailboxAccess } from "@/lib/email/mailboxes.pure";
+import { sameTenant } from "@/lib/email/microsoftTenants.pure";
 import {
   campaignRulesFromRow,
   describeSchedule,
@@ -250,6 +251,8 @@ export const updateCampaign = createServerFn({ method: "POST" })
         id: uuid,
         name: z.string().min(1).max(200).optional(),
         description: z.string().max(2000).nullable().optional(),
+        /** The Microsoft tenant it sends through; null is the deployment's own. */
+        tenantId: uuid.nullable().optional(),
         fromMailbox: z.string().max(320).nullable().optional(),
         fromName: z.string().max(120).nullable().optional(),
         replyTo: z.string().max(320).nullable().optional(),
@@ -269,40 +272,70 @@ export const updateCampaign = createServerFn({ method: "POST" })
     if (data.name !== undefined) patch.name = data.name;
     if (data.description !== undefined) patch.description = data.description;
 
-    // The sending mailbox is checked against the tenant when it CHANGES, and
-    // the check is fresh rather than cached: this is the moment an operator
-    // commits to it, and a mailbox an access policy excludes is refused here
-    // rather than discovered by the first contact's message.
+    // The tenant and the sending mailbox are read together: a mailbox is only
+    // a mailbox OF a tenant, so changing either is checked against the pair.
+    let tenantChange: { from: string | null; to: string | null } | null = null;
     let mailboxChange: { from: string | null; to: string | null } | null = null;
-    if (data.fromMailbox !== undefined) {
-      const next = data.fromMailbox?.trim() ? emailKey(data.fromMailbox) : null;
+    if (data.fromMailbox !== undefined || data.tenantId !== undefined) {
       const { data: current, error: currentError } = await context.supabase
         .from("email_campaigns")
-        .select("from_mailbox")
+        .select("from_mailbox, tenant_id, status")
         .eq("id", data.id)
         .maybeSingle();
       if (currentError) throw currentError;
       if (!current) throw new Error("campaign_not_found");
-      if (!sameMailbox(current.from_mailbox as string | null, next)) {
+      const currentTenant = (current.tenant_id as string | null) ?? null;
+      const currentMailbox = (current.from_mailbox as string | null) ?? null;
+
+      let tenant = currentTenant;
+      if (data.tenantId !== undefined && !sameTenant(currentTenant, data.tenantId)) {
+        // A message in flight was claimed under one tenant's credentials; the
+        // switch waits until nothing is sending.
+        if (current.status === "running") {
+          throw new Error(
+            "pause the campaign before changing the Microsoft tenant it sends through",
+          );
+        }
+        const { tenantProblem } = await import("@/server/microsoft-tenants.server");
+        const problem = await tenantProblem(data.tenantId);
+        if (problem && data.tenantId) throw new Error(problem);
+        tenant = data.tenantId ?? null;
+        tenantChange = { from: currentTenant, to: tenant };
+        patch.tenant_id = tenant;
+      }
+
+      // The sending mailbox is checked against the tenant when either CHANGES,
+      // and the check is fresh rather than cached: this is the moment an
+      // operator commits to it, and a mailbox an access policy excludes is
+      // refused here rather than discovered by the first contact's message.
+      const next =
+        data.fromMailbox !== undefined
+          ? data.fromMailbox?.trim()
+            ? emailKey(data.fromMailbox)
+            : null
+          : currentMailbox;
+      if (tenantChange || !sameMailbox(currentMailbox, next)) {
         if (next) {
-          const { isGraphConfigured } = await import("@/server/graph-client");
+          const { graphConfigFor } = await import("@/server/microsoft-tenants.server");
           // Unconfigured, nothing can be checked and nothing can send either;
           // readiness blocks the start, and checks again once it is set.
-          if (isGraphConfigured()) {
+          if (await graphConfigFor(tenant)) {
             const { checkMailbox } = await import("@/server/email-mailboxes.server");
-            const access = await checkMailbox(next, true);
+            const access = await checkMailbox(next, { tenantId: tenant, force: true });
             if (!mayChoose(access)) {
               throw new Error(
                 access.state === "unknown"
                   ? `${next} could not be checked just now: ${access.reason}`
-                  : `${next} cannot be used: ${access.reason}`,
+                  : tenantChange
+                    ? `${next} cannot be used with that tenant: ${access.reason} — choose one of its mailboxes, or leave the mailbox on the tenant's default`
+                    : `${next} cannot be used: ${access.reason}`,
               );
             }
           }
         }
-        mailboxChange = { from: (current.from_mailbox as string | null) ?? null, to: next };
+        if (!sameMailbox(currentMailbox, next)) mailboxChange = { from: currentMailbox, to: next };
       }
-      patch.from_mailbox = next;
+      if (data.fromMailbox !== undefined) patch.from_mailbox = next;
     }
     if (data.fromName !== undefined) patch.from_name = data.fromName || null;
     if (data.replyTo !== undefined) patch.reply_to = data.replyTo || null;
@@ -337,17 +370,28 @@ export const updateCampaign = createServerFn({ method: "POST" })
       .eq("id", data.id);
     if (error) throw error;
 
-    if (mailboxChange) {
-      // Which mailbox a campaign speaks as is an identity decision, and an
-      // application permission can reach mailboxes nobody meant to share.
+    if (tenantChange || mailboxChange) {
+      // Which tenant and mailbox a campaign speaks as is an identity decision,
+      // and an application permission can reach mailboxes nobody meant to share.
       const { writeAuditLog } = await import("@/server/audit.server");
-      await writeAuditLog({
-        action: "email_campaign_mailbox_changed",
-        entityType: "email_campaign",
-        entityId: data.id,
-        actorUserId: context.userId,
-        metadata: mailboxChange,
-      });
+      if (tenantChange) {
+        await writeAuditLog({
+          action: "email_campaign_tenant_changed",
+          entityType: "email_campaign",
+          entityId: data.id,
+          actorUserId: context.userId,
+          metadata: tenantChange,
+        });
+      }
+      if (mailboxChange) {
+        await writeAuditLog({
+          action: "email_campaign_mailbox_changed",
+          entityType: "email_campaign",
+          entityId: data.id,
+          actorUserId: context.userId,
+          metadata: mailboxChange,
+        });
+      }
     }
     return { ok: true };
   });
@@ -435,6 +479,8 @@ export type Readiness = {
   personalising: string[];
   batchSize: number;
   pending: number;
+  /** The tenant it sends through; `id` null is the deployment's own. */
+  tenant: { id: string | null; label: string; configured: boolean };
   /** The mailbox the next message would leave from, and whether it can. */
   mailbox: { address: string | null; isDefault: boolean; access: MailboxAccess | null };
   attachments: { count: number; totalBytes: number; path: DeliveryPath };
@@ -474,21 +520,29 @@ async function assessReadiness(
   if (!String(campaign.body_template ?? "").trim()) blocking.push("the message body is empty");
   if (pending === 0) blocking.push("no contacts are waiting — attach a list first");
 
-  const { isGraphConfigured, defaultMailbox } = await import("@/server/graph-client");
-  const configured = isGraphConfigured();
+  // Through the campaign's own tenant: the deployment's (null), or one added
+  // under Microsoft tenants.
+  const tenantId = (campaign.tenant_id as string | null) ?? null;
+  const { graphConfigFor, tenantName, tenantProblem } =
+    await import("@/server/microsoft-tenants.server");
+  const config = await graphConfigFor(tenantId);
   const effectiveMailbox =
-    (campaign.from_mailbox as string | null)?.trim() || defaultMailbox() || null;
+    (campaign.from_mailbox as string | null)?.trim() || config?.mailbox || null;
   let mailboxAccess: MailboxAccess | null = null;
   let canBuildDrafts: boolean | null = null;
-  if (!configured) {
-    blocking.push("Microsoft Graph is not configured on this deployment");
+  if (!config) {
+    blocking.push((await tenantProblem(tenantId)) ?? "Microsoft Graph is not configured");
   } else if (!effectiveMailbox) {
-    blocking.push("no sending mailbox is chosen — pick one on the Message tab");
+    blocking.push(
+      tenantId
+        ? `no sending mailbox is chosen and "${tenantName(config)}" has no default mailbox — pick one on the Message tab`
+        : "no sending mailbox is chosen — pick one on the Message tab",
+    );
   } else {
     const { checkMailbox, graphCapabilities } = await import("@/server/email-mailboxes.server");
     const [access, capabilities] = await Promise.all([
-      checkMailbox(effectiveMailbox),
-      graphCapabilities(),
+      checkMailbox(effectiveMailbox, { tenantId }),
+      graphCapabilities({ tenantId }),
     ]);
     mailboxAccess = access;
     canBuildDrafts = capabilities.readWrite;
@@ -613,6 +667,7 @@ async function assessReadiness(
     personalising,
     batchSize,
     pending,
+    tenant: { id: tenantId, label: tenantName(config), configured: config !== null },
     mailbox: {
       address: effectiveMailbox ? emailKey(effectiveMailbox) : null,
       isDefault: !(campaign.from_mailbox as string | null)?.trim(),
@@ -743,8 +798,10 @@ export const sendTestEmail = createServerFn({ method: "POST" })
     if (error) throw error;
     if (!campaign) throw new Error("campaign_not_found");
 
-    const { defaultMailbox, deliverMessage } = await import("@/server/graph-client");
-    const mailbox = (campaign.from_mailbox as string | null)?.trim() || defaultMailbox();
+    const { deliverMessage } = await import("@/server/graph-client");
+    const { requireGraphConfigFor } = await import("@/server/microsoft-tenants.server");
+    const config = await requireGraphConfigFor((campaign.tenant_id as string | null) ?? null);
+    const mailbox = (campaign.from_mailbox as string | null)?.trim() || config.mailbox;
     if (!mailbox) throw new Error("no sending mailbox is chosen");
 
     // The same files, read and verified the same way the dispatcher reads
@@ -788,6 +845,7 @@ export const sendTestEmail = createServerFn({ method: "POST" })
           : {}),
       },
       attachments.outbound,
+      config,
     );
 
     if (outcome.kind !== "sent") {
@@ -809,8 +867,8 @@ export const sendTestEmail = createServerFn({ method: "POST" })
   });
 
 /**
- * Whether this deployment can send, its default mailbox, and what the
- * application was granted.
+ * Whether a tenant can send, its default mailbox, and what its application
+ * was granted. Without a tenant, the deployment's own.
  *
  * The default is checked by reading its inbox folder — the same test every
  * mailbox in the picker gets — rather than by reading its directory entry,
@@ -819,9 +877,14 @@ export const sendTestEmail = createServerFn({ method: "POST" })
  */
 export const mailboxStatus = createServerFn({ method: "POST" })
   .middleware([requireOperator])
-  .handler(async () => {
-    const { isGraphConfigured, defaultMailbox } = await import("@/server/graph-client");
-    if (!isGraphConfigured()) {
+  .inputValidator((input) =>
+    z.object({ tenantId: uuid.nullable().default(null) }).parse(input ?? {}),
+  )
+  .handler(async ({ data }) => {
+    const { tenantId } = data;
+    const { graphConfigFor } = await import("@/server/microsoft-tenants.server");
+    const config = await graphConfigFor(tenantId);
+    if (!config) {
       return {
         configured: false,
         mailbox: null as string | null,
@@ -832,55 +895,66 @@ export const mailboxStatus = createServerFn({ method: "POST" })
     }
     const { checkMailbox, displayNameFor, graphCapabilities } =
       await import("@/server/email-mailboxes.server");
-    const capabilities = await graphCapabilities();
-    const mailbox = defaultMailbox();
+    const capabilities = await graphCapabilities({ tenantId });
+    const mailbox = config.mailbox;
     if (!mailbox) {
       return {
         configured: true,
         mailbox: null as string | null,
         reachable: false,
-        detail:
-          "MICROSOFT_MAILBOX_EMAIL is not set — that is fine: each campaign chooses its mailbox from the tenant",
+        detail: tenantId
+          ? "this tenant has no default mailbox — that is fine: each campaign chooses its mailbox from the tenant"
+          : "MICROSOFT_MAILBOX_EMAIL is not set — that is fine: each campaign chooses its mailbox from the tenant",
         capabilities,
       };
     }
-    const access = await checkMailbox(mailbox);
+    const access = await checkMailbox(mailbox, { tenantId });
     const reachable = access.state === "reachable";
     return {
       configured: true,
       mailbox,
       reachable,
-      detail: reachable ? await displayNameFor(mailbox) : access.reason,
+      detail: reachable ? await displayNameFor(mailbox, tenantId) : access.reason,
       capabilities,
     };
   });
 
 /**
- * Every mailbox in the tenant a campaign might send from, each marked with
- * whether this application can use it. `refresh` re-reads the directory and
- * re-checks access instead of answering from the five-minute cache.
+ * Every mailbox in a tenant a campaign might send from, each marked with
+ * whether that tenant's application can use it. `refresh` re-reads the
+ * directory and re-checks access instead of answering from the five-minute
+ * cache. Without a tenant, the deployment's own.
  */
 export const listMailboxes = createServerFn({ method: "POST" })
   .middleware([requireOperator])
-  .inputValidator((input) => z.object({ refresh: z.boolean().default(false) }).parse(input ?? {}))
+  .inputValidator((input) =>
+    z
+      .object({ refresh: z.boolean().default(false), tenantId: uuid.nullable().default(null) })
+      .parse(input ?? {}),
+  )
   .handler(async ({ data, context }) => {
     const { mailboxDirectory } = await import("@/server/email-mailboxes.server");
-    return mailboxDirectory(context.supabase, data.refresh);
+    return mailboxDirectory(context.supabase, { tenantId: data.tenantId, force: data.refresh });
   });
 
-/** Check one address the operator typed, against the tenant, now. */
+/** Check one address the operator typed, against a tenant, now. */
 export const verifyMailbox = createServerFn({ method: "POST" })
   .middleware([requireOperator])
-  .inputValidator((input) => z.object({ address: z.string().min(3).max(320) }).parse(input))
+  .inputValidator((input) =>
+    z
+      .object({ address: z.string().min(3).max(320), tenantId: uuid.nullable().default(null) })
+      .parse(input),
+  )
   .handler(async ({ data }) => {
     const address = emailKey(data.address);
     if (!address) throw new Error("that is not a valid email address");
     const { checkMailbox, displayNameFor } = await import("@/server/email-mailboxes.server");
-    const access = await checkMailbox(address, true);
+    const access = await checkMailbox(address, { tenantId: data.tenantId, force: true });
     return {
       address,
       access,
-      displayName: access.state === "reachable" ? await displayNameFor(address) : null,
+      displayName:
+        access.state === "reachable" ? await displayNameFor(address, data.tenantId) : null,
     };
   });
 

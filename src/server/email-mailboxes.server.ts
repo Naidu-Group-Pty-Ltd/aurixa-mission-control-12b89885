@@ -1,9 +1,14 @@
 /**
- * The tenant's mailboxes, and which of them this deployment may send from.
+ * A tenant's mailboxes, and which of them this deployment may send from.
  *
  * `src/lib/email/mailboxes.pure.ts` carries the reasoning; this is the I/O:
  * the directory listing, the reachability probes, and the mailboxes this
  * deployment already knows about from its own campaigns and message ledger.
+ *
+ * Every question is asked of ONE tenant — `null` for the deployment's own,
+ * or an added tenant's id (see `microsoft-tenants.server.ts`). A mailbox one
+ * tenant may use says nothing about another, so every cache is kept per
+ * tenant, and per version of its credentials: a rotated secret starts fresh.
  *
  * ## Caching
  *
@@ -29,14 +34,15 @@ import {
   type MailboxOption,
   type MailboxSource,
 } from "@/lib/email/mailboxes.pure";
+import { tenantKey } from "@/lib/email/microsoftTenants.pure";
 import {
   GraphError,
-  defaultMailbox,
   grantedRoles,
-  isGraphConfigured,
   listDirectoryUsers,
   probeMailboxes,
+  type GraphConfig,
 } from "@/server/graph-client";
+import { graphConfigFor, tenantProblem } from "@/server/microsoft-tenants.server";
 
 const TTL_MS = 5 * 60_000;
 /** Directory entries read at most. Past this the picker says it is a partial list. */
@@ -53,18 +59,46 @@ export type DirectoryRead = {
   truncated: boolean;
 };
 
+/** Which tenant, and whether to ask Microsoft again rather than remember. */
+export type TenantQuery = { tenantId?: string | null; force?: boolean };
+
+/** Keyed `<tenant config key>|<address>`. */
 const accessCache = new Map<string, { at: number; access: MailboxAccess }>();
-let directoryCache: { at: number; value: DirectoryRead } | null = null;
-let capabilityCache: { at: number; value: GraphCapabilities } | null = null;
+/** Keyed by tenant config key. */
+const directoryCache = new Map<string, { at: number; value: DirectoryRead }>();
+const capabilityCache = new Map<string, { at: number; value: GraphCapabilities }>();
 
 const fresh = (at: number) => Date.now() - at < TTL_MS;
+const scopeOf = (config: GraphConfig) => config.key ?? "default";
 
-/** The tenant's mailboxes from the directory, or why they cannot be listed. */
-export async function readDirectory(force = false): Promise<DirectoryRead> {
-  if (!force && directoryCache && fresh(directoryCache.at)) return directoryCache.value;
+/** Forget what a tenant's token was granted, so the next question asks again. */
+export function forgetGraphCapabilities(tenantId: string | null | undefined): void {
+  const prefix = tenantKey(tenantId);
+  for (const key of capabilityCache.keys()) {
+    if (key === prefix || key.startsWith(`${prefix}:`)) capabilityCache.delete(key);
+  }
+}
+
+/** A tenant's mailboxes from the directory, or why they cannot be listed. */
+export async function readDirectory({
+  tenantId = null,
+  force = false,
+}: TenantQuery = {}): Promise<DirectoryRead> {
+  const config = await graphConfigFor(tenantId);
+  if (!config) {
+    return {
+      readable: false,
+      error: await tenantProblem(tenantId),
+      mailboxes: [],
+      truncated: false,
+    };
+  }
+  const scope = scopeOf(config);
+  const cached = directoryCache.get(scope);
+  if (!force && cached && fresh(cached.at)) return cached.value;
   let value: DirectoryRead;
   try {
-    const { users, truncated } = await listDirectoryUsers(MAX_DIRECTORY);
+    const { users, truncated } = await listDirectoryUsers(MAX_DIRECTORY, config);
     value = { readable: true, error: null, mailboxes: mailboxesFromDirectory(users), truncated };
   } catch (error) {
     const denied = error instanceof GraphError && (error.status === 403 || error.status === 401);
@@ -80,28 +114,34 @@ export async function readDirectory(force = false): Promise<DirectoryRead> {
     // ask Microsoft for a 403 every time it opens.
     if (!denied) return value;
   }
-  directoryCache = { at: Date.now(), value };
+  directoryCache.set(scope, { at: Date.now(), value });
   return value;
 }
 
-/** Whether each address can be used, probing what is not already known. */
+/**
+ * Whether each address can be used by a tenant's credentials, probing what is
+ * not already known. A tenant with no usable credentials gets no answers.
+ */
 export async function checkMailboxes(
   addresses: string[],
-  force = false,
+  { tenantId = null, force = false }: TenantQuery = {},
 ): Promise<Map<string, MailboxAccess>> {
   const out = new Map<string, MailboxAccess>();
+  const config = await graphConfigFor(tenantId);
+  if (!config) return out;
+  const scope = scopeOf(config);
   const toProbe: string[] = [];
   for (const raw of addresses) {
     const key = emailKey(raw);
     if (!key || out.has(key) || toProbe.includes(key)) continue;
-    const cached = accessCache.get(key);
+    const cached = accessCache.get(`${scope}|${key}`);
     if (!force && cached && fresh(cached.at)) out.set(key, cached.access);
     else toProbe.push(key);
   }
   if (toProbe.length === 0) return out;
 
-  const capabilities = await graphCapabilities();
-  for (const probe of await probeMailboxes(toProbe)) {
+  const capabilities = await graphCapabilities({ tenantId });
+  for (const probe of await probeMailboxes(toProbe, config)) {
     const access: MailboxAccess =
       probe.code === "token"
         ? {
@@ -110,77 +150,112 @@ export async function checkMailboxes(
           }
         : qualifyAccess(describeMailboxAccess(probe.status, probe.code), capabilities);
     out.set(probe.address, access);
-    if (access.state !== "unknown") accessCache.set(probe.address, { at: Date.now(), access });
+    if (access.state !== "unknown") {
+      accessCache.set(`${scope}|${probe.address}`, { at: Date.now(), access });
+    }
   }
   return out;
 }
 
-/** One address. */
-export async function checkMailbox(address: string, force = false): Promise<MailboxAccess> {
+/** One address, for one tenant. */
+export async function checkMailbox(
+  address: string,
+  query: TenantQuery = {},
+): Promise<MailboxAccess> {
   const key = emailKey(address);
   if (!key) return { state: "no_mailbox", reason: "that is not a valid email address" };
-  if (!isGraphConfigured()) {
-    return { state: "unknown", reason: "Microsoft Graph is not configured on this deployment" };
+  if (!(await graphConfigFor(query.tenantId))) {
+    return {
+      state: "unknown",
+      reason: (await tenantProblem(query.tenantId)) ?? "Microsoft Graph is not configured",
+    };
   }
   return (
-    (await checkMailboxes([key], force)).get(key) ?? {
+    (await checkMailboxes([key], query)).get(key) ?? {
       state: "unknown",
       reason: "Microsoft did not answer",
     }
   );
 }
 
-/** What the token says this application was granted. Advisory. */
-export async function graphCapabilities(force = false): Promise<GraphCapabilities> {
-  if (!force && capabilityCache && fresh(capabilityCache.at)) return capabilityCache.value;
+/** What a tenant's token says its application was granted. Advisory. */
+export async function graphCapabilities({
+  tenantId = null,
+  force = false,
+}: TenantQuery = {}): Promise<GraphCapabilities> {
+  const config = await graphConfigFor(tenantId);
+  if (!config) return capabilitiesFrom(null);
+  const scope = scopeOf(config);
+  const cached = capabilityCache.get(scope);
+  if (!force && cached && fresh(cached.at)) return cached.value;
   let value: GraphCapabilities;
   try {
-    value = capabilitiesFrom(await grantedRoles());
+    value = capabilitiesFrom(await grantedRoles(config));
   } catch {
     // No token at all is reported by whatever tried to send; here it only
     // means the page cannot say what was granted.
     return capabilitiesFrom(null);
   }
-  capabilityCache = { at: Date.now(), value };
+  capabilityCache.set(scope, { at: Date.now(), value });
   return value;
 }
 
+export type KnownMailbox = { address: string; source: MailboxSource; tenantId: string | null };
+
 /**
  * Mailboxes this deployment already uses: those campaigns name, and those
- * messages have actually left from recently. Read with whichever client the
- * caller holds — an operator's own, or the service role for the bounce scan.
+ * messages have actually left from recently — each with the tenant it was
+ * used through. Read with whichever client the caller holds — an operator's
+ * own, or the service role for the bounce scan.
+ *
+ * `tenantId` narrows to one tenant (`null` the deployment's own); leaving it
+ * out returns every tenant's.
  */
 export async function knownMailboxes(
   client: SupabaseClient<Database>,
-  options: { includeDrafts?: boolean } = {},
-): Promise<{ address: string; source: MailboxSource }[]> {
+  options: { includeDrafts?: boolean; tenantId?: string | null } = {},
+): Promise<KnownMailbox[]> {
+  const narrow = "tenantId" in options && options.tenantId !== undefined;
   let campaigns = client
     .from("email_campaigns")
-    .select("from_mailbox")
+    .select("from_mailbox, tenant_id")
     .not("from_mailbox", "is", null);
   if (!options.includeDrafts) campaigns = campaigns.neq("status", "draft");
   const since = new Date(Date.now() - SENDING_HISTORY_DAYS * 86_400_000).toISOString();
-  const [named, sent] = await Promise.all([
-    campaigns,
-    client.from("email_campaign_sending_mailboxes").select("mailbox").gte("last_used_at", since),
-  ]);
+  let sent = client
+    .from("email_campaign_sending_mailboxes")
+    .select("mailbox, tenant_id")
+    .gte("last_used_at", since);
+  if (narrow) {
+    if (options.tenantId) {
+      campaigns = campaigns.eq("tenant_id", options.tenantId);
+      sent = sent.eq("tenant_id", options.tenantId);
+    } else {
+      campaigns = campaigns.is("tenant_id", null);
+      sent = sent.is("tenant_id", null);
+    }
+  }
+  const [named, used] = await Promise.all([campaigns, sent]);
   if (named.error) throw named.error;
-  if (sent.error) throw sent.error;
+  if (used.error) throw used.error;
 
-  const out: { address: string; source: MailboxSource }[] = [];
+  const out: KnownMailbox[] = [];
   for (const row of named.data ?? []) {
     const address = emailKey(String(row.from_mailbox ?? ""));
-    if (address) out.push({ address, source: "campaign" });
+    if (address) out.push({ address, source: "campaign", tenantId: row.tenant_id ?? null });
   }
-  for (const row of sent.data ?? []) {
+  for (const row of used.data ?? []) {
     const address = emailKey(String(row.mailbox ?? ""));
-    if (address) out.push({ address, source: "history" });
+    if (address) out.push({ address, source: "history", tenantId: row.tenant_id ?? null });
   }
   return out;
 }
 
 export type MailboxDirectory = {
+  tenantId: string | null;
   configured: boolean;
+  /** Why the tenant cannot be used, when it cannot. */
+  problem: string | null;
   defaultMailbox: string | null;
   directory: { readable: boolean; error: string | null; truncated: boolean; count: number };
   options: MailboxOption[];
@@ -189,16 +264,19 @@ export type MailboxDirectory = {
   capabilities: GraphCapabilities;
 };
 
-/** Everything the mailbox picker shows. */
+/** Everything the mailbox picker shows, for one tenant. */
 export async function mailboxDirectory(
   client: SupabaseClient<Database>,
-  force = false,
+  { tenantId = null, force = false }: TenantQuery = {},
 ): Promise<MailboxDirectory> {
-  const fallbackDefault = defaultMailbox();
-  if (!isGraphConfigured()) {
+  const config = await graphConfigFor(tenantId);
+  const fallbackDefault = config?.mailbox ?? null;
+  if (!config) {
     return {
+      tenantId,
       configured: false,
-      defaultMailbox: fallbackDefault,
+      problem: await tenantProblem(tenantId),
+      defaultMailbox: null,
       directory: { readable: false, error: null, truncated: false, count: 0 },
       options: [],
       unchecked: 0,
@@ -206,10 +284,11 @@ export async function mailboxDirectory(
     };
   }
 
+  const scope = scopeOf(config);
   const [directory, known, capabilities] = await Promise.all([
-    readDirectory(force),
-    knownMailboxes(client, { includeDrafts: true }),
-    graphCapabilities(force),
+    readDirectory({ tenantId, force }),
+    knownMailboxes(client, { includeDrafts: true, tenantId }),
+    graphCapabilities({ tenantId, force }),
   ]);
 
   // The ones that matter most are checked first: the default, the ones this
@@ -223,10 +302,10 @@ export async function mailboxDirectory(
   for (const entry of known) push(entry.address);
   for (const mailbox of directory.mailboxes) push(mailbox.address);
 
-  const access = await checkMailboxes(ordered.slice(0, MAX_PROBES), force);
+  const access = await checkMailboxes(ordered.slice(0, MAX_PROBES), { tenantId, force });
   // Beyond the probe budget, show whatever an earlier check already knows.
   for (const address of ordered.slice(MAX_PROBES)) {
-    const cached = accessCache.get(address);
+    const cached = accessCache.get(`${scope}|${address}`);
     if (cached && fresh(cached.at)) access.set(address, cached.access);
   }
 
@@ -238,7 +317,9 @@ export async function mailboxDirectory(
   });
 
   return {
+    tenantId,
     configured: true,
+    problem: null,
     defaultMailbox: fallbackDefault ? emailKey(fallbackDefault) : null,
     directory: {
       readable: directory.readable,
@@ -252,10 +333,13 @@ export async function mailboxDirectory(
   };
 }
 
-/** A display name for an address, when the directory has one. */
-export async function displayNameFor(address: string): Promise<string | null> {
+/** A display name for an address, when the tenant's directory has one. */
+export async function displayNameFor(
+  address: string,
+  tenantId: string | null = null,
+): Promise<string | null> {
   const key = emailKey(address);
   if (!key) return null;
-  const directory = await readDirectory();
+  const directory = await readDirectory({ tenantId });
   return directory.mailboxes.find((mailbox) => mailbox.address === key)?.displayName ?? null;
 }

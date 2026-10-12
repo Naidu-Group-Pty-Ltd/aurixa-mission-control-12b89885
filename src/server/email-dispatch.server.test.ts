@@ -8,7 +8,9 @@
 //     and pauses the campaign, rather than marking the whole list refused;
 //   - repeated refusals of any kind stop the campaign;
 //   - a send that never left (a draft that could not be built) is retried,
-//     and one that may have left (unconfirmed) is not, and keeps its draft id.
+//     and one that may have left (unconfirmed) is not, and keeps its draft id;
+//   - a campaign sends through its own Microsoft tenant's credentials, and a
+//     tenant whose credentials fail holds up only its own campaigns.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { sha256Hex } from "@/lib/email/attachments.pure";
 
@@ -17,7 +19,16 @@ type Row = Record<string, unknown>;
 const db = vi.hoisted(() => ({
   tables: {} as Record<string, Record<string, unknown>[]>,
   objects: new Map<string, Uint8Array>(),
-  deliveries: [] as { mailbox: string; message: Record<string, unknown>; attachments: unknown[] }[],
+  deliveries: [] as {
+    mailbox: string;
+    message: Record<string, unknown>;
+    attachments: unknown[];
+    tenant: string | undefined;
+  }[],
+  /** Vault, by tenant id: what `microsoft_tenant_credentials` returns. */
+  vault: new Map<string, string>(),
+  /** Tenant config keys whose token request Microsoft refuses. */
+  refusedTokens: new Set<string>(),
   outcomes: [] as Record<string, unknown>[],
   audits: [] as Record<string, unknown>[],
   seq: 0,
@@ -69,6 +80,10 @@ vi.mock("@/integrations/supabase/client.server", () => {
     }
     neq(column: string, value: unknown) {
       this.filters.push((row) => row[column] !== value);
+      return this;
+    }
+    is(column: string, value: null) {
+      this.filters.push((row) => (row[column] ?? null) === value);
       return this;
     }
     gte(column: string, value: string) {
@@ -164,6 +179,10 @@ vi.mock("@/integrations/supabase/client.server", () => {
   return {
     supabaseAdmin: {
       from: (table: string) => new Query(table),
+      rpc: async (name: string, args: { p_tenant: string }) => {
+        if (name !== "microsoft_tenant_credentials") throw new Error(`fake: no rpc ${name}`);
+        return { data: db.vault.get(args.p_tenant) ?? null, error: null };
+      },
       storage: {
         from: () => ({
           download: async (path: string) => {
@@ -178,28 +197,44 @@ vi.mock("@/integrations/supabase/client.server", () => {
   };
 });
 
-vi.mock("@/server/graph-client", () => ({
-  isGraphConfigured: () => true,
-  defaultMailbox: () => "hello@aurixa.test",
-  accessToken: async () => "token",
-  GraphError: class GraphError extends Error {},
-  deliverMessage: async (
-    mailbox: string,
-    message: Record<string, unknown>,
-    attachments: unknown[],
-  ) => {
-    db.deliveries.push({ mailbox, message, attachments });
-    return (
-      db.outcomes.shift() ?? {
-        kind: "sent",
-        status: 202,
-        requestId: "rq",
-        path: "sendmail",
-        draftId: null,
+vi.mock("@/server/graph-client", () => {
+  class GraphError extends Error {}
+  return {
+    defaultGraphConfig: () => ({
+      tenantId: "deployment-tenant",
+      clientId: "deployment-client",
+      clientSecret: "deployment-secret",
+      mailbox: "hello@aurixa.test",
+      key: "default",
+    }),
+    accessToken: async (config: { key?: string; label?: string }) => {
+      if (config.key && db.refusedTokens.has(config.key)) {
+        throw new GraphError(`Microsoft rejected the application credentials for ${config.label}`);
       }
-    );
-  },
-}));
+      return "token";
+    },
+    forgetToken: () => {},
+    probeMailboxes: async () => [],
+    GraphError,
+    deliverMessage: async (
+      mailbox: string,
+      message: Record<string, unknown>,
+      attachments: unknown[],
+      config: { tenantId: string },
+    ) => {
+      db.deliveries.push({ mailbox, message, attachments, tenant: config?.tenantId });
+      return (
+        db.outcomes.shift() ?? {
+          kind: "sent",
+          status: 202,
+          requestId: "rq",
+          path: "sendmail",
+          draftId: null,
+        }
+      );
+    },
+  };
+});
 
 vi.mock("@/server/audit.server", () => ({
   writeAuditLog: async (entry: Record<string, unknown>) => {
@@ -282,7 +317,10 @@ beforeEach(() => {
     email_campaign_quotas: [],
     email_campaign_attachments: [],
     email_suppressions: [],
+    microsoft_tenants: [],
   };
+  db.vault.clear();
+  db.refusedTokens.clear();
   db.objects.clear();
   db.deliveries = [];
   db.outcomes = [];
@@ -620,5 +658,86 @@ describe("what a pass leaves behind", () => {
     const summary = await dispatchDueCampaigns({ now: NOW });
     expect(summary.completed).toBe(1);
     expect(db.tables.email_campaigns[0].status).toBe("completed");
+  });
+});
+
+describe("a campaign on an added Microsoft tenant", () => {
+  const TENANT = "11111111-2222-4333-8444-555555555555";
+
+  function addTenant(over: Row = {}) {
+    db.tables.microsoft_tenants.push({
+      id: TENANT,
+      label: "Partner tenant",
+      default_mailbox: "partner@partner.test",
+      credentials_version: 2,
+      removed_at: null,
+      vault_secret_id: "vault-1",
+      ...over,
+    });
+    db.vault.set(
+      TENANT,
+      JSON.stringify({
+        tenantId: "partner-tenant",
+        clientId: "partner-client",
+        clientSecret: "partner-secret",
+      }),
+    );
+  }
+
+  beforeEach(async () => {
+    const { forgetTenantConfig } = await import("@/server/microsoft-tenants.server");
+    forgetTenantConfig();
+  });
+
+  it("sends with that tenant's credentials and records the tenant on every message", async () => {
+    addTenant();
+    db.tables.email_campaigns = [campaign({ tenant_id: TENANT, from_mailbox: null })];
+
+    const summary = await dispatchDueCampaigns({ now: NOW });
+
+    expect(summary.messages).toBe(4);
+    expect(db.deliveries.map((d) => d.tenant)).toEqual(Array(4).fill("partner-tenant"));
+    // No mailbox of its own: the tenant's default, not the deployment's.
+    expect(db.deliveries.map((d) => d.mailbox)).toEqual(Array(4).fill("partner@partner.test"));
+    expect(db.tables.email_campaign_messages.map((m) => m.tenant_id)).toEqual(
+      Array(4).fill(TENANT),
+    );
+  });
+
+  it("claims nothing when the tenant's credentials are refused, and the deployment's campaigns still send", async () => {
+    addTenant();
+    db.refusedTokens.add(`tenant:${TENANT}:v2`);
+    db.tables.email_campaigns = [
+      campaign({ tenant_id: TENANT }),
+      campaign({ id: "camp-2", name: "Deployment campaign" }),
+    ];
+    db.tables.email_campaign_recipients.push(
+      ...recipients(2).map((row) => ({ ...row, id: `other-${row.id}`, campaign_id: "camp-2" })),
+    );
+
+    const summary = await dispatchDueCampaigns({ now: NOW });
+
+    expect(statuses().filter((s) => s.startsWith("rcpt-"))).toEqual([
+      "rcpt-1:pending",
+      "rcpt-2:pending",
+      "rcpt-3:pending",
+      "rcpt-4:pending",
+    ]);
+    expect(summary.skipped.join(" ")).toMatch(
+      /October brochure: nothing was claimed: Microsoft rejected the application credentials for Partner tenant/,
+    );
+    expect(db.deliveries.map((d) => d.tenant)).toEqual(["deployment-tenant", "deployment-tenant"]);
+  });
+
+  it("claims nothing when the tenant was removed", async () => {
+    addTenant({ removed_at: NOW.toISOString(), vault_secret_id: null });
+    db.vault.clear();
+    db.tables.email_campaigns = [campaign({ tenant_id: TENANT })];
+
+    const summary = await dispatchDueCampaigns({ now: NOW });
+
+    expect(db.deliveries).toEqual([]);
+    expect(statuses().every((s) => s.endsWith(":pending"))).toBe(true);
+    expect(summary.skipped.join(" ")).toMatch(/"Partner tenant" was removed/);
   });
 });

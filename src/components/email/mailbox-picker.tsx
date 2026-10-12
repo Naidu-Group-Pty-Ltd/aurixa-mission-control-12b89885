@@ -1,5 +1,9 @@
 /**
- * Choosing which mailbox in the Microsoft tenant a campaign sends from.
+ * Choosing which mailbox in a Microsoft tenant a campaign sends from.
+ *
+ * Always one tenant's mailboxes: the deployment's own (`tenantId` null) or one
+ * added under Microsoft tenants. Each tenant is listed and cached on its own,
+ * so switching the tenant shows that tenant's directory, not the last one's.
  *
  * The list comes from the tenant's directory, each entry marked with whether
  * this application may actually use it — read from Exchange, not assumed. A
@@ -11,9 +15,10 @@
  * permission), the picker still offers every mailbox this deployment already
  * uses, and any address can be typed and checked.
  *
- * The value is the address, or "" for the deployment's default — kept as
+ * The value is the address, or "" for the tenant's default — kept as
  * "default" rather than pinned to today's address, so a change to
- * MICROSOFT_MAILBOX_EMAIL carries the campaign with it.
+ * MICROSOFT_MAILBOX_EMAIL (or to an added tenant's default mailbox) carries
+ * the campaign with it.
  */
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -35,7 +40,9 @@ import { cn } from "@/lib/utils";
 import { mayChoose, type MailboxAccess, type MailboxOption } from "@/lib/email/mailboxes.pure";
 import { listMailboxes, verifyMailbox } from "@/lib/email-campaigns.functions";
 
-const QUERY_KEY = ["email", "mailboxes"] as const;
+/** One cache entry per tenant; `["email", "mailboxes"]` invalidates them all. */
+const mailboxesQueryKey = (tenantId: string | null) =>
+  ["email", "mailboxes", tenantId ?? "default"] as const;
 
 function AccessBadge({ access }: { access: MailboxAccess | null }) {
   const state = access?.state ?? "unchecked";
@@ -75,34 +82,41 @@ export function MailboxPicker({
   onChange,
   disabled,
   id,
+  tenantId = null,
+  tenantLabel,
 }: {
   value: string;
   onChange: (address: string) => void;
   disabled?: boolean;
   id?: string;
+  /** Whose mailboxes: null is the deployment's own tenant. */
+  tenantId?: string | null;
+  /** How that tenant is named, for the default's heading. */
+  tenantLabel?: string;
 }) {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [typed, setTyped] = useState("");
+  const queryKey = mailboxesQueryKey(tenantId);
 
   const directory = useQuery({
-    queryKey: QUERY_KEY,
-    queryFn: () => listMailboxes({ data: {} }),
+    queryKey,
+    queryFn: () => listMailboxes({ data: { tenantId } }),
     staleTime: 60_000,
   });
 
   const refresh = useMutation({
-    mutationFn: () => listMailboxes({ data: { refresh: true } }),
-    onSuccess: (data) => qc.setQueryData(QUERY_KEY, data),
+    mutationFn: () => listMailboxes({ data: { refresh: true, tenantId } }),
+    onSuccess: (data) => qc.setQueryData(queryKey, data),
     onError: (error: Error) =>
       toast.error("Could not read the tenant's mailboxes", { description: error.message }),
   });
 
   const verify = useMutation({
-    mutationFn: (address: string) => verifyMailbox({ data: { address } }),
+    mutationFn: (address: string) => verifyMailbox({ data: { address, tenantId } }),
     onSuccess: (result) => {
       // Fold the answer into the list so it is not asked again.
-      qc.setQueryData(QUERY_KEY, (current: typeof directory.data) => {
+      qc.setQueryData(queryKey, (current: typeof directory.data) => {
         if (!current) return current;
         const known = current.options.some((option) => option.address === result.address);
         const options: MailboxOption[] = known
@@ -161,7 +175,7 @@ export function MailboxPicker({
       ? optionLabel(selected)
       : chosen
     : data?.defaultMailbox
-      ? `Deployment default — ${data.defaultMailbox}`
+      ? `${tenantId ? "Tenant" : "Deployment"} default — ${data.defaultMailbox}`
       : "Choose a mailbox";
   const triggerAccess = chosen ? (selected?.access ?? null) : (defaultOption?.access ?? null);
 
@@ -172,7 +186,8 @@ export function MailboxPicker({
         value={value}
         disabled={disabled}
         onChange={(event) => onChange(event.target.value)}
-        placeholder="Microsoft Graph is not configured"
+        placeholder={data.problem ?? "Microsoft Graph is not configured"}
+        title={data.problem ?? undefined}
       />
     );
   }
@@ -206,7 +221,13 @@ export function MailboxPicker({
           <CommandList className="max-h-72">
             <CommandEmpty>No mailbox matches.</CommandEmpty>
             {defaultOption && (
-              <CommandGroup heading="Deployment default (MICROSOFT_MAILBOX_EMAIL)">
+              <CommandGroup
+                heading={
+                  tenantId
+                    ? `Default for ${tenantLabel ?? "this tenant"}`
+                    : "Deployment default (MICROSOFT_MAILBOX_EMAIL)"
+                }
+              >
                 <CommandItem
                   value={`default ${defaultOption.address} ${defaultOption.displayName ?? ""}`}
                   onSelect={() => {

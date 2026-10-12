@@ -4364,6 +4364,69 @@ export type Database = {
           },
         ]
       }
+      microsoft_tenants: {
+        Row: {
+          client_hint: string
+          created_at: string
+          created_by: string | null
+          credentials_version: number
+          default_mailbox: string | null
+          directory_hint: string
+          fingerprint: string
+          granted_roles: string[] | null
+          id: string
+          label: string
+          removed_at: string | null
+          removed_by: string | null
+          secret_expires_on: string | null
+          secret_hint: string
+          updated_at: string
+          vault_secret_id: string | null
+          verified_at: string | null
+          verify_error: string | null
+        }
+        Insert: {
+          client_hint: string
+          created_at?: string
+          created_by?: string | null
+          credentials_version?: number
+          default_mailbox?: string | null
+          directory_hint: string
+          fingerprint: string
+          granted_roles?: string[] | null
+          id?: string
+          label: string
+          removed_at?: string | null
+          removed_by?: string | null
+          secret_expires_on?: string | null
+          secret_hint: string
+          updated_at?: string
+          vault_secret_id?: string | null
+          verified_at?: string | null
+          verify_error?: string | null
+        }
+        Update: {
+          client_hint?: string
+          created_at?: string
+          created_by?: string | null
+          credentials_version?: number
+          default_mailbox?: string | null
+          directory_hint?: string
+          fingerprint?: string
+          granted_roles?: string[] | null
+          id?: string
+          label?: string
+          removed_at?: string | null
+          removed_by?: string | null
+          secret_expires_on?: string | null
+          secret_hint?: string
+          updated_at?: string
+          vault_secret_id?: string | null
+          verified_at?: string | null
+          verify_error?: string | null
+        }
+        Relationships: []
+      }
       voice_stack_templates: {
         Row: {
           created_at: string
@@ -7447,6 +7510,7 @@ export type Database = {
           sent_at: string | null
           status: string
           subject: string
+          tenant_id: string | null
           to_address: string | null
         }
         Insert: {
@@ -7468,6 +7532,7 @@ export type Database = {
           sent_at?: string | null
           status?: string
           subject: string
+          tenant_id?: string | null
           to_address?: string | null
         }
         Update: {
@@ -7489,9 +7554,17 @@ export type Database = {
           sent_at?: string | null
           status?: string
           subject?: string
+          tenant_id?: string | null
           to_address?: string | null
         }
         Relationships: [
+          {
+            foreignKeyName: "email_campaign_messages_tenant_id_fkey"
+            columns: ["tenant_id"]
+            isOneToOne: false
+            referencedRelation: "microsoft_tenants"
+            referencedColumns: ["id"]
+          },
           {
             foreignKeyName: "email_campaign_messages_campaign_id_fkey"
             columns: ["campaign_id"]
@@ -7667,6 +7740,7 @@ export type Database = {
           starts_at: string | null
           status: string
           subject_template: string
+          tenant_id: string | null
           timezone: string
           updated_at: string
           window_end: string
@@ -7702,6 +7776,7 @@ export type Database = {
           starts_at?: string | null
           status?: string
           subject_template?: string
+          tenant_id?: string | null
           timezone?: string
           updated_at?: string
           window_end?: string
@@ -7737,12 +7812,21 @@ export type Database = {
           starts_at?: string | null
           status?: string
           subject_template?: string
+          tenant_id?: string | null
           timezone?: string
           updated_at?: string
           window_end?: string
           window_start?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "email_campaigns_tenant_id_fkey"
+            columns: ["tenant_id"]
+            isOneToOne: false
+            referencedRelation: "microsoft_tenants"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       email_list_contacts: {
         Row: {
@@ -15080,6 +15164,7 @@ export type Database = {
           last_used_at: string | null
           mailbox: string | null
           messages: number | null
+          tenant_id: string | null
         }
         Relationships: []
       }
@@ -15402,6 +15487,18 @@ export type Database = {
       }
       mark_feedback_forwarded: {
         Args: { _error?: string; _ok: boolean; _submission_id: string }
+        Returns: undefined
+      }
+      microsoft_tenant_credentials: {
+        Args: { p_tenant: string }
+        Returns: string
+      }
+      microsoft_tenant_credentials_put: {
+        Args: { p_credentials: string; p_tenant: string }
+        Returns: undefined
+      }
+      microsoft_tenant_remove: {
+        Args: { p_actor: string; p_tenant: string }
         Returns: undefined
       }
       migration_queue_state: { Args: never; Returns: Json }
