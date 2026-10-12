@@ -58,6 +58,12 @@ export const HEALTH_MIN_SAMPLE = 5;
 export const MIN_SEND_GAP_MINUTES = 4;
 /** A message not found in the recipient's mailbox after this long is "missing" — quarantined, rejected or deleted. */
 export const MISSING_AFTER_MINUTES = 6 * 60;
+/**
+ * A message nobody could LOOK for this long — Microsoft unreachable, the
+ * tenant's credentials refused — is given up as unchecked. Never `missing`:
+ * not being able to search is no evidence that it did not arrive.
+ */
+export const UNCHECKABLE_AFTER_MINUTES = 48 * 60;
 /** A row still `sending` this long after it was written belongs to a pass that died. */
 export const STALE_SENDING_MINUTES = 15;
 /** A sent draft still in Drafts this long after the send call was not sent. */

@@ -731,3 +731,142 @@ describe("preparing a mailbox", () => {
     expect(String(mailboxRow("mb-alex").status_reason)).toMatch(/Mail\.ReadWrite/);
   });
 });
+
+describe("an outage is not a missing message", () => {
+  const breakSamsTenant = () => {
+    db.vault.delete(TENANT_B);
+    forgetTenantConfig();
+  };
+  const mendSamsTenant = () => {
+    db.vault.set(
+      TENANT_B,
+      JSON.stringify({ tenantId: "org-b", clientId: "client-b", clientSecret: "secret-b" }),
+    );
+    forgetTenantConfig();
+  };
+
+  it("keeps looking through hours of failed checks, and finds the mail once it can", async () => {
+    await tick(0);
+    const toSam = messages().find((m) => m.recipient_id === "mb-sam")!;
+    breakSamsTenant();
+    // Seven hours on — past the point a search that RAN would call it missing.
+    await tick(7 * 60);
+    expect(toSam).toMatchObject({ status: "sent" });
+    expect(String(toSam.error)).toMatch(/could not reach sam@b\.test/);
+    mendSamsTenant();
+    await tick(7 * 60 + 30);
+    expect(toSam).toMatchObject({ status: "landed", placement: "inbox" });
+  });
+
+  it("does not call mail missing when its sending could not be confirmed either", async () => {
+    // Sam's message to Alex never arrives, and Sam's own tenant is down, so
+    // nobody can say whether it ever left.
+    graph.dropFor.add("alex@a.test");
+    await tick(0);
+    const fromSam = messages().find((m) => m.sender_id === "mb-sam")!;
+    breakSamsTenant();
+    const summary = await tick(7 * 60);
+    expect(summary.missing).toBe(0);
+    expect(fromSam).toMatchObject({ status: "sent" });
+    expect(String(fromSam.error)).toMatch(/could not confirm it was sent/);
+    // Once it can be confirmed, not finding it means what it says.
+    mendSamsTenant();
+    await tick(7 * 60 + 30);
+    expect(fromSam).toMatchObject({ status: "missing" });
+  });
+
+  it("gives up after two days as unchecked, never as missing", async () => {
+    await tick(0);
+    const toSam = messages().find((m) => m.recipient_id === "mb-sam")!;
+    breakSamsTenant();
+    const summary = await tick(49 * 60);
+    expect(summary.missing).toBe(0);
+    expect(toSam).toMatchObject({ status: "done", placement: null });
+    expect(String(toSam.error)).toMatch(/^could not be checked: could not reach sam@b\.test/);
+  });
+});
+
+describe("answering", () => {
+  // Alex writes to Sam, who always answers; the reply falls due at 10:18.
+  async function upToTheReply() {
+    await tick(0);
+    await tick(5);
+    await tick(8);
+    const parent = messages().find((m) => m.sender_id === "mb-alex" && m.depth === 0)!;
+    expect(parent.status).toBe("engaged");
+    return parent;
+  }
+  const replyDrafts = () => items("sam@b.test").filter((i) => i.subject.startsWith("RE: "));
+
+  it("never answers twice when a pass sent the reply and died before recording it", async () => {
+    const parent = await upToTheReply();
+    // What a pass that died after the send leaves behind.
+    db.tables.email_warmup_messages.push({
+      id: "earlier-reply",
+      thread_id: parent.thread_id,
+      parent_id: parent.id,
+      depth: 1,
+      sender_id: "mb-sam",
+      recipient_id: "mb-alex",
+      sender_address: "sam@b.test",
+      recipient_address: "alex@a.test",
+      subject: `RE: ${String(parent.subject)}`,
+      status: "sent",
+      sent_at: at(19).toISOString(),
+      next_check_at: at(400).toISOString(),
+      created_at: at(19).toISOString(),
+      check_attempts: 0,
+      action_attempts: 0,
+    });
+    const summary = await tick(20);
+    expect(summary.replied).toBe(0);
+    expect(replyDrafts()).toHaveLength(0);
+    expect(parent).toMatchObject({ status: "done", replied_at: at(19).toISOString() });
+    expect(messages().filter((m) => m.parent_id === parent.id)).toHaveLength(1);
+  });
+
+  it("waits while a reply is still being sent, rather than writing another", async () => {
+    const parent = await upToTheReply();
+    db.tables.email_warmup_messages.push({
+      id: "in-flight-reply",
+      thread_id: parent.thread_id,
+      parent_id: parent.id,
+      depth: 1,
+      sender_id: "mb-sam",
+      recipient_id: "mb-alex",
+      sender_address: "sam@b.test",
+      recipient_address: "alex@a.test",
+      subject: "RE: x",
+      status: "sending",
+      created_at: at(19).toISOString(),
+      check_attempts: 0,
+      action_attempts: 0,
+    });
+    await tick(20);
+    expect(replyDrafts()).toHaveLength(0);
+    expect(parent.status).toBe("engaged");
+    expect(String(parent.reply_due_at) > at(20).toISOString()).toBe(true);
+  });
+
+  it("does answer again when the earlier attempt failed", async () => {
+    const parent = await upToTheReply();
+    db.tables.email_warmup_messages.push({
+      id: "refused-reply",
+      thread_id: parent.thread_id,
+      parent_id: parent.id,
+      depth: 1,
+      sender_id: "mb-sam",
+      recipient_id: "mb-alex",
+      sender_address: "sam@b.test",
+      recipient_address: "alex@a.test",
+      subject: "RE: x",
+      status: "failed",
+      created_at: at(19).toISOString(),
+      check_attempts: 0,
+      action_attempts: 0,
+    });
+    const summary = await tick(20);
+    expect(summary.replied).toBe(1);
+    expect(parent.status).toBe("done");
+  });
+});

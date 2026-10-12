@@ -73,6 +73,7 @@ import {
   MISSING_AFTER_MINUTES,
   REPLY_DELAY_MINUTES,
   STALE_SENDING_MINUTES,
+  UNCHECKABLE_AFTER_MINUTES,
   WARMUP_FOLDER_NAME,
   checkDelayMinutes,
   choosePartner,
@@ -519,19 +520,20 @@ async function checkMessage(pass: Pass, message: MessageRow): Promise<void> {
   const sender = pass.pool.get(message.sender_id);
   const recipient = pass.pool.get(message.recipient_id);
   const patch: MessageUpdate = {};
-  const missingNow = minutesSince(message.sent_at, now) >= MISSING_AFTER_MINUTES;
+  const attempts = message.check_attempts + 1;
+  const lookAgain = () =>
+    new Date(now.getTime() + checkDelayMinutes(attempts) * MINUTE).toISOString();
 
-  const retry = async (why: string | null) => {
-    const attempts = message.check_attempts + 1;
-    if (missingNow) {
+  // The recipient's mailbox was searched and the message is not in it. Only
+  // this can make a message `missing` — after six hours of looking.
+  const notFound = async () => {
+    if (minutesSince(message.sent_at, now) >= MISSING_AFTER_MINUTES) {
       await updateMessage(message.id, {
         ...patch,
         status: "missing",
         check_attempts: attempts,
         next_check_at: null,
-        error:
-          why ??
-          `never arrived in ${message.recipient_address} — quarantined, rejected or deleted on arrival`,
+        error: `never arrived in ${message.recipient_address} — quarantined, rejected or deleted on arrival`,
       });
       pass.summary.missing += 1;
       return;
@@ -539,8 +541,30 @@ async function checkMessage(pass: Pass, message: MessageRow): Promise<void> {
     await updateMessage(message.id, {
       ...patch,
       check_attempts: attempts,
-      next_check_at: new Date(now.getTime() + checkDelayMinutes(attempts) * MINUTE).toISOString(),
-      ...(why ? { error: why } : {}),
+      next_check_at: lookAgain(),
+    });
+  };
+
+  // Nobody could look — Microsoft unreachable or throttling, the tenant's
+  // credentials refused. That says nothing about whether it arrived, so it is
+  // never `missing`: keep looking, and after two days give it up as
+  // unchecked, which does not count against anyone's placement.
+  const couldNotCheck = async (why: string) => {
+    if (minutesSince(message.sent_at, now) >= UNCHECKABLE_AFTER_MINUTES) {
+      await updateMessage(message.id, {
+        ...patch,
+        status: "done",
+        check_attempts: attempts,
+        next_check_at: null,
+        error: `could not be checked: ${why}`,
+      });
+      return;
+    }
+    await updateMessage(message.id, {
+      ...patch,
+      check_attempts: attempts,
+      next_check_at: lookAgain(),
+      error: why,
     });
   };
 
@@ -554,10 +578,17 @@ async function checkMessage(pass: Pass, message: MessageRow): Promise<void> {
   }
 
   // 1. Did it leave? Read the sender's copy back once: still a draft means no.
+  // When the copy cannot be read the recipient is still searched — finding
+  // the message there proves it left — but not finding it proves nothing.
   let internetMessageId = message.internet_message_id;
-  if (!message.sent_confirmed_at && sender && message.sender_item_id) {
-    const access = await pass.tenant(sender.tenant_id);
-    if (access.config) {
+  let unconfirmed: string | null = null;
+  if (!message.sent_confirmed_at && message.sender_item_id) {
+    const access = sender ? await pass.tenant(sender.tenant_id) : null;
+    if (!sender || !access?.config) {
+      unconfirmed = sender
+        ? `could not confirm it was sent: ${access?.problem ?? "no credentials"}`
+        : "could not confirm it was sent: the sender left the warmup pool";
+    } else {
       try {
         const copy = await getMailboxMessage(sender.mailbox, message.sender_item_id, access.config);
         if (copy?.isDraft) {
@@ -596,25 +627,32 @@ async function checkMessage(pass: Pass, message: MessageRow): Promise<void> {
           }
         }
       } catch (error) {
-        if (!isGone(error)) return retry(`could not read the sent copy: ${describe(error)}`);
-        // The sender's copy is gone (deleted by a person); the recipient's
-        // copy is still the question, by the Message-ID we already have.
-        patch.sent_confirmed_at = now.toISOString();
+        if (isGone(error)) {
+          // The sender's copy is gone (deleted by a person); the recipient's
+          // copy is still the question, by the Message-ID we already have.
+          patch.sent_confirmed_at = now.toISOString();
+        } else {
+          unconfirmed = `could not read the sent copy: ${describe(error)}`;
+        }
       }
     }
   }
-  if (!internetMessageId) return retry("Microsoft gave this message no Message-ID to look for");
+  if (!internetMessageId) {
+    return couldNotCheck("Microsoft gave this message no Message-ID to look for");
+  }
 
   // 2. Where did it land?
   const access = await pass.tenant(recipient.tenant_id);
-  if (!access.config) return retry(`could not check ${recipient.mailbox}: ${access.problem}`);
+  if (!access.config) {
+    return couldNotCheck(`could not reach ${recipient.mailbox}: ${access.problem}`);
+  }
   let found: Awaited<ReturnType<typeof locate>>;
   try {
     found = await locate(recipient.mailbox, internetMessageId, access.config);
   } catch (error) {
-    return retry(`could not search ${recipient.mailbox}: ${describe(error)}`);
+    return couldNotCheck(`could not search ${recipient.mailbox}: ${describe(error)}`);
   }
-  if (!found) return retry(null);
+  if (!found) return unconfirmed ? couldNotCheck(unconfirmed) : notFound();
 
   const engageIn = minutesBetween(ENGAGE_DELAY_MINUTES.min, ENGAGE_DELAY_MINUTES.max, pass.random);
   await updateMessage(message.id, {
@@ -631,7 +669,7 @@ async function checkMessage(pass: Pass, message: MessageRow): Promise<void> {
     landed_at: now.toISOString(),
     engage_at: new Date(now.getTime() + engageIn * MINUTE).toISOString(),
     next_check_at: null,
-    check_attempts: message.check_attempts + 1,
+    check_attempts: attempts,
     error: null,
   });
   pass.summary.found += 1;
@@ -796,6 +834,34 @@ async function replyTo(pass: Pass, message: MessageRow): Promise<void> {
     updateMessage(message.id, { status: "done", reply_due_at: null, ...(error ? { error } : {}) });
 
   if (!replier || !original) return finish("the other mailbox left the warmup pool");
+
+  // Never answer twice. A reply already on record settles it — including one
+  // a pass sent and then died before it could mark this message answered.
+  // One still `sending` is a pass in flight or a dead one; the stale sweep
+  // settles that row first, so this waits.
+  const { data: earlier, error: earlierError } = await supabaseAdmin
+    .from("email_warmup_messages")
+    .select("id, status, created_at")
+    .eq("parent_id", message.id)
+    .neq("status", "failed");
+  if (earlierError) throw earlierError;
+  if ((earlier ?? []).length > 0) {
+    if ((earlier ?? []).some((row) => row.status === "sending")) {
+      await updateMessage(message.id, {
+        reply_due_at: new Date(now.getTime() + STALE_SENDING_MINUTES * MINUTE).toISOString(),
+      });
+      return;
+    }
+    const first = [...(earlier ?? [])].sort((a, b) => a.created_at.localeCompare(b.created_at))[0];
+    await updateMessage(message.id, {
+      status: "done",
+      reply_due_at: null,
+      replied_at: first.created_at,
+      action_attempts: 0,
+      error: null,
+    });
+    return;
+  }
   if (replier.status !== "active") return finish(`${replier.mailbox} was paused before it replied`);
   if (message.reply_due_at && now.getTime() - Date.parse(message.reply_due_at) > STALE_REPLY_MS) {
     return finish("the reply was due more than a day ago, so it was not sent late");

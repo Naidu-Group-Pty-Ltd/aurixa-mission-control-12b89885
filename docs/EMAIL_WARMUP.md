@@ -123,8 +123,12 @@ irregular intervals, rather than in a burst at nine.
    Warmup folder (unless "file sent copies" is off), and the recipient's mailbox
    is searched for its Message-ID: **inbox, then Junk, then anywhere**. Where it
    is found is its **placement**. Searches widen from minutes to an hour apart;
-   not found within **six hours**, it is `missing` — quarantined, rejected or
-   deleted on arrival.
+   searched for and not found within **six hours**, it is `missing` —
+   quarantined, rejected or deleted on arrival. A check that could not run at
+   all (Microsoft unreachable or throttling, the tenant's credentials refused)
+   is no evidence either way, so it never makes a message missing: it keeps
+   being retried, and after two days the message is given up as "could not be
+   checked", which counts for and against nobody.
 3. **Engaged** (2–20 minutes after it is found): moved out of Junk if it landed
    there (**rescued**), marked read, flagged at the mark-important rate, moved
    to Focused if Focused Inbox had put it in Other, and **filed into the
@@ -134,7 +138,9 @@ irregular intervals, rather than in a burst at nine.
    quoted original are real) with a few lines written above the quote, sent,
    and recorded as a message of its own that goes through all of this again —
    so the original sender's inbox placement is measured too. A reply to a reply
-   is half as likely, and a thread stops at three messages.
+   is half as likely, and a thread stops at three messages. A message is never
+   answered twice: a reply already on record — including one a pass sent and
+   then died before it could mark the message answered — settles it.
 
 What the recipient will do — answer, flag — is decided when the message is
 sent and stored on it, by the **recipient's** rates. A step that is retried
